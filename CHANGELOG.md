@@ -1,6 +1,41 @@
 # Unreleased
 
+## ⚠️ Breaking
+- **A hosted cezar with no authentication now refuses to boot.** If you run with `CEZ_REMOTE=1`
+  or a non-loopback `--bind-host` and set neither `CEZ_AUTH` nor `CEZ_ALLOW_UNAUTHENTICATED=1`,
+  `cezar serve` exits non-zero at startup — before it touches `~/.cezar`, reclaims a worktree or
+  resumes a run — and prints why. **Local installs, which is the npm default, are completely
+  unaffected.** The fix is one line: `CEZ_ALLOW_UNAUTHENTICATED=1` if your network or reverse
+  proxy is the perimeter, or `CEZ_AUTH=oidc|google` to require a sign-in. Hosts installed with
+  `cezar server-install --platform ubuntu-vps` get the flag written into their systemd unit
+  automatically (that platform puts nginx `auth_basic` in front), so they keep booting with no
+  action from you. The reason it is a refusal and not a warning: cezar executes agents, and
+  `POST /api/v1/workflows` takes a free-form `command` that a check step runs through
+  `spawn('bash', ['-lc', …])` — "no auth" has to be something you chose, not a variable you
+  forgot. It does not enforce authentication; it enforces choosing.
+
 ## ✨ Features
+- ✨ **Optional sign-in: generic OIDC or Google, off by default.** Set `CEZ_AUTH=oidc` (with
+  `CEZ_PUBLIC_URL`, `CEZ_OIDC_ISSUER`, `CEZ_OIDC_CLIENT_ID`, `CEZ_OIDC_CLIENT_SECRET`) or
+  `CEZ_AUTH=google` and every API route, both SSE streams and the WebSocket upgrade require a
+  session cookie; `/auth/login`, `/auth/callback`, `/auth/logout` and `/auth/me` appear. It is
+  Authorization Code + PKCE with `state` and `nonce` verified, the ID-token signature checked
+  against the provider's JWKS, `state` single-use *and* bound to the browser that started the
+  flow, `redirect_uri` derived from `CEZ_PUBLIC_URL` at boot and never from a forwarded header,
+  an `HttpOnly; Secure; SameSite=Lax` cookie, logout that invalidates server-side rather than
+  only clearing the cookie, and optional group → role mapping that grants nothing for a group
+  you did not map. Google is the same code path with a pinned issuer, not a second flow.
+  **With `CEZ_AUTH` unset nothing changes at all**: no identity storage is created, no session
+  middleware is mounted, no login route is registered, the auth modules are never even imported,
+  and the health payload is byte-identical. Identity lives in `~/.cezar/identity/*.json` behind
+  the same `O_EXCL` write lease the source and automation stores already use — no new dependency,
+  and every uniqueness rule (one org per slug, one team slug per org, one user per
+  `(issuer, subject)`, one membership per pair, **one project root in exactly one organization**)
+  is enforced inside that lease rather than at each call site.
+  **Signing in is not tenancy.** A hosted cezar with auth is a single-organization deployment
+  with a login screen: everyone who signs in shares one process, one filesystem and the host's
+  own agent credentials, so **members of an organization can run code as one another — invite
+  accordingly.** The per-organization process boundary is a later phase.
 - ✨ **Agent accounts: run one project on your work login and another on your personal one.**
   The same CLI logged in twice — `CLAUDE_CONFIG_DIR=~/.claude-klaudiusz claude`, or `CODEX_HOME` for
   Codex — is now something cezar can address. Add the extra config folder under **Settings → Agent

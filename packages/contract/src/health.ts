@@ -21,6 +21,34 @@ export const backendCheckSchema = z.object({
 });
 export type BackendCheck = z.infer<typeof backendCheckSchema>;
 
+/**
+ * `CEZ_AUTH` (D1, spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`): which auth provider,
+ * if any, this deployment requires. `'none'` is the default — an unset env, or any spelling other
+ * than the two exact provider names, resolves to it (`resolveAuthProvider` in
+ * `server/capabilities.ts`), the same "unrecognised means off" discipline `skills`/`singleProject`
+ * already use for their own flags.
+ *
+ * **Deliberately NOT a member of `capabilitiesSchema` below**, unlike every other flag derived
+ * from a `CEZ_*` variable. Two reasons, and the first is the binding one:
+ *
+ *  - The spec's Risks section makes the auth-off health payload the *control* for this whole
+ *    change — "a diff in the auth-off health payload is a failure, not an update" — with
+ *    route-parity / bc-route-inventory / versioned-surface as the suites that hold it. Adding a
+ *    key and then editing ~20 fixture files to expect it is updating the control to match the
+ *    change, which is the one move that makes a control stop meaning anything. It was written
+ *    that way first and reverted here.
+ *  - Nothing consumes it. Every other capability gates a cockpit surface; `auth` gates nothing in
+ *    the client, because an unauthenticated cockpit gets a 401 from `requirePrincipal` and learns
+ *    what it needs from that. Whichever phase builds a login screen is the right place to decide
+ *    what the client is told and to add the key deliberately, with a BACKWARD_COMPATIBILITY §2
+ *    entry beside the `tokenUsageMetrics`/`costMetrics` one.
+ *
+ * The type stays here because the contract package is where shared wire-adjacent types live, and
+ * `server/capabilities.ts`, `auth/session.ts` and `auth/oidc.ts` all name it.
+ */
+export const authProviderSchema = z.enum(['none', 'oidc', 'google']);
+export type AuthProvider = z.infer<typeof authProviderSchema>;
+
 export const forgeInfoSchema = z.object({
   kind: z.literal('github'),
   /**

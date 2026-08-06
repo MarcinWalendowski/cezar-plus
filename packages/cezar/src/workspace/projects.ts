@@ -29,6 +29,16 @@ import {
  * for the boot project, the rest are the cockpit shell's own top-level path
  * segments. A repo named `default/` becomes `default-2` and can never shadow
  * the alias or a route.
+ *
+ * `auth`, `login`, `callback`, `o`, `t` were added by spec
+ * 2026-08-06-org-team-auth-onboarding (D5) for the auth/onboarding routes and
+ * the future `/o/<org>/`, `/t/<team>/` segments. This reservation is
+ * **forward-only**: it changes what `allocateProjectSlug` hands out to a
+ * project registering from here on, and nothing else. It must never gate a
+ * *read* of an existing registry — `listProjects`/`loadWorkspaceConfig` never
+ * consult this set — because a project registered before this list grew is
+ * sitting in someone's `~/.cezar/config.json` on disk, and that JSON file
+ * cannot be migrated out from under a reservation added later (D5).
  */
 export const RESERVED_PROJECT_IDS: ReadonlySet<string> = new Set([
   'default',
@@ -37,6 +47,11 @@ export const RESERVED_PROJECT_IDS: ReadonlySet<string> = new Set([
   'api',
   'p',
   'assets',
+  'auth',
+  'login',
+  'callback',
+  'o',
+  't',
 ]);
 
 /** Slug length cap — mirrors `PROJECT_ID_RE` (1 head char + up to 63 more). */

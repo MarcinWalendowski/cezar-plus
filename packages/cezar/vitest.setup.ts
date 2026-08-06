@@ -20,6 +20,21 @@ const pinSandboxHome = (): void => {
   if (!process.env.CEZ_HOME) process.env.CEZ_HOME = sandboxHome
 }
 
+// `CEZ_AUTH` is a second unpinned global with the same failure mode, and a nastier blast radius.
+// It is read PER REQUEST by `requirePrincipal` and by `verifyWsUpgrade`, so an ambient
+// `CEZ_AUTH=oidc` — exported in a developer's shell, or left behind by a CI runner — turns every
+// `createApp`-based suite red at once: route-parity, versioned-surface, host-guard and the rest
+// all start 401ing, and the failure reads as "route parity is broken" rather than "the
+// environment lied". (Demonstrated: `CEZ_AUTH=oidc npx vitest run …/route-parity.test.ts` → 6
+// failed | 3 passed.) The suites that MEAN to exercise auth set it inside their own tests
+// (`server/auth-perimeter.test.ts`, `server/ws.test.ts`, `auth/*.test.ts`) and restore it; this
+// only removes the ambient value nobody chose, before any of them run.
+//
+// Deliberately a delete rather than a save/restore-per-test: unlike `CEZ_HOME` there is no
+// sandbox value that would be correct, and the whole point is that the worker must never inherit
+// one.
+delete process.env.CEZ_AUTH
+
 pinSandboxHome()
 beforeEach(pinSandboxHome)
 // Registered before any suite's own hooks, so vitest runs it last on the way out —

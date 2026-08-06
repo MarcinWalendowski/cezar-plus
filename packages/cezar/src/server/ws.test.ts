@@ -282,13 +282,22 @@ describe('verifyWsUpgrade', () => {
   // hosted mode (a reverse proxy forwards the real public Host there). An ambient CEZ_REMOTE on
   // the dev box must not decide what this table sees — without this the suite passes only when
   // some earlier file in the same worker happened to delete the var.
+  //
+  // CEZ_AUTH is the same kind of global and is scrubbed for the same reason (it was added by the
+  // auth change and initially was not): a leaked `CEZ_AUTH=oidc` from another file in this worker
+  // flips every verdict below to `false`, because the principal check runs before the Origin
+  // logic these cases are about. The auth-ON cases set it explicitly per test instead.
   const savedRemote = process.env.CEZ_REMOTE;
+  const savedAuth = process.env.CEZ_AUTH;
   beforeEach(() => {
     delete process.env.CEZ_REMOTE;
+    delete process.env.CEZ_AUTH;
   });
   afterEach(() => {
     if (savedRemote === undefined) delete process.env.CEZ_REMOTE;
     else process.env.CEZ_REMOTE = savedRemote;
+    if (savedAuth === undefined) delete process.env.CEZ_AUTH;
+    else process.env.CEZ_AUTH = savedAuth;
   });
 
   it('trusts a loopback Host with no Origin (non-browser client)', () => {
@@ -365,5 +374,109 @@ describe('verifyWsUpgrade', () => {
         req({ host: '127.0.0.1:4321', origin: 'http://127.0.0.1:4321', 'sec-fetch-site': 'same-origin' }),
       ),
     ).toEqual({ trusted: true });
+  });
+
+  // ---- the principal check (D6) ---------------------------------------------------------------
+  //
+  // D6 asks for this by name: "this gets its own test asserting an unauthenticated upgrade is
+  // refused — the negative control must exercise the socket, not the route beside it." The
+  // WebSocket upgrade is attached to the RAW http server, so `app.use('/api/*', …)` never runs for
+  // it; a cookie-authenticated fetch that passes while the socket does not check is the exact
+  // bypass shape D6 exists to name. Every case above runs with `CEZ_AUTH` unset, i.e. entirely in
+  // the `auth === 'none'` branch — which is why deleting the whole principal block left the suite
+  // green until these existed.
+  describe('when CEZ_AUTH names a provider', () => {
+    /** A stand-in for `auth/session.ts`'s real resolver, recording what it was asked so a test can
+     *  prove the SOCKET's cookie reached it rather than inferring it from the verdict. */
+    const resolverFor = (accept: (cookie: string | undefined) => boolean) => {
+      const seen: (string | undefined)[] = [];
+      return {
+        seen,
+        resolver: {
+          resolveFromCookieHeader: (cookie: string | undefined) => {
+            seen.push(cookie);
+            return accept(cookie)
+              ? ({ kind: 'session', userId: 'u1', orgId: 'o1', teamId: 't1', role: 'member' } as const)
+              : null;
+          },
+        },
+      };
+    };
+
+    beforeEach(() => {
+      process.env.CEZ_AUTH = 'oidc';
+    });
+
+    it('REFUSES an upgrade with no session cookie, on an otherwise perfect same-origin handshake', () => {
+      const { resolver, seen } = resolverFor(() => false);
+      // Identical to the "trusts the cockpit itself" case above in every respect but the session —
+      // so a `false` here can only be the principal check, not the Host or Origin halves.
+      expect(
+        verifyWsUpgrade(req({ host: '127.0.0.1:4321', origin: 'http://127.0.0.1:4321' }), undefined, resolver),
+      ).toBe(false);
+      expect(seen).toEqual([undefined]);
+    });
+
+    it('REFUSES an upgrade carrying a forged/expired cookie the resolver rejects', () => {
+      const { resolver, seen } = resolverFor((cookie) => cookie === 'cez_session=good');
+      expect(
+        verifyWsUpgrade(
+          req({ host: '127.0.0.1:4321', origin: 'http://127.0.0.1:4321', cookie: 'cez_session=forged' }),
+          undefined,
+          resolver,
+        ),
+      ).toBe(false);
+      // The raw upgrade's own Cookie header is what was checked — not a value read from somewhere
+      // else, and not a check that was skipped.
+      expect(seen).toEqual(['cez_session=forged']);
+    });
+
+    it('REFUSES when no resolver was wired at all — a boot-wiring bug must fail closed, not open', () => {
+      // `CEZ_AUTH` on with `deps.sessionResolver` undefined means `serveCommand` did not load
+      // `auth/session.ts`. Admitting the socket "because there is nothing to check with" is the
+      // fallback D1's boot refusal exists to rule out; this asserts the WS half does not reopen it.
+      expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321', origin: 'http://127.0.0.1:4321' }))).toBe(false);
+    });
+
+    it('REFUSES a no-Origin native client without a session — the auth check runs BEFORE the no-Origin trust', () => {
+      // `origin === undefined` is trusted outright in the auth-off table above ("non-browser client
+      // — no Origin to spoof"). Order matters: if the principal check ran after it, every
+      // non-browser client would bypass auth entirely by simply omitting a header.
+      const { resolver } = resolverFor(() => false);
+      expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321' }), undefined, resolver)).toBe(false);
+    });
+
+    it('admits a valid session — the refusals above are not just "auth on means always false"', () => {
+      const { resolver, seen } = resolverFor((cookie) => cookie === 'cez_session=good');
+      expect(
+        verifyWsUpgrade(
+          req({ host: '127.0.0.1:4321', origin: 'http://127.0.0.1:4321', cookie: 'cez_session=good' }),
+          undefined,
+          resolver,
+        ),
+      ).toEqual({ trusted: true });
+      expect(seen).toEqual(['cez_session=good']);
+    });
+
+    it('still applies the Origin rules to an authenticated socket — a session is not a bypass', () => {
+      // Belt and braces in the other direction: a valid cookie must not readmit a foreign Origin.
+      // Cookies ride along on a cross-site WebSocket handshake, so "signed in" and "same origin"
+      // are independent facts and both still have to hold.
+      const { resolver } = resolverFor(() => true);
+      expect(
+        verifyWsUpgrade(
+          req({ host: '127.0.0.1:4321', origin: 'https://evil.com', cookie: 'cez_session=good' }),
+          undefined,
+          resolver,
+        ),
+      ).toBe(false);
+    });
+
+    it('is not fooled by CEZ_AUTH spellings that do not name a provider', () => {
+      // `resolveAuthProvider` maps anything other than the two exact spellings to `'none'`, so a
+      // typo must land on today's unauthenticated behaviour rather than half-enabling the check.
+      process.env.CEZ_AUTH = 'OIDC';
+      expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321' }))).toEqual({ trusted: true });
+    });
   });
 });

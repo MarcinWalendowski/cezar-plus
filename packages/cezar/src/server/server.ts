@@ -142,7 +142,18 @@ import {
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { readUiState, uiStatePath } from '../ui-state.ts';
 import { agentHomePaths, expandTilde } from '../paths.ts';
-import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.ts';
+import { isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCapabilities } from './capabilities.ts';
+// D3's single construction of "who is this request". Imported STATICALLY, unlike every other
+// `../auth/*` module (which `src/index.ts` reaches only through a `CEZ_AUTH`-gated dynamic
+// `import()`), and that asymmetry is deliberate: `auth/principal.ts` has no runtime imports of
+// its own — its only import of this file is `import type`, which TypeScript erases — reads no
+// file, and touches nothing under `<CEZ_HOME>/identity`. D1's "unset means zero I/O" is about
+// filesystem work, which this does none of; what it buys is that `CEZ_AUTH=none` resolves its
+// principal through the SAME function an authenticated request does instead of through a second
+// hand-rolled constant here. Two constants "kept in sync by convention" is exactly the drift D3
+// names, and it had already appeared once in this change: a `LOCAL_PRINCIPAL` here and a
+// `LOCAL_IDENTITY` there, byte-identical and with nothing asserting they stayed that way.
+import { resolvePrincipal } from '../auth/principal.ts';
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
 import { parseRemote, resolveForge, type ForgeAvailability } from './forge/index.ts';
@@ -239,7 +250,81 @@ export interface ServerDeps {
   socketHub?: SocketHub;
   /** Re-arm the workspace automation timer after definition mutations. */
   automationsChanged?: () => void;
+  /**
+   * The Phase 2/3 identity resolver (D1/D3/D6, spec
+   * `.ai/specs/2026-08-06-org-team-auth-onboarding.md`), wired in by `src/index.ts`'s
+   * `serveCommand` — never built here. `createApp`/`startServer` stay synchronous, but resolving
+   * `../auth/session.ts` (a module that does not exist before Phase 2) is a dynamic import, which
+   * is not, so the async load happens once in the CLI's already-`async` boot path and the already-
+   * resolved instance is threaded through here. Present iff `resolveAuthProvider(process.env) !== 'none'`
+   * — `requirePrincipal` below and `verifyWsUpgrade` both treat "auth is on but this is
+   * undefined" as a boot-wiring bug, not as "auth is actually off", and fail closed rather than
+   * silently falling back to the implicit local principal.
+   */
+  sessionResolver?: SessionResolver;
+  /**
+   * The Phase 3 auth routes (`../auth/routes.ts`: `/login`, `/auth/callback`, session
+   * status/logout — the OIDC/Google flow of D9 and the onboarding flow of D8), mounted at the
+   * app root when present. Same "loaded once in `serveCommand`, threaded in already-built"
+   * shape as `sessionResolver` and for the same reason. Undefined is the `CEZ_AUTH=none` case,
+   * and D1 is explicit that unset must register no login route at all — so this is genuinely
+   * absent rather than present-but-inert, unlike most other optional deps here.
+   */
+  authRoutes?: Hono;
 }
+
+/**
+ * A resolved caller identity (D3): every `/api/*` request and every WebSocket upgrade carries
+ * one, through the SAME resolution path whether `CEZ_AUTH` is off (the implicit
+ * `LOCAL_PRINCIPAL` below) or on (a real session). There is deliberately no "if auth is off,
+ * skip the resolver" branch — see D3's own worked incident for what that shape costs: two
+ * project-context construction paths (`ProjectContexts.build()` vs the hand-built `bootContext`)
+ * silently disagreed about which stores were active, and the same drift would apply to who is
+ * allowed to do what if auth-on and auth-off resolved a principal two different ways.
+ */
+export interface Principal {
+  /** `'local'` is the implicit `CEZ_AUTH=none` identity; `'session'` is a real signed-in user. */
+  readonly kind: 'local' | 'session';
+  readonly userId: string;
+  readonly orgId: string;
+  readonly teamId: string;
+  readonly role: 'owner' | 'admin' | 'member';
+}
+
+/**
+ * The Phase 2/3 contract `packages/cezar/src/auth/session.ts` implements (D3, D7) — declared
+ * here, not there, because that module does not exist until Phase 2 lands, and putting the
+ * shape where BOTH sides already exist lets this seam and the future module compile against the
+ * identical type instead of each inventing its own (or the seam falling back to `any`).
+ *
+ * Deliberately SYNCHRONOUS: `SocketHub.attach()`'s `verifyUpgrade` callback (`./ws.ts`) is sync
+ * by construction — the raw `upgrade` event has nowhere to `await` before the hub decides
+ * whether to complete the handshake — and D6 asks for the exact same check duplicated into that
+ * path, not a second async one bolted on beside it. A resolver only callable from an `async`
+ * handler is a resolver `verifyWsUpgrade` could never call. This is not a hardship Phase 2/3
+ * inherits reluctantly: D7's identity reads are plain JSON behind an `O_EXCL` lease, which is
+ * sync fs I/O — the same constraint `RunStore`/`SourceStore` already live under.
+ */
+export interface SessionResolver {
+  /** `null` for no session, an invalid one, or an expired one — never throws. An unreadable
+   *  identity store degrades to "no session", the same zero-config failure mode every other
+   *  store in this codebase uses (see e.g. `loadWorkspaceConfig`). */
+  resolveFromCookieHeader(cookieHeader: string | undefined): Principal | null;
+}
+
+/**
+ * The implicit identity every request resolves to while `CEZ_AUTH` is unset (D1/D3) — a
+ * synthetic local user in a default org/team, so the zero-config single-user product never has
+ * to reason about "no principal". Fixed ids, never persisted: nothing under `CEZ_AUTH=none` ever
+ * touches `<CEZ_HOME>/identity/*.json` (D7) to produce this value.
+ *
+ * Built by CALLING `resolvePrincipal`, not by writing the four fields out again here. D3 forbids
+ * a second construction path, and a duplicated literal is one: it drifts silently, because
+ * nothing type-checks two object literals against each other. `resolvePrincipal` is a pure
+ * function of its argument, so hoisting the auth-off call to module scope costs one object at
+ * import time and is not a per-request allocation.
+ */
+const LOCAL_PRINCIPAL: Principal = resolvePrincipal({ authProvider: 'none' });
 
 // ---- project-scoped routing (multi-project spec, step 2.2) -----------------
 
@@ -1076,7 +1161,7 @@ async function probeWritableDir(dir: string, create: boolean): Promise<string | 
 // Annotating it `Hono` here would erase every route from the type and leave the typed client
 // with nothing to offer. See the `routed` assembly at the end of the function.
 export function createApp(deps: ServerDeps) {
-  const { version, update, bindHost, bootProjectId } = deps;
+  const { version, update, bindHost, bootProjectId, sessionResolver } = deps;
   // Boot singletons keep DELIBERATELY distinct names (`boot*`): every
   // project-scoped handler must resolve its `{store, manager, root, dataDir,
   // launchKey}` from `c.get('project')` — a bare `store`/`repoRoot` in a
@@ -1307,9 +1392,17 @@ export function createApp(deps: ServerDeps) {
   // response body (we send CORS headers on /api/v1/health alone), and no GET
   // handler mutates state. Rebinding, which WOULD make those reads legible, is
   // what check 1 stops.
+  //
+  // Scope: `/api/*` AND `/auth/*` (D1/D9's login family, mounted at the app root by D5 so it
+  // carries no `/api/v1` segment). Registering the guard on `/api/*` alone left `/auth/*` as the
+  // only route family in the app outside the perimeter, and `POST /auth/logout` as the only
+  // unguarded write in the app: a page on another loopback port is same-SITE, so its `SameSite=Lax`
+  // session cookie rides along and check 2 is the only thing that would have stopped it destroying
+  // the session. The two registrations share ONE handler rather than being written twice — the
+  // guard's semantics are the invariant, and a copy would be free to drift from it.
   const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
   const isHostedMode = () => !resolveCapabilities(process.env, bindHost).localHandoff;
-  app.use('/api/*', async (c, next) => {
+  const originGuard = async (c: Context, next: Next) => {
     const hostName = hostnameOfHost(c.req.header('host'));
     // Strict twin of `isLoopbackHost`: a *missing* Host is untrusted here (an
     // absent header is not the "we defaulted to the loopback bind" case), and
@@ -1375,6 +1468,59 @@ export function createApp(deps: ServerDeps) {
         );
       }
     }
+    return next();
+  };
+  app.use('/api/*', originGuard);
+  app.use('/auth/*', originGuard);
+
+  // ---- principal resolution (D1/D3/D6) --------------------------------------
+  // Mounted on the same scope as the origin guard above, and deliberately AFTER it: an
+  // unauthenticated cross-origin request is rejected by #426 before it ever reaches identity.
+  //
+  // `/api/v1/health` is exempt for the same reason the origin guard exempts it — it is the
+  // CORS-open cross-origin discovery route (#431), reachable before a browser has any cookie
+  // for this origin to send, and the bookmarklet's port-sweep depends on that. It carries no
+  // per-principal data (BACKWARD_COMPATIBILITY.md §2), so skipping identity resolution here
+  // widens nothing.
+  //
+  // `c.set`/`c.get` below go through a cast to `Context<{ Variables: { principal: Principal } }>`
+  // rather than through typing `app` itself with that Env: `app`'s inferred generic IS `createApp`'s
+  // inferred return type (nothing here annotates it), and widening it broke assignability to
+  // the plain `Hono` every one of `createApp`'s ~30 test-file callers types its own `app`
+  // variable as. No handler reads `c.get('principal')` yet — that starts in Phase 4/5, once
+  // permission checks exist — so until then this cast is the seam's whole footprint; whichever
+  // phase adds the first real reader is also the right place to decide whether `app`'s env is
+  // worth widening for real.
+  app.use('/api/*', async (c, next) => {
+    if (c.req.path === `${V1_PREFIX}/health`) return next();
+    const principalContext = c as unknown as Context<{ Variables: { principal: Principal } }>;
+    // `resolveAuthProvider`, not `resolveCapabilities(...).auth`: which provider a deployment
+    // requires is a server-side policy, not a capability the cockpit is told about, and it is
+    // deliberately absent from the health payload — the spec's Risks section names a diff in the
+    // auth-off health payload as a failure rather than an update, and the route-parity /
+    // bc-route-inventory / versioned-surface suites are the control that only means something
+    // while it stays byte-identical. `bindHost` is not a parameter here because `CEZ_AUTH` is
+    // read the same way in every deployment mode (unlike `localHandoff`).
+    const auth = resolveAuthProvider(process.env);
+    if (auth === 'none') {
+      // D3: the implicit principal goes through THIS SAME middleware, not a bypassed branch —
+      // see the module-level doc comment on `Principal` for the incident that rule guards
+      // against.
+      principalContext.set('principal', LOCAL_PRINCIPAL);
+      return next();
+    }
+    // CEZ_AUTH is on. `sessionResolver` only exists when `src/index.ts`'s `serveCommand` loaded
+    // `../auth/session.ts` and threaded the result in — a missing resolver here means CEZ_AUTH
+    // was flipped on without going through that boot path (e.g. `createApp` called directly).
+    // Fail closed rather than quietly falling back to the local principal: that fallback is
+    // exactly the "forgot a variable, exposed a shell" shape D1's boot refusal exists to rule
+    // out, and this seam must not reopen it one layer up.
+    if (!sessionResolver) {
+      return c.json({ error: 'server misconfigured: CEZ_AUTH is set but no session resolver was wired' }, 500);
+    }
+    const principal = sessionResolver.resolveFromCookieHeader(c.req.header('cookie'));
+    if (!principal) return c.json({ error: 'unauthenticated' }, 401);
+    principalContext.set('principal', principal);
     return next();
   });
 
@@ -5182,6 +5328,15 @@ export function createApp(deps: ServerDeps) {
     .route(V1_PREFIX, v1)
     .route(V1_PREFIX, workspaceV1);
 
+  // ---- auth routes (D1/D9, mount point only — Phase 3 builds the router) ----
+  // `/login`, `/auth/callback` and the rest of the OIDC/Google + onboarding flow are top-level
+  // paths, not API ones (D5: org is which PROCESS answers, so it needs no `/api/v1` segment or
+  // `/o/<org>` prefix). Mounted at root, before the SPA catch-all so it still wins; absent
+  // whenever `CEZ_AUTH=none` (`deps.authRoutes` is only ever set by `serveCommand`'s auth
+  // branch), which is what makes D1's "no login route registered" literally true rather than a
+  // route that exists but 404s.
+  if (deps.authRoutes) routed.route('/', deps.authRoutes);
+
   // ---- SPA catch-all -------------------------------------------------------
   // Last, so every route above still wins. Any other GET gets the cockpit shell:
   // react-router owns the route map, including the 404, so `/tasks/:id/changes`
@@ -5301,7 +5456,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     }).catch(() => undefined);
   });
   server.once('close', () => { unsubscribe(); coordinator.stop(); automationScheduler.stop(); });
-  socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost));
+  socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost, deps.sessionResolver));
   return server;
 }
 
@@ -5337,12 +5492,28 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
  * page without any per-topic vigilance. A connection is `trusted` when it is
  * provably the cockpit itself: a same-authority Origin, a no-Origin native
  * client, or a dev proxy the browser vouches for via `Sec-Fetch-Site`.
+ *
+ * **Principal check (D6).** Duplicated here rather than shared with the HTTP `requirePrincipal`
+ * middleware above because the upgrade is attached to the RAW http server (`startServer`, below),
+ * never to Hono — `app.use('/api/*', requirePrincipal)` never runs for this path, which is
+ * exactly why D6 calls this out as its own bypass-shaped gap. `sessionResolver` is the SAME
+ * instance `requirePrincipal` uses (both threaded from `ServerDeps` by `serveCommand`'s one
+ * `../auth/session.ts` import), so the two call sites can only drift in wiring, never in what
+ * counts as a valid session.
  */
-export function verifyWsUpgrade(req: IncomingMessage, bindHost?: string): WsUpgradeVerdict {
+export function verifyWsUpgrade(req: IncomingMessage, bindHost?: string, sessionResolver?: SessionResolver): WsUpgradeVerdict {
   const host = req.headers.host;
   const hostName = hostnameOfHost(host);
   const hosted = !resolveCapabilities(process.env, bindHost).localHandoff;
   if (!hosted && !isLoopbackHostHeader(hostName)) return false;
+  const auth = resolveAuthProvider(process.env);
+  if (auth !== 'none') {
+    // Same fail-closed stance as `requirePrincipal`: a missing resolver while auth is nominally
+    // on is a boot-wiring bug, not "auth is actually off", and an unauthenticated upgrade is
+    // refused outright rather than admitted at reduced trust — this is the negative control D6
+    // asks for, exercising the socket itself rather than an HTTP route beside it.
+    if (!sessionResolver || !sessionResolver.resolveFromCookieHeader(req.headers.cookie)) return false;
+  }
   const origin = req.headers.origin;
   if (origin === undefined) return { trusted: true }; // non-browser client — no Origin to spoof
   // Scheme-checked, like the HTTP guard's comparison: `authorityOfOrigin` is

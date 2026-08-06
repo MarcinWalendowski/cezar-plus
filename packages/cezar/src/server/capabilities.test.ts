@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { isLoopbackHost, isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.ts';
+import {
+  isLoopbackHost,
+  isLoopbackHostHeader,
+  normalizeHostname,
+  resolveAuthProvider,
+  resolveCapabilities,
+} from './capabilities.ts';
 
 /**
  * `resolveCapabilities` takes its env as a parameter, so these drive it
@@ -172,6 +178,41 @@ describe('resolveCapabilities — followups (#471)', () => {
       // silently, and it is why the polarity of a new key cannot slip through unnoticed.
       skills: true,
     });
+  });
+});
+
+describe('resolveAuthProvider (CEZ_AUTH, D1)', () => {
+  it('is "none" for the npm default (nothing set)', () => {
+    expect(resolveAuthProvider({})).toBe('none');
+  });
+
+  it('is "oidc" for CEZ_AUTH=oidc', () => {
+    expect(resolveAuthProvider({ CEZ_AUTH: 'oidc' })).toBe('oidc');
+  });
+
+  it('is "google" for CEZ_AUTH=google', () => {
+    expect(resolveAuthProvider({ CEZ_AUTH: 'google' })).toBe('google');
+  });
+
+  it.each(['1', 'true', 'OIDC', 'Google', 'none', ''])(
+    'falls back to "none" for the unrecognised spelling %j — a typo must never silently turn auth on',
+    (value) => {
+      expect(resolveAuthProvider({ CEZ_AUTH: value })).toBe('none');
+    },
+  );
+
+  it('is independent of the deployment mode', () => {
+    expect(resolveAuthProvider({ CEZ_AUTH: 'oidc', CEZ_REMOTE: '1' })).toBe('oidc');
+  });
+
+  // The spec's Risks section makes the auth-off health payload the control for the whole auth
+  // change ("a diff in the auth-off health payload is a failure, not an update"). `CEZ_AUTH` is
+  // therefore read through the function above and NOT reported as a capability — this asserts
+  // the absence directly, so re-adding the key fails here rather than only in the ~20 fixtures
+  // whose edits are what made the first attempt look green.
+  it('never appears in the capability payload, whatever CEZ_AUTH says', () => {
+    expect(resolveCapabilities({ CEZ_AUTH: 'oidc' })).not.toHaveProperty('auth');
+    expect(resolveCapabilities({ CEZ_AUTH: 'oidc', CEZ_REMOTE: '1' }, '0.0.0.0')).not.toHaveProperty('auth');
   });
 });
 

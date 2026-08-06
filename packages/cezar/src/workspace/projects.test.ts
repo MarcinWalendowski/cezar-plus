@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync,
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { loadWorkspaceConfig } from './config.ts';
+import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from './config.ts';
 import {
   allocateProjectSlug,
   clearProjectProbeCache,
@@ -97,11 +97,62 @@ describe('workspace projects', () => {
     });
 
     it('never allocates a reserved slug — a repo named default/ becomes default-2', async () => {
-      for (const reserved of ['default', 'new', 'settings', 'api', 'p', 'assets']) {
+      for (const reserved of [
+        'default',
+        'new',
+        'settings',
+        'api',
+        'p',
+        'assets',
+        // auth/login/callback/o/t: added by spec 2026-08-06-org-team-auth-onboarding
+        // (D5) for the auth/onboarding routes and the future /o/<org>/, /t/<team>/
+        // segments.
+        'auth',
+        'login',
+        'callback',
+        'o',
+        't',
+      ]) {
         const entry = await registerProject(makeDir('reserved', reserved));
         expect(entry.id).toBe(`${reserved}-2`);
       }
     });
+
+    it(
+      'retroactive reservation is forward-only: an existing registry entry already holding a ' +
+        'now-reserved slug still loads and resolves (spec 2026-08-06-org-team-auth-onboarding D5) ' +
+        "— it is JSON on someone's disk and cannot be migrated out from under a new reservation",
+      async () => {
+        // Simulate a registry written before `auth` was reserved: push the entry
+        // directly rather than through registerProject/allocateProjectSlug, which
+        // would now refuse to hand out this id.
+        const root = makeDir('legacy-auth-project');
+        const legacyEntry = {
+          id: 'auth',
+          root,
+          name: 'legacy-auth-project',
+          addedAt: new Date(0).toISOString(),
+          lastOpenedAt: new Date(0).toISOString(),
+          source: 'local' as const,
+        };
+        await mergeWriteWorkspaceConfig((config) => {
+          config.projects.push(legacyEntry);
+        });
+
+        // It still loads via the raw config...
+        expect((await loadWorkspaceConfig()).projects).toEqual([legacyEntry]);
+
+        // ...and still resolves through listProjects, both unfiltered and pinned.
+        const [listed] = await listProjects();
+        expect(listed).toMatchObject({ id: 'auth', root, status: 'not-git' });
+        expect((await listProjects({ projectId: 'auth' })).map((p) => p.id)).toEqual(['auth']);
+
+        // A second, unrelated root registering fresh still gets steered off the
+        // now-reserved slug — the legacy entry surviving does not un-reserve it.
+        const fresh = await registerProject(makeDir('another-auth-repo', 'auth'));
+        expect(fresh.id).toBe('auth-2');
+      },
+    );
 
     it('slugifies ugly basenames and keeps a checkout source', async () => {
       const entry = await registerProject(makeDir('My Repo!.git'), 'checkout');

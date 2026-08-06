@@ -142,6 +142,28 @@ export function notesLogPath(): string {
 }
 
 /**
+ * Identity storage — orgs, teams, users, memberships, sessions (D7,
+ * `.ai/specs/2026-08-06-org-team-auth-onboarding.md`). Its own directory under `cezarHomeDir()`,
+ * on the `agentAccountsPath()`/`notesPath()` precedent: a cezar build with `CEZ_AUTH` unset never
+ * imports the module that reads this path, so it never creates or touches it either — "unset
+ * means zero I/O" (D1) requires that this function existing is not itself a filesystem
+ * operation, and it is not (`join` does no I/O).
+ *
+ * JSON files behind the same `O_EXCL` lease idiom `sources/store.ts` and `automations/store.ts`
+ * already use, not SQLite: `node:sqlite` is absent at cezar's declared floor
+ * (`engines: {"node": ">=20"}` — the module throws even on a local Node v22.12) and
+ * `better-sqlite3` is a native dependency this all-pure-JS runtime cannot add without breaking
+ * `npx cezar-cli` on any platform without a prebuild (D7). Individual file names inside this
+ * directory (`orgs.json`, `sessions.json`, …) belong to whichever module actually reads and
+ * writes them — this function only fixes where the directory itself lives, so that decision is
+ * made once, here, rather than re-derived per file the way `cezarHomeDir()`'s own doc comment
+ * warns against.
+ */
+export function identityDir(): string {
+  return join(cezarHomeDir(), 'identity');
+}
+
+/**
  * Expand a leading `~` to the user's home. Lives here with the other homedir
  * logic (see the module note above — one place owns `homedir()`): the
  * workspace browse/checkout roots are stored as the user wrote them (a literal `~`), so

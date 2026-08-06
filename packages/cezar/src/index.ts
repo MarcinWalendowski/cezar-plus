@@ -18,7 +18,9 @@ import { reclaimWorktrees } from './runs/retention.ts';
 import { RunStore } from './runs/store.ts';
 import { RunManager } from './workflows/run.ts';
 import { loadWorkflows } from './workflows/load.ts';
-import { startServer, WorkspaceEventBus } from './server/server.ts';
+import { startServer, WorkspaceEventBus, type SessionResolver } from './server/server.ts';
+import { runAuthBootGate } from './auth-boot-gate.ts';
+import type { Hono } from 'hono';
 import {
   ProviderRuntimeAuthObserver,
   recoverWithProviderRuntimeAuthObservation,
@@ -202,6 +204,49 @@ async function serveCommand(
   openBrowser: boolean,
   bindHost?: string,
 ): Promise<void> {
+  // ---- auth boot gate (D1, spec .ai/specs/2026-08-06-org-team-auth-onboarding.md) -------------
+  // FIRST, before `initWorkspace` (writes `~/.cezar`), `reclaimWorktrees` (deletes worktree
+  // directories) and `manager.recover()` (re-queues and resumes interrupted runs). "Refuses to
+  // boot" has to mean the process did nothing, not that it migrated the home and resumed other
+  // people's agent runs and then declined to serve. Everything the gate decides — including the
+  // exact refusal wording and the non-zero exit — lives in `./auth-boot-gate.ts` and is covered
+  // by `auth-boot-gate.test.ts`; a CLI entry module cannot be imported by a unit test without
+  // running the CLI, so an inline gate here was untestable by construction and a mutation
+  // disabling it left all five gates green.
+  const gate = runAuthBootGate(process.env, bindHost);
+  if (!gate.proceed) return;
+  let sessionResolver: SessionResolver | undefined;
+  let authRoutes: Hono | undefined;
+  if (gate.provider !== 'none') {
+    // Lazy by construction (D1: "unset means zero I/O … never loads them") — this branch only
+    // ever runs once CEZ_AUTH names a real provider, loopback or hosted alike (the D1 table's
+    // second row: local + oidc/google still requires login). `./auth/session.ts` opens the
+    // identity store at module scope, so it must never become a static import at the top of this
+    // file: a dynamic `import()` is evaluated when this line runs and not before, which is what
+    // keeps the npm default path free of any filesystem work.
+    //
+    // The specifiers are STRING LITERALS, and that is load-bearing rather than incidental. They
+    // were first routed through `const` variables so `npm run typecheck` would not have to
+    // resolve modules Phase 2/3 had not written yet — but a variable specifier is opaque to the
+    // compiler in BOTH directions, so nothing was left to notice that the paths themselves were
+    // wrong. They read `../auth/…`, and this file is `src/index.ts`, so its sibling directory is
+    // `./auth/`: `../auth/…` resolves to `packages/cezar/auth/…` from `src` and to the same
+    // place from `dist`, a directory that has never existed in either. Every
+    // `CEZ_AUTH=oidc|google` boot therefore died with ERR_MODULE_NOT_FOUND — with all five gates
+    // green, because no gate can check a path the type-checker was deliberately prevented from
+    // reading. Phase 2/3 has landed and both modules exist, so as literals they are now verified
+    // on every typecheck, and `rewriteRelativeImportExtensions` rewrites the `.ts` to `.js` at
+    // compile time instead of through the emitted runtime helper. Do not reintroduce the
+    // indirection to silence a resolution error: an unresolvable specifier here means the module
+    // is genuinely missing from the build, which is the thing worth failing on.
+    const [sessionMod, routesMod] = await Promise.all([
+      import('./auth/session.ts'),
+      import('./auth/routes.ts'),
+    ]);
+    sessionResolver = sessionMod.sessionResolver;
+    authRoutes = routesMod.authRoutes;
+  }
+
   const bootProjectId = await initWorkspace(repoRoot);
   // ONE workspace semaphore for the whole process (spec 2026-07-20, step 2.5):
   // the boot manager and every lazily-built project context count their runs
@@ -273,6 +318,7 @@ async function serveCommand(
         `    and make sure this interface is not reachable from the internet.\n`,
     );
   }
+
   startServer({
     repoRoot,
     store,
@@ -285,6 +331,8 @@ async function serveCommand(
     providerAuth,
     providerRuntimeAuth,
     workspaceEvents,
+    sessionResolver,
+    authRoutes,
   }, port);
   const url = `http://localhost:${port}`;
 

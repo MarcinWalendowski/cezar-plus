@@ -56,10 +56,18 @@
  * `workspaceViews` (`CEZ_WORKSPACE_VIEWS`) are cross-project by nature, so both report `false`
  * under `CEZ_SINGLE_PROJECT=1` regardless of their own flag — a single-project cockpit has no
  * "every registered project" to aggregate or fan a note out across.
+ *
+ * `CEZ_AUTH` (D1 of `.ai/specs/2026-08-06-org-team-auth-onboarding.md`) is read by
+ * `resolveAuthProvider` below and is **not** part of `resolveCapabilities`'s result: it is
+ * server-side policy the cockpit is never told, and keeping it out is what leaves the auth-off
+ * health payload byte-identical to the pre-auth build. Unlike every boolean above, an unset
+ * `CEZ_AUTH` is not merely "off" — it is the whole npm zero-config product, so
+ * `resolveAuthProvider` treats anything other than the two exact provider spellings as `'none'`
+ * rather than trying to guess what a typo meant.
  */
 
 import { followupsEnabled } from '../handoff.ts';
-import type { Capabilities } from '@open-mercato/cezar-contract';
+import type { AuthProvider, Capabilities } from '@open-mercato/cezar-contract';
 
 /** Every IPv4 address in 127.0.0.0/8, anchored. Anchoring is load-bearing: a
  *  `startsWith('127.')` test also matches attacker-controlled *hostnames* like
@@ -148,6 +156,18 @@ export function isLoopbackHostHeader(host: string | null | undefined): boolean {
   return isLoopbackName(normalizeHostname(host));
 }
 
+/**
+ * `CEZ_AUTH` selects the provider (D1): `'oidc'` or `'google'` exactly, everything else —
+ * including unset — is `'none'`. `'none'` is what the npm default (no env set at all) resolves
+ * to, and it MUST stay zero-I/O: nothing beyond this string comparison runs to reach that answer,
+ * which is what lets `packages/cezar/src/index.ts`'s boot gate and `requirePrincipal` in
+ * `server.ts` both import the Phase 2/3 identity module only on the branch where this returns
+ * something other than `'none'`.
+ */
+export function resolveAuthProvider(env: NodeJS.ProcessEnv = process.env): AuthProvider {
+  return env.CEZ_AUTH === 'oidc' || env.CEZ_AUTH === 'google' ? env.CEZ_AUTH : 'none';
+}
+
 /** `CEZ_REMOTE=1` or a non-loopback bind host ⇒ hosted mode (no local handoff).
  *  `CEZ_FOLLOWUPS=1` ⇒ the follow-up inbox exists (#471).
  *
@@ -181,5 +201,9 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
     // Skills predates the capability payload, so absent has to keep meaning on — see the
     // `skills` field in `contract/health.ts` for why the asymmetry is deliberate.
     skills: env.CEZ_SKILLS !== '0',
+    // No `auth` key. `CEZ_AUTH` is read through `resolveAuthProvider` by the two call sites that
+    // need it (`requirePrincipal`/`verifyWsUpgrade` in server.ts, the boot gate in index.ts) and
+    // is deliberately absent from this payload — see `authProviderSchema`'s own doc comment in
+    // `contract/health.ts` for why the auth-off health response has to stay byte-identical.
   };
 }

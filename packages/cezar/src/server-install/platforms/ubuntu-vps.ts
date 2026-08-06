@@ -573,6 +573,22 @@ export function systemdUnit(
   // systemd expands `%` specifiers in Environment/ExecStart values — a literal
   // `%` (possible in an nvm dir name) must be doubled or the unit fails to load.
   const sysd = (s: string) => s.replace(/%/g, '%%');
+  // `CEZ_ALLOW_UNAUTHENTICATED=1` is what keeps this unit bootable under D1's auth gate
+  // (`src/auth-boot-gate.ts`, spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`): the gate
+  // refuses to start a hosted deployment (`CEZ_REMOTE=1`, right above) that has neither `CEZ_AUTH`
+  // nor this opt-out, so without the line every existing `--platform ubuntu-vps` host would die on
+  // upgrade and every fresh install would provision a service that never starts.
+  //
+  // It is the CORRECT row of D1's table for this installer rather than a way around the gate: this
+  // platform puts an nginx vhost with `auth_basic` + htpasswd in front of the service (see the
+  // vhost template above), so the operator really has said "my proxy is the perimeter". D1's rule
+  // is that they say it once, deliberately — and writing it here IS that statement, made by the
+  // installer on their behalf at the moment it also installs the proxy that backs it. The service
+  // will log the warning naming the exposure on every start.
+  //
+  // When this platform grows an OIDC option (phase 7's `--platform hetzner` replaces `auth_basic`
+  // with a real login), that variant sets `CEZ_AUTH` instead and must NOT also write this line.
+  //
   // Loopback stays the default (and stays flag-less, so existing units are
   // byte-identical); an external-proxy install binds an interface its proxy can
   // actually reach — a container-based proxy cannot dial the host's loopback.
@@ -587,6 +603,7 @@ Wants=network-online.target
 Type=simple
 ${userLine}WorkingDirectory=${repoRoot}
 Environment=CEZ_REMOTE=1
+Environment=CEZ_ALLOW_UNAUTHENTICATED=1
 Environment=PATH=${sysd(pathDirs.join(':'))}
 ExecStart=${sysd(execStart)} serve --no-open --port ${port}${sysd(bind)}
 Restart=on-failure

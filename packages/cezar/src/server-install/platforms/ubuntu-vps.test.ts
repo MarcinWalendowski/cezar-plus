@@ -10,6 +10,7 @@ import {
   systemdUnit,
   ubuntuVps,
 } from './ubuntu-vps.ts';
+import { resolveAuthBootGate } from '../../auth-boot-gate.ts';
 import { StepAborted } from '../steps.ts';
 import { createAutoUi } from '../ui.ts';
 import type { InstallContext, InstallStep, Runner, Ui } from '../types.ts';
@@ -247,6 +248,43 @@ describe('systemdUnit', () => {
   it('passes --bind-host when an external-proxy install needs a reachable interface', () => {
     const unit = systemdUnit('/srv/app', 4321, 'user', '/usr/local/bin/cezar', '172.17.0.1');
     expect(unit).toContain('ExecStart=/usr/local/bin/cezar serve --no-open --port 4321 --bind-host 172.17.0.1');
+  });
+
+  // The unit this installer writes must actually boot under D1's auth gate. `CEZ_REMOTE=1` above
+  // makes it hosted, and a hosted deployment with neither `CEZ_AUTH` nor this opt-out is REFUSED
+  // (`src/auth-boot-gate.ts`) — so without the line, every existing `--platform ubuntu-vps` host
+  // dies on upgrade and a fresh install provisions a service that never starts. Asserted here
+  // rather than only in the gate's own suite, because the defect is the pairing: both files were
+  // individually correct and the deployment they compose was dead.
+  it.each([
+    [undefined],
+    ['172.17.0.1'],
+  ])('carries CEZ_ALLOW_UNAUTHENTICATED=1 so the hosted boot gate lets it start (bindHost=%s)', (bindHost) => {
+    const unit = systemdUnit('/srv/app', 4321, 'user', '/usr/local/bin/cezar', bindHost);
+    expect(unit).toContain('Environment=CEZ_REMOTE=1');
+    expect(unit).toContain('Environment=CEZ_ALLOW_UNAUTHENTICATED=1');
+    // This platform fronts the service with nginx `auth_basic`, so the opt-out is the honest row
+    // of D1's table for it — not a provider. A unit that named both would be contradictory.
+    expect(unit).not.toContain('CEZ_AUTH=');
+  });
+
+  it('the gate agrees: this exact environment boots, and dropping the flag refuses', () => {
+    // Reads the unit's own `Environment=` lines and runs the real decision over them, so the two
+    // cannot drift apart the way they did when the gate landed without touching this installer.
+    const unit = systemdUnit('/srv/app', 4321, 'user', '/usr/local/bin/cezar');
+    const env = Object.fromEntries(
+      unit
+        .split('\n')
+        .filter((line) => line.startsWith('Environment='))
+        .map((line) => {
+          const [key, ...rest] = line.slice('Environment='.length).split('=');
+          return [key!, rest.join('=')];
+        }),
+    ) as NodeJS.ProcessEnv;
+
+    expect(resolveAuthBootGate(env).proceed).toBe(true);
+    const { CEZ_ALLOW_UNAUTHENTICATED: _dropped, ...withoutFlag } = env;
+    expect(resolveAuthBootGate(withoutFlag).proceed).toBe(false);
   });
 
   it('stays flag-free for loopback so existing units are unchanged', () => {

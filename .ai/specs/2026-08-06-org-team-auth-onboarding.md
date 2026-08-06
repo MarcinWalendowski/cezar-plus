@@ -76,6 +76,34 @@ The refusal is the point. An operator who treats their private network as the
 perimeter says so once, deliberately; nobody exposes a shell by forgetting a
 variable. This does not enforce auth — it enforces *choosing*.
 
+**AMENDED 2026-08-07 (post-review), two ways the first implementation got this
+wrong:**
+
+1. **The refusal ran too late to be a refusal.** It sat after `initWorkspace`
+   (writes `~/.cezar`), `reclaimWorktrees` (*deletes* worktree directories) and
+   `manager.recover()` (re-queues and resumes interrupted agent runs). A hosted
+   no-auth box therefore did all of that and only then declined to serve. The
+   decision, its two messages and its exit code now live in
+   `packages/cezar/src/auth-boot-gate.ts`, and `serveCommand` calls it as its
+   **first** statement — before any of the above — leaving only
+   `if (!gate.proceed) return;` at the call site. It is its own module because
+   `src/index.ts` is the CLI entry: importing it runs the CLI, so an inline gate
+   was untestable by construction, and a mutation turning the refusal into
+   `if (false && …)` passed all five gates. `auth-boot-gate.test.ts` walks every
+   row of the table above.
+2. **The one deployment cezar itself ships was left unbootable.**
+   `server-install --platform ubuntu-vps` writes `Environment=CEZ_REMOTE=1` and
+   nothing else, so every existing host would have died on upgrade and a fresh
+   install would have provisioned a service that never starts. That installer now
+   also writes `Environment=CEZ_ALLOW_UNAUTHENTICATED=1` — the correct row of the
+   table for it, since the same installer puts an nginx `auth_basic` vhost in
+   front, so the operator genuinely has said "my proxy is the perimeter" and the
+   installer states it on their behalf at the moment it installs the proxy that
+   backs it. `ubuntu-vps.test.ts` feeds the generated unit's own `Environment=`
+   lines to `resolveAuthBootGate` and asserts both directions, so the two files
+   cannot drift apart again. Phase 7's `--platform hetzner` sets `CEZ_AUTH`
+   instead and must not write this flag.
+
 The startup refusal message must name the actual consequence, not "auth
 required": *"hosted mode with no authentication exposes shell execution to
 anyone who can reach this port (POST /api/v1/workflows → spawn bash). Set
@@ -108,6 +136,24 @@ elsewhere: `ProjectContexts.build()` activated the knowledge and source stores,
 disagreed until the knowledge base was dead on the only project the cockpit
 opens by default. Two authorization paths would drift the same way, and what
 drifts is who is allowed to do what.
+
+**CORRECTED 2026-08-07 (post-review).** The first implementation violated this
+decision in the most literal available way: a `LOCAL_PRINCIPAL` literal in
+`server/server.ts` **and** a byte-identical `LOCAL_IDENTITY` literal in
+`auth/principal.ts`, with the auth-off request short-circuiting to the former
+before any resolver call — and a comment conceding the two were "hand-kept in
+sync ... by convention, not by shared code". Nothing asserted they matched.
+`server.ts` now imports `resolvePrincipal` and its auth-off constant *is*
+`resolvePrincipal({ authProvider: 'none' })`, so there is one construction.
+
+The static import was the thing weighed against D1's "unset means zero I/O", and
+the trade is sound: `auth/principal.ts` has no runtime imports of its own (its
+only import of `server.ts` is `import type`, which TypeScript erases, so there is
+no cycle), reads no file, and touches nothing under `<CEZ_HOME>/identity`. A
+module-load trace of `dist/index.js` confirms it is the **only** `dist/auth/*`
+module loaded on the `CEZ_AUTH`-unset path. D1's own gloss on zero I/O is "no
+database file created, no session middleware mounted, no login route registered",
+and all three still hold.
 
 ### D4 — isolation is a process per org
 
@@ -154,6 +200,16 @@ the reserved-slug list **forward-only at allocation**
 (`workspace/projects.ts:33-40`): retroactive reservation cannot evict a slug
 already sitting in someone's registry.
 
+**AMENDED 2026-08-07 (post-review).** Root-mounting `/auth/*` also put it outside
+the `#426` origin guard, which was registered on `app.use('/api/*', …)` only —
+making `POST /auth/logout` the only unguarded write in the application. A page on
+another *loopback port* is same-**site**, so its `SameSite=Lax` session cookie
+rides along, which is exactly the case the guard's own comment names ("on a dev
+machine `http://localhost:3000` is every bit as foreign as `https://evil.tld`").
+The guard is now one handler registered on **both** `/api/*` and `/auth/*`; the
+"no new URL segment" decision stands, but a route family living outside `/api/`
+must be added to the perimeter explicitly, because nothing derives it.
+
 ### D6 — the session is a cookie, and the WebSocket check is separate
 
 `packages/web/src/api/client.ts:330` already sends `credentials: 'include'` and
@@ -171,6 +227,16 @@ control must exercise the socket, not the route beside it.
 
 Browser WebSocket cannot send `Authorization`, which is why a cookie is the only
 workable session carrier here and a bearer token is not.
+
+**STATUS 2026-08-07: the required negative control now exists**, having initially
+shipped without one. `server/ws.test.ts` → `describe('when CEZ_AUTH names a
+provider')` refuses an upgrade with no cookie, with a rejected cookie, and with no
+resolver wired at all, asserts the check runs *before* the `origin === undefined`
+trust (otherwise any non-browser client bypasses auth by omitting a header), and
+admits a valid session so the refusals are not "auth on means always false". The
+HTTP twin is `server/auth-perimeter.test.ts`. Both were missing at first review,
+and deleting either guard left all five gates green — the exact shape D6 exists to
+name.
 
 ### D7 — identity storage is JSON behind the existing `O_EXCL` lease
 
@@ -244,6 +310,25 @@ code path — one code path per D3's reasoning.
 - Group/role mapping from a configurable claim, defaulting to none. An
   unrecognised group grants nothing; membership is never inferred from a claim
   the operator did not map.
+- **ADDED 2026-08-07 (post-review): `state` is bound to the browser, not only to
+  the server.** "`state` verified" as written meant only "this server issued it",
+  because the pending map is process-global. That leaves login CSRF / session
+  fixation: the attacker starts the flow against the deployment's own
+  `/auth/login`, completes it at the IdP as themselves, then navigates the victim
+  to the resulting `?code=&state=` — `SameSite=Lax` permits a cookie-setting
+  response to a cross-site top-level GET, so the victim's browser ends up pinned
+  to the attacker's identity. Today the damage is capped only because a user with
+  no membership resolves to no principal and everything 401s anyway; **D8 step 1
+  ("the first user to sign in becomes owner of a new org") is precisely the change
+  that uncaps it**, so it was closed before that phase rather than after.
+  `/auth/login` now mirrors `state` into a short-lived `HttpOnly; Secure;
+  SameSite=Lax` cookie and `/auth/callback` requires the query `state` to equal
+  it, checked *before* `completeAuthorization` and without consuming the pending
+  entry (so a spoofed callback cannot cancel the real browser's in-flight login).
+  `Lax` rather than `Strict` is load-bearing: the callback arrives as a cross-site
+  top-level navigation from the IdP, and a `Strict` cookie would not be sent with
+  it. Not `__Host-` prefixed, because that requires `Secure` and D1's table
+  supports `CEZ_AUTH=oidc` on a plain-http loopback deployment for testing.
 
 ## Data Models
 
@@ -316,6 +401,21 @@ what makes "multi-tenant" true, and until it lands the docs say single-org.
 - **Zero-config regression.** The npm default is the product for most users. The
   route-parity, bc-route-inventory and versioned-surface suites are the control;
   a diff in the auth-off health payload is a failure, not an update.
+  **HELD 2026-08-07.** The first implementation added `capabilities.auth` to the
+  health payload and edited ~20 fixture files to expect it — updating the control
+  to match the change, which is the one move that makes a control stop meaning
+  anything. Reverted: `CEZ_AUTH` is read by `resolveAuthProvider` at the two call
+  sites that need it and is **not** a capability, so the auth-off payload is
+  byte-identical to the pre-auth build. `capabilities.test.ts` now asserts the
+  absence directly, so re-adding the key fails a test rather than only ~20
+  fixtures whose edits are what made the first attempt look green. Nothing
+  consumed the field; whichever phase builds a login screen adds it deliberately.
+- **A guard the suite cannot reach.** `CEZ_AUTH` is read *per request*, so an
+  ambient `CEZ_AUTH=oidc` in a developer's shell or a CI runner turned every
+  `createApp`-based suite red at once and blamed route parity
+  (`CEZ_AUTH=oidc npx vitest run …/route-parity.test.ts` → 6 failed | 3 passed).
+  `packages/cezar/vitest.setup.ts` now deletes it once per worker, the way
+  `CEZ_HOME` is pinned; the suites that mean to exercise auth set it per test.
 - **Cookie + SSE + WS drift.** Three transports, one session. The WS path is the
   one that bypasses Hono, so it is the one that will silently miss a change.
 - **`CEZ_PUBLIC_URL` misconfiguration** breaks the OIDC redirect with an opaque
