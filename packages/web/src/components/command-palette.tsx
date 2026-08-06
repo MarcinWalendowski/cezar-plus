@@ -123,6 +123,9 @@ function PaletteContent({ close }: { close: () => void }) {
             // can never disagree (`nav-items.ts`) — both gates need to travel here too.
             knowledge: health.data?.capabilities.knowledge === true,
             notes: health.data?.capabilities.notes === true,
+            // Opt-OUT, so `!== false` — see `NavAvailability.skills`. Written the other way
+            // round this would hide Skills from the palette while the sidebar still showed it.
+            skills: health.data?.capabilities.skills !== false,
           }).map((item) => {
             const Icon = item.icon
             return (

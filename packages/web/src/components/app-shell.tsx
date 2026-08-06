@@ -82,6 +82,9 @@ export type AppShellProps = {
   /** Notes gating (central-hub scaffold F3): `false` drops the Notes nav item — opt-in via
    *  `CEZ_NOTES=1`. Defaults to shown for the same reason as `forgeAvailable`. */
   notesAvailable?: boolean
+  /** Skills gating: `false` drops the Skills nav item — opt-OUT via `CEZ_SKILLS=0`, so unlike
+   *  every neighbour here the default is `true` and only an explicit `false` hides it. */
+  skillsAvailable?: boolean
   /** Single-project capability gating: hides workspace-expansion affordances. Defaults off so
    *  standalone and older callers preserve the multi-project shell. */
   singleProject?: boolean
@@ -145,6 +148,7 @@ export function AppShell({
   inboxAvailable = true,
   knowledgeAvailable = true,
   notesAvailable = true,
+  skillsAvailable = true,
   singleProject = false,
   banner,
   projectGroups,
@@ -195,6 +199,7 @@ export function AppShell({
       inbox: inboxAvailable,
       knowledge: knowledgeAvailable,
       notes: notesAvailable,
+      skills: skillsAvailable,
     }),
     repo,
     // The badge belongs to the Inbox item — with the item gone there is nothing to badge.

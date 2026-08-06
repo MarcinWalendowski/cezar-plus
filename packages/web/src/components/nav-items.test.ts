@@ -101,6 +101,7 @@ describe('visibleNavItems', () => {
     inbox: true,
     knowledge: true,
     notes: true,
+    skills: true,
   }
   const labelsOf = (opts?: Parameters<typeof visibleNavItems>[0]) =>
     visibleNavItems(opts).map((item) => item.label)

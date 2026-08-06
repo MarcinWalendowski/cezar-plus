@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/api/query-client'
 import type { ProjectListEntry, RunRecord } from '@open-mercato/cezar-api-client'
 import { ListViewProvider } from '@/components/list-view'
-import { isProjectCollapsed, ProjectGroups } from '@/components/project-groups'
+import { isProjectCollapsed, ProjectGroups, RECENT_LIMIT } from '@/components/project-groups'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -120,7 +120,7 @@ describe('isProjectCollapsed', () => {
 })
 
 describe('ProjectGroups', () => {
-  it('caps an expanded group at 10 rows and links More… at that project’s tasks pane', async () => {
+  it('caps an expanded group at 10 rows and links the remainder at that project’s tasks pane', async () => {
     const runs = Array.from({ length: 15 }, () => run())
     serve({ '/api/v1/workspace/ui-state': {}, '/api/v1/p/cezar/runs': runs })
     renderGroups([project(), project({ id: 'shop', name: 'shop', lastOpenedAt: '2026-07-19T00:00:00.000Z' })])
@@ -129,8 +129,34 @@ describe('ProjectGroups', () => {
     // Ten of fifteen — the spec's "10 most recent tasks", counted across buckets.
     expect(taskLinks('cezar')).toHaveLength(10)
 
-    const more = within(group('cezar')).getByRole('link', { name: 'More…' })
+    // The label carries the count, so the link says what it will do rather than "More…".
+    const more = within(group('cezar')).getByRole('link', { name: '5 more…' })
     expect(more.getAttribute('href')).toBe('/p/cezar/')
+  })
+
+  // The complaint that prompted the change: under the cap this link went to the URL the `Tasks`
+  // item already pointed at, so from the tasks pane it navigated nowhere and read as broken.
+  // Nine tasks, not ten, so a cap that is merely off-by-one still fails this.
+  it('renders no remainder link when nothing was capped', async () => {
+    const runs = Array.from({ length: 9 }, () => run())
+    serve({ '/api/v1/workspace/ui-state': {}, '/api/v1/p/cezar/runs': runs })
+    renderGroups([project()])
+
+    await waitFor(() => expect(taskLinks('cezar')).toHaveLength(9))
+    expect(
+      within(group('cezar')).queryByRole('link', { name: /more…/i }),
+    ).toBeNull()
+  })
+
+  it('renders no remainder link at exactly the cap', async () => {
+    const runs = Array.from({ length: RECENT_LIMIT }, () => run())
+    serve({ '/api/v1/workspace/ui-state': {}, '/api/v1/p/cezar/runs': runs })
+    renderGroups([project()])
+
+    await waitFor(() => expect(taskLinks('cezar')).toHaveLength(RECENT_LIMIT))
+    expect(
+      within(group('cezar')).queryByRole('link', { name: /more…/i }),
+    ).toBeNull()
   })
 
   it('orders groups by lastOpenedAt and only fetches the expanded one', async () => {

@@ -109,6 +109,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notes: false,
       workspaceViews: false,
       notify: false,
+      skills: true,
     });
   });
 
@@ -162,6 +163,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notes: false,
       workspaceViews: false,
       notify: false,
+      skills: true,
     });
   });
 
@@ -194,6 +196,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notes: false,
       workspaceViews: false,
       notify: false,
+      skills: true,
     });
   });
 
@@ -211,6 +214,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notes: false,
       workspaceViews: false,
       notify: false,
+      skills: true,
     });
   });
 
@@ -233,6 +237,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notes: false,
       workspaceViews: false,
       notify: false,
+      skills: true,
     });
   });
 
@@ -250,6 +255,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notes: false,
       workspaceViews: false,
       notify: false,
+      skills: true,
     });
   });
 

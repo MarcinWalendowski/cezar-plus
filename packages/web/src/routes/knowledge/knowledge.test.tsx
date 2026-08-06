@@ -61,6 +61,7 @@ const HEALTH_ON: HealthResponse = {
     notes: false,
     workspaceViews: false,
     notify: false,
+    skills: true,
   },
   projects: [{ id: BOOT, name: 'cezar' }],
   bootProject: BOOT,

@@ -32,6 +32,7 @@ const CAPABILITIES_ON: HealthResponse['capabilities'] = {
   notes: false,
   workspaceViews: true,
   notify: false,
+  skills: true,
 }
 
 function health(overrides: Partial<HealthResponse> = {}): HealthResponse {

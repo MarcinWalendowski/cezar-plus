@@ -35,6 +35,11 @@ export type NavItem = {
   /** Notes-gated (central-hub scaffold F3): the item exists only while `/api/health` reports
    *  `capabilities.notes` — opt-in via `CEZ_NOTES=1`. */
   notes?: boolean
+  /** Skills-gated: the item exists unless `/api/health` reports `capabilities.skills === false`
+   *  (`CEZ_SKILLS=0`). Note the polarity — every other gate here is opt-IN and this one is
+   *  opt-OUT, because Skills predates the capability payload and absent must keep meaning on.
+   *  See `visibleNavItems`. */
+  skills?: boolean
   /** Renders ONCE in the shell's top-level nav rather than inside each project group, and never
    *  receives `scopeTo` (`.ai/specs/2026-08-06-workspace-notes-cross-project.md` "Nav"): a
    *  workspace item has no project to scope into. `ProjectGroups` filters these out of its
@@ -64,7 +69,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/github', label: 'GitHub', icon: GithubIcon, match: ['/github'], forge: true },
   { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true },
   { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true },
-  { to: '/skills', label: 'Skills', icon: SparklesIcon, match: ['/skills'], badge: 'skills-update' },
+  { to: '/skills', label: 'Skills', icon: SparklesIcon, match: ['/skills'], badge: 'skills-update', skills: true },
   { to: '/workflows', label: 'Workflows', icon: WorkflowIcon, match: ['/workflows'] },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'] },
 ]
@@ -81,6 +86,12 @@ export type NavAvailability = {
    *  `CEZ_NOTES=1`). Also `false` under `CEZ_SINGLE_PROJECT=1` (`capabilities.ts`), same as the
    *  server reports it. */
   notes?: boolean
+  /** `capabilities.skills` — the opt-OUT Skills surface (`CEZ_SKILLS=0` hides it). Defaults to
+   *  `true` here, the opposite of every field above, for the same reason the capability itself is
+   *  inverted: Skills predates this key, so an install that has never heard of it must keep the
+   *  tab. Defaulting it to `false` would make the tab vanish for the moment before health lands,
+   *  which is a visible regression for the majority of installs that never set the flag. */
+  skills?: boolean
 }
 
 /**
@@ -99,13 +110,18 @@ export function visibleNavItems({
   inbox = false,
   knowledge = false,
   notes = false,
+  skills = true,
 }: NavAvailability = {}): NavItem[] {
   return NAV_ITEMS.filter(
     (item) =>
       (item.forge ? forge : true) &&
       (item.inbox ? inbox : true) &&
       (item.knowledge ? knowledge : true) &&
-      (item.notes ? notes : true),
+      (item.notes ? notes : true) &&
+      // `skills` defaults TRUE (see `NavAvailability`), so this line reads the same as the
+      // four above while meaning the opposite: it removes the item only on an explicit
+      // `skills: false` from health.
+      (item.skills ? skills : true),
   )
 }
 

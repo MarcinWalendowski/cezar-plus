@@ -177,5 +177,9 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
     notes: env.CEZ_NOTES === '1' && !singleProject,
     workspaceViews: env.CEZ_WORKSPACE_VIEWS === '1' && !singleProject,
     notify: env.CEZ_NOTIFY === '1',
+    // The one INVERTED gate in this object: `=== '1'` everywhere above, `!== '0'` here.
+    // Skills predates the capability payload, so absent has to keep meaning on — see the
+    // `skills` field in `contract/health.ts` for why the asymmetry is deliberate.
+    skills: env.CEZ_SKILLS !== '0',
   };
 }

@@ -30,7 +30,7 @@ import { cn } from '@/lib/utils'
 
 /** The spec's "10 most recent tasks", counted ACROSS buckets — a collapsed variant tile is one
  *  row, because it occupies one row of sidebar. */
-const RECENT_LIMIT = 10
+export const RECENT_LIMIT = 10
 
 /** Collapse is a click-through-a-list gesture: a user opening three groups in a row should cost
  *  the server one write, not three. Short enough that a reload right after a toggle still finds
@@ -230,7 +230,13 @@ function ProjectGroup({
   const onNavigate = useSidebarNavigate()
 
   const waiting = runs.data ? listCounts(runs.data).waiting : 0
-  const buckets = runs.data ? capBuckets(groupRuns(runs.data, view), RECENT_LIMIT) : []
+  const grouped = runs.data ? groupRuns(runs.data, view) : []
+  const buckets = capBuckets(grouped, RECENT_LIMIT)
+  // Counted on ROWS, not on `runs.data.length`: a collapsed variant group is one row here but
+  // several runs, so the run count would claim the cap hid tasks it did not hide.
+  const rowCount = (list: readonly { rows: readonly unknown[] }[]) =>
+    list.reduce((total, bucket) => total + bucket.rows.length, 0)
+  const hiddenCount = rowCount(grouped) - rowCount(buckets)
 
   // A missing project's panes all 409 (spec, "Registered project folder deleted/moved"), so
   // there is nothing behind the chevron — the row renders greyed and inert rather than
@@ -380,16 +386,24 @@ function ProjectGroup({
             showCost={showCost}
           />
 
-          {/* Always present, not only past the cap: it is this group's door into the project's
-              tasks pane (`/p/<id>/`), which is worth an affordance even with two tasks listed. */}
-          <Link
-            to={scopeTo(project.id, '/')}
-            onClick={onNavigate}
-            data-slot="project-group-more"
-            className="flex h-9 items-center rounded-md px-3 text-[12px] text-muted-foreground transition-colors hover:text-foreground md:h-7"
-          >
-            More…
-          </Link>
+          {/* Shown ONLY when the cap actually hid something, and it says how much.
+              It used to render unconditionally, labelled "More…", pointing at
+              `scopeTo(project.id, '/')` — byte for byte the same URL as the `Tasks` item a few
+              lines above. Under the cap that is a real affordance (ten of fifteen are listed;
+              this is the door to the rest). With ten or fewer tasks it was a link to the page
+              you were already on: click, nothing happens, and an affordance that does nothing
+              teaches you to distrust the ones that do. The count is what distinguishes the two
+              cases for the reader, so it is in the label rather than implied. */}
+          {hiddenCount > 0 ? (
+            <Link
+              to={scopeTo(project.id, '/')}
+              onClick={onNavigate}
+              data-slot="project-group-more"
+              className="flex h-9 items-center rounded-md px-3 text-[12px] text-muted-foreground transition-colors hover:text-foreground md:h-7"
+            >
+              {hiddenCount} more…
+            </Link>
+          ) : null}
         </div>
       )}
     </div>

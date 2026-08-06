@@ -167,8 +167,33 @@ describe('resolveCapabilities — followups (#471)', () => {
       notes: false,
       workspaceViews: false,
       notify: false,
+      // Opt-OUT, so it is `true` in an env that sets nothing. This `toEqual` is the exhaustive
+      // one — it is what forces every new capability to be declared here rather than added
+      // silently, and it is why the polarity of a new key cannot slip through unnoticed.
+      skills: true,
     });
   });
+});
+
+describe('resolveCapabilities — skills is the one OPT-OUT capability', () => {
+  // Skills predates the capability payload. Had it been added with the `=== '1'` polarity of
+  // every neighbour, upgrading would have removed the Skills tab from every install that had
+  // never heard of the flag. These assert the inversion in both directions, because "defaults
+  // on" and "cannot be turned off" look identical from the default case alone.
+  it('is on when the flag is unset', () => {
+    expect(resolveCapabilities({})).toMatchObject({ skills: true });
+  });
+
+  it('is off for exactly "0"', () => {
+    expect(resolveCapabilities({ CEZ_SKILLS: '0' })).toMatchObject({ skills: false });
+  });
+
+  it.each(['1', 'true', 'false', 'no', '', 'off'])(
+    'stays ON for %j — only an exact "0" opts out',
+    (value) => {
+      expect(resolveCapabilities({ CEZ_SKILLS: value })).toMatchObject({ skills: true });
+    },
+  );
 });
 
 describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources, notes, workspaceViews, notify)', () => {

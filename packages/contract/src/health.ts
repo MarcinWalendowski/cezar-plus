@@ -69,6 +69,13 @@ export const capabilitiesSchema = z.object({
   workspaceViews: z.boolean(),
   /** `CEZ_NOTIFY=1` (F4, outbound notification transports). */
   notify: z.boolean(),
+  /** The Skills surface. **Opt-OUT, and the only capability here that is** — `CEZ_SKILLS=0`
+   *  hides it; every other value, including unset, leaves it on. Inverted deliberately: every
+   *  flag above gates a feature that did not exist before it, so absent-means-off is the honest
+   *  default. Skills has shipped since long before this key, so absent must keep meaning ON or
+   *  adding the key would silently remove a surface from every existing install. Deployments
+   *  that do not use Skills can now hide it without patching the nav table. */
+  skills: z.boolean(),
 });
 export type Capabilities = z.infer<typeof capabilitiesSchema>;
 

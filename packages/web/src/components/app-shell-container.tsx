@@ -131,6 +131,9 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // honesty rule — hidden unless health reports the opt-in capability.
         knowledgeAvailable={health.data?.capabilities.knowledge === true}
         notesAvailable={health.data?.capabilities.notes === true}
+        // `!== false`, not `=== true`: an older server that reports no `skills` key at all
+        // must keep its Skills tab. Only an explicit `false` removes it.
+        skillsAvailable={health.data?.capabilities.skills !== false}
         banner={<ProviderBannerContainer />}
         singleProject={health.data?.capabilities.singleProject === true}
         taskQuickList={<TaskQuickListContainer />}
