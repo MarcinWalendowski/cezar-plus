@@ -1,0 +1,17 @@
+{
+  "object": "list",
+  "results": [
+    {
+      "object": "page",
+      "id": "page-b",
+      "url": "https://www.notion.so/page-b",
+      "last_edited_time": "2026-08-02T10:00:00.000Z",
+      "archived": false,
+      "properties": {
+        "Name": { "id": "title", "type": "title", "title": [{ "type": "text", "plain_text": "Document B" }] }
+      }
+    }
+  ],
+  "has_more": false,
+  "next_cursor": null
+}

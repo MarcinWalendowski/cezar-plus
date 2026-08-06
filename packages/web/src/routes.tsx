@@ -32,6 +32,15 @@ import {
 } from './routes/settings/settings-shell'
 import { TasksOverviewRoute } from './routes/tasks-overview'
 import { AutomationsRoute } from './routes/automations/automations'
+// Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D22c): these three are
+// capability-gated placeholder pages, created by the scaffold so `routes.tsx` is edited exactly
+// once. Each is taken over and FILLED by its own wave (W2.3 knowledge, P2.4 notes, W4.10
+// workspace-tasks) — a sequenced hand-off of the same file, never a concurrent edit. Statically
+// imported like `InboxRoute`/`TasksOverviewRoute`: today each is a tiny placeholder, not a heavy
+// chunk, so there is nothing here yet worth lazy-loading.
+import { KnowledgeRoute } from './routes/knowledge/knowledge'
+import { NotesRoute } from './routes/notes/notes'
+import { WorkspaceTasksRoute } from './routes/workspace/workspace-tasks'
 
 /** Lazy ON PURPOSE: the thread view carries the markdown stack (Streamdown + remark/rehype,
  *  ~140 KB gz) — as a static import it would sit in the main bundle every visitor pays for
@@ -280,6 +289,9 @@ const PAGE_TITLE_ROUTES = [
   { pattern: '/automations/*', pageLabel: 'Automations' },
   { pattern: '/skills', pageLabel: 'Skills' },
   { pattern: '/inbox', pageLabel: 'Inbox' },
+  { pattern: '/knowledge/*', pageLabel: 'Knowledge' },
+  { pattern: '/notes', pageLabel: 'Notes' },
+  { pattern: '/workspace/tasks', pageLabel: 'Tasks' },
   { pattern: '/workflows/*', pageLabel: 'Workflows' },
   { pattern: '/settings/*', pageLabel: 'Settings' },
 ] as const
@@ -462,6 +474,12 @@ export function AppRoutes() {
             bundle like the overview does. */}
         <Route path="inbox" element={<InboxRoute />} />
 
+        {/* The knowledge base (central-hub scaffold F1, `CEZ_KB=1`): project-scoped, like Git.
+            Reachable even off — off just means `KnowledgeRoute` renders its own "disabled" state,
+            same as `/inbox` does for `followups` (D19: a switched-off feature is never a 404). */}
+        <Route path="knowledge" element={<KnowledgeRoute />} />
+        <Route path="knowledge/:id" element={<KnowledgeRoute />} />
+
         {/* The workflow builder (R6 Step 1.6): /workflows opens the canvas on the repo's first
             saved chain, /workflows/:name deep-links a specific one. */}
         <Route
@@ -527,6 +545,15 @@ export function AppRoutes() {
           element={<SettingsSectionRoute section={section} scope="global" capabilities={capabilities} />}
         />
       ))}
+
+      {/* Two more non-project areas (central-hub scaffold F3, `CEZ_NOTES=1` /
+          `CEZ_WORKSPACE_VIEWS=1`), the same shape as `/settings/global` above: no project owns a
+          note before it is filed, and the cross-project board aggregates every project, so
+          neither mounts under `ProjectScopeRoute` (`.ai/specs/2026-08-06-workspace-notes-cross-
+          project.md` "The scope trap"). Reachable even off — each route renders its own
+          "disabled" state rather than a 404 (D19). */}
+      <Route path="/notes" element={<NotesRoute />} />
+      <Route path="/workspace/tasks" element={<WorkspaceTasksRoute />} />
 
       {/* Everything else IS a legacy flat URL — the boot-project redirect owns it. The 404 for
           truly unknown paths still renders, scoped, after the redirect. */}

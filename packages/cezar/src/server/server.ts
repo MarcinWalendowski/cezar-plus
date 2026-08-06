@@ -23,6 +23,11 @@ import { serve, type ServerType } from '@hono/node-server';
 import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
+import { createKnowledgeRoutes } from './knowledge-routes.ts';
+import { createSourcesRoutes } from './sources-routes.ts';
+import { createNotesRoutes } from './notes-routes.ts';
+import { createWorkspaceRunsRoutes } from './workspace-runs-routes.ts';
+import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import type {
@@ -128,7 +133,12 @@ import {
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/ui-state.ts';
 import { checkoutRepo, type CloneRunner } from './checkout.ts';
-import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.ts';
+import {
+  activateOptionalStores,
+  ProjectContextError,
+  ProjectContexts,
+  type ProjectContext,
+} from './project-context.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { readUiState, uiStatePath } from '../ui-state.ts';
 import { agentHomePaths, expandTilde } from '../paths.ts';
@@ -234,8 +244,20 @@ export interface ServerDeps {
 // ---- project-scoped routing (multi-project spec, step 2.2) -----------------
 
 /** Hono env for the mirrored project-route table: the scope resolver puts the
- *  request's `ProjectContext` on the context, handlers read `c.get('project')`. */
-type ProjectApiEnv = { Variables: { project: ProjectContext } };
+ *  request's `ProjectContext` on the context, handlers read `c.get('project')`.
+ *
+ *  Exported (central-hub scaffold, `.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`) so a
+ *  project-scoped route family can live in its own file (`knowledge-routes.ts`,
+ *  `sources-routes.ts`) and still type its `Hono<ProjectApiEnv>()` against the same env every
+ *  in-file family uses, rather than declaring a second, structurally-equal env that could drift.
+ *
+ *  `ProjectContext` is re-exported alongside it for the same reason: a consumer that types a
+ *  `Hono<ProjectApiEnv>()` almost always also has to name the object the env carries (to build a
+ *  fixed context in a test, or to narrow one in a helper). Exporting the env while leaving the
+ *  type it is defined in terms of module-private is an incomplete surface — the definition still
+ *  lives in `project-context.ts`, and this is an alias, not a second declaration. */
+export type { ProjectContext };
+export type ProjectApiEnv = { Variables: { project: ProjectContext } };
 
 /** `projectId` gate at the route boundary (spec "Project identity"): the slug
  *  shape or the reserved `default` alias — validated BEFORE touching any map
@@ -1184,6 +1206,13 @@ export function createApp(deps: ServerDeps) {
   // lazy map, so its `.ai/cezar` state is never double-opened. `id` starts as
   // the reserved alias when registration was suppressed — handlers never read
   // it; API payloads name the boot project via `resolveBootProject` instead.
+  //
+  // The flag-gated stores come from the SAME activator `ProjectContexts.build()`
+  // uses, never a second copy inlined here. They were missing entirely until
+  // 2026-08-06: `build()` activated them and this literal did not, so with
+  // `CEZ_KB=1` the knowledge base was live on every project except the boot one
+  // — which `resolveProjectScope` serves for unscoped requests, for `default`,
+  // and for the boot project's own id. See `activateOptionalStores`.
   const bootContext: ProjectContext = {
     id: bootProjectId ?? 'default',
     root: bootRoot,
@@ -1191,6 +1220,13 @@ export function createApp(deps: ServerDeps) {
     store: deps.store,
     manager: deps.manager,
     automationStore: deps.automationStore ?? AutomationStore.open(bootDataDir),
+    ...activateOptionalStores({
+      env: process.env,
+      projectId: bootProjectId ?? 'default',
+      root: bootRoot,
+      dataDir: bootDataDir,
+      bindHost,
+    }),
     launchKey: ensureLaunchKey(bootDataDir), // bookmarklet auto-start secret (spec 011)
   };
   // Non-boot projects build lazily on first scoped request; their managers
@@ -5069,6 +5105,19 @@ export function createApp(deps: ServerDeps) {
     name: z.string().trim().min(1).max(200),
     from: z.string().trim().min(1).max(200).optional(),
   });
+
+  // ---- central-hub scaffold: five inert, flag-gated families ---------------
+  // Each lives in its own file (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D6) and is built
+  // by a factory rather than declared inline, so the wave-4 packages that fill them in touch only
+  // their own file — never this one. `knowledgeRoutes`/`sourcesRoutes` are project-scoped (mounted
+  // into `v1` below); `notesRoutes`/`workspaceRunsRoutes`/`notificationsRoutes` are workspace-level
+  // (mounted into `workspaceV1`).
+  const knowledgeRoutes = createKnowledgeRoutes();
+  const sourcesRoutes = createSourcesRoutes();
+  const notesRoutes = createNotesRoutes();
+  const workspaceRunsRoutes = createWorkspaceRunsRoutes();
+  const notificationsRoutes = createNotificationsRoutes();
+
   // ---- assemble the chained families --------------------------------------
   // Every chained family is registered ONCE and mounted into the versioned table. There is no
   // second, unversioned spelling: `/api/*` was removed once the whole API was reachable under
@@ -5097,7 +5146,9 @@ export function createApp(deps: ServerDeps) {
     .route('/', githubRoutes)
     .route('/', repoRoutes)
     .route('/', configRoutes)
-    .route('/', agentConfigRoutes);
+    .route('/', agentConfigRoutes)
+    .route('/', knowledgeRoutes)
+    .route('/', sourcesRoutes);
 
   // Workspace-level families answer for the whole workspace, so they are single-mount: never a
   // project-scoped spelling, which would be a second surface to protect with no consumer.
@@ -5111,7 +5162,10 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceConfigRoutes)
     .route('/', fsBrowseRoutes)
     .route('/', automationChecksRoutes)
-    .route('/', workspaceEventsRoutes);
+    .route('/', workspaceEventsRoutes)
+    .route('/', notesRoutes)
+    .route('/', workspaceRunsRoutes)
+    .route('/', notificationsRoutes);
 
   // ---- mount ---------------------------------------------------------------
   // Scoped first, then the unscoped alias bound to the boot project. The paths are disjoint (no

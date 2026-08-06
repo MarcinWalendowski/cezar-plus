@@ -104,6 +104,11 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
+      knowledge: false,
+      sources: false,
+      notes: false,
+      workspaceViews: false,
+      notify: false,
     });
   });
 
@@ -152,6 +157,11 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
+      knowledge: false,
+      sources: false,
+      notes: false,
+      workspaceViews: false,
+      notify: false,
     });
   });
 
@@ -179,6 +189,11 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
+      knowledge: false,
+      sources: false,
+      notes: false,
+      workspaceViews: false,
+      notify: false,
     });
   });
 
@@ -191,6 +206,11 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
+      knowledge: false,
+      sources: false,
+      notes: false,
+      workspaceViews: false,
+      notify: false,
     });
   });
 
@@ -208,6 +228,11 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
+      knowledge: false,
+      sources: false,
+      notes: false,
+      workspaceViews: false,
+      notify: false,
     });
   });
 
@@ -220,6 +245,11 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       tokenMetrics: false,
       tokenUsageMetrics: false,
       costMetrics: false,
+      knowledge: false,
+      sources: false,
+      notes: false,
+      workspaceViews: false,
+      notify: false,
     });
   });
 

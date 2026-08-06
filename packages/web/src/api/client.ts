@@ -93,6 +93,28 @@ import type {
   WorkspaceConfigResponse,
   WorkspaceUiState,
   SkillsUpdateState,
+  // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`) — the five inert
+  // families' GET response shapes. Mutator wrappers are deliberately NOT added yet: every
+  // mutating route answers ONLY a 409 today (D19), with no 2xx branch for a wrapper to type
+  // against, so there is nothing real to wrap. Each wave that gives its family a real success
+  // response (W4.1, W4.6, W4.7, P2.3, W4.10) adds the matching mutator function here.
+  KnowledgeResponse,
+  KnowledgeSearchResponse,
+  KnowledgeProposalsResponse,
+  KnowledgeDocumentResponse,
+  SourcesListResponse,
+  SourceProvidersResponse,
+  SourceCollectionsResponse,
+  SourceDocumentsResponse,
+  SourceDocumentResponse,
+  SourceCommentsResponse,
+  SourceLogResponse,
+  NotesListResponse,
+  NoteResponse,
+  WorkspaceRunsResponse,
+  NotificationsResponse,
+  NotificationLogResponse,
+  NotificationLogStatus,
 } from '@open-mercato/cezar-api-client'
 import { parseProviderStatusResponse } from '@/lib/provider-status'
 import {
@@ -1671,5 +1693,243 @@ export async function removeRunWorktree(id: string): Promise<RemoveWorktreeRespo
       param: { projectId: queryScope(), id: encodeURIComponent(id) },
     }),
     runPath(id, '/remove-worktree'),
+  )
+}
+
+// ---- central-hub scaffold (F1-F4, `.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`) -----------
+//
+// Reads only (see the import-block comment above). With each family's flag unset the server
+// answers the D19 flag-off shape — a schema-valid empty payload, never 404 — so these are safe
+// to call from a cockpit surface regardless of whether the feature is on.
+
+/** `GET /knowledge` (F1, `CEZ_KB`). Project-scoped. */
+export async function getKnowledge(opts?: ReadOptions): Promise<KnowledgeResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].knowledge.$get({ param: { projectId: queryScope() } }, init(opts)),
+    '/knowledge',
+  )
+}
+
+/** `GET /knowledge/search`. `q` omitted searches with an empty query (the facet-only browse case). */
+export async function searchKnowledge(
+  query: { q?: string; type?: string; tag?: string; status?: string; root?: string; limit?: number; offset?: number } = {},
+  opts?: ReadOptions,
+): Promise<KnowledgeSearchResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].knowledge.search.$get(
+      {
+        param: { projectId: queryScope() },
+        query: {
+          q: query.q,
+          type: query.type,
+          tag: query.tag,
+          status: query.status,
+          root: query.root,
+          // Numbers, NOT `String(…)`: `queryZodValidator` publishes the schema's OUTPUT as the
+          // request type (see `server/validators.ts`), so a `z.coerce.number()` key is typed
+          // `number` on the wire and `hc` stringifies it itself.
+          limit: query.limit,
+          offset: query.offset,
+        },
+      },
+      init(opts),
+    ),
+    '/knowledge/search',
+  )
+}
+
+/** `GET /knowledge/proposals` — pending agent write-back proposals awaiting review. */
+export async function getKnowledgeProposals(opts?: ReadOptions): Promise<KnowledgeProposalsResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].knowledge.proposals.$get(
+      { param: { projectId: queryScope() } },
+      init(opts),
+    ),
+    '/knowledge/proposals',
+  )
+}
+
+/** `GET /knowledge/:id`. `{document: null}` for both "off" and "no such id" — the reader tells
+ *  the two apart from `enabled` on `useKnowledge()`, not from this call. */
+export async function getKnowledgeDocument(
+  id: string,
+  opts?: ReadOptions,
+): Promise<KnowledgeDocumentResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].knowledge[':id'].$get(
+      { param: { projectId: queryScope(), id: encodeURIComponent(id) } },
+      init(opts),
+    ),
+    '/knowledge/:id',
+  )
+}
+
+/** `GET /sources` (F2, `CEZ_SOURCES`). Project-scoped connection list. */
+export async function getSources(opts?: ReadOptions): Promise<SourcesListResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources.$get({ param: { projectId: queryScope() } }, init(opts)),
+    '/sources',
+  )
+}
+
+/** `GET /sources/providers` — the provider catalog, including an unavailable provider's reason. */
+export async function getSourceProviders(opts?: ReadOptions): Promise<SourceProvidersResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources.providers.$get(
+      { param: { projectId: queryScope() } },
+      init(opts),
+    ),
+    '/sources/providers',
+  )
+}
+
+export async function getSourceCollections(
+  connectionId: string,
+  opts?: ReadOptions,
+): Promise<SourceCollectionsResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources[':connectionId'].collections.$get(
+      { param: { projectId: queryScope(), connectionId } },
+      init(opts),
+    ),
+    '/sources/:connectionId/collections',
+  )
+}
+
+/** Mirrored document metadata for one connection, no bodies. */
+export async function getSourceDocuments(
+  connectionId: string,
+  opts?: ReadOptions,
+): Promise<SourceDocumentsResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources[':connectionId'].documents.$get(
+      { param: { projectId: queryScope(), connectionId } },
+      init(opts),
+    ),
+    '/sources/:connectionId/documents',
+  )
+}
+
+/** One mirrored document, with its body. */
+export async function getSourceDocument(
+  connectionId: string,
+  docId: string,
+  opts?: ReadOptions,
+): Promise<SourceDocumentResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources[':connectionId'].documents[':docId'].$get(
+      { param: { projectId: queryScope(), connectionId, docId } },
+      init(opts),
+    ),
+    '/sources/:connectionId/documents/:docId',
+  )
+}
+
+export async function getSourceComments(
+  connectionId: string,
+  opts?: ReadOptions,
+): Promise<SourceCommentsResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources[':connectionId'].comments.$get(
+      { param: { projectId: queryScope(), connectionId } },
+      init(opts),
+    ),
+    '/sources/:connectionId/comments',
+  )
+}
+
+export async function getSourceLog(
+  connectionId: string,
+  query: { cursor?: string; limit?: number } = {},
+  opts?: ReadOptions,
+): Promise<SourceLogResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources[':connectionId'].log.$get(
+      {
+        param: { projectId: queryScope(), connectionId },
+        query: {
+          cursor: query.cursor,
+          limit: query.limit,
+        },
+      },
+      init(opts),
+    ),
+    '/sources/:connectionId/log',
+  )
+}
+
+/** `GET /workspace/notes` (F3 feature B, `CEZ_NOTES`). Workspace-level, never project-scoped
+ *  (D14 — a note has not yet been assigned to a project). */
+export async function getWorkspaceNotes(
+  query: { status?: 'raw' | 'processing' | 'processed' | 'all'; projects?: string; limit?: number } = {},
+  opts?: ReadOptions,
+): Promise<NotesListResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.notes.$get(
+      {
+        query: {
+          status: query.status,
+          projects: query.projects,
+          limit: query.limit,
+        },
+      },
+      init(opts),
+    ),
+    '/workspace/notes',
+  )
+}
+
+export async function getWorkspaceNote(noteId: string, opts?: ReadOptions): Promise<NoteResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.notes[':noteId'].$get({ param: { noteId } }, init(opts)),
+    '/workspace/notes/:noteId',
+  )
+}
+
+/** `GET /workspace/runs` (F3 feature A, `CEZ_WORKSPACE_VIEWS`) — the cross-project aggregate.
+ *  Also reports the flag-off shape under `CEZ_SINGLE_PROJECT=1`, same as its own flag being off. */
+export async function getWorkspaceRuns(
+  query: { projects?: string; view?: 'active' | 'archived'; limit?: number } = {},
+  opts?: ReadOptions,
+): Promise<WorkspaceRunsResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.runs.$get(
+      {
+        query: {
+          projects: query.projects,
+          view: query.view,
+          limit: query.limit,
+        },
+      },
+      init(opts),
+    ),
+    '/workspace/runs',
+  )
+}
+
+/** `GET /workspace/notifications` (F4, `CEZ_NOTIFY`) — the machine-wide outbound transport
+ *  registry. Not the per-browser desktop-notification toggle at Settings → Notifications
+ *  (`getWorkspaceUiState`/`putWorkspaceUiState` own that one). */
+export async function getWorkspaceNotifications(opts?: ReadOptions): Promise<NotificationsResponse> {
+  return unwrap(await cez.api.v1.workspace.notifications.$get({}, init(opts)), '/workspace/notifications')
+}
+
+export async function getWorkspaceNotificationsLog(
+  query: { cursor?: string; limit?: number; transportId?: string; status?: NotificationLogStatus } = {},
+  opts?: ReadOptions,
+): Promise<NotificationLogResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.notifications.log.$get(
+      {
+        query: {
+          cursor: query.cursor,
+          limit: query.limit,
+          transportId: query.transportId,
+          status: query.status,
+        },
+      },
+      init(opts),
+    ),
+    '/workspace/notifications/log',
   )
 }

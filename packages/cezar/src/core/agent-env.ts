@@ -338,8 +338,17 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
   /** `name` is matched normalized; the caller keeps the original spelling. */
   function allow(name: string): boolean {
     const key = name.toUpperCase();
-    // cezar's own namespace (CEZ_DRY_RUN plumbing, mock hooks, run wiring).
-    if (key.startsWith('CEZ_')) return true;
+    // cezar's own namespace (CEZ_DRY_RUN plumbing, mock hooks, run wiring) — EXCEPT a
+    // secret-shaped name within it. `CEZ_KB_EMBEDDINGS_API_KEY` (spec
+    // 2026-08-06-knowledge-base-mounts-search, "Env contract") is a server-side credential the
+    // embeddings build reads directly from `process.env`; an agent never needs it, and the spec
+    // states it is "automatically stripped from every agent child env... with no allowlist edit" —
+    // that promise only holds if the CEZ_ prefix itself defers to `looksSecret`, the same guard
+    // `BASE_ALLOW_PREFIXES` already applies below. Without this, ANY secret-shaped `CEZ_*` var set
+    // in the host env (this one, `CEZ_NOTIFY_WEBHOOK_TOKEN`, `CEZ_NOTION_TOKEN`, ...) would ride
+    // into every spawned backend's environment unconditionally, defeating #427's least-privilege
+    // premise for cezar's own namespace.
+    if (key.startsWith('CEZ_') && !looksSecret(key)) return true;
     // Backend auth + gh handoff + the cloud creds an active Bedrock/Vertex
     // toggle needs: forwarded even though they are secrets — the backend cannot
     // authenticate without them. They are still redacted before anything

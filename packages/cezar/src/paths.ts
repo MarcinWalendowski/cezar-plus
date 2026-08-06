@@ -124,6 +124,24 @@ export function agentAccountsPath(): string {
 }
 
 /**
+ * Notes — a workspace-scoped capture inbox (`.ai/specs/2026-08-06-workspace-notes-cross-project.md`,
+ * F3/feature B, `CEZ_NOTES=1`). Its OWN file, on the `agentAccountsPath()` precedent above: a cezar
+ * that has never heard of notes does not open `notes.json`, so it cannot drop them, whereas a key
+ * inside `config.json` would make survival depend on another version's `.passthrough()`. It also
+ * means zero `ensureDataGitignore` entries, since the workspace home sits outside every checkout —
+ * no captured note ever lands near a user's git history.
+ */
+export function notesPath(): string {
+  return join(cezarHomeDir(), 'notes.json');
+}
+
+/** Append-only pass-receipt log beside `notes.json`, 90-day retention — the `automations/store.ts`
+ *  NDJSON-plus-compaction shape, not a file per note. */
+export function notesLogPath(): string {
+  return join(cezarHomeDir(), 'notes-log.ndjson');
+}
+
+/**
  * Expand a leading `~` to the user's home. Lives here with the other homedir
  * logic (see the module note above — one place owns `homedir()`): the
  * workspace browse/checkout roots are stored as the user wrote them (a literal `~`), so

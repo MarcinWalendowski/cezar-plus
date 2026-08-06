@@ -1,9 +1,13 @@
 import { ChevronRightIcon } from 'lucide-react'
 import { Link as RouterLink, NavLink as RouterNavLink } from 'react-router'
-import type { Capabilities } from '@open-mercato/cezar-api-client'
 import { Link as ScopedLink, NavLink as ScopedNavLink } from '@/lib/project-router'
 import { cn } from '@/lib/utils'
-import { visibleSettingsSections, type SettingsScope, type SettingsSection } from './registry'
+import {
+  visibleSettingsSections,
+  type SettingsCapabilities,
+  type SettingsScope,
+  type SettingsSection,
+} from './registry'
 
 /**
  * The registry-driven Settings shell (R6 Step 1.3, spec §"Settings").
@@ -51,7 +55,7 @@ function SectionNav({
 }: {
   scope: SettingsScope
   activeId: SettingsSection['id'] | null
-  capabilities?: Pick<Capabilities, 'singleProject'>
+  capabilities?: SettingsCapabilities
 }) {
   const { NavLink } = navComponents(scope)
   return (
@@ -95,7 +99,7 @@ function SectionPills({
 }: {
   scope: SettingsScope
   activeId: SettingsSection['id']
-  capabilities?: Pick<Capabilities, 'singleProject'>
+  capabilities?: SettingsCapabilities
 }) {
   const { NavLink } = navComponents(scope)
   return (
@@ -132,7 +136,7 @@ export function SettingsSectionRoute({
 }: {
   section: SettingsSection
   scope: SettingsScope
-  capabilities?: Pick<Capabilities, 'singleProject'>
+  capabilities?: SettingsCapabilities
 }) {
   const Body = section.component
   return (
@@ -166,7 +170,7 @@ export function SettingsSectionRoute({
  *  page; on desktop it sits beside the nav as a plain directory). */
 export function SettingsIndexRoute({ scope, capabilities }: {
   scope: SettingsScope
-  capabilities?: Pick<Capabilities, 'singleProject'>
+  capabilities?: SettingsCapabilities
 }) {
   const { Link } = navComponents(scope)
   const global = scope === 'global'

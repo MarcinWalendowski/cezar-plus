@@ -66,6 +66,23 @@ describe('every mutating route carries a typed body into AppType', () => {
     Assert<HasTypedBody<'/api/v1/workspace/ui-state', '$put'>>,
     Assert<HasTypedBody<'/api/v1/workspace/skills-update/check', '$post'>>,
     Assert<HasTypedBody<'/api/v1/workspace/skills-update/apply', '$post'>>,
+
+    // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`), inert families:
+    // every route below answers only a 409 today (D19) — the assertion is about the BODY reaching
+    // `AppType`, which does not depend on what the handler does with it.
+    Assert<HasTypedBody<'/api/v1/knowledge', '$post'>>,
+    Assert<HasTypedBody<'/api/v1/knowledge/:id', '$put'>>,
+    Assert<HasTypedBody<'/api/v1/knowledge/proposals/apply', '$post'>>,
+    Assert<HasTypedBody<'/api/v1/sources', '$post'>>,
+    Assert<HasTypedBody<'/api/v1/sources/:connectionId', '$put'>>,
+    Assert<HasTypedBody<'/api/v1/sources/:connectionId/documents/:docId/resolve', '$post'>>,
+    Assert<HasTypedBody<'/api/v1/workspace/notes', '$post'>>,
+    Assert<HasTypedBody<'/api/v1/workspace/notes/:noteId', '$patch'>>,
+    Assert<HasTypedBody<'/api/v1/workspace/notes/:noteId/approve', '$post'>>,
+    Assert<HasTypedBody<'/api/v1/workspace/notes/:noteId/reject', '$post'>>,
+    Assert<HasTypedBody<'/api/v1/workspace/notifications', '$put'>>,
+    Assert<HasTypedBody<'/api/v1/workspace/notifications/transports', '$post'>>,
+    Assert<HasTypedBody<'/api/v1/workspace/notifications/transports/:id', '$put'>>,
   ];
 
   /** Same idea for the routes that validate a path param or the query string. */
@@ -98,6 +115,13 @@ describe('every mutating route carries a typed body into AppType', () => {
     Assert<HasTypedInput<'/api/v1/github/prs/:number/changes', '$get', 'param'>>,
     Assert<HasTypedInput<'/api/v1/repo/commit/:sha', '$get', 'query'>>,
     Assert<HasTypedInput<'/api/v1/automation-log', '$get', 'query'>>,
+
+    // Central-hub scaffold: every GET that carries a real query string in its family's spec.
+    Assert<HasTypedInput<'/api/v1/knowledge/search', '$get', 'query'>>,
+    Assert<HasTypedInput<'/api/v1/sources/:connectionId/log', '$get', 'query'>>,
+    Assert<HasTypedInput<'/api/v1/workspace/notes', '$get', 'query'>>,
+    Assert<HasTypedInput<'/api/v1/workspace/runs', '$get', 'query'>>,
+    Assert<HasTypedInput<'/api/v1/workspace/notifications/log', '$get', 'query'>>,
   ];
 
   it('is enforced by tsc, not at runtime', () => {

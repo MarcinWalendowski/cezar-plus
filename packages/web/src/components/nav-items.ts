@@ -1,7 +1,9 @@
 import {
+  BookOpenIcon,
   GitBranchIcon,
   InboxIcon,
   ListChecksIcon,
+  NotebookPenIcon,
   SettingsIcon,
   SparklesIcon,
   WorkflowIcon,
@@ -27,6 +29,18 @@ export type NavItem = {
    *  `capabilities.followups` — the global inbox is opt-in via `CEZ_FOLLOWUPS=1`.
    *  See `visibleNavItems`. */
   inbox?: boolean
+  /** Knowledge-gated (central-hub scaffold F1): the item exists only while `/api/health`
+   *  reports `capabilities.knowledge` — opt-in via `CEZ_KB=1`. Project-scoped, like Git. */
+  knowledge?: boolean
+  /** Notes-gated (central-hub scaffold F3): the item exists only while `/api/health` reports
+   *  `capabilities.notes` — opt-in via `CEZ_NOTES=1`. */
+  notes?: boolean
+  /** Renders ONCE in the shell's top-level nav rather than inside each project group, and never
+   *  receives `scopeTo` (`.ai/specs/2026-08-06-workspace-notes-cross-project.md` "Nav"): a
+   *  workspace item has no project to scope into. `ProjectGroups` filters these out of its
+   *  per-project loop; the flat single-project sidebar renders every visible item, this one
+   *  included, since there is only ever one group to render it in. */
+  workspace?: boolean
 }
 
 /** The sidebar nav from the spec's "App shell & navigation" section, in mockup order.
@@ -38,20 +52,35 @@ export type NavItem = {
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare'], badge: 'tasks-unread' },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, match: ['/inbox'], badge: 'inbox-count', inbox: true },
+  {
+    to: '/notes',
+    label: 'Notes',
+    icon: NotebookPenIcon,
+    match: ['/notes'],
+    notes: true,
+    workspace: true,
+  },
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'] },
   { to: '/github', label: 'GitHub', icon: GithubIcon, match: ['/github'], forge: true },
   { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true },
+  { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true },
   { to: '/skills', label: 'Skills', icon: SparklesIcon, match: ['/skills'], badge: 'skills-update' },
   { to: '/workflows', label: 'Workflows', icon: WorkflowIcon, match: ['/workflows'] },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'] },
 ]
 
-/** What `/api/health` says exists. Both default to `false` — see `visibleNavItems`. */
+/** What `/api/health` says exists. All default to `false` — see `visibleNavItems`. */
 export type NavAvailability = {
   /** `forge.available` (spec §"GitHub tab (forge tab)"). */
   forge?: boolean
   /** `capabilities.followups` — the opt-in global inbox (#471). */
   inbox?: boolean
+  /** `capabilities.knowledge` — the opt-in knowledge base (central-hub scaffold F1, `CEZ_KB=1`). */
+  knowledge?: boolean
+  /** `capabilities.notes` — the opt-in workspace capture inbox (central-hub scaffold F3,
+   *  `CEZ_NOTES=1`). Also `false` under `CEZ_SINGLE_PROJECT=1` (`capabilities.ts`), same as the
+   *  server reports it. */
+  notes?: boolean
 }
 
 /**
@@ -65,8 +94,19 @@ export type NavAvailability = {
  * explains the GitHub absence). Both the sidebar and the ⌘K palette's Views group render through
  * this, so the two can never disagree.
  */
-export function visibleNavItems({ forge = false, inbox = false }: NavAvailability = {}): NavItem[] {
-  return NAV_ITEMS.filter((item) => (item.forge ? forge : true) && (item.inbox ? inbox : true))
+export function visibleNavItems({
+  forge = false,
+  inbox = false,
+  knowledge = false,
+  notes = false,
+}: NavAvailability = {}): NavItem[] {
+  return NAV_ITEMS.filter(
+    (item) =>
+      (item.forge ? forge : true) &&
+      (item.inbox ? inbox : true) &&
+      (item.knowledge ? knowledge : true) &&
+      (item.notes ? notes : true),
+  )
 }
 
 /** Does `pathname` sit inside the area rooted at `prefix`?

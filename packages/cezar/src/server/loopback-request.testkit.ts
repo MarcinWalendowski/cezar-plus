@@ -1,4 +1,4 @@
-import type { Hono } from 'hono';
+import type { Env, Hono, Schema } from 'hono';
 
 /**
  * `app.request()` with the `Host` header that every real client sends.
@@ -12,8 +12,18 @@ import type { Hono } from 'hono';
  *
  * Tests that assert on the guard itself should call `app.request()` directly —
  * they need to control (or omit) `Host` themselves.
+ *
+ * Generic over Hono's three type parameters rather than typed as the bare `Hono` default
+ * (`Hono<BlankEnv, BlankSchema, '/'>`): a suite that mounts a route family directly — rather than
+ * going through `createApp()` — builds a `new Hono<ProjectApiEnv>()`, and `Env` is INVARIANT in
+ * Hono's handler positions, so the bare default rejects it. Adding the header is what this helper
+ * does; the app's env and schema are none of its business.
  */
-export async function apiRequest(app: Hono, input: string, init?: RequestInit): Promise<Response> {
+export async function apiRequest<E extends Env, S extends Schema, P extends string>(
+  app: Hono<E, S, P>,
+  input: string,
+  init?: RequestInit,
+): Promise<Response> {
   const headers = new Headers(init?.headers);
   if (!headers.has('host')) headers.set('host', '127.0.0.1:4321');
   return app.request(input, { ...init, headers });

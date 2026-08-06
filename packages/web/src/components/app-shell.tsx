@@ -76,6 +76,12 @@ export type AppShellProps = {
   /** Inbox gating (#471): `false` drops the Inbox nav item and its badge — the global inbox is
    *  opt-in via `CEZ_FOLLOWUPS=1`. Defaults to shown for the same reason as `forgeAvailable`. */
   inboxAvailable?: boolean
+  /** Knowledge gating (central-hub scaffold F1): `false` drops the Knowledge nav item — opt-in
+   *  via `CEZ_KB=1`. Defaults to shown for the same reason as `forgeAvailable`. */
+  knowledgeAvailable?: boolean
+  /** Notes gating (central-hub scaffold F3): `false` drops the Notes nav item — opt-in via
+   *  `CEZ_NOTES=1`. Defaults to shown for the same reason as `forgeAvailable`. */
+  notesAvailable?: boolean
   /** Single-project capability gating: hides workspace-expansion affordances. Defaults off so
    *  standalone and older callers preserve the multi-project shell. */
   singleProject?: boolean
@@ -137,6 +143,8 @@ export function AppShell({
   toolsMenu,
   forgeAvailable = true,
   inboxAvailable = true,
+  knowledgeAvailable = true,
+  notesAvailable = true,
   singleProject = false,
   banner,
   projectGroups,
@@ -182,7 +190,12 @@ export function AppShell({
 
   const nav = {
     activeTo,
-    items: visibleNavItems({ forge: forgeAvailable, inbox: inboxAvailable }),
+    items: visibleNavItems({
+      forge: forgeAvailable,
+      inbox: inboxAvailable,
+      knowledge: knowledgeAvailable,
+      notes: notesAvailable,
+    }),
     repo,
     // The badge belongs to the Inbox item — with the item gone there is nothing to badge.
     inboxCount: inboxAvailable ? inboxCount : null,
@@ -382,6 +395,15 @@ function SidebarContent({
       {projectGroups ? (
         // Step 3.3: one collapsible group per registered project — nav + task list per group.
         // The whole area scrolls as one (per the sidebar mockup); collapsed groups are one row.
+        //
+        // KNOWN GAP (central-hub scaffold, `.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`):
+        // `items` (below) is what a `workspace: true` item like Notes is meant to render through
+        // ONCE, outside every group (`nav-items.ts`, `project-groups.tsx` filters it OUT of its
+        // per-project loop for exactly this reason) — but `items` never renders on THIS branch.
+        // There is currently no top-level slot in multi-project mode for a workspace item; one
+        // needs to land here before `CEZ_NOTES=1` is usable with more than one registered
+        // project. Not a regression: today, with the flag off by default, this branch is
+        // unaffected either way.
         <div
           data-slot="project-groups"
           className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pb-2"

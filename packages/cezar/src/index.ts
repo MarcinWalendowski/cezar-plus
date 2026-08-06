@@ -680,6 +680,19 @@ function ensureDataGitignore(repoRoot: string): void {
     'automation-log.ndjson',
     'automation-log.ndjson.tmp',
     'automation-poll.lock',
+    // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`). Knowledge
+    // documents under `knowledge/` are deliberately NOT listed here — they are committable
+    // content (D16, dispatch contract clause 8), not run state.
+    'knowledge-index/', // F1 — the single derived-artifact dir: catalog cache, manifest, optional
+    // embeddings blob. See `.ai/specs/2026-08-06-knowledge-base-mounts-search.md` Q6/"Catalog cache".
+    'sources.json', // F2 — connection definitions + tombstones (mirrors automations.json's own entry)
+    'sources.json.tmp',
+    'source-state.json',
+    'source-state.json.tmp',
+    'source-log.ndjson',
+    'source-comments.ndjson',
+    'sources-poll.lock',
+    'sources/', // the mirror root itself, including its un-indexed conflicts/ and deleted/ subdirs
   ];
   try {
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });

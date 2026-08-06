@@ -7,6 +7,8 @@ import {
   cezarHomeDir,
   claudeStateFilePath,
   instanceSlug,
+  notesLogPath,
+  notesPath,
   serverInstancesDir,
   serverLockPath,
   serverStatePath,
@@ -49,6 +51,18 @@ describe('paths', () => {
     process.env.CEZ_HOME = '/tmp/cez-home-test';
     expect(workspaceConfigPath()).toBe('/tmp/cez-home-test/config.json');
     expect(workspaceUiStatePath()).toBe('/tmp/cez-home-test/ui-state.json');
+  });
+
+  it('notes live directly under the cezar home, beside notifications and agent-accounts', () => {
+    delete process.env.CEZ_HOME;
+    expect(notesPath()).toBe(join(homedir(), '.cezar', 'notes.json'));
+    expect(notesLogPath()).toBe(join(homedir(), '.cezar', 'notes-log.ndjson'));
+  });
+
+  it('notes paths honor the CEZ_HOME override', () => {
+    process.env.CEZ_HOME = '/tmp/cez-home-test';
+    expect(notesPath()).toBe('/tmp/cez-home-test/notes.json');
+    expect(notesLogPath()).toBe('/tmp/cez-home-test/notes-log.ndjson');
   });
 
   it('a named instance lives under server-instances/, keyed by slug', () => {

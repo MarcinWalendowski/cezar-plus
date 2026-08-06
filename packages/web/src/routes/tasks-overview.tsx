@@ -10,6 +10,7 @@ import {
   SearchXIcon,
 } from 'lucide-react'
 import * as React from 'react'
+import { Link as RouterLink } from 'react-router'
 import { Link, useNavigate } from '@/lib/project-router'
 
 import { archiveFinished, markAllRunsSeen, patchRun } from '@/api/client'
@@ -67,6 +68,7 @@ export function TasksOverview({
   now = Date.now(),
   showTokens = true,
   showCost = true,
+  showWorkspaceSwitch = false,
 }: {
   /** Undefined while `/api/runs` has not answered: the header renders, the body stays empty —
    *  an empty state before we know there are no runs would be a lie. */
@@ -84,6 +86,14 @@ export function TasksOverview({
   /** Presentation capability; defaults visible for older health responses and direct renders. */
   showTokens?: boolean
   showCost?: boolean
+  /** Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D22c, F3 feature A):
+   *  renders the `[ This project | All projects ]` header switch. A prop, not a hook read in
+   *  here — this component stays presentational (its own promise, above) and every other
+   *  capability already arrives this way (`showTokens`/`showCost`); `TasksOverviewRoute` is what
+   *  has query-client access and decides `capabilities.workspaceViews && health.projects.length > 1`.
+   *  Defaults `false` so a direct render (this file's own test suite, mostly) stays exactly the
+   *  pre-scaffold header. */
+  showWorkspaceSwitch?: boolean
 }) {
   const [query, setQuery] = React.useState('')
   const all = runs ?? []
@@ -102,6 +112,27 @@ export function TasksOverview({
           carries the shared Active/Archived tabs — repeating them here would be a third copy. */}
       <header className="sticky top-0 z-10 hidden h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-5 md:flex">
         <h1 className="text-base font-semibold">Tasks</h1>
+        {showWorkspaceSwitch ? (
+          <div data-slot="project-scope-switch" className="inline-flex gap-0.5 rounded-md bg-muted p-[3px]">
+            <span
+              aria-current="true"
+              className="flex h-7 items-center justify-center rounded-[7px] bg-card px-3 text-[12.5px] font-semibold text-foreground shadow-xs"
+            >
+              This project
+            </span>
+            {/* Unscoped on purpose (`RouterLink`, not the project-scoped `Link`): `/workspace/tasks`
+                mounts OUTSIDE `ProjectScopeRoute`, the same non-project area as `/settings/global/*`
+                (`.ai/specs/2026-08-06-workspace-notes-cross-project.md` "The scope trap"). The
+                project-scoped `Link` would prefix this `/p/<id>/workspace/tasks`, a route nobody
+                registers. */}
+            <RouterLink
+              to="/workspace/tasks"
+              className="flex h-7 items-center justify-center rounded-[7px] px-3 text-[12.5px] font-medium text-muted-foreground hover:text-foreground"
+            >
+              All projects
+            </RouterLink>
+          </div>
+        ) : null}
         <div className="inline-flex gap-0.5 rounded-md bg-muted p-[3px]">
           <OverviewTab view="active" current={view} onSelect={onViewChange} count={counts.active}>
             Active
@@ -667,6 +698,14 @@ export function TasksOverviewRoute() {
   const runs = useRuns()
   const health = useHealth()
   const metricVisibility = usageMetricVisibility(health.data)
+  // The registered projects come off HEALTH, not a second `useProjects()` observer. `/api/health`
+  // already carries the same registry (`healthResponseSchema.projects`, always sent), and this
+  // route mounts INSIDE the `/p/:projectId` gate, which itself gates on `useProjects()`: adding a
+  // second observer here made that query refetch on every mount while it was errored, so with
+  // `/api/v1/projects` down the gate flapped pending → error → pending forever (a permanent
+  // "Loading…" plus an unbounded retry loop against a server already answering 500).
+  const showWorkspaceSwitch =
+    health.data?.capabilities?.workspaceViews === true && (health.data?.projects.length ?? 0) > 1
   const [view, setView] = useListView()
   const queryClient = useQueryClient()
   const archive = useMutation({
@@ -700,6 +739,7 @@ export function TasksOverviewRoute() {
       now={now}
       showTokens={metricVisibility.tokens}
       showCost={metricVisibility.cost}
+      showWorkspaceSwitch={showWorkspaceSwitch}
     />
   )
 }

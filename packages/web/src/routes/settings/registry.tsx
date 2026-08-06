@@ -11,6 +11,7 @@ import {
   KeyboardIcon,
   NotebookPenIcon,
   PaletteIcon,
+  PlugZapIcon,
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 
@@ -26,6 +27,10 @@ import { ProjectsSection } from './projects-section'
 import { PromptTemplatesSection } from './prompt-templates-section'
 import { ResourcesSection } from './resources-section'
 import { SkillsSection } from './skills-section'
+// Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`, F2): a placeholder the
+// scaffold creates so this registry is edited exactly once — see the file's own docblock. W4.8
+// takes over and fills it.
+import { SourcesSection } from './sources-section'
 import { WorktreesSection } from './worktrees-section'
 
 /**
@@ -57,6 +62,7 @@ export type SettingsSectionId =
   | 'prompt-templates'
   | 'keyboard'
   | 'skills'
+  | 'sources'
 
 /** Which settings area a section belongs to — and therefore which store it writes. */
 export type SettingsScope = 'project' | 'global'
@@ -72,6 +78,10 @@ export interface SettingsSection {
   scope: SettingsScope
   /** Declared but not yet implemented: no nav entry, no route (the URL is honestly a 404). */
   hidden?: boolean
+  /** Central-hub scaffold gate (D19): the section drops out of the nav and the route list
+   *  exactly like `hidden`, but the condition is a live capability rather than a permanent
+   *  build-time flag — flipping `CEZ_SOURCES=1` reveals it without a code change. */
+  capability?: 'sources'
 }
 
 /** A registry entry whose real section arrives in a later Step — routable, honest about it. */
@@ -130,6 +140,15 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     icon: NotebookPenIcon,
     component: PromptTemplatesSection,
     scope: 'project',
+  },
+  {
+    id: 'sources',
+    title: 'Sources',
+    description: 'Mirror an external source — Notion first — into the knowledge base.',
+    icon: PlugZapIcon,
+    component: SourcesSection,
+    scope: 'project',
+    capability: 'sources',
   },
   // ---- global scope (`/settings/global/…`) — the user and the machine, in mockup order -----
   {
@@ -192,18 +211,30 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
 ]
 
 /**
+ * Exactly the capability keys the filter below reads, named once so the shell that forwards
+ * them cannot fall behind this list — adding a `capability` to a section widens this alias and
+ * every prop typed with it, instead of leaving `settings-shell.tsx` passing a narrower `Pick`
+ * that no longer satisfies the filter.
+ */
+export type SettingsCapabilities = Pick<Capabilities, 'singleProject' | 'sources'>
+
+/**
  * What one settings area's nav and route table actually show — hidden sections drop out
  * entirely, and so does everything belonging to the OTHER scope. The two areas are rendered by
  * the same shell, so this filter is the only thing keeping them apart.
  */
 export function visibleSettingsSections(
   scope: SettingsScope,
-  capabilities?: Pick<Capabilities, 'singleProject'>,
+  capabilities?: SettingsCapabilities,
 ): SettingsSection[] {
   return SETTINGS_SECTIONS.filter(
     (section) =>
       !section.hidden &&
       section.scope === scope &&
-      !(capabilities?.singleProject === true && section.id === 'projects'),
+      !(capabilities?.singleProject === true && section.id === 'projects') &&
+      // Central-hub scaffold (D19): a section naming a capability stays out of the nav and the
+      // route list until that capability answers `true` — unknown health (capabilities
+      // undefined) reads as off, same as every other gate here.
+      (section.capability === undefined || capabilities?.[section.capability] === true),
   )
 }

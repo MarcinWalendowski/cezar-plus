@@ -127,6 +127,10 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // Hidden unless health reports the opt-in inbox (#471) — same honesty rule as above:
         // the nav must not offer an Inbox this server will never fill.
         inboxAvailable={inboxAvailable}
+        // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`, F1/F3): same
+        // honesty rule — hidden unless health reports the opt-in capability.
+        knowledgeAvailable={health.data?.capabilities.knowledge === true}
+        notesAvailable={health.data?.capabilities.notes === true}
         banner={<ProviderBannerContainer />}
         singleProject={health.data?.capabilities.singleProject === true}
         taskQuickList={<TaskQuickListContainer />}

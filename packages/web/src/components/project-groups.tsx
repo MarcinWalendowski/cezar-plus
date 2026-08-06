@@ -323,7 +323,13 @@ function ProjectGroup({
                 group offers a GitHub tab — the boot folder's health-level forge answer says
                 nothing about the other projects in the workspace. Whether `gh` itself works
                 still surfaces inside the tab as its availability hint. */}
-            {visibleNavItems({ forge: project.forge === 'github', inbox: inboxAvailable }).map((item) => {
+            {/* `workspace: true` items (central-hub scaffold, e.g. Notes) render once at the
+                shell's top level, never inside a project group — a group's whole nav is scoped
+                into ONE project via `scopeTo` below, and a workspace item has no project to
+                scope into (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D22c). */}
+            {visibleNavItems({ forge: project.forge === 'github', inbox: inboxAvailable })
+              .filter((item) => !item.workspace)
+              .map((item) => {
               // Only the active group can own the current URL: the flat route map is
               // project-agnostic, so `/git` lights Git in exactly one project — the scoped one.
               const isActive = active && item.to === activeTo

@@ -58,6 +58,17 @@ export const capabilitiesSchema = z.object({
   tokenUsageMetrics: z.boolean(),
   /** Current backend-reported-cost presentation policy. */
   costMetrics: z.boolean(),
+  /** `CEZ_KB=1` (F1, knowledge base). Exact-`'1'` gate; every other spelling stays off. */
+  knowledge: z.boolean(),
+  /** `CEZ_SOURCES=1` (F2, external source connectors / Notion mirror). */
+  sources: z.boolean(),
+  /** `CEZ_NOTES=1` (F3, the workspace capture inbox). */
+  notes: z.boolean(),
+  /** `CEZ_WORKSPACE_VIEWS=1` (F3, the cross-project runs aggregate). Also `false` under
+   *  `CEZ_SINGLE_PROJECT=1`, which takes the identical flag-off shape. */
+  workspaceViews: z.boolean(),
+  /** `CEZ_NOTIFY=1` (F4, outbound notification transports). */
+  notify: z.boolean(),
 });
 export type Capabilities = z.infer<typeof capabilitiesSchema>;
 

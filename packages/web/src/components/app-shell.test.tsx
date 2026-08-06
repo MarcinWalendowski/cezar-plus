@@ -68,9 +68,11 @@ describe('AppShell', () => {
     expect(links.map((a) => a.textContent)).toEqual([
       'Tasks',
       'Inbox',
+      'Notes',
       'Git',
       'GitHub',
       'Automations',
+      'Knowledge',
       'Skills',
       'Workflows',
       'Settings',
@@ -79,9 +81,11 @@ describe('AppShell', () => {
     expect(links.map((a) => a.getAttribute('href'))).toEqual([
       '/',
       '/inbox',
+      '/notes',
       '/git',
       '/github',
       '/automations',
+      '/knowledge',
       '/skills',
       '/workflows',
       '/settings',

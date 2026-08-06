@@ -152,10 +152,12 @@ describe('the section registry', () => {
   it('hides Projects only when the single-project capability is active', () => {
     // Accounts survives: a single-project cockpit still runs on ONE of possibly several logins,
     // so "which account" is orthogonal to "how many projects".
-    expect(visibleSettingsSections('global', { singleProject: true }).map((s) => s.id)).toEqual([
+    expect(visibleSettingsSections('global', { singleProject: true, sources: false }).map((s) => s.id)).toEqual([
       'appearance', 'notifications', 'resources', 'skills', 'accounts',
     ])
-    expect(visibleSettingsSections('global', { singleProject: false }).map((s) => s.id)).toEqual(GLOBAL_SECTIONS)
+    expect(
+      visibleSettingsSections('global', { singleProject: false, sources: false }).map((s) => s.id),
+    ).toEqual(GLOBAL_SECTIONS)
     expect(visibleSettingsSections('global').map((s) => s.id)).toEqual(GLOBAL_SECTIONS)
   })
 })

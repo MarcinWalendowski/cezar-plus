@@ -24,6 +24,38 @@
  * `CEZ_HIDE_TOKEN_USAGE=1` and `CEZ_HIDE_COST=1` hide them independently;
  * legacy `CEZ_HIDE_TOKEN_METRICS=1` remains the master hide-all switch. None
  * changes collection, persistence, events, or API run records.
+ *
+ * The central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`, D4/D19): five more
+ * opt-in capabilities, each strictly gated on the exact string `'1'` and each currently inert.
+ *
+ * **CORRECTED 2026-08-06 — the flag-off byte-identity claim below was false as written.** This
+ * docblock used to say "with all five unset, `/api/v1/health` and the agent system prompt stay
+ * byte-identical to the pre-scaffold build". Measured against the pre-change build (`d3aff0a`)
+ * with every `CEZ_*` var unset, only the second half holds:
+ *
+ * - **Agent system prompt: byte-identical.** `loadKnowledgeSummary` returns `undefined` off the
+ *   exact-`'1'` gate, `knowledgeSystemPrompt(undefined)` returns `undefined`, and
+ *   `composeSystemPrompt` drops it — the composed prompt and `additionalDirectories` are
+ *   unchanged, verified by hashing both builds' output.
+ * - **`/api/v1/health`: NOT byte-identical.** The five keys below are emitted unconditionally, so
+ *   the flag-off body grows by `"knowledge":false,"sources":false,"notes":false,
+ *   "workspaceViews":false,"notify":false` (933 → 1019 bytes on an otherwise identical fixture).
+ *
+ * That is a deliberate shape, not a slip, and it is why the claim had to be corrected rather than
+ * the code: `capabilitiesSchema` (`packages/contract/src/health.ts`) declares all five as required
+ * `z.boolean()`, `capabilities.test.ts`'s "independent of the deployment mode" case asserts the
+ * full 11-key object with `toEqual`, and the pre-existing opt-in capability `followups` is itself
+ * always present as `false`. Omitting a key when off would contradict all three. What "opt-in"
+ * buys here is behavioural, not byte-level: no index, no watcher, no timer, no route, no nav item
+ * and no prompt bytes. If byte-level identity of the health body is genuinely required, it is a
+ * contract-shaped decision (optional keys, or a nested `capabilities.experimental` object) and
+ * belongs in the plan before the code, not in a quiet edit here.
+ *
+ * `knowledge` (`CEZ_KB`), `sources` (`CEZ_SOURCES`) and `notify` (`CEZ_NOTIFY`)
+ * are per-project features and are independent of `singleProject`. `notes` (`CEZ_NOTES`) and
+ * `workspaceViews` (`CEZ_WORKSPACE_VIEWS`) are cross-project by nature, so both report `false`
+ * under `CEZ_SINGLE_PROJECT=1` regardless of their own flag — a single-project cockpit has no
+ * "every registered project" to aggregate or fan a note out across.
  */
 
 import { followupsEnabled } from '../handoff.ts';
@@ -128,14 +160,22 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
   const hideAllUsage = env.CEZ_HIDE_TOKEN_METRICS === '1';
   const tokenUsageMetrics = !hideAllUsage && env.CEZ_HIDE_TOKEN_USAGE !== '1';
   const costMetrics = !hideAllUsage && env.CEZ_HIDE_COST !== '1';
+  const singleProject = env.CEZ_SINGLE_PROJECT === '1';
   return {
     localHandoff: env.CEZ_REMOTE !== '1' && isLoopbackHost(bindHost),
     // Deliberately not re-derived here: RunManager enforces the same predicate,
     // and two spellings of "is the inbox on" would eventually disagree.
     followups: followupsEnabled(env),
-    singleProject: env.CEZ_SINGLE_PROJECT === '1',
+    singleProject,
     tokenMetrics: tokenUsageMetrics && costMetrics,
     tokenUsageMetrics,
     costMetrics,
+    knowledge: env.CEZ_KB === '1',
+    sources: env.CEZ_SOURCES === '1',
+    // Cross-project by nature: false under singleProject regardless of the flag (see the
+    // module docblock) — a single-project cockpit has nothing to aggregate or fan out across.
+    notes: env.CEZ_NOTES === '1' && !singleProject,
+    workspaceViews: env.CEZ_WORKSPACE_VIEWS === '1' && !singleProject,
+    notify: env.CEZ_NOTIFY === '1',
   };
 }

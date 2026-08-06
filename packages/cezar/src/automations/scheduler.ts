@@ -1,3 +1,4 @@
+import { DueScheduler, type DueEntry } from '../scheduling/due-scheduler.ts';
 import type { AutomationCoordinator } from './coordinator.ts';
 import type { GithubCandidate, GithubPoller, GithubPollResult } from './github-poller.ts';
 import type { AutomationStore } from './store.ts';
@@ -153,55 +154,62 @@ export interface WorkspaceAutomationSchedulerOptions {
   now?: () => number;
 }
 
-/** One workspace timer, created only while at least one enabled definition exists. */
+interface DueAutomation { definition: AutomationDefinition; scheduler: ProjectAutomationScheduler }
+
+/** One workspace timer, created only while at least one enabled definition exists.
+ * The earliest-due timer mechanism itself lives in `DueScheduler`
+ * (`packages/cezar/src/scheduling/due-scheduler.ts`); this class owns the
+ * automation-specific parts: project discovery via `coordinator.refresh()` and the
+ * definitions-to-entries collection below. */
 export class WorkspaceAutomationScheduler {
-  private timer?: ReturnType<typeof setTimeout>;
+  private readonly due: DueScheduler<DueAutomation>;
   private stopped = true;
   private scheduleGeneration = 0;
-  constructor(private readonly options: WorkspaceAutomationSchedulerOptions) {}
+  constructor(private readonly options: WorkspaceAutomationSchedulerOptions) {
+    this.due = new DueScheduler({
+      collectDue: () => this.collectDue(),
+      run: (next) => next.scheduler.check(next.definition),
+      now: this.options.now,
+    });
+  }
 
   async start(): Promise<void> {
     this.stopped = false;
+    this.due.start();
     await this.reschedule();
   }
 
   async reschedule(): Promise<void> {
     if (this.stopped) return;
     const generation = ++this.scheduleGeneration;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = undefined;
+    this.due.cancel();
     await this.options.coordinator.refresh();
     if (this.stopped || generation !== this.scheduleGeneration) return;
-    this.schedule();
+    this.due.schedule();
   }
 
   stop(): void {
     this.stopped = true;
     this.scheduleGeneration += 1;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = undefined;
+    this.due.stop();
   }
 
-  hasTimer(): boolean { return this.timer !== undefined; }
+  hasTimer(): boolean { return this.due.hasTimer(); }
 
-  private schedule(): void {
-    if (this.stopped) return;
-    const due: Array<{ at: number; definition: AutomationDefinition; scheduler: ProjectAutomationScheduler }> = [];
+  private collectDue(): Array<DueEntry<DueAutomation>> {
+    const due: Array<DueEntry<DueAutomation>> = [];
     for (const projectId of this.options.coordinator.enabledProjectIds()) {
       const store = this.options.coordinator.store(projectId);
       if (!store) continue;
       const handle = this.options.handle(projectId, store);
       if (!handle) continue;
       for (const definition of store.list().filter((item) => item.enabled)) {
-        due.push({ at: Date.parse(store.state(definition.id)?.nextCheckAt ?? new Date().toISOString()), definition, scheduler: new ProjectAutomationScheduler(handle) });
+        due.push({
+          at: Date.parse(store.state(definition.id)?.nextCheckAt ?? new Date().toISOString()),
+          value: { definition, scheduler: new ProjectAutomationScheduler(handle) },
+        });
       }
     }
-    if (!due.length) return;
-    due.sort((a, b) => a.at - b.at);
-    const next = due[0]!;
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      void next.scheduler.check(next.definition).catch(() => undefined).finally(() => this.schedule());
-    }, Math.max(0, next.at - (this.options.now?.() ?? Date.now())));
+    return due;
   }
 }

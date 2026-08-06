@@ -162,7 +162,71 @@ describe('resolveCapabilities — followups (#471)', () => {
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
+      knowledge: false,
+      sources: false,
+      notes: false,
+      workspaceViews: false,
+      notify: false,
     });
+  });
+});
+
+describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources, notes, workspaceViews, notify)', () => {
+  it('are all off by default', () => {
+    expect(resolveCapabilities({})).toMatchObject({
+      knowledge: false,
+      sources: false,
+      notes: false,
+      workspaceViews: false,
+      notify: false,
+    });
+  });
+
+  it('turn on independently with their own exact-"1" flag', () => {
+    expect(resolveCapabilities({ CEZ_KB: '1' })).toMatchObject({ knowledge: true, sources: false });
+    expect(resolveCapabilities({ CEZ_SOURCES: '1' })).toMatchObject({ knowledge: false, sources: true });
+    expect(resolveCapabilities({ CEZ_NOTES: '1' })).toMatchObject({ notes: true });
+    expect(resolveCapabilities({ CEZ_WORKSPACE_VIEWS: '1' })).toMatchObject({ workspaceViews: true });
+    expect(resolveCapabilities({ CEZ_NOTIFY: '1' })).toMatchObject({ notify: true });
+  });
+
+  it.each(['0', 'true', 'yes', '', 'on'])('stays off for %j — only an exact "1" opts in', (value) => {
+    expect(
+      resolveCapabilities({
+        CEZ_KB: value,
+        CEZ_SOURCES: value,
+        CEZ_NOTES: value,
+        CEZ_WORKSPACE_VIEWS: value,
+        CEZ_NOTIFY: value,
+      }),
+    ).toMatchObject({
+      knowledge: false,
+      sources: false,
+      notes: false,
+      workspaceViews: false,
+      notify: false,
+    });
+  });
+
+  it('notes and workspaceViews report false under CEZ_SINGLE_PROJECT=1 regardless of their own flag', () => {
+    expect(
+      resolveCapabilities({
+        CEZ_SINGLE_PROJECT: '1',
+        CEZ_NOTES: '1',
+        CEZ_WORKSPACE_VIEWS: '1',
+      }),
+    ).toMatchObject({ singleProject: true, notes: false, workspaceViews: false });
+  });
+
+  it('knowledge, sources and notify are independent of singleProject', () => {
+    expect(
+      resolveCapabilities({
+        CEZ_SINGLE_PROJECT: '1',
+        CEZ_KB: '1',
+        CEZ_SOURCES: '1',
+        CEZ_NOTIFY: '1',
+      }),
+    ).toMatchObject({ singleProject: true, knowledge: true, sources: true, notify: true });
   });
 });
 

@@ -3,10 +3,17 @@ import { AutomationStore } from '../automations/store.ts';
 import { reconcileAutomationReceipts } from '../automations/task-template.ts';
 import { DEFAULT_WORKTREE_RETENTION, resolveWorktreeRetention } from '../config.ts';
 import { pruneOrphans } from '../git-worktree.ts';
+import { KnowledgeStore } from '../knowledge/store.ts';
+import { NotificationOutbox, notificationsDataDir } from '../notifications/outbox.ts';
+import { NotificationRegistry } from '../notifications/registry.ts';
+import { NotificationSender } from '../notifications/sender.ts';
 import { reclaimWorktrees } from '../runs/retention.ts';
 import { RunStore } from '../runs/store.ts';
+import { SourceStore } from '../sources/store.ts';
+import { WorkspaceRunIndex, type WorkspaceRunProjectSource } from '../workspace/run-index.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from '../workflows/run.ts';
+import { isLoopbackHost } from './capabilities.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { getRepoInfo } from './git.ts';
 
@@ -23,9 +30,93 @@ import { getRepoInfo } from './git.ts';
  * root is gone (`status: 'missing'`) is never instantiated; `context()`
  * throws a typed `ProjectContextError` the route layer maps to 409 (and
  * `unknown-project` to 404).
+ *
+ * **Central-hub activation** (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`, W3.1, D22a): this
+ * file also hangs the F1/F2 per-project stores on the bundle above, and registers the F3/F4
+ * workspace-level singletons on `ProjectContexts` itself, never per project (a notification
+ * runtime and a cross-project run index are one-per-process by nature).
+ *
+ * - `knowledgeStore` (F1, `CEZ_KB=1`) and `sourceStore` (F2, `CEZ_SOURCES=1`) are built in
+ *   `build()` and torn down in `teardown()`/`dispose()`, exactly like `automationStore`. Unlike
+ *   `automationStore`, each is gated on its own flag and performs ZERO I/O when that flag is
+ *   unset (D4): a context built with every central-hub flag off is byte-identical to one built
+ *   before this package existed.
+ * - `runIndex` (W1.11) and `notifications()` (W1.7 registry + W2.5 outbox/sender) live on
+ *   `ProjectContexts`, not on any one `ProjectContext`; see the class doc comment below.
  */
 
 /** The per-project bundle the routes operate on. */
+/**
+ * The two flag-gated stores a project context may carry, built the same way for
+ * EVERY project.
+ *
+ * Extracted 2026-08-06 because it was not. `ProjectContexts.build()` activated
+ * these, and the boot project never goes through `build()` — `server.ts` hand-
+ * builds its `bootContext` from the deps `serveCommand` already had. So with
+ * `CEZ_KB=1` the knowledge base came up on every project EXCEPT the one the
+ * user is looking at, and `resolveProjectScope` hands that same boot context to
+ * unscoped requests, to `default`, AND to the boot project's own id — three of
+ * the four ways to name it. The cockpit showed an empty Knowledge tab over a
+ * fully-indexed corpus (80 documents, verified directly against the store).
+ *
+ * The general shape of that bug — one construction path per caller, silently
+ * diverging — is why this is a function rather than a second copy: any store
+ * added here reaches both paths or neither.
+ */
+export interface OptionalProjectStores {
+  knowledgeStore?: KnowledgeStore;
+  sourceStore?: SourceStore;
+}
+
+export function activateOptionalStores(opts: {
+  env: NodeJS.ProcessEnv;
+  projectId: string;
+  root: string;
+  dataDir: string;
+  /** The host the server bound to, for the hosted-mode decision — same value
+   *  `resolveCapabilities(env, bindHost)` reads. Omitted reads as loopback. */
+  bindHost?: string;
+}): OptionalProjectStores {
+  const { env, projectId, root, dataDir, bindHost } = opts;
+
+  // F1 (plan D4/D22a): zero I/O when `CEZ_KB` is unset. `KnowledgeStore.create` itself never
+  // touches the filesystem; only `initialize()` does, and that is fired below without awaiting.
+  const knowledgeStore = env.CEZ_KB === '1'
+    ? KnowledgeStore.create(root, dataDir, {
+        env,
+        hosted: env.CEZ_REMOTE === '1' || !isLoopbackHost(bindHost),
+      })
+    : undefined;
+  if (knowledgeStore) {
+    // Fire-and-forget, per `KnowledgeStore.initialize()`'s own doc comment: "the build runs off
+    // the boot path, after listen". A full corpus scan must never add latency to this project's
+    // first API touch. A caller that needs to know whether the scan finished reads
+    // `knowledgeStore.isInitialized()`.
+    void knowledgeStore.initialize().catch((err: unknown) => {
+      console.warn(
+        `[cez] knowledge base failed to initialize for project "${projectId}": ${describeError(err)}`,
+      );
+    });
+  }
+
+  // F2 (plan D4/D22a): zero I/O when `CEZ_SOURCES` is unset. `SourceStore.open` DOES do
+  // synchronous I/O (mkdir + read), so a failure here degrades to `undefined` with a warning
+  // rather than failing the whole project context: the run store, manager and automation
+  // store have nothing to do with external sources and must still come up.
+  let sourceStore: SourceStore | undefined;
+  if (env.CEZ_SOURCES === '1') {
+    try {
+      sourceStore = SourceStore.open(dataDir);
+    } catch (err) {
+      console.warn(
+        `[cez] external sources store failed to open for project "${projectId}": ${describeError(err)}`,
+      );
+    }
+  }
+
+  return { knowledgeStore, sourceStore };
+}
+
 export interface ProjectContext {
   /** Registry project id (slug). */
   id: string;
@@ -36,6 +127,16 @@ export interface ProjectContext {
   store: RunStore;
   manager: RunManager;
   automationStore: AutomationStore;
+  /** Present only when `CEZ_KB` is exactly `'1'` (F1, plan W2.1); `undefined` otherwise, with
+   *  zero I/O performed to decide that (D4). `build()` fires `initialize()` off without awaiting
+   *  it (see that method's own doc comment: "the call runs off the boot path, after listen"), so a
+   *  full corpus scan never adds latency to this project's first API touch; a caller that needs to
+   *  know whether the scan has finished reads `knowledgeStore.isInitialized()`. */
+  knowledgeStore?: KnowledgeStore;
+  /** Present only when `CEZ_SOURCES` is exactly `'1'` (F2, plan W1.5), the same zero-I/O-when-off
+   *  contract as `knowledgeStore`. Opening it is cheap (JSON reads, no directory scan), so unlike
+   *  `knowledgeStore` there is no async warm-up to avoid awaiting. */
+  sourceStore?: SourceStore;
   /** Bookmarklet auto-start secret (spec 011), ensured at context build. */
   launchKey: string;
 }
@@ -48,6 +149,26 @@ export interface ProjectContextSource {
   root: string;
   /** `missing` roots are never instantiated; `ok`/`not-git` both build. */
   status: 'ok' | 'missing' | 'not-git';
+  /** Display name. Optional because every caller and test fixture written before W3.1 never set
+   *  it; threaded through to `WorkspaceRunIndex` (workspace level, D22a) as `name ?? ''`, which
+   *  that module already turns into `basename(root)` when falsy. */
+  name?: string;
+}
+
+/** The workspace-level notification runtime (plan D22a: this package's dependency on F4 is
+ *  narrowed to exactly W1.7's registry and W2.5's outbox/sender, not W1.8's config store or
+ *  W2.4's webhook transport). One instance for the whole process, never per project, reachable
+ *  via `ProjectContexts.notifications()`. `registry` starts with zero registered transports:
+ *  loading `~/.cezar/notifications.json` and turning its rows into `RegisteredTransport`s is a
+ *  later package's job (W4.7), which is also what calls `registry.register(...)` as transports
+ *  are added or edited. `sender.start()` IS called here (this package's whole point is
+ *  activation); with nothing registered, `dispatch()` is never invoked by anything yet, so
+ *  starting early arms no timer (D4's "no background timer" holds) and only holds the
+ *  cross-process outbox lease, which is the intended one-sender-per-`CEZ_HOME` guarantee. */
+export interface NotificationRuntime {
+  readonly outbox: NotificationOutbox;
+  readonly registry: NotificationRegistry;
+  readonly sender: NotificationSender;
 }
 
 export interface ProjectContextDeps {
@@ -63,6 +184,21 @@ export interface ProjectContextDeps {
    *  When omitted, the map still shares one private instance across the
    *  managers it builds (workspace defaults, never refreshed). */
   semaphore?: WorkspaceSemaphore;
+  /** Overrides `process.env`. Every central-hub `CEZ_*` gate below (D4) reads through this, and
+   *  it is threaded into `KnowledgeStore`'s own env-based root resolution and into
+   *  `notificationsDataDir()`, so a test exercises a flag without mutating the real process env. */
+  env?: NodeJS.ProcessEnv;
+  /** Untrusted-input twin of `CEZ_REMOTE` for the `knowledgeStore.hosted` gate (Q4 of the
+   *  knowledge spec: `capabilities().localHandoff === false`): the bind host the server was
+   *  started with, exactly as `resolveCapabilities(env, bindHost)` uses it. Omitted (the CLI's
+   *  normal loopback default) reads as loopback, matching `isLoopbackHost(undefined) === true`. */
+  bindHost?: string;
+  /** Test seam for the workspace-level notification runtime (D22a). Bypasses `CEZ_NOTIFY` gating
+   *  and the real `NotificationOutbox.open()` I/O entirely when supplied. Production never sets
+   *  this; the constructor builds the real thing from `env`. */
+  notificationRuntime?: NotificationRuntime;
+  /** Test seam for the workspace run index (W1.11). Production builds one from `listProjects`. */
+  runIndex?: WorkspaceRunIndex;
 }
 
 export type ProjectContextFailure = 'unknown-project' | 'missing-root';
@@ -89,6 +225,13 @@ export class ProjectContextError extends Error {
  * `context(bootId)`; every other project on first API touch. Concurrent
  * `context()` calls for the same id share one build (the in-flight promise is
  * cached), so recovery never runs twice for a project.
+ *
+ * Also the home of the two central-hub WORKSPACE-level singletons (plan D22a: "this package's
+ * dependencies include W1.7 and W2.5, because its own title requires it to register the
+ * notification runtime"): `runIndex` (W1.11) and the notification runtime reachable through
+ * `notifications()`. Neither belongs on a per-project `ProjectContext`; a note or a cross-project
+ * board reads N projects' `runs.json` without instantiating any of them, and one notification
+ * sender must exist per `CEZ_HOME`, not one per registered project.
  */
 export class ProjectContexts {
   private readonly contexts = new Map<string, ProjectContext>();
@@ -100,9 +243,33 @@ export class ProjectContexts {
   /** One semaphore for every manager this map builds — injected by boot,
    *  private-but-shared otherwise. */
   private readonly semaphore: WorkspaceSemaphore;
+  private readonly env: NodeJS.ProcessEnv;
+  /** Workspace level (D22a), never per project. Always buildable at zero cost: it is a read-only
+   *  parser that touches no filesystem until `.list()`/`.digest()` is actually called (its own doc
+   *  comment), so it exists whether or not `CEZ_NOTES`/`CEZ_WORKSPACE_VIEWS` are on; those flags
+   *  gate the ROUTES that call it (W4.10/P2.x), not this index. */
+  readonly runIndex: WorkspaceRunIndex;
+  /** Workspace level (D22a). `undefined` when `CEZ_NOTIFY` is not exactly `'1'`, or when building
+   *  it failed: a degraded cockpit rather than a boot failure (`AGENTS.md`: "a missing
+   *  dependency, an absent peer, a read-only home: degrade... never fail the boot"). */
+  private readonly notificationRuntime: NotificationRuntime | undefined;
 
   constructor(private readonly deps: ProjectContextDeps) {
     this.semaphore = deps.semaphore ?? new WorkspaceSemaphore();
+    this.env = deps.env ?? process.env;
+    this.runIndex = deps.runIndex ?? new WorkspaceRunIndex({
+      listProjects: async () => (await this.deps.listProjects()).map(toRunIndexSource),
+    });
+    this.notificationRuntime = deps.notificationRuntime
+      ?? (this.env.CEZ_NOTIFY === '1' ? buildNotificationRuntime(this.env) : undefined);
+  }
+
+  /** The workspace-level notification runtime (D22a), `undefined` under `CEZ_NOTIFY` unset,
+   *  matching every other flag-off shape in this plan (D4/D19). Registering transports from
+   *  `~/.cezar/notifications.json` and driving `POST /workspace/notifications/*` is a later
+   *  package's job (W4.7); this method only makes the wired-but-empty runtime reachable. */
+  notifications(): NotificationRuntime | undefined {
+    return this.notificationRuntime;
   }
 
   /** The built context for `projectId`, building it on first access.
@@ -194,9 +361,12 @@ export class ProjectContexts {
     return true;
   }
 
-  /** Tear down every built context (process shutdown). */
+  /** Tear down every built context (process shutdown), including the workspace-level notification
+   *  runtime (D22a): it is shared across every project, so only a full-workspace teardown, never
+   *  a single `dispose(projectId)`, releases its outbox lease and stops its send timer. */
   disposeAll(): void {
     for (const id of this.ids()) this.dispose(id);
+    this.notificationRuntime?.sender.stop();
   }
 
   private async build(projectId: string): Promise<ProjectContext> {
@@ -214,6 +384,15 @@ export class ProjectContexts {
     reconcileAutomationReceipts(automationStore, store);
     this.notifyStoreCreated(store);
     const manager = new RunManager(store, project.root, { semaphore: this.semaphore });
+
+    const { knowledgeStore, sourceStore } = activateOptionalStores({
+      env: this.env,
+      projectId: project.id,
+      root: project.root,
+      dataDir,
+      bindHost: this.deps.bindHost,
+    });
+
     try {
       const launchKey = ensureLaunchKey(dataDir);
       // Startup reconcile (spec 006) + count-based retention (#483) — the same
@@ -229,18 +408,66 @@ export class ProjectContexts {
         await reclaimWorktrees(project.root, store, keep).catch(() => [] as string[]);
       }
       await manager.recover();
-      return { id: project.id, root: project.root, dataDir, store, manager, automationStore, launchKey };
+      return {
+        id: project.id,
+        root: project.root,
+        dataDir,
+        store,
+        manager,
+        automationStore,
+        knowledgeStore,
+        sourceStore,
+        launchKey,
+      };
     } catch (err) {
       // A failed build must not leak the half-built context's subscriptions.
-      teardown({ store, manager });
+      teardown({ store, manager, knowledgeStore });
       throw err;
     }
   }
 }
 
-/** Shared teardown for built and half-built contexts. */
-function teardown(ctx: { store: RunStore; manager: RunManager }): void {
+/** Shared teardown for built and half-built contexts. `knowledgeStore` is absent when `CEZ_KB` was
+ *  never on for this project; `dispose()`'s own optional chaining is the whole gate. `sourceStore`
+ *  needs no teardown call: it holds no live resource beyond its own explicitly-acquired-and-released
+ *  `SourceLease`, unlike `KnowledgeStore`'s fs.watch handles and debounce timers. */
+function teardown(ctx: { store: RunStore; manager: RunManager; knowledgeStore?: KnowledgeStore }): void {
   ctx.manager.dispose();
   ctx.store.flush();
   ctx.store.removeAllListeners();
+  ctx.knowledgeStore?.dispose();
+}
+
+function toRunIndexSource(source: ProjectContextSource): WorkspaceRunProjectSource {
+  return { id: source.id, root: source.root, status: source.status, name: source.name ?? '' };
+}
+
+/**
+ * Wires the runtime skeleton (D22a): outbox -> registry -> sender. The registry/sender circular
+ * reference (the registry's `sink` IS the sender; the sender's `send` calls back into the
+ * registry) is closed with a `let` capture, safe because neither side is ever invoked during this
+ * function, only later, off a reserved outbox row or a `/test` call, by which point both are
+ * assigned. Never throws: this runs inside `ProjectContexts`'s constructor, on the boot path, and
+ * `AGENTS.md`'s "degrade, never fail the boot" applies. A broken `CEZ_HOME` disables notifications;
+ * it does not stop cezar from starting.
+ */
+function buildNotificationRuntime(env: NodeJS.ProcessEnv): NotificationRuntime | undefined {
+  try {
+    const outbox = NotificationOutbox.open(notificationsDataDir(env));
+    let registry!: NotificationRegistry;
+    const sender = new NotificationSender({
+      outbox,
+      send: (transportId, notification, timeoutMs) => registry.send(transportId, notification, timeoutMs),
+    });
+    registry = new NotificationRegistry({ sink: sender });
+    sender.start();
+    return { outbox, registry, sender };
+  } catch (err) {
+    console.warn(`[cez] notification runtime failed to initialize, notifications are unavailable (${describeError(err)})`);
+    return undefined;
+  }
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

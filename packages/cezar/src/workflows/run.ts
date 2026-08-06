@@ -29,6 +29,8 @@ import {
   seedHandoffFile,
 } from '../handoff.ts';
 import { todosPath } from '../todos.ts';
+import { knowledgeSystemPrompt, loadKnowledgeSummary, type KnowledgePromptSummary } from '../knowledge/prompt.ts';
+import { knowledgeWriteFilePath } from '../knowledge/proposals.ts';
 import type { AgentEvent, ContentBlock } from '../core/agent-runner.ts';
 import { discoverSkills, type Skill } from '../skills.ts';
 import { materializeSkillDir } from '../skills-remote.ts';
@@ -619,25 +621,62 @@ export class RunManager {
   }
 
   /** Env the spawned claude gets so the agent can find its handoff file and
-   *  the global inbox (spec 007; the inbox only when the run opted in).
+   *  the global inbox (spec 007; the inbox only when the run opted in), plus the knowledge base
+   *  wiring (spec 2026-08-06-knowledge-base-mounts-search, "Agent read path and write back",
+   *  W4.2).
    *
    *  `CEZ_TODOS_FILE` is set to `''` rather than omitted when follow-ups are
    *  off: runners spawn with `{ ...process.env, ...spec.env }`, so omitting the
    *  key would let a value inherited from *this* process through — a nested
    *  cezar (an agent running `cez serve`/`cez run`/the test suite) would then
    *  write follow-ups into the parent's inbox despite the opt-out. Empty is the
-   *  established "absent" spelling — consumers guard with `if (todosFile)`. */
-  private agentEnv(runId: string, generateFollowups = true): Record<string, string> {
+   *  established "absent" spelling — consumers guard with `if (todosFile)`.
+   *
+   *  `CEZ_KB_ROOTS`/`CEZ_KB_WRITE_FILE` do NOT follow that rule: with `CEZ_KB` off they are
+   *  **absent**, not `''`, so the zero-config env stays exactly the three keys it has always been
+   *  (`agent-profile-wiring.test.ts`, "adds NOTHING for the default account"). That is the
+   *  flag-off byte-identity requirement in `.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`: an
+   *  unset flag must leave the agent's environment untouched, and two extra empty keys are not
+   *  untouched.
+   *
+   *  The empty-string spelling above is not the precedent it looks like, because the two cases
+   *  differ in where the decision lives. `generateFollowups` is a PER-RUN boolean that flips
+   *  inside one process whose `process.env` never changes, so omitting the key really would let
+   *  the ambient value through and silently defeat the opt-out. `CEZ_KB` is a PROCESS-level flag:
+   *  a nested cezar inherits its parent's `process.env` wholesale, so if the parent had the flag
+   *  on the child has `CEZ_KB=1` too and computes its own roots — there is no state in which a
+   *  parent's roots leak into a child that considers the feature off.
+   *
+   *  With the flag on, `CEZ_KB_ROOTS` uses whatever root list `knowledge.summary` resolved to
+   *  (possibly `undefined` in the narrow window before the store's first reindex has persisted a
+   *  manifest) — `''` there, self-healing once that first reindex completes. `CEZ_KB_WRITE_FILE`
+   *  does NOT wait on that: an agent must be able to propose the very first document into an
+   *  empty knowledge base, so it is set from the flag alone. */
+  private agentEnv(
+    runId: string,
+    generateFollowups: boolean,
+    knowledge: { enabled: boolean; summary: KnowledgePromptSummary | undefined },
+  ): Record<string, string> {
     return {
       CEZ_HANDOFF_FILE: handoffPath(this.dataDir, runId),
       CEZ_TASK_ID: runId,
       CEZ_TODOS_FILE: generateFollowups ? todosPath(this.dataDir) : '',
+      ...(knowledge.enabled
+        ? {
+            CEZ_KB_ROOTS: knowledge.summary ? knowledge.summary.roots.map((r) => r.path).join(':') : '',
+            CEZ_KB_WRITE_FILE: knowledgeWriteFilePath(this.dataDir, runId),
+          }
+        : {}),
     };
   }
 
   /**
    * `agentEnv` plus the agent-account variable for the profile this STEP runs under (spec
-   * 2026-07-29-agent-profiles), and the id it resolved to so the caller can record it.
+   * 2026-07-29-agent-profiles), and the id it resolved to so the caller can record it — plus,
+   * since this is already the one place every agent step's env gets assembled, the knowledge-base
+   * summary (spec 2026-08-06-knowledge-base-mounts-search, W4.2) a caller needs for BOTH the
+   * `CEZ_KB_*` env vars above and the `knowledgeSystemPrompt`/`additionalDirectories` wiring at
+   * the `composeSystemPrompt` call site — one read, reused three ways, rather than three reads.
    *
    * Resolved per step, not per run, because a workflow can mix backends: an override naming a
    * Claude account says nothing about which Codex account a codex step should use. Resolution
@@ -657,14 +696,24 @@ export class RunManager {
     runId: string,
     backend: RunnerId,
     options: { generateFollowups?: boolean; recordedProfileId?: string } = {},
-  ): Promise<{ env: Record<string, string>; profileId: string }> {
+  ): Promise<{ env: Record<string, string>; profileId: string; knowledgeSummary: KnowledgePromptSummary | undefined }> {
     const run = this.store.getRun(runId);
     const profileId = options.recordedProfileId
       ?? (backend === (run?.runner ?? 'claude') ? run?.agentProfile : undefined);
-    const resolved = await resolveProfileEnvForRoot(this.repoRoot, backend, profileId);
+    // Zero I/O when off (D4) — `loadKnowledgeSummary` itself re-checks the flag, this short-circuit
+    // just avoids the Promise.all overhead in the (overwhelmingly common, today) off case.
+    const kbEnabled = process.env.CEZ_KB === '1';
+    const [resolved, knowledgeSummary] = await Promise.all([
+      resolveProfileEnvForRoot(this.repoRoot, backend, profileId),
+      kbEnabled ? loadKnowledgeSummary(this.dataDir) : Promise.resolve(undefined),
+    ]);
     return {
-      env: { ...this.agentEnv(runId, options.generateFollowups), ...resolved.env },
+      env: {
+        ...this.agentEnv(runId, options.generateFollowups ?? true, { enabled: kbEnabled, summary: knowledgeSummary }),
+        ...resolved.env,
+      },
       profileId: resolved.profile.id,
+      knowledgeSummary,
     };
   }
 
@@ -2297,12 +2346,16 @@ export class RunManager {
         systemPrompt: composeSystemPrompt(
           record?.systemPrompt,
           generateFollowups ? HANDOFF_INSTRUCTIONS : HANDOFF_ONLY_INSTRUCTIONS,
+          knowledgeSystemPrompt(continueProfile.knowledgeSummary),
         ),
         userPrompt: attachments.length ? `${prompt}\n\n${pastedAttachmentsText(attachments)}` : prompt,
         ...(openingImages.length ? { images: openingImages } : {}),
         cwd: state.cwd,
         allowedTools: DEFAULT_ALLOWED_TOOLS,
-        additionalDirectories: [join(this.dataDir, 'runs')],
+        additionalDirectories: [
+          join(this.dataDir, 'runs'),
+          ...(continueProfile.knowledgeSummary?.roots.map((r) => r.path) ?? []),
+        ],
         env: continueProfile.env,
         model: continueModel,
         sessionId,
@@ -2861,14 +2914,22 @@ export class RunManager {
             followupsEnabled() && input.generateFollowups !== false
               ? HANDOFF_INSTRUCTIONS
               : HANDOFF_ONLY_INSTRUCTIONS,
+            knowledgeSystemPrompt(stepProfile.knowledgeSummary),
           ),
           userPrompt,
           images,
           cwd: state.cwd,
           allowedTools: step.allowedTools ?? DEFAULT_ALLOWED_TOOLS,
           bashAllowlist: step.bashAllowlist,
-          // The handoff file lives outside the worktree — grant access.
-          additionalDirectories: [join(this.dataDir, 'runs')],
+          // The handoff file lives outside the worktree — grant access. The knowledge base's
+          // roots ride along too (spec 2026-08-06-knowledge-base-mounts-search, "Agent read path
+          // and write back"): helps Claude (`claude-cli-runner.ts` pushes `--add-dir` per entry),
+          // ignored by the codex/opencode runners — the portable half is the absolute path
+          // already stated in `knowledgeSystemPrompt`'s own text.
+          additionalDirectories: [
+            join(this.dataDir, 'runs'),
+            ...(stepProfile.knowledgeSummary?.roots.map((r) => r.path) ?? []),
+          ],
           env: stepProfile.env,
           model: backendModel,
           sessionId,

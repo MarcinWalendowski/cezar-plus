@@ -48,6 +48,22 @@ import {
   getWorkflows,
   getWorkspaceConfig,
   getWorkspaceUiState,
+  getKnowledge,
+  searchKnowledge,
+  getKnowledgeProposals,
+  getKnowledgeDocument,
+  getSources,
+  getSourceProviders,
+  getSourceCollections,
+  getSourceDocuments,
+  getSourceDocument,
+  getSourceComments,
+  getSourceLog,
+  getWorkspaceNotes,
+  getWorkspaceNote,
+  getWorkspaceRuns,
+  getWorkspaceNotifications,
+  getWorkspaceNotificationsLog,
   getSkillsUpdate,
   checkSkillsUpdate,
   applySkillsUpdate,
@@ -76,6 +92,7 @@ import type {
   CreateAgentProfileInput,
   HealthResponse,
   MessageInput,
+  NotificationLogStatus,
   PatchRunInput,
   ProviderId,
   OpenAgentAccountFileInput,
@@ -182,6 +199,30 @@ export const queryKeys = {
   get openTargets() {
     return [queryScope(), 'open-targets'] as const
   },
+  // ---- central-hub scaffold (F1/F2, project-scoped) ---------------------------------------
+  get knowledge() {
+    return [queryScope(), 'knowledge'] as const
+  },
+  knowledgeSearch: (query: string) => [queryScope(), 'knowledge', 'search', query] as const,
+  get knowledgeProposals() {
+    return [queryScope(), 'knowledge', 'proposals'] as const
+  },
+  knowledgeDocument: (id: string) => [queryScope(), 'knowledge', 'document', id] as const,
+  get sources() {
+    return [queryScope(), 'sources'] as const
+  },
+  get sourceProviders() {
+    return [queryScope(), 'sources', 'providers'] as const
+  },
+  sourceCollections: (connectionId: string) =>
+    [queryScope(), 'sources', connectionId, 'collections'] as const,
+  sourceDocuments: (connectionId: string) =>
+    [queryScope(), 'sources', connectionId, 'documents'] as const,
+  sourceDocument: (connectionId: string, docId: string) =>
+    [queryScope(), 'sources', connectionId, 'documents', docId] as const,
+  sourceComments: (connectionId: string) =>
+    [queryScope(), 'sources', connectionId, 'comments'] as const,
+  sourceLog: (connectionId: string) => [queryScope(), 'sources', connectionId, 'log'] as const,
 }
 
 /**
@@ -218,6 +259,20 @@ export const workspaceQueryKeys = {
   fsBrowseRoot: ['workspace', 'fs-browse'] as const,
   fsBrowse: (path: string | null, showHidden = false) =>
     [...workspaceQueryKeys.fsBrowseRoot, path, showHidden] as const,
+  // ---- central-hub scaffold (F3/F4, workspace-level) ---------------------------------------
+  /** `GET /workspace/notes` (D14 — a note is workspace-scoped, never project-scoped). */
+  notesRoot: ['workspace', 'notes'] as const,
+  notes: (filters: { status?: string; projects?: string } = {}) =>
+    [...workspaceQueryKeys.notesRoot, filters.status ?? null, filters.projects ?? null] as const,
+  note: (noteId: string) => [...workspaceQueryKeys.notesRoot, noteId] as const,
+  /** `GET /workspace/runs` — the cross-project aggregate. */
+  workspaceRuns: (filters: { projects?: string; view?: string } = {}) =>
+    ['workspace', 'runs', filters.projects ?? null, filters.view ?? null] as const,
+  /** `GET /workspace/notifications` — the machine-wide outbound transport registry, distinct
+   *  from `uiState` (which owns the per-browser desktop-notification toggle). */
+  notifications: ['workspace', 'notifications'] as const,
+  notificationsLog: (filters: { transportId?: string; status?: string } = {}) =>
+    ['workspace', 'notifications', 'log', filters.transportId ?? null, filters.status ?? null] as const,
 }
 
 /** `enabled` lets a caller that only MIGHT render the model pills (the thread's Continue —
@@ -1160,5 +1215,144 @@ export function useGithubPrChanges(number: number | undefined) {
     enabled: number !== undefined,
     staleTime: 60_000,
     retry: false,
+  })
+}
+
+// ---- central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`) -------------------
+//
+// Reads only — see the mutator note beside the imports in `client.ts`. Every hook below is safe
+// to mount unconditionally: with its family's flag unset the server answers the D19 flag-off
+// shape rather than an error, so there is no "disabled" branch these hooks need to model
+// themselves. A cockpit surface that wants to hide entirely while off still gates on
+// `useHealth().data?.capabilities.<flag>`, same as `useTodos`'s callers do for `followups`.
+
+/** `GET /knowledge` (F1). Project-scoped. */
+export function useKnowledge() {
+  return useQuery({
+    queryKey: queryKeys.knowledge,
+    queryFn: ({ signal }) => getKnowledge({ signal }),
+  })
+}
+
+export function useKnowledgeSearch(
+  query: { q?: string; type?: string; tag?: string; status?: string; root?: string; limit?: number; offset?: number },
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: queryKeys.knowledgeSearch(query.q ?? ''),
+    queryFn: ({ signal }) => searchKnowledge(query, { signal }),
+    enabled,
+  })
+}
+
+export function useKnowledgeProposals() {
+  return useQuery({
+    queryKey: queryKeys.knowledgeProposals,
+    queryFn: ({ signal }) => getKnowledgeProposals({ signal }),
+  })
+}
+
+export function useKnowledgeDocument(id: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.knowledgeDocument(id),
+    queryFn: ({ signal }) => getKnowledgeDocument(id, { signal }),
+    enabled,
+  })
+}
+
+/** `GET /sources` (F2). Project-scoped. */
+export function useSources() {
+  return useQuery({
+    queryKey: queryKeys.sources,
+    queryFn: ({ signal }) => getSources({ signal }),
+  })
+}
+
+export function useSourceProviders() {
+  return useQuery({
+    queryKey: queryKeys.sourceProviders,
+    queryFn: ({ signal }) => getSourceProviders({ signal }),
+  })
+}
+
+export function useSourceCollections(connectionId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.sourceCollections(connectionId),
+    queryFn: ({ signal }) => getSourceCollections(connectionId, { signal }),
+    enabled,
+  })
+}
+
+export function useSourceDocuments(connectionId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.sourceDocuments(connectionId),
+    queryFn: ({ signal }) => getSourceDocuments(connectionId, { signal }),
+    enabled,
+  })
+}
+
+export function useSourceDocument(connectionId: string, docId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.sourceDocument(connectionId, docId),
+    queryFn: ({ signal }) => getSourceDocument(connectionId, docId, { signal }),
+    enabled,
+  })
+}
+
+export function useSourceComments(connectionId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.sourceComments(connectionId),
+    queryFn: ({ signal }) => getSourceComments(connectionId, { signal }),
+    enabled,
+  })
+}
+
+export function useSourceLog(connectionId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.sourceLog(connectionId),
+    queryFn: ({ signal }) => getSourceLog(connectionId, {}, { signal }),
+    enabled,
+  })
+}
+
+/** `GET /workspace/notes` (F3 feature B). Workspace-level (D14) — never led by `queryScope()`. */
+export function useWorkspaceNotes(filters: { status?: 'raw' | 'processing' | 'processed' | 'all'; projects?: string } = {}) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.notes(filters),
+    queryFn: ({ signal }) => getWorkspaceNotes(filters, { signal }),
+  })
+}
+
+export function useWorkspaceNote(noteId: string, enabled = true) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.note(noteId),
+    queryFn: ({ signal }) => getWorkspaceNote(noteId, { signal }),
+    enabled,
+  })
+}
+
+/** `GET /workspace/runs` (F3 feature A) — the cross-project board's aggregate read. */
+export function useWorkspaceRuns(filters: { projects?: string; view?: 'active' | 'archived' } = {}) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.workspaceRuns(filters),
+    queryFn: ({ signal }) => getWorkspaceRuns(filters, { signal }),
+  })
+}
+
+/** `GET /workspace/notifications` (F4) — the outbound transport registry, not the per-browser
+ *  toggle `useWorkspaceUiState` already owns. */
+export function useWorkspaceNotifications() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.notifications,
+    queryFn: ({ signal }) => getWorkspaceNotifications({ signal }),
+  })
+}
+
+export function useWorkspaceNotificationsLog(
+  filters: { transportId?: string; status?: NotificationLogStatus } = {},
+) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.notificationsLog(filters),
+    queryFn: ({ signal }) => getWorkspaceNotificationsLog(filters, { signal }),
   })
 }
