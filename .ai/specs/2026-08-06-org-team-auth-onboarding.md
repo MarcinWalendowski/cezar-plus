@@ -172,15 +172,41 @@ control must exercise the socket, not the route beside it.
 Browser WebSocket cannot send `Authorization`, which is why a cookie is the only
 workable session carrier here and a bearer token is not.
 
-### D7 — identity storage is SQLite, created only when auth is on
+### D7 — identity storage is JSON behind the existing `O_EXCL` lease
 
-`<CEZ_HOME>/identity.db` via `node:sqlite`. Users, orgs, teams, memberships,
-sessions, and the project→team mapping. Not JSON: these are relational,
-concurrently written, and want real constraints (a unique index is what makes
-"one root, one org" true rather than hoped for).
+**CORRECTED 2026-08-06, before implementation.** This decision first read
+"SQLite via `node:sqlite`… Not JSON: these are relational, concurrently written,
+and want real constraints (a unique index is what makes 'one root, one org' true
+rather than hoped for)." The reasoning about constraints stands; the mechanism
+does not, and was checked rather than assumed:
 
-The file is created lazily on first authenticated boot. `CEZ_AUTH` unset ⇒ the
-module is never imported.
+- `node:sqlite` is **absent** at cezar's supported floor. `package.json` declares
+  `engines: {"node": ">=20"}`, and `require('node:sqlite')` throws
+  *"No such built-in module"* even on the local Node **v22.12**.
+- `better-sqlite3` is a **native** dependency. cezar's runtime deps today are
+  `@clack/prompts, @hono/node-server, hono, smol-toml, ws, yaml, zod` — all pure
+  JS. Adding a compiled module breaks `npx cezar-cli` on any platform without a
+  prebuild, which is the product's entire first-run story.
+- A runtime "SQLite if available, else JSON" fallback would be two storage code
+  paths, which D3 exists to forbid.
+
+**So:** `<CEZ_HOME>/identity/*.json`, written through the same `O_EXCL` lease
+idiom the codebase already uses (`openSync(path, 'wx', 0o600)` —
+`sources/store.ts:236`, `automations/store.ts:212`), with tmp+rename for the
+write itself. House style, no new dependency, and unlike `RunStore` it actually
+takes the lease.
+
+The uniqueness that a `PRIMARY KEY` would have given is enforced **inside the
+lease** — read, check, write, release — which is sound precisely because the
+lease serializes writers. Write it as one guarded helper, not as a check at each
+call site, or the guarantee decays to "every caller remembered".
+
+Scale makes this comfortable rather than a compromise: identity is tens to
+thousands of rows, and under D4 it is written by the single supervisor process,
+not by N org processes.
+
+Created lazily on first authenticated boot. `CEZ_AUTH` unset ⇒ the module is
+never imported.
 
 `RunRecord` gains an optional `createdBy` (`packages/contract/src/runs.ts`).
 Optional because every run already on disk has no author and must keep loading;
@@ -220,6 +246,10 @@ code path — one code path per D3's reasoning.
   the operator did not map.
 
 ## Data Models
+
+Expressed as SQL because it states the constraints exactly; the storage is JSON
+under D7, and every `UNIQUE` / `PRIMARY KEY` below is a check performed inside
+the write lease.
 
 ```sql
 CREATE TABLE orgs (
