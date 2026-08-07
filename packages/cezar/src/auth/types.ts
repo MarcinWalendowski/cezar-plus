@@ -12,6 +12,9 @@ import { z } from 'zod';
  * `.passthrough()` at every object layer, matching `automations/types.ts` and
  * `sources/types.ts`: this is on-disk state a later cezar version reads (BACKWARD_COMPATIBILITY.md
  * §3/§9), so a field a newer writer adds must survive an older reader's round-trip untouched.
+ *
+ * One table below (`inviteSchema`/`invites`) has no counterpart in the spec's SQL — see its own
+ * doc comment for why this scaffold added it anyway (phase 4-5 scaffolding pass, spec unchanged).
  */
 
 export const roleSchema = z.enum(['owner', 'admin', 'member']);
@@ -117,6 +120,41 @@ export const sessionSchema = z
   .passthrough();
 export type Session = z.infer<typeof sessionSchema>;
 
+/**
+ * A pending invite (D8: "the first user to sign in becomes owner of a new org; subsequent users
+ * need an invite"). **Not in the spec's Data Models section** — that SQL block has six tables and
+ * no `invites`, which is a genuine gap: D8 names the concept in prose but never says how a second
+ * user is meant to acquire a membership before they have ever signed in (and so before a `User`
+ * row, keyed on `(issuer, subject)`, can exist for them at all). This row is this scaffold's
+ * minimal, additive answer, sized only to make `identity-store.ts`'s declared invite methods
+ * well-typed — the actual creation/redemption POLICY (token entropy, default TTL, whether an
+ * invite pre-assigns a team) is deliberately left to whichever unit implements those methods.
+ *
+ * `id` is the invite token itself, unguessable and single-use — the same "the id IS the
+ * credential, the store never invents it" idiom `sessionSchema` above already uses, for the same
+ * reason: a store that could mint its own bearer tokens would be a second place that policy (how
+ * much entropy, what format) lives.
+ */
+export const inviteSchema = z
+  .object({
+    id: z.string().min(1),
+    orgId: z.string().min(1),
+    /** Optional: an invite may grant org membership without pre-assigning a team — D8 step 4
+     *  ("add projects, assigned to that team") is where a team first matters, and nothing
+     *  requires the inviter to have decided it up front. */
+    teamId: z.string().min(1).optional(),
+    role: roleSchema,
+    createdAt: isoTimestamp,
+    expiresAt: isoTimestamp,
+    /** Both present together or both absent — set atomically by whatever redeems the invite, in
+     *  the same guarded write that creates the resulting `Membership` (see `identity-store.ts`'s
+     *  `redeemInvite` doc comment on why that atomicity matters). */
+    consumedAt: isoTimestamp.optional(),
+    consumedByUserId: z.string().min(1).optional(),
+  })
+  .passthrough();
+export type Invite = z.infer<typeof inviteSchema>;
+
 /** The whole on-disk snapshot (`identity.json`) as one object — see `identity-store.ts`'s module
  *  doc for why every table lives in one file behind one lease rather than six. `.passthrough()`
  *  here too, for the same forward-compat reason as every row schema above: `identity-store.ts`'s
@@ -133,6 +171,9 @@ export const identitySnapshotSchema = z
     memberships: z.array(membershipSchema),
     projectTeams: z.array(projectTeamSchema),
     sessions: z.array(sessionSchema),
+    /** See `inviteSchema`'s own doc comment for why this table exists at all despite having no
+     *  entry in the spec's Data Models section. */
+    invites: z.array(inviteSchema),
   })
   .passthrough();
 export type IdentitySnapshot = z.infer<typeof identitySnapshotSchema>;
@@ -140,5 +181,14 @@ export type IdentitySnapshot = z.infer<typeof identitySnapshotSchema>;
 /** A fresh identity store before its first write — D7: "created lazily on first authenticated
  *  boot", so this is also what a missing `identity.json` reads as, never an error. */
 export function emptyIdentitySnapshot(): IdentitySnapshot {
-  return { version: 1, orgs: [], teams: [], users: [], memberships: [], projectTeams: [], sessions: [] };
+  return {
+    version: 1,
+    orgs: [],
+    teams: [],
+    users: [],
+    memberships: [],
+    projectTeams: [],
+    sessions: [],
+    invites: [],
+  };
 }

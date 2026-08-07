@@ -1,4 +1,5 @@
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -18,15 +19,17 @@ import { allocateProjectSlug, clearProjectProbeCache, listProjects, registerProj
 import { ProjectContexts } from './project-context.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from '../workspace/config.ts';
-import { workspaceConfigPath } from '../paths.ts';
+import { identityDir, workspaceConfigPath } from '../paths.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import type { CloneRunner } from './checkout.ts';
 import {
   WorkspaceEventBus,
   createApp,
+  type Principal,
   type ProjectsResponse,
   type RegisterProjectResponse,
   type ServerDeps,
+  type SessionResolver,
   type UpdateProjectResponse,
 } from './server.ts';
 
@@ -416,6 +419,354 @@ describe('workspace projects API', () => {
       expect(answer.status).toBe(400);
       expect(answer.body.error).toBe('folder is outside the browsable root');
       expect((await getProjects()).projects).toEqual([]);
+    });
+  });
+
+  /**
+   * Phase 5 (spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`, D4/D5/D7/D8) — the
+   * `project_teams` mapping's enforcement AT REGISTRATION: a project root belongs to exactly one
+   * org, checked and claimed through `POST /api/v1/projects` itself. The negative control for all
+   * of this is the very last `describe` below: `CEZ_AUTH` unset must exercise NONE of it.
+   */
+  describe('/api/v1/projects — org-boundary enforcement + team annotation (Phase 5, D4/D5)', () => {
+    const savedAuth = process.env.CEZ_AUTH;
+
+    beforeEach(() => {
+      process.env.CEZ_AUTH = 'oidc';
+    });
+
+    afterEach(() => {
+      if (savedAuth === undefined) delete process.env.CEZ_AUTH;
+      else process.env.CEZ_AUTH = savedAuth;
+    });
+
+    /** Two real orgs, each with its atomic default team, in a REAL `IdentityStore` rooted at this
+     *  test's `CEZ_HOME` (pinned in the outer `beforeEach`) — the registration route opens its own
+     *  second `IdentityStore` instance at the same directory (mirrors `auth/routes.ts`'s own
+     *  precedent, `session.ts`'s doc comment on why), so this is exactly what it reads. */
+    const seedOrgs = async () => {
+      const { IdentityStore } = await import('../auth/identity-store.ts');
+      const store = IdentityStore.open(identityDir());
+      const a = await store.createOrg({ name: 'Acme', slug: 'acme' });
+      const b = await store.createOrg({ name: 'Beta', slug: 'beta' });
+      return { store, orgA: a.org, teamA: a.defaultTeam, orgB: b.org, teamB: b.defaultTeam };
+    };
+
+    /** A `SessionResolver` stand-in, mirroring `auth-perimeter.test.ts`'s `recordingResolver`: maps
+     *  a fixed cookie value to a fixed `Principal` with no real OIDC round trip. The middleware that
+     *  turns a cookie into a `Principal` is covered there; these tests are about what the
+     *  registration ROUTE does once a principal already exists. */
+    const principalResolver = (byCookie: Record<string, Principal>): SessionResolver => ({
+      resolveFromCookieHeader: (cookie) => (cookie ? (byCookie[cookie] ?? null) : null),
+    });
+
+    const postAs = async (body: unknown, cookie: string, sessionResolver: SessionResolver) => {
+      const res = await apiRequest(makeApp({ sessionResolver }), '/api/v1/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify(body),
+      });
+      return {
+        status: res.status,
+        body: (await res.json()) as RegisterProjectResponse & { error?: string },
+      };
+    };
+
+    it('claims an unclaimed root for the signing-in org and reports its team on the 200', async () => {
+      const { orgA, teamA } = await seedOrgs();
+      const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+      const resolver = principalResolver({ 'cez_session=a': principalA });
+
+      const { status, body } = await postAs({ root: otherRoot }, 'cez_session=a', resolver);
+      expect(status).toBe(200);
+      expect(body.project.teamId).toBe(teamA.id);
+    });
+
+    it('refuses a second org registering the SAME root — D4 (one root, one org)', async () => {
+      const { orgA, teamA, orgB, teamB } = await seedOrgs();
+      const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+      const principalB: Principal = { kind: 'session', userId: 'u-b', orgId: orgB.id, teamId: teamB.id, role: 'owner' };
+      const resolver = principalResolver({ 'cez_session=a': principalA, 'cez_session=b': principalB });
+
+      const first = await postAs({ root: otherRoot }, 'cez_session=a', resolver);
+      expect(first.status).toBe(200);
+
+      const second = await postAs({ root: otherRoot }, 'cez_session=b', resolver);
+      expect(second.status).toBe(409);
+      expect(second.body.error).toBe('this project is already registered to a different organization');
+      // The registry itself is untouched by the refused attempt: still ONE entry, org A's. Read
+      // the registry directly rather than through `getProjects()` — that helper's own GET route
+      // sits behind the SAME auth middleware, and asserting through it would need its own
+      // `sessionResolver`, which is not what this assertion is about.
+      expect((await loadWorkspaceConfig()).projects).toHaveLength(1);
+    });
+
+    it('re-registering the SAME root as the SAME org is the ordinary idempotent 409, not the org-conflict one', async () => {
+      const { orgA, teamA } = await seedOrgs();
+      const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+      const resolver = principalResolver({ 'cez_session=a': principalA });
+
+      const first = await postAs({ root: otherRoot }, 'cez_session=a', resolver);
+      expect(first.status).toBe(200);
+      const again = await postAs({ root: otherRoot }, 'cez_session=a', resolver);
+      expect(again.status).toBe(409);
+      expect(again.body.error).toContain('already registered as');
+      expect(again.body.project.teamId).toBe(teamA.id);
+    });
+
+    it(
+      'the org-boundary refusal is not dodged by a trailing slash or a symlink spelling of the ' +
+        'claimed root — a relative spelling is refused earlier, by the same absolute-path gate every ' +
+        'other caller hits (workspace/projects.test.ts covers relative-path AND case-differing ' +
+        'dedup directly against `registerProject`, below the HTTP layer\'s absolute-path requirement)',
+      async () => {
+        const { orgA, teamA, orgB, teamB } = await seedOrgs();
+        const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+        const principalB: Principal = { kind: 'session', userId: 'u-b', orgId: orgB.id, teamId: teamB.id, role: 'owner' };
+        const resolver = principalResolver({ 'cez_session=a': principalA, 'cez_session=b': principalB });
+
+        const claimed = await postAs({ root: otherRoot }, 'cez_session=a', resolver);
+        expect(claimed.status).toBe(200);
+
+        const link = join(home, 'linked-elsewhere');
+        symlinkSync(otherRoot, link);
+
+        for (const spelling of [`${otherRoot}/`, link]) {
+          const { status, body } = await postAs({ root: spelling }, 'cez_session=b', resolver);
+          expect(status, spelling).toBe(409);
+          expect(body.error, spelling).toBe('this project is already registered to a different organization');
+        }
+        expect((await loadWorkspaceConfig()).projects).toHaveLength(1);
+      },
+    );
+
+    it('claims a LEGACY root (registered before auth existed) on its first authenticated touch', async () => {
+      // `registerProject` called directly, the way `cezar serve`'s boot registration or a pre-auth
+      // install already did — no `project_teams` row exists for it yet.
+      const legacy = await registerProject(otherRoot);
+      const { orgA, teamA } = await seedOrgs();
+      const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+      const resolver = principalResolver({ 'cez_session=a': principalA });
+
+      const { status, body } = await postAs({ root: otherRoot }, 'cez_session=a', resolver);
+      // Same root, already registered — the ordinary idempotent 409 (workspace layer), but the
+      // identity layer still claims it for org A in the SAME request.
+      expect(status).toBe(409);
+      expect(body.project.id).toBe(legacy.id);
+      expect(body.project.teamId).toBe(teamA.id);
+      const identityStore = (await import('../auth/identity-store.ts')).IdentityStore.open(identityDir());
+      expect(identityStore.getProjectTeam(legacy.root)?.orgId).toBe(orgA.id);
+    });
+
+    it('rejects an explicit teamId from a different org (400, nothing persisted), and honors one from the same org', async () => {
+      const { store, orgA, teamA, teamB } = await seedOrgs();
+      const secondTeamInOrgA = await store.createTeam({ orgId: orgA.id, name: 'Platform', slug: 'platform' });
+      const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+      const resolver = principalResolver({ 'cez_session=a': principalA });
+
+      const wrongOrg = await postAs({ root: otherRoot, teamId: teamB.id }, 'cez_session=a', resolver);
+      expect(wrongOrg.status).toBe(400);
+      expect(wrongOrg.body.error).toContain('unknown team');
+      expect((await loadWorkspaceConfig()).projects).toEqual([]); // refused before any write
+
+      const sameOrg = await postAs({ root: otherRoot, teamId: secondTeamInOrgA.id }, 'cez_session=a', resolver);
+      expect(sameOrg.status).toBe(200);
+      expect(sameOrg.body.project.teamId).toBe(secondTeamInOrgA.id);
+    });
+
+    it('CEZ_AUTH unset: creates no identity.json and ignores a stray teamId field (D1 zero-I/O control)', async () => {
+      delete process.env.CEZ_AUTH;
+      const res = await apiRequest(makeApp(), '/api/v1/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ root: otherRoot, teamId: 'whatever' }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as RegisterProjectResponse;
+      expect(body.project.teamId).toBeUndefined();
+      expect(existsSync(join(home, 'identity'))).toBe(false);
+    });
+
+    /**
+     * The WRITE verbs on an ALREADY-registered row (ADDED 2026-08-07, repair stage). Phase 5
+     * enforced D4's one-root-one-org mapping on `POST` and nowhere else, so a second org could
+     * `DELETE` the first org's registration — reproduced at review: `DELETE` answered 200, the
+     * registry emptied, and the orphaned `project_teams` row survived and then blocked
+     * re-registration. Enforced on create, ignored on destroy, is not a constraint.
+     */
+    describe('DELETE / PATCH /api/v1/projects/:projectId — the same org boundary', () => {
+      const removeAs = async (id: string, cookie: string, sessionResolver: SessionResolver) => {
+        const res = await apiRequest(makeApp({ sessionResolver }), `/api/v1/projects/${id}`, {
+          method: 'DELETE',
+          headers: { cookie },
+        });
+        return { status: res.status, body: (await res.json()) as { error?: string; removed?: boolean } };
+      };
+
+      const patchAs = async (id: string, cookie: string, sessionResolver: SessionResolver) => {
+        const res = await apiRequest(makeApp({ sessionResolver }), `/api/v1/projects/${id}`, {
+          method: 'PATCH',
+          headers: { cookie, 'content-type': 'application/json' },
+          body: JSON.stringify({ maxParallel: 4 }),
+        });
+        return { status: res.status, body: (await res.json()) as { error?: string } };
+      };
+
+      it("refuses another org's DELETE and leaves the registration standing", async () => {
+        const { store: identity, orgA, teamA, orgB, teamB } = await seedOrgs();
+        const claimed = await registerProject(otherRoot);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: orgA.id, teamId: teamA.id });
+
+        const principalB: Principal = { kind: 'session', userId: 'u-b', orgId: orgB.id, teamId: teamB.id, role: 'owner' };
+        const { status, body } = await removeAs(claimed.id, 'cez_session=b', principalResolver({ 'cez_session=b': principalB }));
+        expect(status).toBe(409);
+        expect(body.error).toBe('this project is already registered to a different organization');
+        expect((await loadWorkspaceConfig()).projects.map((p) => p.id)).toEqual([claimed.id]);
+        expect(identity.getProjectTeam(claimed.root)?.orgId).toBe(orgA.id);
+      });
+
+      it("refuses another org's PATCH of the concurrency ceiling", async () => {
+        const { store: identity, orgA, teamA, orgB, teamB } = await seedOrgs();
+        const claimed = await registerProject(otherRoot);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: orgA.id, teamId: teamA.id });
+
+        const principalB: Principal = { kind: 'session', userId: 'u-b', orgId: orgB.id, teamId: teamB.id, role: 'owner' };
+        const { status, body } = await patchAs(claimed.id, 'cez_session=b', principalResolver({ 'cez_session=b': principalB }));
+        expect(status).toBe(409);
+        expect(body.error).toBe('this project is already registered to a different organization');
+        expect((await loadWorkspaceConfig()).projects[0]?.maxParallel).toBeUndefined();
+      });
+
+      it("releases the org's claim when its OWN delete succeeds, so the root can be re-registered with a different team", async () => {
+        const { store: identity, orgA, teamA } = await seedOrgs();
+        const second = await identity.createTeam({ orgId: orgA.id, name: 'Platform', slug: 'platform' });
+        const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+        const resolver = principalResolver({ 'cez_session=a': principalA });
+
+        const registered = await postAs({ root: otherRoot }, 'cez_session=a', resolver);
+        expect(registered.status).toBe(200);
+        expect(registered.body.project.teamId).toBe(teamA.id);
+        const id = registered.body.project.id;
+        const root = registered.body.project.root;
+
+        const removed = await removeAs(id, 'cez_session=a', resolver);
+        expect(removed.status).toBe(200);
+        // The orphan is the bug: left behind, `project_teams` grows a row per removed project AND
+        // the explicit `teamId` on the re-registration below is silently discarded in favour of
+        // the stale claim (`server.ts` prefers an existing claim, correctly — which is exactly why
+        // a dead one must not survive).
+        expect(identity.getProjectTeam(root)).toBeUndefined();
+
+        const again = await postAs({ root: otherRoot, teamId: second.id }, 'cez_session=a', resolver);
+        expect(again.status).toBe(200);
+        expect(again.body.project.teamId).toBe(second.id);
+      });
+
+      it('CEZ_AUTH unset: DELETE touches no identity state at all, even with a claim on the root (D1 zero-I/O control)', async () => {
+        const { IdentityStore } = await import('../auth/identity-store.ts');
+        const identity = IdentityStore.open(identityDir());
+        // Ids chosen to match `resolvePrincipal({ authProvider: 'none' })`'s own `orgId`/`teamId`,
+        // the same reasoning as the listing control below: a row an auth-off request WOULD match
+        // if the `principal.kind` guard were dropped, so the control can actually fail.
+        await identity.createOrg({ name: 'Local', slug: 'local' }, { orgId: 'local', defaultTeamId: 'local' });
+        const claimed = await registerProject(otherRoot);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: 'local', teamId: 'local' });
+
+        delete process.env.CEZ_AUTH;
+        const res = await apiRequest(makeApp(), `/api/v1/projects/${claimed.id}`, { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        // Unregistered as always — and the claim is NOT released, because auth-off never reads or
+        // writes identity state. Byte-identical to the pre-Phase-5 behaviour.
+        expect((await loadWorkspaceConfig()).projects).toEqual([]);
+        expect(identity.getProjectTeam(claimed.root)?.orgId).toBe('local');
+      });
+    });
+
+    /**
+     * The LISTING half of the same mapping. Without it `teamId`/`teamName` would be populated only
+     * by the registration response — the cockpit's team filter (D5, `settings/projects-section.tsx`)
+     * would have data for exactly the project you just added and none after a reload, i.e. a
+     * feature that is load-bearing but never actually reachable.
+     */
+    describe('GET /api/v1/projects', () => {
+      const listAs = async (cookie: string, sessionResolver: SessionResolver): Promise<ProjectsResponse> => {
+        const res = await apiRequest(makeApp({ sessionResolver }), '/api/v1/projects', { headers: { cookie } });
+        expect(res.status).toBe(200);
+        return (await res.json()) as ProjectsResponse;
+      };
+
+      it("annotates a root claimed by the caller's own org with teamId AND teamName, and leaves an unclaimed root bare", async () => {
+        const { store: identity, orgA, teamA } = await seedOrgs();
+        const unclaimed = mkdtempSync(join(realpathSync(tmpdir()), 'cez-projects-unclaimed-'));
+        const claimed = await registerProject(otherRoot);
+        const bare = await registerProject(unclaimed);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: orgA.id, teamId: teamA.id });
+
+        const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+        const { projects } = await listAs('cez_session=a', principalResolver({ 'cez_session=a': principalA }));
+
+        const claimedEntry = projects.find((p) => p.id === claimed.id);
+        // `teamName`, not just the id: the filter's option labels come from here, and there is no
+        // "list teams" route for a client to join the raw id against (D5 adds no team surface).
+        expect(claimedEntry?.teamId).toBe(teamA.id);
+        expect(claimedEntry?.teamName).toBe(teamA.name);
+
+        const bareEntry = projects.find((p) => p.id === bare.id);
+        expect(bareEntry).toBeDefined();
+        expect(bareEntry?.teamId).toBeUndefined();
+        expect(bareEntry?.teamName).toBeUndefined();
+        rmSync(unclaimed, { recursive: true, force: true });
+      });
+
+      it("still LISTS a root claimed by another org, but never carries that org's team id or name", async () => {
+        // Annotation, not scoping: D4 makes cross-org isolation a process boundary that phase 6
+        // delivers, so a filtered listing here would read as an isolation control while every
+        // other route stays open. What must not happen is org B learning org A's team.
+        const { store: identity, orgA, teamA, orgB, teamB } = await seedOrgs();
+        const claimed = await registerProject(otherRoot);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: orgA.id, teamId: teamA.id });
+
+        const principalB: Principal = { kind: 'session', userId: 'u-b', orgId: orgB.id, teamId: teamB.id, role: 'owner' };
+        const { projects } = await listAs('cez_session=b', principalResolver({ 'cez_session=b': principalB }));
+
+        const entry = projects.find((p) => p.id === claimed.id);
+        expect(entry).toBeDefined();
+        expect(entry?.teamId).toBeUndefined();
+        expect(entry?.teamName).toBeUndefined();
+        expect(JSON.stringify(projects)).not.toContain(teamA.id);
+        expect(JSON.stringify(projects)).not.toContain(teamA.name);
+      });
+
+      /**
+       * D1's control for the listing. The seeded row's ids are `'local'` DELIBERATELY: that is
+       * exactly `resolvePrincipal({ authProvider: 'none' })`'s `orgId`/`teamId`
+       * (`auth/principal.ts`), so this row is the one a `CEZ_AUTH`-unset request WOULD match if
+       * `withTeams`' `principal.kind !== 'session'` guard were dropped. Seeding an ordinary org's
+       * row instead would leave the assertion passing under that mutation for the uninteresting
+       * reason that no id matched — a control that cannot fail. Verified by mutation: removing the
+       * `kind` check turns this test red and leaves the rest of the file green.
+       */
+      it("CEZ_AUTH unset: a project_teams row matching the LOCAL principal's own ids is still never read (D1 zero-I/O control)", async () => {
+        const { IdentityStore } = await import('../auth/identity-store.ts');
+        const identity = IdentityStore.open(identityDir());
+        await identity.createOrg({ name: 'Local', slug: 'local' }, { orgId: 'local', defaultTeamId: 'local' });
+        const claimed = await registerProject(otherRoot);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: 'local', teamId: 'local' });
+
+        delete process.env.CEZ_AUTH;
+        const { projects } = await getProjects();
+        expect(projects).toHaveLength(1);
+        expect(projects[0]?.teamId).toBeUndefined();
+        expect(projects[0]?.teamName).toBeUndefined();
+      });
+
+      it('CEZ_AUTH unset on a clean home: listing creates no identity directory at all (D7)', async () => {
+        await registerProject(otherRoot);
+        delete process.env.CEZ_AUTH;
+        const { projects } = await getProjects();
+        expect(projects).toHaveLength(1);
+        expect(existsSync(join(home, 'identity'))).toBe(false);
+      });
     });
   });
 

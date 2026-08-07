@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
+import { registerProject } from '../workspace/projects.ts';
 import type { RunManager, StartRunInput } from '../workflows/run.ts';
 import type { WorkflowDef } from '../workflows/types.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
@@ -157,6 +158,48 @@ describe('requirePrincipal — the /api/* auth perimeter', () => {
       expect((await res.json()) as { version: string }).toHaveProperty('version');
     });
 
+    /**
+     * ...but "reachable" is not "the same payload". `projects[].name` is every registered
+     * repository's name, and `/api/v1/health` answers `Access-Control-Allow-Origin: *`, so any
+     * page on the internet can READ that list, not merely force the request. On a hosted
+     * deployment with `CEZ_AUTH` set, repository names are exactly what the login exists to
+     * protect — and phase 7's plan is for OIDC to REPLACE the nginx `auth_basic` layer that hides
+     * this today. (`repoRoot` was already basename-redacted in hosted mode by #431; this is the
+     * same argument applied to the field #431 did not cover.)
+     */
+    it('redacts the project list for a request with no valid session, and restores it for one with', async () => {
+      const home = mkdtempSync(join(tmpdir(), 'cez-authperim-home-'));
+      const savedHome = process.env.CEZ_HOME;
+      process.env.CEZ_HOME = home;
+      try {
+        const secret = mkdtempSync(join(realpathSync(tmpdir()), 'cez-acme-secret-client-'));
+        await registerProject(secret);
+        const app = makeApp(recordingResolver((cookie) => cookie === 'cez_session=good'));
+
+        const anonymous = (await (await apiRequest(app, '/api/v1/health')).json()) as {
+          projects: { name: string }[];
+          bootProject: string;
+        };
+        expect(anonymous.projects).toEqual([]);
+        expect(JSON.stringify(anonymous)).not.toContain(basename(secret));
+        // `bootProject` deliberately stays — the SPA shell's redirect gate reads it before any
+        // `/api/v1/*` call can succeed. Asserted so a future reader does not "fix" it by accident.
+        expect(anonymous.bootProject).toBeTruthy();
+
+        const signedIn = (await (
+          await apiRequest(app, '/api/v1/health', { headers: { cookie: 'cez_session=good' } })
+        ).json()) as { projects: { name: string }[] };
+        // The positive half: the cockpit's own workspace views read the registry off health
+        // (`tasks-overview.tsx`), so redacting it for everyone would break the signed-in product.
+        expect(signedIn.projects.map((p) => p.name)).toContain(basename(secret));
+        rmSync(secret, { recursive: true, force: true });
+      } finally {
+        if (savedHome === undefined) delete process.env.CEZ_HOME;
+        else process.env.CEZ_HOME = savedHome;
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
     it('is not fooled by a CEZ_AUTH spelling that does not name a provider', async () => {
       // `resolveAuthProvider` maps anything but the two exact spellings to `'none'` — a typo must
       // land on today's zero-config behaviour, never on half-enabled auth.
@@ -194,6 +237,36 @@ describe('requirePrincipal — the /api/* auth perimeter', () => {
       const resolver = recordingResolver(() => true);
       expect((await apiRequest(makeApp(resolver), '/api/v1/runs')).status).toBe(200);
       expect(resolver.seen).toEqual([]);
+    });
+
+    /**
+     * The control for the health redaction two describes up. The spec's Risks section is explicit
+     * that "a diff in the auth-off health payload is a failure, not an update" — so the redaction
+     * must be gated on `CEZ_AUTH` naming a provider and on nothing else. Verified by mutation:
+     * deleting the `resolveAuthProvider(...) === 'none'` early return turns this test red (and
+     * only this one, across the suites that touch health), which is what makes the gate falsifiable
+     * rather than merely present.
+     */
+    it('still names every registered project on GET /api/v1/health, and resolves no session to decide it', async () => {
+      const home = mkdtempSync(join(tmpdir(), 'cez-authperim-home-off-'));
+      const savedHome = process.env.CEZ_HOME;
+      process.env.CEZ_HOME = home;
+      try {
+        const project = mkdtempSync(join(realpathSync(tmpdir()), 'cez-authoff-visible-'));
+        await registerProject(project);
+        const resolver = recordingResolver(() => true);
+
+        const body = (await (await apiRequest(makeApp(resolver), '/api/v1/health')).json()) as {
+          projects: { name: string }[];
+        };
+        expect(body.projects.map((p) => p.name)).toContain(basename(project));
+        expect(resolver.seen).toEqual([]);
+        rmSync(project, { recursive: true, force: true });
+      } finally {
+        if (savedHome === undefined) delete process.env.CEZ_HOME;
+        else process.env.CEZ_HOME = savedHome;
+        rmSync(home, { recursive: true, force: true });
+      }
     });
   });
 });

@@ -458,6 +458,7 @@ Useful environment variables:
 | `CEZ_OIDC_ISSUER=https://idp.example.com/realms/main` | Issuer for `CEZ_AUTH=oidc`; discovery runs against `<issuer>/.well-known/openid-configuration`. Must be `https` (a `localhost` issuer is allowed, for testing the flow locally). Ignored under `CEZ_AUTH=google`, whose issuer is pinned. |
 | `CEZ_OIDC_CLIENT_ID`, `CEZ_OIDC_CLIENT_SECRET` | The registered client. Authorization Code + PKCE; `state` and `nonce` are both verified, and `state` is additionally bound to the browser that started the flow by a short-lived `HttpOnly` cookie. |
 | `CEZ_OIDC_GROUP_CLAIM=groups`, `CEZ_OIDC_GROUP_ROLE_MAP=cezar-admins=admin` | Optional group → role mapping, defaulting to none. Only `admin` and `member` can be mapped; an unrecognised group grants nothing, and membership is never inferred from a claim you did not map. |
+| `CEZ_AUTH_BOOTSTRAP_TOKEN`, `CEZ_AUTH_BOOTSTRAP_OPEN=1` | **Who may claim a fresh deployment.** The first user to name an organization becomes its owner, and an owner can run shell commands on this host — so with `CEZ_AUTH=google` the issuer is pinned but the *audience* is every Google account on the internet, and arriving first must not be enough. While `CEZ_AUTH` is set and no organization exists yet, cezar mints a random **bootstrap code** at every start and prints it to its own log (`journalctl -u cezar`); the onboarding wizard asks for it and refuses with 403 without it. **Nothing to set for the default.** `CEZ_AUTH_BOOTSTRAP_TOKEN` pins your own value instead of the generated one; `CEZ_AUTH_BOOTSTRAP_OPEN=1` (that exact value) opts back into "whoever signs in first", the way `CEZ_ALLOW_UNAUTHENTICATED` opts out of the boot refusal. The code stops being printed, and stops granting anything, the moment the organization exists. |
 
 > **Signing in is not tenancy — yet.** With `CEZ_AUTH` set, a hosted cezar is a
 > **single-organization** deployment with a login screen. Everyone who signs in shares one
@@ -468,6 +469,14 @@ Useful environment variables:
 > catastrophic across organizations. The real boundary — one process, one unix user and one
 > `CEZ_HOME` per organization, with a supervisor routing requests — is a later phase, and
 > until it ships cezar should not be pointed at customers who must not reach each other.
+>
+> **And "everyone who signs in" is currently *one person*.** The first user to name an
+> organization owns it (with the bootstrap code above); everyone after that is told they
+> need an invite — and the invite surface is not built yet. So today an authenticated cezar
+> holds exactly one organization and exactly one member. Roles (`owner` / `admin` /
+> `member`) are stored and mapped from your IdP's groups, but only the team-rename route
+> reads them: assume every member of an organization can do everything, including author a
+> workflow step that runs `bash`.
 | `VITE_CEZ_API_BASE=http://localhost:4321` | **Build time only**, and only when the cockpit bundle is deployed apart from the service it talks to. Empty (the default) means "the origin that served this page", which is right for both normal cases: the CLI serves the bundle itself, and `npm run dev` proxies `/api` to the local service. A deployment that must be configured without a rebuild can put `<meta name="cez-api-base" content="…">` in the served HTML instead, which wins over this. |
 
 ---

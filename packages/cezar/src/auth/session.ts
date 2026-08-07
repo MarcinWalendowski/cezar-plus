@@ -103,6 +103,31 @@ function parseCookieHeader(header: string | undefined): Map<string, string> {
   return cookies;
 }
 
+/**
+ * The ONE reading of "which session id, if any, does this `Cookie:` header name" — D3's
+ * single-construction rule applied to the input side of the resolver.
+ *
+ * **ADDED 2026-08-07 (repair stage), because there were two and they disagreed.** Phase 4's
+ * `auth/onboarding-routes.ts#resolveSignedInUser` read the same cookie with `getCookie` from
+ * `hono/cookie`, and its docblock claimed that was "the SAME way" this module reads it. On a
+ * header carrying two `cez_session` values it is not: measured on this repo's hono, `getCookie`
+ * returns the FIRST occurrence and `parseCookieHeader` below returns the LAST (`Map.set`
+ * overwrites). Cookies are not origin-scoped — anything on a sibling subdomain can set
+ * `cez_session` for the parent domain, and RFC 6265 §5.4 orders longer-`Path` cookies first — so
+ * an attacker could deterministically make `POST /auth/onboarding/org` act as THEM (writing the
+ * owner membership to their own user id) while `requirePrincipal`, `verifyWsUpgrade`, `/auth/me`
+ * and `PATCH /auth/onboarding/team` all acted as the victim. `SESSION_ID_RE` is applied here too,
+ * so a malformed candidate never reaches `identity-store.ts` from either caller.
+ *
+ * Returns `undefined` for "no usable session id in this header" — never a partially-validated
+ * string a caller might still look up.
+ */
+export function readSessionIdFromCookieHeader(header: string | undefined): string | undefined {
+  const candidate = parseCookieHeader(header).get(SESSION_COOKIE_NAME);
+  if (!candidate || !SESSION_ID_RE.test(candidate)) return undefined;
+  return candidate;
+}
+
 function serializeSessionCookie(id: string, ttlMs: number): string {
   const maxAgeSeconds = Math.max(0, Math.floor(ttlMs / 1000));
   return `${SESSION_COOKIE_NAME}=${id}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly; Secure; SameSite=Lax`;
@@ -210,8 +235,8 @@ export class SessionService {
    * context for severity, not a reason the gap should stay open.
    */
   resolveFromCookieHeader(cookieHeader: string | undefined): Principal | null {
-    const candidate = parseCookieHeader(cookieHeader).get(SESSION_COOKIE_NAME);
-    if (!candidate || !SESSION_ID_RE.test(candidate)) return null;
+    const candidate = readSessionIdFromCookieHeader(cookieHeader);
+    if (!candidate) return null;
     const session = this.identityStore.getSession(candidate); // already expiry-checked (D6: on every read)
     if (!session) return null;
     const identity = this.resolveIdentity(session.userId);

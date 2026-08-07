@@ -96,6 +96,21 @@ const WorkflowsRoute = lazy(() =>
  *  bundle as a static Settings section). */
 const SkillsRoute = lazy(() => import('./routes/skills').then((m) => ({ default: m.SkillsRoute })))
 
+/**
+ * The onboarding wizard (D8, `.ai/specs/2026-08-06-org-team-auth-onboarding.md`, phase 4).
+ *
+ * **CORRECTED 2026-08-07 (repair stage): lazy.** It landed as a static import, defended as "it
+ * must render with zero delay for a user who just came back from `/auth/callback`" — a navigation
+ * that cannot happen when `CEZ_AUTH` is unset, which is the npm default and the product for most
+ * users. Measured with `vite build`: the static import put 6.90 kB (2.02 gz) of wizard into the
+ * entry chunk that every zero-config cockpit downloads and parses, for a page whose auth-off
+ * render is one sentence. Lazy costs the authenticated user one chunk fetch on a screen that is
+ * already waiting on `GET /auth/onboarding`.
+ */
+const OnboardingRoute = lazy(() =>
+  import('./routes/onboarding/onboarding').then((m) => ({ default: m.OnboardingRoute })),
+)
+
 /** `/settings/skills` moved to the top-level `/skills` (out of the Settings shell). Redirect —
  *  preserving the `?skill=` selection and any hash — so pasted links and saved bookmarklets
  *  still land. The scoped Navigate keeps the redirect inside the active project. */
@@ -292,6 +307,7 @@ const PAGE_TITLE_ROUTES = [
   { pattern: '/knowledge/*', pageLabel: 'Knowledge' },
   { pattern: '/notes', pageLabel: 'Notes' },
   { pattern: '/workspace/tasks', pageLabel: 'Tasks' },
+  { pattern: '/onboarding', pageLabel: 'Onboarding' },
   { pattern: '/workflows/*', pageLabel: 'Workflows' },
   { pattern: '/settings/*', pageLabel: 'Settings' },
 ] as const
@@ -554,6 +570,19 @@ export function AppRoutes() {
           "disabled" state rather than a 404 (D19). */}
       <Route path="/notes" element={<NotesRoute />} />
       <Route path="/workspace/tasks" element={<WorkspaceTasksRoute />} />
+
+      {/* The onboarding wizard (D8): outside `ProjectScopeRoute` for the same reason as the two
+          routes above — there may be no project, and on first sign-in no ORG, yet. Reachable at
+          all times (never a 404, D19's pattern); `OnboardingRoute` itself renders the "auth is
+          off" explainer when `CEZ_AUTH` is unset (see that file's own doc comment). */}
+      <Route
+        path="/onboarding"
+        element={
+          <Suspense fallback={<p className="px-4 py-6 text-center text-xs text-soft-foreground">Loading…</p>}>
+            <OnboardingRoute />
+          </Suspense>
+        }
+      />
 
       {/* Everything else IS a legacy flat URL — the boot-project redirect owns it. The 404 for
           truly unknown paths still renders, scoped, after the redirect. */}

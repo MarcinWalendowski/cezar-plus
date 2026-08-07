@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { FoldersIcon } from 'lucide-react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 
 import { putWorkspaceConfig } from '@/api/client'
 import {
@@ -51,6 +51,23 @@ import { SettingsField } from './settings-field'
  * affordance lives here rather than in the sidebar: the sidebar greys it out, this is where the
  * user can act on it.
  */
+
+/**
+ * Team filtering (D5, spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md` phase 5): "Team is
+ * metadata on a project used for grouping and filtering, NOT a scope." No URL segment, no route
+ * change — this reads `teamId`/`teamName` off the SAME `GET /api/v1/projects` entry every other
+ * column already reads, and filters client-side.
+ *
+ * `teamId`/`teamName` are optional on `ProjectListEntry` (`packages/contract/src/projects.ts`) and
+ * populated by `GET /api/v1/projects` only for a root the caller's own org has claimed. With
+ * `CEZ_AUTH` unset the server never reads the identity store at all, so every project comes back
+ * with neither — which is exactly the state that must render with no filter and no board change.
+ * Read through this one helper rather than at each use site, so "has a team" is decided once.
+ */
+function teamOf(project: ProjectListEntry): { id: string; label: string } | null {
+  if (!project.teamId) return null
+  return { id: project.teamId, label: project.teamName ?? project.teamId }
+}
 
 /** Which project the confirm dialog is about — `null` while it is closed. */
 type Confirming = ProjectListEntry | null
@@ -248,7 +265,32 @@ function RegistryTable({
   workspaceMax: number
 }) {
   const [confirming, setConfirming] = useState<Confirming>(null)
+  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null)
   const remove = useRemoveProject()
+
+  // The filter's whole option set: distinct teams actually present on a registered project.
+  // Empty under `CEZ_AUTH` unset, and empty for any deployment where no project has been
+  // assigned a team yet — either way, no data means no filter, never an empty dropdown.
+  const teamOptions = useMemo(() => {
+    const byId = new Map<string, string>()
+    for (const project of registry.projects) {
+      const team = teamOf(project)
+      if (team && !byId.has(team.id)) byId.set(team.id, team.label)
+    }
+    return Array.from(byId, ([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label))
+  }, [registry.projects])
+
+  // A selection that no longer names a team actually present (its last project was removed, or
+  // reassigned) is treated as cleared rather than filtering everything away — the alternative is
+  // a "no projects on this team" message the reader has no visible control left to undo, since
+  // the whole filter disappears in the same render once `teamOptions` is empty.
+  const effectiveTeamId =
+    selectedTeamId !== null && teamOptions.some((team) => team.id === selectedTeamId) ? selectedTeamId : null
+
+  const visibleProjects =
+    effectiveTeamId === null
+      ? registry.projects
+      : registry.projects.filter((project) => teamOf(project)?.id === effectiveTeamId)
 
   const confirmRemoval = () => {
     if (!confirming) return
@@ -268,6 +310,28 @@ function RegistryTable({
       title="Registered projects"
       hint={`Every folder cezar has run in, plus the ones added from the GUI. “Max parallel” caps how many of that project's tasks run at once; the workspace limit (${workspaceMax}) still applies as an overall ceiling, so a per-project value above it has no extra effect until the workspace limit is raised. Removing a project only unregisters it — no files on disk are deleted.`}
     >
+      {teamOptions.length > 0 ? (
+        <div className="mb-2 flex items-center gap-2">
+          <label htmlFor="project-team-filter" className="text-[12px] text-soft-foreground">
+            Team
+          </label>
+          <select
+            id="project-team-filter"
+            data-slot="project-team-filter"
+            aria-label="Filter projects by team"
+            value={effectiveTeamId ?? ''}
+            onChange={(event) => setSelectedTeamId(event.target.value === '' ? null : event.target.value)}
+            className="block w-48 rounded-md border border-input bg-card px-2 py-1.5 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          >
+            <option value="">All teams</option>
+            {teamOptions.map((team) => (
+              <option key={team.id} value={team.id}>
+                {team.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
       {registry.projects.length === 0 ? (
         <p data-slot="projects-empty" className="text-[13px] text-soft-foreground">
           No projects registered yet.
@@ -286,7 +350,7 @@ function RegistryTable({
               </tr>
             </thead>
             <tbody>
-              {registry.projects.map((project) => (
+              {visibleProjects.map((project) => (
                 <ProjectRow
                   key={project.id}
                   project={project}
@@ -360,6 +424,11 @@ function ProjectRow({
         </span>
         {project.status !== 'missing' ? (
           <span className="ml-1 text-[11px] text-soft-foreground">· {project.source}</span>
+        ) : null}
+        {teamOf(project) ? (
+          <span data-slot="project-team" className="ml-1 text-[11px] text-soft-foreground">
+            · {teamOf(project)!.label}
+          </span>
         ) : null}
       </td>
       <td className="px-3 py-2">

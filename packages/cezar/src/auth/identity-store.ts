@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import {
   emptyIdentitySnapshot,
   identitySnapshotSchema,
+  inviteSchema,
   membershipSchema,
   orgSchema,
   projectTeamSchema,
@@ -23,6 +24,7 @@ import {
   teamSchema,
   userSchema,
   type IdentitySnapshot,
+  type Invite,
   type Membership,
   type Org,
   type ProjectTeam,
@@ -53,7 +55,14 @@ export type IdentityStoreErrorCode =
   | 'membership-exists'
   | 'project-root-taken'
   | 'session-id-taken'
-  | 'lease-timeout';
+  | 'lease-timeout'
+  // ---- D8 first-user bootstrap race (see `bootstrapFirstOrg`'s own doc comment) ----------------
+  | 'org-already-bootstrapped'
+  // ---- invites (scaffold addition — see `types.ts`'s `inviteSchema` doc comment) --------------
+  | 'invite-id-taken'
+  | 'invite-not-found'
+  | 'invite-expired'
+  | 'invite-already-consumed';
 
 /** Thrown by every guarded write below in place of the SQL engine's constraint violation (D7:
  *  "every UNIQUE/PRIMARY KEY … is a check performed inside the write lease"). `code` is the part a
@@ -236,6 +245,27 @@ export class IdentityStore {
     return Date.parse(session.expiresAt) > this.now().getTime() ? session : undefined;
   }
 
+  /**
+   * Scaffold addition (see `types.ts`'s `inviteSchema` doc comment). Unexpired and unconsumed
+   * only — the same "expiry is centralized in the store, never left to each caller" discipline
+   * `getSession` above already applies, extended to cover consumption too: a caller asking "is
+   * this invite still good" must get one answer, not have to separately remember to check both
+   * `expiresAt` and `consumedAt` itself.
+   */
+  getInvite(id: string): Invite | undefined {
+    const invite = this.readSnapshot().invites.find((row) => row.id === id);
+    if (!invite) return undefined;
+    if (invite.consumedAt) return undefined;
+    return Date.parse(invite.expiresAt) > this.now().getTime() ? invite : undefined;
+  }
+
+  /** Every invite ever created for the org, expired/consumed included — an admin "invite
+   *  history" view's job to filter, not this method's (mirrors `listOrgMembers`, which returns
+   *  every membership rather than pre-filtering by role). */
+  listOrgInvites(orgId: string): Invite[] {
+    return this.readSnapshot().invites.filter((row) => row.orgId === orgId);
+  }
+
   // ---- writes: async, retry-and-block on lease contention, one guarded helper ------------------
 
   /**
@@ -364,16 +394,99 @@ export class IdentityStore {
   }
 
   /**
+   * D8 step 1's structural half: "the first user to sign in becomes owner of a new org;
+   * subsequent users need an invite." This is the ONE place that fact is enforced, and it is
+   * enforced the same way every other uniqueness constraint in this class is (D7): as a check
+   * performed on the snapshot `guardedWrite` re-reads FRESH, under the lease — never a check the
+   * caller performs first and then acts on, which is exactly the shape that loses a race (read
+   * "no org exists" — yield to the event loop for an await — write; two callers can both read
+   * "no org" before either writes).
+   *
+   * **What "first" means here, precisely, and why `orgs.length > 0` is the whole test.** D4: "Until
+   * the per-org split ships … hosted means single-org." This method is the bootstrap for THAT
+   * single org, not a general ceiling on how many `Org` rows can ever exist — `createOrg` above
+   * remains available uncontested (tests use it to set up multiple orgs today; a future phase-6
+   * multi-org tool would use it too). What must never happen twice is THIS structural event: a
+   * user landing on a truly empty deployment and walking away as its owner. So the guard is simply
+   * "has ANY org ever been bootstrapped or otherwise created" — the moment one exists, every
+   * subsequent caller (a genuinely later user, or the loser of a simultaneous race) gets
+   * `org-already-bootstrapped` and must go through an invite instead, exactly as D8 describes.
+   * Because that check is `orgs.length > 0`, a slug collision on the org being created is provably
+   * unreachable (no existing org has any slug when the write is allowed to proceed at all), so —
+   * unlike `createOrg` — there is deliberately no separate `org-slug-taken` check to duplicate.
+   *
+   * **`role` is not a parameter.** The membership this creates is hardcoded to `'owner'`, never
+   * read from the caller — the same reasoning `oidc.ts`'s module doc comment gives for why
+   * `CEZ_OIDC_GROUP_ROLE_MAP` can only ever produce `'admin'`/`'member'`: "owner is not a fact
+   * re-derived from an IdP claim on every login" or, here, from whatever a caller happens to pass —
+   * it is a one-time structural fact about being first, decided by this method alone.
+   *
+   * `userId` must already name a real `User` row (`findOrCreateUser` is the caller's job, same
+   * split `createMembership` already draws) — this only ever runs for an authenticated, already
+   * signed-in user with a resolvable session and no membership yet.
+   */
+  async bootstrapFirstOrg(
+    input: { userId: string; name: string; slug: string; defaultTeamName?: string; defaultTeamSlug?: string },
+    ids: { orgId?: string; defaultTeamId?: string } = {},
+  ): Promise<{ org: Org; defaultTeam: Team; membership: Membership }> {
+    return this.guardedWrite((snapshot) => {
+      if (snapshot.orgs.length > 0) {
+        throw new IdentityStoreError(
+          'org-already-bootstrapped',
+          'an org already exists — the single-org bootstrap window is closed; new members need an invite',
+        );
+      }
+      if (!snapshot.users.some((user) => user.id === input.userId)) {
+        throw new IdentityStoreError('user-not-found', `no user ${input.userId}`);
+      }
+      const org = orgSchema.parse({
+        id: ids.orgId ?? randomUUID(),
+        name: input.name,
+        slug: input.slug,
+        createdAt: this.now().toISOString(),
+      });
+      const team = teamSchema.parse({
+        id: ids.defaultTeamId ?? randomUUID(),
+        orgId: org.id,
+        name: input.defaultTeamName ?? 'General',
+        slug: input.defaultTeamSlug ?? 'general',
+      });
+      const membership = membershipSchema.parse({ userId: input.userId, orgId: org.id, role: 'owner' });
+      return {
+        snapshot: {
+          ...snapshot,
+          orgs: [...snapshot.orgs, org],
+          teams: [...snapshot.teams, team],
+          memberships: [...snapshot.memberships, membership],
+        },
+        result: { org, defaultTeam: team, membership },
+      };
+    });
+  }
+
+  /**
    * D4's hard constraint: "a project root may belong to exactly one org … `RunStore` has no
    * lease, [so two processes over one `.ai/cezar`] is silent history loss, not a leak." The
-   * `realpathSync` below is what makes that constraint mean something — a bare string PK would let
-   * a symlink and its target register as two different roots, each innocently believing it alone
-   * owns that `.ai/cezar`. This is the ONE place identity-store resolves a project root; readers
-   * (`getProjectTeam`, `listProjectTeams`) take an already-normalized root by contract rather than
-   * re-resolving (and risking an `ENOENT` on a root a caller is merely filtering by, not touching).
+   * `realpathSync.native` below is what makes that constraint mean something — a bare string PK
+   * would let a symlink and its target register as two different roots, each innocently believing
+   * it alone owns that `.ai/cezar`. This is the ONE place identity-store resolves a project root;
+   * readers (`getProjectTeam`, `listProjectTeams`) take an already-normalized root by contract
+   * rather than re-resolving (and risking an `ENOENT` on a root a caller is merely filtering by,
+   * not touching).
+   *
+   * **`.native`, not plain `realpathSync` (2026-08-07, repair stage).** Node's JS-implemented
+   * `fs.realpathSync` resolves symlinks and `.`/`..` but does NOT correct a wrong-case query
+   * against an existing directory entry on a case-insensitive-but-case-preserving filesystem
+   * (APFS/HFS+/NTFS) — it echoes back the case it was given. `.native` delegates to the OS's
+   * `realpath(3)` and returns the on-disk spelling, which is the same value
+   * `workspace/projects.ts#normalizeRoot` produces (that one via `fs/promises.realpath`, which is
+   * libuv-backed and canonicalizes case too). Matching them matters because this PRIMARY KEY is
+   * the whole of D4's one-root-one-org guarantee: with the plain version a caller who hands this
+   * method `/repo/foo` while the registry holds `/repo/Foo` would mint a SECOND claim on one
+   * `.ai/cezar`, which is precisely the silent run-history loss D4 exists to prevent.
    */
   async createProjectTeam(input: { projectRoot: string; orgId: string; teamId: string }): Promise<ProjectTeam> {
-    const projectRoot = realpathSync(input.projectRoot);
+    const projectRoot = realpathSync.native(input.projectRoot);
     return this.guardedWrite((snapshot) => {
       if (!snapshot.orgs.some((org) => org.id === input.orgId)) {
         throw new IdentityStoreError('org-not-found', `no org ${input.orgId}`);
@@ -388,6 +501,30 @@ export class IdentityStore {
       }
       const projectTeam = projectTeamSchema.parse({ projectRoot, orgId: input.orgId, teamId: input.teamId });
       return { snapshot: { ...snapshot, projectTeams: [...snapshot.projectTeams, projectTeam] }, result: projectTeam };
+    });
+  }
+
+  /**
+   * Release a root's claim (ADDED 2026-08-07, repair stage). Idempotent, mirroring
+   * `deleteSession`: releasing an unclaimed root is not an error, it returns `false`.
+   *
+   * **Why this has to exist at all.** Phase 5 enforced D4's one-root-one-org mapping on `create`
+   * and on nothing else, so `DELETE /api/v1/projects/:id` unregistered the workspace entry and
+   * left the `project_teams` row behind. Two consequences, both reproduced at review: the table
+   * grows a row per removed project forever, and re-registering the same root afterwards silently
+   * inherits the OLD team — an explicit `teamId` on the re-registration is validated and then
+   * discarded, because `server.ts` prefers an existing claim over the caller's choice (correctly:
+   * that is what makes the constraint a constraint). The claim must therefore be released by the
+   * same request that unregisters the root.
+   *
+   * Takes an already-normalized root, like `getProjectTeam`/`listProjectTeams` and unlike
+   * `createProjectTeam` — a root being *removed* may no longer exist on disk, and `realpathSync`
+   * on it would throw `ENOENT` and turn a successful unregistration into a 500.
+   */
+  async deleteProjectTeam(projectRoot: string): Promise<boolean> {
+    return this.guardedWrite((snapshot) => {
+      const projectTeams = snapshot.projectTeams.filter((row) => row.projectRoot !== projectRoot);
+      return { snapshot: { ...snapshot, projectTeams }, result: projectTeams.length !== snapshot.projectTeams.length };
     });
   }
 
@@ -424,6 +561,133 @@ export class IdentityStore {
     return this.guardedWrite((snapshot) => {
       const sessions = snapshot.sessions.filter((s) => s.id !== id);
       return { snapshot: { ...snapshot, sessions }, result: sessions.length !== snapshot.sessions.length };
+    });
+  }
+
+  // ---- invites: implemented by the "memberships + invites" unit ---------------------------------
+  //
+  // D8: "subsequent users need an invite." Every method below has the exact shape every OTHER
+  // write method in this class already has — one `guardedWrite` call, checks-then-insert inside
+  // its callback, nothing touching the lease or the file directly — filled in exactly per the
+  // guarded-write contract each doc comment below states; see `identity-store.test.ts`'s "invites"
+  // describe block for the coverage proving each check and the redeem-is-atomic claim.
+
+  /**
+   * `id` is REQUIRED and caller-supplied, mirroring `createSession` above and for the identical
+   * reason (`sessionSchema`'s own doc comment): the store never mints the bearer token itself —
+   * that randomness policy belongs to whichever module calls this, not to the store.
+   *
+   * Checks the implementation must perform, inside the SAME guarded write (`guardedWrite` re-reads
+   * the snapshot fresh under the lease — these must run against THAT read, never a value captured
+   * before the lease was acquired):
+   *  - `org-not-found` if `input.orgId` names no org.
+   *  - if `input.teamId` is present: `team-not-found` if it names no team, `team-org-mismatch` if
+   *    that team belongs to a different org than `input.orgId` — the exact two checks
+   *    `createProjectTeam` below already performs, for the same reason.
+   *  - `invite-id-taken` if `input.id` already exists in `invites` (mirrors `session-id-taken`).
+   */
+  async createInvite(input: {
+    id: string;
+    orgId: string;
+    teamId?: string;
+    role: Role;
+    expiresAt: Date;
+  }): Promise<Invite> {
+    return this.guardedWrite((snapshot) => {
+      if (!snapshot.orgs.some((org) => org.id === input.orgId)) {
+        throw new IdentityStoreError('org-not-found', `no org ${input.orgId}`);
+      }
+      if (input.teamId !== undefined) {
+        const team = snapshot.teams.find((t) => t.id === input.teamId);
+        if (!team) throw new IdentityStoreError('team-not-found', `no team ${input.teamId}`);
+        if (team.orgId !== input.orgId) {
+          throw new IdentityStoreError('team-org-mismatch', `team ${input.teamId} belongs to org ${team.orgId}, not ${input.orgId}`);
+        }
+      }
+      if (snapshot.invites.some((invite) => invite.id === input.id)) {
+        throw new IdentityStoreError('invite-id-taken', `invite id ${input.id} already exists`);
+      }
+      const invite = inviteSchema.parse({
+        id: input.id,
+        orgId: input.orgId,
+        teamId: input.teamId,
+        role: input.role,
+        createdAt: this.now().toISOString(),
+        expiresAt: input.expiresAt.toISOString(),
+      });
+      return { snapshot: { ...snapshot, invites: [...snapshot.invites, invite] }, result: invite };
+    });
+  }
+
+  /**
+   * Redeeming an invite and granting the resulting membership MUST be one guarded write, not two
+   * — the exact atomicity `createOrg` already applies to "org + its default team", for the same
+   * reason: two separate writes would each be individually consistent but leave a window, if the
+   * process died between them, where an invite reads as consumed with no membership to show for
+   * it. Fold both mutations into one `guardedWrite` call.
+   *
+   * Checks, in order, inside that one guarded write:
+   *  - `invite-not-found` if no invite with `input.id` exists at all.
+   *  - `invite-already-consumed` if it exists but `consumedAt` is already set.
+   *  - `invite-expired` if `expiresAt` has passed (do NOT reuse `getInvite` for this check —
+   *    that method already folds "consumed" and "expired" into one `undefined`, which cannot
+   *    distinguish the three error codes this method must raise separately; read `invites`
+   *    off the fresh snapshot directly, the same way every other checker in this class does).
+   *  - `user-not-found` if `input.userId` names no user.
+   *  - `membership-exists` if that user already has a membership in the invite's `orgId` (reuse
+   *    `createMembership`'s own check — an already-a-member redeeming a second invite to the same
+   *    org is not a new grant).
+   *
+   * On success: stamp `consumedAt`/`consumedByUserId` on the invite row AND insert the new
+   * `Membership` row (role from `invite.role`), both in the returned `snapshot`.
+   */
+  async redeemInvite(input: { id: string; userId: string }): Promise<{ invite: Invite; membership: Membership }> {
+    return this.guardedWrite((snapshot) => {
+      const index = snapshot.invites.findIndex((invite) => invite.id === input.id);
+      const existing = snapshot.invites[index];
+      if (!existing) throw new IdentityStoreError('invite-not-found', `no invite ${input.id}`);
+      if (existing.consumedAt) throw new IdentityStoreError('invite-already-consumed', `invite ${input.id} was already consumed`);
+      if (Date.parse(existing.expiresAt) <= this.now().getTime()) {
+        throw new IdentityStoreError('invite-expired', `invite ${input.id} expired at ${existing.expiresAt}`);
+      }
+      if (!snapshot.users.some((user) => user.id === input.userId)) {
+        throw new IdentityStoreError('user-not-found', `no user ${input.userId}`);
+      }
+      if (snapshot.memberships.some((m) => m.userId === input.userId && m.orgId === existing.orgId)) {
+        throw new IdentityStoreError('membership-exists', `user ${input.userId} is already a member of org ${existing.orgId}`);
+      }
+      const consumedInvite = inviteSchema.parse({
+        ...existing,
+        consumedAt: this.now().toISOString(),
+        consumedByUserId: input.userId,
+      });
+      const membership = membershipSchema.parse({ userId: input.userId, orgId: existing.orgId, role: existing.role });
+      const invites = [...snapshot.invites];
+      invites[index] = consumedInvite;
+      return {
+        snapshot: { ...snapshot, invites, memberships: [...snapshot.memberships, membership] },
+        result: { invite: consumedInvite, membership },
+      };
+    });
+  }
+
+  /** Revoke an invite before it is redeemed. Idempotent, mirroring `deleteSession` above: revoking
+   *  an already-gone, already-expired or already-consumed invite is not an error, it returns
+   *  `false` rather than throwing — the caller asked for the invite to not be usable, and it
+   *  already isn't. */
+  async revokeInvite(id: string): Promise<boolean> {
+    return this.guardedWrite((snapshot) => {
+      const existing = snapshot.invites.find((invite) => invite.id === id);
+      const isActive = existing !== undefined && !existing.consumedAt && Date.parse(existing.expiresAt) > this.now().getTime();
+      if (!isActive) {
+        // Idempotent no-op — and deliberately NOT a delete for a missing/consumed/expired row:
+        // `listOrgInvites`'s own doc comment says consumed/expired rows are kept for an admin
+        // "invite history" view to filter, and revoking an already-consumed invite must not erase
+        // who redeemed it (`consumedByUserId`/`consumedAt`).
+        return { snapshot, result: false };
+      }
+      const invites = snapshot.invites.filter((invite) => invite.id !== id);
+      return { snapshot: { ...snapshot, invites }, result: true };
     });
   }
 
@@ -523,10 +787,19 @@ export class IdentityStore {
     }
     const obj = raw as Record<string, unknown>;
     // Any top-level key this version doesn't recognize rides along untouched — the same
-    // `.passthrough()` contract every row schema below gets, applied by hand here because the six
+    // `.passthrough()` contract every row schema below gets, applied by hand here because the
     // known keys are rebuilt individually (per-entry salvage, not `identitySnapshotSchema.parse`
     // wholesale) rather than round-tripped as-is.
-    const KNOWN_KEYS = new Set(['version', 'orgs', 'teams', 'users', 'memberships', 'projectTeams', 'sessions']);
+    const KNOWN_KEYS = new Set([
+      'version',
+      'orgs',
+      'teams',
+      'users',
+      'memberships',
+      'projectTeams',
+      'sessions',
+      'invites',
+    ]);
     const passthroughTop: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
       if (!KNOWN_KEYS.has(key)) passthroughTop[key] = value;
@@ -543,6 +816,12 @@ export class IdentityStore {
       memberships: this.salvage(obj.memberships, membershipSchema, 'memberships'),
       projectTeams: this.salvage(obj.projectTeams, projectTeamSchema, 'projectTeams'),
       sessions: this.salvage(obj.sessions, sessionSchema, 'sessions'),
+      // A file written before this scaffold added `invites` (i.e. every identity.json on disk
+      // today) simply has no `invites` key — `obj.invites` is `undefined`, and `salvage` already
+      // treats a non-array as "no rows" rather than throwing, so this reads as `[]` exactly like
+      // `emptyIdentitySnapshot()`'s own default. No migration needed (D7/AGENTS.md: new fields are
+      // additive, never required of an old file).
+      invites: this.salvage(obj.invites, inviteSchema, 'invites'),
     };
   }
 

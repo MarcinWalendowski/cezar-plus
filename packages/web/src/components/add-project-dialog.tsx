@@ -33,9 +33,15 @@ import { FolderBrowser, useBrowseTarget } from '@/components/folder-browser'
 export function AddProjectDialog({
   open,
   onOpenChange,
+  teamId,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** Onboarding step 4 (D8, spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`): assigns
+   *  the newly registered project to this team. Omitted keeps today's behavior byte-identical —
+   *  every OTHER caller of this dialog leaves it unset, and `registerProject` sends no `teamId`
+   *  key at all when it is absent, so the request on the wire is unchanged for them. */
+  teamId?: string
 }) {
   // `null` = the independently configured browse root. The dialog never spells that path itself
   // — it only ever echoes what it was told.
@@ -62,14 +68,17 @@ export function AddProjectDialog({
 
   const add = () => {
     if (target === null || register.isPending) return
-    register.mutate(target, {
-      onSuccess: ({ project }) => {
-        onOpenChange(false)
-        // Raw react-router `useNavigate`, not the scope-aware wrapper: this is a deliberate
-        // cross-project jump, and `/p/…` targets pass through the wrapper untouched anyway.
-        navigate(`/p/${encodeURIComponent(project.id)}/`)
+    register.mutate(
+      { root: target, teamId },
+      {
+        onSuccess: ({ project }) => {
+          onOpenChange(false)
+          // Raw react-router `useNavigate`, not the scope-aware wrapper: this is a deliberate
+          // cross-project jump, and `/p/…` targets pass through the wrapper untouched anyway.
+          navigate(`/p/${encodeURIComponent(project.id)}/`)
+        },
       },
-    })
+    )
   }
 
   return (

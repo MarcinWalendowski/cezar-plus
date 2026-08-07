@@ -1,7 +1,16 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from './config.ts';
 import {
@@ -87,6 +96,43 @@ describe('workspace projects', () => {
       expect((await loadWorkspaceConfig()).projects).toHaveLength(1);
     });
 
+    it('dedupes a relative-path spelling to the same absolute entry', async () => {
+      const root = makeDir('relative-target');
+      const first = await registerProject(root);
+      const relativeSpelling = relative(process.cwd(), root);
+      const again = await registerProject(relativeSpelling);
+      expect(again.id).toBe(first.id);
+      expect(again.root).toBe(first.root);
+      expect((await loadWorkspaceConfig()).projects).toHaveLength(1);
+    });
+
+    it(
+      'dedupes a case-differing spelling on a case-insensitive filesystem (spec ' +
+        '2026-08-06-org-team-auth-onboarding, "the key is the REALPATH … a case-differing path on a ' +
+        'case-insensitive filesystem must collapse to the same key") — normalizeRoot uses ' +
+        "`fs/promises.realpath`, which is libuv-backed and returns the on-disk case; Node's " +
+        'JS-implemented `fs.realpathSync` echoes the queried case back instead, and swapping ' +
+        'normalizeRoot for it fails this test (verified by mutation, 2026-08-07)',
+      async () => {
+        const root = makeDir('CaseSensitiveName');
+        const differentCase = `${root.slice(0, -'CaseSensitiveName'.length)}casesensitivename`;
+        if (!existsSync(differentCase)) {
+          // A genuinely case-sensitive filesystem (e.g. Linux ext4 in CI): the
+          // differently-cased spelling does not exist, so there is nothing to
+          // dedupe — the property under test does not apply here. Skipping
+          // silently would look identical to a passing assertion, so assert
+          // the precondition instead of just returning.
+          expect(existsSync(differentCase)).toBe(false);
+          return;
+        }
+        const first = await registerProject(root);
+        const viaOtherCase = await registerProject(differentCase);
+        expect(viaOtherCase.id).toBe(first.id);
+        expect(viaOtherCase.root).toBe(first.root);
+        expect((await loadWorkspaceConfig()).projects).toHaveLength(1);
+      },
+    );
+
     it('suffixes colliding slugs numerically (web, web-2)', async () => {
       const a = await registerProject(makeDir('one', 'web'));
       const b = await registerProject(makeDir('two', 'web'));
@@ -110,6 +156,9 @@ describe('workspace projects', () => {
         'auth',
         'login',
         'callback',
+        // `onboarding`: added 2026-08-07 (repair stage) once phase 4 made `/onboarding` a real
+        // top-level cockpit segment, which the D5 reservation had not caught up with.
+        'onboarding',
         'o',
         't',
       ]) {

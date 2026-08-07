@@ -61,13 +61,15 @@ type Answers = {
   putConfig?: { status: number; payload: unknown }
   /** What `DELETE /api/v1/projects/:id` answers. */
   del?: { status: number; payload: unknown }
+  /** Overrides `GET /api/v1/projects`' entries — default `PROJECTS`, carries no `teamId`. */
+  projects?: ProjectListEntry[]
 }
 
 function serve(answers: Answers = {}) {
   requests = []
   const registry: ProjectsResponse = {
-    // Copies, not the shared PROJECTS objects: the PATCH handler mutates entries.
-    projects: PROJECTS.map((p) => ({ ...p })),
+    // Copies, not the shared source objects: the PATCH handler mutates entries.
+    projects: (answers.projects ?? PROJECTS).map((p) => ({ ...p })),
     bootProject: 'cezar',
     projectsDir: '~/cezar/projects',
   }
@@ -130,20 +132,26 @@ function serve(answers: Answers = {}) {
   )
 }
 
-/** Seeds the step-3.2 route gates so the (unscoped) global settings shell renders immediately. */
-function gateSeededClient() {
+/**
+ * Seeds the step-3.2 route gates so the (unscoped) global settings shell renders immediately.
+ * The default `staleTime` (query-client.ts) is 5 minutes, so this seed — not `serve()`'s mock
+ * fetch — is what the FIRST render shows; a test that wants custom entries (e.g. with a `teamId`)
+ * must pass the SAME array here that it passes to `serve({ projects })`, or the initial paint
+ * shows the unseeded default instead.
+ */
+function gateSeededClient(projects: ProjectListEntry[] = PROJECTS) {
   const client = createQueryClient()
   client.setQueryData(queryKeys.health, { bootProject: 'cezar' })
   client.setQueryData(workspaceQueryKeys.projects, {
-    projects: PROJECTS,
+    projects,
     bootProject: 'cezar',
     projectsDir: '~/cezar/projects',
   })
   return client
 }
 
-function renderProjects() {
-  const client = gateSeededClient()
+function renderProjects(projects: ProjectListEntry[] = PROJECTS) {
+  const client = gateSeededClient(projects)
   render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={['/settings/global/projects']}>
@@ -169,6 +177,8 @@ const deletes = () => requests.filter((r) => r.method === 'DELETE')
 const patches = () => requests.filter((r) => r.method === 'PATCH')
 const maxParallelSelect = (id: string) =>
   row(id)?.querySelector<HTMLSelectElement>('[data-slot="project-max-parallel"]')
+const teamFilterSelect = () => document.querySelector<HTMLSelectElement>('[data-slot="project-team-filter"]')
+const teamBadge = (id: string) => row(id)?.querySelector<HTMLElement>('[data-slot="project-team"]')
 
 afterEach(() => {
   act(() => resetToasts())
@@ -361,5 +371,80 @@ describe('Global settings → Projects', () => {
     // The server refuses it too (it re-registers at every start); disabling explains it first.
     expect(removeButton('cezar')?.disabled).toBe(true)
     expect(removeButton('cezar')?.title).toContain('re-registers')
+  })
+
+  describe('team filtering (D5 — grouping/filtering metadata, never a scope)', () => {
+    it('shows no filter and no team badges when CEZ_AUTH is unset — the board is unchanged', async () => {
+      // The default PROJECTS fixture carries no `teamId` at all, which is exactly the shape
+      // every project has with `CEZ_AUTH` unset: no `project_teams` row was ever written.
+      serve()
+      renderProjects()
+      await waitFor(() => expect(rows()).toHaveLength(3))
+      expect(teamFilterSelect()).toBeNull()
+      expect(document.querySelectorAll('[data-slot="project-team"]')).toHaveLength(0)
+      // Same three rows, same text, as the unfiltered baseline test above — the board itself is
+      // untouched by this feature existing in the code.
+      expect(row('shop-backend')?.textContent).toContain('/home/piotr/cezar/projects/shop-backend')
+      expect(row('old-spike')?.textContent).toContain('folder not found')
+    })
+
+    it('filters the board by team once projects carry one, and clears back to "All teams"', async () => {
+      const withTeams = [
+        { ...PROJECTS[0], teamId: 'team-eng', teamName: 'Engineering' },
+        { ...PROJECTS[1], teamId: 'team-mkt', teamName: 'Marketing' },
+        { ...PROJECTS[2] }, // no team assigned — visible under "All teams", hidden by either filter
+      ] as ProjectListEntry[]
+      serve({ projects: withTeams })
+      renderProjects(withTeams)
+      await waitFor(() => expect(rows()).toHaveLength(3))
+
+      const select = teamFilterSelect()
+      expect(select).not.toBeNull()
+      expect(Array.from(select!.options).map((o) => o.textContent)).toEqual([
+        'All teams',
+        'Engineering',
+        'Marketing',
+      ])
+      expect(teamBadge('cezar')?.textContent).toContain('Engineering')
+      expect(teamBadge('shop-backend')?.textContent).toContain('Marketing')
+      expect(teamBadge('old-spike')).toBeNull()
+
+      fireEvent.change(select!, { target: { value: 'team-eng' } })
+      await waitFor(() => expect(rows()).toHaveLength(1))
+      expect(row('cezar')).not.toBeNull()
+      expect(row('shop-backend')).toBeNull()
+      expect(row('old-spike')).toBeNull()
+
+      fireEvent.change(select!, { target: { value: '' } })
+      await waitFor(() => expect(rows()).toHaveLength(3))
+    })
+
+    it('clears a stale team selection instead of filtering everything away', async () => {
+      // 'cezar' is the boot project — Remove stays disabled for it — so only 'shop-backend'
+      // carries the team being removed here, and the filter has no OTHER team to fall back to.
+      const withTeams = [
+        { ...PROJECTS[0] }, // cezar — no team
+        { ...PROJECTS[1], teamId: 'team-eng', teamName: 'Engineering' }, // shop-backend
+      ] as ProjectListEntry[]
+      serve({ projects: withTeams })
+      renderProjects(withTeams)
+      await waitFor(() => expect(rows()).toHaveLength(2))
+
+      fireEvent.change(teamFilterSelect()!, { target: { value: 'team-eng' } })
+      await waitFor(() => expect(rows()).toHaveLength(1))
+      expect(row('shop-backend')).not.toBeNull()
+
+      fireEvent.click(removeButton('shop-backend')!)
+      await waitFor(() => expect(confirmButton()).not.toBeNull())
+      fireEvent.click(confirmButton()!)
+
+      // The removed project was the only one on 'team-eng': the filter option (and the select
+      // itself) disappears, and the stale selection falls back to "All teams" rather than
+      // rendering a "no projects" message for a team the reader can no longer even pick.
+      await waitFor(() => expect(teamFilterSelect()).toBeNull())
+      expect(rows()).toHaveLength(1)
+      expect(row('cezar')).not.toBeNull()
+      expect(document.querySelector('[data-slot="projects-empty"]')).toBeNull()
+    })
   })
 })

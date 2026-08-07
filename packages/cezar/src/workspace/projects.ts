@@ -32,7 +32,10 @@ import {
  *
  * `auth`, `login`, `callback`, `o`, `t` were added by spec
  * 2026-08-06-org-team-auth-onboarding (D5) for the auth/onboarding routes and
- * the future `/o/<org>/`, `/t/<team>/` segments. This reservation is
+ * the future `/o/<org>/`, `/t/<team>/` segments; `onboarding` joined them on
+ * 2026-08-07 at the repair stage, when phase 4 turned `/onboarding` into a real
+ * top-level cockpit segment (`packages/web/src/routes.tsx`) without reserving
+ * it — the same argument that put `auth`/`login`/`callback` here. This reservation is
  * **forward-only**: it changes what `allocateProjectSlug` hands out to a
  * project registering from here on, and nothing else. It must never gate a
  * *read* of an existing registry — `listProjects`/`loadWorkspaceConfig` never
@@ -50,6 +53,7 @@ export const RESERVED_PROJECT_IDS: ReadonlySet<string> = new Set([
   'auth',
   'login',
   'callback',
+  'onboarding',
   'o',
   't',
 ]);
@@ -91,13 +95,46 @@ export function allocateProjectSlug(root: string, taken: Iterable<string>): stri
 }
 
 /**
- * Realpath-normalize a root: resolves symlinks and drops trailing slashes, so
- * every spelling of the same directory dedupes to one registry entry. A path
- * that cannot be realpath'd (doesn't exist yet, unreadable) degrades to plain
- * `resolve()` — registration callers guard existence; this module never throws
- * over it.
+ * Realpath-normalize a root: resolves symlinks, drops trailing slashes, AND
+ * canonicalizes case on a case-insensitive-but-case-preserving filesystem
+ * (APFS/HFS+/NTFS), so every spelling of the same directory dedupes to one
+ * key. A path that cannot be realpath'd (doesn't exist yet, unreadable)
+ * degrades to plain `resolve()` — registration callers guard existence; this
+ * module never throws over it.
+ *
+ * **CORRECTED 2026-08-07 (repair stage).** Phase 5 briefly swapped this to
+ * `realpathSync.native`, justified by a docblock claiming "the plain (non-native)
+ * `realpath` this module used before" does not correct case. That claim was
+ * measured against `fs.realpathSync` — a function this module has never called.
+ * The code being replaced was `await realpath(root)` from `node:fs/promises`,
+ * which routes through libuv's `uv_fs_realpath` and therefore ALREADY returns the
+ * on-disk canonical case. Measured on this repo's dev filesystem (APFS, Node
+ * v22.12) against a real `FooBar/` directory queried as `foobar`:
+ *
+ *     fs.promises.realpath   → …/FooBar   ← what this module used, and uses again
+ *     fs.realpathSync        → …/foobar   ← the JS implementation; the one measured
+ *     fs.realpathSync.native → …/FooBar
+ *
+ * So the swap bought nothing and cost something real: it turned an async,
+ * threadpool `realpath` into a BLOCKING sync syscall on the event loop, inside a
+ * function that still advertises `Promise<string>` and is called on the
+ * registration route, at boot by `shouldRegisterProject`, and by
+ * `server.ts`'s `registerFolder`. Reverted.
+ *
+ * The case-canonicalization property itself is genuine and load-bearing —
+ * post-Phase-5 it is what stops `/repo/Foo` and `/repo/foo` from registering as
+ * two roots and dodging the `project_teams` one-root-one-org PRIMARY KEY (spec
+ * `.ai/specs/2026-08-06-org-team-auth-onboarding.md` D4/D7). `fs/promises.realpath`
+ * delivers it; only `fs.realpathSync` does not. `projects.test.ts`'s case-dedupe
+ * test pins the property, and swapping this body for `realpathSync` fails it.
+ *
+ * Exported so `server.ts`'s registration route computes the SAME key it hands to
+ * `identity-store.ts#createProjectTeam` (which `realpathSync`'s the value again
+ * internally — idempotent on an already-canonical string, since the input is
+ * already the on-disk spelling) rather than a second, possibly-diverging
+ * normalization.
  */
-async function normalizeRoot(root: string): Promise<string> {
+export async function normalizeRoot(root: string): Promise<string> {
   try {
     return await realpath(root);
   } catch {
@@ -178,6 +215,17 @@ export interface ProjectListEntry extends WorkspaceProject {
    *  The sidebar gates each project group's GitHub tab on this, instead of on
    *  the boot folder's health-level forge answer. */
   forge?: ForgeKind;
+  /** Which team this root is assigned to (spec 2026-08-06-org-team-auth-onboarding, Phase 5) —
+   *  NOT stored in this registry (`~/.cezar/config.json`); the field exists here only so a route
+   *  that resolved it from `<CEZ_HOME>/identity/*.json` (`server.ts`'s registration handler) can
+   *  attach it to the same entry shape the GET listing answers with. This module never populates
+   *  it itself and never imports the identity store — see `normalizeRoot`'s own doc comment on why
+   *  that boundary matters under `CEZ_AUTH` unset. */
+  teamId?: string;
+  /** That team's display name, resolved alongside `teamId` by the same route and for the same
+   *  reason (see `projectListEntrySchema.teamName` in `packages/contract/src/projects.ts`). Also
+   *  never populated by this module. */
+  teamName?: string;
 }
 
 interface RootProbe {

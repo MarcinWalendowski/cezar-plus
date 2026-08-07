@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -190,6 +190,34 @@ describe('IdentityStore — project_teams (D4)', () => {
     expect(store.listProjectTeams()).toHaveLength(1);
   });
 
+  it('collapses a case-differing spelling on a case-insensitive filesystem — `realpathSync.native`, not the JS `realpathSync`', async () => {
+    const store = IdentityStore.open(await directory());
+    const { org, defaultTeam } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    // `mkdtemp` gives a lowercase-ish random suffix, so force a name with real case to flip.
+    const parent = await directory('cezar-identity-caseparent-');
+    const onDisk = join(parent, 'ProjectRoot');
+    mkdirSync(onDisk);
+    const lowercased = join(parent, 'projectroot');
+    if (!existsSync(lowercased)) {
+      // A genuinely case-sensitive filesystem (Linux ext4 in CI): the other spelling does not
+      // exist, so the property under test does not apply. Asserting the precondition rather than
+      // returning silently — a skipped test and a passing one look identical otherwise.
+      expect(existsSync(lowercased)).toBe(false);
+      return;
+    }
+
+    // Claim it by its lowercase spelling. `realpathSync.native` asks the OS, which answers with
+    // the on-disk case; Node's JS `realpathSync` would echo the query back, and the two spellings
+    // would then be two PRIMARY KEYs over one `.ai/cezar` — D4's silent-history-loss case.
+    const claim = await store.createProjectTeam({ projectRoot: lowercased, orgId: org.id, teamId: defaultTeam.id });
+    expect(claim.projectRoot).toBe(realpathSync.native(onDisk));
+    expect(store.getProjectTeam(realpathSync.native(onDisk))?.orgId).toBe(org.id);
+    await expect(store.createProjectTeam({ projectRoot: onDisk, orgId: org.id, teamId: defaultTeam.id })).rejects.toMatchObject({
+      code: 'project-root-taken',
+    });
+    expect(store.listProjectTeams()).toHaveLength(1);
+  });
+
   it('refuses to link a project root to a team that belongs to a different org', async () => {
     const store = IdentityStore.open(await directory());
     const { org: orgA } = await store.createOrg({ name: 'Acme', slug: 'acme' });
@@ -211,6 +239,281 @@ describe('IdentityStore — project_teams (D4)', () => {
     await expect(store.createProjectTeam({ projectRoot: projectDir, orgId: org.id, teamId: 'nope' })).rejects.toMatchObject({
       code: 'team-not-found',
     });
+  });
+});
+
+describe('IdentityStore — D8 first-user bootstrap (bootstrapFirstOrg)', () => {
+  it('creates the org, its default team, and an owner membership in one write', async () => {
+    const store = IdentityStore.open(await directory());
+    const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-1' });
+    const { org, defaultTeam, membership } = await store.bootstrapFirstOrg({ userId: user.id, name: 'Acme', slug: 'acme' });
+
+    expect(org.slug).toBe('acme');
+    expect(defaultTeam.orgId).toBe(org.id);
+    expect(defaultTeam.name).toBe('General');
+    expect(membership).toEqual({ userId: user.id, orgId: org.id, role: 'owner' });
+    expect(store.getMembership(user.id, org.id)?.role).toBe('owner');
+    expect(store.listTeams(org.id)).toEqual([defaultTeam]);
+  });
+
+  it('refuses a second bootstrap once any org exists — the second user needs an invite instead', async () => {
+    const store = IdentityStore.open(await directory());
+    const { user: first } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-1' });
+    await store.bootstrapFirstOrg({ userId: first.id, name: 'Acme', slug: 'acme' });
+
+    const { user: second } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-2' });
+    await expect(store.bootstrapFirstOrg({ userId: second.id, name: 'Beta', slug: 'beta' })).rejects.toMatchObject({
+      code: 'org-already-bootstrapped',
+    });
+    // The loser gets nothing — no second org, no membership for them anywhere.
+    expect(store.listOrgs()).toHaveLength(1);
+    expect(store.listMemberships(second.id)).toEqual([]);
+  });
+
+  it('refuses an unknown user without touching disk', async () => {
+    const dir = await directory();
+    const store = IdentityStore.open(dir);
+    await expect(store.bootstrapFirstOrg({ userId: 'nope', name: 'Acme', slug: 'acme' })).rejects.toMatchObject({
+      code: 'user-not-found',
+    });
+    expect(store.listOrgs()).toEqual([]);
+  });
+
+  it('hardcodes the granted role to owner regardless of what a caller might otherwise expect', async () => {
+    const store = IdentityStore.open(await directory());
+    const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-1' });
+    const { membership } = await store.bootstrapFirstOrg({ userId: user.id, name: 'Acme', slug: 'acme' });
+    expect(membership.role).toBe('owner');
+  });
+
+  it('THE RACE: two users bootstrapping simultaneously on an empty deployment — exactly one wins, exactly one org is ever created', async () => {
+    const dir = await directory();
+    // Two separate store instances over the SAME directory, mirroring two different requests
+    // landing on the single supervisor process at once (D4) — IdentityStore keeps no in-memory
+    // cache (see the class's own module doc), so this is exactly as consistent as one instance
+    // handling two concurrent calls, and it proves the real O_EXCL lease is what serializes them
+    // rather than any accident of sharing one JS object.
+    const storeA = IdentityStore.open(dir, { lockRetryMs: 5 });
+    const storeB = IdentityStore.open(dir, { lockRetryMs: 5 });
+
+    const { user: userA } = await storeA.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-a' });
+    const { user: userB } = await storeB.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-b' });
+
+    const [resultA, resultB] = await Promise.allSettled([
+      storeA.bootstrapFirstOrg({ userId: userA.id, name: 'Acme', slug: 'acme' }),
+      storeB.bootstrapFirstOrg({ userId: userB.id, name: 'Beta', slug: 'beta' }),
+    ]);
+
+    const outcomes = [resultA, resultB];
+    const fulfilled = outcomes.filter((r) => r.status === 'fulfilled');
+    const rejected = outcomes.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({ code: 'org-already-bootstrapped' });
+
+    // Exactly one org, one team, one membership survive — no partial state from the loser.
+    expect(storeA.listOrgs()).toHaveLength(1);
+    const winningOrg = storeA.listOrgs()[0]!;
+    expect(storeA.listTeams(winningOrg.id)).toHaveLength(1);
+    expect(storeA.listOrgMembers(winningOrg.id)).toHaveLength(1);
+    expect(storeA.listOrgMembers(winningOrg.id)[0]?.role).toBe('owner');
+
+    // The loser's user has no membership anywhere — they genuinely need an invite now.
+    const winnerUserId = storeA.listOrgMembers(winningOrg.id)[0]?.userId;
+    const loserUserId = winnerUserId === userA.id ? userB.id : userA.id;
+    expect(storeA.listMemberships(loserUserId)).toEqual([]);
+  });
+});
+
+describe('IdentityStore — invites (D8: "subsequent users need an invite")', () => {
+  it('creates an invite scoped to an org, redeemable via its own id', async () => {
+    const store = IdentityStore.open(await directory());
+    const { org } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    const expiresAt = new Date(Date.now() + 60_000);
+    const invite = await store.createInvite({ id: 'inv-1', orgId: org.id, role: 'member', expiresAt });
+
+    expect(invite).toMatchObject({ id: 'inv-1', orgId: org.id, role: 'member' });
+    expect(invite.consumedAt).toBeUndefined();
+    expect(store.getInvite('inv-1')).toEqual(invite);
+    expect(store.listOrgInvites(org.id)).toEqual([invite]);
+  });
+
+  it('an invite may pre-assign a team, validated against the org', async () => {
+    const store = IdentityStore.open(await directory());
+    const { org, defaultTeam } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    const invite = await store.createInvite({
+      id: 'inv-1',
+      orgId: org.id,
+      teamId: defaultTeam.id,
+      role: 'admin',
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    expect(invite.teamId).toBe(defaultTeam.id);
+  });
+
+  it('createInvite validates org and team the same way createProjectTeam does', async () => {
+    const store = IdentityStore.open(await directory());
+    const { org: orgA, defaultTeam: teamA } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    const { org: orgB } = await store.createOrg({ name: 'Beta', slug: 'beta' });
+    const expiresAt = new Date(Date.now() + 60_000);
+
+    await expect(store.createInvite({ id: 'i1', orgId: 'nope', role: 'member', expiresAt })).rejects.toMatchObject({
+      code: 'org-not-found',
+    });
+    await expect(store.createInvite({ id: 'i1', orgId: orgA.id, teamId: 'nope', role: 'member', expiresAt })).rejects.toMatchObject({
+      code: 'team-not-found',
+    });
+    await expect(
+      store.createInvite({ id: 'i1', orgId: orgB.id, teamId: teamA.id, role: 'member', expiresAt }),
+    ).rejects.toMatchObject({ code: 'team-org-mismatch' });
+  });
+
+  it('refuses a second invite with the same id', async () => {
+    const store = IdentityStore.open(await directory());
+    const { org } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    const expiresAt = new Date(Date.now() + 60_000);
+    await store.createInvite({ id: 'inv-1', orgId: org.id, role: 'member', expiresAt });
+    await expect(store.createInvite({ id: 'inv-1', orgId: org.id, role: 'admin', expiresAt })).rejects.toMatchObject({
+      code: 'invite-id-taken',
+    });
+  });
+
+  it('redeeming grants the invite\'s role AND consumes the invite in one write', async () => {
+    const dir = await directory();
+    const store = IdentityStore.open(dir);
+    const { org } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-1' });
+    const invite = await store.createInvite({ id: 'inv-1', orgId: org.id, role: 'admin', expiresAt: new Date(Date.now() + 60_000) });
+
+    const { invite: consumed, membership } = await store.redeemInvite({ id: invite.id, userId: user.id });
+    expect(membership).toEqual({ userId: user.id, orgId: org.id, role: 'admin' });
+    expect(consumed.consumedByUserId).toBe(user.id);
+    expect(consumed.consumedAt).toBeTruthy();
+
+    // Both halves landed together, verified from a FRESH store instance reading disk — not this
+    // instance's own idea of what it just wrote.
+    const reopened = IdentityStore.open(dir);
+    expect(reopened.getMembership(user.id, org.id)?.role).toBe('admin');
+    expect(reopened.getInvite(invite.id)).toBeUndefined(); // consumed invites read as absent
+    expect(reopened.listOrgInvites(org.id)[0]?.consumedByUserId).toBe(user.id); // but history survives
+  });
+
+  it('redeemInvite refuses an unknown invite', async () => {
+    const store = IdentityStore.open(await directory());
+    const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-1' });
+    await expect(store.redeemInvite({ id: 'nope', userId: user.id })).rejects.toMatchObject({ code: 'invite-not-found' });
+  });
+
+  it('redeemInvite refuses an already-consumed invite (no second membership from the same invite)', async () => {
+    const store = IdentityStore.open(await directory());
+    const { org } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    const { user: first } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-1' });
+    const { user: second } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-2' });
+    const invite = await store.createInvite({ id: 'inv-1', orgId: org.id, role: 'member', expiresAt: new Date(Date.now() + 60_000) });
+    await store.redeemInvite({ id: invite.id, userId: first.id });
+
+    await expect(store.redeemInvite({ id: invite.id, userId: second.id })).rejects.toMatchObject({
+      code: 'invite-already-consumed',
+    });
+    expect(store.listMemberships(second.id)).toEqual([]);
+  });
+
+  it('redeemInvite refuses an expired invite', async () => {
+    const store = IdentityStore.open(await directory(), { now: () => new Date('2026-01-01T00:00:00.000Z') });
+    const { org } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-1' });
+    const invite = await store.createInvite({ id: 'inv-1', orgId: org.id, role: 'member', expiresAt: new Date('2026-01-01T00:05:00.000Z') });
+
+    const expiredView = IdentityStore.open(store.dir, { now: () => new Date('2026-01-01T00:10:00.000Z') });
+    await expect(expiredView.redeemInvite({ id: invite.id, userId: user.id })).rejects.toMatchObject({
+      code: 'invite-expired',
+    });
+    expect(expiredView.listMemberships(user.id)).toEqual([]);
+  });
+
+  it('redeemInvite refuses an unknown user', async () => {
+    const store = IdentityStore.open(await directory());
+    const { org } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    const invite = await store.createInvite({ id: 'inv-1', orgId: org.id, role: 'member', expiresAt: new Date(Date.now() + 60_000) });
+    await expect(store.redeemInvite({ id: invite.id, userId: 'nope' })).rejects.toMatchObject({ code: 'user-not-found' });
+  });
+
+  it('redeemInvite refuses when the user already has a membership in that org', async () => {
+    const store = IdentityStore.open(await directory());
+    const { org } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-1' });
+    await store.createMembership({ userId: user.id, orgId: org.id, role: 'owner' });
+    const invite = await store.createInvite({ id: 'inv-1', orgId: org.id, role: 'member', expiresAt: new Date(Date.now() + 60_000) });
+
+    await expect(store.redeemInvite({ id: invite.id, userId: user.id })).rejects.toMatchObject({ code: 'membership-exists' });
+    // The pre-existing membership's role is untouched — redemption never downgrades an existing owner.
+    expect(store.getMembership(user.id, org.id)?.role).toBe('owner');
+  });
+
+  it('THE RACE: two users redeeming the SAME invite simultaneously — exactly one succeeds', async () => {
+    const dir = await directory();
+    const seed = IdentityStore.open(dir);
+    const { org } = await seed.createOrg({ name: 'Acme', slug: 'acme' });
+    const { user: userA } = await seed.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-a' });
+    const { user: userB } = await seed.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-b' });
+    const invite = await seed.createInvite({ id: 'inv-1', orgId: org.id, role: 'member', expiresAt: new Date(Date.now() + 60_000) });
+
+    const storeA = IdentityStore.open(dir, { lockRetryMs: 5 });
+    const storeB = IdentityStore.open(dir, { lockRetryMs: 5 });
+    const [resultA, resultB] = await Promise.allSettled([
+      storeA.redeemInvite({ id: invite.id, userId: userA.id }),
+      storeB.redeemInvite({ id: invite.id, userId: userB.id }),
+    ]);
+
+    const fulfilled = [resultA, resultB].filter((r) => r.status === 'fulfilled');
+    const rejected = [resultA, resultB].filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({ code: 'invite-already-consumed' });
+    expect(seed.listOrgMembers(org.id)).toHaveLength(1);
+  });
+
+  it('revokeInvite deletes an active invite, and is idempotent for unknown/consumed/expired ones', async () => {
+    const store = IdentityStore.open(await directory(), { now: () => new Date('2026-01-01T00:00:00.000Z') });
+    const { org } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-1' });
+
+    // Active invite: revoke actually removes it.
+    const active = await store.createInvite({ id: 'inv-active', orgId: org.id, role: 'member', expiresAt: new Date('2026-01-01T00:05:00.000Z') });
+    expect(await store.revokeInvite(active.id)).toBe(true);
+    expect(store.getInvite(active.id)).toBeUndefined();
+    expect(store.listOrgInvites(org.id)).toEqual([]); // fully gone, no dead row left behind
+
+    // Unknown invite: no-op.
+    expect(await store.revokeInvite('never-existed')).toBe(false);
+
+    // Consumed invite: no-op, and its history (who redeemed it) survives the revoke call.
+    const consumable = await store.createInvite({ id: 'inv-consumed', orgId: org.id, role: 'member', expiresAt: new Date('2026-01-01T00:05:00.000Z') });
+    await store.redeemInvite({ id: consumable.id, userId: user.id });
+    expect(await store.revokeInvite(consumable.id)).toBe(false);
+    expect(store.listOrgInvites(org.id).find((i) => i.id === consumable.id)?.consumedByUserId).toBe(user.id);
+
+    // Expired invite: no-op, and it is also retained (not silently purged by a revoke call).
+    const expired = await store.createInvite({ id: 'inv-expired', orgId: org.id, role: 'member', expiresAt: new Date('2025-01-01T00:00:00.000Z') });
+    expect(await store.revokeInvite(expired.id)).toBe(false);
+    expect(store.listOrgInvites(org.id).find((i) => i.id === expired.id)).toBeDefined();
+  });
+});
+
+describe('IdentityStore — a membership is never inferred, only ever explicitly granted (regression)', () => {
+  it('signing in and having an unredeemed invite sitting around grants NOTHING by itself', async () => {
+    const store = IdentityStore.open(await directory());
+    const { org } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+    const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example', subject: 'sub-1' });
+    await store.createInvite({ id: 'inv-1', orgId: org.id, role: 'admin', expiresAt: new Date(Date.now() + 60_000) });
+
+    // The user exists and an invite exists for the SAME org — but nobody redeemed it, so the
+    // user has no membership, which is what `session.ts`'s `resolveFromCookieHeader` (untouched by
+    // this unit) keys "resolves to no principal, and every /api/* route 401s" on — see
+    // `session.test.ts`'s own "a valid, unexpired session for a user with no org membership yet
+    // resolves to null" test and `server/auth-perimeter.test.ts`'s 401 matrix, both re-run
+    // unmodified by this session's gates.
+    expect(store.listMemberships(user.id)).toEqual([]);
   });
 });
 
@@ -318,6 +621,60 @@ describe('IdentityStore — the write lease actually serializes concurrent write
     const past = new Date(Date.now() - 5_000);
     utimesSync(lockPath, past, past);
     expect(store.acquireLease()).toBeDefined();
+  });
+});
+
+describe('IdentityStore — uniqueness checks run INSIDE the lease, under real interleaving', () => {
+  // These two are deliberately NOT the "await A, then await B and expect it to reject" shape
+  // already covered above (that only proves serial rejection — a check run once at import time
+  // would still pass it). Both calls below are issued in the SAME synchronous tick, with no
+  // `await` between them, so both start executing before either has acquired the lease. If the
+  // uniqueness check ran against a snapshot read BEFORE the lease was taken — the exact bug D7
+  // exists to forbid ("write it as one guarded helper... or the guarantee decays to 'every caller
+  // remembered'") — both callers would see an empty/pre-collision snapshot, both would pass their
+  // check, and both writes would land, producing two rows with the same slug. The real
+  // implementation re-reads the snapshot fresh only once the lease is actually held
+  // (`guardedWrite`), so the second writer's check runs against the first writer's already-written
+  // row and loses — that is what these tests prove.
+  it('two truly concurrent createOrg calls for the same slug: exactly one wins, one is refused', async () => {
+    const dir = await directory();
+    const store = IdentityStore.open(dir, { lockRetryMs: 5 });
+
+    const results = await Promise.allSettled([
+      store.createOrg({ name: 'Acme One', slug: 'acme' }),
+      store.createOrg({ name: 'Acme Two', slug: 'acme' }),
+    ]);
+
+    const fulfilled = results.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof store.createOrg>>> => r.status === 'fulfilled');
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.reason).toBeInstanceOf(IdentityStoreError);
+    expect(rejected[0]?.reason).toMatchObject({ code: 'org-slug-taken' });
+
+    // Only the winner's org (and its default team) is ever on disk — never both, never neither.
+    expect(store.listOrgs()).toHaveLength(1);
+    expect(store.listOrgs()[0]?.slug).toBe('acme');
+    expect(store.listOrgs()[0]?.name).toBe(fulfilled[0]!.value.org.name);
+  });
+
+  it('two truly concurrent createTeam calls for the same (org, slug): exactly one wins, one is refused', async () => {
+    const store = IdentityStore.open(await directory(), { lockRetryMs: 5 });
+    const { org } = await store.createOrg({ name: 'Acme', slug: 'acme' });
+
+    const results = await Promise.allSettled([
+      store.createTeam({ orgId: org.id, name: 'Engineering A', slug: 'engineering' }),
+      store.createTeam({ orgId: org.id, name: 'Engineering B', slug: 'engineering' }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.reason).toMatchObject({ code: 'team-slug-taken' });
+
+    // The default "general" team plus exactly one "engineering" — never two.
+    expect(store.listTeams(org.id).map((t) => t.slug).sort()).toEqual(['engineering', 'general']);
   });
 });
 

@@ -124,6 +124,20 @@ existing one is a breaking change to a published API.
 "Team" is also the word Linear uses for exactly this tier, and Linear is the
 stated reference.
 
+**ADDED 2026-08-07 (post-review): after phases 4-5 the tier exists in storage and
+is inert in the product, and the spec should say so rather than let the phase
+table imply otherwise.** `IdentityStore.createTeam` has no HTTP caller;
+`PATCH /auth/onboarding/team` is the only rename surface and the onboarding
+wizard is its only client, reached once and never returned to; and a project's
+team cannot be reassigned (`POST /api/v1/projects` prefers an existing claim and
+discards an explicit `teamId` for an already-claimed root, correctly, since that
+is what makes D4 a constraint). So `teamOptions` on the board can never hold more
+than the one default team, and D2's own example — teams named `engineering` and
+`marketing` — is unreachable from any user surface. **Team management (create /
+rename / reassign, with the role checks that go with them) is its own phase and
+is not in 4-5.** The wizard's copy was corrected to stop promising "you can
+rename it again later", which nothing could deliver.
+
 ### D3 — ONE resolver, both modes
 
 Auth-off resolves to an implicit principal — a synthetic `local` user, in a
@@ -155,6 +169,21 @@ module loaded on the `CEZ_AUTH`-unset path. D1's own gloss on zero I/O is "no
 database file created, no session middleware mounted, no login route registered",
 and all three still hold.
 
+**CORRECTED again 2026-08-07 (post-review): one resolver was not enough, because
+there were two readings of the INPUT.** Phase 4's onboarding routes resolved the
+session cookie with `getCookie` from `hono/cookie` while everything else went
+through `session.ts`'s own parser, and a docblock asserted the two read it "the
+SAME way". On a `Cookie:` header carrying two `cez_session` values they do not:
+measured on this repo's hono, `getCookie` returns the FIRST occurrence and
+`session.ts` the LAST. So one request could create the org — and its `owner`
+membership — as Alice while `requirePrincipal`, `verifyWsUpgrade`, `/auth/me` and
+`PATCH /auth/onboarding/team` all acted as Bob. Cookies are not origin-scoped and
+RFC 6265 §5.4 orders longer-`Path` cookies first, so an attacker who can set a
+cookie on a sibling subdomain chooses which occurrence is first. There is now one
+exported `readSessionIdFromCookieHeader` in `session.ts` (applying `SESSION_ID_RE`
+too) and both callers use it. **D3 covers "who is this request" end to end — the
+parse, not only the resolve.**
+
 ### D4 — isolation is a process per org
 
 Decided by the owner, 2026-08-06.
@@ -181,6 +210,31 @@ of root → org.
 Until the per-org split ships (phase 4), **hosted means single-org**, and the
 spec says so rather than letting a partial implementation imply otherwise.
 
+**AMENDED 2026-08-07 (post-review), two ways.**
+
+1. **The constraint was enforced on create and ignored on destroy and modify.**
+   Phase 5 put the check in `identity-store.ts#createProjectTeam` and in
+   `POST /api/v1/projects`, and nowhere else — so `DELETE /api/v1/projects/:id`
+   and `PATCH /api/v1/projects/:id` read no principal at all. With two orgs
+   seeded, org B unregistered org A's project (200) and left the `project_teams`
+   row behind as an orphan, which then blocked re-registration and made the old
+   team stick to any later one. Both verbs now go through one `mayActOnRoot`
+   helper and answer the same 409 `registerFolder` does, and a successful DELETE
+   *releases* the claim (`IdentityStore#deleteProjectTeam`). The project-scoped
+   *reads* deliberately stay open: D4 says cross-org isolation is the process
+   boundary phase 6 delivers, and org-scoping one listing would read as an
+   isolation control without being one. Destroying another org's registration is
+   not tenancy-shaped behaviour, it is data loss, which is why that half could
+   not wait.
+2. **Phase 6 must REPLACE this check, not merely join it.** The phase-5
+   enforcement is keyed on `<CEZ_HOME>/identity/identity.json`, i.e. it is
+   in-process and per-`CEZ_HOME`. The moment phase 6 gives each org its own unix
+   user and its own `CEZ_HOME`, each process sees only its own `project_teams`
+   table, and two orgs registering the same root both succeed — reinstating
+   exactly the leaseless-`RunStore` history loss this constraint exists to
+   prevent, with all five gates green and the phase-5 suite still passing (it
+   seeds both orgs in one store). Phase 6's row says so explicitly below.
+
 ### D5 — no new URL segment
 
 Because org is determined by *which process answers*, it needs no path segment;
@@ -195,10 +249,12 @@ routes auto-enrol — survives unchanged. Adding an `/o/<org>/` prefix would hav
 multiplied that alias set and handed every path-keyed gate a fresh way to be
 wrong.
 
-New top-level segments (`auth`, `login`, `callback`, `o`, `t`) must be added to
-the reserved-slug list **forward-only at allocation**
+New top-level segments (`auth`, `login`, `callback`, `onboarding`, `o`, `t`) must
+be added to the reserved-slug list **forward-only at allocation**
 (`workspace/projects.ts:33-40`): retroactive reservation cannot evict a slug
-already sitting in someone's registry.
+already sitting in someone's registry. (`onboarding` was missed when phase 4 made
+`/onboarding` a real top-level cockpit segment and added 2026-08-07 at the repair
+stage — the same argument that put `auth`/`login`/`callback` on the list.)
 
 **AMENDED 2026-08-07 (post-review).** Root-mounting `/auth/*` also put it outside
 the `#426` origin guard, which was registered on `app.use('/api/*', …)` only —
@@ -282,8 +338,9 @@ absent renders as "—", never as a guessed owner.
 
 First authenticated boot with no org:
 
-1. **Sign in** (OIDC or Google). The first user to sign in becomes owner of a
-   new org; subsequent users need an invite.
+1. **Sign in** (OIDC or Google). The first user to **name an organization**, and
+   who can supply the deployment's bootstrap code, becomes its owner; subsequent
+   users need an invite.
 2. **Name the organization** — defaulted from the OIDC `hd`/email domain when
    present, editable.
 3. **Create a default team.** Suggested and pre-filled, one click to accept, per
@@ -294,6 +351,67 @@ First authenticated boot with no org:
 Steps 2–4 are skippable and resumable — a half-finished onboarding must not
 strand an org with no team, so the default team is created on org creation and
 the step only renames it.
+
+**AMENDED 2026-08-07 (post-review). Five corrections; step 1's wording above is
+already the corrected one.**
+
+1. **"the first user to *sign in*" was not implementable and is now "the first
+   user to *name an organization*".** Signing in cannot create an org because an
+   org needs a name. The implementation puts the gate in
+   `IdentityStore.bootstrapFirstOrg` as `orgs.length > 0`, checked on the
+   snapshot re-read fresh under the write lease (D7), which also closes the
+   two-simultaneous-first-timers race the literal reading would leave open.
+2. **ADDED: being first is not, on its own, permission to own a shell.** D8 never
+   said who is *allowed* to be first, and phase 4 shipped the literal reading:
+   with `CEZ_AUTH=google` the issuer is pinned to Google, so the eligible set was
+   every Google account on the internet, and the first stranger to reach
+   `/auth/login` became owner. Reproduced end to end at review: `GET
+   /api/v1/runs` 401 → one `POST /auth/onboarding/org` → 201 `role: "owner"` →
+   `POST /api/v1/workflows` 201 with a free-form `command:` that a check step
+   runs through `spawn('bash', ['-lc', …], { env: process.env })`, i.e. Problem
+   §3. Closed by `auth/bootstrap-claim.ts`: with `CEZ_AUTH` on, claiming a fresh
+   deployment requires a **bootstrap code** the operator can see and the network
+   cannot — generated and printed to the boot log by default,
+   `CEZ_AUTH_BOOTSTRAP_TOKEN` to pin your own, `CEZ_AUTH_BOOTSTRAP_OPEN=1` to opt
+   back into "whoever signs in first". This is D1's own doctrine one layer in: it
+   does not enforce a policy, it enforces *choosing*, and the safe option is what
+   you get by doing nothing. The gate is one-shot by construction — it is only
+   consulted by the route `bootstrapFirstOrg` already makes unreachable once an
+   org exists, so a leaked code afterwards grants nothing.
+3. **ADDED: `needs-invite` is a state, not only a 409.** "Subsequent users need
+   an invite" shipped as a refusal on a form the wizard had already invited the
+   user to fill in: the status route reported `needs-org` to *every*
+   membership-less user, so the second person to sign in was shown "Name your
+   organization", typed a name, and was told they needed an invite that no
+   surface in the product can produce. `onboardingStateSchema` now has three
+   states and the wizard renders a terminal "ask an owner to invite you" screen,
+   carrying nothing about the existing org.
+4. **STILL MISSING, and named here so the next phase owns it: there is no invite
+   HTTP surface.** `IdentityStore.createInvite`/`redeemInvite`/`revokeInvite`
+   exist, are guarded and are tested; nothing calls them. Until a create/redeem
+   route, a `packages/contract/src/invites.ts` and the owner-side UI land, a
+   phases-4/5 deployment holds exactly one org and exactly one member. Phase 4's
+   verification row ("invite required for the second user") is therefore
+   half-satisfied: the refusal exists, the invite does not.
+   **Whoever builds it must not assume `role` is enforced.** As of this repair
+   stage exactly one route reads `principal.role` —
+   `PATCH /auth/onboarding/team`, restricted to `owner`/`admin`. Every
+   `/api/v1/*` route treats `member` and `owner` identically, including
+   `POST /api/v1/workflows` (shell) and `PUT /api/v1/workspace/config` (which
+   moves `browseRoot`, the containment root project registration is checked
+   against in hosted mode). That is consistent with D4's "members of an
+   organization can run code as one another", but it means an `admin`/`member`
+   invite grants everything an owner has, and the invite phase is where that
+   becomes reachable and therefore where the decision has to be made.
+5. **`hd` never reaches step 2.** `auth/oidc.ts` extracts only
+   `issuer`/`subject`/`email`/`name`/`role` from the verified ID token and
+   nothing persists an `hd` claim, so `suggestedOrgName` is derived from the email
+   domain alone — and `PERSONAL_EMAIL_DOMAINS` deliberately suppresses
+   `gmail.com`, so a personal-Google first user gets an empty required field.
+   Wiring `hd` end to end (oidc → callback → `userSchema` → store) is additive and
+   deferred; it is a defaulting nicety, not a correctness gap, but for a Google
+   Workspace deployment `hd` is *the* org signal and the spec named it first for
+   that reason.
 
 ### D9 — OIDC and Google
 
@@ -379,13 +497,22 @@ it hands that human the previous holder's org membership.
 | 1 | `CEZ_AUTH` capability + boot refusal (D1) | off ⇒ health payload and every route byte-identical to today; hosted+no-auth+no-flag exits non-zero with the message; the flag permits boot |
 | 2 | identity.db + principal resolver (D3, D7) | auth-off resolves the implicit principal through the SAME resolver; no db file exists when off |
 | 3 | OIDC + Google, cookie session, **WS upgrade check** (D6, D9) | full code+PKCE flow; bad `state` rejected; expired session 401s; **unauthenticated WS upgrade refused** — its own test |
-| 4 | orgs/teams/memberships + onboarding UI (D2, D8) | first user owns the org; default team exists the moment the org does; invite required for the second user |
-| 5 | project→team mapping + filtering (D5) | one root in two orgs is refused at registration; team filter on the board |
-| 6 | per-org process supervisor + nginx (D4) | two orgs ⇒ two unix users, two `CEZ_HOME`s, no shared path; org A cannot read org B's runs |
+| 4 | orgs/teams/memberships + onboarding UI (D2, D8) | first user owns the org **and had to supply the bootstrap code**; default team exists the moment the org does; the second user is refused and told `needs-invite` |
+| 5 | project→team mapping + filtering (D5) | one root in two orgs is refused at registration **and on DELETE/PATCH**; team filter on the board |
+| 5b *(new, not yet built)* | invite create/redeem HTTP surface + the role decision it forces (D8) | a second member exists, joined by invite; what an `admin`/`member` may do is decided rather than inherited |
+| 5c *(new, not yet built)* | team management: create/rename/reassign (D2) | a project can be moved between two real teams; the board filter has more than one option |
+| 6 | per-org process supervisor + nginx (D4) | two orgs ⇒ two unix users, two `CEZ_HOME`s, no shared path; org A cannot read org B's runs. **The phase-5 in-process `project_teams` check must be REPLACED by the supervisor's mapping, not joined by it** — per-org `CEZ_HOME`s make each process blind to the other's table, so two orgs would both succeed at claiming one root with every gate green (D4's amendment) |
 | 7 | `server-install --platform hetzner` (D4) | provisions from clean; OIDC replaces `auth_basic`; TLS |
 
 Phases 1–3 are useful alone (a single-org authenticated deployment). Phase 6 is
 what makes "multi-tenant" true, and until it lands the docs say single-org.
+
+**AMENDED 2026-08-07 (post-review): 5b and 5c are new rows, and they are not
+polish.** They were implicit in D8 and D2 and were read as delivered by phase
+4/5 because the storage layer for both exists and is tested. It does, and
+nothing calls it: without 5b a deployment holds exactly one member forever, and
+without 5c the team tier the board filters on can never have a second value. Two
+rows in a table are cheaper than a reviewer rediscovering that twice.
 
 ## Risks
 
@@ -421,14 +548,60 @@ what makes "multi-tenant" true, and until it lands the docs say single-org.
 - **`CEZ_PUBLIC_URL` misconfiguration** breaks the OIDC redirect with an opaque
   provider-side error. Validate at boot and fail loudly, rather than at first
   login.
+- **The CORS-open health route is outside the perimeter, and it carries the
+  registry.** `ADDED 2026-08-07.` `/api/v1/health` is exempt from
+  `requirePrincipal` — it must be, since the bookmarklet's port sweep runs before
+  any cookie for the origin exists — and the exemption's own comment justified
+  itself with "it carries no per-principal data, so skipping identity resolution
+  here widens nothing." True about principals and beside the point: the payload's
+  `projects[].name` is every registered repository's name, and
+  `Access-Control-Allow-Origin: *` means any page on the internet can *read* the
+  response, not merely force the request. #431 already basename-redacted
+  `repoRoot` for exactly this reason and did not cover the sibling field. The
+  route now redacts `projects` to `[]` when `CEZ_AUTH` names a provider and the
+  request carries no valid session; `bootProject` deliberately stays (the SPA
+  shell's redirect gate reads it before any `/api/v1/*` call can succeed). The
+  auth-off payload is untouched, and there is a test asserting exactly that — the
+  redaction is gated on `CEZ_AUTH`, so the control this Risks entry is about
+  stays byte-identical.
+- **The zero-config bundle is the control's other half.** `ADDED 2026-08-07.`
+  Phase 4 statically imported the onboarding wizard into the cockpit's entry
+  chunk, adding 6.90 kB raw / 2.02 kB gz that every `CEZ_AUTH`-unset install
+  downloads and parses for a page whose auth-off render is one sentence. The
+  route is `lazy()` now. A payload regression on the npm default counts as a
+  zero-config regression even when no JSON changed.
 
 ## Verification
 
 Beyond the per-phase table: an end-to-end on a real Hetzner VPS — provision from
 clean with `server-install`, sign in through a real Google account and a real
-generic OIDC provider (Keycloak or Authentik), create an org, accept the default
-team, register a project, start a run, and confirm from a second org's session
-that neither its runs nor its knowledge base are reachable.
+generic OIDC provider (Keycloak or Authentik), **read the bootstrap code out of
+`journalctl -u cezar` and paste it into the wizard**, create an org, accept the
+default team, register a project, start a run, and confirm from a second org's
+session that neither its runs nor its knowledge base are reachable.
+
+**ADDED 2026-08-07: what only that VPS can settle**, listed so the difference
+between "tested" and "QA Needed" is not left to interpretation. Everything below
+is exercised by unit/route tests against a real `IdentityStore` here, and none of
+it is *evidence* until it runs against a real IdP on a real host:
+
+- The bootstrap code end to end: that it actually reaches the systemd journal in
+  a readable form, that a restart before onboarding mints a new one, and that the
+  banner stops once the org exists.
+- The `/auth/callback` → `/onboarding` redirect through a real IdP's cross-site
+  top-level navigation, with the real `SameSite=Lax` session cookie and the real
+  `state` cookie — a `Set-Cookie` that a browser silently drops behind TLS
+  termination looks identical here to one it keeps.
+- `hd` and the email-domain default against a real Google Workspace account and a
+  real Keycloak realm, including the personal-Gmail case that leaves the field
+  empty.
+- The health redaction from a genuinely third-party origin, not a synthetic
+  `Origin:` header — and that the signed-in cockpit's workspace views still
+  enumerate projects behind nginx.
+- Two REAL orgs. Every cross-org assertion in this repo seeds both orgs in ONE
+  `IdentityStore` inside one process, which is precisely the arrangement phase 6
+  abolishes; the D4 boundary as specified cannot be observed until two unix users
+  and two `CEZ_HOME`s exist.
 
 Until that has actually been run against a live VPS this ships as **QA Needed**,
 not Done. A local `--platform ubuntu-vps` dry run is not the same evidence: the

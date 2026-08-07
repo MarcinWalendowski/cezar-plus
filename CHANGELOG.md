@@ -35,7 +35,31 @@
   **Signing in is not tenancy.** A hosted cezar with auth is a single-organization deployment
   with a login screen: everyone who signs in shares one process, one filesystem and the host's
   own agent credentials, so **members of an organization can run code as one another — invite
-  accordingly.** The per-organization process boundary is a later phase.
+  accordingly.** The per-organization process boundary is a later phase. And "everyone who signs
+  in" is currently *one person*: the first user to name an organization owns it, everyone after
+  that is told they need an invite, and the invite surface is not built yet — see the
+  organizations entry below.
+- ✨ **Organizations, teams and a first-run onboarding wizard (`/onboarding`).** With `CEZ_AUTH`
+  set, signing in lands on a three-step wizard: name your organization, accept (or rename) its
+  default team, add your first project. The org and its default team are created in one atomic
+  write, so a half-finished onboarding can never strand an organization with no team, and the
+  wizard is resumable — an already-onboarded user is sent straight into the cockpit. Registered
+  projects carry an optional `teamId`/`teamName` that Settings → Projects can filter by, and
+  **one project root belongs to exactly one organization**, enforced at registration and on
+  removal (two processes over one `.ai/cezar` would destroy each other's run history silently).
+  A second person who signs in is told they need an invite rather than being walked into a form
+  that will refuse them. **With `CEZ_AUTH` unset none of this exists**: no wizard is reachable
+  from anywhere, the project listing carries no team fields, and no identity file is created or
+  even opened.
+- 🔒 **A fresh authenticated deployment now needs its bootstrap code to be claimed.** The first
+  user to name an organization becomes its owner, and an owner can run shell commands on the
+  host — so with `CEZ_AUTH=google` the issuer is pinned but the audience is every Google account
+  on the internet. While `CEZ_AUTH` is set and no organization exists yet, cezar mints a random
+  code at each start and prints it to its own log (`journalctl -u cezar`); the wizard asks for
+  it and refuses without it. **Nothing to configure for the default.** Pin your own with
+  `CEZ_AUTH_BOOTSTRAP_TOKEN`, or opt back into "whoever signs in first" with
+  `CEZ_AUTH_BOOTSTRAP_OPEN=1`. The code stops being printed, and stops granting anything, once
+  the organization exists.
 - ✨ **Agent accounts: run one project on your work login and another on your personal one.**
   The same CLI logged in twice — `CLAUDE_CONFIG_DIR=~/.claude-klaudiusz claude`, or `CODEX_HOME` for
   Codex — is now something cezar can address. Add the extra config folder under **Settings → Agent
@@ -60,6 +84,16 @@
   because that would bill the wrong subscription while the UI said otherwise. OpenCode is not
   supported yet: it keeps credentials outside its config folder, so a second folder would change
   settings without changing the account. Spec: `.ai/specs/2026-07-29-agent-profiles.md`.
+
+## 🔧 Changed
+- 🔧 **`GET /api/v1/health` no longer names your repositories to the unauthenticated internet
+  when `CEZ_AUTH` is set.** That route is CORS-open and deliberately exempt from the sign-in
+  check — the bookmarklet's port sweep runs before any cookie exists — but its `projects[].name`
+  list is every registered repository, readable cross-origin by any page. It is now `[]` for a
+  request with no valid session on an authenticated deployment; `bootProject` and every other
+  field are unchanged, and **with `CEZ_AUTH` unset the payload is byte-identical to before.**
+- 🔧 The cockpit's onboarding wizard is code-split, so the zero-config install no longer
+  downloads or parses it (≈7 kB off the entry chunk).
 
 # 0.9.2 (2026-08-04)
 

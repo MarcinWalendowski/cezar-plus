@@ -380,7 +380,10 @@ export function useFsBrowse(path: string | null, showHidden = false) {
 export function useRegisterProject() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (root: string) => registerProject(root),
+    // `teamId` is additive — the onboarding wizard's "add projects" step (spec
+    // `.ai/specs/2026-08-06-org-team-auth-onboarding.md`) is the one caller that passes it;
+    // `add-project-dialog.tsx`'s own default usage omits it, unchanged.
+    mutationFn: ({ root, teamId }: { root: string; teamId?: string }) => registerProject(root, teamId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects }),
   })
 }

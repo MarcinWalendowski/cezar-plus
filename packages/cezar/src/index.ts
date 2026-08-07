@@ -217,6 +217,7 @@ async function serveCommand(
   if (!gate.proceed) return;
   let sessionResolver: SessionResolver | undefined;
   let authRoutes: Hono | undefined;
+  let onboardingRoutes: Hono | undefined;
   if (gate.provider !== 'none') {
     // Lazy by construction (D1: "unset means zero I/O … never loads them") — this branch only
     // ever runs once CEZ_AUTH names a real provider, loopback or hosted alike (the D1 table's
@@ -239,12 +240,41 @@ async function serveCommand(
     // compile time instead of through the emitted runtime helper. Do not reintroduce the
     // indirection to silence a resolution error: an unresolvable specifier here means the module
     // is genuinely missing from the build, which is the thing worth failing on.
-    const [sessionMod, routesMod] = await Promise.all([
+    const [sessionMod, routesMod, onboardingMod, claimMod, identityMod, pathsMod] = await Promise.all([
       import('./auth/session.ts'),
       import('./auth/routes.ts'),
+      // D8 onboarding (phase 4/5) — same "string literal, never a variable specifier" discipline
+      // as the two imports above and for the identical reason (see the paragraph this comment
+      // continues): a variable specifier is opaque to `npm run typecheck` in both directions, so
+      // a wrong path here would only ever be caught at runtime, by a boot that never happens on
+      // the npm-default `CEZ_AUTH` unset path.
+      import('./auth/onboarding-routes.ts'),
+      import('./auth/bootstrap-claim.ts'),
+      import('./auth/identity-store.ts'),
+      // `./paths.ts` is reached the same dynamic way it already is further down this file
+      // (`instanceSlug`/`DEFAULT_SERVER_INSTANCE`), rather than becoming this module's first
+      // static import of it — the CLI entry's own module graph is what the auth-off load trace
+      // measures, and there is no reason for this branch to widen it.
+      import('./paths.ts'),
     ]);
     sessionResolver = sessionMod.sessionResolver;
     authRoutes = routesMod.authRoutes;
+    onboardingRoutes = onboardingMod.onboardingRoutes;
+    // The bootstrap code (`./auth/bootstrap-claim.ts`, ADDED 2026-08-07) is only useful if the
+    // operator can see it, and it is only *relevant* while the deployment has no org — so the
+    // banner is printed here, next to D1's own boot messages, and suppressed once onboarding has
+    // happened. Same ESM module instance the onboarding route checks against (module cache), never
+    // a second resolution that would mint a second code. Best-effort: a store that cannot be read
+    // must not stop the server from booting, and an unreadable identity store reads as "no org"
+    // anyway (`readSnapshot` degrades to empty), so the banner errs towards being printed.
+    let hasOrg = false;
+    try {
+      hasOrg = identityMod.IdentityStore.open(pathsMod.identityDir()).listOrgs().length > 0;
+    } catch {
+      // unreadable identity home — treat as un-onboarded and print the code
+    }
+    const banner = claimMod.bootstrapClaimBanner(claimMod.bootstrapClaim, hasOrg);
+    if (banner) console.log(banner);
   }
 
   const bootProjectId = await initWorkspace(repoRoot);
@@ -333,6 +363,7 @@ async function serveCommand(
     workspaceEvents,
     sessionResolver,
     authRoutes,
+    onboardingRoutes,
   }, port);
   const url = `http://localhost:${port}`;
 

@@ -196,7 +196,7 @@ describe('createAuthRoutes', () => {
   });
 
   describe('GET /auth/callback', () => {
-    it('finds-or-creates the (issuer, subject) user, sets the session cookie, and redirects to /', async () => {
+    it('finds-or-creates the (issuer, subject) user, sets the session cookie, and redirects to /onboarding', async () => {
       const store = await tempStore();
       let nonce = '';
       const oidc = new OidcClient(config, discovery, {
@@ -209,7 +209,12 @@ describe('createAuthRoutes', () => {
 
       const res = await callback(app, `code=abc123&state=${encodeURIComponent(login.state)}`, login.cookie);
       expect(res.status).toBe(302);
-      expect(res.headers.get('location')).toBe('/');
+      // `/onboarding`, not `/` (2026-08-07, repair stage): this redirect is the ONLY thing in
+      // the product that points at the D8 wizard, so a first-ever user who lands on `/` instead
+      // has a valid session, no membership, every `/api/v1/*` call 401ing, and no way to reach
+      // the org-creation screen. An already-onboarded user is not detoured — the wizard reads
+      // `hasProjects` off `GET /auth/onboarding` and navigates straight on.
+      expect(res.headers.get('location')).toBe('/onboarding');
       expect(res.headers.get('set-cookie')).toContain(`${SESSION_COOKIE_NAME}=`);
       expect(res.headers.get('set-cookie')).toContain('HttpOnly');
 

@@ -222,7 +222,17 @@ export function createAuthRoutes(deps: AuthRouteDeps): Hono {
       const created = await deps.createSession(user.id);
       c.header('set-cookie', created.cookie);
       c.header('set-cookie', clearAuthStateCookie(), { append: true });
-      return c.redirect('/', 302);
+      // **CORRECTED 2026-08-07 (repair stage): `/onboarding`, not `/`.** This redirected to the
+      // cockpit root, and D8 was therefore unreachable end to end: a user with a valid session and
+      // no membership landed on `/`, where `requirePrincipal` 401s every `/api/v1/*` call, so the
+      // shell rendered with every panel erroring and no affordance pointing anywhere. Nothing else
+      // in the cockpit links to `/onboarding` — `grep -rn "onboarding" packages/web/src` finds
+      // only the route's own registration — so this redirect IS the seam. An already-onboarded
+      // user is not detoured: `/onboarding` resolves `GET /auth/onboarding`, sees
+      // `state: 'ready'` with `hasProjects`, and navigates straight to `/` (see
+      // `onboarding.tsx#fromProbe`). The alternative — deciding here, by reading the user's
+      // memberships — would put a second copy of the onboarding state machine in the login route.
+      return c.redirect('/onboarding', 302);
     })
 
     // ---- POST /auth/logout: server-side invalidation + cookie clear ----------------------------

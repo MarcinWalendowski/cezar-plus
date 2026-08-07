@@ -883,13 +883,19 @@ export async function retryProviderAuth(
  * registered) is NOT a failure for the add-project flow — the server answers it with the
  * EXISTING entry, which is exactly what the dialog needs to navigate to. Every other non-2xx
  * still becomes the same ApiError as anywhere else.
+ *
+ * `teamId` is additive (spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`, phase 4/5's
+ * project→team mapping): the onboarding wizard's "add projects" step is the one caller that
+ * passes it, so a project registered there is assigned to the caller's team in the same request
+ * instead of a second call. Every other caller omits it, and the body sent is byte-identical to
+ * before.
  */
-export async function registerProject(root: string): Promise<RegisterProjectResponse> {
+export async function registerProject(root: string, teamId?: string): Promise<RegisterProjectResponse> {
   const path = '/projects'
   const res = await send(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ root }),
+    body: JSON.stringify({ root, ...(teamId ? { teamId } : {}) }),
   })
   const body = await res.text()
   const parsed = parseJson(body)

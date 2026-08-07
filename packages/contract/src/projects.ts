@@ -38,6 +38,20 @@ export const projectListEntrySchema = z.object({
   /** Per-project cap on concurrently running tasks (spec 2026-07-22). Omitted = inherit the
    *  workspace `resources.maxParallel`; a number pins this project. */
   maxParallel: z.number().optional(),
+  /** Which team this project is assigned to (spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`,
+   *  D2/D5/D8, Phase 5) — metadata for grouping/filtering, never a scope (D5). Lives in
+   *  `<CEZ_HOME>/identity/*.json` (`project_teams`), not in this registry entry itself, so it is
+   *  omitted entirely under `CEZ_AUTH` unset (no identity store exists to answer from) and for any
+   *  root not yet claimed by an org. Present only once a registration under real auth has assigned
+   *  (or claimed) a team for this root. */
+  teamId: z.string().optional(),
+  /** The team's display name, denormalized onto the entry beside `teamId` — same precedent as
+   *  `forge` (a derived fact the server resolves once so every consumer doesn't re-derive it).
+   *  Without it the only thing a client could label a filter option with is the raw team id, and
+   *  there is no "list teams" route for it to join against (D5 deliberately adds no new URL
+   *  segment or scope for teams). Always accompanies `teamId`; omitted exactly when `teamId` is,
+   *  plus the unreachable-today case of a `project_teams` row pointing at a deleted team. */
+  teamName: z.string().optional(),
 });
 export type ProjectListEntry = z.infer<typeof projectListEntrySchema>;
 
