@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cezarLaunchdPlist, launchdPlist, macosxNgrok } from './macosx-ngrok.ts';
+import { resolveAuthBootGate } from '../../auth-boot-gate.ts';
 import { availablePlatformIds, getStrategy } from '../strategies.ts';
 import { runInstall, runUninstall } from '../engine.ts';
 import { loadServerState } from '../state.ts';
@@ -24,9 +25,9 @@ describe('macosx-ngrok', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('is registered alongside ubuntu-vps', () => {
+  it('is registered alongside ubuntu-vps and hetzner', () => {
     expect(getStrategy('macosx-ngrok')?.id).toBe('macosx-ngrok');
-    expect(availablePlatformIds()).toEqual(['ubuntu-vps', 'macosx-ngrok']);
+    expect(availablePlatformIds()).toEqual(['ubuntu-vps', 'macosx-ngrok', 'hetzner']);
   });
 
   it('launchdPlist embeds the port, basic-auth and reserved domain', () => {
@@ -48,6 +49,42 @@ describe('macosx-ngrok', () => {
     expect(p).toContain('<string>/repo</string>');
     expect(p).toContain('<key>CEZ_REMOTE</key>');
     expect(p).toContain('<string>ai.cezar.cockpit</string>');
+  });
+
+  /**
+   * **The pairing test `ubuntu-vps.test.ts` has and this file did not.** ADDED 2026-08-07.
+   *
+   * `CEZ_REMOTE=1` means "hosted" to `resolveCapabilities`, and D1's boot gate refuses a hosted
+   * deployment naming neither `CEZ_AUTH` nor `CEZ_ALLOW_UNAUTHENTICATED`. This plist set the first
+   * and not the second, so every `macosx-ngrok` host — existing and fresh — refused to boot the
+   * moment the gate shipped, and `KeepAlive` turned that into a launchd respawn-throttle loop
+   * across reboots. `ubuntu-vps` had the identical defect and D1's amendment 2 fixed it there,
+   * with exactly this test; nothing carried it to this platform.
+   *
+   * Feeding the plist's OWN `EnvironmentVariables` back through the REAL `resolveAuthBootGate` is
+   * what makes the generator and the gate unable to drift apart again. An assertion that merely
+   * matched the string `CEZ_ALLOW_UNAUTHENTICATED` would go green against a plist that spelled the
+   * value wrong, or that also set `CEZ_AUTH` and contradicted itself.
+   */
+  it('the gate agrees: this exact plist environment boots, and dropping the flag refuses', () => {
+    const plist = cezarLaunchdPlist('/repo', 4321, ['/usr/local/bin/node', '/app/dist/index.js']);
+    // Parse the `EnvironmentVariables` <dict> the way launchd reads it: <key>/<string> pairs.
+    const dict = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(plist)?.[1];
+    expect(dict).toBeDefined();
+    const env = Object.fromEntries(
+      [...dict!.matchAll(/<key>([^<]+)<\/key>\s*<string>([^<]*)<\/string>/g)].map((m) => [m[1]!, m[2]!]),
+    ) as NodeJS.ProcessEnv;
+
+    expect(env.CEZ_REMOTE).toBe('1');
+    expect(resolveAuthBootGate(env).proceed).toBe(true);
+
+    // The negative control: the flag is what makes it boot, not something else in the environment.
+    const { CEZ_ALLOW_UNAUTHENTICATED: _dropped, ...withoutFlag } = env;
+    expect(resolveAuthBootGate(withoutFlag).proceed).toBe(false);
+
+    // ngrok's `--basic-auth` edge is this platform's perimeter, so the opt-out is the honest row
+    // of D1's table for it — never a provider. A plist naming both would be contradictory.
+    expect(env.CEZ_AUTH).toBeUndefined();
   });
 
   it('dry-run install walks every step and server-uninstall reverses it', async () => {

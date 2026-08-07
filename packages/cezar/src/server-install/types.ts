@@ -9,7 +9,7 @@ import { z } from 'zod';
  */
 
 /** The platforms the registry knows. Extend here + add a strategy file. */
-export const PLATFORM_IDS = ['ubuntu-vps', 'macosx-ngrok'] as const;
+export const PLATFORM_IDS = ['ubuntu-vps', 'macosx-ngrok', 'hetzner'] as const;
 export type PlatformId = (typeof PLATFORM_IDS)[number];
 
 /** Per-step lifecycle. `failed` resumes identically to `pending`. */
@@ -93,6 +93,23 @@ export const serverStateSchema = z
      * bridge `172.17.0.1` when the proxy runs in a container).
      */
     bindHost: z.string().optional().catch(undefined),
+    /**
+     * `--platform hetzner` only (D4/D10, spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`).
+     * The org this instance provisions infrastructure for. Absent means this instance is the
+     * deployment's ONE supervisor (D10: "own dedicated unix user, own dedicated home") — present
+     * means it is one org's dedicated unix user + `CEZ_HOME` + systemd unit + nginx vhost. Recorded
+     * so a resumed/redeployed run (and `server-uninstall`) know which mode they are acting on
+     * without re-parsing `--org-slug` from argv.
+     */
+    orgSlug: z.string().min(1).optional().catch(undefined),
+    /**
+     * `--platform hetzner` only. The auth provider chosen for the SUPERVISOR instance's OIDC/Google
+     * credential prompt (`supervisorSystemdStep` in `platforms/hetzner.ts`) — recorded so a resumed
+     * run that finds the `EnvironmentFile=` secret already written can regenerate the same unit text
+     * (`supervisorSystemdUnit`'s `authProvider`) without re-prompting. Absent on every non-hetzner /
+     * org-mode record.
+     */
+    hetznerAuthProvider: z.enum(['oidc', 'google']).optional().catch(undefined),
     /** Flips true only when every required step is `done`. */
     installed: z.boolean().default(false).catch(false),
     /** True when this record was written by a CEZ_DRY_RUN preview — a real

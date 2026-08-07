@@ -157,15 +157,21 @@ export function isLoopbackHostHeader(host: string | null | undefined): boolean {
 }
 
 /**
- * `CEZ_AUTH` selects the provider (D1): `'oidc'` or `'google'` exactly, everything else —
- * including unset — is `'none'`. `'none'` is what the npm default (no env set at all) resolves
- * to, and it MUST stay zero-I/O: nothing beyond this string comparison runs to reach that answer,
- * which is what lets `packages/cezar/src/index.ts`'s boot gate and `requirePrincipal` in
+ * `CEZ_AUTH` selects the provider (D1): `'oidc'`, `'google'` or `'supervisor'` exactly, everything
+ * else — including unset — is `'none'`. `'none'` is what the npm default (no env set at all)
+ * resolves to, and it MUST stay zero-I/O: nothing beyond this string comparison runs to reach that
+ * answer, which is what lets `packages/cezar/src/index.ts`'s boot gate and `requirePrincipal` in
  * `server.ts` both import the Phase 2/3 identity module only on the branch where this returns
  * something other than `'none'`.
+ *
+ * `'supervisor'` added 2026-08-07 (D10, phase 6/7 fill unit 5 — see `authProviderSchema`'s own
+ * doc comment, `@open-mercato/cezar-contract`, for what this value means and does not mean). This
+ * function needed exactly the one added literal below — the boot gate, the D4 project-team
+ * registry seam (`server/server.ts#openProjectTeamRegistry`) and every other reader of this
+ * function's return value already treat "any non-`'none'` provider" uniformly.
  */
 export function resolveAuthProvider(env: NodeJS.ProcessEnv = process.env): AuthProvider {
-  return env.CEZ_AUTH === 'oidc' || env.CEZ_AUTH === 'google' ? env.CEZ_AUTH : 'none';
+  return env.CEZ_AUTH === 'oidc' || env.CEZ_AUTH === 'google' || env.CEZ_AUTH === 'supervisor' ? env.CEZ_AUTH : 'none';
 }
 
 /** `CEZ_REMOTE=1` or a non-loopback bind host ⇒ hosted mode (no local handoff).

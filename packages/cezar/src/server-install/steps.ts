@@ -209,9 +209,36 @@ export async function sudoStep(ctx: InstallContext, opts: SudoStepOpts): Promise
     } else {
       ui.info('Copy the command above and run it as root on the server (paste into a root shell, or prefix with sudo), then confirm below.');
       if (opts.input != null) {
-        // Screen-only: pasted as stdin it stays out of argv AND shell history.
-        ui.info(`The command reads from stdin — after starting it, paste this ${opts.inputLabel ?? 'line'} and press Ctrl-D:`);
-        ui.message(opts.input);
+        if (ctx.assumeYes) {
+          /**
+           * **Unattended delegate mode prints NOTHING of the payload.** ADDED 2026-08-07
+           * (phase 6/7 repair stage). `--yes` on a box without passwordless sudo lands here — a CI
+           * or IaC run — where there is by definition no human watching to paste anything, so the
+           * only effect of echoing the payload is to write it into a job log, a `script`/tmux
+           * transcript and scrollback. The step then fails its own `verify` a few lines below
+           * regardless, because nobody ran the command. So this branch traded a real disclosure
+           * for zero benefit.
+           *
+           * That matters more since phase 6/7 than it did before: `ubuntu-vps.ts`'s only stdin
+           * payload is an apr1 htpasswd hash on a single-tenant box, while `hetzner.ts` feeds
+           * `CEZ_SUPERVISOR_SECRET` — the key that signs every forwarded principal for one org —
+           * and the supervisor's OIDC client secret through the same seam. D10's Risks entry names
+           * this exact channel: "never `printf %s <content>` into the operator's terminal or a
+           * sudo-note transcript."
+           *
+           * The INTERACTIVE delegate path below still shows it, and must: the operator is being
+           * asked to paste it, and a secret they cannot see is a step they cannot complete.
+           */
+          ui.warn(
+            `This command needs the ${opts.inputLabel ?? 'payload'} on stdin, and --yes cannot supply it without ` +
+              `passwordless sudo. The value is deliberately NOT printed here (it would land in this job's log). ` +
+              `Re-run interactively, or grant passwordless sudo, to complete this step.`,
+          );
+        } else {
+          // Screen-only: pasted as stdin it stays out of argv AND shell history.
+          ui.info(`The command reads from stdin — after starting it, paste this ${opts.inputLabel ?? 'line'} and press Ctrl-D:`);
+          ui.message(opts.input);
+        }
       }
       if (!ctx.assumeYes) {
         const done = await ui.confirm({ message: 'Have you run it as root?', initialValue: true });

@@ -199,4 +199,46 @@ describe('sudoStep secret channel (stdin, never argv)', () => {
     expect(displayed).toBeDefined();
     expect(displayed).not.toContain('secret-hash');
   });
+
+  /**
+   * **UNATTENDED delegate mode prints nothing of the payload.** ADDED 2026-08-07 at the phase 6/7
+   * repair stage. `--yes` on a host without passwordless sudo falls back to delegate — a CI or IaC
+   * run, with no human watching to paste anything — and the old code echoed the payload anyway,
+   * straight into that job's log, before failing its own `verify` because nobody ran the command.
+   * Pure disclosure, zero benefit.
+   *
+   * It matters more since phase 6/7: `ubuntu-vps.ts`'s only stdin payload is an apr1 hash on a
+   * single-tenant box, while `hetzner.ts` pushes `CEZ_SUPERVISOR_SECRET` (the key that signs one
+   * org's forwarded principals) and the supervisor's OIDC client secret through this same seam.
+   *
+   * The interactive case above is the control: this is a change to the unattended branch only, not
+   * "sudoStep stopped showing secrets", which would break the operator flow that needs to see one.
+   */
+  it('UNATTENDED delegate mode (--yes, no passwordless sudo) never echoes the payload', async () => {
+    const shown: string[] = [];
+    const record = (m: string) => shown.push(m);
+    const ui: Ui = { ...createAutoUi(), message: record, info: record, warn: record, error: record };
+    const ctx = makeCtx({
+      ui,
+      assumeYes: true,
+      // `sudo -n true` fails ⇒ no passwordless sudo ⇒ `--yes` falls back to delegate.
+      runner: { capture: async () => ({ code: 1, stdout: '', stderr: 'a password is required' }) },
+    });
+    await expect(
+      sudoStep(ctx, {
+        description: 'write credentials',
+        command: 'cat > /etc/cezar/hetzner-acme.env',
+        input: 'CEZ_SUPERVISOR_SECRET=deadbeefcafebabe\n',
+        inputLabel: 'CEZ_SUPERVISOR_PORT / CEZ_SUPERVISOR_SECRET',
+        // nobody ran it, so it genuinely did not take effect — the honest outcome
+        verify: async () => false,
+      }),
+    ).rejects.toBeInstanceOf(StepAborted);
+
+    const all = shown.join('\n');
+    expect(all).not.toContain('deadbeefcafebabe');
+    expect(all).not.toContain('CEZ_SUPERVISOR_SECRET=');
+    // …and it says why, rather than failing mutely.
+    expect(all).toMatch(/deliberately NOT printed/);
+  });
 });

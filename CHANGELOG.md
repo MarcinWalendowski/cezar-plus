@@ -32,13 +32,39 @@
   and every uniqueness rule (one org per slug, one team slug per org, one user per
   `(issuer, subject)`, one membership per pair, **one project root in exactly one organization**)
   is enforced inside that lease rather than at each call site.
-  **Signing in is not tenancy.** A hosted cezar with auth is a single-organization deployment
-  with a login screen: everyone who signs in shares one process, one filesystem and the host's
-  own agent credentials, so **members of an organization can run code as one another — invite
-  accordingly.** The per-organization process boundary is a later phase. And "everyone who signs
-  in" is currently *one person*: the first user to name an organization owns it, everyone after
-  that is told they need an invite, and the invite surface is not built yet — see the
-  organizations entry below.
+  **Signing in is not tenancy — a hosted cezar still holds exactly one organization.** The
+  per-organization process boundary now exists (`cezar supervisor` + `server-install --platform
+  hetzner`, below) — but nothing yet creates a second organization to put behind it, so today's
+  deployments still share one process, one filesystem and the host's own agent credentials
+  within their one org: **members of an organization can run code as one another — invite
+  accordingly.** And "everyone who signs in" is currently *one person*: the first user to name
+  an organization owns it, everyone after that is told they need an invite, and the invite
+  surface is not built yet — see the organizations entry below.
+- 🔒 **Cross-org isolation: a real OS process boundary (`cezar supervisor`,
+  `server-install --platform hetzner`).** A new dedicated `cezar supervisor` process terminates
+  auth and holds identity for the whole deployment; each organization's `cezar serve` instead
+  runs `CEZ_AUTH=supervisor`, under its own unix user with its own `CEZ_HOME`, provisioned by
+  `cezar server-install --platform hetzner --domain <org-host> --org-slug <slug>`. nginx does an
+  `auth_request` subrequest to the supervisor, which signs the resolved principal with a
+  per-org secret (`CEZ_SUPERVISOR_SECRET`) before forwarding to that org's own loopback port —
+  a forged header from a sibling process on the same host fails verification at the org's own
+  process, not just at nginx. Two organizations provisioned this way share no filesystem and no
+  process. Provisioning an org is end-to-end: the installer mints that org's secret, writes it to
+  a root-owned `0600` `EnvironmentFile` and **registers the org with the supervisor itself**,
+  reading both credentials back inside a root shell so neither is ever printed or passed in
+  `argv`; uninstalling deprovisions the record rather than leaving the supervisor routing at a
+  unit that no longer exists. **This still does not make cezar multi-tenant today**: onboarding
+  refuses to create a second organization, and there is no other surface that creates one — so
+  the installer's org-registration step resolves `--org-slug` against the supervisor and stops
+  there. So this ships the isolation a second organization would need, not a second organization.
+  `--platform ubuntu-vps` and `--platform macosx-ngrok` are unaffected and unchanged.
+  Also new alongside it: `CEZ_SESSION_COOKIE_DOMAIN` (unset = today's host-only cookie, byte for
+  byte; the supervisor's unit sets `.<base-domain>` so one sign-in is visible on every org's
+  hostname) and `CEZ_SUPERVISOR_ADMIN_TOKEN` (the supervisor's own provisioning credential —
+  **unset closes that surface** rather than opening it). A project can no longer be allocated the
+  slug `internal`: the generated org vhost answers that prefix itself, so such a project would
+  work locally and 404 when hosted. Reservations are forward-only — a project already holding the
+  slug keeps it.
 - ✨ **Organizations, teams and a first-run onboarding wizard (`/onboarding`).** With `CEZ_AUTH`
   set, signing in lands on a three-step wizard: name your organization, accept (or rename) its
   default team, add your first project. The org and its default team are created in one atomic

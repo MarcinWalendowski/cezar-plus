@@ -64,6 +64,23 @@ describe('resolvePrincipal', () => {
     expect(principal).toEqual({ kind: 'session', ...identity });
   });
 
+  it('auth on (supervisor) resolves from the forwarded, already-verified identity through the same entry point (D10)', () => {
+    // The org-process case (phase 6/7): by the time `resolvePrincipal` is called, a supervisor's
+    // HMAC-signed forwarded principal has already been verified — this function does not know or
+    // care that the identity came from a header instead of a cookie-backed session lookup.
+    const identity: SessionIdentity = {
+      userId: 'usr_dave',
+      orgId: 'org_acme',
+      teamId: 'team_engineering',
+      role: 'member',
+    };
+
+    const principal = resolvePrincipal({ authProvider: 'supervisor', identity });
+
+    expect(principal.kind).toBe('session');
+    expect(principal).toEqual({ kind: 'session', ...identity });
+  });
+
   it('never falls back to the local identity for an authenticated provider', () => {
     // The whole reason ResolvePrincipalInput is a discriminated union and not
     // `SessionIdentity | null`: there is no spelling of an authenticated call that can produce

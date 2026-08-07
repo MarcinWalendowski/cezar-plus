@@ -26,9 +26,18 @@ import {
 
 /**
  * Slugs the allocator must never hand out: `default` is the reserved alias
- * for the boot project, the rest are the cockpit shell's own top-level path
- * segments. A repo named `default/` becomes `default-2` and can never shadow
- * the alias or a route.
+ * for the boot project, the rest are top-level path segments something ELSE
+ * already answers. A repo named `default/` becomes `default-2` and can never
+ * shadow the alias or a route.
+ *
+ * "Something else" is two different layers, and both count. Most entries are
+ * the cockpit shell's own routes, so the collision is in-process and shows up
+ * the moment you open the project locally. `internal` (added 2026-08-07) is
+ * the first entry where the collision lives ABOVE the app — phase 7's
+ * generated nginx org vhost answers that prefix itself — so it is invisible
+ * locally and only bites on a hosted host. Reserving it here rather than in
+ * the installer keeps every allocation, hosted or not, off a slug that can be
+ * unreachable somewhere.
  *
  * `auth`, `login`, `callback`, `o`, `t` were added by spec
  * 2026-08-06-org-team-auth-onboarding (D5) for the auth/onboarding routes and
@@ -56,6 +65,15 @@ export const RESERVED_PROJECT_IDS: ReadonlySet<string> = new Set([
   'onboarding',
   'o',
   't',
+  // `internal`: added 2026-08-07 (phase 6/7 repair stage). Phase 7's generated nginx org vhost
+  // (`server-install/platforms/hetzner/nginx.ts`) declares `location /internal/ { internal; … }`
+  // on EVERY org hostname, so nginx answers 404 to any external request under that prefix and it
+  // never reaches the org process at all. A project allocated the slug `internal` would therefore
+  // be silently unreachable in the hosted cockpit — `https://acme.<base>/internal/tasks` 404s at
+  // the proxy — while working perfectly in local mode, which is the worst shape of D5 collision:
+  // it cannot be reproduced on the machine the slug was allocated on. The other prefix that vhost
+  // carves out, `/auth/`, was already reserved above.
+  'internal',
 ]);
 
 /** Slug length cap — mirrors `PROJECT_ID_RE` (1 head char + up to 63 more). */

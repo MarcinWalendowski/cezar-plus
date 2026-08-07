@@ -48,6 +48,9 @@ Usage:
   cezar server-install      interactive wizard to host cezar on a server
   cezar server-deploy       redeploy a new version (reload the service) + verify
   cezar server-uninstall    reverse a server-install
+  cezar supervisor          run the auth-terminating supervisor process (D4/D10 —
+                            per-org process isolation; see the org-team-auth spec).
+                            Requires CEZ_AUTH=oidc|google; not the everyday command.
 
 Options:
   -p, --port <n>              cockpit port (default 4321; server-install: this
@@ -56,10 +59,17 @@ Options:
       --workflow <name>       workflow for \`run\` (default: quick-task)
       --model <model>         model override for \`run\`
       --no-open               don't open the browser
-      --platform <id>         server-install target (ubuntu-vps | macosx-ngrok)
-      --domain <host>         server-install (ubuntu-vps): host a SECOND, independent
-                              cockpit for this domain (own nginx site + service + port).
-                              A new domain never resumes/clobbers the first install.
+      --platform <id>         server-install target (ubuntu-vps | macosx-ngrok | hetzner)
+      --domain <host>         server-install (ubuntu-vps/hetzner): host a SECOND,
+                              independent cockpit for this domain (own nginx site +
+                              service + port). A new domain never resumes/clobbers the
+                              first install. hetzner: the supervisor's login host, or
+                              (with --org-slug) one org's own subdomain of it.
+      --org-slug <slug>       server-install --platform hetzner: provision this ORG's
+                              own unix user + CEZ_HOME + systemd unit + nginx vhost
+                              (D4/D10 per-org process isolation) instead of the
+                              deployment's one supervisor. Requires the supervisor to
+                              already be provisioned on this host — see docs/server-install/hetzner.md.
       --external-proxy        server-install (ubuntu-vps): the box ALREADY has a
                               reverse proxy owning :80/:443 (Dokploy/Traefik, Coolify,
                               Caddy, your own nginx). Installs the service only — no
@@ -71,6 +81,11 @@ Options:
       --yes                   server-install: accept safe defaults (never auto-sudo)
       --reconfigure <ids>     server-install: force re-run of step id(s), comma-separated
       --reinstall             server-install: force re-run of every step (full reinstall)
+      --port-strict           serve: refuse to boot rather than silently drift to the
+                              next free port when --port/-p is already in use (same as
+                              CEZ_PORT_STRICT=1). A hosted org's nginx proxy_pass is a
+                              static port baked in at provisioning time — server-install
+                              --platform hetzner sets this on every org's unit (D10).
   -h, --help                  show this help
 
 Zero config: uses your logged-in \`claude\` CLI (and \`gh\` for GitHub bits).
@@ -88,11 +103,13 @@ async function main(): Promise<void> {
       'no-open': { type: 'boolean', default: false },
       platform: { type: 'string' },
       domain: { type: 'string' },
+      'org-slug': { type: 'string' },
       'bind-host': { type: 'string' },
       'external-proxy': { type: 'boolean', default: false },
       yes: { type: 'boolean', default: false },
       reconfigure: { type: 'string' },
       reinstall: { type: 'boolean', default: false },
+      'port-strict': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -118,7 +135,13 @@ async function main(): Promise<void> {
 
   switch (command) {
     case 'serve':
-      await serveCommand(repoRoot, Number(values.port), !values['no-open'], values['bind-host']);
+      await serveCommand(
+        repoRoot,
+        Number(values.port),
+        !values['no-open'],
+        values['bind-host'],
+        Boolean(values['port-strict']) || process.env.CEZ_PORT_STRICT === '1',
+      );
       return;
     case 'run':
       await runCommand(repoRoot, positionals.slice(1).join(' ').trim(), values.workflow, values.model);
@@ -144,6 +167,7 @@ async function main(): Promise<void> {
         reconfigure: values.reconfigure,
         reinstall: Boolean(values.reinstall),
         domain: values.domain,
+        orgSlug: values['org-slug'],
         port: portExplicit ? Number(values.port) : undefined,
         externalProxy: Boolean(values['external-proxy']),
         bindHost: values['bind-host'],
@@ -160,6 +184,9 @@ async function main(): Promise<void> {
         yes: Boolean(values.yes),
         domain: values.domain,
       });
+      return;
+    case 'supervisor':
+      await supervisorCommand(Number(values.port), values['bind-host']);
       return;
     default:
       console.error(`unknown command: ${command}\n`);
@@ -203,6 +230,16 @@ async function serveCommand(
   preferredPort: number,
   openBrowser: boolean,
   bindHost?: string,
+  /**
+   * `--port-strict` / `CEZ_PORT_STRICT=1` (D10, spec .ai/specs/2026-08-06-org-team-auth-onboarding.md):
+   * `preferredPort` becomes a hard requirement instead of a preference — `pickPort`'s normal
+   * silent forward-scan is refused. `server-install --platform hetzner` writes
+   * `Environment=CEZ_PORT_STRICT=1` into every ORG unit's systemd file
+   * (`server-install/platforms/hetzner/systemd-unit.ts#orgSystemdUnit`) because nginx's
+   * `proxy_pass` for that org is a specific loopback port baked in at provisioning time: a
+   * drifted bind there is not a startup failure, it is silent cross-tenant traffic (D10 Risks).
+   */
+  portStrict = false,
 ): Promise<void> {
   // ---- auth boot gate (D1, spec .ai/specs/2026-08-06-org-team-auth-onboarding.md) -------------
   // FIRST, before `initWorkspace` (writes `~/.cezar`), `reclaimWorktrees` (deletes worktree
@@ -215,10 +252,50 @@ async function serveCommand(
   // disabling it left all five gates green.
   const gate = runAuthBootGate(process.env, bindHost);
   if (!gate.proceed) return;
+
+  // ---- port-strict refusal (D10) — same "refuses to boot means did nothing" discipline as the
+  // auth gate above, and for the identical reason: checked and returned BEFORE initWorkspace,
+  // reclaimWorktrees or manager.recover() run, so a busy strict port never leaves half-migrated
+  // workspace state behind it.
+  if (portStrict && !(await canListen(preferredPort))) {
+    console.error(
+      `\n  ✗ port ${preferredPort} is already in use, and --port-strict / CEZ_PORT_STRICT=1 is set — ` +
+        `refusing to silently pick a different one.\n` +
+        `    A hosted org's nginx proxy_pass is baked in to this exact port at provisioning time; ` +
+        `drifting here would route that org's traffic into whatever else is listening on the next ` +
+        `free port instead.\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   let sessionResolver: SessionResolver | undefined;
   let authRoutes: Hono | undefined;
   let onboardingRoutes: Hono | undefined;
-  if (gate.provider !== 'none') {
+  if (gate.provider === 'supervisor') {
+    // ---- D10: this process is an ORG process behind `cezar supervisor`. ------------------------
+    //
+    // It does NOT terminate authentication and must never open `<CEZ_HOME>/identity/*.json` —
+    // under D4 that directory does not exist here, and D10 assigns it to the one supervisor
+    // process. So this branch deliberately does none of what the `oidc`/`google` branch below
+    // does: no `./auth/session.ts` (which opens an `IdentityStore` at MODULE scope, i.e. merely
+    // importing it would create the directory), no `authRoutes`/`onboardingRoutes` (mounting a
+    // second login surface on a loopback port every local uid can reach), and no bootstrap-code
+    // banner (there is no local store for a code to claim).
+    //
+    // ADDED 2026-08-07 at the repair stage. Before it, `if (gate.provider !== 'none')` swallowed
+    // `'supervisor'` and wired the COOKIE resolver — so every request to every org host 401'd,
+    // permanently, with all five gates green. See `./supervisor/forwarded-session.ts`'s own
+    // module doc comment for why no test caught it.
+    const forwardedMod = await import('./supervisor/forwarded-session.ts');
+    const supervisorGate = forwardedMod.resolveSupervisorModeGate(process.env);
+    if (!supervisorGate.proceed) {
+      if (supervisorGate.message) console.error(supervisorGate.message);
+      process.exitCode = 1;
+      return;
+    }
+    sessionResolver = forwardedMod.forwardedSessionResolver;
+  } else if (gate.provider !== 'none') {
     // Lazy by construction (D1: "unset means zero I/O … never loads them") — this branch only
     // ever runs once CEZ_AUTH names a real provider, loopback or hosted alike (the D1 table's
     // second row: local + oidc/google still requires login). `./auth/session.ts` opens the
@@ -336,7 +413,7 @@ async function serveCommand(
     console.log(`\n  ⬆ cezar ${latest} is available (running ${version}) — restart with: npx ${pkgName}@latest\n`);
   });
 
-  const port = await pickPort(preferredPort);
+  const port = portStrict ? preferredPort : await pickPort(preferredPort);
   // SECURITY: cezar executes agents. A non-loopback bind exposes that box to
   // whatever can reach the interface, and cezar itself has NO auth — it is only
   // for a deliberate hosted setup where a reverse proxy in front provides TLS +
@@ -423,6 +500,28 @@ async function waitForHealth(healthUrl: string, timeoutMs: number): Promise<bool
     await new Promise((r) => setTimeout(r, 150));
   }
   return false;
+}
+
+// ---- supervisor (D4/D10, spec .ai/specs/2026-08-06-org-team-auth-onboarding.md) ---------------
+// Lazily imported for the same reason server-install is below: `cezar supervisor` is an operator
+// command for a per-org hosted deployment, not something the everyday `serve`/`run`/`init` import
+// graph should carry. `./supervisor/index.ts` itself refuses to boot with CEZ_AUTH unset (its own
+// gate, distinct from `./auth-boot-gate.ts`'s D1 table — see that module's doc comment) and prints
+// its own message + sets a non-zero exit code, so this wrapper's whole job is the dynamic import,
+// the direct port bind (no `pickPort` auto-fallback: D10 is explicit that a drifted port is silent
+// cross-org traffic once nginx's static `proxy_pass` is in the picture, and the same reasoning
+// applies to the supervisor's own well-known port), and shutdown wiring.
+async function supervisorCommand(port: number, bindHost?: string): Promise<void> {
+  const { startSupervisor } = await import('./supervisor/index.ts');
+  const server = await startSupervisor({ port, bindHost });
+  if (!server) return; // boot gate refused — message printed and exit code set already
+
+  const shutdown = () => {
+    server.close();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 // ---- run (headless) ----------------------------------------------------------
@@ -559,6 +658,8 @@ async function serverCommand(
     reconfigure?: string;
     reinstall?: boolean;
     domain?: string;
+    /** `--platform hetzner` only — see `RunOptions#orgSlug` (`server-install/engine.ts`). */
+    orgSlug?: string;
     port?: number;
     externalProxy?: boolean;
     bindHost?: string;
@@ -614,9 +715,11 @@ async function serverCommand(
     process.exitCode = 1;
     return;
   }
-  // Domain-keyed multi-instance is an ubuntu-vps feature (shared nginx front).
-  if (instance !== DEFAULT_SERVER_INSTANCE && chosen !== 'ubuntu-vps') {
-    console.error(`--domain (multi-instance) is only supported on ubuntu-vps, not ${chosen}.`);
+  // Domain-keyed multi-instance: ubuntu-vps's optional SECOND cockpit, and hetzner's REQUIRED
+  // one-instance-per-domain shape (every hetzner target — the supervisor and each org — is its
+  // own named instance; `hetzner.ts`'s own preflight refuses to run without --domain at all).
+  if (instance !== DEFAULT_SERVER_INSTANCE && !['ubuntu-vps', 'hetzner'].includes(chosen)) {
+    console.error(`--domain (multi-instance) is only supported on ubuntu-vps and hetzner, not ${chosen}.`);
     process.exitCode = 1;
     return;
   }
@@ -641,6 +744,7 @@ async function serverCommand(
     now: new Date().toISOString(),
     instance,
     domain,
+    orgSlug: flags.orgSlug,
     port,
     // Only an install decides proxy mode; deploy/uninstall read it back from
     // the recorded state. Preserve an omitted flag as `undefined`: a flag-less

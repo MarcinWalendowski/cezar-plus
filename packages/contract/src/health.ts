@@ -45,8 +45,20 @@ export type BackendCheck = z.infer<typeof backendCheckSchema>;
  *
  * The type stays here because the contract package is where shared wire-adjacent types live, and
  * `server/capabilities.ts`, `auth/session.ts` and `auth/oidc.ts` all name it.
+ *
+ * **`'supervisor'` added 2026-08-07 (D10, phase 6/7 fill unit 5 — "root-org-registry").** Not a
+ * third way to LOG IN — `oidc`/`google` are the only providers that ever terminate real
+ * authentication (D9). `'supervisor'` names the phase-6+ org process: it runs behind a supervisor
+ * that already resolved and HMAC-signed the caller's `Principal`
+ * (`supervisor/forwarded-principal.ts`), so `CEZ_AUTH=supervisor` tells this process to trust that
+ * forwarded, verified signature rather than terminate OIDC/Google itself or open a local identity
+ * store (this process's `CEZ_HOME` holds no `identity/` directory under D4). It still satisfies
+ * every existing "`CEZ_AUTH` names a provider" check the same way `oidc`/`google` do —
+ * `auth-boot-gate.ts`'s whole decision is `provider !== 'none'` ⇒ proceed, so it needed no change —
+ * and it is deliberately excluded from `OidcProvider` (`auth/oidc.ts`), which stays `oidc | google`
+ * exactly, since this process never runs the OIDC/PKCE flow.
  */
-export const authProviderSchema = z.enum(['none', 'oidc', 'google']);
+export const authProviderSchema = z.enum(['none', 'oidc', 'google', 'supervisor']);
 export type AuthProvider = z.infer<typeof authProviderSchema>;
 
 export const forgeInfoSchema = z.object({

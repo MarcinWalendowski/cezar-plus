@@ -207,8 +207,106 @@ org. Registering one root under two orgs puts two processes on one
 leak. Enforced at registration by the supervisor, which owns the only mapping
 of root → org.
 
-Until the per-org split ships (phase 4), **hosted means single-org**, and the
+Until the per-org split ships (phase 6), **hosted means single-org**, and the
 spec says so rather than letting a partial implementation imply otherwise.
+
+**CORRECTED 2026-08-07: the paragraph above named the wrong phase number** —
+the per-org split is phase 6 (the phase table's own row), not phase 4; phase 4
+is orgs/teams/onboarding. Fixed in place; every other cross-reference in this
+document already said "phase 6" and this was the one straggler.
+
+**ADDED 2026-08-07 (docs pass, started ahead of phase 6/7 landing, CONFIRMED
+once units 1-7 actually landed later in the same session): closing the process
+boundary is necessary but not sufficient — nothing creates a SECOND org
+either way, and this is now two independently-confirmed gaps, not one.**
+
+Checked against the code, not assumed: `IdentityStore#createOrg`
+(`auth/identity-store.ts:279`) has exactly one caller, `bootstrapFirstOrg`
+itself, and that method's whole gate is `orgs.length > 0` — once *any* org
+exists, every later `POST /auth/onboarding/org` 409s regardless of caller
+(`bootstrapFirstOrg`'s own doc comment: "not a general ceiling on how many
+`Org` rows can ever exist ... a future phase-6 multi-org tool would use it
+too" — written at phase 4/5, anticipating phase 6 would add one). **D10's
+8-unit ownership map does not add that tool, and the landed code confirms it
+rather than merely the plan**: `supervisor/server.ts`'s `/internal/orgs` and
+`/internal/orgs/:slug` (`:204-211`) are both `GET`; there is no `POST
+/internal/orgs`. `auth/onboarding-routes.ts` is mounted into the supervisor
+**verbatim** (`supervisor/server.ts:192-194`), gate included.
+
+**CORRECTED 2026-08-07 (repair stage) — the second gap below is CLOSED; the
+first one above is not.** The paragraph that follows says provisioning a
+second org's infrastructure stops short of handing its secret to the
+supervisor, so the org "cannot actually be reached until that's done by
+hand". That is no longer true and must not be read as current. `hetzner.ts`
+now ships an `org-register` step (`orgRegistrationStep`, between `org-systemd`
+and `nginx` in `steps()`) that reads `CEZ_SUPERVISOR_ADMIN_TOKEN` and the
+org's own `CEZ_SUPERVISOR_SECRET` out of their root-owned `0600`
+`EnvironmentFile`s and `POST`s the record to `/internal/org-processes` — no
+value printed, none in `argv`. The route it calls is `POST
+/internal/org-processes`, not the `POST /internal/orgs/register` the text
+below anticipated; the spelling changed, the capability is there. Its
+`check()` and its post-write `verify` are the same function
+(`isRegistered`), so "already done" and "did it take" cannot disagree, and
+`undo` deprovisions the record rather than leaving the supervisor routing at
+a unit that no longer exists.
+
+The **existence check** that paragraph also asks for landed too, but in a
+different place than it names, and the difference matters: it is in the
+`org-register` step (`GET /internal/orgs/:slug`, `curl -f`, aborting with
+"the supervisor knows no org with slug X — create it in the onboarding
+wizard first"), **not** in `preflight`. `preflight` runs before any sudo, and
+the check needs the root-owned admin token, so it cannot live there. The
+practical consequence is unchanged from what D10 wanted — an unknown
+`--org-slug` fails the install — but it fails four steps in, after the unix
+user and the systemd unit already exist, rather than before anything is
+written. `preflight` does now refuse one thing it never did: the same org
+slug already provisioned on a second hostname (see `sibling` there).
+
+**What has NOT changed: nothing creates a second `Org`.** The first gap above
+stands exactly as written, and it alone is why "hosted means single-org" is
+still true. `bootstrapFirstOrg` remains `createOrg`'s only caller, its
+`orgs.length > 0` gate is untouched, and `supervisor/server.ts` exposes
+`/internal/orgs` and `/internal/orgs/:slug` as `GET` only. So the honest
+statement after phases 6/7 is: **provisioning a second org's infrastructure is
+now fully automated, and there is still no way to create the org it would
+serve.** Whoever closes that gap needs an authenticated org-create surface;
+`org-register` is then already waiting for it.
+
+The original text follows unchanged.
+
+**A second, distinct gap surfaced once `hetzner.ts` itself landed, named by
+its own author, not found independently by this docs pass**: even
+provisioning a second org's *infrastructure* doesn't finish wiring it up.
+`hetzner.ts`'s own module doc, "What this pass deliberately does NOT build"
+(`:85-94`): `POST /internal/orgs/register` — the call that would hand a
+freshly-provisioned org's `CEZ_SUPERVISOR_SECRET` to the supervisor's
+`OrgProcessRegistryStore` so `/internal/auth-check` can actually route to it
+— does not exist yet ("Fill unit 1's remaining work"). `orgSystemdStep`
+prints the fields an operator would need to complete that registration by
+hand once the route ships. Separately, `hetzner.ts`'s `preflight` does not
+call `/internal/orgs/:slug` to confirm the named org exists before
+provisioning (D10's text said it would); it only validates hostname
+structure and that a supervisor instance exists locally — so `--org-slug`
+accepts any slug today, whether or not that org has ever been onboarded.
+
+So even a fully-landed phase 6 **and** phase 7 — every unix user, every
+`CEZ_HOME`, every nginx vhost, working exactly as D10 specifies — still
+cannot host a second **working** organization: there is no surface that
+creates its identity, and no automated surface that finishes registering its
+process even if one were created by hand. The OS-level isolation this phase
+builds is real and independently valuable (it is what phase 7's own
+verification exercises against a real second `IdentityStore` seeded
+in-process, per the Verification section's own caveat that two REAL orgs
+cannot be observed yet), but "hosted means single-org" does not become false
+the moment units 1-7 land — it stays true for a *different* reason than the
+one this paragraph gives today. **Whoever closes these gaps should treat them
+as named work, not fold a fix in silently**: unit 1 needs `POST
+/internal/orgs/register` (already scoped by `hetzner.ts`'s own doc) and an
+authenticated org-create endpoint, and `hetzner.ts`'s `preflight` needs the
+`/internal/orgs/:slug` existence check D10 originally specified. The docs
+correction these gaps require — precise about what's real (isolation) and
+what isn't (a second org) — is applied: see README's D4 blockquote and
+`CHANGELOG.md`.
 
 **AMENDED 2026-08-07 (post-review), two ways.**
 
@@ -249,12 +347,28 @@ routes auto-enrol — survives unchanged. Adding an `/o/<org>/` prefix would hav
 multiplied that alias set and handed every path-keyed gate a fresh way to be
 wrong.
 
-New top-level segments (`auth`, `login`, `callback`, `onboarding`, `o`, `t`) must
-be added to the reserved-slug list **forward-only at allocation**
+New top-level segments (`auth`, `login`, `callback`, `onboarding`, `o`, `t`,
+`internal`) must be added to the reserved-slug list **forward-only at allocation**
 (`workspace/projects.ts:33-40`): retroactive reservation cannot evict a slug
 already sitting in someone's registry. (`onboarding` was missed when phase 4 made
 `/onboarding` a real top-level cockpit segment and added 2026-08-07 at the repair
 stage — the same argument that put `auth`/`login`/`callback` on the list.)
+
+**AMENDED 2026-08-07 (repair stage): "no new URL segment" cuts both ways, and
+phase 7 added a segment nobody was watching.** The rule above was written about
+segments the *cockpit* answers, so the reserved list was maintained against
+`packages/web/src/routes.tsx`. Phase 7's generated org vhost adds two prefixes
+that **nginx** answers, above the app: `location /internal/` (declared nginx
+`internal;` — an external request gets 404 and never reaches the org process at
+all) and `location /auth/` (proxied to the SUPERVISOR, not to this org). `auth`
+was already reserved for the in-process reason; `internal` was not reserved at
+all, so `allocateProjectSlug` could hand a repo named `internal/` a slug that
+works perfectly on a laptop and 404s on a hosted host — the worst shape of D5
+collision, because it cannot be reproduced where it was allocated. `internal` is
+now on the list, and `projects.test.ts` asserts every prefix the generated org
+vhost carves out is reserved, so a third carve-out fails a test instead of
+shipping. The reserved list is therefore maintained against **two** route tables
+now, the cockpit's and the vhost generator's.
 
 **AMENDED 2026-08-07 (post-review).** Root-mounting `/auth/*` also put it outside
 the `#426` origin guard, which was registered on `app.use('/api/*', …)` only —
@@ -448,6 +562,177 @@ code path — one code path per D3's reasoning.
   it. Not `__Host-` prefixed, because that requires `Secure` and D1's table
   supports `CEZ_AUTH=oidc` on a plain-http loopback deployment for testing.
 
+### D10 — the phase 6/7 seam: the supervisor owns auth and identity; org processes trust a forwarded signature
+
+**ADDED 2026-08-07, scaffold pass ahead of phase 6/7 implementation.** Three recon passes over
+`server-install/`, the runtime (`paths.ts`, `server.ts`, `runs/store.ts`, …) and the uid boundary
+itself converged on one blocking gap: **the spec never said whether the supervisor or each org's
+own process terminates authentication**, and the two readings are mutually exclusive —
+
+- *Org process terminates* ⇒ N identity stores, N OIDC clients, N IdP-registered `redirect_uri`s
+  (D9's exact-match rule), and the supervisor never learns who anyone is, so it cannot own the
+  root→org mapping D4 assigns it.
+- *Supervisor terminates* ⇒ org processes run `CEZ_AUTH` unset ⇒ `principal.kind === 'local'` ⇒
+  phase 5's `mayActOnRoot`/`releaseRootClaim`/`registerFolder` checks (all gated on
+  `principal.kind !== 'session'`) **evaporate rather than get replaced**, silently satisfying "the
+  phase-5 check must be replaced" by deleting the only thing there was to replace.
+
+D7 already answers this, one layer in, and phase 5's code just doesn't reflect it yet:
+`identity-store.ts:85-89`'s own doc comment says *"under D4 this store is written only by the
+single supervisor process"* — not one identity store per org. **Resolved: the supervisor
+terminates auth and is the only process that ever opens `<CEZ_HOME>/identity/*.json`.** Concretely:
+
+**The supervisor is a cezar process, not a new program.** `cezar supervisor` (new subcommand,
+`src/index.ts`) boots with its OWN `CEZ_HOME` (never equal to any org's, and never the operator's
+real `~/.cezar` — same "own dedicated unix user, own dedicated home" posture D4 asks of an org,
+applied to the process that holds every org's identity and secrets, which is the single highest-
+value target on the box). It imports **`auth/routes.ts`'s `authRoutes` and
+`auth/onboarding-routes.ts`'s `onboardingRoutes` verbatim** — both are already self-contained,
+already-landed `Hono` instances with zero dependency on `server.ts`'s general-purpose app — and
+mounts them exactly as a phase 1-3 single-process deployment does today. `auth/session.ts`'s
+existing `sessionResolver` singleton, `IdentityStore`, `bootstrap-claim.ts` and `oidc.ts` are used
+**unmodified**. Two things are genuinely new, both owned by the not-yet-built Fill unit 1:
+
+1. An `/internal/auth-check` route for nginx's `auth_request` directive: resolve the request's
+   session cookie via the existing `sessionResolver.resolveFromCookieHeader`, and on a resolved
+   `Principal`, sign it with `forwarded-principal.ts#signForwardedPrincipal` (below) using that
+   caller's org's secret, returning it as the two headers nginx's `auth_request_set` captures and
+   `proxy_set_header` forwards to the org's own upstream. No session ⇒ plain 401, same as every
+   other unauthenticated `/api/v1/*` request today.
+2. `/internal/orgs/*` — thin reads over `IdentityStore` (list orgs, resolve an org by slug) that
+   the hetzner platform's `--provision-org` step (D10 below) calls to look up the `orgId` an
+   operator names by slug, so a provisioning record never has to duplicate identity data.
+
+**The org process is `cezar serve`, unmodified, running with a new `CEZ_AUTH=supervisor` value.**
+Under it: `resolveAuthProvider` (`server/capabilities.ts`) and `authProviderSchema`
+(`packages/contract/src/health.ts`) gain the literal `'supervisor'` — one line each, and
+`auth-boot-gate.ts` needs **no change at all**: its whole decision is `provider !== 'none'` ⇒
+proceed, which already covers any named provider. The org process's `SessionResolver`
+(`server/server.ts`'s existing interface) is a **new**, small implementation
+(`auth/forwarded-principal.ts`'s `verifyForwardedPrincipal` + `principalFromForwardedPayload`,
+already written and tested this pass — see below) wired in `index.ts`'s existing "which resolver
+does `CEZ_AUTH` import" dynamic-import branch, alongside the existing `oidc`/`google` case. It
+never imports `identity-store.ts` or opens `identityDir()` — there is nothing there to open, since
+this process's `CEZ_HOME` carries no `identity/` directory at all. `SessionResolver#
+resolveFromCookieHeader` gains one optional second parameter carrying the forwarded headers
+(TypeScript's "fewer params is assignable to more params" rule means every existing implementation,
+including `auth/session.ts`'s own, satisfies the widened interface with **zero edits** — this is
+additive, not a rename):
+
+```ts
+resolveFromCookieHeader(cookieHeader: string | undefined, forwarded?: ForwardedPrincipalHeaders): Principal | null
+```
+
+**Why a signature, not bare header trust.** Every org's process still binds loopback-only, per D4 —
+but loopback is one namespace shared by every unix user on the host, uid-separated or not. Trusting
+whatever headers arrived is one nginx-config mistake away from any local process forging
+`X-Cezar-Role: owner` directly against another org's port. A **per-org** HMAC secret
+(`CEZ_SUPERVISOR_SECRET`, minted at provisioning, `EnvironmentFile`-delivered — see below) makes a
+forged header fail at the org process itself regardless of how it arrived, the same "verify where
+it's actually enforced" reasoning D6 already applies to the WebSocket upgrade rather than trusting
+that Hono's middleware ran. **This pass wrote the full contract, signed and verified, with tests —
+`packages/cezar/src/supervisor/forwarded-principal.ts` / `.test.ts`** — so Fill units 1 (signs) and
+5 (verifies) converge on one scheme instead of each inventing one, which is exactly the
+"two-literals-hand-kept-in-sync" drift D3's own history (`server.ts`'s `LOCAL_PRINCIPAL` vs.
+`auth/principal.ts`'s `LOCAL_IDENTITY`) already named as a real failure mode once in this repo.
+
+**The phase-5 in-process check is replaced by deletion at the call site, not by a new local
+check.** `withTeams`/`mayActOnRoot`/`releaseRootClaim` (`server.ts:2594-2656`) and
+`registerFolder`'s claim block all gate on `principal.kind !== 'session'` and, when it IS
+`'session'`, open `IdentityStore.open(identityDir())` **in the org process** — which under D4 holds
+no identity data and is precisely the "each process sees only its own table" hazard the phase-6 row
+warns about. Fill unit 5 replaces those four call sites with a small HTTP client
+(`supervisor/registry-client.ts`, new) that asks the supervisor's `/internal/*` surface instead —
+which, because the supervisor is the ONE process with `identityDir()`, is calling the very same
+`IdentityStore#getProjectTeam`/`createProjectTeam`/`deleteProjectTeam`/`listProjectTeams` methods
+phase 5 already built and tested, just from across a process boundary instead of in-process. No new
+storage, no new lease mechanism — the O_EXCL lease D7 already took care of is what makes this safe
+to call concurrently from N org processes in the first place.
+
+**Org identity (self-service) and org infrastructure (operator-run) are deliberately two separate
+steps — D8's onboarding never provisions a systemd unit, and it must not start to.**
+`POST /auth/onboarding/org` is reachable by any authenticated first user (guarded only by the
+bootstrap code, D8 amendment 2) — letting it trigger unix-user creation or a systemd unit write
+would hand a network request root-adjacent power over the host, which is exactly the shape D1
+exists to refuse elsewhere. So: onboarding creates the `Org` row only (unchanged, phase 4 code).
+Turning that row into a running process is `cezar server-install --platform hetzner --domain
+<org-hostname> --org-slug <slug>` — an operator command requiring shell/sudo on the host, resolving
+`slug` against the supervisor's `/internal/orgs/*` lookup before it provisions anything.
+
+**Hostname/TLS topology: one base domain, one supervisor login host, org hostnames are its
+subdomains — not arbitrary customer domains, for phase 7.** D9's `redirect_uri` exact-match rule
+means an IdP registration names ONE host; the auth_request pattern (nginx forwards the session
+cookie from the ORIGINAL request to the supervisor as a subrequest) only works when that cookie is
+visible on every org's hostname, which requires `Domain=.<base-domain>` cookie scoping — i.e. every
+org hostname must be a subdomain of the same base domain the login host uses. This resolves what
+recon flagged as an unsolved per-org IdP-registration cost: with this topology there is exactly
+**one** registered `redirect_uri` for the whole deployment, ever, regardless of org count. Fully
+custom per-org domains (`acme-corp.com` rather than `acme.<base>`) are explicitly out of scope for
+phase 7; note it as a real limitation rather than letting it surface as a surprise later.
+`auth/session.ts#serializeSessionCookie` needs one additive change to carry a configurable
+`Domain=` (new optional `CEZ_SESSION_COOKIE_DOMAIN`, unset preserving today's host-only cookie
+exactly — a single-process phase 1-5 deployment sets nothing and is untouched).
+
+**nginx's role is unchanged in kind, widened in routing.** Per hostname: `/auth/` and `/internal/`
+(marked `internal;`, unreachable from outside) proxy to the supervisor; `/` runs `auth_request
+/internal/auth-check` then proxies to that org's own loopback port with the signed headers
+attached. D5 ("no new URL segment") holds exactly as before — every change here is which upstream
+nginx picks, never a path a client sees.
+
+**The org's port must be a hard bind, not today's "auto-picks the next free port".**
+`pickPort`/`serveCommand` (`index.ts`) silently falling back to the next free port (documented,
+protected behaviour, BACKWARD_COMPATIBILITY.md §1) is exactly wrong here: nginx's `proxy_pass` is
+rendered with a specific port at provisioning time, and a process that silently drifted to the next
+free one would have nginx forwarding one org's traffic into another org's — or a stranger's —
+process. The zero-config default (`cezar serve`, no flags) must NOT change. Fill unit 6 adds a new
+opt-in flag (`--port-strict`, or an env var of the same shape as every other `CEZ_*` opt-in) that
+makes an explicit `--port` a hard requirement (`EADDRINUSE` fails startup loudly) rather than a
+preference, and only the hetzner unit's `ExecStart` sets it.
+
+**Secrets go in a root-owned `EnvironmentFile=`, never a unit's `Environment=` line.**
+`systemctl show <unit>` is readable by any local user regardless of which org's uid it runs as —
+exactly the cross-org leak D4 exists to prevent. `CEZ_SUPERVISOR_SECRET` (and, on the supervisor's
+own unit, `CEZ_OIDC_CLIENT_SECRET`/`CEZ_AUTH_BOOTSTRAP_TOKEN` if pinned) belong in
+`EnvironmentFile=/etc/cezar/<slug>.env` at `0600`, written the way the existing `htpasswd` step
+already does it — payload on stdin, never `printf %s <content>` into the operator's terminal or a
+sudo-note transcript (`ubuntu-vps.ts`'s `writeFileStep`/`writeRootFileCmd` echo their content by
+design; this is a different, narrower write shape and needs its own step, not that one
+parameterised).
+
+#### Ownership map — the 8 units, no file overlap
+
+| # | Unit | Owns (new files unless noted) | Reads (imports, never edits) |
+|---|---|---|---|
+| 1 | Supervisor core | `src/index.ts` (new `supervisor` subcommand only — coordinate with unit 6, which owns the REST of `index.ts`'s edits), `supervisor/server.ts`, `supervisor/index.ts`, `supervisor/auth-request.ts`, `supervisor/paths.ts` (new home/registry-path helpers — never touches the existing `paths.ts`), the org-process-registry STORE built around `supervisor/org-process-registry.ts`'s schema (this pass) | `auth/routes.ts`, `auth/onboarding-routes.ts`, `auth/session.ts`, `auth/identity-store.ts`, `supervisor/forwarded-principal.ts` (this pass) |
+| 2 | Unix user + `CEZ_HOME` provisioning | `server-install/platforms/hetzner/provision-user.ts` (+ test) — pure generators only, per this task's safety rules: useradd/mkdir/chown/`git config --global --add safe.directory` commands, never executed here | `server-install/steps.ts` (the `sudoStep`/stdin-secret idiom) |
+| 3 | Per-org + supervisor systemd unit generation | `server-install/platforms/hetzner/systemd-unit.ts` (+ test) — new functions, does NOT edit `ubuntu-vps.ts#systemdUnit` (invariant 6) | may import `ubuntu-vps.ts`'s exported `sysd()` escaping helper if exported additively; else a 3-line duplicate, noted as such |
+| 4 | nginx vhost + hostname routing | `server-install/platforms/hetzner/nginx.ts` (+ test) — org vhost (`auth_request` + signed-header forwarding) and the supervisor's own base config (`/auth/`, `/internal/` `internal;`) | none |
+| 5 | Root→org registry replacement + principal resolution | `server/server.ts` (edit: the 4 call sites named above), `auth/principal.ts` (edit: new `authProvider: 'supervisor'` branch), `supervisor/registry-client.ts` (new — the HTTP client org processes use to reach unit 1's `/internal/*`) | `supervisor/forwarded-principal.ts` (this pass, unmodified) |
+| 6 | `hetzner` platform installer | `server-install/platforms/hetzner.ts` (+ test), `server-install/strategies.ts` (register `'hetzner'`), `server-install/types.ts` (extend `PLATFORM_IDS`), `src/index.ts` (help text, `--domain`/`--org-slug` flag plumbing, the new `--port-strict` flag/env — coordinate with unit 1 on the `supervisor` subcommand addition) | units 2/3/4/7's generators |
+| 7 | TLS / certificate issuance | `server-install/platforms/hetzner/tls.ts` (+ test) | may import `ubuntu-vps.ts`'s certbot command shape if exported; else a short duplicate |
+| 8 | Docs | `docs/server-install/hetzner.md` (new), `docs/server-install/README.md` (provider table), `README.md` + `packages/cezar/README.md` (correct the single-org claim **only once phase 6 actually lands** — do not correct it early, since the boundary it describes does not exist until then), `CHANGELOG.md`, `.env.example` (every new `CEZ_*` named in this section: `CEZ_SUPERVISOR_SECRET`, `CEZ_SESSION_COOKIE_DOMAIN`, the port-strict flag, `CEZ_AUTH=supervisor`) | — |
+
+`supervisor/forwarded-principal.ts` and `supervisor/org-process-registry.ts` (+ their tests) are
+this scaffold pass's own output, already landed by the time any of the 8 units start — treat them
+as frozen contracts, not drafts to revise independently.
+
+#### Named separately: two defects this recon surfaced that are NOT phase 6/7 work
+
+Neither belongs in the 8 units above — raising them here so they are not lost, not so they get
+folded in.
+
+- **P0, pre-existing, unrelated to this spec: `macosx-ngrok`'s generated launchd plist never
+  gained `CEZ_ALLOW_UNAUTHENTICATED=1`** (`server-install/platforms/macosx-ngrok.ts`'s
+  `cezarLaunchdPlist`), so under the CURRENT `auth-boot-gate.ts` every existing and fresh
+  `macosx-ngrok` host refuses to boot — verbatim the defect D1's amendment 2 fixed for `ubuntu-vps`
+  and missed on this platform. This needs its own immediate, narrowly-scoped fix (one line plus the
+  `ubuntu-vps.test.ts:259-288`-shaped pairing test's macOS twin), independent of phase 6/7.
+- **The existing multi-instance docs overstate isolation today, before phase 6 changes anything.**
+  `docs/server-install/ubuntu-vps.md:183-208` calls two `--domain` instances on one host "fully
+  independent cockpits" — they share one unix user and therefore one `~/.cezar` project registry,
+  identity store and agent credentials. Worth a docs correction on its own, separate from this
+  spec's phase 6/7 work (which is what actually makes two cockpits independent).
+
 ## Data Models
 
 Expressed as SQL because it states the constraints exactly; the storage is JSON
@@ -506,6 +791,22 @@ it hands that human the previous holder's org membership.
 
 Phases 1–3 are useful alone (a single-org authenticated deployment). Phase 6 is
 what makes "multi-tenant" true, and until it lands the docs say single-org.
+
+**CORRECTED 2026-08-07 (docs pass): "what makes multi-tenant true" overstates
+what phase 6 delivers on its own.** Phase 6 makes the *isolation* true — a real
+uid/process/filesystem boundary an operator could put a second org behind. It
+does not make *multi-tenant* true, because nothing in phases 1-7 as scoped
+creates a second org to put behind it (see the D4 addendum above, and D10's
+ownership map, unit 1). Read "until it lands the docs say single-org" as still
+correct after phase 6/7 land, not stale — for the new reason, not the old one —
+until an org-creation surface exists.
+
+**ADDED 2026-08-07 (scaffold pass): phase 6's "supervisor" and phase 7's `hetzner` platform have a
+shared design now — D10, in the Decisions section above. Read it before starting either row.**
+It resolves the auth-termination question the phase-6 row's own text left open, defines the
+forwarded-principal contract (written and tested this pass:
+`packages/cezar/src/supervisor/forwarded-principal.ts`), and gives an 8-way ownership map so
+phase 6 and phase 7 can be filled in parallel without two units editing the same file.
 
 **AMENDED 2026-08-07 (post-review): 5b and 5c are new rows, and they are not
 polish.** They were implicit in D8 and D2 and were read as delivered by phase
@@ -570,6 +871,21 @@ rows in a table are cheaper than a reviewer rediscovering that twice.
   downloads and parses for a page whose auth-off render is one sentence. The
   route is `lazy()` now. A payload regression on the npm default counts as a
   zero-config regression even when no JSON changed.
+- **`ADDED 2026-08-07 (D10 scaffold pass).` Port auto-drift silently routes one org's traffic to
+  another's process.** `pickPort` (`index.ts`) falls back to the next free port by design and is a
+  protected default (BACKWARD_COMPATIBILITY.md §1) — but nginx's per-org `proxy_pass` is a static
+  port baked in at provisioning time, so a drifted bind is not a startup failure, it is silent
+  cross-tenant traffic. Fill unit 6's `--port-strict` opt-in (D10) must ship in the SAME change that
+  wires it into the hetzner unit's `ExecStart`, never after.
+- **A secret in `Environment=` is readable by any local user, any org's uid included.**
+  `systemctl show <unit>` does not check whose unit it is. `CEZ_SUPERVISOR_SECRET` and any OIDC
+  client secret the supervisor's own unit carries must go through `EnvironmentFile=` at `0600`,
+  written via stdin like the existing htpasswd step — never through `writeRootFileCmd`'s
+  content-echoing sudo-note path, which is fine for a public vhost and wrong for a secret.
+- **Phase 7's hostname/TLS topology is one base domain, not arbitrary customer domains** (D10). A
+  fully custom per-org domain needs a different, unbuilt mechanism (per-org IdP registration, no
+  shared cookie domain) — call this a limitation in the phase 7 release notes, not a surprise a
+  customer discovers.
 
 ## Verification
 
@@ -579,6 +895,26 @@ generic OIDC provider (Keycloak or Authentik), **read the bootstrap code out of
 `journalctl -u cezar` and paste it into the wizard**, create an org, accept the
 default team, register a project, start a run, and confirm from a second org's
 session that neither its runs nor its knowledge base are reachable.
+
+**ADDED 2026-08-07 (D10 scaffold pass).** For phase 7 specifically, "provision from clean" means
+the supervisor's OWN unit first (a **system**-scope unit under its own dedicated unix user, per
+D10 — deliberately not the `systemctl --user`-preferred path `ubuntu-vps.ts#autostartStep` defaults
+to, which cannot express a per-org or per-supervisor unix user at all), then one `--domain
+--org-slug` run per org. `journalctl -u cezar` for the bootstrap code (below) is correct for this
+topology precisely because the supervisor is forced onto a system unit — the ambiguity recon
+flagged against `ubuntu-vps`'s user-scope default does not apply to `hetzner`. The additional
+things only that VPS run settles for D10 specifically: the `auth_request` → signed-header → org-
+process round trip against REAL nginx (not a generated-string assertion), that a session cookie set
+by the supervisor's login host is actually visible to nginx's subrequest on an org's subdomain
+(`Domain=` cookie scoping, live), and that two orgs' `EnvironmentFile` secrets are in fact
+unreadable to each other's unix user on a real filesystem.
+
+`forwarded-principal.ts`'s sign/verify contract itself does not need that VPS — it is pure
+functions over strings, and this pass's own test suite
+(`packages/cezar/src/supervisor/forwarded-principal.test.ts`) already covers the round trip, cross-
+org secret rejection, tampering, staleness and future-dated clocks. What the VPS adds for that
+piece specifically is only the wiring: that nginx actually calls `auth_request` before proxying,
+and that the headers it sets are the ones the org process reads.
 
 **ADDED 2026-08-07: what only that VPS can settle**, listed so the difference
 between "tested" and "QA Needed" is not left to interpretation. Everything below
@@ -607,3 +943,63 @@ Until that has actually been run against a live VPS this ships as **QA Needed**,
 not Done. A local `--platform ubuntu-vps` dry run is not the same evidence: the
 things that break here — TLS, redirect URIs, forwarded headers, systemd users —
 are precisely the ones a local run does not exercise.
+
+**ADDED 2026-08-07 (phase 6/7 repair stage): the QA-Needed list GREW when
+phases 6 and 7 landed, and saying so is the point.** Every item above still
+stands. Phases 6 and 7 are the first work in this spec whose deliverable is
+*generated text a machine executes elsewhere* — systemd units, an nginx config,
+root shell commands — so the gap between "asserted" and "observed" is wider here
+than in any earlier phase, not narrower. The repair stage's own discipline was
+to assert on generated output and never execute it (no unix user created, no
+service manager run, no port bound, no `~/.cezar` touched), which is the correct
+discipline and also exactly why the following cannot be closed from here:
+
+- **Every privileged command's actual effect.** `install -d -m 0700 -o cez-acme`,
+  `useradd --create-home`, `systemctl enable --now`, `nginx -t`, `certbot
+  --nginx`, `git config --global --add safe.directory` — all of these are pinned
+  as *strings* by tests that read the generated command. Nothing here has ever
+  run one. A quoting bug that survives `shquote` review, a `useradd` flag an
+  Ubuntu release deprecated, an `install` that succeeds and produces the wrong
+  mode: each looks identical to correct from this side.
+- **The `auth_request` round trip end to end**, which is the whole of D10. The
+  supervisor's signing (`auth-request.ts`), nginx's forwarding (`nginx.ts`) and
+  the org's verification (`forwarded-session.ts`) are each tested, and the header
+  *names* are imported rather than re-typed so they cannot drift. What no test
+  here can show is nginx actually performing the subrequest, capturing
+  `$upstream_http_x_cezar_principal` under that spelling, and overwriting a
+  client-supplied header with it.
+- **That `CEZ_SESSION_COOKIE_DOMAIN` actually produces a cookie a browser sends
+  to `acme.<base>`.** This variable was generated-and-never-read until the repair
+  stage; it now has a consumer and a test, but the test asserts a `Set-Cookie`
+  *string*. Whether a real browser scopes it as intended across a real
+  `login.<base>` → `acme.<base>` navigation is a browser behaviour, and this
+  repo cannot observe browser behaviour.
+- **`org-register` against a real supervisor.** The command is asserted; the
+  `curl -f` failure modes, the `sed`-out-of-an-`EnvironmentFile` parse, and the
+  bootstrap ordering (an org registered before its unit is enabled vs. after) are
+  not. Note its failure is *silent by construction from the outside*: an org whose
+  process record is missing answers 401 to an anonymous request, which is also
+  what a correctly-installed org answers, so a passing install does not prove the
+  registration landed.
+- **Upgrade, not just install.** `server-install` has already provisioned real
+  hosts on earlier versions. `describeBootGateUpgradeRisk` reads a literal
+  `systemctl show` transcript transcribed from `v0.9.2` and warns correctly
+  against it — but "correctly warns" was verified against a string, and an actual
+  upgrade of an actual pre-phase-6 host is unobserved. So is the interaction of a
+  changed unit file with an already-enabled unit.
+- **`ProtectSystem=full` + the agent CLIs.** The hardening set is chosen and
+  argued (`ProtectHome` deliberately absent, `full` not `strict`), and it is
+  entirely untested against a real `claude`/`codex` run inside the unit. A
+  hardening directive that breaks an agent CLI at runtime is invisible until an
+  agent CLI runs under it.
+- **The uid boundary itself, which is phase 6's verification row verbatim.** "Two
+  orgs ⇒ two unix users, two `CEZ_HOME`s, no shared path; org A cannot read org
+  B's runs" cannot be observed here at all, and — per the D4 correction above —
+  cannot yet be observed on a real host either, because nothing creates the
+  second org. What a VPS run *can* settle today is the one-org shape: that the
+  isolation primitives (user, home mode, `WorkingDirectory`, `EnvironmentFile`
+  ownership) are what the generators claim.
+
+So the honest status after this repair stage is: phases 6 and 7 are **QA Needed
+with a longer list than any earlier phase**, and one line of their stated
+verification is **not reachable at all** until an org-creation surface exists.

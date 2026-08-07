@@ -43,6 +43,10 @@ export interface RunOptions {
   /** Public domain for this instance — recorded up front so instance selection
    * and the SSL step share one source of truth. */
   domain?: string;
+  /** `--platform hetzner` only (D4/D10): the org this instance provisions
+   * infrastructure for. Absent means the deployment's one supervisor instance —
+   * see `ServerState#orgSlug`'s own doc comment (`types.ts`) for the full contract. */
+  orgSlug?: string;
   /** Loopback port for this instance. For a NEW named instance the caller
    * passes an auto-picked free port; a resume keeps the recorded one. */
   port?: number;
@@ -152,6 +156,7 @@ export async function runInstall(strategy: PlatformStrategy, opts: RunOptions): 
     // uninstall/deploy runs (and `server-instances/` listings) agree on it.
     state.instance = opts.instance ?? state.instance ?? 'default';
     if (opts.domain) state.domain = opts.domain;
+    if (opts.orgSlug) state.orgSlug = opts.orgSlug;
     // Proxy mode + bind host are recorded before `steps(ctx)` runs, because the
     // platform selects its step list from them (external proxy ⇒ no nginx/SSL).
     if (opts.externalProxy !== undefined) state.externalProxy = opts.externalProxy;
@@ -332,6 +337,7 @@ export async function runUninstall(strategy: PlatformStrategy, opts: RunOptions)
     state.publicUrl = undefined;
     state.ephemeral = undefined;
     state.domain = undefined;
+    state.orgSlug = undefined;
     await ctx.save();
     // A named instance is fully gone now — drop its (empty) record so it no
     // longer reserves a port or shows up as an install. The default record is

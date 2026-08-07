@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -216,7 +216,28 @@ async function resolveCezarArgv(ctx: InstallContext): Promise<string[]> {
   );
 }
 
-/** launchd agent that keeps the cezar cockpit running on the given port. */
+/**
+ * launchd agent that keeps the cezar cockpit running on the given port.
+ *
+ * **`CEZ_ALLOW_UNAUTHENTICATED=1` ADDED 2026-08-07.** This plist sets `CEZ_REMOTE=1`, which
+ * `resolveCapabilities` reads as "hosted" — and D1's boot gate (`auth-boot-gate.ts`) refuses to
+ * boot a hosted deployment that names neither `CEZ_AUTH` nor this flag. So every `macosx-ngrok`
+ * host, existing and fresh, refused to start the moment the gate shipped: `KeepAlive` then
+ * respawn-throttles a permanently failing job across reboots, which is the worst available shape
+ * of the failure. This is verbatim the defect D1's own amendment 2 fixed for `ubuntu-vps` and
+ * missed here; the spec names it as a P0 in its own right (D10, "two defects this recon surfaced
+ * that are NOT phase 6/7 work").
+ *
+ * The flag, not `CEZ_AUTH`, is the honest row of D1's table for this platform for exactly the
+ * reason it is for `ubuntu-vps`: the same installer puts `ngrok --basic-auth` in front of the
+ * service, so the operator HAS said "my proxy is the perimeter", and the installer states it on
+ * their behalf at the moment it installs the proxy that backs it. A plist naming both would be
+ * contradictory.
+ *
+ * `macosx-ngrok.test.ts` feeds this plist's own `EnvironmentVariables` back through the real
+ * `resolveAuthBootGate`, so the two cannot drift apart again — the same pairing discipline
+ * `ubuntu-vps.test.ts` already applies to its systemd unit.
+ */
 export function cezarLaunchdPlist(repoRoot: string, port: number, argv: string[]): string {
   // Give the agent the operator's PATH so cezar can spawn claude/gh/codex.
   const pathDirs = [dirname(process.execPath), ...(process.env.PATH ?? '').split(':'), '/usr/local/bin', '/usr/bin', '/bin']
@@ -238,6 +259,8 @@ ${argXml}
     <string>${escapeXml(repoRoot)}</string>
     <key>EnvironmentVariables</key>
     <dict>
+      <key>CEZ_ALLOW_UNAUTHENTICATED</key>
+      <string>1</string>
       <key>CEZ_REMOTE</key>
       <string>1</string>
       <key>PATH</key>
@@ -252,12 +275,38 @@ ${argXml}
 `;
 }
 
+/**
+ * True when an already-installed plist would still BOOT — i.e. it carries the
+ * `CEZ_ALLOW_UNAUTHENTICATED` D1's gate requires of a `CEZ_REMOTE=1` agent.
+ *
+ * **ADDED 2026-08-07, and it is the upgrade half of the fix above.** Writing the flag into
+ * `cezarLaunchdPlist` repairs a FRESH install; it reaches an EXISTING host only if something
+ * rewrites that host's plist. Nothing did: `check()` was `test -f <plist>`, so the engine recorded
+ * the step `done` and skipped it on every later `server-install`, and `redeploy` only
+ * `launchctl kickstart`s the agent it finds. Every host installed before the boot gate landed
+ * would therefore have gone on refusing to start, through re-install and re-deploy alike, with the
+ * installer reporting success. `ubuntu-vps` never had this half of the problem because its own
+ * `autostartStep.check()` already returns `false` unconditionally ("always (re)assert").
+ *
+ * Reads the file rather than `launchctl print`: the plist on disk is what the next boot uses, and
+ * a running agent's in-memory environment can differ from it after a hand-edit. Unreadable ⇒
+ * `false` ⇒ rewrite, which is the safe direction (the write is idempotent).
+ */
+function installedPlistBoots(): boolean {
+  try {
+    return readFileSync(cezarPlistPath(), 'utf8').includes('<key>CEZ_ALLOW_UNAUTHENTICATED</key>');
+  } catch {
+    return false;
+  }
+}
+
 const autostartStep: InstallStep = {
   id: 'autostart',
   title: 'Run cezar as a service (launchd — starts now + on boot)',
   async check(ctx) {
     if (ctx.dryRun) return false;
-    return verifyCommand(ctx, 'test', ['-f', cezarPlistPath()]);
+    if (!(await verifyCommand(ctx, 'test', ['-f', cezarPlistPath()]))) return false;
+    return installedPlistBoots();
   },
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
     const argv = await resolveCezarArgv(ctx);

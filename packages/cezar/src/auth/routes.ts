@@ -312,6 +312,19 @@ async function buildAuthRoutes(): Promise<Hono> {
     console.error(`auth routes: ${reason}`);
     return misconfiguredRoutes(reason);
   }
+  if (provider === 'supervisor') {
+    // ADDED 2026-08-07 (repair stage). `'supervisor'` names an ORG process that TRUSTS a
+    // supervisor's forwarded principal, not a way to log in (D10) — and `src/index.ts`'s
+    // supervisor branch deliberately never imports this module. Reaching it anyway means either
+    // the supervisor's own unit was mis-set to `CEZ_AUTH=supervisor` (its own boot gate refuses
+    // that now, `supervisor/index.ts`) or a caller imported this module directly. Before this
+    // branch, `'supervisor'` fell into `resolveOidcConfig`'s GENERIC-OIDC path and, on a host
+    // that happened to carry OIDC credentials, would have stood up a second, unintended login
+    // surface against a store D10 says this process must never open.
+    const reason = 'CEZ_AUTH is "supervisor" — this process trusts a forwarded principal (D10) and has no login flow of its own';
+    console.error(`auth routes: ${reason}`);
+    return misconfiguredRoutes(reason);
+  }
   const configResult = resolveOidcConfig(provider, process.env);
   if (!configResult.ok) {
     console.error(`auth routes: ${configResult.reason}`);

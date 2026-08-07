@@ -7,20 +7,22 @@ import type { Principal } from '../server/server.ts';
  * and source stores, `createApp`'s hand-built `bootContext` did not, and the two paths silently
  * disagreed about which stores were live until the knowledge base was dead on the only project
  * the cockpit opens by default. Two ways to construct "what a request is allowed to do" would
- * drift the same way, so `CEZ_AUTH=none` and `CEZ_AUTH={oidc,google}` do not get two functions,
- * or a caller that special-cases "off" before ever reaching this module. Both modes call
- * `resolvePrincipal` and the function has exactly one `return`, building the same four fields
- * from whichever `identity` it was handed. The distinction between the modes lives entirely in
- * *what* they hand it: the implicit local identity below (auth off, no I/O — D1's "unset means
- * zero I/O" holds because this module reads no file to produce it), or an already-resolved
- * session (auth on).
+ * drift the same way, so `CEZ_AUTH=none` and `CEZ_AUTH={oidc,google,supervisor}` do not get two
+ * functions, or a caller that special-cases "off" before ever reaching this module. Every mode
+ * calls `resolvePrincipal` and the function has exactly one `return`, building the same four
+ * fields from whichever `identity` it was handed. The distinction between the modes lives
+ * entirely in *what* they hand it: the implicit local identity below (auth off, no I/O — D1's
+ * "unset means zero I/O" holds because this module reads no file to produce it), or an
+ * already-resolved session (auth on).
  *
  * What "resolved" means for the session case is deliberately out of scope here: picking a user's
  * current org/team out of a possibly-multi-membership signed-in user, and turning a session
  * cookie into that in the first place, is Phase 3's `auth/session.ts` (D7's identity store, D9's
- * OIDC/Google flow) — a module that does not exist yet. This function's contract starts after
- * that decision has already been made; it only owns turning a decided identity into the
- * `Principal` shape every route and the WebSocket upgrade check (D6) both read.
+ * OIDC/Google flow) for `oidc`/`google`, and — added phase 6/7 (D10) — verifying the supervisor's
+ * signed, forwarded principal (`supervisor/forwarded-principal.ts#verifyForwardedPrincipal`) for
+ * `supervisor`. This function's contract starts after that decision has already been made; it
+ * only owns turning a decided identity into the `Principal` shape every route and the WebSocket
+ * upgrade check (D6) both read.
  */
 
 /** The `(org, team, role)` a signed-in user is acting as, once a session has already been
@@ -45,7 +47,7 @@ export interface SessionIdentity {
  */
 export type ResolvePrincipalInput =
   | { readonly authProvider: 'none' }
-  | { readonly authProvider: 'oidc' | 'google'; readonly identity: SessionIdentity };
+  | { readonly authProvider: 'oidc' | 'google' | 'supervisor'; readonly identity: SessionIdentity };
 
 /**
  * The implicit identity every request resolves to while `CEZ_AUTH` is unset (D1/D3) — a
@@ -70,9 +72,11 @@ const LOCAL_IDENTITY: SessionIdentity = {
 
 /**
  * D3's one construction path. `authProvider === 'none'` always yields the implicit local
- * identity; `'oidc'`/`'google'` yields whatever `identity` the caller already resolved. Either
- * way the return is the same four-field object, so "off" and "on" cannot describe a `Principal`
- * as two different shapes: there is only one shape, and one place that builds it.
+ * identity; `'oidc'`/`'google'`/`'supervisor'` all yield whatever `identity` the caller already
+ * resolved — the three session-carrying providers share ONE branch because, by the time any of
+ * them reaches this function, "which provider" has already been decided; only "which identity"
+ * differs. Either way the return is the same four-field object, so "off" and "on" cannot describe
+ * a `Principal` as two different shapes: there is only one shape, and one place that builds it.
  */
 export function resolvePrincipal(input: ResolvePrincipalInput): Principal {
   const identity = input.authProvider === 'none' ? LOCAL_IDENTITY : input.identity;

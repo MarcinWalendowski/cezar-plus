@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.ts';
 import { depCheckStep, generatePassword, owned, shared, shquote, StepAborted, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.ts';
+import { resolveAuthBootGate } from '../../auth-boot-gate.ts';
 
 /**
  * The `ubuntu-vps` strategy: stand up an authenticated, proxied cezar on a bare
@@ -752,6 +753,60 @@ async function readExecStart(ctx: InstallContext, scope: 'user' | 'system', unit
   return stdout;
 }
 
+/**
+ * `systemctl show -p Environment` output → an env object.
+ *
+ * The property is one line, `Environment=A=1 B=2`, space-separated and shell-quoted when a value
+ * needs it. Only unquoted `KEY=VALUE` words are read here, which is all this installer ever writes
+ * (`CEZ_REMOTE`, `CEZ_ALLOW_UNAUTHENTICATED`, `PATH`) — a value we did not write and cannot parse
+ * is simply absent, which pushes `willBootAfterUpgrade` toward "warn", the safe direction.
+ *
+ * Exported for `ubuntu-vps.test.ts`, which feeds it BOTH the shape a live `systemctl` emits and
+ * the shape the RELEASED v0.9.2 installer left behind.
+ */
+export function parseSystemdEnvironmentProperty(showOutput: string): NodeJS.ProcessEnv {
+  const line = showOutput.split('\n').find((l) => l.startsWith('Environment='));
+  if (!line) return {};
+  const env: NodeJS.ProcessEnv = {};
+  for (const word of line.slice('Environment='.length).trim().split(/\s+/)) {
+    const eq = word.indexOf('=');
+    if (eq > 0) env[word.slice(0, eq)] = word.slice(eq + 1);
+  }
+  return env;
+}
+
+/**
+ * **Upgrade safety for a host installed BEFORE D1's boot gate existed.** ADDED 2026-08-07.
+ *
+ * The released `@open-mercato/cezar` 0.9.2 installer wrote a unit carrying `Environment=CEZ_REMOTE=1`
+ * and `Environment=PATH=…` and nothing else. D1's gate then shipped, refusing to boot a hosted
+ * deployment that names neither `CEZ_AUTH` nor `CEZ_ALLOW_UNAUTHENTICATED` — and D1's amendment 2
+ * added the flag to `systemdUnit` so a FRESH install is fine. It never reaches an existing host on
+ * the path an existing host actually takes: `server-deploy` calls `redeploy()`, and `redeploy()`
+ * never runs `steps()`, so `autostartStep` — the only writer of the unit — is not reached. The new
+ * binary would boot against the old unit, `runAuthBootGate` would exit 1, and `Restart=on-failure`
+ * would loop until systemd gave up. The cockpit dies, and the fix (hand-edit a systemd unit) is in
+ * no document.
+ *
+ * Re-running `server-install` already repairs it (that step's `check()` returns `false`
+ * unconditionally — "always (re)assert"), so this only has to catch the `server-deploy` path, and
+ * it does so by SAYING so rather than silently rewriting a unit `redeploy` does not otherwise
+ * touch: the repair is one command the operator can read, and re-running the installer is the
+ * supported route.
+ */
+export function describeBootGateUpgradeRisk(unitEnv: NodeJS.ProcessEnv, unitName: string): string | undefined {
+  if (resolveAuthBootGate(unitEnv).proceed) return undefined;
+  return (
+    `The installed ${unitName} unit predates cezar's hosted-mode boot gate: it sets CEZ_REMOTE=1 but names\n` +
+    `neither CEZ_AUTH nor CEZ_ALLOW_UNAUTHENTICATED, so the new version will REFUSE to start and\n` +
+    `Restart=on-failure will loop. This platform fronts the service with an nginx auth_basic vhost, so the\n` +
+    `flag is the right answer for it — re-run the installer to have it rewritten for you:\n` +
+    `  cezar server-install --platform ubuntu-vps --reconfigure autostart\n` +
+    `or add this line to [Service] in the unit yourself and \`systemctl daemon-reload\`:\n` +
+    `  Environment=CEZ_ALLOW_UNAUTHENTICATED=1`
+  );
+}
+
 const autostartStep: InstallStep = {
   id: 'autostart',
   // Required: after install the cockpit must actually be serving, so cezar runs
@@ -1073,6 +1128,18 @@ export const ubuntuVps: PlatformStrategy = {
       ctx.ui.info(`DRY RUN — would reload+restart the cezar ${scope} service and re-verify the cockpit.`);
       return;
     }
+    // Before restarting into a version whose boot gate the INSTALLED unit may not satisfy — see
+    // `describeBootGateUpgradeRisk`. Warned, not silently rewritten: `redeploy` does not otherwise
+    // own the unit file, and re-running the installer is the supported repair.
+    const showEnv = await ctx.runner.capture('systemctl', [
+      ...(scope === 'user' ? ['--user'] : []),
+      'show',
+      UNIT_NAME,
+      '-p',
+      'Environment',
+    ]);
+    const risk = describeBootGateUpgradeRisk(parseSystemdEnvironmentProperty(showEnv.stdout), UNIT_NAME);
+    if (risk) ctx.ui.warn(risk);
     ctx.ui.info(`Redeploying — restarting the cezar ${scope} service to pick up the new version.`);
     if (scope === 'user') {
       await ctx.runner.interactive('systemctl', ['--user', 'daemon-reload']);

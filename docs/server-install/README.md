@@ -23,9 +23,19 @@ npx cezar-cli server-uninstall --platform <id>   # reverse it
 |----------|--------------|--------------|----------|-----------|-------|
 | **Ubuntu / Debian VPS** | `ubuntu-vps` | nginx + Let's Encrypt (HTTPS) | HTTP Basic-Auth (htpasswd) | systemd | [Step-by-step →](./ubuntu-vps.md) |
 | **macOS + ngrok** | `macosx-ngrok` | ngrok tunnel (HTTPS) | ngrok `--basic-auth` | launchd | [Step-by-step →](./macosx-ngrok.md) |
+| **Hetzner / any Ubuntu box, one process per org** | `hetzner` | nginx + Let's Encrypt (HTTPS), `auth_request` | **OIDC or Google sign-in** (real accounts, not one shared password) | systemd, one unit **per organization** | [Step-by-step →](./hetzner.md) |
 
 Same engine, different steps — each strategy is a small registry entry, so new
 platforms slot in without touching the engine.
+
+> **`hetzner` is the only one with a boundary *between* tenants.** The other two
+> put a single shared login in front of a single shared process; everyone who
+> gets through is the same unix user. `hetzner` gives each organization its own
+> unix user, its own `CEZ_HOME` and its own systemd unit, and routes to it by
+> hostname. It is also the only one where you sign in as **yourself** rather than
+> as the box. Read its guide before choosing it: it is a bigger install, it needs
+> a wildcard-ish DNS setup and an identity provider, and there is a real
+> limitation about creating the *second* organization that it states up front.
 
 > **Several domains on one box?** `ubuntu-vps` can host multiple independent
 > cockpits — add `--domain <host>` to install/deploy/uninstall a separate
@@ -83,4 +93,4 @@ or track a branch with `npx cezar-cli@develop server-deploy --platform <id>`.
 
 ---
 
-Guides: **[Ubuntu / Debian VPS](./ubuntu-vps.md)** · **[macOS + ngrok](./macosx-ngrok.md)**
+Guides: **[Ubuntu / Debian VPS](./ubuntu-vps.md)** · **[macOS + ngrok](./macosx-ngrok.md)** · **[Hetzner, one process per org](./hetzner.md)**

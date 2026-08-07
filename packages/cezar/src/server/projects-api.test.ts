@@ -12,7 +12,7 @@ import {
 import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { allocateProjectSlug, clearProjectProbeCache, listProjects, registerProject } from '../workspace/projects.ts';
@@ -767,6 +767,133 @@ describe('workspace projects API', () => {
         expect(projects).toHaveLength(1);
         expect(existsSync(join(home, 'identity'))).toBe(false);
       });
+    });
+  });
+
+  /**
+   * Phase 6/7 (spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`, D4's phase-6 amendment,
+   * D10) — the REPLACEMENT half: `CEZ_AUTH=supervisor` must route every D4 call site through
+   * `supervisor/registry-client.ts` (a mocked HTTP round trip here — never a live server, per this
+   * unit's safety rules) instead of `IdentityStore.open(identityDir())`. The `CEZ_AUTH=oidc` block
+   * above already proves the LOCAL path is unchanged; this block proves the two paths are mutually
+   * exclusive, not additive — a `CEZ_AUTH=supervisor` request must touch NO local identity state
+   * at all, the same "zero I/O on the path that doesn't apply" discipline D1/D7 already hold for
+   * the auth-off case, applied here to the OTHER process that must stay blind to this one.
+   */
+  describe('CEZ_AUTH=supervisor — the org process asks the supervisor, never the local IdentityStore (D10)', () => {
+    const savedAuth = process.env.CEZ_AUTH;
+    const savedPort = process.env.CEZ_SUPERVISOR_PORT;
+    const savedSecret = process.env.CEZ_SUPERVISOR_SECRET;
+
+    beforeEach(() => {
+      process.env.CEZ_AUTH = 'supervisor';
+      process.env.CEZ_SUPERVISOR_PORT = '4999';
+      process.env.CEZ_SUPERVISOR_SECRET = 'test-supervisor-secret-value-0000';
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      if (savedAuth === undefined) delete process.env.CEZ_AUTH;
+      else process.env.CEZ_AUTH = savedAuth;
+      if (savedPort === undefined) delete process.env.CEZ_SUPERVISOR_PORT;
+      else process.env.CEZ_SUPERVISOR_PORT = savedPort;
+      if (savedSecret === undefined) delete process.env.CEZ_SUPERVISOR_SECRET;
+      else process.env.CEZ_SUPERVISOR_SECRET = savedSecret;
+    });
+
+    const principalResolver = (byCookie: Record<string, Principal>): SessionResolver => ({
+      resolveFromCookieHeader: (cookie) => (cookie ? (byCookie[cookie] ?? null) : null),
+    });
+
+    const orgA: Principal = { kind: 'session', userId: 'u-a', orgId: 'org_a', teamId: 'team_a', role: 'owner' };
+
+    const fakeJsonResponse = (status: number, body: unknown) =>
+      ({ ok: status >= 200 && status < 300, status, json: async () => body }) as Response;
+
+    it('a successful registration never opens a local identity directory (no fetch fallback to IdentityStore)', async () => {
+      // Ordered by what `registerFolder` actually does (server.ts): (1) pre-check the requested
+      // root is unclaimed, (2) register locally (no fetch), (3) re-check + (4) POST the claim, (5)
+      // `withTeams` reads the claim + the team name back. No explicit `teamId` in the request body
+      // below, so `registerFolder` never calls `GET /internal/teams/:id` on this path.
+      // Every shape below is the REAL one `supervisor/server.ts` answers with — deliberately not a
+      // convenient approximation. An over-generous fake here is how the client/server drift this
+      // seam already suffered once got in: a fake that answers 200 where the real route answers
+      // 404/201, or answers a route the real supervisor does not serve at all, makes this test
+      // prove the org process talks to a supervisor that does not exist.
+      // `supervisor/server.test.ts` + `supervisor/registry-client.test.ts` pin these same shapes
+      // against the real `createSupervisorApp`, so a drift fails there rather than only here.
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        // Unclaimed reads 404 on the real handler, never a 200 carrying `null`.
+        if (method === 'GET' && url.startsWith('http://127.0.0.1:4999/internal/project-teams/by-root?')) {
+          return fakeJsonResponse(404, { error: 'no org/team claim' });
+        }
+        // Success is 201 + `{ projectTeam }` — there is no `ok` field on the wire.
+        if (method === 'POST' && url === 'http://127.0.0.1:4999/internal/project-teams') {
+          return fakeJsonResponse(201, { projectTeam: { projectRoot: otherRoot, orgId: 'org_a', teamId: 'team_a' } });
+        }
+        if (method === 'GET' && url.startsWith('http://127.0.0.1:4999/internal/project-teams?')) {
+          return fakeJsonResponse(200, { projectTeams: [{ projectRoot: otherRoot, orgId: 'org_a', teamId: 'team_a' }] });
+        }
+        if (method === 'GET' && url.startsWith('http://127.0.0.1:4999/internal/teams?')) {
+          return fakeJsonResponse(200, { teams: [{ id: 'team_a', orgId: 'org_a', name: 'General', slug: 'general' }] });
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      // Registration doesn't pass an explicit teamId — registerFolder falls back to principal.teamId
+      // (`team_a`), so no /internal/teams/:id lookup happens on this path (see server.ts's
+      // `if (teamId !== undefined)` guard) — only the create + read-back calls below fire.
+      const res = await apiRequest(makeApp({ sessionResolver: principalResolver({ 'cez_session=a': orgA }) }), '/api/v1/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: 'cez_session=a' },
+        body: JSON.stringify({ root: otherRoot }),
+      });
+      const createCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
+      expect(createCall).toBeDefined();
+      expect(String(createCall![0])).toBe('http://127.0.0.1:4999/internal/project-teams');
+      expect((createCall![1] as RequestInit).headers).toMatchObject({ authorization: 'Bearer test-supervisor-secret-value-0000' });
+      expect(res.status).toBe(200);
+      // The zero-cross-contamination half: nothing under this test's CEZ_HOME/identity exists —
+      // the supervisor's own store is a DIFFERENT process's disk this org process never touches.
+      expect(existsSync(join(home, 'identity'))).toBe(false);
+    });
+
+    it("mayActOnRoot fails CLOSED when the supervisor is unreachable — an unclaimed root's DELETE is refused, not silently allowed", async () => {
+      const claimed = await registerProject(otherRoot);
+      const fetchMock = vi.fn(async () => {
+        throw new Error('ECONNREFUSED');
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await apiRequest(makeApp({ sessionResolver: principalResolver({ 'cez_session=a': orgA }) }), `/api/v1/projects/${claimed.id}`, {
+        method: 'DELETE',
+        headers: { cookie: 'cez_session=a' },
+      });
+      const body = (await res.json()) as { error?: string };
+      // 409, the exact CROSS_ORG_REFUSAL wording — an unreachable registry must read the same as a
+      // genuinely cross-org claim, never as "unclaimed, go ahead" (that would be the fail-OPEN
+      // shape D4 exists to prevent).
+      expect(res.status).toBe(409);
+      expect(body.error).toBe('this project is already registered to a different organization');
+      // Refused before the workspace registry write: the project is still registered.
+      expect((await loadWorkspaceConfig()).projects.map((p) => p.id)).toEqual([claimed.id]);
+    });
+
+    it('withTeams degrades to the unannotated listing when the supervisor is unreachable, rather than 500ing the whole request', async () => {
+      await registerProject(otherRoot);
+      const fetchMock = vi.fn(async () => {
+        throw new Error('ECONNREFUSED');
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await apiRequest(makeApp({ sessionResolver: principalResolver({ 'cez_session=a': orgA }) }), '/api/v1/projects', {
+        headers: { cookie: 'cez_session=a' },
+      });
+      expect(res.status).toBe(200);
+      const { projects } = (await res.json()) as ProjectsResponse;
+      expect(projects).toHaveLength(1);
+      expect(projects[0]?.teamId).toBeUndefined();
     });
   });
 

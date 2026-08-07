@@ -155,6 +155,11 @@ import { isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCa
 // names, and it had already appeared once in this change: a `LOCAL_PRINCIPAL` here and a
 // `LOCAL_IDENTITY` there, byte-identical and with nothing asserting they stayed that way.
 import { resolvePrincipal } from '../auth/principal.ts';
+// Type-only — erased by TypeScript, so importing it statically does not touch D1's "unset means
+// zero I/O": no runtime code from `auth/types.ts` (or its own imports) ever loads. Used only by
+// the D4 `ProjectTeamRegistry` seam below (`openProjectTeamRegistry`), which is the ONE place
+// either the local `IdentityStore` or the phase 6/7 `supervisor/registry-client.ts` gets reached.
+import type { ProjectTeam, Team } from '../auth/types.ts';
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
 import { parseRemote, resolveForge, type ForgeAvailability } from './forge/index.ts';
@@ -170,13 +175,17 @@ import {
   providersRequiredByWorkflow,
   unavailableProviderMessage,
 } from './provider-action-gate.ts';
+import { cockpitAssetRoutes, serveCockpitShell } from './shell-routes.ts';
+// The forwarded-principal HEADER NAMES, imported rather than re-spelled (D10 / D3's own history —
+// see `hetzner/nginx.ts`'s "Header names are IMPORTED, not re-typed" section, which makes the same
+// argument for the nginx generator). `readForwardedPrincipalHeaders` is the only runtime symbol
+// this file takes from the supervisor tree; that module reads no file, opens no store and does no
+// I/O to be imported, so D1's "unset means zero I/O" is untouched, and the two call sites below
+// only ever CALL it after `resolveAuthProvider(...) !== 'none'` has already been decided.
 import {
-  ASSET_CACHE_CONTROL,
-  BUILD_HINT_HTML,
-  assetContentType,
-  isSafeAssetFilename,
-  resolveGetRequest,
-} from './static-ui.ts';
+  readForwardedPrincipalHeaders,
+  type ForwardedPrincipalHeaders,
+} from '../supervisor/forwarded-principal.ts';
 
 export interface ServerDeps {
   repoRoot: string;
@@ -319,8 +328,16 @@ export interface Principal {
 export interface SessionResolver {
   /** `null` for no session, an invalid one, or an expired one — never throws. An unreadable
    *  identity store degrades to "no session", the same zero-config failure mode every other
-   *  store in this codebase uses (see e.g. `loadWorkspaceConfig`). */
-  resolveFromCookieHeader(cookieHeader: string | undefined): Principal | null;
+   *  store in this codebase uses (see e.g. `loadWorkspaceConfig`).
+   *
+   *  `forwarded` carries the supervisor's HMAC-signed principal headers when this process runs
+   *  as an ORG process behind the supervisor (`CEZ_AUTH=supervisor`, D10) —
+   *  `supervisor/forwarded-session.ts` is the implementation that reads it, and it ignores the
+   *  cookie entirely (an org process has no identity store to look a session id up in). ADDITIVE
+   *  and optional by design: TypeScript's "fewer parameters is assignable to more parameters"
+   *  rule means `auth/session.ts`'s own cookie resolver, and every test's hand-written stub,
+   *  satisfies this widened signature with zero edits. */
+  resolveFromCookieHeader(cookieHeader: string | undefined, forwarded?: ForwardedPrincipalHeaders): Principal | null;
 }
 
 /**
@@ -1538,7 +1555,14 @@ export function createApp(deps: ServerDeps) {
     if (!sessionResolver) {
       return c.json({ error: 'server misconfigured: CEZ_AUTH is set but no session resolver was wired' }, 500);
     }
-    const principal = sessionResolver.resolveFromCookieHeader(c.req.header('cookie'));
+    // The supervisor's signed, forwarded principal (D10) rides alongside the cookie — read here,
+    // once, and handed to whichever resolver `serveCommand` wired. `auth/session.ts`'s cookie
+    // resolver ignores the second argument (it declares one parameter); the org process's
+    // `supervisor/forwarded-session.ts` resolver ignores the FIRST. Reading both at one call site
+    // is what keeps "who is this request" a single decision (D3) instead of a per-provider branch
+    // in the middleware.
+    const forwarded = readForwardedPrincipalHeaders((name) => c.req.header(name));
+    const principal = sessionResolver.resolveFromCookieHeader(c.req.header('cookie'), forwarded);
     if (!principal) return c.json({ error: 'unauthenticated' }, 401);
     principalContext.set('principal', principal);
     return next();
@@ -1582,68 +1606,13 @@ export function createApp(deps: ServerDeps) {
   };
 
   // ---- static GUI ----------------------------------------------------------
-  const webDir = resolveWebDir();
-  const distDir = join(webDir, 'dist');
-  const HTML_TYPE = 'text/html; charset=utf-8';
-  const staticFile = (name: string, type: string) => (c: Context): Response => {
-    // Read per request — the files are tiny and this keeps dev iteration live.
-    //
-    // Served out of the Vite build: the file is a `public/` asset of the web package, which the
-    // build copies verbatim into `web/dist`. One home, one URL — the same bytes this route
-    // hands out are what the bundle's own `<img src="/open-mercato.svg">` asks for.
-    // Without a build there is nothing to serve, which is a 404 rather than a crash (the shell
-    // route answers the same dev-only state with its build hint).
-    const path = join(distDir, name);
-    if (!existsSync(path)) return c.json({ error: 'not found' }, 404);
-    return new Response(readFileSync(path), { headers: { 'content-type': type } });
-  };
-
-  let hintLogged = false;
-  const serveShell = (c: Context): Response | undefined => {
-    const distIndex = join(distDir, 'index.html');
-    // existsSync per request, like the reads below: `npm run build:web` in a
-    // running cockpit takes effect on the next reload, no restart.
-    const target = resolveGetRequest({
-      path: c.req.path,
-      distExists: existsSync(distIndex),
-    });
-    if (target === 'passthrough') return undefined;
-    if (target === 'build-hint') {
-      // Dev-only state (the tarball ships web/dist): serve the built-in hint
-      // page instead of the app — the legacy fallback UI was deleted in R7.
-      if (!hintLogged) {
-        hintLogged = true;
-        console.log('cezar: web/dist is missing — run `npm run build:web` to build the cockpit');
-      }
-      return new Response(BUILD_HINT_HTML, {
-        headers: { 'content-type': HTML_TYPE },
-      });
-    }
-    return new Response(readFileSync(distIndex), {
-      headers: { 'content-type': HTML_TYPE },
-    });
-  };
-
-  // Hashed bundles/fonts of the built app. Vite fingerprints every name, so
-  // the bytes behind a URL never change — cache them hard. Only plain
-  // filenames are served: `basename('..')` is `'..'` (it resolves to the
-  // assets dir itself and readFileSync would throw EISDIR), so dot-segments
-  // and separator-bearing params get a 404, not a 500.
-  app.get('/assets/:file', (c) => {
-    const file = c.req.param('file');
-    if (!isSafeAssetFilename(file)) return c.json({ error: 'not found' }, 404);
-    const path = join(distDir, 'assets', file);
-    if (!existsSync(path) || !statSync(path).isFile()) return c.json({ error: 'not found' }, 404);
-    return new Response(readFileSync(path), {
-      headers: {
-        'content-type': assetContentType(file),
-        'cache-control': ASSET_CACHE_CONTROL,
-      },
-    });
-  });
-
-  // The favicon packages/web/index.html points at (`/open-mercato.svg`).
-  app.get('/open-mercato.svg', staticFile('open-mercato.svg', 'image/svg+xml'));
+  // `/assets/:file` + `/open-mercato.svg`, and the SPA shell responder used by the catch-all at
+  // the bottom of this function. Both now live in `./shell-routes.ts` — the SAME module
+  // `supervisor/server.ts` mounts, so the login host and every org host serve byte-identical
+  // bytes from byte-identical paths (see that module's own doc comment for the phase-6/7 defect
+  // that forced the extraction: the supervisor served no shell, so `/auth/callback`'s redirect to
+  // `/onboarding` 404'd and the installer's own verify step could never pass).
+  app.route('/', cockpitAssetRoutes());
 
   // ---- meta ----------------------------------------------------------------
   // CORS — deliberately for /api/health ONLY (spec 011): the bookmarklets
@@ -2573,16 +2542,96 @@ export function createApp(deps: ServerDeps) {
   };
 
   /**
-   * Attach `teamId`/`teamName` to registry entries from `<CEZ_HOME>/identity/*.json`'s
-   * `project_teams` (Phase 5, D5: "Team is metadata on a project used for grouping and filtering,
-   * NOT a scope"). The ONE place either field is ever put on a `ProjectListEntry` — both the GET
-   * listing and the POST registration answer through this, so the two cannot report a different
-   * team for the same root.
+   * D4's root→org registry (`<CEZ_HOME>/identity/*.json`'s `project_teams`/`teams` tables),
+   * abstracted behind ONE seam every D4 call site below goes through — never `IdentityStore`
+   * directly, and never a second, independent lookup. This is what the spec's phase-6 amendment
+   * to D4 asks for: "the phase-5 in-process check must be REPLACED by the supervisor's mapping,
+   * not joined by it" — per-org `CEZ_HOME`s make each org process blind to every other org's
+   * `project_teams` table, so a local `IdentityStore.open(identityDir())` call from an org process
+   * would not error, it would silently start a SECOND, empty table, reinstating the exact
+   * leaseless-`RunStore` history loss D4 exists to prevent, with every gate green. One seam here
+   * means a local read and a remote read can never quietly disagree about the same root.
    *
-   * **`principal.kind === 'local'` returns `projects` untouched, by identity.** No dynamic import
-   * of `../auth/identity-store.ts`, no `identityDir()` call, no `existsSync` — D1's "unset means
-   * zero I/O" and D7's "`CEZ_AUTH` unset ⇒ the module is never imported" both still hold literally,
-   * and the auth-off listing payload is byte-identical to the pre-Phase-5 build.
+   * Which implementation answers is `resolveAuthProvider()`, read fresh on every call — the same
+   * "`CEZ_AUTH` is read per request" posture this file already documents at its `/api/*` auth
+   * middleware. `'supervisor'` (phase 6+, D10: an org process running behind the supervisor) asks
+   * the supervisor over HTTP (`supervisor/registry-client.ts`); every other session-carrying
+   * provider (`oidc`/`google`, the phase 1-5 single-process deployment, and every existing test in
+   * `projects-api.test.ts`, none of which set `CEZ_AUTH`) keeps reading the SAME local
+   * `IdentityStore` it always has — unchanged behavior, unchanged file, unchanged tests.
+   *
+   * Both implementations return the exact same async shape (never a mix of sync reads and async
+   * writes, unlike `IdentityStore`'s own public methods) — the local one is a thin `async` wrapper,
+   * not a second construction of the contract. `createProjectTeam` returns a discriminated result
+   * rather than throwing an error type specific to either implementation, so `registerFolder`'s
+   * claim block below has exactly one error-handling shape regardless of which one answered.
+   */
+  interface ProjectTeamRegistry {
+    listProjectTeams(filter: { orgId?: string; teamId?: string }): Promise<ProjectTeam[]>;
+    listTeams(orgId: string): Promise<Team[]>;
+    getTeamById(teamId: string): Promise<Team | undefined>;
+    getProjectTeam(root: string): Promise<ProjectTeam | undefined>;
+    createProjectTeam(input: { projectRoot: string; orgId: string; teamId: string }): Promise<
+      | { ok: true; projectTeam: ProjectTeam }
+      | { ok: false; code: 'org-not-found' | 'team-not-found' | 'team-org-mismatch' | 'project-root-taken' }
+    >;
+    deleteProjectTeam(root: string): Promise<boolean>;
+  }
+
+  /** The phase 1-5 implementation, wrapped to the async shape above — every check and every write
+   *  is byte-for-byte what `IdentityStore` already did; only the calling convention changed. */
+  const openLocalProjectTeamRegistry = async (): Promise<ProjectTeamRegistry> => {
+    const { IdentityStore, IdentityStoreError } = await import('../auth/identity-store.ts');
+    const store = IdentityStore.open(identityDir());
+    return {
+      listProjectTeams: async (filter) => store.listProjectTeams(filter),
+      listTeams: async (orgId) => store.listTeams(orgId),
+      getTeamById: async (teamId) => store.getTeamById(teamId),
+      getProjectTeam: async (root) => store.getProjectTeam(root),
+      createProjectTeam: async (input) => {
+        try {
+          const projectTeam = await store.createProjectTeam(input);
+          return { ok: true, projectTeam };
+        } catch (err) {
+          if (
+            err instanceof IdentityStoreError &&
+            (err.code === 'org-not-found' ||
+              err.code === 'team-not-found' ||
+              err.code === 'team-org-mismatch' ||
+              err.code === 'project-root-taken')
+          ) {
+            return { ok: false, code: err.code };
+          }
+          throw err;
+        }
+      },
+      deleteProjectTeam: async (root) => store.deleteProjectTeam(root),
+    };
+  };
+
+  /** `principal.kind === 'local'` (`CEZ_AUTH` unset) never reaches this — every call site below
+   *  guards on `principal.kind === 'session'` first, exactly as it did before this seam existed —
+   *  so D1's "unset means zero I/O" and D7's "the module is never imported" both hold literally:
+   *  this function is never even called on the auth-off path, let alone the dynamic imports inside
+   *  either branch it can reach. */
+  const openProjectTeamRegistry = async (): Promise<ProjectTeamRegistry> => {
+    if (resolveAuthProvider(process.env) === 'supervisor') {
+      const { openRegistryClient } = await import('../supervisor/registry-client.ts');
+      return openRegistryClient();
+    }
+    return openLocalProjectTeamRegistry();
+  };
+
+  /**
+   * Attach `teamId`/`teamName` to registry entries (Phase 5, D5: "Team is metadata on a project
+   * used for grouping and filtering, NOT a scope"). The ONE place either field is ever put on a
+   * `ProjectListEntry` — both the GET listing and the POST registration answer through this, so
+   * the two cannot report a different team for the same root.
+   *
+   * **`principal.kind === 'local'` returns `projects` untouched, by identity.** No call to
+   * `openProjectTeamRegistry()` at all — D1's "unset means zero I/O" and D7's "`CEZ_AUTH` unset ⇒
+   * the module is never imported" both still hold literally, and the auth-off listing payload is
+   * byte-identical to the pre-Phase-5 build.
    *
    * **Annotates; deliberately does NOT filter.** Under D4 cross-org isolation is an OS process
    * boundary that phase 6 delivers, and the spec's Risks section names shipping tenancy-shaped
@@ -2590,18 +2639,30 @@ export function createApp(deps: ServerDeps) {
    * every other route stays open would read as an isolation control without being one. A root
    * claimed by a DIFFERENT org does stay unannotated, though — `listProjectTeams` is filtered to
    * the caller's own org, so another org's team id and name are never handed out.
+   *
+   * **Best-effort, not a security check.** Unlike `mayActOnRoot` below, this only decorates a
+   * listing — a registry that cannot be reached (the phase 6+ HTTP path) degrades to the
+   * unannotated listing rather than failing the whole request, matching every other
+   * "unreadable workspace — degrade" read already in this file.
    */
   const withTeams = async (projects: ProjectListEntry[], principal: Principal): Promise<ProjectListEntry[]> => {
     if (principal.kind !== 'session' || projects.length === 0) return projects;
-    const { IdentityStore } = await import('../auth/identity-store.ts');
-    const identityStore = IdentityStore.open(identityDir());
-    // Two whole-table reads, never one lookup per project: `IdentityStore` keeps no in-memory
-    // cache and re-parses `identity.json` on EVERY read (its own module doc explains why that is
-    // deliberate), so a per-entry `getProjectTeam` would re-parse the file once per registered
-    // project on every sidebar render.
-    const claims = new Map(identityStore.listProjectTeams({ orgId: principal.orgId }).map((row) => [row.projectRoot, row.teamId]));
-    if (claims.size === 0) return projects;
-    const teamNames = new Map(identityStore.listTeams(principal.orgId).map((team) => [team.id, team.name]));
+    let claims: Map<string, string>;
+    let teamNames: Map<string, string>;
+    try {
+      const registry = await openProjectTeamRegistry();
+      // Two whole-table reads, never one lookup per project: the local `IdentityStore` keeps no
+      // in-memory cache and re-parses `identity.json` on EVERY read (its own module doc explains
+      // why that is deliberate), so a per-entry `getProjectTeam` would re-parse the file once per
+      // registered project on every sidebar render — and the remote path pays a round trip per
+      // call, which the same batching avoids paying once per project too.
+      const rows = await registry.listProjectTeams({ orgId: principal.orgId });
+      if (rows.length === 0) return projects;
+      claims = new Map(rows.map((row) => [row.projectRoot, row.teamId]));
+      teamNames = new Map((await registry.listTeams(principal.orgId)).map((team) => [team.id, team.name]));
+    } catch {
+      return projects;
+    }
     return projects.map((project) => {
       // Keyed on the realpath both sides normalize to: `registerProject` stores `normalizeRoot`'s
       // output as `root`, and `createProjectTeam` realpaths its input again (idempotent on an
@@ -2636,23 +2697,53 @@ export function createApp(deps: ServerDeps) {
    * behaviour", it is data loss.
    *
    * `principal.kind !== 'session'` (`CEZ_AUTH` unset) returns `true` having done ZERO I/O — no
-   * dynamic import, no `identityDir()` — so D1/D7 hold exactly as they do for `withTeams`.
+   * call to `openProjectTeamRegistry()` — so D1/D7 hold exactly as they do for `withTeams`.
+   *
+   * **This IS the D4 boundary, not an annotation** (ADDED phase 6, D10) — unlike `withTeams`'s
+   * best-effort decoration, a registry that cannot be reached must refuse, never silently allow: a
+   * caught error here answers `false`, the exact same refusal a genuinely cross-org claim gets, so
+   * an unreachable supervisor fails CLOSED rather than opening the boundary it exists to enforce.
    */
   const mayActOnRoot = async (root: string, principal: Principal): Promise<boolean> => {
     if (principal.kind !== 'session') return true;
-    const { IdentityStore } = await import('../auth/identity-store.ts');
-    const claim = IdentityStore.open(identityDir()).getProjectTeam(root);
-    return claim === undefined || claim.orgId === principal.orgId;
+    try {
+      const claim = await (await openProjectTeamRegistry()).getProjectTeam(root);
+      return claim === undefined || claim.orgId === principal.orgId;
+    } catch {
+      return false;
+    }
   };
 
-  /** Release this root's `project_teams` claim after a successful unregistration — see
-   *  `IdentityStore#deleteProjectTeam`'s own doc comment for why leaving it behind is a bug and
-   *  not merely untidy (the orphan makes a later re-registration silently inherit the old team).
-   *  Same zero-I/O auth-off contract as `mayActOnRoot` above. */
+  /**
+   * Release this root's `project_teams` claim after a successful unregistration — see
+   * `IdentityStore#deleteProjectTeam`'s own doc comment for why leaving it behind is a bug and not
+   * merely untidy (the orphan makes a later re-registration silently inherit the old team). Same
+   * zero-I/O auth-off contract as `mayActOnRoot` above. Unlike `withTeams`, a failure here is
+   * deliberately NOT swallowed: it propagates, so the caller sees a 500 rather than a silently
+   * orphaned claim.
+   *
+   * **The transient-failure window is closed one layer down (ADDED 2026-08-07, phase 6/7 repair
+   * stage), not here.** Before phase 6 this was a local write behind D7's `O_EXCL` lease, where a
+   * failure meant something was genuinely wrong with the filesystem. It is now a 5 s `fetch` to
+   * another process, where a single blip — supervisor mid-restart, a `systemctl reload`, a
+   * momentarily saturated loopback — is an ordinary event that would orphan the claim. The retry
+   * lives in `supervisor/registry-client.ts#deleteProjectTeam`, which owns `RegistryClientError`
+   * and can therefore retry only the transport failure (`unreachable`) rather than duck-typing an
+   * error class this module deliberately does not import (D7: `CEZ_AUTH` unset ⇒ the supervisor
+   * module is never even loaded, which a top-level `import` here would break).
+   *
+   * **Why the ordering above it stays as it is.** The release runs AFTER `removeProject`, not
+   * before, and both orderings have a failure mode — but they are not equally bad. Release-first
+   * with a failing `removeProject` drops a live claim on a root this process is still serving, so
+   * another org can take it: two processes over one leaseless `.ai/cezar`, which is D4's silent
+   * run-history loss. Remove-first with a failing release leaves an orphan that the SAME org can
+   * still re-register (`mayActOnRoot` compares `claim.orgId`, so no other org can), inheriting a
+   * stale team. A recoverable annotation bug beats unrecoverable data loss, so the window gets
+   * closed by retrying rather than by reversing the ordering.
+   */
   const releaseRootClaim = async (root: string, principal: Principal): Promise<void> => {
     if (principal.kind !== 'session') return;
-    const { IdentityStore } = await import('../auth/identity-store.ts');
-    await IdentityStore.open(identityDir()).deleteProjectTeam(root);
+    await (await openProjectTeamRegistry()).deleteProjectTeam(root);
   };
 
   /** The one wording both write verbs answer a cross-org attempt with — identical to
@@ -2997,34 +3088,21 @@ export function createApp(deps: ServerDeps) {
     }
 
     // D4 hard constraint (Phase 5): a project root belongs to exactly ONE org.
-    // `principal.kind === 'local'` skips every line in this block — no dynamic
-    // import of `identity-store.ts`, no `identityDir()` touch — so D7's "the
-    // module is never imported" while `CEZ_AUTH` is unset still holds, and the
-    // auth-off registration path is untouched.
-    //
-    // A second `IdentityStore` instance, deliberately: `auth/session.ts`'s own
-    // doc comment on why `auth/routes.ts` opens its own applies identically
-    // here — there is no in-memory cache on either side, so a second reader
-    // at the same directory is exactly as consistent as reaching into a
-    // shared singleton would be.
-    type IdentityStoreModule = typeof import('../auth/identity-store.ts');
-    // `IdentityStore`'s constructor is private (`static open()` is the only way to build one — see
-    // its own doc comment), so `InstanceType<typeof IdentityStore>` cannot name it; the return type
-    // of the factory method it publishes can.
-    type IdentityStoreInstance = ReturnType<IdentityStoreModule['IdentityStore']['open']>;
-    let identityMod: IdentityStoreModule | undefined;
-    let identityStore: IdentityStoreInstance | undefined;
+    // `principal.kind === 'local'` skips every line in this block — no call to
+    // `openProjectTeamRegistry()` at all — so D7's "the module is never
+    // imported" while `CEZ_AUTH` is unset still holds, and the auth-off
+    // registration path is untouched.
+    let registry: ProjectTeamRegistry | undefined;
     let claimedTeamId: string | undefined;
     if (principal.kind === 'session') {
-      identityMod = await import('../auth/identity-store.ts');
-      identityStore = identityMod.IdentityStore.open(identityDir());
+      registry = await openProjectTeamRegistry();
       if (teamId !== undefined) {
-        const team = identityStore.getTeamById(teamId);
+        const team = await registry.getTeamById(teamId);
         if (!team || team.orgId !== principal.orgId) {
           return { status: 400, body: { error: `unknown team: ${teamId}` } };
         }
       }
-      const existingClaim = identityStore.getProjectTeam(real);
+      const existingClaim = await registry.getProjectTeam(real);
       if (existingClaim && existingClaim.orgId !== principal.orgId) {
         // Refused BEFORE `registerProject` runs: this request must not leave
         // a workspace-registry row behind for a root it was never allowed to
@@ -3052,23 +3130,23 @@ export function createApp(deps: ServerDeps) {
       };
     }
 
-    if (identityStore && identityMod) {
+    if (registry) {
       // Claim an unclaimed root (brand new, or a legacy root registered
       // before auth existed) for the signing-in org. `createProjectTeam`
       // re-checks project-root-taken itself, atomically, inside its write
-      // lease (D7) — the pre-check above is a UX nicety (avoid the registry
-      // write above for a request we already know will be refused); THIS is
-      // the actual guarantee, and it is what catches a genuine race against a
-      // concurrent claim from another org landing between the two reads.
-      if (!identityStore.getProjectTeam(project.root)) {
-        try {
-          await identityStore.createProjectTeam({
-            projectRoot: project.root,
-            orgId: principal.orgId,
-            teamId: claimedTeamId ?? principal.teamId,
-          });
-        } catch (err) {
-          if (err instanceof identityMod.IdentityStoreError && err.code === 'project-root-taken') {
+      // lease (D7, or the supervisor's equivalent under D10) — the pre-check
+      // above is a UX nicety (avoid the registry write above for a request we
+      // already know will be refused); THIS is the actual guarantee, and it
+      // is what catches a genuine race against a concurrent claim from
+      // another org landing between the two reads.
+      if (!(await registry.getProjectTeam(project.root))) {
+        const created = await registry.createProjectTeam({
+          projectRoot: project.root,
+          orgId: principal.orgId,
+          teamId: claimedTeamId ?? principal.teamId,
+        });
+        if (!created.ok) {
+          if (created.code === 'project-root-taken') {
             return {
               status: 409,
               body: {
@@ -3076,7 +3154,13 @@ export function createApp(deps: ServerDeps) {
               },
             };
           }
-          throw err;
+          // `org-not-found`/`team-not-found`/`team-org-mismatch` are unreachable here in
+          // practice — `principal.orgId` and `claimedTeamId` were already validated against
+          // this SAME registry a few lines up — but the discriminated result forces this
+          // branch to exist rather than silently swallowing a code this call site never
+          // expects, instead of an `instanceof` check on an error type specific to whichever
+          // implementation answered.
+          throw new Error(`unexpected project-team registration failure: ${created.code}`);
         }
       }
       // Read the answer BACK through the same `withTeams` the GET listing uses, rather than
@@ -5609,7 +5693,7 @@ export function createApp(deps: ServerDeps) {
   // an unknown API path must never answer with HTML.
   // Without a web/dist build this serves the built-in build-hint page (dev-only
   // state — the published tarball ships web/dist), never a 404.
-  routed.get('*', (c) => serveShell(c) ?? c.notFound());
+  routed.get('*', (c) => serveCockpitShell(c) ?? c.notFound());
 
   return routed;
 }
@@ -5776,7 +5860,15 @@ export function verifyWsUpgrade(req: IncomingMessage, bindHost?: string, session
     // on is a boot-wiring bug, not "auth is actually off", and an unauthenticated upgrade is
     // refused outright rather than admitted at reduced trust — this is the negative control D6
     // asks for, exercising the socket itself rather than an HTTP route beside it.
-    if (!sessionResolver || !sessionResolver.resolveFromCookieHeader(req.headers.cookie)) return false;
+    // Same two inputs as `requirePrincipal`'s own call above, read off the RAW `IncomingMessage`
+    // headers this path gets instead of Hono's request (D10 — the org process's forwarded
+    // principal must gate the socket too, or `CEZ_AUTH=supervisor` would refuse every upgrade
+    // while admitting every HTTP request, which is a bypass in the opposite direction).
+    const forwarded = readForwardedPrincipalHeaders((name) => {
+      const value = req.headers[name];
+      return Array.isArray(value) ? value[0] : value;
+    });
+    if (!sessionResolver || !sessionResolver.resolveFromCookieHeader(req.headers.cookie, forwarded)) return false;
   }
   const origin = req.headers.origin;
   if (origin === undefined) return { trusted: true }; // non-browser client — no Origin to spoof
@@ -5844,12 +5936,6 @@ function hostnameOfOrigin(origin: string): string | null {
   } catch {
     return null;
   }
-}
-
-function resolveWebDir(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  // here = <pkg>/dist/server (built) or <pkg>/src/server (tsx dev).
-  return join(here, '..', '..', 'web');
 }
 
 /**

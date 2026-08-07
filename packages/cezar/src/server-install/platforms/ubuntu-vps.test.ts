@@ -3,8 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  describeBootGateUpgradeRisk,
   isNpxExecStart,
   nginxVhost,
+  parseSystemdEnvironmentProperty,
   refreshNpxCacheForRedeploy,
   serviceExecStart,
   systemdUnit,
@@ -285,6 +287,66 @@ describe('systemdUnit', () => {
     expect(resolveAuthBootGate(env).proceed).toBe(true);
     const { CEZ_ALLOW_UNAUTHENTICATED: _dropped, ...withoutFlag } = env;
     expect(resolveAuthBootGate(withoutFlag).proceed).toBe(false);
+  });
+
+  /**
+   * **The other half of that pairing: what an ALREADY-PROVISIONED host looks like.** ADDED
+   * 2026-08-07 (invariant 6 — "any change to a generated unit must be checked against what an
+   * EXISTING install looks like, not only a fresh one").
+   *
+   * The test above proves a FRESH install boots. It cannot see the upgrade, and the upgrade is
+   * where the damage was: the released `@open-mercato/cezar` 0.9.2 installer wrote exactly
+   * `Environment=CEZ_REMOTE=1` plus `Environment=PATH=…`, and `redeploy()` — the only thing
+   * `server-deploy` runs — never reaches `autostartStep`, the only writer of the unit. So the new
+   * binary booted against the old unit, `runAuthBootGate` exited 1, and `Restart=on-failure`
+   * looped. The env literal below is that released unit's, transcribed from
+   * `git show v0.9.2:…/ubuntu-vps.ts`, not from today's generator — a fixture derived from the
+   * current code could not have caught this.
+   */
+  describe('upgrade safety for a host installed before the boot gate existed', () => {
+    /** Verbatim `systemctl show cezar -p Environment` for a unit written by the RELEASED v0.9.2. */
+    const RELEASED_V092_SHOW = 'Environment=CEZ_REMOTE=1 PATH=/usr/local/bin:/usr/bin:/bin\n';
+
+    it('parses systemctl\'s Environment property the way systemd emits it', () => {
+      expect(parseSystemdEnvironmentProperty(RELEASED_V092_SHOW)).toEqual({
+        CEZ_REMOTE: '1',
+        PATH: '/usr/local/bin:/usr/bin:/bin',
+      });
+      // A unit with no Environment at all, and unparseable output, both answer {} — which pushes
+      // the risk check toward "warn", the safe direction.
+      expect(parseSystemdEnvironmentProperty('')).toEqual({});
+      expect(parseSystemdEnvironmentProperty('ExecStart={ path=/usr/bin/node ; }')).toEqual({});
+    });
+
+    it('names the risk for a released-v0.9.2 unit, and stays silent for one this version wrote', () => {
+      const stale = parseSystemdEnvironmentProperty(RELEASED_V092_SHOW);
+      // The premise: that environment genuinely refuses to boot. Without this the assertion below
+      // would pass just as well against a check that always returned a string.
+      expect(resolveAuthBootGate(stale).proceed).toBe(false);
+
+      const warning = describeBootGateUpgradeRisk(stale, 'cezar.service');
+      expect(warning).toBeDefined();
+      expect(warning).toContain('CEZ_ALLOW_UNAUTHENTICATED');
+      expect(warning).toContain('--reconfigure autostart');
+
+      // Today's generator, round-tripped through systemd's own property format: no warning.
+      const fresh = systemdUnit('/srv/app', 4321, 'system', '/usr/local/bin/cezar');
+      const freshShow =
+        'Environment=' +
+        fresh
+          .split('\n')
+          .filter((l) => l.startsWith('Environment='))
+          .map((l) => l.slice('Environment='.length))
+          .join(' ') +
+        '\n';
+      expect(describeBootGateUpgradeRisk(parseSystemdEnvironmentProperty(freshShow), 'cezar.service')).toBeUndefined();
+    });
+
+    it('a LOOPBACK unit (not hosted) is never warned about — the gate only refuses hosted', () => {
+      // `systemdUnit` omits both flags for a loopback bind, and D1's gate proceeds there. Warning
+      // an operator whose host is fine would train them to ignore the message that matters.
+      expect(describeBootGateUpgradeRisk({ PATH: '/usr/bin' }, 'cezar.service')).toBeUndefined();
+    });
   });
 
   it('stays flag-free for loopback so existing units are unchanged', () => {

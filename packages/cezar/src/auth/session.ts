@@ -128,16 +128,56 @@ export function readSessionIdFromCookieHeader(header: string | undefined): strin
   return candidate;
 }
 
+/**
+ * `Domain=` for the session cookie — `CEZ_SESSION_COOKIE_DOMAIN`, unset preserving today's
+ * host-only cookie byte-for-byte (D10: "a single-process phase 1-5 deployment sets nothing and is
+ * untouched").
+ *
+ * **ADDED 2026-08-07 at the phase 6/7 repair stage. The variable was generated and read by
+ * nothing.** `hetzner/systemd-unit.ts` wrote `Environment=CEZ_SESSION_COOKIE_DOMAIN=.<base>` and
+ * its own test asserted the line, but nothing here ever looked at `process.env`, so the login host
+ * set a HOST-ONLY cookie. D10 makes this load-bearing in its own words: the `auth_request` pattern
+ * "only works when that cookie is visible on every org's hostname, which requires
+ * `Domain=.<base-domain>`". Without it the browser never sends the cookie to `acme.<base>`,
+ * nginx's subrequest carries none, and every request to every org host 401s — permanently, and
+ * independently of the resolver defect the same repair stage fixed. That unit-file test was a
+ * pairing test in shape only: it compared a generator against a hand-written string and fed
+ * nothing back into the code that has to consume the value, unlike `ubuntu-vps.test.ts`, which
+ * runs its generated `Environment=` lines through the real `resolveAuthBootGate`.
+ *
+ * Read per call, not captured at module load, for the same reason `resolveAuthProvider` is read
+ * per request throughout this codebase. Empty/whitespace reads as unset — an operator who cleared
+ * the variable meant "host-only", not `Domain=`.
+ *
+ * A malformed value is deliberately NOT validated here: `Set-Cookie` is generated, never parsed,
+ * by this process, and the one writer is `server-install`'s own generator, which validates the
+ * hostname it derives it from (`HOSTNAME_RE`). What IS refused is a value carrying a character
+ * that could inject a second cookie attribute (`;`) or a header (`\r`/`\n`) — cheap, and the only
+ * failure mode that would turn a misconfiguration into a vulnerability.
+ */
+const UNSAFE_COOKIE_DOMAIN = /[\s;,"\\]/;
+
+export function sessionCookieDomainAttribute(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = (env.CEZ_SESSION_COOKIE_DOMAIN ?? '').trim();
+  if (!raw || UNSAFE_COOKIE_DOMAIN.test(raw)) return '';
+  return `; Domain=${raw}`;
+}
+
 function serializeSessionCookie(id: string, ttlMs: number): string {
   const maxAgeSeconds = Math.max(0, Math.floor(ttlMs / 1000));
-  return `${SESSION_COOKIE_NAME}=${id}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly; Secure; SameSite=Lax`;
+  return `${SESSION_COOKIE_NAME}=${id}; Path=/${sessionCookieDomainAttribute()}; Max-Age=${maxAgeSeconds}; HttpOnly; Secure; SameSite=Lax`;
 }
 
 /** The `Set-Cookie` value that clears the session cookie in the browser. On its own this is only
  *  half of "logout" — D6/this unit's task explicitly call out that logout must invalidate
- *  server-side too, which is `destroySession`; `../auth/routes.ts`'s `/auth/logout` calls both. */
+ *  server-side too, which is `destroySession`; `../auth/routes.ts`'s `/auth/logout` calls both.
+ *
+ *  Carries the SAME `Domain=` as `serializeSessionCookie` above, and that is not cosmetic: a
+ *  browser matches a clearing `Set-Cookie` on (name, domain, path), so a host-only clear cannot
+ *  remove a domain-scoped cookie — logout would appear to succeed and leave the session cookie in
+ *  place on every org host. One helper, called by both, so the pair cannot drift. */
 export function logoutCookie(): string {
-  return `${SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
+  return `${SESSION_COOKIE_NAME}=; Path=/${sessionCookieDomainAttribute()}; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
 }
 
 // ---- session service ----------------------------------------------------------------------------

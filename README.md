@@ -459,16 +459,45 @@ Useful environment variables:
 | `CEZ_OIDC_CLIENT_ID`, `CEZ_OIDC_CLIENT_SECRET` | The registered client. Authorization Code + PKCE; `state` and `nonce` are both verified, and `state` is additionally bound to the browser that started the flow by a short-lived `HttpOnly` cookie. |
 | `CEZ_OIDC_GROUP_CLAIM=groups`, `CEZ_OIDC_GROUP_ROLE_MAP=cezar-admins=admin` | Optional group → role mapping, defaulting to none. Only `admin` and `member` can be mapped; an unrecognised group grants nothing, and membership is never inferred from a claim you did not map. |
 | `CEZ_AUTH_BOOTSTRAP_TOKEN`, `CEZ_AUTH_BOOTSTRAP_OPEN=1` | **Who may claim a fresh deployment.** The first user to name an organization becomes its owner, and an owner can run shell commands on this host — so with `CEZ_AUTH=google` the issuer is pinned but the *audience* is every Google account on the internet, and arriving first must not be enough. While `CEZ_AUTH` is set and no organization exists yet, cezar mints a random **bootstrap code** at every start and prints it to its own log (`journalctl -u cezar`); the onboarding wizard asks for it and refuses with 403 without it. **Nothing to set for the default.** `CEZ_AUTH_BOOTSTRAP_TOKEN` pins your own value instead of the generated one; `CEZ_AUTH_BOOTSTRAP_OPEN=1` (that exact value) opts back into "whoever signs in first", the way `CEZ_ALLOW_UNAUTHENTICATED` opts out of the boot refusal. The code stops being printed, and stops granting anything, the moment the organization exists. |
+| `CEZ_AUTH=supervisor` | **Set on an ORG's process only** (phase 6/7, D4/D10) — never by hand outside a `server-install --platform hetzner`-provisioned host. Means "trust the supervisor's signed, forwarded principal" rather than terminate OIDC/Google itself; the supervisor's own process sets `CEZ_AUTH=oidc`/`google` instead. Requires `CEZ_SUPERVISOR_PORT` and `CEZ_SUPERVISOR_SECRET`. |
+| `CEZ_SUPERVISOR_PORT`, `CEZ_SUPERVISOR_SECRET` | Where an org's process reaches its supervisor (always loopback, same host — a bare port) and the per-org shared secret it authenticates those calls with, to ask "who owns this project root" (D4's root→org registry). This is the phase-6 REPLACEMENT for the phase 1-5 in-process `IdentityStore` lookup: an org process's own `CEZ_HOME` holds no `identity/` directory under D4's per-org uid boundary, so this is the only way it can answer that question. The secret is minted at provisioning and delivered via a root-owned `EnvironmentFile`, never a plain `Environment=` line. Both required when `CEZ_AUTH=supervisor`. |
+| `CEZ_PORT_STRICT=1` (or `--port-strict`) | Make the requested port a hard requirement instead of `serve`'s normal preference: when it is already in use, cezar refuses to boot rather than silently binding the next free one. Off by default — the npm-default `cezar serve` still drifts to a free port exactly as before. `server-install --platform hetzner` sets this on every ORG unit's systemd `Environment=` (never the supervisor's own), because that org's nginx `proxy_pass` is a specific loopback port baked in at provisioning time: a silently drifted bind there is not a startup failure, it is another org's traffic routed into the wrong process (D10). |
+| `CEZ_SESSION_COOKIE_DOMAIN=.cezar.example.com` | `Domain=` for the session cookie. **Unset is the default and is host-only**, exactly as every release before multi-org hosting behaved — leave it alone on a single-host install. Multi-org needs it because the supervisor sets the cookie on `login.<base>` while each org answers on `<org>.<base>`: a host-only cookie is never sent to an org hostname, nginx's `auth_request` subrequest sees no cookie, and every org host 401s in a redirect loop. Must be the shared base domain, and it is a real widening — every subdomain of `<base>` now receives the cookie, so that base domain has to be yours alone. `server-install --platform hetzner` writes it on the **supervisor's** unit only (`.<base>`), because the supervisor is the only process that issues or clears a session cookie — an org's process never touches one, it is handed an already-verified principal. |
+| `CEZ_SUPERVISOR_ADMIN_TOKEN` | **The supervisor's own credential**, minted at provisioning into its root-owned `EnvironmentFile` — you never type it. It authorizes the `/internal/*` provisioning calls no org's per-org secret may make (reading the org roster, registering and deprovisioning an org's process), which is how `server-install --platform hetzner --org-slug <slug>` finishes wiring an org up without an operator pasting secrets. It exists because that first registration is genuinely circular: the call that hands over an org's secret cannot authenticate with it. **Unset closes the admin surface** rather than opening it — with no token there is no admin caller and every admin-only route answers 403. |
 
-> **Signing in is not tenancy — yet.** With `CEZ_AUTH` set, a hosted cezar is a
-> **single-organization** deployment with a login screen. Everyone who signs in shares one
-> process, one filesystem, and the host's own `claude` / `codex` credentials — so
-> **members of an organization can run code as one another. Invite accordingly.** That is
-> the honest description of what exists today: everybody in an org already has commit
-> rights to the same repositories, so the shared shell adds little *there*, but it would be
-> catastrophic across organizations. The real boundary — one process, one unix user and one
-> `CEZ_HOME` per organization, with a supervisor routing requests — is a later phase, and
-> until it ships cezar should not be pointed at customers who must not reach each other.
+> **Signing in is not tenancy — a hosted cezar still holds exactly one organization, and
+> that's true for a different reason now than it used to be.** `cezar supervisor` +
+> `server-install --platform hetzner` (above) give cezar a real cross-org boundary: one
+> unix user, one `CEZ_HOME`, one systemd unit per organization, with the supervisor and
+> nginx routing each request to its org's own process by hostname and a signed,
+> per-org-secret header (`CEZ_AUTH=supervisor`, `CEZ_SUPERVISOR_SECRET`, above) — not a
+> plan, built with its own test suite. Two organizations provisioned this way share no
+> filesystem and no process.
+>
+> **But nothing creates a second organization.** `POST /auth/onboarding/org` — the only
+> place an `Org` row is ever created — refuses once *any* org exists on the deployment,
+> full stop, and no route or command calls the store method that would create a second
+> one. The supervisor's own `/internal/orgs` and `/internal/orgs/:slug` are reads (`GET`);
+> there is no create route there either.
+>
+> Provisioning a second org's *infrastructure*, on the other hand, is fully automated:
+> `server-install --platform hetzner --org-slug <slug>` generates that org's unix user,
+> secret and systemd unit **and registers it with the supervisor itself** (an `org-register`
+> step that reads both the admin token and the org secret out of their root-owned `0600`
+> files, so neither is printed or passed in `argv`). It resolves `<slug>` against the
+> supervisor first and aborts if that org does not exist — which is exactly the wall you
+> hit: **the infrastructure for org number two can be provisioned; the organization it
+> would serve cannot be created.** So today a hosted cezar still holds **exactly one**
+> organization — the isolation boundary is real, and there is nothing on the other side
+> of it. This is a known, tracked gap, not an oversight to work around (see the spec's D4
+> addendum, `.ai/specs/2026-08-06-org-team-auth-onboarding.md`).
+>
+> **Within that one organization, sharing is real and said out loud, and phase 6/7
+> doesn't touch it.** Everyone who signs in to an org still shares one process, one
+> filesystem, and the host's own `claude`/`codex` credentials — so **members of an
+> organization can run code as one another. Invite accordingly.** The boundary above sits
+> *between* organizations; it was never meant to, and does not, separate one member of an
+> org from another.
 >
 > **And "everyone who signs in" is currently *one person*.** The first user to name an
 > organization owns it (with the bootstrap code above); everyone after that is told they
@@ -575,6 +604,7 @@ none of its own. [Details →](docs/server-install/ubuntu-vps.md#the-box-already
 | Ubuntu / Debian VPS | `ubuntu-vps` | nginx + Let's Encrypt HTTPS, htpasswd login, systemd | [Step-by-step →](docs/server-install/ubuntu-vps.md) |
 | Ubuntu + existing proxy | `ubuntu-vps --external-proxy` | your Dokploy/Traefik/Caddy front; cezar ships the service only | [Step-by-step →](docs/server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy) |
 | macOS + ngrok | `macosx-ngrok` | ngrok tunnel + `--basic-auth`, launchd | [Step-by-step →](docs/server-install/macosx-ngrok.md) |
+| Hetzner (or any Ubuntu box), **one process per org** | `hetzner` | nginx + Let's Encrypt, **OIDC/Google sign-in** in front (`auth_request`, not `auth_basic`), one systemd unit and one unix user per organization | [Step-by-step →](docs/server-install/hetzner.md) |
 
 See the **[Remote access overview](docs/server-install/README.md)** for how it
 works and how to redeploy new versions.

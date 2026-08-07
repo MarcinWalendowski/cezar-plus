@@ -40,9 +40,40 @@ import type { AuthProvider } from '@open-mercato/cezar-contract';
 
 // ---- provider selection --------------------------------------------------------------------
 
-/** `'none'` never reaches this module — `../auth/session.ts`/`../auth/routes.ts` are only
- *  ever loaded once `resolveAuthProvider(process.env) !== 'none'` (see `src/index.ts`'s boot gate). */
-export type OidcProvider = Exclude<AuthProvider, 'none'>;
+/**
+ * The two providers that actually run the OIDC/PKCE flow (D9).
+ *
+ * **CORRECTED 2026-08-07 (phase 6/7 repair stage): spelled out, not derived.** This was
+ * `Exclude<AuthProvider, 'none'>`, and phase 6 widened `AuthProvider` with `'supervisor'` — so
+ * this type silently gained a third member, and `contract/health.ts`'s own new docblock claiming
+ * `OidcProvider` "stays `oidc | google` exactly" became false the moment it was written. Verified
+ * by probe at review: `const _: OidcProvider = 'supervisor'` type-checked. The compile-time guard
+ * that would have stopped `'supervisor'` reaching `resolveOidcConfig` was gone, which is why
+ * `../auth/routes.ts` compiles while passing `resolveAuthProvider`'s output straight in.
+ *
+ * A derived type is right when the two sets are the same set for a REASON; here they are the same
+ * set only by coincidence of there being no third value yet, and that coincidence expired. The
+ * exhaustiveness this loses is bought back by `authProviderCoverage` below, which fails to compile
+ * if a future `AuthProvider` member is neither an OIDC provider nor explicitly listed as
+ * non-OIDC — so adding a fourth provider is still a compile error somewhere, just at a place that
+ * forces a decision instead of guessing one.
+ */
+export type OidcProvider = 'oidc' | 'google';
+
+/** Every `AuthProvider` that is NOT an `OidcProvider`, named explicitly. */
+type NonOidcProvider = 'none' | 'supervisor';
+
+/** Compile-time exhaustiveness: if `AuthProvider` ever gains a member, this alias stops being
+ *  assignable and typecheck fails here — at the one place that has to decide whether the new
+ *  provider runs the OIDC flow. Never evaluated at runtime; the `void` keeps it from being an
+ *  unused-symbol lint error. */
+type AuthProviderCoverage = OidcProvider | NonOidcProvider;
+const _authProviderCoverage: AuthProvider extends AuthProviderCoverage
+  ? AuthProviderCoverage extends AuthProvider
+    ? true
+    : never
+  : never = true;
+void _authProviderCoverage;
 
 const GOOGLE_ISSUER = 'https://accounts.google.com';
 

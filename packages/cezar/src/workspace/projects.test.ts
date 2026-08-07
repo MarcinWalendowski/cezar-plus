@@ -14,6 +14,7 @@ import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from './config.ts';
 import {
+  RESERVED_PROJECT_IDS,
   allocateProjectSlug,
   clearProjectProbeCache,
   listProjects,
@@ -142,28 +143,55 @@ describe('workspace projects', () => {
       expect(c.id).toBe('web-3');
     });
 
+    /** Spelled out rather than derived from `RESERVED_PROJECT_IDS`, and then checked against it in
+     *  both directions below — deriving the loop from the set under test would make the set
+     *  unfalsifiable (delete an entry and the loop simply stops testing it, green). */
+    const EXPECTED_RESERVED = [
+      'default',
+      'new',
+      'settings',
+      'api',
+      'p',
+      'assets',
+      // auth/login/callback/o/t: added by spec 2026-08-06-org-team-auth-onboarding
+      // (D5) for the auth/onboarding routes and the future /o/<org>/, /t/<team>/
+      // segments.
+      'auth',
+      'login',
+      'callback',
+      // `onboarding`: added 2026-08-07 (repair stage) once phase 4 made `/onboarding` a real
+      // top-level cockpit segment, which the D5 reservation had not caught up with.
+      'onboarding',
+      'o',
+      't',
+      // `internal`: added 2026-08-07 (repair stage) — phase 7's generated org vhost declares
+      // `location /internal/ { internal; }`, so nginx 404s that prefix before the org process ever
+      // sees it. See `RESERVED_PROJECT_IDS`' own comment.
+      'internal',
+    ] as const;
+
     it('never allocates a reserved slug — a repo named default/ becomes default-2', async () => {
-      for (const reserved of [
-        'default',
-        'new',
-        'settings',
-        'api',
-        'p',
-        'assets',
-        // auth/login/callback/o/t: added by spec 2026-08-06-org-team-auth-onboarding
-        // (D5) for the auth/onboarding routes and the future /o/<org>/, /t/<team>/
-        // segments.
-        'auth',
-        'login',
-        'callback',
-        // `onboarding`: added 2026-08-07 (repair stage) once phase 4 made `/onboarding` a real
-        // top-level cockpit segment, which the D5 reservation had not caught up with.
-        'onboarding',
-        'o',
-        't',
-      ]) {
+      for (const reserved of EXPECTED_RESERVED) {
         const entry = await registerProject(makeDir('reserved', reserved));
         expect(entry.id).toBe(`${reserved}-2`);
+      }
+    });
+
+    it('the reserved set and the list exercised above are the SAME set, in both directions', () => {
+      // Adding a slug to `RESERVED_PROJECT_IDS` without exercising it here, or dropping one from
+      // the set while the list still names it, both fail here rather than passing quietly.
+      expect([...RESERVED_PROJECT_IDS].sort()).toEqual([...EXPECTED_RESERVED].sort());
+    });
+
+    it('every path prefix the generated org vhost carves out is reserved (D5)', () => {
+      // The mechanism, not a plausible proxy: these are the literal `location` prefixes
+      // `server-install/platforms/hetzner/nginx.ts` writes for an org hostname. `/internal/` is
+      // nginx-`internal;` (external 404) and `/auth/` proxies to the SUPERVISOR, so a project
+      // holding either slug is unreachable in hosted mode while working fine locally. If that
+      // generator grows a third carve-out, this list grows with it — and then this test fails
+      // until the slug is reserved too.
+      for (const prefix of ['internal', 'auth']) {
+        expect(RESERVED_PROJECT_IDS.has(prefix)).toBe(true);
       }
     });
 

@@ -1,3 +1,4 @@
+import { hetzner } from './platforms/hetzner.ts';
 import { macosxNgrok } from './platforms/macosx-ngrok.ts';
 import { ubuntuVps } from './platforms/ubuntu-vps.ts';
 import { PLATFORM_IDS, type PlatformId, type PlatformStrategy } from './types.ts';
@@ -10,6 +11,7 @@ import { PLATFORM_IDS, type PlatformId, type PlatformStrategy } from './types.ts
 const REGISTRY: Partial<Record<PlatformId, PlatformStrategy>> = {
   'ubuntu-vps': ubuntuVps,
   'macosx-ngrok': macosxNgrok,
+  hetzner: hetzner,
 };
 
 export function getStrategy(id: string): PlatformStrategy | undefined {
