@@ -1,4 +1,4 @@
-import { Hono, type Context } from 'hono';
+import { Hono, type Context, type Next } from 'hono';
 import {
   createOnboardingOrgInputSchema,
   renameOnboardingTeamInputSchema,
@@ -17,7 +17,9 @@ import {
   type BootstrapClaim,
 } from './bootstrap-claim.ts';
 import { IdentityStore, IdentityStoreError } from './identity-store.ts';
+import { invalidateLocalOrgIdentityCache } from './local-identity.ts';
 import { matchesOrgClaimToken } from './org-claim-token.ts';
+import { hasOrgScope } from './principal.ts';
 import { createRequireOrgAdmin, getOrgAdminPrincipal } from './require-org-admin.ts';
 import { createRequireSignedIn, getSignedInUser, resolveSignedInUser } from './require-signed-in.ts';
 import { sessionResolver } from './session.ts';
@@ -37,6 +39,16 @@ import type { Org, Team } from './types.ts';
  * by registering the SAME guard handler on both `/api/*` and `/auth/*`. This file's two mutating
  * routes ride that fix for free by living under `/auth/*` too — see
  * `onboarding-routes.test.ts`'s "mount point" suite, which proves it rather than assuming it.
+ *
+ * **CORRECTED 2026-08-07 by D13: "only when `CEZ_AUTH` names a provider" above is no longer
+ * true.** `server.ts` mounts `deps.onboardingRoutes` whenever the field is populated, and D13's
+ * local-mode branch (`../local-mode-boot.ts#buildLocalModeRoutes`, gated on
+ * `isLocalOrgModeActive`, never on `CEZ_AUTH` naming a provider) populates it on a loopback bind
+ * with `CEZ_AUTH` unset too — the npm zero-config default. So `GET /auth/onboarding`,
+ * `POST /auth/onboarding/org` and `PATCH /auth/onboarding/team` are mounted in BOTH cases D1's
+ * table distinguishes: an authenticated deployment, and a local one that has never set `CEZ_AUTH`
+ * at all. The reserved-segment and `originGuard` reasoning above holds unchanged in both cases —
+ * only the mounting *condition* was wrong.
  *
  * **Why this can't just be three more routes on `./routes.ts`'s `Hono`.** `routes.ts`'s own
  * module doc comment names exactly this gap and defers it: "a user who signs in with no existing
@@ -97,14 +109,56 @@ export type OnboardingIdentityStore = Pick<
 
 export interface OnboardingRouteDeps {
   /** D3's one resolver — see the module doc comment on why `PATCH /auth/onboarding/team` uses
-   *  this and the other two routes deliberately do not. */
+   *  this and the other two routes deliberately do not.
+   *
+   *  **D13 (phase 9 HTTP surface): also what `GET /auth/onboarding` reads for local mode.** In
+   *  local mode this is `./local-gates.ts#localSessionResolver` — never `null`, `kind: 'local'` —
+   *  wired by `src/index.ts` beside `localSignedInGate`/`localOrgAdminGate` below. Session mode's
+   *  cookie-based resolver keeps being threaded here unchanged. */
   readonly sessionResolver: SessionResolver;
   readonly identityStore: OnboardingIdentityStore;
   /** Who is allowed to be the first user (`./bootstrap-claim.ts`). Injected rather than read from
    *  the module singleton so a test can exercise all three modes without mutating the shared
    *  `process.env` (one global per vitest worker, the same reason `SessionServiceOptions.
-   *  authProvider` is injectable). Defaults to the process-lifetime claim. */
+   *  authProvider` is injectable). Defaults to the process-lifetime claim.
+   *
+   *  **D13: local mode supplies a LITERAL `{ required: false, mode: 'open' }` here, never the
+   *  imported `./bootstrap-claim.ts#bootstrapClaim` singleton.** That singleton is keyed on
+   *  `resolveAuthProvider(env) === 'none'` — true for BOTH loopback (this file's local mode) and
+   *  a hosted, `CEZ_ALLOW_UNAUTHENTICATED=1` deployment with no bind restriction. D13's own text
+   *  is explicit that the waiver must be keyed on the BIND (`capabilities.localHandoff`), not on
+   *  `CEZ_AUTH`, precisely so a future change to how these routes get mounted
+   *  cannot silently waive the deployment-wide code for a hosted, exposed instance. Local
+   *  mode's literal is constructed only inside the branch that has already checked
+   *  `isLocalOrgModeActive` — see `../local-mode-boot.ts#buildLocalModeRoutes`, the function
+   *  `src/index.ts` calls to do this wiring — never derived here from `CEZ_AUTH` again. */
   readonly bootstrapClaim?: BootstrapClaim;
+  /**
+   * D13's local-mode "signed in" gate (`./local-gates.ts#createRequireSignedInLocal`) —
+   * substitutes for the internally-built `createRequireSignedIn(identityStore)` on
+   * `POST /auth/onboarding/org` alone. Absent (every session-mode caller, and every pre-D13
+   * test) keeps EXACTLY today's construction — this is D13's "one implementation, two injected
+   * gates," not a second onboarding surface (see the module doc comment).
+   */
+  readonly localSignedInGate?: (c: Context, next: Next) => Response | Promise<Response | void>;
+  /**
+   * D13's local-mode "org admin" gate (`./local-gates.ts#createRequireOrgAdminLocal`) —
+   * substitutes for the internally-built `createRequireOrgAdmin(sessionResolver)` on
+   * `PATCH /auth/onboarding/team`. Cannot be expressed by swapping `sessionResolver` alone:
+   * `createRequireOrgAdmin`'s own `kind !== 'session'` check would 401 every local request (see
+   * `./local-gates.ts`'s module doc comment). Absent keeps today's cookie-based construction.
+   */
+  readonly localOrgAdminGate?: (c: Context, next: Next) => Response | Promise<Response | void>;
+  /**
+   * D13's project-adoption read (`.ai/specs/2026-08-06-org-team-auth-onboarding.md`: "Existing
+   * projects are adopted, not stranded"). Called ONCE, inside `POST /auth/onboarding/org`'s
+   * legacy branch, only when the caller is about to create the deployment's first-ever local org
+   * — its result is passed straight to `IdentityStore#claimOrg`'s `projectRoots` input, so every
+   * already-registered project is filed under the new default team in the SAME guarded write.
+   * Absent in session mode: an OIDC/Google deployment's org isn't tied to one on-disk project
+   * registry the way a `cezar serve` process is, so there is nothing here to adopt.
+   */
+  readonly listRegisteredProjectRoots?: () => Promise<string[]>;
 }
 
 // ---- wire shaping --------------------------------------------------------------------------------
@@ -214,40 +268,51 @@ export function createOnboardingRoutes(deps: OnboardingRouteDeps): Hono {
   // Own instance built from THIS factory's injected resolver (not the process-wide
   // `requireOrgAdmin` singleton), so the one admin route below keeps reading the same identity
   // every other route in this file reads — the same shape `invite-routes.ts`/`team-routes.ts` use.
-  const adminGate = createRequireOrgAdmin(deps.sessionResolver);
+  //
+  // D13: `deps.localOrgAdminGate` substitutes the WHOLE gate, not just its resolver — swapping
+  // only `deps.sessionResolver` into `createRequireOrgAdmin` would still 401 every local request
+  // (that function's own `kind !== 'session'` check), see `./local-gates.ts`'s module doc comment.
+  const adminGate = deps.localOrgAdminGate ?? createRequireOrgAdmin(deps.sessionResolver);
   // The LOWER bar (`./require-signed-in.ts`), for `POST /auth/onboarding/org` alone — as middleware
   // so it runs ahead of `jsonZodValidator`, which is what turns an unauthenticated caller's
   // schema-violating body from a 400 (leaking the schema, and parsing a stranger's JSON first) into
   // a 401. `GET /auth/onboarding` deliberately does NOT mount it: see the note above.
-  const signedInGate = createRequireSignedIn(deps.identityStore);
+  //
+  // D13: `deps.localSignedInGate` substitutes the whole gate for local mode (resolves/creates the
+  // local user instead of reading a cookie) — same `'signedInUser'` stash, so the handler below
+  // needs no branch on which gate ran.
+  const signedInGate = deps.localSignedInGate ?? createRequireSignedIn(deps.identityStore);
+  // D13 FIX 7: local mode's own signal, read by the `org-already-bootstrapped` catch below to pick
+  // an error message that names a route local mode actually mounts — `deps.localSignedInGate` is
+  // present ONLY when `src/index.ts`'s local-mode branch built this `Hono` (see that field's own
+  // doc comment on `OnboardingRouteDeps`), never in session mode.
+  const isLocalMode = deps.localSignedInGate !== undefined;
   return (
     new Hono()
-      // ---- GET /auth/onboarding: the resumable state machine (D8, "two states, not four") --------
+      // ---- GET /auth/onboarding: the resumable state machine (D8, "two states, not four";
+      // D13 adds no new state, only a new SOURCE for the existing two — see below) --------------
       .get('/auth/onboarding', (c) => {
         // Try the shared D3 resolver FIRST — reuses org/team/role resolution instead of a second,
         // possibly-drifting read of the same membership. Everything this needs for the 'ready'
-        // state is already ON the resolved principal.
+        // state is already ON the resolved principal. In local mode `deps.sessionResolver` is
+        // `./local-gates.ts#localSessionResolver`, which never returns `null` — D13's point being
+        // that a local caller is never "unauthenticated", only "not yet in an org".
         const principal = deps.sessionResolver.resolveFromCookieHeader(
           c.req.header('cookie'),
         );
-        if (principal) {
-          if (principal.kind !== 'session') {
-            // Unreachable in practice — this route only ever mounts once `CEZ_AUTH` names a
-            // provider, and `./session.ts`'s `sessionResolver` never resolves the `'local'` kind
-            // (see its own defensive `authProvider === 'none'` branch) — but failing closed here
-            // costs nothing and matches this codebase's general stance on "should never happen".
-            return c.json(
-              { error: 'onboarding is unavailable while CEZ_AUTH is unset' },
-              500,
-            );
-          }
+        if (principal && hasOrgScope(principal)) {
+          // Works for BOTH modes unchanged: `hasOrgScope` narrows `orgId`/`teamId` to `string`
+          // regardless of whether they came from a resolved session or a resolved local org
+          // (D13 — "kind keeps meaning exactly what it always meant... hasOrgScope is the new,
+          // separate predicate for 'does this principal have an org'").
           const org = deps.identityStore.getOrgById(principal.orgId);
           const team = deps.identityStore.getTeamById(principal.teamId);
           if (!org || !team) {
-            // Also unreachable by construction (a resolved principal names a real org/team), same
-            // fail-closed stance as above rather than a response the schema cannot describe.
+            // Unreachable by construction (a resolved principal names a real org/team), same
+            // fail-closed stance this file takes elsewhere rather than a response the schema
+            // cannot describe.
             return c.json(
-              { error: 'onboarding state is inconsistent for this session' },
+              { error: 'onboarding state is inconsistent' },
               500,
             );
           }
@@ -263,9 +328,48 @@ export function createOnboardingRoutes(deps: OnboardingRouteDeps): Hono {
           return c.json(body);
         }
 
-        // No principal. That collapses "no session at all" and "signed in, no org yet" into the
-        // same `null` (`session.ts`'s own doc comment names this) — the one distinction ONLY this
-        // route needs to make, so it reads the cookie one level deeper than the shared resolver.
+        // D13: a resolved LOCAL principal with no org yet (`kind: 'local'`, `hasOrgScope` false
+        // above). Local mode is single-org (`claimOrg`'s legacy-branch `orgs.length > 0` guard) —
+        // there is no second local user who could ever need an invite, so `needs-org` is the ONLY
+        // other state a local principal can be in. Never 401 here (D13 invariant 1: loopback is
+        // already fully trusted, so there is no "who are you" question left to fail) and never
+        // `needs-invite` (this deployment can never answer that state truthfully — see item (d) of
+        // the phase-9 HTTP-surface task: "the response must not invite a second org it will
+        // refuse"). No `suggestedOrgName`: there is no email claim to derive one from locally.
+        //
+        // **`principal.kind === 'local'`, not a bare `if (principal)` (FIX 8, repair pass).** The
+        // first D13 draft read `if (principal)` here — ANY resolved principal without org scope,
+        // regardless of `kind` — which silently replaced a deliberate fail-CLOSED 500 with a
+        // fail-OPEN `needs-org, bootstrapTokenRequired: false` for a case D13 was never about. A
+        // resolved SESSION principal with no org contradicts D3: `session.ts#resolveIdentity`
+        // returns `null` for a signed-in user with no membership, never a `Principal` missing org
+        // scope — this route's own `resolveSignedInUser` call below exists precisely because the
+        // shared resolver collapses that case to `null` rather than handing back a partial
+        // principal. So `principal && !hasOrgScope(principal)` can only genuinely happen for
+        // `kind: 'local'` today, and this branch says so explicitly instead of trusting `if
+        // (principal)` to mean the same thing.
+        if (principal && principal.kind === 'local') {
+          const body: OnboardingStatusResponse = {
+            state: 'needs-org',
+            bootstrapTokenRequired: false,
+          };
+          return c.json(body);
+        }
+
+        // Unreachable in practice (see the paragraph above) — but reachable in shape if a future
+        // `SessionResolver` implementation ever resolved a non-local principal with no org, and the
+        // stakes of getting that wrong are real: falling through to `needs-org,
+        // bootstrapTokenRequired: false` would let such a caller create the deployment's first org
+        // with NO bootstrap code, defeating D8 amendment 2's whole point. Fail closed, restoring
+        // this route's original (pre-D13) stance for the case D13 never actually reaches.
+        if (principal) {
+          return c.json({ error: 'onboarding state is inconsistent' }, 500);
+        }
+
+        // Session mode from here on — `principal` was `null` (no/expired/invalid cookie). That
+        // collapses "no session at all" and "signed in, no org yet" into the same `null`
+        // (`session.ts`'s own doc comment names this) — the one distinction ONLY this route needs
+        // to make, so it reads the cookie one level deeper than the shared resolver.
         const user = resolveSignedInUser(c, deps.identityStore);
         if (!user) return c.json({ error: 'unauthenticated' }, 401);
 
@@ -378,6 +482,17 @@ export function createOnboardingRoutes(deps: OnboardingRouteDeps): Hono {
                 userId: user.userId,
                 orgId: org.id,
               });
+              // FIX 4 (D13 repair pass): this branch used to return 201 WITHOUT invalidating
+              // `./local-identity.ts`'s cache — only the legacy branch below did. Local mode never
+              // legitimately reaches this branch today (a local org's `Org` row never gets a
+              // `claimTokenHash`, so the guard above always 403s it first — see that guard's own
+              // comment), but the cache is a general-purpose "does the local org's identity look
+              // like THIS" slot, not a legacy-branch-only one, and `claimOrg` is `claimOrg`
+              // regardless of which branch ran: any write that can change what
+              // `resolveLocalOrgIdentity` returns must invalidate it, or the very next call sees a
+              // process-lifetime-stale answer. A no-op in session mode and in every path that
+              // reaches this branch today, exactly like the legacy branch's own call below.
+              invalidateLocalOrgIdentityCache();
               const body: CreateOnboardingOrgResponse = {
                 org: toWireOrg(claimedOrg),
                 team: toWireTeam(defaultTeam),
@@ -438,12 +553,27 @@ export function createOnboardingRoutes(deps: OnboardingRouteDeps): Hono {
             return c.json({ error: 'name is required' }, 400);
           }
           try {
+            // D13 project adoption: `deps.listRegisteredProjectRoots` is only ever supplied in
+            // local mode (see its own doc comment on `OnboardingRouteDeps`) — `undefined` in
+            // session mode reads as "nothing to adopt", exactly like passing an empty list, so
+            // `claimOrg`'s `projectRoots` input stays optional rather than every session-mode
+            // caller having to pass `[]`. Read INSIDE the same `try`, right before the write it
+            // feeds, so a failure to list projects surfaces as this route's own error handling
+            // rather than a separate unhandled rejection.
+            const projectRoots = await deps.listRegisteredProjectRoots?.();
             const { org, defaultTeam, membership } =
               await deps.identityStore.claimOrg({
                 userId: user.userId,
                 name,
                 slug: slugFromName(name),
+                projectRoots,
               });
+            // D13: the local-org resolver's cache (`./local-identity.ts`) must not go on answering
+            // "no local org" after this write creates one — invalidated here, in-process, the
+            // instant the write that could change the answer succeeds. A no-op in session mode:
+            // nothing populates that cache outside local mode (see its own module doc), so this
+            // just resets an already-`'unknown'`/`'none'` slot back to `'unknown'`.
+            invalidateLocalOrgIdentityCache();
             const body: CreateOnboardingOrgResponse = {
               org: toWireOrg(org),
               team: toWireTeam(defaultTeam),
@@ -465,13 +595,25 @@ export function createOnboardingRoutes(deps: OnboardingRouteDeps): Hono {
               error instanceof IdentityStoreError &&
               error.code === 'org-already-bootstrapped'
             ) {
-              // The bootstrap window is closed, and joining now goes through an invite (D8 step 1).
-              // Nothing was written on this path, so there is no orphaned org/team to clean up the way
-              // the old two-call shape could leave behind.
+              // The bootstrap window is closed. Nothing was written on this path, so there is no
+              // orphaned org/team to clean up the way the old two-call shape could leave behind.
+              //
+              // **FIX 7 (D13 repair pass): local mode gets its own message.** The session-mode
+              // wording below ("you need an invite") pointed a local caller at a route that does
+              // not exist — `inviteRoutes` is deliberately never mounted locally (this file's own
+              // module doc comment: "there is nothing to log into and no second user to invite").
+              // Reachable in local mode too, not merely hypothetically: local mode is single-org
+              // and single-owner by construction (D13's own "Out of scope" list — `claimOrg`'s
+              // `orgs.length > 0` guard is exactly what refuses a second local org), so hitting this
+              // branch locally means the caller ALREADY owns the org they just tried to create
+              // again — a double-submitted wizard step, or a second tab racing the first — not that
+              // a stranger got there first. The fix names the action that actually exists: nothing,
+              // the caller already has what they were asking for.
               return c.json(
                 {
-                  error:
-                    'an organization already exists on this deployment — you need an invite to join it',
+                  error: isLocalMode
+                    ? 'this workspace already has an organization — reload the page to continue'
+                    : 'an organization already exists on this deployment — you need an invite to join it',
                 },
                 409,
               );
@@ -518,6 +660,14 @@ export function createOnboardingRoutes(deps: OnboardingRouteDeps): Hono {
           // doc comment on `renameOnboardingTeamInputSchema`), so a client cannot smuggle a different
           // org's team in even by trying.
           const principal = getOrgAdminPrincipal(c);
+          if (!hasOrgScope(principal)) {
+            // Defensive narrowing only (also what makes `principal.teamId` a `string` below,
+            // rather than `string | null`, to the type checker) — `adminGate` (cookie-based OR
+            // D13's local one) never stashes a principal without an org: `require-org-admin.ts`'s
+            // own `kind !== 'session'` refusal for the cookie gate, `./local-gates.ts`'s own
+            // `hasOrgScope` refusal for the local one. Unreachable in practice.
+            return c.json({ error: 'no organization exists yet' }, 400);
+          }
 
           const { name } = c.req.valid('json');
           try {

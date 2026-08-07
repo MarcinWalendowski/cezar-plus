@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -615,6 +615,73 @@ describe('AppShell', () => {
       // sidebar — which is exactly why these insets live on the shared content, not on a frame.
       expect(content.className).toContain('pt-[env(safe-area-inset-top)]')
       expect(content.className).toContain('pb-[env(safe-area-inset-bottom)]')
+    })
+  })
+
+  /**
+   * D14 (`.ai/specs/2026-08-06-org-team-auth-onboarding.md`): "no dashboard element renders
+   * before the first organization exists" — the wizard, in `children`, is the entire surface.
+   * `chromeless` is the mechanism `app-shell-container.tsx` drives from the shared onboarding
+   * probe; here it is pinned directly against the presentational component.
+   */
+  describe('chromeless (D14)', () => {
+    it('suppresses the sidebar, mobile drawer trigger, top bar and banner, but still renders children', () => {
+      renderShell('/', { chromeless: true, banner: <p>a banner</p> }, <p>the wizard</p>)
+
+      expect(document.querySelector('[data-slot="sidebar"]')).toBeNull()
+      expect(document.querySelector('[data-slot="banner-slot"]')).toBeNull()
+      expect(document.querySelector('[data-slot="mobile-top-bar"]')).toBeNull()
+      expect(screen.queryByRole('navigation', { name: 'Main' })).toBeNull()
+      expect(within(screen.getByRole('main')).getByText('the wizard')).toBeTruthy()
+    })
+
+    it('renders the full chrome when chromeless is omitted or false — the existing default', () => {
+      renderShell('/', {}, <p>route content</p>)
+      expect(document.querySelector('[data-slot="sidebar"]')).not.toBeNull()
+      expect(document.querySelector('[data-slot="mobile-top-bar"]')).not.toBeNull()
+    })
+
+    it('keeps children in the same <main> position either way, so toggling chromeless does not remount them', () => {
+      // A render-count wouldn't prove this: a non-memoized child function is called again on
+      // EVERY parent re-render regardless of remounting. `useState` is the real signal — React
+      // resets it to the initial value only when the fiber is torn down and rebuilt, never on an
+      // ordinary re-render, so surviving state is direct evidence the tree position held.
+      function StatefulChild() {
+        const [clicks, setClicks] = useState(0)
+        return (
+          <button type="button" data-slot="stateful-child" onClick={() => setClicks((c) => c + 1)}>
+            {clicks}
+          </button>
+        )
+      }
+      // Scoped by data-slot rather than role/name: the full (non-chromeless) shell has plenty of
+      // its own buttons, so `getByRole('button')` alone would be ambiguous once chrome reappears.
+      const statefulChild = () => document.querySelector('[data-slot="stateful-child"]') as HTMLButtonElement
+
+      const { rerender } = render(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/']}>
+            <AppShell chromeless>
+              <StatefulChild />
+            </AppShell>
+          </MemoryRouter>
+        </ThemeProvider>,
+      )
+      fireEvent.click(statefulChild())
+      expect(statefulChild().textContent).toBe('1')
+
+      rerender(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/']}>
+            <AppShell chromeless={false}>
+              <StatefulChild />
+            </AppShell>
+          </MemoryRouter>
+        </ThemeProvider>,
+      )
+      // A remount would reset useState back to 0. The click surviving the flip is what proves
+      // `children` never left its position in the tree.
+      expect(statefulChild().textContent).toBe('1')
     })
   })
 })

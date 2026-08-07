@@ -1,8 +1,13 @@
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { workspaceConfigPath } from '../paths.ts';
+// FIX A1/A2 (D13 repair round 2, `.ai/specs/2026-08-06-org-team-auth-onboarding.md`) — `add`/
+// `remove` go through the shared registration seam, not `./projects.ts#registerProject` directly:
+// see `registerAndAdoptProject`'s own doc comment for why a THIRD hand-rolled adoption call site
+// here was exactly the shape that let D13's local-org guard go missing in the first place.
+import { registerAndAdoptProject, releaseProjectTeamClaim } from '../registered-project-roots.ts';
 import { loadWorkspaceConfig } from './config.ts';
-import { listProjects, registerProject, removeProject, shouldRegisterProject } from './projects.ts';
+import { listProjects, removeProject, shouldRegisterProject } from './projects.ts';
 
 /**
  * `cezar projects` (spec 2026-07-20-multi-project-workspace, step 5.2) — the
@@ -123,7 +128,14 @@ async function addCommand(root: string, io: ProjectsCommandIo): Promise<number> 
     return 1;
   }
   const known = new Set((await loadWorkspaceConfig()).projects.map((p) => p.id));
-  const entry = await registerProject(root);
+  // FIX A1 (D13 repair round 2): `registerAndAdoptProject`, not `registerProject` — see that
+  // function's own doc comment. Files this root under the local org when one already exists (and
+  // `CEZ_AUTH` is unset); a no-op otherwise, exactly like `registerProject` was before this call
+  // was added. No `bindHost` is passed — deliberately, not an oversight: see
+  // `registerAndAdoptProject`'s own "FIX 2" doc comment (D13 repair round 3) for the argued reason
+  // a CLI invocation has no bind to pass at all, and for the one residual risk that decision leaves
+  // named rather than silently accepted.
+  const entry = await registerAndAdoptProject(root);
   // Registration dedupes by realpath, so a second `add` of the same folder
   // (or a symlink to it) reports the entry that already exists.
   io.log(known.has(entry.id) ? `  = ${entry.id} (already registered)  ${entry.root}` : `  + ${entry.id}  ${entry.root}`);
@@ -135,6 +147,16 @@ async function removeCommand(id: string | undefined, io: ProjectsCommandIo): Pro
     io.error(USAGE);
     return 1;
   }
+  // FIX A2 (D13 repair round 2): the root must be resolved BEFORE `removeProject` drops the
+  // registry row — that row is the only place this CLI has the root, and the claim release below
+  // needs it. Best-effort: an unreadable workspace here is not this command's failure to report,
+  // `removeProject` below does that with the real reason.
+  let root: string | undefined;
+  try {
+    root = (await loadWorkspaceConfig()).projects.find((p) => p.id === id)?.root;
+  } catch {
+    // unreadable workspace — `removeProject` below reports the real reason
+  }
   // Unlike `DELETE /api/projects/:projectId`, there is no boot-project refusal
   // here: that rule exists because a running server would break its own
   // sidebar, and the CLI runs with no server and no boot project. Removing the
@@ -144,6 +166,11 @@ async function removeCommand(id: string | undefined, io: ProjectsCommandIo): Pro
     io.error(`unknown project: ${id}`);
     return 1;
   }
+  // FIX A2 (D13 repair round 2): release this root's `project_teams` claim, if any — see
+  // `releaseProjectTeamClaim`'s own doc comment for why the orphan this closes is a real defect
+  // (it makes the claiming org's team, and possibly the whole org, permanently undeletable through
+  // the product) and for why this call is deliberately NOT swallowed on failure.
+  if (root) await releaseProjectTeamClaim(root);
   io.log(`  - ${id} (registry entry only — the repo and its .ai/cezar/ are untouched)`);
   return 0;
 }

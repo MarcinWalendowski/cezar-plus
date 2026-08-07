@@ -142,10 +142,10 @@ import {
 } from './project-context.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { readUiState, uiStatePath } from '../ui-state.ts';
-import { agentHomePaths, expandTilde, identityDir } from '../paths.ts';
+import { agentHomePaths, expandTilde } from '../paths.ts';
 import { isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCapabilities } from './capabilities.ts';
-// D3's single construction of "who is this request". Imported STATICALLY, unlike every other
-// `../auth/*` module (which `src/index.ts` reaches only through a `CEZ_AUTH`-gated dynamic
+// D3's single construction of "who is this request". Imported STATICALLY, unlike most other
+// `../auth/*` modules (which `src/index.ts` reaches only through a `CEZ_AUTH`-gated dynamic
 // `import()`), and that asymmetry is deliberate: `auth/principal.ts` has no runtime imports of
 // its own — its only import of this file is `import type`, which TypeScript erases — reads no
 // file, and touches nothing under `<CEZ_HOME>/identity`. D1's "unset means zero I/O" is about
@@ -154,12 +154,31 @@ import { isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCa
 // hand-rolled constant here. Two constants "kept in sync by convention" is exactly the drift D3
 // names, and it had already appeared once in this change: a `LOCAL_PRINCIPAL` here and a
 // `LOCAL_IDENTITY` there, byte-identical and with nothing asserting they stayed that way.
-import { resolvePrincipal } from '../auth/principal.ts';
-// Type-only — erased by TypeScript, so importing it statically does not touch D1's "unset means
-// zero I/O": no runtime code from `auth/types.ts` (or its own imports) ever loads. Used only by
-// the D4 `ProjectTeamRegistry` seam below (`openProjectTeamRegistry`), which is the ONE place
-// either the local `IdentityStore` or the phase 6/7 `supervisor/registry-client.ts` gets reached.
-import type { ProjectTeam, Team } from '../auth/types.ts';
+//
+// **CORRECTED 2026-08-07 (D13, phase 9 HTTP-surface pass): "unlike every other ../auth/* module"
+// above is no longer literally true — `auth/local-gates.ts`, imported statically just below, is a
+// second one.** Safe for the same underlying reason: neither its own module scope nor
+// `local-identity.ts`'s (the module it re-exports the resolver from) reads a file at IMPORT time —
+// `local-identity.ts` declares only `let cache = { kind: 'unknown' }` — so loading either costs
+// nothing, and what actually does I/O (`localSessionResolver.resolveFromCookieHeader`) is only
+// ever CALLED from inside the `resolveAuthProvider(...) === 'none'` branch of the principal
+// middleware below, never from the authenticated branches. A hosted deployment with a real
+// provider pays one extra `require` for a function it never invokes; it does not pay the read.
+// See `auth/local-identity.ts#resolveLocalOrgIdentity`'s own doc comment for what that read costs
+// once it IS invoked (bounded and cached — "one stat for the process lifetime" — never
+// per-request I/O).
+import { hasOrgScope, resolvePrincipal } from '../auth/principal.ts';
+// D13's local-org resolver (phase 9 HTTP-surface pass, `resolveLocalPrincipal` below) — the SAME
+// `SessionResolver` `auth/onboarding-routes.ts`/`auth/team-routes.ts` are wired with for their own
+// gates (`src/index.ts`'s local-mode branch), imported and reused here rather than re-derived: two
+// call sites composing `resolveLocalOrgIdentity` + `resolvePrincipal` the same way by hand is
+// exactly the `LOCAL_PRINCIPAL`/`LOCAL_IDENTITY` drift shape named two paragraphs up, just at a
+// smaller scale — importing the one resolver both need closes it the same way that fix did.
+import { localSessionResolver } from '../auth/local-gates.ts';
+// D4's root→org registry seam (EXTRACTED 2026-08-07, D13 repair round 3, FIX 3) — see
+// `./project-team-registry.ts`'s own doc comment. `registered-project-roots.ts` imports the
+// identical `openProjectTeamRegistry` for its non-HTTP `cezar projects remove` caller.
+import { openProjectTeamRegistry, type ProjectTeamRegistry } from './project-team-registry.ts';
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
 import { parseRemote, resolveForge, type ForgeAvailability } from './forge/index.ts';
@@ -284,11 +303,18 @@ export interface ServerDeps {
   /**
    * The D8 onboarding routes (`../auth/onboarding-routes.ts`: `GET /auth/onboarding`,
    * `POST /auth/onboarding/org`, `PATCH /auth/onboarding/team`) — mounted at the app root
-   * alongside `authRoutes`, same "loaded once in `serveCommand`, threaded in already-built" shape
-   * and the same `CEZ_AUTH=none` ⇒ undefined ⇒ nothing registered contract. A separate field
-   * (not folded into `authRoutes`) because it is a separate module owned by a separate unit of
-   * work; `onboarding-routes.ts`'s own module doc comment explains why these three routes cannot
-   * live behind `requirePrincipal` the way the rest of `/api/*` does.
+   * alongside `authRoutes`, same "loaded once in `serveCommand`, threaded in already-built" shape.
+   * **CORRECTED 2026-08-07 by D13: no longer the same "`CEZ_AUTH=none` ⇒ undefined ⇒ nothing
+   * registered" contract `authRoutes` above has.** D13's local-mode branch
+   * (`local-mode-boot.ts#buildLocalModeRoutes`) populates this field on a loopback bind with
+   * `CEZ_AUTH` unset too — the npm zero-config default — gated on `isLocalOrgModeActive`
+   * (`resolveAuthProvider(env) === 'none' && capabilities.localHandoff`), not on `CEZ_AUTH` naming
+   * a provider. `undefined` still means "nothing registered" (still true, still enforced by
+   * `if (deps.onboardingRoutes)` at the mount point below), but `CEZ_AUTH=none` no longer implies
+   * `undefined` — only a HOSTED unauthenticated deployment does. A separate field (not folded into
+   * `authRoutes`) because it is a separate module owned by a separate unit of work;
+   * `onboarding-routes.ts`'s own module doc comment explains why these three routes cannot live
+   * behind `requirePrincipal` the way the rest of `/api/*` does.
    */
   onboardingRoutes?: Hono;
   /**
@@ -304,28 +330,51 @@ export interface ServerDeps {
    * Team CRUD (`../auth/team-routes.ts`: `GET/POST /auth/teams`, `PATCH/DELETE
    * /auth/teams/:teamId`, Phase 5c, D2/D12) — mounted at the app root alongside
    * `authRoutes`/`onboardingRoutes`/`inviteRoutes`, same "loaded once in `serveCommand`, threaded
-   * in already-built" shape and the same `CEZ_AUTH=none` ⇒ undefined ⇒ nothing registered
-   * contract. A separate field, not folded into `onboardingRoutes`, for the identical reason
-   * `inviteRoutes` is not: a separate module owned by a separate unit of work.
+   * in already-built" shape. **CORRECTED 2026-08-07 by D13: no longer the same `CEZ_AUTH=none` ⇒
+   * undefined ⇒ nothing registered contract `inviteRoutes` above has** — same correction and same
+   * reason as `onboardingRoutes`'s own doc comment right above: D13's local-mode branch populates
+   * this field on a loopback bind with `CEZ_AUTH` unset too, gated on `isLocalOrgModeActive`, not
+   * on `CEZ_AUTH` naming a provider. `undefined` still means "nothing registered"; `CEZ_AUTH=none`
+   * no longer implies `undefined`. A separate field, not folded into `onboardingRoutes`, for the
+   * identical reason `inviteRoutes` is not: a separate module owned by a separate unit of work.
    */
   teamRoutes?: Hono;
 }
 
 /**
  * A resolved caller identity (D3): every `/api/*` request and every WebSocket upgrade carries
- * one, through the SAME resolution path whether `CEZ_AUTH` is off (the implicit
- * `LOCAL_PRINCIPAL` below) or on (a real session). There is deliberately no "if auth is off,
- * skip the resolver" branch — see D3's own worked incident for what that shape costs: two
- * project-context construction paths (`ProjectContexts.build()` vs the hand-built `bootContext`)
- * silently disagreed about which stores were active, and the same drift would apply to who is
- * allowed to do what if auth-on and auth-off resolved a principal two different ways.
+ * one, through the SAME resolution path whether `CEZ_AUTH` is off (the implicit local principal
+ * `resolveLocalPrincipal` below resolves) or on (a real session). There is deliberately no "if
+ * auth is off, skip the resolver" branch — see D3's own worked incident for what that shape
+ * costs: two project-context construction paths (`ProjectContexts.build()` vs the hand-built
+ * `bootContext`) silently disagreed about which stores were active, and the same drift would
+ * apply to who is allowed to do what if auth-on and auth-off resolved a principal two different
+ * ways.
+ *
+ * **`orgId`/`teamId` widened to `string | null` (D13, phase 9 data-layer pass).** `kind` used to
+ * double as "has an org": `'local'` always meant `orgId === 'local'` (a literal naming no row),
+ * `'session'` always meant a real org. D13 breaks that coincidence — a local user may now create
+ * a real org without authenticating — so `kind` goes back to meaning only "was this request
+ * authenticated" and a NEW predicate, `hasOrgScope` (`auth/principal.ts`), is what the five
+ * org-scoped call sites (`withTeams`, `mayActOnRoot`, `releaseRootClaim`, `registerFolder`'s claim
+ * block, `PATCH /projects/:id`'s `teamId` arm) switch to in place of `kind === 'session'`.
+ * **DONE 2026-08-07 (phase 9 HTTP-surface pass) — corrects the line above, which read "not done
+ * in this pass" while this file was still only the data-layer pass.** All five sites now read
+ * `hasOrgScope(principal)` (or its negation via TypeScript's control-flow narrowing on an early
+ * return), never `kind`; `kind` is read ONLY where the question really is "was this request
+ * authenticated" — the auth perimeter middleware, `verifyWsUpgrade`, the health-payload
+ * redaction, unchanged by this pass. D13 invariant 3 — "a `null` orgId is NEVER coerced to the
+ * string `'local'`" — holds because `hasOrgScope` is a type guard: every read of
+ * `principal.orgId`/`principal.teamId` inside one of its narrowed branches is the real `string`
+ * that guard just proved is not `null`, never a placeholder standing in for "no org".
  */
 export interface Principal {
-  /** `'local'` is the implicit `CEZ_AUTH=none` identity; `'session'` is a real signed-in user. */
+  /** `'local'` is the implicit `CEZ_AUTH=none` identity; `'session'` is a real signed-in user.
+   *  No longer a stand-in for "has an org" — see `hasOrgScope` in `auth/principal.ts`. */
   readonly kind: 'local' | 'session';
   readonly userId: string;
-  readonly orgId: string;
-  readonly teamId: string;
+  readonly orgId: string | null;
+  readonly teamId: string | null;
   readonly role: 'owner' | 'admin' | 'member';
 }
 
@@ -359,18 +408,54 @@ export interface SessionResolver {
 }
 
 /**
- * The implicit identity every request resolves to while `CEZ_AUTH` is unset (D1/D3) — a
- * synthetic local user in a default org/team, so the zero-config single-user product never has
- * to reason about "no principal". Fixed ids, never persisted: nothing under `CEZ_AUTH=none` ever
- * touches `<CEZ_HOME>/identity/*.json` (D7) to produce this value.
+ * The identity every request resolves to while `CEZ_AUTH` is unset AND the bind is loopback (D1/D3,
+ * amended by D13) — a synthetic local user, carrying REAL `orgId`/`teamId` once one has been created
+ * through the onboarding wizard, and `null`/`null` until then, so the zero-config single-user
+ * product never has to reason about "no principal" at all (it always gets one; `hasOrgScope` is
+ * what tells a caller whether that principal may act on an org).
  *
- * Built by CALLING `resolvePrincipal`, not by writing the four fields out again here. D3 forbids
- * a second construction path, and a duplicated literal is one: it drifts silently, because
- * nothing type-checks two object literals against each other. `resolvePrincipal` is a pure
- * function of its argument, so hoisting the auth-off call to module scope costs one object at
- * import time and is not a per-request allocation.
+ * **Callable only on the loopback bind (CORRECTED 2026-08-07, adversarial review).** This function
+ * reads `<CEZ_HOME>/identity` through `localSessionResolver` with no awareness of who is asking —
+ * it is not, on its own, safe to call for every `CEZ_AUTH === 'none'` request, because
+ * `hosted + CEZ_AUTH unset + CEZ_ALLOW_UNAUTHENTICATED=1` is a real topology (D1's table) whose
+ * audience is a network, not this machine. Its one call site (`requirePrincipal` above) now guards
+ * it with `isHostedMode()` — `capabilities.localHandoff`, the same predicate
+ * `local-mode-boot.ts#buildLocalModeRoutes` (via `isLocalOrgModeActive`, `server/capabilities.ts`)
+ * already gates MOUNTING the local onboarding/team routes on — and falls back to the plain no-org
+ * `resolvePrincipal({ authProvider: 'none' })` on a hosted bind instead. Do not add a second caller
+ * without the same guard.
+ *
+ * **No longer a frozen module-scope constant (CORRECTED 2026-08-07, D13 phase 9).** Before D13
+ * this could be hoisted ONCE at import time — the doc comment here used to say exactly that,
+ * "hoisting the auth-off call to module scope costs one object at import time and is not a
+ * per-request allocation" — because the auth-off identity never changed for the process's
+ * lifetime. D13 breaks that: a local user can create an org WHILE this process keeps running
+ * (`POST /auth/onboarding/org`), so a value computed once at import time would go on reporting
+ * "no org" forever even after one exists. This function is called fresh on every request instead.
+ *
+ * **Resolved per request, but this is NOT per-request I/O.** `localSessionResolver`
+ * (`auth/local-gates.ts`) reads through `auth/local-identity.ts#resolveLocalOrgIdentity`'s own
+ * module-level cache (`unknown` → one `existsSync` → `none` | `resolved`) — a request pays that
+ * cost at most once per process, and the onboarding write is what invalidates it
+ * (`invalidateLocalOrgIdentityCache`, called by `auth/onboarding-routes.ts` the instant it
+ * succeeds), never a TTL or a re-check on every call.
+ *
+ * Built by CALLING `resolvePrincipal` (inside `localSessionResolver`), not by writing the four
+ * fields out again here. D3 forbids a second construction path, and a duplicated literal is one:
+ * it drifts silently, because nothing type-checks two object literals against each other — see
+ * this file's own `LOCAL_PRINCIPAL`/`auth/principal.ts`'s `LOCAL_IDENTITY` history, above.
  */
-const LOCAL_PRINCIPAL: Principal = resolvePrincipal({ authProvider: 'none' });
+function resolveLocalPrincipal(): Principal {
+  // `localSessionResolver.resolveFromCookieHeader` is typed against the shared `SessionResolver`
+  // interface (`Principal | null`, since a COOKIE-based resolver can genuinely fail to resolve a
+  // session) — but the concrete local implementation (`auth/local-gates.ts`) ignores its argument
+  // and always resolves to a `Principal` (the implicit no-org identity, or a real one once the
+  // local org exists), never `null`. The `??` below is therefore unreachable in practice; it
+  // exists so this function's own return type stays a plain `Principal`, matching every other
+  // principal this middleware ever sets, rather than leaking a nullability no caller here needs
+  // to handle.
+  return localSessionResolver.resolveFromCookieHeader(undefined) ?? resolvePrincipal({ authProvider: 'none' });
+}
 
 // ---- project-scoped routing (multi-project spec, step 2.2) -----------------
 
@@ -1560,8 +1645,34 @@ export function createApp(deps: ServerDeps) {
     if (auth === 'none') {
       // D3: the implicit principal goes through THIS SAME middleware, not a bypassed branch —
       // see the module-level doc comment on `Principal` for the incident that rule guards
-      // against.
-      principalContext.set('principal', LOCAL_PRINCIPAL);
+      // against. D13: resolved FRESH every request (`resolveLocalPrincipal`'s own doc comment
+      // explains why that is not per-request I/O) — and never through `sessionResolver`/a cookie,
+      // so invariant 1 ("no cookie parsed, ever, in local mode") holds exactly as it did before
+      // this seam existed.
+      //
+      // **CORRECTED 2026-08-07 (adversarial review, reported independently by four reviewers):
+      // this used to call `resolveLocalPrincipal()` for EVERY request where `auth === 'none'` —
+      // keyed on the PROVIDER. D13 itself says the opposite is load-bearing ("the reason must be
+      // the bind, not the provider"): `hosted + CEZ_AUTH unset + CEZ_ALLOW_UNAUTHENTICATED=1` is a
+      // real, permitted topology (D1's table) whose audience is a NETWORK, not one machine — and
+      // keying local-org adoption on the provider let an anonymous network caller on that exact
+      // topology adopt whatever local org happened to already exist under this process's
+      // `<CEZ_HOME>/identity` (e.g. left behind by an earlier loopback run against the same
+      // `CEZ_HOME`), with role `owner`. `local-mode-boot.ts#buildLocalModeRoutes` (via
+      // `isLocalOrgModeActive`) already gates MOUNTING the local
+      // onboarding/team routes on `capabilities.localHandoff`, never on `resolveAuthProvider`;
+      // `isHostedMode()` above reads the identical predicate
+      // (`resolveCapabilities(process.env, bindHost).localHandoff`), so this call site can no
+      // longer disagree with it. On a hosted, unauthenticated bind the principal now stays the
+      // plain no-org identity — `orgId`/`teamId` `null`, never coerced to the string `'local'`
+      // (D13 invariant 3) — built the exact same way it always was for the no-org case:
+      // `resolvePrincipal({ authProvider: 'none' })`, with no local-org lookup at all.
+      // `resolveLocalPrincipal()` is now only ever reached on the ONE bind D13 is actually about:
+      // loopback.
+      principalContext.set(
+        'principal',
+        isHostedMode() ? resolvePrincipal({ authProvider: 'none' }) : resolveLocalPrincipal(),
+      );
       return next();
     }
     // CEZ_AUTH is on. `sessionResolver` only exists when `src/index.ts`'s `serveCommand` loaded
@@ -2560,108 +2671,25 @@ export function createApp(deps: ServerDeps) {
   };
 
   /**
-   * D4's root→org registry (`<CEZ_HOME>/identity/*.json`'s `project_teams`/`teams` tables),
-   * abstracted behind ONE seam every D4 call site below goes through — never `IdentityStore`
-   * directly, and never a second, independent lookup. This is what the spec's phase-6 amendment
-   * to D4 asks for: "the phase-5 in-process check must be REPLACED by the supervisor's mapping,
-   * not joined by it" — per-org `CEZ_HOME`s make each org process blind to every other org's
-   * `project_teams` table, so a local `IdentityStore.open(identityDir())` call from an org process
-   * would not error, it would silently start a SECOND, empty table, reinstating the exact
-   * leaseless-`RunStore` history loss D4 exists to prevent, with every gate green. One seam here
-   * means a local read and a remote read can never quietly disagree about the same root.
+   * D4's root→org registry seam — **EXTRACTED 2026-08-07 (D13 repair round 3, FIX 3) to
+   * `./project-team-registry.ts`**, so `registered-project-roots.ts#releaseProjectTeamClaim` (the
+   * `cezar projects remove` path, which has no HTTP request and no resolved `Principal` to build
+   * this closure from) can share the identical seam instead of opening `IdentityStore` directly and
+   * silently missing a claim held by the supervisor on the D10 topology. See that module's own doc
+   * comment for the full reasoning; nothing here closes over `ServerDeps`, so the move is
+   * behavior-preserving for every call site below.
    *
-   * Which implementation answers is `resolveAuthProvider()`, read fresh on every call — the same
-   * "`CEZ_AUTH` is read per request" posture this file already documents at its `/api/*` auth
-   * middleware. `'supervisor'` (phase 6+, D10: an org process running behind the supervisor) asks
-   * the supervisor over HTTP (`supervisor/registry-client.ts`); every other session-carrying
-   * provider (`oidc`/`google`, the phase 1-5 single-process deployment, and every existing test in
-   * `projects-api.test.ts`, none of which set `CEZ_AUTH`) keeps reading the SAME local
-   * `IdentityStore` it always has — unchanged behavior, unchanged file, unchanged tests.
-   *
-   * Both implementations return the exact same async shape (never a mix of sync reads and async
-   * writes, unlike `IdentityStore`'s own public methods) — the local one is a thin `async` wrapper,
-   * not a second construction of the contract. `createProjectTeam` returns a discriminated result
-   * rather than throwing an error type specific to either implementation, so `registerFolder`'s
-   * claim block below has exactly one error-handling shape regardless of which one answered.
+   * **CORRECTED 2026-08-07 (D13, phase 9): the sentence below described `kind`, and the gate moved
+   * to `hasOrgScope`.** A principal with NO org (`!hasOrgScope(principal)` — `CEZ_AUTH` unset with
+   * no local org yet) never reaches `openProjectTeamRegistry` — every call site below guards on
+   * `hasOrgScope` first, exactly as they guarded on `principal.kind === 'session'` before this seam
+   * existed — so D1's "unset means zero I/O" and D7's "the module is never imported" both hold
+   * literally for that case: the function is never even called, let alone the dynamic imports
+   * inside either branch it can reach. Once a LOCAL principal has a real org (D13's onboarding
+   * wizard), `hasOrgScope` is true and it DOES run — deliberately: `kind` stays `'local'`
+   * throughout, because `kind` only ever means "was this request authenticated" (see `hasOrgScope`,
+   * `auth/principal.ts`), never "does it have an org".
    */
-  interface ProjectTeamRegistry {
-    listProjectTeams(filter: { orgId?: string; teamId?: string }): Promise<ProjectTeam[]>;
-    listTeams(orgId: string): Promise<Team[]>;
-    getTeamById(teamId: string): Promise<Team | undefined>;
-    getProjectTeam(root: string): Promise<ProjectTeam | undefined>;
-    createProjectTeam(input: { projectRoot: string; orgId: string; teamId: string }): Promise<
-      | { ok: true; projectTeam: ProjectTeam }
-      | { ok: false; code: 'org-not-found' | 'team-not-found' | 'team-org-mismatch' | 'project-root-taken' }
-    >;
-    /** 5c (D2/D4, ADDED 2026-08-07) — reassign an already-claimed root to a different team in the
-     *  SAME org. No `orgId` parameter: the D4 guard is checked against the EXISTING row's org, not
-     *  a caller-supplied one — see `auth/identity-store.ts#updateProjectTeam`'s own doc comment. */
-    updateProjectTeam(root: string, teamId: string): Promise<
-      | { ok: true; projectTeam: ProjectTeam }
-      | { ok: false; code: 'project-root-not-found' | 'team-not-found' | 'team-org-mismatch' }
-    >;
-    deleteProjectTeam(root: string): Promise<boolean>;
-  }
-
-  /** The phase 1-5 implementation, wrapped to the async shape above — every check and every write
-   *  is byte-for-byte what `IdentityStore` already did; only the calling convention changed. */
-  const openLocalProjectTeamRegistry = async (): Promise<ProjectTeamRegistry> => {
-    const { IdentityStore, IdentityStoreError } = await import('../auth/identity-store.ts');
-    const store = IdentityStore.open(identityDir());
-    return {
-      listProjectTeams: async (filter) => store.listProjectTeams(filter),
-      listTeams: async (orgId) => store.listTeams(orgId),
-      getTeamById: async (teamId) => store.getTeamById(teamId),
-      getProjectTeam: async (root) => store.getProjectTeam(root),
-      createProjectTeam: async (input) => {
-        try {
-          const projectTeam = await store.createProjectTeam(input);
-          return { ok: true, projectTeam };
-        } catch (err) {
-          if (
-            err instanceof IdentityStoreError &&
-            (err.code === 'org-not-found' ||
-              err.code === 'team-not-found' ||
-              err.code === 'team-org-mismatch' ||
-              err.code === 'project-root-taken')
-          ) {
-            return { ok: false, code: err.code };
-          }
-          throw err;
-        }
-      },
-      updateProjectTeam: async (root, teamId) => {
-        try {
-          const projectTeam = await store.updateProjectTeam(root, teamId);
-          return { ok: true, projectTeam };
-        } catch (err) {
-          if (
-            err instanceof IdentityStoreError &&
-            (err.code === 'project-root-not-found' ||
-              err.code === 'team-not-found' ||
-              err.code === 'team-org-mismatch')
-          ) {
-            return { ok: false, code: err.code };
-          }
-          throw err;
-        }
-      },
-      deleteProjectTeam: async (root) => store.deleteProjectTeam(root),
-    };
-  };
-
-  /** `principal.kind === 'local'` (`CEZ_AUTH` unset) never reaches this — every call site below
-   *  guards on `principal.kind === 'session'` first, exactly as it did before this seam existed —
-   *  so D1's "unset means zero I/O" and D7's "the module is never imported" both hold literally:
-   *  this function is never even called on the auth-off path, let alone the dynamic imports inside
-   *  either branch it can reach. */
-  const openProjectTeamRegistry = async (): Promise<ProjectTeamRegistry> => {
-    if (resolveAuthProvider(process.env) === 'supervisor') {
-      const { openRegistryClient } = await import('../supervisor/registry-client.ts');
-      return openRegistryClient();
-    }
-    return openLocalProjectTeamRegistry();
-  };
 
   /**
    * Attach `teamId`/`teamName` to registry entries (Phase 5, D5: "Team is metadata on a project
@@ -2669,10 +2697,13 @@ export function createApp(deps: ServerDeps) {
    * `ProjectListEntry` — both the GET listing and the POST registration answer through this, so
    * the two cannot report a different team for the same root.
    *
-   * **`principal.kind === 'local'` returns `projects` untouched, by identity.** No call to
-   * `openProjectTeamRegistry()` at all — D1's "unset means zero I/O" and D7's "`CEZ_AUTH` unset ⇒
-   * the module is never imported" both still hold literally, and the auth-off listing payload is
-   * byte-identical to the pre-Phase-5 build.
+   * **A principal with no org (`!hasOrgScope(principal)` — D13) returns `projects` untouched, by
+   * identity.** No call to `openProjectTeamRegistry()` at all — D1's "unset means zero I/O" and
+   * D7's "the module is never imported" both still hold for that case, and the pre-onboarding
+   * listing payload is byte-identical to the pre-Phase-5 build. Once a local principal HAS an org
+   * (D13), `hasOrgScope` is true and this annotates its listing exactly like a signed-in
+   * session's — `kind` stays `'local'` either way (D13: `kind` means authenticated, never
+   * org-scoped).
    *
    * **Annotates; deliberately does NOT filter.** Under D4 cross-org isolation is an OS process
    * boundary that phase 6 delivers, and the spec's Risks section names shipping tenancy-shaped
@@ -2687,7 +2718,7 @@ export function createApp(deps: ServerDeps) {
    * "unreadable workspace — degrade" read already in this file.
    */
   const withTeams = async (projects: ProjectListEntry[], principal: Principal): Promise<ProjectListEntry[]> => {
-    if (principal.kind !== 'session' || projects.length === 0) return projects;
+    if (!hasOrgScope(principal) || projects.length === 0) return projects;
     let claims: Map<string, string>;
     let teamNames: Map<string, string>;
     try {
@@ -2742,8 +2773,11 @@ export function createApp(deps: ServerDeps) {
    * the largest risk here. Destroying another org's registration is not "tenancy-shaped
    * behaviour", it is data loss.
    *
-   * `principal.kind !== 'session'` (`CEZ_AUTH` unset) returns `true` having done ZERO I/O — no
-   * call to `openProjectTeamRegistry()` — so D1/D7 hold exactly as they do for `withTeams`.
+   * `!hasOrgScope(principal)` (no `CEZ_AUTH` and no local org yet, D13) returns `true` having done
+   * ZERO I/O — no call to `openProjectTeamRegistry()` — so D1/D7 hold exactly as they do for
+   * `withTeams`. Once a local principal has a real org, `hasOrgScope` is true and this DOES read
+   * the registry, same as a signed-in session — `kind` stays `'local'` either way (D13: `kind`
+   * means authenticated, never org-scoped).
    *
    * **This IS the D4 boundary, not an annotation** (ADDED phase 6, D10) — unlike `withTeams`'s
    * best-effort decoration, a registry that cannot be reached must refuse, never silently allow: a
@@ -2760,7 +2794,7 @@ export function createApp(deps: ServerDeps) {
    * is still live and still load-bearing on that path — it is not dead code on either topology.
    */
   const mayActOnRoot = async (root: string, principal: Principal): Promise<boolean> => {
-    if (principal.kind !== 'session') return true;
+    if (!hasOrgScope(principal)) return true;
     try {
       const claim = await (await openProjectTeamRegistry()).getProjectTeam(root);
       return claim === undefined || claim.orgId === principal.orgId;
@@ -2797,7 +2831,7 @@ export function createApp(deps: ServerDeps) {
    * closed by retrying rather than by reversing the ordering.
    */
   const releaseRootClaim = async (root: string, principal: Principal): Promise<void> => {
-    if (principal.kind !== 'session') return;
+    if (!hasOrgScope(principal)) return;
     await (await openProjectTeamRegistry()).deleteProjectTeam(root);
   };
 
@@ -2951,12 +2985,20 @@ export function createApp(deps: ServerDeps) {
       // 5c (D2/D4, ADDED 2026-08-07): `teamId` reassigns this project's team WITHIN its owning
       // org. Applied BEFORE the `maxParallel` write below, so a refused reassignment (unknown
       // team, a team from a different org) leaves `maxParallel` untouched too — one PATCH, one
-      // outcome, never a half-applied body. `CEZ_AUTH` unset (`principal.kind !== 'session'`) has
-      // no org to reassign FROM, so this field is REJECTED rather than silently ignored (contract's
+      // outcome, never a half-applied body. A principal with no org yet (`!hasOrgScope(principal)`
+      // — `CEZ_AUTH` unset with no local org, D13, or a hosted deployment before phase 6) has no
+      // org to reassign FROM, so this field is REJECTED rather than silently ignored (contract's
       // own doc comment on `updateProjectInputSchema.teamId`).
+      //
+      // **CORRECTED 2026-08-07 (D13, phase 9): the 400 below used to say "requires an
+      // authenticated session" — that was never the real precondition, and D13 makes the gap
+      // visible: a LOCAL principal (never authenticated, `kind === 'local'`) can satisfy
+      // `hasOrgScope` once it has onboarded, and would then have been refused by a message naming
+      // a fact about itself that is true and irrelevant. The real precondition, in both modes, is
+      // an organization to reassign within — so that is what the message names.**
       if (teamId !== undefined) {
-        if (patchPrincipal.kind !== 'session') {
-          return c.json({ error: 'teamId requires an authenticated session — there is no org to reassign a team within' }, 400);
+        if (!hasOrgScope(patchPrincipal)) {
+          return c.json({ error: 'teamId requires an organization — there is no org to reassign a team within' }, 400);
         }
         const result = await (await openProjectTeamRegistry()).updateProjectTeam(existing.root, teamId);
         if (!result.ok) {
@@ -3075,10 +3117,13 @@ export function createApp(deps: ServerDeps) {
    * `principal` and `teamId` are Phase 5 additions (spec
    * `.ai/specs/2026-08-06-org-team-auth-onboarding.md`, D4/D5/D8): which org (and,
    * optionally, which team) the freshly-registered — or freshly-touched — root gets
-   * assigned to. `principal.kind === 'local'` (`CEZ_AUTH` unset) is the D1 zero-I/O
-   * case: every identity-store touch below is skipped outright, not merely made
-   * inert, so this function's behavior is byte-identical to pre-Phase-5 for every
-   * existing install.
+   * assigned to. **CORRECTED 2026-08-07 (D13, phase 9): the gate below moved from `kind` to
+   * `hasOrgScope`.** `!hasOrgScope(principal)` (`CEZ_AUTH` unset with no local org yet) is the D1
+   * zero-I/O case: every identity-store touch below is skipped outright, not merely made inert, so
+   * this function's behavior is byte-identical to pre-Phase-5 for every install that has not
+   * onboarded. Once a local principal has a real org (D13), `hasOrgScope` is true and this claims
+   * the root exactly as it does for a signed-in session — `kind` stays `'local'` either way (D13:
+   * `kind` means authenticated, never org-scoped).
    */
   const registerFolder = async (
     spelled: string,
@@ -3179,13 +3224,15 @@ export function createApp(deps: ServerDeps) {
     }
 
     // D4 hard constraint (Phase 5): a project root belongs to exactly ONE org.
-    // `principal.kind === 'local'` skips every line in this block — no call to
-    // `openProjectTeamRegistry()` at all — so D7's "the module is never
-    // imported" while `CEZ_AUTH` is unset still holds, and the auth-off
-    // registration path is untouched.
+    // A principal with no org (`!hasOrgScope(principal)` — `CEZ_AUTH` unset with no local org
+    // yet, D13) skips every line in this block — no call to `openProjectTeamRegistry()` at all —
+    // so D7's "the module is never imported" still holds for that case, and the pre-onboarding
+    // registration path is untouched. Once a local principal has a real org (D13), `hasOrgScope`
+    // is true and this block runs exactly as it does for a signed-in session — `kind` stays
+    // `'local'` either way (D13: `kind` means authenticated, never org-scoped).
     let registry: ProjectTeamRegistry | undefined;
     let claimedTeamId: string | undefined;
-    if (principal.kind === 'session') {
+    if (hasOrgScope(principal)) {
       registry = await openProjectTeamRegistry();
       if (teamId !== undefined) {
         const team = await registry.getTeamById(teamId);
@@ -3221,7 +3268,12 @@ export function createApp(deps: ServerDeps) {
       };
     }
 
-    if (registry) {
+    // `registry` alone would tell TypeScript nothing about `principal.orgId`/`teamId` (it is a
+    // SEPARATE variable, only ever assigned inside the `hasOrgScope(principal)` block above) — the
+    // redundant `hasOrgScope(principal)` re-check here is what narrows `principal` back to its
+    // real, non-null `orgId`/`teamId` for the block below, at zero cost (`hasOrgScope` is a pure,
+    // synchronous read of two already-resolved fields, not a second registry round trip).
+    if (registry && hasOrgScope(principal)) {
       // Claim an unclaimed root (brand new, or a legacy root registered
       // before auth existed) for the signing-in org. `createProjectTeam`
       // re-checks project-root-taken itself, atomically, inside its write
@@ -5782,14 +5834,22 @@ export function createApp(deps: ServerDeps) {
   // branch), which is what makes D1's "no login route registered" literally true rather than a
   // route that exists but 404s.
   if (deps.authRoutes) routed.route('/', deps.authRoutes);
-  // Same mount, same guard coverage, same `CEZ_AUTH=none` ⇒ absent contract as `authRoutes` right
-  // above — see `../auth/onboarding-routes.ts`'s own module doc comment for why these three
-  // routes are a separate file rather than three more methods on that one.
+  // Same mount, same guard coverage. **CORRECTED 2026-08-07 by D13: NOT the same `CEZ_AUTH=none`
+  // ⇒ absent contract `authRoutes` above has.** `deps.onboardingRoutes` is also populated by D13's
+  // local-mode branch on a loopback bind with `CEZ_AUTH` unset (`local-mode-boot.ts`, gated on
+  // `isLocalOrgModeActive`, not on `CEZ_AUTH` naming a provider) — so this `if` DOES mount
+  // `/auth/onboarding*`/`/auth/teams*` on the npm zero-config default now. See
+  // `../auth/onboarding-routes.ts`'s own module doc comment for why these three routes are a
+  // separate file rather than three more methods on that one.
   if (deps.onboardingRoutes) routed.route('/', deps.onboardingRoutes);
-  // Same mount, same guard coverage, same contract, for the 5b invite routes — see
-  // `../auth/invite-routes.ts`'s own module doc comment for why these are a separate file too.
+  // Same mount, same guard coverage, same `CEZ_AUTH=none` ⇒ absent contract as `authRoutes` above
+  // — still accurate for invite routes: D13 leaves `inviteRoutes` unmounted locally (there is no
+  // second local user to invite), so this stays populated only once `CEZ_AUTH` names a provider.
+  // See `../auth/invite-routes.ts`'s own module doc comment for why these are a separate file too.
   if (deps.inviteRoutes) routed.route('/', deps.inviteRoutes);
-  // Same mount, same guard coverage, same contract, for the 5c team routes — see
+  // Same mount, same guard coverage as `onboardingRoutes` above, not as `authRoutes`/`inviteRoutes`
+  // — **CORRECTED 2026-08-07 by D13**, for the identical reason: `deps.teamRoutes` is also
+  // populated by D13's local-mode branch on a loopback bind with `CEZ_AUTH` unset. See
   // `../auth/team-routes.ts`'s own module doc comment for why these are a separate file too.
   if (deps.teamRoutes) routed.route('/', deps.teamRoutes);
 

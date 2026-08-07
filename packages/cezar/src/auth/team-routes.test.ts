@@ -10,6 +10,16 @@ import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { createApp } from '../server/server.ts';
 import { apiRequest } from '../server/loopback-request.testkit.ts';
+import { identityDir } from '../paths.ts';
+import {
+  createOnboardingRoutes,
+} from './onboarding-routes.ts';
+import {
+  createRequireOrgAdminLocal,
+  createRequireSignedInLocal,
+  localSessionResolver,
+} from './local-gates.ts';
+import { invalidateLocalOrgIdentityCache } from './local-identity.ts';
 
 /**
  * Phase 5c's team-management HTTP surface (D2, D12), exercised against a REAL `IdentityStore`
@@ -456,7 +466,12 @@ describe('mount point (server.ts)', () => {
       teamRoutes,
     });
 
-  it('registers no /auth/teams* route at all when teamRoutes is absent (the CEZ_AUTH=none shape, D1)', async () => {
+  // CORRECTED 2026-08-07 (D13, phase 9 HTTP surface): this title used to read "...(the
+  // CEZ_AUTH=none shape, D1)". No longer accurate — `CEZ_AUTH` unset no longer implies these deps
+  // are absent (see the `local mode` block below, wired with `CEZ_AUTH` still unset). What is
+  // still true, and all this test asserts, is that ABSENT deps produce this exact 404/SPA-fallback
+  // signature — a statement about `server.ts`'s mount contract, not about auth mode.
+  it('registers no /auth/teams* route at all when teamRoutes is absent (deps-absence, not an auth-mode signature)', async () => {
     const app = makeApp(undefined);
     // Same two-signature absence proof `./onboarding-routes.test.ts` uses: GET falls through to
     // the SPA catch-all (200 HTML), a mutating method has no such fallback (genuine 404).
@@ -484,5 +499,142 @@ describe('mount point (server.ts)', () => {
     // 401, not 404 or the SPA shell: the route exists and ran, it just has no session.
     const res = await apiRequest(app, '/auth/teams');
     expect(res.status).toBe(401);
+  });
+
+  // ---- D13 local mode: teamRoutes wired the way src/index.ts wires it, CEZ_AUTH still unset -----
+  describe('local mode (D13)', () => {
+    beforeEach(() => {
+      // Single global cache slot (see `./local-identity.ts`'s own doc comment) — must not leak a
+      // cached answer between this block's own cases, or from a case above it in this same file.
+      invalidateLocalOrgIdentityCache();
+    });
+
+    it('reaches /auth/teams with no session cookie at all, once an org exists — never 401 (D13 invariant 1)', async () => {
+      const identityStore = IdentityStore.open(identityDir());
+      const onboarding = makeApp(
+        createOnboardingRoutes({
+          sessionResolver: localSessionResolver,
+          identityStore,
+          bootstrapClaim: { required: false, mode: 'open' },
+          localSignedInGate: createRequireSignedInLocal(identityStore),
+          localOrgAdminGate: createRequireOrgAdminLocal(localSessionResolver),
+        }),
+      );
+      const created = await apiRequest(onboarding, '/auth/onboarding/org', {
+        method: 'POST',
+        headers: { origin: 'http://127.0.0.1:4321', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'My Workspace' }),
+      });
+      expect(created.status).toBe(201);
+
+      const teams = makeApp(
+        createTeamRoutes({
+          sessionResolver: localSessionResolver,
+          identityStore,
+          localOrgAdminGate: createRequireOrgAdminLocal(localSessionResolver),
+        }),
+      );
+      const listed = await apiRequest(teams, '/auth/teams');
+      expect(listed.status).toBe(200);
+      const body = (await listed.json()) as { teams: { name: string }[] };
+      expect(body.teams).toHaveLength(1);
+      expect(body.teams[0]?.name).toBe('General');
+
+      const secondTeam = await apiRequest(teams, '/auth/teams', {
+        method: 'POST',
+        headers: { origin: 'http://127.0.0.1:4321', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Engineering', slug: 'engineering' }),
+      });
+      expect(secondTeam.status).toBe(201);
+    });
+
+    it('reports "no organization exists yet" (400, never 401) before the local org has been created', async () => {
+      const identityStore = IdentityStore.open(identityDir());
+      const teams = makeApp(
+        createTeamRoutes({
+          sessionResolver: localSessionResolver,
+          identityStore,
+          localOrgAdminGate: createRequireOrgAdminLocal(localSessionResolver),
+        }),
+      );
+      const res = await apiRequest(teams, '/auth/teams');
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'no organization exists yet' });
+    });
+
+    /**
+     * FIX 4 (D13 repair pass). `./local-identity.ts#resolveLocalOrgIdentity`'s cache was
+     * invalidated in exactly ONE place before this fix — `POST /auth/onboarding/org`'s legacy
+     * branch — so a request that had already resolved (and cached) a local `Principal` naming the
+     * org's default team kept reading that SAME `teamId` after a later `DELETE
+     * /auth/teams/:teamId` removed it. Reproduced end to end, through the real HTTP surface, using
+     * the same cache both `localSessionResolver` (this file) and `server.ts#resolveLocalPrincipal`
+     * (the POST /api/v1/projects path below) read: without the fix, the final assertion's request
+     * throws `unexpected project-team registration failure: team-not-found` inside
+     * `registerFolder`'s claim block and answers 500 instead of 200.
+     */
+    it('DELETE-ing the cached team does not brick a later POST /api/v1/projects — the cache is invalidated too', async () => {
+      const identityStore = IdentityStore.open(identityDir());
+      const onboarding = makeApp(
+        createOnboardingRoutes({
+          sessionResolver: localSessionResolver,
+          identityStore,
+          bootstrapClaim: { required: false, mode: 'open' },
+          localSignedInGate: createRequireSignedInLocal(identityStore),
+          localOrgAdminGate: createRequireOrgAdminLocal(localSessionResolver),
+        }),
+      );
+      const created = await apiRequest(onboarding, '/auth/onboarding/org', {
+        method: 'POST',
+        headers: { origin: 'http://127.0.0.1:4321', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'My Workspace' }),
+      });
+      expect(created.status).toBe(201);
+      const defaultTeamId = ((await created.json()) as { team: { id: string } }).team.id;
+
+      const teams = makeApp(
+        createTeamRoutes({
+          sessionResolver: localSessionResolver,
+          identityStore,
+          localOrgAdminGate: createRequireOrgAdminLocal(localSessionResolver),
+        }),
+      );
+      // A second team so the default team is not the org's LAST (`team-is-last` would otherwise
+      // refuse the delete below) — this call ALSO warms `resolveLocalOrgIdentity`'s cache with
+      // `teamId: defaultTeamId` (the admin gate resolves the principal on every call), which is
+      // the precondition the bug needs: a resolved, CACHED principal naming the team about to be
+      // deleted.
+      const secondTeam = await apiRequest(teams, '/auth/teams', {
+        method: 'POST',
+        headers: { origin: 'http://127.0.0.1:4321', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Engineering', slug: 'engineering' }),
+      });
+      expect(secondTeam.status).toBe(201);
+
+      const deleted = await apiRequest(teams, `/auth/teams/${defaultTeamId}`, {
+        method: 'DELETE',
+        headers: { origin: 'http://127.0.0.1:4321' },
+      });
+      expect(deleted.status).toBe(200);
+
+      // The regression: `server.ts`'s own `resolveLocalPrincipal` reads THE SAME
+      // `resolveLocalOrgIdentity` cache `localSessionResolver` reads above. If the cache was not
+      // invalidated by the DELETE, this still names the just-deleted team and `registerFolder`'s
+      // claim block 500s instead of filing the project under whatever team is actually left.
+      const projectRoot = mkdtempSync(join(tmpdir(), 'cez-teams-project-'));
+      try {
+        const registered = await apiRequest(makeApp(), '/api/v1/projects', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ root: projectRoot }),
+        });
+        expect(registered.status).toBe(200);
+        const body = (await registered.json()) as { project: { teamId?: string } };
+        expect(body.project.teamId).toBeDefined();
+        expect(body.project.teamId).not.toBe(defaultTeamId);
+      } finally {
+        rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
   });
 });

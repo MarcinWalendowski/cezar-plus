@@ -12,6 +12,11 @@ import { OidcClient, type OidcDiscoveryDocument, type OidcProvider, type Resolve
 import { IdentityStore } from './identity-store.ts';
 import { SESSION_COOKIE_NAME, SessionService, logoutCookie } from './session.ts';
 import { createAuthRoutes, type AuthRouteDeps } from './routes.ts';
+import { createOnboardingRoutes } from './onboarding-routes.ts';
+import { createTeamRoutes } from './team-routes.ts';
+import { createRequireOrgAdminLocal, createRequireSignedInLocal, localSessionResolver } from './local-gates.ts';
+import { invalidateLocalOrgIdentityCache } from './local-identity.ts';
+import { identityDir } from '../paths.ts';
 
 /**
  * `routes.ts`'s own responsibility, tested against the REAL `./oidc.ts` `OidcClient` (only its
@@ -542,7 +547,13 @@ describe('mount point (server.ts)', () => {
   const makeApp = (authRoutes?: ReturnType<typeof createAuthRoutes>) =>
     createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test', authRoutes });
 
-  it('registers no /auth/* route at all when authRoutes is absent (the CEZ_AUTH=none shape, D1)', async () => {
+  // CORRECTED 2026-08-07 (D13, phase 9 HTTP surface): this title used to read "...(the
+  // CEZ_AUTH=none shape, D1)". No longer accurate on its own — `CEZ_AUTH` unset no longer implies
+  // NOTHING under `/auth/*` is wired (D13's local mode wires `onboardingRoutes`/`teamRoutes` with
+  // `CEZ_AUTH` still unset). What is still true, and what the `local mode` case just below proves
+  // directly rather than leaving implied, is D13's own claim: "authRoutes... and inviteRoutes stay
+  // unmounted locally — there is nothing to log into and no second user to invite."
+  it('registers no /auth/* route at all when authRoutes is absent (deps-absence, not an auth-mode signature)', async () => {
     const app = makeApp(undefined);
     // Two different "nothing is registered here" signatures, because `server.ts`'s own SPA
     // catch-all (`routed.get('*', ...)`, line ~5320) is a GET-only fallback that answers 200
@@ -561,6 +572,50 @@ describe('mount point (server.ts)', () => {
     // dev "build the cockpit" fallback), never this file's JSON — so a reader can tell a real
     // `/auth/me` (401 JSON `{error:'unauthenticated'}`) apart from an unwired one (200 HTML) at a
     // glance, which is the actual, observable difference "no route registered" produces here.
+    for (const path of ['/auth/login', '/auth/callback', '/auth/me'] as const) {
+      const res = await apiRequest(app, path, { method: 'GET' });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/html');
+    }
+  });
+
+  // ---- D13 local mode: the shape that makes the title correction above meaningful ---------------
+  //
+  // `onboardingRoutes`/`teamRoutes` ARE wired here — `CEZ_AUTH` still unset — proving `authRoutes`'
+  // absence is D13's deliberate choice ("there is nothing to log into... locally"), not a side
+  // effect of nothing under `/auth/*` being mounted at all.
+  it('D13: authRoutes stays absent in local mode even though onboardingRoutes/teamRoutes are wired', async () => {
+    invalidateLocalOrgIdentityCache();
+    const identityStore = IdentityStore.open(identityDir());
+    const app = createApp({
+      repoRoot,
+      store,
+      manager: {} as RunManager,
+      version: '0.0.0-test',
+      // authRoutes: deliberately omitted — D13's own claim under test.
+      onboardingRoutes: createOnboardingRoutes({
+        sessionResolver: localSessionResolver,
+        identityStore,
+        bootstrapClaim: { required: false, mode: 'open' },
+        localSignedInGate: createRequireSignedInLocal(identityStore),
+        localOrgAdminGate: createRequireOrgAdminLocal(localSessionResolver),
+      }),
+      teamRoutes: createTeamRoutes({
+        sessionResolver: localSessionResolver,
+        identityStore,
+        localOrgAdminGate: createRequireOrgAdminLocal(localSessionResolver),
+      }),
+    });
+
+    // The onboarding surface actually works, with no session, no cookie, no bootstrap code.
+    const onboarding = await apiRequest(app, '/auth/onboarding');
+    expect(onboarding.status).toBe(200);
+    expect(await onboarding.json()).toEqual({ state: 'needs-org', bootstrapTokenRequired: false });
+
+    // ...while every authRoutes path answers exactly like the "absent" case above: no login, no
+    // callback, no logout, no second-user invite surface, all with CEZ_AUTH still unset.
+    const postRes = await apiRequest(app, '/auth/logout', { method: 'POST', headers: { origin: 'http://127.0.0.1:4321' } });
+    expect(postRes.status).toBe(404);
     for (const path of ['/auth/login', '/auth/callback', '/auth/me'] as const) {
       const res = await apiRequest(app, path, { method: 'GET' });
       expect(res.status).toBe(200);

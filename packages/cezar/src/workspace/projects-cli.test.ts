@@ -3,6 +3,9 @@ import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync,
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { IdentityStore } from '../auth/identity-store.ts';
+import { invalidateLocalOrgIdentityCache } from '../auth/local-identity.ts';
+import { identityDir } from '../paths.ts';
 import { loadWorkspaceConfig } from './config.ts';
 import { clearProjectProbeCache, registerProject } from './projects.ts';
 import { runProjectsCommand, type ProjectsCommandIo } from './projects-cli.ts';
@@ -24,6 +27,11 @@ describe('cezar projects CLI', () => {
     repos = mkdtempSync(join(realpathSync(tmpdir()), 'cez-projects-cli-repos-'));
     process.env.CEZ_HOME = home;
     clearProjectProbeCache();
+    // FIX A1/A2 (D13 repair round 2): `add`/`remove` now touch `auth/local-identity.ts`'s
+    // resolver — its cache is ONE global slot (see that module's own doc comment), not keyed per
+    // `CEZ_HOME`, so a resolved answer from a PREVIOUS case in this file must not leak into this
+    // one's fresh `CEZ_HOME`.
+    invalidateLocalOrgIdentityCache();
     const out: string[] = [];
     const err: string[] = [];
     io = { out, err, log: (l) => out.push(l), error: (l) => err.push(l) };
@@ -34,6 +42,7 @@ describe('cezar projects CLI', () => {
     else process.env.CEZ_HOME = originalHome;
     rmSync(home, { recursive: true, force: true });
     rmSync(repos, { recursive: true, force: true });
+    invalidateLocalOrgIdentityCache();
   });
 
   const run = (...args: string[]): Promise<number> =>
@@ -138,6 +147,26 @@ describe('cezar projects CLI', () => {
       expect(io.err.join('\n')).toContain('refusing to register');
       expect((await loadWorkspaceConfig()).projects).toEqual([]);
     });
+
+    // FIX A1 (D13 repair round 2, `.ai/specs/2026-08-06-org-team-auth-onboarding.md`): round 1
+    // wired local-org adoption into boot registration only — `cezar projects add` never filed a
+    // project under an already-existing local org. This is the CLI-level regression control.
+    it('files a newly-added project under an already-existing local org', async () => {
+      const identity = IdentityStore.open(identityDir());
+      const { user } = await identity.findOrCreateLocalUser();
+      const { org, defaultTeam } = await identity.claimOrg({ userId: user.id, name: 'Solo', slug: 'solo' });
+
+      const root = makeRepo('billing');
+      expect(await run('add', root)).toBe(0);
+
+      const entry = (await loadWorkspaceConfig()).projects.find((p) => p.id === 'billing');
+      expect(entry).toBeDefined();
+      expect(identity.getProjectTeam(entry!.root)).toEqual({
+        projectRoot: entry!.root,
+        orgId: org.id,
+        teamId: defaultTeam.id,
+      });
+    });
   });
 
   describe('remove', () => {
@@ -157,6 +186,26 @@ describe('cezar projects CLI', () => {
       expect(io.err.join('\n')).toContain('unknown project: nope');
       expect(await run('remove')).toBe(1);
       expect(io.err.join('\n')).toContain('cezar projects remove <id>');
+    });
+
+    // FIX A2 (D13 repair round 2): removal never released the `project_teams` claim, orphaning it
+    // — which makes the claiming org's team (and, if it was the last one, the whole org)
+    // permanently undeletable through the product. This is the CLI-level regression control.
+    it("releases the project's org claim on removal, unblocking the org's team for deletion afterward", async () => {
+      const entry = await registerProject(makeRepo('claimed'));
+      const identity = IdentityStore.open(identityDir());
+      const { user } = await identity.findOrCreateLocalUser();
+      const { org, defaultTeam } = await identity.claimOrg({ userId: user.id, name: 'Solo', slug: 'solo' });
+      await identity.createProjectTeam({ projectRoot: entry.root, orgId: org.id, teamId: defaultTeam.id });
+
+      expect(await run('remove', entry.id)).toBe(0);
+
+      expect(identity.getProjectTeam(entry.root)).toBeUndefined();
+      // Before this fix, this would throw `team-has-projects` — the orphaned claim FIX A2 closes.
+      await expect(identity.deleteTeam(defaultTeam.id)).rejects.toThrow(); // still the org's LAST team (team-is-last)
+      const secondTeam = await identity.createTeam({ orgId: org.id, name: 'Spare', slug: 'spare' });
+      await expect(identity.deleteTeam(defaultTeam.id)).resolves.toBeUndefined();
+      expect(identity.getTeamById(secondTeam.id)).toBeDefined();
     });
   });
 

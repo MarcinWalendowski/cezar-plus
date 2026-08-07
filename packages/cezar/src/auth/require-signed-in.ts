@@ -10,6 +10,19 @@ import { readSessionIdFromCookieHeader } from './session.ts';
  * `./require-org-admin.ts` is the HIGHER bar on the same family (a full principal, plus D12's
  * `owner`/`admin` role); these two are siblings, not alternatives.
  *
+ * **CORRECTED 2026-08-07 by D13: "cannot produce a D3 `Principal` at all" is no longer true of
+ * every caller of these routes.** This module (`createRequireSignedIn`,
+ * `resolveSignedInUser`/`getSignedInUser`) is the gate `GET /auth/onboarding` and
+ * `POST /auth/onboarding/org` use in SESSION mode, where the claim still holds exactly as written
+ * — a signed-in user with no membership yet genuinely has no `orgId`/`teamId`/`role` to build one
+ * from. D13 mounts the SAME two routes in LOCAL mode too, gated instead by
+ * `./local-gates.ts#createRequireSignedInLocal` (never this file's gate), and a local caller
+ * always DOES have a full D3 `Principal` — `resolvePrincipal({ authProvider: 'none' })` never
+ * returns anything else, even before an org exists (`orgId`/`teamId` are `null`, not absent). What
+ * a local caller cannot produce is an org-*scoped* principal (`hasOrgScope(principal)` is false),
+ * which is a narrower gap than "no `Principal` at all". The bar this file's gate enforces is
+ * therefore specific to the session-mode caller it actually serves.
+ *
  * **ADDED 2026-08-07 (5b/5c/8 repair stage), for two reasons that turned out to be one.**
  *
  * 1. **Authorization ran after validation on two routes, which is invariant 3's exact defect.**

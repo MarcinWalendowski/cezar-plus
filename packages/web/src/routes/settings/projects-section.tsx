@@ -60,9 +60,16 @@ import { listOrgTeams } from './teams-api'
  * other column already reads, and filters client-side.
  *
  * `teamId`/`teamName` are optional on `ProjectListEntry` (`packages/contract/src/projects.ts`) and
- * populated by `GET /api/v1/projects` only for a root the caller's own org has claimed. With
- * `CEZ_AUTH` unset the server never reads the identity store at all, so every project comes back
- * with neither — which is exactly the state that must render with no filter and no board change.
+ * populated by `GET /api/v1/projects` only for a root the caller's own org has claimed.
+ *
+ * **CORRECTED 2026-08-07 by D13: "With `CEZ_AUTH` unset the server never reads the identity store
+ * at all" is FALSE.** D13 lets a local user create an org on a loopback bind with `CEZ_AUTH`
+ * still unset; once they have, `server.ts#withTeams` DOES read `<CEZ_HOME>/identity/*.json` and
+ * these fields ARE populated, exactly as under real auth (gated on `hasOrgScope(principal)`, never
+ * on `resolveAuthProvider`). What still renders with no filter and no board change is a caller
+ * with no org yet — `CEZ_AUTH` unset with no local org created, same as before D13, or a hosted
+ * deployment before its first org exists.
+ *
  * Read through this one helper rather than at each use site, so "has a team" is decided once.
  */
 function teamOf(project: ProjectListEntry): { id: string; label: string } | null {
@@ -298,8 +305,11 @@ function RegistryTable({
   // as-yet-empty team is selectable), unioned with any team a registered project carries that the
   // org list somehow missed — belt-and-suspenders for a query that failed or hasn't resolved yet,
   // never a second source of truth (both name the same team the same way when they agree). Empty
-  // under `CEZ_AUTH` unset, and empty for any deployment with exactly its one original team — no
-  // data means no filter, never an empty dropdown.
+  // for a caller with no org yet, and empty for any deployment with exactly its one original team
+  // — no data means no filter, never an empty dropdown. CORRECTED 2026-08-07 by D13: "empty under
+  // `CEZ_AUTH` unset" is no longer the accurate framing — see `teamOf`'s own module doc comment,
+  // corrected the same way. It is now empty for "no org yet", which `CEZ_AUTH` unset no longer
+  // implies once a local org has been created.
   const teamOptions = useMemo(() => {
     const byId = new Map<string, string>()
     for (const team of orgTeams.data ?? []) byId.set(team.id, team.name)
@@ -323,9 +333,10 @@ function RegistryTable({
       : registry.projects.filter((project) => teamOf(project)?.id === effectiveTeamId)
 
   // Phase 5c: the reassignment picker's own gate is the SAME `teamOptions.length > 0` signal the
-  // filter row above already uses — no team data (CEZ_AUTH unset, or a genuinely team-less org)
-  // means no column, not a column full of dashes. This is what makes the picker "invisible", not
-  // merely disabled, under CEZ_AUTH unset (this file's own module doc comment on `teamOf`).
+  // filter row above already uses — no team data (no org yet, or a genuinely team-less org) means
+  // no column, not a column full of dashes. This is what makes the picker "invisible", not merely
+  // disabled, for a caller with no org (this file's own module doc comment on `teamOf`, corrected
+  // 2026-08-07 by D13 — "no org yet" is the real precondition, not "CEZ_AUTH unset").
   const showTeamColumn = teamOptions.length > 0
 
   const confirmRemoval = () => {
@@ -446,7 +457,8 @@ function ProjectRow({
   disabled: boolean
   onRemove: () => void
   /** `null` when `RegistryTable` decided the Team column itself is not shown (no team data at
-   *  all — CEZ_AUTH unset, this file's own inertness contract). Non-null, including `[]`, means
+   *  all — no org yet, this file's own inertness contract; corrected 2026-08-07 by D13, which
+   *  means `CEZ_AUTH` unset no longer implies this). Non-null, including `[]`, means
    *  the column IS rendered; see `TeamPicker`'s own comment for why a `[]` case can't actually
    *  happen given how `RegistryTable` derives it. */
   teamOptions: { id: string; label: string }[] | null

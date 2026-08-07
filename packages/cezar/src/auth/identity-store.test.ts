@@ -188,6 +188,40 @@ describe('IdentityStore — duplicate inserts are refused, never last-write-wins
     expect(raw.users).toHaveLength(1);
   });
 
+  it('findOrCreateLocalUser mints a real row keyed on issuer/subject "local"/"local" (D13)', async () => {
+    const dir = await directory();
+    const store = IdentityStore.open(dir);
+    const { user, created } = await store.findOrCreateLocalUser();
+
+    expect(created).toBe(true);
+    expect(user.issuer).toBe('local');
+    expect(user.subject).toBe('local');
+
+    const raw = JSON.parse(readFileSync(join(dir, 'identity.json'), 'utf8'));
+    expect(raw.users).toEqual([
+      expect.objectContaining({ id: user.id, issuer: 'local', subject: 'local' }),
+    ]);
+  });
+
+  it('findOrCreateLocalUser is idempotent — reuses the SAME row on a second call', async () => {
+    const store = IdentityStore.open(await directory());
+    const first = await store.findOrCreateLocalUser();
+    const second = await store.findOrCreateLocalUser();
+
+    expect(second.created).toBe(false);
+    expect(second.user.id).toBe(first.user.id);
+    expect(store.listOrgs()).toEqual([]); // creates a user row only, never an org on its own
+  });
+
+  it('findOrCreateLocalUser IS findOrCreateUser reused, not a second write path — same row either way', async () => {
+    const store = IdentityStore.open(await directory());
+    const viaLocal = await store.findOrCreateLocalUser();
+    const viaGeneric = await store.findOrCreateUser({ issuer: 'local', subject: 'local' });
+
+    expect(viaGeneric.user.id).toBe(viaLocal.user.id);
+    expect(viaGeneric.created).toBe(false); // the local-named call already created it
+  });
+
   it('refuses a second membership for the same (user, org) pair', async () => {
     const store = IdentityStore.open(await directory());
     const { user } = await store.findOrCreateUser({
@@ -655,6 +689,103 @@ describe('IdentityStore — D8 first-user bootstrap (claimOrg, legacy branch —
     const winnerUserId = storeA.listOrgMembers(winningOrg.id)[0]?.userId;
     const loserUserId = winnerUserId === userA.id ? userB.id : userA.id;
     expect(storeA.listMemberships(loserUserId)).toEqual([]);
+  });
+});
+
+// ---- D13 project adoption: claimOrg's legacy branch accepts already-registered project roots and
+// files them under the new default team IN THE SAME write — "an org whose project list is empty is
+// a FAIL, not a cosmetic gap" (D13's own words). ---------------------------------------------------
+describe('IdentityStore — claimOrg project adoption (D13, legacy branch)', () => {
+  it('files every supplied root under the new default team, in the same write that creates the org', async () => {
+    const store = IdentityStore.open(await directory());
+    const { user } = await store.findOrCreateLocalUser();
+    const { org, defaultTeam } = await store.claimOrg({
+      userId: user.id,
+      name: 'Solo',
+      slug: 'solo',
+      projectRoots: ['/repo/boot-project', '/repo/second-project'],
+    });
+
+    const rows = store.listProjectTeams({ orgId: org.id });
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.projectRoot).sort()).toEqual([
+      '/repo/boot-project',
+      '/repo/second-project',
+    ]);
+    for (const row of rows) {
+      expect(row.orgId).toBe(org.id);
+      expect(row.teamId).toBe(defaultTeam.id);
+    }
+  });
+
+  it('an org created with no projectRoots has an EMPTY project list, not a silently-adopted one', async () => {
+    const store = IdentityStore.open(await directory());
+    const { user } = await store.findOrCreateLocalUser();
+    const { org } = await store.claimOrg({ userId: user.id, name: 'Solo', slug: 'solo' });
+
+    expect(store.listProjectTeams({ orgId: org.id })).toEqual([]);
+  });
+
+  it('de-duplicates a root repeated in the input list — one project_teams row, not two sharing a PK', async () => {
+    const store = IdentityStore.open(await directory());
+    const { user } = await store.findOrCreateLocalUser();
+    const { org } = await store.claimOrg({
+      userId: user.id,
+      name: 'Solo',
+      slug: 'solo',
+      projectRoots: ['/repo/boot-project', '/repo/boot-project'],
+    });
+
+    expect(store.listProjectTeams({ orgId: org.id })).toHaveLength(1);
+  });
+
+  it('adoption is atomic with org creation — a refused claim (already bootstrapped) adopts nothing', async () => {
+    const store = IdentityStore.open(await directory());
+    const { user: first } = await store.findOrCreateLocalUser();
+    await store.claimOrg({ userId: first.id, name: 'Acme', slug: 'acme' });
+
+    const { user: second } = await store.findOrCreateUser({
+      issuer: 'https://idp.example',
+      subject: 'sub-2',
+    });
+    await expect(
+      store.claimOrg({
+        userId: second.id,
+        name: 'Beta',
+        slug: 'beta',
+        projectRoots: ['/repo/should-not-be-adopted'],
+      }),
+    ).rejects.toMatchObject({ code: 'org-already-bootstrapped' });
+
+    // The root was never adopted by anyone — the write that would have filed it never happened.
+    expect(store.listProjectTeams()).toEqual([]);
+  });
+
+  it("an already-adopted root is refused by createProjectTeam afterward — adoption does not bypass D4's one-root-one-org rule", async () => {
+    const store = IdentityStore.open(await directory());
+    // A real, resolvable directory, pre-normalized exactly the way `claimOrg`'s own doc comment
+    // says its caller must hand it one — `createProjectTeam` below independently resolves the
+    // SAME literal path via `realpathSync.native`, so the two must agree for this test to prove
+    // anything about the uniqueness check rather than about two different strings.
+    const projectRoot = realpathSync.native(await directory());
+    const { user } = await store.findOrCreateLocalUser();
+    const { org } = await store.claimOrg({
+      userId: user.id,
+      name: 'Solo',
+      slug: 'solo',
+      projectRoots: [projectRoot],
+    });
+
+    const otherOrg = await store.createOrg({ name: 'Other', slug: 'other' });
+    await expect(
+      store.createProjectTeam({
+        projectRoot,
+        orgId: otherOrg.org.id,
+        teamId: otherOrg.defaultTeam.id,
+      }),
+    ).rejects.toMatchObject({ code: 'project-root-taken' });
+    // Original adoption survives untouched.
+    expect(store.getProjectTeam(projectRoot)?.orgId).toBe(org.id);
   });
 });
 

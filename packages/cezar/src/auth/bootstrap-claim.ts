@@ -30,10 +30,30 @@ import { resolveAuthProvider } from '../server/capabilities.ts';
  *
  * | env | mode | effect |
  * |---|---|---|
- * | `CEZ_AUTH` unset/`none` | `open` | never consulted — the onboarding routes are not mounted at all |
+ * | `CEZ_AUTH` unset/`none` | `open` | never consulted BY THIS MODULE — see the CORRECTED note below the table |
  * | `CEZ_AUTH_BOOTSTRAP_TOKEN=<secret>` | `preset` | that exact value must be supplied to claim the deployment |
  * | (default, `CEZ_AUTH` on) | `generated` | a fresh 128-bit code is minted at boot and printed once |
  * | `CEZ_AUTH_BOOTSTRAP_OPEN=1` | `open` | the operator says out loud that whoever signs in first may claim it |
+ *
+ * **CORRECTED 2026-08-07 (D13, adversarial review): the first row's original wording — "never
+ * consulted — the onboarding routes are not mounted at all" — is FALSE.** D13 mounts
+ * `/auth/onboarding*`/`/auth/teams*` locally too, on every loopback boot with `CEZ_AUTH` unset
+ * (`local-mode-boot.ts#buildLocalModeRoutes`, gated on `isLocalOrgModeActive` — see that module's
+ * own doc comment for why it is no longer the inline `src/index.ts` branch this note originally
+ * named, repair round 2's FIX B1) — the onboarding routes ARE mounted with `CEZ_AUTH` unset now.
+ * What is still true, and is the actual reason the
+ * row's `effect` column holds, is narrower: THIS module (`resolveBootstrapClaim`,
+ * `matchesBootstrapClaim`, the `bootstrapClaim` export) is never consulted on that path, because
+ * D13's local branch constructs the value inline instead — `bootstrapClaim: { required: false,
+ * mode: 'open' }`, literal, never read from this file (see that branch's own comment on
+ * `OnboardingRouteDeps.bootstrapClaim` for why) — precisely because `bootstrapTokenRequired` must
+ * be keyed on the BIND (`capabilities.localHandoff`), not on `CEZ_AUTH`, which is what reading
+ * `resolveAuthProvider` again inside this module would do instead (D13's own text: "keying this on
+ * `CEZ_AUTH` instead would hand org-one ownership to the first stranger who reaches an
+ * intentionally-exposed instance"). The `resolveAuthProvider(env) === 'none'` branch inside
+ * `resolveBootstrapClaim` below is therefore reachable in principle (see the CORRECTED note on the
+ * `bootstrapClaim` export further down — the module IS loaded on the local path) but is not, in
+ * practice, where local mode's `bootstrapTokenRequired: false` comes from.
  *
  * `generated` is the default on purpose: it is the mode that is safe when the operator does
  * nothing, and the code costs them one glance at `journalctl -u cezar`. `open` restores phase 4's
@@ -75,10 +95,14 @@ export function resolveBootstrapClaim(
   env: NodeJS.ProcessEnv,
   mint: MintToken = defaultMint,
 ): BootstrapClaim {
-  // Auth off ⇒ `/auth/*` is never mounted, so nothing can consult this. Returning `open` (rather
-  // than minting a code nobody will ever be asked for) keeps D1's "unset means zero I/O" literally
-  // true even if some future caller reaches this on the auth-off path: no randomness is drawn, no
-  // banner is produced, nothing is stored.
+  // CORRECTED 2026-08-07 (D13): "Auth off ⇒ `/auth/*` is never mounted" is FALSE now — D13 mounts
+  // `/auth/onboarding*`/`/auth/teams*` locally too. What still holds: THIS function is not what
+  // local mode's `bootstrapTokenRequired` comes from (D13's local branch constructs the value
+  // inline instead, keyed on the bind — see the module docblock's table note). Returning `open`
+  // here anyway (rather than minting a code nobody will ever be asked for) keeps D1's "unset means
+  // zero I/O" literally true even if some future caller DOES reach this on the auth-off path — and
+  // one now can, transitively, at module-load time (see the `bootstrapClaim` export below): no
+  // randomness is drawn, no banner is produced, nothing is stored.
   if (resolveAuthProvider(env) === 'none')
     return { required: false, mode: 'open' };
   if (env.CEZ_AUTH_BOOTSTRAP_OPEN === '1')
@@ -145,11 +169,35 @@ export function bootstrapClaimBanner(
 }
 
 /**
- * The process-lifetime claim. Resolved once at module load — which only ever happens on the
- * `CEZ_AUTH`-on path, because `src/index.ts` reaches this module (and `./onboarding-routes.ts`,
- * which imports it) through the same `gate.provider !== 'none'` dynamic import as the rest of
- * `auth/`. One instance, shared by the route that checks it and the boot banner that prints it,
- * via the ESM module cache — never two resolutions that could mint two different codes.
+ * The process-lifetime claim. Resolved once at module load.
+ *
+ * **CORRECTED 2026-08-07 (D13, adversarial review): "which only ever happens on the `CEZ_AUTH`-on
+ * path" is now FALSE.** D13's local branch (FIX B1, D13 repair round 2: extracted out of
+ * `src/index.ts` into `../local-mode-boot.ts#buildLocalModeRoutes`, gated on `isLocalOrgModeActive`
+ * — see that module's own doc comment for why) ALSO dynamically imports `./onboarding-routes.ts` —
+ * on every loopback boot with `CEZ_AUTH` unset, not only on the `gate.provider !== 'none'` branch —
+ * and that module statically imports this one, so this constant is now resolved at module load on
+ * BOTH paths. Harmless rather than a defect, and
+ * exactly what `resolveBootstrapClaim`'s own comment above already anticipated ("even if some
+ * future caller reaches this on the auth-off path"): `resolveAuthProvider(env) === 'none'` on the
+ * local path, so this resolves to `{ required: false, mode: 'open' }` with no randomness drawn and
+ * nothing stored or printed. It is still not where local mode's `bootstrapTokenRequired: false`
+ * actually comes from at request time, though — D13's local branch constructs that value inline
+ * instead of reading this export, precisely so the decision is keyed on the BIND
+ * (`capabilities.localHandoff`) rather than by asking `resolveAuthProvider` a second time (see the
+ * module docblock's table note, and D13 itself: "keying this on `CEZ_AUTH` instead would hand
+ * org-one ownership to the first stranger who reaches an intentionally-exposed instance"). The
+ * "one instance … never two resolutions" guarantee in the original sentence below still holds —
+ * it was never about which PATH reaches this module, only about how many times it runs once
+ * reached — and remains true for the `CEZ_AUTH`-on path, the only path where the value is ever
+ * actually consulted by a route.
+ *
+ * The original text follows unchanged: Resolved once at module load — which only ever happens on
+ * the `CEZ_AUTH`-on path, because `src/index.ts` reaches this module (and
+ * `./onboarding-routes.ts`, which imports it) through the same `gate.provider !== 'none'` dynamic
+ * import as the rest of `auth/`. One instance, shared by the route that checks it and the boot
+ * banner that prints it, via the ESM module cache — never two resolutions that could mint two
+ * different codes.
  */
 export const bootstrapClaim: BootstrapClaim = resolveBootstrapClaim(
   process.env,

@@ -7,6 +7,7 @@ import {
   FoldersIcon,
   GaugeIcon,
   IdCardIcon,
+  LogOutIcon,
   PackageCheckIcon,
   KeyboardIcon,
   NotebookPenIcon,
@@ -18,6 +19,7 @@ import type { ComponentType, SVGProps } from 'react'
 
 import type { Capabilities } from '@open-mercato/cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
+import { AccountSection } from './account-section'
 import { AccountsSection } from './accounts-section'
 import { AgentConfigSection } from './agent-config-section'
 import { AgentsSection } from './agents-section'
@@ -54,6 +56,7 @@ import { WorktreesSection } from './worktrees-section'
 export type SettingsSectionId =
   | 'bookmarklets'
   | 'appearance'
+  | 'account'
   | 'accounts'
   | 'agents'
   | 'agent-config'
@@ -203,11 +206,26 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     scope: 'global',
   },
   {
+    // D13: the owner's word for this is "Workspace" (UI label only — see `teams-section.tsx`'s
+    // own doc comment). `id`/`component` stay `teams`/`TeamsSection`: no identifier renamed.
     id: 'teams',
-    title: 'Teams',
-    description: 'Create and rename the teams your projects are grouped under.',
+    title: 'Workspaces',
+    description: 'Create and rename the workspaces your projects are grouped under.',
     icon: UsersIcon,
     component: TeamsSection,
+    scope: 'global',
+  },
+  {
+    // D14 (`.ai/specs/2026-08-06-org-team-auth-onboarding.md`): `POST /auth/logout` has existed
+    // since phase 3 with no caller in the cockpit. Declared unconditionally, like `teams` above —
+    // see `account-section.tsx`'s own doc comment for why visibility lives in the panel (an async
+    // probe against `/auth/me`) rather than a registry-level `capability` gate: `capabilitiesSchema`
+    // deliberately has no `auth` key.
+    id: 'account',
+    title: 'Account',
+    description: 'Sign out of this cezar deployment.',
+    icon: LogOutIcon,
+    component: AccountSection,
     scope: 'global',
   },
   {

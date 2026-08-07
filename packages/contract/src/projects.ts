@@ -41,9 +41,19 @@ export const projectListEntrySchema = z.object({
   /** Which team this project is assigned to (spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`,
    *  D2/D5/D8, Phase 5) — metadata for grouping/filtering, never a scope (D5). Lives in
    *  `<CEZ_HOME>/identity/*.json` (`project_teams`), not in this registry entry itself, so it is
-   *  omitted entirely under `CEZ_AUTH` unset (no identity store exists to answer from) and for any
-   *  root not yet claimed by an org. Present only once a registration under real auth has assigned
-   *  (or claimed) a team for this root. */
+   *  omitted for any root not yet claimed by an org. Present once a registration has assigned (or
+   *  claimed) a team for this root.
+   *
+   *  **CORRECTED 2026-08-07 by D13: "omitted entirely under `CEZ_AUTH` unset (no identity store
+   *  exists to answer from)" is FALSE.** D13 (phase 9) lets a local user create an org on a
+   *  loopback bind with `CEZ_AUTH` still unset; once they have, `GET /api/v1/projects` DOES read
+   *  `<CEZ_HOME>/identity/*.json` (`server.ts#withTeams`, gated on `hasOrgScope(principal)`, never
+   *  on `resolveAuthProvider`) and populates this field exactly as it would under real auth. The
+   *  precondition this field is actually gated on is "does the caller's principal have an org"
+   *  (`hasOrgScope`), which `CEZ_AUTH` unset no longer implies — see D13's own `hasOrgScope` seam
+   *  in `auth/principal.ts`. It remains true, and is the accurate replacement, that a caller with
+   *  no org yet — `CEZ_AUTH` unset with no local org created, or a hosted deployment before
+   *  onboarding — sees this field omitted and the identity store untouched. */
   teamId: z.string().optional(),
   /** The team's display name, denormalized onto the entry beside `teamId` — same precedent as
    *  `forge` (a derived fact the server resolves once so every consumer doesn't re-derive it).
@@ -121,6 +131,15 @@ export type UpdateProjectResponse = z.infer<typeof updateProjectResponseSchema>;
  * Under `CEZ_AUTH` unset, or for a root with no org claim at all, this field must be REJECTED
  * (400) rather than silently ignored — there is no team to reassign FROM, and silently accepting
  * it would let a caller believe a reassignment happened when nothing was written.
+ *
+ * **CORRECTED 2026-08-07 by D13: "Under `CEZ_AUTH` unset ... this field must be REJECTED" is
+ * FALSE as a blanket rule.** D13 lets a local user create an org with `CEZ_AUTH` still unset
+ * (loopback bind); once they have, a `teamId` reassignment SUCCEEDS exactly as it would under
+ * real auth (`server.ts`'s handler checks `hasOrgScope(principal)`, never `resolveAuthProvider`).
+ * The real precondition — unchanged by D13, and what the sentence above should have said — is "no
+ * organization to reassign within": `CEZ_AUTH` unset with no local org created yet, or a hosted
+ * deployment before its first org exists, both still 400 here for that reason; `CEZ_AUTH` unset
+ * with a local org already claimed does not.
  */
 export const updateProjectInputSchema = z.object({
   maxParallel: z.number().int().min(1).max(16).nullable().optional(),

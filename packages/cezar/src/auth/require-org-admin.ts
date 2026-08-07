@@ -61,11 +61,18 @@ export function createRequireOrgAdmin(
 ): (c: Context, next: Next) => Response | Promise<Response | void> {
   return async (c, next) => {
     const principal = resolver.resolveFromCookieHeader(c.req.header('cookie'));
-    // `principal.kind !== 'session'` is unreachable in practice — `/auth/*` only mounts once
-    // `CEZ_AUTH` names a provider, and a cookie resolver never resolves the `'local'` kind (the
-    // same defensive stance `onboarding-routes.ts`'s `GET /auth/onboarding` and `PATCH
-    // /auth/onboarding/team` already take for this exact check) — but failing closed here costs
-    // nothing.
+    // `principal.kind !== 'session'` is unreachable in practice.
+    // **CORRECTED 2026-08-07 by D13: the reason below — "`/auth/*` only mounts once `CEZ_AUTH`
+    // names a provider" — is no longer true; D13 mounts `/auth/onboarding*`/`/auth/teams*` locally
+    // too.** The conclusion still holds, for a narrower, still-correct reason: THIS gate
+    // (`createRequireOrgAdmin`, bound to the cookie-based `sessionResolver`) is never the admin
+    // gate local mode actually uses — `local-mode-boot.ts#buildLocalModeRoutes` wires
+    // `team-routes.ts`/`onboarding-routes.ts` with `local-gates.ts#createRequireOrgAdminLocal`
+    // instead (its `localOrgAdminGate` parameter overrides the `createRequireOrgAdmin(...)`
+    // fallback this file builds). A cookie resolver genuinely never resolves the `'local'` kind —
+    // that part of the original reasoning stands (the same defensive stance
+    // `onboarding-routes.ts`'s `GET /auth/onboarding` and `PATCH /auth/onboarding/team` already
+    // take for this exact check) — but failing closed here costs nothing.
     if (!principal || principal.kind !== 'session') {
       return c.json({ error: 'unauthenticated' }, 401);
     }

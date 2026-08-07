@@ -37,6 +37,21 @@ import {
 const SNAPSHOT_FILE = 'identity.json';
 const LOCK_FILE = 'identity.lock';
 
+/**
+ * D13: the local user's fixed `(issuer, subject)` identity key — never a nullable-issuer bypass.
+ * `findOrCreateUser` keys every row on `(issuer, subject)`, both required (`userSchema`'s own doc
+ * comment: "identity is (issuer, sub), never email"); a local, IdP-less deployment gets a REAL row
+ * with these two literals instead of a schema change that would let `issuer` go missing for
+ * everyone. `'local'` is not a URL, so it can never collide with a real OIDC issuer (those are
+ * always absolute URLs per D9's discovery flow) — which is exactly what makes "this deployment
+ * later turns auth on" well-defined: the local row and any future OIDC row for the same human stay
+ * two different rows (merging them is out of scope, D13's own Risks). Exported so
+ * `auth/local-identity.ts`'s resolver can look the row back up by the same key without either file
+ * duplicating the literal.
+ */
+export const LOCAL_USER_ISSUER = 'local';
+export const LOCAL_USER_SUBJECT = 'local';
+
 /** Cap on the exponential backoff between lease retries — see `IdentityStore`'s module doc for
  *  why writes retry-and-block instead of the sibling stores' "one shot, else undefined" idiom. */
 const MAX_RETRY_DELAY_MS = 200;
@@ -475,6 +490,24 @@ export class IdentityStore {
     });
   }
 
+  /**
+   * D13: the local user, without an IdP. A thin, named wrapper over `findOrCreateUser` above —
+   * NOT a second write path — reusing that method's guarded write and its lease is what "the local
+   * user is `issuer: 'local', subject: 'local'`, which keeps the `(issuer, subject)` key honest"
+   * (D13's own text) means concretely: this method invents no new uniqueness rule, no new schema
+   * branch and no nullable-issuer bypass, it just spells `LOCAL_USER_ISSUER`/`LOCAL_USER_SUBJECT`
+   * once so `auth/local-identity.ts`'s onboarding write (and any other future local-mode caller)
+   * never has to. Idempotent for the same reason `findOrCreateUser` already is: calling this twice
+   * (e.g. a re-run of the onboarding wizard against an already-onboarded `CEZ_HOME`) returns the
+   * SAME row, `created: false` the second time, never a duplicate.
+   */
+  async findOrCreateLocalUser(): Promise<{ user: User; created: boolean }> {
+    return this.findOrCreateUser({
+      issuer: LOCAL_USER_ISSUER,
+      subject: LOCAL_USER_SUBJECT,
+    });
+  }
+
   async createMembership(input: {
     userId: string;
     orgId: string;
@@ -592,6 +625,29 @@ export class IdentityStore {
           slug: string;
           defaultTeamName?: string;
           defaultTeamSlug?: string;
+          /**
+           * **D13 project adoption.** Already-registered project roots (e.g. the boot project every
+           * `cezar serve` has from its very first run) to file under this org's new default team, IN
+           * THIS SAME guarded write — "an org whose project list is empty is a FAIL, not a cosmetic
+           * gap" (D13's own words). Legacy-branch only: the D11 claim branch attaches an owner to an
+           * org that already exists on a fresh org process, which has no already-registered projects
+           * of its own to adopt.
+           *
+           * Every root here is trusted to already be normalized (`realpathSync.native`'d), the same
+           * contract `deleteProjectTeam`/`getProjectTeam`/`listProjectTeams` already hold their
+           * callers to (see `createProjectTeam`'s own doc comment for the one place that DOES
+           * re-resolve) — the caller here is D13's local-org onboarding write, filing roots the
+           * workspace registry already normalized at registration time, not raw user input.
+           *
+           * No "already claimed" check against `snapshot.projectTeams`: `createProjectTeam` requires
+           * `org-not-found` to fail first, so a `project_teams` row can only exist for an org that
+           * exists, and this branch's own `org-already-bootstrapped` guard just above only lets this
+           * code run when `snapshot.orgs.length === 0` — no org has ever existed yet, so no
+           * `project_teams` row referencing one can exist either. Duplicate roots WITHIN this list
+           * are still de-duplicated below (a caller error, not a data hazard, but the PK would
+           * otherwise see two rows for one root).
+           */
+          projectRoots?: string[];
         }
       | { userId: string; orgId: string },
     ids: { orgId?: string; defaultTeamId?: string } = {},
@@ -672,7 +728,8 @@ export class IdentityStore {
         };
       }
 
-      // ---- legacy path: create the deployment's first-ever org, UNCHANGED from `bootstrapFirstOrg` ----
+      // ---- legacy path: create the deployment's first-ever org, otherwise UNCHANGED from
+      // `bootstrapFirstOrg` — the one addition is `projectRoots` adoption below (D13, phase 9) ----
       if (snapshot.orgs.length > 0) {
         throw new IdentityStoreError(
           'org-already-bootstrapped',
@@ -702,12 +759,19 @@ export class IdentityStore {
         orgId: org.id,
         role: 'owner',
       });
+      // D13 project adoption — see `projectRoots`'s own doc comment on the input type above for
+      // why no "already claimed" check is needed here. `Set` dedupes a caller passing the same
+      // root twice, which would otherwise mint two `project_teams` rows sharing one PK.
+      const adoptedProjectTeams = [...new Set(input.projectRoots ?? [])].map((projectRoot) =>
+        projectTeamSchema.parse({ projectRoot, orgId: org.id, teamId: team.id }),
+      );
       return {
         snapshot: {
           ...snapshot,
           orgs: [...snapshot.orgs, org],
           teams: [...snapshot.teams, team],
           memberships: [...snapshot.memberships, membership],
+          projectTeams: [...snapshot.projectTeams, ...adoptedProjectTeams],
         },
         result: { org, defaultTeam: team, membership },
       };

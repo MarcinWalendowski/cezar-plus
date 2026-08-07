@@ -27,14 +27,21 @@ import { ApiError } from '@/api/client'
  * the ~15 lines below are a deliberate duplicate of its `fetchAuth`/`isJsonResponse`/
  * `parseJsonBody`/`errorMessageFrom` shape, not a drifted reinvention.
  *
- * **The auth-off signal is the same one `onboarding-api.ts#probeOnboarding` already established.**
- * With `CEZ_AUTH` unset, `/auth/*` is never registered at all (D1: "unset means zero I/O"), so
+ * **The "no `/auth/*` at all" signal is the same one `onboarding-api.ts#probeOnboarding` already
+ * established, and reads the same way here.** On a hosted, unauthenticated deployment
+ * (`CEZ_ALLOW_UNAUTHENTICATED=1`, D9) — the one topology that mounts no `/auth/*` surface at all —
  * `GET /auth/teams` falls through to the SPA catch-all, which answers every unmatched GET with the
  * built `index.html` — `200 text/html`, never JSON. That is read as "no teams" here rather than as
  * an error: `listOrgTeams` resolves to `[]`, which is exactly the value that already makes
  * `projects-section.tsx`'s filter render nothing (its own `teamOptions` already treats an empty
- * option set as "no filter, not an empty dropdown"). So the CEZ_AUTH-unset invariant holds without
- * a special case at the call site — see that file's own test for the negative control.
+ * option set as "no filter, not an empty dropdown"). So that invariant holds without a special
+ * case at the call site — see that file's own test for the negative control.
+ *
+ * **This is narrower than "`CEZ_AUTH` unset" since D13 (phase 9, local mode).** The npm
+ * zero-config default (loopback, `CEZ_AUTH` unset) now mounts a real, local `/auth/teams` — so a
+ * `CEZ_AUTH`-unset deployment answers real JSON here (a genuine, possibly-empty team list, or the
+ * local `no organization exists yet` 400 before onboarding), not the SPA shell. See
+ * `probeTeams`/`TeamsProbe` below for the client's own read of both those states.
  */
 
 function authUrl(path: string): string {
@@ -84,20 +91,39 @@ export async function listOrgTeams(signal?: AbortSignal): Promise<Team[]> {
 
 // ---- the Settings → Teams management pane (5c: create/rename) -----------------------------------
 //
-// `listOrgTeams` above folds `CEZ_AUTH` unset AND "org has zero teams" into the same `[]` — exactly
-// right for a SUPPLEMENTARY filter (no data means no filter, either reason), but too lossy for the
-// pane that owns "manage your teams": that surface has to tell a genuinely-empty org apart from a
-// deployment with no auth at all, the same way `onboarding-api.ts#probeOnboarding` distinguishes
-// `auth-off` from a real state. `probeTeams` below is that dedicated probe, kept separate from
-// `listOrgTeams` rather than folded into it — same reasoning as this file's own module doc comment
-// ("a deliberate duplicate... not a drifted reinvention").
+// `listOrgTeams` above folds "no `/auth/*` mounted" AND "org has zero teams" into the same `[]` —
+// exactly right for a SUPPLEMENTARY filter (no data means no filter, either reason), but too lossy
+// for the pane that owns "manage your teams": that surface has to tell a genuinely-empty org apart
+// from a deployment with no onboarding surface at all, the same way
+// `onboarding-api.ts#probeOnboarding` distinguishes `unavailable` from a real state. `probeTeams`
+// below is that dedicated probe, kept separate from `listOrgTeams` rather than folded into it —
+// same reasoning as this file's own module doc comment ("a deliberate duplicate... not a drifted
+// reinvention").
 
-/** The three states `teams-panel.tsx` renders. Mirrors `onboarding-api.ts#OnboardingProbe`'s shape
- *  for the same two states (`auth-off`, `signed-out`) — see that file for the exact signal each one
- *  reads off the response. */
+/** The four states `teams-panel.tsx` renders. Mirrors `onboarding-api.ts#OnboardingProbe`'s shape
+ *  for `signed-out` and (renamed, see below) `unavailable` — see that file for the exact signal
+ *  each one reads off the response.
+ *
+ *  **`unavailable`, renamed from `auth-off` 2026-08-07 (second adversarial review, FIX C4).** Kept
+ *  out of step with `onboarding-api.ts#OnboardingProbe`'s own 2026-08-07 rename — its own module
+ *  doc comment already gives the reason: D13 local mode answers real JSON here now, so a kind named
+ *  for "auth is off" is actively misleading about which deployments reach it. Renamed to match its
+ *  twin rather than left to say a false thing about a state it does still, correctly, describe (the
+ *  narrower hosted-unauthenticated topology — see the module doc comment above).
+ *
+ *  **`no-org`, ADDED 2026-08-07 (FIX C3).** `probeTeams` used to fold this precondition into a
+ *  thrown `ApiError`, same as any other non-2xx body — which rendered `teams-panel.tsx`'s generic
+ *  `tone="danger"` "Could not load workspaces" card for the ordinary, expected zero-config-default
+ *  state (before any org exists, or permanently after a decline): a RED ERROR CARD on the default
+ *  deployment mode, where the pre-D13 pane showed a quiet neutral explainer. `team-routes.ts`'s own
+ *  `GET /auth/teams` handler answers this precondition with 400, never 401, and — for this specific
+ *  parameterless GET — for no other reason (see that file's own doc comment, "D13 invariant 1: no
+ *  401 in local mode, ever"), so matching on `res.status === 400` alone is decisive here, not a
+ *  guess at an error string. */
 export type TeamsProbe =
-  | { kind: 'auth-off' }
+  | { kind: 'unavailable' }
   | { kind: 'signed-out' }
+  | { kind: 'no-org' }
   | { kind: 'ok'; teams: Team[] }
 
 /** Same contract as `onboarding-api.ts#fetchAuth`: credentials always included, and a request that
@@ -120,12 +146,17 @@ export async function probeTeams(signal?: AbortSignal): Promise<TeamsProbe> {
   const res = await fetchAuth('/auth/teams', { method: 'GET', signal })
   if (!isJsonResponse(res)) {
     // The SPA shell, not `/auth/teams` — drain the body (nothing in it is ours to read) and
-    // report auth as off rather than trying to interpret HTML as a team list.
+    // report the deployment as carrying no onboarding surface rather than trying to interpret
+    // HTML as a team list.
     await res.text().catch(() => undefined)
-    return { kind: 'auth-off' }
+    return { kind: 'unavailable' }
   }
   const body = parseJsonBody(await res.text())
   if (res.status === 401) return { kind: 'signed-out' }
+  // FIX C3: the local "no organization exists yet" precondition (D13, `team-routes.ts`'s own D13
+  // branch) — a genuine, expected state, never an error. See `TeamsProbe`'s own doc comment for
+  // why matching on the status code alone is decisive for this route.
+  if (res.status === 400) return { kind: 'no-org' }
   if (!res.ok || body === undefined) {
     throw new ApiError(res.status, errorMessageFrom(res.status, res.statusText, body))
   }

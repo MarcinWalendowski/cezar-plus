@@ -14,6 +14,7 @@ import { jsonZodValidator } from '../server/validators.ts';
 import { identityDir } from '../paths.ts';
 import type { SessionResolver } from '../server/server.ts';
 import { IdentityStore, IdentityStoreError } from './identity-store.ts';
+import { hasOrgScope } from './principal.ts';
 import { createRequireOrgAdmin, getOrgAdminPrincipal } from './require-org-admin.ts';
 import { createRequireSignedIn, getSignedInUser } from './require-signed-in.ts';
 import { sessionResolver } from './session.ts';
@@ -176,6 +177,15 @@ export function createInviteRoutes(deps: InviteRouteDeps): Hono {
     // ---- POST /auth/invites: D12 admin action, org derived from the principal, never the body ----
     .post('/auth/invites', adminGate, jsonZodValidator(createInviteInputSchema), async (c) => {
       const principal = getOrgAdminPrincipal(c);
+      if (!hasOrgScope(principal)) {
+        // Defensive narrowing only (also what makes `principal.orgId` a `string` below to the
+        // type checker) — `adminGate` here is always `createRequireOrgAdmin` (D13: `inviteRoutes`
+        // stays unmounted in local mode, module doc comment), which only ever stashes a
+        // `kind: 'session'` principal, and `resolvePrincipal` only builds that kind from an
+        // already-resolved `SessionIdentity` whose `orgId`/`teamId` are non-null by construction
+        // (`principal.ts`). Unreachable in practice; see `team-routes.ts`'s identical guard.
+        return c.json({ error: 'no organization exists yet' }, 400);
+      }
       const { role, teamId, expiresInMs } = c.req.valid('json');
       const ttlMs = expiresInMs ?? DEFAULT_INVITE_TTL_MS;
       if (ttlMs < MIN_INVITE_TTL_MS || ttlMs > MAX_INVITE_TTL_MS) {
@@ -217,6 +227,10 @@ export function createInviteRoutes(deps: InviteRouteDeps): Hono {
     // one `requirePrincipal`-equivalent resolution already put the caller in) --------------------
     .get('/auth/invites', adminGate, (c) => {
       const principal = getOrgAdminPrincipal(c);
+      if (!hasOrgScope(principal)) {
+        // Defensive narrowing only — see `POST /auth/invites`'s identical guard above.
+        return c.json({ error: 'no organization exists yet' }, 400);
+      }
       const invites = deps.identityStore.listOrgInvites(principal.orgId).map(toWireInvite);
       const body: ListOrgInvitesResponse = { invites };
       return c.json(body);
@@ -227,6 +241,10 @@ export function createInviteRoutes(deps: InviteRouteDeps): Hono {
     // store method itself is not (see this file's module doc comment) ------------------------------
     .post('/auth/invites/revoke', adminGate, jsonZodValidator(revokeInviteInputSchema), async (c) => {
       const principal = getOrgAdminPrincipal(c);
+      if (!hasOrgScope(principal)) {
+        // Defensive narrowing only — see `POST /auth/invites`'s identical guard above.
+        return c.json({ error: 'no organization exists yet' }, 400);
+      }
       const { id } = c.req.valid('json');
       const belongsToCallerOrg = deps.identityStore.listOrgInvites(principal.orgId).some((invite) => invite.id === id);
       if (!belongsToCallerOrg) {

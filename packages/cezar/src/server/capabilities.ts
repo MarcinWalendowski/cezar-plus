@@ -213,3 +213,39 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
     // `contract/health.ts` for why the auth-off health response has to stay byte-identical.
   };
 }
+
+/**
+ * D13's local-org-mode predicate (`.ai/specs/2026-08-06-org-team-auth-onboarding.md`), factored
+ * out to a single exported function so every caller that needs to ask "is this the ONE topology
+ * D13's local-org onboarding actually applies to" asks it the same way, rather than re-deriving
+ * the two-part test inline and risking the halves drifting apart.
+ *
+ * The two halves are `resolveAuthProvider(env) === 'none'` (this topology has no login at all —
+ * a hosted `CEZ_AUTH=oidc`/`google`/`supervisor` deployment is never eligible, even if a STALE
+ * local org happens to sit in `<CEZ_HOME>/identity` from before auth was turned on) AND
+ * `resolveCapabilities(env, bindHost).localHandoff` (this bind is loopback — D1's table has BOTH
+ * `hosted + CEZ_AUTH unset + CEZ_ALLOW_UNAUTHENTICATED=1` AND the npm zero-config default resolve
+ * `resolveAuthProvider` to `'none'`, and only the SECOND is D13's local-org topology; the first is
+ * a network-facing box whose audience is not "one machine").
+ *
+ * `server.ts`'s per-request principal resolution (`isHostedMode()`, gating `resolveLocalPrincipal`
+ * inside the `auth === 'none'` branch) already applies this exact pair inline, per request, with a
+ * `Context` to resolve a `Principal` from. This function exists for the callers that have no
+ * request to resolve one from at all — `src/index.ts#initWorkspace` (boot-time registration) and
+ * `cezar projects add` (`workspace/projects-cli.ts`) — both of which read/write
+ * `<CEZ_HOME>/identity/*.json` directly through `auth/local-identity.ts#adoptRegisteredProjectIntoLocalOrg`,
+ * not through a resolved principal.
+ *
+ * **Not a hypothetical guard.** D13's repair round 2 (FIX A3) found a caller of that exact write
+ * path — `src/index.ts#initWorkspace`'s own `adoptRegisteredProjectIntoLocalOrg` call, made
+ * inline back then — keyed on NEITHER half of this predicate, so it ran unconditionally on every
+ * topology, including a hosted `CEZ_AUTH=oidc` deployment: a leftover local org from before auth
+ * was turned on would silently keep claiming every newly-registered project forever. The call no
+ * longer lives in `src/index.ts` at all — `registered-project-roots.ts#registerAndAdoptProject`
+ * is both the fixed call site (it wraps the same `adoptRegisteredProjectIntoLocalOrg` call behind
+ * this predicate) and its own test is the mutation-killing regression control for this function
+ * specifically.
+ */
+export function isLocalOrgModeActive(env: NodeJS.ProcessEnv = process.env, bindHost?: string): boolean {
+  return resolveAuthProvider(env) === 'none' && resolveCapabilities(env, bindHost).localHandoff;
+}

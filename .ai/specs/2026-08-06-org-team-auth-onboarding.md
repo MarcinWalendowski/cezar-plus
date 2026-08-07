@@ -62,11 +62,24 @@ Unset means **zero I/O**: no database file created, no session middleware
 mounted, no login route registered — the same discipline as `CEZ_KB` and its
 siblings, which do no filesystem work to decide they are off.
 
+> **PARTLY SUPERSEDED 2026-08-07 by D13 (local-mode onboarding).** The sentence
+> above conflated two things that D13 separates: *authentication* (still fully
+> off, and still zero I/O — no session middleware, no login route, no cookie
+> parsed, no 401 ever) and *organization scope* (which a local user may now
+> create deliberately). Precisely: with `CEZ_AUTH` unset cezar still creates
+> **nothing** on its own — `<CEZ_HOME>/identity/` comes into existence only if
+> the local user completes the onboarding wizard and asks for an org. Until
+> then the behaviour above holds exactly as written, which is why D1's landed
+> controls (`projects-api.test.ts`'s five "no identity directory is created"
+> assertions) stay green unchanged. What is no longer true is the *implication*
+> that auth-off can never have an org: it can, because the local user asked.
+> See D13 for why that is not an authorization change.
+
 But "optional" cuts by deployment, not by one global switch:
 
 | Bind | `CEZ_AUTH` | Result |
 |---|---|---|
-| loopback | unset | today's behaviour, unchanged. The npm default. |
+| loopback | unset | ~~today's behaviour, unchanged. The npm default.~~ **AMENDED TWICE, 2026-08-07.** D13: no login, no session, no 401 — but the local user may create an org. **D14 (owner decision, supersedes "unchanged"):** the cockpit is now *gated* on onboarding — no dashboard element renders until the first org exists, so the npm default DOES change for existing users. Auth behaviour is still unchanged; the landing experience is not. |
 | loopback | `oidc`/`google` | login required locally (useful for testing the flow) |
 | hosted | `oidc`/`google` | login required |
 | hosted | unset, `CEZ_ALLOW_UNAUTHENTICATED=1` | boots, logs a startup warning naming the risk |
@@ -188,6 +201,22 @@ module-load trace of `dist/index.js` confirms it is the **only** `dist/auth/*`
 module loaded on the `CEZ_AUTH`-unset path. D1's own gloss on zero I/O is "no
 database file created, no session middleware mounted, no login route registered",
 and all three still hold.
+
+**CORRECTED 2026-08-07 by D13: the module-load-trace sentence above is now FALSE
+on the loopback-bind branch of the `CEZ_AUTH`-unset path.** D13's local-mode
+onboarding dynamically imports `auth/identity-store.ts`, `auth/local-gates.ts`,
+`auth/onboarding-routes.ts`, `auth/team-routes.ts` and `paths.ts`, and — transitively,
+via those last two's own static imports — `auth/session.ts` too, on every loopback
+boot with `CEZ_AUTH` unset (the npm zero-config default), gated on
+`isLocalOrgModeActive`, not on `CEZ_AUTH` naming a provider. `auth/principal.ts`
+remains the *statically*-imported one — that half of the sentence still holds
+literally — but it is no longer the only `dist/auth/*` module the trace would show
+on that path. D1's own gloss on zero I/O still holds in its narrower,
+behavioural sense: none of the newly-reached modules performs filesystem I/O at
+import time (`IdentityStore.open` is a bare constructor; see `auth/session.ts`'s
+own doc comment, corrected the same way), so "no database file created" survives
+for a user who never opens the onboarding wizard — it is "the module is never
+imported" that no longer does.
 
 **CORRECTED again 2026-08-07 (post-review): one resolver was not enough, because
 there were two readings of the INPUT.** Phase 4's onboarding routes resolved the
@@ -484,6 +513,35 @@ not by N org processes.
 
 Created lazily on first authenticated boot. `CEZ_AUTH` unset ⇒ the module is
 never imported.
+
+> **CORRECTED 2026-08-07 by D13.** The second sentence is now: `CEZ_AUTH` unset
+> ⇒ the module is never imported **until the local user creates an org through
+> the onboarding wizard**, and never imported at all if they don't. The trigger
+> changed from "is auth on?" to "does an org exist, or is one being created?" —
+> a `POST` to the onboarding route, or a cached-miss check that finds
+> `identity.json` present. A local read never creates the directory
+> (`readSnapshot` degrades a missing file to an empty snapshot,
+> `identity-store.ts:1291`), so "cezar created identity state I never asked
+> for" stays false. The `users` row written on that path carries
+> `issuer: 'local'` — see D13 for why that keeps `findOrCreateUser`'s
+> `(issuer, subject)` key honest rather than bypassing it.
+>
+> **CORRECTED AGAIN 2026-08-07 (phase 9 HTTP-surface pass): the paragraph above
+> is itself now superseded — "never imported until an org exists" describes an
+> intermediate build, not what shipped.** Once D13's route-mounting landed,
+> `local-mode-boot.ts#buildLocalModeRoutes` imports `identity-store.ts`
+> unconditionally on every loopback boot with `CEZ_AUTH` unset — regardless of
+> whether an org exists yet — because `onboarding-routes.ts`/`team-routes.ts`
+> need `IdentityStore.open` wired in to answer `GET /auth/onboarding`'s
+> `needs-org` state at all, not only once `POST /auth/onboarding/org` is
+> called. So the trigger is "is the bind loopback with `CEZ_AUTH` unset", not
+> "does an org exist, or is one being created" — importing the module and
+> *creating identity state* are the two different things this correction
+> conflated. What still holds, unchanged: `IdentityStore.open` and a local
+> read both still do no filesystem I/O, so "cezar created identity state I
+> never asked for" stays false for a user who never opens the wizard. See
+> `paths.ts#identityDir`'s own doc comment for the fuller, source-checked
+> account.
 
 `RunRecord` gains an optional `createdBy` (`packages/contract/src/runs.ts`).
 Optional because every run already on disk has no author and must keep loading;
@@ -1069,6 +1127,294 @@ silently skip):**
 - **The claim-mode UX inside `GET /auth/onboarding`/the wizard is undesigned.** How a user learns to
   type `orgSlug` (a new wizard state? a field always shown?) is left to Fill unit 7.
 
+### D13 — a local user may create an org and workspaces without auth
+
+**The ask.** Opening `http://127.0.0.1:<port>` for the first time, with no
+`CEZ_AUTH`, should offer to create an **organization**, then one or more
+**workspaces** ("Engineering", "Marketing"), then file projects under them. Today
+it cannot: the wizard is "invisible and inert with `CEZ_AUTH` unset"
+(`onboarding.tsx:30`), no `/auth/*` route is constructed at all
+(`index.ts:301`), and the local principal is a synthetic literal naming no
+stored row (`principal.ts:66-71`).
+
+**Why this is not an authorization change, and the one fact that makes it
+safe.** D12 already settled that `role` gates org *administration* and never
+code execution. Local mode is the limiting case: the caller is on loopback, and
+anyone who can reach loopback can already `POST /api/v1/workflows` and get a
+shell. So an org here partitions *the user's own work*; it grants nothing and
+withholds nothing. Concretely, this changes **no** authentication behaviour:
+
+- no session middleware, no cookie parsed, no login route, no 401 — ever;
+- `requirePrincipal`'s auth-off branch still short-circuits on
+  `resolveAuthProvider(process.env) === 'none'` (`server.ts:1559`);
+- `verifyWsUpgrade` still skips the principal check when the provider is
+  `'none'` (`server.ts:5965`);
+- the health payload is still returned unredacted, and `capabilitiesSchema`
+  still carries **no** `auth` key (`capabilities.test.ts:213` stays green).
+
+That is possible because **authentication and org-scope are already keyed on two
+different things**, and only coincide today by derivation. Every auth decision
+reads `resolveAuthProvider(...)`; every org decision reads
+`principal.kind === 'session'`. D13 breaks the coincidence and leaves the auth
+half untouched.
+
+**The seam: `kind` stops standing in for "has an org".** `Principal.orgId` and
+`teamId` become `string | null`, and the five org gates stop asking
+`kind === 'session'` and start asking a single exported predicate
+`hasOrgScope(principal)` (`orgId !== null`).
+
+**CORRECTED 2026-08-07 by D13 (adversarial review): "`orgId !== null`" describes
+what the implementation was PLANNED to check here, not what it does.**
+`hasOrgScope` (`auth/principal.ts`) reads `principal.orgId !== null &&
+principal.teamId !== null` — both fields, not `orgId` alone. `resolvePrincipal`'s
+one construction path only ever produces the two as a matched pair (both `null`
+or both real), which is why checking `orgId` alone would have been
+*observationally* sufficient for every principal the resolver can produce today —
+but it is not what shipped, and a reader who trusted this sentence over the
+source risks writing a future caller (or a future edit to `hasOrgScope` itself)
+against the weaker, one-field claim. See `auth/principal.ts#hasOrgScope`'s own
+doc comment for the fuller reasoning, corrected the same way at the first
+adversarial review.
+
+Each seam then carries exactly one condition:
+
+| principal | `kind` | `orgId`/`teamId` | meaning |
+|---|---|---|---|
+| auth off, no org yet | `'local'` | `null` | today's zero-config default, unchanged |
+| auth off, org created | `'local'` | real ids | D13's new state |
+| auth on | `'session'` | real ids | unchanged |
+
+`kind` keeps its honest meaning — *was this request authenticated* — and is what
+the auth perimeter and D10's supervisor branch keep reading. The five call sites
+that move to `hasOrgScope` are `withTeams` (`server.ts:2690`), `mayActOnRoot`
+(`:2763`), `releaseRootClaim` (`:2800`), `registerFolder`'s claim block
+(`:3188`), and `PATCH /projects/:id`'s `teamId` arm (`:2958`) — whose 400 message
+must change from "teamId requires an authenticated session" to naming the real
+precondition, an org. **A `null` orgId must never be silently coerced to the
+string `'local'`**: that string is what the old literal used, it names no row,
+and a coercion would file projects under a phantom org.
+
+**Identity, without an IdP.** `findOrCreateUser` keys users on `(issuer,
+subject)`, both required. The local user is a real row with
+`issuer: 'local'`, `subject: 'local'` — the key stays honest and stays unique,
+rather than being bypassed with a nullable column. `issuer: 'local'` can never
+collide with an OIDC issuer (those are absolute URLs), which is also what makes
+"this deployment later turns auth on" well-defined: the local row and an OIDC
+row for the same human are different rows, and merging them is out of scope
+here and named in Risks.
+
+**Zero I/O is preserved for the user who never onboards.** The local org is
+resolved through a module-level cache with three states (`unknown` → one
+`existsSync` → `none` | resolved). A user who never opens the wizard costs one
+`stat` for the process lifetime and creates nothing; `readSnapshot` degrades a
+missing file to an empty snapshot without `mkdir`
+(`identity-store.ts:1291`). D1's five landed "no identity directory is created"
+controls (`projects-api.test.ts:577,665,751,855,869`) therefore stay green
+**unchanged** — and that is the acceptance test for this paragraph, not a
+prediction. The cache is invalidated by the onboarding write itself, in-process.
+
+**CORRECTED 2026-08-07 (adversarial review round 4): the cache design above is
+no longer what shipped.** "For the process lifetime" was the defect three
+review rounds kept reopening: `<CEZ_HOME>/identity/identity.json` is
+machine-global (D4 allows more than one process pointed at the same
+`CEZ_HOME` — a long-lived `cezar serve` alongside a `cezar projects add` CLI
+invocation, for instance), so a `'none'` answer cached for the rest of the
+process lifetime, invalidated only by the in-process
+`invalidateLocalOrgIdentityCache()`, went stale forever for any reader that
+was running when a DIFFERENT process's onboarding write landed — silently
+filing every project that reader registered under no org, reproducing D13's
+own named FAIL state through a door in-process invalidation could not close.
+`auth/local-identity.ts#resolveLocalOrgIdentity` now pairs each cache state
+(`'none'` or `'resolved'`, `'unknown'` unchanged) with a **fingerprint** —
+`identity.json`'s `{size, mtimeMs}` as of the last `statSync` — and re-reads
+the real store whenever the current fingerprint differs from the one the
+cache was built from, regardless of which process wrote the change. The
+"one `stat` for the process lifetime" cost above is now "one `stat` per
+call": still cheap enough to pay on every auth-off request, and what makes a
+second process's write always visible rather than only visible to the
+process that made it. `invalidateLocalOrgIdentityCache()` still exists and is
+still called by the onboarding write, but is now belt-and-suspenders for the
+same-process caller (an unconditional fresh read on the very next call,
+rather than depending on the fingerprint having moved) — cross-process
+readers have no way to call it at all, which is exactly why they needed the
+fingerprint check instead. See that module's own doc comment for the fuller
+account, including the deliberate asymmetry: a `'resolved'` cache is sticky
+against `identity.json` disappearing (never happens through this store's own
+write path) but not against it changing.
+
+**One onboarding implementation, two gates — never two implementations.** The
+same `onboardingRoutes`/`teamRoutes` mount in local mode at the same
+`/auth/onboarding*` and `/auth/teams*` paths; only the injected gate differs
+(`createRequireSignedIn` → a local gate that resolves/creates the local user).
+This is deliberate: `invite-routes.ts` already shipped a byte-for-byte copy of
+`resolveSignedInUser` whose "these cannot drift" docblock nothing tested, and a
+second onboarding surface under `/api/v1/*` would repeat that mistake at a
+larger scale. `authRoutes` (login/callback/logout) and `inviteRoutes` stay
+**unmounted** locally — there is nothing to log into and no second user to
+invite.
+
+**CORRECTED 2026-08-07 (repair round 2, FIX B1): the mounting decision no
+longer lives inline in `src/index.ts`.** The first implementation put the
+~45-line "resolve the two gates, dynamic-import the four modules, wire
+`onboardingRoutes`/`teamRoutes`" body directly in `serveCommand`'s `else if
+(resolveCapabilities(process.env, bindHost).localHandoff)` branch — untestable
+by construction (`src/index.ts` is the CLI entry; importing it runs the CLI)
+and, worse, that inline condition re-derived only HALF of this decision's real
+predicate (the bind check) and relied on the branch's position after two prior
+`if`/`else if`s to supply the other half (`gate.provider === 'none'`), so a
+reordering of that chain could have stranded it reachable on an authenticated
+topology unnoticed. Both the decision and the wiring now live in
+`local-mode-boot.ts#buildLocalModeRoutes`, which re-asks the full two-part
+predicate (`isLocalOrgModeActive`, `server/capabilities.ts`) as its own first
+statement and is exercised directly by `local-mode-boot.test.ts` — including
+asserting the returned `onboardingRoutes`/`teamRoutes` are real, functioning
+`Hono` apps, not merely that the boolean is correct (a deleted wiring body
+previously left both `undefined` with every other gate green). `src/index.ts`'s
+`else` branch is reduced to `const localMode = await buildLocalModeRoutes(...);
+if (localMode.active) { ... }`.
+
+**The bootstrap claim does not apply locally, and the reason must be the bind,
+not the provider.** `bootstrapTokenRequired` is `false` in local mode *because
+`capabilities.localHandoff` is true* (loopback), not because `CEZ_AUTH` is
+unset. The distinction is load-bearing: `hosted + unset + CEZ_ALLOW_UNAUTHENTICATED=1`
+is a real, permitted topology (D1's table), and there the audience is a network,
+not one machine — so that configuration keeps requiring the deployment-wide
+code, exactly as D9's bounded-audience reasoning demands. Keying this on
+`CEZ_AUTH` instead would hand org-one ownership to the first stranger who
+reaches an intentionally-exposed instance.
+
+**Workspaces are the code's `team`, renamed only in the UI.** The owner's word
+is "workspace"; the code's `workspace` already means the per-OS-user machine
+scope (`~/.cezar`, `workspace/config.ts`), which is released and test-enforced.
+So the UI says **Workspace**, the code keeps saying `team`, and no identifier is
+renamed. A rename would collide with a shipped concept for a cosmetic gain.
+
+**The wizard gains a create step.** Today step 3 only *renames* the single
+hardcoded `General` team (`onboarding.tsx:432-446`) — with one workspace there
+is nothing to organize. The wizard gains "add a workspace" backed by the
+existing `POST /auth/teams`, defaulting to one workspace and letting the user
+add "Engineering"/"Marketing" before finishing.
+
+**Existing projects are adopted, not stranded.** Creating the first org locally
+must file every already-registered project under the default workspace in the
+same write. Otherwise the first run — which always has at least the boot project
+— produces an org whose project list is empty, and nothing else ever backfills
+it (`claimOrg` writes only orgs/teams/memberships). This is the D13 step most
+likely to be skipped as "polish"; it is the difference between a wizard that
+works and a wizard that looks like it did.
+
+**ADDED 2026-08-07 (repair round 2): the paragraph above covers only the
+moment the org is CREATED — it does not, on its own, cover a project
+registered AFTER that moment, and the first implementation genuinely did not
+either.** `cezar projects add` (`workspace/projects-cli.ts`) and a fresh
+`cezar serve` boot in a NEW repo (`src/index.ts#initWorkspace`) both call
+`registerProject` directly, bypassing the HTTP `POST /api/v1/projects` route
+that already had D4-aware team-claiming logic (`registerFolder` in
+`server.ts`) — so a project added by either of those two paths after a local
+org already existed was filed in the registry but never in
+`<CEZ_HOME>/identity/project_teams`, silently absent from every team filter.
+Closed by one shared seam, `registerAndAdoptProject`
+(`registered-project-roots.ts`), called from both call sites: it resolves
+whether a local org exists (`isLocalOrgModeActive`) and, only then, claims the
+newly-registered root under the caller's default team — mirroring
+`registerFolder`'s own D4 claim rather than inventing a second one. A
+symmetric `releaseProjectTeamClaim` does the same for `cezar projects remove`,
+so a root removed through the CLI stops blocking re-registration the same way
+`DELETE /api/v1/projects/:id` already did. Both are gated on
+`isLocalOrgModeActive`, not on `resolveAuthProvider` alone, for the identical
+reason the bootstrap claim paragraph below already gives — and a failed
+adoption write (a stuck lease, a team deleted out from under a stale cache
+read) is caught and logged rather than propagating into `initWorkspace`'s own
+error path, so a transient identity-store failure never turns a successful
+project registration into a boot failure.
+
+**Out of scope, named rather than implied:** switching between orgs locally
+(`session.ts#resolveIdentity` still pins to `listMemberships(userId)[0]`);
+merging a `local` user row into an OIDC row when a deployment later enables
+auth; and multi-org local mode — `claimOrg`'s `orgs.length > 0` guard still
+holds, so local mode is single-org, and the wizard must say so rather than
+offering a second org it will refuse.
+
+**ADDED 2026-08-07 (repair round 2, packages/web fixes C1-C4): four cockpit
+defects the decision text above did not anticipate, closed at this pass.**
+(1) Declining onboarding was irreversible — nothing routed back into
+`/onboarding` afterward. Settings → Workspaces now renders a "Create an
+organization" link into `/onboarding` whenever it reads the new `no-org`
+probe state, and re-entry is tested directly (declining, then loading
+`/onboarding` again, asserts the wizard actually renders rather than bouncing
+away). (2) The decline flag lived in `localStorage` only, with no fallback —
+now a 3-tier `localStorage` → `sessionStorage` → in-memory chain, each tier's
+read/write independently guarded, with the in-memory tier's real limit (does
+not survive an actual page reload) named rather than silently claimed as
+fixed. (3) `GET /auth/teams`'s 400 "no organization exists yet" precondition
+— the ordinary, expected state on every zero-config default before onboarding
+— surfaced as `teams-panel.tsx`'s generic red `tone="danger"` error card
+instead of a neutral explainer; `probeTeams` now returns a dedicated `no-org`
+state for that one status code. (4) `TeamsProbe`'s `auth-off` kind was
+renamed `unavailable` to match `onboarding-api.ts#OnboardingProbe`'s own
+2026-08-07 rename (see that file's own doc comment): D13 local mode answers
+real JSON from `/auth/onboarding`/`/auth/teams` now, so a kind named for
+"auth is off" was actively misleading about which deployments actually reach
+it — only a hosted, unauthenticated deployment with no `/auth/*` mounted at
+all does. **Left open, named rather than fixed:** `listOrgTeams` (the
+Projects-board team-filter query, `teams-api.ts`) still throws on that same
+400 instead of returning `[]` the way its sibling `probeTeams` now handles it
+explicitly — not user-visible today (`useOrgTeams()` is a soft,
+`retry: false` query whose result is always read through `?? []`), but a
+latent inconsistency now that one of the two callers handles the status and
+the other doesn't.
+
+### D14 — the cockpit is gated on onboarding, and logout exists
+
+**Owner decision, 2026-08-07. This REVERSES D13's repair-round-3 "decline" behaviour**
+(`onboarding-decline.ts`, the "Not now" button, and the Settings re-entry path added to
+make declining reversible). Those were added because a reviewer objected that an
+unconditional redirect turned the npm zero-config default into a mandatory
+org-naming interstitial, contradicting D1's compatibility row. The owner has
+decided the opposite: **no dashboard element renders before the first
+organization exists.** The wizard is the entire surface until onboarding
+completes. The decline flag and its Settings entry point are removed rather than
+left as dead code that still reads as live.
+
+**The consequence, stated rather than discovered later:** cezar is released, and
+today `npx cezar` opens straight into a working cockpit. After this, an existing
+user upgrading meets a mandatory onboarding wall on first launch. That is a
+deliberate product change, not an accident of the auth work — D1's table row is
+amended again to say so.
+
+**The gate is keyed on the probe, never on a flag, and never on `CEZ_AUTH`.** It
+fires only when `GET /auth/onboarding` answers `needs-org`. It must NOT fire on
+`unavailable` — the hosted + `CEZ_AUTH` unset + `CEZ_ALLOW_UNAUTHENTICATED=1`
+topology mounts no `/auth/*` at all (`index.ts`'s D13 branch is keyed on
+`localHandoff` and falls through unmatched there), so a hard gate on that
+deployment would block the cockpit behind a wizard the deployment can never
+satisfy. Bricking a permitted topology is the failure mode this paragraph
+exists to prevent, and it needs its own test.
+
+**Logout.** `POST /auth/logout` has existed since phase 3 with **no caller in the
+cockpit at all** — there is no way to sign out of a cezar deployment from its own
+UI. The cockpit gains an Account section in Settings whose visibility is derived
+from whether `/auth/*` is actually mounted (the same
+answered-with-JSON probe `onboarding-api.ts` already uses, not a capability flag
+— `capabilitiesSchema` still deliberately carries no `auth` key). In local mode
+`authRoutes` stay unmounted, so the section is absent there: local mode has no
+session to end.
+
+> **CORRECTED 2026-08-07, hours after this was written — "the section is absent
+> there" is not achievable and was not achieved.** Settings sections are declared
+> in `registry.tsx` and gated by `visibleSettingsSections`, whose three gates
+> (`hidden`, `scope`, `capability`) are all **synchronous**, decided from
+> `useHealth()` at render time. The `auth` capability key that a synchronous gate
+> would need is exactly the key D1's Risks section forbids and
+> `capabilities.test.ts:213` enforces the absence of. An async probe can hide the
+> PANEL but not the NAV ENTRY. Shipped behaviour: the nav entry exists in local
+> mode and its panel states that this deployment has no sign-in. The sentence
+> above mattered because implementing it literally produced a live *Account* nav
+> item — described as "Sign out of this cezar deployment" — that opened a blank
+> pane on the npm zero-config default, which reads as a broken build rather than
+> as a deployment without sessions. What is genuinely load-bearing, and is tested,
+> is that **no sign-out action is reachable** where there is no session.
+
 ## Data Models
 
 Expressed as SQL because it states the constraints exactly; the storage is JSON
@@ -1125,6 +1471,7 @@ it hands that human the previous holder's org membership.
 | 6 | per-org process supervisor + nginx (D4) | two orgs ⇒ two unix users, two `CEZ_HOME`s, no shared path; org A cannot read org B's runs. **The phase-5 in-process `project_teams` check must be REPLACED by the supervisor's mapping, not joined by it** — per-org `CEZ_HOME`s make each process blind to the other's table, so two orgs would both succeed at claiming one root with every gate green (D4's amendment) |
 | 7 | `server-install --platform hetzner` (D4) | provisions from clean; OIDC replaces `auth_basic`; TLS |
 | 8 *(landed 2026-08-07, QA Needed)* | org-creation surface (D11) — admin-only `POST /internal/orgs`, the installer step that calls it, and `bootstrapFirstOrg` → claim-an-unclaimed-org | a **second** org exists on one host; the first user to sign in **at the deployment's login host** claims it with its slug + **its own** claim code and cannot claim another org's *(**CORRECTED 2026-08-07 at the repair stage**: this row read "the first user at its hostname", which is not where the claim is served — see D11's own correction; the row was unrunnable as written)*; a non-admin `POST /internal/orgs` is **403 before validation**; every single-org claim in README/CHANGELOG/this spec is corrected in the same change; **phase 6's verification row runs for the first time** |
+| 9 | local-mode onboarding (D13) — `orgId`/`teamId` become nullable + `hasOrgScope`, a local user/gate, onboarding+team routes mounted with `CEZ_AUTH` unset, a create-workspace wizard step, and project adoption | **The negative half first, and it must pass UNCHANGED:** D1's five "no `<CEZ_HOME>/identity` directory is created" controls (`projects-api.test.ts:577,665,751,855,869`), `capabilities.test.ts:213` (no `auth` key), and `auth-perimeter.test.ts:225-240` (auth-off never 401s, no resolver consulted) all stay green **with no edit to their assertions** — an edit to any of them is the signal that the change went wider than D13 permits. **Then the positive half, on a real first run:** from a cleared `CEZ_HOME`, `http://127.0.0.1:<port>` offers to create an org with **no bootstrap code**; creating one yields a default workspace **and files the already-registered boot project under it** (an org whose project list is empty is a FAIL, not a cosmetic gap); a second workspace named "Engineering" can be added and a project moved into it; `PATCH /projects/:id` with a `teamId` succeeds where it previously 400'd; and `<CEZ_HOME>/identity/identity.json` contains a `users` row with `issuer: 'local'`. **The mutation that must kill a test:** coercing a `null` `orgId` back to the string `'local'` — if the suite stays green, `hasOrgScope` is not actually load-bearing anywhere. **CORRECTED 2026-08-07, and this row was wrong in a way worth keeping:** naming these five controls as the tripwire assumed they *could* fail. At least the listing one cannot, and the reason is structural, not an oversight. `withTeams` is read-only; `IdentityStore`'s reads are documented "always fresh off disk, never throw"; `withTeams` wraps them in `catch { return projects; }`; and `project_teams.org_id` is `NOT NULL`, so a `null` `orgId` matches no seeded row even with the guard deleted. Mutating `withTeams`'s condition to `(false && !hasOrgScope(principal))` leaves **all 64 tests in the file green** — verified by running it, not by reading it. No booby trap can change that: every path a bypass would take is designed to swallow identity-storage failure and degrade to the unannotated listing. So the requirement "these pass unedited" was satisfiable by a test that had stopped testing, which is exactly the failure mode the row existed to prevent. What IS now pinned: the shared `hasOrgScope` predicate, via `registerFolder`'s POST and `mayActOnRoot`/`releaseRootClaim`'s DELETE, which reach the identity **write** path — that path is not swallowed, and mutating `hasOrgScope` to `return true \|\| (...)` turns 9 tests red including two controls added for exactly this. Making the *listing* guard falsifiable would require narrowing `withTeams`'s catch so a registry failure surfaces instead of degrading silently — a product decision (it trades resilience for observability), not a test fix, and deliberately not taken here. |
 
 Phases 1–3 are useful alone (a single-org authenticated deployment). Phase 6 is
 what makes "multi-tenant" true, and until it lands the docs say single-org.

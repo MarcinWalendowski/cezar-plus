@@ -1,3 +1,4 @@
+import { hasOrgScope } from '../auth/principal.ts';
 import type { SessionResolver } from '../server/server.ts';
 import { signForwardedPrincipal, type ForwardedPrincipalPayload, type SignedForwardedPrincipal } from './forwarded-principal.ts';
 import type { OrgProcessRecord } from './org-process-registry.ts';
@@ -34,6 +35,17 @@ import type { OrgProcessRecord } from './org-process-registry.ts';
  * `forwarded-principal.ts#forwardedPrincipalPayloadSchema` cannot express (there is no `kind`
  * field on the wire payload; `principalFromForwardedPayload` hardcodes `'session'`) must never be
  * signed and forwarded as if it were one.
+ *
+ * **`!hasOrgScope(principal)` (D13, `auth/principal.ts`) is checked alongside `kind`, for the
+ * same "unreachable but not assumed" reason.** `Principal.orgId`/`teamId` are `string | null` for
+ * every `kind`, D13's own seam — `kind === 'session'` no longer proves the org fields are real, only
+ * `hasOrgScope` does. In practice the two still coincide here exactly as before D13: a `'session'`
+ * principal is only ever built from an already-resolved `SessionIdentity` (`principal.ts`), whose
+ * `orgId`/`teamId` are non-null by construction, and D13's nullable case (`kind: 'local'`, no org
+ * yet) is the `CEZ_AUTH=none` branch this route never runs under. The check is what narrows
+ * `principal.orgId`/`teamId` from `string | null` to `string` for the payload built below — the
+ * `ForwardedPrincipalPayload` this function signs and forwards must never carry a `null` org/team,
+ * the exact "coerced to a placeholder" failure D13 invariant 3 rules out at every seam.
  */
 
 export interface AuthCheckDeps {
@@ -50,7 +62,9 @@ export type AuthCheckResult =
 
 export function resolveAuthCheck(cookieHeader: string | undefined, deps: AuthCheckDeps): AuthCheckResult {
   const principal = deps.sessionResolver.resolveFromCookieHeader(cookieHeader);
-  if (!principal || principal.kind !== 'session') return { ok: false, reason: 'unauthenticated' };
+  if (!principal || principal.kind !== 'session' || !hasOrgScope(principal)) {
+    return { ok: false, reason: 'unauthenticated' };
+  }
 
   const record = deps.getActiveOrgProcess(principal.orgId);
   if (!record) return { ok: false, reason: 'org-has-no-active-process' };

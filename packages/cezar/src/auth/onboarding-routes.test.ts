@@ -13,6 +13,7 @@ import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { createApp } from '../server/server.ts';
 import { apiRequest } from '../server/loopback-request.testkit.ts';
+import { identityDir } from '../paths.ts';
 import { IdentityStore } from './identity-store.ts';
 import { SessionService } from './session.ts';
 import {
@@ -21,6 +22,12 @@ import {
 } from './onboarding-routes.ts';
 import type { BootstrapClaim } from './bootstrap-claim.ts';
 import { hashOrgClaimToken, mintOrgClaimToken } from './org-claim-token.ts';
+import {
+  createRequireOrgAdminLocal,
+  createRequireSignedInLocal,
+  localSessionResolver,
+} from './local-gates.ts';
+import { invalidateLocalOrgIdentityCache } from './local-identity.ts';
 
 /**
  * Exercised against a REAL `IdentityStore` (temp directory, no fakes) and a REAL `SessionService`
@@ -234,6 +241,37 @@ describe('createOnboardingRoutes', () => {
         state: 'ready',
         hasProjects: true,
       });
+    });
+
+    /**
+     * FIX 8 (D13 repair pass). D13's first draft read `if (principal)` here — ANY resolved
+     * principal with no org, regardless of `kind` — silently turning a deliberate fail-CLOSED 500
+     * into a fail-OPEN `needs-org, bootstrapTokenRequired: false`. D3 says a resolved SESSION
+     * principal with no org can never happen through the real `sessionResolver`
+     * (`session.ts#resolveIdentity` returns `null` for that case instead), so this drives the
+     * route with a HAND-CRAFTED resolver that violates that invariant on purpose — the only way to
+     * exercise the branch at all — and asserts the route still fails closed rather than trusting
+     * `kind` to be `'local'` just because org scope is missing.
+     */
+    it('fails CLOSED (500) for a resolved non-local principal with no org — a case D3 says cannot happen, but must not be trusted open', async () => {
+      const store = await tempStore();
+      const deps: OnboardingRouteDeps = {
+        ...buildDeps(store),
+        sessionResolver: {
+          resolveFromCookieHeader: () => ({
+            kind: 'session',
+            userId: 'ghost',
+            orgId: null,
+            teamId: null,
+            role: 'owner',
+          }),
+        },
+      };
+      const app = createOnboardingRoutes(deps);
+
+      const res = await app.request('/auth/onboarding');
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: 'onboarding state is inconsistent' });
     });
   });
 
@@ -1319,7 +1357,13 @@ describe('mount point (server.ts)', () => {
       onboardingRoutes,
     });
 
-  it('registers no /auth/onboarding* route at all when onboardingRoutes is absent (the CEZ_AUTH=none shape, D1)', async () => {
+  // CORRECTED 2026-08-07 (D13, phase 9 HTTP surface): this title used to read "...(the
+  // CEZ_AUTH=none shape, D1)". That framing is no longer accurate — `CEZ_AUTH` unset no longer
+  // implies these deps are absent (see the `local mode` block below, which wires them with
+  // `CEZ_AUTH` still unset). What is still true, and all this test asserts, is that ABSENT deps
+  // (whatever the reason) produce this exact 404/SPA-fallback signature — a statement about
+  // `server.ts`'s mount contract, not about auth mode.
+  it('registers no /auth/onboarding* route at all when onboardingRoutes is absent (deps-absence, not an auth-mode signature)', async () => {
     const app = makeApp(undefined);
     // Same two-signature absence proof `./routes.test.ts` uses: GET falls through to the SPA
     // catch-all (200 HTML), a mutating method has no such fallback (genuine, un-shadowed 404).
@@ -1345,6 +1389,142 @@ describe('mount point (server.ts)', () => {
 
     // 401, not 404: the route exists and ran, it just has no session.
     expect((await apiRequest(app, '/auth/onboarding')).status).toBe(401);
+  });
+
+  // ---- D13 local mode: the OTHER shape onboardingRoutes is wired in, still with CEZ_AUTH unset --
+  //
+  // The positive case the title correction above promises: `onboardingRoutes` present, `CEZ_AUTH`
+  // unset, local gates wired exactly the way `src/index.ts`'s local-mode branch wires them — the
+  // real `./local-gates.ts` module, not a stand-in, since that pairing (which gate got built) is
+  // precisely what would drift silently if this file only ever exercised session mode.
+  describe('local mode (D13)', () => {
+    beforeEach(() => {
+      // `./local-gates.ts#localSessionResolver` reads through `local-identity.ts`'s module-scope
+      // cache — a single global slot, not keyed per `CEZ_HOME` (see that module's own doc comment
+      // on why). Every test above and below this block runs with a fresh `CEZ_HOME` in the SAME
+      // process, so a cached answer from a previous case would leak into this one without this.
+      invalidateLocalOrgIdentityCache();
+    });
+
+    const makeLocalOnboardingApp = async () => {
+      const identity = IdentityStore.open(identityDir());
+      return makeApp(
+        createOnboardingRoutes({
+          sessionResolver: localSessionResolver,
+          identityStore: identity,
+          bootstrapClaim: { required: false, mode: 'open' },
+          localSignedInGate: createRequireSignedInLocal(identity),
+          localOrgAdminGate: createRequireOrgAdminLocal(localSessionResolver),
+        }),
+      );
+    };
+
+    it('answers needs-org, never 401, with no organization yet — D13 invariant 1', async () => {
+      const app = await makeLocalOnboardingApp();
+      const res = await apiRequest(app, '/auth/onboarding');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ state: 'needs-org', bootstrapTokenRequired: false });
+    });
+
+    it('creates the local org with NO bootstrap code, then reports ready', async () => {
+      const app = await makeLocalOnboardingApp();
+      const created = await apiRequest(app, '/auth/onboarding/org', {
+        method: 'POST',
+        headers: { origin: 'http://127.0.0.1:4321', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'My Workspace' }),
+      });
+      expect(created.status).toBe(201);
+      const createdBody = (await created.json()) as { role: string };
+      expect(createdBody.role).toBe('owner');
+
+      const status = await apiRequest(app, '/auth/onboarding');
+      expect(status.status).toBe(200);
+      expect((await status.json()) as { state: string }).toMatchObject({ state: 'ready', role: 'owner' });
+    });
+
+    // D13's own emphasis: "This is the D13 step most likely to be skipped as 'polish'; it is the
+    // difference between a wizard that works and a wizard that looks like it did." So this is its
+    // own test, not folded into the "creates the org" case above — an org whose project list is
+    // empty after this route runs is a FAIL, not a cosmetic gap.
+    it('adopts every already-registered project into the new default team, in the SAME write', async () => {
+      const identity = IdentityStore.open(identityDir());
+      const preExistingRoot = await mkdtemp(join(tmpdir(), 'cezar-onboarding-boot-project-'));
+      dirs.push(preExistingRoot);
+      const app = makeApp(
+        createOnboardingRoutes({
+          sessionResolver: localSessionResolver,
+          identityStore: identity,
+          bootstrapClaim: { required: false, mode: 'open' },
+          localSignedInGate: createRequireSignedInLocal(identity),
+          localOrgAdminGate: createRequireOrgAdminLocal(localSessionResolver),
+          listRegisteredProjectRoots: async () => [preExistingRoot],
+        }),
+      );
+
+      const created = await apiRequest(app, '/auth/onboarding/org', {
+        method: 'POST',
+        headers: { origin: 'http://127.0.0.1:4321', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'My Workspace' }),
+      });
+      expect(created.status).toBe(201);
+      const createdBody = (await created.json()) as { org: { id: string }; team: { id: string } };
+      expect(identity.getProjectTeam(preExistingRoot)).toEqual({
+        projectRoot: preExistingRoot,
+        orgId: createdBody.org.id,
+        teamId: createdBody.team.id,
+      });
+
+      const status = await apiRequest(app, '/auth/onboarding');
+      expect(status.status).toBe(200);
+      expect((await status.json()) as { hasProjects: boolean }).toMatchObject({
+        state: 'ready',
+        hasProjects: true,
+      });
+    });
+
+    it('renames the default team with no session cookie at all, and never 401s', async () => {
+      const app = await makeLocalOnboardingApp();
+      await apiRequest(app, '/auth/onboarding/org', {
+        method: 'POST',
+        headers: { origin: 'http://127.0.0.1:4321', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'My Workspace' }),
+      });
+      const renamed = await apiRequest(app, '/auth/onboarding/team', {
+        method: 'PATCH',
+        headers: { origin: 'http://127.0.0.1:4321', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Engineering' }),
+      });
+      expect(renamed.status).toBe(200);
+      expect(((await renamed.json()) as { team: { name: string } }).team.name).toBe('Engineering');
+    });
+
+    /**
+     * FIX 7 (D13 repair pass). A double-submitted wizard step (or a second tab racing the first)
+     * hits `claimOrg`'s `org-already-bootstrapped` guard locally too — local mode is single-org
+     * and single-owner by construction (D13's own "Out of scope" list), so this branch's
+     * session-mode wording ("you need an invite to join it") would point a local caller at
+     * `inviteRoutes`, which this file's own module doc comment says is deliberately never mounted
+     * locally. The message must name something that actually exists instead.
+     */
+    it('a re-submitted org-create names an action that exists locally, not "you need an invite"', async () => {
+      const app = await makeLocalOnboardingApp();
+      const first = await apiRequest(app, '/auth/onboarding/org', {
+        method: 'POST',
+        headers: { origin: 'http://127.0.0.1:4321', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'My Workspace' }),
+      });
+      expect(first.status).toBe(201);
+
+      const second = await apiRequest(app, '/auth/onboarding/org', {
+        method: 'POST',
+        headers: { origin: 'http://127.0.0.1:4321', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'A Second Workspace' }),
+      });
+      expect(second.status).toBe(409);
+      const body = (await second.json()) as { error: string };
+      expect(body.error).not.toContain('invite');
+      expect(body.error.toLowerCase()).toContain('reload');
+    });
   });
 
   // ---- /auth/onboarding* is INSIDE the #426 perimeter (the exact defect the task named) --------

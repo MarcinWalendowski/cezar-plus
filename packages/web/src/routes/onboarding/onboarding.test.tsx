@@ -24,9 +24,12 @@ interface SentRequest {
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
-/** What `resolveGetRequest` (`server/static-ui.ts`) answers for ANY unmatched GET, including
- *  `/auth/onboarding` when `CEZ_AUTH` is unset and the `/auth/*` family was never registered —
- *  the exact shape `onboarding-api.ts` reads as the auth-off signal. */
+/** What `resolveGetRequest` (`server/static-ui.ts`) answers for ANY unmatched GET — still what a
+ *  HOSTED, unauthenticated deployment (`CEZ_ALLOW_UNAUTHENTICATED=1`, D9) answers for
+ *  `/auth/onboarding`, since D13 never mounts local mode's onboarding routes there. The npm
+ *  zero-config default (loopback, `CEZ_AUTH` unset) answers real JSON now — see
+ *  `onboarding-api.ts`'s own module doc comment. The exact shape `onboarding-api.ts` reads as the
+ *  `unavailable` signal. */
 const spaShellResponse = () =>
   new Response('<!doctype html><html><body>cezar</body></html>', {
     status: 200,
@@ -48,6 +51,10 @@ type Answers = {
   onboarding?: () => Response
   createOrg?: (body: unknown) => Response
   renameTeam?: (body: unknown) => Response
+  /** D13: `AddWorkspaceField`'s `POST /auth/teams` — the same route `teams-api.ts#createTeam`
+   *  (Settings → Workspaces) calls, exercised here as a SECOND caller of that already-tested
+   *  function. */
+  createTeam?: (body: unknown) => Response
   /** Keyed by the `path` query value, `''` is the browse root — a FUNCTION per path, called
    *  fresh on every request, since a `Response` body can only be read once (`Response.clone()`
    *  is what `add-project-dialog.test.tsx`'s own stub relies on for the same reason). */
@@ -61,6 +68,7 @@ function stubFetch({
   onboarding = () => jsonResponse({ error: 'unauthenticated' }, 401),
   createOrg,
   renameTeam,
+  createTeam,
   browse = { '': () => jsonResponse(HOME) },
   register,
 }: Answers = {}): SentRequest[] {
@@ -84,6 +92,21 @@ function stubFetch({
         return renameTeam
           ? renameTeam(body)
           : jsonResponse({ team: { ...TEAM, name: (body as { name: string }).name } })
+      }
+      if (method === 'POST' && path === '/auth/teams') {
+        return createTeam
+          ? createTeam(body)
+          : jsonResponse(
+              {
+                team: {
+                  id: 'team-2',
+                  orgId: ORG.id,
+                  name: (body as { name: string }).name,
+                  slug: (body as { slug: string }).slug,
+                },
+              },
+              201,
+            )
       }
       if (method === 'GET' && path === '/api/v1/fs/browse') {
         const answer = browse[new URL(url, 'http://onboarding.test').searchParams.get('path') ?? '']
@@ -137,8 +160,8 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('CEZ_AUTH unset — the surface is inert', () => {
-  it('renders the auth-off explainer and never asks for anything past the one probe', async () => {
+describe('no onboarding surface at all (hosted, unauthenticated) — the wizard is inert', () => {
+  it('renders the unavailable explainer and never asks for anything past the one probe', async () => {
     const sent = stubFetch({ onboarding: spaShellResponse })
     renderAt()
 
@@ -190,7 +213,7 @@ describe('needs-org: name → accept team → add projects', () => {
     // two state transitions render, and under a loaded full-suite run that budget was not
     // reliably met — the test flaked 1 in 24 full-suite runs at review, failing here with the
     // create-org screen still on screen. A longer wait for the SAME assertion, not a weaker one.
-    const teamInput = await screen.findByLabelText('Team name', {}, { timeout: 5000 })
+    const teamInput = await screen.findByLabelText('Workspace name', {}, { timeout: 5000 })
     expect((teamInput as HTMLInputElement).value).toBe('General')
 
     fireEvent.click(screen.getByRole('button', { name: 'Accept and continue' }))
@@ -210,7 +233,7 @@ describe('needs-org: name → accept team → add projects', () => {
     fireEvent.change(nameInput, { target: { value: 'Widgets Inc' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create organization' }))
 
-    const teamInput = await screen.findByLabelText('Team name', {}, { timeout: 5000 })
+    const teamInput = await screen.findByLabelText('Workspace name', {}, { timeout: 5000 })
     fireEvent.change(teamInput, { target: { value: 'Engineering' } })
     fireEvent.click(screen.getByRole('button', { name: 'Accept and continue' }))
 
@@ -219,6 +242,82 @@ describe('needs-org: name → accept team → add projects', () => {
     )
     expect(sent.find((r) => r.path === '/auth/onboarding/team')?.body).toEqual({ name: 'Engineering' })
     await screen.findByText(/Engineering/)
+  })
+})
+
+/**
+ * D14 (`.ai/specs/2026-08-06-org-team-auth-onboarding.md`, owner decision) removed the "Not now"
+ * decline action D13's repair round 3 added (FIX 10) — "no dashboard element renders before the
+ * first organization exists" leaves nothing for a decline to fall back into. `NameOrgStep` now
+ * renders exactly one action again; this pins its absence rather than its old behaviour.
+ */
+describe('D14: NameOrgStep has no decline action', () => {
+  it('renders only "Create organization" — no "Not now"', async () => {
+    stubFetch({
+      onboarding: () =>
+        jsonResponse({ state: 'needs-org', suggestedOrgName: 'Acme', bootstrapTokenRequired: false }),
+    })
+    renderAt()
+
+    await screen.findByLabelText('Organization name')
+    expect(screen.queryByRole('button', { name: 'Not now' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Create organization' })).not.toBeNull()
+  })
+})
+
+describe('D13: adding extra workspaces during the accept-workspace step', () => {
+  it('adds a workspace via POST /auth/teams, lists it, and does not block Accept and continue', async () => {
+    const sent = stubFetch({
+      onboarding: () =>
+        jsonResponse({ state: 'needs-org', suggestedOrgName: 'Acme', bootstrapTokenRequired: false }),
+      createTeam: (body) =>
+        jsonResponse(
+          {
+            team: {
+              id: 'team-eng',
+              orgId: ORG.id,
+              name: (body as { name: string }).name,
+              slug: (body as { slug: string }).slug,
+            },
+          },
+          201,
+        ),
+    })
+    renderAt()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create organization' }))
+    await screen.findByLabelText('Workspace name', {}, { timeout: 5000 })
+
+    fireEvent.change(screen.getByLabelText('Add another workspace'), { target: { value: 'Engineering' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add workspace' }))
+
+    await waitFor(() => expect(sent.some((r) => r.method === 'POST' && r.path === '/auth/teams')).toBe(true))
+    expect(sent.find((r) => r.path === '/auth/teams')?.body).toEqual({ name: 'Engineering', slug: 'engineering' })
+    await screen.findByText('Engineering')
+
+    // The field clears, ready for a second addition — and the primary action is untouched.
+    expect((screen.getByLabelText('Add another workspace') as HTMLInputElement).value).toBe('')
+    expect(screen.queryByText('Add your first project')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and continue' }))
+    await screen.findByText('Add your first project')
+  })
+
+  it('surfaces the server refusal (e.g. a slug collision) inline, without losing the field value', async () => {
+    stubFetch({
+      onboarding: () =>
+        jsonResponse({ state: 'needs-org', suggestedOrgName: 'Acme', bootstrapTokenRequired: false }),
+      createTeam: () => jsonResponse({ error: 'a team with slug "engineering" already exists in this organization' }, 409),
+    })
+    renderAt()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create organization' }))
+    await screen.findByLabelText('Workspace name', {}, { timeout: 5000 })
+    fireEvent.change(screen.getByLabelText('Add another workspace'), { target: { value: 'Engineering' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add workspace' }))
+
+    await screen.findByText('a team with slug "engineering" already exists in this organization')
+    expect((screen.getByLabelText('Add another workspace') as HTMLInputElement).value).toBe('Engineering')
   })
 })
 
@@ -333,7 +432,7 @@ describe('needs-invite: the second user is told the truth, not shown a form they
       ]),
     )
     // …and a successful claim continues into the ordinary wizard, not back to the dead end.
-    await screen.findByText('Your default team is ready')
+    await screen.findByText('Your workspace is ready')
   })
 
   it("surfaces the server's refusal verbatim — the 403 is deliberately identical for a wrong slug and a wrong code, so this must not guess", async () => {
@@ -370,7 +469,7 @@ describe('ready: resumes straight to add-projects, and the team threads through 
 
     await screen.findByText('Add your first project')
     expect(screen.queryByLabelText('Organization name')).toBeNull()
-    expect(screen.queryByLabelText('Team name')).toBeNull()
+    expect(screen.queryByLabelText('Workspace name')).toBeNull()
   })
 
   it('"Skip for now" leaves without registering a project', async () => {
@@ -406,7 +505,7 @@ describe('ready: resumes straight to add-projects, and the team threads through 
   })
 })
 
-describe('a genuine server error is not mistaken for auth-off', () => {
+describe('a genuine server error is not mistaken for unavailable', () => {
   it('shows a retry state rather than the inert explainer', async () => {
     stubFetch({ onboarding: () => jsonResponse({ error: 'auth is misconfigured: bad issuer' }, 500) })
     renderAt()

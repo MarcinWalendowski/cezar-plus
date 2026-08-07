@@ -20,6 +20,7 @@ import { RunManager } from './workflows/run.ts';
 import { loadWorkflows } from './workflows/load.ts';
 import { startServer, WorkspaceEventBus, type SessionResolver } from './server/server.ts';
 import { runAuthBootGate } from './auth-boot-gate.ts';
+import { buildLocalModeRoutes } from './local-mode-boot.ts';
 import type { Hono } from 'hono';
 import {
   ProviderRuntimeAuthObserver,
@@ -33,9 +34,18 @@ import { checkForUpdate } from './update-check.ts';
 import { printSkillsBanner } from './skills-banner.ts';
 import { loadWorkspaceConfig } from './workspace/config.ts';
 import { runMigrations } from './workspace/migrations.ts';
-import { registerProject, shouldRegisterProject } from './workspace/projects.ts';
+import { shouldRegisterProject } from './workspace/projects.ts';
 import { runProjectsCommand } from './workspace/projects-cli.ts';
 import { WorkspaceSemaphore } from './workspace/semaphore.ts';
+// FIX 6 (D13 repair pass 1): the production `listRegisteredProjectRoots` supplier lives in
+// `./registered-project-roots.ts` for the same reason `./auth-boot-gate.ts` was extracted from this
+// file — see that module's own doc comment. `registerAndAdoptProject` (FIX A1/A3/A4, D13 repair
+// round 2) is the registration seam `initWorkspace` below and `cezar projects add`
+// (`workspace/projects-cli.ts`) both call instead of `registerProject` directly — see that
+// function's own doc comment for why. (`listRegisteredProjectRoots` itself is no longer imported
+// HERE — FIX B1 moved its one caller, the local-mode wiring, into `./local-mode-boot.ts`, which
+// imports it directly.)
+import { registerAndAdoptProject } from './registered-project-roots.ts';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -211,11 +221,29 @@ async function main(): Promise<void> {
  * `/api/projects` and `/api/v1/health` can name the boot project without a
  * lookup. Undefined when registration was suppressed or the workspace is
  * unavailable; the server then derives a fallback on its own.
+ *
+ * `bindHost` is threaded through to `registerAndAdoptProject` (D13, FIX A3) — it is `undefined`
+ * for every caller except `serveCommand` (`run`, `cezar projects` have no bind at all), and
+ * `isLocalOrgModeActive`'s own doc comment covers why `undefined` correctly reads as loopback
+ * there rather than as "unknown".
+ *
+ * **FIX 5 (D13 repair pass 1) is now inside `registerAndAdoptProject`
+ * (`./registered-project-roots.ts`), not inlined here** — file the freshly-registered (or
+ * already-known) project under the local org, if one already exists, on EVERY registration, not
+ * only the onboarding-time one `OnboardingRouteDeps.listRegisteredProjectRoots` covers. See that
+ * function's own doc comment (FIX A1/A3/A4, D13 repair round 2) for why it moved: a project
+ * registered here used to call `adoptRegisteredProjectIntoLocalOrg` inline, unconditionally, with
+ * no local-org-mode guard and with an adoption failure able to swallow this function's own
+ * unrelated `return entry.id` — both fixed at the one call site every non-HTTP registration path
+ * now shares.
  */
-async function initWorkspace(repoRoot: string): Promise<string | undefined> {
+async function initWorkspace(repoRoot: string, bindHost?: string): Promise<string | undefined> {
   try {
     await runMigrations({ bootRepoRoot: repoRoot });
-    if (await shouldRegisterProject(repoRoot)) return (await registerProject(repoRoot)).id;
+    if (await shouldRegisterProject(repoRoot)) {
+      const entry = await registerAndAdoptProject(repoRoot, { bindHost });
+      return entry.id;
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[cez] workspace registry unavailable (${message}) — continuing without it`);
@@ -304,7 +332,19 @@ async function serveCommand(
     // second row: local + oidc/google still requires login). `./auth/session.ts` opens the
     // identity store at module scope, so it must never become a static import at the top of this
     // file: a dynamic `import()` is evaluated when this line runs and not before, which is what
-    // keeps the npm default path free of any filesystem work.
+    // keeps THIS BRANCH's path free of any filesystem work when it does not run.
+    //
+    // **CORRECTED 2026-08-07 by D13: "keeps the npm default path free of any filesystem work" no
+    // longer describes the npm default path as a whole — only this branch's contribution to it.**
+    // The `else` branch below (D13, `local-mode-boot.ts#buildLocalModeRoutes`) is what the npm
+    // default (loopback, `CEZ_AUTH` unset) actually reaches, and it dynamically imports
+    // `./auth/onboarding-routes.ts`/`./auth/team-routes.ts`, which statically import
+    // `./auth/session.ts` — so `session.ts` DOES load on the npm default path now, just via that
+    // other branch, on every loopback boot rather than only once `CEZ_AUTH` names a provider. It
+    // still does no actual filesystem I/O at import time (`IdentityStore.open` is a bare
+    // constructor — see `session.ts`'s own doc comment, corrected the same way), so "free of
+    // filesystem work" survives in its narrower, behavioural sense; "this branch's import never
+    // runs on the npm default path" survives literally, unchanged.
     //
     // The specifiers are STRING LITERALS, and that is load-bearing rather than incidental. They
     // were first routed through `const` variables so `npm run typecheck` would not have to
@@ -361,9 +401,41 @@ async function serveCommand(
     }
     const banner = claimMod.bootstrapClaimBanner(claimMod.bootstrapClaim, hasOrg);
     if (banner) console.log(banner);
+  } else {
+    // ---- D13: local-mode onboarding, spec .ai/specs/2026-08-06-org-team-auth-onboarding.md ------
+    //
+    // `gate.provider` is `'none'` here (the two branches above matched `'supervisor'` and every
+    // other named provider), which covers TWO topologies (D1's table): loopback with `CEZ_AUTH`
+    // unset (the npm zero-config default) AND hosted with `CEZ_AUTH` unset plus
+    // `CEZ_ALLOW_UNAUTHENTICATED=1`. D13 is about the FIRST one only.
+    //
+    // FIX B1 (D13 repair round 2, adversarial review): this used to be `else if
+    // (resolveCapabilities(process.env, bindHost).localHandoff)`, with the ~45-line wiring body
+    // inline — the ONLY thing standing between the hosted-unauthenticated topology and mounting the
+    // full local `/auth/onboarding*` + `/auth/teams*` surface, with ZERO test coverage, because
+    // `src/index.ts` is the CLI entry no test imports (the identical defect `./auth-boot-gate.ts`
+    // was extracted from this same file to fix — see that module's own doc comment). Worse, the
+    // inline condition only re-derived HALF of D13's real predicate (the bind check) and relied on
+    // this branch's position after the two `if`/`else if`s above to supply the other half (`gate.
+    // provider === 'none'`) — a reordering of those branches could have stranded it reachable on an
+    // authenticated topology with nothing here to notice.
+    //
+    // The whole decision AND the wiring now live in `./local-mode-boot.ts#buildLocalModeRoutes`,
+    // unit-tested directly (`local-mode-boot.test.ts`): it re-asks the FULL two-part predicate via
+    // `isLocalOrgModeActive` as its own first statement rather than trusting control-flow position,
+    // and a mutation removing its bind check is caught there. See that module's own doc comment for
+    // the full reasoning, including why the wiring itself — not just the boolean — had to move: a
+    // deleted `else if` body left `onboardingRoutes`/`teamRoutes` `undefined` with every gate green.
+    const localMode = await buildLocalModeRoutes(process.env, bindHost);
+    if (localMode.active) {
+      onboardingRoutes = localMode.onboardingRoutes;
+      teamRoutes = localMode.teamRoutes;
+    }
   }
 
-  const bootProjectId = await initWorkspace(repoRoot);
+  // `bindHost` threaded through so the registration seam's own local-org-mode guard (D13, FIX A3)
+  // reads the SAME bind this process actually serves on, not `undefined`/loopback by default.
+  const bootProjectId = await initWorkspace(repoRoot, bindHost);
   // ONE workspace semaphore for the whole process (spec 2026-07-20, step 2.5):
   // the boot manager and every lazily-built project context count their runs
   // against the same `resources.maxParallel`. The boot refresh() below is the

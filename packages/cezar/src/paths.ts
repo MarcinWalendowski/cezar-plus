@@ -144,6 +144,28 @@ export function notesLogPath(): string {
 /**
  * Identity storage — orgs, teams, users, memberships, sessions (D7,
  * `.ai/specs/2026-08-06-org-team-auth-onboarding.md`). Its own directory under `cezarHomeDir()`,
+ * on the `agentAccountsPath()`/`notesPath()` precedent.
+ *
+ * **CORRECTED 2026-08-07 (D13, adversarial review): the paragraph below — "a cezar build with
+ * `CEZ_AUTH` unset never imports the module that reads this path" — is now FALSE.** D13's local
+ * branch (`local-mode-boot.ts#buildLocalModeRoutes`, gated on `isLocalOrgModeActive` —
+ * `server/capabilities.ts` — extracted out of the `else if (resolveCapabilities(process.env,
+ * bindHost).localHandoff)` branch this note originally described; `src/index.ts`'s own `else`
+ * now just calls it) imports `identity-store.ts` and calls THIS function on every loopback boot
+ * with `CEZ_AUTH` unset — not only once a local user has actually onboarded, and not only on some
+ * other build —
+ * so the npm zero-config default now reaches this path unconditionally. What still holds, and is
+ * the property that actually matters, is D1's "unset means zero I/O" in its behavioural sense:
+ * this function itself still does no I/O (`join` never has), and `IdentityStore.open(identityDir())`
+ * is a bare constructor that performs none either (see that method's own doc comment) — so
+ * importing the module, and even opening the store, still creates or touches nothing on disk.
+ * Only an actual read/write call (`findOrCreateLocalUser`, `claimOrg`, …) — reached from
+ * `POST /auth/onboarding/org` or a `GET /auth/onboarding` status check — ever performs I/O under
+ * this path, matching D1's own later amendment: "`<CEZ_HOME>/identity/` comes into existence only
+ * if the local user completes the onboarding wizard and asks for an org."
+ *
+ * The original text follows unchanged:
+ *
  * on the `agentAccountsPath()`/`notesPath()` precedent: a cezar build with `CEZ_AUTH` unset never
  * imports the module that reads this path, so it never creates or touches it either — "unset
  * means zero I/O" (D1) requires that this function existing is not itself a filesystem

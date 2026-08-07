@@ -745,3 +745,167 @@ describe('/new query params', () => {
     expect(textarea().value).toBe('')
   })
 })
+
+/**
+ * `OnboardingEntryGate` (D13/D14, `.ai/specs/2026-08-06-org-team-auth-onboarding.md`, phase 9 and
+ * the D14 amendment) — the ONLY path that ever routes a first-run user into `/onboarding`
+ * automatically. An adversarial review found this reachable through no test at all (`grep -rn
+ * "OnboardingEntryGate"` found no test file) alongside three real defects, all fixed in
+ * `routes.tsx`/`onboarding.tsx` at the same time these tests were added:
+ *
+ * - FIX 9: the gate stayed armed forever after a DIRECT load at `/onboarding`, so finishing the
+ *   wizard from there bounced straight back into it against a stale cached probe.
+ * - FIX 10: the redirect was unconditional and `NameOrgStep` offered no way to decline, so the
+ *   npm zero-config default became a mandatory interstitial on every page load.
+ * - FIX 11 (this file): zero coverage of the entry path itself.
+ *
+ * **D14 (2026-08-07, owner decision) reversed FIX 10.** "No dashboard element renders before the
+ * first organization exists" means declining no longer exists — `onboarding-decline.ts`, the
+ * wizard's "Not now" action and the Settings re-entry link it needed are all deleted, so the two
+ * tests that pinned that behaviour are gone from this block. What replaces them: the gate is now
+ * unconditionally enabled (`onboarding-gate.ts`'s own doc comment — "never on a flag, never on
+ * `CEZ_AUTH`"), so it must fire on `needs-org` regardless of `capabilities.localHandoff`, and it
+ * must NEVER fire on `unavailable` — the one topology (hosted, `CEZ_AUTH` unset,
+ * `CEZ_ALLOW_UNAUTHENTICATED=1`) that mounts no `/auth/*` surface at all and could never satisfy a
+ * wizard it was bricked behind.
+ */
+describe('D13/D14 onboarding entry gate (OnboardingEntryGate)', () => {
+  const ORG = { id: 'org-1', name: 'Acme', slug: 'acme', createdAt: '2026-08-07T00:00:00.000Z' }
+  const TEAM = { id: 'team-1', orgId: 'org-1', name: 'General', slug: 'general' }
+
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+
+  /** Every unmatched request hangs forever — the same "honestly loading" discipline the rest of
+   *  this file uses — so a test only has to name the paths it actually cares about. */
+  function stubOnboarding({
+    onboarding,
+    createOrg,
+  }: {
+    onboarding: () => Response
+    createOrg?: () => Response
+  }) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const path = String(input).split('?')[0]
+      const method = init.method ?? 'GET'
+      if (method === 'GET' && path === '/auth/onboarding') return onboarding()
+      if (method === 'POST' && path === '/auth/onboarding/org') {
+        return createOrg ? createOrg() : jsonResponse({ org: ORG, team: TEAM, role: 'owner' })
+      }
+      return new Promise<never>(() => {})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  it('redirects to /onboarding on a first run (needs-org)', async () => {
+    stubOnboarding({
+      onboarding: () =>
+        jsonResponse({ state: 'needs-org', suggestedOrgName: 'Acme', bootstrapTokenRequired: false }),
+    })
+    renderAt('/')
+
+    await waitFor(() => expect(currentPathname()).toBe('/onboarding'))
+    // The lazy `OnboardingRoute` chunk (and its own probe fetch) resolve on a later tick than the
+    // navigation itself — the Suspense fallback carries no `data-route`, unlike the route it
+    // replaces, so this settles separately from the pathname assertion above.
+    await waitFor(() => expect(routeName()).toBe('onboarding'))
+  })
+
+  it('an existing org (ready) never redirects', async () => {
+    stubOnboarding({
+      onboarding: () => jsonResponse({ state: 'ready', org: ORG, team: TEAM, role: 'owner', hasProjects: true }),
+    })
+    renderAt('/')
+
+    await waitFor(() => expect(currentPathname()).toBe(`/p/${BOOT}/`))
+    // Give the probe a chance to resolve and the effect a chance to (wrongly) fire before
+    // asserting it never does.
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(currentPathname()).toBe(`/p/${BOOT}/`)
+    expect(routeName()).not.toBe('onboarding')
+  })
+
+  /**
+   * D14: "never on a flag, never on `CEZ_AUTH`" — the pre-D14 gate restricted its own probe to
+   * `capabilities.localHandoff` (an optimisation that assumed only the npm zero-config default
+   * needed the auto-redirect; a real hosted+authenticated deployment relied on `/auth/callback`'s
+   * own hard redirect instead). D14's render-level chrome gate (`app-shell-container.test.tsx`)
+   * needs the SAME probe to answer correctly on every topology, so the restriction is gone —
+   * pinned here on the navigation half: a `needs-org` answer redirects even with
+   * `capabilities.localHandoff: false`.
+   */
+  it('redirects to /onboarding on needs-org even when capabilities.localHandoff is false', async () => {
+    stubOnboarding({
+      onboarding: () =>
+        jsonResponse({ state: 'needs-org', suggestedOrgName: 'Acme', bootstrapTokenRequired: false }),
+    })
+    renderAt('/', { health: { ...HEALTH, capabilities: { ...HEALTH.capabilities, localHandoff: false } } })
+
+    await waitFor(() => expect(currentPathname()).toBe('/onboarding'))
+    await waitFor(() => expect(routeName()).toBe('onboarding'))
+  })
+
+  /**
+   * THE constraint D14 spells out explicitly: this is the one topology that must NEVER be gated —
+   * hosted, `CEZ_AUTH` unset, `CEZ_ALLOW_UNAUTHENTICATED=1` mounts no `/auth/*` surface at all, so
+   * `GET /auth/onboarding` falls through to the SPA catch-all (`onboarding-api.ts`'s own module doc
+   * comment) and `probeOnboarding` reports `unavailable` — never `needs-org`. Gating that
+   * deployment would brick it behind a wizard it can never satisfy.
+   */
+  it('never redirects on the unavailable topology (hosted, no /auth/* mounted at all)', async () => {
+    stubOnboarding({
+      onboarding: () =>
+        new Response('<!doctype html><html><body>cezar</body></html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        }),
+    })
+    renderAt('/', { health: { ...HEALTH, capabilities: { ...HEALTH.capabilities, localHandoff: false } } })
+
+    await waitFor(() => expect(currentPathname()).toBe(`/p/${BOOT}/`))
+    // Give the probe a chance to resolve and the effect a chance to (wrongly) fire before
+    // asserting it never does.
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(currentPathname()).toBe(`/p/${BOOT}/`)
+    expect(routeName()).not.toBe('onboarding')
+  })
+
+  it('completing the wizard from a direct /onboarding load does not bounce back into it (FIX 9)', async () => {
+    let orgCreated = false
+    stubOnboarding({
+      onboarding: () =>
+        jsonResponse(
+          orgCreated
+            ? { state: 'ready', org: ORG, team: TEAM, role: 'owner', hasProjects: false }
+            : { state: 'needs-org', suggestedOrgName: 'Acme', bootstrapTokenRequired: false },
+        ),
+      createOrg: () => {
+        orgCreated = true
+        return jsonResponse({ org: ORG, team: TEAM, role: 'owner' })
+      },
+    })
+
+    // A DIRECT load at /onboarding — never through the gate's own redirect — is exactly the case
+    // FIX 9 was blind to: the old code only disarmed `firedOnce` inside the branch that called
+    // `navigate()`, which this path never reaches.
+    renderAt('/onboarding')
+
+    const nameInput = await screen.findByLabelText('Organization name')
+    expect((nameInput as HTMLInputElement).value).toBe('Acme')
+    fireEvent.click(screen.getByRole('button', { name: 'Create organization' }))
+
+    const teamInput = await screen.findByLabelText('Workspace name', {}, { timeout: 5000 })
+    expect((teamInput as HTMLInputElement).value).toBe('General')
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and continue' }))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Skip for now' }))
+
+    await waitFor(() => expect(currentPathname()).not.toBe('/onboarding'))
+    // The bug bounced back on the NEXT tick, after the redirect had already landed — assert it
+    // stays gone rather than only that it left once.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(currentPathname()).not.toBe('/onboarding')
+    expect(routeName()).not.toBe('onboarding')
+  })
+})

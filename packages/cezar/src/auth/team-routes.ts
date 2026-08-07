@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context, type Next } from 'hono';
 import { z } from 'zod';
 import {
   createTeamInputSchema,
@@ -15,6 +15,8 @@ import { jsonZodValidator, paramZodValidator } from '../server/validators.ts';
 import { identityDir } from '../paths.ts';
 import type { SessionResolver } from '../server/server.ts';
 import { IdentityStore, IdentityStoreError } from './identity-store.ts';
+import { invalidateLocalOrgIdentityCache } from './local-identity.ts';
+import { hasOrgScope } from './principal.ts';
 import { createRequireOrgAdmin, getOrgAdminPrincipal } from './require-org-admin.ts';
 import { sessionResolver } from './session.ts';
 import type { Team } from './types.ts';
@@ -74,9 +76,22 @@ export type TeamRoutesIdentityStore = Pick<IdentityStore, 'listTeams' | 'getTeam
 
 export interface TeamRouteDeps {
   /** D3's one resolver — every route here needs the FULL principal (`orgId`/`teamId`/`role`),
-   *  unlike `onboarding-routes.ts`'s lower "signed in, maybe no org yet" bar. */
+   *  unlike `onboarding-routes.ts`'s lower "signed in, maybe no org yet" bar.
+   *
+   *  **D13 (phase 9 HTTP surface): also what `GET /auth/teams` reads for local mode.** In local
+   *  mode this is `./local-gates.ts#localSessionResolver` (never `null`, `kind: 'local'`) — see
+   *  `onboarding-routes.ts`'s `OnboardingRouteDeps.sessionResolver` doc comment for the same note,
+   *  which applies here unchanged. */
   readonly sessionResolver: SessionResolver;
   readonly identityStore: TeamRoutesIdentityStore;
+  /**
+   * D13's local-mode "org admin" gate (`./local-gates.ts#createRequireOrgAdminLocal`) —
+   * substitutes for the internally-built `createRequireOrgAdmin(sessionResolver)` on all three
+   * write verbs. Cannot be expressed by swapping `sessionResolver` alone: `createRequireOrgAdmin`'s
+   * own `kind !== 'session'` check would 401 every local request (see `./local-gates.ts`'s module
+   * doc comment). Absent keeps today's cookie-based construction.
+   */
+  readonly localOrgAdminGate?: (c: Context, next: Next) => Response | Promise<Response | void>;
 }
 
 // ---- wire shaping (mirrors `onboarding-routes.ts`'s own precedent) -------------------------------
@@ -95,13 +110,25 @@ export function createTeamRoutes(deps: TeamRouteDeps): Hono {
   // Own instance (not the process-wide `requireOrgAdmin` singleton) so this factory stays testable
   // against a fake `SessionResolver` — the same shape `invite-routes.ts#createInviteRoutes` and
   // `require-org-admin.test.ts`'s own `buildApp` helper use.
-  const adminGate = createRequireOrgAdmin(deps.sessionResolver);
+  //
+  // D13: `deps.localOrgAdminGate` substitutes the WHOLE gate, not just its resolver — see
+  // `./local-gates.ts`'s module doc comment for why swapping only `deps.sessionResolver` into
+  // `createRequireOrgAdmin` would still 401 every local request.
+  const adminGate = deps.localOrgAdminGate ?? createRequireOrgAdmin(deps.sessionResolver);
 
   return new Hono()
     // ---- GET /auth/teams: every team in the caller's own org, no admin bar (see module doc) -----
     .get('/auth/teams', (c) => {
       const principal = deps.sessionResolver.resolveFromCookieHeader(c.req.header('cookie'));
-      if (!principal || principal.kind !== 'session') return c.json({ error: 'unauthenticated' }, 401);
+      if (!principal) return c.json({ error: 'unauthenticated' }, 401);
+      if (!hasOrgScope(principal)) {
+        // D13: reachable in local mode before an org exists (`kind: 'local'`, `orgId: null`) —
+        // unreachable in session mode (`session.ts#resolveIdentity` never resolves a
+        // membership-less 'session' principal; `sessionResolver` returns `null` instead, caught
+        // above). NOT 401: this caller genuinely is who they say they are, there just isn't an
+        // org yet (D13 invariant 1 — no 401 in local mode, ever).
+        return c.json({ error: 'no organization exists yet' }, 400);
+      }
       const body: ListTeamsResponse = { teams: deps.identityStore.listTeams(principal.orgId).map(toWireTeam) };
       return c.json(body);
     })
@@ -111,6 +138,13 @@ export function createTeamRoutes(deps: TeamRouteDeps): Hono {
     // validation) so a non-admin's malformed body never reaches the validator.
     .post('/auth/teams', adminGate, jsonZodValidator(createTeamInputSchema), async (c) => {
       const principal = getOrgAdminPrincipal(c);
+      if (!hasOrgScope(principal)) {
+        // Defensive narrowing only (also what makes `principal.orgId` a `string` below to the
+        // type checker) — `adminGate` (cookie-based OR D13's local one) never stashes a principal
+        // without an org. Unreachable in practice; see `onboarding-routes.ts`'s identical guard on
+        // `PATCH /auth/onboarding/team` for the same reasoning.
+        return c.json({ error: 'no organization exists yet' }, 400);
+      }
       const { name, slug } = c.req.valid('json');
       try {
         const team = await deps.identityStore.createTeam({ orgId: principal.orgId, name, slug });
@@ -147,6 +181,16 @@ export function createTeamRoutes(deps: TeamRouteDeps): Hono {
       if (!existing || existing.orgId !== principal.orgId) return c.json({ error: `unknown team: ${teamId}` }, 404);
       try {
         await deps.identityStore.deleteTeam(teamId);
+        // FIX 4 (D13 repair pass): `./local-identity.ts`'s cache is a single, process-lifetime slot
+        // that resolves once and is trusted forever until something tells it otherwise — and
+        // before this, the ONLY place that ever did was `onboarding-routes.ts`'s `claimOrg` calls.
+        // A caller who had already resolved (and cached) a local `Principal` naming THIS team keeps
+        // reading that same, now-deleted, `teamId` after a successful delete — and every later
+        // `POST /api/v1/projects` (`server.ts#registerFolder`, via `resolveLocalPrincipal`, the
+        // SAME cache) 500s trying to file a project under a team that no longer exists. A no-op in
+        // session mode: nothing populates that cache outside local mode (see the module's own doc
+        // comment), so this just resets an already-`'unknown'` slot back to `'unknown'`.
+        invalidateLocalOrgIdentityCache();
         const body: DeleteTeamResponse = { deleted: true, id: teamId };
         return c.json(body);
       } catch (error) {

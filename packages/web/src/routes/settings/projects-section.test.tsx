@@ -63,8 +63,13 @@ type Answers = {
   del?: { status: number; payload: unknown }
   /** Overrides `GET /api/v1/projects`' entries — default `PROJECTS`, carries no `teamId`. */
   projects?: ProjectListEntry[]
-  /** Overrides `GET /auth/teams`. Default simulates `CEZ_AUTH` unset: the SPA catch-all answers
-   *  200 `text/html`, never JSON (`teams-api.ts`'s own auth-off signal). */
+  /** Overrides `GET /auth/teams`. Default simulates a hosted, unauthenticated deployment with no
+   *  `/auth/*` mounted at all: the SPA catch-all answers 200 `text/html`, never JSON
+   *  (`teams-api.ts`'s own `unavailable` signal). **Not** what a `CEZ_AUTH`-unset deployment sends
+   *  in general since D13 (phase 9, local mode) — the npm zero-config default now mounts a real,
+   *  JSON-answering `/auth/teams` once a local org exists (or is still missing); see the two
+   *  `CEZ_AUTH is unset` tests below, corrected 2026-08-07 (second adversarial review, FIX C4), for
+   *  why this default is the narrower topology and not the general case its old name implied. */
   orgTeams?: { status: number; payload: unknown }
   /** Overrides a `teamId`-carrying `PATCH /api/v1/projects/:id` (Phase 5c reassignment). Absent
    *  means the default: apply it against the roster and answer 200, mirroring how `maxParallel`
@@ -112,9 +117,11 @@ function serve(answers: Answers = {}) {
       requests.push({ method, url, body })
       if (url === '/auth/teams' && method === 'GET') {
         if (answers.orgTeams) return json(answers.orgTeams.payload, answers.orgTeams.status)
-        // Default: `CEZ_AUTH` unset ⇒ `/auth/*` was never registered ⇒ the SPA catch-all answers
-        // with `index.html` — 200, but NOT `application/json` (`teams-api.ts`'s own auth-off
-        // signal, mirroring `onboarding-api.ts#probeOnboarding`'s).
+        // Default: a HOSTED, unauthenticated deployment ⇒ no `/auth/*` mounted at all ⇒ the SPA
+        // catch-all answers with `index.html` — 200, but NOT `application/json` (`teams-api.ts`'s
+        // own `unavailable` signal, mirroring `onboarding-api.ts#probeOnboarding`'s). NOT what a
+        // `CEZ_AUTH`-unset deployment sends in general since D13 — see the `Answers.orgTeams` doc
+        // comment above.
         return new Response('<!doctype html>', { status: 200, headers: { 'content-type': 'text/html' } })
       }
       if (url === '/api/v1/projects' && method === 'GET') return json(registry)
@@ -402,11 +409,16 @@ describe('Global settings → Projects', () => {
   })
 
   describe('team filtering (D5 — grouping/filtering metadata, never a scope)', () => {
-    it('shows no filter and no team badges when CEZ_AUTH is unset — the board is unchanged', async () => {
-      // The default PROJECTS fixture carries no `teamId` at all, which is exactly the shape
-      // every project has with `CEZ_AUTH` unset: no `project_teams` row was ever written.
-      // `serve()`'s default `/auth/teams` answer is the SPA catch-all (200, non-JSON) — the real
-      // shape a `CEZ_AUTH`-unset deployment sends, not a mock that merely omits the route.
+    it('shows no filter and no team badges on a hosted, unauthenticated deployment (no /auth/* mounted) — the board is unchanged', async () => {
+      // The default PROJECTS fixture carries no `teamId` at all, which is exactly the shape every
+      // project has when no `project_teams` row was ever written for it. `serve()`'s default
+      // `/auth/teams` answer is the SPA catch-all (200, non-JSON) — the real shape a hosted,
+      // unauthenticated deployment sends (D9's `CEZ_ALLOW_UNAUTHENTICATED=1`), not a mock that
+      // merely omits the route. **Renamed 2026-08-07 (second adversarial review, FIX C4):** this
+      // used to say "when CEZ_AUTH is unset", which stopped being the general case with D13 (phase
+      // 9) — the npm zero-config default now mounts a real `/auth/teams` and answers real JSON
+      // (see `Answers.orgTeams`'s own doc comment above). The stub itself is unchanged and still
+      // exercises a real, narrower topology; only the claim in its name was too broad.
       serve()
       renderProjects()
       await waitFor(() => expect(rows()).toHaveLength(3))
@@ -591,7 +603,9 @@ describe('Global settings → Projects', () => {
       },
     }
 
-    it('has no Team column at all when CEZ_AUTH is unset', async () => {
+    // Renamed 2026-08-07 (second adversarial review, FIX C4) — see the sibling rename above for
+    // why "when CEZ_AUTH is unset" is no longer the accurate name for this stub's default.
+    it('has no Team column at all on a hosted, unauthenticated deployment (no /auth/* mounted)', async () => {
       serve()
       renderProjects()
       await waitFor(() => expect(rows()).toHaveLength(3))

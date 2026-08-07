@@ -1,4 +1,4 @@
-import { Suspense, lazy } from 'react'
+import { Suspense, lazy, useEffect, useRef } from 'react'
 import {
   matchPath,
   Navigate,
@@ -6,6 +6,7 @@ import {
   Route,
   Routes,
   useLocation,
+  useNavigate,
   useParams,
 } from 'react-router'
 
@@ -13,6 +14,7 @@ import { useHealth, useProjects, useWorkspaceUiState } from './api/queries'
 import { ProjectScopeProvider } from './api/project-scope-context'
 import { locationToRestore } from './lib/last-location'
 import { Navigate as ScopedNavigate, stripProjectPrefix } from './lib/project-router'
+import { needsOrgGate, useOnboardingEntryProbe } from './routes/onboarding/onboarding-gate'
 import { CompareLoading } from './routes/compare-loading'
 import { GithubLoading } from './routes/github/github-loading'
 import { InboxRoute } from './routes/inbox'
@@ -290,6 +292,78 @@ function LegacyPathRedirect() {
   )
 }
 
+/**
+ * D13/D14 entry point (spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`, phases 9 and the
+ * D14 amendment) — "opening `http://127.0.0.1:<port>` for the first time … should offer to create
+ * an organization," and (D14) the wizard is the entire surface until it does. Before D13, the ONLY
+ * thing that ever routed a user INTO `/onboarding` was `/auth/callback`'s post-login redirect
+ * (`auth/routes.ts`, see `onboarding.tsx`'s own doc comment: "redirects EVERY sign-in here") — a
+ * route that exists only when `CEZ_AUTH` names a real provider. Local mode has no login at all, so
+ * nothing ever pointed a first-run local user at the wizard; `/onboarding` was reachable only by
+ * typing the URL by hand, which is what made the whole feature unreachable in practice. This
+ * component is local mode's equivalent of that callback redirect, generalised (D14) to every
+ * topology the probe can answer `needs-org` for — see `onboarding-gate.ts`'s own doc comment for
+ * why the query below is unconditionally enabled rather than restricted to `capabilities.
+ * localHandoff` the way the pre-D14 version of this gate was.
+ *
+ * **Deliberately a side effect, not a render-blocking gate added to `LegacyPathRedirect`.** Gating
+ * the bare-root redirect chain itself on this probe's answer would tie EVERY boot — including
+ * every already-onboarded install, forever, and every test in `routes.test.tsx` that exercises
+ * that chain synchronously against seeded query data — to one more sequential round trip. Mounted
+ * instead as an always-present sibling of `<Routes>`: it renders nothing and imperatively
+ * navigates to `/onboarding` at most ONCE per page load, the moment the probe answers `needs-org`
+ * — never a second time, so a user who finishes onboarding and lands back on `/` is never fought
+ * back into it. (D14 removed the other way a user used to leave `/onboarding` early — declining —
+ * so completing the wizard is now the only way out.)
+ *
+ * **FIXED 2026-08-07 (adversarial review of D13, FIX 9 — the "at most ONCE" claim above was false
+ * for the one case that matters most).** The `firedOnce` ref was set only inside the branch that
+ * called `navigate()`, so a user who loaded (or was linked to) `/onboarding` DIRECTLY — never
+ * through this gate's own redirect — left it unset: the probe stayed `enabled` and its `needs-org`
+ * answer stayed cached. Finishing the wizard and landing back on `/` re-ran this effect against
+ * that STALE cached answer, which still read `needs-org`, and bounced the user straight back into
+ * `/onboarding` — where `OnboardingRoute`'s own probe cache (`onboarding.tsx`'s `['onboarding',
+ * 'status']`) was equally stale, re-rendering `NameOrgStep` for an org that already existed and
+ * 409ing on submit. Fixed two ways, together: (1) the effect now disarms — `firedOnce.current =
+ * true` — the moment the pathname IS `/onboarding`, regardless of how the user got there, checked
+ * before anything else so a direct load latches on its very first pathname-settled render; (2)
+ * `onboarding.tsx#OnboardingRoute` evicts every `['onboarding', ...]`-keyed query (this gate's
+ * `entry-probe` included, by shared key prefix) the moment the org is actually created, so even a
+ * query that somehow stayed `enabled` has no stale `needs-org` left to read on its next render.
+ *
+ * **D14 (2026-08-07, owner decision): declining no longer exists.** This gate used to also check
+ * `hasDeclinedOnboarding()` (`onboarding-decline.ts`, added at D13's repair round 3) before ever
+ * enabling its probe or navigating, and `NameOrgStep` carried a "Not now" action that wrote that
+ * flag. The owner reversed that: no dashboard element renders before the first organization
+ * exists, full stop, so there is nothing left for a decline to make reversible. Both are removed
+ * rather than left inert.
+ */
+function OnboardingEntryGate() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const firedOnce = useRef(false)
+  const probe = useOnboardingEntryProbe()
+
+  useEffect(() => {
+    // Disarm the moment the user IS at `/onboarding`, for ANY reason — this gate's own `navigate`
+    // below, a direct load, or a hand-typed link — not only when this effect performed the
+    // navigation itself. Checked first, and unconditionally, so a direct load latches on its very
+    // first render at this pathname, before the probe has even resolved. Without this, a direct
+    // load leaves `firedOnce` false forever, and a later navigation away (any wizard-completion
+    // path) re-reads the still-cached `needs-org` answer and bounces back in (FIX 9 above).
+    if (location.pathname === '/onboarding') {
+      firedOnce.current = true
+      return
+    }
+    if (firedOnce.current) return
+    if (!needsOrgGate(probe.data)) return
+    firedOnce.current = true
+    navigate('/onboarding', { replace: true })
+  }, [probe.data, location.pathname, navigate])
+
+  return null
+}
+
 export interface PageTitleContext {
   pageLabel: string | null
   taskId: string | null
@@ -337,256 +411,264 @@ export function pageTitleContext(pathname: string): PageTitleContext {
 export function AppRoutes() {
   const capabilities = useHealth().data?.capabilities
   return (
-    <Routes>
-      <Route path="/p/:projectId" element={<ProjectScopeRoute />}>
-        <Route index element={<TasksOverviewRoute />} />
-        <Route path="new" element={<NewTaskProjectRoute />} />
+    <>
+      <OnboardingEntryGate />
+      <Routes>
+        <Route path="/p/:projectId" element={<ProjectScopeRoute />}>
+          <Route index element={<TasksOverviewRoute />} />
+          <Route path="new" element={<NewTaskProjectRoute />} />
 
-        <Route
-          path="tasks/:id"
-          element={
-            <Suspense fallback={<ThreadLoading />}>
-              <TaskThreadRoute />
-            </Suspense>
-          }
-        />
-        <Route
-          path="tasks/:id/changes"
-          element={
-            <Suspense fallback={<GitTabLoading tab="changes" />}>
-              <TaskChangesRoute />
-            </Suspense>
-          }
-        />
-        <Route
-          path="tasks/:id/files"
-          element={
-            <Suspense fallback={<GitTabLoading tab="files" />}>
-              <TaskFilesRoute />
-            </Suspense>
-          }
-        />
-        <Route
-          path="tasks/:id/commits"
-          element={
-            <Suspense fallback={<GitTabLoading tab="changes" />}>
-              <TaskCommitsRoute />
-            </Suspense>
-          }
-        />
-        <Route
-          path="tasks/:id/commits/:sha"
-          element={
-            <Suspense fallback={<GitTabLoading tab="changes" />}>
-              <TaskCommitsRoute />
-            </Suspense>
-          }
-        />
-        <Route
-          path="compare/:groupId"
-          element={
-            <Suspense fallback={<CompareLoading />}>
-              <CompareVariantsRoute />
-            </Suspense>
-          }
-        />
-
-        {/* The repo view (R5 Step 1.7): each segment is a URL — /git (working-tree changes),
-            /git/commits (+ /:sha for one commit's diff), /git/branches. */}
-        <Route
-          path="git"
-          element={
-            <Suspense fallback={<RepoGitLoading />}>
-              <RepoGitRoute tab="changes" />
-            </Suspense>
-          }
-        />
-        <Route
-          path="git/commits"
-          element={
-            <Suspense fallback={<RepoGitLoading />}>
-              <RepoGitRoute tab="commits" />
-            </Suspense>
-          }
-        />
-        <Route
-          path="git/commits/:sha"
-          element={
-            <Suspense fallback={<RepoGitLoading />}>
-              <RepoGitRoute tab="commits" />
-            </Suspense>
-          }
-        />
-        <Route
-          path="git/branches"
-          element={
-            <Suspense fallback={<RepoGitLoading />}>
-              <RepoGitRoute tab="branches" />
-            </Suspense>
-          }
-        />
-        {/* The GitHub tab (R6 Step 1.1): issues and PRs are separate list URLs, each item a
-            deep link. The nav item is forge-gated in the shell; the routes stay reachable so a
-            pasted link renders the honest unavailable explainer instead of a 404. The bare
-            `/github` is the one URL that restores the last-selected tab (#417) — `/github/prs`
-            and the `:n` deep links are always exactly what they say. */}
-        <Route
-          path="github"
-          element={
-            <Suspense fallback={<GithubLoading />}>
-              <GithubIndexRoute />
-            </Suspense>
-          }
-        />
-        <Route
-          path="github/prs"
-          element={
-            <Suspense fallback={<GithubLoading />}>
-              <GithubRoute view="prs" />
-            </Suspense>
-          }
-        />
-        <Route
-          path="github/issues/:n"
-          element={
-            <Suspense fallback={<GithubLoading />}>
-              <GithubRoute view="issues" />
-            </Suspense>
-          }
-        />
-        <Route
-          path="github/prs/:n"
-          element={
-            <Suspense fallback={<GithubLoading />}>
-              <GithubRoute view="prs" />
-            </Suspense>
-          }
-        />
-        <Route
-          path="github/prs/:n/changes"
-          element={
-            <Suspense fallback={<GithubLoading />}>
-              <GithubRoute view="prs" changes />
-            </Suspense>
-          }
-        />
-        <Route path="automations" element={<AutomationsRoute />} />
-        <Route path="automations/new" element={<AutomationsRoute mode="new" />} />
-        <Route path="automations/:automationId" element={<AutomationsRoute mode="edit" />} />
-        <Route path="automations/:automationId/log" element={<AutomationsRoute mode="log" />} />
-
-        {/* The skills catalog (R6 Step 1.4) — its own top-level surface, no settings sub-nav.
-            `/settings/skills` redirects here (below) so pasted links keep working. */}
-        <Route
-          path="skills"
-          element={
-            <Suspense fallback={<SkillsLoading />}>
-              <SkillsRoute />
-            </Suspense>
-          }
-        />
-
-        {/* The follow-up inbox (R6 Step 1.2): light — no markdown stack — so it rides the main
-            bundle like the overview does. */}
-        <Route path="inbox" element={<InboxRoute />} />
-
-        {/* The knowledge base (central-hub scaffold F1, `CEZ_KB=1`): project-scoped, like Git.
-            Reachable even off — off just means `KnowledgeRoute` renders its own "disabled" state,
-            same as `/inbox` does for `followups` (D19: a switched-off feature is never a 404). */}
-        <Route path="knowledge" element={<KnowledgeRoute />} />
-        <Route path="knowledge/:id" element={<KnowledgeRoute />} />
-
-        {/* The workflow builder (R6 Step 1.6): /workflows opens the canvas on the repo's first
-            saved chain, /workflows/:name deep-links a specific one. */}
-        <Route
-          path="workflows"
-          element={
-            <Suspense fallback={<WorkflowsLoading />}>
-              <WorkflowsRoute />
-            </Suspense>
-          }
-        />
-        <Route
-          path="workflows/:name"
-          element={
-            <Suspense fallback={<WorkflowsLoading />}>
-              <WorkflowsRoute />
-            </Suspense>
-          }
-        />
-
-        {/* Settings (R6 Step 1.3): registry-driven — the section list, nav and routes all come
-            from routes/settings/registry.tsx. Hidden sections are NOT routed, so their URLs are
-            honest 404s until the section ships (notifications unhides in Step 1.7).
-
-            Only the PROJECT-scoped sections live here (multi-project spec, step 3.5); the
-            global ones are the top-level `/settings/global/*` block below. */}
-        <Route path="settings" element={<SettingsIndexRoute scope="project" capabilities={capabilities} />} />
-        <Route path="settings/skills" element={<SettingsSkillsRedirect />} />
-        {visibleSettingsSections('project', capabilities).map((section) => (
           <Route
-            key={section.id}
-            path={`settings/${section.id}`}
-            element={<SettingsSectionRoute section={section} scope="project" capabilities={capabilities} />}
+            path="tasks/:id"
+            element={
+              <Suspense fallback={<ThreadLoading />}>
+                <TaskThreadRoute />
+              </Suspense>
+            }
           />
-        ))}
-        {/* A section that MOVED out of the project area keeps its old URL working: every
-            pre-3.5 bookmark and every legacy flat `/settings/appearance` (which the redirect
-            below turns into `/p/<boot>/settings/appearance`) lands on the global twin instead
-            of a 404 — query and hash intact across both hops. */}
+          <Route
+            path="tasks/:id/changes"
+            element={
+              <Suspense fallback={<GitTabLoading tab="changes" />}>
+                <TaskChangesRoute />
+              </Suspense>
+            }
+          />
+          <Route
+            path="tasks/:id/files"
+            element={
+              <Suspense fallback={<GitTabLoading tab="files" />}>
+                <TaskFilesRoute />
+              </Suspense>
+            }
+          />
+          <Route
+            path="tasks/:id/commits"
+            element={
+              <Suspense fallback={<GitTabLoading tab="changes" />}>
+                <TaskCommitsRoute />
+              </Suspense>
+            }
+          />
+          <Route
+            path="tasks/:id/commits/:sha"
+            element={
+              <Suspense fallback={<GitTabLoading tab="changes" />}>
+                <TaskCommitsRoute />
+              </Suspense>
+            }
+          />
+          <Route
+            path="compare/:groupId"
+            element={
+              <Suspense fallback={<CompareLoading />}>
+                <CompareVariantsRoute />
+              </Suspense>
+            }
+          />
+
+          {/* The repo view (R5 Step 1.7): each segment is a URL — /git (working-tree changes),
+              /git/commits (+ /:sha for one commit's diff), /git/branches. */}
+          <Route
+            path="git"
+            element={
+              <Suspense fallback={<RepoGitLoading />}>
+                <RepoGitRoute tab="changes" />
+              </Suspense>
+            }
+          />
+          <Route
+            path="git/commits"
+            element={
+              <Suspense fallback={<RepoGitLoading />}>
+                <RepoGitRoute tab="commits" />
+              </Suspense>
+            }
+          />
+          <Route
+            path="git/commits/:sha"
+            element={
+              <Suspense fallback={<RepoGitLoading />}>
+                <RepoGitRoute tab="commits" />
+              </Suspense>
+            }
+          />
+          <Route
+            path="git/branches"
+            element={
+              <Suspense fallback={<RepoGitLoading />}>
+                <RepoGitRoute tab="branches" />
+              </Suspense>
+            }
+          />
+          {/* The GitHub tab (R6 Step 1.1): issues and PRs are separate list URLs, each item a
+              deep link. The nav item is forge-gated in the shell; the routes stay reachable so a
+              pasted link renders the honest unavailable explainer instead of a 404. The bare
+              `/github` is the one URL that restores the last-selected tab (#417) — `/github/prs`
+              and the `:n` deep links are always exactly what they say. */}
+          <Route
+            path="github"
+            element={
+              <Suspense fallback={<GithubLoading />}>
+                <GithubIndexRoute />
+              </Suspense>
+            }
+          />
+          <Route
+            path="github/prs"
+            element={
+              <Suspense fallback={<GithubLoading />}>
+                <GithubRoute view="prs" />
+              </Suspense>
+            }
+          />
+          <Route
+            path="github/issues/:n"
+            element={
+              <Suspense fallback={<GithubLoading />}>
+                <GithubRoute view="issues" />
+              </Suspense>
+            }
+          />
+          <Route
+            path="github/prs/:n"
+            element={
+              <Suspense fallback={<GithubLoading />}>
+                <GithubRoute view="prs" />
+              </Suspense>
+            }
+          />
+          <Route
+            path="github/prs/:n/changes"
+            element={
+              <Suspense fallback={<GithubLoading />}>
+                <GithubRoute view="prs" changes />
+              </Suspense>
+            }
+          />
+          <Route path="automations" element={<AutomationsRoute />} />
+          <Route path="automations/new" element={<AutomationsRoute mode="new" />} />
+          <Route path="automations/:automationId" element={<AutomationsRoute mode="edit" />} />
+          <Route path="automations/:automationId/log" element={<AutomationsRoute mode="log" />} />
+
+          {/* The skills catalog (R6 Step 1.4) — its own top-level surface, no settings sub-nav.
+              `/settings/skills` redirects here (below) so pasted links keep working. */}
+          <Route
+            path="skills"
+            element={
+              <Suspense fallback={<SkillsLoading />}>
+                <SkillsRoute />
+              </Suspense>
+            }
+          />
+
+          {/* The follow-up inbox (R6 Step 1.2): light — no markdown stack — so it rides the main
+              bundle like the overview does. */}
+          <Route path="inbox" element={<InboxRoute />} />
+
+          {/* The knowledge base (central-hub scaffold F1, `CEZ_KB=1`): project-scoped, like Git.
+              Reachable even off — off just means `KnowledgeRoute` renders its own "disabled" state,
+              same as `/inbox` does for `followups` (D19: a switched-off feature is never a 404). */}
+          <Route path="knowledge" element={<KnowledgeRoute />} />
+          <Route path="knowledge/:id" element={<KnowledgeRoute />} />
+
+          {/* The workflow builder (R6 Step 1.6): /workflows opens the canvas on the repo's first
+              saved chain, /workflows/:name deep-links a specific one. */}
+          <Route
+            path="workflows"
+            element={
+              <Suspense fallback={<WorkflowsLoading />}>
+                <WorkflowsRoute />
+              </Suspense>
+            }
+          />
+          <Route
+            path="workflows/:name"
+            element={
+              <Suspense fallback={<WorkflowsLoading />}>
+                <WorkflowsRoute />
+              </Suspense>
+            }
+          />
+
+          {/* Settings (R6 Step 1.3): registry-driven — the section list, nav and routes all come
+              from routes/settings/registry.tsx. Hidden sections are NOT routed, so their URLs are
+              honest 404s until the section ships (notifications unhides in Step 1.7).
+
+              Only the PROJECT-scoped sections live here (multi-project spec, step 3.5); the
+              global ones are the top-level `/settings/global/*` block below. */}
+          <Route path="settings" element={<SettingsIndexRoute scope="project" capabilities={capabilities} />} />
+          <Route path="settings/skills" element={<SettingsSkillsRedirect />} />
+          {visibleSettingsSections('project', capabilities).map((section) => (
+            <Route
+              key={section.id}
+              path={`settings/${section.id}`}
+              element={<SettingsSectionRoute section={section} scope="project" capabilities={capabilities} />}
+            />
+          ))}
+          {/* A section that MOVED out of the project area keeps its old URL working: every
+              pre-3.5 bookmark and every legacy flat `/settings/appearance` (which the redirect
+              below turns into `/p/<boot>/settings/appearance`) lands on the global twin instead
+              of a 404 — query and hash intact across both hops. */}
+          {visibleSettingsSections('global', capabilities).map((section) => (
+            <Route
+              key={section.id}
+              path={`settings/${section.id}`}
+              element={<MovedSettingsSectionRedirect sectionId={section.id} />}
+            />
+          ))}
+
+          <Route path="*" element={<NotFoundRoute />} />
+        </Route>
+
+        {/* Global settings (multi-project spec, step 3.5) — the one cockpit area that is NOT
+            under `/p/:projectId`, because nothing here belongs to a project: appearance and
+            notifications are the user's, resources are the machine's, and the Projects pane IS
+            the registry. No `ProjectScopeProvider` above it, so its sections must read/write the
+            workspace routes (`/api/workspace/*`), which are never scope-prefixed.
+
+            Static segments outrank the `*` legacy redirect below in React Router's ranking, so
+            these win regardless of order — listed here for readability. */}
+        <Route path="/settings/global" element={<SettingsIndexRoute scope="global" capabilities={capabilities} />} />
         {visibleSettingsSections('global', capabilities).map((section) => (
           <Route
             key={section.id}
-            path={`settings/${section.id}`}
-            element={<MovedSettingsSectionRedirect sectionId={section.id} />}
+            path={settingsSectionPath('global', section.id)}
+            element={<SettingsSectionRoute section={section} scope="global" capabilities={capabilities} />}
           />
         ))}
 
-        <Route path="*" element={<NotFoundRoute />} />
-      </Route>
+        {/* Two more non-project areas (central-hub scaffold F3, `CEZ_NOTES=1` /
+            `CEZ_WORKSPACE_VIEWS=1`), the same shape as `/settings/global` above: no project owns a
+            note before it is filed, and the cross-project board aggregates every project, so
+            neither mounts under `ProjectScopeRoute` (`.ai/specs/2026-08-06-workspace-notes-cross-
+            project.md` "The scope trap"). Reachable even off — each route renders its own
+            "disabled" state rather than a 404 (D19). */}
+        <Route path="/notes" element={<NotesRoute />} />
+        <Route path="/workspace/tasks" element={<WorkspaceTasksRoute />} />
 
-      {/* Global settings (multi-project spec, step 3.5) — the one cockpit area that is NOT
-          under `/p/:projectId`, because nothing here belongs to a project: appearance and
-          notifications are the user's, resources are the machine's, and the Projects pane IS
-          the registry. No `ProjectScopeProvider` above it, so its sections must read/write the
-          workspace routes (`/api/workspace/*`), which are never scope-prefixed.
-
-          Static segments outrank the `*` legacy redirect below in React Router's ranking, so
-          these win regardless of order — listed here for readability. */}
-      <Route path="/settings/global" element={<SettingsIndexRoute scope="global" capabilities={capabilities} />} />
-      {visibleSettingsSections('global', capabilities).map((section) => (
+        {/* The onboarding wizard (D8; D13 local mode). Outside `ProjectScopeRoute` for the same
+            reason as the two routes above — there may be no project, and no ORG, yet. Reachable at
+            all times (never a 404, D19's pattern). `OnboardingRoute` renders the full wizard for
+            BOTH an authenticated deployment and the npm zero-config local default (D13) — it only
+            falls back to the quiet "unavailable" explainer on the one remaining topology that mounts
+            no `/auth/*` surface at all (a hosted, unauthenticated deployment; see that file's own
+            doc comment, corrected 2026-08-07). `OnboardingEntryGate` above is what actually routes a
+            first-run local user here — this `<Route>` is only reachable once something points at
+            it. */}
         <Route
-          key={section.id}
-          path={settingsSectionPath('global', section.id)}
-          element={<SettingsSectionRoute section={section} scope="global" capabilities={capabilities} />}
+          path="/onboarding"
+          element={
+            <Suspense fallback={<p className="px-4 py-6 text-center text-xs text-soft-foreground">Loading…</p>}>
+              <OnboardingRoute />
+            </Suspense>
+          }
         />
-      ))}
 
-      {/* Two more non-project areas (central-hub scaffold F3, `CEZ_NOTES=1` /
-          `CEZ_WORKSPACE_VIEWS=1`), the same shape as `/settings/global` above: no project owns a
-          note before it is filed, and the cross-project board aggregates every project, so
-          neither mounts under `ProjectScopeRoute` (`.ai/specs/2026-08-06-workspace-notes-cross-
-          project.md` "The scope trap"). Reachable even off — each route renders its own
-          "disabled" state rather than a 404 (D19). */}
-      <Route path="/notes" element={<NotesRoute />} />
-      <Route path="/workspace/tasks" element={<WorkspaceTasksRoute />} />
-
-      {/* The onboarding wizard (D8): outside `ProjectScopeRoute` for the same reason as the two
-          routes above — there may be no project, and on first sign-in no ORG, yet. Reachable at
-          all times (never a 404, D19's pattern); `OnboardingRoute` itself renders the "auth is
-          off" explainer when `CEZ_AUTH` is unset (see that file's own doc comment). */}
-      <Route
-        path="/onboarding"
-        element={
-          <Suspense fallback={<p className="px-4 py-6 text-center text-xs text-soft-foreground">Loading…</p>}>
-            <OnboardingRoute />
-          </Suspense>
-        }
-      />
-
-      {/* Everything else IS a legacy flat URL — the boot-project redirect owns it. The 404 for
-          truly unknown paths still renders, scoped, after the redirect. */}
-      <Route path="*" element={<LegacyPathRedirect />} />
-    </Routes>
+        {/* Everything else IS a legacy flat URL — the boot-project redirect owns it. The 404 for
+            truly unknown paths still renders, scoped, after the redirect. */}
+        <Route path="*" element={<LegacyPathRedirect />} />
+      </Routes>
+    </>
   )
 }

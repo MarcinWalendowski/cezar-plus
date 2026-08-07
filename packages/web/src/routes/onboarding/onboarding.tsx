@@ -1,10 +1,11 @@
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Building2Icon, FolderPlusIcon, LockIcon, LogInIcon, MailQuestionIcon, TriangleAlertIcon, UsersIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 
 import type {
   CreateOnboardingOrgInput,
+  CreateTeamInput,
   Org,
   RenameOnboardingTeamInput,
   Role,
@@ -15,39 +16,84 @@ import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+// `POST /auth/teams` — the same public function Settings → Workspaces uses
+// (`settings/teams-panel.tsx`), reused rather than duplicated: `AddWorkspaceField` below is a
+// second CALLER of an already-tested function, not a second implementation of the request.
+import { createTeam } from '@/routes/settings/teams-api'
 
 import { createOnboardingOrg, probeOnboarding, renameOnboardingTeam, type OnboardingProbe } from './onboarding-api'
 
 /**
- * `/onboarding` (D8, spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`, phase 4).
+ * `/onboarding` (D8, spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`, phase 4; D13 local
+ * mode, same spec, phase 9).
  *
  * Workspace-level — mounted OUTSIDE `ProjectScopeRoute` in `routes.tsx`, the same shape as
  * `/notes`/`/workspace/tasks`: there is no project (and possibly no org) yet, so nothing here can
- * hang off a project scope. D8's four steps, one screen each: **sign in** → **name the
- * organization** → **accept the pre-filled default team** (one click) → **add projects**. Steps
- * 2-4 are skippable and resumable by construction — see `fromProbe` below.
+ * hang off a project scope. D8's steps, one screen each: **sign in** (skipped entirely in local
+ * mode, D13 — there is nothing to sign into) → **name the organization** → **accept the
+ * pre-filled default workspace, and optionally add more** (D13) → **add projects**. Every step
+ * after the first is skippable and resumable by construction — see `fromProbe` below.
  *
- * **Invisible and inert with `CEZ_AUTH` unset.** No capability key gates this page (that control
- * is deliberately not spent here — see `onboarding-api.ts`'s module doc comment and
+ * **CORRECTED 2026-08-07 (D13 cockpit pass): "Invisible and inert with `CEZ_AUTH` unset" below
+ * described the WHOLE `CEZ_AUTH`-unset population, and is no longer true of most of it.** D13
+ * mounts a real `onboardingRoutes` for the npm zero-config default (loopback bind, `CEZ_AUTH`
+ * unset — `capabilities.localHandoff`), so THAT deployment now runs the full wizard, same as an
+ * authenticated one — `routes.tsx#OnboardingEntryGate` is what routes a first-run local user here
+ * automatically. What the paragraph below still correctly describes is the one topology D13
+ * deliberately excludes: hosted, `CEZ_AUTH` unset, `CEZ_ALLOW_UNAUTHENTICATED=1` (D9's
+ * bounded-audience escape hatch) — there `/auth/*` still mounts nothing, so this route still
+ * renders the quiet explainer below for it. `onboarding-api.ts`'s own module doc comment has the
+ * full mechanism; the probe's kind for this case is `unavailable`, not `auth-off` (renamed for
+ * the same reason).
+ *
+ * **Invisible and inert on that one remaining topology only.** No capability key gates this page
+ * (that control is deliberately not spent here — see `onboarding-api.ts`'s module doc comment and
  * `BACKWARD_COMPATIBILITY.md` §2). The ONE request this route makes on mount
- * (`GET /auth/onboarding`) IS the probe: when auth is off the server never registered `/auth/*`
- * at all, so the SPA catch-all answers with `index.html` — a 200 that isn't JSON — and
- * `probeOnboarding` reports that as `auth-off`, which renders a quiet, static explainer and
- * issues no further request, mutation, or dialog. `onboarding.test.tsx`'s
- * `describe('CEZ_AUTH unset — the surface is inert')` is the negative control for this.
+ * (`GET /auth/onboarding`) IS the probe: when the deployment mounts no `/auth/*` surface at all,
+ * the SPA catch-all answers with `index.html` — a 200 that isn't JSON — and `probeOnboarding`
+ * reports that as `unavailable`, which renders a quiet, static explainer and issues no further
+ * request, mutation, or dialog. `onboarding.test.tsx`'s own describe block for this case is the
+ * negative control.
  */
 export function OnboardingRoute() {
   const probe = useOnboardingProbe()
   const [wizard, setWizard] = useState<WizardState | null>(null)
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
 
   // `/auth/callback` redirects EVERY sign-in here (that redirect is the only seam pointing at this
   // route — see its own comment in `auth/routes.ts`), so an already-onboarded user has to be sent
   // straight on rather than shown "Add your first project" they finished months ago. `replace`, so
   // the back button does not bounce them into the wizard again.
+  //
+  // **ADDED 2026-08-07 (D13 review, FIX 9): evict every `['onboarding', ...]` query on the way
+  // out.** This route's own probe (`['onboarding','status']`, below) AND
+  // `routes.tsx#OnboardingEntryGate`'s separate `['onboarding','entry-probe']` share that key
+  // prefix on purpose. Without this, either cache can keep answering the `needs-org` it fetched
+  // BEFORE the org existed: a return visit to `/onboarding` (back button, a stray relink) remounts
+  // onto that stale answer and renders `NameOrgStep` again for an org that already exists —
+  // submitting it 409s. `removeQueries`, not `invalidateQueries`: invalidating only marks the
+  // cached `needs-org` value stale and triggers a background refetch, but a fresh mount still
+  // seeds `wizard` SYNCHRONOUSLY from that stale value on its first render (`fromProbe` below runs
+  // before the refetch can land) — one render of the wrong step is exactly the window a fast
+  // resubmit lands in. Removing the entry outright leaves nothing to seed from until the real
+  // fetch resolves, so a return visit shows the loading line instead of a flash of `NameOrgStep`.
+  // `handleOrgCreated` below evicts at the earlier, more precise moment (the org is created); this
+  // is the second, defensive eviction for the "hasProjects" resume path, which never calls that
+  // handler at all.
   useEffect(() => {
-    if (wizard?.step === 'done') navigate('/', { replace: true })
-  }, [wizard, navigate])
+    if (wizard?.step !== 'done') return
+    void queryClient.removeQueries({ queryKey: ['onboarding'] })
+    navigate('/', { replace: true })
+  }, [wizard, navigate, queryClient])
+
+  // The org (and its default team) now exist — every cached onboarding probe answer is stale from
+  // this instant, in BOTH `NameOrgStep`'s and `NeedsInviteStep`'s success paths (both create the
+  // org: the ordinary D8 flow and the D11 claim form). See the effect above for why this matters.
+  const handleOrgCreated = (result: { org: Org; team: Team; role: Role }) => {
+    void queryClient.removeQueries({ queryKey: ['onboarding'] })
+    setWizard({ step: 'accept-team', ...result })
+  }
 
   // Seeded from the probe exactly ONCE, on first resolve — never re-derived on a later refetch.
   // There is no polling and no invalidation of this query from outside this file, so in practice
@@ -77,7 +123,7 @@ export function OnboardingRoute() {
           />
         ) : wizard === null ? (
           <p className="px-4 py-6 text-center text-xs text-soft-foreground">Loading…</p>
-        ) : wizard.step === 'auth-off' ? (
+        ) : wizard.step === 'unavailable' ? (
           <CenteredState
             icon={<LockIcon />}
             tone="neutral"
@@ -87,7 +133,7 @@ export function OnboardingRoute() {
         ) : wizard.step === 'sign-in' ? (
           <SignInStep />
         ) : wizard.step === 'needs-invite' ? (
-          <NeedsInviteStep onClaimed={(result) => setWizard({ step: 'accept-team', ...result })} />
+          <NeedsInviteStep onClaimed={handleOrgCreated} />
         ) : wizard.step === 'done' ? (
           // The redirect above is already in flight; rendering the loading line rather than a
           // step avoids a one-frame flash of "Add your first project" on the way out.
@@ -96,7 +142,7 @@ export function OnboardingRoute() {
           <NameOrgStep
             suggestedName={wizard.suggestedOrgName}
             bootstrapTokenRequired={wizard.bootstrapTokenRequired}
-            onCreated={(result) => setWizard({ step: 'accept-team', ...result })}
+            onCreated={handleOrgCreated}
           />
         ) : wizard.step === 'accept-team' ? (
           <AcceptTeamStep team={wizard.team} onAccepted={(team) => setWizard({ ...wizard, team, step: 'add-projects' })} />
@@ -125,7 +171,7 @@ function useOnboardingProbe() {
 // ---- the wizard's own step state -----------------------------------------------------------------
 
 type WizardState =
-  | { step: 'auth-off' }
+  | { step: 'unavailable' }
   | { step: 'sign-in' }
   /** Signed in, an org exists, this user is not in it (D8 step 1). A terminal screen, not a step:
    *  there is nothing here for them to do until someone invites them. */
@@ -152,8 +198,8 @@ type WizardState =
  */
 function fromProbe(probe: OnboardingProbe): WizardState {
   switch (probe.kind) {
-    case 'auth-off':
-      return { step: 'auth-off' }
+    case 'unavailable':
+      return { step: 'unavailable' }
     case 'signed-out':
       return { step: 'sign-in' }
     case 'needs-invite':
@@ -324,6 +370,15 @@ function ClaimOrgForm({ onClaimed }: { onClaimed: (result: { org: Org; team: Tea
 
 // ---- step 2: name the organization -------------------------------------------------------------
 
+/**
+ * **The "Not now" decline action REMOVED 2026-08-07 (D14, owner decision).** D13's review round 3
+ * added it (FIX 10) so the npm zero-config default's automatic redirect into this screen
+ * (`routes.tsx#OnboardingEntryGate`) had an exit — otherwise it was a mandatory interstitial on
+ * every page load until an org existed. D14 reverses that on purpose: "no dashboard element
+ * renders before the first organization exists" means there is no cockpit for a decline to fall
+ * back into, so the wizard now renders exactly one action again. `onboarding-decline.ts` and its
+ * test are deleted rather than left as dead code that still reads as live.
+ */
 function NameOrgStep({
   suggestedName,
   bootstrapTokenRequired,
@@ -412,25 +467,52 @@ function NameOrgStep({
   )
 }
 
-// ---- step 3: accept the default team -------------------------------------------------------------
+// ---- step 3: name the default workspace, and optionally add more (D13) --------------------------
 
 /**
- * **CORRECTED 2026-08-07 (repair stage).** This read "…or rename it now — you can rename it again
- * later", and nothing in the cockpit can. `PATCH /auth/onboarding/team` is the only rename surface
- * in the product and this screen is the only caller: a reload resolves `ready` and lands on
- * `add-projects`, never back here. Team management (create/rename/reassign) is deferred — see the
- * spec's D2 amendment — so the copy states what is true today rather than promising a screen that
- * does not exist. `marketing-site-copy-rules`-style honesty applies to product copy too: an
- * absolute claim on a page has to be true.
+ * **SUPERSEDED 2026-08-07 (D13 cockpit pass) — the note below no longer describes this screen.**
+ * Team management shipped in phase 5c (`Settings → Workspaces` — `teams-panel.tsx`, labelled
+ * "Workspaces" in the UI, the same `team` identifiers underneath; D13's own "rename no identifier"
+ * rule), so "until team management ships" is no longer a future this copy has to hedge around.
+ * D13 also widens this step itself: it no longer only renames the single hardcoded default — it
+ * now lets the user add more workspaces directly, backed by the same `POST /auth/teams` Settings
+ * uses (`AddWorkspaceField` below), defaulting to the one default workspace unless the user adds
+ * more. The subtitle reflects both.
+ *
+ * Superseded text, kept for history rather than deleted: "This read '…or rename it now — you can
+ * rename it again later', and nothing in the cockpit can. `PATCH /auth/onboarding/team` is the
+ * only rename surface in the product and this screen is the only caller … Team management
+ * (create/rename/reassign) is deferred — see the spec's D2 amendment — so the copy states what is
+ * true today rather than promising a screen that does not exist."
  */
-const ACCEPT_TEAM_SUBTITLE =
-  'Projects you register are assigned to a team. Accept the suggested name, or rename it now — this is the one place to change it until team management ships.'
+const WORKSPACE_STEP_SUBTITLE =
+  'Projects you register are assigned to a workspace. Accept the suggested name, add more below, or manage them anytime from Settings → Workspaces.'
+
+/** A quick, client-side slug for `AddWorkspaceField` below — good enough to satisfy the wire's
+ *  `slugInputSchema` (lowercase, hyphen-safe DNS label): the field this step exposes is a NAME,
+ *  matching the "one click" ethos the default-workspace field already has — asking a first-time
+ *  user for a slug too is Settings → Workspaces' job (`teams-panel.tsx#CreateTeamField`), not
+ *  onboarding's. A collision (two workspaces deriving the same slug) surfaces as the server's own
+ *  409, shown inline like every other admin refusal on this screen — this function does not try
+ *  to disambiguate one locally. */
+function slugifyWorkspaceName(name: string): string {
+  const base = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 63)
+  return base === '' ? 'workspace' : base
+}
 
 /** "One click to accept" (D8 step 3, the owner's explicit ask): the suggested name round-trips
  *  with no network call at all when left untouched — `renameOnboardingTeam` fires only when the
- *  field actually changed. */
+ *  field actually changed. Adding a workspace (D13) is a separate, immediate action next to it:
+ *  each `AddWorkspaceField` submit is its own `POST /auth/teams`, independent of "Accept and
+ *  continue", which only ever finalizes the DEFAULT workspace's name and advances the wizard. */
 function AcceptTeamStep({ team, onAccepted }: { team: Team; onAccepted: (team: Team) => void }) {
   const [name, setName] = useState(team.name)
+  const [extraWorkspaces, setExtraWorkspaces] = useState<Team[]>([])
   const rename = useMutation({
     mutationFn: (input: RenameOnboardingTeamInput) => renameOnboardingTeam(input),
   })
@@ -449,34 +531,113 @@ function AcceptTeamStep({ team, onAccepted }: { team: Team; onAccepted: (team: T
     <CenteredState
       icon={<UsersIcon />}
       tone="primary"
-      title="Your default team is ready"
-      subtitle={ACCEPT_TEAM_SUBTITLE}
+      title="Your workspace is ready"
+      subtitle={WORKSPACE_STEP_SUBTITLE}
       actions={
         <Button data-slot="onboarding-team-accept" disabled={name.trim() === '' || rename.isPending} onClick={accept}>
           {rename.isPending ? 'Saving…' : 'Accept and continue'}
         </Button>
       }
     >
-      <div className="grid gap-1.5 text-left">
-        <Label htmlFor="onboarding-team-name">Team name</Label>
-        <Input
-          id="onboarding-team-name"
-          data-slot="onboarding-team-name"
-          autoFocus
-          value={name}
-          disabled={rename.isPending}
-          onChange={(event) => setName(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') accept()
-          }}
-        />
-        {rename.isError ? (
-          <p data-slot="onboarding-team-error" className="text-[13px] text-danger">
-            {rename.error instanceof Error ? rename.error.message : 'could not rename the team'}
-          </p>
+      <div className="grid gap-4 text-left">
+        <div className="grid gap-1.5">
+          <Label htmlFor="onboarding-team-name">Workspace name</Label>
+          <Input
+            id="onboarding-team-name"
+            data-slot="onboarding-team-name"
+            autoFocus
+            value={name}
+            disabled={rename.isPending}
+            onChange={(event) => setName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') accept()
+            }}
+          />
+          {rename.isError ? (
+            <p data-slot="onboarding-team-error" className="text-[13px] text-danger">
+              {rename.error instanceof Error ? rename.error.message : 'could not rename the workspace'}
+            </p>
+          ) : null}
+        </div>
+
+        {extraWorkspaces.length > 0 ? (
+          <ul data-slot="onboarding-workspace-list" className="flex flex-wrap gap-1.5">
+            {extraWorkspaces.map((workspace) => (
+              <li
+                key={workspace.id}
+                className="rounded-full border border-border px-2.5 py-1 text-[12px] text-soft-foreground"
+              >
+                {workspace.name}
+              </li>
+            ))}
+          </ul>
         ) : null}
+
+        <AddWorkspaceField onAdded={(workspace) => setExtraWorkspaces((prev) => [...prev, workspace])} />
       </div>
     </CenteredState>
+  )
+}
+
+/** D13's "add a workspace" affordance — `POST /auth/teams`, the same route and store path
+ *  Settings → Workspaces uses (`teams-panel.tsx`, imported rather than duplicated: it is already
+ *  the tested, public function for this exact call). Immediate on submit, independent of
+ *  `AcceptTeamStep`'s own "Accept and continue" — see that function's own doc comment. */
+function AddWorkspaceField({ onAdded }: { onAdded: (workspace: Team) => void }) {
+  const [name, setName] = useState('')
+  const add = useMutation({
+    mutationFn: (input: CreateTeamInput) => createTeam(input),
+  })
+
+  const submit = () => {
+    const trimmed = name.trim()
+    if (trimmed === '' || add.isPending) return
+    add.mutate(
+      { name: trimmed, slug: slugifyWorkspaceName(trimmed) },
+      {
+        onSuccess: ({ team }) => {
+          onAdded(team)
+          setName('')
+        },
+      },
+    )
+  }
+
+  return (
+    <div className="grid gap-1.5">
+      <Label htmlFor="onboarding-workspace-add-name">Add another workspace</Label>
+      <div className="flex gap-2">
+        <Input
+          id="onboarding-workspace-add-name"
+          data-slot="onboarding-workspace-add-name"
+          placeholder="Engineering"
+          value={name}
+          disabled={add.isPending}
+          onChange={(event) => setName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') submit()
+          }}
+        />
+        <Button
+          type="button"
+          variant="outline"
+          data-slot="onboarding-workspace-add-submit"
+          disabled={name.trim() === '' || add.isPending}
+          onClick={submit}
+        >
+          {add.isPending ? 'Adding…' : 'Add workspace'}
+        </Button>
+      </div>
+      <p className="text-[13px] text-soft-foreground">
+        Optional — every workspace you add now is ready to file projects under. You can add or rename more anytime
+        from Settings → Workspaces.
+      </p>
+      {add.isError ? (
+        <p data-slot="onboarding-workspace-add-error" className="text-[13px] text-danger">
+          {add.error instanceof Error ? add.error.message : 'could not create the workspace'}
+        </p>
+      ) : null}
+    </div>
   )
 }
 

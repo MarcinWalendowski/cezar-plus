@@ -325,7 +325,21 @@ export class SessionService {
  *  dynamic `import()` — see `index.ts`'s own comment on why — so `CEZ_AUTH` unset never imports
  *  it in the first place). `../auth/routes.ts` deliberately opens its OWN second `IdentityStore`
  *  instance at the same directory rather than reaching into this one — see that file's own
- *  comment on why that is exactly as consistent (no in-memory cache on either side). */
+ *  comment on why that is exactly as consistent (no in-memory cache on either side).
+ *
+ *  **CORRECTED 2026-08-07 by D13: the parenthetical above is FALSE.** `src/index.ts` also reaches
+ *  this module on the `CEZ_AUTH`-unset, loopback-bind path (the npm zero-config default) — not
+ *  through a direct import of `session.ts` itself, but transitively: D13's local-mode branch
+ *  (`local-mode-boot.ts#buildLocalModeRoutes`) dynamically imports `./onboarding-routes.ts` and
+ *  `./team-routes.ts`, and BOTH have a static top-level `import { sessionResolver } from
+ *  './session.ts'` (each file's private `buildOnboardingRoutes`/`buildTeamRoutes` builds its own
+ *  exported `onboardingRoutes`/`teamRoutes` singleton from it) — so this module loads on every loopback boot now,
+ *  whether or not a local org exists yet. What still holds is the narrower, behavioural claim the
+ *  first sentence of this comment makes: `IdentityStore.open` does no I/O, so the import itself
+ *  still touches nothing on disk — only an actual `findOrCreateLocalUser`/`claimOrg` call (never
+ *  reached from this module's own exports in local mode, which are wired with `local-gates.ts`'s
+ *  resolver instead) would. See `paths.ts#identityDir`'s own doc comment, corrected the same way,
+ *  for the fuller account of what is and is not still zero I/O post-D13. */
 const identityStore = IdentityStore.open(identityDir());
 const service = SessionService.create(identityStore);
 

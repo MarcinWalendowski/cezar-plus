@@ -15,6 +15,7 @@ import { useActiveProjectId } from '@/lib/project-router'
 import { unreadDoneCount } from '@/lib/read-state'
 import { runTitle } from '@/lib/task-groups'
 import { pageTitleContext } from '@/routes'
+import { needsOrgGate, useOnboardingEntryProbe } from '@/routes/onboarding/onboarding-gate'
 
 /**
  * Derive the sidebar's repo chip from `/api/health`.
@@ -52,9 +53,24 @@ export function skillsUpdateMarkerOf(state: SkillsUpdateState | undefined): bool
  * then showed a stale branch forever). The chips read whatever is currently in the health query,
  * so keeping them live is `useHealth`'s job — its poll plus Step 3.2's reconnect/visibility
  * reconcile — not a change here.
+ *
+ * **D14 (`.ai/specs/2026-08-06-org-team-auth-onboarding.md`): the sidebar/nav/banner/command
+ * palette are all suppressed while the shared onboarding probe (`onboarding-gate.ts`) answers
+ * `needs-org`** — "no dashboard element renders before the first organization exists." `children`
+ * (`<AppRoutes/>`, ultimately `<OnboardingRoute/>` once `routes.tsx#OnboardingEntryGate` has
+ * navigated there) is passed to `<AppShell>` UNCONDITIONALLY either way — only `chromeless` and
+ * the slot props change — because toggling whether `<AppShell>` wraps `children` at ALL would
+ * change `children`'s position in the tree and force React to unmount and remount it. That would
+ * lose `OnboardingRoute`'s own local wizard-step state (`onboarding.tsx`'s `wizard`) the instant
+ * the org is created and the probe's cached answer moves past `needs-org` — landing the user back
+ * on the org-naming step mid-wizard instead of the next one. Keeping `<AppShell>` mounted and only
+ * varying its `chromeless` prop (which itself preserves `<main>{children}</main>`'s position, see
+ * that component's own doc comment) avoids the remount entirely.
  */
 export function AppShellContainer({ children }: { children: ReactNode }) {
   const { pathname } = useLocation()
+  const onboardingProbe = useOnboardingEntryProbe()
+  const chromeless = needsOrgGate(onboardingProbe.data)
   const projectId = useActiveProjectId()
   const health = useHealth()
   // The global inbox is opt-in (#471). With the capability off there is no Inbox nav item to
@@ -154,12 +170,14 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
           ) : undefined
         }
         toolsMenu={<ToolsMenu health={health.data} />}
+        chromeless={chromeless}
       >
         {children}
       </AppShell>
-      {/* Global chrome, not a route: ⌘K must work on every URL. Mounted here (not in AppShell)
-          because it needs the query client and router this container already assumes. */}
-      <CommandPalette />
+      {/* Global chrome, not a route: ⌘K must work on every URL — except D14's gated onboarding,
+          where there is no dashboard to jump to yet (`chromeless`, above). Mounted here (not in
+          AppShell) because it needs the query client and router this container already assumes. */}
+      {chromeless ? null : <CommandPalette />}
     </ListViewProvider>
   )
 }

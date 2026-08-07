@@ -28,9 +28,15 @@ interface SentRequest {
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
-/** What `resolveGetRequest` (`server/static-ui.ts`) answers for ANY unmatched GET, including
- *  `/auth/teams` when `CEZ_AUTH` is unset and the `/auth/*` family was never registered — the
- *  exact shape `teams-api.ts#probeTeams` reads as the auth-off signal. */
+/** What `resolveGetRequest` (`server/static-ui.ts`) answers for ANY unmatched GET — still what a
+ *  HOSTED, unauthenticated deployment (`CEZ_ALLOW_UNAUTHENTICATED=1`, D9) answers for
+ *  `/auth/teams`, since D13 (spec phase 9) never mounts local mode's `/auth/teams` there either.
+ *  The npm zero-config default (loopback, `CEZ_AUTH` unset) answers real JSON now, once the local
+ *  user has an org (see the `describe('D13 local mode …')` blocks below) — the exact shape
+ *  `teams-api.ts#probeTeams` reads as `{ kind: 'unavailable' }` (renamed from `auth-off`, FIX C4 —
+ *  a hosted-unauthenticated deployment mounts no `/auth/*` surface at all, `CEZ_AUTH` on or off
+ *  makes no difference there) is therefore reachable only on that one narrower, hosted topology
+ *  now. */
 const spaShellResponse = () =>
   new Response('<!doctype html><html><body>cezar</body></html>', {
     status: 200,
@@ -41,8 +47,8 @@ const TEAM_ENG: Team = { id: 'team-eng', orgId: 'org-1', name: 'Engineering', sl
 const TEAM_MKT: Team = { id: 'team-mkt', orgId: 'org-1', name: 'Marketing', slug: 'marketing' }
 
 type Answers = {
-  /** A fixed list answer, overriding the mutable default entirely (used for auth-off/error/401
-   *  cases, where no create/rename in the same test needs to see a persisted change). */
+  /** A fixed list answer, overriding the mutable default entirely (used for unavailable/no-org/
+   *  error/401 cases, where no create/rename in the same test needs to see a persisted change). */
   list?: () => Response
   create?: (body: unknown) => Response
   rename?: (teamId: string, body: unknown) => Response
@@ -103,8 +109,8 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('CEZ_AUTH unset — the surface is inert', () => {
-  it('renders the auth-off explainer and never asks for anything past the one probe', async () => {
+describe('no onboarding surface at all (hosted, unauthenticated) — the pane is inert', () => {
+  it('renders the unavailable explainer and never asks for anything past the one probe', async () => {
     const sent = stubFetch({ list: spaShellResponse })
     renderTeams()
 
@@ -113,7 +119,7 @@ describe('CEZ_AUTH unset — the surface is inert', () => {
     // No sign-in link, no create form, no table — none of the pane's machinery mounted at all.
     expect(screen.queryByRole('link', { name: 'Sign in' })).toBeNull()
     expect(screen.queryByLabelText('Name')).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Create team' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Create workspace' })).toBeNull()
 
     // Give any errant follow-up request a chance to land before asserting none did.
     await new Promise((resolve) => setTimeout(resolve, 20))
@@ -126,9 +132,61 @@ describe('signed out', () => {
     stubFetch({ list: () => jsonResponse({ error: 'unauthenticated' }, 401) })
     renderTeams()
 
-    await screen.findByText('Sign in to manage teams', {}, { timeout: 5000 })
+    await screen.findByText('Sign in to manage workspaces', {}, { timeout: 5000 })
     const link = screen.getByRole('link', { name: 'Sign in' })
     expect(link.getAttribute('href')).toBe('/auth/login')
+  })
+})
+
+/**
+ * ADDED 2026-08-07 (D13 cockpit pass). Before D13, `GET /auth/teams` with `CEZ_AUTH` unset always
+ * fell through to the SPA shell (the `describe` above) — there was no local-org state to reach.
+ * D13 mounts a real `/auth/teams` for the npm zero-config default once a local org exists (or is
+ * still missing), so the pane now has two more REAL states to reach on that exact topology: the
+ * ordinary "an org with teams" case (already covered below, wire-shape-identical to an
+ * authenticated deployment's) and the local "no organization exists yet" precondition
+ * (`team-routes.ts`'s own D13 branch: 400, never 401 — invariant 1, no 401 in local mode, ever).
+ *
+ * **CORRECTED 2026-08-07 (second adversarial review, FIX C3): the paragraph this replaces said
+ * `probeTeams` "has no THIRD state for that precondition" and folds it into the pane's generic
+ * error state — that was the bug, not a documented limitation.** A 400 that means "no org exists
+ * yet" is not a fetch failure: it is the ordinary, expected shape of the zero-config default, so
+ * folding it into `tone="danger"` "Could not load workspaces" put a RED ERROR CARD on the
+ * product's default deployment mode. `TeamsProbe` (`teams-api.ts`) now has a real third state,
+ * `no-org`, and the pane renders it as a neutral empty state.
+ *
+ * **CORRECTED AGAIN 2026-08-07 (D14, owner decision): the "way back into the wizard" this
+ * paragraph used to describe is gone.** FIX C1's "Create an organization" link existed only
+ * because D13's now-deleted "decline" behaviour (`onboarding-decline.ts`) could otherwise strand a
+ * browser on this state forever. D14 reverses that — the cockpit is gated on onboarding
+ * (`app-shell-container.tsx`'s `chromeless`), so Settings cannot render at all while no org
+ * exists; `routes.tsx#OnboardingEntryGate` gets there first. This state is now defensive rather
+ * than ordinarily reachable, and the test below pins its NEW shape: no link, still no danger card.
+ */
+describe('D13 local mode: the pane is real, not inert, once /auth/teams is mounted', () => {
+  it('a local org with teams renders exactly like an authenticated one — same wire shape, same component', async () => {
+    stubFetch()
+    renderTeams()
+
+    await waitFor(() => expect(document.querySelectorAll('[data-slot="team-row"]')).toHaveLength(2), {
+      timeout: 5000,
+    })
+    const eng = document.querySelector('[data-slot="team-row"][data-team="team-eng"]')!
+    expect(eng.textContent).toContain('Engineering')
+  })
+
+  it('no local org yet: a neutral, actionless empty state — never the danger card, never the sign-in screen, and no re-entry link (D14)', async () => {
+    stubFetch({ list: () => jsonResponse({ error: 'no organization exists yet' }, 400) })
+    renderTeams()
+
+    await screen.findByText('No organization yet', {}, { timeout: 5000 })
+    // Not the generic fetch-failure card this precondition used to fall into.
+    expect(screen.queryByText('Could not load workspaces')).toBeNull()
+    // Not the sign-in screen either: this caller genuinely is who they say they are (D13 invariant 1).
+    expect(screen.queryByText('Sign in to manage workspaces')).toBeNull()
+    // D14: no link back into `/onboarding` — the cockpit-level gate is what routes a user there
+    // now, not a Settings affordance that made a deleted "decline" reversible.
+    expect(screen.queryByRole('link', { name: 'Create an organization' })).toBeNull()
   })
 })
 
@@ -151,7 +209,7 @@ describe('listing teams', () => {
   it('shows the empty state when the org has no teams', async () => {
     stubFetch({ list: () => jsonResponse({ teams: [] }) })
     renderTeams()
-    await screen.findByText('No teams yet.', {}, { timeout: 5000 })
+    await screen.findByText('No workspaces yet.', {}, { timeout: 5000 })
   })
 
   it('surfaces a genuine fetch failure distinctly from auth-off', async () => {
@@ -159,7 +217,7 @@ describe('listing teams', () => {
     renderTeams()
     // A 500 retries once (`query-client.ts`'s default retry policy) before settling into the
     // error state, the same reason `onboarding.test.tsx`'s equivalent test widens this timeout.
-    await screen.findByText('Could not load teams', {}, { timeout: 5000 })
+    await screen.findByText('Could not load workspaces', {}, { timeout: 5000 })
     expect(screen.getByText('boom')).not.toBeNull()
   })
 })
@@ -179,7 +237,7 @@ describe('creating a team', () => {
 
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Design' } })
     fireEvent.change(screen.getByLabelText('Slug'), { target: { value: 'design' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Create team' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create workspace' }))
 
     await waitFor(() =>
       expect(sent.filter((r) => r.method === 'POST' && r.path === '/auth/teams')).toEqual([
@@ -203,7 +261,7 @@ describe('creating a team', () => {
       timeout: 5000,
     })
 
-    const submit = screen.getByRole('button', { name: 'Create team' }) as HTMLButtonElement
+    const submit = screen.getByRole('button', { name: 'Create workspace' }) as HTMLButtonElement
     expect(submit.disabled).toBe(true)
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Design' } })
     expect(submit.disabled).toBe(true)
@@ -223,7 +281,7 @@ describe('creating a team', () => {
 
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Design' } })
     fireEvent.change(screen.getByLabelText('Slug'), { target: { value: 'design' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Create team' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create workspace' }))
 
     await waitFor(() =>
       expect(document.querySelector('[data-slot="teams-create-error"]')?.textContent).toBe(

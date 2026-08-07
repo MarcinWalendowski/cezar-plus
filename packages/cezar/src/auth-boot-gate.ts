@@ -32,7 +32,35 @@ import type { AuthProvider } from '@open-mercato/cezar-contract';
 export interface AuthBootGate {
   /** `false` only for the refusal: hosted, no `CEZ_AUTH`, and no `CEZ_ALLOW_UNAUTHENTICATED=1`. */
   readonly proceed: boolean;
-  /** `'none'` means the caller must NOT import anything under `src/auth/` (D1: unset ⇒ zero I/O). */
+  /** `'none'` means the caller must NOT import anything under `src/auth/` (D1: unset ⇒ zero I/O).
+   *  **CORRECTED 2026-08-07 by D13: false for the loopback-bind population of this row.** D13's
+   *  local-mode branch (`src/index.ts`'s `provider === 'none'` arm, now
+   *  `local-mode-boot.ts#buildLocalModeRoutes`) imports `./auth/identity-store.ts`,
+   *  `./auth/local-gates.ts`, `./auth/onboarding-routes.ts`, `./auth/team-routes.ts` and
+   *  `./paths.ts` (transitively also `./auth/session.ts`, via those last two's own static
+   *  imports) on every loopback boot, `provider: 'none'` and all. What survives from the original
+   *  sentence is narrower: it still holds for the OTHER population of this row — a hosted,
+   *  `CEZ_ALLOW_UNAUTHENTICATED=1` deployment, where `isLocalOrgModeActive` is false and
+   *  `buildLocalModeRoutes` returns `{ active: false }` before any dynamic `import()` runs — and it
+   *  still holds behaviourally rather than at the module-graph level even where it is imported: see
+   *  `auth/session.ts`'s own doc comment on why loading the module still does no filesystem I/O.
+   *
+   *  **CORRECTED AGAIN 2026-08-07 (repair pass): the "still holds for the hosted,
+   *  `CEZ_ALLOW_UNAUTHENTICATED=1` population" claim just above is ALSO false, and for a reason
+   *  D13 itself introduced.** `server/server.ts` carries two *static*, top-level imports under
+   *  `src/auth/` — `auth/principal.ts` (`resolvePrincipal`, D3) and, added by this same D13 pass,
+   *  `auth/local-gates.ts` (`localSessionResolver`) — and both load the moment `server.ts` loads,
+   *  unconditionally, for every `CEZ_AUTH` value and every bind. `buildLocalModeRoutes` returning
+   *  `{ active: false }` before its own *dynamic* imports run says nothing about these two: they
+   *  are never gated on `isLocalOrgModeActive` at all. So "must NOT import anything under
+   *  `src/auth/`" now holds for **no** population of this row, hosted-no-auth included — see
+   *  `server/server.ts`'s own doc comment beside those two imports for the same correction, made
+   *  independently there first. What does still hold, for every population, is D1's actual
+   *  invariant: zero **I/O**. Neither `auth/principal.ts` nor `auth/local-gates.ts` (nor
+   *  `local-identity.ts`, which the latter re-exports from) reads a file at import time — see
+   *  `local-identity.ts`'s own doc comment (`let cache = { kind: 'unknown' }`, no `existsSync` at
+   *  module scope). `provider: 'none'` therefore still means "the caller performs no filesystem
+   *  I/O to decide it is off," never "the caller imports nothing under `src/auth/`." */
   readonly provider: AuthProvider;
   /** Printed by the caller, or by `runAuthBootGate` below. Absent when there is nothing to say —
    *  the npm zero-config default prints nothing at all, exactly as before this change. */

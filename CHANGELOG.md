@@ -27,7 +27,16 @@
   you did not map. Google is the same code path with a pinned issuer, not a second flow.
   **With `CEZ_AUTH` unset nothing changes at all**: no identity storage is created, no session
   middleware is mounted, no login route is registered, the auth modules are never even imported,
-  and the health payload is byte-identical. Identity lives in `~/.cezar/identity/*.json` behind
+  and the health payload is byte-identical.
+  **CORRECTED 2026-08-07 by D13 (see the "Local-mode onboarding" entry below): "nothing changes at
+  all", "no identity storage is created" and "the auth modules are never even imported" no longer
+  hold without qualification.** On a loopback bind — the npm default — `CEZ_AUTH` unset now also
+  lets a local user create an organization and workspaces, and the auth modules ARE imported on
+  that path (though still doing no filesystem I/O at import time). A user who never opens
+  `/onboarding` still creates nothing, so that half of the sentence above survives unqualified.
+  **What does not change, ever, on this path: authentication itself** — no session middleware is
+  mounted, no login route is registered, and the health payload stays byte-identical. Identity
+  lives in `~/.cezar/identity/*.json` behind
   the same `O_EXCL` write lease the source and automation stores already use — no new dependency,
   and every uniqueness rule (one org per slug, one team slug per org, one user per
   `(issuer, subject)`, one membership per pair, **one project root in exactly one organization**)
@@ -81,7 +90,11 @@
   A second person who signs in is told they need an invite rather than being walked into a form
   that will refuse them. **With `CEZ_AUTH` unset none of this exists**: no wizard is reachable
   from anywhere, the project listing carries no team fields, and no identity file is created or
-  even opened.
+  even opened. **CORRECTED 2026-08-07 by D13 (see the "Local-mode onboarding"
+  entry below): this no longer describes every `CEZ_AUTH`-unset deployment.** On a loopback bind —
+  the npm default — the wizard IS now reachable at `/onboarding`, the project listing CAN carry
+  team fields once a local org exists, and the identity file IS created the moment that local user
+  completes it. What is unaffected is authentication: no session, no cookie, no 401, ever.
 - 🔒 **A fresh authenticated deployment now needs its bootstrap code to be claimed.** The first
   user to name an organization becomes its owner, and an owner can run shell commands on the
   host — so with `CEZ_AUTH=google` the issuer is pinned but the audience is every Google account
@@ -120,6 +133,38 @@
   set of agent credentials — a role check in front of code execution would only look like a
   boundary. **What has not changed: none of this has been run against a real, two-organization
   host yet** — QA Needed, see the spec's Verification section.
+- ✨ **Local-mode onboarding: the zero-config npm default can now organize projects into
+  workspaces, with no sign-in of any kind (D13, phase 9).** Opening `http://127.0.0.1:<port>` for
+  the first time — `CEZ_AUTH` unset, loopback bind, the npm default — now offers to create an
+  **organization**, then one or more **workspaces** ("Engineering", "Marketing"), through the same
+  `/onboarding` wizard and the same `/auth/onboarding*`/`/auth/teams*` routes a real deployment
+  uses, gated by whether the bind is loopback rather than by `CEZ_AUTH`. Every already-registered
+  project — including the one `cezar serve` booted in — is adopted into the default workspace in
+  the same write that creates the org, so the first run never produces an org with an empty
+  project list. **This is not an authorization change**: anyone who can reach a loopback port can
+  already `POST /api/v1/workflows` and get a shell, so an org here partitions the user's own work;
+  it grants nothing and withholds nothing. No session middleware, no cookie, no login route, no
+  401 — ever, on this path. A user who never opens the wizard still creates nothing under
+  `<CEZ_HOME>/identity` (one `stat`, no `mkdir`); a hosted, `CEZ_ALLOW_UNAUTHENTICATED=1`
+  deployment is a different topology and is deliberately NOT eligible — this is keyed on the BIND
+  being loopback, never on `CEZ_AUTH` alone, so an intentionally-exposed instance cannot hand
+  org-one ownership to the first stranger who reaches it. Local mode stays single-org (creating a
+  second is refused, same as hosted) and cannot switch between orgs. Gates (typecheck, full
+  `vitest` suite) are green; no real-device/browser E2E has been run for this entry — QA Needed.
+- ✨ **The cockpit is now gated on onboarding (D14, owner decision — reverses D13's "decline"
+  behaviour above).** No dashboard element — sidebar, nav, banner, command palette — renders until
+  the first organization exists; the onboarding wizard is the entire surface until then. This
+  applies to every deployment the probe can answer `needs-org` for, local mode included, and is
+  keyed on that probe's answer alone, never on a flag or on `CEZ_AUTH`: a hosted, `CEZ_AUTH` unset,
+  `CEZ_ALLOW_UNAUTHENTICATED=1` deployment (no `/auth/*` mounted at all) is excluded because the
+  probe answers `unavailable` there, not because the gate special-cases it. **The consequence,
+  stated rather than left to be discovered:** `npx cezar` used to open straight into a working
+  cockpit; it now opens into a mandatory onboarding wall on first launch. That is a deliberate
+  product change, not an accident of the auth work. **Not yet done, named rather than implied:**
+  D14 also calls for removing D13's "Not now" decline button and its Settings re-entry link as dead
+  code, and for a Settings → Account section that surfaces `POST /auth/logout` (unmounted since
+  phase 3, with no caller anywhere in the cockpit until now) — neither has landed in this pass.
+  QA Needed either way.
 - ✨ **Agent accounts: run one project on your work login and another on your personal one.**
   The same CLI logged in twice — `CLAUDE_CONFIG_DIR=~/.claude-klaudiusz claude`, or `CODEX_HOME` for
   Codex — is now something cezar can address. Add the extra config folder under **Settings → Agent

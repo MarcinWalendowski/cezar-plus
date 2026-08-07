@@ -497,3 +497,89 @@ describe('document title wiring', () => {
     )
   })
 })
+
+/**
+ * D14 (`.ai/specs/2026-08-06-org-team-auth-onboarding.md`, owner decision): "no dashboard element
+ * renders before the first organization exists" — `AppShellContainer` reads the shared onboarding
+ * probe (`onboarding-gate.ts`) and passes `chromeless` to `<AppShell>` accordingly. `AppShell`'s
+ * own test file (`app-shell.test.tsx`) pins what `chromeless` does presentationally; these tests
+ * pin the WIRING — which live probe answers actually flip it, and which never do.
+ */
+describe('D14 onboarding gate (chromeless)', () => {
+  it('needs-org: hides the sidebar (and the rest of the chrome), still renders children', async () => {
+    serve({
+      '/api/v1/health': HEALTH,
+      '/api/v1/todos': [],
+      '/auth/onboarding': { state: 'needs-org', suggestedOrgName: 'Acme', bootstrapTokenRequired: false },
+    })
+    renderShell()
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="app-shell"]')?.getAttribute('data-chromeless')).toBe(''),
+    )
+    expect(document.querySelector('[data-slot="sidebar"]')).toBeNull()
+    expect(document.querySelector('[data-slot="mobile-top-bar"]')).toBeNull()
+    // The content passed to `AppShellContainer` still renders — the wizard IS the surface, not a
+    // blank page.
+    expect(screen.getByText('route content')).toBeTruthy()
+  })
+
+  /** THE constraint D14 spells out explicitly: this topology must NEVER gate. Hosted, `CEZ_AUTH`
+   *  unset, `CEZ_ALLOW_UNAUTHENTICATED=1` mounts no `/auth/*` surface at all, so `GET
+   *  /auth/onboarding` falls through to the SPA catch-all — the exact shape `onboarding-api.ts`
+   *  reads as `unavailable`, never `needs-org`. Gating that deployment would brick it behind a
+   *  wizard it can never satisfy. */
+  it('unavailable (hosted, no /auth/* mounted at all): never gates — the sidebar renders normally', async () => {
+    serve({
+      '/api/v1/health': HEALTH,
+      '/api/v1/todos': [],
+      '/auth/onboarding': new Response('<!doctype html><html><body>cezar</body></html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }),
+    })
+    renderShell()
+
+    await waitFor(() => expect(repoChip()).not.toBeNull())
+    // Give the probe every chance to resolve and the gate every chance to (wrongly) fire before
+    // asserting it never does.
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(document.querySelector('[data-slot="sidebar"]')).not.toBeNull()
+    expect(document.querySelector('[data-slot="app-shell"]')?.getAttribute('data-chromeless')).toBeNull()
+  })
+
+  it('signed-out never gates', async () => {
+    serve({
+      '/api/v1/health': HEALTH,
+      '/api/v1/todos': [],
+      '/auth/onboarding': new Response(JSON.stringify({ error: 'unauthenticated' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    })
+    renderShell()
+
+    await waitFor(() => expect(repoChip()).not.toBeNull())
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(document.querySelector('[data-slot="sidebar"]')).not.toBeNull()
+  })
+
+  it('ready (an org already exists) never gates', async () => {
+    serve({
+      '/api/v1/health': HEALTH,
+      '/api/v1/todos': [],
+      '/auth/onboarding': {
+        state: 'ready',
+        org: { id: 'org-1', name: 'Acme', slug: 'acme', createdAt: '2026-08-07T00:00:00.000Z' },
+        team: { id: 'team-1', orgId: 'org-1', name: 'General', slug: 'general' },
+        role: 'owner',
+        hasProjects: true,
+      },
+    })
+    renderShell()
+
+    await waitFor(() => expect(repoChip()).not.toBeNull())
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(document.querySelector('[data-slot="sidebar"]')).not.toBeNull()
+  })
+})

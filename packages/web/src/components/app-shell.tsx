@@ -98,6 +98,14 @@ export type AppShellProps = {
    *  still loading, or unreachable — the shell renders the single-project sidebar it always
    *  did, which is the honest degradation, not a special case. */
   projectGroups?: ReactNode
+  /** D14 (`.ai/specs/2026-08-06-org-team-auth-onboarding.md`): "no dashboard element renders
+   *  before the first organization exists" — the onboarding wizard, in `children`, is the entire
+   *  surface. `true` suppresses the sidebar, the mobile drawer, the mobile top bar and the banner
+   *  row, but keeps `children`'s exact position in the tree (`<main>`) unchanged, so a route
+   *  mounted while `chromeless` is true is NOT remounted the instant it turns false again — see
+   *  `app-shell-container.tsx`'s own doc comment on why that matters for the wizard's step state.
+   *  Defaults to `false`, the shell every existing caller already gets. */
+  chromeless?: boolean
 }
 
 /**
@@ -152,6 +160,7 @@ export function AppShell({
   singleProject = false,
   banner,
   projectGroups,
+  chromeless = false,
 }: AppShellProps) {
   const { pathname } = useLocation()
   // The nav's area rules reason about the flat route map — strip any `/p/:projectId` prefix
@@ -220,15 +229,16 @@ export function AppShell({
     <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
       <div
         data-slot="app-shell"
+        data-chromeless={chromeless ? '' : undefined}
         className="flex h-dvh overflow-hidden bg-background text-foreground pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
       >
-        <Sidebar {...nav} />
-        <MobileNavDrawer {...nav} onNavigate={() => setMenuOpen(false)} />
+        {chromeless ? null : <Sidebar {...nav} />}
+        {chromeless ? null : <MobileNavDrawer {...nav} onNavigate={() => setMenuOpen(false)} />}
 
         <div className="grid min-w-0 flex-1 grid-rows-[auto_auto_1fr_auto] overflow-hidden">
-          <MobileTopBar title={current?.label ?? 'cezar'} />
+          {chromeless ? null : <MobileTopBar title={current?.label ?? 'cezar'} />}
 
-          {banner ? (
+          {!chromeless && banner ? (
             <div data-slot="banner-slot" className="row-start-2">
               {banner}
             </div>

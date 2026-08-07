@@ -22,16 +22,35 @@ import { ApiError } from '@/api/client'
  * fetch, `{error}` extraction), reused rather than duplicated, just pointed at `/auth/onboarding*`
  * instead of `/api/v1/...`.
  *
- * **The auth-off signal, and why it is read here instead of declared.** This unit's own
- * instruction is explicit: no capability key gates this surface (`BACKWARD_COMPATIBILITY.md` §2 —
- * "capabilities gained no key for authentication", and the Risks section names exactly this move
- * as the one that broke the auth-off control once already). With `CEZ_AUTH` unset, `/auth/*` is
- * never registered at all (D1, "unset means zero I/O") — `src/index.ts`'s boot gate never even
- * imports `auth/routes.ts` — so a request to `/auth/onboarding` falls through to the SPA
- * catch-all, which answers EVERY unmatched GET with the built `index.html`
- * (`server/static-ui.ts#resolveGetRequest`: only `/api/*` and the static asset paths are
- * `'passthrough'`). That answer is `200 text/html`, never JSON. So "the body isn't JSON" IS the
- * on/off signal — derived from what the server actually sent, never a flag this module reads.
+ * **What "not JSON" means, and why the signal is no longer called "auth-off".**
+ *
+ * **CORRECTED 2026-08-07 (D13 cockpit pass): the paragraph this replaces claimed `CEZ_AUTH`
+ * unset ⇒ `/auth/*` is never registered, full stop — no longer true for most of that
+ * population.** D13 (`.ai/specs/2026-08-06-org-team-auth-onboarding.md`, phase 9) mounts a real,
+ * local `onboardingRoutes` for exactly the topology that old paragraph was written to describe —
+ * the npm zero-config default, loopback bind, `CEZ_AUTH` unset (`src/index.ts`'s
+ * `capabilities.localHandoff` branch) — so `GET /auth/onboarding` answers real JSON there now
+ * (`needs-org` before a local org exists, `ready` after). No capability key gates any of this
+ * either way (`BACKWARD_COMPATIBILITY.md` §2 — "capabilities gained no key for authentication",
+ * and the Risks section names exactly that move as the one that broke the auth-off control once
+ * already), so this module still has to read the signal off the response rather than a flag.
+ *
+ * What survives is narrower: a **hosted** deployment that also leaves `CEZ_AUTH` unset
+ * (`CEZ_REMOTE=1` or a non-loopback bind, plus the operator's own explicit
+ * `CEZ_ALLOW_UNAUTHENTICATED=1` — D9's bounded-audience escape hatch) still mounts nothing under
+ * `/auth/*` at all — `src/index.ts`'s D13 branch is keyed on `capabilities.localHandoff`
+ * specifically and falls through unmatched there. So a request to `/auth/onboarding` on THAT
+ * topology still falls through to the SPA catch-all, which answers EVERY unmatched GET with the
+ * built `index.html` (`server/static-ui.ts#resolveGetRequest`: only `/api/*` and the static asset
+ * paths are `'passthrough'`) — `200 text/html`, never JSON.
+ *
+ * So "the body isn't JSON" no longer means "auth is off" (it can be off AND answer real JSON now,
+ * in local mode) — it means **this deployment offers no org/onboarding surface to reach at all**,
+ * which today describes exactly one topology: hosted, unauthenticated, no per-request identity of
+ * any kind, local or session. `OnboardingProbe`'s `unavailable` kind (below) is named for that —
+ * the old `auth-off` name was the deciding CONDITION's name, and the deciding condition moved out
+ * from under it. The signal itself is unchanged: still derived from what the server actually
+ * sent, never a flag this module reads.
  */
 
 function authUrl(path: string): string {
@@ -50,7 +69,16 @@ async function fetchAuth(path: string, init: RequestInit = {}): Promise<Response
   }
 }
 
-function isJsonResponse(res: Response): boolean {
+/** Whether a response is real JSON from a mounted route, rather than the SPA catch-all's
+ *  `index.html` (`server/static-ui.ts#resolveGetRequest`: every unmatched GET answers `200
+ *  text/html`). The one idiom every hand-rolled `/auth/*` probe in the cockpit reads this off —
+ *  see this module's own doc comment above. Exported so a probe against a DIFFERENT `/auth/*`
+ *  route family (`settings/account-api.ts`'s `GET /auth/me` check, D14) reuses it rather than
+ *  writing a third copy — `teams-api.ts` already duplicated it once, deliberately, for a
+ *  documented reason (a different Fill unit's file, under an ownership map that no longer
+ *  applies); a third hand-rolled copy with no such reason would be the mistake
+ *  `invite-routes.ts`'s own "these cannot drift" docblock names. */
+export function isJsonResponse(res: Response): boolean {
   return (res.headers.get('content-type') ?? '').includes('application/json')
 }
 
@@ -77,10 +105,15 @@ function errorMessageFrom(status: number, statusText: string, body: unknown): st
 /**
  * The five states the wizard renders: `orgs.ts#onboardingStateSchema`'s three, plus the 401
  * `/auth/onboarding` answers for "no session at all" (mirroring `/auth/me`'s 401 contract), plus
- * `auth-off`, which exists only on this side of the wire (see the module doc comment above).
+ * `unavailable`, which exists only on this side of the wire (see the module doc comment above).
+ *
+ * **Renamed from `auth-off` 2026-08-07 (D13 cockpit pass).** D13 local mode never produces this
+ * state — it answers `needs-org`/`ready` like an authenticated deployment does — so a kind named
+ * for "auth is off" would be actively misleading about which deployments reach it. Only a hosted,
+ * unauthenticated deployment (no `/auth/*` mounted at all) does now.
  */
 export type OnboardingProbe =
-  | { kind: 'auth-off' }
+  | { kind: 'unavailable' }
   | { kind: 'signed-out' }
   | { kind: 'needs-org'; suggestedOrgName?: string; bootstrapTokenRequired: boolean }
   /** Signed in, an org exists, and this user is not in it — D8 step 1's "subsequent users need an
@@ -91,10 +124,12 @@ export type OnboardingProbe =
 export async function probeOnboarding(signal?: AbortSignal): Promise<OnboardingProbe> {
   const res = await fetchAuth('/auth/onboarding', { method: 'GET', signal })
   if (!isJsonResponse(res)) {
-    // The SPA shell, not `/auth/onboarding` — drain the body (nothing in it is ours to read) and
-    // report the surface as absent rather than trying to interpret HTML as a state.
+    // The SPA shell, not `/auth/onboarding` — only reachable now on a hosted, unauthenticated
+    // deployment (see the module doc comment: D13 mounts real JSON routes for the npm zero-config
+    // default, so this branch no longer fires there). Drain the body (nothing in it is ours to
+    // read) and report onboarding as unavailable rather than trying to interpret HTML as a state.
     await res.text().catch(() => undefined)
-    return { kind: 'auth-off' }
+    return { kind: 'unavailable' }
   }
   const body = parseJsonBody(await res.text())
   if (res.status === 401) return { kind: 'signed-out' }

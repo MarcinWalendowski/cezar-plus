@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolvePrincipal, type SessionIdentity } from './principal.ts';
+import { hasOrgScope, resolvePrincipal, type SessionIdentity } from './principal.ts';
 
 /**
  * Both modes go through the SAME `resolvePrincipal` call below: no test-only shortcut that
@@ -8,7 +8,13 @@ import { resolvePrincipal, type SessionIdentity } from './principal.ts';
  * of the production code having only one.
  */
 describe('resolvePrincipal', () => {
-  it('auth off resolves a real, fully-populated local principal (not undefined/null)', () => {
+  // D13: this assertion is a snapshot of THIS file's own output, not one of the three security/
+  // design controls named by the phase-9 invariants (those live in `projects-api.test.ts`,
+  // `capabilities.test.ts`, `auth-perimeter.test.ts` and assert HTTP-layer behaviour, never a bare
+  // `resolvePrincipal` return value) — so unlike those, it is expected to change here, and it is
+  // the change D13 asks for by name: "the no-org local case returns `orgId: null, teamId: null`
+  // (NOT 'local')."
+  it("auth off with no local org resolves a real principal with a NULL org/team (D13 invariant 3: never coerced to 'local')", () => {
     const principal = resolvePrincipal({ authProvider: 'none' });
 
     expect(principal).toBeDefined();
@@ -17,10 +23,31 @@ describe('resolvePrincipal', () => {
     expect(principal).toEqual({
       kind: 'local',
       userId: 'local',
-      orgId: 'local',
-      teamId: 'local',
+      orgId: null,
+      teamId: null,
       role: 'owner',
     });
+    expect(hasOrgScope(principal)).toBe(false);
+  });
+
+  it("auth off WITH a resolved local org identity resolves kind: 'local' plus the REAL ids, never the implicit no-org identity (D13)", () => {
+    const identity: SessionIdentity = {
+      userId: 'usr_local_abc',
+      orgId: 'org_local_one',
+      teamId: 'team_local_general',
+      role: 'owner',
+    };
+
+    const principal = resolvePrincipal({ authProvider: 'none', identity });
+
+    expect(principal).toEqual({
+      kind: 'local',
+      userId: 'usr_local_abc',
+      orgId: 'org_local_one',
+      teamId: 'team_local_general',
+      role: 'owner',
+    });
+    expect(hasOrgScope(principal)).toBe(true);
   });
 
   it('auth off always resolves the SAME implicit identity regardless of call site', () => {
@@ -97,6 +124,54 @@ describe('resolvePrincipal', () => {
     for (const role of ['owner', 'admin', 'member'] as const) {
       const identity: SessionIdentity = { userId: 'usr', orgId: 'org', teamId: 'team', role };
       expect(resolvePrincipal({ authProvider: 'oidc', identity }).role).toBe(role);
+    }
+  });
+});
+
+/**
+ * D13's replacement for the five call sites' old `principal.kind === 'session'` check. These
+ * exercise `hasOrgScope` directly against every `Principal` shape `resolvePrincipal` can actually
+ * produce, rather than only against `resolvePrincipal`'s own output above — `hasOrgScope` is a
+ * public, independently-callable predicate, and a future caller building a `Principal` by hand
+ * (a test double, say) must get the same answer `resolvePrincipal`'s own callers do.
+ */
+describe('hasOrgScope', () => {
+  it('is false for the implicit no-org local principal (D13: the common, un-onboarded case)', () => {
+    expect(hasOrgScope(resolvePrincipal({ authProvider: 'none' }))).toBe(false);
+  });
+
+  it('is true for a local principal carrying a resolved org (D13: auth off, org created)', () => {
+    const identity: SessionIdentity = { userId: 'u', orgId: 'org_x', teamId: 'team_x', role: 'owner' };
+    expect(hasOrgScope(resolvePrincipal({ authProvider: 'none', identity }))).toBe(true);
+  });
+
+  it('is true for every authenticated-session principal, every role', () => {
+    for (const role of ['owner', 'admin', 'member'] as const) {
+      const identity: SessionIdentity = { userId: 'u', orgId: 'org_x', teamId: 'team_x', role };
+      expect(hasOrgScope(resolvePrincipal({ authProvider: 'oidc', identity }))).toBe(true);
+    }
+  });
+
+  // D13's whole reason for introducing this predicate: `kind` must stop standing in for "has an
+  // org". A hand-built principal with `kind: 'session'` (the OLD, pre-D13 signal for "has a real
+  // org") but a null org/team must still read as scopeless — proving `hasOrgScope` is keyed on
+  // the id fields themselves, never on `kind`, which is what makes it correct for D13's new
+  // `kind: 'local'`-with-a-real-org case above.
+  it("is keyed on orgId/teamId nullability, never on kind — a 'session' principal with no org still reads as scopeless", () => {
+    const phantom = { kind: 'session' as const, userId: 'u', orgId: null, teamId: null, role: 'member' as const };
+    expect(hasOrgScope(phantom)).toBe(false);
+  });
+
+  it('narrows orgId/teamId to non-null strings inside the guarded branch (compile-time check)', () => {
+    const principal = resolvePrincipal({ authProvider: 'none' });
+    if (hasOrgScope(principal)) {
+      // If this compiles, `orgId`/`teamId` are narrowed to `string` here — assigning to a
+      // `string`-typed local would fail to compile if the guard did not narrow.
+      const orgId: string = principal.orgId;
+      const teamId: string = principal.teamId;
+      expect(orgId).toEqual(teamId); // unreachable for the no-org identity; asserted only to use the vars
+    } else {
+      expect(principal.orgId).toBeNull();
     }
   });
 });

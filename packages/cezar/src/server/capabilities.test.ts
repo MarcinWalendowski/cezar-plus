@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isLocalOrgModeActive,
   isLoopbackHost,
   isLoopbackHostHeader,
   normalizeHostname,
@@ -213,6 +214,35 @@ describe('resolveAuthProvider (CEZ_AUTH, D1)', () => {
   it('never appears in the capability payload, whatever CEZ_AUTH says', () => {
     expect(resolveCapabilities({ CEZ_AUTH: 'oidc' })).not.toHaveProperty('auth');
     expect(resolveCapabilities({ CEZ_AUTH: 'oidc', CEZ_REMOTE: '1' }, '0.0.0.0')).not.toHaveProperty('auth');
+  });
+});
+
+describe('isLocalOrgModeActive (D13, FIX A3 — the registration seam\'s bind predicate)', () => {
+  it('is true for the npm zero-config default: CEZ_AUTH unset, loopback bind (undefined)', () => {
+    expect(isLocalOrgModeActive({}, undefined)).toBe(true);
+  });
+
+  it('is true for an explicit loopback bindHost too', () => {
+    expect(isLocalOrgModeActive({}, '127.0.0.1')).toBe(true);
+  });
+
+  it.each(['oidc', 'google', 'supervisor'])(
+    'is false whenever CEZ_AUTH names a real provider (%s), even on a loopback bind',
+    (provider) => {
+      expect(isLocalOrgModeActive({ CEZ_AUTH: provider }, undefined)).toBe(false);
+    },
+  );
+
+  it('is false on a hosted (non-loopback) bind, even with CEZ_AUTH unset', () => {
+    expect(isLocalOrgModeActive({}, '0.0.0.0')).toBe(false);
+  });
+
+  it('is false when CEZ_REMOTE=1, even with CEZ_AUTH unset and no bindHost — the D1 hosted-unauthenticated topology', () => {
+    expect(isLocalOrgModeActive({ CEZ_REMOTE: '1' }, undefined)).toBe(false);
+  });
+
+  it('is false when BOTH halves fail — a hosted CEZ_AUTH=oidc deployment is the case FIX A3 exists for', () => {
+    expect(isLocalOrgModeActive({ CEZ_AUTH: 'oidc' }, '0.0.0.0')).toBe(false);
   });
 });
 

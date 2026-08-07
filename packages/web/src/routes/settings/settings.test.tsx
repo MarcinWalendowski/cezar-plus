@@ -131,6 +131,11 @@ const GLOBAL_SECTIONS = [
   // and Projects, and NOT gated by `singleProject`: a single-project deployment can still belong
   // to an org with more than one team.
   'teams',
+  // Account (D14, same spec) — logout. Declared unconditionally like `teams`, above: visibility is
+  // an async probe inside the panel (`account-section.tsx`'s own doc comment), not a registry-level
+  // gate, so it is never absent from THIS list (which only reflects the synchronous `hidden`/
+  // `scope`/`capability` gates `visibleSettingsSections` actually has).
+  'account',
 ]
 
 describe('the section registry', () => {
@@ -154,10 +159,11 @@ describe('the section registry', () => {
   })
 
   it('hides Projects only when the single-project capability is active', () => {
-    // Accounts and Teams both survive: a single-project cockpit still runs on ONE of possibly
-    // several logins in an org with more than one team, so neither is "how many projects".
+    // Accounts, Teams and Account all survive: a single-project cockpit still runs on ONE of
+    // possibly several logins in an org with more than one team, and can still have a session to
+    // sign out of — none of that is "how many projects".
     expect(visibleSettingsSections('global', { singleProject: true, sources: false }).map((s) => s.id)).toEqual([
-      'appearance', 'notifications', 'resources', 'skills', 'accounts', 'teams',
+      'appearance', 'notifications', 'resources', 'skills', 'accounts', 'teams', 'account',
     ])
     expect(
       visibleSettingsSections('global', { singleProject: false, sources: false }).map((s) => s.id),

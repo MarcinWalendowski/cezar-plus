@@ -844,13 +844,27 @@ describe('workspace projects API', () => {
       });
 
       /**
-       * D1's control for the listing. The seeded row's ids are `'local'` DELIBERATELY: that is
-       * exactly `resolvePrincipal({ authProvider: 'none' })`'s `orgId`/`teamId`
-       * (`auth/principal.ts`), so this row is the one a `CEZ_AUTH`-unset request WOULD match if
-       * `withTeams`' `principal.kind !== 'session'` guard were dropped. Seeding an ordinary org's
-       * row instead would leave the assertion passing under that mutation for the uninteresting
-       * reason that no id matched — a control that cannot fail. Verified by mutation: removing the
-       * `kind` check turns this test red and leaves the rest of the file green.
+       * D1's control for the listing. **CORRECTED 2026-08-07 by D13: two statements below are now
+       * FALSE, and the control's own named mutation may no longer kill it.** The seeded row's ids
+       * were `'local'` because that used to be exactly `resolvePrincipal({ authProvider: 'none'
+       * })`'s `orgId`/`teamId`; D13 invariant 3 (`auth/principal.ts#LOCAL_IDENTITY`) makes that
+       * pair `null`/`null` instead — a `null` orgId/teamId is never coerced to the string `'local'`,
+       * precisely so it can never collide with a real row. And `withTeams` (`server/server.ts`)
+       * no longer has a `principal.kind !== 'session'` guard to drop — D13 replaced it with
+       * `!hasOrgScope(principal)`, which narrows `orgId`/`teamId` from `string | null` to `string`.
+       * So "removing the `kind` check turns this test red" no longer describes an available
+       * mutation, and the row this test seeds (`orgId: 'local'`) can no longer be the one a real
+       * `CEZ_AUTH`-unset principal would match even if `hasOrgScope`'s check were deleted outright:
+       * `principal.orgId` would be `null`, `project_teams.org_id` is `NOT NULL` (Data Models), and
+       * `listProjectTeams({ orgId: null })` filters on `row.orgId === null`, which is unsatisfiable
+       * by construction — no row can ever have a `null` org id to match. **This control is very
+       * likely VACUOUS post-D13**: the assertions below still pass, but for the same
+       * "no id matched" reason this comment used to name as the failure mode a well-formed control
+       * must avoid. Left as-is rather than quietly rewritten — the fix (if wanted) is a THIRD
+       * negative control keyed on D13's actual local-org case: seed a row under a real onboarded
+       * local org's `(orgId, teamId)` and assert a differently-scoped or pre-onboarding request
+       * still doesn't read it. Not made here: the spec that requested this fix pass scoped it to
+       * comments only and forbade changing this file's assertions.
        */
       it("CEZ_AUTH unset: a project_teams row matching the LOCAL principal's own ids is still never read (D1 zero-I/O control)", async () => {
         const { IdentityStore } = await import('../auth/identity-store.ts');
@@ -873,6 +887,131 @@ describe('workspace projects API', () => {
         expect(projects).toHaveLength(1);
         expect(existsSync(join(home, 'identity'))).toBe(false);
       });
+    });
+  });
+
+  /**
+   * ADDED 2026-08-07 (D13 repair): the sibling "no `<CEZ_HOME>/identity` directory is created"
+   * controls above (this file's own D1 zero-I/O controls, incl. the listing one at
+   * `"CEZ_AUTH unset: a project_teams row matching the LOCAL principal's own ids is still never
+   * read"`) still pass, but their own comments now say why that no longer proves what they claim:
+   * `withTeams`'s guard moved from `principal.kind !== 'session'` to `hasOrgScope(principal)`
+   * (`orgId !== null && teamId !== null`), and `resolvePrincipal({ authProvider: 'none' })`'s
+   * implicit identity carries `orgId: null` (D13 invariant 3 — never the string `'local'`). Since
+   * `project_teams.org_id` is `NOT NULL` (Data Models), NO seeded row can ever have a `null` org
+   * id to match — so `listProjectTeams({ orgId: null })` returns `[]` whether the guard runs or
+   * is deleted outright. The "matching row" shape those controls use is unfalsifiable for D13's
+   * actual local-no-org case, not merely stale.
+   *
+   * **This is a NEW control, not a fix to those** (that file's own comment says the fix, if
+   * wanted, is a THIRD control — this is it) — and their assertions are left untouched.
+   *
+   * **Why "make it fatal" catches `mayActOnRoot`/`releaseRootClaim`/`registerFolder`'s claim
+   * block but structurally CANNOT catch `withTeams` itself, and that gap is left open rather
+   * than hidden:** `IdentityStore`'s read methods (`listProjectTeams`, `listTeams`, `getProjectTeam`,
+   * …) are documented and implemented to "always [read] fresh off disk, never throw, never create
+   * state" (`identity-store.ts`'s own `// ---- reads ----` section) — `readSnapshot` degrades a
+   * missing OR unreadable OR corrupt file to an empty snapshot inside its own `catch`, by design,
+   * so that a damaged identity store never takes down an unrelated request. `withTeams` then wraps
+   * its own registry calls in a SECOND catch-all ("Best-effort, not a security check … degrades to
+   * the unannotated listing rather than failing the whole request", `server.ts`). Two independent
+   * swallow layers mean NO booby trap on `<CEZ_HOME>/identity` can make a bypassed `withTeams`
+   * guard observable through the listing response — not as a thrown error (both catches eat it)
+   * and not as leaked team data (no row can ever match a `null` orgId either). A black-box HTTP
+   * control cannot see a `withTeams`-only guard failure post-D13, full stop.
+   *
+   * What CAN be made observable: `hasOrgScope` is the ONE shared predicate behind five call sites
+   * (D13's own text), and the other four are not read-only/self-swallowing the way `withTeams` is —
+   * `registerFolder`'s claim block calls `registry.createProjectTeam` (a WRITE, propagated
+   * uncaught past `IdentityStoreError`-only handling in `project-team-registry.ts`), and
+   * `releaseRootClaim` calls `registry.deleteProjectTeam` with **no** try/catch at all ("Unlike
+   * `withTeams`, a failure here is deliberately NOT swallowed", `server.ts`'s own comment). Both
+   * bottom out in `IdentityStore`'s write plumbing (`guardedWrite` → `writeSnapshot`), whose last
+   * step, `renameSync(tmp, path)`, is unguarded and throws `EISDIR` if `identity.json` is a
+   * DIRECTORY rather than a file (verified directly against Node's `fs` before relying on it — see
+   * the trap's own comment below for the fuller account, including a FIRST trap shape — `identity/`
+   * itself as a plain file — that was tried, ran, and rejected because it also broke the correct,
+   * unmutated code: every auth-off request `statSync`s `identity.json` during principal resolution
+   * alone, before any route runs, and re-throws anything but `ENOENT`). So: with `CEZ_AUTH` unset
+   * and no local org, `principal.orgId` is really `null` and every one of these five call sites
+   * must see `hasOrgScope` return `false` and never reach the write path at all. If any of them
+   * stopped checking it, the very next write attempt hits the trap and the request fails loudly —
+   * proven below by actually deleting the check and watching it fail (see this session's report for
+   * the verbatim mutation output).
+   */
+  describe('CEZ_AUTH unset, no org: identity storage booby-trapped so any WRITE attempt is fatal (D13)', () => {
+    const savedAuth = process.env.CEZ_AUTH;
+
+    afterEach(() => {
+      if (savedAuth === undefined) delete process.env.CEZ_AUTH;
+      else process.env.CEZ_AUTH = savedAuth;
+    });
+
+    /**
+     * `<CEZ_HOME>/identity/identity.json` as a DIRECTORY, not a file — not `identity/` itself as a
+     * plain file. That first shape was tried and rejected here (empirically, not by inspection):
+     * every auth-off request — including a request no mutation is even under test on — resolves
+     * its principal through `resolveLocalOrgIdentity` (`auth/local-identity.ts`), which
+     * `statSync`s `identity.json` on EVERY call to fingerprint it for change-detection and
+     * *deliberately* re-throws anything other than `ENOENT` ("a permissions problem is real and is
+     * allowed to propagate", that module's own doc comment). Making `identity/` itself a file turns
+     * that `statSync` into `ENOTDIR`, which is not `ENOENT`, so it throws on the FIRST line of
+     * principal resolution for every request regardless of `hasOrgScope` — a trap that fires
+     * whether or not the guard under test is even reached, catching nothing specific. Confirmed by
+     * running it: all three requests below 500'd even against the unmodified, correct guard.
+     *
+     * `identity.json` as a directory clears that false positive: `statSync` on a directory succeeds
+     * (it is a real, `stat`-able node), so fingerprinting is unaffected, and `IdentityStore`'s own
+     * reads (`readSnapshot`'s `readFileSync`) degrade an `EISDIR` the same way they degrade a
+     * missing or corrupt file — inside their own `catch`, silently, to an empty snapshot (see the
+     * block comment above). Only a WRITE reaches the failure: `writeSnapshot`'s last step,
+     * `renameSync(tmp, path)`, tries to rename a freshly-written temp file ONTO `identity.json` —
+     * and POSIX `rename()` refuses to replace an existing directory with a file (`EISDIR`),
+     * unguarded, propagating straight out of `guardedWrite` and past `project-team-registry.ts`'s
+     * `IdentityStoreError`-only `catch` (a plain `EISDIR` is not an `IdentityStoreError`, so it
+     * re-throws rather than swallows). Verified directly against Node's `fs` before relying on it.
+     */
+    const trapIdentityDir = () => {
+      const dir = join(home, 'identity');
+      mkdirSync(dir, { recursive: true });
+      mkdirSync(join(dir, 'identity.json'));
+    };
+
+    it('POST /api/v1/projects (register) still returns its normal 200, never reaching the trap', async () => {
+      trapIdentityDir();
+      delete process.env.CEZ_AUTH;
+      const res = await apiRequest(makeApp(), '/api/v1/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ root: otherRoot }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as RegisterProjectResponse;
+      expect(body.project.teamId).toBeUndefined();
+    });
+
+    it('DELETE /api/v1/projects/:id still returns its normal 200, never reaching the trap', async () => {
+      const claimed = await registerProject(otherRoot);
+      trapIdentityDir();
+      delete process.env.CEZ_AUTH;
+      const res = await apiRequest(makeApp(), `/api/v1/projects/${claimed.id}`, { method: 'DELETE' });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { removed?: boolean };
+      expect(body.removed).toBe(true);
+    });
+
+    // Included for completeness against the request set this control is named for, but — per the
+    // block comment above — this one is NOT itself a mutation-killing negative control: a bypassed
+    // `withTeams` guard is a pure read, both `readSnapshot` and `withTeams`'s own catch degrade any
+    // failure silently, and no row can ever match a `null` orgId. This assertion can never turn red
+    // from the mutation this describe block exists to catch; it only confirms the trap itself
+    // doesn't collaterally break an unrelated GET.
+    it('GET /api/v1/projects still returns its normal 200 (not a negative control — see comment above)', async () => {
+      await registerProject(otherRoot);
+      trapIdentityDir();
+      delete process.env.CEZ_AUTH;
+      const { projects } = await getProjects();
+      expect(projects).toHaveLength(1);
     });
   });
 

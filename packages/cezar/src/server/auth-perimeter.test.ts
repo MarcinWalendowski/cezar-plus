@@ -1,8 +1,11 @@
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { IdentityStore } from '../auth/identity-store.ts';
+import { invalidateLocalOrgIdentityCache } from '../auth/local-identity.ts';
+import { identityDir } from '../paths.ts';
 import { RunStore } from '../runs/store.ts';
 import { registerProject } from '../workspace/projects.ts';
 import type { RunManager, StartRunInput } from '../workflows/run.ts';
@@ -240,6 +243,47 @@ describe('requirePrincipal — the /api/* auth perimeter', () => {
     });
 
     /**
+     * ADDED 2026-08-07 (adversarial review) — the test above is a real, correct assertion but a
+     * BLIND control for the claim in its own name. It spies on the INJECTED, cookie-based
+     * `deps.sessionResolver` — but D13 routes auth-off principal resolution through a completely
+     * different mechanism: the module-scope `localSessionResolver`/`resolveLocalOrgIdentity`
+     * singleton (`auth/local-gates.ts`, `auth/local-identity.ts`), reached via
+     * `resolveLocalPrincipal()` in `server.ts`. The test above would stay green even if that
+     * singleton did unbounded filesystem I/O on every single request — it never looks at it, and
+     * `resolver.seen` can only ever be `[]` there regardless of what the real mechanism does, since
+     * the real mechanism is never given that resolver to record into.
+     *
+     * This test drives the REAL mechanism instead: a clean, never-onboarded `CEZ_HOME`, hit through
+     * the actual middleware with no fake resolver in the picture at all, asserting the one thing
+     * D1/D13 actually promise for this path — that `<CEZ_HOME>/identity` never comes into
+     * existence. Verified by mutation: if `resolveLocalOrgIdentity`'s `unknown` branch were changed
+     * to `mkdir` the identity directory before its `existsSync` read (or `resolveLocalPrincipal`
+     * were changed to call `IdentityStore#findOrCreateLocalUser` instead of the read-only
+     * resolver), this test goes red while the test above — which never looks at the real mechanism
+     * — stays green.
+     */
+    it('the REAL auth-off mechanism (resolveLocalPrincipal / localSessionResolver) does zero I/O on a clean, never-onboarded CEZ_HOME', async () => {
+      const home = mkdtempSync(join(realpathSync(tmpdir()), 'cez-authperim-clean-home-'));
+      const savedHome = process.env.CEZ_HOME;
+      process.env.CEZ_HOME = home;
+      // `resolveLocalOrgIdentity`'s cache is ONE global slot (see that module's own doc comment) —
+      // reset it so this test's first request actually re-reads `home`, rather than trusting an
+      // answer cached from whichever `CEZ_HOME` an earlier test in this worker left behind.
+      invalidateLocalOrgIdentityCache();
+      try {
+        const res = await apiRequest(makeApp(), '/api/v1/runs');
+        expect(res.status).not.toBe(401);
+        expect(res.status).not.toBe(500);
+        expect(existsSync(join(home, 'identity'))).toBe(false);
+      } finally {
+        invalidateLocalOrgIdentityCache();
+        if (savedHome === undefined) delete process.env.CEZ_HOME;
+        else process.env.CEZ_HOME = savedHome;
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    /**
      * The control for the health redaction two describes up. The spec's Risks section is explicit
      * that "a diff in the auth-off health payload is a failure, not an update" — so the redaction
      * must be gated on `CEZ_AUTH` naming a provider and on nothing else. Verified by mutation:
@@ -267,6 +311,92 @@ describe('requirePrincipal — the /api/* auth perimeter', () => {
         else process.env.CEZ_HOME = savedHome;
         rmSync(home, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('CEZ_AUTH unset, HOSTED bind (CEZ_REMOTE=1) — D13 keys local-org adoption on the BIND, never on CEZ_AUTH', () => {
+    const savedHostedHome = process.env.CEZ_HOME;
+    let hostedHome: string;
+    let hostedRoot: string;
+
+    beforeEach(() => {
+      hostedHome = mkdtempSync(join(realpathSync(tmpdir()), 'cez-authperim-hosted-home-'));
+      hostedRoot = mkdtempSync(join(realpathSync(tmpdir()), 'cez-authperim-hosted-root-'));
+      process.env.CEZ_HOME = hostedHome;
+      invalidateLocalOrgIdentityCache();
+    });
+
+    afterEach(() => {
+      if (savedHostedHome === undefined) delete process.env.CEZ_HOME;
+      else process.env.CEZ_HOME = savedHostedHome;
+      rmSync(hostedHome, { recursive: true, force: true });
+      rmSync(hostedRoot, { recursive: true, force: true });
+      invalidateLocalOrgIdentityCache();
+    });
+
+    /**
+     * THE bug reported independently by four reviewers. `resolveLocalPrincipal()` used to run for
+     * every request where `resolveAuthProvider(process.env) === 'none'` — keyed on the PROVIDER.
+     * D13 says the opposite is load-bearing: adopting a local org's identity must be keyed on
+     * `capabilities.localHandoff` (the BIND), because `hosted + CEZ_AUTH unset +
+     * CEZ_ALLOW_UNAUTHENTICATED=1` is a real, permitted topology (D1's table) whose audience is a
+     * NETWORK, not one machine. `index.ts:365` already gated MOUNTING the local onboarding/team
+     * routes on `capabilities.localHandoff`; this test pins the PER-REQUEST principal to the same
+     * predicate.
+     *
+     * Seeds a real local org — the state a `CEZ_HOME` would carry after being onboarded once on
+     * loopback and then redeployed hosted against the same `CEZ_HOME` with
+     * `CEZ_ALLOW_UNAUTHENTICATED=1` — and proves an anonymous request arriving on a HOSTED bind
+     * cannot act as that org's owner. A mutation that re-keys the principal middleware back onto
+     * bare `resolveAuthProvider(process.env) === 'none'` must turn this red: with `CEZ_REMOTE=1`
+     * the middleware would still read `auth === 'none'`, still call `resolveLocalPrincipal()`,
+     * still resolve the seeded org (role `owner`), and this PATCH would then succeed (200,
+     * reassigning the project's team) instead of refusing for lack of an organization (400).
+     */
+    it('does not adopt a pre-existing local org for an anonymous request on a hosted bind', async () => {
+      const identity = IdentityStore.open(identityDir());
+      const { user } = await identity.findOrCreateLocalUser();
+      const { org, defaultTeam } = await identity.claimOrg({ userId: user.id, name: 'Local', slug: 'local-org' });
+      const claimed = await registerProject(hostedRoot);
+      await identity.createProjectTeam({ projectRoot: claimed.root, orgId: org.id, teamId: defaultTeam.id });
+      invalidateLocalOrgIdentityCache();
+
+      process.env.CEZ_REMOTE = '1'; // hosted bind — deleted by the outer suite's own beforeEach
+      const res = await apiRequest(makeApp(), `/api/v1/projects/${claimed.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ teamId: defaultTeam.id }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain('organization');
+      // The registry claim must be untouched: no reassignment happened under a caller who was
+      // never actually a member of this org, and never even carried a session cookie.
+      expect(identity.getProjectTeam(claimed.root)?.teamId).toBe(defaultTeam.id);
+    });
+
+    /**
+     * The positive twin: the SAME request, on the SAME `CEZ_HOME`, succeeds once it originates
+     * from the loopback bind D13 is actually about — proving the refusal above is about the bind,
+     * not about the seeded org being somehow unreachable or malformed.
+     */
+    it('the identical request succeeds once the bind is loopback again', async () => {
+      const identity = IdentityStore.open(identityDir());
+      const { user } = await identity.findOrCreateLocalUser();
+      const { org, defaultTeam } = await identity.claimOrg({ userId: user.id, name: 'Local', slug: 'local-org' });
+      const engineering = await identity.createTeam({ orgId: org.id, name: 'Engineering', slug: 'engineering' });
+      const claimed = await registerProject(hostedRoot);
+      await identity.createProjectTeam({ projectRoot: claimed.root, orgId: org.id, teamId: defaultTeam.id });
+      invalidateLocalOrgIdentityCache();
+
+      // deliberately NOT setting CEZ_REMOTE — the loopback default the outer beforeEach leaves in place
+      const res = await apiRequest(makeApp(), `/api/v1/projects/${claimed.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ teamId: engineering.id }),
+      });
+      expect(res.status).toBe(200);
+      expect(identity.getProjectTeam(claimed.root)?.teamId).toBe(engineering.id);
     });
   });
 });
