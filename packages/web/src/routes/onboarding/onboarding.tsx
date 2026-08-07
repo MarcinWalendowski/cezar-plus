@@ -87,7 +87,7 @@ export function OnboardingRoute() {
         ) : wizard.step === 'sign-in' ? (
           <SignInStep />
         ) : wizard.step === 'needs-invite' ? (
-          <NeedsInviteStep />
+          <NeedsInviteStep onClaimed={(result) => setWizard({ step: 'accept-team', ...result })} />
         ) : wizard.step === 'done' ? (
           // The redirect above is already in flight; rendering the loading line rather than a
           // step avoids a one-frame flash of "Add your first project" on the way out.
@@ -199,19 +199,126 @@ function SignInStep() {
 // ---- terminal: signed in, but this deployment already belongs to someone --------------------------
 
 /** D8 step 1's second half ("subsequent users need an invite"), which phase 4 shipped as a 409 on
- *  a form it had already invited the user to fill in. There is no invite HTTP surface yet — see
- *  the spec's D8 amendment — so this screen is honest about the only thing that can happen next:
- *  someone who is already in the org has to add them. It names no org, no owner and no size,
- *  because the server sends none: an unauthorized caller learns nothing from this page that they
- *  did not already know by reaching it. */
-function NeedsInviteStep() {
+ *  a form it had already invited the user to fill in.
+ *
+ *  **CORRECTED 2026-08-07 (phases 5b/5c/8): the invite HTTP surface now exists** —
+ *  `POST /auth/invites`, `GET /auth/invites`, `POST /auth/invites/revoke` and
+ *  `POST /auth/invites/redeem` (`auth/invite-routes.ts`) — so the sentence this replaces is
+ *  stale. What has NOT landed is a cockpit screen that consumes `POST /auth/invites/redeem`, so
+ *  "ask one of its owners to invite you" below is still the only thing a user reaching THIS
+ *  screen can do from the browser; an owner sends the invite id out of band (email, chat) rather
+ *  than through a link this wizard resolves. This screen is still honest about the only thing
+ *  that can happen next from here — it names no org, no owner and no size, because the server
+ *  sends none: an unauthorized caller learns nothing from this page that they did not already
+ *  know by reaching it.
+ *
+ *  **ADDED 2026-08-07 (5b/5c/8 repair stage): the D11 claim form, behind a disclosure.** The
+ *  scaffold pass left "the claim-mode UX inside the wizard is undesigned" as a named gap, and the
+ *  consequence turned out to be larger than a missing nicety: `hetzner.ts` runs its `org-create`
+ *  step for EVERY `--org-slug` install, including the deployment's first, so `listOrgs().length >
+ *  0` from that moment and `GET /auth/onboarding` answers `needs-invite` to every membership-less
+ *  user — including an org's own intended owner, holding that org's one-time code, being told to
+ *  ask an owner who does not exist yet. The only working path was a hand-crafted
+ *  `POST /auth/onboarding/org`, which made phase 8's own verification row unexecutable through
+ *  the product on the one platform that has orgs.
+ *
+ *  **Collapsed by default, and it reveals nothing.** The server deliberately does not tell this
+ *  route that a claimable org exists, or what its slug is (`onboarding-routes.ts`'s own comment:
+ *  "knowing an org exists and can be claimed is itself privileged information the operator hands
+ *  out of band, the same channel that already carries the code"). So this is a form the user must
+ *  already know to fill in — both fields typed from the installer's output — never a hint that
+ *  there is something here to claim. Opening it issues no request; the wizard's terminal message
+ *  above is unchanged and still the primary answer.
+ *
+ *  Deliberately NOT a redeem-an-invite form: that is a different credential with a different
+ *  failure mode, and no phase has designed its UX. Still open, still named. */
+function NeedsInviteStep({ onClaimed }: { onClaimed: (result: { org: Org; team: Team; role: Role }) => void }) {
+  const [claiming, setClaiming] = useState(false)
+
   return (
     <CenteredState
       icon={<MailQuestionIcon />}
       tone="neutral"
       title="You need an invite to join this deployment"
       subtitle="You're signed in, but this cezar already belongs to an organization. Ask one of its owners to invite you — until then there is nothing here for you to set up."
-    />
+      actions={
+        claiming ? undefined : (
+          <Button variant="outline" data-slot="onboarding-claim-open" onClick={() => setClaiming(true)}>
+            I have an organization code
+          </Button>
+        )
+      }
+    >
+      {claiming ? <ClaimOrgForm onClaimed={onClaimed} /> : null}
+    </CenteredState>
+  )
+}
+
+/** The D11 claim: `POST /auth/onboarding/org` with `{ orgSlug, bootstrapToken }`. Both values come
+ *  from the operator who ran `cezar server-install --platform hetzner --org-slug <slug>` — the slug
+ *  they chose and the one-time code that command printed. The server answers the identical 403 for
+ *  "no such org" and "wrong code" (no slug-enumeration oracle), so this form surfaces the server's
+ *  `{error}` verbatim rather than guessing which half was wrong. */
+function ClaimOrgForm({ onClaimed }: { onClaimed: (result: { org: Org; team: Team; role: Role }) => void }) {
+  const [orgSlug, setOrgSlug] = useState('')
+  const [bootstrapToken, setBootstrapToken] = useState('')
+  const claim = useMutation({
+    mutationFn: (input: CreateOnboardingOrgInput) => createOnboardingOrg(input),
+  })
+
+  const incomplete = orgSlug.trim() === '' || bootstrapToken.trim() === ''
+  const submit = () => {
+    if (incomplete || claim.isPending) return
+    claim.mutate(
+      { orgSlug: orgSlug.trim(), bootstrapToken: bootstrapToken.trim() },
+      { onSuccess: (result) => onClaimed(result) },
+    )
+  }
+
+  return (
+    <div className="grid gap-1.5 text-left" data-slot="onboarding-claim-form">
+      <Label htmlFor="onboarding-claim-slug">Organization ID</Label>
+      <Input
+        id="onboarding-claim-slug"
+        data-slot="onboarding-claim-slug"
+        autoFocus
+        autoComplete="off"
+        spellCheck={false}
+        value={orgSlug}
+        disabled={claim.isPending}
+        onChange={(event) => setOrgSlug(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') submit()
+        }}
+      />
+      <Label htmlFor="onboarding-claim-token">Organization code</Label>
+      <Input
+        id="onboarding-claim-token"
+        data-slot="onboarding-claim-token"
+        autoComplete="off"
+        spellCheck={false}
+        value={bootstrapToken}
+        disabled={claim.isPending}
+        onChange={(event) => setBootstrapToken(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') submit()
+        }}
+      />
+      <p className="text-[13px] text-soft-foreground">
+        Both come from whoever set this organization up on the server. The code works once, and
+        only for that one organization.
+      </p>
+      {claim.isError ? (
+        <p data-slot="onboarding-claim-error" className="text-[13px] text-danger">
+          {claim.error instanceof Error ? claim.error.message : 'could not claim that organization'}
+        </p>
+      ) : null}
+      <div>
+        <Button data-slot="onboarding-claim-submit" disabled={incomplete || claim.isPending} onClick={submit}>
+          {claim.isPending ? 'Claiming…' : 'Claim organization'}
+        </Button>
+      </div>
+    </div>
   )
 }
 

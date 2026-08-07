@@ -37,6 +37,23 @@ import { resolvePrincipal, type SessionIdentity } from './principal.ts';
  * since nothing before Phase 4 can add a second one. An org resolved with zero teams (should be
  * unreachable given that atomicity) fails the session closed rather than fabricating an id.
  *
+ * **CORRECTED 2026-08-07 (5b/5c/8 repair stage). Two of the three claims in the paragraph above are
+ * now false, and the third is now a load-bearing invariant rather than a defensive branch.**
+ * `POST /auth/teams` (`./team-routes.ts`, phase 5c) adds a second team, so "always exactly the
+ * default team" and "nothing before Phase 4 can add a second one" no longer hold: `principal.teamId`
+ * is the org's OLDEST team, and an admin who creates `engineering` beside `General` still resolves
+ * to `General`. The one live consequence, named rather than left to be rediscovered: `PATCH
+ * /auth/onboarding/team` renames `principal.teamId`, so it always renames the org's oldest team no
+ * matter which team the caller believes they are acting on — `PATCH /auth/teams/:teamId` is the
+ * route that renames a NAMED team, and is what a team-management surface should call.
+ * And "an org resolved with zero teams should be unreachable" is now guaranteed rather than merely
+ * expected: `IdentityStore#deleteTeam` refuses to delete an org's last team (`team-is-last`),
+ * precisely because THIS `null` would otherwise lock every member of that org out permanently —
+ * see that method's own doc comment for the reproduced blackout. The `if (!team) return null` below
+ * is the fail-closed backstop for a hand-edited `identity.json`, not the only thing standing
+ * between an admin and a bricked org. The original paragraph is kept above unchanged because the
+ * "Membership selection policy" note below was written against it.
+ *
  * **Membership selection policy (same status).** A user with more than one org membership (an
  * invite to a second org — D8's onboarding flow, not this file, is what grants those) has no
  * "active org" switcher yet either. This file picks the OLDEST membership deterministically

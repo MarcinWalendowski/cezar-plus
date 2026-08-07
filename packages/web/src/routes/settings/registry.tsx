@@ -12,6 +12,7 @@ import {
   NotebookPenIcon,
   PaletteIcon,
   PlugZapIcon,
+  UsersIcon,
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 
@@ -31,6 +32,7 @@ import { SkillsSection } from './skills-section'
 // scaffold creates so this registry is edited exactly once — see the file's own docblock. W4.8
 // takes over and fills it.
 import { SourcesSection } from './sources-section'
+import { TeamsSection } from './teams-section'
 import { WorktreesSection } from './worktrees-section'
 
 /**
@@ -63,6 +65,7 @@ export type SettingsSectionId =
   | 'keyboard'
   | 'skills'
   | 'sources'
+  | 'teams'
 
 /** Which settings area a section belongs to — and therefore which store it writes. */
 export type SettingsScope = 'project' | 'global'
@@ -197,6 +200,14 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     description: 'The workspace registry and where GitHub checkouts land.',
     icon: FoldersIcon,
     component: ProjectsSection,
+    scope: 'global',
+  },
+  {
+    id: 'teams',
+    title: 'Teams',
+    description: 'Create and rename the teams your projects are grouped under.',
+    icon: UsersIcon,
+    component: TeamsSection,
     scope: 'global',
   },
   {

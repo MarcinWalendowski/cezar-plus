@@ -1,9 +1,11 @@
 import { Hono, type Context, type Next } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
+import { createInternalOrgInputSchema, type CreateInternalOrgResponse } from '@open-mercato/cezar-contract';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from '../server/validators.ts';
 import type { SessionResolver } from '../server/server.ts';
 import { IdentityStoreError, type IdentityStore } from '../auth/identity-store.ts';
+import { hashOrgClaimToken, mintOrgClaimToken } from '../auth/org-claim-token.ts';
 import type { Org, ProjectTeam, Team } from '../auth/types.ts';
 import { resolveAuthCheck } from './auth-request.ts';
 import { X_CEZAR_PRINCIPAL_HEADER, X_CEZAR_SIGNATURE_HEADER } from './forwarded-principal.ts';
@@ -15,20 +17,41 @@ import type { OrgProcessRecord } from './org-process-registry.ts';
 /**
  * The supervisor's own HTTP surface (D4/D10, spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`).
  *
- * **`authRoutes`/`onboardingRoutes` are mounted VERBATIM.** D10 is explicit: the supervisor
- * "imports `auth/routes.ts`'s `authRoutes` and `auth/onboarding-routes.ts`'s `onboardingRoutes`
- * verbatim ... and mounts them exactly as a phase 1-3 single-process deployment does today." Both
- * are already-built, already-tested `Hono` instances built by `./index.ts` (the real wiring; this
- * file's own `SupervisorAppDeps` takes them as already-constructed values so `server.test.ts` can
- * hand in the real ones — the same "no fakes for a unit whose whole job is being correct" stance
- * `auth/routes.test.ts` and `auth/onboarding-routes.test.ts` already take with `IdentityStore`).
+ * **`authRoutes`/`onboardingRoutes`/`inviteRoutes`/`teamRoutes` are mounted VERBATIM.** D10 is
+ * explicit: the supervisor "imports `auth/routes.ts`'s `authRoutes` and
+ * `auth/onboarding-routes.ts`'s `onboardingRoutes` verbatim ... and mounts them exactly as a phase
+ * 1-3 single-process deployment does today." All four are already-built, already-tested `Hono`
+ * instances built by `./index.ts` (the real wiring; this file's own `SupervisorAppDeps` takes them
+ * as already-constructed values so `server.test.ts` can hand in the real ones — the same "no fakes
+ * for a unit whose whole job is being correct" stance `auth/routes.test.ts` and
+ * `auth/onboarding-routes.test.ts` already take with `IdentityStore`).
+ *
+ * **ADDED 2026-08-07 (5b/5c/8 integration pass): `inviteRoutes`/`teamRoutes` were declared and
+ * mounted on the SINGLE-PROCESS path only, and were unreachable here.** `server/server.ts` gained
+ * `ServerDeps.inviteRoutes`/`.teamRoutes` and `src/index.ts` threaded them, but this file's
+ * `SupervisorAppDeps` carried neither and `startSupervisor` imported neither — so on the D10
+ * topology, where nginx sends every `/auth/` request to the SUPERVISOR and never to an org
+ * process, `/auth/invites*` and `/auth/teams*` answered 404. That is the exact deployment phases
+ * 5b/5c/8 exist for: a hosted host with more than one org is the only place a second member and a
+ * second team are reachable at all, and it was the one place the routes were not. The four fields
+ * are REQUIRED, not optional, for the same reason `authRoutes` always was — the supervisor's boot
+ * gate refuses `CEZ_AUTH=none` outright (`./index.ts`), so there is no topology where it serves
+ * some of `/auth/*` and not the rest, and a required field makes the compiler enforce the wiring
+ * that a comment could only ask for. (`team-routes.ts`'s own singleton docblock already claimed
+ * `SupervisorAppDeps.teamRoutes` existed; it does now.)
  *
  * **What is genuinely new here — the `/internal/*` family, `internal;` in nginx, unreachable from
  * outside the box (D10):**
  *  - `GET /internal/auth-check` — nginx's `auth_request` target. See `./auth-request.ts`.
  *  - `GET /internal/orgs`, `GET /internal/orgs/:slug` — thin reads over `IdentityStore`, so the
- *    hetzner platform's `--provision-org` step (phase 7, not yet built) can resolve an operator-
- *    named slug to an `orgId` without duplicating identity data (D10).
+ *    hetzner platform's `--provision-org` step can resolve an operator-named slug to an `orgId`
+ *    without duplicating identity data (D10).
+ *  - `POST /internal/orgs` — D11's first half, ADDED 2026-08-07 (5b/5c/8 scaffold pass, Fill unit
+ *    6): the org row, created by the installer's not-yet-built `org-create` step (Fill unit 8),
+ *    authenticated the same way every other admin verb here is. Mints and hashes a fresh per-org
+ *    claim code (`auth/org-claim-token.ts`) and returns the RAW code exactly once, in this
+ *    response, so the second half of D11 — the org's first owner claiming it — has something
+ *    other than the deployment-wide bootstrap code to check against.
  *  - `GET /internal/teams`, `GET /internal/teams/:teamId` — thin reads over `IdentityStore`'s team
  *    table, for the two things an org process lost when phase 6 took its local `identity/`
  *    directory away: team NAMES to annotate the project board, and validating an explicit `teamId`
@@ -71,7 +94,11 @@ export type SupervisorIdentityStore = Pick<
   | 'listProjectTeams'
   | 'getProjectTeam'
   | 'createProjectTeam'
+  // ADDED 2026-08-07 (5c, Fill unit 3): `PATCH /internal/project-teams`'s own write.
+  | 'updateProjectTeam'
   | 'deleteProjectTeam'
+  // ADDED 2026-08-07 (5b/5c/8 scaffold pass, D11, Fill unit 6): `POST /internal/orgs`'s own write.
+  | 'createOrg'
 >;
 
 /** The subset of `OrgProcessRegistryStore` this surface touches. */
@@ -83,6 +110,11 @@ export type SupervisorOrgProcessRegistry = Pick<
 export interface SupervisorAppDeps {
   readonly authRoutes: Hono;
   readonly onboardingRoutes: Hono;
+  /** 5b's `/auth/invites*` (`auth/invite-routes.ts`) — see the module doc comment on why these two
+   *  fields are required rather than optional, and what it cost that they were absent. */
+  readonly inviteRoutes: Hono;
+  /** 5c's `/auth/teams*` (`auth/team-routes.ts`). */
+  readonly teamRoutes: Hono;
   /** `process.env.CEZ_SUPERVISOR_ADMIN_TOKEN` in production (the supervisor unit's root-owned
    *  `EnvironmentFile=`). Absent ⇒ there is no admin caller and every `/internal/*` route that
    *  requires one answers 401 — see `./internal-auth.ts` for why that is the fail-closed default
@@ -104,6 +136,18 @@ export interface SupervisorAppDeps {
 
 function toWireOrgSummary(org: Org): { id: string; slug: string; name: string } {
   return { id: org.id, slug: org.slug, name: org.name };
+}
+
+/** `POST /internal/orgs`'s own wire contract (`createInternalOrgResponseSchema`, `packages/
+ *  contract/src/orgs.ts`) is the FULL `orgSchema`, including `createdAt` — deliberately a
+ *  separate function from `toWireOrgSummary` above rather than a shared one widened to match:
+ *  `GET /internal/orgs`/`:slug`'s existing wire contract is `{id, slug, name}` only, asserted with
+ *  `toEqual` (exact-shape) in `server.test.ts`, and widening the shared helper would silently add
+ *  a field neither that test nor its one real caller (the hetzner installer's org-slug lookup,
+ *  D10) ever asked for. Never returns `claimTokenHash` — it only reads the four fields it names,
+ *  so there is no field to accidentally forward the hash through. */
+function toWireOrgWithCreatedAt(org: Org): { id: string; slug: string; name: string; createdAt: string } {
+  return { id: org.id, slug: org.slug, name: org.name, createdAt: org.createdAt };
 }
 
 function toWireProjectTeam(row: ProjectTeam): { projectRoot: string; orgId: string; teamId: string } {
@@ -135,6 +179,17 @@ const createProjectTeamInputSchema = z
   .object({
     projectRoot: z.string().min(1),
     orgId: z.string().min(1),
+    teamId: z.string().min(1),
+  })
+  .strict();
+
+/** `PATCH /internal/project-teams`'s body (5c, ADDED 2026-08-07, Fill unit 3) — deliberately no
+ *  `orgId` field, matching `IdentityStore#updateProjectTeam`'s own signature: the D4 guard is
+ *  checked against the EXISTING row's `orgId` (below, via `callerMayUseOrgId`), never one a
+ *  caller names, so a reassignment can never smuggle a root across the org boundary. */
+const updateProjectTeamInputSchema = z
+  .object({
+    projectRoot: z.string().min(1),
     teamId: z.string().min(1),
   })
   .strict();
@@ -291,8 +346,16 @@ export function createSupervisorApp(deps: SupervisorAppDeps): Hono {
     );
 
   // ---- /auth/* — mounted verbatim (see module doc comment) -------------------------------------
+  // All four in the SAME order `server/server.ts`'s single-process `createApp` mounts them
+  // (`authRoutes`, `onboardingRoutes`, `inviteRoutes`, `teamRoutes`), so the two topologies cannot
+  // resolve an overlapping path differently. Every one of them is already covered by the
+  // `app.use('/auth/*', sameOriginWriteGuard)` registration above — the perimeter half D5's
+  // amendment closed for `POST /auth/logout`, which a route family living outside `/api/` has to
+  // be added to explicitly because nothing derives it.
   app.route('/', deps.authRoutes);
   app.route('/', deps.onboardingRoutes);
+  app.route('/', deps.inviteRoutes);
+  app.route('/', deps.teamRoutes);
 
   const internal = new Hono<InternalEnv>()
     // ---- GET /internal/auth-check: nginx's auth_request target (D10) ---------------------------
@@ -324,6 +387,40 @@ export function createSupervisorApp(deps: SupervisorAppDeps): Hono {
       const org = deps.identityStore.getOrgBySlug(slug);
       if (!org) return c.json({ error: `no org with slug "${slug}"` }, 404);
       return c.json({ org: toWireOrgSummary(org) });
+    })
+
+    // ---- POST /internal/orgs -----------------------------------------------------------------
+    // ADDED 2026-08-07 (5b/5c/8 scaffold pass, Fill unit 6). D11's first half: "the org row —
+    // created by the installer through a new admin-only POST /internal/orgs, authenticated by
+    // CEZ_SUPERVISOR_ADMIN_TOKEN". ADMIN ONLY — inherited from the `requireAdmin` middleware
+    // already registered on this exact path above (the `for (const path of [...])` loop), NOT a
+    // check in this handler: that ordering is what keeps a non-admin's malformed body from ever
+    // reaching `jsonZodValidator` (see the middleware's own doc comment on why the check used to
+    // sit downstream of validation and what that cost — 400, leaking the body schema, instead of
+    // 403).
+    //
+    // Mints and hashes a fresh per-org claim code (`auth/org-claim-token.ts`, D11's crux) rather
+    // than accepting one on the wire: the raw code exists to leave this process exactly once, in
+    // THIS response, for the installer to print for the org's intended owner — nothing upstream
+    // of this route has a code to hand in, and accepting a caller-supplied one would let whoever
+    // holds the admin token also choose a weak or reused code.
+    .post('/internal/orgs', jsonZodValidator(createInternalOrgInputSchema), async (c) => {
+      const { name, slug } = c.req.valid('json');
+      const bootstrapToken = mintOrgClaimToken();
+      try {
+        const { org, defaultTeam } = await deps.identityStore.createOrg({
+          name,
+          slug,
+          claimTokenHash: hashOrgClaimToken(bootstrapToken),
+        });
+        const body: CreateInternalOrgResponse = { org: toWireOrgWithCreatedAt(org), team: toWireTeam(defaultTeam), bootstrapToken };
+        return c.json(body, 201);
+      } catch (error) {
+        if (error instanceof IdentityStoreError && error.code === 'org-slug-taken') {
+          return c.json({ error: error.message, code: error.code }, 409);
+        }
+        throw error;
+      }
     })
 
     // ---- GET /internal/teams, GET /internal/teams/:teamId ---------------------------------------
@@ -377,6 +474,26 @@ export function createSupervisorApp(deps: SupervisorAppDeps): Hono {
       const { root } = c.req.valid('query');
       const row = deps.identityStore.getProjectTeam(root);
       if (!row) return c.json({ error: `no org/team claim on ${root}` }, 404);
+      // TIGHTENED 2026-08-07 (5b/5c/8 repair stage). This was the ONE verb in the
+      // `/internal/project-teams*` family with no org scoping — `POST`, `PATCH` and `DELETE` all
+      // call `callerMayUseOrgId`, and this one went straight from the validator to the store.
+      // Reproduced at review holding org A's `CEZ_SUPERVISOR_SECRET` against org B's root: 200,
+      // with org B's `orgId` and `teamId` in the body, while every sibling verb answered 403.
+      // Under D4 every MEMBER of org A shares that org's unix user and shell, and D10 delivers the
+      // secret into that process's environment, so this is reachable by a tenant, not only by the
+      // operator — the exact caller `internal-auth.ts`'s own module doc names as its threat model.
+      //
+      // Scoped against the EXISTING row's `orgId`, never a caller-named one, exactly like `PATCH`
+      // and `DELETE` on this path. The 403-vs-404 split (claimed-by-another vs. unclaimed) is the
+      // same split those two already have, so this adds no oracle that was not already there.
+      //
+      // **This does not weaken `server.ts#mayActOnRoot`, which needs to see a foreign claim in
+      // order to refuse.** `registry-client.ts`'s `call()` turns a 403 into
+      // `RegistryClientError('unauthorized')`, and `mayActOnRoot` is deliberately fail-CLOSED
+      // (`catch { return false; }`, its own doc comment) — so a root claimed by another org still
+      // refuses the write, now because the supervisor refused to answer rather than because the
+      // client compared two org ids. Pinned by `registry-client.test.ts`.
+      if (!callerMayUseOrgId(c.get('internalCaller'), row.orgId)) return refuseOrgScope(c, row.orgId);
       return c.json({ projectTeam: toWireProjectTeam(row) });
     })
     .post('/internal/project-teams', jsonZodValidator(createProjectTeamInputSchema), async (c) => {
@@ -404,6 +521,35 @@ export function createSupervisorApp(deps: SupervisorAppDeps): Hono {
             return c.json({ error: error.message, code: error.code }, 404);
           }
           if (error.code === 'team-org-mismatch' || error.code === 'project-root-taken') {
+            return c.json({ error: error.message, code: error.code }, 409);
+          }
+        }
+        throw error;
+      }
+    })
+
+    // ---- PATCH /internal/project-teams: 5c reassignment (D4 amendment 2, Fill unit 3, ADDED
+    // 2026-08-07) — the phase-5 in-process `updateProjectTeam` call, replaced by this supervisor
+    // route exactly as D4's amendment 2 requires ("REPLACED, not merely joined"). Org-scoped
+    // against the EXISTING row's `orgId`, mirroring `DELETE /internal/project-teams/by-root`'s own
+    // posture: the wire body carries no `orgId` for a caller to name, so the only org this can ever
+    // act against is whichever one already claimed `projectRoot`.
+    .patch('/internal/project-teams', jsonZodValidator(updateProjectTeamInputSchema), async (c) => {
+      const { projectRoot, teamId } = c.req.valid('json');
+      const existing = deps.identityStore.getProjectTeam(projectRoot);
+      if (!existing) return c.json({ error: `no org/team claim on ${projectRoot}`, code: 'project-root-not-found' }, 404);
+      if (!callerMayUseOrgId(c.get('internalCaller'), existing.orgId)) return refuseOrgScope(c, existing.orgId);
+      try {
+        const row = await deps.identityStore.updateProjectTeam(projectRoot, teamId);
+        return c.json({ projectTeam: toWireProjectTeam(row) });
+      } catch (error) {
+        if (error instanceof IdentityStoreError) {
+          // Same `code`-alongside-`error` discipline `POST /internal/project-teams` above already
+          // uses, and for the identical reason: the status alone cannot carry the discriminant.
+          if (error.code === 'project-root-not-found' || error.code === 'team-not-found') {
+            return c.json({ error: error.message, code: error.code }, 404);
+          }
+          if (error.code === 'team-org-mismatch') {
             return c.json({ error: error.message, code: error.code }, 409);
           }
         }

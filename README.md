@@ -458,13 +458,43 @@ Useful environment variables:
 | `CEZ_OIDC_ISSUER=https://idp.example.com/realms/main` | Issuer for `CEZ_AUTH=oidc`; discovery runs against `<issuer>/.well-known/openid-configuration`. Must be `https` (a `localhost` issuer is allowed, for testing the flow locally). Ignored under `CEZ_AUTH=google`, whose issuer is pinned. |
 | `CEZ_OIDC_CLIENT_ID`, `CEZ_OIDC_CLIENT_SECRET` | The registered client. Authorization Code + PKCE; `state` and `nonce` are both verified, and `state` is additionally bound to the browser that started the flow by a short-lived `HttpOnly` cookie. |
 | `CEZ_OIDC_GROUP_CLAIM=groups`, `CEZ_OIDC_GROUP_ROLE_MAP=cezar-admins=admin` | Optional group → role mapping, defaulting to none. Only `admin` and `member` can be mapped; an unrecognised group grants nothing, and membership is never inferred from a claim you did not map. |
-| `CEZ_AUTH_BOOTSTRAP_TOKEN`, `CEZ_AUTH_BOOTSTRAP_OPEN=1` | **Who may claim a fresh deployment.** The first user to name an organization becomes its owner, and an owner can run shell commands on this host — so with `CEZ_AUTH=google` the issuer is pinned but the *audience* is every Google account on the internet, and arriving first must not be enough. While `CEZ_AUTH` is set and no organization exists yet, cezar mints a random **bootstrap code** at every start and prints it to its own log (`journalctl -u cezar`); the onboarding wizard asks for it and refuses with 403 without it. **Nothing to set for the default.** `CEZ_AUTH_BOOTSTRAP_TOKEN` pins your own value instead of the generated one; `CEZ_AUTH_BOOTSTRAP_OPEN=1` (that exact value) opts back into "whoever signs in first", the way `CEZ_ALLOW_UNAUTHENTICATED` opts out of the boot refusal. The code stops being printed, and stops granting anything, the moment the organization exists. |
+| `CEZ_AUTH_BOOTSTRAP_TOKEN`, `CEZ_AUTH_BOOTSTRAP_OPEN=1` | **Who may claim a fresh deployment.** The first user to name an organization becomes its owner, and an owner can run shell commands on this host — so with `CEZ_AUTH=google` the issuer is pinned but the *audience* is every Google account on the internet, and arriving first must not be enough. While `CEZ_AUTH` is set and no organization exists yet, cezar mints a random **bootstrap code** at every start and prints it to its own log (`journalctl -u cezar`); the onboarding wizard asks for it and refuses with 403 without it. **Nothing to set for the default.** `CEZ_AUTH_BOOTSTRAP_TOKEN` pins your own value instead of the generated one; `CEZ_AUTH_BOOTSTRAP_OPEN=1` (that exact value) opts back into "whoever signs in first", the way `CEZ_ALLOW_UNAUTHENTICATED` opts out of the boot refusal. The code stops being printed, and stops granting anything, the moment the organization exists. **Scoped 2026-08-07 (phases 5b/5c/8, D11):** this whole row is about the deployment's FIRST organization and nothing else. Every organization after that is created by the operator (`POST /internal/orgs`, `CEZ_SUPERVISOR_ADMIN_TOKEN` below) and carries its **own** single-use claim code, returned once to whoever made that call and never re-derivable from the deployment-wide code above; its intended owner signs in at the deployment's login host and enters that org's slug + code. So "stops granting anything the moment the organization exists" stays literally true of *this* code, and is no longer the same thing as "nobody else can ever own an org here". |
 | `CEZ_AUTH=supervisor` | **Set on an ORG's process only** (phase 6/7, D4/D10) — never by hand outside a `server-install --platform hetzner`-provisioned host. Means "trust the supervisor's signed, forwarded principal" rather than terminate OIDC/Google itself; the supervisor's own process sets `CEZ_AUTH=oidc`/`google` instead. Requires `CEZ_SUPERVISOR_PORT` and `CEZ_SUPERVISOR_SECRET`. |
 | `CEZ_SUPERVISOR_PORT`, `CEZ_SUPERVISOR_SECRET` | Where an org's process reaches its supervisor (always loopback, same host — a bare port) and the per-org shared secret it authenticates those calls with, to ask "who owns this project root" (D4's root→org registry). This is the phase-6 REPLACEMENT for the phase 1-5 in-process `IdentityStore` lookup: an org process's own `CEZ_HOME` holds no `identity/` directory under D4's per-org uid boundary, so this is the only way it can answer that question. The secret is minted at provisioning and delivered via a root-owned `EnvironmentFile`, never a plain `Environment=` line. Both required when `CEZ_AUTH=supervisor`. |
 | `CEZ_PORT_STRICT=1` (or `--port-strict`) | Make the requested port a hard requirement instead of `serve`'s normal preference: when it is already in use, cezar refuses to boot rather than silently binding the next free one. Off by default — the npm-default `cezar serve` still drifts to a free port exactly as before. `server-install --platform hetzner` sets this on every ORG unit's systemd `Environment=` (never the supervisor's own), because that org's nginx `proxy_pass` is a specific loopback port baked in at provisioning time: a silently drifted bind there is not a startup failure, it is another org's traffic routed into the wrong process (D10). |
 | `CEZ_SESSION_COOKIE_DOMAIN=.cezar.example.com` | `Domain=` for the session cookie. **Unset is the default and is host-only**, exactly as every release before multi-org hosting behaved — leave it alone on a single-host install. Multi-org needs it because the supervisor sets the cookie on `login.<base>` while each org answers on `<org>.<base>`: a host-only cookie is never sent to an org hostname, nginx's `auth_request` subrequest sees no cookie, and every org host 401s in a redirect loop. Must be the shared base domain, and it is a real widening — every subdomain of `<base>` now receives the cookie, so that base domain has to be yours alone. `server-install --platform hetzner` writes it on the **supervisor's** unit only (`.<base>`), because the supervisor is the only process that issues or clears a session cookie — an org's process never touches one, it is handed an already-verified principal. |
-| `CEZ_SUPERVISOR_ADMIN_TOKEN` | **The supervisor's own credential**, minted at provisioning into its root-owned `EnvironmentFile` — you never type it. It authorizes the `/internal/*` provisioning calls no org's per-org secret may make (reading the org roster, registering and deprovisioning an org's process), which is how `server-install --platform hetzner --org-slug <slug>` finishes wiring an org up without an operator pasting secrets. It exists because that first registration is genuinely circular: the call that hands over an org's secret cannot authenticate with it. **Unset closes the admin surface** rather than opening it — with no token there is no admin caller and every admin-only route answers 403. |
+| `CEZ_SUPERVISOR_ADMIN_TOKEN` | **The supervisor's own credential**, minted at provisioning into its root-owned `EnvironmentFile` — you never type it. It authorizes the `/internal/*` provisioning calls no org's per-org secret may make (**creating a new organization's row** — `POST /internal/orgs`, added 2026-08-07 phases 5b/5c/8 — reading the org roster, registering and deprovisioning an org's process), which is how `server-install --platform hetzner --org-slug <slug>` finishes wiring an org up without an operator pasting secrets. It exists because that first registration is genuinely circular: the call that hands over an org's secret cannot authenticate with it. **Unset closes the admin surface** rather than opening it — with no token there is no admin caller and every admin-only route answers 403. |
 
+> **CORRECTED 2026-08-07 (phases 5b/5c/8 — invites, team management, org-creation surface;
+> spec D11/D12): EVERY paragraph below is superseded except the D12 one, which was added by
+> this same change — the fact changed, not merely the reason for it.** (This block first said
+> "the four paragraphs below", which undercounted: the last one, "And 'everyone who signs in'
+> is currently *one person*", sits after the D12 paragraph and was left reading as current.
+> It carries its own correction now.) A hosted cezar can now host more than one organization. `POST
+> /internal/orgs` — admin-only, authenticated by `CEZ_SUPERVISOR_ADMIN_TOKEN` above —
+> creates the org row for every organization after the first; `server-install --platform
+> hetzner --org-slug <slug>` calls it as part of provisioning, so the wall the paragraphs
+> below describe (an org's infrastructure fully automated, nothing to put behind it) is
+> closed. `bootstrapFirstOrg` is renamed `claimOrg`: with no `orgId` it is unchanged — still
+> the deployment's own self-serve first-org bootstrap, still what a bare `cezar serve --auth
+> oidc` with no supervisor relies on; given an `orgId` it is the D11 claim path — the first
+> person to sign in **at the deployment's login host** and enter *that org's own* slug and
+> per-org claim code (never the deployment-wide one org one's owner holds) becomes its owner.
+> (An earlier draft of this sentence said "the first person at *that* org's own hostname",
+> which named the wrong host: an org's own process runs `CEZ_AUTH=supervisor` and mounts no
+> `/auth/*` routes at all, so nothing can be claimed there. The claim is keyed on the
+> `orgSlug` in the request body plus that org's `claimTokenHash`, and it is answered by the
+> supervisor — the hostname the browser is on is not read.) A second and
+> later member now joins by invite (`owner`/`admin`-only `/auth/invites*`) instead of never
+> at all, and `owner`/`admin` can create, rename and reassign teams (`/auth/teams*`) — see
+> the D12 paragraph below for exactly what `role` does and does not gate. **What is
+> unchanged: none of this has been run against a real, two-organization host yet** — see the
+> spec's Verification section (`.ai/specs/2026-08-06-org-team-auth-onboarding.md`) for the
+> current QA-Needed list. The superseded paragraphs are kept for the reasoning
+> they still carry — why the boundary sits *between* organizations, and that sharing within
+> one is real and disclosed — even though their "still holds exactly one organization" /
+> "exactly one member" claims no longer hold.**
+>
 > **Signing in is not tenancy — a hosted cezar still holds exactly one organization, and
 > that's true for a different reason now than it used to be.** `cezar supervisor` +
 > `server-install --platform hetzner` (above) give cezar a real cross-org boundary: one
@@ -498,6 +528,33 @@ Useful environment variables:
 > organization can run code as one another. Invite accordingly.** The boundary above sits
 > *between* organizations; it was never meant to, and does not, separate one member of an
 > org from another.
+>
+> **ADDED 2026-08-07 (D12): `role` gates org administration, and never code execution.**
+> `owner`/`admin` can create and revoke invites, rename the org, and create, rename or
+> reassign teams; `member` gets everything else, including `POST /api/v1/workflows` and
+> every other agent-run surface. A `role !== 'member'` check in front of code execution
+> would not be a boundary — everyone in an org already shares the one unix user, one
+> `CEZ_HOME` and one set of `claude`/`codex` credentials the paragraph above describes, so
+> the member would reach the identical shell through any other agent surface, and a role
+> check that only looks like isolation is worse than none. If you need members who cannot
+> execute code, that is a second organization (the boundary above), not a role.
+>
+> **SUPERSEDED 2026-08-07 by phases 5b/5c/8 (D8/D11/D12) — four of this paragraph's five
+> claims are now false, and the paragraph is kept below only so a reader who remembers it
+> can see what replaced each one.** The invite surface **is** built: `POST /auth/invites`
+> (owner/admin) mints a single-use code, `POST /auth/invites/redeem` spends it, `GET
+> /auth/invites` lists and `POST /auth/invites/revoke` revokes (body-addressed rather than
+> `DELETE /auth/invites/:id`, because that id is the secret a redeemer types and a path
+> segment lands in access logs). A deployment therefore holds
+> as many members as have redeemed an invite, and — via `POST /internal/orgs` plus the D11
+> claim above — as many organizations as an operator has provisioned. `role` is no longer
+> read by the team-rename route alone: `requireOrgAdmin` gates the whole of `/auth/invites*`
+> and `/auth/teams*`. **The one claim that still stands is the last and the load-bearing
+> one** — every member of an organization can still run code as every other member, because
+> they share one unix user, one `CEZ_HOME` and one set of agent credentials, so "assume
+> every member of an organization can do everything, including author a workflow step that
+> runs `bash`" remains true and is exactly what the D12 paragraph above says. Invite
+> accordingly.
 >
 > **And "everyone who signs in" is currently *one person*.** The first user to name an
 > organization owns it (with the bootstrap code above); everyone after that is told they

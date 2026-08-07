@@ -40,10 +40,16 @@ import { resolveAuthProvider } from '../server/capabilities.ts';
  * original behaviour for anyone who genuinely wants it (a single-user loopback deployment testing
  * the OIDC flow, per D1's table) — but it has to be *said*.
  *
- * This gate is one-shot by construction: it is only ever consulted by
- * `POST /auth/onboarding/org`, whose own `bootstrapFirstOrg` guard (`orgs.length > 0`, checked
- * under the identity store's write lease) makes the route unreachable the moment any org exists.
- * A leaked code after onboarding grants nothing.
+ * This gate is one-shot by construction: it is only ever consulted by `POST /auth/onboarding/org`'s
+ * legacy branch, whose own `IdentityStore#claimOrg` guard (`orgs.length > 0`, checked under the
+ * identity store's write lease) makes that branch unreachable the moment any org exists. A leaked
+ * code after onboarding grants nothing for the deployment's first org.
+ *
+ * **D11 (5b/5c/8 scaffold pass, ADDED 2026-08-07): the SECOND org and later do not use this
+ * module at all.** `POST /auth/onboarding/org`'s `orgSlug` branch is gated by that org's own,
+ * per-org code instead (`./org-claim-token.ts`) — a deliberately separate mechanism, because this
+ * module's one code is process-wide and the whole point of D11 is that org one's owner (who
+ * already holds this code, having used it) must not also be able to claim org two with it.
  */
 
 export type BootstrapClaimMode = 'open' | 'preset' | 'generated';
@@ -65,13 +71,18 @@ export type MintToken = () => string;
 
 const defaultMint: MintToken = () => randomBytes(16).toString('hex');
 
-export function resolveBootstrapClaim(env: NodeJS.ProcessEnv, mint: MintToken = defaultMint): BootstrapClaim {
+export function resolveBootstrapClaim(
+  env: NodeJS.ProcessEnv,
+  mint: MintToken = defaultMint,
+): BootstrapClaim {
   // Auth off ⇒ `/auth/*` is never mounted, so nothing can consult this. Returning `open` (rather
   // than minting a code nobody will ever be asked for) keeps D1's "unset means zero I/O" literally
   // true even if some future caller reaches this on the auth-off path: no randomness is drawn, no
   // banner is produced, nothing is stored.
-  if (resolveAuthProvider(env) === 'none') return { required: false, mode: 'open' };
-  if (env.CEZ_AUTH_BOOTSTRAP_OPEN === '1') return { required: false, mode: 'open' };
+  if (resolveAuthProvider(env) === 'none')
+    return { required: false, mode: 'open' };
+  if (env.CEZ_AUTH_BOOTSTRAP_OPEN === '1')
+    return { required: false, mode: 'open' };
   const preset = env.CEZ_AUTH_BOOTSTRAP_TOKEN?.trim();
   if (preset) return { required: true, mode: 'preset', token: preset };
   return { required: true, mode: 'generated', token: mint() };
@@ -87,7 +98,10 @@ export function resolveBootstrapClaim(env: NodeJS.ProcessEnv, mint: MintToken = 
  * `preset` mode lets an operator choose a short, human-picked secret, and this is a *single*
  * comparison against one known value, which is the exact shape a timing oracle attacks.
  */
-export function matchesBootstrapClaim(claim: BootstrapClaim, supplied: string | undefined): boolean {
+export function matchesBootstrapClaim(
+  claim: BootstrapClaim,
+  supplied: string | undefined,
+): boolean {
   if (!claim.required) return true;
   if (claim.token === undefined) return false; // unreachable: `required` implies a token
   if (supplied === undefined) return false;
@@ -105,7 +119,10 @@ export function matchesBootstrapClaim(claim: BootstrapClaim, supplied: string | 
  * access: it is imported on the `CEZ_AUTH`-on path only, but keeping it pure is what lets
  * `bootstrap-claim.test.ts` walk every row of the table above without a temp directory.
  */
-export function bootstrapClaimBanner(claim: BootstrapClaim, hasOrg: boolean): string | undefined {
+export function bootstrapClaimBanner(
+  claim: BootstrapClaim,
+  hasOrg: boolean,
+): string | undefined {
   if (hasOrg) return undefined;
   if (claim.mode === 'generated') {
     return (
@@ -134,4 +151,6 @@ export function bootstrapClaimBanner(claim: BootstrapClaim, hasOrg: boolean): st
  * `auth/`. One instance, shared by the route that checks it and the boot banner that prints it,
  * via the ESM module cache — never two resolutions that could mint two different codes.
  */
-export const bootstrapClaim: BootstrapClaim = resolveBootstrapClaim(process.env);
+export const bootstrapClaim: BootstrapClaim = resolveBootstrapClaim(
+  process.env,
+);

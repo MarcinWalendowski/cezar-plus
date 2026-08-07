@@ -31,7 +31,7 @@ vi.mock('./hetzner/tls.ts', async (importOriginal) => {
   return { ...actual, createTlsStep: vi.fn(actual.createTlsStep) };
 });
 
-const { hetzner, SUPERVISOR_PORT_DRY_RUN_FALLBACK } = await import('./hetzner.ts');
+const { hetzner, SUPERVISOR_PORT_DRY_RUN_FALLBACK, orgCreateCommand } = await import('./hetzner.ts');
 const { orgVhost, supervisorVhost } = await import('./hetzner/nginx.ts');
 const { orgSystemdUnit, supervisorSystemdUnit } = await import('./hetzner/systemd-unit.ts');
 const { createTlsStep } = await import('./hetzner/tls.ts');
@@ -297,11 +297,11 @@ describe('hetzner steps() — two provisioning targets, one platform', () => {
     expect(ids).toEqual(['supervisor-user', 'supervisor-systemd', 'nginx', 'tls', 'identity']);
   });
 
-  it('org mode (--org-slug): deps, org user, org systemd, nginx, TLS, verify', () => {
+  it('org mode (--org-slug): deps, org create, org user, org systemd, org register, nginx, TLS, verify', () => {
     const ids = hetzner
       .steps(ctxWith({ state: { domain: 'acme.cezar.example.com', orgSlug: 'acme' } }))
       .map((s) => s.id);
-    expect(ids).toEqual(['deps', 'org-user', 'org-systemd', 'org-register', 'nginx', 'tls', 'identity']);
+    expect(ids).toEqual(['deps', 'org-create', 'org-user', 'org-systemd', 'org-register', 'nginx', 'tls', 'identity']);
   });
 
   it('TLS is required in both modes — never `optional: true` like ubuntu-vps.ts\'s sslStep (D10)', () => {
@@ -486,6 +486,120 @@ describe('hetzner supervisor-systemd / org-systemd — generator wiring + once-o
 });
 
 /**
+ * **`org-create` — D11's first half, unit 8.** ADDED 2026-08-07 (5b/5c/8 scaffold pass). Before
+ * this step, `POST /internal/orgs` had no caller and `orgRegistrationStep`'s `ORG_ID` resolution
+ * always 404'd for a second-and-later org — the "fails SILENTLY from outside" failure mode this
+ * unit's task named explicitly, since an org with no process record ALSO answers 401, identically
+ * to a correct install. These tests assert the loud failure (`StepAborted`) and the generated text,
+ * never execution — same discipline as the rest of this file.
+ */
+describe('hetzner org-create step (D11 POST /internal/orgs)', () => {
+  const ORG = { domain: 'acme.cezar.example.com', orgSlug: 'acme', primaryPort: 4322 };
+
+  const seedSupervisor = () =>
+    saveServerState(
+      { ...freshServerState(), installed: true, primaryPort: 4321, platform: 'hetzner', domain: 'cezar.example.com' },
+      'supervisor-instance',
+    );
+
+  it('runs before every other org-specific step, including org-register and org-user', () => {
+    const ids = hetzner.steps(ctxWith({ state: ORG })).map((s) => s.id);
+    expect(ids.indexOf('org-create')).toBeLessThan(ids.indexOf('org-register'));
+    expect(ids.indexOf('org-create')).toBeLessThan(ids.indexOf('org-user'));
+    expect(ids.indexOf('org-create')).toBeLessThan(ids.indexOf('org-systemd'));
+  });
+
+  it('dry-run prints a preview, prompts for nothing, and creates nothing', async () => {
+    const textCalls: string[] = [];
+    const ui = {
+      ...createAutoUi(),
+      text: async (o: { message: string; initialValue?: string }) => {
+        textCalls.push(o.message);
+        return o.initialValue ?? '';
+      },
+    } as Ui;
+    const ctx = ctxWith({ dryRun: true, ui, state: ORG });
+    const result = await stepById(ctx, 'org-create').run(ctx);
+    expect(textCalls).toHaveLength(0);
+    expect(result?.artifacts).toEqual([]);
+  });
+
+  it('aborts loudly — not with a later silent 401 — when no supervisor instance is recorded', () =>
+    withSandboxedCezHome(async () => {
+      // No seedSupervisor() call: the sandboxed CEZ_HOME is genuinely empty, matching a host where
+      // the supervisor was never provisioned (or its record went missing) — exactly the case that
+      // used to reach `org-register`'s own ORG_ID resolution and 404 with no diagnosable reason.
+      const ctx = ctxWith({ state: ORG });
+      await expect(stepById(ctx, 'org-create').run(ctx)).rejects.toBeInstanceOf(StepAborted);
+    })(),
+  );
+
+  it("prompts for a display name defaulted from the slug, and reads the admin token from its file rather than putting a secret in argv", () =>
+    withSandboxedCezHome(async () => {
+      seedSupervisor();
+      const promptedMessages: string[] = [];
+      let promptedInitial: string | undefined;
+      const ui = {
+        ...createAutoUi(),
+        text: async (o: { message: string; initialValue?: string }) => {
+          promptedMessages.push(o.message);
+          promptedInitial = o.initialValue;
+          return o.initialValue ?? '';
+        },
+      } as Ui;
+      let capturedCommand: string | undefined;
+      const runner: Runner = {
+        capture: async () => ({ code: 0, stdout: '', stderr: '' }), // passwordless-sudo probe: present
+        interactive: async (program, args) => {
+          if (program === 'sudo' && args[0] === 'bash' && args[1] === '-lc') capturedCommand = String(args[2]);
+          return 0;
+        },
+      };
+      const ctx = ctxWith({ ui, runner, state: ORG });
+      await stepById(ctx, 'org-create').run(ctx);
+
+      expect(promptedMessages[0]).toContain('acme');
+      expect(promptedInitial).toBe('Acme'); // defaultOrgNameFromSlug('acme')
+      expect(capturedCommand).toBeDefined();
+      // Reads the token FROM THE FILE via `sed` at run time — `OrgCreateCommandOptions` (below)
+      // never accepts a literal admin-token value in the first place, so there is nothing for this
+      // generator to leak: the only way `CEZ_SUPERVISOR_ADMIN_TOKEN` appears is as the KEY the sed
+      // program matches on, never as `KEY=<value>`.
+      expect(capturedCommand).toContain("sed -n 's/^CEZ_SUPERVISOR_ADMIN_TOKEN=//p'");
+    })(),
+  );
+
+  it('captures the response and prints the bootstrap token — unlike org-register, it must NOT discard it to /dev/null', () => {
+    const command = orgCreateCommand({
+      supervisorEnvFile: '/etc/cezar/hetzner-supervisor.env',
+      supervisorPort: 4321,
+      orgSlug: 'acme',
+      orgName: 'Acme',
+    });
+    expect(command).toContain('POST');
+    expect(command).toContain('http://127.0.0.1:4321/internal/orgs');
+    expect(command).not.toMatch(/internal\/orgs\/\S/); // POSTs the collection, never a resolved :slug sub-path
+    expect(command).not.toMatch(/>\s*\/dev\/null/); // the response must reach TOKEN=, not be thrown away
+    expect(command).toContain('bootstrapToken');
+    expect(command).toMatch(/TOKEN="\$\(/);
+    expect(command).toContain('echo "  $TOKEN"');
+
+    const b64Match = /printf %s '([A-Za-z0-9+/=]+)'/.exec(command);
+    expect(b64Match).not.toBeNull();
+    const decoded = JSON.parse(Buffer.from(b64Match![1]!, 'base64').toString('utf8'));
+    expect(decoded).toEqual({ name: 'Acme', slug: 'acme' });
+  });
+
+  it('undo leaves the org row in place and says why — there is no delete route for it yet', async () => {
+    const notes: string[] = [];
+    const ui = { ...createAutoUi(), note: (m: string) => notes.push(m) } as Ui;
+    const ctx = ctxWith({ ui, state: ORG });
+    await stepById(ctx, 'org-create').undo(ctx, { artifacts: [] });
+    expect(notes.some((m) => m.includes('acme') && m.toLowerCase().includes('no delete route'))).toBe(true);
+  });
+});
+
+/**
  * **Every step's `check()`, both directions.** ADDED 2026-08-07 at the repair stage.
  *
  * `engine.ts` reads `check()` as the resume/self-heal probe: `if (!forced && await step.check(ctx))`
@@ -533,6 +647,7 @@ describe('hetzner step check() — the resume/self-heal probe the engine skips a
   it.each([
     ['supervisor-user', SUPERVISOR],
     ['supervisor-systemd', SUPERVISOR],
+    ['org-create', ORG],
     ['org-user', ORG],
     ['org-systemd', ORG],
     ['org-register', ORG],
@@ -557,6 +672,7 @@ describe('hetzner step check() — the resume/self-heal probe the engine skips a
     for (const [id, state] of [
       ['supervisor-user', SUPERVISOR],
       ['supervisor-systemd', SUPERVISOR],
+      ['org-create', ORG],
       ['org-user', ORG],
       ['org-systemd', ORG],
       ['org-register', ORG],

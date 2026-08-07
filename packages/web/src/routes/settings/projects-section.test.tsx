@@ -63,6 +63,13 @@ type Answers = {
   del?: { status: number; payload: unknown }
   /** Overrides `GET /api/v1/projects`' entries — default `PROJECTS`, carries no `teamId`. */
   projects?: ProjectListEntry[]
+  /** Overrides `GET /auth/teams`. Default simulates `CEZ_AUTH` unset: the SPA catch-all answers
+   *  200 `text/html`, never JSON (`teams-api.ts`'s own auth-off signal). */
+  orgTeams?: { status: number; payload: unknown }
+  /** Overrides a `teamId`-carrying `PATCH /api/v1/projects/:id` (Phase 5c reassignment). Absent
+   *  means the default: apply it against the roster and answer 200, mirroring how `maxParallel`
+   *  PATCHes already behave with no override. */
+  patchTeam?: { status: number; payload: unknown }
 }
 
 function serve(answers: Answers = {}) {
@@ -103,6 +110,13 @@ function serve(answers: Answers = {}) {
       const method = init?.method ?? 'GET'
       const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined
       requests.push({ method, url, body })
+      if (url === '/auth/teams' && method === 'GET') {
+        if (answers.orgTeams) return json(answers.orgTeams.payload, answers.orgTeams.status)
+        // Default: `CEZ_AUTH` unset ⇒ `/auth/*` was never registered ⇒ the SPA catch-all answers
+        // with `index.html` — 200, but NOT `application/json` (`teams-api.ts`'s own auth-off
+        // signal, mirroring `onboarding-api.ts#probeOnboarding`'s).
+        return new Response('<!doctype html>', { status: 200, headers: { 'content-type': 'text/html' } })
+      }
       if (url === '/api/v1/projects' && method === 'GET') return json(registry)
       if (url === '/api/v1/workspace/config' && method === 'GET') return json(config)
       if (url === '/api/v1/workspace/config' && method === 'PUT') {
@@ -115,9 +129,20 @@ function serve(answers: Answers = {}) {
         const id = url.split('/').pop() ?? ''
         const entry = registry.projects.find((p) => p.id === id)
         if (!entry) return json({ error: `unknown project: ${id}` }, 404)
-        const mp = body?.maxParallel
-        if (mp === null) delete entry.maxParallel
-        else entry.maxParallel = mp as number
+        if ('teamId' in (body ?? {})) {
+          if (answers.patchTeam) return json(answers.patchTeam.payload, answers.patchTeam.status)
+          const teamId = body?.teamId as string
+          const team = (
+            answers.orgTeams?.payload as { teams?: { id: string; name: string }[] } | undefined
+          )?.teams?.find((t) => t.id === teamId)
+          entry.teamId = teamId
+          entry.teamName = team?.name ?? teamId
+        }
+        if ('maxParallel' in (body ?? {})) {
+          const mp = body?.maxParallel
+          if (mp === null) delete entry.maxParallel
+          else entry.maxParallel = mp as number
+        }
         return json({ project: entry })
       }
       if (url.startsWith('/api/v1/projects/') && method === 'DELETE') {
@@ -179,6 +204,9 @@ const maxParallelSelect = (id: string) =>
   row(id)?.querySelector<HTMLSelectElement>('[data-slot="project-max-parallel"]')
 const teamFilterSelect = () => document.querySelector<HTMLSelectElement>('[data-slot="project-team-filter"]')
 const teamBadge = (id: string) => row(id)?.querySelector<HTMLElement>('[data-slot="project-team"]')
+const teamPicker = (id: string) =>
+  row(id)?.querySelector<HTMLSelectElement>('[data-slot="project-team-picker"]')
+const orgTeamsRequests = () => requests.filter((r) => r.method === 'GET' && r.url === '/auth/teams')
 
 afterEach(() => {
   act(() => resetToasts())
@@ -377,15 +405,109 @@ describe('Global settings → Projects', () => {
     it('shows no filter and no team badges when CEZ_AUTH is unset — the board is unchanged', async () => {
       // The default PROJECTS fixture carries no `teamId` at all, which is exactly the shape
       // every project has with `CEZ_AUTH` unset: no `project_teams` row was ever written.
+      // `serve()`'s default `/auth/teams` answer is the SPA catch-all (200, non-JSON) — the real
+      // shape a `CEZ_AUTH`-unset deployment sends, not a mock that merely omits the route.
       serve()
       renderProjects()
       await waitFor(() => expect(rows()).toHaveLength(3))
+      // Let the org-teams fetch actually resolve before asserting absence, so this is a decisive
+      // control rather than a check that could pass by outrunning the request.
+      await waitFor(() => expect(orgTeamsRequests()).toHaveLength(1))
       expect(teamFilterSelect()).toBeNull()
       expect(document.querySelectorAll('[data-slot="project-team"]')).toHaveLength(0)
       // Same three rows, same text, as the unfiltered baseline test above — the board itself is
       // untouched by this feature existing in the code.
       expect(row('shop-backend')?.textContent).toContain('/home/piotr/cezar/projects/shop-backend')
       expect(row('old-spike')?.textContent).toContain('folder not found')
+    })
+
+    it('phase 5c: an org team with NO registered projects still appears in the filter, and selecting it shows zero rows', async () => {
+      // The gap phase 5c closes: before this, `teamOptions` could only ever list a team already
+      // carrying a project (`teamOf`, derived from `GET /api/v1/projects` alone). Here the org has
+      // THREE real teams (`GET /auth/teams`) but only two are attached to a project — 'design' has
+      // none, which is exactly D2's "engineering, marketing" example one team short of usable.
+      serve({
+        orgTeams: {
+          status: 200,
+          payload: {
+            teams: [
+              {
+                id: 'team-eng',
+                orgId: 'org-1',
+                name: 'Engineering',
+                slug: 'engineering',
+              },
+              {
+                id: 'team-mkt',
+                orgId: 'org-1',
+                name: 'Marketing',
+                slug: 'marketing',
+              },
+              {
+                id: 'team-design',
+                orgId: 'org-1',
+                name: 'Design',
+                slug: 'design',
+              },
+            ],
+          },
+        },
+      })
+      renderProjects()
+      await waitFor(() => expect(rows()).toHaveLength(3))
+
+      // The select does not exist at all until `teamOptions` is non-empty, so `teamFilterSelect()`
+      // itself must be re-queried on every poll — capturing it once before the org-teams fetch
+      // resolves would pin a stale (null) reference.
+      await waitFor(() =>
+        expect(Array.from(teamFilterSelect()?.options ?? []).map((o) => o.textContent)).toEqual([
+          'All teams',
+          'Design',
+          'Engineering',
+          'Marketing',
+        ]),
+      )
+      // No badge anywhere yet — none of the three registered projects carry a `teamId` in this
+      // fixture, only the org-wide roster does. The option is real; nothing is filtered TO it yet.
+      expect(document.querySelectorAll('[data-slot="project-team"]')).toHaveLength(0)
+
+      fireEvent.change(teamFilterSelect()!, {
+        target: { value: 'team-design' },
+      })
+      // An empty team is a VALID, working filter selection — zero rows, not a missing option and
+      // not the whole board falling back to "All teams".
+      await waitFor(() => expect(rows()).toHaveLength(0))
+      expect(document.querySelector('[data-slot="projects-empty"]')).toBeNull()
+
+      fireEvent.change(teamFilterSelect()!, { target: { value: '' } })
+      await waitFor(() => expect(rows()).toHaveLength(3))
+    })
+
+    it('a failed org-teams fetch degrades to the phase-5 project-derived filter, not a broken board', async () => {
+      const withTeams = [
+        { ...PROJECTS[0], teamId: 'team-eng', teamName: 'Engineering' },
+        { ...PROJECTS[1] },
+        { ...PROJECTS[2] },
+      ] as ProjectListEntry[]
+      serve({
+        projects: withTeams,
+        orgTeams: { status: 500, payload: { error: 'boom' } },
+      })
+      renderProjects(withTeams)
+      await waitFor(() => expect(rows()).toHaveLength(3))
+      await waitFor(() => expect(orgTeamsRequests()).toHaveLength(1))
+
+      // The registry-derived option still shows up — a broken org-teams call only forfeits the
+      // extra, not-yet-used teams; it must not take the board's own data down with it. Asserted
+      // inside `waitFor`: the failed fetch settling into react-query's error state is itself async,
+      // separate from `orgTeamsRequests()` merely recording that the request was sent.
+      await waitFor(() =>
+        expect(Array.from(teamFilterSelect()?.options ?? []).map((o) => o.textContent)).toEqual([
+          'All teams',
+          'Engineering',
+        ]),
+      )
+      expect(row('cezar')?.textContent).toContain('/home/piotr/Projects/cezar')
     })
 
     it('filters the board by team once projects carry one, and clears back to "All teams"', async () => {
@@ -445,6 +567,113 @@ describe('Global settings → Projects', () => {
       expect(rows()).toHaveLength(1)
       expect(row('cezar')).not.toBeNull()
       expect(document.querySelector('[data-slot="projects-empty"]')).toBeNull()
+    })
+  })
+
+  describe("reassigning a project's team (5c, D2/D4)", () => {
+    const ORG_TEAMS = {
+      status: 200,
+      payload: {
+        teams: [
+          {
+            id: 'team-eng',
+            orgId: 'org-1',
+            name: 'Engineering',
+            slug: 'engineering',
+          },
+          {
+            id: 'team-mkt',
+            orgId: 'org-1',
+            name: 'Marketing',
+            slug: 'marketing',
+          },
+        ],
+      },
+    }
+
+    it('has no Team column at all when CEZ_AUTH is unset', async () => {
+      serve()
+      renderProjects()
+      await waitFor(() => expect(rows()).toHaveLength(3))
+      await waitFor(() => expect(orgTeamsRequests()).toHaveLength(1))
+      expect(document.querySelector('[data-slot="project-team-picker"]')).toBeNull()
+      expect(screen.queryByText('Team')).toBeNull()
+    })
+
+    it('PATCHes the new teamId, shows a confirmation, and the row reflects the move', async () => {
+      const withTeams = [
+        { ...PROJECTS[0], teamId: 'team-eng', teamName: 'Engineering' },
+        { ...PROJECTS[1] },
+        { ...PROJECTS[2] },
+      ] as ProjectListEntry[]
+      serve({ projects: withTeams, orgTeams: ORG_TEAMS })
+      renderProjects(withTeams)
+      await waitFor(() => expect(rows()).toHaveLength(3))
+      await waitFor(() => expect(teamPicker('cezar')).not.toBeNull())
+
+      expect(teamPicker('cezar')!.value).toBe('team-eng')
+      fireEvent.change(teamPicker('cezar')!, { target: { value: 'team-mkt' } })
+
+      await waitFor(() =>
+        expect(patches()).toEqual([
+          {
+            method: 'PATCH',
+            url: '/api/v1/projects/cezar',
+            body: { teamId: 'team-mkt' },
+          },
+        ]),
+      )
+      await waitFor(() => expect(teamPicker('cezar')!.value).toBe('team-mkt'))
+      await waitFor(() =>
+        expect(screen.getByRole('status').textContent).toContain('moved to Marketing'),
+      )
+    })
+
+    it('a project with no team yet shows a dash, not a picker with no correct starting value', async () => {
+      const withTeams = [
+        { ...PROJECTS[0], teamId: 'team-eng', teamName: 'Engineering' },
+        { ...PROJECTS[1] }, // shop-backend — no team
+        { ...PROJECTS[2] },
+      ] as ProjectListEntry[]
+      serve({ projects: withTeams, orgTeams: ORG_TEAMS })
+      renderProjects(withTeams)
+      await waitFor(() => expect(rows()).toHaveLength(3))
+      await waitFor(() => expect(teamPicker('cezar')).not.toBeNull())
+
+      expect(teamPicker('shop-backend')).toBeNull()
+      expect(row('shop-backend')?.textContent).toContain('—')
+    })
+
+    it('a server refusal (D12: not an owner/admin) surfaces as an error toast and reverts the select', async () => {
+      const withTeams = [
+        { ...PROJECTS[0], teamId: 'team-eng', teamName: 'Engineering' },
+        { ...PROJECTS[1] },
+        { ...PROJECTS[2] },
+      ] as ProjectListEntry[]
+      serve({
+        projects: withTeams,
+        orgTeams: ORG_TEAMS,
+        patchTeam: {
+          status: 403,
+          payload: {
+            error: "only an owner or admin may reassign a project's team",
+          },
+        },
+      })
+      renderProjects(withTeams)
+      await waitFor(() => expect(rows()).toHaveLength(3))
+      await waitFor(() => expect(teamPicker('cezar')).not.toBeNull())
+
+      fireEvent.change(teamPicker('cezar')!, { target: { value: 'team-mkt' } })
+
+      await waitFor(() =>
+        expect(screen.getByRole('status').textContent).toContain(
+          "only an owner or admin may reassign a project's team",
+        ),
+      )
+      // The registry never actually changed server-side, so the invalidated refetch brings the
+      // select right back to what it already was — not a value the UI pretended to accept.
+      await waitFor(() => expect(teamPicker('cezar')!.value).toBe('team-eng'))
     })
   })
 })

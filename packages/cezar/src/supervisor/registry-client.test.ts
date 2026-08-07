@@ -131,6 +131,26 @@ describe('openRegistryClient — reads', () => {
     expect(await client.getProjectTeam('/repo/unclaimed')).toBeUndefined();
   });
 
+  /**
+   * ADDED 2026-08-07 (5b/5c/8 repair stage), alongside the supervisor-side tightening of
+   * `GET /internal/project-teams/by-root`. A root claimed by a DIFFERENT org now answers 403 rather
+   * than handing over that org's row, and this pins the two consequences that matter to `server.ts`:
+   * it is NOT folded into the `undefined` an unclaimed root produces (which would make
+   * `mayActOnRoot` read a foreign claim as "unclaimed, anyone may act" — the fail-OPEN shape D4
+   * exists to prevent), and it surfaces as the `unauthorized` code `mayActOnRoot`'s fail-CLOSED
+   * catch already refuses on.
+   */
+  it('getProjectTeam raises `unauthorized` — never `undefined` — for a root claimed by ANOTHER org', async () => {
+    const fetchImpl = vi.fn(async () =>
+      fakeResponse(403, { error: 'forbidden: this credential does not belong to that organization' }),
+    );
+    const client = openRegistryClient({ ...baseOptions, fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(client.getProjectTeam('/repo/someone-elses')).rejects.toMatchObject({
+      name: 'RegistryClientError',
+      code: 'unauthorized',
+    });
+  });
+
   it('getTeamById returns undefined, not null, for an unknown team', async () => {
     const fetchImpl = vi.fn(async () => fakeResponse(200, { team: null }));
     const client = openRegistryClient({ ...baseOptions, fetchImpl: fetchImpl as unknown as typeof fetch });
@@ -349,8 +369,14 @@ describe('openRegistryClient — against a REAL createSupervisorApp (no mocked f
     const identityStore = IdentityStore.open(await directory('cezar-registry-client-identity-'));
     const orgProcessRegistry = OrgProcessRegistryStore.open(await directory('cezar-registry-client-orgproc-'));
     const app = createSupervisorApp({
+      // Empty routers for all four `/auth/*` families: this suite drives `/internal/*` only, and
+      // the four are required deps precisely so a REAL deployment cannot forget one (see
+      // `supervisor/server.ts`'s module doc). Their own coverage is `server.test.ts`'s
+      // `describe('createSupervisorApp — serves 5b invites and 5c team management')`.
       authRoutes: new Hono(),
       onboardingRoutes: new Hono(),
+      inviteRoutes: new Hono(),
+      teamRoutes: new Hono(),
       sessionResolver: { resolveFromCookieHeader: () => null },
       identityStore,
       orgProcessRegistry,

@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { FoldersIcon } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
@@ -25,6 +25,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
 import { SettingsField } from './settings-field'
+import { listOrgTeams } from './teams-api'
 
 /**
  * Global settings → Projects (multi-project spec, step 4.4; mockup
@@ -53,10 +54,10 @@ import { SettingsField } from './settings-field'
  */
 
 /**
- * Team filtering (D5, spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md` phase 5): "Team is
- * metadata on a project used for grouping and filtering, NOT a scope." No URL segment, no route
- * change — this reads `teamId`/`teamName` off the SAME `GET /api/v1/projects` entry every other
- * column already reads, and filters client-side.
+ * Team filtering (D5, spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`, phases 5/5c): "Team
+ * is metadata on a project used for grouping and filtering, NOT a scope." No URL segment, no
+ * route change — this reads `teamId`/`teamName` off the SAME `GET /api/v1/projects` entry every
+ * other column already reads, and filters client-side.
  *
  * `teamId`/`teamName` are optional on `ProjectListEntry` (`packages/contract/src/projects.ts`) and
  * populated by `GET /api/v1/projects` only for a root the caller's own org has claimed. With
@@ -67,6 +68,30 @@ import { SettingsField } from './settings-field'
 function teamOf(project: ProjectListEntry): { id: string; label: string } | null {
   if (!project.teamId) return null
   return { id: project.teamId, label: project.teamName ?? project.teamId }
+}
+
+/**
+ * Phase 5c: now that an org can hold more than its one original default team (5c's create/rename
+ * surface), `teamOptions` deriving purely from `teamOf` above — i.e. only teams a REGISTERED
+ * PROJECT already carries — undercounts. A freshly-created, still-empty team (D2's examples,
+ * `engineering` / `marketing`) could never be offered as something to filter by, which is the gap
+ * `RegistryTable`'s `teamOptions` closes below by also reading the org's full roster from
+ * `GET /auth/teams` (`teams-api.ts`).
+ *
+ * A soft query, deliberately: `listOrgTeams` already folds `CEZ_AUTH` unset into `[]` (the SPA
+ * catch-all, non-JSON, is not an error), and a genuine failure here (network, 5xx) is left
+ * un-retried and simply contributes no extra options rather than blocking or erroring the whole
+ * pane — `registry.projects` (and the `teamOf`-derived options already proven at phase 5) render
+ * regardless of whether this call ever resolves. Not in `@/api/queries`'s shared registry: like
+ * `onboarding.tsx#useOnboardingProbe`, nothing else in the cockpit reads org teams, so a local key
+ * avoids adding a workspace-wide query the rest of the app never touches.
+ */
+function useOrgTeams() {
+  return useQuery({
+    queryKey: ['settings', 'org-teams'] as const,
+    queryFn: ({ signal }) => listOrgTeams(signal),
+    retry: false,
+  })
 }
 
 /** Which project the confirm dialog is about — `null` while it is closed. */
@@ -267,18 +292,23 @@ function RegistryTable({
   const [confirming, setConfirming] = useState<Confirming>(null)
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null)
   const remove = useRemoveProject()
+  const orgTeams = useOrgTeams()
 
-  // The filter's whole option set: distinct teams actually present on a registered project.
-  // Empty under `CEZ_AUTH` unset, and empty for any deployment where no project has been
-  // assigned a team yet — either way, no data means no filter, never an empty dropdown.
+  // The filter's whole option set: the org's REAL team roster (`GET /auth/teams`, so an
+  // as-yet-empty team is selectable), unioned with any team a registered project carries that the
+  // org list somehow missed — belt-and-suspenders for a query that failed or hasn't resolved yet,
+  // never a second source of truth (both name the same team the same way when they agree). Empty
+  // under `CEZ_AUTH` unset, and empty for any deployment with exactly its one original team — no
+  // data means no filter, never an empty dropdown.
   const teamOptions = useMemo(() => {
     const byId = new Map<string, string>()
+    for (const team of orgTeams.data ?? []) byId.set(team.id, team.name)
     for (const project of registry.projects) {
       const team = teamOf(project)
       if (team && !byId.has(team.id)) byId.set(team.id, team.label)
     }
     return Array.from(byId, ([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label))
-  }, [registry.projects])
+  }, [registry.projects, orgTeams.data])
 
   // A selection that no longer names a team actually present (its last project was removed, or
   // reassigned) is treated as cleared rather than filtering everything away — the alternative is
@@ -291,6 +321,12 @@ function RegistryTable({
     effectiveTeamId === null
       ? registry.projects
       : registry.projects.filter((project) => teamOf(project)?.id === effectiveTeamId)
+
+  // Phase 5c: the reassignment picker's own gate is the SAME `teamOptions.length > 0` signal the
+  // filter row above already uses — no team data (CEZ_AUTH unset, or a genuinely team-less org)
+  // means no column, not a column full of dashes. This is what makes the picker "invisible", not
+  // merely disabled, under CEZ_AUTH unset (this file's own module doc comment on `teamOf`).
+  const showTeamColumn = teamOptions.length > 0
 
   const confirmRemoval = () => {
     if (!confirming) return
@@ -345,6 +381,7 @@ function RegistryTable({
                 <th scope="col" className="px-3 py-2 font-medium">Project</th>
                 <th scope="col" className="px-3 py-2 font-medium">Status</th>
                 <th scope="col" className="px-3 py-2 font-medium">Max parallel</th>
+                {showTeamColumn ? <th scope="col" className="px-3 py-2 font-medium">Team</th> : null}
                 <th scope="col" className="px-3 py-2 font-medium">Added</th>
                 <th scope="col" className="px-3 py-2 font-medium text-right">Actions</th>
               </tr>
@@ -358,6 +395,7 @@ function RegistryTable({
                   workspaceMax={workspaceMax}
                   disabled={remove.isPending}
                   onRemove={() => setConfirming(project)}
+                  teamOptions={showTeamColumn ? teamOptions : null}
                 />
               ))}
             </tbody>
@@ -400,12 +438,18 @@ function ProjectRow({
   workspaceMax,
   disabled,
   onRemove,
+  teamOptions,
 }: {
   project: ProjectListEntry
   isBoot: boolean
   workspaceMax: number
   disabled: boolean
   onRemove: () => void
+  /** `null` when `RegistryTable` decided the Team column itself is not shown (no team data at
+   *  all — CEZ_AUTH unset, this file's own inertness contract). Non-null, including `[]`, means
+   *  the column IS rendered; see `TeamPicker`'s own comment for why a `[]` case can't actually
+   *  happen given how `RegistryTable` derives it. */
+  teamOptions: { id: string; label: string }[] | null
 }) {
   return (
     <tr data-slot="project-row" data-project={project.id} className="border-b border-border last:border-0">
@@ -434,6 +478,11 @@ function ProjectRow({
       <td className="px-3 py-2">
         <MaxParallelSelect project={project} workspaceMax={workspaceMax} />
       </td>
+      {teamOptions ? (
+        <td className="px-3 py-2">
+          <TeamPicker project={project} teamOptions={teamOptions} />
+        </td>
+      ) : null}
       <td className="px-3 py-2 tabular-nums text-soft-foreground">{shortDate(project.addedAt)}</td>
       <td className="px-3 py-2 text-right">
         <Button
@@ -454,6 +503,84 @@ function ProjectRow({
         </Button>
       </td>
     </tr>
+  )
+}
+
+/**
+ * Per-project team reassignment (D2/D4, Phase 5c: "a project can be moved between two real
+ * teams" — spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`'s own phase-table wording).
+ * The write side of this was already wired end to end before this pane existed:
+ * `identity-store.ts#updateProjectTeam`, `PATCH /api/v1/projects/:projectId`'s `teamId` field,
+ * `client.ts#updateProject`, `useUpdateProject` — this component is the one piece that was
+ * missing, a control that actually calls it.
+ *
+ * Mirrors `MaxParallelSelect` immediately below: bound straight to the server value
+ * (`project.teamId`), saved on change, and `useUpdateProject`'s shared `onSuccess` (queries.ts)
+ * invalidates the projects list so a successful move re-renders every row — including the
+ * static `project-team` badge above, which is left untouched by this file (see `RegistryTable`'s
+ * own comment on why the column is additive rather than a replacement).
+ *
+ * **No client-side role check.** D12 gates team reassignment to `owner`/`admin`, and this pane
+ * does not try to guess that client-side — same "no local admin probe" choice
+ * `teams-panel.tsx`'s create/rename form already makes: a `member` sees the same picker an
+ * `owner`/`admin` does and would learn the boundary from the server's own refusal, surfaced here
+ * as an error toast rather than a silently-reverted select. **As of this pass `PATCH
+ * /api/v1/projects/:projectId`'s `teamId` branch (`server.ts`) has no such check — it only
+ * verifies same-org via `mayActOnRoot`, not role — so today a `member` CAN reassign a project's
+ * team.** That is a gap against D12's own text, not a decision this file makes: `server.ts` is
+ * outside this unit's ownership (team CRUD store+HTTP is a different Fill unit), so it is reported
+ * rather than fixed here. This component is written for the D12-compliant server it should be
+ * talking to — see `describe("reassigning a project's team...")`'s own 403 test in this file's
+ * test twin, which exercises the CLIENT's handling of a refusal without claiming the server sends
+ * one today.
+ *
+ * **`teamOptions` is never actually empty when this renders.** `RegistryTable` only mounts this
+ * column at all when `teamOptions.length > 0`, and that array always contains THIS project's own
+ * team when it has one (unioned in via `teamOf(project)`) — so the value bound to `<select>` is
+ * always one of its own `<option>`s. A project with no team yet (`project.teamId === undefined` —
+ * a legacy root claimed before this org had more than its default team) has nothing to reassign:
+ * `updateProjectTeam`'s own docblock is explicit that it moves an EXISTING claim rather than
+ * creating one, so that row renders a plain dash instead of a select with no correct starting
+ * value.
+ */
+function TeamPicker({
+  project,
+  teamOptions,
+}: {
+  project: ProjectListEntry
+  teamOptions: { id: string; label: string }[]
+}) {
+  const update = useUpdateProject()
+  if (project.teamId === undefined) {
+    return <span className="text-[12px] text-soft-foreground">—</span>
+  }
+  const currentTeamId = project.teamId
+  return (
+    <select
+      aria-label={`Team for ${project.name}`}
+      data-slot="project-team-picker"
+      value={currentTeamId}
+      disabled={update.isPending}
+      onChange={(event) => {
+        const next = event.target.value
+        if (next === currentTeamId) return
+        const label = teamOptions.find((team) => team.id === next)?.label ?? next
+        update.mutate(
+          { id: project.id, teamId: next },
+          {
+            onSuccess: () => toast(`${project.name} moved to ${label}`),
+            onError: (error: Error) => toast(error.message, { tone: 'danger' }),
+          },
+        )
+      }}
+      className="block w-40 rounded-md border border-input bg-card px-2 py-1.5 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50"
+    >
+      {teamOptions.map((team) => (
+        <option key={team.id} value={team.id}>
+          {team.label}
+        </option>
+      ))}
+    </select>
   )
 }
 

@@ -33,9 +33,18 @@ platforms slot in without touching the engine.
 > gets through is the same unix user. `hetzner` gives each organization its own
 > unix user, its own `CEZ_HOME` and its own systemd unit, and routes to it by
 > hostname. It is also the only one where you sign in as **yourself** rather than
-> as the box. Read its guide before choosing it: it is a bigger install, it needs
-> a wildcard-ish DNS setup and an identity provider, and there is a real
-> limitation about creating the *second* organization that it states up front.
+> as the box. Read its guide before choosing it: it is a bigger install, and it
+> needs a wildcard-ish DNS setup and an identity provider.
+>
+> **CORRECTED 2026-08-07 (phases 5b/5c/8, spec D11).** This paragraph used to end
+> "and there is a real limitation about creating the *second* organization that it
+> states up front". That limitation is gone: `server-install --platform hetzner
+> --org-slug <slug>` now creates the organization as well as its infrastructure,
+> via the supervisor's admin-only `POST /internal/orgs`, and prints a one-time
+> per-org claim code its intended owner redeems at the login host. What has *not*
+> changed is that creating an organization stays an **operator** action — a
+> browser request from an existing org's owner cannot create one. See
+> [hetzner.md](./hetzner.md).
 
 > **Several domains on one box?** `ubuntu-vps` can host multiple independent
 > cockpits — add `--domain <host>` to install/deploy/uninstall a separate

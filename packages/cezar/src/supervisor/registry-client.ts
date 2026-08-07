@@ -18,7 +18,7 @@ import type { ProjectTeam, Team } from '../auth/types.ts';
  * `IdentityStore` directly, it now asks the ONE authoritative registry — the supervisor's own
  * `IdentityStore`, reached over its loopback HTTP surface — through the client built here. Same
  * method names as `IdentityStore#{listProjectTeams,listTeams,getTeamById,getProjectTeam,
- * createProjectTeam,deleteProjectTeam}`, wrapped `async` (an HTTP round trip can never be
+ * createProjectTeam,updateProjectTeam,deleteProjectTeam}`, wrapped `async` (an HTTP round trip can never be
  * synchronous, unlike the local store's zero-cache disk reads) so `server/server.ts`'s
  * `openProjectTeamRegistry()` seam can swap this in for the local implementation without either
  * call site knowing which one it got.
@@ -51,6 +51,23 @@ import type { ProjectTeam, Team } from '../auth/types.ts';
  * boundary the in-process call never had to cross. `POST /internal/project-teams`'s body `orgId`
  * needs the identical check for the identical reason — it is the actual D4 write.
  *
+ * **CORRECTED 2026-08-07 (5b/5c/8 repair stage): root-keyed lookups ARE org-scoped, and the
+ * paragraph below is false as of this change.** It said `GET`/`DELETE .../by-root` are gated by
+ * authentication alone because "`mayActOnRoot` needs to see ANOTHER org's claim to correctly refuse
+ * a cross-org write". `DELETE` had already been tightened at the phase-6/7 repair stage (see that
+ * route's own comment: holding org B's secret and calling it destroyed org A's claim); `GET` had
+ * not, which left it the one unscoped verb in the family — org A's secret read org B's `orgId` and
+ * `teamId` off org B's root, 200, while every sibling answered 403. It now calls
+ * `callerMayUseOrgId` on the EXISTING row's `orgId` too.
+ *
+ * The premise about `mayActOnRoot` still holds and is satisfied differently: a foreign claim now
+ * arrives as a 403, `call()` below turns that into `RegistryClientError('unauthorized')`, and
+ * `mayActOnRoot`'s fail-CLOSED `catch` answers `false` — the same refusal, produced by the
+ * supervisor rather than by a client-side org-id comparison. Nothing in `server.ts` changed; the
+ * refusal moved to the side of the boundary that can actually enforce it.
+ *
+ * The original paragraph follows unchanged:
+ *
  * **Root-keyed lookups are intentionally NOT org-scoped**, mirroring `IdentityStore#getProjectTeam`
  * /`#deleteProjectTeam`'s own contract exactly: "does this root belong to anyone, and to whom" (or
  * "release whatever claim this root has") has never been scoped to the caller's own org in-process
@@ -60,8 +77,9 @@ import type { ProjectTeam, Team } from '../auth/types.ts';
  * | Method | Path | Auth-checked against | Request | Response |
  * |---|---|---|---|---|
  * | GET | `/internal/project-teams?orgId=&teamId=` | `orgId` must equal secret's org | — | `{ projectTeams: ProjectTeam[] }` |
- * | GET | `/internal/project-teams/by-root?root=` (root = `encodeURIComponent`, a query param — NOT a path segment) | any active org | — | `{ projectTeam: ProjectTeam }` on 200; **404** (not a `null` body) when the root is unclaimed |
+ * | GET | `/internal/project-teams/by-root?root=` (root = `encodeURIComponent`, a query param — NOT a path segment) | checked against the EXISTING row's `orgId` (TIGHTENED 2026-08-07 — was "any active org") | — | `{ projectTeam: ProjectTeam }` on 200; **404** (not a `null` body) when the root is unclaimed; **403** when it is claimed by a DIFFERENT org, which `call()` raises as `unauthorized` and `mayActOnRoot` fails closed on |
  * | POST | `/internal/project-teams` | body `orgId` must equal secret's org | `{ projectRoot, orgId, teamId }` | success: `{ projectTeam }` at 201. failure: `{ error, code }` at 404/409 |
+ * | PATCH | `/internal/project-teams` (5c, Fill unit 3, ADDED 2026-08-07) | checked against the EXISTING row's `orgId`, never a body-supplied one — mirrors `DELETE /internal/project-teams/by-root`'s own posture exactly (the reassignment can never smuggle a root across the D4 boundary, since there is no `orgId` field on the wire for it to smuggle THROUGH) | `{ projectRoot, teamId }` — no `orgId`, deliberately, matching `IdentityStore#updateProjectTeam`'s own signature | success: `{ projectTeam }` at 200. failure: `{ error, code }` at 404 (`project-root-not-found`/`team-not-found`) or 409 (`team-org-mismatch`) |
  * | DELETE | `/internal/project-teams/by-root?root=` | any active org (authorization already happened via a prior `mayActOnRoot` round trip — see that function's own comment in `server.ts`) | — | `{ released: boolean }` |
  * | GET | `/internal/teams?orgId=` | `orgId` must equal secret's org | — | `{ teams: Team[] }` |
  * | GET | `/internal/teams/:teamId` | any active org (client re-checks `team.orgId` itself, matching `IdentityStore#getTeamById`'s own unscoped contract) | — | `{ team: Team \| null }` |
@@ -139,6 +157,17 @@ export type CreateProjectTeamResult =
   | { readonly ok: true; readonly projectTeam: ProjectTeam }
   | { readonly ok: false; readonly code: CreateProjectTeamErrorCode };
 
+/** Mirrors `IdentityStoreError`'s codes for exactly the checks `updateProjectTeam` performs (5c,
+ *  ADDED 2026-08-07, Fill unit 3) — see that method's own doc comment in `auth/identity-store.ts`.
+ *  Not `org-not-found`: this reassigns an EXISTING claim, so the org half of the check is always
+ *  "does the target team belong to the row's own org" (`team-org-mismatch`), never "does the org
+ *  exist at all". */
+export type UpdateProjectTeamErrorCode = 'project-root-not-found' | 'team-not-found' | 'team-org-mismatch';
+
+export type UpdateProjectTeamResult =
+  | { readonly ok: true; readonly projectTeam: ProjectTeam }
+  | { readonly ok: false; readonly code: UpdateProjectTeamErrorCode };
+
 /** The seam `server/server.ts#openProjectTeamRegistry` swaps this client into — every method the
  *  local `IdentityStore` wrapper also implements, async on both sides so either can be handed to
  *  the same four call sites without them knowing which one they got. */
@@ -148,6 +177,12 @@ export interface ProjectTeamRegistryClient {
   getTeamById(teamId: string): Promise<Team | undefined>;
   getProjectTeam(root: string): Promise<ProjectTeam | undefined>;
   createProjectTeam(input: { projectRoot: string; orgId: string; teamId: string }): Promise<CreateProjectTeamResult>;
+  /** 5c, ADDED 2026-08-07 (Fill unit 3) — reassign an already-claimed root to a different team in
+   *  the SAME org. Takes NO `orgId`: mirrors `IdentityStore#updateProjectTeam`'s own signature
+   *  exactly (see that method's doc comment on why — the D4 guard is checked against the EXISTING
+   *  row's org, never a caller-supplied one, so a reassignment can never smuggle a root across the
+   *  process boundary). */
+  updateProjectTeam(root: string, teamId: string): Promise<UpdateProjectTeamResult>;
   deleteProjectTeam(root: string): Promise<boolean>;
 }
 
@@ -171,7 +206,7 @@ export interface RegistryClientOptions {
 const DEFAULT_TIMEOUT_MS = 5_000;
 
 interface CallOptions {
-  method: 'GET' | 'POST' | 'DELETE';
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   path: string;
   body?: unknown;
 }
@@ -263,6 +298,13 @@ export function openRegistryClient(options: RegistryClientOptions = {}): Project
       // into the generic `unexpected` throw below. Mirrors `IdentityStore#getProjectTeam`'s own
       // never-throws-for-unclaimed contract, just reached over HTTP instead of in-process.
       if (res.status === 404) return undefined;
+      // A 403 (the root is claimed by a DIFFERENT org — TIGHTENED 2026-08-07, see the module doc's
+      // corrected paragraph) never reaches here: `call()` above raises it as
+      // `RegistryClientError('unauthorized')`, which `mayActOnRoot`'s fail-closed catch turns into
+      // the refusal a cross-org root has always produced. Deliberately NOT folded into the 404
+      // branch: "nobody claims this root" and "somebody else does" are different facts, and
+      // collapsing them here would make an unreachable supervisor's foreign claim read as
+      // unclaimed, which is the fail-OPEN shape D4 exists to prevent.
       if (!res.ok) throw new RegistryClientError('unexpected', `GET /internal/project-teams/by-root answered ${res.status}`);
       const body = (await res.json().catch(() => null)) as { projectTeam?: ProjectTeam | null } | null;
       if (!body || body.projectTeam === undefined) {
@@ -290,6 +332,26 @@ export function openRegistryClient(options: RegistryClientOptions = {}): Project
         return { ok: false, code };
       }
       throw new RegistryClientError('unexpected', `POST /internal/project-teams answered an unrecognised shape (${res.status})`);
+    },
+
+    /** 5c, ADDED 2026-08-07 (Fill unit 3). No retry — unlike `deleteProjectTeam` below, this is not
+     *  idempotent (two successful reassignments to different teams are two different, both
+     *  meaningful, outcomes), so a transient failure surfaces rather than silently repeating a
+     *  write whose first attempt may already have landed. */
+    async updateProjectTeam(root, teamId) {
+      const res = await call({ method: 'PATCH', path: '/internal/project-teams', body: { projectRoot: root, teamId } });
+      const body = (await res.json().catch(() => null)) as
+        | { projectTeam?: ProjectTeam; code?: unknown }
+        | null;
+      if (!body) throw new RegistryClientError('unexpected', `PATCH /internal/project-teams answered a malformed body (${res.status})`);
+      if (res.ok && body.projectTeam) return { ok: true, projectTeam: body.projectTeam };
+      // Same "trust only an explicit `code`" posture `createProjectTeam` above already takes — see
+      // its own comment for why guessing a code off the status alone is the wrong default here.
+      const code = body.code;
+      if (code === 'project-root-not-found' || code === 'team-not-found' || code === 'team-org-mismatch') {
+        return { ok: false, code };
+      }
+      throw new RegistryClientError('unexpected', `PATCH /internal/project-teams answered an unrecognised shape (${res.status})`);
     },
 
     /**

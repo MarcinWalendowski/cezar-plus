@@ -3,10 +3,17 @@ import type { AuthProvider } from '@open-mercato/cezar-contract';
 import { identityDir } from '../paths.ts';
 import { resolveAuthProvider } from '../server/capabilities.ts';
 import { IdentityStore } from '../auth/identity-store.ts';
+import {
+  bootstrapClaim,
+  bootstrapClaimBanner,
+  type BootstrapClaim,
+} from '../auth/bootstrap-claim.ts';
 import { sessionResolver } from '../auth/session.ts';
 import { authRoutes } from '../auth/routes.ts';
 import { onboardingRoutes } from '../auth/onboarding-routes.ts';
-import { createSupervisorApp } from './server.ts';
+import { inviteRoutes } from '../auth/invite-routes.ts';
+import { teamRoutes } from '../auth/team-routes.ts';
+import { createSupervisorApp, type SupervisorAppDeps } from './server.ts';
 import { orgProcessRegistryDir } from './paths.ts';
 import { OrgProcessRegistryStore } from './org-registry-store.ts';
 
@@ -109,13 +116,93 @@ export interface StartSupervisorOptions {
   readonly bindHost?: string;
 }
 
+/** Everything `buildSupervisorApp` cannot supply itself: the two stores (which open a real
+ *  `CEZ_HOME`) and the admin credential (which reads `process.env`). Every OTHER field of
+ *  `SupervisorAppDeps` is a module-scope singleton this file imports, which is exactly the wiring
+ *  the function below exists to make testable. */
+export type SupervisorAppEnvironment = Pick<
+  SupervisorAppDeps,
+  'identityStore' | 'orgProcessRegistry' | 'adminToken'
+>;
+
+/**
+ * The route wiring, split out of `startSupervisor` so it can be exercised without binding a port
+ * — **ADDED 2026-08-07 (5b/5c/8 repair stage), because it was the one place nothing tested.**
+ *
+ * `SupervisorAppDeps` making `inviteRoutes`/`teamRoutes` REQUIRED enforces the field's *presence*,
+ * never its *value*: replacing both arguments below with `new Hono()` left all 382 test files and
+ * 6851 tests green, because the only suite that proves the supervisor serves those seven routes
+ * (`./server.test.ts`) builds its own deps, and `./index.test.ts` covered the boot gate and nothing
+ * else. That is the same "mounted on one topology and not the other" regression the integration
+ * pass already had to fix once — arriving through the one call site with no test — and on the D10
+ * topology it means every `/auth/invites*` and `/auth/teams*` request 404s, which is the only
+ * topology where a second org (and therefore 5b/5c) exists at all.
+ *
+ * `supervisor/index.test.ts` now drives the app this returns and asserts each `/auth/*` family
+ * answers its own 401, never a 404 — so blanking either singleton fails a test instead of shipping.
+ */
+export function buildSupervisorApp(environment: SupervisorAppEnvironment): ReturnType<typeof createSupervisorApp> {
+  return createSupervisorApp({
+    authRoutes,
+    onboardingRoutes,
+    inviteRoutes,
+    teamRoutes,
+    sessionResolver,
+    ...environment,
+  });
+}
+
+/**
+ * Everything `cezar supervisor` prints at boot, as lines — **pure, and split out at the 5b/5c/8
+ * repair stage because the deployment-wide bootstrap code was never printed by this process at
+ * all.**
+ *
+ * `serveCommand` prints `bootstrapClaimBanner(...)` on its `CEZ_AUTH`-on path; `startSupervisor`
+ * did not, and on a `--platform hetzner` install the supervisor is the ONLY process that mounts
+ * `POST /auth/onboarding/org`. So the default `generated` mode minted a fresh 128-bit code at every
+ * start, the onboarding wizard refused every claim with 403 without it, and the operator had no way
+ * to read it — `docs/server-install/hetzner.md` even told them to run
+ * `journalctl -u cezar-hetzner-<instance> | grep -i bootstrap`, which matched nothing. The
+ * deployment's FIRST organization was therefore unclaimable on the one platform this whole
+ * spec is written for, unless the operator happened to pin `CEZ_AUTH_BOOTSTRAP_TOKEN` at install.
+ *
+ * Same module instance the route checks (`../auth/bootstrap-claim.ts`'s `bootstrapClaim` const, via
+ * the ESM module cache) — never a second `resolveBootstrapClaim` that would mint a second code and
+ * print one while the route demands the other.
+ *
+ * Pure and exported so `index.test.ts` can assert the code IS among the lines, which is the exact
+ * regression above; `startSupervisor` below keeps only the `console.log` loop, on the same
+ * "a CLI-entry side effect is untestable by construction" reasoning `auth-boot-gate.ts` documents.
+ */
+export function supervisorBootLines(input: {
+  readonly provider: AuthProvider;
+  readonly port: number;
+  readonly claim: BootstrapClaim;
+  readonly hasOrg: boolean;
+}): string[] {
+  const lines = [`\n  cezar supervisor — auth provider: ${input.provider}, port ${input.port}\n`];
+  const banner = bootstrapClaimBanner(input.claim, input.hasOrg);
+  if (banner) lines.push(banner);
+  return lines;
+}
+
 /**
  * The real, process-lifetime boot: `if (!gate.proceed) return undefined;` first (mirroring
- * `serveCommand`'s own reduced call site around `auth-boot-gate.ts`), then wires the ALREADY-BUILT,
+ * `serveCommand`'s own reduced call site around `auth-boot-gate.ts`), then opens the two stores and
+ * hands them to `buildSupervisorApp` above — which is where the ALREADY-BUILT,
  * already-tested `auth/routes.ts#authRoutes` / `auth/onboarding-routes.ts#onboardingRoutes` /
+ * `auth/invite-routes.ts#inviteRoutes` / `auth/team-routes.ts#teamRoutes` /
  * `auth/session.ts#sessionResolver` singletons — mounted "exactly as a phase 1-3 single-process
  * deployment does today" (D10) — plus this pass's own `IdentityStore`/`OrgProcessRegistryStore`
  * into `./server.ts#createSupervisorApp`, and starts listening.
+ *
+ * **The last two arrived at the 5b/5c/8 integration pass**, and importing them here is what makes
+ * 5b's invites and 5c's team management reachable on a hosted deployment at all: nginx's per-org
+ * vhost proxies `location /auth/` to THIS process, never to the org's own
+ * (`server-install/platforms/hetzner/nginx.ts`), so a route mounted only by `serveCommand` works on
+ * a laptop and 404s on exactly the host phases 5b/5c/8 were written for. Both are plain synchronous
+ * singletons like `onboardingRoutes`, and both open their `IdentityStore` against `identityDir()` —
+ * which, under D10, is the supervisor's own `CEZ_HOME` and the only identity directory on the box.
  *
  * Binds `bindHost ?? '127.0.0.1'` — loopback by default, on the same "nginx is the perimeter"
  * posture D4/D10 ask of every org process, not a non-loopback default that would make the
@@ -128,10 +215,7 @@ export async function startSupervisor(options: StartSupervisorOptions): Promise<
   const identityStore = IdentityStore.open(identityDir());
   const orgProcessRegistry = OrgProcessRegistryStore.open(orgProcessRegistryDir());
 
-  const app = createSupervisorApp({
-    authRoutes,
-    onboardingRoutes,
-    sessionResolver,
+  const app = buildSupervisorApp({
     identityStore,
     orgProcessRegistry,
     // The operator-tooling credential for `/internal/*` (`./internal-auth.ts`). Read here rather
@@ -141,6 +225,21 @@ export async function startSupervisor(options: StartSupervisorOptions): Promise<
   });
 
   const server = serve({ fetch: app.fetch, port: options.port, hostname: options.bindHost ?? '127.0.0.1' });
-  console.log(`\n  cezar supervisor — auth provider: ${gate.provider}, port ${options.port}\n`);
+  // Best-effort, exactly as `serveCommand` does it: an identity store that cannot be read must not
+  // stop the supervisor from booting, and an unreadable store reads as "no org" anyway
+  // (`readSnapshot` degrades to empty), so this errs towards printing the code.
+  let hasOrg = false;
+  try {
+    hasOrg = identityStore.listOrgs().length > 0;
+  } catch {
+    // unreadable identity home — treat as un-onboarded and print the code
+  }
+  for (const line of supervisorBootLines({
+    provider: gate.provider,
+    port: options.port,
+    claim: bootstrapClaim,
+    hasOrg,
+  }))
+    console.log(line);
   return server;
 }

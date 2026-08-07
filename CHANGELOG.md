@@ -32,6 +32,9 @@
   and every uniqueness rule (one org per slug, one team slug per org, one user per
   `(issuer, subject)`, one membership per pair, **one project root in exactly one organization**)
   is enforced inside that lease rather than at each call site.
+  **CORRECTED 2026-08-07 (phases 5b/5c/8): the sentence below is superseded, and the fact
+  changed, not merely the reason for it — see the "Second organizations, invites and team
+  management" entry further down for the current shape.**
   **Signing in is not tenancy — a hosted cezar still holds exactly one organization.** The
   per-organization process boundary now exists (`cezar supervisor` + `server-install --platform
   hetzner`, below) — but nothing yet creates a second organization to put behind it, so today's
@@ -53,7 +56,9 @@
   a root-owned `0600` `EnvironmentFile` and **registers the org with the supervisor itself**,
   reading both credentials back inside a root shell so neither is ever printed or passed in
   `argv`; uninstalling deprovisions the record rather than leaving the supervisor routing at a
-  unit that no longer exists. **This still does not make cezar multi-tenant today**: onboarding
+  unit that no longer exists. **CORRECTED 2026-08-07 (phases 5b/5c/8): the next sentence is
+  superseded — see the "Second organizations, invites and team management" entry further down.**
+  **This still does not make cezar multi-tenant today**: onboarding
   refuses to create a second organization, and there is no other surface that creates one — so
   the installer's org-registration step resolves `--org-slug` against the supervisor and stops
   there. So this ships the isolation a second organization would need, not a second organization.
@@ -86,6 +91,35 @@
   `CEZ_AUTH_BOOTSTRAP_TOKEN`, or opt back into "whoever signs in first" with
   `CEZ_AUTH_BOOTSTRAP_OPEN=1`. The code stops being printed, and stops granting anything, once
   the organization exists.
+- ✨ **Second organizations, invites and team management (phases 5b/5c/8).** `POST
+  /internal/orgs` — admin-only, authenticated by `CEZ_SUPERVISOR_ADMIN_TOKEN` — creates the org
+  row for every organization after the deployment's first; `server-install --platform hetzner
+  --org-slug <slug>` calls it as part of provisioning, closing the gap the two entries above
+  describe (isolation fully automated, nothing to put behind it). `bootstrapFirstOrg` is renamed
+  `claimOrg`: absent an org id it is unchanged — still the deployment's own self-serve first-org
+  bootstrap; given one it is the new claim path — the first person to sign in **at the
+  deployment's login host** and enter that organization's slug plus its own per-org claim code
+  (never the deployment-wide one the first organization's owner holds) becomes its owner. The
+  onboarding screen a membership-less user lands on carries an "I have an organization code"
+  disclosure for exactly that, collapsed by default so the common case (wait for an invite) still
+  reads as the common case. *(An earlier draft of this entry said "at that org's own hostname",
+  which named a host that serves no wizard: an org's own process runs `CEZ_AUTH=supervisor` and
+  mounts no `/auth/*` route. The claim is keyed on the slug in the request body plus that org's
+  claim-token hash; the hostname is never read.)* A signed-in user with no membership can now be
+  invited rather than told to wait on a surface that doesn't exist: `owner`/`admin` create and
+  revoke invites (`/auth/invites`), and create, rename and delete teams (`/auth/teams`), so the
+  board's team filter can finally hold more than the one default team. Moving a project between
+  its org's teams is a new `teamId` field on `PATCH /api/v1/projects/:id`, and — unlike the
+  `/auth/teams` verbs beside it — **any member of the org can do it today**, since a team is
+  grouping metadata rather than a scope and moving a project between two of them grants and
+  removes no access at all. Whether that field should be `owner`/`admin` like the rest of team
+  management is recorded as an open question in the spec (D12), not decided by omission. **`role`
+  gates org administration and never code
+  execution**: `member` still reaches `POST /api/v1/workflows` and every other agent-run surface
+  exactly as `owner`/`admin` do, because everyone in an org already shares one unix user and one
+  set of agent credentials — a role check in front of code execution would only look like a
+  boundary. **What has not changed: none of this has been run against a real, two-organization
+  host yet** — QA Needed, see the spec's Verification section.
 - ✨ **Agent accounts: run one project on your work login and another on your personal one.**
   The same CLI logged in twice — `CLAUDE_CONFIG_DIR=~/.claude-klaudiusz claude`, or `CODEX_HOME` for
   Codex — is now something cezar can address. Add the extra config folder under **Settings → Agent
@@ -120,6 +154,44 @@
   field are unchanged, and **with `CEZ_AUTH` unset the payload is byte-identical to before.**
 - 🔧 The cockpit's onboarding wizard is code-split, so the zero-config install no longer
   downloads or parses it (≈7 kB off the entry chunk).
+- 🔧 **Global settings shows a "Teams" item on every deployment, including the zero-config one,
+  where the pane then explains the feature needs `CEZ_AUTH`.** Named here rather than quietly
+  fixed: the only way to hide it would be a client-side probe on the auth-off default (the exact
+  I/O that default exists to avoid) or a `capabilities.auth` key, which is the one thing the
+  spec's Risks section forbids and a test enforces. Everything behind the item is inert — one
+  request, no writes, no identity file — and the section's own doc comment records the trade.
+
+## 🐛 Fixes
+*(All of the below are in unreleased code — phases 5b/5c/8 and their repair stage — so nothing
+here regressed a shipped release.)*
+- 🔒 **`cezar supervisor` never printed the bootstrap code, which made a `--platform hetzner`
+  deployment's first organization unclaimable.** `cezar serve` printed it; the supervisor did not
+  — and on that platform the supervisor is the only process that serves the onboarding wizard. The
+  default mode therefore minted a fresh code at every restart, the wizard refused every claim
+  without it, and `docs/server-install/hetzner.md` told operators to grep a journal that never
+  contained it. The only installs that could be claimed were ones that had pinned
+  `CEZ_AUTH_BOOTSTRAP_TOKEN` by hand.
+- 🔒 **A mis-aimed organization claim, or an invite redeemed by someone who already belongs
+  somewhere, used to be irreversible.** Both paths now refuse with `409` and leave the code or
+  invite unspent, instead of burning a single-use credential to produce a membership that grants
+  nothing — one project root maps to exactly one organization, so a second membership is inert by
+  construction, and there is no member-removal surface yet to undo it with.
+- 🔒 **Deleting an organization's last team locked every one of its members out.** Every
+  membership resolves through a team, so an organization with zero teams could not be signed into
+  by anybody, including its owner, and had no route that could create one. `DELETE /auth/teams/:id`
+  now refuses the last team.
+- 🔒 **Two `/auth/*` routes parsed and validated an unauthenticated caller's request body before
+  checking who they were**, answering `400` with the field-by-field schema instead of `401`. The
+  sign-in check is now middleware on both, so the ordering is inherited by any route added later
+  rather than re-decided.
+- 🔒 **`GET /internal/project-teams/by-root` answered for any organization**, while the `PATCH`
+  and `DELETE` beside it were org-scoped — so one organization's per-org secret could read which
+  organization owns a given project root, and probe roots outside its own filesystem.
+- 🔒 **The org-process registry accepted the same `CEZ_SUPERVISOR_SECRET` for two organizations**,
+  which would have let either one's process authenticate as the other. Registration now refuses a
+  secret already held by a different org's active record.
+- 🐛 A slug that the wire schema accepted but the identity store rejected (`Acme Inc`, `-x`, 400
+  characters) answered `500` instead of `400` on team creation and org creation.
 
 # 0.9.2 (2026-08-04)
 

@@ -7,6 +7,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { apiRequest } from '../server/loopback-request.testkit.ts';
 import type { Principal } from '../server/server.ts';
 import { IdentityStore } from '../auth/identity-store.ts';
+import { createInviteRoutes } from '../auth/invite-routes.ts';
+import { createTeamRoutes } from '../auth/team-routes.ts';
+import { matchesOrgClaimToken } from '../auth/org-claim-token.ts';
 import { createSupervisorApp, type SupervisorAppDeps } from './server.ts';
 import { OrgProcessRegistryStore } from './org-registry-store.ts';
 import { verifyForwardedPrincipal } from './forwarded-principal.ts';
@@ -38,14 +41,38 @@ function fakeOnboardingRoutes(): Hono {
  *  `server-install --platform hetzner` reads out of the supervisor's root-owned `EnvironmentFile`. */
 const ADMIN_TOKEN = 'admin-'.padEnd(48, 'a');
 
-async function buildDeps(overrides: Partial<SupervisorAppDeps> = {}): Promise<{ deps: SupervisorAppDeps; identityStore: IdentityStore; registry: OrgProcessRegistryStore }> {
+/**
+ * `identityStore` is deliberately NOT overridable (unlike every other dep). It is the one dep two
+ * things now read: `/internal/*`'s handlers take it straight off `deps`, while `inviteRoutes`/
+ * `teamRoutes` CAPTURE it when they are constructed below — so an override applied by the
+ * `...overrides` spread would leave the two halves of this app reading different stores, and a
+ * `/auth/teams` listing would silently answer `[]` for an org `/internal/orgs` can see. (That is
+ * not hypothetical: it is what the first draft of the 5b/5c mount tests below did.) Tests that
+ * need to seed the store use the one this function returns.
+ */
+type BuildDepsOverrides = Partial<Omit<SupervisorAppDeps, 'identityStore'>>;
+
+async function buildDeps(overrides: BuildDepsOverrides = {}): Promise<{ deps: SupervisorAppDeps; identityStore: IdentityStore; registry: OrgProcessRegistryStore }> {
   const identityStore = IdentityStore.open(await directory('cezar-supervisor-identity-'));
   const registry = OrgProcessRegistryStore.open(await directory('cezar-supervisor-registry-'));
+  // The EFFECTIVE resolver, resolved before the two route families are built: `createInviteRoutes`/
+  // `createTeamRoutes` capture whichever resolver they are handed, so building them against the
+  // default and letting `...overrides` swap `deps.sessionResolver` afterwards would leave the
+  // 5b/5c routes reading a different identity than `/internal/auth-check` does — the exact
+  // "two readings of the input" shape D3's second correction already named once.
+  const sessionResolver = overrides.sessionResolver ?? { resolveFromCookieHeader: () => null };
   const deps: SupervisorAppDeps = {
     authRoutes: fakeAuthRoutes(),
     onboardingRoutes: fakeOnboardingRoutes(),
+    // The REAL 5b/5c factories, not fakes: `authRoutes`/`onboardingRoutes` above are fakes because
+    // the assertion they serve is "this file mounts whatever it is handed". These two carry a
+    // different assertion — that the supervisor actually SERVES invites and team management, the
+    // thing that was missing — and a fake mounted at the same path would satisfy the mount without
+    // proving the surface exists on this process at all.
+    inviteRoutes: createInviteRoutes({ sessionResolver, identityStore }),
+    teamRoutes: createTeamRoutes({ sessionResolver, identityStore }),
     adminToken: ADMIN_TOKEN,
-    sessionResolver: { resolveFromCookieHeader: () => null },
+    sessionResolver,
     identityStore,
     orgProcessRegistry: registry,
     ...overrides,
@@ -96,6 +123,133 @@ describe('createSupervisorApp — mounts authRoutes/onboardingRoutes verbatim', 
     const onboarding = await apiRequest(app, '/auth/onboarding');
     expect(onboarding.status).toBe(200);
     await expect(onboarding.json()).resolves.toEqual({ state: 'needs-org' });
+  });
+});
+
+/**
+ * ADDED 2026-08-07 (5b/5c/8 integration pass). `inviteRoutes`/`teamRoutes` were mounted by
+ * `server/server.ts`'s single-process `createApp` and by nothing here, so on the D10 topology —
+ * where the org vhost proxies `location /auth/` to the SUPERVISOR and never to the org's own
+ * process (`server-install/platforms/hetzner/nginx.ts`) — every 5b/5c route answered 404. That is
+ * the one deployment those phases exist for: a second member (5b) and a second team (5c) are only
+ * reachable on a hosted host, and it was the only place the routes were not.
+ *
+ * These assertions therefore drive the REAL routers over a REAL `IdentityStore`, not the fakes the
+ * block above uses: a fake mounted at `/auth/teams` would prove the mount and prove nothing about
+ * whether the surface exists on this process. The routers' own semantics stay their own suites'
+ * job (`invite-routes.test.ts`, `team-routes.test.ts`) — what is new here is only that the
+ * SUPERVISOR serves them, with its own perimeter (`sameOriginWriteGuard`) and its own D12 gate
+ * intact rather than accidentally re-decided by the second mount point.
+ */
+describe('createSupervisorApp — serves 5b invites and 5c team management (D10 + D12)', () => {
+  /**
+   * Seeds an org in the suite's OWN store (see `buildDeps`'s note on why the store is not
+   * overridable) and returns an app whose resolver answers with `role`. The principal is read
+   * through a mutable binding because the resolver has to be handed to `buildDeps` BEFORE the org
+   * it names exists — the store is what mints the ids.
+   */
+  async function orgWithRole(role: Principal['role']) {
+    let principal: Principal | null = null;
+    const { deps, identityStore } = await buildDeps({ sessionResolver: { resolveFromCookieHeader: () => principal } });
+    const { org, defaultTeam } = await identityStore.createOrg({ name: 'Acme', slug: 'acme' });
+    principal = { kind: 'session', userId: `u-${role}`, orgId: org.id, teamId: defaultTeam.id, role };
+    return { app: createSupervisorApp(deps), store: identityStore, org, defaultTeam };
+  }
+
+  it('an owner reaches BOTH families through the supervisor — not the 404 they answered before', async () => {
+    const { app, store, org, defaultTeam } = await orgWithRole('owner');
+
+    // 5c: the org's teams are listable here, and a SECOND team can be created — D2's own example
+    // (`engineering` beside the default) is what phase 5c exists to make expressible.
+    const listed = await apiRequest(app, '/auth/teams', { headers: { cookie: 'cez_session=whatever' } });
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toEqual({ teams: [{ id: defaultTeam.id, orgId: org.id, name: 'General', slug: 'general' }] });
+
+    const created = await apiRequest(app, '/auth/teams', {
+      method: 'POST',
+      headers: { cookie: 'cez_session=whatever', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Engineering', slug: 'engineering' }),
+    });
+    expect(created.status).toBe(201);
+
+    // 5b: an invite can be minted here, which is the only way this deployment ever gets a second
+    // member (D8 amendment 4: "a phases-4/5 deployment holds exactly one org and exactly one
+    // member" — that stops being true only where this route answers).
+    const invited = await apiRequest(app, '/auth/invites', {
+      method: 'POST',
+      headers: { cookie: 'cez_session=whatever', 'content-type': 'application/json' },
+      body: JSON.stringify({ role: 'member' }),
+    });
+    expect(invited.status).toBe(201);
+    const { invite } = (await invited.json()) as { invite: { id: string; orgId: string; role: string } };
+    // `Invite.id` IS the redeemable token (`contract/src/invites.ts`'s own comment on `redeem`'s
+    // `token` field) — 256 bits of hex, per `invite-routes.ts`'s entropy policy.
+    expect(invite.id).toMatch(/^[0-9a-f]{64}$/);
+    expect(invite).toMatchObject({ orgId: org.id, role: 'member' });
+    // and it really landed in THIS supervisor's identity store, not merely in a response body
+    expect(store.listOrgInvites(org.id).map((row) => row.id)).toEqual([invite.id]);
+  });
+
+  it("D12's gate survives the second mount point: a member is 403 on both admin verbs, and BEFORE validation", async () => {
+    const { app } = await orgWithRole('member');
+
+    // Bodies that would FAIL `jsonZodValidator`: 403 rather than 400 is what proves the role gate
+    // ran first (invariant 3's ordering — the same defect `requireAdmin` had to be moved out of
+    // the handlers to fix on this file's `/internal/*` side).
+    for (const path of ['/auth/teams', '/auth/invites']) {
+      const res = await apiRequest(app, path, {
+        method: 'POST',
+        headers: { cookie: 'cez_session=whatever', 'content-type': 'application/json' },
+        body: JSON.stringify({ nonsense: true }),
+      });
+      expect(res.status).toBe(403);
+    }
+    // …and the member still reads what a member may read.
+    const listed = await apiRequest(app, '/auth/teams', { headers: { cookie: 'cez_session=whatever' } });
+    expect(listed.status).toBe(200);
+  });
+
+  it('no session -> 401 on both families, never the SPA-shaped 404 an unmounted route gives', async () => {
+    const { deps } = await buildDeps();
+    const app = createSupervisorApp(deps);
+    for (const path of ['/auth/teams', '/auth/invites']) {
+      const res = await apiRequest(app, path);
+      expect(res.status).toBe(401);
+    }
+  });
+
+  it('every /auth/* route this app registers is one of the four mounted families — no path exists that no family owns', async () => {
+    const { deps } = await buildDeps();
+    const app = createSupervisorApp(deps);
+    // A `Set`, because `app.routes` carries ONE entry per registered HANDLER, not per route: the
+    // three D12-gated verbs each contribute their `requireOrgAdmin` middleware and their
+    // validator(s) under the same `${method} ${path}` key. De-duplicating is what makes this an
+    // assertion about the route SURFACE rather than about how many handlers each route happens to
+    // stack today.
+    const registered = [
+      ...new Set(
+        app.routes.filter((r) => r.method !== 'ALL' && r.path.startsWith('/auth/')).map((r) => `${r.method} ${r.path}`),
+      ),
+    ].sort();
+    // The two fakes contribute `/auth/ping` + `/auth/logout` + `/auth/onboarding`; everything else
+    // is the real 5b/5c surface. Asserted as an exact set, in both directions, so a route family
+    // dropped from `createSupervisorApp` fails here rather than silently 404ing in production —
+    // which is precisely how the gap this block closes went unnoticed.
+    expect(registered).toEqual(
+      [
+        'GET /auth/ping',
+        'POST /auth/logout',
+        'GET /auth/onboarding',
+        'POST /auth/invites',
+        'GET /auth/invites',
+        'POST /auth/invites/revoke',
+        'POST /auth/invites/redeem',
+        'GET /auth/teams',
+        'POST /auth/teams',
+        'PATCH /auth/teams/:teamId',
+        'DELETE /auth/teams/:teamId',
+      ].sort(),
+    );
   });
 });
 
@@ -157,6 +311,81 @@ describe('createSupervisorApp — GET /internal/orgs, GET /internal/orgs/:slug',
     const missing = await internalRequest(app, '/internal/orgs/nope');
     expect(missing.status).toBe(404);
   });
+});
+
+/**
+ * ADDED 2026-08-07 (5b/5c/8 scaffold pass, D11, Fill unit 6). The org-creation half the D4
+ * addendum and D11 itself both name as the gap: `bootstrapFirstOrg` was `createOrg`'s only
+ * caller, so nothing could ever provision a SECOND org. `POST /internal/orgs` is admin-only
+ * (`requireAdmin`, already registered on this exact path — the negative-credential coverage is
+ * `ADMIN_ONLY`'s job, in the `/internal/* credential guard` suite below, not duplicated here).
+ */
+describe('createSupervisorApp — POST /internal/orgs (D11)', () => {
+  it('creates an org + its default team, and returns a per-org claim code exactly once', async () => {
+    const { deps, identityStore } = await buildDeps();
+    const app = createSupervisorApp(deps);
+
+    const res = await internalRequest(app, '/internal/orgs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Acme', slug: 'acme' }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as {
+      org: { id: string; slug: string; name: string; createdAt: string };
+      team: { id: string; orgId: string; name: string; slug: string };
+      bootstrapToken: string;
+    };
+    expect(body.org).toMatchObject({ slug: 'acme', name: 'Acme' });
+    expect(typeof body.org.createdAt).toBe('string');
+    expect(body.team).toMatchObject({ orgId: body.org.id, name: 'General', slug: 'general' });
+
+    // the hash, never the raw code, is what actually lands on disk — and the response never
+    // echoes it back (the same "the secret is never echoed" posture `toWireOrgProcess` already
+    // applies to `supervisorSecret`, one section down).
+    expect(JSON.stringify(body)).not.toContain('claimTokenHash');
+    const stored = identityStore.getOrgBySlug('acme');
+    expect(stored?.claimTokenHash).toBeTruthy();
+    expect(matchesOrgClaimToken(stored!.claimTokenHash!, body.bootstrapToken)).toBe(true);
+    // and a DIFFERENT code must not verify against this org's hash
+    expect(matchesOrgClaimToken(stored!.claimTokenHash!, 'not-the-real-code')).toBe(false);
+  });
+
+  it('a taken slug answers 409 with a machine-readable code, not a raw 500', async () => {
+    const { deps, identityStore } = await buildDeps();
+    await identityStore.createOrg({ name: 'Acme', slug: 'acme' });
+    const app = createSupervisorApp(deps);
+
+    const res = await internalRequest(app, '/internal/orgs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Acme Two', slug: 'acme' }),
+    });
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({ code: 'org-slug-taken' });
+  });
+
+  /**
+   * ADDED 2026-08-07 (5b/5c/8 repair stage). `createInternalOrgInputSchema.slug` was a bare
+   * `z.string().trim().min(1).max(63)` while the STORE's `slugSchema` enforces DNS label rules, so
+   * an operator's `--org-slug "Bad Slug!"` passed this route's validator and threw a raw `ZodError`
+   * out of `identity-store.ts#createOrg` — past this handler's `IdentityStoreError`-only catch — as
+   * an unhandled 500. The contract carries `slugInputSchema` now.
+   */
+  it.each([['Bad Slug!'], ['UPPER'], ['-leading'], ['trailing-'], ['under_score']])(
+    'a malformed slug %j answers 400, never a 500',
+    async (slug) => {
+      const { deps, identityStore } = await buildDeps();
+      const app = createSupervisorApp(deps);
+      const res = await internalRequest(app, '/internal/orgs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Bad', slug }),
+      });
+      expect(res.status).toBe(400);
+      expect(identityStore.listOrgs()).toEqual([]);
+    },
+  );
 });
 
 describe('createSupervisorApp — /internal/project-teams* (D4\'s root -> org mapping)', () => {
@@ -555,6 +784,8 @@ describe('createSupervisorApp — /internal/* credential guard (D4/D10)', () => 
   const ADMIN_ONLY: ReadonlyArray<readonly [string, string, string]> = [
     ['GET', '/internal/orgs', '/internal/orgs'],
     ['GET', '/internal/orgs/acme', '/internal/orgs/:slug'],
+    // ADDED 2026-08-07 (5b/5c/8 scaffold pass, D11, Fill unit 6).
+    ['POST', '/internal/orgs', '/internal/orgs'],
     ['GET', '/internal/org-processes', '/internal/org-processes'],
     ['GET', '/internal/org-processes/org_x', '/internal/org-processes/:orgId'],
     ['GET', '/internal/org-processes/org_x/health', '/internal/org-processes/:orgId/health'],
@@ -567,6 +798,8 @@ describe('createSupervisorApp — /internal/* credential guard (D4/D10)', () => 
     ['GET', '/internal/project-teams?orgId=org_x', '/internal/project-teams'],
     ['GET', '/internal/project-teams/by-root?root=%2Fsrv%2Frepo', '/internal/project-teams/by-root'],
     ['POST', '/internal/project-teams', '/internal/project-teams'],
+    // ADDED 2026-08-07 (5c, Fill unit 3).
+    ['PATCH', '/internal/project-teams', '/internal/project-teams'],
     ['DELETE', '/internal/project-teams/by-root?root=%2Fsrv%2Frepo', '/internal/project-teams/by-root'],
   ];
   const INTERNAL_ROUTES = [...ADMIN_ONLY, ...ORG_SCOPED].map(([method, path]) => [method, path] as const);
@@ -574,14 +807,27 @@ describe('createSupervisorApp — /internal/* credential guard (D4/D10)', () => 
   it('every /internal/* path the app registers is classified admin-only or org-scoped above', async () => {
     const { deps } = await buildDeps();
     const app = createSupervisorApp(deps);
-    // `app.routes` also carries the `app.use()` middleware entries, whose paths are patterns
-    // (`/internal/*`) rather than routes. Only concrete paths are classifiable.
+    // `app.routes` also carries the `app.use()` middleware entries — some registered against a
+    // wildcard PATTERN (`/internal/*`), some (the `requireAdmin` loop above) against a CONCRETE
+    // path with method `'ALL'` (`/internal/orgs`, `/internal/org-processes`). Neither is a route
+    // this list can classify, so both are filtered out below.
+    //
+    // CORRECTED 2026-08-07 (5b/5c/8 scaffold pass): keyed on `` `${method} ${path}` ``, not path
+    // alone. A path-only key let a second VERB land on an already-classified path — `POST
+    // /internal/orgs`, joining the existing `GET` — read as fully classified while carrying no
+    // `ADMIN_ONLY`/`ORG_SCOPED` entry of its own: `registered` and `classified` were both sets of
+    // bare paths, so `/internal/orgs` being present in `classified` (for the `GET`) made the
+    // assertion below pass with the new `POST` completely unclassified, and — because
+    // `INTERNAL_ROUTES` is built from the same tuples — with no 401/403 negative-credential
+    // coverage either. Confirmed by reverting this fix locally: with `POST /internal/orgs` wired
+    // in `server.ts` but NOT added to `ADMIN_ONLY` below, the OLD (path-only) form of this
+    // assertion still passed. See the spec's D11/D12 scaffold addendum for the full write-up.
     const registered = new Set(
       app.routes
-        .map((r) => r.path)
-        .filter((p) => p.startsWith('/internal/') && !p.includes('*') && p !== '/internal/auth-check'),
+        .filter((r) => r.method !== 'ALL' && r.path.startsWith('/internal/') && !r.path.includes('*') && r.path !== '/internal/auth-check')
+        .map((r) => `${r.method} ${r.path}`),
     );
-    const classified = new Set([...ADMIN_ONLY, ...ORG_SCOPED].map(([, , pattern]) => pattern));
+    const classified = new Set([...ADMIN_ONLY, ...ORG_SCOPED].map(([method, , pattern]) => `${method} ${pattern}`));
     expect([...registered].filter((p) => !classified.has(p)).sort()).toEqual([]);
     // …and nothing in the lists names a route that no longer exists, so a deleted route does not
     // leave a passing assertion behind pretending to guard it.
@@ -690,6 +936,114 @@ describe('createSupervisorApp — /internal/* credential guard (D4/D10)', () => 
       const still = await internalRequest(app, `/internal/project-teams/by-root?root=${encodeURIComponent(root)}`);
       expect(still.status).toBe(200);
       await expect(still.json()).resolves.toMatchObject({ projectTeam: { orgId: orgA.id } });
+    });
+
+    /**
+     * ADDED 2026-08-07 (5b/5c/8 repair stage). `GET .../by-root` was the ONE verb in this family
+     * with no `callerMayUseOrgId` call — the suite around it had cases for POST, PATCH and DELETE
+     * and none for the GET, so the two-directional inventory proved only that someone had
+     * CLASSIFIED the route `ORG_SCOPED`, never that the classification was true. Reproduced holding
+     * org A's secret against org B's row: 200, with org B's `orgId` and `teamId` in the body. Under
+     * D4 every member of org A shares that org's shell and D10 puts `CEZ_SUPERVISOR_SECRET` in its
+     * environment, so the caller is a tenant, not only the operator.
+     */
+    it("org B cannot READ org A's claim by root — the GET this family's other three verbs already refused", async () => {
+      const { app, orgA, teamA } = await twoOrgs();
+      const root = await realProjectDir();
+      expect(
+        (
+          await orgRequest(app, ORG_A_SECRET, '/internal/project-teams', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ projectRoot: root, orgId: orgA.id, teamId: teamA.id }),
+          })
+        ).status,
+      ).toBe(201);
+
+      const peek = await orgRequest(app, ORG_B_SECRET, `/internal/project-teams/by-root?root=${encodeURIComponent(root)}`);
+      expect(peek.status).toBe(403);
+      // Nothing about org A leaks in the refusal body beyond the org id the scoping message names,
+      // and specifically no `teamId` and no `projectTeam` object.
+      expect(await peek.text()).not.toContain(teamA.id);
+
+      // ...while the OWNING org still reads its own row, and admin still reads everything.
+      const own = await orgRequest(app, ORG_A_SECRET, `/internal/project-teams/by-root?root=${encodeURIComponent(root)}`);
+      expect(own.status).toBe(200);
+      await expect(own.json()).resolves.toMatchObject({ projectTeam: { orgId: orgA.id, teamId: teamA.id } });
+      expect((await internalRequest(app, `/internal/project-teams/by-root?root=${encodeURIComponent(root)}`)).status).toBe(200);
+    });
+
+    it("org B cannot REASSIGN org A's project to a different team — the D4 write, reached over HTTP (5c)", async () => {
+      const { app, identityStore, orgA, teamA } = await twoOrgs();
+      const root = await realProjectDir();
+      const engA = await identityStore.createTeam({ orgId: orgA.id, name: 'Engineering', slug: 'engineering' });
+      await orgRequest(app, ORG_A_SECRET, '/internal/project-teams', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectRoot: root, orgId: orgA.id, teamId: teamA.id }),
+      });
+
+      const res = await orgRequest(app, ORG_B_SECRET, '/internal/project-teams', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectRoot: root, teamId: engA.id }),
+      });
+      expect(res.status).toBe(403);
+      // and nothing changed — still org A's, still on its original team
+      const still = await internalRequest(app, `/internal/project-teams/by-root?root=${encodeURIComponent(root)}`);
+      await expect(still.json()).resolves.toMatchObject({ projectTeam: { orgId: orgA.id, teamId: teamA.id } });
+    });
+
+    it("org A CAN reassign its OWN project's team, and the org itself never changes (D4, 5c)", async () => {
+      const { app, identityStore, orgA, teamA } = await twoOrgs();
+      const root = await realProjectDir();
+      const engA = await identityStore.createTeam({ orgId: orgA.id, name: 'Engineering', slug: 'engineering' });
+      await orgRequest(app, ORG_A_SECRET, '/internal/project-teams', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectRoot: root, orgId: orgA.id, teamId: teamA.id }),
+      });
+
+      const res = await orgRequest(app, ORG_A_SECRET, '/internal/project-teams', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectRoot: root, teamId: engA.id }),
+      });
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({ projectTeam: { orgId: orgA.id, teamId: engA.id, projectRoot: root } });
+    });
+
+    it("org A cannot reassign its own root to org B's team — team-org-mismatch, 409 (5c)", async () => {
+      const { app, orgA, teamA, teamB } = await twoOrgs();
+      const root = await realProjectDir();
+      await orgRequest(app, ORG_A_SECRET, '/internal/project-teams', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectRoot: root, orgId: orgA.id, teamId: teamA.id }),
+      });
+
+      const res = await orgRequest(app, ORG_A_SECRET, '/internal/project-teams', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectRoot: root, teamId: teamB.id }),
+      });
+      expect(res.status).toBe(409);
+      await expect(res.json()).resolves.toMatchObject({ code: 'team-org-mismatch' });
+      // still on its original team
+      const still = await internalRequest(app, `/internal/project-teams/by-root?root=${encodeURIComponent(root)}`);
+      await expect(still.json()).resolves.toMatchObject({ projectTeam: { teamId: teamA.id } });
+    });
+
+    it("an unclaimed root -> 404 project-root-not-found (5c)", async () => {
+      const { app } = await twoOrgs();
+      const root = await realProjectDir();
+      const res = await orgRequest(app, ORG_A_SECRET, '/internal/project-teams', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectRoot: root, teamId: 'does-not-matter' }),
+      });
+      expect(res.status).toBe(404);
+      await expect(res.json()).resolves.toMatchObject({ code: 'project-root-not-found' });
     });
 
     it("org B cannot read org A's team NAMES by guessing an id", async () => {

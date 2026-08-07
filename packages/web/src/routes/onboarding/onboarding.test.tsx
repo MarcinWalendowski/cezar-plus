@@ -291,6 +291,65 @@ describe('needs-invite: the second user is told the truth, not shown a form they
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(sent.filter((r) => r.method !== 'GET')).toEqual([])
   })
+
+  /**
+   * ADDED 2026-08-07 (5b/5c/8 repair stage). `hetzner.ts` runs `org-create` for EVERY `--org-slug`
+   * install, so `listOrgs().length > 0` from the deployment's FIRST org onward and this screen is
+   * what every membership-less user sees — including that org's intended owner, holding its
+   * one-time code. Until this form existed the only working claim was a hand-crafted
+   * `POST /auth/onboarding/org`, which made phase 8's own verification row unexecutable through
+   * the product on the only platform that has orgs.
+   *
+   * The disclosure must stay CLOSED by default and reveal nothing: the server deliberately does
+   * not tell this route that a claimable org exists (`onboarding-routes.ts`'s own comment), so a
+   * user who does not already hold both values must not be able to learn anything by reaching
+   * this page. The test above (unchanged) is the other half of that: no field, no create button,
+   * no request.
+   */
+  it('a user holding an org code can claim through the wizard — the form is closed until asked for, and issues nothing until submitted', async () => {
+    const sent = stubFetch({
+      onboarding: () => jsonResponse({ state: 'needs-invite' }),
+      createOrg: () => jsonResponse({ org: ORG, team: TEAM, role: ROLE }),
+    })
+    renderAt()
+    await screen.findByText('You need an invite to join this deployment')
+
+    // Closed: no fields on the page, and nothing about any org that might exist.
+    expect(screen.queryByLabelText('Organization ID')).toBeNull()
+    expect(screen.queryByLabelText('Organization code')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'I have an organization code' }))
+    // Opening it is still a pure client-side reveal — no probe, no lookup.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(sent.filter((r) => r.method !== 'GET')).toEqual([])
+
+    fireEvent.change(await screen.findByLabelText('Organization ID'), { target: { value: 'globex' } })
+    fireEvent.change(screen.getByLabelText('Organization code'), { target: { value: 'the-one-time-code' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Claim organization' }))
+
+    await waitFor(() =>
+      expect(sent.filter((r) => r.method === 'POST')).toEqual([
+        { path: '/auth/onboarding/org', method: 'POST', body: { orgSlug: 'globex', bootstrapToken: 'the-one-time-code' } },
+      ]),
+    )
+    // …and a successful claim continues into the ordinary wizard, not back to the dead end.
+    await screen.findByText('Your default team is ready')
+  })
+
+  it("surfaces the server's refusal verbatim — the 403 is deliberately identical for a wrong slug and a wrong code, so this must not guess", async () => {
+    stubFetch({
+      onboarding: () => jsonResponse({ state: 'needs-invite' }),
+      createOrg: () => jsonResponse({ error: 'no organization matches that slug and code' }, 403),
+    })
+    renderAt()
+    await screen.findByText('You need an invite to join this deployment')
+    fireEvent.click(screen.getByRole('button', { name: 'I have an organization code' }))
+    fireEvent.change(await screen.findByLabelText('Organization ID'), { target: { value: 'nope' } })
+    fireEvent.change(screen.getByLabelText('Organization code'), { target: { value: 'wrong' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Claim organization' }))
+
+    await screen.findByText('no organization matches that slug and code')
+  })
 })
 
 describe('ready: resumes straight to add-projects, and the team threads through registration', () => {

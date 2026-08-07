@@ -74,6 +74,10 @@ export type OrgProcessRegistryErrorCode =
   | 'org-already-provisioned'
   | 'hostname-taken'
   | 'port-taken'
+  // ---- ADDED 2026-08-07 (5b/5c/8 repair stage) — see `register`'s own doc comment. The secret
+  // both authenticates a caller and ANSWERS WHICH ORG IT IS (`internal-auth.ts`), so two orgs
+  // sharing one is the one place that mapping had no uniqueness constraint behind it. -----------
+  | 'supervisor-secret-taken'
   | 'lease-timeout';
 
 /** Thrown by every guarded write below in place of a SQL engine's constraint violation — the same
@@ -180,13 +184,17 @@ export class OrgProcessRegistryStore {
    * `identity-store.ts#bootstrapFirstOrg`'s own doc comment argues for, applied here to the same
    * shape of race: two provisioning calls for the same org landing together must not both succeed).
    *
-   * Three checks, each against ACTIVE records only (a deprovisioned org's old hostname/port/org id
-   * is free to be reused — by itself, on re-provisioning, or by a different org):
+   * Four checks (three until 2026-08-07), each against ACTIVE records only (a deprovisioned org's
+   * old hostname/port/org id is free to be reused — by itself, on re-provisioning, or by a
+   * different org):
    *  - `org-already-provisioned`: this org already has a running process.
    *  - `hostname-taken`: a DIFFERENT org's active process already answers this hostname — nginx's
    *    static per-hostname routing (D10, phase 7) can only be correct if this is unique.
    *  - `port-taken`: a DIFFERENT org's active process already binds this loopback port, for the
    *    identical reason on the `proxy_pass` side.
+   *  - `supervisor-secret-taken` (ADDED 2026-08-07, 5b/5c/8 repair stage): a DIFFERENT org's active
+   *    process already registered this exact `supervisorSecret` — see the check's own comment for
+   *    why that silently reassigns one org's `/internal/*` identity to another.
    *
    * On success the new record is APPENDED, never overwriting a prior (deprovisioned) row for the
    * same org — `identity-store.ts#revokeInvite`'s own "keep the history" precedent, applied here so
@@ -213,6 +221,26 @@ export class OrgProcessRegistryStore {
         throw new OrgProcessRegistryError(
           'port-taken',
           `loopback port ${input.loopbackPort} is already bound to org ${portClash.orgId}`,
+        );
+      }
+      // ---- ADDED 2026-08-07 (5b/5c/8 repair stage): the secret is an IDENTITY, so it needs the
+      // same uniqueness the other three fields get. `internal-auth.ts#resolveInternalCaller`
+      // resolves a bearer secret to a calling org by returning the FIRST active record it matches,
+      // so two orgs registered with one secret silently gave one of them the other's `/internal/*`
+      // identity (reproduced: two 201s, then that secret asking for org B answered 403 because it
+      // had resolved to org A). Worse on the other side: `forwarded-session.ts` derives the acting
+      // org entirely from the SIGNED payload with no check against the org the process serves, so a
+      // shared secret would also let org A's forwarded principal verify at org B's process — a real
+      // cross-tenant hole, gated today only by the fact that the hetzner installer happens to mint
+      // one randomly per org. Defense in depth, made structural: nothing outside this store can
+      // promise the secrets are distinct.
+      const secretClash = snapshot.orgs.find(
+        (org) => org.supervisorSecret === input.supervisorSecret && org.status === 'active' && org.orgId !== input.orgId,
+      );
+      if (secretClash) {
+        throw new OrgProcessRegistryError(
+          'supervisor-secret-taken',
+          `that supervisorSecret is already registered to org ${secretClash.orgId} — each org's secret both authenticates it and identifies it, so two orgs cannot share one`,
         );
       }
       const record = orgProcessRecordSchema.parse({

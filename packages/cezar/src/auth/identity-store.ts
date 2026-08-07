@@ -53,16 +53,42 @@ export type IdentityStoreErrorCode =
   | 'team-org-mismatch'
   | 'user-not-found'
   | 'membership-exists'
+  // ---- F4's first-membership pinning, enforced rather than silently produced (ADDED 2026-08-07,
+  // 5b/5c/8 repair stage). `session.ts#resolveIdentity` resolves a signed-in user as
+  // `listMemberships(userId)[0]` — the OLDEST membership — and there is no active-org switcher, so
+  // a SECOND membership is inert: every request that user ever makes still resolves against their
+  // first org. Both writes that can mint one (`claimOrg`'s D11 claim branch and `redeemInvite`)
+  // therefore REFUSE a user who already belongs to an org, rather than writing a membership the
+  // product cannot honour. See both methods' own doc comments for the two concrete failures this
+  // closes — a burnt one-shot org claim code and a burnt single-use invite, each answering 201 for
+  // a grant that does nothing, neither recoverable by any route in the product. Lift this the moment
+  // an active-org selector exists; until then a refusal that leaves the credential spendable is the
+  // only honest answer. ----------------------------------------------------------------------------
+  | 'user-already-member'
   | 'project-root-taken'
   | 'session-id-taken'
   | 'lease-timeout'
-  // ---- D8 first-user bootstrap race (see `bootstrapFirstOrg`'s own doc comment) ----------------
+  // ---- D8 first-user bootstrap race (see `claimOrg`'s own doc comment, legacy branch) -----------
   | 'org-already-bootstrapped'
+  // ---- D11 claim-an-unclaimed-org (5b/5c/8 scaffold pass — see `claimOrg`'s own doc comment,
+  // claim branch; thrown when the named org already has a member) --------------------------------
+  | 'org-already-claimed'
   // ---- invites (scaffold addition — see `types.ts`'s `inviteSchema` doc comment) --------------
   | 'invite-id-taken'
   | 'invite-not-found'
   | 'invite-expired'
-  | 'invite-already-consumed';
+  | 'invite-already-consumed'
+  // ---- 5c team management: project→team reassignment (scaffold addition — see
+  // `updateProjectTeam`'s own doc comment; NOT thrown by any method in this file today, declared
+  // here so Fill unit 3 doesn't have to invent the spelling) --------------------------------------
+  | 'project-root-not-found'
+  // ---- 5c team management: deleteTeam (ADDED this pass, Fill unit 3 — see `deleteTeam`'s own doc
+  // comment for the refuse-vs-reassign decision this code is the answer to) -----------------------
+  | 'team-has-projects'
+  // ---- 5c team management: deleting an org's LAST team (ADDED 2026-08-07, 5b/5c/8 repair stage —
+  // see `deleteTeam`'s own doc comment; a team-less org resolves NO principal for ANY of its
+  // members, which is a permanent, in-product-unrecoverable lockout) ------------------------------
+  | 'team-is-last';
 
 /** Thrown by every guarded write below in place of the SQL engine's constraint violation (D7:
  *  "every UNIQUE/PRIMARY KEY … is a check performed inside the write lease"). `code` is the part a
@@ -196,7 +222,9 @@ export class IdentityStore {
   }
 
   getTeamBySlug(orgId: string, slug: string): Team | undefined {
-    return this.readSnapshot().teams.find((team) => team.orgId === orgId && team.slug === slug);
+    return this.readSnapshot().teams.find(
+      (team) => team.orgId === orgId && team.slug === slug,
+    );
   }
 
   getUserById(id: string): User | undefined {
@@ -206,33 +234,48 @@ export class IdentityStore {
   /** The only user lookup that matters for sign-in — see `types.ts`'s `userSchema` doc for why
    *  this, and never email, is the identity key. */
   getUserByIssuerSubject(issuer: string, subject: string): User | undefined {
-    return this.readSnapshot().users.find((user) => user.issuer === issuer && user.subject === subject);
+    return this.readSnapshot().users.find(
+      (user) => user.issuer === issuer && user.subject === subject,
+    );
   }
 
   listMemberships(userId: string): Membership[] {
-    return this.readSnapshot().memberships.filter((membership) => membership.userId === userId);
+    return this.readSnapshot().memberships.filter(
+      (membership) => membership.userId === userId,
+    );
   }
 
   listOrgMembers(orgId: string): Membership[] {
-    return this.readSnapshot().memberships.filter((membership) => membership.orgId === orgId);
+    return this.readSnapshot().memberships.filter(
+      (membership) => membership.orgId === orgId,
+    );
   }
 
   getMembership(userId: string, orgId: string): Membership | undefined {
-    return this.readSnapshot().memberships.find((membership) => membership.userId === userId && membership.orgId === orgId);
+    return this.readSnapshot().memberships.find(
+      (membership) =>
+        membership.userId === userId && membership.orgId === orgId,
+    );
   }
 
   /** Filters are ANDed. Callers registering/looking up a specific root are expected to pass an
    *  already-`realpath`d value — see `createProjectTeam`'s own comment for why normalization is
    *  centralized at the one write site rather than repeated (and possibly forgotten) in every
    *  reader. */
-  listProjectTeams(filter: { orgId?: string; teamId?: string } = {}): ProjectTeam[] {
+  listProjectTeams(
+    filter: { orgId?: string; teamId?: string } = {},
+  ): ProjectTeam[] {
     return this.readSnapshot().projectTeams.filter(
-      (row) => (filter.orgId === undefined || row.orgId === filter.orgId) && (filter.teamId === undefined || row.teamId === filter.teamId),
+      (row) =>
+        (filter.orgId === undefined || row.orgId === filter.orgId) &&
+        (filter.teamId === undefined || row.teamId === filter.teamId),
     );
   }
 
   getProjectTeam(projectRoot: string): ProjectTeam | undefined {
-    return this.readSnapshot().projectTeams.find((row) => row.projectRoot === projectRoot);
+    return this.readSnapshot().projectTeams.find(
+      (row) => row.projectRoot === projectRoot,
+    );
   }
 
   /** Expired sessions read as absent — never returns a row whose `expiresAt` has passed, so no
@@ -242,7 +285,9 @@ export class IdentityStore {
   getSession(id: string): Session | undefined {
     const session = this.readSnapshot().sessions.find((row) => row.id === id);
     if (!session) return undefined;
-    return Date.parse(session.expiresAt) > this.now().getTime() ? session : undefined;
+    return Date.parse(session.expiresAt) > this.now().getTime()
+      ? session
+      : undefined;
   }
 
   /**
@@ -256,7 +301,9 @@ export class IdentityStore {
     const invite = this.readSnapshot().invites.find((row) => row.id === id);
     if (!invite) return undefined;
     if (invite.consumedAt) return undefined;
-    return Date.parse(invite.expiresAt) > this.now().getTime() ? invite : undefined;
+    return Date.parse(invite.expiresAt) > this.now().getTime()
+      ? invite
+      : undefined;
   }
 
   /** Every invite ever created for the org, expired/consumed included — an admin "invite
@@ -275,20 +322,39 @@ export class IdentityStore {
    * guarded writes would each be individually consistent but leave a window, if the process died
    * between them, where an org exists with no team; folding both inserts into one lease + one
    * atomic file write makes that window not exist rather than merely making it short.
+   *
+   * **`input.claimTokenHash` (ADDED 2026-08-07, 5b/5c/8 scaffold pass, D11).** Optional, and this
+   * method does no hashing itself — the SAME "the store never invents the credential, it only
+   * persists what it is given" idiom `createSession`/`createInvite` already follow for their own
+   * bearer tokens. The intended caller is `POST /internal/orgs` (Fill unit 6): mint a raw code with
+   * `./org-claim-token.ts#mintOrgClaimToken`, hash it with `#hashOrgClaimToken`, pass the HASH here,
+   * and return the raw code to the installer once in that route's own response — never round-tripped
+   * through this store. Absent (every existing caller, including every test) leaves
+   * `Org.claimTokenHash` unset, exactly as before this field existed.
    */
   async createOrg(
-    input: { name: string; slug: string; defaultTeamName?: string; defaultTeamSlug?: string },
+    input: {
+      name: string;
+      slug: string;
+      defaultTeamName?: string;
+      defaultTeamSlug?: string;
+      claimTokenHash?: string;
+    },
     ids: { orgId?: string; defaultTeamId?: string } = {},
   ): Promise<{ org: Org; defaultTeam: Team }> {
     return this.guardedWrite((snapshot) => {
       if (snapshot.orgs.some((org) => org.slug === input.slug)) {
-        throw new IdentityStoreError('org-slug-taken', `an org with slug "${input.slug}" already exists`);
+        throw new IdentityStoreError(
+          'org-slug-taken',
+          `an org with slug "${input.slug}" already exists`,
+        );
       }
       const org = orgSchema.parse({
         id: ids.orgId ?? randomUUID(),
         name: input.name,
         slug: input.slug,
         createdAt: this.now().toISOString(),
+        claimTokenHash: input.claimTokenHash,
       });
       const team = teamSchema.parse({
         id: ids.defaultTeamId ?? randomUUID(),
@@ -297,7 +363,11 @@ export class IdentityStore {
         slug: input.defaultTeamSlug ?? 'general',
       });
       return {
-        snapshot: { ...snapshot, orgs: [...snapshot.orgs, org], teams: [...snapshot.teams, team] },
+        snapshot: {
+          ...snapshot,
+          orgs: [...snapshot.orgs, org],
+          teams: [...snapshot.teams, team],
+        },
         result: { org, defaultTeam: team },
       };
     });
@@ -305,16 +375,34 @@ export class IdentityStore {
 
   /** A later (non-default) team — `engineering`, `marketing` per the spec's own example — added to
    *  an org that already exists. */
-  async createTeam(input: { orgId: string; name: string; slug: string }, id?: string): Promise<Team> {
+  async createTeam(
+    input: { orgId: string; name: string; slug: string },
+    id?: string,
+  ): Promise<Team> {
     return this.guardedWrite((snapshot) => {
       if (!snapshot.orgs.some((org) => org.id === input.orgId)) {
         throw new IdentityStoreError('org-not-found', `no org ${input.orgId}`);
       }
-      if (snapshot.teams.some((team) => team.orgId === input.orgId && team.slug === input.slug)) {
-        throw new IdentityStoreError('team-slug-taken', `org ${input.orgId} already has a team with slug "${input.slug}"`);
+      if (
+        snapshot.teams.some(
+          (team) => team.orgId === input.orgId && team.slug === input.slug,
+        )
+      ) {
+        throw new IdentityStoreError(
+          'team-slug-taken',
+          `org ${input.orgId} already has a team with slug "${input.slug}"`,
+        );
       }
-      const team = teamSchema.parse({ id: id ?? randomUUID(), orgId: input.orgId, name: input.name, slug: input.slug });
-      return { snapshot: { ...snapshot, teams: [...snapshot.teams, team] }, result: team };
+      const team = teamSchema.parse({
+        id: id ?? randomUUID(),
+        orgId: input.orgId,
+        name: input.name,
+        slug: input.slug,
+      });
+      return {
+        snapshot: { ...snapshot, teams: [...snapshot.teams, team] },
+        result: team,
+      };
     });
   }
 
@@ -326,7 +414,8 @@ export class IdentityStore {
     return this.guardedWrite((snapshot) => {
       const index = snapshot.teams.findIndex((team) => team.id === id);
       const existing = snapshot.teams[index];
-      if (!existing) throw new IdentityStoreError('team-not-found', `no team ${id}`);
+      if (!existing)
+        throw new IdentityStoreError('team-not-found', `no team ${id}`);
       const updated = teamSchema.parse({ ...existing, name });
       const teams = [...snapshot.teams];
       teams[index] = updated;
@@ -353,7 +442,10 @@ export class IdentityStore {
     // false`, and without pinning `T` up front TS infers it from whichever branch it visits first,
     // then rejects the other as a mismatch against that narrower literal.
     return this.guardedWrite<{ user: User; created: boolean }>((snapshot) => {
-      const index = snapshot.users.findIndex((user) => user.issuer === input.issuer && user.subject === input.subject);
+      const index = snapshot.users.findIndex(
+        (user) =>
+          user.issuer === input.issuer && user.subject === input.subject,
+      );
       const existing = snapshot.users[index];
       if (existing) {
         const updated = userSchema.parse({
@@ -363,7 +455,10 @@ export class IdentityStore {
         });
         const users = [...snapshot.users];
         users[index] = updated;
-        return { snapshot: { ...snapshot, users }, result: { user: updated, created: false } };
+        return {
+          snapshot: { ...snapshot, users },
+          result: { user: updated, created: false },
+        };
       }
       const user = userSchema.parse({
         id: randomUUID(),
@@ -373,63 +468,211 @@ export class IdentityStore {
         name: input.name,
         createdAt: this.now().toISOString(),
       });
-      return { snapshot: { ...snapshot, users: [...snapshot.users, user] }, result: { user, created: true } };
+      return {
+        snapshot: { ...snapshot, users: [...snapshot.users, user] },
+        result: { user, created: true },
+      };
     });
   }
 
-  async createMembership(input: { userId: string; orgId: string; role: Role }): Promise<Membership> {
+  async createMembership(input: {
+    userId: string;
+    orgId: string;
+    role: Role;
+  }): Promise<Membership> {
     return this.guardedWrite((snapshot) => {
       if (!snapshot.users.some((user) => user.id === input.userId)) {
-        throw new IdentityStoreError('user-not-found', `no user ${input.userId}`);
+        throw new IdentityStoreError(
+          'user-not-found',
+          `no user ${input.userId}`,
+        );
       }
       if (!snapshot.orgs.some((org) => org.id === input.orgId)) {
         throw new IdentityStoreError('org-not-found', `no org ${input.orgId}`);
       }
-      if (snapshot.memberships.some((m) => m.userId === input.userId && m.orgId === input.orgId)) {
-        throw new IdentityStoreError('membership-exists', `user ${input.userId} is already a member of org ${input.orgId}`);
+      if (
+        snapshot.memberships.some(
+          (m) => m.userId === input.userId && m.orgId === input.orgId,
+        )
+      ) {
+        throw new IdentityStoreError(
+          'membership-exists',
+          `user ${input.userId} is already a member of org ${input.orgId}`,
+        );
       }
-      const membership = membershipSchema.parse({ userId: input.userId, orgId: input.orgId, role: input.role });
-      return { snapshot: { ...snapshot, memberships: [...snapshot.memberships, membership] }, result: membership };
+      const membership = membershipSchema.parse({
+        userId: input.userId,
+        orgId: input.orgId,
+        role: input.role,
+      });
+      return {
+        snapshot: {
+          ...snapshot,
+          memberships: [...snapshot.memberships, membership],
+        },
+        result: membership,
+      };
     });
   }
 
   /**
-   * D8 step 1's structural half: "the first user to sign in becomes owner of a new org;
-   * subsequent users need an invite." This is the ONE place that fact is enforced, and it is
-   * enforced the same way every other uniqueness constraint in this class is (D7): as a check
-   * performed on the snapshot `guardedWrite` re-reads FRESH, under the lease — never a check the
-   * caller performs first and then acts on, which is exactly the shape that loses a race (read
-   * "no org exists" — yield to the event loop for an await — write; two callers can both read
-   * "no org" before either writes).
+   * **RENAMED from `bootstrapFirstOrg` (D11, 5b/5c/8 scaffold pass → Fill unit 7, landed
+   * 2026-08-07).** D11: "a function called `bootstrapFirstOrg` that no longer creates anything is
+   * exactly the stale name a future session would trust" — and this method now sometimes doesn't
+   * create anything, so "claim" is the honest verb: become an org's owner, whether that org is
+   * minted by this same call (legacy) or already exists (D11).
    *
-   * **What "first" means here, precisely, and why `orgs.length > 0` is the whole test.** D4: "Until
-   * the per-org split ships … hosted means single-org." This method is the bootstrap for THAT
-   * single org, not a general ceiling on how many `Org` rows can ever exist — `createOrg` above
-   * remains available uncontested (tests use it to set up multiple orgs today; a future phase-6
-   * multi-org tool would use it too). What must never happen twice is THIS structural event: a
-   * user landing on a truly empty deployment and walking away as its owner. So the guard is simply
-   * "has ANY org ever been bootstrapped or otherwise created" — the moment one exists, every
-   * subsequent caller (a genuinely later user, or the loser of a simultaneous race) gets
-   * `org-already-bootstrapped` and must go through an invite instead, exactly as D8 describes.
-   * Because that check is `orgs.length > 0`, a slug collision on the org being created is provably
-   * unreachable (no existing org has any slug when the write is allowed to proceed at all), so —
-   * unlike `createOrg` — there is deliberately no separate `org-slug-taken` check to duplicate.
+   * D8 step 1's structural half — "the first user to sign in becomes owner of a new org;
+   * subsequent users need an invite" — plus D11's extension of it to the SECOND and later org, now
+   * live in one method with two branches, forked on whether `input.orgId` is present. Both branches
+   * share the same discipline every other uniqueness constraint in this class uses (D7): the check
+   * runs on the snapshot `guardedWrite` re-reads FRESH, under the lease — never a check the caller
+   * performs first and then acts on, which is exactly the shape that loses a race (read "no org
+   * exists" — yield to the event loop for an await — write; two callers can both read "no org"
+   * before either writes).
    *
-   * **`role` is not a parameter.** The membership this creates is hardcoded to `'owner'`, never
-   * read from the caller — the same reasoning `oidc.ts`'s module doc comment gives for why
-   * `CEZ_OIDC_GROUP_ROLE_MAP` can only ever produce `'admin'`/`'member'`: "owner is not a fact
-   * re-derived from an IdP claim on every login" or, here, from whatever a caller happens to pass —
-   * it is a one-time structural fact about being first, decided by this method alone.
+   * **`orgId` ABSENT — the legacy path, UNCHANGED, byte-for-byte from `bootstrapFirstOrg`.** Every
+   * existing caller (today: `onboarding-routes.ts`'s `POST /auth/onboarding/org` with no `orgSlug`
+   * in its body) keeps working exactly as before: guard `snapshot.orgs.length > 0` →
+   * `org-already-bootstrapped`, create org+team+`owner`-membership from `input.name`/`input.slug`
+   * in one write. This is what a bare `cezar serve --auth oidc` (no supervisor, D1's own "loopback
+   * + oidc: useful for testing the flow" row) still needs — it has no `/internal/orgs` route to
+   * pre-create anything with, so self-serve creation of the deployment's first org must keep
+   * working. **D11's "creating an organization requires root" is about a SECOND org behind a
+   * supervisor, never about this path.**
+   *
+   * What "first" means here, precisely, and why `orgs.length > 0` is the whole test in this branch:
+   * D4 said "until the per-org split ships … hosted means single-org", and this branch is the
+   * bootstrap for THAT single org, not a general ceiling on how many `Org` rows can ever exist —
+   * `createOrg` remains available uncontested (D11's `POST /internal/orgs` uses it to mint org two
+   * and later). What must never happen twice is THIS structural event: a user landing on a truly
+   * empty deployment and walking away as its owner. Because the check is `orgs.length > 0`, a slug
+   * collision on the org being created is provably unreachable (no existing org has any slug when
+   * the write is allowed to proceed at all) — unlike `createOrg`, there is deliberately no separate
+   * `org-slug-taken` check to duplicate.
+   *
+   * **`orgId` PRESENT — the D11 claim path, new.** The org (and its default team) already exist,
+   * created by the admin-only `POST /internal/orgs` (Fill unit 6, `createOrg`'s `claimTokenHash`
+   * input). Checks, in this order, inside the SAME guarded write: `org-not-found` if no org has
+   * that id; `org-already-claimed` if `snapshot.memberships.some(m => m.orgId === org.id)` — i.e.
+   * this org already has at least one member, which can only be its owner, since nothing can
+   * redeem an invite before an owner exists to send one; `user-not-found` for the same defensive
+   * reason the legacy branch checks it; and — ADDED 2026-08-07 at the 5b/5c/8 repair stage —
+   * `user-already-member` if the CALLER already belongs to any org (see the check's own comment
+   * below for the operator-bricks-org-two failure that closes, and `IdentityStoreErrorCode`'s
+   * `user-already-member` note for why F4 makes a second membership inert in the first place).
+   * Then look up the org's EXISTING default team
+   * (`snapshot.teams.find(t => t.orgId === org.id)` — never create a second one) and insert just
+   * the `owner` `Membership`. `input.name`/`input.slug` have no meaning in this branch — the org
+   * already has both, which is exactly why the two branches are two members of a union rather than
+   * one object with every field optional: a caller claiming an existing org has nothing to name.
+   *
+   * **`role` is not a parameter, in either branch.** The membership created here is hardcoded to
+   * `'owner'`, never read from the caller — the same reasoning `oidc.ts`'s module doc comment gives
+   * for why `CEZ_OIDC_GROUP_ROLE_MAP` can only ever produce `'admin'`/`'member'`: owner is not a
+   * fact re-derived from an IdP claim, or from whatever a caller happens to pass — it is a
+   * one-time structural fact about being first (deployment-wide or per-org), decided by this
+   * method alone.
+   *
+   * **Bootstrap-token verification is OUT of this method, in both branches.** Exactly like the
+   * legacy path (checked by the ROUTE against the single deployment-wide `./bootstrap-claim.ts`
+   * code, never inside this store method), the claim path's token check belongs in the route too —
+   * against `org.claimTokenHash` via `./org-claim-token.ts#matchesOrgClaimToken` — so this method
+   * never receives a raw token, only a userId and (for the claim branch) an org to attach it to.
    *
    * `userId` must already name a real `User` row (`findOrCreateUser` is the caller's job, same
    * split `createMembership` already draws) — this only ever runs for an authenticated, already
    * signed-in user with a resolvable session and no membership yet.
    */
-  async bootstrapFirstOrg(
-    input: { userId: string; name: string; slug: string; defaultTeamName?: string; defaultTeamSlug?: string },
+  async claimOrg(
+    input:
+      | {
+          userId: string;
+          name: string;
+          slug: string;
+          defaultTeamName?: string;
+          defaultTeamSlug?: string;
+        }
+      | { userId: string; orgId: string },
     ids: { orgId?: string; defaultTeamId?: string } = {},
   ): Promise<{ org: Org; defaultTeam: Team; membership: Membership }> {
     return this.guardedWrite((snapshot) => {
+      if ('orgId' in input) {
+        // ---- D11 claim path: the org (and its default team) already exist ----------------------
+        const org = snapshot.orgs.find(
+          (candidate) => candidate.id === input.orgId,
+        );
+        if (!org)
+          throw new IdentityStoreError(
+            'org-not-found',
+            `no org ${input.orgId}`,
+          );
+        if (snapshot.memberships.some((m) => m.orgId === org.id)) {
+          throw new IdentityStoreError(
+            'org-already-claimed',
+            `org ${org.id} already has an owner`,
+          );
+        }
+        if (!snapshot.users.some((user) => user.id === input.userId)) {
+          throw new IdentityStoreError(
+            'user-not-found',
+            `no user ${input.userId}`,
+          );
+        }
+        // ---- the caller must not already belong to an org (ADDED 2026-08-07, 5b/5c/8 repair
+        // stage; see `IdentityStoreErrorCode`'s `user-already-member` note for the general rule).
+        //
+        // **The failure this closes, reproduced at review.** The operator who runs
+        // `server-install --platform hetzner --org-slug initech` reads that org's one-shot claim
+        // code off the install output — and is very often already the owner of the deployment's
+        // first org. Pasting the code into their own signed-in browser (the natural way to check
+        // it works) answered **201, role: owner**, wrote a second membership, and burnt the claim
+        // in the same guarded write. Because `session.ts#resolveIdentity` pins to
+        // `listMemberships(userId)[0]`, that membership was inert — the operator kept acting as
+        // org one forever — while the new org now had a member, so `org-already-claimed` refused
+        // every later claim, including the intended owner's. There is no unclaim route, no
+        // member-removal route and no re-mint, so the unix user, `CEZ_HOME`, systemd unit, vhost
+        // and TLS cert phases 6/7 provisioned for it were dead short of hand-editing
+        // `identity.json`. A refusal costs the operator one browser profile; the 201 cost the org.
+        //
+        // Checked HERE, inside the guarded write, beside `org-already-claimed` rather than in the
+        // route — same reasoning D7 gives for every other uniqueness check in this class: a check
+        // the caller performs first and then acts on is the shape that loses a race.
+        //
+        // The LEGACY branch below deliberately gets no such check: it only runs when
+        // `snapshot.orgs.length === 0`, and a membership must reference an org, so its caller is a
+        // first-ever user by construction.
+        if (snapshot.memberships.some((m) => m.userId === input.userId)) {
+          throw new IdentityStoreError(
+            'user-already-member',
+            `user ${input.userId} already belongs to an organization on this deployment`,
+          );
+        }
+        // The org's EXISTING default team, never a new one — `createOrg` is this org's only
+        // possible producer and always creates one in the SAME write as the org itself (see its
+        // own doc comment), so a missing team here would mean a bug in that method, not a case
+        // this branch needs a dedicated error code for.
+        const team = snapshot.teams.find((t) => t.orgId === org.id);
+        if (!team)
+          throw new IdentityStoreError(
+            'team-not-found',
+            `org ${org.id} has no default team to attach an owner to`,
+          );
+        const membership = membershipSchema.parse({
+          userId: input.userId,
+          orgId: org.id,
+          role: 'owner',
+        });
+        return {
+          snapshot: {
+            ...snapshot,
+            memberships: [...snapshot.memberships, membership],
+          },
+          result: { org, defaultTeam: team, membership },
+        };
+      }
+
+      // ---- legacy path: create the deployment's first-ever org, UNCHANGED from `bootstrapFirstOrg` ----
       if (snapshot.orgs.length > 0) {
         throw new IdentityStoreError(
           'org-already-bootstrapped',
@@ -437,7 +680,10 @@ export class IdentityStore {
         );
       }
       if (!snapshot.users.some((user) => user.id === input.userId)) {
-        throw new IdentityStoreError('user-not-found', `no user ${input.userId}`);
+        throw new IdentityStoreError(
+          'user-not-found',
+          `no user ${input.userId}`,
+        );
       }
       const org = orgSchema.parse({
         id: ids.orgId ?? randomUUID(),
@@ -451,7 +697,11 @@ export class IdentityStore {
         name: input.defaultTeamName ?? 'General',
         slug: input.defaultTeamSlug ?? 'general',
       });
-      const membership = membershipSchema.parse({ userId: input.userId, orgId: org.id, role: 'owner' });
+      const membership = membershipSchema.parse({
+        userId: input.userId,
+        orgId: org.id,
+        role: 'owner',
+      });
       return {
         snapshot: {
           ...snapshot,
@@ -485,22 +735,48 @@ export class IdentityStore {
    * method `/repo/foo` while the registry holds `/repo/Foo` would mint a SECOND claim on one
    * `.ai/cezar`, which is precisely the silent run-history loss D4 exists to prevent.
    */
-  async createProjectTeam(input: { projectRoot: string; orgId: string; teamId: string }): Promise<ProjectTeam> {
+  async createProjectTeam(input: {
+    projectRoot: string;
+    orgId: string;
+    teamId: string;
+  }): Promise<ProjectTeam> {
     const projectRoot = realpathSync.native(input.projectRoot);
     return this.guardedWrite((snapshot) => {
       if (!snapshot.orgs.some((org) => org.id === input.orgId)) {
         throw new IdentityStoreError('org-not-found', `no org ${input.orgId}`);
       }
       const team = snapshot.teams.find((t) => t.id === input.teamId);
-      if (!team) throw new IdentityStoreError('team-not-found', `no team ${input.teamId}`);
+      if (!team)
+        throw new IdentityStoreError(
+          'team-not-found',
+          `no team ${input.teamId}`,
+        );
       if (team.orgId !== input.orgId) {
-        throw new IdentityStoreError('team-org-mismatch', `team ${input.teamId} belongs to org ${team.orgId}, not ${input.orgId}`);
+        throw new IdentityStoreError(
+          'team-org-mismatch',
+          `team ${input.teamId} belongs to org ${team.orgId}, not ${input.orgId}`,
+        );
       }
-      if (snapshot.projectTeams.some((row) => row.projectRoot === projectRoot)) {
-        throw new IdentityStoreError('project-root-taken', `project root ${projectRoot} is already assigned to an org`);
+      if (
+        snapshot.projectTeams.some((row) => row.projectRoot === projectRoot)
+      ) {
+        throw new IdentityStoreError(
+          'project-root-taken',
+          `project root ${projectRoot} is already assigned to an org`,
+        );
       }
-      const projectTeam = projectTeamSchema.parse({ projectRoot, orgId: input.orgId, teamId: input.teamId });
-      return { snapshot: { ...snapshot, projectTeams: [...snapshot.projectTeams, projectTeam] }, result: projectTeam };
+      const projectTeam = projectTeamSchema.parse({
+        projectRoot,
+        orgId: input.orgId,
+        teamId: input.teamId,
+      });
+      return {
+        snapshot: {
+          ...snapshot,
+          projectTeams: [...snapshot.projectTeams, projectTeam],
+        },
+        result: projectTeam,
+      };
     });
   }
 
@@ -523,35 +799,194 @@ export class IdentityStore {
    */
   async deleteProjectTeam(projectRoot: string): Promise<boolean> {
     return this.guardedWrite((snapshot) => {
-      const projectTeams = snapshot.projectTeams.filter((row) => row.projectRoot !== projectRoot);
-      return { snapshot: { ...snapshot, projectTeams }, result: projectTeams.length !== snapshot.projectTeams.length };
+      const projectTeams = snapshot.projectTeams.filter(
+        (row) => row.projectRoot !== projectRoot,
+      );
+      return {
+        snapshot: { ...snapshot, projectTeams },
+        result: projectTeams.length !== snapshot.projectTeams.length,
+      };
+    });
+  }
+
+  /**
+   * **IMPLEMENTED (5c, D2, D4 — Fill unit 3, team CRUD store+HTTP).** Originally landed by the
+   * 5b/5c/8 scaffold pass as a declared-but-throwing stub for Fill unit 3 to fill in; the body
+   * below IS that fill, so this comment no longer describes a gap. Reassigns an already-claimed
+   * project root to a DIFFERENT team in the SAME org — the one write
+   * `createProjectTeam`/`deleteProjectTeam` cannot express safely: delete-then-create is two
+   * guarded writes, not one, and the window between them is exactly the "two processes over one
+   * leaseless `.ai/cezar`" hazard D4 exists to close (`server.ts#registerFolder` already discards
+   * an explicit `teamId` for an already-claimed root for this reason — see its own comment). This
+   * method is what lets a caller change the team WITHOUT ever releasing the org's claim on the
+   * root.
+   *
+   * Takes an already-normalized root, like `getProjectTeam`/`deleteProjectTeam` and unlike
+   * `createProjectTeam` — the root being reassigned is by definition already registered, so there
+   * is no "resolve a fresh symlink" case to handle here that those two readers don't already cover.
+   *
+   * Checks the implementation must perform, inside ONE `guardedWrite` (re-read fresh under the
+   * lease, never a value captured before it was acquired):
+   *  - `project-root-not-found` (declared in `IdentityStoreErrorCode` above) if no `project_teams`
+   *    row exists for `projectRoot` — this method reassigns an existing claim, it does not create
+   *    one; the caller wants `createProjectTeam` for that.
+   *  - `team-not-found` if `teamId` names no team.
+   *  - `team-org-mismatch` if that team belongs to a DIFFERENT org than the existing row's `orgId`
+   *    — **this is the D4 guard, and it is deliberately checked against the EXISTING row's `orgId`,
+   *    never a caller-supplied one**: this method's signature takes no `orgId` parameter precisely
+   *    so a reassignment can never smuggle a root across the process boundary D4 draws — it can
+   *    only move a root between two teams of the ONE org that already claimed it.
+   *  - On success: replace the row's `teamId` in place, `orgId`/`projectRoot` unchanged, and return
+   *    the updated row — the same "find index, validate, splice one row" shape `renameTeam` above
+   *    already uses.
+   *
+   * **The HTTP surface built on top of this (LANDED, Fill unit 3, ADDED 2026-08-07):**
+   * `PATCH /api/v1/projects/:projectId`'s additive `teamId` field
+   * (`packages/contract/src/projects.ts`'s `updateProjectInputSchema`) for the single-process path
+   * — that route already calls `mayActOnRoot` before writing (`server.ts`), so the D4 read-side
+   * check is inherited for free — and, for supervisor mode (D4 amendment 2's "phase 6 must REPLACE,
+   * not join"), `PATCH /internal/project-teams` on `supervisor/server.ts` beside the existing
+   * `POST`/`DELETE` on that same path, org-scoped via `callerMayUseOrgId` on the EXISTING row's
+   * `orgId` exactly like `DELETE /internal/project-teams/by-root` already is — and classified in
+   * `server.test.ts`'s `ADMIN_ONLY`/`ORG_SCOPED` two-directional inventory (as `ORG_SCOPED`,
+   * `POST`'s own sibling).
+   */
+  async updateProjectTeam(
+    projectRoot: string,
+    teamId: string,
+  ): Promise<ProjectTeam> {
+    return this.guardedWrite((snapshot) => {
+      const index = snapshot.projectTeams.findIndex(
+        (row) => row.projectRoot === projectRoot,
+      );
+      const existing = snapshot.projectTeams[index];
+      if (!existing)
+        throw new IdentityStoreError(
+          'project-root-not-found',
+          `no project_teams claim for ${projectRoot}`,
+        );
+      const team = snapshot.teams.find((t) => t.id === teamId);
+      if (!team)
+        throw new IdentityStoreError('team-not-found', `no team ${teamId}`);
+      if (team.orgId !== existing.orgId) {
+        throw new IdentityStoreError(
+          'team-org-mismatch',
+          `team ${teamId} belongs to org ${team.orgId}, not ${existing.orgId}`,
+        );
+      }
+      const updated = projectTeamSchema.parse({ ...existing, teamId });
+      const projectTeams = [...snapshot.projectTeams];
+      projectTeams[index] = updated;
+      return { snapshot: { ...snapshot, projectTeams }, result: updated };
+    });
+  }
+
+  /**
+   * Delete a team (5c, D2 — ADDED this pass, Fill unit 3; no method existed before). Mirrors
+   * `renameTeam` above rather than `deleteSession`/`deleteProjectTeam`'s idempotent-no-op shape:
+   * `team-not-found` is a THROW, not a silent `false` — a caller acting on a specific team by id
+   * (the only shape `DELETE /auth/teams/:teamId` has) gets the same not-found signal `renameTeam`
+   * already gives for the identical mistake, rather than a boolean the route would have to
+   * re-interpret. (`team-routes.ts`'s own HTTP handler pre-checks `getTeamById` anyway, for the
+   * cross-org 404 — see its own comment — so this throw is defense in depth, not the only guard.)
+   *
+   * **The decision this method IS: refuse, never reassign, when the team still has projects.**
+   * `snapshot.projectTeams.some(row => row.teamId === id)` — if any project is still claimed by
+   * this team, the delete is refused with `team-has-projects` rather than either (a) silently
+   * releasing those rows (an orphaned project with no team, which the spec's own instruction for
+   * this method rules out by name) or (b) silently reassigning them to some other team this store
+   * would have to guess at (the org's default team? whichever team is `[0]`? — a real product
+   * decision this store has no basis to make on a caller's behalf, and a WRONG guess is worse than
+   * a refusal because it moves a project's assignment without anyone asking for that). The caller
+   * that wants to delete a team with projects on it must reassign each one first
+   * (`updateProjectTeam` above), then delete — the same "move it, then remove it" two-step shape
+   * `deleteProjectTeam`'s own doc comment already describes for the release-before-reclaim case.
+   *
+   * **The second decision, ADDED 2026-08-07 (5b/5c/8 repair stage): an org's LAST team may never be
+   * deleted (`team-is-last`).** `session.ts#resolveIdentity` resolves a signed-in user's
+   * `principal.teamId` as `listTeams(membership.orgId)[0]` and returns `null` when there is none —
+   * so an org with zero teams resolves NO principal for ANY of its members, owner included.
+   * Reproduced at review against the real store and the real routes: deleting a brand-new org's one
+   * (project-free, therefore `team-has-projects`-passing) team answered `200 {"deleted":true}` and
+   * then `GET /auth/me`, `GET /auth/teams`, `POST /auth/teams` and `POST /auth/invites` all answered
+   * **401** for every member — and every recovery door is shut. `claimOrg`'s legacy branch needs
+   * `orgs.length === 0`; its D11 branch needs an unclaimed org; `/internal/*` has no team-create
+   * verb; and a FRESH user redeeming a valid invite into the team-less org gets 201 and then
+   * resolves `null` too. On the D10 topology `/internal/auth-check` 401s, so nginx's `auth_request`
+   * fails every request to that org's vhost: total blackout, recoverable only by hand-editing
+   * `identity.json` as that org's unix user.
+   *
+   * This is a STORE invariant, not a route check, for the same reason every other one in this class
+   * is: `deleteTeam` is reachable from `DELETE /auth/teams/:teamId` today and from whatever calls it
+   * next, and "the guarantee decays to 'every caller remembered'" (D7) is exactly what a route-level
+   * count would be. An admin who wants no team named `General` renames it (`renameTeam`), or creates
+   * the replacement FIRST and deletes after — both already possible through `/auth/teams*`.
+   */
+  async deleteTeam(id: string): Promise<void> {
+    return this.guardedWrite((snapshot) => {
+      const team = snapshot.teams.find((candidate) => candidate.id === id);
+      if (!team) {
+        throw new IdentityStoreError('team-not-found', `no team ${id}`);
+      }
+      if (
+        snapshot.teams.filter((candidate) => candidate.orgId === team.orgId)
+          .length <= 1
+      ) {
+        throw new IdentityStoreError(
+          'team-is-last',
+          `team ${id} is the only team in org ${team.orgId} — an org with no teams locks every one of its members out`,
+        );
+      }
+      if (snapshot.projectTeams.some((row) => row.teamId === id)) {
+        throw new IdentityStoreError(
+          'team-has-projects',
+          `team ${id} still has projects assigned to it — reassign them before deleting the team`,
+        );
+      }
+      const teams = snapshot.teams.filter((team) => team.id !== id);
+      return { snapshot: { ...snapshot, teams }, result: undefined };
     });
   }
 
   /** `id` is REQUIRED and caller-supplied — see `sessionSchema`'s doc comment on why the store
    *  never mints session ids itself. A collision is treated as a bug in the caller's randomness,
    *  not a retryable condition, so it throws rather than silently overwriting someone's session. */
-  async createSession(input: { id: string; userId: string; expiresAt: Date }): Promise<Session> {
+  async createSession(input: {
+    id: string;
+    userId: string;
+    expiresAt: Date;
+  }): Promise<Session> {
     return this.guardedWrite((snapshot) => {
       if (!snapshot.users.some((user) => user.id === input.userId)) {
-        throw new IdentityStoreError('user-not-found', `no user ${input.userId}`);
+        throw new IdentityStoreError(
+          'user-not-found',
+          `no user ${input.userId}`,
+        );
       }
       if (snapshot.sessions.some((s) => s.id === input.id)) {
-        throw new IdentityStoreError('session-id-taken', `session id ${input.id} already exists`);
+        throw new IdentityStoreError(
+          'session-id-taken',
+          `session id ${input.id} already exists`,
+        );
       }
       const now = this.now();
       // Opportunistic prune on every session write, mirroring `AutomationStore`'s tombstone
       // pruning on every definitions write — sessions accumulate on every sign-in and nothing else
       // ever visits every row, so "prune when we're already holding the lease and writing anyway"
       // is the only hook that reliably runs.
-      const pruned = snapshot.sessions.filter((s) => Date.parse(s.expiresAt) > now.getTime());
+      const pruned = snapshot.sessions.filter(
+        (s) => Date.parse(s.expiresAt) > now.getTime(),
+      );
       const session = sessionSchema.parse({
         id: input.id,
         userId: input.userId,
         expiresAt: input.expiresAt.toISOString(),
         createdAt: now.toISOString(),
       });
-      return { snapshot: { ...snapshot, sessions: [...pruned, session] }, result: session };
+      return {
+        snapshot: { ...snapshot, sessions: [...pruned, session] },
+        result: session,
+      };
     });
   }
 
@@ -560,7 +995,10 @@ export class IdentityStore {
   async deleteSession(id: string): Promise<boolean> {
     return this.guardedWrite((snapshot) => {
       const sessions = snapshot.sessions.filter((s) => s.id !== id);
-      return { snapshot: { ...snapshot, sessions }, result: sessions.length !== snapshot.sessions.length };
+      return {
+        snapshot: { ...snapshot, sessions },
+        result: sessions.length !== snapshot.sessions.length,
+      };
     });
   }
 
@@ -599,13 +1037,23 @@ export class IdentityStore {
       }
       if (input.teamId !== undefined) {
         const team = snapshot.teams.find((t) => t.id === input.teamId);
-        if (!team) throw new IdentityStoreError('team-not-found', `no team ${input.teamId}`);
+        if (!team)
+          throw new IdentityStoreError(
+            'team-not-found',
+            `no team ${input.teamId}`,
+          );
         if (team.orgId !== input.orgId) {
-          throw new IdentityStoreError('team-org-mismatch', `team ${input.teamId} belongs to org ${team.orgId}, not ${input.orgId}`);
+          throw new IdentityStoreError(
+            'team-org-mismatch',
+            `team ${input.teamId} belongs to org ${team.orgId}, not ${input.orgId}`,
+          );
         }
       }
       if (snapshot.invites.some((invite) => invite.id === input.id)) {
-        throw new IdentityStoreError('invite-id-taken', `invite id ${input.id} already exists`);
+        throw new IdentityStoreError(
+          'invite-id-taken',
+          `invite id ${input.id} already exists`,
+        );
       }
       const invite = inviteSchema.parse({
         id: input.id,
@@ -615,7 +1063,10 @@ export class IdentityStore {
         createdAt: this.now().toISOString(),
         expiresAt: input.expiresAt.toISOString(),
       });
-      return { snapshot: { ...snapshot, invites: [...snapshot.invites, invite] }, result: invite };
+      return {
+        snapshot: { ...snapshot, invites: [...snapshot.invites, invite] },
+        result: invite,
+      };
     });
   }
 
@@ -637,35 +1088,93 @@ export class IdentityStore {
    *  - `membership-exists` if that user already has a membership in the invite's `orgId` (reuse
    *    `createMembership`'s own check — an already-a-member redeeming a second invite to the same
    *    org is not a new grant).
+   *  - `user-already-member` (ADDED 2026-08-07, 5b/5c/8 repair stage) if that user has a membership
+   *    in a DIFFERENT org — see the check's own comment below, and `IdentityStoreErrorCode`'s
+   *    `user-already-member` note, for why a 201 there was a false grant that also burnt the token.
    *
    * On success: stamp `consumedAt`/`consumedByUserId` on the invite row AND insert the new
    * `Membership` row (role from `invite.role`), both in the returned `snapshot`.
    */
-  async redeemInvite(input: { id: string; userId: string }): Promise<{ invite: Invite; membership: Membership }> {
+  async redeemInvite(input: {
+    id: string;
+    userId: string;
+  }): Promise<{ invite: Invite; membership: Membership }> {
     return this.guardedWrite((snapshot) => {
-      const index = snapshot.invites.findIndex((invite) => invite.id === input.id);
+      const index = snapshot.invites.findIndex(
+        (invite) => invite.id === input.id,
+      );
       const existing = snapshot.invites[index];
-      if (!existing) throw new IdentityStoreError('invite-not-found', `no invite ${input.id}`);
-      if (existing.consumedAt) throw new IdentityStoreError('invite-already-consumed', `invite ${input.id} was already consumed`);
+      if (!existing)
+        throw new IdentityStoreError(
+          'invite-not-found',
+          `no invite ${input.id}`,
+        );
+      if (existing.consumedAt)
+        throw new IdentityStoreError(
+          'invite-already-consumed',
+          `invite ${input.id} was already consumed`,
+        );
       if (Date.parse(existing.expiresAt) <= this.now().getTime()) {
-        throw new IdentityStoreError('invite-expired', `invite ${input.id} expired at ${existing.expiresAt}`);
+        throw new IdentityStoreError(
+          'invite-expired',
+          `invite ${input.id} expired at ${existing.expiresAt}`,
+        );
       }
       if (!snapshot.users.some((user) => user.id === input.userId)) {
-        throw new IdentityStoreError('user-not-found', `no user ${input.userId}`);
+        throw new IdentityStoreError(
+          'user-not-found',
+          `no user ${input.userId}`,
+        );
       }
-      if (snapshot.memberships.some((m) => m.userId === input.userId && m.orgId === existing.orgId)) {
-        throw new IdentityStoreError('membership-exists', `user ${input.userId} is already a member of org ${existing.orgId}`);
+      if (
+        snapshot.memberships.some(
+          (m) => m.userId === input.userId && m.orgId === existing.orgId,
+        )
+      ) {
+        throw new IdentityStoreError(
+          'membership-exists',
+          `user ${input.userId} is already a member of org ${existing.orgId}`,
+        );
+      }
+      // ---- a member of ANOTHER org cannot redeem (ADDED 2026-08-07, 5b/5c/8 repair stage; see
+      // `IdentityStoreErrorCode`'s `user-already-member` note for the general rule).
+      //
+      // **The failure this closes, reproduced at review.** A `member` of org A redeeming org B's
+      // `owner` invite got `201 {"orgId": B, "role": "owner"}` — and then resolved as an org-A
+      // `member` on every subsequent request, because `session.ts#resolveIdentity` takes
+      // `listMemberships(userId)[0]`. The response asserted a grant the product structurally could
+      // not deliver, and the single-use token was stamped `consumedAt` in the same write, so org
+      // B's owner could not even re-send it: the next invite failed identically. That is "a silent
+      // fallback is indistinguishable from success", and it was the ONLY outcome for an invitee who
+      // already belonged to an org — the exact population a multi-org host produces.
+      //
+      // Refusing THROWS, so `guardedWrite` returns no new snapshot and the invite stays UNCONSUMED
+      // and revocable — which is the whole point: the credential remains spendable once an
+      // active-org selector exists (F4), instead of having been burnt on a no-op.
+      if (snapshot.memberships.some((m) => m.userId === input.userId)) {
+        throw new IdentityStoreError(
+          'user-already-member',
+          `user ${input.userId} already belongs to another organization on this deployment`,
+        );
       }
       const consumedInvite = inviteSchema.parse({
         ...existing,
         consumedAt: this.now().toISOString(),
         consumedByUserId: input.userId,
       });
-      const membership = membershipSchema.parse({ userId: input.userId, orgId: existing.orgId, role: existing.role });
+      const membership = membershipSchema.parse({
+        userId: input.userId,
+        orgId: existing.orgId,
+        role: existing.role,
+      });
       const invites = [...snapshot.invites];
       invites[index] = consumedInvite;
       return {
-        snapshot: { ...snapshot, invites, memberships: [...snapshot.memberships, membership] },
+        snapshot: {
+          ...snapshot,
+          invites,
+          memberships: [...snapshot.memberships, membership],
+        },
         result: { invite: consumedInvite, membership },
       };
     });
@@ -678,7 +1187,10 @@ export class IdentityStore {
   async revokeInvite(id: string): Promise<boolean> {
     return this.guardedWrite((snapshot) => {
       const existing = snapshot.invites.find((invite) => invite.id === id);
-      const isActive = existing !== undefined && !existing.consumedAt && Date.parse(existing.expiresAt) > this.now().getTime();
+      const isActive =
+        existing !== undefined &&
+        !existing.consumedAt &&
+        Date.parse(existing.expiresAt) > this.now().getTime();
       if (!isActive) {
         // Idempotent no-op — and deliberately NOT a delete for a missing/consumed/expired row:
         // `listOrgInvites`'s own doc comment says consumed/expired rows are kept for an admin
@@ -706,7 +1218,13 @@ export class IdentityStore {
     const path = join(this.dir, LOCK_FILE);
     try {
       const fd = openSync(path, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: this.now().toISOString() }));
+      writeFileSync(
+        fd,
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: this.now().toISOString(),
+        }),
+      );
       return new IdentityLease(path, fd);
     } catch {
       try {
@@ -750,7 +1268,12 @@ export class IdentityStore {
    * atomically, and always releases. Every public write method above is a thin wrapper around one
    * call to this; none of them touch the lease or the file directly.
    */
-  private async guardedWrite<T>(mutate: (snapshot: IdentitySnapshot) => { snapshot: IdentitySnapshot; result: T }): Promise<T> {
+  private async guardedWrite<T>(
+    mutate: (snapshot: IdentitySnapshot) => {
+      snapshot: IdentitySnapshot;
+      result: T;
+    },
+  ): Promise<T> {
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     const lease = await this.acquireLeaseBlocking();
     try {
@@ -778,11 +1301,17 @@ export class IdentityStore {
     try {
       raw = JSON.parse(readFileSync(path, 'utf8'));
     } catch {
-      this.warnOnce('parse', `Ignored a corrupt ${SNAPSHOT_FILE} — identity reads as empty until the next successful write.`);
+      this.warnOnce(
+        'parse',
+        `Ignored a corrupt ${SNAPSHOT_FILE} — identity reads as empty until the next successful write.`,
+      );
       return emptyIdentitySnapshot();
     }
     if (typeof raw !== 'object' || raw === null) {
-      this.warnOnce('parse', `Ignored a malformed ${SNAPSHOT_FILE} (not an object) — identity reads as empty until the next successful write.`);
+      this.warnOnce(
+        'parse',
+        `Ignored a malformed ${SNAPSHOT_FILE} (not an object) — identity reads as empty until the next successful write.`,
+      );
       return emptyIdentitySnapshot();
     }
     const obj = raw as Record<string, unknown>;
@@ -813,8 +1342,16 @@ export class IdentityStore {
       orgs: this.salvage(obj.orgs, orgSchema, 'orgs'),
       teams: this.salvage(obj.teams, teamSchema, 'teams'),
       users: this.salvage(obj.users, userSchema, 'users'),
-      memberships: this.salvage(obj.memberships, membershipSchema, 'memberships'),
-      projectTeams: this.salvage(obj.projectTeams, projectTeamSchema, 'projectTeams'),
+      memberships: this.salvage(
+        obj.memberships,
+        membershipSchema,
+        'memberships',
+      ),
+      projectTeams: this.salvage(
+        obj.projectTeams,
+        projectTeamSchema,
+        'projectTeams',
+      ),
       sessions: this.salvage(obj.sessions, sessionSchema, 'sessions'),
       // A file written before this scaffold added `invites` (i.e. every identity.json on disk
       // today) simply has no `invites` key — `obj.invites` is `undefined`, and `salvage` already
@@ -825,7 +1362,11 @@ export class IdentityStore {
     };
   }
 
-  private salvage<T>(value: unknown, schema: { safeParse(v: unknown): { success: boolean; data?: T } }, label: string): T[] {
+  private salvage<T>(
+    value: unknown,
+    schema: { safeParse(v: unknown): { success: boolean; data?: T } },
+    label: string,
+  ): T[] {
     if (!Array.isArray(value)) return [];
     const rows: T[] = [];
     let dropped = 0;
@@ -834,7 +1375,11 @@ export class IdentityStore {
       if (parsed.success && parsed.data !== undefined) rows.push(parsed.data);
       else dropped += 1;
     }
-    if (dropped > 0) this.warnOnce(label, `Skipped ${dropped} malformed "${label}" row(s) in ${SNAPSHOT_FILE}.`);
+    if (dropped > 0)
+      this.warnOnce(
+        label,
+        `Skipped ${dropped} malformed "${label}" row(s) in ${SNAPSHOT_FILE}.`,
+      );
     return rows;
   }
 
@@ -848,7 +1393,9 @@ export class IdentityStore {
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     const path = join(this.dir, SNAPSHOT_FILE);
     const tmp = `${path}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(validated, null, 2)}\n`, { mode: 0o600 });
+    writeFileSync(tmp, `${JSON.stringify(validated, null, 2)}\n`, {
+      mode: 0o600,
+    });
     renameSync(tmp, path);
     try {
       // Best-effort defensive re-assert of the mode post-rename — `workspace/config.ts` does the

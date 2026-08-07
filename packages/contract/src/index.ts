@@ -20,3 +20,4 @@ export * from './notes.ts';
 export * from './workspace-runs.ts';
 export * from './notifications.ts';
 export * from './orgs.ts';
+export * from './invites.ts';

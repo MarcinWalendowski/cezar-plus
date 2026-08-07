@@ -127,6 +127,10 @@ const GLOBAL_SECTIONS = [
   // machine and the person at it, not any one repo.
   'accounts',
   'projects',
+  // Teams (spec 2026-08-06-org-team-auth-onboarding, D2/D12, Phase 5c) — org-wide, like Accounts
+  // and Projects, and NOT gated by `singleProject`: a single-project deployment can still belong
+  // to an org with more than one team.
+  'teams',
 ]
 
 describe('the section registry', () => {
@@ -150,10 +154,10 @@ describe('the section registry', () => {
   })
 
   it('hides Projects only when the single-project capability is active', () => {
-    // Accounts survives: a single-project cockpit still runs on ONE of possibly several logins,
-    // so "which account" is orthogonal to "how many projects".
+    // Accounts and Teams both survive: a single-project cockpit still runs on ONE of possibly
+    // several logins in an org with more than one team, so neither is "how many projects".
     expect(visibleSettingsSections('global', { singleProject: true, sources: false }).map((s) => s.id)).toEqual([
-      'appearance', 'notifications', 'resources', 'skills', 'accounts',
+      'appearance', 'notifications', 'resources', 'skills', 'accounts', 'teams',
     ])
     expect(
       visibleSettingsSections('global', { singleProject: false, sources: false }).map((s) => s.id),

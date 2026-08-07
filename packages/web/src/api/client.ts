@@ -941,15 +941,27 @@ export async function removeProject(projectId: string): Promise<RemoveProjectRes
 }
 
 /**
- * Set or clear a project's per-project concurrency ceiling
- * (`PATCH /api/v1/projects/:projectId`, spec 2026-07-22). `maxParallel: null`
- * clears the override back to "inherit the workspace cap"; an integer pins it.
- * The server applies the new ceiling live (semaphore refresh), so the answer is
- * the updated entry the pane swaps into its list.
+ * Set or clear a project's per-project concurrency ceiling, and/or reassign its team
+ * (`PATCH /api/v1/projects/:projectId`, spec 2026-07-22 + `.ai/specs/2026-08-06-org-team-auth-
+ * onboarding.md` D2/D4 Phase 5c). `maxParallel: null` clears the override back to "inherit the
+ * workspace cap"; an integer pins it; `undefined` (simply omitted) leaves it untouched — the ROUTE
+ * (`server.ts`, widened 2026-08-07, Fill unit 3) now distinguishes "clear" from "don't touch",
+ * which is what makes a `teamId`-only call safe. The server applies the new ceiling live (semaphore
+ * refresh) and reports the reassigned team back through the SAME `withTeams` decoration the GET
+ * listing uses, so the answer is the fully up-to-date entry the pane swaps into its list.
  *
  * Deliberately NOT where a project's agent account is set — that is
  * `selectAgentProfile` (`PUT /api/v1/workspace/agent-profiles/selection`), so
  * the selection is stored beside the accounts it names.
+ *
+ * **The `?? null` trap this comment used to warn about is closed.** Before the route understood
+ * `teamId`, `$patch`'s typed `json` required the OLD, narrower `{maxParallel: number | null}`, so
+ * this rebuilt that shape from scratch — and an unqualified `maxParallel: input.maxParallel ?? null`
+ * would have CLEARED a project's concurrency override on every team-only reassignment the moment the
+ * route learned to read `teamId`. `$patch`'s typed `json` is inferred from `server.ts`'s own
+ * validator (`app-type.ts`), which is widened now too, so `maxParallel` is forwarded only when the
+ * caller actually named it (`undefined` omits the key entirely, matching the route's "absent means
+ * untouched" contract) and `teamId` rides along unmodified.
  */
 export async function updateProject(
   projectId: string,
@@ -958,7 +970,10 @@ export async function updateProject(
   return unwrap(
     await cez.api.v1.projects[':projectId'].$patch({
       param: { projectId: encodeURIComponent(projectId) },
-      json: input,
+      json: {
+        ...(input.maxParallel !== undefined ? { maxParallel: input.maxParallel } : {}),
+        ...(input.teamId !== undefined ? { teamId: input.teamId } : {}),
+      },
     }),
     `/projects/${encodeURIComponent(projectId)}`,
   )

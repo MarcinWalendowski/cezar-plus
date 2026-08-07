@@ -91,6 +91,55 @@ describe('OrgProcessRegistryStore — register (the "start" half)', () => {
     ).rejects.toMatchObject({ code: 'port-taken' });
   });
 
+  /**
+   * ADDED 2026-08-07 (5b/5c/8 repair stage). `orgId`, `hostname` and `loopbackPort` each had a
+   * uniqueness check; `supervisorSecret` — the field that ANSWERS WHICH ORG A CALLER IS
+   * (`internal-auth.ts#resolveInternalCaller` returns the FIRST active record whose secret matches)
+   * — had none. Two orgs registered with one secret both answered 201, and that secret then
+   * resolved to whichever was registered first: one org silently lost its `/internal/*` identity.
+   * Worse on the other side, `forwarded-session.ts` derives the acting org from the signed payload
+   * alone, so a shared secret would let org A's forwarded principal verify at org B's process.
+   * Defense in depth today (the hetzner installer mints one randomly per org), made structural.
+   */
+  it("refuses a supervisorSecret already registered to a DIFFERENT org's active process", async () => {
+    const dir = await directory();
+    const store = OrgProcessRegistryStore.open(dir);
+    const shared = 'y'.repeat(32);
+    await store.register(registration({ orgId: 'org_acme', orgSlug: 'acme', supervisorSecret: shared }));
+    await expect(
+      store.register(
+        registration({
+          orgId: 'org_beta',
+          orgSlug: 'beta',
+          hostname: 'beta.cezar.example.com',
+          loopbackPort: 4401,
+          supervisorSecret: shared,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'supervisor-secret-taken' });
+    expect(store.getActiveByOrgId('org_beta')).toBeUndefined();
+
+    // A distinct secret registers fine — the refusal is about the collision, not about org B.
+    const ok = await store.register(
+      registration({
+        orgId: 'org_beta',
+        orgSlug: 'beta',
+        hostname: 'beta.cezar.example.com',
+        loopbackPort: 4401,
+        supervisorSecret: 'z'.repeat(32),
+      }),
+    );
+    expect(ok.status).toBe('active');
+  });
+
+  it('re-provisioning the SAME org with the same secret is fine — the check is cross-org only', async () => {
+    const dir = await directory();
+    const store = OrgProcessRegistryStore.open(dir);
+    await store.register(registration());
+    await store.deprovision('org_acme');
+    await expect(store.register(registration())).resolves.toMatchObject({ status: 'active' });
+  });
+
   it('a deprovisioned org frees its hostname AND port for reuse — by itself or another org', async () => {
     const dir = await directory();
     const store = OrgProcessRegistryStore.open(dir);

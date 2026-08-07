@@ -272,6 +272,8 @@ async function serveCommand(
   let sessionResolver: SessionResolver | undefined;
   let authRoutes: Hono | undefined;
   let onboardingRoutes: Hono | undefined;
+  let inviteRoutes: Hono | undefined;
+  let teamRoutes: Hono | undefined;
   if (gate.provider === 'supervisor') {
     // ---- D10: this process is an ORG process behind `cezar supervisor`. ------------------------
     //
@@ -279,9 +281,10 @@ async function serveCommand(
     // under D4 that directory does not exist here, and D10 assigns it to the one supervisor
     // process. So this branch deliberately does none of what the `oidc`/`google` branch below
     // does: no `./auth/session.ts` (which opens an `IdentityStore` at MODULE scope, i.e. merely
-    // importing it would create the directory), no `authRoutes`/`onboardingRoutes` (mounting a
-    // second login surface on a loopback port every local uid can reach), and no bootstrap-code
-    // banner (there is no local store for a code to claim).
+    // importing it would create the directory), no
+    // `authRoutes`/`onboardingRoutes`/`inviteRoutes`/`teamRoutes` (mounting a second login/admin
+    // surface on a loopback port every local uid can reach), and no bootstrap-code banner (there
+    // is no local store for a code to claim).
     //
     // ADDED 2026-08-07 at the repair stage. Before it, `if (gate.provider !== 'none')` swallowed
     // `'supervisor'` and wired the COOKIE resolver — so every request to every org host 401'd,
@@ -317,7 +320,7 @@ async function serveCommand(
     // compile time instead of through the emitted runtime helper. Do not reintroduce the
     // indirection to silence a resolution error: an unresolvable specifier here means the module
     // is genuinely missing from the build, which is the thing worth failing on.
-    const [sessionMod, routesMod, onboardingMod, claimMod, identityMod, pathsMod] = await Promise.all([
+    const [sessionMod, routesMod, onboardingMod, inviteMod, teamMod, claimMod, identityMod, pathsMod] = await Promise.all([
       import('./auth/session.ts'),
       import('./auth/routes.ts'),
       // D8 onboarding (phase 4/5) — same "string literal, never a variable specifier" discipline
@@ -326,6 +329,10 @@ async function serveCommand(
       // a wrong path here would only ever be caught at runtime, by a boot that never happens on
       // the npm-default `CEZ_AUTH` unset path.
       import('./auth/onboarding-routes.ts'),
+      // 5b invites — same string-literal discipline as the two imports above, for the same reason.
+      import('./auth/invite-routes.ts'),
+      // 5c team management — same string-literal discipline, same reason.
+      import('./auth/team-routes.ts'),
       import('./auth/bootstrap-claim.ts'),
       import('./auth/identity-store.ts'),
       // `./paths.ts` is reached the same dynamic way it already is further down this file
@@ -337,6 +344,8 @@ async function serveCommand(
     sessionResolver = sessionMod.sessionResolver;
     authRoutes = routesMod.authRoutes;
     onboardingRoutes = onboardingMod.onboardingRoutes;
+    inviteRoutes = inviteMod.inviteRoutes;
+    teamRoutes = teamMod.teamRoutes;
     // The bootstrap code (`./auth/bootstrap-claim.ts`, ADDED 2026-08-07) is only useful if the
     // operator can see it, and it is only *relevant* while the deployment has no org — so the
     // banner is printed here, next to D1's own boot messages, and suppressed once onboarding has
@@ -441,6 +450,8 @@ async function serveCommand(
     sessionResolver,
     authRoutes,
     onboardingRoutes,
+    inviteRoutes,
+    teamRoutes,
   }, port);
   const url = `http://localhost:${port}`;
 

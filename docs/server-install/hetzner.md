@@ -50,7 +50,57 @@ has to remember to filter.
 
 ---
 
-## Read this before you start: you can host exactly one organization today
+## Read this before you start: a hosted deployment can now host more than one organization
+
+**CORRECTED 2026-08-07 (phases 5b/5c/8): this heading, and the section below it, replace the
+superseded "you can host exactly one organization today" section kept immediately after this
+one — the falsehood was in that heading, not only its body, so amending only the body would have
+left a reader scanning headings carrying away the wrong claim.** See the spec's D11
+(`.ai/specs/2026-08-06-org-team-auth-onboarding.md`).
+
+`POST /internal/orgs` — admin-only, authenticated by `CEZ_SUPERVISOR_ADMIN_TOKEN` — creates the
+organization row for every organization after the deployment's first. The **org** install below
+calls it as part of provisioning: it resolves `--org-slug <slug>` against the supervisor and, if
+no organization by that slug exists yet, creates one before provisioning that organization's unix
+user, systemd unit, nginx vhost and `org-register` step — closing the wall the superseded section
+describes (infrastructure fully automated, nothing to put behind it).
+
+The first person to sign in **at the deployment's login host** (`login.example.com` below — NOT
+the organization's own hostname) and enter that organization's **slug** plus **its own** per-org
+claim code — printed once at creation, never the deployment-wide code the very first
+organization's owner holds — becomes its owner.
+
+> **CORRECTED 2026-08-07, same day, at the 5b/5c/8 repair stage: the sentence above first read
+> "the first person to sign in *at that organization's own hostname*", which names a host where
+> the claim cannot happen at all.** An organization's own process runs `CEZ_AUTH=supervisor` and
+> deliberately mounts none of the `/auth/*` routes (`packages/cezar/src/index.ts` — no login
+> surface on a loopback port every local uid can reach, and no identity store under D4's per-org
+> uid boundary). `POST /auth/onboarding/org` exists only on the supervisor, and its claim branch
+> is keyed on the `orgSlug` in the request body plus that org's `claimTokenHash` — the hostname
+> the browser is on is never read. Following the original instruction would have meant sitting on
+> `acme.login.example.com` waiting for a wizard that is not served there.
+
+A second and
+later member of any organization now joins by invite rather than never at all
+(`owner`/`admin`-only), and `owner`/`admin` can create, rename and reassign teams. `role` gates
+that kind of organization administration and never code execution: **members of an organization
+can run code as one another. Invite accordingly** (unchanged from ["How it's
+wired"](#remote-access-hetzner-one-process-per-organization) above) — a `member` reaches
+`POST /api/v1/workflows` exactly as an `owner` does, because both share the one unix user
+provisioning below gives their organization.
+
+**What has not changed: none of this has been run against a real, two-organization Hetzner
+host.** Everything above is built and unit/route-tested in this repo; see the spec's
+Verification section for the current QA-Needed list before treating a live multi-org deployment
+as proven.
+
+---
+
+### Superseded 2026-08-07: "you can host exactly one organization today"
+
+Kept for the reasoning it still carries about what per-org isolation buys you even before an
+org-creation surface exists — not as a current description of this platform's capability, which
+the corrected section above replaces.
 
 The isolation described above is real, built and tested. **What is missing is
 the ability to create a second organization.**
@@ -128,8 +178,19 @@ npx cezar-cli server-install --platform hetzner \
   --domain acme.login.example.com --org-slug acme
 ```
 
-Steps: `deps` → `org-user` → `org-systemd` → `org-register` → `nginx` → `tls` →
-`identity`.
+Steps: `deps` → `org-create` → `org-user` → `org-systemd` → `org-register` →
+`nginx` → `tls` → `identity`.
+
+**CORRECTED 2026-08-07 (phases 5b/5c/8): `org-create` is new and runs first among the
+org-specific steps, before even the unix user** — it needs nothing but the supervisor's
+admin token, so a failure there (bad token, rejected name, supervisor unreachable) leaves
+nothing provisioned to undo. It calls the admin-only `POST /internal/orgs` (D11) to create
+the organization row for `--org-slug` if it does not already exist, and prints the one-time
+per-org bootstrap claim code its intended owner needs — see [Claiming the
+deployment](#claiming-the-deployment). The two paragraphs below, about `org-register` and
+about `--org-slug` resolution aborting because "a second org stops today", describe the
+pre-`org-create` state and are kept for the reasoning about why `org-register` sits where it
+does, not as a current description — see the corrected section at the top of this page.
 
 `org-register` is the one that hands this org's freshly minted
 `CEZ_SUPERVISOR_SECRET` to the supervisor, which is what makes the
@@ -181,6 +242,11 @@ would be another org's traffic routed into the wrong process.
 
 ## Claiming the deployment
 
+There are **two different codes**, and they claim different things. Both are answered at the
+**login host** — an organization's own hostname serves no `/auth/*` route at all.
+
+### The first organization — the deployment-wide bootstrap code
+
 The first user to sign in and name an organization becomes its owner, and an
 owner can run shell commands on this host. With `--platform hetzner` and
 `CEZ_AUTH=google` the issuer is pinned but the *audience* is every Google
@@ -194,9 +260,39 @@ and refuses with 403 without it.
 sudo journalctl -u cezar-hetzner-<instance> -n 50 --no-pager | grep -i bootstrap
 ```
 
+> **FIXED 2026-08-07 (phases 5b/5c/8 repair stage): until this release the command above matched
+> nothing, and this section was describing a claim nobody could complete.** `cezar serve` printed
+> the code on its `CEZ_AUTH`-on path; `cezar supervisor` never did — and on this platform the
+> supervisor is the only process that mounts `POST /auth/onboarding/org`. So the default mode
+> minted a fresh code at every restart, the wizard refused every claim without it, and the operator
+> had no way to read it: a `--platform hetzner` install was unclaimable unless the bootstrap prompt
+> below had been answered with a pinned value. `startSupervisor` now prints the same banner
+> `serve` does, from the same module instance the route checks
+> (`packages/cezar/src/supervisor/index.ts#supervisorBootLines`).
+
 Pin your own value instead by answering the bootstrap prompt during install (it
 becomes `CEZ_AUTH_BOOTSTRAP_TOKEN` in the supervisor's env file). The code stops
 being printed, and stops granting anything, the moment the organization exists.
+
+### Every organization after that — its own per-org claim code
+
+The deployment-wide code above is spent, and deliberately cannot claim a second organization:
+org one's owner already holds it, and D11's whole point is that holding it must not make them the
+owner of every organization on the box.
+
+Instead, `server-install --platform hetzner --org-slug <slug>`'s `org-create` step prints that
+organization's **own** single-use claim code, once, at provisioning time. It is not written to any
+log and cannot be re-derived — if it is lost, delete the organization and provision it again.
+Hand it to that organization's intended owner out of band, along with the slug.
+
+They then sign in at **`https://login.example.com`** (the login host — *not*
+`https://<slug>.login.example.com`, which runs `CEZ_AUTH=supervisor` and serves no wizard), open
+"I have an organization code" on the onboarding screen, and enter the slug and the code. That
+makes them that organization's `owner`; everyone else joins by an invite an `owner`/`admin` mints
+from the cockpit.
+
+A wrong code and a slug that names no organization answer the identical 403, on purpose — telling
+them apart would let anyone enumerate which organizations exist on the deployment.
 
 ---
 

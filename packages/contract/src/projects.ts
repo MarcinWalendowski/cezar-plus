@@ -104,9 +104,27 @@ export type UpdateProjectResponse = z.infer<typeof updateProjectResponseSchema>;
  *
  * Deliberately NOT where the agent-account selection lives — that is
  * `PUT /api/v1/workspace/agent-profiles/selection`, stored beside the accounts it names.
+ *
+ * **`maxParallel` relaxed to OPTIONAL, and `teamId` added — both 2026-08-07 (5b/5c/8 scaffold
+ * pass, D2/D4, Phase 5c).** Additive, BC-safe in both directions: every existing caller already
+ * sends `maxParallel` on every call (nothing that used to be accepted is now rejected — the
+ * "widen a request schema, never narrow it" rule), and `teamId` absent means "leave the current
+ * team assignment untouched", which is what makes an existing `{maxParallel}`-only PATCH answer
+ * byte-identically to before.
+ *
+ * `teamId`, when present, reassigns this project's team WITHIN its owning org — see
+ * `auth/identity-store.ts#updateProjectTeam`'s own doc comment for the exact D4 guard (the org
+ * itself can never change through this field; only which team inside it). This is the cheapest
+ * correct home for reassignment (Fill unit 3, "team CRUD store+HTTP"): the route already resolves
+ * a `Principal` and calls `mayActOnRoot` before writing (`server/server.ts`), so the D4 read-side
+ * check for "is this even your org's root" is inherited for free rather than re-decided here.
+ * Under `CEZ_AUTH` unset, or for a root with no org claim at all, this field must be REJECTED
+ * (400) rather than silently ignored — there is no team to reassign FROM, and silently accepting
+ * it would let a caller believe a reassignment happened when nothing was written.
  */
 export const updateProjectInputSchema = z.object({
-  maxParallel: z.number().int().min(1).max(16).nullable(),
+  maxParallel: z.number().int().min(1).max(16).nullable().optional(),
+  teamId: z.string().min(1).optional(),
 });
 export type UpdateProjectInput = z.infer<typeof updateProjectInputSchema>;
 

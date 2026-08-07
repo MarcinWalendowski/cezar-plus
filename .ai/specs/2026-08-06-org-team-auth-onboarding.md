@@ -124,6 +124,26 @@ existing one is a breaking change to a published API.
 "Team" is also the word Linear uses for exactly this tier, and Linear is the
 stated reference.
 
+**CORRECTED 2026-08-07 (phase 5c landed): the paragraph below describes a state of affairs
+that phase 5c ended, and its framing — that this needed its own phase — is what 5c was.**
+`IdentityStore.createTeam` has an HTTP caller now (`POST /auth/teams`, `auth/team-routes.ts`,
+D12-gated, beside `PATCH`/`DELETE /auth/teams/:teamId` and a Settings → Teams pane); a
+project's team IS reassignable (`PATCH /api/v1/projects/:projectId`'s `teamId` field over
+`IdentityStore#updateProjectTeam`); and `teamOptions` on the board is sourced from `GET
+/auth/teams` rather than derived from already-claimed projects, so a team with no projects is
+selectable. **D2's own example — `engineering` beside `marketing` — is reachable from the
+product.** The original text follows unchanged.
+
+**AMENDED 2026-08-07 (5b/5c/8 repair stage): the tier has a floor of one, enforced in the
+store.** `DELETE /auth/teams/:teamId` refuses (409, `team-is-last`) when the named team is the
+last one in its org. Not a route-level nicety: every membership resolves through a team
+(`session.ts#resolveIdentity` reads `listTeams(orgId)[0]`), so an org with zero teams cannot be
+signed into by *anybody*, including its owner, and no route can create one back — the org is
+bricked, permanently, by one successful admin action. The check therefore lives in
+`IdentityStore#deleteTeam` under the write lease, beside every other uniqueness invariant (D7),
+rather than in the handler, so a second caller cannot race past it. Read D2 as
+"`Organization → Team → Project`, with at least one Team, always".
+
 **ADDED 2026-08-07 (post-review): after phases 4-5 the tier exists in storage and
 is inert in the product, and the spec should say so rather than let the phase
 table imply otherwise.** `IdentityStore.createTeam` has no HTTP caller;
@@ -207,6 +227,15 @@ org. Registering one root under two orgs puts two processes on one
 leak. Enforced at registration by the supervisor, which owns the only mapping
 of root → org.
 
+**CORRECTED 2026-08-07 (phases 5b/5c/8 landed): the sentence below is FALSE and this is the
+one correction in this document where the FACT changed rather than the reason.** A hosted
+cezar can now hold more than one organization: `POST /internal/orgs` (admin-only, D11)
+creates the row, the hetzner installer's `org-create` step calls it, and `claimOrg` (the
+renamed `bootstrapFirstOrg`) grants that org's first owner via `POST /auth/onboarding/org`
+with an `orgSlug` and that org's own claim code. The sentence is kept below unchanged because
+every "hosted means single-org" reference elsewhere in this document was written against it;
+read each of those as superseded by D11 too, not as a second, still-standing claim.
+
 Until the per-org split ships (phase 6), **hosted means single-org**, and the
 spec says so rather than letting a partial implementation imply otherwise.
 
@@ -261,6 +290,18 @@ practical consequence is unchanged from what D10 wanted — an unknown
 user and the systemd unit already exist, rather than before anything is
 written. `preflight` does now refuse one thing it never did: the same org
 slug already provisioned on a second hostname (see `sibling` there).
+
+**CORRECTED 2026-08-07 (phases 5b/5c/8 landed) — the heading below is now false and every
+one of the four facts it rests on has changed.** `createOrg` has a second caller (`POST
+/internal/orgs`, admin-only, `supervisor/server.ts`); that route exists, so `/internal/orgs`
+is no longer `GET`-only; `bootstrapFirstOrg` is renamed `claimOrg` and its `orgs.length > 0`
+gate now guards only the legacy first-org branch, while the `orgId` branch guards "this org
+already has a member" instead; and the hetzner installer calls the new route from its
+`org-create` step. The honest statement after phases 5b/5c/8 is therefore: **provisioning a
+second org's infrastructure is automated AND the org it serves can now be created — by an
+operator holding `CEZ_SUPERVISOR_ADMIN_TOKEN`, never by a browser request (D11).** The
+original paragraph is kept below unchanged because the paragraphs above it were written
+against it.
 
 **What has NOT changed: nothing creates a second `Org`.** The first gap above
 stands exactly as written, and it alone is why "hosted means single-org" is
@@ -500,7 +541,23 @@ already the corrected one.**
    surface in the product can produce. `onboardingStateSchema` now has three
    states and the wizard renders a terminal "ask an owner to invite you" screen,
    carrying nothing about the existing org.
-4. **STILL MISSING, and named here so the next phase owns it: there is no invite
+4. **CORRECTED 2026-08-07 (phase 5b landed): the heading below is false — the
+   invite HTTP surface exists.** `auth/invite-routes.ts` ships `POST /auth/invites`
+   (mint, 256-bit hex token, TTL bounded to `[15 min, 30 days]`, 7-day default),
+   `GET /auth/invites`, `POST /auth/invites/revoke` — all three D12-gated by
+   `require-org-admin.ts`'s middleware, ahead of validation — and `POST
+   /auth/invites/redeem`, deliberately NOT role-gated because the caller has no
+   membership yet. `packages/contract/src/invites.ts` is its wire contract, and
+   the routes are mounted on BOTH the single-process app and the supervisor. So
+   phase 4's verification row ("invite required for the second user") is fully
+   satisfied rather than half: the refusal exists and so does the invite. **What
+   the paragraph asks for that is still open: the owner-side invite UI.** No
+   cockpit surface creates or redeems an invite yet — an operator or owner drives
+   these routes directly today. The role question it raises is answered by D12
+   below, which was written for exactly this reason.
+   The original text follows unchanged.
+
+   **STILL MISSING, and named here so the next phase owns it: there is no invite
    HTTP surface.** `IdentityStore.createInvite`/`redeemInvite`/`revokeInvite`
    exist, are guarded and are tested; nothing calls them. Until a create/redeem
    route, a `packages/contract/src/invites.ts` and the owner-side UI land, a
@@ -654,7 +711,14 @@ steps — D8's onboarding never provisions a systemd unit, and it must not start
 `POST /auth/onboarding/org` is reachable by any authenticated first user (guarded only by the
 bootstrap code, D8 amendment 2) — letting it trigger unix-user creation or a systemd unit write
 would hand a network request root-adjacent power over the host, which is exactly the shape D1
-exists to refuse elsewhere. So: onboarding creates the `Org` row only (unchanged, phase 4 code).
+exists to refuse elsewhere. **CORRECTED 2026-08-07 (5b/5c/8 scaffold pass) by D11, for the
+SECOND-and-later org only — the sentence that follows is no longer true in that one case; the
+reasoning above it (self-service identity, operator-run infrastructure, kept as two steps) still
+stands and is exactly why D11 exists.** So: onboarding creates the `Org` row only (unchanged, phase
+4 code) — **true for the deployment's first-ever org, on either topology; false for org two
+onward, where `POST /internal/orgs` (admin-only, D11) creates the row instead and onboarding only
+grants the caller's `owner` membership on it.** See D11's own text below, and its 5b/5c/8 scaffold
+addendum, for the exact split and why the first org keeps the self-serve path.
 Turning that row into a running process is `cezar server-install --platform hetzner --domain
 <org-hostname> --org-slug <slug>` — an operator command requiring shell/sudo on the host, resolving
 `slug` against the supervisor's `/internal/orgs/*` lookup before it provisions anything.
@@ -733,6 +797,278 @@ folded in.
   identity store and agent credentials. Worth a docs correction on its own, separate from this
   spec's phase 6/7 work (which is what actually makes two cockpits independent).
 
+### D11 — creating the *second* organization is an operator action, not a user action
+
+Added 2026-08-07, after phases 6/7 landed and the multi-org story turned out to be
+unreachable. Phase 6 automated every piece of infrastructure for org two — a unix user, a
+`CEZ_HOME`, a systemd unit, an nginx vhost, a supervisor process record — and left no way to
+create the organization those serve. `bootstrapFirstOrg` is `createOrg`'s only caller and its
+guard is `orgs.length > 0`; the supervisor's `/internal/orgs*` routes are `GET` only. So phase
+6's own verification row ("two orgs ⇒ two unix users…") is not reachable here **or on a real
+host**, and the whole uid boundary is, today, infrastructure with nothing on the far side.
+
+**Creating an organization requires root.** It provisions a unix user, a home directory, a
+systemd unit and an nginx vhost. No request from a browser can do that, and no application role
+should be able to: handing org creation to an org `owner` would let any tenant create unix users
+and consume host resources, which inverts the very boundary D4 exists to draw. D4's isolation is
+a *uid* boundary, so the authority to mint one belongs to whoever already holds root.
+
+So org creation splits into two halves with **two different authorities**:
+
+1. **The org row** — created by the installer through a new admin-only `POST /internal/orgs`,
+   authenticated by `CEZ_SUPERVISOR_ADMIN_TOKEN`, the same credential
+   `POST /internal/org-processes` already requires. The installer runs as root and already holds
+   it, so this adds no new trust: it makes an existing capability reachable rather than granting
+   one. `requireAdmin` already covers `/internal/orgs*`, so the new verb inherits the
+   authorization-before-validation ordering rather than re-deciding it.
+2. **The org's first owner** — claimed by the first user to sign in at *that org's hostname* with
+   *that org's* bootstrap code, exactly as org one is claimed today. Unchanged mechanism, and
+   D9's bounded-audience reasoning carries over verbatim.
+
+   **CORRECTED 2026-08-07 (5b/5c/8 repair stage): "at *that org's hostname*" is wrong, and it was
+   wrong when written — an org's own process cannot serve a claim.** Under D10 an org process runs
+   `CEZ_AUTH=supervisor` and deliberately mounts none of `authRoutes`/`onboardingRoutes`/
+   `inviteRoutes`/`teamRoutes` (`packages/cezar/src/index.ts`'s `provider === 'supervisor'` branch,
+   which exists precisely so a second login surface never appears on a loopback port every local
+   uid can reach). `POST /auth/onboarding/org` therefore exists **only on the supervisor**, and its
+   claim branch is keyed on the `orgSlug` in the request body plus that org's `claimTokenHash` —
+   the Host header is never read. As landed: the owner signs in at the deployment's **login host**
+   and enters slug + code. Two things follow that the original wording hid. First, the docs
+   telling an operator to send the owner to `<slug>.<base>` were sending them to a 401 loop, and
+   `README.md`, `docs/server-install/hetzner.md` and `CHANGELOG.md` all carried that instruction —
+   now corrected in place. Second, "exactly as org one is claimed today" is what made the
+   supervisor's missing bootstrap banner invisible in review: `cezar serve` printed the code and
+   `cezar supervisor` never did, so on the one platform this spec is written for, org ONE was
+   unclaimable too unless `CEZ_AUTH_BOOTSTRAP_TOKEN` had been pinned at install. Fixed at this
+   stage (`supervisor/index.ts#supervisorBootLines`, pinned by `supervisor/index.test.ts`).
+
+**`bootstrapFirstOrg` therefore changes meaning, not shape:** from "create the first org" to
+"claim an unclaimed org". Its guard becomes *this org already has an owner*, not *any org
+exists*. That was always the honest reading — the check existed to stop a second **claim**, and
+capped orgs at one only incidentally. Renaming it to say so is part of this phase, because a
+function called `bootstrapFirstOrg` that no longer creates anything is exactly the stale name a
+future session would trust.
+
+**What this makes false.** The single-org claim in the README, the CHANGELOG and this spec stops
+being true the moment this lands — and unlike the last two corrections, the *fact* changes rather
+than the reason. Every one of those sentences must be corrected in place, and phase 6's
+verification row becomes runnable for the first time. Do not land this phase and leave them
+standing.
+
+### D12 — `role` gates org administration, and never code execution
+
+Added 2026-08-07. Phase 5b was left with "what an `admin`/`member` may do is decided rather than
+inherited", and an implementer should not be the one deciding it, because the tempting answer is
+wrong in a way that reads as security.
+
+**`owner` / `admin` gate org administration**: creating and revoking invites, renaming the org,
+creating/renaming/reassigning teams, removing members. **`member` gets everything else**,
+including `POST /api/v1/workflows` and every agent-run surface.
+
+**Role must NOT be used to restrict code execution.** D4 already states the honest position —
+*"members of an organization can run code as one another. Invite accordingly."* Everyone in an
+org shares one unix user, one `CEZ_HOME`, one set of `claude`/`codex` credentials and one shell.
+A `role !== 'member'` check in front of `POST /api/v1/workflows` would not create a boundary; it
+would only *look* like one, while the member reaches the identical shell through any other agent
+surface. An isolation control that isn't one is worse than none, because it is what the next
+reader trusts when deciding who to invite.
+
+The line is therefore: **role decides who can change the org; the uid decides who can run code.**
+If a deployment genuinely needs members who cannot execute code, that is a second org (D4's real
+boundary), not a role — and the docs should say so rather than implying a role would do.
+
+**OPEN 2026-08-07 (5b/5c/8 integration pass), and deliberately NOT decided here: which side of
+that line `PATCH /api/v1/projects/:projectId`'s `teamId` field falls on.** D12's list above
+names "creating/renaming/reassigning teams" as gated, and phase 5c's row says "team
+management: create/rename/reassign" — so reassigning a project between teams reads as gated.
+It shipped ungated: `/auth/teams*`'s three write verbs go through `requireOrgAdmin`, and this
+field goes through `mayActOnRoot` (D4's same-org check) alone, so a `member` can move any
+project between their org's teams. Two written artifacts pull apart on the fix, which is why
+an integration pass should not pick a side quietly:
+- **D12's own list** says gate it.
+- **`auth/require-org-admin.ts`'s module doc** says, flatly, "DO NOT mount this in front of
+  `POST /api/v1/workflows`, **any other `/api/v1/*` route**, or any agent-run surface", and
+  names `/auth/*` org-administration routes as its one legitimate mount family.
+The prohibition's stated reason is code execution, which this field is not — D5 calls team
+"metadata on a project used for grouping and filtering, not a scope", so a `member` moving a
+project between teams gains and loses no access whatsoever. That argues the prohibition wants
+scoping rather than a blanket ban. But it is also a route a `member` may legitimately call
+(for `maxParallel`), so the gate would be FIELD-level, not route-level, and therefore cannot
+be middleware — which means it cannot inherit the authorization-before-validation ordering the
+rest of D12's gates get by construction. **Whoever resolves this owns two edits, not one:** the
+check itself, and re-scoping `require-org-admin.ts`'s prohibition so the next reader is not
+choosing between a decision and a docblock.
+
+**OPEN 2026-08-07 (5b/5c/8 repair stage), also deliberately not decided here: an `admin` can mint
+an `owner` invite.** `POST /auth/invites` takes `role` from the body and validates it against
+`roleSchema` alone, so an `admin` can create an invite that makes its redeemer an `owner` — and
+`owner` is not a higher tier of anything today, because D12's list is flat: `owner` and `admin`
+are the same set of permissions, and the only asymmetry anywhere in the system is that the
+deployment's claim path mints `owner`. So the escalation is currently **inert**: an `admin` can
+produce another principal with exactly the permissions they already have. It is recorded rather
+than fixed because it stops being inert the moment anything is made owner-only (org deletion,
+billing, removing the last admin, transferring ownership), and at that point the fix is a
+one-line rank check at the route — not a redesign. The reason not to add that check now is D12's
+own discipline about not deciding a policy in an implementation pass: "an `admin` may not mint an
+`owner`" is a real product rule with a real consequence (an org whose only `owner` leaves has no
+way back), and it should be decided beside whatever first makes `owner` mean more than `admin`.
+
+**GAP 2026-08-07 (5b/5c/8 repair stage), named so it is not mistaken for an oversight: there is
+no member roster and no member-removal surface.** D12's own list names "removing members" as an
+org-administration act, and nothing implements it — there is no `GET /auth/members`, no
+`DELETE /auth/members/:userId`, and `IdentityStore` has no `deleteMembership`. A user invited by
+mistake, or one who should no longer have access, can only be removed by editing
+`<CEZ_HOME>/identity/*.json` by hand. That is a real operational hole, and it is worth being
+precise about how big: it does not gate anything landed in 5b/5c/8, because every path that could
+have made it *worse* now refuses instead of writing — a claim aimed at the wrong org and an
+invite redeemed by a user who already belongs somewhere both answer 409 with the code unspent
+(`user-already-member`), and an org's last team cannot be deleted (`team-is-last`). So the
+irreversible cases are closed; the missing verb is the reversible one. Whichever phase builds it
+owns three things: the store method under the existing write lease, the D12 role gate, and the
+rule for the last `owner` (an org with no owner is the same class of lockout `team-is-last`
+exists to prevent).
+
+### D11/D12 scaffold — seams for nine 5b/5c/8 Fill units
+
+Added 2026-08-07. Three recon passes over the landed phase 1-7 code (invites/roles, teams/UI,
+org-creation/D11) converged on a set of blockers that D11 as first written did not anticipate — the
+most load-bearing being **"per-org bootstrap codes do not exist"** (D11 assumed the per-org secret
+was already solvable; the deployment-wide `auth/bootstrap-claim.ts` is one code per PROCESS, not
+per org, and org one's owner already holds it). This section is that gap closed, plus the wire/store
+seams and the 9-unit ownership map Fill builds from — mirroring the shape D10 already used for
+phase 6/7. Everything below is either already-landed code (marked as such) or a declared-not-
+implemented seam a Fill unit fills in; nothing here is a business-logic decision left for Fill to
+make on its own.
+
+**The crux, solved.** `packages/cezar/src/auth/org-claim-token.ts` (+ `.test.ts`) is the frozen,
+already-implemented, already-tested two-sided contract — `mintOrgClaimToken`/`hashOrgClaimToken`
+(Fill unit 6 mints+hashes at `POST /internal/orgs`) and `matchesOrgClaimToken` (Fill unit 7 verifies
+at the renamed claim method) — the same "write both sides once so two units converge on one scheme"
+move D10 made for `supervisor/forwarded-principal.ts`. The hash lands on a new, additive
+`Org.claimTokenHash` (`auth/types.ts`, `.passthrough()`-safe); `IdentityStore#createOrg` already
+takes an optional `claimTokenHash` input this pass (existing callers unaffected — every one omits
+it). This is what makes D11's "cannot claim another org's [code]" true: org one's owner holds the
+DEPLOYMENT-wide code (unchanged, still gates only the deployment's first-ever org); org two's code
+is a completely different, per-org secret nothing about org one exposes.
+
+**`bootstrapFirstOrg` → `claimOrg` — the exact rename target. LANDED 2026-08-07 (Fill unit 7); this section is kept as the specification the implementation was checked against.** Spelled out in
+full on `bootstrapFirstOrg`'s own docblock in `identity-store.ts` (Fill unit 7 reads it there, not
+only here): the method gains an optional `orgId` input that forks its behavior — **absent** keeps
+today's exact behavior (deployment-wide code, `orgs.length > 0` guard, creates org+team+membership
+from a name) for the deployment's first-ever org on EITHER topology (a bare `cezar serve --auth
+oidc` with no supervisor has no `/internal/orgs` route to pre-create anything with, so this path
+must survive); **present** is the new D11 claim path (org+team already exist, guard is "does this
+org already have a member", grants only the `owner` membership). Every production call site that
+must change: `onboarding-routes.ts:83` (the `OnboardingIdentityStore` `Pick<>` literal),
+`onboarding-routes.ts:310` (the `POST /auth/onboarding/org` handler, branching on the new `orgSlug`
+wire field), and every comment across `identity-store.ts`/`onboarding-routes.ts`/`bootstrap-
+claim.ts` that names the old method — grep for it once the rename lands rather than hand-picking.
+**Do not rename this without doing the D11 legacy-path preservation above** — a rename that dropped
+the `orgId`-absent branch would break the ONLY currently-real, currently-tested org-creation path
+(the deployment's first org) in the name of enabling one that is still QA Needed even after phase
+6/7 (per this spec's own Verification section).
+
+**The routing gap D11 could not have specified: "at that org's hostname" is not reachable, and this
+scaffold does not reopen nginx to make it so.** Three independent, already-landed facts close it:
+`/auth/callback` redirects with a RELATIVE `/onboarding` (`auth/routes.ts:235`), so every login
+lands on the LOGIN host regardless of where it started; the org vhost's `location /` runs
+`auth_request /internal/auth-check` ahead of everything, which 401s a membership-less signed-in
+user before the wizard's HTML ever loads (`hetzner/nginx.ts`); and `OnboardingRouteDeps` carries no
+hostname resolver at all. Reopening the perimeter (carving `/onboarding` + its asset prefix out of
+the org vhost's `auth_request` gate) is a real option but is a D10-perimeter decision, not a
+scaffolding one — **not made here, flagged instead.** The wire contract adopted in its place:
+`POST /auth/onboarding/org` grows an optional `orgSlug` body field
+(`packages/contract/src/orgs.ts`'s `createOnboardingOrgInputSchema`, doc comment has the full
+reasoning) that the user types in (told the slug out-of-band by the operator, the same channel that
+already carries the code). This preserves the security property D11 actually cares about — org A's
+owner cannot claim org B without ALSO knowing org B's own per-org code — at the cost of the "walk up
+to your own subdomain" ergonomics, which stays open for whoever revisits the nginx perimeter later.
+**Flag this to the owner as a product-flow decision, not an implementation detail**, per all three
+recon passes' independent conclusion.
+
+**Wire seams (`packages/contract/src`, all landed this pass. CORRECTED 2026-08-07: "none yet consumed by a route" is no longer true — every row below now has its consuming route):**
+
+| File | What | Consumed by |
+|---|---|---|
+| `invites.ts` (new) | `inviteSchema`, create/list/revoke/redeem DTOs | Fill unit 1 |
+| `orgs.ts` (extended) | `createOnboardingOrgInputSchema` gains `orgSlug` (claim mode); `createInternalOrgInputSchema`/`Response` (`POST /internal/orgs`); `listTeamsResponseSchema`, `createTeamInputSchema`/`Response`, `renameTeamInputSchema`/`Response` | Fill units 6, 3 |
+| `projects.ts` (extended) | `updateProjectInputSchema.maxParallel` relaxed to optional, `.teamId` added (reassignment) | Fill unit 3 |
+
+`packages/web/src/api/client.ts#updateProject` was adjusted in the SAME change to keep `npm run
+typecheck` green against the widened `UpdateProjectInput` (the route's own validator is untouched,
+so the Hono-typed client still requires the OLD narrower body) — see that function's own comment for
+the exact trap Fill unit 3 must not walk into when it wires `teamId` through for real (an
+unqualified forward of `maxParallel: input.maxParallel ?? null` would silently CLEAR a project's
+concurrency override on a team-only reassignment once the route understands the field).
+
+**Store seam (`auth/identity-store.ts`. CORRECTED 2026-08-07: no longer "declared, stub bodies" — Fill unit 3 implemented it, and `project-root-not-found`/`org-already-claimed` are both thrown now):**
+`updateProjectTeam(projectRoot, teamId)` — reassign an already-claimed root to a different team in
+the SAME org, one guarded write (delete+create is two writes and reopens the exact D4 race
+`registerFolder`'s existing claim-preference already avoids). Full check list, in order, is on the
+method's own docblock. Two new `IdentityStoreErrorCode` members declared for it and for the D11
+claim path: `project-root-not-found`, `org-already-claimed` — neither is thrown by any method
+today; both exist so Fill doesn't have to invent the spelling.
+
+**The route-inventory gate has a bug Fill unit 6 must fix in the SAME change it adds `POST
+/internal/orgs`, not after.** `supervisor/server.test.ts`'s two-directional inventory assertion
+(the one invariant 3 leans on) keys both `registered` and `classified` on PATH ALONE:
+
+```ts
+const registered = new Set(app.routes.map((r) => r.path).filter(/* … */));
+const classified = new Set([...ADMIN_ONLY, ...ORG_SCOPED].map(([, , pattern]) => pattern));
+```
+
+`/internal/orgs` is already in `ADMIN_ONLY` as a `GET`. Adding `POST /internal/orgs` registers the
+SAME path string, so both `expect(...).toEqual([])` assertions stay green with the new verb
+COMPLETELY UNCLASSIFIED — and, because `INTERNAL_ROUTES` (feeding the 401/403 `it.each` suites) is
+built from the same tuples, the new verb gets no negative-credential coverage either. This is not
+hypothetical: it is the exact "gate that proves someone decided" hole invariant 3 exists to close,
+sitting in the gate itself. The fix: key both sets on `` `${method} ${path}` ``, add
+`['POST', '/internal/orgs', '/internal/orgs']` to `ADMIN_ONLY`, and confirm the existing `GET`
+entries still pass (they will — nothing else changes shape).
+
+**File overlaps this ownership map deliberately allows, and how to sequence them (per this task's
+own "split differently NOW and say so" instruction — these two are additive, same-file, different
+route families, and splitting the file itself is out of scope for a scaffold pass):**
+- `supervisor/server.ts` + `supervisor/server.test.ts`: unit 3 adds a `PATCH /internal/project-
+  teams` route (project-teams section) and its `ORG_SCOPED` entry; unit 6 adds `POST /internal/orgs`
+  (orgs section, fixing the inventory keying above) and its `ADMIN_ONLY` entry. Land either first,
+  rebase the other — both diffs are small, additive hunks in disjoint sections of the same route
+  chain and the same two const arrays.
+- `SupervisorIdentityStore`'s `Pick<IdentityStore, …>` union (`supervisor/server.ts`): unit 6 adds
+  `'createOrg'`; unit 3 adds `'updateProjectTeam'`. Same note.
+
+**Ownership map — the nine 5b/5c/8 units, no file overlap beyond the two noted above:**
+
+| # | Unit | Owns (new files unless noted) | Reads (imports, never edits) |
+|---|---|---|---|
+| 1 | Invite store+HTTP | `/auth/invites*` routes (new file or an addition to `auth/onboarding-routes.ts`'s family — implementer's call), the token-entropy/default-TTL policy `createInviteInputSchema`'s doc comment leaves open | `packages/contract/src/invites.ts` (this pass), `identity-store.ts`'s already-implemented `createInvite`/`redeemInvite`/`revokeInvite`/`getInvite`/`listOrgInvites` (unmodified) |
+| 2 | Role enforcement (D12) | A `requireOrgAdmin` middleware for the `/auth/*` family (mirrors `supervisor/server.ts`'s `requireAdmin` — registered BEFORE `jsonZodValidator`, not a per-handler check, so invariant 3's ordering defect can't recur three more times across units 1/3's new admin verbs), plus its own route-inventory test over `/auth/*` | `onboarding-routes.ts`'s existing `principal.role !== 'owner' && !== 'admin'` check (the one precedent to generalize, not re-invent) |
+| 3 | Team CRUD store+HTTP | `IdentityStore#updateProjectTeam`'s implementation (declared this pass), `/auth/teams*` routes, `PATCH /api/v1/projects/:projectId`'s `teamId` branch (`server.ts`), `supervisor/server.ts`'s new `PATCH /internal/project-teams` + `registry-client.ts`'s mirror method, `packages/web/src/api/client.ts#updateProject`'s eventual `teamId` wiring (see its own comment on the `?? null` trap) | `packages/contract/src/orgs.ts`/`projects.ts` (this pass) |
+| 4 | Team management UI | A Settings → Teams pane (list/create/rename), reached from the cockpit's lazy-loaded settings chunk (AGENTS.md zero-config-bundle discipline — do not statically import into the entry chunk, the exact regression this spec's Risks section already names once) | unit 3's routes/contract |
+| 5 | Board/project team filter | `projects-section.tsx`'s `teamOptions` (currently derived from `project.teamId` on registered projects only — `:274-281`) gains a per-row team-picker control backed by unit 1's/3's `GET /auth/teams` so an EMPTY team is selectable, not only one already carrying a project | unit 3's list-teams route |
+| 6 | `POST /internal/orgs` + route inventory | `supervisor/server.ts`'s orgs section (new `POST`), `supervisor/server.test.ts`'s inventory fix (above) + new `ADMIN_ONLY` row, `SupervisorIdentityStore`'s `'createOrg'` addition | `auth/org-claim-token.ts`, `identity-store.ts#createOrg` (already extended, this pass — no store change left) |
+| 7 | Claim-an-unclaimed-org rename + per-org bootstrap codes | The `bootstrapFirstOrg` → `claimOrg` rename (target fully specified on that method's own docblock, this pass), `onboarding-routes.ts`'s `POST /auth/onboarding/org` handler (branch on `orgSlug`), `GET /auth/onboarding`'s status-route/state-machine interaction with claim mode (genuinely undesigned by this pass — see the routing-gap note above) | `auth/org-claim-token.ts`, `packages/contract/src/orgs.ts` (this pass) |
+| 8 | Installer org-creation step | A new `org-create` step in `server-install/platforms/hetzner.ts`'s `steps()`, positioned BEFORE `orgRegistrationStep` (today aborts with "create it in the onboarding wizard first" at `hetzner.ts:655` — that message becomes wrong advice the moment this step exists and must change in the SAME diff), `check()`/`verify` sharing one probe against `GET /internal/orgs/:slug` (mirror `isRegistered`'s own idiom, `hetzner.ts:679-693`), printing the returned `bootstrapToken` once (never in `argv`, never echoed by a sudo-note transcript — the same discipline `orgSystemdStep` already applies to `CEZ_SUPERVISOR_SECRET`) | unit 6's route, `packages/contract/src/orgs.ts`'s `createInternalOrg*` DTOs (this pass) |
+| 9 | Docs incl. every single-org correction | `README.md` (**CORRECTED 2026-08-07: `packages/cezar/README.md` is NOT hand-edited and this row was wrong to say so.** `packages/cezar/scripts/sync-readme.mjs` copies the root file into it as a `prebuild` step and the copy is gitignored — edit the root README only; `npm run build` regenerates the pairing, so something does enforce it), `CHANGELOG.md`, `docs/server-install/hetzner.md` (heading included — the falsehood is IN the heading, `## Read this before you start: you can host exactly one organization today`), `BACKWARD_COMPATIBILITY.md` §1's `409 once ANY org exists` line, plus every docblock recon named (`identity-store.ts:405-416`+`:436`, `onboarding-routes.ts:195-206`+`:270-289`, `bootstrap-claim.ts:43-46`, `contract/src/orgs.ts:196-207`, `onboarding.tsx:202-206`+`:213`) — correct each IN PLACE per this project's correction discipline, do not leave the old text standing unmarked | this spec |
+
+**Known gaps this scaffold pass names but does not close (report these, do not silently fix or
+silently skip):**
+- **F4 (recon, pre-existing, now reachable):** `auth/session.ts#resolveIdentity` picks
+  `listMemberships(userId)[0]` and that org's FIRST team — a user with two org memberships is
+  permanently pinned to whichever is oldest. 5b's invite flow reaches this immediately: a user
+  invited to and redeeming an invite for a SECOND org can never actually use it (every request to
+  that org's host/scope resolves against the wrong org and 401s/403s with no diagnosable reason).
+  Documented as a "Phase 4/5 owns replacing" gap since phase 3; still open. Not this scaffold's to
+  fix — named so Fill unit 1 doesn't discover it by way of a confusing bug report.
+- **The bootstrap-code banner still never prints on a hetzner deployment** (recon F2,
+  pre-existing): `startSupervisor` never calls `bootstrapClaimBanner`. Blocks org ONE's claim on a
+  real hetzner host today, independent of everything above. Not fixed here — flagged because phase
+  8's own verification row ("the first user at its hostname claims it with its own bootstrap code")
+  cannot run until it is.
+- **The claim-mode UX inside `GET /auth/onboarding`/the wizard is undesigned.** How a user learns to
+  type `orgSlug` (a new wizard state? a field always shown?) is left to Fill unit 7.
+
 ## Data Models
 
 Expressed as SQL because it states the constraints exactly; the storage is JSON
@@ -784,10 +1120,11 @@ it hands that human the previous holder's org membership.
 | 3 | OIDC + Google, cookie session, **WS upgrade check** (D6, D9) | full code+PKCE flow; bad `state` rejected; expired session 401s; **unauthenticated WS upgrade refused** — its own test |
 | 4 | orgs/teams/memberships + onboarding UI (D2, D8) | first user owns the org **and had to supply the bootstrap code**; default team exists the moment the org does; the second user is refused and told `needs-invite` |
 | 5 | project→team mapping + filtering (D5) | one root in two orgs is refused at registration **and on DELETE/PATCH**; team filter on the board |
-| 5b *(new, not yet built)* | invite create/redeem HTTP surface + the role decision it forces (D8) | a second member exists, joined by invite; what an `admin`/`member` may do is decided rather than inherited |
-| 5c *(new, not yet built)* | team management: create/rename/reassign (D2) | a project can be moved between two real teams; the board filter has more than one option |
+| 5b *(landed 2026-08-07, QA Needed)* | invite create/redeem HTTP surface + the role decision it forces (D8) | a second member exists, joined by invite; what an `admin`/`member` may do is decided rather than inherited — **and the decision is D12 below, not the implementer's** |
+| 5c *(landed 2026-08-07, QA Needed)* | team management: create/rename/reassign (D2) | a project can be moved between two real teams; the board filter has more than one option |
 | 6 | per-org process supervisor + nginx (D4) | two orgs ⇒ two unix users, two `CEZ_HOME`s, no shared path; org A cannot read org B's runs. **The phase-5 in-process `project_teams` check must be REPLACED by the supervisor's mapping, not joined by it** — per-org `CEZ_HOME`s make each process blind to the other's table, so two orgs would both succeed at claiming one root with every gate green (D4's amendment) |
 | 7 | `server-install --platform hetzner` (D4) | provisions from clean; OIDC replaces `auth_basic`; TLS |
+| 8 *(landed 2026-08-07, QA Needed)* | org-creation surface (D11) — admin-only `POST /internal/orgs`, the installer step that calls it, and `bootstrapFirstOrg` → claim-an-unclaimed-org | a **second** org exists on one host; the first user to sign in **at the deployment's login host** claims it with its slug + **its own** claim code and cannot claim another org's *(**CORRECTED 2026-08-07 at the repair stage**: this row read "the first user at its hostname", which is not where the claim is served — see D11's own correction; the row was unrunnable as written)*; a non-admin `POST /internal/orgs` is **403 before validation**; every single-org claim in README/CHANGELOG/this spec is corrected in the same change; **phase 6's verification row runs for the first time** |
 
 Phases 1–3 are useful alone (a single-org authenticated deployment). Phase 6 is
 what makes "multi-tenant" true, and until it lands the docs say single-org.
@@ -800,6 +1137,16 @@ creates a second org to put behind it (see the D4 addendum above, and D10's
 ownership map, unit 1). Read "until it lands the docs say single-org" as still
 correct after phase 6/7 land, not stale — for the new reason, not the old one —
 until an org-creation surface exists.
+
+**CORRECTED AGAIN 2026-08-07 (phase 8 landed): that org-creation surface now exists, so the
+instruction in the sentence directly above has expired.** `POST /internal/orgs` creates the
+org row and `claimOrg` grants its first owner, so *multi-tenant* is true in the product sense
+for the first time: phase 6's isolation has something on the far side of it. Read the two
+paragraphs above as the history of why the claim was held back, not as the current status.
+What is still NOT settled is evidence, not capability — see the Verification section: two
+REAL orgs on two unix users has never been observed on a real host, so this ships as **QA
+Needed**, and "isolation is real, tenancy is now reachable" is the honest phrasing rather
+than "multi-tenant, verified".
 
 **ADDED 2026-08-07 (scaffold pass): phase 6's "supervisor" and phase 7's `hetzner` platform have a
 shared design now — D10, in the Decisions section above. Read it before starting either row.**
@@ -814,6 +1161,88 @@ polish.** They were implicit in D8 and D2 and were read as delivered by phase
 nothing calls it: without 5b a deployment holds exactly one member forever, and
 without 5c the team tier the board filters on can never have a second value. Two
 rows in a table are cheaper than a reviewer rediscovering that twice.
+
+**ADDED 2026-08-07 (5b/5c/8 scaffold pass): rows 5b, 5c and 8 have a shared design now too — the
+D11/D12 scaffold addendum right after D12, in the Decisions section above. Read it before starting
+any of the three.** It solves D11's crux (per-org bootstrap codes did not exist — `auth/org-claim-
+token.ts`, tested, frozen), specifies the exact `bootstrapFirstOrg` → `claimOrg` rename target,
+flags the one product-flow decision it could NOT make on its own (hostname-based claim routing is
+unreachable against the landed nginx/D9 topology — an explicit `orgSlug` field is the pragmatic
+wire-level substitute, not a replacement decision), and gives the nine-unit ownership map. All three
+rows remain **not yet built**: the wire contracts (`packages/contract/src/invites.ts`, `orgs.ts`,
+`projects.ts`) and store seam (`IdentityStore#updateProjectTeam`, `Org.claimTokenHash`,
+`createOrg`'s optional `claimTokenHash` input) are landed; the routes, the rename itself, the
+installer step, the UI and the docs corrections are not.
+
+**CORRECTED 2026-08-07 (5b/5c/8 landed): the last sentence above is stale — all nine units
+landed.** The routes (`auth/invite-routes.ts`, `auth/team-routes.ts`, `POST /internal/orgs`),
+the `bootstrapFirstOrg` → `claimOrg` rename, the hetzner `org-create` step, the Settings →
+Teams pane, the board's team-option widening and the docs corrections are all in. Two things
+the nine units did NOT do were caught and closed at the integration pass, and are recorded
+here because both are the shape a future parallel-unit pass will reproduce:
+- **A route mounted on one topology and not the other.** `inviteRoutes`/`teamRoutes` were
+  threaded into `server/server.ts`'s single-process app and into nothing else, so on the D10
+  hosted topology — the only one where a second org exists, and therefore the only one where
+  5b/5c matter — every one of the seven routes 404'd. `SupervisorAppDeps` now carries all
+  four `/auth/*` families as REQUIRED fields, so the compiler enforces the pairing.
+- **An inventory gate that enumerated a subset of its own surface.**
+  `auth-admin-routes.test.ts` composed two of the four route factories and called that "the
+  whole `/auth/*` surface", so the seven new routes — three of them D12-gated admin verbs —
+  were invisible to the assertion whose entire job is refusing an unclassified route. Driving
+  every `ADMIN_ONLY` route with a body that satisfies no schema then exposed a second, older
+  defect: `PATCH /auth/onboarding/team`'s role check sat INSIDE the handler, downstream of
+  `jsonZodValidator`, so a `member` with a malformed body got 400 and an unauthenticated
+  caller got 400. It uses `require-org-admin.ts`'s middleware now — the module that route was
+  the stated precedent for.
+
+**Still open after 5b/5c/8, named rather than folded in:** no cockpit UI creates or redeems
+an invite (the routes are driven directly); `PATCH /api/v1/projects/:projectId`'s `teamId`
+branch carries no D12 role check while `/auth/teams*`'s three verbs do (see the note at the
+end of D12); and the three "known gaps" the scaffold pass listed — F4's first-membership
+pinning, the missing bootstrap-code banner on `startSupervisor`, and the claim-mode wizard UX
+— are all untouched.
+
+**CORRECTED 2026-08-07 (repair stage): two of the three "known gaps" above are now closed, and
+the list has grown two entries it did not have.** Read the paragraph above as the state at the
+end of the build stage, not as current.
+
+Closed at the repair stage:
+- **The missing bootstrap-code banner on `startSupervisor`** — closed. It was not cosmetic: the
+  supervisor is the only process that serves `POST /auth/onboarding/org` on the D10 topology, so
+  with no banner a `--platform hetzner` deployment's FIRST org was unclaimable unless
+  `CEZ_AUTH_BOOTSTRAP_TOKEN` had been pinned at install, and `docs/server-install/hetzner.md` told
+  the operator to grep a journal that never held the code. `supervisor/index.ts#supervisorBootLines`
+  is a pure function so the regression is pinned by a test rather than by the boot path (which
+  binds a port and is untestable here by construction).
+- **The claim-mode wizard UX** — closed. `/onboarding`'s `needs-invite` step now carries a
+  collapsed "I have an organization code" disclosure that POSTs `{orgSlug, bootstrapToken}`.
+  Collapsed rather than a fourth wizard state on purpose: `GET /auth/onboarding` still answers
+  `needs-invite` to every membership-less user and deliberately does not hint that a claimable org
+  exists (that fact is privileged and travels out of band with the code), so the disclosure asks
+  the user to assert they hold a code rather than the server to volunteer that one is wanted.
+  Without it, phase 8's verification row could only be executed with `curl`.
+
+Still open, unchanged: **F4's first-membership pinning** (`session.ts#resolveIdentity` pins a
+user to `listMemberships(userId)[0]` and `listTeams(orgId)[0]`, with no active-org switcher —
+which is now *load-bearing* rather than latent, because the `user-already-member` refusals added
+at this stage are what keep a second membership from ever existing to be silently ignored), and
+the ungated `teamId` field above.
+
+Added to the list at the repair stage:
+- **No member roster and no member-removal surface** — D12 names "removing members" and nothing
+  implements it. Full reasoning, and why the irreversible half is nonetheless closed, in the GAP
+  note at the end of D12.
+- **An `admin` can mint an `owner` invite** — inert under D12's flat role model, live the moment
+  anything becomes owner-only. Recorded as an OPEN question at the end of D12 rather than decided
+  in an implementation pass.
+- **The auth-off cockpit shows a "Teams" item in global settings.** The nav registry has three
+  gates (`hidden`, `scope`, `capability`) and none can express "auth is on" — by design, since
+  D1's Risks entry below forbids a `capabilities.auth` key and a test enforces its absence. The
+  pane behind it is inert (one request, a static explainer, no writes, no identity file), and
+  invariant 1 holds literally: no route diff, no health-payload diff, no server-side I/O with
+  `CEZ_AUTH` unset. Recorded as an accepted deviation in `teams-section.tsx`'s own doc comment
+  and in CHANGELOG.md rather than fixed, because both available fixes are worse than the symptom
+  (a probe on the zero-config default, or the forbidden capability key).
 
 ## Risks
 
@@ -838,6 +1267,21 @@ rows in a table are cheaper than a reviewer rediscovering that twice.
   absence directly, so re-adding the key fails a test rather than only ~20
   fixtures whose edits are what made the first attempt look green. Nothing
   consumed the field; whichever phase builds a login screen adds it deliberately.
+  **ADDED 2026-08-07 (5b/5c/8 repair stage): the accepted cost of that decision is
+  now visible in the product, and it should be written down rather than
+  rediscovered.** Phase 5c's Settings → Teams section is registered like every
+  other global section, and `visibleSettingsSections` has exactly three gates
+  (`hidden`, `scope`, `capability`) — none of which can express "auth is on",
+  because of the paragraph above. So the zero-config npm default shows a **Teams**
+  nav item for a feature that deployment can never have; the pane behind it makes
+  one request, gets the SPA catch-all, and renders a static explainer. Invariant 1
+  is untouched — no route diff, no health-payload diff, no server-side I/O — and
+  both available fixes are worse: a client-side probe puts a fetch on the default
+  path this whole decision exists to keep quiet, and a `capabilities.auth` key is
+  the exact move `capabilities.test.ts` fails on by design. Accepted, recorded in
+  `teams-section.tsx`'s own doc comment and in CHANGELOG.md, and revisitable by
+  whichever phase builds a login screen — which is the same phase that would add
+  the capability key deliberately.
 - **A guard the suite cannot reach.** `CEZ_AUTH` is read *per request*, so an
   ambient `CEZ_AUTH=oidc` in a developer's shell or a CI runner turned every
   `createApp`-based suite red at once and blamed route parity
@@ -1003,3 +1447,68 @@ discipline and also exactly why the following cannot be closed from here:
 So the honest status after this repair stage is: phases 6 and 7 are **QA Needed
 with a longer list than any earlier phase**, and one line of their stated
 verification is **not reachable at all** until an org-creation surface exists.
+
+**CORRECTED 2026-08-07 (phases 5b/5c/8 landed): that last clause has expired, and what
+replaces it is a bigger QA-Needed list, not a smaller one.** The org-creation surface exists
+(`POST /internal/orgs` + the hetzner `org-create` step + `claimOrg`), so phase 6's
+verification row — "two orgs ⇒ two unix users, two `CEZ_HOME`s, no shared path; org A cannot
+read org B's runs" — is **runnable for the first time**, on a real host, by an operator. It
+has not been run. Every bullet above still stands unchanged, and 5b/5c/8 add their own:
+- **A second org, end to end, on one host.** The installer creating org two's row, printing
+  its claim code, provisioning its unix user/`CEZ_HOME`/unit/vhost, and a different human
+  claiming it at that org's hostname with that code — and, critically, **failing** to claim
+  it with org one's code. Every assertion in this repo about this seeds both orgs in one
+  `IdentityStore` in one process, which is the exact arrangement phase 6 abolishes.
+- **An invite redeemed by a real second human through a real IdP.** The routes are tested;
+  the flow (owner mints, hands the token over some channel, a stranger signs in and redeems)
+  is not, and F4's first-membership pinning bug is waiting on exactly that path for a user
+  who already belongs to another org.
+- **`/auth/invites*` and `/auth/teams*` through real nginx.** They are mounted on the
+  supervisor now and asserted in-process; whether nginx's org vhost actually routes
+  `location /auth/` to the supervisor for these paths, and whether the session cookie is
+  visible there, is the same live question D10's `auth_request` bullet already raises.
+- **The claim code out of the journal on a hetzner host.** Still blocked by the pre-existing
+  gap the scaffold pass named: `startSupervisor` never calls `bootstrapClaimBanner`, so org
+  ONE's code does not print on this topology. Org two's code comes from the installer's own
+  output instead, so 5b/5c/8 do not depend on it — but phase 8's own verification row for the
+  FIRST org still does.
+
+**ADDED 2026-08-07 (5b/5c/8 repair stage). Two corrections to the four bullets above, and then
+the precise answer to "how much of phase 6's row does this phase actually close".**
+
+Corrections first:
+- The last bullet's blocker is **removed**, not still standing. `startSupervisor` prints the
+  banner now (`supervisorBootLines`, pinned by `supervisor/index.test.ts`), so the documented
+  `journalctl … | grep -i bootstrap` step is executable. What remains unobserved is one notch
+  narrower and still real: that the line actually lands in a **systemd journal** in readable form
+  on a real host, which is a `console.log`-under-`systemd` question, not a code question. Before
+  this fix that step could not have succeeded on any hetzner host, and phase 8's verification row
+  for the FIRST org was therefore unrunnable end to end.
+- The first bullet says "claiming it **at that org's hostname**". It is not claimed there — see
+  D11's correction. Read that bullet as "at the deployment's login host, entering org two's slug
+  and org two's code, and **failing** with org one's code".
+
+**Phase 6's row is "two orgs ⇒ two unix users, two `CEZ_HOME`s, no shared path; org A cannot read
+org B's runs." It has two halves, and this phase closes exactly one of them.**
+
+- **Closed: the far side of the boundary now exists.** The half that made the row *unrunnable*
+  for three phases was not the isolation — that landed in phase 6 — it was that nothing created
+  a second organization to isolate. `POST /internal/orgs` + the installer's `org-create` step +
+  `claimOrg`'s claim branch + the wizard's claim form close that, and the repair stage's fixes are
+  what make the path survive being walked by a human rather than by curl: the supervisor now
+  prints org one's code, a mis-aimed claim refuses instead of burning the code, and the docs name
+  the host the claim is actually served on. An operator can now run the row start to finish.
+- **NOT closed, and not closeable from this repo: every observation the row asks for.** "Two unix
+  users", "two `CEZ_HOME`s", "no shared path" and "org A cannot read org B's runs" are all
+  filesystem and kernel facts on a provisioned host. Nothing in this repo has ever created a unix
+  user, started a unit, or bound a port — by the standing rule this stage ran under, and by
+  necessity: a `useradd` in CI proves nothing about an Ubuntu VPS. Every cross-org assertion here
+  still seeds both orgs in ONE `IdentityStore` in ONE process, which is precisely the arrangement
+  phase 6 abolishes, so the strongest thing the suite can say is "the application layer refuses
+  cross-org access", never "the uid boundary holds".
+
+So: **the row moved from unrunnable to unrun.** That is a real change of state and the only one
+5b/5c/8 could deliver, but it is not evidence, and phases 6, 7, 5b, 5c and 8 all stay **QA
+Needed** on a real Hetzner host. The first org can now be claimed on that host; the second org can
+now exist there; whether the two are actually isolated remains, as it has been since phase 6, a
+question only the host can answer.

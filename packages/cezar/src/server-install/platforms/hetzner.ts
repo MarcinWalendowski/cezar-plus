@@ -101,6 +101,18 @@ import { createTlsStep, publicUrlForDomain } from './hetzner/tls.ts';
  * bootstrap is genuinely circular — the first registration for an org is the call that CREATES
  * that org's secret, so it cannot authenticate with one — and an operator with sudo on the box can
  * read a root-owned file while a remote attacker cannot.
+ *
+ * ## Creating the org itself — ADDED 2026-08-07 (5b/5c/8 scaffold pass, D11, unit 8)
+ *
+ * Everything above assumes the `Org` row already exists. Until this step, nothing made that true
+ * for a second-and-later org: `bootstrapFirstOrg`'s `orgs.length > 0` guard made
+ * `POST /auth/onboarding/org` unreachable the moment any org existed, and the supervisor's
+ * `/internal/orgs*` routes were `GET`-only — so `orgRegistrationStep` above always 404'd resolving
+ * `orgId`, silently, the exact failure mode this task was told to close. `orgCreateStep` (`org-create`
+ * in `steps()`, positioned before every other org-specific step) creates it via the new admin-only
+ * `POST /internal/orgs` (D11's first half — "the org row... created by the installer") and prints
+ * the one-time bootstrap claim code the org's intended owner needs to claim it (D11's second half,
+ * unchanged: "the first user to sign in at that org's hostname with that org's bootstrap code").
  */
 
 // ---- shared naming / mode ---------------------------------------------------------------------
@@ -601,6 +613,155 @@ function orgSystemdStep(orgSlug: string): InstallStep {
   };
 }
 
+// ---- org: create the Org row with the supervisor (D11) -------------------------------------------
+
+/**
+ * A starting point for the "Display name" prompt below, editable by the operator before it's sent.
+ * Same "capitalize a label" idiom `auth/onboarding-routes.ts#orgNameFromEmailDomain` already uses
+ * for the self-serve flow's own name default — just off `--org-slug` instead of an email domain,
+ * since the installer has no email to derive one from.
+ */
+function defaultOrgNameFromSlug(orgSlug: string): string {
+  return orgSlug
+    .split('-')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+export interface OrgCreateCommandOptions {
+  /** `/etc/cezar/hetzner-<supervisor instance>.env` — carries `CEZ_SUPERVISOR_ADMIN_TOKEN`. */
+  supervisorEnvFile: string;
+  supervisorPort: number;
+  orgSlug: string;
+  orgName: string;
+}
+
+/**
+ * The one root shell command that creates this org's `Org` row via `POST /internal/orgs` (D11:
+ * "the org row — created by the installer through a new admin-only `POST /internal/orgs`,
+ * authenticated by `CEZ_SUPERVISOR_ADMIN_TOKEN`") and prints the one-time bootstrap claim code the
+ * response carries.
+ *
+ * **The admin token stays inside the shell** — read out of its `0600` file into a shell variable
+ * and sent as a bearer header, the same `orgRegistrationCommand` discipline of never putting a
+ * secret in argv or a sudo-note transcript. `name`/`slug` are NOT secrets (the slug is already
+ * `--org-slug`, typed into argv by the operator to invoke this install in the first place), so they
+ * travel as an ordinary base64'd JSON body — base64 rather than inline JSON so neither value has to
+ * be shell- or JSON-escaped here (`writeRootFileCmd`'s own idiom, reused for the same reason: "a
+ * copy-paste of the command survives newlines/quoting untouched").
+ *
+ * **The bootstrap token IS meant to be printed**, unlike `CEZ_SUPERVISOR_SECRET` — it has to leave
+ * the machine to reach the org's actual owner (`createInternalOrgResponseSchema`'s own doc comment:
+ * "the claim code has to leave the machine to reach the actual owner"). So, unlike
+ * `orgRegistrationCommand`'s POST which discards its response to `/dev/null`, this one captures the
+ * response and parses the token back out to echo it with a label, rather than leaving it inside a
+ * raw JSON blob.
+ */
+export function orgCreateCommand(opts: OrgCreateCommandOptions): string {
+  const bodyB64 = Buffer.from(JSON.stringify({ name: opts.orgName, slug: opts.orgSlug }), 'utf8').toString('base64');
+  return [
+    'set -eu',
+    `ADMIN="$(sed -n 's/^CEZ_SUPERVISOR_ADMIN_TOKEN=//p' ${shquote(opts.supervisorEnvFile)} | head -n1)"`,
+    `[ -n "$ADMIN" ] || { echo "no CEZ_SUPERVISOR_ADMIN_TOKEN in ${opts.supervisorEnvFile} — re-run the supervisor install with --reconfigure supervisor-systemd" >&2; exit 1; }`,
+    `RESP="$(printf %s ${shquote(bodyB64)} | base64 --decode | curl -sS -f -X POST -H 'content-type: application/json' -H "Authorization: Bearer $ADMIN" --data-binary @- http://127.0.0.1:${opts.supervisorPort}/internal/orgs)"`,
+    `TOKEN="$(printf '%s' "$RESP" | sed -n 's/.*"bootstrapToken":"\\([^"]*\\)".*/\\1/p')"`,
+    `[ -n "$TOKEN" ] || { echo "org created but no bootstrapToken in the response — cannot hand off the claim code" >&2; exit 1; }`,
+    'echo',
+    `echo "org ${opts.orgSlug} created. One-time bootstrap claim code for its owner (hand this off out of band — it will not be shown again):"`,
+    'echo "  $TOKEN"',
+  ].join('\n');
+}
+
+/**
+ * Creates the second-and-later org's `Org` row — D11's first half, and the gap D11's own text
+ * names by number: "provisioning a second org's infrastructure is now fully automated, and there is
+ * still no way to create the org it would serve." Positioned before EVERY other org-specific step
+ * in `steps()`, `org-register` included: it needs the org to exist before there is anything to
+ * register, and putting it first means a failure here (bad admin token, name rejected, supervisor
+ * unreachable) leaves nothing to undo — no unix user, no `CEZ_HOME`, no systemd unit, no secret
+ * file. `orgRegistrationCommand`'s own abort message used to send the operator to "the onboarding
+ * wizard" to create a second org — the one thing D11 says a browser request must never be allowed
+ * to do — so that message is corrected below, in the same change that makes this step exist.
+ */
+function orgCreateStep(orgSlug: string): InstallStep {
+  /** Mirrors `orgRegistrationStep`'s own `isRegistered` idiom exactly: one probe against
+   *  `GET /internal/orgs/:slug`, used as BOTH `check()` and the post-write `verify`, so "already
+   *  created" and "did it take" cannot disagree. The org row is idempotent to create by
+   *  construction this way: re-running an install against an org that already exists on the
+   *  supervisor skips this step (via `check()`) rather than erroring or minting a second row. */
+  const orgExists = async (ctx: InstallContext): Promise<boolean> => {
+    if (ctx.dryRun) return false;
+    const supervisorEnv = supervisorEnvironmentFilePath();
+    if (!supervisorEnv) return false;
+    if (!(await hasPasswordlessSudo(ctx))) return false;
+    const probe =
+      `set -eu\n` +
+      `ADMIN="$(sed -n 's/^CEZ_SUPERVISOR_ADMIN_TOKEN=//p' ${shquote(supervisorEnv)} | head -n1)"\n` +
+      `[ -n "$ADMIN" ] || exit 1\n` +
+      `curl -sS -f -H "Authorization: Bearer $ADMIN" ` +
+      `http://127.0.0.1:${resolveSupervisorPort(ctx)}/internal/orgs/${shquote(orgSlug)} >/dev/null`;
+    return (await ctx.runner.capture('sudo', ['-n', 'bash', '-lc', probe])).code === 0;
+  };
+
+  return {
+    id: 'org-create',
+    title: `Create org "${orgSlug}" with the supervisor (D11 POST /internal/orgs)`,
+    check: orgExists,
+    async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
+      if (ctx.dryRun) {
+        ctx.ui.info(
+          `DRY RUN — would create org "${orgSlug}" via POST /internal/orgs and print its one-time bootstrap claim code.`,
+        );
+        return { artifacts: [] };
+      }
+      // Checked BEFORE the prompt below: no point asking the operator for a name if there is
+      // nowhere to send it, and this is the exact silent-401-later failure mode named in this
+      // task — surface it here, loudly, rather than downstream.
+      const supervisorEnv = supervisorEnvironmentFilePath();
+      if (!supervisorEnv) {
+        throw new StepAborted(
+          'no supervisor instance is recorded on this host — cannot find its EnvironmentFile to read CEZ_SUPERVISOR_ADMIN_TOKEN. ' +
+            'Run `cezar server-install --platform hetzner --domain <login-host>` first (D10: "the supervisor\'s OWN unit first").',
+        );
+      }
+      const nameAnswer = await ctx.ui.text({
+        message: `Display name for org "${orgSlug}" (shown in the onboarding wizard)`,
+        initialValue: defaultOrgNameFromSlug(orgSlug),
+        validate: (v) => (v.trim() ? undefined : 'org name is required'),
+      });
+      if (nameAnswer === CANCEL) throw new StepCancelled();
+      const orgName = String(nameAnswer).trim();
+
+      const command = orgCreateCommand({
+        supervisorEnvFile: supervisorEnv,
+        supervisorPort: resolveSupervisorPort(ctx),
+        orgSlug,
+        orgName,
+      });
+      await sudoStep(ctx, {
+        description:
+          `Create org "${orgSlug}" (D11 POST /internal/orgs). Prints its one-time bootstrap claim code — copy ` +
+          `it now and hand it to the org's intended owner out of band; it is never shown again.`,
+        command,
+        verify: orgExists,
+      });
+      return { artifacts: [owned('config', { path: `supervisor:org:${orgSlug}` })] };
+    },
+    async undo(ctx) {
+      // There is no delete route for an `Org` row (only `/internal/org-processes` can be
+      // deprovisioned) — an org's identity, once claimed, may carry real members and history, so
+      // this leaves it in place rather than inventing a destructive call nothing else exposes. Same
+      // posture `supervisorUserProvisioningStep`'s own undo already takes for the unix user.
+      ctx.ui.note(
+        `Org "${orgSlug}" was left registered with the supervisor — there is no delete route for an Org row yet. ` +
+          `Remove it by hand once one exists, if you're sure nobody has claimed it.`,
+        'org identity',
+      );
+    },
+  };
+}
+
 // ---- org: register the process with its supervisor ------------------------------------------------
 
 export interface OrgRegistrationCommandOptions {
@@ -652,7 +813,13 @@ export function orgRegistrationCommand(opts: OrgRegistrationCommandOptions): str
     `[ -n "$SECRET" ] || { echo "no CEZ_SUPERVISOR_SECRET in ${opts.orgEnvFile}" >&2; exit 1; }`,
     `ORG_JSON="$(curl -sS -f -H "Authorization: Bearer $ADMIN" http://127.0.0.1:${opts.supervisorPort}/internal/orgs/${shquote(opts.orgSlug)})"`,
     `ORG_ID="$(printf '%s' "$ORG_JSON" | sed -n 's/.*"id":"\\([^"]*\\)".*/\\1/p')"`,
-    `[ -n "$ORG_ID" ] || { echo "the supervisor knows no org with slug ${opts.orgSlug} — create it in the onboarding wizard first" >&2; exit 1; }`,
+    // CORRECTED 2026-08-07 (5b/5c/8 scaffold pass, unit 8): this used to say "create it in the
+    // onboarding wizard first" — wrong advice the moment `org-create` exists, and wrong on its own
+    // terms even before then: D11 says a browser request must NEVER create an org. `org-create`
+    // (above) runs earlier in this SAME `steps()` list, so this branch firing means IT failed or
+    // was skipped (e.g. a targeted `--reconfigure org-register` without re-running `org-create`),
+    // not that the org was never meant to exist.
+    `[ -n "$ORG_ID" ] || { echo "the supervisor knows no org with slug ${opts.orgSlug} — the org-create step should have created it; re-run server-install (or --reconfigure org-create) first" >&2; exit 1; }`,
     `printf '%s' "$(printf '${body}' "$ORG_ID" ${shquote(opts.orgSlug)} ${shquote(opts.unixUser)} ${shquote(opts.cezHome)} ${shquote(opts.hostname)} "$SECRET")" ` +
       `| curl -sS -f -X POST -H 'content-type: application/json' -H "Authorization: Bearer $ADMIN" ` +
       `--data-binary @- http://127.0.0.1:${opts.supervisorPort}/internal/org-processes >/dev/null`,
@@ -996,11 +1163,16 @@ export const hetzner: PlatformStrategy = {
       return [supervisorUserProvisioningStep(), supervisorSystemdStep(), nginxStep(), buildTlsStep(ctx), verifyStep()];
     }
     const orgSlug = orgSlugOf(ctx) as string;
-    // `org-register` sits between the unit and nginx on purpose: the org's process record must
-    // exist before nginx's `auth_request` can resolve this hostname to it, and it needs the unit's
-    // `EnvironmentFile` (written by `org-systemd`) to read the secret back out of.
+    // `org-create` (D11) runs FIRST among the org-specific steps, ahead even of the unix user: it
+    // needs nothing but the supervisor's admin token, so a failure there (bad token, rejected name,
+    // supervisor unreachable) leaves nothing provisioned to undo. `org-register` sits between the
+    // unit and nginx on purpose: the org's process record must exist before nginx's `auth_request`
+    // can resolve this hostname to it, and it needs the unit's `EnvironmentFile` (written by
+    // `org-systemd`) to read the secret back out of, and the `Org` row `org-create` just made
+    // (read back via `GET /internal/orgs/:slug`) to resolve `orgId`.
     return [
       depCheckStep(),
+      orgCreateStep(orgSlug),
       orgUserProvisioningStep(orgSlug),
       orgSystemdStep(orgSlug),
       orgRegistrationStep(orgSlug),

@@ -291,6 +291,24 @@ export interface ServerDeps {
    * live behind `requirePrincipal` the way the rest of `/api/*` does.
    */
   onboardingRoutes?: Hono;
+  /**
+   * The 5b invite routes (`../auth/invite-routes.ts`: `POST /auth/invites`, `GET /auth/invites`,
+   * `POST /auth/invites/revoke`, `POST /auth/invites/redeem`) — mounted at the app root alongside
+   * `authRoutes`/`onboardingRoutes`, same "loaded once in `serveCommand`, threaded in already-built"
+   * shape and the same `CEZ_AUTH=none` ⇒ undefined ⇒ nothing registered contract. A separate field,
+   * not folded into `onboardingRoutes`, for the identical reason that field is not folded into
+   * `authRoutes`: a separate module owned by a separate unit of work.
+   */
+  inviteRoutes?: Hono;
+  /**
+   * Team CRUD (`../auth/team-routes.ts`: `GET/POST /auth/teams`, `PATCH/DELETE
+   * /auth/teams/:teamId`, Phase 5c, D2/D12) — mounted at the app root alongside
+   * `authRoutes`/`onboardingRoutes`/`inviteRoutes`, same "loaded once in `serveCommand`, threaded
+   * in already-built" shape and the same `CEZ_AUTH=none` ⇒ undefined ⇒ nothing registered
+   * contract. A separate field, not folded into `onboardingRoutes`, for the identical reason
+   * `inviteRoutes` is not: a separate module owned by a separate unit of work.
+   */
+  teamRoutes?: Hono;
 }
 
 /**
@@ -2575,6 +2593,13 @@ export function createApp(deps: ServerDeps) {
       | { ok: true; projectTeam: ProjectTeam }
       | { ok: false; code: 'org-not-found' | 'team-not-found' | 'team-org-mismatch' | 'project-root-taken' }
     >;
+    /** 5c (D2/D4, ADDED 2026-08-07) — reassign an already-claimed root to a different team in the
+     *  SAME org. No `orgId` parameter: the D4 guard is checked against the EXISTING row's org, not
+     *  a caller-supplied one — see `auth/identity-store.ts#updateProjectTeam`'s own doc comment. */
+    updateProjectTeam(root: string, teamId: string): Promise<
+      | { ok: true; projectTeam: ProjectTeam }
+      | { ok: false; code: 'project-root-not-found' | 'team-not-found' | 'team-org-mismatch' }
+    >;
     deleteProjectTeam(root: string): Promise<boolean>;
   }
 
@@ -2599,6 +2624,22 @@ export function createApp(deps: ServerDeps) {
               err.code === 'team-not-found' ||
               err.code === 'team-org-mismatch' ||
               err.code === 'project-root-taken')
+          ) {
+            return { ok: false, code: err.code };
+          }
+          throw err;
+        }
+      },
+      updateProjectTeam: async (root, teamId) => {
+        try {
+          const projectTeam = await store.updateProjectTeam(root, teamId);
+          return { ok: true, projectTeam };
+        } catch (err) {
+          if (
+            err instanceof IdentityStoreError &&
+            (err.code === 'project-root-not-found' ||
+              err.code === 'team-not-found' ||
+              err.code === 'team-org-mismatch')
           ) {
             return { ok: false, code: err.code };
           }
@@ -2670,8 +2711,13 @@ export function createApp(deps: ServerDeps) {
       const teamId = claims.get(project.root);
       if (teamId === undefined) return project;
       const teamName = teamNames.get(teamId);
-      // A claim pointing at a team that no longer exists is unreachable today (nothing deletes a
-      // team) — but emitting `teamName: undefined` would put the key on the wire as `null` through
+      // CORRECTED 2026-08-07 (5b/5c/8 repair stage): this used to say "unreachable today (nothing
+      // deletes a team)". Something does now — `DELETE /auth/teams/:teamId` (`auth/team-routes.ts`)
+      // — the same correction `auth/onboarding-routes.ts` already applied to the identical sentence
+      // about `renameTeam`, and this sibling was the one it missed. The branch remains unreachable,
+      // but for a DIFFERENT reason: `IdentityStore#deleteTeam` refuses (`team-has-projects`) while
+      // any project still claims the team, so a claim can never outlive its team. Kept anyway,
+      // because emitting `teamName: undefined` would put the key on the wire as `null` through
       // JSON, which the closed contract does not describe. Omit it instead.
       return teamName === undefined ? { ...project, teamId } : { ...project, teamId, teamName };
     });
@@ -2703,6 +2749,15 @@ export function createApp(deps: ServerDeps) {
    * best-effort decoration, a registry that cannot be reached must refuse, never silently allow: a
    * caught error here answers `false`, the exact same refusal a genuinely cross-org claim gets, so
    * an unreachable supervisor fails CLOSED rather than opening the boundary it exists to enforce.
+   *
+   * **ADDED 2026-08-07 (5b/5c/8 repair stage): in SUPERVISOR mode the refusal now arrives through
+   * that same catch, and that is deliberate.** `GET /internal/project-teams/by-root` used to answer
+   * any authenticated org with any org's claim, so the comparison below did the refusing; it is now
+   * org-scoped like every sibling verb on that path, so a foreign claim comes back 403 →
+   * `RegistryClientError('unauthorized')` → `catch` → `false`. Same answer, enforced on the side of
+   * the process boundary that can actually enforce it. The LOCAL (single-process) registry is
+   * unchanged and still returns the row, so the `claim.orgId === principal.orgId` comparison below
+   * is still live and still load-bearing on that path — it is not dead code on either topology.
    */
   const mayActOnRoot = async (root: string, principal: Principal): Promise<boolean> => {
     if (principal.kind !== 'session') return true;
@@ -2874,7 +2929,7 @@ export function createApp(deps: ServerDeps) {
       const parsed = { data: c.req.valid('json') };
       // `default` is the boot alias the cockpit is allowed to use everywhere else.
       const id = raw === 'default' ? await resolveBootProject() : raw;
-      const { maxParallel } = parsed.data;
+      const { maxParallel, teamId } = parsed.data;
 
       // Read-first (mirroring DELETE, server.ts:1252-1258): a well-formed but
       // unknown id must 404 WITHOUT rewriting the config — otherwise it would both
@@ -2888,36 +2943,72 @@ export function createApp(deps: ServerDeps) {
         // not a 500 the caller cannot act on (same reasoning as DELETE).
       }
       if (!existing) return c.json({ error: `unknown project: ${id}` }, 404);
-      // D4, same guard and same wording as DELETE above: `maxParallel` is that project's
-      // concurrency ceiling, and another org's ceiling is not this caller's to move.
+      // D4, same guard and same wording as DELETE above: `maxParallel`/`teamId` are that project's
+      // own settings, and another org's are not this caller's to move.
       const patchPrincipal = (c as unknown as Context<{ Variables: { principal: Principal } }>).get('principal');
       if (!(await mayActOnRoot(existing.root, patchPrincipal))) return c.json(CROSS_ORG_REFUSAL, 409);
 
-      let updated: WorkspaceProject | undefined;
-      try {
-        await mergeWriteWorkspaceConfig((config) => {
-          const entry = config.projects.find((p) => p.id === id);
-          if (!entry) return; // lost a race with a concurrent remove — answered below
-          // null clears the override; a number sets it. Mutated in place so
-          // `.passthrough()` keys on the entry survive.
-          if (maxParallel === null) delete entry.maxParallel;
-          else entry.maxParallel = maxParallel;
-          updated = entry;
-        });
-      } catch (err) {
-        // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
-        return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      // 5c (D2/D4, ADDED 2026-08-07): `teamId` reassigns this project's team WITHIN its owning
+      // org. Applied BEFORE the `maxParallel` write below, so a refused reassignment (unknown
+      // team, a team from a different org) leaves `maxParallel` untouched too — one PATCH, one
+      // outcome, never a half-applied body. `CEZ_AUTH` unset (`principal.kind !== 'session'`) has
+      // no org to reassign FROM, so this field is REJECTED rather than silently ignored (contract's
+      // own doc comment on `updateProjectInputSchema.teamId`).
+      if (teamId !== undefined) {
+        if (patchPrincipal.kind !== 'session') {
+          return c.json({ error: 'teamId requires an authenticated session — there is no org to reassign a team within' }, 400);
+        }
+        const result = await (await openProjectTeamRegistry()).updateProjectTeam(existing.root, teamId);
+        if (!result.ok) {
+          if (result.code === 'project-root-not-found') {
+            return c.json({ error: 'this project has no team assignment to reassign — it was never claimed by an organization' }, 400);
+          }
+          if (result.code === 'team-not-found') {
+            return c.json({ error: `unknown team: ${teamId}` }, 400);
+          }
+          return c.json({ error: 'cannot move a project to a team outside its own organization' }, 409);
+        }
       }
-      // Raced with a concurrent removal between the read and the write.
-      if (!updated) return c.json({ error: `unknown project: ${id}` }, 404);
 
-      // The new ceiling takes effect WITHOUT a restart: refresh the shared
-      // semaphore's snapshot and pump every manager — the same live-apply hook
-      // `PUT /api/workspace/config` fires for a workspace-cap change.
-      await deps.semaphore?.refresh();
-      const body: UpdateProjectResponse = {
-        project: { ...updated, ...(await probeProjectStatus(updated.root)) },
-      };
+      // `maxParallel` absent (Fill unit 3, 5c widening) means "leave the concurrency override
+      // untouched" — skip the write entirely rather than round-tripping the config for nothing,
+      // the same "no needless write" discipline the read-first 404 above already follows. A
+      // `teamId`-only PATCH therefore costs exactly one write (the team reassignment above), not
+      // two.
+      let updated: WorkspaceProject = existing;
+      if (maxParallel !== undefined) {
+        let written: WorkspaceProject | undefined;
+        try {
+          await mergeWriteWorkspaceConfig((config) => {
+            const entry = config.projects.find((p) => p.id === id);
+            if (!entry) return; // lost a race with a concurrent remove — answered below
+            // null clears the override; a number sets it. Mutated in place so
+            // `.passthrough()` keys on the entry survive.
+            if (maxParallel === null) delete entry.maxParallel;
+            else entry.maxParallel = maxParallel;
+            written = entry;
+          });
+        } catch (err) {
+          // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
+          return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        }
+        // Raced with a concurrent removal between the read and the write.
+        if (!written) return c.json({ error: `unknown project: ${id}` }, 404);
+        updated = written;
+
+        // The new ceiling takes effect WITHOUT a restart: refresh the shared
+        // semaphore's snapshot and pump every manager — the same live-apply hook
+        // `PUT /api/workspace/config` fires for a workspace-cap change.
+        await deps.semaphore?.refresh();
+      }
+
+      let project: ProjectListEntry = { ...updated, ...(await probeProjectStatus(updated.root)) };
+      // Read the team assignment back through the SAME `withTeams` the GET listing uses (5c),
+      // rather than restating `teamId` here — that literal is only what this handler *intended* to
+      // write, and `withTeams` reports what `project_teams` actually holds now. Mirrors
+      // `registerFolder`'s own "read the answer back" comment above for the identical reason.
+      project = (await withTeams([project], patchPrincipal))[0] ?? project;
+      const body: UpdateProjectResponse = { project };
       return c.json(body);
     })
 
@@ -3275,10 +3366,11 @@ export function createApp(deps: ServerDeps) {
       }
     });
 
-  // Edit one field of an existing registry entry (spec
-  // 2026-07-22-per-project-concurrency): the per-project concurrency ceiling.
-  // A PATCH (not PUT) because it touches a single field, and a distinct route
-  // from POST (register-a-folder) to keep register vs. edit semantics clear.
+  // Edit one or more fields of an existing registry entry (spec
+  // 2026-07-22-per-project-concurrency, and 5c team reassignment,
+  // .ai/specs/2026-08-06-org-team-auth-onboarding.md). A PATCH (not PUT)
+  // because it touches individual fields, and a distinct route from POST
+  // (register-a-folder) to keep register vs. edit semantics clear.
   // `maxParallel: null` clears the override back to "inherit the workspace
   // cap". Bounds mirror `workspaceProjectSchema` (config.ts) exactly, so a
   // value this route accepts can never be degraded away by the next load's
@@ -3287,8 +3379,18 @@ export function createApp(deps: ServerDeps) {
   // Deliberately NOT the home of the agent-account selection: that lives in
   // `~/.cezar/agent-accounts.json` beside the accounts it names, so a cezar version that has
   // never heard of accounts cannot drop it (see workspace/agent-accounts.ts).
+  //
+  // **Widened to mirror `packages/contract/src/projects.ts#updateProjectInputSchema` exactly (5c,
+  // Fill unit 3, ADDED 2026-08-07) — `maxParallel` relaxed to optional, `teamId` added.** Absent
+  // `maxParallel` means "leave the concurrency override untouched" (not "clear it" — that is what
+  // explicit `null` means), which is what keeps an existing `{maxParallel}`-only PATCH byte-
+  // identical to before this change: every prior caller always sent `maxParallel`, so this widening
+  // rejects nothing that used to be accepted. `teamId`, when present, reassigns this project's team
+  // WITHIN its owning org — see the handler below and `auth/identity-store.ts#updateProjectTeam`'s
+  // own doc comment for the D4 guard.
   const updateProjectSchema = z.object({
-    maxParallel: z.number().int().min(1).max(16).nullable(),
+    maxParallel: z.number().int().min(1).max(16).nullable().optional(),
+    teamId: z.string().min(1).optional(),
   });
   // ---- GUI clone (multi-project spec, step 4.3) ----------------------------
   // "Add project → Clone from GitHub": clone into the checkout root, then
@@ -5684,6 +5786,12 @@ export function createApp(deps: ServerDeps) {
   // above — see `../auth/onboarding-routes.ts`'s own module doc comment for why these three
   // routes are a separate file rather than three more methods on that one.
   if (deps.onboardingRoutes) routed.route('/', deps.onboardingRoutes);
+  // Same mount, same guard coverage, same contract, for the 5b invite routes — see
+  // `../auth/invite-routes.ts`'s own module doc comment for why these are a separate file too.
+  if (deps.inviteRoutes) routed.route('/', deps.inviteRoutes);
+  // Same mount, same guard coverage, same contract, for the 5c team routes — see
+  // `../auth/team-routes.ts`'s own module doc comment for why these are a separate file too.
+  if (deps.teamRoutes) routed.route('/', deps.teamRoutes);
 
   // ---- SPA catch-all -------------------------------------------------------
   // Last, so every route above still wins. Any other GET gets the cockpit shell:

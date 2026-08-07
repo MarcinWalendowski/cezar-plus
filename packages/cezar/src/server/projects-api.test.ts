@@ -603,13 +603,13 @@ describe('workspace projects API', () => {
         return { status: res.status, body: (await res.json()) as { error?: string; removed?: boolean } };
       };
 
-      const patchAs = async (id: string, cookie: string, sessionResolver: SessionResolver) => {
+      const patchAs = async (id: string, cookie: string, sessionResolver: SessionResolver, patchBody: unknown = { maxParallel: 4 }) => {
         const res = await apiRequest(makeApp({ sessionResolver }), `/api/v1/projects/${id}`, {
           method: 'PATCH',
           headers: { cookie, 'content-type': 'application/json' },
-          body: JSON.stringify({ maxParallel: 4 }),
+          body: JSON.stringify(patchBody),
         });
-        return { status: res.status, body: (await res.json()) as { error?: string } };
+        return { status: res.status, body: (await res.json()) as UpdateProjectResponse & { error?: string } };
       };
 
       it("refuses another org's DELETE and leaves the registration standing", async () => {
@@ -679,6 +679,112 @@ describe('workspace projects API', () => {
         // writes identity state. Byte-identical to the pre-Phase-5 behaviour.
         expect((await loadWorkspaceConfig()).projects).toEqual([]);
         expect(identity.getProjectTeam(claimed.root)?.orgId).toBe('local');
+      });
+
+      /**
+       * 5c (D2/D4, `.ai/specs/2026-08-06-org-team-auth-onboarding.md`, Fill unit 3, ADDED
+       * 2026-08-07): `PATCH /api/v1/projects/:projectId`'s `teamId` field — reassigning an
+       * already-claimed root to a different team WITHIN its owning org. The cross-org write
+       * refusal tests just above already cover `mayActOnRoot` generically (it runs before this
+       * field is even read); the tests here are about the reassignment itself. Nested here (not a
+       * sibling describe) so `patchAs`/`seedOrgs`/`principalResolver`/`postAs` are in scope.
+       */
+      describe('PATCH /api/v1/projects/:projectId — teamId reassignment (5c)', () => {
+      it("reassigns to a different team in the caller's own org, and the response reports it back (withTeams)", async () => {
+        const { store: identity, orgA, teamA } = await seedOrgs();
+        const engineering = await identity.createTeam({ orgId: orgA.id, name: 'Engineering', slug: 'engineering' });
+        const claimed = await registerProject(otherRoot);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: orgA.id, teamId: teamA.id });
+
+        const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+        const { status, body } = await patchAs(claimed.id, 'cez_session=a', principalResolver({ 'cez_session=a': principalA }), {
+          teamId: engineering.id,
+        });
+        expect(status).toBe(200);
+        expect(body.project.teamId).toBe(engineering.id);
+        expect(body.project.teamName).toBe('Engineering');
+        // and the org claim itself never moved (D4) — read back from the store directly.
+        expect(identity.getProjectTeam(claimed.root)?.orgId).toBe(orgA.id);
+      });
+
+      it("refuses moving a root to a team from a DIFFERENT org (409), and nothing changes", async () => {
+        const { store: identity, orgA, teamA, teamB } = await seedOrgs();
+        const claimed = await registerProject(otherRoot);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: orgA.id, teamId: teamA.id });
+
+        const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+        const { status, body } = await patchAs(claimed.id, 'cez_session=a', principalResolver({ 'cez_session=a': principalA }), {
+          teamId: teamB.id,
+        });
+        expect(status).toBe(409);
+        expect(body.error).toContain('outside its own organization');
+        expect(identity.getProjectTeam(claimed.root)?.teamId).toBe(teamA.id);
+      });
+
+      it('refuses an unknown teamId (400), and nothing changes', async () => {
+        const { store: identity, orgA, teamA } = await seedOrgs();
+        const claimed = await registerProject(otherRoot);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: orgA.id, teamId: teamA.id });
+
+        const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+        const { status, body } = await patchAs(claimed.id, 'cez_session=a', principalResolver({ 'cez_session=a': principalA }), {
+          teamId: 'does-not-exist',
+        });
+        expect(status).toBe(400);
+        expect(body.error).toContain('unknown team');
+        expect(identity.getProjectTeam(claimed.root)?.teamId).toBe(teamA.id);
+      });
+
+      it('refuses reassigning a root with NO existing team claim (400) — this reassigns, it does not create one', async () => {
+        const { orgA, teamA } = await seedOrgs();
+        // Registered as a plain workspace entry, never claimed by an org (no `project_teams` row).
+        const unclaimed = await registerProject(otherRoot);
+
+        const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+        const { status, body } = await patchAs(unclaimed.id, 'cez_session=a', principalResolver({ 'cez_session=a': principalA }), {
+          teamId: teamA.id,
+        });
+        expect(status).toBe(400);
+        expect(body.error).toContain('never claimed');
+      });
+
+      it("CEZ_AUTH unset: teamId is REJECTED (400), not silently ignored — unlike POST's registration-time field", async () => {
+        const claimed = await registerProject(otherRoot);
+        delete process.env.CEZ_AUTH;
+        const res = await apiRequest(makeApp(), `/api/v1/projects/${claimed.id}`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ teamId: 'whatever' }),
+        });
+        expect(res.status).toBe(400);
+        expect(existsSync(join(home, 'identity'))).toBe(false); // zero I/O — the field was rejected, not looked up
+      });
+
+      it("another org's caller cannot reassign the team either — the SAME mayActOnRoot gate as maxParallel", async () => {
+        const { store: identity, orgA, teamA, orgB, teamB } = await seedOrgs();
+        const claimed = await registerProject(otherRoot);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: orgA.id, teamId: teamA.id });
+
+        const principalB: Principal = { kind: 'session', userId: 'u-b', orgId: orgB.id, teamId: teamB.id, role: 'owner' };
+        const { status, body } = await patchAs(claimed.id, 'cez_session=b', principalResolver({ 'cez_session=b': principalB }), {
+          teamId: teamB.id,
+        });
+        expect(status).toBe(409);
+        expect(body.error).toBe('this project is already registered to a different organization');
+        expect(identity.getProjectTeam(claimed.root)?.teamId).toBe(teamA.id);
+      });
+
+      it('an empty body is a no-op — 200, nothing changes, no team write attempted', async () => {
+        const { store: identity, orgA, teamA } = await seedOrgs();
+        const claimed = await registerProject(otherRoot);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: orgA.id, teamId: teamA.id });
+
+        const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+        const { status, body } = await patchAs(claimed.id, 'cez_session=a', principalResolver({ 'cez_session=a': principalA }), {});
+        expect(status).toBe(200);
+        expect(body.project.teamId).toBe(teamA.id);
+        expect(body.project.maxParallel).toBeUndefined();
+      });
       });
     });
 
@@ -1103,11 +1209,31 @@ describe('workspace projects API', () => {
 
     it('rejects an out-of-range value with a 400 and persists nothing', async () => {
       const other = await registerProject(otherRoot);
-      for (const bad of [{ maxParallel: 0 }, { maxParallel: 99 }, { maxParallel: 1.5 }, {}]) {
+      for (const bad of [{ maxParallel: 0 }, { maxParallel: 99 }, { maxParallel: 1.5 }]) {
         const { status } = await patch(other.id, bad);
         expect(status, JSON.stringify(bad)).toBe(400);
       }
       expect((await getProjects()).projects.find((p) => p.id === other.id)?.maxParallel).toBeUndefined();
+    });
+
+    /**
+     * CORRECTED 2026-08-07 (5c, Fill unit 3): `{}` used to be in the "bad" list above, because
+     * `maxParallel` was a REQUIRED key — an empty body failed the validator's own presence check.
+     * The 5c widening (`updateProjectSchema` gains `teamId`, and relaxes `maxParallel` to optional
+     * so a `teamId`-only PATCH doesn't have to also restate the ceiling) makes an empty body
+     * legitimate: "touch nothing" rather than "malformed". This is the NEW behavior that widening
+     * is FOR, made explicit rather than leaving the old test's assumption to silently go stale.
+     */
+    it('an empty body is now a no-op, not a 400 — 5c widened maxParallel to optional', async () => {
+      const other = await registerProject(otherRoot);
+      const { semaphore, refreshes } = countingSemaphore();
+      const { status, body } = await patch(other.id, {}, { semaphore });
+      expect(status).toBe(200);
+      expect(body.project.id).toBe(other.id);
+      expect(body.project.maxParallel).toBeUndefined();
+      expect((await getProjects()).projects.find((p) => p.id === other.id)?.maxParallel).toBeUndefined();
+      // No write attempted at all — the live-apply hook does not fire for a no-op.
+      expect(refreshes()).toBe(0);
     });
 
     it('404s an unknown id and a malformed one, and rewrites nothing (read-first, like DELETE)', async () => {

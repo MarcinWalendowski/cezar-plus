@@ -1,5 +1,11 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -9,8 +15,12 @@ import { createApp } from '../server/server.ts';
 import { apiRequest } from '../server/loopback-request.testkit.ts';
 import { IdentityStore } from './identity-store.ts';
 import { SessionService } from './session.ts';
-import { createOnboardingRoutes, type OnboardingRouteDeps } from './onboarding-routes.ts';
+import {
+  createOnboardingRoutes,
+  type OnboardingRouteDeps,
+} from './onboarding-routes.ts';
 import type { BootstrapClaim } from './bootstrap-claim.ts';
+import { hashOrgClaimToken, mintOrgClaimToken } from './org-claim-token.ts';
 
 /**
  * Exercised against a REAL `IdentityStore` (temp directory, no fakes) and a REAL `SessionService`
@@ -28,7 +38,9 @@ async function tempStore(): Promise<IdentityStore> {
 }
 
 afterEach(async () => {
-  await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(
+    dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+  );
 });
 
 /**
@@ -39,10 +51,16 @@ afterEach(async () => {
  * one explicitly rather than mutating `process.env`, the same reason `SessionServiceOptions.
  * authProvider` is injectable.
  */
-function buildDeps(store: IdentityStore, bootstrapClaim?: BootstrapClaim): OnboardingRouteDeps {
+function buildDeps(
+  store: IdentityStore,
+  bootstrapClaim?: BootstrapClaim,
+): OnboardingRouteDeps {
   const service = SessionService.create(store, { authProvider: () => 'oidc' });
   return {
-    sessionResolver: { resolveFromCookieHeader: (header) => service.resolveFromCookieHeader(header) },
+    sessionResolver: {
+      resolveFromCookieHeader: (header) =>
+        service.resolveFromCookieHeader(header),
+    },
     identityStore: store,
     bootstrapClaim,
   };
@@ -51,8 +69,15 @@ function buildDeps(store: IdentityStore, bootstrapClaim?: BootstrapClaim): Onboa
 /** Mints a real session cookie against `store` — a fresh `SessionService` here is exactly as good
  *  as reaching into `deps.sessionResolver`, since both read/write the SAME `IdentityStore` and
  *  neither keeps an in-memory cache (see `identity-store.ts`'s own module doc on why). */
-async function signInCookie(store: IdentityStore, input: { subject: string; email?: string }): Promise<{ cookie: string; userId: string }> {
-  const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example.test', subject: input.subject, email: input.email });
+async function signInCookie(
+  store: IdentityStore,
+  input: { subject: string; email?: string },
+): Promise<{ cookie: string; userId: string }> {
+  const { user } = await store.findOrCreateUser({
+    issuer: 'https://idp.example.test',
+    subject: input.subject,
+    email: input.email,
+  });
   const service = SessionService.create(store, { authProvider: () => 'oidc' });
   const created = await service.createSession(user.id);
   return { cookie: created.cookie.split(';')[0]!, userId: user.id };
@@ -71,23 +96,40 @@ describe('createOnboardingRoutes', () => {
     it('reports needs-org for a signed-in user with no membership, suggesting an org name from the email domain', async () => {
       const store = await tempStore();
       const deps = buildDeps(store);
-      const { cookie } = await signInCookie(store, { subject: 'alice', email: 'alice@acme.com' });
+      const { cookie } = await signInCookie(store, {
+        subject: 'alice',
+        email: 'alice@acme.com',
+      });
       const app = createOnboardingRoutes(deps);
 
-      const res = await app.request('/auth/onboarding', { headers: { cookie } });
+      const res = await app.request('/auth/onboarding', {
+        headers: { cookie },
+      });
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ state: 'needs-org', suggestedOrgName: 'Acme', bootstrapTokenRequired: false });
+      expect(await res.json()).toEqual({
+        state: 'needs-org',
+        suggestedOrgName: 'Acme',
+        bootstrapTokenRequired: false,
+      });
     });
 
     it('suggests nothing for a personal-mailbox domain (gmail.com) rather than an actively wrong default', async () => {
       const store = await tempStore();
       const deps = buildDeps(store);
-      const { cookie } = await signInCookie(store, { subject: 'bob', email: 'bob@gmail.com' });
+      const { cookie } = await signInCookie(store, {
+        subject: 'bob',
+        email: 'bob@gmail.com',
+      });
       const app = createOnboardingRoutes(deps);
 
-      const res = await app.request('/auth/onboarding', { headers: { cookie } });
+      const res = await app.request('/auth/onboarding', {
+        headers: { cookie },
+      });
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ state: 'needs-org', bootstrapTokenRequired: false });
+      expect(await res.json()).toEqual({
+        state: 'needs-org',
+        bootstrapTokenRequired: false,
+      });
     });
 
     it('suggests nothing when the signed-in user has no email on file', async () => {
@@ -96,28 +138,57 @@ describe('createOnboardingRoutes', () => {
       const { cookie } = await signInCookie(store, { subject: 'carol' });
       const app = createOnboardingRoutes(deps);
 
-      const res = await app.request('/auth/onboarding', { headers: { cookie } });
+      const res = await app.request('/auth/onboarding', {
+        headers: { cookie },
+      });
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ state: 'needs-org', bootstrapTokenRequired: false });
+      expect(await res.json()).toEqual({
+        state: 'needs-org',
+        bootstrapTokenRequired: false,
+      });
     });
 
     it('reports ready with the resolved org/team/role once a membership exists, hasProjects false with none registered', async () => {
       const store = await tempStore();
-      const { org, defaultTeam } = await store.createOrg({ name: 'Acme', slug: 'acme' });
-      const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example.test', subject: 'dave' });
-      await store.createMembership({ userId: user.id, orgId: org.id, role: 'owner' });
+      const { org, defaultTeam } = await store.createOrg({
+        name: 'Acme',
+        slug: 'acme',
+      });
+      const { user } = await store.findOrCreateUser({
+        issuer: 'https://idp.example.test',
+        subject: 'dave',
+      });
+      await store.createMembership({
+        userId: user.id,
+        orgId: org.id,
+        role: 'owner',
+      });
       const deps = buildDeps(store);
-      const service = SessionService.create(store, { authProvider: () => 'oidc' });
+      const service = SessionService.create(store, {
+        authProvider: () => 'oidc',
+      });
       const created = await service.createSession(user.id);
       const cookie = created.cookie.split(';')[0]!;
       const app = createOnboardingRoutes(deps);
 
-      const res = await app.request('/auth/onboarding', { headers: { cookie } });
+      const res = await app.request('/auth/onboarding', {
+        headers: { cookie },
+      });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
         state: 'ready',
-        org: { id: org.id, name: org.name, slug: org.slug, createdAt: org.createdAt },
-        team: { id: defaultTeam.id, orgId: defaultTeam.orgId, name: defaultTeam.name, slug: defaultTeam.slug },
+        org: {
+          id: org.id,
+          name: org.name,
+          slug: org.slug,
+          createdAt: org.createdAt,
+        },
+        team: {
+          id: defaultTeam.id,
+          orgId: defaultTeam.orgId,
+          name: defaultTeam.name,
+          slug: defaultTeam.slug,
+        },
         role: 'owner',
         hasProjects: false,
       });
@@ -125,21 +196,44 @@ describe('createOnboardingRoutes', () => {
 
     it('reports hasProjects true once a project root is registered to the org', async () => {
       const store = await tempStore();
-      const { org, defaultTeam } = await store.createOrg({ name: 'Acme', slug: 'acme' });
-      const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example.test', subject: 'erin' });
-      await store.createMembership({ userId: user.id, orgId: org.id, role: 'owner' });
-      const projectRoot = await mkdtemp(join(tmpdir(), 'cezar-onboarding-project-'));
+      const { org, defaultTeam } = await store.createOrg({
+        name: 'Acme',
+        slug: 'acme',
+      });
+      const { user } = await store.findOrCreateUser({
+        issuer: 'https://idp.example.test',
+        subject: 'erin',
+      });
+      await store.createMembership({
+        userId: user.id,
+        orgId: org.id,
+        role: 'owner',
+      });
+      const projectRoot = await mkdtemp(
+        join(tmpdir(), 'cezar-onboarding-project-'),
+      );
       dirs.push(projectRoot);
-      await store.createProjectTeam({ projectRoot, orgId: org.id, teamId: defaultTeam.id });
+      await store.createProjectTeam({
+        projectRoot,
+        orgId: org.id,
+        teamId: defaultTeam.id,
+      });
       const deps = buildDeps(store);
-      const service = SessionService.create(store, { authProvider: () => 'oidc' });
+      const service = SessionService.create(store, {
+        authProvider: () => 'oidc',
+      });
       const created = await service.createSession(user.id);
       const cookie = created.cookie.split(';')[0]!;
       const app = createOnboardingRoutes(deps);
 
-      const res = await app.request('/auth/onboarding', { headers: { cookie } });
+      const res = await app.request('/auth/onboarding', {
+        headers: { cookie },
+      });
       expect(res.status).toBe(200);
-      expect((await res.json()) as { hasProjects: boolean }).toMatchObject({ state: 'ready', hasProjects: true });
+      expect((await res.json()) as { hasProjects: boolean }).toMatchObject({
+        state: 'ready',
+        hasProjects: true,
+      });
     });
   });
 
@@ -155,10 +249,39 @@ describe('createOnboardingRoutes', () => {
       expect(res.status).toBe(401);
     });
 
+    /**
+     * ADDED 2026-08-07 (5b/5c/8 repair stage). The case above sends a VALID body, and both
+     * orderings answer 401 for it — which is why it could not see that the identity check sat
+     * INSIDE the handler, downstream of `jsonZodValidator`. An unauthenticated caller sending
+     * `{"name":123}` got `400 {"error":"name: Invalid input: expected string, received number"}`:
+     * the request schema, learned before any identity check, with a stranger's JSON body parsed
+     * first. Invariant 3's exact defect, one bar below D12's gate;
+     * `./require-signed-in.ts`'s middleware is the fix and this is its pin.
+     *
+     * `{}` is deliberately NOT in this list: every field of `createOnboardingOrgInputSchema` is
+     * optional, so `{}` satisfies it and answers 401 under either ordering. That is precisely how
+     * the first probe of this route missed the defect.
+     */
+    it('401s BEFORE the body validator runs — a body satisfying no schema still answers 401, never 400', async () => {
+      const store = await tempStore();
+      const app = createOnboardingRoutes(buildDeps(store));
+      for (const body of [JSON.stringify({ name: 123 }), '[]', JSON.stringify({ orgSlug: [] })]) {
+        const res = await app.request('/auth/onboarding/org', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body,
+        });
+        expect([body, res.status]).toEqual([body, 401]);
+      }
+    });
+
     it('creates the org + default team, grants the caller owner, and reports ready afterwards', async () => {
       const store = await tempStore();
       const deps = buildDeps(store);
-      const { cookie, userId } = await signInCookie(store, { subject: 'frank', email: 'frank@umbrella.corp' });
+      const { cookie, userId } = await signInCookie(store, {
+        subject: 'frank',
+        email: 'frank@umbrella.corp',
+      });
       const app = createOnboardingRoutes(deps);
 
       const res = await app.request('/auth/onboarding/org', {
@@ -167,7 +290,11 @@ describe('createOnboardingRoutes', () => {
         body: JSON.stringify({ name: 'Umbrella Corp' }),
       });
       expect(res.status).toBe(201);
-      const body = (await res.json()) as { org: { id: string; slug: string; name: string }; team: { id: string }; role: string };
+      const body = (await res.json()) as {
+        org: { id: string; slug: string; name: string };
+        team: { id: string };
+        role: string;
+      };
       expect(body.org.name).toBe('Umbrella Corp');
       expect(body.org.slug).toBe('umbrella-corp');
       expect(body.role).toBe('owner');
@@ -175,9 +302,14 @@ describe('createOnboardingRoutes', () => {
       const membership = store.getMembership(userId, body.org.id);
       expect(membership).toEqual({ userId, orgId: body.org.id, role: 'owner' });
 
-      const status = await app.request('/auth/onboarding', { headers: { cookie } });
+      const status = await app.request('/auth/onboarding', {
+        headers: { cookie },
+      });
       expect(status.status).toBe(200);
-      expect((await status.json()) as { state: string }).toMatchObject({ state: 'ready', role: 'owner' });
+      expect((await status.json()) as { state: string }).toMatchObject({
+        state: 'ready',
+        role: 'owner',
+      });
     });
 
     it('409s a second bootstrap attempt for the same already-a-member user', async () => {
@@ -225,7 +357,9 @@ describe('createOnboardingRoutes', () => {
         body: JSON.stringify({ name: 'Acme' }),
       });
       expect(firstRes.status).toBe(201);
-      const firstBody = (await firstRes.json()) as { org: { id: string; slug: string } };
+      const firstBody = (await firstRes.json()) as {
+        org: { id: string; slug: string };
+      };
       expect(firstBody.org.slug).toBe('acme');
 
       // A genuinely different user, with zero memberships of their own — the exact caller the
@@ -243,7 +377,9 @@ describe('createOnboardingRoutes', () => {
       expect(store.listOrgs()).toHaveLength(1);
       expect(store.listOrgs()[0]!.id).toBe(firstBody.org.id);
       expect(store.listMemberships(second.userId)).toEqual([]);
-      expect(store.getMembership(first.userId, firstBody.org.id)?.role).toBe('owner');
+      expect(store.getMembership(first.userId, firstBody.org.id)?.role).toBe(
+        'owner',
+      );
     });
 
     it('lets exactly one of two simultaneous first-time users win the bootstrap', async () => {
@@ -292,7 +428,9 @@ describe('createOnboardingRoutes', () => {
         body: JSON.stringify({ name: '株式会社アクメ' }),
       });
       expect(res.status).toBe(201);
-      const body = (await res.json()) as { org: { name: string; slug: string } };
+      const body = (await res.json()) as {
+        org: { name: string; slug: string };
+      };
       expect(body.org.name).toBe('株式会社アクメ');
       expect(body.org.slug).toBe('org');
       // …and it really is on disk, i.e. the 201 is not a response shaped ahead of a failed write.
@@ -341,13 +479,321 @@ describe('createOnboardingRoutes', () => {
     });
   });
 
+  // ---- D11 claim mode: claiming a SECOND (or later) org that already exists (ADDED 2026-08-07,
+  // 5b/5c/8 scaffold pass → Fill unit 7). `org` here always comes from `store.createOrg` with a
+  // `claimTokenHash` — the same call `POST /internal/orgs` (Fill unit 6, not built here) makes —
+  // never from this route's own legacy branch, which is exactly the production shape: this branch
+  // ONLY attaches an owner to an org someone else already minted. -----------------------------------
+  describe('POST /auth/onboarding/org — D11 claim mode (orgSlug)', () => {
+    it("claims an org by slug+code, grants owner, and reuses the org's EXISTING default team", async () => {
+      const store = await tempStore();
+      const token = mintOrgClaimToken();
+      const { org, defaultTeam } = await store.createOrg({
+        name: 'Acme Two',
+        slug: 'acme2',
+        claimTokenHash: hashOrgClaimToken(token),
+      });
+      const { cookie, userId } = await signInCookie(store, {
+        subject: 'org-two-owner',
+      });
+      const app = createOnboardingRoutes(buildDeps(store));
+
+      const res = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ orgSlug: 'acme2', bootstrapToken: token }),
+      });
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as {
+        org: { id: string; slug: string };
+        team: { id: string };
+        role: string;
+      };
+      expect(body.org.id).toBe(org.id);
+      expect(body.org.slug).toBe('acme2');
+      expect(body.team.id).toBe(defaultTeam.id);
+      expect(body.role).toBe('owner');
+      expect(store.getMembership(userId, org.id)?.role).toBe('owner');
+      // No second team was minted for the claim.
+      expect(store.listTeams(org.id)).toEqual([defaultTeam]);
+    });
+
+    it('403s a wrong code for a real org, and writes nothing', async () => {
+      const store = await tempStore();
+      const token = mintOrgClaimToken();
+      await store.createOrg({
+        name: 'Acme Two',
+        slug: 'acme2',
+        claimTokenHash: hashOrgClaimToken(token),
+      });
+      const { cookie, userId } = await signInCookie(store, {
+        subject: 'guesser',
+      });
+      const app = createOnboardingRoutes(buildDeps(store));
+
+      const res = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          orgSlug: 'acme2',
+          bootstrapToken: 'wrong-code',
+        }),
+      });
+      expect(res.status).toBe(403);
+      expect(store.listMemberships(userId)).toEqual([]);
+    });
+
+    it('403s an unknown slug with the SAME message as a wrong code — no enumeration oracle', async () => {
+      const store = await tempStore();
+      const token = mintOrgClaimToken();
+      await store.createOrg({
+        name: 'Acme Two',
+        slug: 'acme2',
+        claimTokenHash: hashOrgClaimToken(token),
+      });
+      const { cookie } = await signInCookie(store, { subject: 'wanderer' });
+      const app = createOnboardingRoutes(buildDeps(store));
+
+      const wrongCode = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          orgSlug: 'acme2',
+          bootstrapToken: 'wrong-code',
+        }),
+      });
+      const unknownSlug = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ orgSlug: 'no-such-org', bootstrapToken: token }),
+      });
+      expect(wrongCode.status).toBe(403);
+      expect(unknownSlug.status).toBe(403);
+      expect(await wrongCode.json()).toEqual(await unknownSlug.json());
+    });
+
+    // ---- THE cross-claim negative: org A's code must not claim org B ----------------------------
+    //
+    // The whole reason D11 needs a code PER ORG rather than the deployment-wide one
+    // (`./bootstrap-claim.ts`): org one's owner already holds the deployment-wide code, so if that
+    // were also good enough to claim org two, it would be a permanent skeleton key across every
+    // future org. This is the mechanism that keeps D9's bounded-audience property intact once a
+    // SECOND org exists — a stranger who compromises or is handed org A's code must not thereby
+    // gain org B.
+    it("org A's own claim code does not claim org B, even with org B's real slug", async () => {
+      const store = await tempStore();
+      const tokenA = mintOrgClaimToken();
+      const tokenB = mintOrgClaimToken();
+      expect(tokenA).not.toBe(tokenB); // real entropy, not a fixture collision
+      const { org: orgA } = await store.createOrg({
+        name: 'Acme One',
+        slug: 'acme1',
+        claimTokenHash: hashOrgClaimToken(tokenA),
+      });
+      const { org: orgB } = await store.createOrg({
+        name: 'Acme Two',
+        slug: 'acme2',
+        claimTokenHash: hashOrgClaimToken(tokenB),
+      });
+      // Org A is already claimed by its own, legitimate owner — the exact caller D11 is protecting
+      // against: someone who already has a real code for ONE org.
+      const ownerA = await signInCookie(store, { subject: 'org-a-owner' });
+      const app = createOnboardingRoutes(buildDeps(store));
+      expect(
+        (
+          await app.request('/auth/onboarding/org', {
+            method: 'POST',
+            headers: {
+              cookie: ownerA.cookie,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({ orgSlug: 'acme1', bootstrapToken: tokenA }),
+          })
+        ).status,
+      ).toBe(201);
+
+      // Now org A's owner tries org A's OWN code against org B's slug.
+      const attempt = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: { cookie: ownerA.cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ orgSlug: 'acme2', bootstrapToken: tokenA }),
+      });
+      expect(attempt.status).toBe(403);
+
+      // Org B is completely untouched: no owner, no membership, still claimable by whoever
+      // actually holds ITS code.
+      expect(store.listOrgMembers(orgB.id)).toEqual([]);
+      const legitimateOwnerB = await signInCookie(store, {
+        subject: 'org-b-owner',
+      });
+      const legitimate = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: {
+          cookie: legitimateOwnerB.cookie,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ orgSlug: 'acme2', bootstrapToken: tokenB }),
+      });
+      expect(legitimate.status).toBe(201);
+      expect(store.getMembership(legitimateOwnerB.userId, orgB.id)?.role).toBe(
+        'owner',
+      );
+    });
+
+    /**
+     * ADDED 2026-08-07 (5b/5c/8 repair stage). The test directly above proves org A's owner cannot
+     * claim org B with org A's code. This is the case it does NOT cover, and it is the likelier
+     * one: org A's owner holding org B's REAL code — which is exactly what the operator who ran
+     * `server-install --platform hetzner --org-slug <b>` is holding, off the install output, in a
+     * browser they are already signed into.
+     *
+     * That used to answer **201, role: owner**, write an inert second membership (F4 pins the user
+     * to `listMemberships(userId)[0]`, so they kept acting as org A forever), and consume org B's
+     * one-shot claim in the same guarded write. With no unclaim route, no member-removal route and
+     * no re-mint, org B's unix user, `CEZ_HOME`, unit, vhost and cert were dead. The 409 is half
+     * the point; the other half is every assertion after it — the code must still work for the
+     * person it was for.
+     */
+    it("409s an already-a-member claimant holding the org's REAL code — and the code survives for its intended owner", async () => {
+      const store = await tempStore();
+      const tokenA = mintOrgClaimToken();
+      const tokenB = mintOrgClaimToken();
+      await store.createOrg({ name: 'Acme One', slug: 'acme1', claimTokenHash: hashOrgClaimToken(tokenA) });
+      const { org: orgB } = await store.createOrg({ name: 'Acme Two', slug: 'acme2', claimTokenHash: hashOrgClaimToken(tokenB) });
+      const operator = await signInCookie(store, { subject: 'the-operator' });
+      const app = createOnboardingRoutes(buildDeps(store));
+      expect(
+        (
+          await app.request('/auth/onboarding/org', {
+            method: 'POST',
+            headers: { cookie: operator.cookie, 'content-type': 'application/json' },
+            body: JSON.stringify({ orgSlug: 'acme1', bootstrapToken: tokenA }),
+          })
+        ).status,
+      ).toBe(201);
+
+      const res = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: { cookie: operator.cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ orgSlug: 'acme2', bootstrapToken: tokenB }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toContain('has NOT been used up');
+
+      // Nothing was written: no second membership, and org B is still UNCLAIMED...
+      expect(store.listMemberships(operator.userId).map((m) => m.orgId)).toEqual([store.getOrgBySlug('acme1')!.id]);
+      expect(store.listOrgMembers(orgB.id)).toEqual([]);
+      // ...so the code the operator was holding still does what it was minted to do.
+      const intended = await signInCookie(store, { subject: 'org-b-owner' });
+      const legitimate = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: { cookie: intended.cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ orgSlug: 'acme2', bootstrapToken: tokenB }),
+      });
+      expect(legitimate.status).toBe(201);
+      expect(store.getMembership(intended.userId, orgB.id)?.role).toBe('owner');
+    });
+
+    it('409s claiming an org that already has an owner — the code was right, but someone else won the race', async () => {
+      const store = await tempStore();
+      const token = mintOrgClaimToken();
+      const { org } = await store.createOrg({
+        name: 'Acme Two',
+        slug: 'acme2',
+        claimTokenHash: hashOrgClaimToken(token),
+      });
+      const app = createOnboardingRoutes(buildDeps(store));
+
+      const first = await signInCookie(store, { subject: 'first-claimant' });
+      expect(
+        (
+          await app.request('/auth/onboarding/org', {
+            method: 'POST',
+            headers: {
+              cookie: first.cookie,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({ orgSlug: 'acme2', bootstrapToken: token }),
+          })
+        ).status,
+      ).toBe(201);
+
+      const second = await signInCookie(store, { subject: 'second-claimant' });
+      const res = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: { cookie: second.cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ orgSlug: 'acme2', bootstrapToken: token }),
+      });
+      expect(res.status).toBe(409);
+      expect(store.listOrgMembers(org.id)).toHaveLength(1);
+      expect(store.getMembership(second.userId, org.id)).toBeUndefined();
+    });
+
+    it("403s claiming the deployment's first-ever (legacy) org by slug — it has no per-org code, and the deployment-wide code is not accepted here", async () => {
+      const store = await tempStore();
+      const first = await signInCookie(store, { subject: 'legacy-owner' });
+      const app = createOnboardingRoutes(buildDeps(store));
+      const created = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: { cookie: first.cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Acme' }),
+      });
+      expect(created.status).toBe(201);
+      const orgSlug = ((await created.json()) as { org: { slug: string } }).org
+        .slug;
+      expect(store.getOrgBySlug(orgSlug)?.claimTokenHash).toBeUndefined();
+
+      const second = await signInCookie(store, { subject: 'second-visitor' });
+      const res = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: { cookie: second.cookie, 'content-type': 'application/json' },
+        // Even the deployment-wide bootstrap code (which this deployment doesn't require in the
+        // suite's default env, per buildDeps' own comment) does not satisfy the per-org check.
+        body: JSON.stringify({ orgSlug, bootstrapToken: 'anything' }),
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it('ignores `name` in claim mode — no 400 for omitting it, and it never overrides the pre-existing org name', async () => {
+      const store = await tempStore();
+      const token = mintOrgClaimToken();
+      const { org } = await store.createOrg({
+        name: 'Original Name',
+        slug: 'acme2',
+        claimTokenHash: hashOrgClaimToken(token),
+      });
+      const { cookie } = await signInCookie(store, { subject: 'claimant' });
+      const app = createOnboardingRoutes(buildDeps(store));
+
+      const res = await app.request('/auth/onboarding/org', {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          orgSlug: 'acme2',
+          bootstrapToken: token,
+          name: 'Attempted Rename',
+        }),
+      });
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { org: { name: string } };
+      expect(body.org.name).toBe('Original Name');
+      expect(store.getOrgById(org.id)?.name).toBe('Original Name');
+    });
+  });
+
   // ---- who may be first (ADDED 2026-08-07, `./bootstrap-claim.ts`) ------------------------------
   describe('the bootstrap claim', () => {
-    const required: BootstrapClaim = { required: true, mode: 'generated', token: 'c0de-from-the-boot-log' };
+    const required: BootstrapClaim = {
+      required: true,
+      mode: 'generated',
+      token: 'c0de-from-the-boot-log',
+    };
 
     it('403s a signed-in stranger with no code, and writes NOTHING', async () => {
       const store = await tempStore();
-      const { cookie, userId } = await signInCookie(store, { subject: 'passing-stranger' });
+      const { cookie, userId } = await signInCookie(store, {
+        subject: 'passing-stranger',
+      });
       const app = createOnboardingRoutes(buildDeps(store, required));
 
       const res = await app.request('/auth/onboarding/org', {
@@ -370,7 +816,10 @@ describe('createOnboardingRoutes', () => {
       const res = await app.request('/auth/onboarding/org', {
         method: 'POST',
         headers: { cookie, 'content-type': 'application/json' },
-        body: JSON.stringify({ name: 'Acme', bootstrapToken: 'c0de-from-the-boot-lob' }),
+        body: JSON.stringify({
+          name: 'Acme',
+          bootstrapToken: 'c0de-from-the-boot-lob',
+        }),
       });
       expect(res.status).toBe(403);
       expect(store.listOrgs()).toEqual([]);
@@ -378,17 +827,24 @@ describe('createOnboardingRoutes', () => {
 
     it('lets the operator through with the exact code', async () => {
       const store = await tempStore();
-      const { cookie, userId } = await signInCookie(store, { subject: 'operator' });
+      const { cookie, userId } = await signInCookie(store, {
+        subject: 'operator',
+      });
       const app = createOnboardingRoutes(buildDeps(store, required));
 
       const res = await app.request('/auth/onboarding/org', {
         method: 'POST',
         headers: { cookie, 'content-type': 'application/json' },
-        body: JSON.stringify({ name: 'Acme', bootstrapToken: 'c0de-from-the-boot-log' }),
+        body: JSON.stringify({
+          name: 'Acme',
+          bootstrapToken: 'c0de-from-the-boot-log',
+        }),
       });
       expect(res.status).toBe(201);
       expect(store.listOrgs()).toHaveLength(1);
-      expect(store.getMembership(userId, store.listOrgs()[0]!.id)?.role).toBe('owner');
+      expect(store.getMembership(userId, store.listOrgs()[0]!.id)?.role).toBe(
+        'owner',
+      );
     });
 
     it('tells the wizard a code is wanted, without ever sending the code itself', async () => {
@@ -396,10 +852,15 @@ describe('createOnboardingRoutes', () => {
       const { cookie } = await signInCookie(store, { subject: 'operator' });
       const app = createOnboardingRoutes(buildDeps(store, required));
 
-      const res = await app.request('/auth/onboarding', { headers: { cookie } });
+      const res = await app.request('/auth/onboarding', {
+        headers: { cookie },
+      });
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body).toEqual({ state: 'needs-org', bootstrapTokenRequired: true });
+      expect(body).toEqual({
+        state: 'needs-org',
+        bootstrapTokenRequired: true,
+      });
       // The negative half, stated as its own assertion rather than left to `toEqual`'s exactness:
       // the secret must not reach a client under ANY key.
       expect(JSON.stringify(body)).not.toContain('c0de-from-the-boot-log');
@@ -408,7 +869,9 @@ describe('createOnboardingRoutes', () => {
     it("an 'open' claim (CEZ_AUTH_BOOTSTRAP_OPEN=1) needs no code — the refusal is opt-out, not unconditional", async () => {
       const store = await tempStore();
       const { cookie } = await signInCookie(store, { subject: 'local-tester' });
-      const app = createOnboardingRoutes(buildDeps(store, { required: false, mode: 'open' }));
+      const app = createOnboardingRoutes(
+        buildDeps(store, { required: false, mode: 'open' }),
+      );
 
       const res = await app.request('/auth/onboarding/org', {
         method: 'POST',
@@ -425,19 +888,30 @@ describe('createOnboardingRoutes', () => {
       const store = await tempStore();
       const app = createOnboardingRoutes(buildDeps(store));
 
-      const first = await signInCookie(store, { subject: 'owner-one', email: 'one@acme.com' });
+      const first = await signInCookie(store, {
+        subject: 'owner-one',
+        email: 'one@acme.com',
+      });
       expect(
         (
           await app.request('/auth/onboarding/org', {
             method: 'POST',
-            headers: { cookie: first.cookie, 'content-type': 'application/json' },
+            headers: {
+              cookie: first.cookie,
+              'content-type': 'application/json',
+            },
             body: JSON.stringify({ name: 'Acme' }),
           })
         ).status,
       ).toBe(201);
 
-      const second = await signInCookie(store, { subject: 'colleague', email: 'two@acme.com' });
-      const res = await app.request('/auth/onboarding', { headers: { cookie: second.cookie } });
+      const second = await signInCookie(store, {
+        subject: 'colleague',
+        email: 'two@acme.com',
+      });
+      const res = await app.request('/auth/onboarding', {
+        headers: { cookie: second.cookie },
+      });
       expect(res.status).toBe(200);
       // Exactly this, and nothing else: no org name, no owner, no suggestion, and — because the
       // bootstrap window is closed for them — no `bootstrapTokenRequired` either. An unauthorized
@@ -470,9 +944,14 @@ describe('createOnboardingRoutes', () => {
       // resolves the identical header through D3's shared `sessionResolver`. If the two readers
       // disagree, the org belongs to Alice while the resolver sees Bob, and this reads
       // `needs-invite` instead of `ready`.
-      const status = await app.request('/auth/onboarding', { headers: { cookie: doubled } });
+      const status = await app.request('/auth/onboarding', {
+        headers: { cookie: doubled },
+      });
       expect(status.status).toBe(200);
-      expect((await status.json()) as { state: string }).toMatchObject({ state: 'ready', role: 'owner' });
+      expect((await status.json()) as { state: string }).toMatchObject({
+        state: 'ready',
+        role: 'owner',
+      });
 
       // Said again from the store's side, so the claim is not resting on one route's answer.
       const orgId = store.listOrgs()[0]!.id;
@@ -485,9 +964,19 @@ describe('createOnboardingRoutes', () => {
   describe('response shaping', () => {
     it('never leaks a storage-only column that `.passthrough()` let through', async () => {
       const store = await tempStore();
-      const { org, defaultTeam } = await store.createOrg({ name: 'Acme', slug: 'acme' });
-      const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example.test', subject: 'nina' });
-      await store.createMembership({ userId: user.id, orgId: org.id, role: 'owner' });
+      const { org, defaultTeam } = await store.createOrg({
+        name: 'Acme',
+        slug: 'acme',
+      });
+      const { user } = await store.findOrCreateUser({
+        issuer: 'https://idp.example.test',
+        subject: 'nina',
+      });
+      await store.createMembership({
+        userId: user.id,
+        orgId: org.id,
+        role: 'owner',
+      });
 
       // Simulate a NEWER cezar having written a column this version has never heard of — the exact
       // case `auth/types.ts`'s `.passthrough()` exists for (D7). `identity.json` is edited
@@ -502,17 +991,38 @@ describe('createOnboardingRoutes', () => {
       writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
       // The store really does carry it forward — otherwise this test would be asserting the
       // absence of something that never existed.
-      expect(store.getOrgById(org.id)).toMatchObject({ billingCustomerId: 'cus_SECRET' });
+      expect(store.getOrgById(org.id)).toMatchObject({
+        billingCustomerId: 'cus_SECRET',
+      });
 
       const deps = buildDeps(store);
-      const service = SessionService.create(store, { authProvider: () => 'oidc' });
-      const cookie = (await service.createSession(user.id)).cookie.split(';')[0]!;
+      const service = SessionService.create(store, {
+        authProvider: () => 'oidc',
+      });
+      const cookie = (await service.createSession(user.id)).cookie.split(
+        ';',
+      )[0]!;
       const app = createOnboardingRoutes(deps);
 
-      const res = await app.request('/auth/onboarding', { headers: { cookie } });
-      const body = (await res.json()) as { org: Record<string, unknown>; team: Record<string, unknown> };
-      expect(Object.keys(body.org).sort()).toEqual(['createdAt', 'id', 'name', 'slug']);
-      expect(Object.keys(body.team).sort()).toEqual(['id', 'name', 'orgId', 'slug']);
+      const res = await app.request('/auth/onboarding', {
+        headers: { cookie },
+      });
+      const body = (await res.json()) as {
+        org: Record<string, unknown>;
+        team: Record<string, unknown>;
+      };
+      expect(Object.keys(body.org).sort()).toEqual([
+        'createdAt',
+        'id',
+        'name',
+        'slug',
+      ]);
+      expect(Object.keys(body.team).sort()).toEqual([
+        'id',
+        'name',
+        'orgId',
+        'slug',
+      ]);
       expect(JSON.stringify(body)).not.toContain('cus_SECRET');
       expect(JSON.stringify(body)).not.toContain('do-not-ship');
       expect(defaultTeam.id).toBe(body.team.id);
@@ -520,25 +1030,53 @@ describe('createOnboardingRoutes', () => {
 
     it('scopes hasProjects to the CALLER’s org — another org’s registered project is not theirs', async () => {
       const store = await tempStore();
-      const { org: orgA, defaultTeam: teamA } = await store.createOrg({ name: 'Org A', slug: 'org-a' });
-      const { org: orgB } = await store.createOrg({ name: 'Org B', slug: 'org-b' });
-      const { user: userB } = await store.findOrCreateUser({ issuer: 'https://idp.example.test', subject: 'user-b' });
-      await store.createMembership({ userId: userB.id, orgId: orgB.id, role: 'owner' });
+      const { org: orgA, defaultTeam: teamA } = await store.createOrg({
+        name: 'Org A',
+        slug: 'org-a',
+      });
+      const { org: orgB } = await store.createOrg({
+        name: 'Org B',
+        slug: 'org-b',
+      });
+      const { user: userB } = await store.findOrCreateUser({
+        issuer: 'https://idp.example.test',
+        subject: 'user-b',
+      });
+      await store.createMembership({
+        userId: userB.id,
+        orgId: orgB.id,
+        role: 'owner',
+      });
 
       // Only org A holds a project claim.
-      const projectRoot = await mkdtemp(join(tmpdir(), 'cezar-onboarding-other-org-'));
+      const projectRoot = await mkdtemp(
+        join(tmpdir(), 'cezar-onboarding-other-org-'),
+      );
       dirs.push(projectRoot);
-      await store.createProjectTeam({ projectRoot, orgId: orgA.id, teamId: teamA.id });
+      await store.createProjectTeam({
+        projectRoot,
+        orgId: orgA.id,
+        teamId: teamA.id,
+      });
 
-      const service = SessionService.create(store, { authProvider: () => 'oidc' });
-      const cookie = (await service.createSession(userB.id)).cookie.split(';')[0]!;
+      const service = SessionService.create(store, {
+        authProvider: () => 'oidc',
+      });
+      const cookie = (await service.createSession(userB.id)).cookie.split(
+        ';',
+      )[0]!;
       const app = createOnboardingRoutes(buildDeps(store));
 
-      const res = await app.request('/auth/onboarding', { headers: { cookie } });
+      const res = await app.request('/auth/onboarding', {
+        headers: { cookie },
+      });
       expect(res.status).toBe(200);
       // Dropping `{ orgId: org.id }` from the `listProjectTeams` call makes this `true`, and org
       // B's owner is told to skip a step they have never done.
-      expect((await res.json()) as { hasProjects: boolean }).toMatchObject({ state: 'ready', hasProjects: false });
+      expect((await res.json()) as { hasProjects: boolean }).toMatchObject({
+        state: 'ready',
+        hasProjects: false,
+      });
     });
   });
 
@@ -554,7 +1092,7 @@ describe('createOnboardingRoutes', () => {
       expect(res.status).toBe(401);
     });
 
-    it("401s a signed-in user who has no org yet — there is nothing to rename", async () => {
+    it('401s a signed-in user who has no org yet — there is nothing to rename', async () => {
       const store = await tempStore();
       const deps = buildDeps(store);
       const { cookie } = await signInCookie(store, { subject: 'iris' });
@@ -568,14 +1106,28 @@ describe('createOnboardingRoutes', () => {
       expect(res.status).toBe(401);
     });
 
-    it('renames the caller\'s own default team', async () => {
+    it("renames the caller's own default team", async () => {
       const store = await tempStore();
-      const { org, defaultTeam } = await store.createOrg({ name: 'Acme', slug: 'acme' });
-      const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example.test', subject: 'jane' });
-      await store.createMembership({ userId: user.id, orgId: org.id, role: 'owner' });
+      const { org, defaultTeam } = await store.createOrg({
+        name: 'Acme',
+        slug: 'acme',
+      });
+      const { user } = await store.findOrCreateUser({
+        issuer: 'https://idp.example.test',
+        subject: 'jane',
+      });
+      await store.createMembership({
+        userId: user.id,
+        orgId: org.id,
+        role: 'owner',
+      });
       const deps = buildDeps(store);
-      const service = SessionService.create(store, { authProvider: () => 'oidc' });
-      const cookie = (await service.createSession(user.id)).cookie.split(';')[0]!;
+      const service = SessionService.create(store, {
+        authProvider: () => 'oidc',
+      });
+      const cookie = (await service.createSession(user.id)).cookie.split(
+        ';',
+      )[0]!;
       const app = createOnboardingRoutes(deps);
 
       const res = await app.request('/auth/onboarding/team', {
@@ -585,9 +1137,16 @@ describe('createOnboardingRoutes', () => {
       });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
-        team: { id: defaultTeam.id, orgId: org.id, name: 'Platform Engineering', slug: defaultTeam.slug },
+        team: {
+          id: defaultTeam.id,
+          orgId: org.id,
+          name: 'Platform Engineering',
+          slug: defaultTeam.slug,
+        },
       });
-      expect(store.getTeamById(defaultTeam.id)?.name).toBe('Platform Engineering');
+      expect(store.getTeamById(defaultTeam.id)?.name).toBe(
+        'Platform Engineering',
+      );
     });
 
     // ---- role is a permission, not a label (ADDED 2026-08-07) -----------------------------------
@@ -599,11 +1158,25 @@ describe('createOnboardingRoutes', () => {
     // permanent rename of the name every member of the org sees.
     it('403s a `member` renaming the org team, and the team keeps its name', async () => {
       const store = await tempStore();
-      const { org, defaultTeam } = await store.createOrg({ name: 'Acme', slug: 'acme' });
-      const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example.test', subject: 'rank-and-file' });
-      await store.createMembership({ userId: user.id, orgId: org.id, role: 'member' });
-      const service = SessionService.create(store, { authProvider: () => 'oidc' });
-      const cookie = (await service.createSession(user.id)).cookie.split(';')[0]!;
+      const { org, defaultTeam } = await store.createOrg({
+        name: 'Acme',
+        slug: 'acme',
+      });
+      const { user } = await store.findOrCreateUser({
+        issuer: 'https://idp.example.test',
+        subject: 'rank-and-file',
+      });
+      await store.createMembership({
+        userId: user.id,
+        orgId: org.id,
+        role: 'member',
+      });
+      const service = SessionService.create(store, {
+        authProvider: () => 'oidc',
+      });
+      const cookie = (await service.createSession(user.id)).cookie.split(
+        ';',
+      )[0]!;
       const app = createOnboardingRoutes(buildDeps(store));
 
       const res = await app.request('/auth/onboarding/team', {
@@ -617,11 +1190,25 @@ describe('createOnboardingRoutes', () => {
 
     it('lets an `admin` rename it — the refusal is about ROLE, not about "only the owner exists"', async () => {
       const store = await tempStore();
-      const { org, defaultTeam } = await store.createOrg({ name: 'Acme', slug: 'acme' });
-      const { user } = await store.findOrCreateUser({ issuer: 'https://idp.example.test', subject: 'an-admin' });
-      await store.createMembership({ userId: user.id, orgId: org.id, role: 'admin' });
-      const service = SessionService.create(store, { authProvider: () => 'oidc' });
-      const cookie = (await service.createSession(user.id)).cookie.split(';')[0]!;
+      const { org, defaultTeam } = await store.createOrg({
+        name: 'Acme',
+        slug: 'acme',
+      });
+      const { user } = await store.findOrCreateUser({
+        issuer: 'https://idp.example.test',
+        subject: 'an-admin',
+      });
+      await store.createMembership({
+        userId: user.id,
+        orgId: org.id,
+        role: 'admin',
+      });
+      const service = SessionService.create(store, {
+        authProvider: () => 'oidc',
+      });
+      const cookie = (await service.createSession(user.id)).cookie.split(
+        ';',
+      )[0]!;
       const app = createOnboardingRoutes(buildDeps(store));
 
       const res = await app.request('/auth/onboarding/team', {
@@ -636,19 +1223,43 @@ describe('createOnboardingRoutes', () => {
     // ---- THE negative control: org isolation, not merely "is logged in" -------------------------
     it("a member of org A cannot rename org B's team, even if the request body tries to name org B's ids directly", async () => {
       const store = await tempStore();
-      const { org: orgA, defaultTeam: teamA } = await store.createOrg({ name: 'Org A', slug: 'org-a' });
-      const { org: orgB, defaultTeam: teamB } = await store.createOrg({ name: 'Org B', slug: 'org-b' });
-      const { user: userA } = await store.findOrCreateUser({ issuer: 'https://idp.example.test', subject: 'user-a' });
-      await store.createMembership({ userId: userA.id, orgId: orgA.id, role: 'owner' });
+      const { org: orgA, defaultTeam: teamA } = await store.createOrg({
+        name: 'Org A',
+        slug: 'org-a',
+      });
+      const { org: orgB, defaultTeam: teamB } = await store.createOrg({
+        name: 'Org B',
+        slug: 'org-b',
+      });
+      const { user: userA } = await store.findOrCreateUser({
+        issuer: 'https://idp.example.test',
+        subject: 'user-a',
+      });
+      await store.createMembership({
+        userId: userA.id,
+        orgId: orgA.id,
+        role: 'owner',
+      });
       // A member of org B too, so a resolver bug that picked the WRONG membership would still
       // read as "some org", not as an obvious crash — the assertions below are what actually
       // catch it.
-      const { user: userB } = await store.findOrCreateUser({ issuer: 'https://idp.example.test', subject: 'user-b' });
-      await store.createMembership({ userId: userB.id, orgId: orgB.id, role: 'owner' });
+      const { user: userB } = await store.findOrCreateUser({
+        issuer: 'https://idp.example.test',
+        subject: 'user-b',
+      });
+      await store.createMembership({
+        userId: userB.id,
+        orgId: orgB.id,
+        role: 'owner',
+      });
 
       const deps = buildDeps(store);
-      const service = SessionService.create(store, { authProvider: () => 'oidc' });
-      const cookieA = (await service.createSession(userA.id)).cookie.split(';')[0]!;
+      const service = SessionService.create(store, {
+        authProvider: () => 'oidc',
+      });
+      const cookieA = (await service.createSession(userA.id)).cookie.split(
+        ';',
+      )[0]!;
       const app = createOnboardingRoutes(deps);
 
       const res = await app.request('/auth/onboarding/team', {
@@ -656,7 +1267,11 @@ describe('createOnboardingRoutes', () => {
         headers: { cookie: cookieA, 'content-type': 'application/json' },
         // Smuggled ids for org B's team — the schema doesn't declare these fields, but a client
         // can still send them; the route must not read them.
-        body: JSON.stringify({ name: 'Hijacked', teamId: teamB.id, orgId: orgB.id }),
+        body: JSON.stringify({
+          name: 'Hijacked',
+          teamId: teamB.id,
+          orgId: orgB.id,
+        }),
       });
       expect(res.status).toBe(200);
 
@@ -687,21 +1302,36 @@ describe('mount point (server.ts)', () => {
 
   afterEach(() => {
     store.flush();
-    for (const dir of [home, repoRoot]) rmSync(dir, { recursive: true, force: true });
+    for (const dir of [home, repoRoot])
+      rmSync(dir, { recursive: true, force: true });
     if (savedHome === undefined) delete process.env.CEZ_HOME;
     else process.env.CEZ_HOME = savedHome;
   });
 
-  const makeApp = (onboardingRoutes?: ReturnType<typeof createOnboardingRoutes>) =>
-    createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test', onboardingRoutes });
+  const makeApp = (
+    onboardingRoutes?: ReturnType<typeof createOnboardingRoutes>,
+  ) =>
+    createApp({
+      repoRoot,
+      store,
+      manager: {} as RunManager,
+      version: '0.0.0-test',
+      onboardingRoutes,
+    });
 
   it('registers no /auth/onboarding* route at all when onboardingRoutes is absent (the CEZ_AUTH=none shape, D1)', async () => {
     const app = makeApp(undefined);
     // Same two-signature absence proof `./routes.test.ts` uses: GET falls through to the SPA
     // catch-all (200 HTML), a mutating method has no such fallback (genuine, un-shadowed 404).
-    const postRes = await apiRequest(app, '/auth/onboarding/org', { method: 'POST', headers: { origin: 'http://127.0.0.1:4321' } });
+    const postRes = await apiRequest(app, '/auth/onboarding/org', {
+      method: 'POST',
+      headers: { origin: 'http://127.0.0.1:4321' },
+    });
     expect(postRes.status).toBe(404);
-    const patchRes = await apiRequest(app, '/auth/onboarding/team', { method: 'PATCH', headers: { origin: 'http://127.0.0.1:4321' } });
+    const patchRes = await apiRequest(app, '/auth/onboarding/team', {
+      method: 'PATCH',
+      headers: { origin: 'http://127.0.0.1:4321' },
+    });
     expect(patchRes.status).toBe(404);
 
     const getRes = await apiRequest(app, '/auth/onboarding', { method: 'GET' });
@@ -724,7 +1354,10 @@ describe('mount point (server.ts)', () => {
 
     const res = await apiRequest(app, '/auth/onboarding/org', {
       method: 'POST',
-      headers: { origin: 'http://localhost:3000', 'content-type': 'application/json' },
+      headers: {
+        origin: 'http://localhost:3000',
+        'content-type': 'application/json',
+      },
       body: JSON.stringify({ name: 'Acme' }),
     });
     expect(res.status).toBe(403);
@@ -736,7 +1369,10 @@ describe('mount point (server.ts)', () => {
 
     const res = await apiRequest(app, '/auth/onboarding/team', {
       method: 'PATCH',
-      headers: { origin: 'http://localhost:3000', 'content-type': 'application/json' },
+      headers: {
+        origin: 'http://localhost:3000',
+        'content-type': 'application/json',
+      },
       body: JSON.stringify({ name: 'Engineering' }),
     });
     expect(res.status).toBe(403);
@@ -746,7 +1382,9 @@ describe('mount point (server.ts)', () => {
     const identity = await tempStore();
     const app = makeApp(createOnboardingRoutes(buildDeps(identity)));
 
-    const res = await app.request('/auth/onboarding', { headers: { host: 'evil.tld' } });
+    const res = await app.request('/auth/onboarding', {
+      headers: { host: 'evil.tld' },
+    });
     expect(res.status).toBe(403);
   });
 });

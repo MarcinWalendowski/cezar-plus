@@ -43,6 +43,21 @@ export const orgSchema = z
     name: z.string().trim().min(1).max(200),
     slug: slugSchema,
     createdAt: isoTimestamp,
+    /**
+     * ADDED 2026-08-07 (5b/5c/8 scaffold pass, D11's crux — see `./org-claim-token.ts`'s module
+     * doc comment for the full contract). A SHA-256 hex digest of this org's own bootstrap
+     * ("claim") code, never the raw code itself — mirrors D7's own stance on the file as a whole
+     * (0600, reasserted post-rename): a leak of `identity.json` must not also hand out every org's
+     * live claim code.
+     *
+     * Optional, and absent for every org created the LEGACY way (the deployment's first-ever org,
+     * self-served through `POST /auth/onboarding/org` with no `orgSlug` in the body — still
+     * gated by the single, deployment-wide `./bootstrap-claim.ts` code, unchanged). Present only
+     * for an org created by the admin-only `POST /internal/orgs` (D11), which mints one per org so
+     * that org one's owner — who already saw the deployment-wide code to claim org one — cannot
+     * also claim org two with it.
+     */
+    claimTokenHash: z.string().min(1).optional(),
   })
   .passthrough();
 export type Org = z.infer<typeof orgSchema>;
