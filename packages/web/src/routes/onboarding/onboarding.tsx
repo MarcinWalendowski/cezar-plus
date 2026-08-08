@@ -1,5 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Building2Icon, FolderPlusIcon, LockIcon, LogInIcon, MailQuestionIcon, TriangleAlertIcon, UsersIcon } from 'lucide-react'
+import {
+  Building2Icon,
+  FilePlus2Icon,
+  FolderOpenIcon,
+  FolderPlusIcon,
+  LockIcon,
+  LogInIcon,
+  MailQuestionIcon,
+  TriangleAlertIcon,
+  UsersIcon,
+} from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 
@@ -11,7 +21,13 @@ import type {
   Role,
   Team,
 } from '@open-mercato/cezar-api-client'
+import { useHealth } from '@/api/queries'
+// The local brand glyph, not a lucide icon — `app-shell.tsx`'s own "Clone from GitHub…" menu
+// item uses this exact one, and lucide dropped brand icons.
+import { GithubIcon } from '@/components/icons'
 import { AddProjectDialog } from '@/components/add-project-dialog'
+import { BlankProjectDialog } from '@/components/blank-project-dialog'
+import { CloneProjectDialog } from '@/components/clone-project-dialog'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -644,20 +660,30 @@ function AddWorkspaceField({ onAdded }: { onAdded: (workspace: Team) => void }) 
 // ---- step 4: add projects ------------------------------------------------------------------------
 
 /**
- * Reuses `AddProjectDialog` — the SAME folder-browse-and-register flow every other "Add project"
- * affordance in the cockpit uses — rather than forking it. The only addition anywhere in that
- * flow is `AddProjectDialog`'s new optional `teamId` prop (threaded to `POST /api/v1/projects`
- * through `useRegisterProject`/`registerProject`, both additive changes): every other caller of
- * the dialog omits it and is byte-identical to before.
+ * Reuses `AddProjectDialog` and `CloneProjectDialog` — the SAME flows every other "Add project"
+ * affordance in the cockpit uses — rather than forking them. The only addition anywhere in those
+ * flows is an optional `teamId` (threaded to `POST /api/v1/projects` and, since D15,
+ * `POST /api/v1/projects/checkout`): every other caller omits it and is byte-identical to before.
  *
- * Skippable (D8): "Skip for now" leaves with no project added and no error — the org and its
- * default team already exist, so nothing is stranded. A successful add navigates into the new
- * project's scope (`AddProjectDialog`'s own behavior, unchanged), which finishes onboarding by
- * simply landing the user in the app.
+ * **NO LONGER SKIPPABLE — D15 (2026-08-07, owner decision).** This step used to carry a "Skip for
+ * now" button, per D8's "steps 2–4 are skippable". A first-run user reported the consequence:
+ * having skipped nothing and added nothing, they landed in a cockpit already showing a project,
+ * its commits and its branch, because boot auto-registration had put one there before the wizard
+ * ever asked. D15 makes "the org owns at least one project" part of the gate and gives the user
+ * three ways to satisfy it — blank, a local directory, or a GitHub clone. There is no way past
+ * this screen that does not create a project, which is the point; `onboarding-gate.ts` enforces
+ * the same condition, so removing the button alone would not have been enough.
+ *
+ * The launch directory is offered rather than assumed: `health.repoRoot` is the folder cezar was
+ * started in, which before D15 was silently registered at boot. Pre-filling it keeps the
+ * historical one-launch-one-repo ergonomics as a single click.
  */
 function AddProjectsStep({ org, team }: { org: Org; team: Team }) {
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const navigate = useNavigate()
+  const [addOpen, setAddOpen] = useState(false)
+  const [cloneOpen, setCloneOpen] = useState(false)
+  const [blankOpen, setBlankOpen] = useState(false)
+  const health = useHealth()
+  const launchRoot = health.data?.repoRoot
 
   return (
     <>
@@ -665,19 +691,32 @@ function AddProjectsStep({ org, team }: { org: Org; team: Team }) {
         icon={<FolderPlusIcon />}
         tone="primary"
         title="Add your first project"
-        subtitle={`${org.name} is ready. Projects you add now are assigned to ${team.name} — add more later from Settings → Projects.`}
+        subtitle={`${org.name} is ready. Every project needs somewhere to live — create an empty one, open a folder you already have, or clone from GitHub. It will be assigned to ${team.name}, and you can add more later from Settings → Projects.`}
         actions={
           <>
-            <Button variant="outline" data-slot="onboarding-skip" onClick={() => navigate('/')}>
-              Skip for now
+            <Button variant="outline" data-slot="onboarding-blank-project" onClick={() => setBlankOpen(true)}>
+              <FilePlus2Icon className="size-[15px]" aria-hidden="true" />
+              Create blank
             </Button>
-            <Button data-slot="onboarding-add-project" onClick={() => setDialogOpen(true)}>
-              Add project
+            <Button variant="outline" data-slot="onboarding-add-project" onClick={() => setAddOpen(true)}>
+              <FolderOpenIcon className="size-[15px]" aria-hidden="true" />
+              Open local folder
+            </Button>
+            <Button data-slot="onboarding-clone-project" onClick={() => setCloneOpen(true)}>
+              <GithubIcon className="size-[15px]" aria-hidden="true" />
+              Import from GitHub
             </Button>
           </>
         }
       />
-      <AddProjectDialog open={dialogOpen} onOpenChange={setDialogOpen} teamId={team.id} />
+      <AddProjectDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        teamId={team.id}
+        {...(launchRoot ? { initialPath: launchRoot } : {})}
+      />
+      <CloneProjectDialog open={cloneOpen} onOpenChange={setCloneOpen} teamId={team.id} />
+      <BlankProjectDialog open={blankOpen} onOpenChange={setBlankOpen} teamId={team.id} />
     </>
   )
 }

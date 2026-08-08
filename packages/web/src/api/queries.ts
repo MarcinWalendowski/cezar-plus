@@ -10,6 +10,7 @@ import {
   connectProvider,
   continueRun,
   createAgentProfile,
+  createBlankProject,
   getAgentConfig,
   getAgentConfigFile,
   getAgentAccountDetails,
@@ -89,6 +90,7 @@ import { githubRepoBase } from '@/lib/tasks-table'
 import type { ContinueOptions } from './client'
 import type {
   CheckoutProjectInput,
+  CreateBlankProjectInput,
   CreateAgentProfileInput,
   HealthResponse,
   MessageInput,
@@ -384,7 +386,15 @@ export function useRegisterProject() {
     // `.ai/specs/2026-08-06-org-team-auth-onboarding.md`) is the one caller that passes it;
     // `add-project-dialog.tsx`'s own default usage omits it, unchanged.
     mutationFn: ({ root, teamId }: { root: string; teamId?: string }) => registerProject(root, teamId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects })
+      // D15: see `useCreateBlankProject` below. Registering a folder is one of the three ways the
+      // onboarding gate's `hasProjects` flips true, so the probe that gate reads must not survive
+      // this mutation. Added here, not only on the blank path, because the wizard's local-directory
+      // button lands on THIS mutation — without the eviction it would add the project and then be
+      // bounced straight back into the wizard by a cached `hasProjects: false`.
+      queryClient.removeQueries({ queryKey: ['onboarding'] })
+    },
   })
 }
 
@@ -581,7 +591,35 @@ export function useCheckoutProject() {
   return useMutation({
     mutationFn: (input: CheckoutProjectInput) => checkoutProject(input),
     retry: false,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects })
+      // D15: the third of the three paths that can flip the gate's `hasProjects` — same eviction,
+      // same reason as `useRegisterProject` above and `useCreateBlankProject` below.
+      queryClient.removeQueries({ queryKey: ['onboarding'] })
+    },
+  })
+}
+
+/**
+ * D15 — create a blank project (`POST /api/v1/projects/blank`).
+ *
+ * Same shape as `useCheckoutProject` above, plus one thing neither of the older project-adding
+ * mutations needed: it evicts every `['onboarding', ...]`-keyed query. This is the mutation that
+ * can flip the onboarding entry probe's `hasProjects` from false to true, and D15's gate is read
+ * FROM that probe — without the eviction the wizard would create the project and then keep gating
+ * on a cached `hasProjects: false`, which is the same stale-probe bounce D13's FIX 9 already had
+ * to repair once (`routes.tsx#OnboardingEntryGate`'s own doc comment). `onboarding.tsx` performs
+ * the identical eviction on org creation, for the identical reason.
+ */
+export function useCreateBlankProject() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CreateBlankProjectInput) => createBlankProject(input),
+    retry: false,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects })
+      queryClient.removeQueries({ queryKey: ['onboarding'] })
+    },
   })
 }
 

@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { lstat, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
@@ -160,6 +160,44 @@ export async function cleanupCheckout(projectsDir: string, target: string): Prom
     return false;
   }
 }
+
+/**
+ * D15 — how `POST /api/projects/blank` turns a freshly created folder into a repository.
+ *
+ * Injected for the same reason `CloneRunner` is: so the route's guards, cleanup and error
+ * surfacing are testable against real temp dirs without depending on a `git` binary being present
+ * or on its exit codes. `dir` already exists and is empty (the route created it).
+ */
+export type GitInitRunner = (dir: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+
+/**
+ * `git init <dir>`.
+ *
+ * `execFile`, not `spawn` — unlike a clone there is no progress worth streaming, and nothing here
+ * is long enough to need cancellation. `GIT_TERMINAL_PROMPT=0` for the same reason the clone
+ * runner sets it: a git that decides to ask something must fail with a message the dialog can
+ * show, never block on a prompt nobody can see.
+ */
+export const defaultGitInit: GitInitRunner = (dir) =>
+  new Promise((resolvePromise) => {
+    execFile(
+      'git',
+      ['init', dir],
+      { timeout: GIT_INIT_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
+      (err, _stdout, stderr) => {
+        if (!err) return resolvePromise({ ok: true });
+        // `git`'s own stderr when it said something, the spawn error otherwise (ENOENT — no git on
+        // PATH — is the case that matters and produces no stderr at all).
+        const said = String(stderr ?? '').trim();
+        resolvePromise({ ok: false, error: said || err.message });
+      },
+    );
+  });
+
+/** Bounded like `CLONE_TIMEOUT_MS`: `git init` is local and near-instant, so a hang means
+ *  something is wrong (a stuck network filesystem, a hostile `core.hooksPath`) and waiting
+ *  forever would leave the request open with a half-made directory on disk. */
+const GIT_INIT_TIMEOUT_MS = 30_000;
 
 /** Injected so the tests can drive a fake clone without a network or a `gh`
  *  binary. `dir` already exists (we created it); the runner clones INTO it. */

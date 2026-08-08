@@ -144,6 +144,39 @@ export async function listRegisteredProjectRoots(): Promise<string[]> {
  * (`initWorkspace`'s, before this fix) where it would silently discard `entry.id` — a boot value
  * that could not previously fail for a reason unrelated to it.
  */
+/**
+ * D3 (`.ai/specs/2026-08-07-org-scoped-tasks-knowledge.md`) — **boot never auto-registers the
+ * launch directory.** An unknown launch directory is *offered*, never written.
+ *
+ * **SUPERSEDES this function's own D15 behaviour, which was wrong in a way the owner caught in
+ * the running app.** D15 suppressed boot registration only *while onboarding was incomplete*,
+ * reasoning that the suppression should be "scoped to a single launch, not to the product". That
+ * merely DEFERRED the reported problem by one launch: the owner completed onboarding, restarted
+ * cezar from inside the cezar checkout, and `cezar` reappeared in the sidebar beside the project
+ * they had actually created — the same "I didn't add any project, why do I see data in commits and
+ * git tab?" they had reported an hour earlier. A bound that lets the bug back in on the second run
+ * is not a bound.
+ *
+ * So: unconditional. `serveCommand` → `initWorkspace` never writes the registry for the launch
+ * directory. The process still SERVES that directory exactly as before — `shouldRegisterProject`
+ * only ever governed registration, never what is served — so `npx cezar` in a repo still works; it
+ * simply stops adding sidebar entries nobody asked for. Phase 5 of that spec adds the offer UI
+ * ("<name> isn't in a workspace yet") that turns the launch directory into one deliberate click.
+ *
+ * **Kept as a function rather than deleting the call site.** The predicate is where the decision is
+ * documented and where the test hangs; inlining `false` at `initWorkspace` would leave the next
+ * reader with a bare deletion and no record of why the founding behaviour changed. It also keeps
+ * the seam for phase 5, which needs to know whether the launch root is already known in order to
+ * decide whether to offer it at all.
+ *
+ * Takes no arguments now: the old body read `isLocalOrgModeActive(process.env, bindHost)` to scope
+ * the suppression to local mode. That scoping went with the bound — a hosted deployment has no more
+ * business auto-adding its own working directory than a local one does.
+ */
+export function suppressBootRegistration(): boolean {
+  return true;
+}
+
 export async function registerAndAdoptProject(
   root: string,
   opts: { source?: 'local' | 'checkout'; bindHost?: string } = {},

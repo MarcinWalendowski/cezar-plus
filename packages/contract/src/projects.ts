@@ -157,8 +157,34 @@ export const checkoutProjectInputSchema = z.object({
   url: z.string().trim().min(1).max(512),
   name: z.string().trim().max(128).optional(),
   checkoutId: z.string().trim().max(128).optional(),
+  // D15: additive, matching `registerProjectSchema`'s existing optional `teamId`. The onboarding
+  // wizard's project step is the caller that passes it; every other caller omits it and sends a
+  // byte-identical body to before.
+  teamId: z.string().trim().min(1).max(200).optional(),
 });
 export type CheckoutProjectInput = z.infer<typeof checkoutProjectInputSchema>;
+
+/**
+ * `POST /api/v1/projects/blank` (D15) — create an empty project rather than adopting an existing
+ * folder or cloning one. `name` is a single path SEGMENT, not a path: the server joins it to the
+ * configured `projectsDir` (the same root "Clone from GitHub" writes into), so accepting a path
+ * would let the caller choose the parent and bypass the containment check that root exists to
+ * enforce. Traversal (`..`), separators and a leading dot are refused rather than normalized.
+ */
+export const createBlankProjectInputSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .regex(
+      /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/,
+      'name must start with a letter or number and contain only letters, numbers, spaces, dots, dashes or underscores',
+    )
+    .refine((v) => !v.includes('..'), 'name must not contain ".."'),
+  teamId: z.string().trim().min(1).max(200).optional(),
+});
+export type CreateBlankProjectInput = z.infer<typeof createBlankProjectInputSchema>;
 
 /** One directory in a `GET /api/v1/fs/browse` listing (multi-project spec, step 4.1). `path` is
  *  absolute — same-origin route, like `ProjectListEntry.root`. */

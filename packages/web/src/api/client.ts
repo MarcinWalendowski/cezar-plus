@@ -26,6 +26,7 @@ import type {
   CancelResponse,
   ChangesPayload,
   CheckoutProjectInput,
+  CreateBlankProjectInput,
   ConfigResponse,
   ReclaimWorktreesResponse,
   RemoveWorktreeResponse,
@@ -923,6 +924,20 @@ export async function registerProject(root: string, teamId?: string): Promise<Re
  */
 export async function checkoutProject(input: CheckoutProjectInput): Promise<RegisterProjectResponse> {
   return unwrap(await cez.api.v1.projects.checkout.$post({ json: input }), '/projects/checkout')
+}
+
+/**
+ * Create a blank project — a new folder under the configured projects dir, `git init`ed and
+ * registered (`POST /api/v1/projects/blank`, D15).
+ *
+ * `unwrap`'s ordinary contract, for exactly `checkoutProject`'s reason above and not
+ * `registerProject`'s: every non-2xx here is a real failure with nothing to navigate to. In
+ * particular the 409 means a folder of that name already exists and this route deliberately
+ * refuses to adopt it — "create blank" must never silently hand back someone else's directory —
+ * so it is an error the dialog shows, not a success to follow.
+ */
+export async function createBlankProject(input: CreateBlankProjectInput): Promise<RegisterProjectResponse> {
+  return unwrap(await cez.api.v1.projects.blank.$post({ json: input }), '/projects/blank')
 }
 
 /**

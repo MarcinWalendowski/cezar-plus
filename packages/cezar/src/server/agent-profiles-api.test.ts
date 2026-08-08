@@ -679,14 +679,41 @@ describe('agent profiles API', () => {
 
     it('allows a terminal for the FOLDER, which is the case it does apply to', async () => {
       const account = await create('work', signedIn('claude-klaudiusz'));
-      // `openInApp` is the real thing here, so assert only that the target passed validation:
-      // a 400 would mean it was refused, and anything else means it reached the launcher.
-      const res = await apiRequest(makeApp(), `/api/v1/workspace/agent-profiles/${account.id}/open`, {
+      // **FIXED 2026-08-07: this test used to open a REAL Terminal window, every run.** It called
+      // `makeApp()` with no `openTerminal`, and said so — "`openInApp` is the real thing here, so
+      // assert only that the target passed validation: a 400 would mean it was refused, and
+      // anything else means it reached the launcher." Reaching the launcher on macOS means
+      // `open-in-app.ts`'s `openInTerminal(dir, ':')` → osascript → an actual Terminal window,
+      // `cd`-ing into this test's `mkdtemp` profile home. The window outlived the test, which had
+      // already deleted that directory in cleanup, so a developer running the suite got a stray
+      // terminal reporting "no such file or directory" for a path they had never heard of. Found
+      // when the owner pasted exactly that window and asked what was opening it.
+      //
+      // Injecting the opener also makes the assertion STRONGER, not weaker: "it reached the
+      // launcher" becomes something observed (`opened`) rather than inferred from the absence of a
+      // 400 — a status that a 409, a 500, or a route that silently did nothing would also satisfy.
+      // Line ~827 in this same file already injects it this way; this call site was the outlier.
+      // `openApp`, NOT `openTerminal`: this route reaches the launcher through `openInApp`, and
+      // `deps.openTerminal` covers only the provider-connect route. Injecting the wrong one is
+      // exactly how this was missed — the first attempt at this fix passed `openTerminal`, the
+      // hook was never called, and the run opened yet another real window.
+      let opened: { target: string; dir: string } | null = null;
+      const app = makeApp({
+        openApp: async (target: string, dir: string) => {
+          opened = { target, dir };
+          return true;
+        },
+      });
+      const res = await apiRequest(app, `/api/v1/workspace/agent-profiles/${account.id}/open`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ file: 'folder', target: 'terminal' }),
       });
       expect(res.status).not.toBe(400);
+      expect(opened).not.toBeNull();
+      // The folder it offered to open is the account's own profile home, not some other account's.
+      expect(opened!.target).toBe('terminal');
+      expect(opened!.dir).toContain('claude-klaudiusz');
     });
 
     it('409s a file the agent has not written yet rather than reporting a false success', async () => {

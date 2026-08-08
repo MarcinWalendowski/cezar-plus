@@ -45,7 +45,7 @@ import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 // function's own doc comment for why. (`listRegisteredProjectRoots` itself is no longer imported
 // HERE — FIX B1 moved its one caller, the local-mode wiring, into `./local-mode-boot.ts`, which
 // imports it directly.)
-import { registerAndAdoptProject } from './registered-project-roots.ts';
+import { registerAndAdoptProject, suppressBootRegistration } from './registered-project-roots.ts';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -240,7 +240,13 @@ async function main(): Promise<void> {
 async function initWorkspace(repoRoot: string, bindHost?: string): Promise<string | undefined> {
   try {
     await runMigrations({ bootRepoRoot: repoRoot });
-    if (await shouldRegisterProject(repoRoot)) {
+    // D3 (`.ai/specs/2026-08-07-org-scoped-tasks-knowledge.md`): boot never auto-registers the
+    // launch directory — see `suppressBootRegistration`'s own doc comment for why the D15 version
+    // of this, which suppressed only while onboarding was incomplete, merely deferred the reported
+    // bug by one launch. `shouldRegisterProject` is retained ahead of it because it still answers a
+    // different question ("is this root registrable at all") that phase 5's offer UI must ask
+    // before offering anything.
+    if ((await shouldRegisterProject(repoRoot)) && !suppressBootRegistration()) {
       const entry = await registerAndAdoptProject(repoRoot, { bindHost });
       return entry.id;
     }

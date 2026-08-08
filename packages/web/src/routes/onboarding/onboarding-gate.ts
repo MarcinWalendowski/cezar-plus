@@ -45,13 +45,31 @@ export function useOnboardingEntryProbe() {
 }
 
 /**
- * The ONE state that gates: `needs-org`. `unavailable`, `signed-out`, `needs-invite` and `ready`
- * must never gate — `unavailable` because that deployment can never satisfy the wizard it would be
- * bricked behind (D1's table), the other three because the probe already answered something more
- * specific than "no org exists for anyone to create". `undefined` (still loading, or the query
+ * The states that gate: `needs-org`, and (D15) `ready` while the org owns NO project yet.
+ *
+ * **WIDENED 2026-08-07 by D15 — was `needs-org` alone.** D14 gated on the first organization, and
+ * that turned out to be half a gate: after naming an org and accepting a workspace, a first-run
+ * user landed in a cockpit already showing a project, its commit history and its branch, none of
+ * which they had added ("I didn't add any project — why do I see data in commits and git tab?").
+ * Onboarding is not complete until the org owns at least one project, so the surface stays gated
+ * through the wizard's project step, not only its org step.
+ *
+ * `unavailable`, `signed-out` and `needs-invite` must STILL never gate, for exactly the reasons
+ * D14 gave and this widening does not touch: `unavailable` because that deployment (hosted +
+ * `CEZ_AUTH` unset + `CEZ_ALLOW_UNAUTHENTICATED=1`, which mounts no `/auth/*` at all) can never
+ * satisfy the wizard it would be bricked behind, the other two because the probe already answered
+ * something more specific than "this org has no project". `undefined` (still loading, or the query
  * errored) also reads as false: a slow or failed probe must not strand a returning user behind a
  * blank gate on every page load.
+ *
+ * The `ready` arm reads `hasProjects`, which `auth/onboarding-routes.ts` computes as
+ * `listProjectTeams({ orgId }).length > 0` — projects **adopted into the org**, never "the
+ * machine-wide registry is non-empty". D15 names that distinction load-bearing: the registry
+ * predates the org and is shared across every org on the machine, so a registry read would let a
+ * project belonging to nobody satisfy an org-scoped requirement.
  */
-export function needsOrgGate(probe: OnboardingProbe | undefined): boolean {
-  return probe?.kind === 'needs-org'
+export function needsOnboardingGate(probe: OnboardingProbe | undefined): boolean {
+  if (probe === undefined) return false
+  if (probe.kind === 'needs-org') return true
+  return probe.kind === 'ready' && !probe.hasProjects
 }

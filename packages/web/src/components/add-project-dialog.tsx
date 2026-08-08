@@ -34,6 +34,7 @@ export function AddProjectDialog({
   open,
   onOpenChange,
   teamId,
+  initialPath,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -42,10 +43,16 @@ export function AddProjectDialog({
    *  every OTHER caller of this dialog leaves it unset, and `registerProject` sends no `teamId`
    *  key at all when it is absent, so the request on the wire is unchanged for them. */
   teamId?: string
+  /** D15: open the browser already showing this folder instead of the configured browse root.
+   *  The onboarding wizard passes `health.repoRoot` — the directory cezar was launched in, which
+   *  before D15 was silently registered at boot — so the historical one-launch-one-repo behaviour
+   *  survives as one click rather than as a write nobody asked for. Omitted keeps today's
+   *  behaviour byte-identical for every other caller. */
+  initialPath?: string
 }) {
   // `null` = the independently configured browse root. The dialog never spells that path itself
   // — it only ever echoes what it was told.
-  const [path, setPath] = useState<string | null>(null)
+  const [path, setPath] = useState<string | null>(initialPath ?? null)
   const [selected, setSelected] = useState<FsBrowseDir | null>(null)
   const projects = useProjects()
   const register = useRegisterProject()

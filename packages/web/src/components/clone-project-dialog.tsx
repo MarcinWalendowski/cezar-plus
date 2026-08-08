@@ -39,9 +39,16 @@ import { Label } from '@/components/ui/label'
 export function CloneProjectDialog({
   open,
   onOpenChange,
+  teamId,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** D15: assigns the freshly cloned project to this team, the same way `AddProjectDialog`'s own
+   *  `teamId` already did for a local folder. The onboarding wizard's "Import from GitHub" button
+   *  is the one caller that passes it. Omitted, the request on the wire is byte-identical to
+   *  before — `checkoutProject` sends no `teamId` key at all when it is absent — and the server
+   *  falls back to the principal's default team exactly as it always has. */
+  teamId?: string
 }) {
   const [url, setUrl] = useState('')
   const [name, setName] = useState('')
@@ -88,7 +95,12 @@ export function CloneProjectDialog({
     if (url.trim() === '' || checkout.isPending) return
     setProgress(null)
     checkout.mutate(
-      { url: url.trim(), checkoutId, ...(name.trim() === '' ? {} : { name: name.trim() }) },
+      {
+        url: url.trim(),
+        checkoutId,
+        ...(name.trim() === '' ? {} : { name: name.trim() }),
+        ...(teamId ? { teamId } : {}),
+      },
       {
         onSuccess: ({ project }) => {
           onOpenChange(false)

@@ -561,6 +561,14 @@ First authenticated boot with no org:
 4. **Add projects**, assigned to that team. Reuses the existing registration
    flow; the only new input is the team.
 
+> **SUPERSEDED 2026-08-07 by D15 for step 4 only.** Step 4 is no longer
+> skippable: onboarding does not complete until the org owns at least one
+> project. Steps 2–3 remain skippable exactly as described below, and the
+> resumability property below is unchanged and now load-bearing (a user who
+> quits at step 4 must resume there, not be stranded). See D15 for the three
+> ways step 4 can be satisfied and for why boot auto-registration must not
+> satisfy it silently.
+
 Steps 2–4 are skippable and resumable — a half-finished onboarding must not
 strand an org with no team, so the default team is created on org creation and
 the step only renames it.
@@ -1415,6 +1423,95 @@ session to end.
 > as a deployment without sessions. What is genuinely load-bearing, and is tested,
 > is that **no sign-out action is reachable** where there is no session.
 
+### D15 — onboarding is not complete until the org owns at least one project
+
+**Owner decision, 2026-08-07, from a first-run report.** D14 gated the cockpit on
+the first *organization*. That turned out to be half the gate: after naming an org
+and accepting a workspace, the user landed in a cockpit already showing a project,
+its commit history and its branch — none of which they had added. Their words:
+*"I didn't add any project — why do I see data in commits and git tab?"*
+
+**Decision: the wizard does not finish until the org owns at least one project,
+and the user chooses that project one of three ways** — blank, from a local
+directory, or imported from GitHub.
+
+**The gate extends D14's rather than replacing it.** D14's condition was
+`kind === 'needs-org'`. It becomes `needs-org` **OR** (`ready` **AND**
+`!hasProjects`). Everything D14 says about what must NOT gate is unchanged and
+still load-bearing: `unavailable` must never gate (it would brick the hosted +
+`CEZ_AUTH` unset + `CEZ_ALLOW_UNAUTHENTICATED=1` topology behind a wizard that
+deployment can never satisfy), and neither may `signed-out` or `needs-invite`.
+
+**`hasProjects` already exists and already means the right thing.** It is
+computed in `auth/onboarding-routes.ts` as
+`identityStore.listProjectTeams({ orgId }).length > 0` — projects **adopted into
+the org**, not merely present in the workspace registry. That distinction is what
+makes the gate honest, and it must not be relaxed to "the registry is non-empty":
+the registry is machine-wide and predates the org, so a registry read would let a
+project belonging to nobody satisfy an org-scoped requirement.
+
+**Boot auto-registration must not satisfy the gate.** This is the part that
+produced the report, and without it the whole decision is vacuous. `serveCommand`
+→ `initWorkspace` → `shouldRegisterProject` (`workspace/projects.ts`) registers
+the launch directory as a project for **every** root except `$HOME` and a task
+worktree. Since `cezar` is normally launched from inside a repo, the requirement
+would be satisfied before the wizard ever asked — the user would be shown "add
+your first project" over a cockpit that already had one, which is precisely the
+contradiction reported. **While the local org does not exist yet, boot does not
+register.**
+
+> **SUPERSEDED 2026-08-07, hours later, by SPEC `2026-08-07-org-scoped-tasks-knowledge.md`
+> D3 — "only while onboarding is incomplete" was the wrong bound, and the owner
+> caught it in the running app.** Scoping the suppression to onboarding merely
+> DEFERS the reported problem by one launch: the owner onboarded, restarted cezar
+> from inside the cezar checkout, and `cezar` reappeared in the sidebar beside the
+> project they had actually created — the same "I didn't add any project"
+> complaint this decision exists to answer. Boot now **never** auto-registers;
+> an unknown launch directory is *offered* ("Add <name> to a workspace") and the
+> registry is not written until the user accepts. The bullets below describe the
+> shipped-then-superseded behaviour and are kept for the reasoning, not as the
+> current rule.
+
+That is a real narrowing of cezar's founding "cockpit for *the current repo*"
+behaviour, so it is bounded deliberately:
+
+- It applies **only** while onboarding is incomplete. Once an org exists, boot
+  registration and adoption behave exactly as they do today, for every launch
+  thereafter.
+- The launch directory is not discarded, it is **offered**: the wizard's
+  local-directory path pre-fills it, so the historical one-launch-one-repo
+  ergonomics survive as one click rather than as a silent write.
+- It changes nothing for hosted/auth topologies, which never had a local org to
+  be missing.
+
+**Blank project = a directory plus `git init`.** It is created at
+`<projectsDir>/<name>` — the same `projectsDir` (default `~/cezar/projects`) that
+"Clone from GitHub" already writes into and that Settings → Projects already
+exposes, so blank projects land beside checkouts instead of inventing a second
+location. `git init` runs because every project-scoped surface in the cockpit
+(Git tab, GitHub tab, task worktrees) assumes a repository; a blank project
+without one is a project whose main panes are permanently empty.
+
+**The checkout route gains an optional `teamId`**, matching the local-register
+route that already takes one. Without it a clone performed *during* onboarding
+would be filed under the principal's default team rather than the team the wizard
+just told the user it would use — right by luck in the single-workspace case, and
+wrong the moment a second workspace exists.
+
+**Risk — the upgrade path must not wall in an existing user.** An installed user
+already has registered projects. On first launch after upgrading,
+`registerAndAdoptProject` adopts them into the local org as it does today, so
+`hasProjects` is true and the wizard closes at the org/workspace steps rather than
+demanding a project they already have. This needs a test, not an assumption: the
+failure mode is an existing user locked out of their own cockpit, which is worse
+than the report this decision answers.
+
+**Risk — "at least one" is a floor, not a ceiling.** Nothing here limits a user to
+one project, and the enforcement must not survive past onboarding: deleting your
+last project later is a normal thing to do and must not re-open the wizard as a
+modal wall. The gate is evaluated on the onboarding probe at entry, and D14's
+`firedOnce` latch already bounds it to at most one redirect per page load.
+
 ## Data Models
 
 Expressed as SQL because it states the constraints exactly; the storage is JSON
@@ -1859,3 +1956,24 @@ So: **the row moved from unrunnable to unrun.** That is a real change of state a
 Needed** on a real Hetzner host. The first org can now be claimed on that host; the second org can
 now exist there; whether the two are actually isolated remains, as it has been since phase 6, a
 question only the host can answer.
+
+### D15 verification — planned before implementation
+
+Written up front per the repo's "plan the test" rule; results recorded in place
+once each step has actually been executed, with anything unrun said plainly.
+
+| # | Step | What it would catch | Result |
+|---|------|--------------------|--------|
+| 1 | Automated: probe answers `ready` + `hasProjects: false` → gate holds (redirect to `/onboarding`, cockpit chromeless) | The gate reading only `needs-org`, i.e. D15 not wired in at all | |
+| 2 | Automated **negative control**: probe answers `ready` + `hasProjects: true` → gate does NOT fire | An enforcement that never releases — the "existing user walled out of their own cockpit" risk | |
+| 3 | Automated: `unavailable` still does not gate | D14's bricked-topology failure mode, re-checked after widening the predicate | |
+| 4 | Automated: boot registration is suppressed while no org exists, and NOT suppressed once one does | The vacuous-enforcement case the user actually reported; the second half is the regression control | |
+| 5 | Automated: blank project creates `<projectsDir>/<name>`, `git init`s it, registers it against `teamId` | Silent wrong-location writes, and a "project" with no repo | |
+| 6 | Automated: checkout route threads `teamId` through to registration | A clone filed under the wrong workspace when a second one exists | |
+| 7 | Runtime E2E, real browser, wiped `~/.cezar`: org → workspace → **each** of the three project paths, confirming the wizard cannot be left without a project | Everything the unit tests cannot: that the three buttons exist, are reachable, and actually finish | |
+| 8 | Runtime E2E: launch from inside a repo, confirm no project appears until chosen, and that the launch repo is offered pre-filled | The exact report this decision answers, plus the ergonomics promised in exchange | |
+
+Step 7 is the one that decides Done vs QA Needed. Steps 1–6 are necessary and, on
+this spec's own record, repeatedly insufficient: three consecutive review rounds
+here ended green and were each found to contain a real defect, one introduced by
+the round before it.

@@ -15,7 +15,7 @@ import { useActiveProjectId } from '@/lib/project-router'
 import { unreadDoneCount } from '@/lib/read-state'
 import { runTitle } from '@/lib/task-groups'
 import { pageTitleContext } from '@/routes'
-import { needsOrgGate, useOnboardingEntryProbe } from '@/routes/onboarding/onboarding-gate'
+import { needsOnboardingGate, useOnboardingEntryProbe } from '@/routes/onboarding/onboarding-gate'
 
 /**
  * Derive the sidebar's repo chip from `/api/health`.
@@ -70,7 +70,7 @@ export function skillsUpdateMarkerOf(state: SkillsUpdateState | undefined): bool
 export function AppShellContainer({ children }: { children: ReactNode }) {
   const { pathname } = useLocation()
   const onboardingProbe = useOnboardingEntryProbe()
-  const chromeless = needsOrgGate(onboardingProbe.data)
+  const chromeless = needsOnboardingGate(onboardingProbe.data)
   const projectId = useActiveProjectId()
   const health = useHealth()
   // The global inbox is opt-in (#471). With the capability off there is no Inbox nav item to
@@ -89,6 +89,24 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
   const bootProjectId = registry?.bootProject ?? health.data?.bootProject ?? null
   const isBootProject = projectId !== null && projectId === bootProjectId
   const activeProject = registry?.projects.find((project) => project.id === projectId)
+
+  /**
+   * **FIXED 2026-08-07 (D15 follow-up, reported from the running app).** This chip used to be
+   * `repoChipOf(health.data)` unconditionally — and `health.repo` describes the directory cezar
+   * was LAUNCHED in, never the project you are looking at. Before D15 that was almost always the
+   * same thing, because boot auto-registered the launch directory as a project; D15 stopped doing
+   * that, and the conflation became a visible lie: a cockpit showing project `black` (at
+   * `~/cezar/projects/black`) captioned `cezar / feat/knowledge-base-central-hub`, naming a repo
+   * that is not even in the registry. The owner's words: "why there is cezar /
+   * feat/knowledge-base-central-hub".
+   *
+   * The registry entry is the authority — it carries this project's own `name` and `branch`
+   * (`contract/src/projects.ts`) — and health is the fallback only when there is no active
+   * project to describe (global settings, an unknown id, a registry that has not answered).
+   */
+  const activeRepoChip = activeProject
+    ? { name: activeProject.name, ...(activeProject.branch ? { branch: activeProject.branch } : {}) }
+    : repoChipOf(health.data)
   const titleRuns = useProjectRuns(
     projectId ?? '',
     // Wait for the registry to identify the project before choosing the boot/non-boot cache
@@ -126,7 +144,7 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
     // both of them under it — the spec requires the two sets of tabs to be one filter.
     <ListViewProvider>
       <AppShell
-        repo={repoChipOf(health.data)}
+        repo={activeRepoChip}
         version={health.data?.version ?? null}
         latestVersion={health.data?.latestVersion ?? null}
         // `?? null` rather than `?? 0`: no badge while the inbox is unknown, and no badge when it

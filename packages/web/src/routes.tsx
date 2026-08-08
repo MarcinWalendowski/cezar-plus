@@ -14,7 +14,7 @@ import { useHealth, useProjects, useWorkspaceUiState } from './api/queries'
 import { ProjectScopeProvider } from './api/project-scope-context'
 import { locationToRestore } from './lib/last-location'
 import { Navigate as ScopedNavigate, stripProjectPrefix } from './lib/project-router'
-import { needsOrgGate, useOnboardingEntryProbe } from './routes/onboarding/onboarding-gate'
+import { needsOnboardingGate, useOnboardingEntryProbe } from './routes/onboarding/onboarding-gate'
 import { CompareLoading } from './routes/compare-loading'
 import { GithubLoading } from './routes/github/github-loading'
 import { InboxRoute } from './routes/inbox'
@@ -254,6 +254,9 @@ function LegacyPathRedirect() {
   const health = useHealth()
   const projects = useProjects()
   const uiState = useWorkspaceUiState()
+  // D15: the shared onboarding probe — the same query `AppShellContainer` and
+  // `OnboardingEntryGate` read, never a second fetch. See the bare-root branch below.
+  const onboarding = useOnboardingEntryProbe()
   const resolvedBoot = health.data?.bootProject ?? projects.data?.bootProject
   const bootSourcesSettled =
     (health.data !== undefined || health.isError) &&
@@ -272,6 +275,28 @@ function LegacyPathRedirect() {
     ) {
       return <ScopeResolving />
     }
+    // **FIXED 2026-08-07 (D15 runtime E2E): the bare root must not race the onboarding gate.**
+    //
+    // Two independent authorities used to redirect `/`: this component, once health + registry +
+    // ui-state settle, and `OnboardingEntryGate` below, once the onboarding probe settles. Whoever
+    // resolved first won — and because that gate latches `firedOnce` to at most one redirect per
+    // page load, losing the race once meant it never re-asserted. Observed live: with an org and a
+    // workspace created but no project yet, `/` landed on `/p/<boot>/` showing the Tasks pane,
+    // chrome correctly suppressed (`AppShellContainer` reads the same probe and had already
+    // decided to gate) but never redirected — the two halves of one gate disagreeing about the
+    // same answer. It reproduced intermittently, which is exactly what a race looks like from
+    // outside.
+    //
+    // Waiting here costs NO extra request: `AppShellContainer` mounts the same
+    // `['onboarding','entry-probe']` query on every page, so this reads a fetch that is already in
+    // flight. It is also scoped to the bare root alone — the deep-link redirect below and every
+    // other path are untouched, which is what the pre-D15 doc comment was protecting when it
+    // argued against gating "EVERY boot" on one more round trip.
+    if (onboarding.data === undefined && !onboarding.isError) return <ScopeResolving />
+    // Gate is on: yield. `OnboardingEntryGate` owns the navigation to `/onboarding` — deliberately
+    // NOT duplicated here, so there stays exactly one place that decides where onboarding starts.
+    if (needsOnboardingGate(onboarding.data)) return <ScopeResolving />
+
 
     const restored = locationToRestore(
       uiState.data?.lastLocation,
@@ -356,7 +381,7 @@ function OnboardingEntryGate() {
       return
     }
     if (firedOnce.current) return
-    if (!needsOrgGate(probe.data)) return
+    if (!needsOnboardingGate(probe.data)) return
     firedOnce.current = true
     navigate('/onboarding', { replace: true })
   }, [probe.data, location.pathname, navigate])

@@ -13,7 +13,7 @@ import {
   type AutomationDefinition,
 } from '../automations/types.ts';
 import type { IncomingMessage } from 'node:http';
-import { access, constants as fsConstants, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, constants as fsConstants, mkdir, readFile, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -133,7 +133,7 @@ import {
 } from '../workspace/projects.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/ui-state.ts';
-import { checkoutRepo, type CloneRunner } from './checkout.ts';
+import { checkoutRepo, defaultGitInit, type CloneRunner, type GitInitRunner } from './checkout.ts';
 import {
   activateOptionalStores,
   ProjectContextError,
@@ -251,6 +251,11 @@ export interface ServerDeps {
    *  route's guards, cleanup and error surfacing are exercised for real
    *  against real temp dirs, without a network or a `gh` binary. */
   cloneRunner?: CloneRunner;
+  /** D15 — how `POST /api/projects/blank` turns the new folder into a repository. Defaults to
+   *  `git init`; injected by tests so the route's cleanup and error surfacing are exercised
+   *  against real temp dirs without depending on a `git` binary or on its exit codes. Same
+   *  reasoning, and the same shape, as `cloneRunner` above. */
+  gitInitRunner?: GitInitRunner;
   /** Host-wide model discovery service. Tests inject a deterministic adapter. */
   modelCatalog?: RunnerModelCatalog;
   /** Host-wide provider authentication discovery. Tests inject deterministic probes. */
@@ -269,6 +274,13 @@ export interface ServerDeps {
   /** Hand a local FILE (or folder) to the OS default app. Injected so the account-file open route
    *  is testable without actually launching an editor. */
   openFile?: typeof openFileInDefaultApp;
+  /** Hand a local FOLDER to a chosen app (editor, file manager, Terminal). The missing sibling of
+   *  `openFile` above, added 2026-08-07 for the same stated reason and one it turned out to need
+   *  urgently: without it, `agent-profiles-api.test.ts`'s "allows a terminal for the FOLDER" test
+   *  reached the real launcher on every run and opened an actual Terminal window `cd`-ing into a
+   *  `mkdtemp` directory the test had already deleted. `deps.openTerminal` did NOT cover that path
+   *  — this route calls `openInApp`, which reaches `openInTerminal` internally. */
+  openApp?: typeof openInApp;
   /** Process-wide Open Mercato skills update detector. Injected in tests and
    * shared by every workspace route/project; createApp owns the default. */
   skillsUpdate?: SkillsUpdateService;
@@ -1354,6 +1366,7 @@ export function createApp(deps: ServerDeps) {
   };
   const openTerminal = deps.openTerminal ?? openInTerminal;
   const openFile = deps.openFile ?? openFileInDefaultApp;
+  const openApp = deps.openApp ?? openInApp;
   const skillsUpdate = deps.skillsUpdate ?? new SkillsUpdateService();
 
   // ---- workspace boot-project identity (multi-project spec) ----------------
@@ -2544,7 +2557,7 @@ export function createApp(deps: ServerDeps) {
         }
         const opened = target === undefined
           ? await openFile(path)
-          : await openInApp(target, path);
+          : await openApp(target, path);
         if (!opened) return c.json({ error: `could not open ${basename(path)}`, path }, 409);
         return c.json({ opened: true as const, path });
       },
@@ -2875,6 +2888,59 @@ export function createApp(deps: ServerDeps) {
       return c.json(registered.body, 200);
     })
 
+    // D15 — create a blank project: `<projectsDir>/<name>` + `git init`, then register it through
+    // the SAME `registerFolder` guards every other project-adding path uses (single-project
+    // refusal, browse-root containment, `$HOME`/worktree refusal, the D4 root→org claim). The
+    // directory is created first and registered second, deliberately in that order: `registerFolder`
+    // stats the path and refuses one that does not exist.
+    .post('/projects/blank', jsonZodValidator(() => blankProjectSchema, { message: 'name must be a valid folder name' }), async (c) => {
+      if (capabilities().singleProject) {
+        return c.json(singleProjectRefusal('adding projects'), 409);
+      }
+      const { name, teamId } = c.req.valid('json');
+      const parent = expandTilde(await workspaceProjectsDir());
+      const target = join(parent, name);
+
+      // Refuse an existing directory rather than adopting it. "Create blank" must never silently
+      // hand back someone else's folder — that is what the local-directory path is for, and it
+      // shows the user what they are picking.
+      if (existsSync(target)) {
+        return c.json({ error: `already exists: ${target}` }, 409);
+      }
+      try {
+        await mkdir(target, { recursive: true });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return c.json({ error: `could not create ${target}: ${message}` }, 500);
+      }
+
+      const init = deps.gitInitRunner ?? defaultGitInit;
+      const initialized = await init(target);
+      if (!initialized.ok) {
+        // The directory exists and is empty, and `git` is the thing that failed — so this DOES
+        // clean up, unlike the checkout route's deliberate "the clone is legitimately the user's
+        // files" stance. There is nothing here worth keeping and a stray empty folder in the
+        // projects dir would be re-offered as "already exists" on the next attempt with the same
+        // name, turning one transient git failure into a permanently blocked name.
+        await rm(target, { recursive: true, force: true }).catch(() => {});
+        return c.json({ error: `could not initialize a git repository: ${initialized.error}` }, 500);
+      }
+
+      const principal = (c as unknown as Context<{ Variables: { principal: Principal } }>).get('principal');
+      const registered = await registerFolder(target, 'local', principal, teamId);
+      if (registered.status !== 200) {
+        // Same reasoning as the cleanup above, and the same limit on it: registration failed on a
+        // directory this route just created and nobody has put anything in, so removing it is
+        // safe. `registerFolder`'s own error is passed through with the location appended, matching
+        // the checkout route's wording discipline.
+        await rm(target, { recursive: true, force: true }).catch(() => {});
+        const { body } = registered;
+        const error = 'error' in body && body.error ? body.error : 'could not register the new project';
+        return c.json({ error: `${error} (at ${target})` }, registered.status);
+      }
+      return c.json(registered.body, 200);
+    })
+
     .delete('/projects/:projectId', async (c) => {
       if (capabilities().singleProject) {
         return c.json(singleProjectRefusal('removing projects'), 409);
@@ -3080,7 +3146,7 @@ export function createApp(deps: ServerDeps) {
         );
       }
       const principal = (c as unknown as Context<{ Variables: { principal: Principal } }>).get('principal');
-      const registered = await registerFolder(result.target, 'checkout', principal);
+      const registered = await registerFolder(result.target, 'checkout', principal, parsed.data.teamId);
       if (registered.status !== 200) {
         // The clone SUCCEEDED and its files are legitimately the user's, so this
         // path deliberately does NOT clean up — an unregisterable checkout is a
@@ -3459,6 +3525,40 @@ export function createApp(deps: ServerDeps) {
     url: z.string().trim().min(1).max(512),
     name: z.string().trim().max(128).optional(),
     checkoutId: z.string().trim().max(128).optional(),
+    // D15: additive, and the same optional shape `registerProjectSchema` already carries. Without
+    // it a clone performed DURING onboarding registers under the principal's default team rather
+    // than the team the wizard just told the user it would use — indistinguishable from correct
+    // while only one workspace exists, and wrong the moment a second one does.
+    teamId: z.string().trim().min(1).max(200).optional(),
+  });
+
+  /**
+   * D15 — "blank" is the third way to satisfy the wizard's project step, beside a local folder and
+   * a GitHub clone. It creates `<projectsDir>/<name>` and `git init`s it.
+   *
+   * `projectsDir` (default `~/cezar/projects`) is deliberately the SAME setting `/projects/checkout`
+   * writes into and Settings → Projects already exposes as "Default checkout folder", so blank
+   * projects land beside checkouts instead of inventing a second location the user would have to
+   * learn. `git init` runs because every project-scoped surface here (Git tab, GitHub tab, task
+   * worktrees) assumes a repository; a blank project without one has permanently empty main panes.
+   *
+   * The name is validated as a single path SEGMENT, not a path: `..`, `/` and a leading `.` are all
+   * refused rather than normalized. This route takes a name and joins it to a directory the server
+   * chose, so accepting a path here would let the caller pick the parent too — the containment the
+   * `registerFolder` browse-root check performs for hosted mode would be bypassed before it ran.
+   */
+  const blankProjectSchema = z.object({
+    name: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .regex(
+        /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/,
+        'name must start with a letter or number and contain only letters, numbers, spaces, dots, dashes or underscores',
+      )
+      .refine((v) => !v.includes('..'), 'name must not contain ".."'),
+    teamId: z.string().trim().min(1).max(200).optional(),
   });
   // ---- workspace settings (multi-project spec, step 2.7) -------------------
   // WORKSPACE-level routes: single-mount (never mirrored under /api/p/),
@@ -4604,14 +4704,16 @@ export function createApp(deps: ServerDeps) {
         if (fallback === null) {
           return c.json({ error: 'this account\'s folder cannot be used in a terminal command' }, 409);
         }
-        const opened = await openInTerminal(dir, command, account.env);
+        // The resolved dep, not the raw import — same reason as `openApp` above: a test must be
+        // able to exercise this branch without a real terminal window surviving the run.
+        const opened = await openTerminal(dir, command, account.env);
         if (!opened) {
           return c.json({ error: 'no terminal emulator found', command: fallback }, 409);
         }
         return c.json({ opened: true, path: dir, command });
       }
 
-      const opened = await openInApp(target, dir);
+      const opened = await openApp(target, dir);
       if (!opened) return c.json({ error: `could not open ${target}`, path: dir }, 409);
       return c.json({ opened: true, path: dir });
     })

@@ -1,5 +1,6 @@
 import {
   FolderIcon,
+  FilePlus2Icon,
   FolderOpenIcon,
   MenuIcon,
   PlusIcon,
@@ -12,6 +13,7 @@ import type { ReactNode } from 'react'
 import { Link as RouterLink, useLocation } from 'react-router'
 
 import { AddProjectDialog } from '@/components/add-project-dialog'
+import { BlankProjectDialog } from '@/components/blank-project-dialog'
 import { CloneProjectDialog } from '@/components/clone-project-dialog'
 import { openCommandPalette } from '@/components/command-palette'
 import { GithubIcon } from '@/components/icons'
@@ -44,7 +46,10 @@ const DESKTOP_MEDIA_QUERY = '(min-width: 768px)'
 
 export type RepoChip = {
   name: string
-  branch: string
+  /** Optional since 2026-08-07 (D15 follow-up): a registry entry omits `branch` on an unborn
+   *  HEAD or a `not-git` project, and a blank project created by the wizard has exactly that
+   *  shape until its first commit. Rendering `name / undefined` there was the alternative. */
+  branch?: string
 }
 
 export type AppShellProps = {
@@ -376,7 +381,7 @@ function SidebarContent({
             data-slot="repo-chip"
             className="ml-auto truncate font-mono text-[11px] font-medium text-soft-foreground"
           >
-            {repo.name} / {repo.branch}
+            {repo.branch ? `${repo.name} / ${repo.branch}` : repo.name}
           </span>
         ) : null}
         {headerAction ? (
@@ -552,7 +557,9 @@ function GlobalSettingsLink({
  * The "Add project" dropdown beside the New task CTA (multi-project spec, "Sidebar → Header").
  *
  * "Open local folder…" opens the folder-browser dialog (step 4.2); "Clone from GitHub…" opens
- * the checkout dialog (step 4.3).
+ * the checkout dialog (step 4.3); "Create blank project…" opens the D15 dialog. The three are the
+ * SAME three the onboarding wizard's project step offers, deliberately — a user who met them once
+ * during onboarding must not find a different, smaller set here afterwards.
  *
  * Neither item is gh-gated here, deliberately. The spec's "disabled with a reason when `gh` is
  * unavailable" would mean reading `GET /api/health` from this component — and the dialogs are
@@ -569,6 +576,7 @@ function GlobalSettingsLink({
 function AddProjectMenu() {
   const [browsing, setBrowsing] = React.useState(false)
   const [cloning, setCloning] = React.useState(false)
+  const [blanking, setBlanking] = React.useState(false)
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -593,9 +601,14 @@ function AddProjectMenu() {
           <GithubIcon aria-hidden="true" />
           Clone from GitHub…
         </DropdownMenuItem>
+        <DropdownMenuItem data-slot="add-project-blank" onSelect={() => setBlanking(true)}>
+          <FilePlus2Icon aria-hidden="true" />
+          Create blank project…
+        </DropdownMenuItem>
       </DropdownMenuContent>
       {browsing ? <AddProjectDialog open onOpenChange={setBrowsing} /> : null}
       {cloning ? <CloneProjectDialog open onOpenChange={setCloning} /> : null}
+      {blanking ? <BlankProjectDialog open onOpenChange={setBlanking} /> : null}
     </DropdownMenu>
   )
 }
