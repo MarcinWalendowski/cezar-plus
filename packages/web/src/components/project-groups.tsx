@@ -302,9 +302,12 @@ function ProjectGroup({
         >
           <nav aria-label={`${project.name} navigation`}>
             {/* Forge-gated per PROJECT (#698): the entry's own remote decides whether THIS
-                group offers a GitHub tab — the boot folder's health-level forge answer says
+                group offers a forge-gated tab — the boot folder's health-level forge answer says
                 nothing about the other projects in the workspace. Whether `gh` itself works
-                still surfaces inside the tab as its availability hint. */}
+                still surfaces inside the tab as its availability hint. The tab this was written
+                for was GitHub, hidden from the nav on 2026-08-14 (`nav-items.ts`); Automations
+                carries the same gate, so the per-project rule below is unchanged and still
+                observable. */}
             {/* `workspace: true` items (central-hub scaffold) render once at the
                 shell's top level, never inside a project group — a group's whole nav is scoped
                 into ONE project via `scopeTo` below, and a workspace item has no project to

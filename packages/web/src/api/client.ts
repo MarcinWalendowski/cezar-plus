@@ -6,6 +6,7 @@ import type {
   AgentProfileSelectionsResponse,
   AgentProfilesResponse,
   CreateAgentProfileInput,
+  DiscoveredAgentAccountsResponse,
   OpenAgentAccountFileInput,
   OpenAgentAccountFileResponse,
   RemoveAgentProfileResponse,
@@ -67,6 +68,7 @@ import type {
   ProviderConnectResponse,
   ProviderId,
   ProviderStatusResponse,
+  ProjectScanResponse,
   ProjectsResponse,
   RegisterProjectResponse,
   RemoveProjectResponse,
@@ -449,6 +451,14 @@ export async function browseFs(
     ),
     '/fs/browse',
   )
+}
+
+/** Every git repo inside `path` (`GET /api/v1/projects/scan`, spec
+ *  `.ai/specs/2026-08-14-nested-repos-as-projects.md`) — what lets "Add project" offer a nested
+ *  repo as its own project. A READ: registering the ones the user keeps is still one
+ *  `registerProject` call per row, through the guards every other add goes through. */
+export async function scanProjectFolder(path: string, opts?: ReadOptions): Promise<ProjectScanResponse> {
+  return unwrap(await cez.api.v1.projects.scan.$get({ query: { path } }, init(opts)), '/projects/scan')
 }
 
 /** The authoritative run list — sorted newest-first by the server. */
@@ -1707,6 +1717,19 @@ export async function createAgentProfile(
   return unwrap(
     await cez.api.v1.workspace['agent-profiles'].$post({ json: input }),
     '/workspace/agent-profiles',
+  )
+}
+
+/** The Claude logins that exist on this machine (`GET …/agent-profiles/discovered`, spec
+ *  `.ai/specs/2026-08-14-claude-subscription-autodetect.md`) — what lets "Add account" offer a
+ *  second subscription instead of asking for its path. A READ: adding one is still
+ *  `createAgentProfile` with the dir it names. */
+export async function getDiscoveredAgentAccounts(
+  opts?: ReadOptions,
+): Promise<DiscoveredAgentAccountsResponse> {
+  return unwrap(
+    await cez.api.v1.workspace['agent-profiles'].discovered.$get({}, init(opts)),
+    '/workspace/agent-profiles/discovered',
   )
 }
 

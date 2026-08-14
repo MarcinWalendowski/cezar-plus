@@ -261,6 +261,39 @@ export const fsBrowseResponseSchema = z.object({
 });
 export type FsBrowseResponse = z.infer<typeof fsBrowseResponseSchema>;
 
+/** One git repository found inside a folder the user is about to add (spec
+ *  `.ai/specs/2026-08-14-nested-repos-as-projects.md`). A PROPOSAL — nothing here is registered
+ *  until the dialog posts it to `POST /api/v1/projects` like any other folder. */
+export const nestedRepoSchema = z.object({
+  /** Absolute repo root. Same-origin route, like `ProjectListEntry.root`. */
+  path: z.string(),
+  /** Relative to the scanned folder, POSIX-spelled (`chat`, `packages/tool`) — the row's label. */
+  relPath: z.string(),
+  /** What the project would be NAMED once registered — `basename(path)`. */
+  name: z.string(),
+  branch: z.string().optional(),
+  forge: z.literal('github').optional(),
+  /** Already in the registry, matched on the realpath the registry stores. The row renders checked
+   *  and disabled: a checkbox that cannot change what the button does is a lie about the button. */
+  registered: z.boolean(),
+});
+export type NestedRepo = z.infer<typeof nestedRepoSchema>;
+
+/** `GET /api/v1/projects/scan?path=` — every git repo inside `path`, bounded (depth ≤ 3, pruned
+ *  build dirs, never descending into a repo, capped at 25). A read: it never writes the registry. */
+export const projectScanResponseSchema = z.object({
+  /** The realpath'd folder that was scanned — never the spelling asked for, matching `fs/browse`. */
+  root: z.string(),
+  /** Whether the scanned folder is ITSELF a repo. The dialog's first row is that folder either way
+   *  (a non-git folder is a legitimate project), so this only decides its "git" badge. */
+  rootIsRepo: z.boolean(),
+  repos: z.array(nestedRepoSchema),
+  /** True when the 25-repo cap bit. Rendered, not just carried: a silently partial list looks
+   *  exactly like a folder with nothing else in it. */
+  truncated: z.boolean(),
+});
+export type ProjectScanResponse = z.infer<typeof projectScanResponseSchema>;
+
 /** `GET /api/v1/launch-key` — the bookmarklet auto-start secret (spec 011). Fetched to COMPARE
  *  against the `?key=` query param and to bake into the `javascript:` links the Settings → Skills
  *  bookmarklet panel generates. The value never renders as text, never logs, and never goes back

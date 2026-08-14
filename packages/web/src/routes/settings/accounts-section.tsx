@@ -10,6 +10,8 @@ import {
   useHealth,
   useAgentAccountStatus,
   useConnectAgentAccount,
+  useCreateAgentProfile,
+  useDiscoveredAgentAccounts,
   useRecheckAgentAccount,
   useOpenAgentAccountFile,
   useOpenTargets,
@@ -70,7 +72,11 @@ import { AddAccountDialog } from './add-account-dialog'
  * is NOT a field on the accounts listing, it comes from its own on-demand route
  * (`useAgentAccountDetails`, `enabled` only once the row is expanded), and it is refused in hosted
  * mode. Nothing fetches it until a person asks, which is what makes "hidden by default" mean the
- * data is absent from the page rather than merely unrendered.
+ * data is absent from the page rather than merely unrendered. That still holds after autodetect
+ * (spec `.ai/specs/2026-08-14-claude-subscription-autodetect.md`): "Detected on this machine" names
+ * the login of dirs that are NOT accounts yet — there is no account id to ask `…/:id/details` with,
+ * and a list of bare paths would not answer the only question that block exists to answer — while
+ * the accounts listing itself still carries no identity at all.
  *
  * Rename and Remove live in that same panel rather than on the collapsed row. A row is a reading
  * surface — which account, where, signed in or not — and Remove sitting on it put a destructive
@@ -325,6 +331,8 @@ function AgentTab({
         ))}
       </ul>
 
+      {provider === 'claude' && canCarryAccounts ? <DetectedLogins /> : null}
+
       {!canCarryAccounts ? (
         <p data-slot="accounts-single-only" className="text-[11.5px] text-soft-foreground">
           {PROVIDER_LABEL[provider]} can only hold one account here: it keeps its credentials
@@ -336,6 +344,94 @@ function AgentTab({
   )
 }
 
+
+/**
+ * The Claude logins already on this machine that cezar does not know about yet (spec
+ * `.ai/specs/2026-08-14-claude-subscription-autodetect.md`).
+ *
+ * A second subscription is a directory — `CLAUDE_CONFIG_DIR=~/.claude-work` — and adding one used
+ * to mean remembering that path and typing it into a folder picker. The CLI has already written
+ * every one of them under `~/.claude*`, and each records the account it is signed in as, so this
+ * offers them by EMAIL instead: the fact a person actually uses to answer "which subscription is
+ * this?".
+ *
+ * Claude only, and the whole block is absent for the other agents. Codex could not be discovered
+ * without reading its `auth.json`, which holds a live API key and refresh token beside the account
+ * id — see `workspace/agent-account-identity.ts`.
+ *
+ * Adding is one click but NOT one silent write: the click posts the same `POST …/agent-profiles`
+ * that the dialog posts, through the same duplicate-folder and absolute-path guards, and nothing
+ * here writes anything until it is clicked.
+ */
+function DetectedLogins() {
+  const discovered = useDiscoveredAgentAccounts()
+  const create = useCreateAgentProfile()
+  // Already-added dirs are dropped rather than shown greyed out: they are RIGHT ABOVE this block,
+  // in the list of accounts, with more detail. A second rendering of the same account would read
+  // as a second account.
+  const candidates = (discovered.data?.accounts ?? []).filter((account) => !account.added)
+  if (candidates.length === 0) return null
+
+  return (
+    <div data-slot="detected-logins" className="flex flex-col gap-2">
+      <h4 className="text-[12px] font-semibold text-muted-foreground">Detected on this machine</h4>
+      <ul className="divide-y divide-border/60 rounded-md border border-dashed border-border bg-card">
+        {candidates.map((account) => (
+          <li
+            key={account.configDir}
+            data-slot="detected-login"
+            data-config-dir={account.configDir}
+            className="flex flex-wrap items-center justify-between gap-3 px-3.5 py-2.5"
+          >
+            <div className="min-w-0">
+              <p className="truncate text-[13px] text-foreground">
+                {account.identity?.email ?? account.configDir}
+                {account.identity?.plan ? (
+                  <span className="text-muted-foreground"> · {account.identity.plan}</span>
+                ) : null}
+              </p>
+              {/* The path is always shown, even when an email was found: the path is WHAT gets
+                  stored and what the agent is spawned with, and an email alone would leave the
+                  user unable to tell two logins of the same account's dirs apart. */}
+              <p className="truncate font-mono text-[11.5px] text-soft-foreground" title={account.configDir}>
+                {account.configDir}
+                {account.identity === undefined ? ' — never signed in' : ''}
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              data-action="detected-login-add"
+              disabled={create.isPending}
+              onClick={() =>
+                create.mutate(
+                  {
+                    provider: 'claude',
+                    configDir: account.configDir,
+                    // The email as the label, and this is load-bearing rather than a nicety: the
+                    // accounts listing carries no identity (D5), so the label is the ONLY place the
+                    // detected subscription survives the add. It stays editable afterwards like any
+                    // other account's, and Show details re-reads the real thing on demand.
+                    label: account.identity?.email ?? account.configDir,
+                  },
+                  { onSuccess: () => toast(`Added ${account.identity?.email ?? account.configDir}`) },
+                )
+              }
+            >
+              Add
+            </Button>
+          </li>
+        ))}
+      </ul>
+      {create.isError ? (
+        <p data-slot="detected-login-error" className="text-[12px] text-danger">
+          {create.error instanceof Error ? create.error.message : 'could not add that login'}
+        </p>
+      ) : null}
+    </div>
+  )
+}
 
 /**
  * What a project that has chosen nothing runs (spec 2026-07-29-agent-profiles).
@@ -485,6 +581,13 @@ function AccountRow({ account, onRemove }: { account: AgentProfile; onRemove: ()
                 discovered
               </Badge>
             ) : null}
+            {/* No identity here, on purpose (spec
+                `.ai/specs/2026-08-14-claude-subscription-autodetect.md`, D5). "Which subscription"
+                is answered by Show details below, on demand — the listing carries no email, which
+                is what keeps "hidden by default" meaning the data is ABSENT from the page rather
+                than merely unrendered. The label above is what names the account at a glance, and
+                for an account added from "Detected on this machine" it is prefilled with exactly
+                the email the CLI recorded. */}
           </div>
           <p
             data-slot="account-path"

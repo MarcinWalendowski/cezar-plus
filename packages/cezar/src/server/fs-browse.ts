@@ -143,19 +143,22 @@ async function exists(path: string): Promise<boolean> {
 }
 
 /**
- * List the directories inside `path`, contained within `root`.
+ * The containment gate, on its own: `path` resolved to a real directory that is the browse root or
+ * strictly beneath it, or the refusal to answer with.
  *
- * `path` is the raw query value: absent/empty means the root itself, `~`
- * spellings are expanded, and a relative value resolves against the root (so
- * the route is usable without the caller knowing the absolute root, and a
- * relative `../..` is still caught by the same containment check as everything
- * else).
+ * Extracted from `browseDirectory` (2026-08-14, `.ai/specs/2026-08-14-nested-repos-as-projects.md`
+ * D5) so `GET /api/v1/projects/scan` — the other route that reads directory STRUCTURE and hands it
+ * to a browser — asks the question through this code rather than through a second copy of it. A
+ * hand-rolled second copy is how one of the two ends up the permissive one, and the copy that
+ * drifts is never the one anybody re-reads.
+ *
+ * Every ordering decision here is load-bearing and is explained where it happens; the module doc
+ * comment above is the summary. Callers get a `real` path that has already passed BOTH halves.
  */
-export async function browseDirectory(opts: {
+export async function resolveBrowsableDir(opts: {
   root: string;
   path?: string | undefined;
-  showHidden?: boolean;
-}): Promise<BrowseResult> {
+}): Promise<{ ok: true; root: string; real: string } | { ok: false; status: 400 | 404; error: string }> {
   // The root is realpath'd ONCE, up front: it is the yardstick every later
   // comparison uses, and comparing a resolved candidate against an
   // unresolved root would reject legitimate paths on any machine whose home
@@ -194,6 +197,27 @@ export async function browseDirectory(opts: {
   // directories, and distinguishing "this is a file" would confirm the
   // existence of a file the caller was never shown.
   if (!info?.isDirectory()) return { ok: false, status: 404, error: 'no such directory' };
+
+  return { ok: true, root, real };
+}
+
+/**
+ * List the directories inside `path`, contained within `root`.
+ *
+ * `path` is the raw query value: absent/empty means the root itself, `~`
+ * spellings are expanded, and a relative value resolves against the root (so
+ * the route is usable without the caller knowing the absolute root, and a
+ * relative `../..` is still caught by the same containment check as everything
+ * else).
+ */
+export async function browseDirectory(opts: {
+  root: string;
+  path?: string | undefined;
+  showHidden?: boolean;
+}): Promise<BrowseResult> {
+  const resolved = await resolveBrowsableDir(opts);
+  if (!resolved.ok) return resolved;
+  const { root, real } = resolved;
 
   const entries = await readdir(real, { withFileTypes: true }).catch(() => null);
   // Unreadable (mode 0300, permission-denied mount) — indistinguishable from

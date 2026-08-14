@@ -4,13 +4,9 @@ import {
   InboxIcon,
   ListChecksIcon,
   SettingsIcon,
-  SparklesIcon,
-  WorkflowIcon,
   ZapIcon,
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
-
-import { GithubIcon } from '@/components/icons'
 
 export type NavItem = {
   /** Where the item navigates. Also its identity — `activeNavPath` returns this. */
@@ -34,7 +30,13 @@ export type NavItem = {
   /** Skills-gated: the item exists unless `/api/health` reports `capabilities.skills === false`
    *  (`CEZ_SKILLS=0`). Note the polarity — every other gate here is opt-IN and this one is
    *  opt-OUT, because Skills predates the capability payload and absent must keep meaning on.
-   *  See `visibleNavItems`. */
+   *  See `visibleNavItems`.
+   *
+   *  **No item carries it today** — Skills was hidden on 2026-08-14 (owner decision; see
+   *  `NAV_ITEMS`). Kept, like `workspace?` below, because restoring the item is meant to be one
+   *  line, and because the server still reports the capability: `capabilities.skills` is
+   *  upstream's, still computed from `CEZ_SKILLS` (`server/capabilities.ts`), and this is the
+   *  only thing that ever read it. */
   skills?: boolean
   /** Renders ONCE in the shell's top-level nav rather than inside each project group, and never
    *  receives `scopeTo` (`.ai/specs/2026-08-06-workspace-notes-cross-project.md` "Nav"): a
@@ -59,16 +61,19 @@ export type NavItem = {
  *  `match` exists because a nav item is active for a whole *area*, not just its own URL:
  *  the spec requires Tasks to stay active while a task thread (`/tasks/:id`) or a variant
  *  compare (`/compare/:groupId`) is open.
+ *
+ *  **GitHub, Skills and Workflows are hidden in this fork (owner decision, 2026-08-14.)** Nav
+ *  items only: `/github`, `/skills` and `/workflows` still render for anyone who types the URL,
+ *  every route and every server surface behind them is untouched, and restoring one is putting its
+ *  line back here. That is why the `forge` and `skills` gates below survive with no item left
+ *  carrying `skills` — see `NavItem.skills`.
  */
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare'], badge: 'tasks-unread' },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, match: ['/inbox'], badge: 'inbox-count', inbox: true },
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'] },
-  { to: '/github', label: 'GitHub', icon: GithubIcon, match: ['/github'], forge: true },
   { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true, automations: true },
   { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true },
-  { to: '/skills', label: 'Skills', icon: SparklesIcon, match: ['/skills'], badge: 'skills-update', skills: true },
-  { to: '/workflows', label: 'Workflows', icon: WorkflowIcon, match: ['/workflows'] },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'] },
 ]
 

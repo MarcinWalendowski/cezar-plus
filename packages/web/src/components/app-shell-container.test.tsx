@@ -222,8 +222,12 @@ describe('sidebar wiring', () => {
 
     await waitFor(() => expect(versionChip()).not.toBeNull())
     expect(screen.queryByRole('link', { name: /Automations/ })).toBeNull()
-    // The gate owns exactly one item — GitHub is forge-gated, not automations-gated.
-    expect(screen.getByRole('link', { name: /GitHub/ })).toBeTruthy()
+    // The gate owns exactly one item, and this asserted the OTHER forge-gated row (GitHub) was
+    // still there. GitHub is hidden from the nav since 2026-08-14 (`nav-items.ts`), so the
+    // surviving statement of "the automations gate removed one item, not the forge's whole
+    // family" is that a forge-carrying row unrelated to automations — Git — is untouched.
+    expect(screen.getByRole('link', { name: /Git$/ })).toBeTruthy()
+    expect(screen.queryByRole('link', { name: /GitHub/ })).toBeNull()
   })
 
   it('shows the Automations nav item once health reports the capability', async () => {

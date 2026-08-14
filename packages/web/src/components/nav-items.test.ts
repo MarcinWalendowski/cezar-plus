@@ -16,16 +16,19 @@ describe('activeNavPath', () => {
 
     ['/inbox', '/inbox'],
     ['/git', '/git'],
-    ['/github', '/github'],
-    ['/github/issues/42', '/github'],
-    ['/github/prs/7', '/github'],
     ['/knowledge', '/knowledge'],
     ['/knowledge/abc123', '/knowledge'],
-    ['/workflows', '/workflows'],
-    ['/workflows/ship-it', '/workflows'],
 
-    // Skills is its own top-level surface now (was /settings/skills).
-    ['/skills', '/skills'],
+    // Hidden 2026-08-14 (owner decision, `NAV_ITEMS`): the ROUTES still render, so these URLs
+    // are reachable by hand — they just have no nav item to light up any more, which is the same
+    // `null` every off-nav surface answers. Kept as cases rather than deleted because that is the
+    // observable consequence of the hide, and a restored item must flip them back.
+    ['/github', null],
+    ['/github/issues/42', null],
+    ['/github/prs/7', null],
+    ['/workflows', null],
+    ['/workflows/ship-it', null],
+    ['/skills', null],
 
     // The nested Settings area: deeper routes fall to the Settings item.
     ['/settings', '/settings'],
@@ -43,9 +46,11 @@ describe('activeNavPath', () => {
     })
   }
 
-  // A `startsWith` implementation passes every case above and still fails these two.
+  // A `startsWith` implementation passes every case above and still fails these two. The first
+  // still earns its keep with GitHub hidden — a prefix match would make `/git` OWN `/github`,
+  // lighting the Git tab on a page that is not it, which is a louder wrong answer than `null`.
   it('does not let /git claim the /github area', () => {
-    expect(activeNavPath('/github')).toBe('/github')
+    expect(activeNavPath('/github')).toBeNull()
   })
 
   it('does not let the root item claim every route', () => {
@@ -56,11 +61,19 @@ describe('activeNavPath', () => {
 describe('activeNavItem', () => {
   it('returns the item, so the mobile bar can title itself', () => {
     expect(activeNavItem('/tasks/abc123')?.label).toBe('Tasks')
-    expect(activeNavItem('/skills')?.label).toBe('Skills')
+    expect(activeNavItem('/knowledge/abc123')?.label).toBe('Knowledge')
   })
 
   it('returns null off-nav', () => {
     expect(activeNavItem('/new')).toBeNull()
+  })
+
+  /** The hidden routes (2026-08-14) reach the same answer as `/new`: they render, and the mobile
+   *  bar titles itself from the route rather than from a nav item that no longer exists. */
+  it('returns null for a hidden surface', () => {
+    expect(activeNavItem('/skills')).toBeNull()
+    expect(activeNavItem('/workflows')).toBeNull()
+    expect(activeNavItem('/github')).toBeNull()
   })
 })
 
@@ -70,13 +83,23 @@ describe('NAV_ITEMS', () => {
       'Tasks',
       'Inbox',
       'Git',
-      'GitHub',
       'Automations',
       'Knowledge',
-      'Skills',
-      'Workflows',
       'Settings',
     ])
+  })
+
+  /** The hide is a property of THIS list and nothing else (owner decision, 2026-08-14): no gate,
+   *  no capability, no flag — so the only thing that can bring an item back is editing the array.
+   *  Asserted by name because the label list above would also pass if a rename, rather than the
+   *  hide, had removed them. */
+  it('carries no GitHub, Skills or Workflows item', () => {
+    const labels = NAV_ITEMS.map((item) => item.label)
+    const paths = NAV_ITEMS.map((item) => item.to)
+    for (const hidden of ['GitHub', 'Skills', 'Workflows']) expect(labels).not.toContain(hidden)
+    for (const hidden of ['/github', '/skills', '/workflows']) expect(paths).not.toContain(hidden)
+    // …and no item's `match` reaches them either, which is what `activeNavPath` reads.
+    expect(NAV_ITEMS.flatMap((item) => item.match)).not.toContain('/github')
   })
 
   // Every item must be reachable by its own URL, or a click would navigate somewhere that
@@ -108,14 +131,12 @@ describe('visibleNavItems', () => {
     expect(visibleNavItems(ALL)).toEqual(NAV_ITEMS)
   })
 
-  it('without a forge, the GitHub AND Automations items drop out', () => {
+  it('without a forge, the Automations item drops out', () => {
     expect(labelsOf({ ...ALL, forge: false })).toEqual([
       'Tasks',
       'Inbox',
       'Git',
       'Knowledge',
-      'Skills',
-      'Workflows',
       'Settings',
     ])
   })
@@ -124,11 +145,8 @@ describe('visibleNavItems', () => {
     expect(labelsOf({ ...ALL, inbox: false })).toEqual([
       'Tasks',
       'Git',
-      'GitHub',
       'Automations',
       'Knowledge',
-      'Skills',
-      'Workflows',
       'Settings',
     ])
   })
@@ -138,10 +156,7 @@ describe('visibleNavItems', () => {
       'Tasks',
       'Inbox',
       'Git',
-      'GitHub',
       'Automations',
-      'Skills',
-      'Workflows',
       'Settings',
     ])
   })
@@ -151,9 +166,6 @@ describe('visibleNavItems', () => {
       'Tasks',
       'Inbox',
       'Git',
-      'GitHub',
-      'Skills',
-      'Workflows',
       'Settings',
     ])
   })
@@ -161,7 +173,15 @@ describe('visibleNavItems', () => {
   it('drops everything gated when nothing is available', () => {
     expect(
       labelsOf({ forge: false, inbox: false, knowledge: false, automations: false }),
-    ).toEqual(['Tasks', 'Git', 'Skills', 'Workflows', 'Settings'])
+    ).toEqual(['Tasks', 'Git', 'Settings'])
+  })
+
+  /** The `skills` gate outlived its item (see `NavItem.skills`). Pinned so the dead clause stays
+   *  visibly dead: with no item carrying it, `CEZ_SKILLS=0` must change NOTHING — if a later edit
+   *  puts the Skills item back without deciding what the gate means, this fails rather than
+   *  silently hiding the restored item on an install that set the flag years ago. */
+  it('the surviving skills gate now removes nothing', () => {
+    expect(labelsOf({ ...ALL, skills: false })).toEqual(labelsOf(ALL))
   })
 
   // The two gates on that one item are ANDed: a forge alone does not resurrect it, which is the
@@ -174,8 +194,6 @@ describe('visibleNavItems', () => {
     expect(labelsOf({ forge: false, inbox: false, automations: false })).toEqual([
       'Tasks',
       'Git',
-      'Skills',
-      'Workflows',
       'Settings',
     ])
   })

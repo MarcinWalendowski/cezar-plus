@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { queryKeys, workspaceQueryKeys } from '@/api/queries'
 import { createQueryClient } from '@/api/query-client'
-import type { AgentProfile, AgentProfilesResponse } from '@open-mercato/cezar-api-client'
+import type {
+  AgentProfile,
+  AgentProfilesResponse,
+  DiscoveredAgentAccount,
+} from '@open-mercato/cezar-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { AppRoutes } from '@/routes'
 
@@ -66,6 +70,9 @@ function serve(
     openError?: string
     targets?: unknown
     status?: unknown
+    /** `GET …/agent-profiles/discovered` — the Claude logins found on the machine. Defaults to an
+     *  empty list, which is what every pre-autodetect test in this file expects to see. */
+    discovered?: DiscoveredAgentAccount[]
   } = {},
 ) {
   requests = []
@@ -82,6 +89,9 @@ function serve(
       const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined
       requests.push({ method, url, body })
       if (url === '/api/v1/workspace/agent-profiles' && method === 'GET') return json(state)
+      if (url === '/api/v1/workspace/agent-profiles/discovered' && method === 'GET') {
+        return json({ accounts: options.discovered ?? [] })
+      }
       if (url.startsWith('/api/v1/workspace/agent-profiles/') && method === 'DELETE') {
         if (options.deleteStatus) return json({ error: options.deleteError }, options.deleteStatus)
         const id = url.split('/').pop()!
@@ -910,5 +920,112 @@ describe('the add-account dialog', () => {
         "that is already this agent's default folder",
       ),
     )
+  })
+})
+
+/**
+ * "Detected on this machine" (spec `.ai/specs/2026-08-14-claude-subscription-autodetect.md`).
+ *
+ * What these pin, in order of how easy each is to break:
+ *
+ * - a detected login is named by the EMAIL the CLI recorded, not by a path you have to recognize;
+ * - a dir cezar already has is not offered again — a second row for one account reads as a second
+ *   account;
+ * - Add posts the discovered dir with that email as the LABEL, which is the only place the
+ *   subscription survives the add (the accounts listing carries no identity, D5);
+ * - the block is absent, not empty, when there is nothing to offer.
+ */
+describe('detected Claude logins', () => {
+  const detected = (over: Partial<DiscoveredAgentAccount> = {}): DiscoveredAgentAccount => ({
+    provider: 'claude',
+    configDir: '/home/u/.claude-bis',
+    identity: { email: 'second@example.com', plan: 'Max 20x' },
+    added: false,
+    ...over,
+  })
+  const detectedRows = () => [...document.querySelectorAll('[data-slot="detected-login"]')]
+  const base = { editable: true, profileCapableProviders: ['claude', 'codex'] as const, defaults: {}, selections: {} }
+
+  it('names a detected login by its email and plan, with the path still shown', async () => {
+    serve({ ...base, profileCapableProviders: ['claude', 'codex'], profiles: DEFAULTS }, { discovered: [detected()] })
+    renderAccounts()
+
+    await waitFor(() => expect(detectedRows()).toHaveLength(1))
+    const row = detectedRows()[0]!
+    expect(row.textContent).toContain('second@example.com')
+    expect(row.textContent).toContain('Max 20x')
+    // The path is what actually gets stored and what the agent is spawned with, so it stays
+    // visible: two dirs of the same account would otherwise be indistinguishable.
+    expect(row.textContent).toContain('/home/u/.claude-bis')
+  })
+
+  /** A dir cezar already has is RIGHT ABOVE this block, in the accounts list, with more detail.
+   *  Offering it again would read as a second account rather than as the one already there. */
+  it('does not offer a dir that is already an account', async () => {
+    serve(
+      { ...base, profileCapableProviders: ['claude', 'codex'], profiles: DEFAULTS },
+      { discovered: [detected({ configDir: '/home/u/.claude', added: true }), detected()] },
+    )
+    renderAccounts()
+
+    await waitFor(() => expect(detectedRows()).toHaveLength(1))
+    // WHICH row survived, not just how many: the count alone would pass if the filter kept the
+    // wrong one, and offering an account cezar already has is the failure this guards.
+    expect(detectedRows()[0]!.textContent).toContain('/home/u/.claude-bis')
+    expect(detectedRows().map((row) => row.getAttribute('data-config-dir'))).toEqual([
+      '/home/u/.claude-bis',
+    ])
+  })
+
+  it('adds the detected dir, labelled with the email the CLI recorded', async () => {
+    serve({ ...base, profileCapableProviders: ['claude', 'codex'], profiles: DEFAULTS }, { discovered: [detected()] })
+    renderAccounts()
+
+    await waitFor(() => expect(detectedRows()).toHaveLength(1))
+    fireEvent.click(detectedRows()[0]!.querySelector('[data-action="detected-login-add"]')!)
+
+    await waitFor(() => expect(requests.some((r) => r.method === 'POST')).toBe(true))
+    expect(requests.find((r) => r.method === 'POST')?.body).toEqual({
+      provider: 'claude',
+      configDir: '/home/u/.claude-bis',
+      label: 'second@example.com',
+    })
+  })
+
+  /** A dir the CLI made but nobody signed into is still worth offering — it just has no email to
+   *  offer it by, and the label falls back to the path rather than to an invented name. */
+  it('offers a dir with no readable login by its path, and says so', async () => {
+    serve(
+      { ...base, profileCapableProviders: ['claude', 'codex'], profiles: DEFAULTS },
+      { discovered: [detected({ identity: undefined })] },
+    )
+    renderAccounts()
+
+    await waitFor(() => expect(detectedRows()).toHaveLength(1))
+    expect(detectedRows()[0]!.textContent).toContain('never signed in')
+
+    fireEvent.click(detectedRows()[0]!.querySelector('[data-action="detected-login-add"]')!)
+    await waitFor(() => expect(requests.some((r) => r.method === 'POST')).toBe(true))
+    expect(requests.find((r) => r.method === 'POST')?.body).toMatchObject({ label: '/home/u/.claude-bis' })
+  })
+
+  /**
+   * Absent, not an empty heading: a block titled "Detected on this machine" over nothing reads as a
+   * failed probe.
+   *
+   * Asserted against an EMPTY discovery rather than an all-added one. The distinction is what makes
+   * this test non-vacuous: with an all-added list, "the block is absent" is also true for the whole
+   * window before the query resolves, so the assertion would pass whether the filter worked or not
+   * — the all-added case is covered above, where the assertion is on which row SURVIVES. Here the
+   * block can never appear, so an unconditionally rendered heading is the only thing that could
+   * fail it, and by the time the accounts list has rendered the component has certainly mounted.
+   */
+  it('renders no block at all when the machine has nothing else to offer', async () => {
+    serve({ ...base, profileCapableProviders: ['claude', 'codex'], profiles: DEFAULTS }, { discovered: [] })
+    renderAccounts()
+
+    await waitFor(() => expect(rows()).toHaveLength(1))
+    expect(document.querySelector('[data-slot="detected-logins"]')).toBeNull()
+    expect(document.body.textContent).not.toContain('Detected on this machine')
   })
 })

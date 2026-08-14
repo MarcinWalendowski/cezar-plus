@@ -1,6 +1,20 @@
-# Nested repos, and what belongs to a project vs the workspace
+# Nested repos (D1 REVERSED 2026-08-14), and what belongs to a project vs the workspace
 
-Status: **Draft** — supersedes nothing; extends `2026-07-20-multi-project-workspace`.
+Status: **Draft, D1/D2/D4 superseded** — extends `2026-07-20-multi-project-workspace`.
+
+> **SUPERSEDED IN PART 2026-08-14 by `2026-08-14-nested-repos-as-projects.md`.** D1 below decided
+> that `~/loki-labs` stays ONE project and that registering each nested repo as its own project was
+> rejected. **The owner reversed that on 2026-08-14: nested repos DO register as projects.** The
+> replacement spec carries the reasoning. What that takes with it: D2's `repos[]` on a project
+> context, D4's per-repo forge and the repo selector in the Git/GitHub views are not being built —
+> the bounded WALK described in D2 survives verbatim as the replacement's D3, because the walk was
+> never the disputed part. D3 (`getRepoInfo`'s `exact` mode) is unbuilt and now unnecessary:
+> discovery keys on a `.git` entry, never on `git rev-parse`, so the upward walk it guarded against
+> cannot fire. D5–D8 are untouched, and D6 (Notes) was carried out on 2026-08-14 by
+> `2026-08-14-remove-notes-capture-inbox.md`.
+>
+> Nothing in this file was ever implemented except D7 and D8, both marked "Implemented already"
+> below. The original text is left unchanged underneath.
 
 ## TLDR
 
@@ -62,7 +76,10 @@ the alternative and is rejected below.
 
 ## Solution
 
-### D1 — a project has repos; nested repos are not projects
+### D1 — a project has repos; nested repos are not projects — **REVERSED 2026-08-14**
+
+**Superseded by `2026-08-14-nested-repos-as-projects.md` D1: nested repos ARE registered as
+projects.** The paragraph below is the rejected alternative that was chosen. Left unedited.
 
 `~/loki-labs` remains one project. Its `Git`/`GitHub` views gain a repo selector.
 

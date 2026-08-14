@@ -183,12 +183,11 @@ describe('ProjectGroups', () => {
 
     await waitFor(() => expect(header('shop').getAttribute('aria-expanded')).toBe('true'))
     const shopNav = within(group('shop')).getByRole('navigation', { name: 'shop navigation' })
+    // GitHub, Skills and Workflows were hidden from the nav on 2026-08-14 (`nav-items.ts`), and a
+    // group's rows come from the same `visibleNavItems`, so they are gone from every group too.
     expect(within(shopNav).getAllByRole('link').map((a) => a.getAttribute('href'))).toEqual([
       '/p/shop/',
       '/p/shop/git',
-      '/p/shop/github',
-      '/p/shop/skills',
-      '/p/shop/workflows',
       '/p/shop/settings',
     ])
     // Only the group that owns the URL lights a nav row — `/p/cezar/` is the Tasks area of
@@ -198,25 +197,37 @@ describe('ProjectGroups', () => {
     expect(within(cezarNav).getByRole('link', { current: 'page' }).textContent).toBe('Tasks')
   })
 
-  it("gates each group's GitHub tab on that project's own forge (#698)", async () => {
-    // Two expanded groups, one with a GitHub remote and one without: the GitHub nav item must
+  it("gates each group's forge tab on that project's own forge (#698)", async () => {
+    // Two expanded groups, one with a GitHub remote and one without: a forge-gated nav item must
     // follow each entry's own `forge` field, not one workspace-wide answer — the exact failure
-    // was every group hiding (or showing) GitHub based on the folder cezar was LAUNCHED in.
+    // was every group hiding (or showing) it based on the folder cezar was LAUNCHED in.
+    //
+    // Read through Automations rather than GitHub since 2026-08-14: GitHub is hidden from the nav
+    // outright, so it can no longer tell a per-project gate from a broken one. Automations carries
+    // the SAME `forge` gate (ANDed with the workspace capability, which is on here), so the
+    // property under test is unchanged — this is the item that still expresses it.
     storeCollapsed({ plain: false })
     serve({
       '/api/v1/p/cezar/runs': [],
       '/api/v1/p/plain/runs': [],
     })
-    renderGroups([
-      project(),
-      project({ id: 'plain', name: 'plain', forge: undefined, lastOpenedAt: '2026-07-19T00:00:00.000Z' }),
-    ])
+    renderGroups(
+      [
+        project(),
+        project({ id: 'plain', name: 'plain', forge: undefined, lastOpenedAt: '2026-07-19T00:00:00.000Z' }),
+      ],
+      '/p/cezar/',
+      { automations: true },
+    )
 
     await waitFor(() => expect(header('plain').getAttribute('aria-expanded')).toBe('true'))
     const cezarNav = within(group('cezar')).getByRole('navigation', { name: 'cezar navigation' })
-    expect(within(cezarNav).getByRole('link', { name: 'GitHub' }).getAttribute('href')).toBe('/p/cezar/github')
+    expect(within(cezarNav).getByRole('link', { name: 'Automations' }).getAttribute('href'))
+      .toBe('/p/cezar/automations')
     const plainNav = within(group('plain')).getByRole('navigation', { name: 'plain navigation' })
-    expect(within(plainNav).queryByRole('link', { name: 'GitHub' })).toBeNull()
+    expect(within(plainNav).queryByRole('link', { name: 'Automations' })).toBeNull()
+    // …and the hidden tab stays hidden in the group that DOES have a GitHub remote.
+    expect(within(cezarNav).queryByRole('link', { name: 'GitHub' })).toBeNull()
   })
 
   // #801: every group reads ONE workspace capability, so no group can offer Automations while

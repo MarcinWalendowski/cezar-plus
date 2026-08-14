@@ -74,7 +74,9 @@ import {
   markRunUnseen,
   patchRun,
   removeQueuedMessage,
+  getDiscoveredAgentAccounts,
   registerProject,
+  scanProjectFolder,
   openAgentAccountFile,
   removeAgentProfile,
   removeProject,
@@ -273,6 +275,10 @@ export const workspaceQueryKeys = {
    *  account drops any details cached for it in the same invalidation. */
   agentAccountDetails: (routeId: string) =>
     ['workspace', 'agent-profiles', 'details', routeId] as const,
+  /** `GET …/agent-profiles/discovered` — the Claude logins found on this machine. Under the
+   *  `agentProfiles` prefix on purpose: adding an account must drop this list too, since the dir it
+   *  was offering is now an account. */
+  discoveredAgentAccounts: ['workspace', 'agent-profiles', 'discovered'] as const,
   /** One account's auth state — a child of `agentProfiles`, so removing an account drops it too. */
   agentAccountStatus: (routeId: string) =>
     ['workspace', 'agent-profiles', 'status', routeId] as const,
@@ -283,6 +289,11 @@ export const workspaceQueryKeys = {
   fsBrowseRoot: ['workspace', 'fs-browse'] as const,
   fsBrowse: (path: string | null, showHidden = false) =>
     [...workspaceQueryKeys.fsBrowseRoot, path, showHidden] as const,
+  /** `GET /api/v1/projects/scan?path=` — the nested repos inside one folder. A sibling of
+   *  `fsBrowse` rather than a child of `projects`: it is a question about the FILESYSTEM, and
+   *  invalidating the registry (which registering a row does) must not refetch every folder the
+   *  dialog has looked at. */
+  projectScan: (path: string | null) => ['workspace', 'project-scan', path] as const,
   // ---- central-hub scaffold (F3 feature A / F4, workspace-level) ----------------------------
   /** `GET /workspace/runs` — the cross-project aggregate. */
   workspaceRuns: (filters: { projects?: string; view?: string } = {}) =>
@@ -412,6 +423,23 @@ export function useFsBrowse(path: string | null, showHidden = false) {
     // and sharing a cache entry would show whichever caller asked first.
     queryKey: workspaceQueryKeys.fsBrowse(path, showHidden),
     queryFn: ({ signal }) => browseFs(path ?? undefined, { signal, showHidden }),
+    retry: false,
+  })
+}
+
+/**
+ * Every git repo inside the folder about to be added (`GET /api/v1/projects/scan`, spec
+ * `.ai/specs/2026-08-14-nested-repos-as-projects.md`).
+ *
+ * `path: null` disables it entirely — the dialog scans the folder it is ABOUT to register, and
+ * there is nothing to scan before one is picked. Retries off for the same reason as `useFsBrowse`:
+ * the interesting failures are the deliberate 400/404s, which re-asking cannot change.
+ */
+export function useProjectFolderScan(path: string | null) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.projectScan(path),
+    queryFn: ({ signal }) => scanProjectFolder(path as string, { signal }),
+    enabled: path !== null,
     retry: false,
   })
 }
@@ -585,6 +613,25 @@ function useAgentProfileMutation<TVariables>(
         queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects }),
       ])
     },
+  })
+}
+
+/**
+ * The Claude logins on this machine (spec `.ai/specs/2026-08-14-claude-subscription-autodetect.md`).
+ *
+ * A CHILD of `agentProfiles` in the key registry, which is load-bearing rather than tidy: adding an
+ * account invalidates that prefix, and a dir that was a candidate a moment ago is now an account —
+ * so the "detected" list has to be refetched by the same invalidation, or it keeps offering to add
+ * what was just added.
+ *
+ * Its own request rather than a field on the listing every settings load already pays for: this one
+ * `readdir`s the home directory, and the listing is on the render path of a pane that opens far more
+ * often than anyone adds a second subscription.
+ */
+export function useDiscoveredAgentAccounts() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.discoveredAgentAccounts,
+    queryFn: ({ signal }) => getDiscoveredAgentAccounts({ signal }),
   })
 }
 

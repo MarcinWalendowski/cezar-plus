@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ProviderId } from '../core/provider-auth.ts';
-import { claudeStateFilePath } from '../paths.ts';
+import { claudeStateFilePath, expandTilde } from '../paths.ts';
 
 /**
  * Who an agent account is logged in AS — the "Show details" read (spec
@@ -19,10 +19,25 @@ import { claudeStateFilePath } from '../paths.ts';
  *    fields by name and builds a fresh object; nothing here spreads, forwards or stringifies a
  *    parsed vendor object, so a key the vendor adds tomorrow cannot leak through. The JWT is read
  *    for its CLAIMS and its signature is never a credential we hold onto.
- * 2. **Read on demand, answered to exactly one route.** This never joins the accounts listing,
+ * 2. **Read on demand, never on the accounts listing.** This never joins the accounts listing,
  *    never enters `runs.json` or the NDJSON, and is never logged. `provider-auth.ts` keeps account
  *    identity out of its own boundary on purpose; this is the deliberate, opt-in exception —
  *    localHandoff-gated, and only when the user asks for it — not a widening of that rule.
+ *
+ *    **AMENDED 2026-08-14 (spec `.ai/specs/2026-08-14-claude-subscription-autodetect.md`): two
+ *    routes, not one.** The rule said "answered to exactly one route", and account discovery
+ *    (`GET /workspace/agent-profiles/discovered`) is now a second one. The narrow reason it has to
+ *    be: a discovered dir is NOT an account yet, so there is no account id a details route could be
+ *    addressed with, and a list of bare paths does not answer the question discovery exists to
+ *    answer ("which subscription is this one?"). It is on-demand and localHandoff-gated exactly
+ *    like the details route, and it reads Claude ONLY — `readClaudeOauthAccount` below is the one
+ *    reader both routes go through, so there is no second copy of where the file lives.
+ *
+ *    What did NOT change, and must not: **the accounts listing still carries no identity.** An
+ *    email on the listing would sit in the response, the query cache and devtools for every load
+ *    of the settings pane, which is what "hidden by default" exists to prevent. An added account
+ *    is named by its LABEL — which discovery prefills with the detected email, so the subscription
+ *    survives the add without the listing ever carrying the identity itself.
  */
 
 /** One labelled row, as the pane renders it. Deliberately not a fixed per-provider shape: what an
@@ -73,18 +88,38 @@ function push(fields: AccountIdentityField[], label: string, value: unknown): vo
 }
 
 /**
- * Claude Code keeps its login in `.claude.json`'s `oauthAccount` — a *sibling* of `~/.claude` by
- * default, but INSIDE an overridden config dir (`claudeStateFilePath` owns that rule, and getting
- * it wrong is how one account reports another's email).
+ * The `oauthAccount` record a Claude config dir records its login in, or `null` when it records
+ * none. Never throws: an absent, unreadable, oversized or malformed file is simply an unknown
+ * identity.
+ *
+ * Claude Code keeps that record in `.claude.json` — a *sibling* of `~/.claude` by default, but
+ * INSIDE an overridden config dir (`claudeStateFilePath` owns that rule, and getting it wrong is
+ * how one account reports another's email).
+ *
+ * Exported because account discovery (`workspace/agent-account-identity.ts`) needs the same record
+ * in a different shape, and a second `readFile(claudeStateFilePath(...))` elsewhere is precisely how
+ * two readers of one upstream drift apart — the vendor's file layout has one home in this repo and
+ * this is it. Callers pick fields BY NAME off the returned record (rule 1); nothing here spreads or
+ * forwards it onward.
+ *
+ * `env` is threaded rather than left to `process.env` because `claudeStateFilePath` decides
+ * sibling-vs-inside FROM it: a caller that resolves config dirs against one env and reads them
+ * against another gets the sibling rule for the wrong dir, which is the "wrong account's email"
+ * failure by a slower route.
  */
-async function readClaudeIdentity(configDir: string): Promise<AccountIdentity> {
-  const state = await readJsonCapped(claudeStateFilePath(configDir));
-  if (state === null) return { available: false, reason: NOT_SIGNED_IN, fields: [] };
+export async function readClaudeOauthAccount(
+  configDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Record<string, unknown> | null> {
+  const state = await readJsonCapped(claudeStateFilePath(expandTilde(configDir), env));
+  if (state === null) return null;
   const account = state.oauthAccount;
-  if (!account || typeof account !== 'object') {
-    return { available: false, reason: NOT_SIGNED_IN, fields: [] };
-  }
-  const a = account as Record<string, unknown>;
+  return account && typeof account === 'object' ? (account as Record<string, unknown>) : null;
+}
+
+async function readClaudeIdentity(configDir: string): Promise<AccountIdentity> {
+  const a = await readClaudeOauthAccount(configDir);
+  if (a === null) return { available: false, reason: NOT_SIGNED_IN, fields: [] };
   const fields: AccountIdentityField[] = [];
   push(fields, 'Email', a.emailAddress);
   push(fields, 'Name', a.displayName);

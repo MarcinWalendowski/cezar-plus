@@ -62,8 +62,8 @@ describe('AppShell', () => {
     const main = screen.getByRole('main')
     main.scrollTop = 640
     expect(main.scrollTop).toBe(640) // jsdom kept the write — the reset below is the effect's
-    fireEvent.click(within(nav()).getByRole('link', { name: 'GitHub' }))
-    expect(screen.getByTestId('location').textContent).toBe('/github')
+    fireEvent.click(within(nav()).getByRole('link', { name: 'Knowledge' }))
+    expect(screen.getByTestId('location').textContent).toBe('/knowledge')
     expect(main.scrollTop).toBe(0)
   })
 
@@ -87,9 +87,9 @@ describe('AppShell', () => {
     const main = screen.getByRole('main')
     main.scrollTop = 640
 
-    fireEvent.click(within(nav()).getByRole('link', { name: 'GitHub' }))
+    fireEvent.click(within(nav()).getByRole('link', { name: 'Knowledge' }))
 
-    expect(screen.getByTestId('location').textContent).toBe('/github')
+    expect(screen.getByTestId('location').textContent).toBe('/knowledge')
     expect(main.scrollTop).toBe(0)
   })
 
@@ -108,11 +108,8 @@ describe('AppShell', () => {
       'Tasks',
       'Inbox',
       'Git',
-      'GitHub',
       'Automations',
       'Knowledge',
-      'Skills',
-      'Workflows',
       'Settings',
     ])
     // Deep-linkable per Step 2.1: every nav row is an <a href>, not a button with an onClick.
@@ -120,22 +117,24 @@ describe('AppShell', () => {
       '/',
       '/inbox',
       '/git',
-      '/github',
       '/automations',
       '/knowledge',
-      '/skills',
-      '/workflows',
       '/settings',
     ])
   })
 
-  // R6 Step 1.1: no forge, no GitHub tab — the nav item disappears entirely (spec's
-  // degradation table), it does not render disabled.
-  it('drops the GitHub item when the forge is unavailable', () => {
-    renderShell('/', { forgeAvailable: false })
-    const links = within(nav()).getAllByRole('link')
-    expect(links.map((a) => a.getAttribute('href'))).not.toContain('/github')
-    expect(links).toHaveLength(NAV_ITEMS.filter((item) => !item.forge).length)
+  /** Hidden 2026-08-14 (owner decision, `nav-items.ts`). The shell renders `visibleNavItems()`,
+   *  so this holds under EVERY availability combination rather than only the default one — a
+   *  forge appearing must not bring the GitHub row back, which is exactly what it used to do. */
+  it('never renders a GitHub, Skills or Workflows row', () => {
+    for (const forgeAvailable of [true, false]) {
+      for (const skillsAvailable of [true, false]) {
+        cleanup()
+        renderShell('/', { forgeAvailable, skillsAvailable, automationsAvailable: true })
+        const hrefs = within(nav()).getAllByRole('link').map((a) => a.getAttribute('href'))
+        for (const hidden of ['/github', '/skills', '/workflows']) expect(hrefs).not.toContain(hidden)
+      }
+    }
   })
 
   // #801: same degradation for the opt-in automations capability — the item disappears, it does
@@ -157,7 +156,7 @@ describe('AppShell', () => {
     const cases: Array<[entry: string, active: string]> = [
       ['/', 'Tasks'],
       ['/git', 'Git'],
-      ['/skills', 'Skills'],
+      ['/knowledge', 'Knowledge'],
       // Tasks stays lit while a task thread is open (spec's "Task list & table").
       ['/tasks/abc123', 'Tasks'],
     ]
@@ -324,18 +323,16 @@ describe('AppShell', () => {
       expect(document.querySelector('[data-slot="nav-badge"]')).toBeNull()
     })
 
-    it('renders a quiet accessible Skills update marker in desktop and mobile navigation', () => {
+    /** **The Skills update marker is unreachable from the nav since 2026-08-14.** It renders on
+     *  the row carrying `badge: 'skills-update'`, and that row was the Skills item, which is
+     *  hidden — so an actionable update now produces no marker anywhere. Pinned as a fact rather
+     *  than deleted: the shell still accepts and threads `skillsUpdateAvailable`, and this is the
+     *  test that tells whoever restores the Skills row that the marker comes back with it. */
+    it('renders no Skills update marker while the Skills row is hidden', () => {
       renderShell('/', { skillsUpdateAvailable: true })
-      expect(document.querySelectorAll('[data-slot="nav-update-marker"]')).toHaveLength(1)
+      expect(document.querySelectorAll('[data-slot="nav-update-marker"]')).toHaveLength(0)
       fireEvent.click(screen.getByRole('button', { name: 'Open menu' }))
-      const markers = document.querySelectorAll('[data-slot="nav-update-marker"]')
-      expect(markers).toHaveLength(2)
-      for (const marker of markers) {
-        expect(marker.textContent).toBe('Skills update available')
-        expect(marker.innerHTML).not.toContain('animate-')
-      }
-      // Radix hides the desktop app from the accessibility tree while the mobile drawer is modal.
-      expect(screen.getAllByRole('link', { name: /Skills update available/ })).toHaveLength(1)
+      expect(document.querySelectorAll('[data-slot="nav-update-marker"]')).toHaveLength(0)
     })
 
     it('renders no Skills marker without an actionable update', () => {
@@ -439,9 +436,9 @@ describe('AppShell', () => {
     })
 
     it('titles the mobile bar from the active route', () => {
-      renderShell('/skills')
+      renderShell('/knowledge')
       const bar = document.querySelector('[data-slot="mobile-top-bar"]') as HTMLElement
-      expect(within(bar).getByText('Skills')).toBeTruthy()
+      expect(within(bar).getByText('Knowledge')).toBeTruthy()
     })
 
   })
@@ -763,11 +760,11 @@ describe('AppShell', () => {
     })
 
     it('marks the active nav item inside the drawer too', () => {
-      renderShell('/skills')
+      renderShell('/knowledge')
       openMenu()
       const current = within(drawer() as HTMLElement).getAllByRole('link', { current: 'page' })
       expect(current).toHaveLength(1)
-      expect(current[0]?.textContent).toBe('Skills')
+      expect(current[0]?.textContent).toBe('Knowledge')
     })
 
     it('closes when a nav item inside it navigates', async () => {

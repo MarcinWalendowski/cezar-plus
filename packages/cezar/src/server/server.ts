@@ -34,6 +34,8 @@ import {
   type GroupResponse,
   type GroupVariant,
   type PickVariantResponse,
+  type DiscoveredAgentAccountsResponse,
+  type ProjectScanResponse,
   type RunIndexEntry,
   type RunsIndexResponse,
 } from '@open-mercato/cezar-contract';
@@ -156,6 +158,8 @@ import {
   shouldRegisterProject,
   type ProjectListEntry,
 } from '../workspace/projects.ts';
+import { discoverClaudeAccounts } from '../workspace/agent-account-identity.ts';
+import { enrichNestedRepos, scanNestedRepos } from '../workspace/nested-repos.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/ui-state.ts';
 import { checkoutRepo, defaultGitInit, type CloneRunner, type GitInitRunner } from './checkout.ts';
@@ -205,7 +209,13 @@ import { localSessionResolver } from '../auth/local-gates.ts';
 // identical `openProjectTeamRegistry` for its non-HTTP `cezar projects remove` caller.
 import { openProjectTeamRegistry, type ProjectTeamRegistry } from './project-team-registry.ts';
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
-import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
+import {
+  browseDirectory,
+  isInsideBrowseRoot,
+  isLexicallyInsideBrowseRoot,
+  resolveBrowsableDir,
+  resolveBrowseRoot,
+} from './fs-browse.ts';
 import { parseRemote, resolveForge, type ForgeAvailability } from './forge/index.ts';
 import { fetchGithub, fetchGithubChecks, fetchGithubComments, fetchGithubPrDiff, fetchGithubRefStatus, forgetRefStatus, readCachedRefStatuses, refNumberFromUrl, GithubPrNotFoundError, GH_CHECKS_MAX, GH_REF_STATUS_MAX } from './github.ts';
 import { ensureLaunchKey } from './launch-key.ts';
@@ -2229,6 +2239,11 @@ export function createApp(deps: ServerDeps) {
         : providerAuth.peekProfileStatus(profile.provider, profile.id);
       return cached ? { status: cached } : {};
     })(),
+    // NO identity field here — see `agentProfileSchema` and `agent-config/account-identity.ts`
+    // rule 2. Which subscription a dir is signed in to is answered on demand (`…/:id/details`) and,
+    // for dirs that are not accounts yet, by `…/agent-profiles/discovered`. This listing is fetched
+    // on every load of the settings pane, so a field here would put an email in the response and
+    // the query cache regardless of what the UI chose to render.
     files: await accountFiles(profile),
   });
 
@@ -2316,6 +2331,44 @@ export function createApp(deps: ServerDeps) {
          *  on the same terms as the rest of this family. */
         defaults: editable ? store.defaults : {},
       });
+    })
+
+    /**
+     * The Claude logins that exist on this machine (spec
+     * `.ai/specs/2026-08-14-claude-subscription-autodetect.md`) — `~/.claude` plus any
+     * `~/.claude*` sibling the CLI actually wrote, each with the account it is signed in as.
+     *
+     * A READ, and a proposal: adding one is still `POST …/agent-profiles` with the dir it names,
+     * through the same duplicate and path guards a hand-typed dir goes through. Discovery that
+     * registered what it found would be a write nobody asked for, and would also decide FOR the
+     * user that every login on the machine belongs in this cockpit.
+     *
+     * `added` is computed here rather than left to the client because the answer is
+     * `sameProfileDir` — a realpath comparison — and a client-side string compare would offer a
+     * second spelling of a dir it already has as if it were a new account.
+     */
+    .get('/workspace/agent-profiles/discovered', async (c) => {
+      // Hosted mode withholds it on exactly the terms the listing above does: these are absolute
+      // paths on the host, and an empty list is the only honest hosted answer.
+      if (!capabilities().localHandoff) return c.json({ accounts: [] } satisfies DiscoveredAgentAccountsResponse);
+      let stored: readonly AgentAccount[] = [];
+      try {
+        stored = (await loadAgentAccounts()).accounts;
+      } catch {
+        // unreadable store — every dir reads as not-yet-added, which is the safe direction: the
+        // POST still refuses a duplicate, so the cost is a refused click rather than a second
+        // account silently sharing one session store.
+      }
+      const discovered = await discoverClaudeAccounts();
+      const accounts = await Promise.all(
+        discovered.map(async (found) => ({
+          provider: found.provider,
+          configDir: found.path,
+          ...(found.identity ? { identity: found.identity } : {}),
+          added: (await conflictingProfile(stored, 'claude', found.path)) !== null,
+        })),
+      );
+      return c.json({ accounts } satisfies DiscoveredAgentAccountsResponse);
     })
 
     .post('/workspace/agent-profiles', jsonZodValidator(() => createAgentProfileSchema), async (c) => {
@@ -2854,6 +2907,57 @@ export function createApp(deps: ServerDeps) {
         projects,
         bootProject: await resolveBootProject(projects),
         projectsDir,
+      };
+      return c.json(body);
+    })
+
+    /**
+     * Every git repo inside a folder, so "Add project" can offer each one as its own project
+     * (spec `.ai/specs/2026-08-14-nested-repos-as-projects.md`, which REVERSED
+     * `2026-08-06-nested-repos-cockpit-scope.md` D1's "nested repos are not projects").
+     *
+     * A READ. It never writes the registry — the dialog posts the rows the user keeps to
+     * `POST /api/v1/projects`, one at a time, through the guards every other add goes through
+     * (D4). That is why this route has no `teamId` and no side effect to undo.
+     *
+     * Containment is `resolveBrowsableDir`, the same gate `GET /api/v1/fs/browse` runs — not a
+     * second copy of it (D5). This route hands back directory STRUCTURE, so a permissive
+     * spelling here would walk around the browse-root narrowing exactly as a permissive
+     * fs-browse would; sharing the function is what stops the two from drifting apart.
+     */
+    .get('/projects/scan', queryZodValidator(z.object({ path: queryValue })), async (c) => {
+      if (capabilities().singleProject) {
+        return c.json(singleProjectRefusal('folder browsing'), 409);
+      }
+      const resolved = await resolveBrowsableDir({
+        root: resolveBrowseRoot(await workspaceBrowseRoot()),
+        path: c.req.valid('query').path,
+      });
+      if (!resolved.ok) return c.json({ error: resolved.error }, resolved.status);
+
+      const scan = await scanNestedRepos(resolved.real);
+      const repos = await enrichNestedRepos(scan.repos);
+      // Which rows are already projects. Read from the registry ONCE, and compared on the realpath
+      // key the registry stores (`normalizeRoot`) rather than on the walked spelling — a project
+      // added through a symlinked path is the same project, and rendering it as addable would put
+      // a checkbox on a row whose POST can only ever answer 409.
+      let known = new Set<string>();
+      try {
+        known = new Set((await loadWorkspaceConfig()).projects.map((p) => p.root));
+      } catch {
+        // Unreadable workspace: every row renders as not-yet-registered. The POST still refuses a
+        // duplicate, so the cost of being wrong here is a redundant request, not a duplicate row.
+      }
+      const body: ProjectScanResponse = {
+        root: resolved.real,
+        rootIsRepo: await stat(join(resolved.real, '.git')).then(() => true).catch(() => false),
+        repos: await Promise.all(
+          repos.map(async (repo) => ({
+            ...repo,
+            registered: known.has(await normalizeRoot(repo.path)),
+          })),
+        ),
+        truncated: scan.truncated,
       };
       return c.json(body);
     })

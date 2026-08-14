@@ -31,6 +31,32 @@
 
 ## ✨ Features
 
+- ✨ **Adding a folder that holds git repositories now offers each repo as its own project.**
+  "Add project → Open local folder" scans the folder you are on (`GET /api/v1/projects/scan`, a
+  read that writes nothing) and lists the repositories inside it, checked, alongside the folder
+  itself. Uncheck what you do not want; the button says how many projects it will create and
+  registers them one `POST /api/v1/projects` at a time, so a refusal names the row it refused
+  instead of losing the batch. Already-registered repos are shown checked and disabled rather than
+  offered again. The walk is depth-limited (3) and capped (25, said out loud when it truncates),
+  never descends into a repo it has already found, skips `node_modules`/`.git`/`dist`-style
+  directories and never offers a linked worktree. Spec
+  `.ai/specs/2026-08-14-nested-repos-as-projects.md` — this REVERSES D1 of
+  `2026-08-06-nested-repos-cockpit-scope.md`, which had decided a workspace folder stays one
+  project with a repo selector; that spec is marked superseded-in-part in place.
+
+- ✨ **Settings → Agent accounts detects the Claude logins already on this machine.** A second
+  subscription is a second config directory, and cezar used to know one only by the label you
+  typed. It now lists `~/.claude` and every `~/.claude*` sibling the CLI actually wrote under
+  "Detected on this machine", each named by the **email and plan the CLI itself recorded**, with a
+  one-click Add that prefills the label with that email. Discovery is a read
+  (`GET /api/v1/workspace/agent-profiles/discovered`): adding still goes through the ordinary
+  `POST …/agent-profiles` and its duplicate-folder guard, so nothing is registered without a click.
+  Claude only — Codex records its identity in a live credential file, and this feature will not
+  read one to build a display label. **The accounts listing still carries no identity**: which
+  subscription an existing account is signed in to remains a "Show details" read, on demand.
+  Spec `.ai/specs/2026-08-14-claude-subscription-autodetect.md`.
+
+
 - ✨ **Optional sign-in: generic OIDC or Google, off by default.** Set `CEZ_AUTH=oidc` (with
   `CEZ_PUBLIC_URL`, `CEZ_OIDC_ISSUER`, `CEZ_OIDC_CLIENT_ID`, `CEZ_OIDC_CLIENT_SECRET`) or
   `CEZ_AUTH=google` and every API route, both SSE streams and the WebSocket upgrade require a
@@ -271,6 +297,10 @@
   state, so cezar emits a visible unsafe-mode note whenever it is active. (#762)
 
 ## 🔧 Changed
+- 🔧 **GitHub, Skills and Workflows are no longer in the sidebar or the ⌘K Views group.** The
+  `/github`, `/skills` and `/workflows` pages, their routes and all of their server machinery are
+  untouched and still reachable by URL — only the navigation entries are gone. Owner decision.
+
 
 - 🔧 **`GET /api/v1/health` no longer names your repositories to the unauthenticated internet
   when `CEZ_AUTH` is set.** That route is CORS-open and deliberately exempt from the sign-in

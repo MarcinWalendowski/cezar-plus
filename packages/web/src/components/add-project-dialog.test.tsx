@@ -4,7 +4,7 @@ import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { FsBrowseResponse, ProjectListEntry } from '@open-mercato/cezar-api-client'
+import type { FsBrowseResponse, ProjectListEntry, ProjectScanResponse } from '@open-mercato/cezar-api-client'
 import { AddProjectDialog } from '@/components/add-project-dialog'
 
 /**
@@ -68,14 +68,22 @@ type Answers = {
   projects?: ProjectListEntry[]
   /** What `POST /api/v1/projects` answers. Receives the posted root. */
   register?: (root: string) => Response
+  /** What `GET /api/v1/projects/scan?path=` answers, keyed by the scanned path (spec
+   *  `.ai/specs/2026-08-14-nested-repos-as-projects.md`). A path with no entry answers 404, which
+   *  is exactly what a folder holding no repos must look like to this dialog: no section at all. */
+  scan?: Record<string, ProjectScanResponse>
 }
 
 const posted: { root: string }[] = []
 
-function serve({ browse = { '': json(HOME) }, projects = [], register }: Answers = {}): void {
+function serve({ browse = { '': json(HOME) }, projects = [], register, scan = {} }: Answers = {}): void {
   posted.length = 0
   fetchMock.mockImplementation(async (input, init) => {
     const url = new URL(String(input), 'http://localhost')
+    if (url.pathname === '/api/v1/projects/scan') {
+      const answer = scan[url.searchParams.get('path') ?? '']
+      return answer === undefined ? json({ error: 'no such directory' }, 404) : json(answer)
+    }
     if (url.pathname === '/api/v1/projects' && init?.method === 'POST') {
       const root = (JSON.parse(String(init.body)) as { root: string }).root
       posted.push({ root })
@@ -113,6 +121,9 @@ const rows = () => within(document.querySelector('[data-slot="fs-listing"]') as 
 const breadcrumb = () => document.querySelector('[data-slot="fs-breadcrumb"]') as HTMLElement
 const addButton = () => document.querySelector('[data-slot="add-project-confirm"]') as HTMLButtonElement
 const target = () => document.querySelector('[data-slot="add-project-target"]') as HTMLElement
+const nestedRows = () => [...document.querySelectorAll('[data-slot="nested-row"]')] as HTMLElement[]
+const nestedToggle = (repo: string) =>
+  document.querySelector(`[data-slot="nested-row"][data-repo="${repo}"] input`) as HTMLInputElement
 
 describe('AddProjectDialog', () => {
   it('lists the browse root, badges git repos, and renders no "up" row when parent is null', async () => {
@@ -252,5 +263,115 @@ describe('AddProjectDialog', () => {
     const before = listCalls()
     fireEvent.click(addButton())
     await waitFor(() => expect(listCalls()).toBeGreaterThan(before))
+  })
+  /**
+   * Nested repos (spec `.ai/specs/2026-08-14-nested-repos-as-projects.md`) — a folder full of
+   * repositories offers one project per repo instead of registering as one.
+   */
+  describe('nested repos', () => {
+    const WORKSPACE: FsBrowseResponse = {
+      path: '/home/me/workspace',
+      parent: null,
+      dirs: [{ name: 'chat', path: '/home/me/workspace/chat', isRepo: true }],
+      truncated: false,
+    }
+
+    const scanOf = (over: Partial<ProjectScanResponse> = {}): ProjectScanResponse => ({
+      root: '/home/me/workspace',
+      rootIsRepo: true,
+      truncated: false,
+      repos: [
+        { path: '/home/me/workspace/chat', relPath: 'chat', name: 'chat', branch: 'main', forge: 'github', registered: false },
+        { path: '/home/me/workspace/cezar', relPath: 'cezar', name: 'cezar', registered: false },
+      ],
+      ...over,
+    })
+
+    const renderScanned = async (scan: ProjectScanResponse): Promise<{ onOpenChange: ReturnType<typeof vi.fn> }> => {
+      serve({ browse: { '': json(WORKSPACE) }, scan: { '/home/me/workspace': scan } })
+      const rendered = renderDialog()
+      await waitFor(() => expect(nestedRows().length).toBe(scan.repos.length + 1))
+      return rendered
+    }
+
+    it('lists the folder plus each nested repo, and says how many will be added', async () => {
+      await renderScanned(scanOf())
+      expect(nestedRows().map((row) => row.getAttribute('data-repo'))).toEqual(['.', 'chat', 'cezar'])
+      // Every row starts checked: the proposal is "add them all", and the button counts it.
+      expect(nestedRows().every((row) => (row.querySelector('input') as HTMLInputElement).checked)).toBe(true)
+      expect(addButton().textContent).toBe('Add 3 projects')
+    })
+
+    it('registers exactly the checked rows, one POST each, and navigates to the first', async () => {
+      const { onOpenChange } = await renderScanned(scanOf())
+      fireEvent.click(nestedToggle('cezar'))
+      expect(addButton().textContent).toBe('Add 2 projects')
+
+      fireEvent.click(addButton())
+
+      await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+      expect(posted.map((call) => call.root)).toEqual(['/home/me/workspace', '/home/me/workspace/chat'])
+      expect(screen.getByTestId('location').textContent).toBe('/p/added/')
+    })
+
+    /** The folder itself is a row like any other: a container directory nobody wants as a project
+     *  must be skippable without giving up its repos. */
+    it('can skip the scanned folder and register only its repos', async () => {
+      await renderScanned(scanOf())
+      fireEvent.click(nestedToggle('.'))
+      expect(addButton().textContent).toBe('Add 2 projects')
+
+      fireEvent.click(addButton())
+
+      await waitFor(() => expect(posted).toHaveLength(2))
+      expect(posted.map((call) => call.root)).toEqual([
+        '/home/me/workspace/chat',
+        '/home/me/workspace/cezar',
+      ])
+    })
+
+    it('never posts an already-registered repo, and does not let one be unchecked', async () => {
+      await renderScanned(
+        scanOf({
+          repos: [
+            { path: '/home/me/workspace/chat', relPath: 'chat', name: 'chat', registered: true },
+            { path: '/home/me/workspace/cezar', relPath: 'cezar', name: 'cezar', registered: false },
+          ],
+        }),
+      )
+      const already = nestedToggle('chat')
+      expect(already.checked).toBe(true)
+      expect(already.disabled).toBe(true)
+      expect(addButton().textContent).toBe('Add 2 projects')
+
+      fireEvent.click(addButton())
+
+      await waitFor(() => expect(posted).toHaveLength(2))
+      expect(posted.map((call) => call.root)).not.toContain('/home/me/workspace/chat')
+    })
+
+    /** The cap has to be visible. A silently short list reads as "there is nothing else in there",
+     *  which is the one wrong answer this feature must not give. */
+    it('renders the truncation rather than only carrying the flag', async () => {
+      await renderScanned(scanOf({ truncated: true }))
+      expect(document.querySelector('[data-slot="nested-truncated"]')).not.toBeNull()
+
+      cleanup()
+      await renderScanned(scanOf())
+      expect(document.querySelector('[data-slot="nested-truncated"]')).toBeNull()
+    })
+
+    /** A folder with no repos in it, and a scan that fails outright, must both look the same to
+     *  the user as the dialog did before this feature existed — no section, one POST. */
+    it('shows no section at all when the folder holds no repos', async () => {
+      serve({ browse: { '': json(HOME) }, scan: { '/home/me': { root: '/home/me', rootIsRepo: false, repos: [], truncated: false } } })
+      renderDialog()
+      await waitFor(() => expect(addButton().disabled).toBe(false))
+      expect(document.querySelector('[data-slot="nested-repos"]')).toBeNull()
+      expect(addButton().textContent).toBe('Add project')
+
+      fireEvent.click(addButton())
+      await waitFor(() => expect(posted).toEqual([{ root: '/home/me' }]))
+    })
   })
 })

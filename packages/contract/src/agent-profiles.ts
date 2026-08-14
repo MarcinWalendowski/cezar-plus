@@ -44,6 +44,27 @@ export const agentAccountFileSchema = z.object({
 export type AgentAccountFile = z.infer<typeof agentAccountFileSchema>;
 
 /**
+ * Who a config dir is signed in as — the Claude `oauthAccount` fields worth showing a person.
+ *
+ * Every field is optional because the source is: a dir the CLI created but nobody logged into has
+ * the file and no `oauthAccount` in it. Deliberately NARROW — three display fields, no ids, no
+ * timestamps, and nothing credential-shaped. The source file carries no token (Claude's live
+ * OAuth tokens are in the OS keychain), and this schema is what keeps that true of the wire even
+ * if the file gains one later.
+ */
+export const agentAccountIdentitySchema = z.object({
+  /** The account's email — the one field a person recognizes at a glance. */
+  email: z.string().optional(),
+  /** A short plan label (`Max 20x`), derived from the vendor's own tier string rather than from a
+   *  table of plan names this repo would have to guess at. */
+  plan: z.string().optional(),
+  /** A real organization name. Absent for a personal account, whose `organizationName` is only
+   *  the email restated. */
+  organization: z.string().optional(),
+});
+export type AgentAccountIdentity = z.infer<typeof agentAccountIdentitySchema>;
+
+/**
  * One account, as the cockpit sees it.
  *
  * A CLOSED object, on the same terms as `projectListEntrySchema`: `.passthrough()` on the
@@ -78,6 +99,13 @@ export const agentProfileSchema = z.object({
   /** This agent's own user-scope config files, resolved inside THIS account's folder — so a
    *  second login's `settings.json` is the one you open, not the default account's. */
   files: z.array(agentAccountFileSchema),
+  // NO `identity` HERE, deliberately (spec `.ai/specs/2026-08-14-claude-subscription-autodetect.md`,
+  // D5). Which subscription an account is signed in to is answered by `…/:id/details` on demand and
+  // by the discovery route for dirs that are not accounts yet — never by this listing, which every
+  // load of the settings pane fetches. An email here would sit in the response, the query cache and
+  // devtools whether or not anything rendered it, which is exactly what
+  // `agent-config/account-identity.ts` rule 2 exists to prevent. An added account is named by its
+  // LABEL, which discovery prefills with the detected email.
 });
 export type AgentProfile = z.infer<typeof agentProfileSchema>;
 
@@ -128,6 +156,30 @@ export const agentProfilesResponseSchema = z.object({
   defaults: agentAccountSelectionSchema,
 });
 export type AgentProfilesResponse = z.infer<typeof agentProfilesResponseSchema>;
+
+/** One Claude config dir found on this machine that is NOT yet an account here (spec
+ *  `.ai/specs/2026-08-14-claude-subscription-autodetect.md`). A proposal for the Add-account
+ *  dialog to prefill — discovery never writes the account store. */
+export const discoveredAgentAccountSchema = z.object({
+  /** Claude only. Codex keeps its identity in a live credential file; see the discovery module's
+   *  own doc comment for why that is not read. */
+  provider: z.literal('claude'),
+  /** Absolute config dir — what `CLAUDE_CONFIG_DIR` would be set to. */
+  configDir: z.string(),
+  identity: agentAccountIdentitySchema.optional(),
+  /** Already the discovered default, or already a stored account. Rendered as context, not as an
+   *  offer: it is listed so the pane can say "these are the logins on this machine" truthfully,
+   *  rather than hiding the ones you have and implying the rest are all there is. */
+  added: z.boolean(),
+});
+export type DiscoveredAgentAccount = z.infer<typeof discoveredAgentAccountSchema>;
+
+/** `GET /api/v1/workspace/agent-profiles/discovered` — the machine's Claude logins. Empty in
+ *  hosted mode, where this whole family is withheld (the paths are the host disclosure). */
+export const discoveredAgentAccountsResponseSchema = z.object({
+  accounts: z.array(discoveredAgentAccountSchema),
+});
+export type DiscoveredAgentAccountsResponse = z.infer<typeof discoveredAgentAccountsResponseSchema>;
 
 /**
  * `PUT /api/v1/workspace/agent-profiles/selection` — point one project's provider at an account.
