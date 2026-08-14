@@ -91,17 +91,25 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     assert.equal(runs.length, 1);
     assert.ok(['done', 'review'].includes(runs[0]?.status ?? ''), 'the dry-run workflow should finish successfully');
 
-    // Boot wiring (spec 2026-07-20-multi-project-workspace, step 1.5): the
-    // headless run migrated ~/.cezar and registered the boot repo.
+    // Boot wiring (D3, .ai/specs/2026-08-07-org-scoped-tasks-knowledge.md): the
+    // headless run still migrates ~/.cezar (the process serves the launch
+    // directory exactly as before — `shouldRegisterProject` only ever governed
+    // registration, never what is served) but must NOT write the boot repo into
+    // the project registry. Registration is now a deliberate, explicit act — the
+    // offer UI in the app, or `cezar projects add` on the CLI, exercised below.
+    // The run's own success was already asserted above (`runs.length === 1` with
+    // a `done`/`review` status), so an empty registry here is evidence D3 held,
+    // not evidence the run never ran.
     const workspace = JSON.parse(await readFile(join(cezHome, 'config.json'), 'utf8')) as {
       schemaVersion: number;
       disabledProviders?: string[];
       projects: Array<{ name: string; root: string }>;
     };
     assert.ok(workspace.schemaVersion >= 1, 'boot runs the workspace migrations');
-    assert.ok(
-      workspace.projects.some((p) => p.name === 'fixture-repo'),
-      'a headless run registers the boot repo in the workspace registry',
+    assert.deepEqual(
+      workspace.projects,
+      [],
+      'a headless run must not auto-register the boot repo in the workspace registry (D3)',
     );
 
     workspace.disabledProviders = ['claude'];
@@ -172,6 +180,19 @@ if (args.join(' ') === 'auth status --json') {
         && typeof event.authFailureId === 'string'),
       'headless runtime rejection must persist provider recovery guidance',
     );
+
+    // D3 leaves the boot repo unregistered (asserted above) — register it
+    // explicitly through the CLI path a user takes instead (`cezar projects
+    // add`, the terminal twin of accepting the "<name> isn't in a workspace
+    // yet" offer), so the `cezar projects` assertion below still has a
+    // registered project to read.
+    const add = await execFile(process.execPath, [cliPath, 'projects', 'add', fixtureRepo], {
+      cwd: consumerDir,
+      env: { ...process.env, CEZ_HOME: cezHome },
+      timeout: 30_000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    assert.match(add.stdout, /\+ fixture-repo/, 'cezar projects add registers the repo');
 
     // `cezar projects` (step 5.2) reads the same registry with no server
     // running — the ssh-into-the-box view of Settings → Projects.

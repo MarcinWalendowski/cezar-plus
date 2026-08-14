@@ -290,6 +290,36 @@ identical failures, identical counts. They are `web/src/routes.test.tsx` (11),
 `test/e2e/package-cli.test.ts` (1, "a headless run registers the boot repo"). Nothing in this
 feature touches any of them. **Fixing them is separate work and has not been done.**
 
+**Root cause of the `test:package` failure, diagnosed 2026-08-15.** Independently reproduced in a
+clean worktree at `0085e2bb` (`npm ci` + `npm run build` — the build is required, since
+`test:package` packs `dist/` and `web/dist/`, both gitignored), then narrowed to a runtime
+behaviour failure with no packing involved at all:
+
+`suppressBootRegistration()` (`packages/cezar/src/registered-project-roots.ts`) returns an
+unconditional `true`, so the registration branch in `initWorkspace`
+(`packages/cezar/src/index.ts:249`, gated on `shouldRegisterProject(...) && !suppressBootRegistration()`)
+is **dead code**. That is deliberate: it is D3 of `.ai/specs/2026-08-07-org-scoped-tasks-knowledge.md`
+— "boot never auto-registers the launch directory; an unknown launch directory is *offered*, never
+written" — which itself superseded an earlier version that suppressed only while onboarding was
+incomplete, after the bug reappeared on a second launch. It landed in `9b5f62b8` (2026-08-08).
+**That commit never touched `test/e2e/`**, and the test file is unchanged since `57683d02`. So the
+assertion has been pinning reverted behaviour for a week.
+
+Two consequences worth stating plainly. First, **`.github/workflows/ci.yml:57` runs `test:package`,
+so CI on `main` is red** — and has been, unnoticed, for that week; "pre-existing" was recorded three
+times without anyone asking why. Second, **the fix is to the test, not the code**: assert the
+inverse (a headless run against an unregistered repo completes and leaves `projects` empty), then
+register the fixture explicitly through the `registerAndAdoptProject` seam before the `cezar projects`
+stdout assertion at `:178-184` that genuinely needs a registered project. Deleting the test instead
+would drop real coverage and leave phase 5's offer-don't-write behaviour with no e2e at all, which
+is the thing D3 exists to guarantee.
+
+**Method note, because the next session will copy whichever one it reads here.** The verification
+above was done by stashing the whole change. **Do not stash to establish a baseline in this
+checkout** — parallel worktrees and agents run against it, and a stash rips their in-flight work out
+from under them. `git worktree add <short-path> <commit>` gives the same clean baseline without
+touching the shared tree. Use a short path: a deep one hits `mkdirat: name too long` here.
+
 Two suites DID break because of this change and were fixed here: `server/health-forge.test.ts`
 (one of seven exhaustive capability fixtures still excluded `notes`, with a comment citing the
 removal spec — corrected in place) and `web/components/app-shell.test.tsx` (the nav gained a
