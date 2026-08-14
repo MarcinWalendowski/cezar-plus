@@ -77,13 +77,32 @@ export const PRUNED_DIRS: readonly string[] = [
   '.cache',
 ];
 
-/** cezar's own task worktrees. `registerFolder` refuses one of these outright, so offering it would
- *  put a row in the list that cannot be added — and the list is a proposal the user is expected to
- *  accept wholesale. Matched on the path, the same marker `workspace/projects.ts` uses. */
-const WORKTREE_MARKER = `${sep}.ai${sep}cezar${sep}worktrees${sep}`;
+/**
+ * Agent task worktrees — never a project row.
+ *
+ * The first is cezar's own: `registerFolder` refuses one outright, so offering it would put a row
+ * in the list that cannot be added. Matched on the path, the same marker
+ * `workspace/projects.ts` uses.
+ *
+ * The second is Claude Code's, and it is the one that bites in practice. Measured on
+ * `~/loki-labs`: ten real repos and **six** `.claude/worktrees/<generated-name>` checkouts, every
+ * one of them a linked worktree of a repo already in the list. They are not refused by
+ * `registerFolder`, so nothing downstream catches them — and the dialog pre-checks every addable
+ * row, so accepting the proposal wholesale registered six throwaway checkouts of the same project
+ * under names like `sunny-riding-cat`, which vanish when the agent finishes.
+ *
+ * Matched on the path rather than by adding `.claude` to `PRUNED_DIRS`: that directory also holds
+ * skills and settings a future walk may want, and pruning the whole thing to solve one subdirectory
+ * is a wider rule than the reason for it.
+ */
+const WORKTREE_MARKERS: readonly string[] = [
+  `${sep}.ai${sep}cezar${sep}worktrees${sep}`,
+  `${sep}.claude${sep}worktrees${sep}`,
+];
 
 function isInsideTaskWorktree(path: string): boolean {
-  return `${path}${sep}`.includes(WORKTREE_MARKER);
+  const probe = `${path}${sep}`;
+  return WORKTREE_MARKERS.some((marker) => probe.includes(marker));
 }
 
 async function isRepoRoot(dir: string): Promise<boolean> {

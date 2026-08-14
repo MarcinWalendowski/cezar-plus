@@ -116,6 +116,31 @@ describe('scanNestedRepos', () => {
     expect(await relPaths(root)).toEqual(['chat']);
   });
 
+  /** NEGATIVE CONTROL 3b: Claude Code's agent worktrees. Unlike cezar's own, `registerFolder`
+   *  does NOT refuse these, so nothing downstream catches them — and the dialog pre-checks every
+   *  addable row. Measured on `~/loki-labs`: ten real repos and six of these, each a linked
+   *  worktree of a repo already in the list. */
+  it('never offers a Claude Code agent worktree', async () => {
+    const root = tree();
+    repo(root, 'chat');
+    repoWithGitFile(root, '.claude', 'worktrees', 'sunny-riding-cat');
+    repoWithGitFile(root, '.claude', 'worktrees', 'playful-rolling-dove');
+    plain(root, 'apps');
+    repoWithGitFile(root, 'apps', '.claude', 'worktrees', 'precious-hatching-bengio');
+
+    expect(await relPaths(root)).toEqual(['chat']);
+  });
+
+  /** POSITIVE CONTROL for the pair above: the marker is `.claude/worktrees/`, not `.claude`. A
+   *  repo that merely lives under a `.claude` directory is still a repo, so pruning the whole
+   *  directory would be a wider rule than the reason for it. */
+  it('still offers a repo under .claude that is not a worktree', async () => {
+    const root = tree();
+    repo(root, '.claude', 'skills-repo');
+
+    expect(await relPaths(root)).toEqual(['.claude/skills-repo']);
+  });
+
   /** NEGATIVE CONTROL 4: the cap is a real ceiling AND it says so. A silently short list reads as
    *  "there is nothing else in there". */
   it('caps the list and reports the truncation', async () => {

@@ -67,8 +67,19 @@ all checked, and the button says how many will be added. Two reasons this is not
   `vendor`, `.venv`, `venv`, `__pycache__`, `.next`, `.turbo`, `coverage`, `.cache`.
 - **Never descend into a repo**: a submodule or vendored checkout inside a repo is not a second
   project.
-- **Never offer a cezar task worktree** (`…/.ai/cezar/worktrees/…`). `registerFolder` refuses these
-  anyway; offering one would put a row in the list that cannot be added.
+- **Never offer an agent task worktree.** Two markers, and the second was added after the first
+  real run:
+  - `…/.ai/cezar/worktrees/…` — cezar's own. `registerFolder` refuses these anyway; offering one
+    would put a row in the list that cannot be added.
+  - **`…/.claude/worktrees/…` — Claude Code's, added 2026-08-14.** Measured on the first folder
+    this feature was pointed at (`~/loki-labs`): **ten real repos and six of these**, each a linked
+    worktree of a repo already in the list. Nothing downstream catches them — unlike cezar's own,
+    `registerFolder` accepts one — and D4's dialog pre-checks every addable row, so accepting the
+    proposal wholesale registered six throwaway checkouts of the same project under generated names
+    (`sunny-riding-cat`), which vanish when the agent finishes. Matched on the path rather than by
+    adding `.claude` to the prune list: that directory also holds skills and settings, and pruning
+    all of it to solve one subdirectory is a wider rule than the reason for it. A repo under
+    `.claude` that is *not* a worktree is still offered (positive control in the tests).
 - **Cap 25**, and say so (`truncated: true`) rather than presenting a partial list as complete.
 
 ### D4 — registration is per row, not one batch
@@ -167,6 +178,9 @@ Automated, per phase above, plus these named negative controls:
    rev-parse` instead of by `.git`.
 2. A repo nested inside a repo (submodule shape) appears once — the outer one — never twice.
 3. A `.ai/cezar/worktrees/<id>` repo is never offered, even at depth 2.
+3b. A `.claude/worktrees/<name>` repo is never offered, at any depth — **and** a repo under
+   `.claude` that is not a worktree still is. The pair is the point: without the second half the
+   guard could be satisfied by pruning `.claude` wholesale, which is not what was decided.
 4. 26 repos ⇒ 25 rows and `truncated: true`.
 
 Runtime E2E, on this machine:
@@ -177,3 +191,15 @@ Runtime E2E, on this machine:
   project groups with their own task lists.
 
 Until that browser pass has run this ships as **QA Needed**, not Done.
+
+### What was actually run — 2026-08-14
+
+`scanNestedRepos('/Users/mw/loki-labs')` against the real filesystem, before the fix:
+**16 rows** — the 10 genuine repos (`anymail-mcp`, `aside`, `bubble-trade`, `career`,
+`career-kit`, `cezar`, `chat`, `chat-wt-spec-101`, `homebrew-tap`, `mw-site`) and 6
+`.claude/worktrees/*`. After the fix, the 6 are gone and the 10 remain. That is the run that
+found D3's missing marker; the E2E above is still unrun, so this stays **QA Needed**.
+
+Mutation check on the new guard: removing `${sep}.claude${sep}worktrees${sep}` from
+`WORKTREE_MARKERS` fails exactly one test, 12/13 — the suite still collects, so the failure is a
+kill and not a broken build.
