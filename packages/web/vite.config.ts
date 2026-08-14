@@ -60,6 +60,16 @@ export default defineConfig({
     proxy: {
       // `ws: true` — /api/ws (the subscription socket) upgrades through the same proxy.
       '/api': { target: API_TARGET, changeOrigin: true, ws: true },
+      // `/auth/*` is a ROOT-mounted family (`src/index.ts`, D13/D14), not under `/api`, so it
+      // needs its own entry: `onboarding-api.ts`/`teams-api.ts`/`account-api.ts` all fetch
+      // `${getApiBaseUrl()}/auth/...`, which in dev is same-origin on the Vite port. Without
+      // this the request fell through to Vite's SPA fallback and came back as `200 text/html`,
+      // which `isJsonResponse()` reads — correctly, for what it saw — as "no onboarding surface
+      // on this deployment": the org wizard and the Teams pane both rendered "Sign-in isn't set
+      // up on this deployment" in `npm run dev` while the server was answering real
+      // `needs-org` JSON on 4321 the whole time. Dev-only; the built cockpit is served by the
+      // same origin as the routes, so production never had the gap.
+      '/auth': { target: API_TARGET, changeOrigin: true },
     },
   },
 })

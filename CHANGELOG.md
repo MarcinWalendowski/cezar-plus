@@ -289,6 +289,16 @@
 
 ## 🐛 Fixes
 
+- 🐛 **Organizations, teams and the account pane were invisible in `npm run dev`.** The Vite dev
+  proxy forwarded `/api` only, but `/auth/*` is a ROOT-mounted family (D13/D14), so the cockpit's
+  `GET /auth/onboarding`, `/auth/teams` and `/auth/me` fell through to Vite's SPA fallback and came
+  back `200 text/html`. `isJsonResponse()` reads a non-JSON answer as "this deployment has no
+  onboarding surface" — the correct reading of what it saw — so the org wizard and the Teams pane
+  both rendered "Sign-in isn't set up on this deployment", and the entry gate never bounced `/`
+  into `/onboarding`, while the server was answering real `{"state":"needs-org"}` on the API port
+  the whole time. `packages/web/vite.config.ts` now proxies `/auth` as well. Dev-only: the built
+  cockpit is served from the same origin as the routes, so a real deployment never had the gap.
+
 - 🐛 **The global Tasks page reacts to work happening in other projects.** Every event from a
   project other than the one you were standing in was dropped before it reached any cache, so
   `/tasks` — which is precisely the page that spans every project — heard nothing and ran on its
