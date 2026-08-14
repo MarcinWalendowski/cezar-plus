@@ -85,7 +85,7 @@ describe('agent profiles API', () => {
       const body = await list();
       expect(body.editable).toBe(true);
       expect(body.profiles.every((p) => p.isDefault)).toBe(true);
-      expect(body.profiles.map((p) => p.provider)).toEqual(['claude', 'codex', 'opencode']);
+      expect(body.profiles.map((p) => p.provider)).toEqual(['claude', 'codex', 'opencode', 'pi']);
       expect(body.profiles.every((p) => p.id === 'default')).toBe(true);
     });
 
@@ -698,9 +698,11 @@ describe('agent profiles API', () => {
       // exactly how this was missed — the first attempt at this fix passed `openTerminal`, the
       // hook was never called, and the run opened yet another real window.
       let opened: { target: string; dir: string } | null = null;
+      const launched: Array<[string, string]> = [];
       const app = makeApp({
         openApp: async (target: string, dir: string) => {
           opened = { target, dir };
+          launched.push([target, dir]);
           return true;
         },
       });
@@ -709,11 +711,13 @@ describe('agent profiles API', () => {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ file: 'folder', target: 'terminal' }),
       });
-      expect(res.status).not.toBe(400);
+      expect(res.status).toBe(200);
       expect(opened).not.toBeNull();
       // The folder it offered to open is the account's own profile home, not some other account's.
       expect(opened!.target).toBe('terminal');
       expect(opened!.dir).toContain('claude-klaudiusz');
+      // Exactly one call, with the account's own path — not merely "the last call looked right".
+      expect(launched).toEqual([['terminal', account.path]]);
     });
 
     it('409s a file the agent has not written yet rather than reporting a false success', async () => {

@@ -13,6 +13,7 @@ import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH } from '@open-mercato/cezar-contract';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { allocateProjectSlug, clearProjectProbeCache, listProjects, registerProject } from '../workspace/projects.ts';
@@ -47,7 +48,13 @@ interface HealthBody {
   checks: unknown[];
   defaultRunner?: string;
   forge: unknown;
-  capabilities: { localHandoff: boolean; followups: boolean; singleProject: boolean; tokenMetrics: boolean };
+  capabilities: {
+    localHandoff: boolean;
+    followups: boolean;
+    singleProject: boolean;
+    automations: boolean;
+    tokenMetrics: boolean;
+  };
   projects: { id: string; name: string }[];
   bootProject: string;
 }
@@ -1358,21 +1365,99 @@ describe('workspace projects API', () => {
     /**
      * CORRECTED 2026-08-07 (5c, Fill unit 3): `{}` used to be in the "bad" list above, because
      * `maxParallel` was a REQUIRED key — an empty body failed the validator's own presence check.
-     * The 5c widening (`updateProjectSchema` gains `teamId`, and relaxes `maxParallel` to optional
-     * so a `teamId`-only PATCH doesn't have to also restate the ceiling) makes an empty body
-     * legitimate: "touch nothing" rather than "malformed". This is the NEW behavior that widening
-     * is FOR, made explicit rather than leaving the old test's assumption to silently go stale.
+     * The 5c widening relaxed `maxParallel` to optional so a `teamId`-only PATCH doesn't have to
+     * restate the ceiling, and that incidentally made `{}` parse.
+     *
+     * **SUPERSEDED 2026-08-13 by the upstream 0.9.3 merge (#845).** The 200 above was a
+     * side effect of the 5c widening, not a decision: nothing wanted "empty PATCH = no-op", it
+     * simply fell out of making every key optional. Upstream added an explicit `.refine` to
+     * `updateProjectInputSchema` restoring the 400, and its reasoning is the one we want —
+     * "a request that names no field is a mistake, and answering 200 to it would report a change
+     * that never happened". The merged refine accepts a body naming `maxParallel`, `tags` OR
+     * `teamId`, so the teamId-only PATCH the 5c widening was actually for keeps working; only the
+     * genuinely empty body is refused. `BACKWARD_COMPATIBILITY.md` §2 states the 400, so leaving
+     * this test asserting 200 would put our own build gate in contradiction with our own suite.
      */
-    it('an empty body is now a no-op, not a 400 — 5c widened maxParallel to optional', async () => {
+    it('refuses an empty body with a 400 — naming no field is a mistake, not a no-op', async () => {
       const other = await registerProject(otherRoot);
       const { semaphore, refreshes } = countingSemaphore();
-      const { status, body } = await patch(other.id, {}, { semaphore });
-      expect(status).toBe(200);
-      expect(body.project.id).toBe(other.id);
-      expect(body.project.maxParallel).toBeUndefined();
+      const { status } = await patch(other.id, {}, { semaphore });
+      expect(status).toBe(400);
       expect((await getProjects()).projects.find((p) => p.id === other.id)?.maxParallel).toBeUndefined();
-      // No write attempted at all — the live-apply hook does not fire for a no-op.
+      // Refused before any write — the live-apply hook must not fire for a rejected body.
       expect(refreshes()).toBe(0);
+    });
+
+    /** The widening 5c was actually for: a `teamId`-only body is legal and does NOT have to
+     *  restate `maxParallel`. This is what the refine above must never start refusing. */
+    it('accepts a teamId-only body — the refine must not narrow 5c back', async () => {
+      const other = await registerProject(otherRoot);
+      const { status } = await patch(other.id, { teamId: 'team-does-not-exist' });
+      // 400 for the unknown team, NOT for a body that named no field — the distinction the
+      // refine has to preserve. A schema-level rejection would answer before the handler runs.
+      expect(status).toBe(400);
+    });
+
+    it('sets tags, normalized, and leaves maxParallel alone', async () => {
+      await registerProject(otherRoot);
+      await mergeWriteWorkspaceConfig((config) => {
+        const entry = config.projects.find((p) => p.root === realpathSync(otherRoot));
+        if (entry) entry.maxParallel = 3;
+      });
+      const other = (await getProjects()).projects.find((p) => p.root === realpathSync(otherRoot))!;
+
+      const { status, body } = await patch(other.id, {
+        tags: [' Storefront ', 'api', 'STOREFRONT'],
+      });
+
+      expect(status).toBe(200);
+      // Trimmed by the schema, then deduped case-insensitively (first spelling wins) and
+      // sorted by the normalizer.
+      expect(body.project.tags).toEqual(['api', 'Storefront']);
+      // A body that says nothing about maxParallel must not clear it.
+      expect(body.project.maxParallel).toBe(3);
+      const listed = await getProjects();
+      expect(listed.projects.find((p) => p.id === other.id)?.tags).toEqual(['api', 'Storefront']);
+    });
+
+    it('clears tags on null and on [], storing no key at all', async () => {
+      const other = await registerProject(otherRoot);
+      await patch(other.id, { tags: ['api'] });
+      for (const cleared of [null, []]) {
+        await patch(other.id, { tags: ['api'] });
+        const { status, body } = await patch(other.id, { tags: cleared });
+        expect(status, JSON.stringify(cleared)).toBe(200);
+        expect(body.project.tags, JSON.stringify(cleared)).toBeUndefined();
+        // Absent, not `[]`: an untagged project costs nothing in the registry file.
+        const raw = JSON.parse(readFileSync(workspaceConfigPath(), 'utf8')) as {
+          projects: { id: string; tags?: unknown }[];
+        };
+        expect(Object.keys(raw.projects.find((p) => p.id === other.id)!)).not.toContain('tags');
+      }
+    });
+
+    it('leaves tags alone for a maxParallel-only body (the pre-tags client)', async () => {
+      const other = await registerProject(otherRoot);
+      await patch(other.id, { tags: ['storefront'] });
+      const { status, body } = await patch(other.id, { maxParallel: 2 });
+      expect(status).toBe(200);
+      expect(body.project.tags).toEqual(['storefront']);
+      expect(body.project.maxParallel).toBe(2);
+    });
+
+    it('rejects a tag list the registry could not hold, and persists nothing', async () => {
+      const other = await registerProject(otherRoot);
+      const bodies = [
+        { tags: ['x'.repeat(PROJECT_TAG_MAX_LENGTH + 1)] },
+        { tags: Array.from({ length: PROJECT_TAGS_MAX + 1 }, (_, i) => `t${i}`) },
+        { tags: [''] },
+        { tags: 'storefront' },
+      ];
+      for (const bad of bodies) {
+        const { status } = await patch(other.id, bad);
+        expect(status, JSON.stringify(bad)).toBe(400);
+      }
+      expect((await getProjects()).projects.find((p) => p.id === other.id)?.tags).toBeUndefined();
     });
 
     it('404s an unknown id and a malformed one, and rewrites nothing (read-first, like DELETE)', async () => {
@@ -1432,6 +1517,7 @@ describe('workspace projects API', () => {
         localHandoff: true,
         followups: false,
         singleProject: false,
+        automations: false,
         tokenMetrics: true,
         tokenUsageMetrics: true,
         costMetrics: true,

@@ -46,6 +46,11 @@ export type NavItem = {
    *  per-project loop; the flat single-project sidebar renders every visible item, this one
    *  included, since there is only ever one group to render it in. */
   workspace?: boolean
+  /** Automations-gated (#801): the item exists only while `/api/health` reports
+   *  `capabilities.automations` — GitHub automations are opt-in via `CEZ_AUTOMATIONS=1`.
+   *  Independent of `forge`: the Automations item carries BOTH, because the feature needs a
+   *  forge to poll AND the operator's opt-in to exist at all. See `visibleNavItems`. */
+  automations?: boolean
 }
 
 /** The sidebar nav from the spec's "App shell & navigation" section, in mockup order.
@@ -67,7 +72,7 @@ export const NAV_ITEMS: NavItem[] = [
   },
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'] },
   { to: '/github', label: 'GitHub', icon: GithubIcon, match: ['/github'], forge: true },
-  { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true },
+  { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true, automations: true },
   { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true },
   { to: '/skills', label: 'Skills', icon: SparklesIcon, match: ['/skills'], badge: 'skills-update', skills: true },
   { to: '/workflows', label: 'Workflows', icon: WorkflowIcon, match: ['/workflows'] },
@@ -92,13 +97,19 @@ export type NavAvailability = {
    *  tab. Defaulting it to `false` would make the tab vanish for the moment before health lands,
    *  which is a visible regression for the majority of installs that never set the flag. */
   skills?: boolean
+  /** `capabilities.automations` — the opt-in GitHub automations (#801). */
+  automations?: boolean
 }
 
 /**
  * The nav items a surface should actually render: a gated item drops out — nav item AND tab —
  * unless the health payload says its feature is there. The forge-gated GitHub item needs the
  * forge driver (spec §"GitHub tab (forge tab)"); the Inbox item needs `capabilities.followups`,
- * which is off unless `CEZ_FOLLOWUPS=1` (#471).
+ * which is off unless `CEZ_FOLLOWUPS=1` (#471); the Automations item needs a forge AND
+ * `capabilities.automations`, which is off unless `CEZ_AUTOMATIONS=1` (#801).
+ *
+ * Gates are ANDed per item, never ORed, which is what lets one item carry two of them: an
+ * automations opt-in on a repo with no GitHub remote still has nothing to poll.
  *
  * Everything defaults to absent while health is still unknown, on the shell's honesty rule: the
  * nav must not claim a tab exists before the server has said so (the Tools menu's forge note
@@ -111,6 +122,7 @@ export function visibleNavItems({
   knowledge = false,
   notes = false,
   skills = true,
+  automations = false,
 }: NavAvailability = {}): NavItem[] {
   return NAV_ITEMS.filter(
     (item) =>
@@ -121,7 +133,8 @@ export function visibleNavItems({
       // `skills` defaults TRUE (see `NavAvailability`), so this line reads the same as the
       // four above while meaning the opposite: it removes the item only on an explicit
       // `skills: false` from health.
-      (item.skills ? skills : true),
+      (item.skills ? skills : true) &&
+      (item.automations ? automations : true),
   )
 }
 
