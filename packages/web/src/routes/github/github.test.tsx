@@ -1954,15 +1954,31 @@ describe('the follow-up prompt template menu (#413)', () => {
    * mount before clicking it, so a stale option from the previous (closing)
    * popover can never satisfy the wait while the wanted one is still absent —
    * the race that made this suite flake in CI (#413).
+   *
+   * `selectOption`'s own "the option node is gone" signal is necessary but not sufficient: an
+   * UNRELATED re-render (the `uiState` query resolving, an invalidation) can also make the
+   * queried node disappear — remounting the menu's items, or closing the popover outright — with
+   * no select ever having landed. A click fired at exactly that moment hits a node about to be
+   * detached and is a silent no-op (2026-08-15, diagnosed under `--maxWorkers=16`: a temporary
+   * counter on `insertPromptTemplate` showed it firing once, for the FIRST template only, on a
+   * run where this test still reported the second template missing — the click was swallowed,
+   * not merely slow). `before` existed for exactly this check and was captured but never read;
+   * comparing the textarea's actual value is the one signal a swallowed click cannot fake, so a
+   * false "landed" retries the whole open+select cycle instead of returning early.
    */
   async function chooseTemplate(id: string): Promise<void> {
     const textarea = () => screen.getByLabelText('Custom prompt') as HTMLTextAreaElement
     const before = textarea().value
-    fireEvent.click(document.querySelector('[data-slot="prompt-template-trigger"]')!)
-    await waitFor(() => {
-      if (!option(id)) throw new Error(`template option "${id}" not mounted yet`)
-    })
-    await selectOption(id)
+    for (let attempt = 0; attempt < 5 && textarea().value === before; attempt++) {
+      fireEvent.click(document.querySelector('[data-slot="prompt-template-trigger"]')!)
+      await waitFor(() => {
+        if (!option(id)) throw new Error(`template option "${id}" not mounted yet`)
+      })
+      await selectOption(id)
+    }
+    if (textarea().value === before) {
+      throw new Error(`chooseTemplate("${id}") did not change the prompt after retrying`)
+    }
   }
 
   it('an untouched ui-state shows the built-in templates, and inserting one fills the custom prompt', async () => {
