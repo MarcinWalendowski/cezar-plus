@@ -188,6 +188,14 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
               // about the other projects in the workspace.
               inboxAvailable={inboxAvailable}
               automationsAvailable={automationsAvailable}
+              // The same value `AppShell` gets above, and it has to be passed twice: the shell's
+              // own copy gates the workspace band, this one gates every project group's nav.
+              // Omitting it here is the bug this prop was added for — the gate defaults to
+              // `false`, so Knowledge silently vanished from every group.
+              knowledgeAvailable={health.data?.capabilities.knowledge === true}
+              // Passed so the `workspace: true` filter is what keeps Notes out of the groups,
+              // rather than a capability that happened to default off — see the prop's own note.
+              notesAvailable={health.data?.capabilities.notes === true}
               inboxCount={todos.data?.length ?? null}
               skillsUpdateAvailable={skillsUpdateAvailable}
             />

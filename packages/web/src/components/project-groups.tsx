@@ -69,6 +69,8 @@ export function ProjectGroups({
   bootProjectId,
   inboxAvailable = false,
   automationsAvailable = false,
+  knowledgeAvailable = false,
+  notesAvailable = false,
   inboxCount = null,
   skillsUpdateAvailable = false,
 }: {
@@ -80,6 +82,23 @@ export function ProjectGroups({
   /** `capabilities.automations` (#801) — workspace-wide, unlike the per-project forge gate:
    *  the opt-in is one env var on the one server that serves every group. */
   automationsAvailable?: boolean
+  /** `capabilities.knowledge` (`CEZ_KB=1`) — workspace-wide like `automations`, since the opt-in
+   *  is one env var, but the PAGE is per project, so it belongs in every group's nav.
+   *
+   *  **Added 2026-08-14 (`.ai/specs/2026-08-14-workspace-level-navigation.md` D4) to fix a live
+   *  hole**: this prop did not exist, so the `visibleNavItems` call below omitted `knowledge`, the
+   *  gate took its `false` default, and the Knowledge item was filtered out of every project group
+   *  on an install that had the capability on. Nothing failed and nothing logged — a
+   *  defaults-to-absent gate hides rather than lies, which is safe and silent. */
+  knowledgeAvailable?: boolean
+  /** `capabilities.notes` (`CEZ_NOTES=1`).
+   *
+   *  Threaded even though **no group may ever show a Notes row** — it carries `workspace: true`
+   *  and the filter below removes it. That is the point: without this prop the gate defaulted
+   *  `false`, so the filter was never the thing keeping Notes out, and a test asserting "no group
+   *  offers Notes" passed for the wrong reason and would have kept passing with the filter
+   *  deleted. Passing the real capability makes the filter load-bearing, and therefore testable. */
+  notesAvailable?: boolean
   inboxCount?: number | null
   skillsUpdateAvailable?: boolean
 }) {
@@ -132,6 +151,8 @@ export function ProjectGroups({
           now={now}
           inboxAvailable={inboxAvailable}
           automationsAvailable={automationsAvailable}
+          knowledgeAvailable={knowledgeAvailable}
+          notesAvailable={notesAvailable}
           inboxCount={inboxCount}
           skillsUpdateAvailable={skillsUpdateAvailable}
           showTokens={metricVisibility.tokens}
@@ -154,6 +175,8 @@ function ProjectGroup({
   now,
   inboxAvailable,
   automationsAvailable,
+  knowledgeAvailable,
+  notesAvailable,
   inboxCount,
   skillsUpdateAvailable,
   showTokens,
@@ -173,6 +196,8 @@ function ProjectGroup({
   now: number
   inboxAvailable: boolean
   automationsAvailable: boolean
+  knowledgeAvailable: boolean
+  notesAvailable: boolean
   inboxCount: number | null
   skillsUpdateAvailable: boolean
   showTokens: boolean
@@ -316,6 +341,8 @@ function ProjectGroup({
               forge: project.forge === 'github',
               inbox: inboxAvailable,
               automations: automationsAvailable,
+              knowledge: knowledgeAvailable,
+              notes: notesAvailable,
             })
               .filter((item) => !item.workspace)
               .map((item) => {

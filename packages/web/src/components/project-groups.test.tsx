@@ -89,14 +89,25 @@ function renderGroups(
   projects: ProjectListEntry[],
   entry = '/p/cezar/',
   // #801: workspace-wide, unlike the per-project forge gate — one env var on the one server that
-  // serves every group. Off by default here, exactly as a default server reports it.
-  { automations = false }: { automations?: boolean } = {},
+  // serves every group. Off by default here, exactly as a default server reports it. `knowledge`
+  // (`CEZ_KB=1`) is the same shape and defaults the same way.
+  {
+    automations = false,
+    knowledge = false,
+    notes = false,
+  }: { automations?: boolean; knowledge?: boolean; notes?: boolean } = {},
 ) {
   return render(
     <QueryClientProvider client={createQueryClient()}>
       <MemoryRouter initialEntries={[entry]}>
         <ListViewProvider>
-          <ProjectGroups projects={projects} bootProjectId="cezar" automationsAvailable={automations} />
+          <ProjectGroups
+            projects={projects}
+            bootProjectId="cezar"
+            automationsAvailable={automations}
+            knowledgeAvailable={knowledge}
+            notesAvailable={notes}
+          />
         </ListViewProvider>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -251,6 +262,67 @@ describe('ProjectGroups', () => {
     for (const id of ['cezar', 'shop']) {
       const nav = within(group(id)).getByRole('navigation', { name: `${id} navigation` })
       expect(within(nav).queryByRole('link', { name: 'Automations' })).toBeNull()
+    }
+  })
+
+  /**
+   * The live hole `.ai/specs/2026-08-14-workspace-level-navigation.md` was written for: the
+   * `visibleNavItems` call here omitted `knowledge`, so the gate took its `false` default and the
+   * Knowledge item was filtered out of every group on an install with `CEZ_KB=1`. Nothing failed
+   * and nothing logged — a defaults-to-absent gate hides rather than lies, which is safe and
+   * silent, and the cockpit spent that time with the page it was displaying unreachable from the
+   * sidebar beside it.
+   *
+   * Deliberately shaped like the Automations test above — same both-directions structure — because
+   * the bug is "a caller forgot one key", and the only durable guard is asserting each gate is
+   * actually threaded.
+   */
+  it("gates every group's Knowledge tab on the workspace capability (CEZ_KB)", async () => {
+    storeCollapsed({ shop: false })
+    serve({ '/api/v1/p/cezar/runs': [], '/api/v1/p/shop/runs': [] })
+    const shop = project({ id: 'shop', name: 'shop', lastOpenedAt: '2026-07-19T00:00:00.000Z' })
+    const view = renderGroups([project(), shop], '/p/cezar/', { knowledge: true })
+
+    await waitFor(() => expect(header('shop').getAttribute('aria-expanded')).toBe('true'))
+    for (const id of ['cezar', 'shop']) {
+      const nav = within(group(id)).getByRole('navigation', { name: `${id} navigation` })
+      expect(within(nav).getByRole('link', { name: 'Knowledge' }).getAttribute('href'))
+        .toBe(`/p/${id}/knowledge`)
+    }
+
+    view.unmount()
+    renderGroups([project(), shop])
+    await waitFor(() => expect(header('shop').getAttribute('aria-expanded')).toBe('true'))
+    for (const id of ['cezar', 'shop']) {
+      const nav = within(group(id)).getByRole('navigation', { name: `${id} navigation` })
+      expect(within(nav).queryByRole('link', { name: 'Knowledge' })).toBeNull()
+      // Not an empty nav: the OFF case must prove the group still renders, or it would pass with
+      // the whole per-project nav broken.
+      expect(within(nav).getByRole('link', { name: 'Tasks' })).not.toBeNull()
+    }
+  })
+
+  /**
+   * A `workspace: true` item belongs to the shell's workspace band and to **no** group: a group's
+   * whole nav is scoped into one project via `scopeTo`, and a workspace item has no project to
+   * scope into.
+   *
+   * `notes: true` is passed on purpose. With the capability off this assertion passes for the
+   * wrong reason — the gate removes the item and the `workspace` filter is never reached — so
+   * deleting the filter would leave it green. Verified by mutation: with `notesAvailable` NOT
+   * threaded, removing the filter killed nothing.
+   */
+  it('keeps a workspace-scoped item out of every group, even with its capability on', async () => {
+    storeCollapsed({ shop: false })
+    serve({ '/api/v1/p/cezar/runs': [], '/api/v1/p/shop/runs': [] })
+    const shop = project({ id: 'shop', name: 'shop', lastOpenedAt: '2026-07-19T00:00:00.000Z' })
+    renderGroups([project(), shop], '/p/cezar/', { notes: true })
+
+    await waitFor(() => expect(header('shop').getAttribute('aria-expanded')).toBe('true'))
+    for (const id of ['cezar', 'shop']) {
+      const nav = within(group(id)).getByRole('navigation', { name: `${id} navigation` })
+      expect(within(nav).queryByRole('link', { name: 'Notes' })).toBeNull()
+      expect(within(nav).getByRole('link', { name: 'Tasks' })).not.toBeNull()
     }
   })
 

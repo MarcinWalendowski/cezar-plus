@@ -350,19 +350,34 @@ describe('AppShell', () => {
     })
   })
 
-  /** The global banner slot (#391). */
-  describe('All tasks link (multi-project only)', () => {
-    const allTasks = () => document.querySelector('[data-slot="all-tasks-link"]') as HTMLElement | null
+  /**
+   * The workspace nav band (multi-project only) — `.ai/specs/2026-08-14-workspace-level-navigation.md`.
+   *
+   * **REWRITTEN 2026-08-14.** This block was `All tasks link (multi-project only)` and asserted a
+   * single hardcoded `[data-slot="all-tasks-link"]`. That link is gone, replaced by a nav rendering
+   * `workspaceNavItems`, so the four assertions below are the same four claims re-pointed at the
+   * band: absent with one project, plain (unscoped) targets, pinned outside the scroller, active
+   * only on its own page. What is NEW is that the band has more than one row, and that its contents
+   * are gated rather than hardcoded — the two tests after these.
+   */
+  describe('workspace nav band (multi-project only)', () => {
+    const band = () => document.querySelector('[data-slot="workspace-nav"]') as HTMLElement | null
+    const rows = () =>
+      [...document.querySelectorAll('[data-slot="workspace-nav"] [data-slot="workspace-nav-item"]')] as HTMLElement[]
+    const row = (label: string) => rows().find((r) => r.textContent?.trim().startsWith(label)) ?? null
 
     it('is absent without project groups — one project needs no "all projects" door', () => {
       renderShell()
-      expect(allTasks()).toBeNull()
+      expect(band()).toBeNull()
     })
 
     it('links out of every project scope', () => {
       renderShell('/p/shop/git', { projectGroups: <p>groups</p> })
-      // A PLAIN target: the scope-aware Link would prefix it with `/p/shop`, which is no route.
-      expect(allTasks()!.getAttribute('href')).toBe('/tasks')
+      // PLAIN targets: the scope-aware Link would prefix them with `/p/shop`, which is no route.
+      // Settings is the one that cannot be derived from the per-project `to` — a project's
+      // `/settings` and the workspace's `/settings/global` are different routes.
+      expect(row('Tasks')!.getAttribute('href')).toBe('/tasks')
+      expect(row('Settings')!.getAttribute('href')).toBe('/settings/global')
     })
 
     it('stays put while the project groups scroll', () => {
@@ -370,16 +385,62 @@ describe('AppShell', () => {
       // projects to want this page is exactly the one that scrolls it out of sight.
       renderShell('/', { projectGroups: <p>groups</p> })
       const scroller = document.querySelector('[data-slot="project-groups"]') as HTMLElement
-      expect(scroller.contains(allTasks())).toBe(false)
+      expect(scroller.contains(band())).toBe(false)
       expect(scroller.className).toContain('overflow-y-auto')
     })
 
-    it('marks itself the current page only on /tasks', () => {
+    it('marks a row current on its own page, and never from inside a project scope', () => {
       renderShell('/tasks', { projectGroups: <p>groups</p> })
-      expect(allTasks()!.getAttribute('aria-current')).toBe('page')
+      expect(row('Tasks')!.getAttribute('aria-current')).toBe('page')
       cleanup()
       renderShell('/p/shop/', { projectGroups: <p>groups</p> })
-      expect(allTasks()!.getAttribute('aria-current')).toBeNull()
+      expect(row('Tasks')!.getAttribute('aria-current')).toBeNull()
+    })
+
+    /**
+     * D5's actual mechanism, pinned on the one path that can tell the two apart: the workspace
+     * band is fed the RAW pathname, so `/p/shop/notes` matches no workspace target. Feed it
+     * `stripProjectPrefix(pathname)` — the value the per-project band correctly uses — and this
+     * becomes `/notes`, lighting the workspace row while the user stands inside a project.
+     *
+     * `/p/shop/` cannot catch that: it strips to `/`, which is the Tasks item's `to` and not its
+     * `workspaceTo`, so both readings agree there.
+     */
+    it('does not light a workspace row from the project page of the same name', () => {
+      renderShell('/p/shop/notes', { projectGroups: <p>groups</p>, notesAvailable: true })
+      expect(row('Notes')!.getAttribute('aria-current')).toBeNull()
+    })
+
+    it('names Settings on its own deeper pages, not just the index', () => {
+      renderShell('/settings/global/appearance', { projectGroups: <p>groups</p> })
+      expect(row('Settings')!.getAttribute('aria-current')).toBe('page')
+    })
+
+    /**
+     * The hole this spec was written for: `Notes` carries `workspace: true`, so it renders HERE
+     * and nowhere else. Before the band existed there was no "here", and the Notes surface
+     * (shipped in `11467f44`) was reachable only by typing its URL.
+     */
+    it('renders a capability-gated workspace item — Notes appears only when notes are on', () => {
+      renderShell('/', { projectGroups: <p>groups</p>, notesAvailable: true })
+      expect(row('Notes')).not.toBeNull()
+      expect(row('Notes')!.getAttribute('href')).toBe('/notes')
+      cleanup()
+      // Explicit `false`, not an omission: `AppShell`'s OWN prop defaults are `true` (only
+      // `AppShellContainer` passes the health answer), so omitting it would assert the default
+      // rather than the gate.
+      renderShell('/', { projectGroups: <p>groups</p>, notesAvailable: false })
+      expect(row('Notes')).toBeNull()
+      // The negative case must not be "the band is empty" — that would pass with the band broken.
+      expect(row('Tasks')).not.toBeNull()
+    })
+
+    /** Git and Knowledge have no cross-project page yet (Phase 2), and a nav row that leads
+     *  nowhere is worse than a missing one. Pinned so Phase 2 has to come here and say so. */
+    it('offers no workspace row for a surface that has no workspace route yet', () => {
+      renderShell('/', { projectGroups: <p>groups</p>, knowledgeAvailable: true })
+      expect(row('Knowledge')).toBeNull()
+      expect(row('Git')).toBeNull()
     })
   })
 

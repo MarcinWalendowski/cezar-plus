@@ -2,7 +2,6 @@ import {
   FolderIcon,
   FilePlus2Icon,
   FolderOpenIcon,
-  LayersIcon,
   MenuIcon,
   PlusIcon,
   SearchIcon,
@@ -31,7 +30,14 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Sheet, SheetClose, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
-import { activeNavItem, activeNavPath, visibleNavItems, type NavItem } from '@/components/nav-items'
+import {
+  activeNavItem,
+  activeNavPath,
+  activeWorkspaceNavPath,
+  visibleNavItems,
+  workspaceNavItems,
+  type NavItem,
+} from '@/components/nav-items'
 import {
   DEFAULT_SIDEBAR_WIDTH,
   MAX_SIDEBAR_WIDTH,
@@ -192,6 +198,10 @@ export function AppShell({
   // (multi-project spec, step 3.2) so `/p/cezar/git/commits` still lights Git.
   const areaPathname = stripProjectPrefix(pathname)
   const activeTo = activeNavPath(areaPathname)
+  // The RAW pathname, not `areaPathname`: the workspace band must know it is inside a project
+  // scope, and stripping the prefix is exactly what destroys that (D5). `/p/x/notes` stripped is
+  // `/notes`, which would light the workspace Notes row from inside a project.
+  const activeWorkspaceTo = activeWorkspaceNavPath(pathname)
   const current = activeNavItem(areaPathname)
   const [menuOpen, setMenuOpen] = React.useState(false)
   const mainRef = React.useRef<HTMLElement>(null)
@@ -240,16 +250,22 @@ export function AppShell({
     return () => query.removeEventListener('change', onChange)
   }, [])
 
+  // One availability object, read by both bands: a capability that hides an item hides it in the
+  // workspace nav and in every project group without being restated (D2).
+  const availability = {
+    forge: forgeAvailable,
+    inbox: inboxAvailable,
+    knowledge: knowledgeAvailable,
+    notes: notesAvailable,
+    skills: skillsAvailable,
+    automations: automationsAvailable,
+  }
+
   const nav = {
     activeTo,
-    items: visibleNavItems({
-      forge: forgeAvailable,
-      inbox: inboxAvailable,
-      knowledge: knowledgeAvailable,
-      notes: notesAvailable,
-      skills: skillsAvailable,
-      automations: automationsAvailable,
-    }),
+    activeWorkspaceTo,
+    items: visibleNavItems(availability),
+    workspaceItems: workspaceNavItems(availability),
     repo,
     // The badge belongs to the Inbox item — with the item gone there is nothing to badge.
     inboxCount: inboxAvailable ? inboxCount : null,
@@ -308,7 +324,14 @@ export function AppShell({
 
 type NavProps = {
   activeTo: string | null
+  /** The active row of the WORKSPACE band, keyed on `workspaceTo` — null inside any project scope
+   *  (`activeWorkspaceNavPath`, D5). Separate from `activeTo` because the two bands can be active
+   *  at once in every other respect. */
+  activeWorkspaceTo: string | null
   items: NavItem[]
+  /** The workspace band's rows (`workspaceNavItems`) — a subset of `items` by construction, so the
+   *  two can never disagree about what a capability hides. */
+  workspaceItems: NavItem[]
   repo: RepoChip | null
   inboxCount: number | null
   unreadCount: number | null
@@ -491,7 +514,9 @@ function MobileNavDrawer({ onNavigate, ...props }: NavProps & { onNavigate: () =
  */
 function SidebarContent({
   activeTo,
+  activeWorkspaceTo,
   items,
+  workspaceItems,
   repo,
   inboxCount,
   unreadCount,
@@ -568,28 +593,79 @@ function SidebarContent({
               rather than a peer of them, and a workspace with enough projects to want this page
               is exactly the workspace that scrolls it out of sight. Its own bordered band is
               what stops it reading as an unusually-worded project. Only in a multi-project
-              workspace: with one project the page would be that project's own Tasks table
-              wearing a second name. */}
+              workspace: with one project these rows would be that project's own pages wearing a
+              second name.
+
+              CLOSED 2026-08-14 (`.ai/specs/2026-08-14-workspace-level-navigation.md`). This band
+              used to hardcode a single `AllTasksLink`, with a TODO(upstream-sync) noting that
+              there was no generic top-level slot for `workspace: true` items and closing "not a
+              regression today: no item carries `workspace: true`". Notes had carried it since
+              `11467f44`, which landed hours later the same day — so the Notes surface shipped
+              reachable only by typing its URL. The band now renders `workspaceNavItems`, the same
+              gated list the project groups and the ⌘K palette read. */}
           <div className="shrink-0 border-b border-border px-1.5 pt-0.5 pb-2">
-            {/* TODO(upstream-sync): hardcodes AllTasksLink here instead of routing through a
-                generic top-level slot for `workspace: true` nav items (`nav-items.ts`).
-                KNOWN GAP (central-hub scaffold, `.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`):
-                `items` (below) is what a `workspace: true` item is meant to render
-                through ONCE, outside every group (`project-groups.tsx` filters it OUT of its
-                per-project loop for exactly this reason) — but `items` never renders on this
-                branch. There is currently no top-level slot in multi-project mode for a
-                workspace item beyond AllTasksLink; one needs to land here before F3 feature A's
-                cross-project board (W4.10) is usable with more than one registered project. Not
-                a regression today: no item carries `workspace: true` (Notes did, and was removed
-                2026-08-14), so this branch is unaffected either way. */}
-            <AllTasksLink onNavigate={onNavigate} />
+            <nav aria-label="Workspace" data-slot="workspace-nav">
+              {workspaceItems.map((item) => {
+                // `workspaceTo` is what `workspaceNavItems` filtered on, so it is present here —
+                // asserted rather than defaulted, because a fallback would silently route a
+                // workspace row at a scoped path.
+                const to = item.workspaceTo as string
+                const isActive = to === activeWorkspaceTo
+                const Icon = item.icon
+                return (
+                  <RouterLink
+                    key={to}
+                    to={to}
+                    data-slot="workspace-nav-item"
+                    onClick={onNavigate}
+                    aria-current={isActive ? 'page' : undefined}
+                    // Reads at the weight of a section header rather than a nav row — full-strength
+                    // foreground and semibold, where the project groups below are semibold-on-default
+                    // and their rows are muted. Inherited from `AllTasksLink`, which earned it: this
+                    // band is a peer of the whole group list, not of one group.
+                    className={cn(
+                      'flex h-11 w-full items-center gap-2.5 rounded-md px-2.5 text-[13.5px] font-semibold text-foreground transition-colors hover:bg-muted md:h-9',
+                      isActive && 'bg-muted',
+                    )}
+                  >
+                    <Icon
+                      className={cn('size-4 shrink-0', isActive ? 'text-violet' : 'text-violet/70')}
+                      aria-hidden="true"
+                    />
+                    {item.label}
+                    {/* Workspace-wide, unlike the per-group badges: this count is every project's
+                        unread finished tasks, which is exactly what the row it sits on answers. */}
+                    {item.badge === 'tasks-unread' && unreadCount ? (
+                      <span
+                        data-slot="nav-unread-badge"
+                        title={`${unreadCount} unread finished ${unreadCount === 1 ? 'task' : 'tasks'}`}
+                        className="ml-auto rounded-full bg-violet px-1.5 py-px text-[10.5px] font-semibold text-violet-foreground"
+                      >
+                        {unreadCount}
+                      </span>
+                    ) : null}
+                  </RouterLink>
+                )
+              })}
+            </nav>
           </div>
           {/* Step 3.3: one collapsible group per registered project — nav + task list per group.
-              The whole area scrolls as one (per the sidebar mockup); collapsed groups are one row. */}
+              The whole area scrolls as one (per the sidebar mockup); collapsed groups are one row.
+
+              The `Projects` label (D3) is what gives the seam a name: with a real workspace band
+              above, the group list stopped being "the sidebar" and became one of two kinds of
+              thing in it. Inside the scroller rather than pinned, because it labels the list it
+              scrolls with — a heading that outlives its own section reads as a second brand. */}
           <div
             data-slot="project-groups"
             className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pt-1.5 pb-2"
           >
+            <h2
+              data-slot="projects-heading"
+              className="px-2.5 pb-1 text-[10.5px] font-semibold tracking-wide text-soft-foreground uppercase"
+            >
+              Projects
+            </h2>
             <SidebarNavigateContext.Provider value={onNavigate}>
               {projectGroups}
             </SidebarNavigateContext.Provider>
@@ -683,42 +759,6 @@ function SidebarContent({
         </div>
       </div>
     </div>
-  )
-}
-
-/**
- * The way into the global Tasks page (`/tasks`) — every project's work in one table, filtered
- * and grouped by project, tag, status or workflow.
- *
- * A PLAIN router Link, like the footer's global-settings one and for the same reason: the page
- * sits outside every project, and the scoped `Link` this file otherwise uses would prefix it
- * with the active `/p/<id>`, which is not a route. Its own icon (layers, not the per-project
- * checklist) so the two Tasks surfaces never read as the same button.
- */
-function AllTasksLink({ onNavigate }: { onNavigate?: () => void }) {
-  const { pathname } = useLocation()
-  const isActive = pathname === '/tasks'
-  return (
-    <RouterLink
-      to="/tasks"
-      data-slot="all-tasks-link"
-      onClick={onNavigate}
-      aria-current={isActive ? 'page' : undefined}
-      // Reads at the weight of a section header rather than a nav row: full-strength foreground
-      // and semibold, where the project groups below it are semibold-on-default and their nav
-      // rows are muted. The violet icon is the one spot of accent — the same hue the tag chips
-      // and this page's own selected filters use, so the door and the room match.
-      className={cn(
-        'flex h-11 w-full items-center gap-2.5 rounded-md px-2.5 text-[13.5px] font-semibold text-foreground transition-colors hover:bg-muted md:h-9',
-        isActive && 'bg-muted',
-      )}
-    >
-      <LayersIcon
-        className={cn('size-4 shrink-0', isActive ? 'text-violet' : 'text-violet/70')}
-        aria-hidden="true"
-      />
-      All tasks
-    </RouterLink>
   )
 }
 

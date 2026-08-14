@@ -50,8 +50,23 @@ export type NavItem = {
    *
    *  Notes carries it, and must: a note is workspace-scoped (PLAN D14) precisely because it has
    *  not been assigned to a repo yet, so rendering it per project would ask the user to pick the
-   *  thing the note exists to defer. */
+   *  thing the note exists to defer.
+   *
+   *  Reads as "an item whose workspace destination is its ONLY destination" — the exclusive case
+   *  of `workspaceTo` below, which is why an item carrying this must also carry that. */
   workspace?: boolean
+  /** Where this item points when rendered in the shell's **workspace-level** nav — the band above
+   *  the project groups (`.ai/specs/2026-08-14-workspace-level-navigation.md` D1).
+   *
+   *  An item appears in that band **iff** it has one, which is the whole gate: `Tasks` answers
+   *  across every project at `/tasks` and inside one at `/p/:id/`, so it carries both `to` and
+   *  this; `Git` and `Knowledge` have no cross-project page yet (Phase 2) and so carry only `to`,
+   *  because a nav row that leads nowhere is worse than a missing one.
+   *
+   *  Never derived from `to` — `/settings` scoped is a project's settings, and the workspace
+   *  answer is `/settings/global`, a different route with a different scope provider. The two
+   *  destinations are related by meaning, not by string. */
+  workspaceTo?: string
   /** Automations-gated (#801): the item exists only while `/api/health` reports
    *  `capabilities.automations` — GitHub automations are opt-in via `CEZ_AUTOMATIONS=1`.
    *  Independent of `forge`: the Automations item carries BOTH, because the feature needs a
@@ -72,14 +87,30 @@ export type NavItem = {
  *  carrying `skills` — see `NavItem.skills`.
  */
 export const NAV_ITEMS: NavItem[] = [
-  { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare'], badge: 'tasks-unread' },
+  { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare'], badge: 'tasks-unread', workspaceTo: '/tasks' },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, match: ['/inbox'], badge: 'inbox-count', inbox: true },
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'] },
   { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true, automations: true },
   { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true },
-  { to: '/notes', label: 'Notes', icon: NotebookPenIcon, match: ['/notes'], notes: true, workspace: true },
-  { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'] },
+  { to: '/notes', label: 'Notes', icon: NotebookPenIcon, match: ['/notes'], notes: true, workspace: true, workspaceTo: '/notes' },
+  { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'], workspaceTo: '/settings/global' },
 ]
+
+/**
+ * The items the shell's **workspace-level** band renders, above the project groups — the gated
+ * list filtered to those with a workspace destination (`workspaceTo`, D1).
+ *
+ * Deliberately the same `visibleNavItems` output the per-project groups and the ⌘K palette read,
+ * not a second hand-kept list: two lists over one concept drift, and this nav has already been
+ * bitten by one concept enforced in two places. A capability that hides an item hides it in both
+ * bands for free.
+ *
+ * `Git` and `Knowledge` are absent by construction until Phase 2 gives them a cross-project page
+ * — see `NavItem.workspaceTo`.
+ */
+export function workspaceNavItems(availability: NavAvailability = {}): NavItem[] {
+  return visibleNavItems(availability).filter((item) => item.workspaceTo !== undefined)
+}
 
 /** What `/api/health` says exists. All default to `false` — see `visibleNavItems`. */
 export type NavAvailability = {
@@ -163,6 +194,36 @@ export function activeNavPath(pathname: string): string | null {
       if (inArea(pathname, prefix) && (best === null || prefix.length > best.length)) {
         best = { to: item.to, length: prefix.length }
       }
+    }
+  }
+  return best?.to ?? null
+}
+
+/**
+ * The `workspaceTo` of the workspace-level item that owns `pathname`, or null when none does
+ * (D5).
+ *
+ * **Pass the RAW pathname, never `stripProjectPrefix`'d.** That single choice is what makes this
+ * scope-aware, and it is the whole mechanism: every workspace route (`/tasks`, `/notes`,
+ * `/settings/global`) sits outside `/p/:id` by construction, so a path inside a project scope
+ * matches none of them and falls out as null on its own. Hand it the stripped path and
+ * `/p/shop/notes` becomes `/notes`, which lights the workspace Notes row while the user is
+ * standing inside one project — the exact confusion the two bands exist to avoid.
+ *
+ * An explicit `startsWith('/p/')` guard was written here first and then removed: with the raw
+ * path it can never fire, so it read as the safety net while the argument was doing the work.
+ * The test that pins this renders at `/p/shop/notes`.
+ *
+ * Longest matching prefix wins, as in `activeNavPath`, so `/settings/global/appearance` lights
+ * Settings rather than falling through.
+ */
+export function activeWorkspaceNavPath(pathname: string): string | null {
+  let best: { to: string; length: number } | null = null
+  for (const item of NAV_ITEMS) {
+    const target = item.workspaceTo
+    if (target === undefined) continue
+    if (inArea(pathname, target) && (best === null || target.length > best.length)) {
+      best = { to: target, length: target.length }
     }
   }
   return best?.to ?? null
