@@ -25,7 +25,6 @@ import { streamSSE } from 'hono/streaming';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
-import { createNotesRoutes } from './notes-routes.ts';
 import { createWorkspaceRunsRoutes } from './workspace-runs-routes.ts';
 import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -5852,15 +5851,15 @@ export function createApp(deps: ServerDeps) {
     from: z.string().trim().min(1).max(200).optional(),
   });
 
-  // ---- central-hub scaffold: five inert, flag-gated families ---------------
+  // ---- central-hub scaffold: four inert, flag-gated families ---------------
   // Each lives in its own file (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D6) and is built
   // by a factory rather than declared inline, so the wave-4 packages that fill them in touch only
   // their own file — never this one. `knowledgeRoutes`/`sourcesRoutes` are project-scoped (mounted
-  // into `v1` below); `notesRoutes`/`workspaceRunsRoutes`/`notificationsRoutes` are workspace-level
-  // (mounted into `workspaceV1`).
+  // into `v1` below); `workspaceRunsRoutes`/`notificationsRoutes` are workspace-level (mounted
+  // into `workspaceV1`). F3 feature B (notes) was the fifth and was removed on 2026-08-14 —
+  // `.ai/specs/2026-08-14-remove-notes-capture-inbox.md`.
   const knowledgeRoutes = createKnowledgeRoutes();
   const sourcesRoutes = createSourcesRoutes();
-  const notesRoutes = createNotesRoutes();
   const workspaceRunsRoutes = createWorkspaceRunsRoutes();
   const notificationsRoutes = createNotificationsRoutes();
 
@@ -5909,7 +5908,6 @@ export function createApp(deps: ServerDeps) {
     .route('/', fsBrowseRoutes)
     .route('/', automationChecksRoutes)
     .route('/', workspaceEventsRoutes)
-    .route('/', notesRoutes)
     .route('/', workspaceRunsRoutes)
     .route('/', notificationsRoutes);
 

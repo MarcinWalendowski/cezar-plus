@@ -124,27 +124,9 @@ export function agentAccountsPath(): string {
 }
 
 /**
- * Notes — a workspace-scoped capture inbox (`.ai/specs/2026-08-06-workspace-notes-cross-project.md`,
- * F3/feature B, `CEZ_NOTES=1`). Its OWN file, on the `agentAccountsPath()` precedent above: a cezar
- * that has never heard of notes does not open `notes.json`, so it cannot drop them, whereas a key
- * inside `config.json` would make survival depend on another version's `.passthrough()`. It also
- * means zero `ensureDataGitignore` entries, since the workspace home sits outside every checkout —
- * no captured note ever lands near a user's git history.
- */
-export function notesPath(): string {
-  return join(cezarHomeDir(), 'notes.json');
-}
-
-/** Append-only pass-receipt log beside `notes.json`, 90-day retention — the `automations/store.ts`
- *  NDJSON-plus-compaction shape, not a file per note. */
-export function notesLogPath(): string {
-  return join(cezarHomeDir(), 'notes-log.ndjson');
-}
-
-/**
  * Identity storage — orgs, teams, users, memberships, sessions (D7,
  * `.ai/specs/2026-08-06-org-team-auth-onboarding.md`). Its own directory under `cezarHomeDir()`,
- * on the `agentAccountsPath()`/`notesPath()` precedent.
+ * on the `agentAccountsPath()` precedent.
  *
  * **CORRECTED 2026-08-07 (D13, adversarial review): the paragraph below — "a cezar build with
  * `CEZ_AUTH` unset never imports the module that reads this path" — is now FALSE.** D13's local
@@ -166,7 +148,7 @@ export function notesLogPath(): string {
  *
  * The original text follows unchanged:
  *
- * on the `agentAccountsPath()`/`notesPath()` precedent: a cezar build with `CEZ_AUTH` unset never
+ * on the `agentAccountsPath()` precedent: a cezar build with `CEZ_AUTH` unset never
  * imports the module that reads this path, so it never creates or touches it either — "unset
  * means zero I/O" (D1) requires that this function existing is not itself a filesystem
  * operation, and it is not (`join` does no I/O).

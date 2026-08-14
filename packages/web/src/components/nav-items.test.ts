@@ -15,7 +15,6 @@ describe('activeNavPath', () => {
     ['/compare/grp-1', '/'],
 
     ['/inbox', '/inbox'],
-    ['/notes', '/notes'],
     ['/git', '/git'],
     ['/github', '/github'],
     ['/github/issues/42', '/github'],
@@ -70,7 +69,6 @@ describe('NAV_ITEMS', () => {
     expect(NAV_ITEMS.map((item) => item.label)).toEqual([
       'Tasks',
       'Inbox',
-      'Notes',
       'Git',
       'GitHub',
       'Automations',
@@ -92,15 +90,13 @@ describe('NAV_ITEMS', () => {
 
 /** The gates: the GitHub item exists exactly while health reports the forge driver (R6 Step 1.1),
  *  the Inbox item exactly while it reports the opt-in `capabilities.followups` (#471), the
- *  Knowledge item exactly while it reports `capabilities.knowledge` (central-hub F1), and the
- *  Notes item exactly while it reports `capabilities.notes` (central-hub F3). Each gate owns
- *  ONLY its own item, and all four default to absent while health is unknown. */
+ *  Knowledge item exactly while it reports `capabilities.knowledge` (central-hub F1). Each gate
+ *  owns ONLY its own item, and all three default to absent while health is unknown. */
 describe('visibleNavItems', () => {
   const ALL: Required<Parameters<typeof visibleNavItems>[0]> = {
     forge: true,
     inbox: true,
     knowledge: true,
-    notes: true,
     skills: true,
   }
   const labelsOf = (opts?: Parameters<typeof visibleNavItems>[0]) =>
@@ -114,7 +110,6 @@ describe('visibleNavItems', () => {
     expect(labelsOf({ ...ALL, forge: false })).toEqual([
       'Tasks',
       'Inbox',
-      'Notes',
       'Git',
       'Knowledge',
       'Skills',
@@ -126,7 +121,6 @@ describe('visibleNavItems', () => {
   it('without the inbox, exactly the Inbox item drops out (#471)', () => {
     expect(labelsOf({ ...ALL, inbox: false })).toEqual([
       'Tasks',
-      'Notes',
       'Git',
       'GitHub',
       'Automations',
@@ -141,24 +135,9 @@ describe('visibleNavItems', () => {
     expect(labelsOf({ ...ALL, knowledge: false })).toEqual([
       'Tasks',
       'Inbox',
-      'Notes',
       'Git',
       'GitHub',
       'Automations',
-      'Skills',
-      'Workflows',
-      'Settings',
-    ])
-  })
-
-  it('without notes, exactly the Notes item drops out (central-hub F3)', () => {
-    expect(labelsOf({ ...ALL, notes: false })).toEqual([
-      'Tasks',
-      'Inbox',
-      'Git',
-      'GitHub',
-      'Automations',
-      'Knowledge',
       'Skills',
       'Workflows',
       'Settings',
@@ -166,7 +145,7 @@ describe('visibleNavItems', () => {
   })
 
   it('drops everything gated when nothing is available', () => {
-    expect(labelsOf({ forge: false, inbox: false, knowledge: false, notes: false })).toEqual([
+    expect(labelsOf({ forge: false, inbox: false, knowledge: false })).toEqual([
       'Tasks',
       'Git',
       'Skills',
@@ -176,17 +155,15 @@ describe('visibleNavItems', () => {
   })
 
   it('defaults to absent — the nav claims nothing before health answers', () => {
-    expect(labelsOf()).toEqual(labelsOf({ forge: false, inbox: false, knowledge: false, notes: false }))
+    expect(labelsOf()).toEqual(labelsOf({ forge: false, inbox: false, knowledge: false }))
   })
 
   it('never invents an item — the result is always a subset of NAV_ITEMS, in order', () => {
     for (const forge of [true, false]) {
       for (const inbox of [true, false]) {
         for (const knowledge of [true, false]) {
-          for (const notes of [true, false]) {
-            const items = visibleNavItems({ forge, inbox, knowledge, notes })
-            expect(NAV_ITEMS.filter((i) => items.includes(i))).toEqual(items)
-          }
+          const items = visibleNavItems({ forge, inbox, knowledge })
+          expect(NAV_ITEMS.filter((i) => items.includes(i))).toEqual(items)
         }
       }
     }

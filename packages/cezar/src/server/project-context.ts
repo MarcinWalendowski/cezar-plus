@@ -246,8 +246,8 @@ export class ProjectContexts {
   private readonly env: NodeJS.ProcessEnv;
   /** Workspace level (D22a), never per project. Always buildable at zero cost: it is a read-only
    *  parser that touches no filesystem until `.list()`/`.digest()` is actually called (its own doc
-   *  comment), so it exists whether or not `CEZ_NOTES`/`CEZ_WORKSPACE_VIEWS` are on; those flags
-   *  gate the ROUTES that call it (W4.10/P2.x), not this index. */
+   *  comment), so it exists whether or not `CEZ_WORKSPACE_VIEWS` is on; that flag gates the
+   *  ROUTES that call it (W4.10), not this index. */
   readonly runIndex: WorkspaceRunIndex;
   /** Workspace level (D22a). `undefined` when `CEZ_NOTIFY` is not exactly `'1'`, or when building
    *  it failed: a degraded cockpit rather than a boot failure (`AGENTS.md`: "a missing

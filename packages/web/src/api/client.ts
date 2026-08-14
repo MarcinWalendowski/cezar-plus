@@ -110,8 +110,6 @@ import type {
   SourceDocumentResponse,
   SourceCommentsResponse,
   SourceLogResponse,
-  NotesListResponse,
-  NoteResponse,
   WorkspaceRunsResponse,
   NotificationsResponse,
   NotificationLogResponse,
@@ -1891,34 +1889,6 @@ export async function getSourceLog(
       init(opts),
     ),
     '/sources/:connectionId/log',
-  )
-}
-
-/** `GET /workspace/notes` (F3 feature B, `CEZ_NOTES`). Workspace-level, never project-scoped
- *  (D14 — a note has not yet been assigned to a project). */
-export async function getWorkspaceNotes(
-  query: { status?: 'raw' | 'processing' | 'processed' | 'all'; projects?: string; limit?: number } = {},
-  opts?: ReadOptions,
-): Promise<NotesListResponse> {
-  return unwrap(
-    await cez.api.v1.workspace.notes.$get(
-      {
-        query: {
-          status: query.status,
-          projects: query.projects,
-          limit: query.limit,
-        },
-      },
-      init(opts),
-    ),
-    '/workspace/notes',
-  )
-}
-
-export async function getWorkspaceNote(noteId: string, opts?: ReadOptions): Promise<NoteResponse> {
-  return unwrap(
-    await cez.api.v1.workspace.notes[':noteId'].$get({ param: { noteId } }, init(opts)),
-    '/workspace/notes/:noteId',
   )
 }
 

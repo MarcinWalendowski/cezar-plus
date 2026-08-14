@@ -1,4 +1,15 @@
-# Workspace notes and cross-project views
+# Workspace notes (REMOVED 2026-08-14) and cross-project views
+
+> **SUPERSEDED IN PART 2026-08-14 by `.ai/specs/2026-08-14-remove-notes-capture-inbox.md`.**
+> **Feature B — the notes capture inbox — was removed from the fork and is not coming back:**
+> every route, the `CEZ_NOTES` flag, the `capabilities.notes` key, the `/notes` page, the
+> contract module and the `~/.cezar/notes.json` path helpers are deleted. It never got past the
+> inert scaffold, so nothing described below about notes was ever implemented. Read everything
+> about notes here as history, not as queued work.
+>
+> **Feature A — cross-project views (`CEZ_WORKSPACE_VIEWS`, `GET /api/v1/workspace/runs`,
+> `/workspace/tasks`, W4.10) — is UNAFFECTED and still current.** That is the half of this spec
+> still worth reading.
 
 > Plan: `.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` (feature F3, packages W1.11, W4.10, P2.1 to P2.5).
 > Its "Resolved decisions" table D1 to D22 (including the cross-spec additions D15 to D22) is

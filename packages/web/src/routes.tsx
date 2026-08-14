@@ -34,14 +34,14 @@ import {
 } from './routes/settings/settings-shell'
 import { TasksOverviewRoute } from './routes/tasks-overview'
 import { AutomationsRoute } from './routes/automations/automations'
-// Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D22c): these three are
+// Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D22c): these two are
 // capability-gated placeholder pages, created by the scaffold so `routes.tsx` is edited exactly
-// once. Each is taken over and FILLED by its own wave (W2.3 knowledge, P2.4 notes, W4.10
-// workspace-tasks) — a sequenced hand-off of the same file, never a concurrent edit. Statically
-// imported like `InboxRoute`/`TasksOverviewRoute`: today each is a tiny placeholder, not a heavy
-// chunk, so there is nothing here yet worth lazy-loading.
+// once. Each is taken over and FILLED by its own wave (W2.3 knowledge, W4.10 workspace-tasks) — a
+// sequenced hand-off of the same file, never a concurrent edit. Statically imported like
+// `InboxRoute`/`TasksOverviewRoute`: today each is a tiny placeholder, not a heavy chunk, so there
+// is nothing here yet worth lazy-loading. (P2.4's `/notes` page was the third until F3 feature B
+// was removed on 2026-08-14 — `.ai/specs/2026-08-14-remove-notes-capture-inbox.md`.)
 import { KnowledgeRoute } from './routes/knowledge/knowledge'
-import { NotesRoute } from './routes/notes/notes'
 import { WorkspaceTasksRoute } from './routes/workspace/workspace-tasks'
 
 /** Lazy ON PURPOSE: the thread view carries the markdown stack (Streamdown + remark/rehype,
@@ -404,7 +404,6 @@ const PAGE_TITLE_ROUTES = [
   { pattern: '/skills', pageLabel: 'Skills' },
   { pattern: '/inbox', pageLabel: 'Inbox' },
   { pattern: '/knowledge/*', pageLabel: 'Knowledge' },
-  { pattern: '/notes', pageLabel: 'Notes' },
   { pattern: '/workspace/tasks', pageLabel: 'Tasks' },
   { pattern: '/onboarding', pageLabel: 'Onboarding' },
   { pattern: '/workflows/*', pageLabel: 'Workflows' },
@@ -663,13 +662,11 @@ export function AppRoutes() {
           />
         ))}
 
-        {/* Two more non-project areas (central-hub scaffold F3, `CEZ_NOTES=1` /
-            `CEZ_WORKSPACE_VIEWS=1`), the same shape as `/settings/global` above: no project owns a
-            note before it is filed, and the cross-project board aggregates every project, so
-            neither mounts under `ProjectScopeRoute` (`.ai/specs/2026-08-06-workspace-notes-cross-
-            project.md` "The scope trap"). Reachable even off — each route renders its own
-            "disabled" state rather than a 404 (D19). */}
-        <Route path="/notes" element={<NotesRoute />} />
+        {/* One more non-project area (central-hub scaffold F3 feature A,
+            `CEZ_WORKSPACE_VIEWS=1`), the same shape as `/settings/global` above: the cross-project
+            board aggregates every project, so it does not mount under `ProjectScopeRoute`
+            (`.ai/specs/2026-08-06-workspace-notes-cross-project.md` "The scope trap"). Reachable
+            even off — the route renders its own "disabled" state rather than a 404 (D19). */}
         <Route path="/workspace/tasks" element={<WorkspaceTasksRoute />} />
 
         {/* The onboarding wizard (D8; D13 local mode). Outside `ProjectScopeRoute` for the same

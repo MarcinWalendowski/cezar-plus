@@ -9,7 +9,7 @@
 |---|---|---|
 | `.ai/specs/2026-08-06-knowledge-base-mounts-search.md` | F1 Knowledge base | yes |
 | `.ai/specs/2026-08-06-external-source-connectors-notion.md` | F2 Source seam + Notion provider | yes |
-| `.ai/specs/2026-08-06-workspace-notes-cross-project.md` | F3 Notes to multi-project tasks, cross-project views | yes |
+| `.ai/specs/2026-08-06-workspace-notes-cross-project.md` | F3 ~~Notes to multi-project tasks~~ (**feature B REMOVED 2026-08-14**, `.ai/specs/2026-08-14-remove-notes-capture-inbox.md`), cross-project views (feature A, still current) | yes |
 | `.ai/specs/2026-08-06-pluggable-notification-transports.md` | F4 Notification transports | yes |
 | `.ai/specs/2026-08-06-ops-board-notion-cutover.md` | F5 Ops board, Notion migration, multi-player | **no, fork-private** |
 | `../../chat/.ai/specs/SPEC-417-2026-08-06-cezar-notification-agent.md` | F6 `agt_cezar` + `/notify/v1` ingress | n/a (chat repo) |

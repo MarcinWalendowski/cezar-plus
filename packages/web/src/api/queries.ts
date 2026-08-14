@@ -60,8 +60,6 @@ import {
   getSourceDocument,
   getSourceComments,
   getSourceLog,
-  getWorkspaceNotes,
-  getWorkspaceNote,
   getWorkspaceRuns,
   getWorkspaceNotifications,
   getWorkspaceNotificationsLog,
@@ -261,12 +259,7 @@ export const workspaceQueryKeys = {
   fsBrowseRoot: ['workspace', 'fs-browse'] as const,
   fsBrowse: (path: string | null, showHidden = false) =>
     [...workspaceQueryKeys.fsBrowseRoot, path, showHidden] as const,
-  // ---- central-hub scaffold (F3/F4, workspace-level) ---------------------------------------
-  /** `GET /workspace/notes` (D14 — a note is workspace-scoped, never project-scoped). */
-  notesRoot: ['workspace', 'notes'] as const,
-  notes: (filters: { status?: string; projects?: string } = {}) =>
-    [...workspaceQueryKeys.notesRoot, filters.status ?? null, filters.projects ?? null] as const,
-  note: (noteId: string) => [...workspaceQueryKeys.notesRoot, noteId] as const,
+  // ---- central-hub scaffold (F3 feature A / F4, workspace-level) ----------------------------
   /** `GET /workspace/runs` — the cross-project aggregate. */
   workspaceRuns: (filters: { projects?: string; view?: string } = {}) =>
     ['workspace', 'runs', filters.projects ?? null, filters.view ?? null] as const,
@@ -1352,22 +1345,6 @@ export function useSourceLog(connectionId: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.sourceLog(connectionId),
     queryFn: ({ signal }) => getSourceLog(connectionId, {}, { signal }),
-    enabled,
-  })
-}
-
-/** `GET /workspace/notes` (F3 feature B). Workspace-level (D14) — never led by `queryScope()`. */
-export function useWorkspaceNotes(filters: { status?: 'raw' | 'processing' | 'processed' | 'all'; projects?: string } = {}) {
-  return useQuery({
-    queryKey: workspaceQueryKeys.notes(filters),
-    queryFn: ({ signal }) => getWorkspaceNotes(filters, { signal }),
-  })
-}
-
-export function useWorkspaceNote(noteId: string, enabled = true) {
-  return useQuery({
-    queryKey: workspaceQueryKeys.note(noteId),
-    queryFn: ({ signal }) => getWorkspaceNote(noteId, { signal }),
     enabled,
   })
 }

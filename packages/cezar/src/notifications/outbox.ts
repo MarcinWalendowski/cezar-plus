@@ -35,7 +35,7 @@ import type { Notification } from './types.ts';
  * This is the same append-then-latest-wins shape `AutomationStore` uses for receipts/log rows.
  *
  * `paths.ts` (scaffold-owned, W1.1) does not export a `notificationsDataDir()` helper alongside
- * its `agentAccountsPath()` / `notesPath()` siblings, so `notificationsDataDir()` below resolves
+ * its `agentAccountsPath()` sibling, so `notificationsDataDir()` below resolves
  * it locally from the already-exported `cezarHomeDir()` — the same move `notifications/config.ts`
  * (W1.8) already makes for `notificationsConfigPath()`, and for the same reason (dispatch-contract
  * rule 5: touch only your own files).

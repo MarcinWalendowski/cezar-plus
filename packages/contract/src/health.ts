@@ -102,8 +102,6 @@ export const capabilitiesSchema = z.object({
   knowledge: z.boolean(),
   /** `CEZ_SOURCES=1` (F2, external source connectors / Notion mirror). */
   sources: z.boolean(),
-  /** `CEZ_NOTES=1` (F3, the workspace capture inbox). */
-  notes: z.boolean(),
   /** `CEZ_WORKSPACE_VIEWS=1` (F3, the cross-project runs aggregate). Also `false` under
    *  `CEZ_SINGLE_PROJECT=1`, which takes the identical flag-off shape. */
   workspaceViews: z.boolean(),

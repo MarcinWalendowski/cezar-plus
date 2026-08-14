@@ -76,10 +76,6 @@ describe('every mutating route carries a typed body into AppType', () => {
     Assert<HasTypedBody<'/api/v1/sources', '$post'>>,
     Assert<HasTypedBody<'/api/v1/sources/:connectionId', '$put'>>,
     Assert<HasTypedBody<'/api/v1/sources/:connectionId/documents/:docId/resolve', '$post'>>,
-    Assert<HasTypedBody<'/api/v1/workspace/notes', '$post'>>,
-    Assert<HasTypedBody<'/api/v1/workspace/notes/:noteId', '$patch'>>,
-    Assert<HasTypedBody<'/api/v1/workspace/notes/:noteId/approve', '$post'>>,
-    Assert<HasTypedBody<'/api/v1/workspace/notes/:noteId/reject', '$post'>>,
     Assert<HasTypedBody<'/api/v1/workspace/notifications', '$put'>>,
     Assert<HasTypedBody<'/api/v1/workspace/notifications/transports', '$post'>>,
     Assert<HasTypedBody<'/api/v1/workspace/notifications/transports/:id', '$put'>>,
@@ -119,7 +115,6 @@ describe('every mutating route carries a typed body into AppType', () => {
     // Central-hub scaffold: every GET that carries a real query string in its family's spec.
     Assert<HasTypedInput<'/api/v1/knowledge/search', '$get', 'query'>>,
     Assert<HasTypedInput<'/api/v1/sources/:connectionId/log', '$get', 'query'>>,
-    Assert<HasTypedInput<'/api/v1/workspace/notes', '$get', 'query'>>,
     Assert<HasTypedInput<'/api/v1/workspace/runs', '$get', 'query'>>,
     Assert<HasTypedInput<'/api/v1/workspace/notifications/log', '$get', 'query'>>,
   ];

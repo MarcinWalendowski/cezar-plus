@@ -46,7 +46,7 @@ describe('notifications config store', () => {
     ...over,
   });
 
-  it('resolves the path under CEZ_HOME, beside agent-accounts.json and notes.json', () => {
+  it('resolves the path under CEZ_HOME, beside agent-accounts.json', () => {
     expect(notificationsConfigPath()).toBe(join(home, 'notifications.json'));
   });
 

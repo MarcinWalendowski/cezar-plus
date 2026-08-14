@@ -132,7 +132,7 @@ export interface OrgSystemdUnitOptions {
  * `CEZ_PORT_STRICT=1` is this generator's own naming for D10's hard-bind opt-in — the spec names
  * `--port-strict` as one option and "an env var of the same shape as every other `CEZ_*` opt-in"
  * as the other; every other boolean toggle in this codebase (`CEZ_ALLOW_UNAUTHENTICATED`,
- * `CEZ_REMOTE`, `CEZ_KB`, `CEZ_NOTES`, …) is the env-var form, so this generator follows that
+ * `CEZ_REMOTE`, `CEZ_KB`, `CEZ_SOURCES`, …) is the env-var form, so this generator follows that
  * precedent rather than inventing a new CLI flag. Fill unit 6 (`index.ts`'s `serve` argument
  * parsing) must implement the variable for it to do anything — an unrecognised `process.env` key
  * is inert, not a crash (unlike `parseArgs`'s strict-mode unknown-flag throw), so this generator

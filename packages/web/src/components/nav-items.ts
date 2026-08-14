@@ -3,7 +3,6 @@ import {
   GitBranchIcon,
   InboxIcon,
   ListChecksIcon,
-  NotebookPenIcon,
   SettingsIcon,
   SparklesIcon,
   WorkflowIcon,
@@ -32,9 +31,6 @@ export type NavItem = {
   /** Knowledge-gated (central-hub scaffold F1): the item exists only while `/api/health`
    *  reports `capabilities.knowledge` — opt-in via `CEZ_KB=1`. Project-scoped, like Git. */
   knowledge?: boolean
-  /** Notes-gated (central-hub scaffold F3): the item exists only while `/api/health` reports
-   *  `capabilities.notes` — opt-in via `CEZ_NOTES=1`. */
-  notes?: boolean
   /** Skills-gated: the item exists unless `/api/health` reports `capabilities.skills === false`
    *  (`CEZ_SKILLS=0`). Note the polarity — every other gate here is opt-IN and this one is
    *  opt-OUT, because Skills predates the capability payload and absent must keep meaning on.
@@ -44,7 +40,12 @@ export type NavItem = {
    *  receives `scopeTo` (`.ai/specs/2026-08-06-workspace-notes-cross-project.md` "Nav"): a
    *  workspace item has no project to scope into. `ProjectGroups` filters these out of its
    *  per-project loop; the flat single-project sidebar renders every visible item, this one
-   *  included, since there is only ever one group to render it in. */
+   *  included, since there is only ever one group to render it in.
+   *
+   *  **No item carries it today** — Notes was the only one and was removed on 2026-08-14
+   *  (`.ai/specs/2026-08-14-remove-notes-capture-inbox.md`). Kept rather than deleted because F3
+   *  feature A's cross-project board (`/workspace/tasks`, W4.10) is the next item that needs it,
+   *  and `ProjectGroups`'s filter is what keeps a workspace item out of the per-project loop. */
   workspace?: boolean
 }
 
@@ -57,14 +58,6 @@ export type NavItem = {
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare'], badge: 'tasks-unread' },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, match: ['/inbox'], badge: 'inbox-count', inbox: true },
-  {
-    to: '/notes',
-    label: 'Notes',
-    icon: NotebookPenIcon,
-    match: ['/notes'],
-    notes: true,
-    workspace: true,
-  },
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'] },
   { to: '/github', label: 'GitHub', icon: GithubIcon, match: ['/github'], forge: true },
   { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true },
@@ -82,10 +75,6 @@ export type NavAvailability = {
   inbox?: boolean
   /** `capabilities.knowledge` — the opt-in knowledge base (central-hub scaffold F1, `CEZ_KB=1`). */
   knowledge?: boolean
-  /** `capabilities.notes` — the opt-in workspace capture inbox (central-hub scaffold F3,
-   *  `CEZ_NOTES=1`). Also `false` under `CEZ_SINGLE_PROJECT=1` (`capabilities.ts`), same as the
-   *  server reports it. */
-  notes?: boolean
   /** `capabilities.skills` — the opt-OUT Skills surface (`CEZ_SKILLS=0` hides it). Defaults to
    *  `true` here, the opposite of every field above, for the same reason the capability itself is
    *  inverted: Skills predates this key, so an install that has never heard of it must keep the
@@ -109,7 +98,6 @@ export function visibleNavItems({
   forge = false,
   inbox = false,
   knowledge = false,
-  notes = false,
   skills = true,
 }: NavAvailability = {}): NavItem[] {
   return NAV_ITEMS.filter(
@@ -117,9 +105,8 @@ export function visibleNavItems({
       (item.forge ? forge : true) &&
       (item.inbox ? inbox : true) &&
       (item.knowledge ? knowledge : true) &&
-      (item.notes ? notes : true) &&
       // `skills` defaults TRUE (see `NavAvailability`), so this line reads the same as the
-      // four above while meaning the opposite: it removes the item only on an explicit
+      // three above while meaning the opposite: it removes the item only on an explicit
       // `skills: false` from health.
       (item.skills ? skills : true),
   )

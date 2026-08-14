@@ -84,9 +84,6 @@ export type AppShellProps = {
   /** Knowledge gating (central-hub scaffold F1): `false` drops the Knowledge nav item — opt-in
    *  via `CEZ_KB=1`. Defaults to shown for the same reason as `forgeAvailable`. */
   knowledgeAvailable?: boolean
-  /** Notes gating (central-hub scaffold F3): `false` drops the Notes nav item — opt-in via
-   *  `CEZ_NOTES=1`. Defaults to shown for the same reason as `forgeAvailable`. */
-  notesAvailable?: boolean
   /** Skills gating: `false` drops the Skills nav item — opt-OUT via `CEZ_SKILLS=0`, so unlike
    *  every neighbour here the default is `true` and only an explicit `false` hides it. */
   skillsAvailable?: boolean
@@ -160,7 +157,6 @@ export function AppShell({
   forgeAvailable = true,
   inboxAvailable = true,
   knowledgeAvailable = true,
-  notesAvailable = true,
   skillsAvailable = true,
   singleProject = false,
   banner,
@@ -212,7 +208,6 @@ export function AppShell({
       forge: forgeAvailable,
       inbox: inboxAvailable,
       knowledge: knowledgeAvailable,
-      notes: notesAvailable,
       skills: skillsAvailable,
     }),
     repo,
@@ -417,13 +412,13 @@ function SidebarContent({
         // The whole area scrolls as one (per the sidebar mockup); collapsed groups are one row.
         //
         // KNOWN GAP (central-hub scaffold, `.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`):
-        // `items` (below) is what a `workspace: true` item like Notes is meant to render through
-        // ONCE, outside every group (`nav-items.ts`, `project-groups.tsx` filters it OUT of its
+        // `items` (below) is what a `workspace: true` item is meant to render through ONCE,
+        // outside every group (`nav-items.ts`, `project-groups.tsx` filters it OUT of its
         // per-project loop for exactly this reason) — but `items` never renders on THIS branch.
         // There is currently no top-level slot in multi-project mode for a workspace item; one
-        // needs to land here before `CEZ_NOTES=1` is usable with more than one registered
-        // project. Not a regression: today, with the flag off by default, this branch is
-        // unaffected either way.
+        // needs to land here before F3 feature A's cross-project board (W4.10) is usable with more
+        // than one registered project. Not a regression: no item carries `workspace: true` today
+        // (Notes did, and was removed 2026-08-14), so this branch is unaffected either way.
         <div
           data-slot="project-groups"
           className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pb-2"

@@ -37,14 +37,17 @@
  *   exact-`'1'` gate, `knowledgeSystemPrompt(undefined)` returns `undefined`, and
  *   `composeSystemPrompt` drops it — the composed prompt and `additionalDirectories` are
  *   unchanged, verified by hashing both builds' output.
- * - **`/api/v1/health`: NOT byte-identical.** The five keys below are emitted unconditionally, so
- *   the flag-off body grows by `"knowledge":false,"sources":false,"notes":false,
- *   "workspaceViews":false,"notify":false` (933 → 1019 bytes on an otherwise identical fixture).
+ * - **`/api/v1/health`: NOT byte-identical.** The central-hub keys below are emitted
+ *   unconditionally, so the flag-off body grows by
+ *   `"knowledge":false,"sources":false,"workspaceViews":false,"notify":false`. (It was five keys
+ *   and a measured 933 → 1019 bytes until `notes` was removed on 2026-08-14 —
+ *   `.ai/specs/2026-08-14-remove-notes-capture-inbox.md`; the byte figure is not restated here
+ *   rather than restated wrong.)
  *
  * That is a deliberate shape, not a slip, and it is why the claim had to be corrected rather than
- * the code: `capabilitiesSchema` (`packages/contract/src/health.ts`) declares all five as required
- * `z.boolean()`, `capabilities.test.ts`'s "independent of the deployment mode" case asserts the
- * full 11-key object with `toEqual`, and the pre-existing opt-in capability `followups` is itself
+ * the code: `capabilitiesSchema` (`packages/contract/src/health.ts`) declares each of them as a
+ * required `z.boolean()`, `capabilities.test.ts`'s "independent of the deployment mode" case
+ * asserts the full object with `toEqual`, and the pre-existing opt-in capability `followups` is itself
  * always present as `false`. Omitting a key when off would contradict all three. What "opt-in"
  * buys here is behavioural, not byte-level: no index, no watcher, no timer, no route, no nav item
  * and no prompt bytes. If byte-level identity of the health body is genuinely required, it is a
@@ -52,10 +55,10 @@
  * belongs in the plan before the code, not in a quiet edit here.
  *
  * `knowledge` (`CEZ_KB`), `sources` (`CEZ_SOURCES`) and `notify` (`CEZ_NOTIFY`)
- * are per-project features and are independent of `singleProject`. `notes` (`CEZ_NOTES`) and
- * `workspaceViews` (`CEZ_WORKSPACE_VIEWS`) are cross-project by nature, so both report `false`
- * under `CEZ_SINGLE_PROJECT=1` regardless of their own flag — a single-project cockpit has no
- * "every registered project" to aggregate or fan a note out across.
+ * are per-project features and are independent of `singleProject`. `workspaceViews`
+ * (`CEZ_WORKSPACE_VIEWS`) is cross-project by nature, so it reports `false`
+ * under `CEZ_SINGLE_PROJECT=1` regardless of its own flag — a single-project cockpit has no
+ * "every registered project" to aggregate across.
  *
  * `CEZ_AUTH` (D1 of `.ai/specs/2026-08-06-org-team-auth-onboarding.md`) is read by
  * `resolveAuthProvider` below and is **not** part of `resolveCapabilities`'s result: it is
@@ -199,8 +202,7 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
     knowledge: env.CEZ_KB === '1',
     sources: env.CEZ_SOURCES === '1',
     // Cross-project by nature: false under singleProject regardless of the flag (see the
-    // module docblock) — a single-project cockpit has nothing to aggregate or fan out across.
-    notes: env.CEZ_NOTES === '1' && !singleProject,
+    // module docblock) — a single-project cockpit has nothing to aggregate across.
     workspaceViews: env.CEZ_WORKSPACE_VIEWS === '1' && !singleProject,
     notify: env.CEZ_NOTIFY === '1',
     // The one INVERTED gate in this object: `=== '1'` everywhere above, `!== '0'` here.

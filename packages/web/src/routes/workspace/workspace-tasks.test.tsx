@@ -29,7 +29,6 @@ const CAPABILITIES_ON: HealthResponse['capabilities'] = {
   costMetrics: true,
   knowledge: false,
   sources: false,
-  notes: false,
   workspaceViews: true,
   notify: false,
   skills: true,

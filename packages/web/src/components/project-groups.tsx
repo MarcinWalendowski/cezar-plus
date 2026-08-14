@@ -329,7 +329,7 @@ function ProjectGroup({
                 group offers a GitHub tab — the boot folder's health-level forge answer says
                 nothing about the other projects in the workspace. Whether `gh` itself works
                 still surfaces inside the tab as its availability hint. */}
-            {/* `workspace: true` items (central-hub scaffold, e.g. Notes) render once at the
+            {/* `workspace: true` items (central-hub scaffold) render once at the
                 shell's top level, never inside a project group — a group's whole nav is scoped
                 into ONE project via `scopeTo` below, and a workspace item has no project to
                 scope into (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D22c). */}

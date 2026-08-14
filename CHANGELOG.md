@@ -1,5 +1,19 @@
 # Unreleased
 
+## 🗑 Removed
+- **The workspace notes capture inbox (F3 feature B) is gone.** `CEZ_NOTES` no longer does
+  anything, `capabilities.notes` is no longer in the `/api/v1/health` payload, the
+  `/api/v1/workspace/notes*` routes are unregistered (those paths fall through to the SPA
+  catch-all again), the `/notes` page and its nav item are removed, and `~/.cezar/notes.json` /
+  `notes-log.ndjson` are no longer named by any path helper. **Nothing to migrate:** the whole
+  surface was an inert scaffold — every route answered a constant empty payload or a `409`
+  regardless of the flag, the page rendered "Notes is not built yet", and no build ever created
+  either file. Owner decision; spec `.ai/specs/2026-08-14-remove-notes-capture-inbox.md`. Listed
+  as removed rather than breaking because the family shipped only in this fork
+  (`65eef6d2`) and was never in a published release. F3 feature A
+  (`CEZ_WORKSPACE_VIEWS`, the cross-project runs board) is untouched, as are knowledge, sources
+  and notifications.
+
 ## ⚠️ Breaking
 - **A hosted cezar with no authentication now refuses to boot.** If you run with `CEZ_REMOTE=1`
   or a non-loopback `--bind-host` and set neither `CEZ_AUTH` nor `CEZ_ALLOW_UNAUTHENTICATED=1`,
