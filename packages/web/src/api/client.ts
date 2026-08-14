@@ -119,6 +119,15 @@ import type {
   SourceDocumentResponse,
   SourceCommentsResponse,
   SourceLogResponse,
+  NotesListResponse,
+  NoteResponse,
+  NoteRemovedResponse,
+  ProcessNoteResponse,
+  ApproveNoteResponse,
+  CreateNoteInput,
+  UpdateNoteInput,
+  ApproveNoteInput,
+  RejectNoteInput,
   WorkspaceRunsResponse,
   NotificationsResponse,
   NotificationLogResponse,
@@ -2064,6 +2073,84 @@ export async function getSourceLog(
       init(opts),
     ),
     '/sources/:connectionId/log',
+  )
+}
+
+/** `GET /workspace/notes` (F3 feature B, `CEZ_NOTES`). Workspace-level, never project-scoped
+ *  (D14 — a note has not yet been assigned to a project). */
+export async function getWorkspaceNotes(
+  query: { status?: 'raw' | 'processing' | 'processed' | 'all'; projects?: string; limit?: number } = {},
+  opts?: ReadOptions,
+): Promise<NotesListResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.notes.$get(
+      {
+        query: {
+          status: query.status,
+          projects: query.projects,
+          limit: query.limit,
+        },
+      },
+      init(opts),
+    ),
+    '/workspace/notes',
+  )
+}
+
+export async function getWorkspaceNote(noteId: string, opts?: ReadOptions): Promise<NoteResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.notes[':noteId'].$get({ param: { noteId } }, init(opts)),
+    '/workspace/notes/:noteId',
+  )
+}
+
+/** `POST /workspace/notes` — THE single write path for a note, whatever typed it. */
+export async function createWorkspaceNote(input: CreateNoteInput): Promise<NoteResponse> {
+  return unwrap(await cez.api.v1.workspace.notes.$post({ json: input }), '/workspace/notes')
+}
+
+export async function updateWorkspaceNote(noteId: string, input: UpdateNoteInput): Promise<NoteResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.notes[':noteId'].$patch({ param: { noteId }, json: input }),
+    '/workspace/notes/:noteId',
+  )
+}
+
+export async function deleteWorkspaceNote(noteId: string): Promise<NoteRemovedResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.notes[':noteId'].$delete({ param: { noteId } }),
+    '/workspace/notes/:noteId',
+  )
+}
+
+/** `POST /workspace/notes/:noteId/process` — 202. Answers the note marked `processing`; the pass
+ *  itself lands later, over the workspace stream and on the next read. */
+export async function processWorkspaceNote(noteId: string): Promise<ProcessNoteResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.notes[':noteId'].process.$post({ param: { noteId } }),
+    '/workspace/notes/:noteId/process',
+  )
+}
+
+/** Partial success is a 200 with `created` and `rejected` side by side — read both, never just
+ *  the status. Two of three proposals starting is the normal case, not an error. */
+export async function approveWorkspaceNote(
+  noteId: string,
+  input: ApproveNoteInput,
+): Promise<ApproveNoteResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.notes[':noteId'].approve.$post({ param: { noteId }, json: input }),
+    '/workspace/notes/:noteId/approve',
+  )
+}
+
+export async function rejectWorkspaceNote(
+  noteId: string,
+  input: RejectNoteInput,
+): Promise<NoteResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.notes[':noteId'].reject.$post({ param: { noteId }, json: input }),
+    '/workspace/notes/:noteId/reject',
   )
 }
 

@@ -9,7 +9,7 @@
 |---|---|---|
 | `.ai/specs/2026-08-06-knowledge-base-mounts-search.md` | F1 Knowledge base | yes |
 | `.ai/specs/2026-08-06-external-source-connectors-notion.md` | F2 Source seam + Notion provider | yes |
-| `.ai/specs/2026-08-06-workspace-notes-cross-project.md` | F3 ~~Notes to multi-project tasks~~ (**feature B REMOVED 2026-08-14**, `.ai/specs/2026-08-14-remove-notes-capture-inbox.md`), cross-project views (feature A, still current) | yes |
+| `.ai/specs/2026-08-06-workspace-notes-cross-project.md` | F3 Notes to multi-project tasks (feature B — scaffold removed 2026-08-14, then **REINSTATED AND BUILT the same day** by `.ai/specs/2026-08-14-note-to-spec-pipeline.md`, which supersedes the removal in part and adds a per-project spec-writing run this design lacked), cross-project views (feature A, still current) | yes |
 | `.ai/specs/2026-08-06-pluggable-notification-transports.md` | F4 Notification transports | yes |
 | `.ai/specs/2026-08-06-ops-board-notion-cutover.md` | F5 Ops board, Notion migration, multi-player | **no, fork-private** |
 | `../../chat/.ai/specs/SPEC-417-2026-08-06-cezar-notification-agent.md` | F6 `agt_cezar` + `/notify/v1` ingress | n/a (chat repo) |
@@ -171,6 +171,20 @@ from `c.get('project')`.
 **No package other than W5.1 may run `npm run test:e2e`.** It is a global mutex.
 
 ### Phase 2 (after MVP ships): notes to multi-project tasks
+
+**BUILT 2026-08-14 under `.ai/specs/2026-08-14-note-to-spec-pipeline.md`** (P2.1 through P2.4;
+QA Needed — the runtime E2E has not been run). That spec is the current authority for this
+phase's shape. Changes to the table below, all additive:
+
+- P2.3's approval starts a run on a new built-in `note-to-spec` workflow (an agent that reads the
+  target repo's knowledge, specs and git history and writes a spec with phases, then stops)
+  rather than running the proposal's prompt directly.
+- `task-template.ts` is folded into `prompt.ts` rather than being its own module. Two further
+  modules exist that the table does not name: `notes/pipeline.ts` (the interface between the
+  routes and the two things a note sets in motion) and `notes/approve.ts` (P2.3's launch half,
+  split out because approval MAY build a project context and the triage pass may not — an
+  asymmetry worth a file boundary rather than a comment).
+- **P2.5 (`cez note` CLI) is NOT built.** It was out of that spec's scope and remains open.
 
 | id | title | owns | deps | size |
 |---|---|---|---|---|

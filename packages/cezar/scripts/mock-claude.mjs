@@ -351,6 +351,42 @@ async function respond(userText, imageCount) {
   // gets a canned chain plan. The `code-review` skill is deliberately made up:
   // the planner's sanitizer strips unknown skills, and the step survives on
   // its prompt — which is exactly the path worth exercising in dry runs.
+  // A note triage pass (marked `[cez-note-pass]`). The canned answer has to name a project that
+  // is actually in the catalog — a made-up id would come back flagged `unknown-project` and the
+  // dry run would exercise only the rejection path — so the first catalog line is read out of the
+  // prompt. With no catalog it answers zero proposals, which is a valid pass.
+  if (userText.includes('[cez-note-pass]')) {
+    const ids = [...userText.matchAll(/^- ([a-z0-9][a-z0-9-]*) — /gm)].map((m) => m[1]);
+    const answer = JSON.stringify({
+      summary: 'Mock triage pass.',
+      proposals: ids.slice(0, 1).map((id) => ({
+        projectId: id,
+        title: 'Mock proposal',
+        task: 'Write a spec for what the note describes.',
+        rationale: 'Produced by the CEZ_DRY_RUN mock, not by a model.',
+        confidence: 'low',
+      })),
+      unassigned: [],
+    });
+    emit({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: answer }],
+        usage: { input_tokens: 600, output_tokens: 90 },
+      },
+    });
+    await sleep(50);
+    emit({
+      type: 'result',
+      subtype: 'success',
+      result: answer,
+      usage: { input_tokens: 600, output_tokens: 90 },
+      total_cost_usd: 0.0009,
+    });
+    return;
+  }
+
   if (userText.includes('[cez-planner]')) {
     const plan = JSON.stringify({
       title: 'implement-verify-review',

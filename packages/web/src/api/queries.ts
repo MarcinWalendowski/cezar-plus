@@ -62,6 +62,14 @@ import {
   getSourceDocument,
   getSourceComments,
   getSourceLog,
+  getWorkspaceNotes,
+  getWorkspaceNote,
+  createWorkspaceNote,
+  updateWorkspaceNote,
+  deleteWorkspaceNote,
+  processWorkspaceNote,
+  approveWorkspaceNote,
+  rejectWorkspaceNote,
   getWorkspaceRuns,
   getWorkspaceNotifications,
   getWorkspaceNotificationsLog,
@@ -94,9 +102,11 @@ import { githubRepoBase } from '@/lib/tasks-table'
 import { normalizeTagsForDisplay } from '@/lib/project-tags'
 import type { ContinueOptions } from './client'
 import type {
+  ApproveNoteInput,
   CheckoutProjectInput,
   CreateBlankProjectInput,
   CreateAgentProfileInput,
+  CreateNoteInput,
   HealthResponse,
   MessageInput,
   NotificationLogStatus,
@@ -113,6 +123,7 @@ import type {
   SelectAgentProfileInput,
   SetAgentConfigInput,
   UpdateAgentProfileInput,
+  UpdateNoteInput,
   UpdateProjectInput,
 } from '@open-mercato/cezar-api-client'
 import { subscribeTopic } from './ws'
@@ -295,6 +306,11 @@ export const workspaceQueryKeys = {
    *  dialog has looked at. */
   projectScan: (path: string | null) => ['workspace', 'project-scan', path] as const,
   // ---- central-hub scaffold (F3 feature A / F4, workspace-level) ----------------------------
+  /** `GET /workspace/notes` (D14 — a note is workspace-scoped, never project-scoped). */
+  notesRoot: ['workspace', 'notes'] as const,
+  notes: (filters: { status?: string; projects?: string } = {}) =>
+    [...workspaceQueryKeys.notesRoot, filters.status ?? null, filters.projects ?? null] as const,
+  note: (noteId: string) => [...workspaceQueryKeys.notesRoot, noteId] as const,
   /** `GET /workspace/runs` — the cross-project aggregate. */
   workspaceRuns: (filters: { projects?: string; view?: string } = {}) =>
     ['workspace', 'runs', filters.projects ?? null, filters.view ?? null] as const,
@@ -1987,6 +2003,116 @@ export function useSourceLog(connectionId: string, enabled = true) {
     queryKey: queryKeys.sourceLog(connectionId),
     queryFn: ({ signal }) => getSourceLog(connectionId, {}, { signal }),
     enabled,
+  })
+}
+
+/**
+ * `GET /workspace/notes` (F3 feature B). Workspace-level (D14) — never led by `queryScope()`.
+ *
+ * `enabled` exists so the page can wait for the health answer. Without it a cold visit to `/notes`
+ * on a gated server fetches the family, gets the 200-empty flag-off payload, and paints "no notes
+ * yet" over what is really "the feature is off" — the two are indistinguishable in the body, which
+ * is exactly why the capability answer has to arrive first.
+ */
+export function useWorkspaceNotes(
+  filters: { status?: 'raw' | 'processing' | 'processed' | 'all'; projects?: string } = {},
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.notes(filters),
+    queryFn: ({ signal }) => getWorkspaceNotes(filters, { signal }),
+    enabled,
+  })
+}
+
+export function useWorkspaceNote(noteId: string, enabled = true) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.note(noteId),
+    queryFn: ({ signal }) => getWorkspaceNote(noteId, { signal }),
+    enabled,
+  })
+}
+
+/**
+ * Every notes mutation invalidates the whole `notesRoot` subtree rather than one key.
+ *
+ * The list is keyed by its filters, so a capture made while a filter is applied lands under a key
+ * the current view is not watching — invalidating precisely would leave the note invisible until
+ * the filter changed. The inbox is small and read on demand; one broad invalidate is cheaper than
+ * the class of bug the narrow one buys.
+ *
+ * No retry on any of them: 400/404/409 are deterministic refusals (unknown note, feature off,
+ * proposal already claimed) that re-asking cannot turn into a success.
+ */
+function useNotesInvalidator() {
+  const queryClient = useQueryClient()
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.notesRoot })
+  }
+}
+
+export function useCreateWorkspaceNote() {
+  const invalidate = useNotesInvalidator()
+  return useMutation({
+    mutationFn: (input: CreateNoteInput) => createWorkspaceNote(input),
+    retry: false,
+    onSuccess: invalidate,
+  })
+}
+
+export function useUpdateWorkspaceNote() {
+  const invalidate = useNotesInvalidator()
+  return useMutation({
+    mutationFn: (variables: { noteId: string } & UpdateNoteInput) => {
+      const { noteId, ...patch } = variables
+      return updateWorkspaceNote(noteId, patch)
+    },
+    retry: false,
+    onSuccess: invalidate,
+  })
+}
+
+export function useDeleteWorkspaceNote() {
+  const invalidate = useNotesInvalidator()
+  return useMutation({
+    mutationFn: (noteId: string) => deleteWorkspaceNote(noteId),
+    retry: false,
+    onSuccess: invalidate,
+  })
+}
+
+/** Starts the triage pass. Answers as soon as the note is `processing` — the proposals arrive on a
+ *  later read, which is why this invalidates rather than writing a result into the cache. */
+export function useProcessWorkspaceNote() {
+  const invalidate = useNotesInvalidator()
+  return useMutation({
+    mutationFn: (noteId: string) => processWorkspaceNote(noteId),
+    retry: false,
+    onSuccess: invalidate,
+  })
+}
+
+/** Resolves with the partial-success body (`created` / `rejected`) — the caller must read both,
+ *  since "two of three started" arrives as a 200. */
+export function useApproveWorkspaceNote() {
+  const invalidate = useNotesInvalidator()
+  return useMutation({
+    mutationFn: (variables: { noteId: string } & ApproveNoteInput) => {
+      const { noteId, ...input } = variables
+      return approveWorkspaceNote(noteId, input)
+    },
+    retry: false,
+    onSuccess: invalidate,
+  })
+}
+
+export function useRejectWorkspaceNote() {
+  const invalidate = useNotesInvalidator()
+  return useMutation({
+    mutationFn: (variables: { noteId: string; proposals: string[] }) =>
+      rejectWorkspaceNote(variables.noteId, { proposals: variables.proposals }),
+    retry: false,
+    onSuccess: invalidate,
   })
 }
 

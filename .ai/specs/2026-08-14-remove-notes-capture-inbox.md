@@ -1,6 +1,22 @@
-# Remove the notes capture inbox (F3 feature B)
+# Remove the notes capture inbox (F3 feature B) — SUPERSEDED IN PART 2026-08-14, the feature is being built
 
-**Date:** 2026-08-14 · **Status:** implemented · **Branch:** `main`
+**Date:** 2026-08-14 · **Status:** implemented, then superseded in part the same day · **Branch:** `main`
+
+> **SUPERSEDED IN PART 2026-08-14 by `2026-08-14-note-to-spec-pipeline.md`.** Owner decision, in
+> the session that followed this removal: build the feature for real. The contract and the six
+> routes below are coming back — recovered from this spec's own removal commit `ce05b940` — this
+> time with the `notes/{store,coordinator,processor,prompt}.ts` modules behind them that never
+> existed, plus a per-project spec-writing run that this design never had.
+>
+> **The removal itself was correct and is NOT being reversed as a mistake.** Everything this spec
+> says about what was deleted is true: it answered a constant empty payload from every route
+> regardless of the flag, rendered "Notes is not built yet", and never wrote a byte to
+> `~/.cezar/notes.json`. Deleting a scaffold that promises a feature was the right call. What
+> changed is that the feature now gets built instead of re-scaffolded.
+>
+> **What still stands from this spec, unchanged:** the reasoning about why an inert flag-gated
+> surface is a cost rather than a placeholder, and the removal's own precedent that a route family
+> introduced in this fork and never published owes no deprecation window.
 
 ## TLDR
 

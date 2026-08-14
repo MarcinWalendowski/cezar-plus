@@ -85,6 +85,7 @@ describe('NAV_ITEMS', () => {
       'Git',
       'Automations',
       'Knowledge',
+      'Notes',
       'Settings',
     ])
   })
@@ -123,6 +124,7 @@ describe('visibleNavItems', () => {
     knowledge: true,
     skills: true,
     automations: true,
+    notes: true,
   }
   const labelsOf = (opts?: Parameters<typeof visibleNavItems>[0]) =>
     visibleNavItems(opts).map((item) => item.label)
@@ -137,6 +139,7 @@ describe('visibleNavItems', () => {
       'Inbox',
       'Git',
       'Knowledge',
+      'Notes',
       'Settings',
     ])
   })
@@ -147,6 +150,7 @@ describe('visibleNavItems', () => {
       'Git',
       'Automations',
       'Knowledge',
+      'Notes',
       'Settings',
     ])
   })
@@ -157,8 +161,28 @@ describe('visibleNavItems', () => {
       'Inbox',
       'Git',
       'Automations',
+      'Notes',
       'Settings',
     ])
+  })
+
+  /** The notes gate owns only its own item, and — the half worth pinning — the Notes item is the
+   *  one that must NOT appear by default. `CEZ_NOTES` unset is the shipped state for every install
+   *  that never opted in, and a capture inbox in the sidebar of an install with no note store
+   *  behind it is exactly the "promises a feature" failure the 2026-08-14 removal was about. */
+  it('without the notes opt-in, exactly the Notes item drops out', () => {
+    expect(labelsOf({ ...ALL, notes: false })).toEqual([
+      'Tasks',
+      'Inbox',
+      'Git',
+      'Automations',
+      'Knowledge',
+      'Settings',
+    ])
+  })
+
+  it('omitting availability entirely hides Notes — absent is not on', () => {
+    expect(labelsOf()).not.toContain('Notes')
   })
 
   it('without the automations opt-in, exactly the Automations item drops out (#801)', () => {

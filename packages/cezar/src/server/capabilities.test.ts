@@ -172,6 +172,7 @@ describe('resolveCapabilities — followups (#471)', () => {
       costMetrics: true,
       knowledge: false,
       sources: false,
+      notes: false,
       workspaceViews: false,
       notify: false,
       // Opt-OUT, so it is `true` in an env that sets nothing. This `toEqual` is the exhaustive
@@ -267,11 +268,12 @@ describe('resolveCapabilities — skills is the one OPT-OUT capability', () => {
   );
 });
 
-describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources, workspaceViews, notify)', () => {
+describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources, notes, workspaceViews, notify)', () => {
   it('are all off by default', () => {
     expect(resolveCapabilities({})).toMatchObject({
       knowledge: false,
       sources: false,
+      notes: false,
       workspaceViews: false,
       notify: false,
     });
@@ -280,6 +282,7 @@ describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources
   it('turn on independently with their own exact-"1" flag', () => {
     expect(resolveCapabilities({ CEZ_KB: '1' })).toMatchObject({ knowledge: true, sources: false });
     expect(resolveCapabilities({ CEZ_SOURCES: '1' })).toMatchObject({ knowledge: false, sources: true });
+    expect(resolveCapabilities({ CEZ_NOTES: '1' })).toMatchObject({ notes: true });
     expect(resolveCapabilities({ CEZ_WORKSPACE_VIEWS: '1' })).toMatchObject({ workspaceViews: true });
     expect(resolveCapabilities({ CEZ_NOTIFY: '1' })).toMatchObject({ notify: true });
   });
@@ -289,35 +292,27 @@ describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources
       resolveCapabilities({
         CEZ_KB: value,
         CEZ_SOURCES: value,
+        CEZ_NOTES: value,
         CEZ_WORKSPACE_VIEWS: value,
         CEZ_NOTIFY: value,
       }),
     ).toMatchObject({
       knowledge: false,
       sources: false,
+      notes: false,
       workspaceViews: false,
       notify: false,
     });
   });
 
-  it('workspaceViews reports false under CEZ_SINGLE_PROJECT=1 regardless of its own flag', () => {
+  it('notes and workspaceViews report false under CEZ_SINGLE_PROJECT=1 regardless of their own flag', () => {
     expect(
       resolveCapabilities({
         CEZ_SINGLE_PROJECT: '1',
+        CEZ_NOTES: '1',
         CEZ_WORKSPACE_VIEWS: '1',
       }),
-    ).toMatchObject({ singleProject: true, workspaceViews: false });
-  });
-
-  // The negative control for the 2026-08-14 removal of F3 feature B
-  // (`.ai/specs/2026-08-14-remove-notes-capture-inbox.md`). Deleting the old
-  // `CEZ_NOTES: '1' → notes: true` assertion only proves the suite stopped asking; this proves
-  // the flag is genuinely inert, which is the claim the removal actually makes. `toEqual` (not
-  // `toMatchObject`) is load-bearing here — `toMatchObject` passes on an object with extra keys,
-  // so it could not see a `notes` key coming back.
-  it('CEZ_NOTES is inert — it adds no capability key at all', () => {
-    expect(resolveCapabilities({ CEZ_NOTES: '1' })).toEqual(resolveCapabilities({}));
-    expect(Object.keys(resolveCapabilities({ CEZ_NOTES: '1' }))).not.toContain('notes');
+    ).toMatchObject({ singleProject: true, notes: false, workspaceViews: false });
   });
 
   it('knowledge, sources and notify are independent of singleProject', () => {

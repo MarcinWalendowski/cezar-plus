@@ -113,6 +113,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       costMetrics: true,
       knowledge: false,
       sources: false,
+      notes: false,
       workspaceViews: false,
       notify: false,
       skills: true,
@@ -167,6 +168,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       costMetrics: true,
       knowledge: false,
       sources: false,
+      notes: false,
       workspaceViews: false,
       notify: false,
       skills: true,
@@ -200,6 +202,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       costMetrics: true,
       knowledge: false,
       sources: false,
+      notes: false,
       workspaceViews: false,
       notify: false,
       skills: true,
@@ -218,6 +221,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       costMetrics: true,
       knowledge: false,
       sources: false,
+      notes: false,
       workspaceViews: false,
       notify: false,
       skills: true,
@@ -241,10 +245,12 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       costMetrics: true,
       // Restored 2026-08-14: the upstream-0.9.3 merge dropped the central-hub keys from THIS
       // block only (its six siblings kept them), so the exhaustive `toEqual` was asserting a
-      // 7-key payload against a 12-key one. `notes` is deliberately not among them —
-      // `.ai/specs/2026-08-14-remove-notes-capture-inbox.md`.
+      // 7-key payload against a 12-key one. `notes` was excluded here on the same day, when the
+      // capture inbox was removed — and is back, because the inbox was rebuilt for real
+      // (`.ai/specs/2026-08-14-note-to-spec-pipeline.md`).
       knowledge: false,
       sources: false,
+      notes: false,
       workspaceViews: false,
       notify: false,
       skills: true,
@@ -269,6 +275,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       costMetrics: true,
       knowledge: false,
       sources: false,
+      notes: false,
       workspaceViews: false,
       notify: false,
       skills: true,
@@ -287,6 +294,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       costMetrics: false,
       knowledge: false,
       sources: false,
+      notes: false,
       workspaceViews: false,
       notify: false,
       skills: true,

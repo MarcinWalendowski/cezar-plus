@@ -94,6 +94,9 @@ export type AppShellProps = {
   /** Knowledge gating (central-hub scaffold F1): `false` drops the Knowledge nav item — opt-in
    *  via `CEZ_KB=1`. Defaults to shown for the same reason as `forgeAvailable`. */
   knowledgeAvailable?: boolean
+  /** Notes gating (central-hub scaffold F3): `false` drops the Notes nav item — opt-in via
+   *  `CEZ_NOTES=1`. Defaults to shown for the same reason as `forgeAvailable`. */
+  notesAvailable?: boolean
   /** Skills gating: `false` drops the Skills nav item — opt-OUT via `CEZ_SKILLS=0`, so unlike
    *  every neighbour here the default is `true` and only an explicit `false` hides it. */
   skillsAvailable?: boolean
@@ -176,6 +179,7 @@ export function AppShell({
   forgeAvailable = true,
   inboxAvailable = true,
   knowledgeAvailable = true,
+  notesAvailable = true,
   skillsAvailable = true,
   automationsAvailable = true,
   singleProject = false,
@@ -242,6 +246,7 @@ export function AppShell({
       forge: forgeAvailable,
       inbox: inboxAvailable,
       knowledge: knowledgeAvailable,
+      notes: notesAvailable,
       skills: skillsAvailable,
       automations: automationsAvailable,
     }),

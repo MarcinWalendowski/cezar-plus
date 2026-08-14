@@ -1,6 +1,7 @@
 import {
   BookOpenIcon,
   GitBranchIcon,
+  NotebookPenIcon,
   InboxIcon,
   ListChecksIcon,
   SettingsIcon,
@@ -38,16 +39,18 @@ export type NavItem = {
    *  upstream's, still computed from `CEZ_SKILLS` (`server/capabilities.ts`), and this is the
    *  only thing that ever read it. */
   skills?: boolean
+  /** Notes-gated (`.ai/specs/2026-08-14-note-to-spec-pipeline.md`): the item exists only while
+   *  `/api/health` reports `capabilities.notes` — opt-in via `CEZ_NOTES=1`. */
+  notes?: boolean
   /** Renders ONCE in the shell's top-level nav rather than inside each project group, and never
    *  receives `scopeTo` (`.ai/specs/2026-08-06-workspace-notes-cross-project.md` "Nav"): a
    *  workspace item has no project to scope into. `ProjectGroups` filters these out of its
    *  per-project loop; the flat single-project sidebar renders every visible item, this one
    *  included, since there is only ever one group to render it in.
    *
-   *  **No item carries it today** — Notes was the only one and was removed on 2026-08-14
-   *  (`.ai/specs/2026-08-14-remove-notes-capture-inbox.md`). Kept rather than deleted because F3
-   *  feature A's cross-project board (`/workspace/tasks`, W4.10) is the next item that needs it,
-   *  and `ProjectGroups`'s filter is what keeps a workspace item out of the per-project loop. */
+   *  Notes carries it, and must: a note is workspace-scoped (PLAN D14) precisely because it has
+   *  not been assigned to a repo yet, so rendering it per project would ask the user to pick the
+   *  thing the note exists to defer. */
   workspace?: boolean
   /** Automations-gated (#801): the item exists only while `/api/health` reports
    *  `capabilities.automations` — GitHub automations are opt-in via `CEZ_AUTOMATIONS=1`.
@@ -74,6 +77,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'] },
   { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true, automations: true },
   { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true },
+  { to: '/notes', label: 'Notes', icon: NotebookPenIcon, match: ['/notes'], notes: true, workspace: true },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'] },
 ]
 
@@ -93,6 +97,8 @@ export type NavAvailability = {
   skills?: boolean
   /** `capabilities.automations` — the opt-in GitHub automations (#801). */
   automations?: boolean
+  /** `capabilities.notes` — the opt-in capture inbox (`CEZ_NOTES=1`). */
+  notes?: boolean
 }
 
 /**
@@ -116,6 +122,7 @@ export function visibleNavItems({
   knowledge = false,
   skills = true,
   automations = false,
+  notes = false,
 }: NavAvailability = {}): NavItem[] {
   return NAV_ITEMS.filter(
     (item) =>
@@ -126,7 +133,8 @@ export function visibleNavItems({
       // three above while meaning the opposite: it removes the item only on an explicit
       // `skills: false` from health.
       (item.skills ? skills : true) &&
-      (item.automations ? automations : true),
+      (item.automations ? automations : true) &&
+      (item.notes ? notes : true),
   )
 }
 

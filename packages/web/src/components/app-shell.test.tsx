@@ -110,6 +110,7 @@ describe('AppShell', () => {
       'Git',
       'Automations',
       'Knowledge',
+      'Notes',
       'Settings',
     ])
     // Deep-linkable per Step 2.1: every nav row is an <a href>, not a button with an onClick.
@@ -119,6 +120,7 @@ describe('AppShell', () => {
       '/git',
       '/automations',
       '/knowledge',
+      '/notes',
       '/settings',
     ])
   })

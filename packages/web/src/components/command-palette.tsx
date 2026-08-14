@@ -445,10 +445,11 @@ function PaletteContent({ close }: { close: () => void }) {
           {visibleNavItems({
             forge: health.data?.forge?.available === true,
             inbox: health.data?.capabilities.followups === true,
-            // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`, F1): the
+            // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`, F1/F3): the
             // sidebar and this palette render through the same `visibleNavItems` call so the two
-            // can never disagree (`nav-items.ts`) — the gate needs to travel here too.
+            // can never disagree (`nav-items.ts`) — both gates need to travel here too.
             knowledge: health.data?.capabilities.knowledge === true,
+            notes: health.data?.capabilities.notes === true,
             // Opt-OUT, so `!== false` — see `NavAvailability.skills`. Written the other way
             // round this would hide Skills from the palette while the sidebar still showed it.
             skills: health.data?.capabilities.skills !== false,

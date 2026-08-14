@@ -164,9 +164,10 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // Hidden unless health reports the opt-in inbox (#471) — same honesty rule as above:
         // the nav must not offer an Inbox this server will never fill.
         inboxAvailable={inboxAvailable}
-        // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`, F1): same
+        // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`, F1/F3): same
         // honesty rule — hidden unless health reports the opt-in capability.
         knowledgeAvailable={health.data?.capabilities.knowledge === true}
+        notesAvailable={health.data?.capabilities.notes === true}
         // `!== false`, not `=== true`: an older server that reports no `skills` key at all
         // must keep its Skills tab. Only an explicit `false` removes it.
         skillsAvailable={health.data?.capabilities.skills !== false}

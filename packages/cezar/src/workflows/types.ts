@@ -206,3 +206,59 @@ export const QUICK_TASK_WORKFLOW: WorkflowDef = {
     },
   ],
 };
+
+/**
+ * The workflow an approved note proposal starts (spec
+ * `.ai/specs/2026-08-14-note-to-spec-pipeline.md`). It **investigates and writes a spec, and
+ * stops.**
+ *
+ * That stopping point is the design, not a limitation. The triage pass that produced this task
+ * saw a note and a list of run titles — it never opened the repository. This step is where the
+ * work is actually understood: inside the target repo, with the tools to read its knowledge base,
+ * its specs and its git history. Implementation is a separate decision a person takes afterwards,
+ * against a spec they can read.
+ *
+ * **`allowedTools` deliberately excludes `Bash`** (the default set includes it). The step needs
+ * `git log`, so it gets exactly that one command through `bashAllowlist` — a read-only history
+ * query. An agent asked to "investigate and write a spec" with a general shell is an agent that
+ * can install dependencies, run migrations and push branches while nobody is watching, on the
+ * strength of a note somebody typed on their phone.
+ */
+export const NOTE_TO_SPEC_WORKFLOW: WorkflowDef = {
+  name: 'note-to-spec',
+  description: 'Investigate a task in this repo and write a spec for it. Does not implement.',
+  source: 'built-in',
+  steps: [
+    {
+      id: 'spec',
+      name: 'Investigate and write the spec',
+      allowedTools: ['Read', 'Grep', 'Glob', 'Write', 'Bash'],
+      bashAllowlist: ['git log', 'git show', 'git status'],
+      prompt: [
+        'You are writing a SPEC for the task below. You are NOT implementing it.',
+        '',
+        'Task:',
+        '{{task}}',
+        '',
+        'Before you write anything, read what this repository already decided:',
+        '1. Its knowledge base or decision records, if it has one.',
+        '2. Its spec directory, for a precedent of this shape or a spec this extends. Most work',
+        '   extends a prior decision rather than starting fresh.',
+        '3. `git log` for recent commits touching the area, so the spec describes the code that is',
+        '   there now rather than the code you assumed.',
+        '',
+        'Then write ONE spec file, following this repository’s own naming and section conventions',
+        '(match the files already in its spec directory — do not impose a different format). It',
+        'must contain: a TLDR, the problem, the solution, the architecture, PHASES broken into',
+        'independently shippable steps, data models and API contracts where they apply, risks, and',
+        'a verification section naming concrete, executable test steps.',
+        '',
+        'Cite what you actually read — spec numbers, file paths, commit hashes. If you could not',
+        'find something, say so in the spec rather than inventing it.',
+        '',
+        'Change NO other file. Write no implementation, no migration, no test. When the spec file',
+        'exists, say its path and stop.',
+      ].join('\n'),
+    },
+  ],
+};

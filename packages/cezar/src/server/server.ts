@@ -25,6 +25,11 @@ import { streamSSE } from 'hono/streaming';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
+import { createNotesRoutes } from './notes-routes.ts';
+import { NoteStore } from '../notes/store.ts';
+import { NoteCoordinator } from '../notes/coordinator.ts';
+import { NoteProcessor } from '../notes/processor.ts';
+import { NoteApprover } from '../notes/approve.ts';
 import { createWorkspaceRunsRoutes } from './workspace-runs-routes.ts';
 import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -6099,15 +6104,55 @@ export function createApp(deps: ServerDeps) {
     from: z.string().trim().min(1).max(200).optional(),
   });
 
-  // ---- central-hub scaffold: four inert, flag-gated families ---------------
+  // ---- central-hub scaffold: five inert, flag-gated families ---------------
   // Each lives in its own file (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D6) and is built
   // by a factory rather than declared inline, so the wave-4 packages that fill them in touch only
   // their own file — never this one. `knowledgeRoutes`/`sourcesRoutes` are project-scoped (mounted
-  // into `v1` below); `workspaceRunsRoutes`/`notificationsRoutes` are workspace-level (mounted
-  // into `workspaceV1`). F3 feature B (notes) was the fifth and was removed on 2026-08-14 —
-  // `.ai/specs/2026-08-14-remove-notes-capture-inbox.md`.
+  // into `v1` below); `notesRoutes`/`workspaceRunsRoutes`/`notificationsRoutes` are workspace-level
+  // (mounted into `workspaceV1`).
   const knowledgeRoutes = createKnowledgeRoutes();
   const sourcesRoutes = createSourcesRoutes();
+
+  // ---- the notes pipeline (P2.2/P2.3) --------------------------------------
+  // ONE store, shared by the routes and the pipeline. `NoteStore` caches the inbox in memory
+  // after its first read, so two instances over one `notes.json` would each hold a stale half of
+  // it — a note captured through the routes would be invisible to the pass that is supposed to
+  // analyse it. Construction touches no filesystem, so building this under a disabled flag is
+  // free.
+  const noteStore = new NoteStore();
+  const noteProcessor = new NoteProcessor({
+    store: noteStore,
+    coordinator: new NoteCoordinator({ listProjects, warn: (message) => console.warn(message) }),
+    // The workspace-level index the context map already owns — same cache, one parse of each
+    // project's `runs.json` rather than two.
+    runIndex: contexts.runIndex,
+    bootRoot: deps.repoRoot,
+  });
+  const noteApprover = new NoteApprover({
+    store: noteStore,
+    listProjects,
+    // Approval is the one notes path that may build a project context: a person named this
+    // repository and asked for a run in it, and building its context is what starting a run
+    // there means. The triage pass is structurally barred from this (see `notes/processor.ts`).
+    startRun: async (projectId, workflow, task, options) => {
+      const ctx = await contexts.context(projectId);
+      return ctx.manager.startRun(workflow, {
+        task,
+        ...options,
+        // A spec run's next step is the explicit "start implementation" click on the note, so the
+        // follow-up inbox would only duplicate a decision the page already presents.
+        generateFollowups: false,
+      });
+    },
+    warn: (message) => console.warn(message),
+  });
+  const notesRoutes = createNotesRoutes({
+    store: noteStore,
+    pipeline: {
+      process: (noteId) => noteProcessor.process(noteId),
+      approve: (noteId, input) => noteApprover.approve(noteId, input),
+    },
+  });
   const workspaceRunsRoutes = createWorkspaceRunsRoutes();
   const notificationsRoutes = createNotificationsRoutes();
 
@@ -6299,6 +6344,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', automationChecksRoutes)
     .route('/', runsIndexRoutes)
     .route('/', workspaceEventsRoutes)
+    .route('/', notesRoutes)
     .route('/', workspaceRunsRoutes)
     .route('/', notificationsRoutes);
 

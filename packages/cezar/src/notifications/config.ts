@@ -48,7 +48,7 @@ import {
  *   untouched — the next successful merge-write is what repairs it.
  *
  * `paths.ts` (scaffold-owned, W1.1) does not yet export a `notificationsConfigPath()` helper
- * alongside its `agentAccountsPath()` sibling, so the path is resolved locally
+ * alongside its `agentAccountsPath()` / `notesPath()` siblings, so the path is resolved locally
  * here from the already-exported `cezarHomeDir()` rather than touching that file — see the
  * dispatch-contract "touch only your files" rule. Worth folding into `paths.ts` for consistency
  * once the scaffold is free to.

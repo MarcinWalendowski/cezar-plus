@@ -2,6 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
+  NOTE_TO_SPEC_WORKFLOW,
   QUICK_TASK_WORKFLOW,
   normalizeWorkflowDoc,
   stepsIssue,
@@ -63,7 +64,9 @@ export async function loadWorkflows(
   const fileNames = new Set(fromFiles.map((w) => w.name));
   const workflows = [
     ...fromFiles,
-    ...[QUICK_TASK_WORKFLOW].filter((w) => !fileNames.has(w.name)),
+    // A repo may override either built-in by shipping a file of the same name — same rule for
+    // both, so `note-to-spec` is customisable per project without any new mechanism.
+    ...[QUICK_TASK_WORKFLOW, NOTE_TO_SPEC_WORKFLOW].filter((w) => !fileNames.has(w.name)),
   ];
   workflows.sort((a, b) => a.name.localeCompare(b.name));
   return { workflows, issues };

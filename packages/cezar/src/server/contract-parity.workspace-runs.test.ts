@@ -10,10 +10,8 @@ import type { AppType } from './app-type.ts';
  * (`./workspace-runs-routes.ts`) sends — no wider, no narrower. Same guard and reasoning as
  * `contract-parity.test.ts`.
  *
- * This family is read-only (D19's 409 half was exercised by `contract-parity.notes.test.ts`,
- * removed with F3 feature B on 2026-08-14 — `.ai/specs/2026-08-14-remove-notes-capture-inbox.md`;
- * the knowledge, sources and notifications parity files still cover it), so there is exactly one
- * route to check, and it is already fully implemented in the
+ * This family is read-only (D19's 409 half is exercised by `contract-parity.notes.test.ts`
+ * instead), so there is exactly one route to check, and it is already fully implemented in the
  * inert scaffold (a constant, schema-valid empty payload — `.ai/runs/2026-08-06-cezar-central-hub/
  * PLAN.md` D19). W4.10 replaces the constant with the real `WorkspaceRunIndex` read; this file
  * does not need to change when it does, since the response SHAPE stays the same.
