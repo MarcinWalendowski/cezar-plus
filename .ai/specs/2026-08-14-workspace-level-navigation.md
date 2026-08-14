@@ -177,8 +177,16 @@ No server, contract or route change in Phase 1. Every destination it links to al
 2. **Workspace Git and workspace Knowledge.** Both need a page that does not exist: a cross-project
    git view, and a knowledge view that reads across every project rather than one project plus the
    `~/.cezar/knowledge/` workspace root it already mounts. New server surface; own spec.
+   **Specced 2026-08-14**, one spec each rather than the single one this line assumed — they share
+   nothing but the nav row, and the knowledge half absorbed the separate "domains + changelog"
+   request:
+   - `.ai/specs/2026-08-14-cross-project-git-overview.md`
+   - `.ai/specs/2026-08-14-knowledge-domains-and-changelog.md`
 3. **Board consolidation.** Retire `/workspace/tasks` or `/tasks` per merge-triage §5, after §5's
    own precondition (the non-instantiating mutation path) lands.
+   **Unblocked 2026-08-14 by `044f529e`** — the precondition is met
+   (`.ai/specs/2026-08-14-cross-project-run-mutations.md`), and merge-triage §5 is marked in place.
+   The consolidation decision itself is still open and still not this spec's to make.
 
 ## Data Models
 

@@ -685,9 +685,15 @@ export function AppRoutes() {
             boards over one idea — upstream built the cross-project run index at
             `runs/run-index.ts` while ours lives at `workspace/run-index.ts`. Reconciling them is
             a decision recorded in `.ai/runs/2026-08-13-upstream-merge-triage/PLAN.md` §5, not
-            something this merge settles. Until it is settled, note that this page's row actions
-            POST to `/api/v1/p/:projectId/…`, which builds a project context and resumes that
-            project's interrupted runs. */}
+            something this merge settles.
+
+            CORRECTED 2026-08-14 by `044f529e`. This used to close with "note that this page's row
+            actions POST to `/api/v1/p/:projectId/…`, which builds a project context and resumes
+            that project's interrupted runs" — true when written, and false now. §5's precondition
+            has landed: the row actions POST to `/api/v1/workspace/runs/:projectId/:runId/…`
+            (`server/workspace-run-mutations-routes.ts`), which peeks and never builds. The
+            consolidation decision itself is still open; only the hazard that blocked it is gone.
+            See `.ai/specs/2026-08-14-cross-project-run-mutations.md`. */}
         <Route path="/tasks" element={<GlobalTasksRoute />} />
 
         {/* The onboarding wizard (D8; D13 local mode). Outside `ProjectScopeRoute` for the same

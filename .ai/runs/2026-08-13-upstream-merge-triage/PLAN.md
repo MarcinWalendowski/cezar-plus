@@ -270,7 +270,17 @@ advantages onto it — the capability gate and per-project health (so a dead pro
 instead of vanishing) — and repoint our structural import guard at `runs/run-index.ts`
 after giving it a floor (§3.9).
 
-**Precondition before that page is exposed:** the row actions need a non-instantiating
+**Precondition before that page is exposed — MET 2026-08-14 by `044f529e`.** The mutation path
+now exists: `archiveProjectRun`/`setProjectRunRead` POST to
+`/api/v1/workspace/runs/:projectId/:runId/{archive,read,unread}`
+(`server/workspace-run-mutations-routes.ts`), which `peek`s a built context or opens a standalone
+`RunStore` with `keepLive: true`, and imports neither `server/project-context.ts` nor
+`workflows/run.ts` — pinned structurally. Spec:
+`.ai/specs/2026-08-14-cross-project-run-mutations.md`. **The consolidation recommendation above is
+still open**; only this blocker is cleared. The original statement of the hazard is kept below
+because it is the reason the route family is shaped the way it is:
+
+> the row actions need a non-instantiating
 mutation path. `archiveProjectRun`/`setProjectRunRead` POST to `/api/v1/p/:projectId/…`,
 and `resolveProjectScope` (`server.ts:1737`) calls `contexts.context()` — the *building*
 accessor — on a method-agnostic `use('*')`. `build()` runs `pruneOrphans` +
