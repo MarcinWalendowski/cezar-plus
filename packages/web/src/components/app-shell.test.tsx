@@ -435,12 +435,30 @@ describe('AppShell', () => {
       expect(row('Tasks')).not.toBeNull()
     })
 
-    /** Git and Knowledge have no cross-project page yet (Phase 2), and a nav row that leads
-     *  nowhere is worse than a missing one. Pinned so Phase 2 has to come here and say so. */
-    it('offers no workspace row for a surface that has no workspace route yet', () => {
+    /** The hole `.ai/specs/2026-08-14-knowledge-domains-and-changelog.md` Phase 3 closed: `Knowledge`
+     *  now carries `workspaceTo: '/workspace/knowledge'`, so it joins the band — but unlike `Git`
+     *  (unconditional) it stays gated on `capabilities.knowledge`, the same flag its per-project
+     *  item already carries. This used to be the "offers no workspace row for a surface that has
+     *  no workspace route yet" test, asserting Knowledge absent — that assertion is retired now
+     *  that Knowledge has a real destination; the capability gate below is what replaces it. */
+    it('renders a capability-gated workspace Knowledge row, not unconditionally like Git', () => {
       renderShell('/', { projectGroups: <p>groups</p>, knowledgeAvailable: true })
+      expect(row('Knowledge')).not.toBeNull()
+      expect(row('Knowledge')!.getAttribute('href')).toBe('/workspace/knowledge')
+      cleanup()
+      renderShell('/', { projectGroups: <p>groups</p>, knowledgeAvailable: false })
       expect(row('Knowledge')).toBeNull()
-      expect(row('Git')).toBeNull()
+      // The negative case must not be "the band is empty" — that would pass with the band broken.
+      expect(row('Tasks')).not.toBeNull()
+    })
+
+    /** The hole `.ai/specs/2026-08-14-cross-project-git-overview.md` Phase 2 closed: `Git` now
+     *  carries `workspaceTo: '/workspace/git'`, so it renders in the band unconditionally (no
+     *  capability gate — unlike Notes/Knowledge, a git overview needs nothing turned on). */
+    it('renders a Git row pointing at the workspace overview, not the per-project /git', () => {
+      renderShell('/', { projectGroups: <p>groups</p> })
+      expect(row('Git')).not.toBeNull()
+      expect(row('Git')!.getAttribute('href')).toBe('/workspace/git')
     })
   })
 

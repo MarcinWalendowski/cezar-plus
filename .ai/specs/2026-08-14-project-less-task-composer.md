@@ -1,6 +1,7 @@
 # Project-less task composer
 
-> **Status:** specified, not implemented · **Date:** 2026-08-14
+> **Status:** implemented, **QA Needed** — no runtime E2E has run · **Date:** 2026-08-14,
+> status corrected 2026-08-15 (it read "specified, not implemented" after the code had landed)
 > **Completes:** `.ai/specs/2026-08-14-note-to-spec-pipeline.md` (shipped `11467f44`) — that spec
 > built the whole engine and left the way in as a capture inbox. This is the way in the owner
 > asked for.
@@ -101,7 +102,34 @@ A pill reading `Auto detect` by default, whose menu also lists every registered 
 The named-project branch exists so the pill is not a lie. A control whose only option is its
 default should not be a control.
 
-### D3 — autonomous keeps the toggle and gains the explainer it never had
+### D3 — autonomous: explainer yes, toggle NO
+
+> **CORRECTED 2026-08-14, during implementation, before anything shipped.** As first written this
+> section specified a working toggle and gave it copy reading *"cezar writes a spec in each
+> detected project, then keeps going and implements it."* **That copy is false and the toggle
+> would have been dead.** Verified in source, not inferred:
+>
+> - `autonomous` appears **nowhere** in `packages/contract/src/notes.ts` or
+>   `packages/cezar/src/notes/` — neither `createNoteInputSchema` nor `approveNoteInputSchema`
+>   carries such a field.
+> - `NOTE_TO_SPEC_WORKFLOW` (`workflows/types.ts:227`) is a single step whose own description ends
+>   **"Does not implement."**
+> - `notes/approve.ts` starts exactly that workflow unconditionally, with no branch on anything.
+>
+> So toggling it on or off would have produced **byte-identical requests**. Shipping that means two
+> failures at once: a control that does nothing, and a product claim about a capability that does
+> not exist. The rule is that an absolute claim on a page has to be true.
+>
+> **What ships instead:** the explainer, describing what actually happens, and no toggle. The
+> owner's ask — "add some explainer to 'autonomous'" — is satisfied by explaining; a switch that
+> changes nothing is not.
+>
+> The owner does want autonomous continuation (*"if autonomous, it continues with implementation
+> as far as I understand"*). That is **engine work** — an implement step plus a field threaded
+> through approve — and it gets its own spec. The toggle returns when there is something behind
+> it. The original text is kept below, unchanged, so the reasoning that produced it is legible.
+
+### Superseded — the original D3, kept for the record
 
 Today the only explanation is a `title` attribute (`new-task.tsx:818-824`) — invisible on touch,
 invisible to a screen reader that does not announce it, invisible to anyone not hovering. At
@@ -197,13 +225,42 @@ composer that accepts text it cannot process.
 | Auto-detect submit calls `POST /workspace/notes` then `/process`, in that order, with the typed text | drop the `/process` call (a note that is never processed is the current inbox, not this feature) |
 | Submit **never** calls any project-scoped path — a request-assertion test in the mould of `new-task-project.test.tsx:352` | issue any `/api/v1/p/…` or unscoped project call (this is the scope-trap guard, and it must fail on the *silent* boot-project hit, not just on a throw) |
 | Picking a named project navigates to `/p/<id>/new` and posts nothing | make it submit in place |
-| The autonomous explainer is visible text, asserted by `getByText`, in **both** states | move it back to a `title` attribute (a `title`-only assertion must not pass) |
-| Autonomous on still requires approval before any run starts | let the on-state auto-approve |
+| The autonomous explainer is visible text, asserted by `getByText` | move it back to a `title` attribute (a `title`-only assertion must not pass) |
+| **No toggle renders** — corrected D3; a control that changes nothing must not ship | render a toggle |
+| The page issues no `autonomous` field on any request, because nothing consumes one | add one (it would be silently ignored, which is the point) |
 | `CEZ_NOTES` off → the off state names the flag; the textarea does not accept a submit | render the composer anyway, or 404 |
 
 The scope-trap guard is the one that matters most and the easiest to write vacuously: it must
 assert on the *set of URLs requested*, because the failure mode is a successful request to the
 wrong project, not an error.
+
+**CORRECTED 2026-08-14, found by mutation testing during implementation.** The obvious spelling of
+this guard — a blocklist on `/api/v1/p/…` — is **vacuous**, and measurably so: adding `useRepo()`
+to a workspace page killed **0** tests.
+
+**Settled on captured evidence, after one wrong amendment.** A middle version of this note claimed
+the typed client emits `/api/v1/p/default/repo`, so a `/p/` blocklist would catch it. That was
+wrong — it read `client.ts:618-622` and stopped one function short.
+
+Logging the actual requests a workspace page makes gives `/api/v1/repo`: no `/p/` segment. The
+reason is `withApiBase` → `unscoped()` (`client.ts:278-303`), which every typed-client request
+passes through and which strips a whole `/p/default` segment whenever `getApiScope() === null`,
+precisely so an unscoped request is byte-identical whichever half of the client sent it.
+
+So both halves collapse to the bare URL on a page outside `ProjectScopeRoute`, and the server's
+no-prefix convention serves the **boot project**. A `/p/`-shaped blocklist sees none of it.
+
+(The `2/13`-either-way measurement on this page is still correct and is not evidence against the
+above: that blocklist had been broadened to name `/api/v1/repo` explicitly, so it caught the bare
+URL. It caught the endpoint someone remembered to list — which is the whole limitation.)
+
+**The guard must therefore be an allowlist**: assert the set of requested paths is a subset of the
+two or three this page is permitted to touch, plus a floor asserting the expected calls did happen
+(an empty request log must not pass). A blocklist can only ever protect against the endpoints its
+author thought of; an allowlist fails closed when someone adds a new one next month.
+
+This applies to **every** page mounted outside `ProjectScopeRoute` — see the same correction in
+`.ai/specs/2026-08-14-cross-project-git-overview.md`.
 
 Gates in order, **`npm test -- <path>`, never `npx vitest`** (PLAN D21): `npm run typecheck`,
 `npm test`, `npm run build`.

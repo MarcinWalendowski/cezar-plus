@@ -100,7 +100,7 @@ async function buildProject(options: { withKnowledge?: boolean } = {}): Promise<
 }
 
 const GET_ROUTES_OFF = [
-  ['/api/v1/knowledge', { enabled: false, roots: [], counts: { documents: 0, idCollisions: 0 }, facets: { types: [], tags: [], statuses: [], roots: [] }, scan: { truncated: false, filesScanned: 0, bytesScanned: 0, skipped: 0 }, formatVersion: 0 }],
+  ['/api/v1/knowledge', { enabled: false, roots: [], counts: { documents: 0, idCollisions: 0 }, facets: { types: [], tags: [], statuses: [], roots: [], domains: [] }, scan: { truncated: false, filesScanned: 0, bytesScanned: 0, skipped: 0 }, formatVersion: 0 }],
   ['/api/v1/knowledge/search', { query: '', total: 0, truncated: false, results: [] }],
   ['/api/v1/knowledge/search?q=anything', { query: 'anything', total: 0, truncated: false, results: [] }],
   ['/api/v1/knowledge/proposals', { proposals: [] }],

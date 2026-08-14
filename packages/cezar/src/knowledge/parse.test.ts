@@ -257,6 +257,48 @@ describe('parseDocument: frontmatter field coercion', () => {
   });
 });
 
+describe('parseDocument: domain and changeType (Phase 1)', () => {
+  it('parses domain and changeType from frontmatter, like project', () => {
+    const raw = '---\ndomain: billing\nchangeType: Fixed\nproject: chat\n---\nBody.\n';
+    const doc = parseDocument(raw, '/repo/x.md', 'markdown');
+    expect(doc.domain).toBe('billing');
+    expect(doc.changeType).toBe('Fixed');
+    expect(doc.project).toBe('chat');
+  });
+
+  it('accepts the change_type snake_case alias, the same treatment supersededBy/superseded_by get', () => {
+    const raw = '---\nchange_type: Added\n---\nBody.\n';
+    const doc = parseDocument(raw, '/repo/x.md', 'markdown');
+    expect(doc.changeType).toBe('Added');
+  });
+
+  it('both are absent by default — a document with no domain still parses cleanly, no warning', () => {
+    const raw = '# Title\n\nBody.\n';
+    const doc = parseDocument(raw, '/repo/x.md', 'markdown');
+    expect(doc.domain).toBeUndefined();
+    expect(doc.changeType).toBeUndefined();
+    expect(doc.warnings).toEqual([]);
+  });
+
+  it('drops an unrecognised changeType value with a warning, never fatal — presence is the signal', () => {
+    const raw = '---\nchangeType: Deleted\n---\nBody.\n';
+    const doc = parseDocument(raw, '/repo/x.md', 'markdown');
+    expect(doc.changeType).toBeUndefined();
+    expect(doc.warnings).toEqual(['frontmatter "changeType" ("Deleted") is not one of Added|Changed|Fixed|Removed, ignoring']);
+  });
+
+  it.each([
+    ['Added'],
+    ['Changed'],
+    ['Fixed'],
+    ['Removed'],
+  ] as const)('accepts %j as a valid changeType', (value) => {
+    const doc = parseDocument(`---\nchangeType: ${value}\n---\nBody.\n`, '/repo/x.md', 'markdown');
+    expect(doc.changeType).toBe(value);
+    expect(doc.warnings).toEqual([]);
+  });
+});
+
 describe('parseDocument: status family precedence', () => {
   it.each([
     ['superseded', 'superseded'],

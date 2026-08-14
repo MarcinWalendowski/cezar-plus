@@ -129,6 +129,9 @@ import type {
   ApproveNoteInput,
   RejectNoteInput,
   WorkspaceRunsResponse,
+  WorkspaceGitResponse,
+  WorkspaceKnowledgeSearchResponse,
+  WorkspaceKnowledgeDomainsResponse,
   NotificationsResponse,
   NotificationLogResponse,
   NotificationLogStatus,
@@ -2187,6 +2190,49 @@ export async function getWorkspaceRuns(
       init(opts),
     ),
     '/workspace/runs',
+  )
+}
+
+/** `GET /workspace/git` (`.ai/specs/2026-08-14-cross-project-git-overview.md`, D1) — one row per
+ *  registered project: branch, ahead/behind, dirty count, last commit. Also reports the flag-off
+ *  shape under `CEZ_SINGLE_PROJECT=1`, same as its own flag being off — matching `getWorkspaceRuns`
+ *  above. No query parameters in v1. */
+export async function getWorkspaceGit(opts?: ReadOptions): Promise<WorkspaceGitResponse> {
+  return unwrap(await cez.api.v1.workspace.git.$get({}, init(opts)), '/workspace/git')
+}
+
+/** `GET /workspace/knowledge/domains` (`.ai/specs/2026-08-14-knowledge-domains-and-changelog.md`,
+ *  D1/D5) — `distinct(domain)` over every considered project's knowledge index, unioned: domain,
+ *  doc count, contributing projects, and the best-guess index document id when the corpus has one.
+ *  Gated on BOTH `capabilities.knowledge` AND `capabilities.workspaceViews` (D6) — off answers 200
+ *  with `disabledReason` naming the one that is off, never a generic "disabled". No parameters. */
+export async function getWorkspaceKnowledgeDomains(opts?: ReadOptions): Promise<WorkspaceKnowledgeDomainsResponse> {
+  return unwrap(await cez.api.v1.workspace.knowledge.domains.$get({}, init(opts)), '/workspace/knowledge/domains')
+}
+
+/** `GET /workspace/knowledge/search` (D5) — the cross-project read: peeks a live project context's
+ *  `knowledgeStore` where one exists, otherwise opens a standalone one, never builds. Same
+ *  `disabledReason` shape as `getWorkspaceKnowledgeDomains` above. */
+export async function getWorkspaceKnowledgeSearch(
+  query: { q?: string; domain?: string; project?: string; type?: string; status?: string; limit?: number; offset?: number } = {},
+  opts?: ReadOptions,
+): Promise<WorkspaceKnowledgeSearchResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.knowledge.search.$get(
+      {
+        query: {
+          q: query.q,
+          domain: query.domain,
+          project: query.project,
+          type: query.type,
+          status: query.status,
+          limit: query.limit,
+          offset: query.offset,
+        },
+      },
+      init(opts),
+    ),
+    '/workspace/knowledge/search',
   )
 }
 

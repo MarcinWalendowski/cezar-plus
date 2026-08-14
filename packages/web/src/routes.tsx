@@ -43,6 +43,9 @@ import { AutomationsRoute } from './routes/automations/automations'
 // chunk, so there is nothing here yet worth lazy-loading.
 import { KnowledgeRoute } from './routes/knowledge/knowledge'
 import { NotesRoute } from './routes/notes/notes'
+import { WorkspaceGitRoute } from './routes/workspace/workspace-git'
+import { WorkspaceKnowledgeRoute } from './routes/workspace/workspace-knowledge'
+import { WorkspaceNewTaskRoute } from './routes/workspace/workspace-new-task'
 import { WorkspaceTasksRoute } from './routes/workspace/workspace-tasks'
 
 /** Lazy ON PURPOSE: the thread view carries the markdown stack (Streamdown + remark/rehype,
@@ -406,7 +409,10 @@ const PAGE_TITLE_ROUTES = [
   { pattern: '/inbox', pageLabel: 'Inbox' },
   { pattern: '/knowledge/*', pageLabel: 'Knowledge' },
   { pattern: '/notes', pageLabel: 'Notes' },
+  { pattern: '/workspace/new', pageLabel: 'New task' },
   { pattern: '/workspace/tasks', pageLabel: 'Tasks' },
+  { pattern: '/workspace/git', pageLabel: 'Git' },
+  { pattern: '/workspace/knowledge', pageLabel: 'Knowledge' },
   { pattern: '/onboarding', pageLabel: 'Onboarding' },
   { pattern: '/workflows/*', pageLabel: 'Workflows' },
   { pattern: '/settings/*', pageLabel: 'Settings' },
@@ -671,7 +677,26 @@ export function AppRoutes() {
             project.md` "The scope trap"). Reachable even off — each route renders its own
             "disabled" state rather than a 404 (D19). */}
         <Route path="/notes" element={<NotesRoute />} />
+        <Route path="/workspace/new" element={<WorkspaceNewTaskRoute />} />
         <Route path="/workspace/tasks" element={<WorkspaceTasksRoute />} />
+        {/* The cross-project git overview (`.ai/specs/2026-08-14-cross-project-git-overview.md`),
+            here for the same reason as its neighbours: "every project's repo state" scoped to one
+            project is a contradiction. `nav-items.ts` gives the Git item
+            `workspaceTo: '/workspace/git'`, so this route is what keeps that band row from
+            navigating into the 404 page — a nav row that leads nowhere being worse than a missing
+            one is exactly why the band shipped WITHOUT Git in Phase 1. */}
+        <Route path="/workspace/git" element={<WorkspaceGitRoute />} />
+        {/* The cross-project knowledge view
+            (`.ai/specs/2026-08-14-knowledge-domains-and-changelog.md` Phase 3), mounted for the
+            identical reason as Git above: `nav-items.ts` gives the Knowledge item
+            `workspaceTo: '/workspace/knowledge'`, so without this route that band row navigates
+            into the 404 page. Note the item is additionally gated on `capabilities.knowledge`, so
+            the row is absent unless `CEZ_KB=1` — but the ROUTE is unconditional, which is
+            deliberate: a user who bookmarks the URL, or flips the flag off after landing here,
+            must reach the page's own `disabledReason` state naming which flag to set, not a 404
+            that tells them nothing (D19). Gating the route as well would collapse those two very
+            different situations into the same dead end. */}
+        <Route path="/workspace/knowledge" element={<WorkspaceKnowledgeRoute />} />
 
         {/* The global Tasks page (#845) — a third non-project area, for the same reason as the
             two above: "every project's tasks" scoped to one project is a contradiction. Its data

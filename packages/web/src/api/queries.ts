@@ -71,6 +71,9 @@ import {
   approveWorkspaceNote,
   rejectWorkspaceNote,
   getWorkspaceRuns,
+  getWorkspaceGit,
+  getWorkspaceKnowledgeDomains,
+  getWorkspaceKnowledgeSearch,
   getWorkspaceNotifications,
   getWorkspaceNotificationsLog,
   getSkillsUpdate,
@@ -314,6 +317,27 @@ export const workspaceQueryKeys = {
   /** `GET /workspace/runs` — the cross-project aggregate. */
   workspaceRuns: (filters: { projects?: string; view?: string } = {}) =>
     ['workspace', 'runs', filters.projects ?? null, filters.view ?? null] as const,
+  /** `GET /workspace/git` (`.ai/specs/2026-08-14-cross-project-git-overview.md`) — the
+   *  cross-project git overview. No parameters in v1, so no filter arguments in the key. */
+  git: ['workspace', 'git'] as const,
+  /** `GET /workspace/knowledge/domains` (`.ai/specs/2026-08-14-knowledge-domains-and-changelog.md`)
+   *  — the domains landing view. No parameters in v1. */
+  knowledgeDomains: ['workspace', 'knowledge', 'domains'] as const,
+  /** `GET /workspace/knowledge/search` — every filter folded into the key, `workspaceRuns`'s own
+   *  pattern above, so a facet-only change is a real cache miss rather than a stale read. */
+  knowledgeSearch: (
+    filters: { q?: string; domain?: string; project?: string; type?: string; status?: string } = {},
+  ) =>
+    [
+      'workspace',
+      'knowledge',
+      'search',
+      filters.q ?? null,
+      filters.domain ?? null,
+      filters.project ?? null,
+      filters.type ?? null,
+      filters.status ?? null,
+    ] as const,
   /** `GET /workspace/notifications` — the machine-wide outbound transport registry, distinct
    *  from `uiState` (which owns the per-browser desktop-notification toggle). */
   notifications: ['workspace', 'notifications'] as const,
@@ -2121,6 +2145,60 @@ export function useWorkspaceRuns(filters: { projects?: string; view?: 'active' |
   return useQuery({
     queryKey: workspaceQueryKeys.workspaceRuns(filters),
     queryFn: ({ signal }) => getWorkspaceRuns(filters, { signal }),
+  })
+}
+
+/** How often `useWorkspaceGit` re-polls on top of its initial fetch. There is no push channel for
+ *  this data (unlike `/workspace/events`, which the runs board rides) and the server deliberately
+ *  ships no cache (D5), so a plain interval is the whole refresh mechanism, not a backstop for a
+ *  stream. Slow enough that a large registry is not re-scanned every few seconds, fast enough that
+ *  a dirty-tree change shows up without a manual reload. */
+const WORKSPACE_GIT_POLL_MS = 15_000
+
+/** `GET /workspace/git` (`.ai/specs/2026-08-14-cross-project-git-overview.md`, D5) — the
+ *  cross-project git overview. Server ships no cache for this route on purpose (a working
+ *  tree has no `mtimeMs`/`size` key the way `runs.json` does, so caching it would risk showing a
+ *  stale answer for the one case that matters most — an agent writing files right now), which
+ *  puts refresh cadence on the client: this polls every `WORKSPACE_GIT_POLL_MS`, the same role
+ *  `RUNS_INDEX_POLL_MS` plays for the cross-project task index (`lib/global-tasks.ts` usage).
+ *  `enabled` lets the route hold off fetching until health has confirmed the capability is on —
+ *  see `WorkspaceGitRoute`. */
+export function useWorkspaceGit(enabled = true) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.git,
+    queryFn: ({ signal }) => getWorkspaceGit({ signal }),
+    enabled,
+    refetchInterval: enabled ? WORKSPACE_GIT_POLL_MS : false,
+  })
+}
+
+/** `GET /workspace/knowledge/domains` (`.ai/specs/2026-08-14-knowledge-domains-and-changelog.md`,
+ *  D1/D5) — the domains landing view. No `enabled` gate: unlike `useWorkspaceGit`, this route's
+ *  OWN response carries `disabledReason` when a capability is off (D6, the AND-gate that must name
+ *  which conjunct), so the caller does not need to know the flags first to decide whether to ask —
+ *  it always asks, and renders whatever the answer says. No polling either: knowledge documents
+ *  change far less often than a working tree, and the query client's own doctrine (`query-client.ts`)
+ *  requires a stream to justify an interval override, which this data has none of yet — a manual
+ *  reload or the default `staleTime` is the whole refresh story in v1. */
+export function useWorkspaceKnowledgeDomains() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.knowledgeDomains,
+    queryFn: ({ signal }) => getWorkspaceKnowledgeDomains({ signal }),
+  })
+}
+
+/** `GET /workspace/knowledge/search` (D5) — the cross-project search underneath the domains
+ *  landing view. `enabled` lets a caller hold off until there is something to filter by (an active
+ *  domain or a typed query) — an unconditional empty-query search would just be `domains()`'s own
+ *  project-health list restated, at the cost of a second aggregate scan. */
+export function useWorkspaceKnowledgeSearch(
+  filters: { q?: string; domain?: string; project?: string; type?: string; status?: string } = {},
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.knowledgeSearch(filters),
+    queryFn: ({ signal }) => getWorkspaceKnowledgeSearch(filters, { signal }),
+    enabled,
   })
 }
 

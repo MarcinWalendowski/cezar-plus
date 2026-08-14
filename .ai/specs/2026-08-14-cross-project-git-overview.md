@@ -1,6 +1,8 @@
 # Cross-project git overview
 
-> **Status:** specified, not implemented · **Date:** 2026-08-14
+> **Status:** implemented, **QA Needed** — no runtime E2E has run · **Date:** 2026-08-14,
+> status corrected 2026-08-15 (it read "specified, not implemented" while the code was already
+> written; a knowledge-first reader scans headers and would have carried that away)
 > **Implements:** Phase 2 (the Git half) of `.ai/specs/2026-08-14-workspace-level-navigation.md`,
 > which shipped the workspace nav band with **no** Git row precisely because the page did not
 > exist and a nav row that leads nowhere is worse than a missing one.
@@ -139,7 +141,7 @@ interface WorkspaceGitProject {
   name: string
   ok: boolean
   reason?: string            // set iff ok === false; 'timed out' | 'root not found' | 'not a git repo' | git's own stderr
-  branch?: string            // absent on a detached HEAD or an unborn branch
+  branch?: string            // absent on a detached HEAD. REPORTED on an unborn branch — see below.
   detached?: boolean
   upstream?: string
   ahead?: number             // absent when there is no upstream — 0 would be a claim we cannot make
@@ -156,6 +158,32 @@ interface WorkspaceGitResponse {
 
 `ahead`/`behind` are **optional, not defaulted to 0**. "No upstream" and "level with upstream" are
 different facts and the UI must be able to say which.
+
+**REFINED 2026-08-14 during implementation, and this sentence was too blunt as first written.** It
+said only "absent when there is no upstream", which leaves the level case ambiguous. The rule the
+code implements, and the one that is actually right:
+
+- **no upstream at all** → both absent. There is nothing to compare against, so no count can be
+  made.
+- **an upstream, and `git` prints no `[ahead/behind]` bracket** → both `0`. An upstream *is* a
+  comparison, and it came back level; that is a fact, not a missing one.
+- **an upstream reported `[gone]`** (its remote-tracking ref no longer exists) → `upstream` is
+  still reported, but both counts are absent. The branch remembers what it tracked; nothing can be
+  counted against a ref that is not there.
+
+The UI must render absent and `0` **differently**, or the distinction is destroyed at the last
+step after the server took trouble to preserve it.
+
+**CORRECTED 2026-08-14 — `branch` on an unborn branch.** The data model first said `branch` is
+absent "on a detached HEAD **or an unborn branch**", and the implementation followed that literally.
+It is wrong for the unborn case, and the same principle that settled `ahead`/`behind` settles it the
+other way here: absence should mean *we cannot say*, and on an unborn branch we can. `git` prints
+`## No commits yet on main` — the name is right there, the branch pointer genuinely exists, it
+simply has no commits yet.
+
+So: **report the branch on an unborn branch.** `head` is already absent in that case, which is what
+carries "nothing committed here yet" — and `branch: main` with no head is strictly more informative
+than reporting neither. Absent `branch` now means exactly one thing: a detached HEAD.
 
 ## API Contracts
 
@@ -193,6 +221,46 @@ Automated, each guard named with the mutation that must turn it red:
 
 The concurrency guard needs a real high-water mark, not a call count: a test that only counts calls
 passes with the cap deleted, which is the mutation it exists to catch.
+
+**The page's scope-trap guard must be an allowlist, not a blocklist — added 2026-08-14 after
+mutation testing proved the obvious version vacuous.** Adding `useRepo()` to this page killed
+**0** tests against a `/api/v1/p/…` blocklist, and 1 against an allowlist.
+
+**This note was written, amended wrongly, and corrected back — settled on captured evidence.** The
+middle version claimed the typed client emits `/api/v1/p/default/repo`, so a `/p/` blocklist would
+catch it. That was wrong, and it was wrong because it read `client.ts:618-622` and stopped one
+function short.
+
+The mechanism, verified by logging the actual requests a workspace page makes:
+
+```
+[{"path":"/api/v1/repo"}, {"path":"/api/v1/health"}, {"path":"/api/v1/workspace/git"}]
+```
+
+`getRepo()` does build the scoped spelling — `cez.api.v1.p[':projectId'].repo.$get({param:{projectId: queryScope()}})`,
+and `queryScope()` answers `'default'` when unscoped. But **every typed-client request then passes
+through `withApiBase` → `unscoped()`** (`client.ts:278-303`), which strips a whole `/p/default`
+segment whenever `getApiScope() === null`. Its docblock says why in as many words: so that an
+unscoped request is byte-identical whichever half of the client sent it, and "migrating a route
+never moves it on the wire."
+
+So on a page mounted outside `ProjectScopeRoute` there is **no `/p/` segment at all**, from either
+half. Both spellings collapse to the bare URL, and the server's no-prefix convention answers with
+the **boot project's** data. A `/p/`-shaped blocklist is genuinely blind to all of it.
+
+**The guard must be an allowlist**: assert the requested-path set is a subset of what this page may
+touch (`/api/v1/health`, `/api/v1/workspace/git`), with a floor asserting those calls did happen so
+an empty log cannot pass. A blocklist would have to enumerate every bare endpoint that exists; an
+allowlist enumerates the two this page is allowed. One fails open as the codebase grows.
+
+The lesson worth more than the conclusion: **a claim about what goes on the wire has to be measured
+at the wire.** Three readings of the source produced three different answers; one request log
+settled it.
+
+So: assert the requested-path set is a **subset** of what this page may touch (`/api/v1/health`,
+`/api/v1/workspace/git`), with a floor asserting those calls did happen so an empty log cannot
+pass. Same correction applies to every page outside `ProjectScopeRoute` — see
+`.ai/specs/2026-08-14-project-less-task-composer.md`.
 
 Gates in order, and **`npm test -- <path>`, never `npx vitest`** (PLAN D21):
 `npm run typecheck`, `npm test`, `npm run build`.

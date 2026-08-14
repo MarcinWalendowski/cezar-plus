@@ -310,15 +310,25 @@ export class KnowledgeStore {
     const tags = new Map<string, number>();
     const statuses = new Map<string, number>();
     const roots = new Map<string, number>();
+    const domains = new Map<string, number>();
     for (const entry of this.documents.values()) {
       types.set(entry.type, (types.get(entry.type) ?? 0) + 1);
       statuses.set(entry.status, (statuses.get(entry.status) ?? 0) + 1);
       roots.set(entry.root, (roots.get(entry.root) ?? 0) + 1);
       for (const tag of entry.tags) tags.set(tag, (tags.get(tag) ?? 0) + 1);
+      // `distinct(domain)` over the index (D1) — a document with no domain contributes to no
+      // bucket at all, never an "unfiled" bucket of its own.
+      if (entry.domain) domains.set(entry.domain, (domains.get(entry.domain) ?? 0) + 1);
     }
     const toBuckets = (map: Map<string, number>): KnowledgeFacetBucket[] =>
       [...map.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([value, count]) => ({ value, count }));
-    return { types: toBuckets(types), tags: toBuckets(tags), statuses: toBuckets(statuses), roots: toBuckets(roots) };
+    return {
+      types: toBuckets(types),
+      tags: toBuckets(tags),
+      statuses: toBuckets(statuses),
+      roots: toBuckets(roots),
+      domains: toBuckets(domains),
+    };
   }
 
   getScan(): ScanStats {
@@ -331,6 +341,26 @@ export class KnowledgeStore {
 
   isInitialized(): boolean {
     return this.initialized;
+  }
+
+  /**
+   * Every indexed document, in the deterministic `(root, path)` order below. Bodies are NOT
+   * included — this is the catalog projection, same as a search result (Q15).
+   *
+   * Added 2026-08-14 for the cross-project changelog
+   * (`.ai/specs/2026-08-14-knowledge-domains-and-changelog.md` D3), which needs "every document
+   * carrying `changeType`" and **cannot get it from `search()`**: `search()` applies its
+   * `type`/`tag`/`status`/`root` filters and then discards the result whenever the query
+   * tokenizes empty (`search.ts:213-222`), so no filter combination browses the catalog. Nor from
+   * `GET /knowledge`, which answers facet counts and never a document array.
+   *
+   * Callers filtering on a FRONTMATTER field (`domain`, `changeType`, `project`) must come through
+   * here rather than dressing the value up as a search query: those fields are not part of
+   * `SearchableDocument`, so a BM25 query over them matches on incidental body-text overlap and
+   * silently returns the wrong set.
+   */
+  listDocuments(): CatalogEntry[] {
+    return this.orderedEntries();
   }
 
   /** Deterministic ordering (D8/spec): `(rootId, relPath)` — approximated here as `(root, path)`,

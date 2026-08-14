@@ -1,6 +1,10 @@
 # Knowledge domains and a project-correlated changelog
 
-> **Status:** specified, not implemented · **Date:** 2026-08-14
+> **Status:** Phases 1–3 + the changelog **read** implemented, **QA Needed** — no runtime E2E has
+> run, and Phase 4's write path is deliberately unbuilt (see the status block below) ·
+> **Date:** 2026-08-14, status corrected 2026-08-15 — this header read "specified, not
+> implemented" while the body already said the opposite, so the file contradicted itself and the
+> header is what a scanning reader keeps
 > **Completes:** Phase 2 (the Knowledge half) of
 > `.ai/specs/2026-08-14-workspace-level-navigation.md`.
 > **Extends:** `.ai/specs/2026-08-06-knowledge-base-mounts-search.md` (F1) — this adds two fields
@@ -233,6 +237,69 @@ Workspace-level, single-mount, never mirrored under `/api/v1/p/` (BC §2). Proje
 
 Phase 1 is shippable alone and is what makes every later phase testable.
 
+**Status 2026-08-14:** Phases 1, 2 and the changelog **read** half of Phase 4 are implemented.
+Phase 3 (the page) is in progress. Phase 4's **write** path is deliberately not built: a changelog
+entry is a knowledge document, so writing one already goes through the existing per-project
+`POST /knowledge` + `POST /knowledge/proposals/apply`, and D7's propose-never-auto-apply guarantee
+is inherited rather than rebuilt. Building a second write path would have been the duplication this
+spec argues against everywhere else.
+
+**One gap had to be closed in the substrate to build any of it.** `KnowledgeStore` had no way to
+enumerate documents: `search()` applies its `type`/`tag`/`status`/`root` filters and then discards
+the result whenever the query tokenizes empty (`search.ts:213-222`), and `GET /knowledge` answers
+facet counts and never a document array — so the search docstring's advice to "browse via
+`GET /knowledge`" pointed nowhere. Added `KnowledgeStore.listDocuments()` (a public delegation to
+the private `orderedEntries()`) and corrected that docstring in place.
+
+The tempting alternative — querying each `changeType` value through BM25 — was rejected rather than
+shipped: `changeType` is frontmatter and not part of `SearchableDocument`, so it would have matched
+on incidental body-text overlap and returned a corpus shaped by word coincidence. That is the
+silent-narrowing failure this spec's other guards exist to prevent.
+
+**And then the same trap caught this spec's own consumer.** `WorkspaceKnowledgeIndex.search()`
+forwarded to the per-project `store.search()` and applied `domain` as a post-filter over its
+results — but `search()` returns `[]` whenever the query tokenizes empty, so the post-filter ran
+over an empty array. The page's primary affordance is **clicking a domain row**, which searches with
+`domain` set and no query text, so every domain rendered "No documents match." directly beneath a
+row stating its document count. The two halves of the page contradicted each other and the count was
+the honest one.
+
+Worth stating plainly, because it is the reusable lesson: the docblock warning against exactly this
+had been written earlier the same day, three functions away, and the consumer walked into it anyway.
+**A docblock is not a guard.** The fix follows `changelog()`'s own precedent in the same file —
+browse through `listDocuments()` when there is nothing to rank and a filter to honour — and the
+regression test is required to fail against the pre-fix code, since a test that passes before the
+fix would be testing nothing. Empty query with *no* filter still returns empty; the distinction
+being defended is "browse a filtered slice" versus "dump the corpus".
+
+**Found while fixing the above, out of scope, and left alone deliberately: a one-character query
+returns nothing, silently.** `search.ts`'s `TOKEN_RE` is `[a-z0-9][a-z0-9_-]{1,31}` — a **two**
+character minimum — so a literal single-character query tokenizes to zero tokens and hits the same
+short-circuit. That is true of the existing per-project search box today, independent of anything
+here: type `a` and you get "No documents match", which is indistinguishable from a genuine empty
+result.
+
+It surfaced because five pre-existing tests used `'q'` as throwaway query text against a fake that
+ignored its argument; once the real `tokenize()` became load-bearing, those five correctly started
+routing through the browse/empty branch. They were repointed to `'query'`, restoring their original
+intent — the alternative, relaxing `TOKEN_RE`, would have changed indexing semantics corpus-wide to
+make five placeholder strings keep working, which is the tail wagging the dog.
+
+**Not fixed here, and the right fix is not in this layer.** Widening `TOKEN_RE` would alter every
+document's index for the sake of a query nobody usefully types. The honest fix is a UI affordance —
+tell the user a search needs two characters — which belongs to the page, not the index. Recorded so
+the next person to see an empty result for `a` finds this instead of re-deriving it. Note the browse
+path above now *improves* this case: a one-character query **with a domain filter** browses
+correctly rather than returning nothing, because both are "no tokens to rank".
+
+**Known gap, not a defect: the changelog route ships with no UI consumer.**
+`GET /api/v1/workspace/knowledge/changelog` exists in the index, the route, the contract and
+`BACKWARD_COMPATIBILITY.md`, but `/workspace/knowledge` reads only `domains` and `search` —
+`workspace-changelog.tsx` (named in the Files table above) was not built. So the changelog
+projection has automated coverage but **no browser path at all**, and the runtime E2E below cannot
+exercise it. Recorded here so the next session does not read "changelog read implemented" as
+"changelog verified end to end".
+
 ## Risks
 
 - **Domains are free-form, so they will be misspelled.** Accepted for v1: the domain list is
@@ -259,9 +326,38 @@ Phase 1 is shippable alone and is what makes every later phase testable.
 | `CEZ_KB` off and `CEZ_WORKSPACE_VIEWS` on → empty payload naming **knowledge**; the reverse names **workspaceViews** | return one generic reason for both (this is the AND-gate blind spot: a single message cannot say which conjunct is false) |
 | The domains list includes a domain that has documents but **no** index document | list only domains with an index doc |
 | A changelog write lands as a proposal, not a file | apply it directly |
+| **A `domain` filter with an EMPTY query returns that domain's documents** | route the empty-query case back through `store.search()` (i.e. restore the original bug) |
+| **A whitespace-only query behaves as an empty one**, not as a term to rank | trim instead of tokenizing, or vice versa — whichever the implementation did not choose |
+| **An empty query with NO filter returns empty**, not the whole corpus | make the browse path unconditional |
+| **A non-empty query still ranks by relevance** — asserted on *ordering*, not membership | route real queries through the browse path too |
 
 The two-flag test must assert **both directions**. One direction passes with the gate hardcoded to
 whichever flag the test happens to set.
+
+The four empty-query rows are a regression suite, so the first of them carries an extra obligation:
+it must be **observed failing against the pre-fix code**. A regression test authored after the fix
+and never run before it proves only that the code agrees with itself.
+
+**The scope-trap guard is an allowlist, and two independent mutations proved why that matters.**
+Two agents, working from two independently written test files, each broke the page by adding a
+project-scoped call — but they picked *different* URL shapes, because they disagreed about what
+actually goes on the wire:
+
+| Mutation | URL shape it assumed | Result |
+|---|---|---|
+| add `fetch('/api/v1/p/default/repo')` | scoped, with `/p/` | 1 test failed |
+| add a `useRepo()` call | bare `/api/v1/repo` — `withApiBase` → `unscoped()` strips `/p/default` when nothing is scoped (`client.ts:288-303`) | 1 test failed |
+
+The allowlist caught **both**. That is the whole argument, demonstrated rather than asserted: a
+`/p/`-shaped **blocklist** would have caught only the first and waved the second through, and the
+second is the one that actually happens on a workspace page — where the server's own no-prefix
+convention then answers with the *boot project's* data, silently and with a 200.
+
+This cost real effort to establish. The wire format was mis-stated three times across two specs
+during implementation, from three readings of the same source, and was settled only by capturing an
+actual request log. The durable lesson is two-part: **a claim about what goes on the wire has to be
+measured at the wire** — and, better, **write the guard so it does not depend on the answer.** The
+allowlist holds under either reading, which is why the second lesson outranks the first.
 
 Gates in order, **`npm test -- <path>`, never `npx vitest`** (PLAN D21): `npm run typecheck`,
 `npm test`, `npm run build`, `npm run test:package`.
@@ -273,3 +369,13 @@ changelog entry in another, open `/workspace/knowledge`, and confirm both projec
 appear under the right domain from a single search. Confirm from the run index that opening the
 page started **no** runs in any project — the whole point of D5. Until that has run this is
 **QA Needed**.
+
+**Click the domain row without typing anything, and confirm documents appear.** This step was added
+after the fact, because the version above would have missed the empty-query defect entirely: it
+searches *with a query*, and the broken path was the one with none. A domain whose row claims a
+document count must not then render "No documents match." — the count and the list have to agree,
+and the E2E has to be the thing that notices when they do not.
+
+**The changelog projection has no step here**, and cannot: no page consumes that route (see the
+status note above). Its coverage is automated only. Do not read a passing E2E as evidence about the
+changelog.

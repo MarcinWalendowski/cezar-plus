@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query'
-import { ListChecksIcon, SearchIcon, SearchXIcon, TriangleAlertIcon } from 'lucide-react'
+import { ListChecksIcon, PlusIcon, SearchIcon, SearchXIcon, TriangleAlertIcon } from 'lucide-react'
 import * as React from 'react'
 import { Link as RouterLink, useSearchParams } from 'react-router'
 
@@ -145,6 +145,17 @@ export function WorkspaceTasksRoute() {
             />
           </>
         ) : null}
+        {/* The entry point onto `/workspace/new` (spec Phase 3,
+            `.ai/specs/2026-08-14-project-less-task-composer.md`) — an action, not a nav row
+            (`nav-items.ts` stays untouched, per the spec's Architecture section). Unconditional:
+            it is gated by `CEZ_WORKSPACE_VIEWS`, not `CEZ_NOTES`, and the destination already
+            renders its own honest "off" state when notes is off (D19's pattern), never a 404. */}
+        <Button asChild size="sm" className="ml-auto">
+          <RouterLink to="/workspace/new">
+            <PlusIcon />
+            New task
+          </RouterLink>
+        </Button>
       </header>
 
       <div className="flex flex-1 flex-col p-3 pb-[calc(90px+env(safe-area-inset-bottom))] md:p-5 md:pb-5">

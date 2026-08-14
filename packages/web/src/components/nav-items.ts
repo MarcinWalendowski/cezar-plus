@@ -60,8 +60,11 @@ export type NavItem = {
    *
    *  An item appears in that band **iff** it has one, which is the whole gate: `Tasks` answers
    *  across every project at `/tasks` and inside one at `/p/:id/`, so it carries both `to` and
-   *  this; `Git` and `Knowledge` have no cross-project page yet (Phase 2) and so carry only `to`,
-   *  because a nav row that leads nowhere is worse than a missing one.
+   *  this. `Git` carries both too as of `.ai/specs/2026-08-14-cross-project-git-overview.md`
+   *  (Phase 2) — `/workspace/git`, its own cross-project page, not a scoped `/git` reused.
+   *  `Knowledge` joined them via `.ai/specs/2026-08-14-knowledge-domains-and-changelog.md`
+   *  (Phase 3) — `/workspace/knowledge`, still gated behind `knowledge` below (an item with no
+   *  cross-project page at all would carry only `to`, the way this one used to).
    *
    *  Never derived from `to` — `/settings` scoped is a project's settings, and the workspace
    *  answer is `/settings/global`, a different route with a different scope provider. The two
@@ -89,9 +92,9 @@ export type NavItem = {
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare'], badge: 'tasks-unread', workspaceTo: '/tasks' },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, match: ['/inbox'], badge: 'inbox-count', inbox: true },
-  { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'] },
+  { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'], workspaceTo: '/workspace/git' },
   { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true, automations: true },
-  { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true },
+  { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true, workspaceTo: '/workspace/knowledge' },
   { to: '/notes', label: 'Notes', icon: NotebookPenIcon, match: ['/notes'], notes: true, workspace: true, workspaceTo: '/notes' },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'], workspaceTo: '/settings/global' },
 ]
@@ -105,8 +108,10 @@ export const NAV_ITEMS: NavItem[] = [
  * bitten by one concept enforced in two places. A capability that hides an item hides it in both
  * bands for free.
  *
- * `Git` and `Knowledge` are absent by construction until Phase 2 gives them a cross-project page
- * — see `NavItem.workspaceTo`.
+ * `Git` joined this band in Phase 2 of `.ai/specs/2026-08-14-cross-project-git-overview.md`.
+ * `Knowledge` joined it in Phase 3 of `.ai/specs/2026-08-14-knowledge-domains-and-changelog.md` —
+ * still gated on `capabilities.knowledge` like its per-project item, so it renders here only when
+ * that flag is on, unlike `Git`, which needs nothing turned on. See `NavItem.workspaceTo`.
  */
 export function workspaceNavItems(availability: NavAvailability = {}): NavItem[] {
   return visibleNavItems(availability).filter((item) => item.workspaceTo !== undefined)

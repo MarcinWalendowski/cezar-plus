@@ -272,6 +272,8 @@ export async function parseScannedFile(file: ScannedFile): Promise<ParsedWorking
       type: parsed.type,
       tags: parsed.tags,
       project: parsed.project,
+      domain: parsed.domain,
+      changeType: parsed.changeType,
       status: parsed.status,
       statusRaw: parsed.statusRaw,
       supersedes: parsed.supersedes,

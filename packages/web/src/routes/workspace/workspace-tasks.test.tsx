@@ -372,3 +372,21 @@ describe('restoring the last-used filter', () => {
     )
   })
 })
+
+describe('the New task entry point', () => {
+  it('links to /workspace/new regardless of the workspaceViews capability', async () => {
+    stubFetch()
+    renderAt('/workspace/tasks')
+    await findInTable('Fix the flaky retry test')
+    const link = screen.getByRole('link', { name: /New task/ })
+    expect(link.getAttribute('href')).toBe('/workspace/new')
+  })
+
+  it('still renders when the cross-project board itself is off', async () => {
+    stubFetch({ healthResponse: health({ capabilities: { ...CAPABILITIES_ON, workspaceViews: false } }) })
+    renderAt('/workspace/tasks')
+    await screen.findByText('The cross-project board is off')
+    const link = screen.getByRole('link', { name: /New task/ })
+    expect(link.getAttribute('href')).toBe('/workspace/new')
+  })
+})

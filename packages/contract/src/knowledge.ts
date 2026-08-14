@@ -30,6 +30,16 @@ export type KnowledgeDocType = z.infer<typeof knowledgeDocTypeSchema>;
 export const knowledgeStatusSchema = z.enum(['current', 'superseded', 'draft']);
 export type KnowledgeStatus = z.infer<typeof knowledgeStatusSchema>;
 
+/**
+ * Closed enum for a changelog entry (D3, `.ai/specs/2026-08-14-knowledge-domains-and-changelog.md`).
+ * A changelog entry is an ordinary knowledge document — presence of `changeType` on it is what
+ * makes it one, not a new `knowledgeDocTypeSchema` member. Widening this enum later carries the
+ * same released-package caution as `knowledgeDocTypeSchema` itself (D1): an older client's zod
+ * parse rejects an enum member it does not know.
+ */
+export const knowledgeChangeTypeSchema = z.enum(['Added', 'Changed', 'Fixed', 'Removed']);
+export type KnowledgeChangeType = z.infer<typeof knowledgeChangeTypeSchema>;
+
 export const knowledgeSourceOriginSchema = z.enum(['remote', 'local']);
 export type KnowledgeSourceOrigin = z.infer<typeof knowledgeSourceOriginSchema>;
 
@@ -87,6 +97,16 @@ export const knowledgeDocumentSchema = z.object({
   tags: z.array(z.string()).default([]),
   /** Absent means workspace-wide. */
   project: z.string().optional(),
+  /**
+   * Free-form grouping axis (D1) — an emergent axis, not a fixed list, so its valid set is
+   * whatever the index actually contains. NOT a member of `knowledgeDocTypeSchema`: a decision, a
+   * spec and a runbook can all share one domain, so a document must be able to say what it IS
+   * (`type`) and what it is ABOUT (`domain`) independently. Absent = not filed under a domain.
+   */
+  domain: z.string().optional(),
+  /** Presence of this field is what makes a document a changelog entry (D3) — a projection over
+   *  the ordinary knowledge documents, not a second store. Absent on every other document. */
+  changeType: knowledgeChangeTypeSchema.optional(),
   status: knowledgeStatusSchema,
   /** The original status string, always kept verbatim, even once normalized into `status`. */
   statusRaw: z.string().optional(),
@@ -132,6 +152,9 @@ export const knowledgeFacetsSchema = z.object({
   tags: z.array(knowledgeFacetBucketSchema).default([]),
   statuses: z.array(knowledgeFacetBucketSchema).default([]),
   roots: z.array(knowledgeFacetBucketSchema).default([]),
+  /** `distinct(domain)` over the index (D1) — a document with no `domain` contributes to no
+   *  bucket here, it is not counted as an "unfiled" bucket of its own. */
+  domains: z.array(knowledgeFacetBucketSchema).default([]),
 });
 export type KnowledgeFacets = z.infer<typeof knowledgeFacetsSchema>;
 

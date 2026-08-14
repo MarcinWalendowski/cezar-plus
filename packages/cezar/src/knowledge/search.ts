@@ -198,8 +198,20 @@ function bm25Score(index: Bm25Index, docId: string, queryTokens: readonly string
 /**
  * The two-stage search entry point. Filters first (`type`/`tag`/`status`/`root`, all AND'd),
  * then pins, then ranks. An empty (or whitespace-only) query returns no results rather than
- * "everything" - callers that want to browse the catalog unfiltered use `GET /knowledge`, not
- * search.
+ * "everything".
+ *
+ * **CORRECTED 2026-08-14.** This used to end: "callers that want to browse the catalog unfiltered
+ * use `GET /knowledge`, not search." That pointer led nowhere — `GET /knowledge` answers
+ * `{roots, counts, facets, scan, formatVersion}` and has never carried a document array. Browsing
+ * callers use **`KnowledgeStore.listDocuments()`**.
+ *
+ * Note the order below, because it surprises people: the filters ARE applied (`:213`) and are then
+ * discarded by the empty-query short-circuit (`:222`). So no combination of `type`/`tag`/`status`/
+ * `root` turns this into a browse, however filtered the call looks.
+ *
+ * And filtering on a FRONTMATTER field (`domain`, `changeType`, `project`) cannot be done here at
+ * all: those are not part of `SearchableDocument`, so passing the value as a query ranks on
+ * incidental body-text overlap and silently returns the wrong set.
  */
 export function search<T extends SearchableDocument>(
   docs: readonly T[],

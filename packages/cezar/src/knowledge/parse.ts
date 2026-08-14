@@ -1,6 +1,8 @@
 import {
+  knowledgeChangeTypeSchema,
   knowledgeDocTypeSchema,
   knowledgeSourceSchema,
+  type KnowledgeChangeType,
   type KnowledgeDocType,
   type KnowledgeSource,
   type KnowledgeStatus,
@@ -33,6 +35,11 @@ export interface ParsedDoc {
   tags: string[];
   /** Absent means workspace-wide. */
   project?: string;
+  /** Free-form grouping axis (D1) — parsed exactly like `project`, no fixed vocabulary. */
+  domain?: string;
+  /** Closed enum; presence is what makes a document a changelog entry (D3). An unrecognised
+   *  value is dropped with a warning, same treatment as a malformed `source` block. */
+  changeType?: KnowledgeChangeType;
   status: KnowledgeStatus;
   /** The original status string, kept verbatim even once normalized into `status`. Absent when
    *  no status was found at all (not even an unrecognised one). */
@@ -72,6 +79,7 @@ export function parseDocument(raw: string, path: string, format?: string): Parse
   const source = resolveSource(frontmatter.source, allWarnings);
   const supersedes = toStringArray(frontmatter.supersedes);
   const links = toStringArray(frontmatter.links);
+  const changeType = resolveChangeType(frontmatter.changeType ?? frontmatter['change_type'], allWarnings);
 
   return {
     format: resolvedFormat,
@@ -79,6 +87,8 @@ export function parseDocument(raw: string, path: string, format?: string): Parse
     type: resolveType(resolveTypeValue(frontmatter)),
     tags: toStringArray(frontmatter.tags),
     project: coerceString(frontmatter.project),
+    domain: coerceString(frontmatter.domain),
+    changeType,
     status,
     statusRaw,
     supersedes: supersedes.length ? supersedes : undefined,
@@ -138,6 +148,21 @@ function resolveType(value: unknown): KnowledgeDocType {
   const raw = coerceString(value)?.trim().toLowerCase();
   const parsed = knowledgeDocTypeSchema.safeParse(raw);
   return parsed.success ? parsed.data : 'note';
+}
+
+// ---- changeType --------------------------------------------------------------------------------
+
+/** Closed enum (D3/D1). Unlike `type`, an unrecognised value does NOT fall back to a default —
+ *  presence of `changeType` is the signal that turns a document into a changelog entry, so a
+ *  wrong value is dropped with a warning rather than silently promoted to one of the four, the
+ *  same tolerant-but-not-silent treatment `resolveSource` gives a malformed `source` block. */
+function resolveChangeType(value: unknown, warnings: string[]): KnowledgeChangeType | undefined {
+  if (value === undefined) return undefined;
+  const raw = coerceString(value)?.trim();
+  const parsed = knowledgeChangeTypeSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  warnings.push(`frontmatter "changeType" ("${raw}") is not one of Added|Changed|Fixed|Removed, ignoring`);
+  return undefined;
 }
 
 // ---- status ----------------------------------------------------------------------------------

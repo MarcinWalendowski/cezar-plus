@@ -157,6 +157,90 @@ describe('KnowledgeStore — CRUD, containment and optimistic concurrency', () =
   });
 });
 
+describe('KnowledgeStore — domain and changeType (Phase 1)', () => {
+  it('domain and changeType survive parse -> catalog -> search result, not just parse', async () => {
+    const repoRoot = await tempDir('cez-kb-store-domain-');
+    const { store } = await openStore(repoRoot);
+    const created = await store.createDocument({
+      scope: 'project',
+      path: 'billing/rate-change.md',
+      content: '---\ndomain: billing\nchangeType: Fixed\n---\n# Rate change\n\nFixed the proration bug.',
+    });
+    if (!created.ok) throw new Error('setup failed');
+
+    const found = store.search('proration').results.find((d) => d.id === created.document.id);
+    expect(found?.domain).toBe('billing');
+    expect(found?.changeType).toBe('Fixed');
+    // The single-document read goes through a different path (`getDocument`) — same guarantee.
+    expect(store.getDocument(created.document.id)?.domain).toBe('billing');
+  });
+
+  it('a document with no domain is still indexed and searchable', async () => {
+    const repoRoot = await tempDir('cez-kb-store-nodomain-');
+    const { store } = await openStore(repoRoot);
+    const created = await store.createDocument({
+      scope: 'project',
+      path: 'undomained.md',
+      content: '# Undomained\n\nNo domain at all, deliberately.',
+    });
+    if (!created.ok) throw new Error('setup failed');
+
+    const found = store.search('deliberately').results.find((d) => d.id === created.document.id);
+    expect(found).toBeDefined();
+    expect(found?.domain).toBeUndefined();
+  });
+
+  it('getFacets() reports a domain facet — distinct(domain) over the index, undomained documents contribute no bucket', async () => {
+    const repoRoot = await tempDir('cez-kb-store-domain-facet-');
+    const { store } = await openStore(repoRoot);
+    await store.createDocument({ scope: 'project', path: 'a.md', content: '---\ndomain: billing\n---\n# A' });
+    await store.createDocument({ scope: 'project', path: 'b.md', content: '---\ndomain: billing\n---\n# B' });
+    await store.createDocument({ scope: 'project', path: 'c.md', content: '---\ndomain: onboarding\n---\n# C' });
+    await store.createDocument({ scope: 'project', path: 'd.md', content: '# D — no domain at all' });
+
+    const facets = store.getFacets();
+    expect(facets.domains).toEqual([
+      { value: 'billing', count: 2 },
+      { value: 'onboarding', count: 1 },
+    ]);
+  });
+});
+
+describe('KnowledgeStore — listDocuments() (D3, added for the cross-project changelog)', () => {
+  it('returns a document search() genuinely cannot reach: zero lexical overlap with any query', async () => {
+    const repoRoot = await tempDir('cez-kb-store-listdocs-');
+    const { store } = await openStore(repoRoot);
+    const created = await store.createDocument({
+      scope: 'project',
+      path: 'changelog/2026-08-14-obscure-fix.md',
+      content: '---\nchangeType: Fixed\n---\n# Xqzvth Wbnroy\n\nKrelmp fjodaw plicnux.',
+    });
+    if (!created.ok) throw new Error('setup failed');
+
+    // Title and body share zero tokens with this query, so BM25 scores it 0 and the non-pinned
+    // filter (`effectiveScore(doc) > 0`, search.ts) drops it — search() is genuinely blind to it,
+    // not just unlucky with this particular query.
+    const searched = store.search('billing invoice payment').results.find((d) => d.id === created.document.id);
+    expect(searched).toBeUndefined();
+
+    const listed = store.listDocuments().find((d) => d.id === created.document.id);
+    expect(listed).toBeDefined();
+    expect(listed?.changeType).toBe('Fixed');
+  });
+
+  it('returns every document unfiltered, including one with no changeType — the caller filters, not the accessor', async () => {
+    const repoRoot = await tempDir('cez-kb-store-listdocs-all-');
+    const { store } = await openStore(repoRoot);
+    await store.createDocument({ scope: 'project', path: 'a.md', content: '---\nchangeType: Added\n---\n# A' });
+    await store.createDocument({ scope: 'project', path: 'b.md', content: '# B — not a changelog entry' });
+
+    const all = store.listDocuments();
+    expect(all).toHaveLength(2);
+    expect(all.some((d) => d.changeType === 'Added')).toBe(true);
+    expect(all.some((d) => d.changeType === undefined)).toBe(true);
+  });
+});
+
 describe('KnowledgeStore — C17: the mirror wire', () => {
   it('a document dropped straight into the sources mirror root is indexed with root: "sources"', async () => {
     const repoRoot = await tempDir('cez-kb-store-mirror-');

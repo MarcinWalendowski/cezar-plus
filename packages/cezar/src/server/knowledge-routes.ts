@@ -71,7 +71,7 @@ const EMPTY_KNOWLEDGE_RESPONSE: KnowledgeResponse = {
   enabled: false,
   roots: [],
   counts: { documents: 0, idCollisions: 0 },
-  facets: { types: [], tags: [], statuses: [], roots: [] },
+  facets: { types: [], tags: [], statuses: [], roots: [], domains: [] },
   scan: { truncated: false, filesScanned: 0, bytesScanned: 0, skipped: 0 },
   formatVersion: 0,
 };

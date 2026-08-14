@@ -12,7 +12,7 @@ import {
   writeManifest,
   type ParsedWorking,
 } from './catalog.ts';
-import { CATALOG_FORMAT_VERSION, type ResolvedKnowledgeRoot } from './types.ts';
+import { CATALOG_FORMAT_VERSION, catalogEntrySchema, type ResolvedKnowledgeRoot } from './types.ts';
 
 async function tempDir(prefix: string): Promise<string> {
   const base = await realpath(tmpdir());
@@ -145,6 +145,28 @@ describe('buildCatalog', () => {
     expect(new Set(ids).size).toBe(2);
     expect(ids).toContain(`root-${shared}`);
     expect(ids).toContain(`root-${shared}-2`);
+  });
+});
+
+describe('buildCatalog — domain and changeType (Phase 1)', () => {
+  it('carries domain/changeType from frontmatter into the catalog entry, and a document with no domain is still a valid catalog entry', async () => {
+    const dir = await tempDir('cez-kb-build-domain-');
+    await writeFile(join(dir, 'a.md'), '---\ndomain: billing\nchangeType: Fixed\n---\n# A\n\nBody.', 'utf8');
+    await writeFile(join(dir, 'b.md'), '# B\n\nNo domain here at all.', 'utf8');
+
+    const { documents } = await buildCatalog([root('project', dir, { writable: true })]);
+    const a = documents.find((d) => d.entry.title === 'A')!;
+    const b = documents.find((d) => d.entry.title === 'B')!;
+
+    expect(a.entry.domain).toBe('billing');
+    expect(a.entry.changeType).toBe('Fixed');
+    expect(catalogEntrySchema.safeParse(a.entry).success).toBe(true);
+
+    // No `domain` in frontmatter at all — must still assemble into a schema-valid catalog entry
+    // (mutation: make `domain` required on the wire schema, this assertion turns red).
+    expect(b.entry.domain).toBeUndefined();
+    expect(b.entry.changeType).toBeUndefined();
+    expect(catalogEntrySchema.safeParse(b.entry).success).toBe(true);
   });
 });
 

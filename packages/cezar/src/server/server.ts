@@ -32,6 +32,8 @@ import { NoteProcessor } from '../notes/processor.ts';
 import { NoteApprover } from '../notes/approve.ts';
 import { createWorkspaceRunsRoutes } from './workspace-runs-routes.ts';
 import { createWorkspaceRunMutationRoutes } from './workspace-run-mutations-routes.ts';
+import { createWorkspaceGitRoutes } from './workspace-git-routes.ts';
+import { createWorkspaceKnowledgeRoutes } from './workspace-knowledge-routes.ts';
 import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -6161,6 +6163,14 @@ export function createApp(deps: ServerDeps) {
   // so the family can `peek` at an already-built store; it can never build one.
   // (`.ai/specs/2026-08-14-cross-project-run-mutations.md`.)
   const workspaceRunMutationRoutes = createWorkspaceRunMutationRoutes({ contexts });
+  // The cross-project git overview (`.ai/specs/2026-08-14-cross-project-git-overview.md`):
+  // same non-instantiating discipline as the two families above, own file, own index.
+  const workspaceGitRoutes = createWorkspaceGitRoutes();
+  // The cross-project knowledge read (`.ai/specs/2026-08-14-knowledge-domains-and-changelog.md`,
+  // D5). Takes `contexts` for the same reason the run mutations do and with the same limit: it
+  // `peek`s an already-built store and can never build one, because building recovers and resumes
+  // that project's interrupted runs — and typing into a search box must not start agents.
+  const workspaceKnowledgeRoutes = createWorkspaceKnowledgeRoutes({ contexts });
   const notificationsRoutes = createNotificationsRoutes();
 
   // ---- assemble the chained families --------------------------------------
@@ -6354,6 +6364,8 @@ export function createApp(deps: ServerDeps) {
     .route('/', notesRoutes)
     .route('/', workspaceRunsRoutes)
     .route('/', workspaceRunMutationRoutes)
+    .route('/', workspaceGitRoutes)
+    .route('/', workspaceKnowledgeRoutes)
     .route('/', notificationsRoutes);
 
   // ---- mount ---------------------------------------------------------------

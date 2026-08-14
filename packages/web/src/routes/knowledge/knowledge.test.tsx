@@ -91,6 +91,10 @@ const KNOWLEDGE_RESPONSE: KnowledgeResponse = {
       { value: 'project', count: 1 },
       { value: 'sources', count: 1 },
     ],
+    // The `domain` axis (`.ai/specs/2026-08-14-knowledge-domains-and-changelog.md` D1). Empty here
+    // because neither fixture document is filed under one — which is itself the point: `domain` is
+    // optional, and a document without it still indexes and still searches.
+    domains: [],
   },
   scan: { truncated: false, filesScanned: 2, bytesScanned: 200, skipped: 0 },
   formatVersion: 1,
