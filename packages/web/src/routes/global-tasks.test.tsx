@@ -172,7 +172,11 @@ function stubFetch({
           recheckAfterMs: null,
         })
       }
-      const receipt = /^\/api\/v1\/p\/([^/]+)\/runs\/([^/]+)\/(read|unread)$/.exec(path)
+      // The workspace spelling, not `/p/:projectId` (spec 2026-08-14-cross-project-run-mutations):
+      // the board's row actions moved off the project-scoped prefix because its `use('*')` resolver
+      // BUILDS the named project's context, resuming every interrupted run in it. The path is the
+      // fix, so these fixtures pin it.
+      const receipt = /^\/api\/v1\/workspace\/runs\/([^/]+)\/([^/]+)\/(read|unread)$/.exec(path)
       if (receipt && method === 'POST') {
         const [, projectId, id, route] = receipt
         index = index.map((run) => {
@@ -185,7 +189,7 @@ function stubFetch({
         })
         return jsonResponse(index.find((run) => run.id === id))
       }
-      const archive = /^\/api\/v1\/p\/([^/]+)\/runs\/([^/]+)\/archive$/.exec(path)
+      const archive = /^\/api\/v1\/workspace\/runs\/([^/]+)\/([^/]+)\/archive$/.exec(path)
       if (archive && method === 'POST') {
         if (archiveStatus !== 200) return jsonResponse({ error: 'still running' }, archiveStatus)
         const [, projectId, id] = archive
@@ -864,7 +868,7 @@ describe('global tasks page', () => {
 
       await waitFor(() =>
         expect(sent.find((request) => request.method === 'POST')?.path).toBe(
-          '/api/v1/p/infra/runs/i1/read',
+          '/api/v1/workspace/runs/infra/i1/read',
         ),
       )
       await waitFor(() => expect(document.querySelectorAll('[aria-label="unread"]')).toHaveLength(0))
@@ -882,7 +886,7 @@ describe('global tasks page', () => {
 
       await waitFor(() =>
         expect(sent.find((request) => request.method === 'POST')?.path).toBe(
-          '/api/v1/p/infra/runs/i1/unread',
+          '/api/v1/workspace/runs/infra/i1/unread',
         ),
       )
       await waitFor(() => expect(document.querySelectorAll('[aria-label="unread"]')).toHaveLength(1))
@@ -919,7 +923,7 @@ describe('global tasks page', () => {
     await waitFor(() =>
       expect(sent.find((request) => request.method === 'POST')).toEqual({
         method: 'POST',
-        path: '/api/v1/p/infra/runs/i1/archive',
+        path: '/api/v1/workspace/runs/infra/i1/archive',
         body: { archived: true },
       }),
     )

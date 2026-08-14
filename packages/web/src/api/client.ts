@@ -1122,11 +1122,19 @@ export async function archiveRun(id: string, archived = true): Promise<RunRecord
 }
 
 /**
- * The same route by EXPLICIT project — the twin of `getProjectRuns`, and for the same reason:
- * the global Tasks page stands outside every `/p/:projectId`, so `queryScope()` would send the
- * BOOT project's id for a row that belongs to another project, and the archive would either 404
- * or (with a colliding id) land on the wrong task. Every caller that is already standing in the
- * run's own project keeps using `archiveRun`.
+ * Archive by EXPLICIT project, for the cross-project board — the twin of `getProjectRuns`, and
+ * for the same reason: the global Tasks page stands outside every `/p/:projectId`, so
+ * `queryScope()` would send the BOOT project's id for a row that belongs to another project, and
+ * the archive would either 404 or (with a colliding id) land on the wrong task. Every caller that
+ * is already standing in the run's own project keeps using `archiveRun`.
+ *
+ * **Moved off `/p/:projectId` on 2026-08-14** (`.ai/specs/2026-08-14-cross-project-run-mutations.md`).
+ * It used to POST to `/api/v1/p/:projectId/runs/:id/archive`, and that prefix carries a
+ * method-agnostic `use('*')` scope resolver which BUILDS the named project's context: prune
+ * orphans, reclaim (delete) worktrees, then `manager.recover()` — resuming every interrupted run
+ * in that project. Archiving one finished row therefore started processes in a project the user
+ * had only pointed at. The workspace spelling has no `:projectId` scope for the resolver to act
+ * on, so the id is data the handler resolves instead.
  */
 export async function archiveProjectRun(
   projectId: string,
@@ -1134,8 +1142,8 @@ export async function archiveProjectRun(
   archived = true,
 ): Promise<RunRecord> {
   return unwrap(
-    await cez.api.v1.p[':projectId'].runs[':id'].archive.$post({
-      param: { projectId, id: encodeURIComponent(id) },
+    await cez.api.v1.workspace.runs[':projectId'][':runId'].archive.$post({
+      param: { projectId, runId: encodeURIComponent(id) },
       json: { archived },
     }),
     runPath(id, '/archive'),
@@ -1146,6 +1154,10 @@ export async function archiveProjectRun(
  * The read receipt by EXPLICIT project — the twin of `archiveProjectRun`, and for the same
  * reason: the global Tasks page stands outside every `/p/:projectId`, so `queryScope()` would
  * stamp the receipt on the boot project. `read: false` is the inverse route (#775).
+ *
+ * On the workspace spelling since 2026-08-14, for the reason `archiveProjectRun` spells out — and
+ * this one is the sharper case: a read receipt is what the board stamps automatically as you look
+ * at rows, so the old path made *reading the board* resume other projects' runs.
  */
 export async function setProjectRunRead(
   projectId: string,
@@ -1155,11 +1167,11 @@ export async function setProjectRunRead(
   const route = read ? 'read' : 'unread'
   return unwrap(
     await (read
-      ? cez.api.v1.p[':projectId'].runs[':id'].read.$post({
-          param: { projectId, id: encodeURIComponent(id) },
+      ? cez.api.v1.workspace.runs[':projectId'][':runId'].read.$post({
+          param: { projectId, runId: encodeURIComponent(id) },
         })
-      : cez.api.v1.p[':projectId'].runs[':id'].unread.$post({
-          param: { projectId, id: encodeURIComponent(id) },
+      : cez.api.v1.workspace.runs[':projectId'][':runId'].unread.$post({
+          param: { projectId, runId: encodeURIComponent(id) },
         })),
     runPath(id, `/${route}`),
   )

@@ -31,6 +31,7 @@ import { NoteCoordinator } from '../notes/coordinator.ts';
 import { NoteProcessor } from '../notes/processor.ts';
 import { NoteApprover } from '../notes/approve.ts';
 import { createWorkspaceRunsRoutes } from './workspace-runs-routes.ts';
+import { createWorkspaceRunMutationRoutes } from './workspace-run-mutations-routes.ts';
 import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -6154,6 +6155,12 @@ export function createApp(deps: ServerDeps) {
     },
   });
   const workspaceRunsRoutes = createWorkspaceRunsRoutes();
+  // The cross-project board's ROW ACTIONS, kept off `/p/:projectId` on purpose: that prefix's
+  // `use('*')` scope resolver builds a context for whichever project the path names, and a build
+  // prunes orphans, reclaims worktrees and recovers every interrupted run. `contexts` is passed
+  // so the family can `peek` at an already-built store; it can never build one.
+  // (`.ai/specs/2026-08-14-cross-project-run-mutations.md`.)
+  const workspaceRunMutationRoutes = createWorkspaceRunMutationRoutes({ contexts });
   const notificationsRoutes = createNotificationsRoutes();
 
   // ---- assemble the chained families --------------------------------------
@@ -6346,6 +6353,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceEventsRoutes)
     .route('/', notesRoutes)
     .route('/', workspaceRunsRoutes)
+    .route('/', workspaceRunMutationRoutes)
     .route('/', notificationsRoutes);
 
   // ---- mount ---------------------------------------------------------------
