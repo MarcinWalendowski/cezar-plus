@@ -171,7 +171,10 @@ describe('no onboarding surface at all (hosted, unauthenticated) — the wizard 
     // wizard's step machinery mounted at all.
     expect(screen.queryByRole('link', { name: 'Sign in' })).toBeNull()
     expect(screen.queryByLabelText('Organization name')).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Add project' })).toBeNull()
+    // The project step's own three affordances (D15 renamed these from the single "Add project").
+    expect(screen.queryByRole('button', { name: 'Create blank' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open local folder' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Import from GitHub' })).toBeNull()
 
     // Give any errant follow-up request a chance to land before asserting none did.
     await new Promise((resolve) => setTimeout(resolve, 20))
@@ -472,13 +475,29 @@ describe('ready: resumes straight to add-projects, and the team threads through 
     expect(screen.queryByLabelText('Workspace name')).toBeNull()
   })
 
-  it('"Skip for now" leaves without registering a project', async () => {
+  /**
+   * **REPLACED 2026-08-14.** This block used to assert that "Skip for now" left the wizard without
+   * registering a project, and had been failing since D15 (2026-08-07) deleted that button —
+   * "there is no way past this screen that does not create a project, which is the point"
+   * (`onboarding.tsx#AddProjectsStep`). Pinning the deleted behaviour is worse than pinning
+   * nothing, so the test now asserts D15's decision instead of its opposite: three ways forward,
+   * and no way around.
+   *
+   * Named affordances rather than a bare "no skip button": a negative-only assertion would stay
+   * green if the whole step stopped rendering.
+   */
+  it('offers three ways to create a project and no way past without one (D15)', async () => {
     stubFetch({ onboarding: () => jsonResponse({ state: 'ready', org: ORG, team: TEAM, role: ROLE }) })
     renderAt()
 
-    await screen.findByRole('button', { name: 'Skip for now' })
-    fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }))
-    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/'))
+    await screen.findByRole('button', { name: 'Create blank' })
+    expect(screen.getByRole('button', { name: 'Open local folder' })).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Import from GitHub' })).not.toBeNull()
+    for (const name of ['Skip for now', 'Not now', 'Skip', 'Continue without a project']) {
+      expect(screen.queryByRole('button', { name })).toBeNull()
+    }
+    // Still on the wizard: nothing here navigated away on its own.
+    expect(screen.getByTestId('location').textContent).toBe('/onboarding')
   })
 
   it('registering a project from the wizard sends the resolved team id, reusing AddProjectDialog', async () => {
@@ -488,9 +507,10 @@ describe('ready: resumes straight to add-projects, and the team threads through 
     })
     renderAt()
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Add project' }))
-    // The same folder-browser dialog every other "Add project" entry point uses.
-    await screen.findByText('Open local folder')
+    fireEvent.click(await screen.findByRole('button', { name: 'Open local folder' }))
+    // The same folder-browser dialog every other "open a folder" entry point uses — matched on its
+    // own slot, because D15 gave the step's BUTTON the dialog's title as its label.
+    await waitFor(() => expect(document.querySelector('[data-slot="add-project-dialog"]')).not.toBeNull())
     const confirm = document.querySelector('[data-slot="add-project-confirm"]') as HTMLButtonElement
     await waitFor(() => expect(confirm.disabled).toBe(false))
     fireEvent.click(confirm)

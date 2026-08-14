@@ -1063,14 +1063,20 @@ export async function removeProject(projectId: string): Promise<RemoveProjectRes
  * `selectAgentProfile` (`PUT /api/v1/workspace/agent-profiles/selection`), so
  * the selection is stored beside the accounts it names.
  *
- * **The `?? null` trap this comment used to warn about is closed.** Before the route understood
- * `teamId`, `$patch`'s typed `json` required the OLD, narrower `{maxParallel: number | null}`, so
- * this rebuilt that shape from scratch — and an unqualified `maxParallel: input.maxParallel ?? null`
- * would have CLEARED a project's concurrency override on every team-only reassignment the moment the
- * route learned to read `teamId`. `$patch`'s typed `json` is inferred from `server.ts`'s own
- * validator (`app-type.ts`), which is widened now too, so `maxParallel` is forwarded only when the
- * caller actually named it (`undefined` omits the key entirely, matching the route's "absent means
- * untouched" contract) and `teamId` rides along unmodified.
+ * **The body is forwarded WHOLE, and that is the point.** This used to rebuild it key by key —
+ * originally to dodge a `?? null` trap, when `$patch`'s typed `json` still required the narrower
+ * pre-`teamId` `{maxParallel: number | null}` and an unqualified `input.maxParallel ?? null` would
+ * have CLEARED a concurrency override on every team-only reassignment. That list then went stale:
+ * `tags` was added to the contract (2026-08-10) and to the route, and this function kept sending
+ * `{ maxParallel?, teamId? }`, so every tag edit PATCHed an empty body. The server left the project
+ * untouched and answered with it, `onSuccess` replaced the optimistic row with that answer, and the
+ * tag vanished a beat after it appeared — a hand-maintained whitelist over a contract that grows.
+ *
+ * `useUpdateProject` one layer up already forwards its variables whole for exactly this reason
+ * ("an unlisted key would be silently dropped instead of sent"); this now matches. `undefined`
+ * values disappear in JSON serialization, which is precisely the route's "absent means untouched"
+ * contract, and the typed `json` is inferred from `server.ts`'s own validator, so a field the route
+ * does not accept cannot compile.
  */
 export async function updateProject(
   projectId: string,
@@ -1079,10 +1085,7 @@ export async function updateProject(
   return unwrap(
     await cez.api.v1.projects[':projectId'].$patch({
       param: { projectId: encodeURIComponent(projectId) },
-      json: {
-        ...(input.maxParallel !== undefined ? { maxParallel: input.maxParallel } : {}),
-        ...(input.teamId !== undefined ? { teamId: input.teamId } : {}),
-      },
+      json: input,
     }),
     `/projects/${encodeURIComponent(projectId)}`,
   )

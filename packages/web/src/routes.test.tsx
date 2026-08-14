@@ -11,6 +11,7 @@ import { ListViewProvider } from './components/list-view'
 import { ThemeProvider } from './components/theme-provider'
 import { LAST_LOCATION_STORAGE_KEY } from './lib/last-location'
 import { AppRoutes, pageTitleContext } from './routes'
+import { ONBOARDING_ENTRY_PROBE_KEY } from './routes/onboarding/onboarding-gate'
 import { resetDraft } from './routes/new-task-draft'
 
 // The `/` overview fetches `/api/v1/runs` on mount. A never-answering fetch keeps every route
@@ -52,6 +53,26 @@ const HEALTH = {
   capabilities: { localHandoff: true, followups: true, singleProject: false, automations: false },
   projects: [{ id: BOOT, name: 'cezar' }],
   bootProject: BOOT,
+}
+
+/**
+ * The onboarding entry probe, answering as an install that finished onboarding.
+ *
+ * Seeded because the bare-root branch of `LegacyPathRedirect` **waits** for this query (routes.tsx,
+ * the 2026-08-07 D15 fix: two authorities used to redirect `/` and whoever settled first won).
+ * `fetch` is stubbed here to a promise that never resolves, so an unseeded probe never settles and
+ * every bare-root case parks on `scope-resolving` forever — which is exactly what it did.
+ *
+ * `ready` with `hasProjects: true` rather than the simpler `unavailable`: `unavailable` never gates
+ * by construction, so it would keep these tests green even if `needsOnboardingGate` started gating
+ * an onboarded install. This seed runs the real predicate.
+ */
+const ONBOARDING_READY = {
+  kind: 'ready' as const,
+  org: { id: 'org-1', name: 'Test org', slug: 'test-org', createdAt: '' },
+  team: { id: 'team-1', orgId: 'org-1', name: 'Engineering', slug: 'engineering' },
+  role: 'owner' as const,
+  hasProjects: true,
 }
 
 const REGISTRY: ProjectsResponse = {
@@ -112,11 +133,13 @@ function renderAt(
     health = HEALTH,
     registry = REGISTRY,
     uiState = {},
+    onboarding = ONBOARDING_READY,
   }: {
     seed?: boolean
     health?: typeof HEALTH | null
     registry?: ProjectsResponse | null
     uiState?: WorkspaceUiState | Record<string, unknown> | null
+    onboarding?: typeof ONBOARDING_READY | null
   } = {},
 ) {
   const client = createQueryClient()
@@ -126,6 +149,7 @@ function renderAt(
     if (health !== null) client.setQueryData(queryKeys.health, health)
     if (registry !== null) client.setQueryData(workspaceQueryKeys.projects, registry)
     if (uiState !== null) client.setQueryData(workspaceQueryKeys.uiState, uiState)
+    if (onboarding !== null) client.setQueryData(ONBOARDING_ENTRY_PROBE_KEY, onboarding)
   }
   render(
     <QueryClientProvider client={client}>
@@ -803,9 +827,11 @@ describe('D13/D14 onboarding entry gate (OnboardingEntryGate)', () => {
   function stubOnboarding({
     onboarding,
     createOrg,
+    createBlankProject,
   }: {
     onboarding: () => Response
     createOrg?: () => Response
+    createBlankProject?: () => Response
   }) {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
       const path = String(input).split('?')[0]
@@ -814,18 +840,26 @@ describe('D13/D14 onboarding entry gate (OnboardingEntryGate)', () => {
       if (method === 'POST' && path === '/auth/onboarding/org') {
         return createOrg ? createOrg() : jsonResponse({ org: ORG, team: TEAM, role: 'owner' })
       }
+      if (method === 'POST' && path === '/api/v1/projects/blank' && createBlankProject) {
+        return createBlankProject()
+      }
       return new Promise<never>(() => {})
     })
     vi.stubGlobal('fetch', fetchMock)
     return fetchMock
   }
 
+  /** Every test in this block is ABOUT the probe's real answer, so none of them may take the
+   *  harness's default seed — a seeded probe would resolve before the stubbed fetch and the
+   *  assertion would be about the fixture instead of about the gate. */
+  const PROBE_LIVE = { onboarding: null } as const
+
   it('redirects to /onboarding on a first run (needs-org)', async () => {
     stubOnboarding({
       onboarding: () =>
         jsonResponse({ state: 'needs-org', suggestedOrgName: 'Acme', bootstrapTokenRequired: false }),
     })
-    renderAt('/')
+    renderAt('/', PROBE_LIVE)
 
     await waitFor(() => expect(currentPathname()).toBe('/onboarding'))
     // The lazy `OnboardingRoute` chunk (and its own probe fetch) resolve on a later tick than the
@@ -838,7 +872,7 @@ describe('D13/D14 onboarding entry gate (OnboardingEntryGate)', () => {
     stubOnboarding({
       onboarding: () => jsonResponse({ state: 'ready', org: ORG, team: TEAM, role: 'owner', hasProjects: true }),
     })
-    renderAt('/')
+    renderAt('/', PROBE_LIVE)
 
     await waitFor(() => expect(currentPathname()).toBe(`/p/${BOOT}/`))
     // Give the probe a chance to resolve and the effect a chance to (wrongly) fire before
@@ -862,7 +896,7 @@ describe('D13/D14 onboarding entry gate (OnboardingEntryGate)', () => {
       onboarding: () =>
         jsonResponse({ state: 'needs-org', suggestedOrgName: 'Acme', bootstrapTokenRequired: false }),
     })
-    renderAt('/', { health: { ...HEALTH, capabilities: { ...HEALTH.capabilities, localHandoff: false } } })
+    renderAt('/', { ...PROBE_LIVE, health: { ...HEALTH, capabilities: { ...HEALTH.capabilities, localHandoff: false } } })
 
     await waitFor(() => expect(currentPathname()).toBe('/onboarding'))
     await waitFor(() => expect(routeName()).toBe('onboarding'))
@@ -883,7 +917,7 @@ describe('D13/D14 onboarding entry gate (OnboardingEntryGate)', () => {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         }),
     })
-    renderAt('/', { health: { ...HEALTH, capabilities: { ...HEALTH.capabilities, localHandoff: false } } })
+    renderAt('/', { ...PROBE_LIVE, health: { ...HEALTH, capabilities: { ...HEALTH.capabilities, localHandoff: false } } })
 
     await waitFor(() => expect(currentPathname()).toBe(`/p/${BOOT}/`))
     // Give the probe a chance to resolve and the effect a chance to (wrongly) fire before
@@ -893,25 +927,51 @@ describe('D13/D14 onboarding entry gate (OnboardingEntryGate)', () => {
     expect(routeName()).not.toBe('onboarding')
   })
 
+  /**
+   * **REWRITTEN 2026-08-14.** This used to finish the wizard by clicking "Skip for now", and had
+   * been failing since D15 (2026-08-07) deleted that button: "there is no way past this screen that
+   * does not create a project, which is the point" (`onboarding.tsx#AddProjectsStep`). The claim
+   * FIX 9 makes is unchanged and still worth guarding, so the test now completes the wizard the way
+   * a user can — by creating a blank project — rather than being deleted along with the button.
+   *
+   * The `needs-org` first answer is load-bearing, not scene-setting: it is what puts a `needs-org`
+   * result in the ENTRY probe's cache, and re-firing the gate against that stale cache is the whole
+   * regression. Starting from an already-`ready` probe would make this vacuous.
+   */
   it('completing the wizard from a direct /onboarding load does not bounce back into it (FIX 9)', async () => {
     let orgCreated = false
+    let projectCreated = false
     stubOnboarding({
       onboarding: () =>
         jsonResponse(
           orgCreated
-            ? { state: 'ready', org: ORG, team: TEAM, role: 'owner', hasProjects: false }
+            ? { state: 'ready', org: ORG, team: TEAM, role: 'owner', hasProjects: projectCreated }
             : { state: 'needs-org', suggestedOrgName: 'Acme', bootstrapTokenRequired: false },
         ),
       createOrg: () => {
         orgCreated = true
         return jsonResponse({ org: ORG, team: TEAM, role: 'owner' })
       },
+      createBlankProject: () => {
+        projectCreated = true
+        return jsonResponse({
+          project: {
+            id: 'fresh',
+            name: 'fresh',
+            root: '/home/u/cezar/projects/fresh',
+            addedAt: '',
+            lastOpenedAt: '',
+            source: 'local',
+            status: 'ok',
+          },
+        })
+      },
     })
 
     // A DIRECT load at /onboarding — never through the gate's own redirect — is exactly the case
     // FIX 9 was blind to: the old code only disarmed `firedOnce` inside the branch that called
     // `navigate()`, which this path never reaches.
-    renderAt('/onboarding')
+    renderAt('/onboarding', PROBE_LIVE)
 
     const nameInput = await screen.findByLabelText('Organization name')
     expect((nameInput as HTMLInputElement).value).toBe('Acme')
@@ -921,7 +981,11 @@ describe('D13/D14 onboarding entry gate (OnboardingEntryGate)', () => {
     expect((teamInput as HTMLInputElement).value).toBe('General')
     fireEvent.click(screen.getByRole('button', { name: 'Accept and continue' }))
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Skip for now' }))
+    // The project step, D15's replacement for the skip. "Create blank" is the one route through it
+    // that needs no folder browser and no clone.
+    fireEvent.click(await screen.findByRole('button', { name: 'Create blank' }))
+    fireEvent.change(await screen.findByLabelText('Project name'), { target: { value: 'fresh' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create project' }))
 
     await waitFor(() => expect(currentPathname()).not.toBe('/onboarding'))
     // The bug bounced back on the NEXT tick, after the redirect had already landed — assert it

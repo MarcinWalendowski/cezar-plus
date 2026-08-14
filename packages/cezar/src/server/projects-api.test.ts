@@ -781,16 +781,42 @@ describe('workspace projects API', () => {
         expect(identity.getProjectTeam(claimed.root)?.teamId).toBe(teamA.id);
       });
 
-      it('an empty body is a no-op — 200, nothing changes, no team write attempted', async () => {
+      /**
+       * **CORRECTED 2026-08-14.** This asserted `{}` was a 200 no-op, and had been failing since
+       * `31e48bed` (global Tasks + repository tags) gave `updateProjectInputSchema` a `.refine`
+       * requiring one of `maxParallel` / `tags` / `teamId`. The refine is the later and better
+       * decision — a PATCH that names nothing is a caller bug, and 400 says so — so the expectation
+       * moves to match it rather than the refine being weakened back.
+       *
+       * The half of the original claim worth keeping is the SECOND half: a body that stays silent
+       * about `teamId` must not attempt a team write. That is now pinned below on a body that names
+       * something else, which is where it was always the more interesting assertion — an empty body
+       * never reaches the write at all.
+       */
+      it('a body naming nothing is refused — 400, and the registration is untouched', async () => {
         const { store: identity, orgA, teamA } = await seedOrgs();
         const claimed = await registerProject(otherRoot);
         await identity.createProjectTeam({ projectRoot: claimed.root, orgId: orgA.id, teamId: teamA.id });
 
         const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
-        const { status, body } = await patchAs(claimed.id, 'cez_session=a', principalResolver({ 'cez_session=a': principalA }), {});
+        const { status } = await patchAs(claimed.id, 'cez_session=a', principalResolver({ 'cez_session=a': principalA }), {});
+        expect(status).toBe(400);
+        expect(identity.getProjectTeam(claimed.root)?.teamId).toBe(teamA.id);
+      });
+
+      it('a body silent about teamId leaves the team exactly as it was — no team write attempted', async () => {
+        const { store: identity, orgA, teamA } = await seedOrgs();
+        const claimed = await registerProject(otherRoot);
+        await identity.createProjectTeam({ projectRoot: claimed.root, orgId: orgA.id, teamId: teamA.id });
+
+        const principalA: Principal = { kind: 'session', userId: 'u-a', orgId: orgA.id, teamId: teamA.id, role: 'owner' };
+        const { status, body } = await patchAs(claimed.id, 'cez_session=a', principalResolver({ 'cez_session=a': principalA }), {
+          maxParallel: 3,
+        });
         expect(status).toBe(200);
+        expect(body.project.maxParallel).toBe(3);
         expect(body.project.teamId).toBe(teamA.id);
-        expect(body.project.maxParallel).toBeUndefined();
+        expect(identity.getProjectTeam(claimed.root)?.teamId).toBe(teamA.id);
       });
       });
     });

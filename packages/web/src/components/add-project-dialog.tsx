@@ -125,8 +125,18 @@ export function AddProjectDialog({
       // cross-org root), and stopping there leaves the earlier rows registered — which they are,
       // and the error names the row that failed. Silently continuing past it would report a
       // success the user never got.
-      const { project } = await register.mutateAsync({ root, teamId })
-      first ??= project.id
+      //
+      // Caught rather than allowed to propagate, and the two are NOT the same: the call site is
+      // `void add()`, and `void` discards a promise without handling it, so a refused folder threw
+      // an unhandled rejection into the page (and a "this might cause false positive tests" error
+      // into the suite). Nothing is swallowed by catching here — `register.isError` below renders
+      // the server's message verbatim, which is the whole error surface this flow ever had.
+      try {
+        const { project } = await register.mutateAsync({ root, teamId })
+        first ??= project.id
+      } catch {
+        return
+      }
     }
     if (first === null) return
     onOpenChange(false)

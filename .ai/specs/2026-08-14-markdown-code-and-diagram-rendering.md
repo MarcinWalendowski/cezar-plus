@@ -183,6 +183,9 @@ change and none of them touch markdown). One of the five files failing at the st
 *was* this session's fault — the upstream-purity brand scan, which the earlier nested-repos
 docblock tripped — and it is fixed here.
 
+**Those 24 were fixed later the same session** — `2026-08-14-tag-patch-and-stale-tests.md`. One of
+them was a real product bug, not a stale test.
+
 Runtime, in the running cockpit at `/p/<project>/knowledge/<id>`, on a document containing a GFM
 table, a `ts` fence and a mermaid flowchart:
 
@@ -196,8 +199,15 @@ Still **QA Needed** rather than Done: the owner's own pass over a task thread (a
 knowledge document) has not run, and the screenshot pipeline returned a stale frame for the light
 theme, so that half is confirmed by measurement only.
 
-## Not done here
+## Not done here — superseded 2026-08-14 by `2026-08-14-sortable-markdown-tables.md`
 
-**Sortable tables.** Raised in the same conversation and worth correcting in place: Streamdown's
-table controls are copy / download / fullscreen — **it has no column sorting at all**, so this is
-not a switch that is turned off, it is a feature that would have to be built. Unstarted.
+**Sortable tables. Built, later the same session — this section's "unstarted" is stale.** The
+sorting lives in `routes/task-thread/sortable-table.tsx`, installed as `components.table`; see that
+spec, in particular its D1 on Streamdown's children-blind `memo` comparator, which is why a naive
+implementation sorts exactly once. Original text, unchanged:
+
+> Raised in the same conversation and worth correcting in place: Streamdown's table controls are
+> copy / download / fullscreen — **it has no column sorting at all**, so this is not a switch that
+> is turned off, it is a feature that would have to be built. Unstarted.
+
+That first half remains true, and is the reason the feature is ~220 lines rather than a prop.

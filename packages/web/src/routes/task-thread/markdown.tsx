@@ -12,6 +12,7 @@ import {
 import { SYN_THEME, highlight, highlightSync, supportedLanguages } from '@/lib/highlighter'
 
 import { LinkSafetyDialog } from './link-safety-dialog'
+import { SortableTable } from './sortable-table'
 
 /**
  * Assistant markdown for the thread — Streamdown (spec tech pick: stable-block memoization,
@@ -227,6 +228,16 @@ const INLINE_ELEMENTS = ['p', 'strong', 'em', 'del', 'code', 'a'] as const
 const INLINE_COMPONENTS = { p: 'span', a: 'span' } as const
 
 /**
+ * Click-to-sort tables. Module-level so the object identity is stable — Streamdown memoizes its
+ * merged component map on the `components` prop, and a fresh object per render would rebuild it on
+ * every keystroke of a streaming message.
+ *
+ * Not applied in `inline` mode: that vocabulary disallows block elements entirely, so there is no
+ * table to sort there.
+ */
+const BLOCK_COMPONENTS = { table: SortableTable } as const
+
+/**
  * Streamdown's link confirm, rendered by US so it portals out of the thread's contained rows —
  * see link-safety-dialog.tsx for the whole story. Module-level, not built per render: Streamdown
  * memoizes on `linkSafety` by identity, so a fresh object here would re-render every message on
@@ -264,7 +275,7 @@ export const Markdown = memo(function Markdown({
       remarkPlugins={breaks ? HARD_BREAKS : undefined}
       allowedElements={inline ? INLINE_ELEMENTS : undefined}
       unwrapDisallowed={inline || undefined}
-      components={inline ? INLINE_COMPONENTS : undefined}
+      components={inline ? INLINE_COMPONENTS : BLOCK_COMPONENTS}
       linkSafety={LINK_SAFETY}
       // Copy + language chip on every fence (the deliverable); download is file-manager noise
       // in a chat, and table export dropdowns are R5-territory chrome. A diagram gets fullscreen
