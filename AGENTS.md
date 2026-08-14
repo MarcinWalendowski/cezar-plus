@@ -166,6 +166,38 @@ npm test -- --testTimeout=30000 path/to/one.test.ts
 npm test -- -t "the name of one test"
 ```
 
+### Debugging an intermittent failure — cross-file pollution is NOT a possible cause
+
+**`isolate` is unset here, so it is vitest's default `true`: every test FILE gets its own fresh
+module graph**, even inside one worker under `--no-file-parallelism`. A module-level mutation in
+file A therefore **cannot** be seen by file B's own import of the same module.
+
+Verified by experiment on 2026-08-15, not read off the docs: a deliberate top-level
+`DEFAULT_PROMPT_TEMPLATES[0].text = 'POLLUTED…'` was injected into `prompt-templates.test.ts` and
+paired with `new-task.test.tsx`, which asserts on that exact string. Serialized and parallel,
+three runs each — **6/6 clean**. The victim never saw the mutated value.
+
+This matters because "another test file left shared state behind" is the most attractive
+hypothesis for a test that fails in the suite and passes alone, and **in this repo it is not a
+mechanism that exists.** Drop that class and look at the two that do:
+
+1. **A race inside the file's own helpers.** This is what `github.test.tsx:2020` turned out to be
+   (`c27aadd8`): a retry helper treated "the DOM node vanished" as proof a click had landed, but an
+   unrelated re-render removes the node too, so a click fired at that moment was a silent no-op.
+   Assert the **effect** (did the value change), never a proxy for it.
+2. **Genuine concurrency timing.** Failures clustered at `--maxWorkers=16` on a 16-core box, and
+   this repo is often run with several agents competing for the same cores.
+
+Two method notes, both learned the hard way here:
+
+- **Prove pollution by injecting it**, as above. A hypothesis about shared state is cheap to test
+  directly and expensive to bisect toward.
+- **Mind the sample size.** A sweep showing 0/4 failures at one worker count and 4/16 at another
+  proves very little: at a 25% failure rate, 0-in-4 happens about a third of the time by chance.
+  Prefer a mechanism trace (an invocation counter, a logged value) over a table of small-n runs —
+  and note that a *signature* mismatch settles it outright, since pollution predicts a wrong
+  **value** while a swallowed event predicts a missing **call**.
+
 The UI smoke suite is a **separate** command — it boots the real app and drives it in a real
 Chrome through the `agent-browser` provider (`.ai/browsers/agent-browser.md`):
 
