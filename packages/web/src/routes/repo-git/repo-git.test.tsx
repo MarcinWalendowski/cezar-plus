@@ -38,7 +38,7 @@ const HEALTH: HealthResponse = {
   checks: [],
   defaultRunner: 'claude',
   forge: { kind: 'github', available: true },
-  capabilities: { localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: false, singleProject: false, knowledge: false, sources: false, workspaceViews: false, notify: false, skills: true },
+  capabilities: { localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: false, singleProject: false, knowledge: false, sources: false, workspaceViews: false, notify: false, skills: true, automations: false },
 }
 
 const CHANGES: ChangesPayload = {

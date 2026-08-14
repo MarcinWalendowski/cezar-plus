@@ -6,8 +6,13 @@ import { workspaceConfigPath } from '../paths.ts';
 // see `registerAndAdoptProject`'s own doc comment for why a THIRD hand-rolled adoption call site
 // here was exactly the shape that let D13's local-org guard go missing in the first place.
 import { registerAndAdoptProject, releaseProjectTeamClaim } from '../registered-project-roots.ts';
-import { loadWorkspaceConfig } from './config.ts';
-import { listProjects, removeProject, shouldRegisterProject } from './projects.ts';
+import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from './config.ts';
+import {
+  listProjects,
+  normalizeProjectTags,
+  removeProject,
+  shouldRegisterProject,
+} from './projects.ts';
 
 /**
  * `cezar projects` (spec 2026-07-20-multi-project-workspace, step 5.2) — the
@@ -34,11 +39,14 @@ const USAGE = `usage:
   cezar projects [list]        list the registered projects
   cezar projects add [<dir>]   register a folder (default: --repo, else cwd)
   cezar projects remove <id>   drop a registry entry (the repo is untouched)
+  cezar projects tag <id> [<tag>…]
+                               set the grouping tags of a project (none clears them)
 
-  add/remove are unavailable when CEZ_SINGLE_PROJECT=1`;
+  add/remove/tag are unavailable when CEZ_SINGLE_PROJECT=1`;
 
 const SINGLE_PROJECT_ADD_ERROR = 'single-project mode is enabled; adding projects is disabled';
 const SINGLE_PROJECT_REMOVE_ERROR = 'single-project mode is enabled; removing projects is disabled';
+const SINGLE_PROJECT_EDIT_ERROR = 'single-project mode is enabled; editing projects is disabled';
 
 /**
  * Run one `projects` subcommand. Returns the process exit code (0 ok, 1 for a
@@ -68,6 +76,12 @@ export async function runProjectsCommand(
         return 1;
       }
       return removeCommand(rest[0], io);
+    case 'tag':
+      if (singleProject) {
+        io.error(SINGLE_PROJECT_EDIT_ERROR);
+        return 1;
+      }
+      return tagCommand(rest[0], rest.slice(1), io);
     default:
       io.error(`unknown projects subcommand: ${sub}\n`);
       io.error(USAGE);
@@ -107,7 +121,10 @@ async function listCommand(
   io.log('');
   for (const project of projects) {
     const label = statusLabel(project).padEnd(labelWidth);
-    io.log(`  ${statusMark(project.status)} ${project.id.padEnd(idWidth)}  ${label}  ${project.root}`);
+    // Tags trail the path rather than taking a column of their own: most projects have none,
+    // and a mostly-empty column would cost every row width to say nothing.
+    const tags = project.tags?.length ? `  [${project.tags.join(' ')}]` : '';
+    io.log(`  ${statusMark(project.status)} ${project.id.padEnd(idWidth)}  ${label}  ${project.root}${tags}`);
   }
   io.log(`\n  ${projects.length} project(s) — registry: ${workspaceConfigPath()}\n`);
   return 0;
@@ -172,5 +189,47 @@ async function removeCommand(id: string | undefined, io: ProjectsCommandIo): Pro
   // the product) and for why this call is deliberately NOT swallowed on failure.
   if (root) await releaseProjectTeamClaim(root);
   io.log(`  - ${id} (registry entry only — the repo and its .ai/cezar/ are untouched)`);
+  return 0;
+}
+
+/**
+ * `cezar projects tag <id> [<tag>…]` — the terminal twin of the Tags cell in
+ * Settings → Projects.
+ *
+ * Replaces the WHOLE list, like the PATCH route does, and for the same reason:
+ * the caller always knows the full set, and an add-one/remove-one grammar would
+ * be a merge protocol with no one to merge against. No tags at all clears them.
+ * Normalization is the shared `normalizeProjectTags`, so a tag typed here and a
+ * tag typed in the cockpit are stored identically.
+ */
+async function tagCommand(
+  id: string | undefined,
+  tags: string[],
+  io: ProjectsCommandIo,
+): Promise<number> {
+  if (!id) {
+    io.error(USAGE);
+    return 1;
+  }
+  const normalized = normalizeProjectTags(tags);
+  let known = false;
+  await mergeWriteWorkspaceConfig((config) => {
+    const entry = config.projects.find((project) => project.id === id);
+    if (!entry) return;
+    known = true;
+    // Mutated in place so `.passthrough()` keys on the entry survive, and the key
+    // is DELETED rather than set to `[]`: an untagged project stores nothing.
+    if (normalized === undefined) delete entry.tags;
+    else entry.tags = normalized;
+  });
+  if (!known) {
+    io.error(`unknown project: ${id}`);
+    return 1;
+  }
+  io.log(
+    normalized === undefined
+      ? `  = ${id} (no tags)`
+      : `  = ${id}  [${normalized.join(' ')}]`,
+  );
   return 0;
 }

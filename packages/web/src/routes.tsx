@@ -10,9 +10,9 @@ import {
   useParams,
 } from 'react-router'
 
-import { useHealth, useProjects, useWorkspaceUiState } from './api/queries'
+import { useHealth, useProjects } from './api/queries'
 import { ProjectScopeProvider } from './api/project-scope-context'
-import { locationToRestore } from './lib/last-location'
+import { locationToRestore, readStoredLastLocation } from './lib/last-location'
 import { Navigate as ScopedNavigate, stripProjectPrefix } from './lib/project-router'
 import { needsOnboardingGate, useOnboardingEntryProbe } from './routes/onboarding/onboarding-gate'
 import { CompareLoading } from './routes/compare-loading'
@@ -33,6 +33,7 @@ import {
   settingsSectionPath,
 } from './routes/settings/settings-shell'
 import { TasksOverviewRoute } from './routes/tasks-overview'
+import { GlobalTasksRoute } from './routes/global-tasks'
 import { AutomationsRoute } from './routes/automations/automations'
 // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D22c): these two are
 // capability-gated placeholder pages, created by the scaffold so `routes.tsx` is edited exactly
@@ -245,15 +246,15 @@ function NewTaskProjectRoute() {
  * Legacy flat URLs — every pre-multi-project path, `/tasks/:id` bookmarks and the `/new?...`
  * bookmarklet grammar included — redirect to the boot project's scoped twin, preserving path,
  * query and hash byte-for-byte (BACKWARD_COMPATIBILITY.md protects the bookmarklet contract).
- * The exact bare root is the sole exception: once health, registry, and workspace UI state
- * settle, it may restore the last valid project-scoped page. Any query/hash makes `/` explicit,
- * so pasted links always win. `replace` keeps Back from bouncing off either startup redirect.
+ * The exact bare root is the sole exception: once health and the registry settle, it may restore
+ * the last valid project-scoped page THIS browser was on (localStorage, so a second client never
+ * decides where this one lands). Any query/hash makes `/` explicit, so pasted links always win.
+ * `replace` keeps Back from bouncing off either startup redirect.
  */
 function LegacyPathRedirect() {
   const location = useLocation()
   const health = useHealth()
   const projects = useProjects()
-  const uiState = useWorkspaceUiState()
   // D15: the shared onboarding probe — the same query `AppShellContainer` and
   // `OnboardingEntryGate` read, never a second fetch. See the bare-root branch below.
   const onboarding = useOnboardingEntryProbe()
@@ -269,12 +270,9 @@ function LegacyPathRedirect() {
   const isBareRoot =
     location.pathname === '/' && location.search === '' && location.hash === ''
   if (isBareRoot) {
-    if (
-      (projects.data === undefined && !projects.isError) ||
-      (uiState.data === undefined && !uiState.isError)
-    ) {
-      return <ScopeResolving />
-    }
+    // The remembered location itself is local and synchronous (#786); only the registry that
+    // validates its project is still worth waiting for.
+    if (projects.data === undefined && !projects.isError) return <ScopeResolving />
     // **FIXED 2026-08-07 (D15 runtime E2E): the bare root must not race the onboarding gate.**
     //
     // Two independent authorities used to redirect `/`: this component, once health + registry +
@@ -299,7 +297,7 @@ function LegacyPathRedirect() {
 
 
     const restored = locationToRestore(
-      uiState.data?.lastLocation,
+      readStoredLastLocation(),
       projects.data,
       resolvedBoot,
     )
@@ -396,6 +394,9 @@ export interface PageTitleContext {
 
 const PAGE_TITLE_ROUTES = [
   { pattern: '/', pageLabel: 'Tasks' },
+  // The global page. It is not project-scoped, so it never carries a `/p/` prefix to strip —
+  // but it goes through the same table, because the browser title is one mechanism.
+  { pattern: '/tasks', pageLabel: 'All tasks' },
   { pattern: '/new', pageLabel: 'New task' },
   { pattern: '/compare/:groupId', pageLabel: 'Compare' },
   { pattern: '/git/*', pageLabel: 'Git' },
@@ -668,6 +669,23 @@ export function AppRoutes() {
             (`.ai/specs/2026-08-06-workspace-notes-cross-project.md` "The scope trap"). Reachable
             even off — the route renders its own "disabled" state rather than a 404 (D19). */}
         <Route path="/workspace/tasks" element={<WorkspaceTasksRoute />} />
+
+        {/* The global Tasks page (#845) — a third non-project area, for the same reason as the
+            two above: "every project's tasks" scoped to one project is a contradiction. Its data
+            is the workspace-level run index, which is never scope-prefixed.
+
+            EXACTLY `/tasks`, never `/tasks/*`: `/tasks/:id` is a legacy flat task link and must
+            keep redirecting to the boot project's thread (`LegacyPathRedirect` below owns it).
+            React Router ranks this static segment above that `*`, so the two never compete.
+
+            TODO(upstream-sync 2026-08-13): this and our own `/workspace/tasks` above are two
+            boards over one idea — upstream built the cross-project run index at
+            `runs/run-index.ts` while ours lives at `workspace/run-index.ts`. Reconciling them is
+            a decision recorded in `.ai/runs/2026-08-13-upstream-merge-triage/PLAN.md` §5, not
+            something this merge settles. Until it is settled, note that this page's row actions
+            POST to `/api/v1/p/:projectId/…`, which builds a project context and resumes that
+            project's interrupted runs. */}
+        <Route path="/tasks" element={<GlobalTasksRoute />} />
 
         {/* The onboarding wizard (D8; D13 local mode). Outside `ProjectScopeRoute` for the same
             reason as the two routes above — there may be no project, and no ORG, yet. Reachable at

@@ -90,14 +90,16 @@ describe('NAV_ITEMS', () => {
 
 /** The gates: the GitHub item exists exactly while health reports the forge driver (R6 Step 1.1),
  *  the Inbox item exactly while it reports the opt-in `capabilities.followups` (#471), the
- *  Knowledge item exactly while it reports `capabilities.knowledge` (central-hub F1). Each gate
- *  owns ONLY its own item, and all three default to absent while health is unknown. */
+ *  Knowledge item exactly while it reports `capabilities.knowledge` (central-hub F1), and the
+ *  Automations item exactly while it reports a forge AND the opt-in `capabilities.automations`
+ *  (#801). Each gate owns ONLY its own item, and all default to absent while health is unknown. */
 describe('visibleNavItems', () => {
   const ALL: Required<Parameters<typeof visibleNavItems>[0]> = {
     forge: true,
     inbox: true,
     knowledge: true,
     skills: true,
+    automations: true,
   }
   const labelsOf = (opts?: Parameters<typeof visibleNavItems>[0]) =>
     visibleNavItems(opts).map((item) => item.label)
@@ -106,7 +108,7 @@ describe('visibleNavItems', () => {
     expect(visibleNavItems(ALL)).toEqual(NAV_ITEMS)
   })
 
-  it('without a forge, exactly the GitHub item drops out', () => {
+  it('without a forge, the GitHub AND Automations items drop out', () => {
     expect(labelsOf({ ...ALL, forge: false })).toEqual([
       'Tasks',
       'Inbox',
@@ -144,8 +146,32 @@ describe('visibleNavItems', () => {
     ])
   })
 
+  it('without the automations opt-in, exactly the Automations item drops out (#801)', () => {
+    expect(labelsOf({ forge: true, inbox: true, automations: false })).toEqual([
+      'Tasks',
+      'Inbox',
+      'Git',
+      'GitHub',
+      'Skills',
+      'Workflows',
+      'Settings',
+    ])
+  })
+
   it('drops everything gated when nothing is available', () => {
-    expect(labelsOf({ forge: false, inbox: false, knowledge: false })).toEqual([
+    expect(
+      labelsOf({ forge: false, inbox: false, knowledge: false, automations: false }),
+    ).toEqual(['Tasks', 'Git', 'Skills', 'Workflows', 'Settings'])
+  })
+
+  // The two gates on that one item are ANDed: a forge alone does not resurrect it, which is the
+  // whole point of #801 — every project with a GitHub remote used to see the tab.
+  it('a forge alone does not bring Automations back', () => {
+    expect(labelsOf({ forge: true, inbox: false })).not.toContain('Automations')
+  })
+
+  it('drops all three when nothing is available', () => {
+    expect(labelsOf({ forge: false, inbox: false, automations: false })).toEqual([
       'Tasks',
       'Git',
       'Skills',
@@ -155,15 +181,19 @@ describe('visibleNavItems', () => {
   })
 
   it('defaults to absent — the nav claims nothing before health answers', () => {
-    expect(labelsOf()).toEqual(labelsOf({ forge: false, inbox: false, knowledge: false }))
+    expect(labelsOf()).toEqual(
+      labelsOf({ forge: false, inbox: false, knowledge: false, automations: false }),
+    )
   })
 
   it('never invents an item — the result is always a subset of NAV_ITEMS, in order', () => {
     for (const forge of [true, false]) {
       for (const inbox of [true, false]) {
         for (const knowledge of [true, false]) {
-          const items = visibleNavItems({ forge, inbox, knowledge })
-          expect(NAV_ITEMS.filter((i) => items.includes(i))).toEqual(items)
+          for (const automations of [true, false]) {
+            const items = visibleNavItems({ forge, inbox, knowledge, automations })
+            expect(NAV_ITEMS.filter((i) => items.includes(i))).toEqual(items)
+          }
         }
       }
     }

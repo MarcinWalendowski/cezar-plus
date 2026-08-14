@@ -26,6 +26,7 @@ interface HealthBody {
     localHandoff: boolean;
     followups: boolean;
     singleProject: boolean;
+    automations: boolean;
     tokenMetrics: boolean;
     tokenUsageMetrics: boolean;
     costMetrics: boolean;
@@ -38,6 +39,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
   const savedRemote = process.env.CEZ_REMOTE;
   const savedFollowups = process.env.CEZ_FOLLOWUPS;
   const savedSingleProject = process.env.CEZ_SINGLE_PROJECT;
+  const savedAutomations = process.env.CEZ_AUTOMATIONS;
   const savedHideTokenMetrics = process.env.CEZ_HIDE_TOKEN_METRICS;
   const savedHideTokenUsage = process.env.CEZ_HIDE_TOKEN_USAGE;
   const savedHideCost = process.env.CEZ_HIDE_COST;
@@ -51,6 +53,8 @@ describe('GET /api/v1/health — forge + capabilities', () => {
     // must not decide what these assertions see.
     delete process.env.CEZ_FOLLOWUPS;
     delete process.env.CEZ_SINGLE_PROJECT;
+    // #801: automations are opt-in for the same reason, and the same ambient-env hazard applies.
+    delete process.env.CEZ_AUTOMATIONS;
     delete process.env.CEZ_HIDE_TOKEN_METRICS;
     delete process.env.CEZ_HIDE_TOKEN_USAGE;
     delete process.env.CEZ_HIDE_COST;
@@ -68,6 +72,8 @@ describe('GET /api/v1/health — forge + capabilities', () => {
     else process.env.CEZ_FOLLOWUPS = savedFollowups;
     if (savedSingleProject === undefined) delete process.env.CEZ_SINGLE_PROJECT;
     else process.env.CEZ_SINGLE_PROJECT = savedSingleProject;
+    if (savedAutomations === undefined) delete process.env.CEZ_AUTOMATIONS;
+    else process.env.CEZ_AUTOMATIONS = savedAutomations;
     if (savedHideTokenMetrics === undefined) delete process.env.CEZ_HIDE_TOKEN_METRICS;
     else process.env.CEZ_HIDE_TOKEN_METRICS = savedHideTokenMetrics;
     if (savedHideTokenUsage === undefined) delete process.env.CEZ_HIDE_TOKEN_USAGE;
@@ -101,6 +107,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       localHandoff: true,
       followups: false,
       singleProject: false,
+      automations: false,
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
@@ -154,6 +161,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       localHandoff: false,
       followups: false,
       singleProject: false,
+      automations: false,
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
@@ -186,6 +194,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       localHandoff: false,
       followups: false,
       singleProject: false,
+      automations: false,
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
@@ -203,6 +212,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       localHandoff: true,
       followups: false,
       singleProject: false,
+      automations: false,
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
@@ -225,6 +235,35 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       localHandoff: true,
       followups: true,
       singleProject: false,
+      automations: false,
+      tokenMetrics: true,
+      tokenUsageMetrics: true,
+      costMetrics: true,
+      // Restored 2026-08-14: the upstream-0.9.3 merge dropped the central-hub keys from THIS
+      // block only (its six siblings kept them), so the exhaustive `toEqual` was asserting a
+      // 7-key payload against a 12-key one. `notes` is deliberately not among them —
+      // `.ai/specs/2026-08-14-remove-notes-capture-inbox.md`.
+      knowledge: false,
+      sources: false,
+      workspaceViews: false,
+      notify: false,
+      skills: true,
+    });
+  });
+
+  // #801 — the automations capability rides the same payload, and is what the cockpit's nav gate
+  // reads. Asserted as a whole object so a capability leaking on by accident cannot pass.
+  it('reports automations:false by default — GitHub automations are opt-in', async () => {
+    expect((await health()).capabilities.automations).toBe(false);
+  });
+
+  it('reports automations:true with CEZ_AUTOMATIONS=1', async () => {
+    process.env.CEZ_AUTOMATIONS = '1';
+    expect((await health()).capabilities).toEqual({
+      localHandoff: true,
+      followups: false,
+      singleProject: false,
+      automations: true,
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
@@ -242,6 +281,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       localHandoff: true,
       followups: false,
       singleProject: false,
+      automations: false,
       tokenMetrics: false,
       tokenUsageMetrics: false,
       costMetrics: false,
