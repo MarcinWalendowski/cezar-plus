@@ -37,6 +37,80 @@ describe('Markdown', () => {
     )
   }, 15_000)
 
+  /**
+   * The fence had rendered as ONE line since the Streamdown 2.x upgrade: it emits a `<span>` per
+   * token line with nothing between them, and only makes that span `display: block` when line
+   * numbers are on — which this component turns off. The guard has to be on the TEXT, not on the
+   * spans: `code.children.length` already equalled the line count while the block was collapsed,
+   * so counting them proves nothing. `withLineBreaks` in `markdown.tsx` is what these pin;
+   * deleting it turns both red.
+   */
+  describe('line breaks inside a fence', () => {
+    it('separates token lines with real newlines, so the block is not one long line', async () => {
+      render(<Markdown>{'```text\nfirst\nsecond\nthird\n```'}</Markdown>)
+      await waitFor(() => {
+        const body = document.querySelector('[data-streamdown="code-block-body"]')
+        expect(body?.textContent).toBe('first\nsecond\nthird')
+      })
+    })
+
+    it('does not double a blank line — Streamdown already renders an empty line as a newline', async () => {
+      render(<Markdown>{'```text\na\n\nb\n```'}</Markdown>)
+      await waitFor(() => {
+        const body = document.querySelector('[data-streamdown="code-block-body"]')
+        expect(body?.textContent).toBe('a\n\nb')
+      })
+    })
+  })
+
+  /**
+   * Streamdown renders a ```mermaid fence as a diagram only when `plugins.mermaid` carries a
+   * `DiagramPlugin`; with the slot empty it falls through to the code-block branch and says
+   * nothing, which is how every diagram in the app rendered as its own source.
+   *
+   * Asserting the mermaid WRAPPER rather than the SVG is deliberate: the diagram is a lazy chunk
+   * behind a visibility gate, so the SVG needs mermaid itself loaded and an element with a real
+   * layout — neither of which jsdom offers. The wrapper IS the branch, and it exists only when the
+   * plugin does, which is the thing that was missing.
+   */
+  describe('mermaid', () => {
+    /** Never reports the element as visible, which keeps the assertion off mermaid's own render
+     *  path. Present at all only because Streamdown's gate calls the constructor unconditionally,
+     *  and jsdom has no IntersectionObserver — without it React unmounts the tree on the throw. */
+    class NeverIntersects {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): [] {
+        return []
+      }
+    }
+
+    beforeEach(() => {
+      vi.stubGlobal('IntersectionObserver', NeverIntersects)
+    })
+
+    afterEach(() => {
+      vi.unstubAllGlobals()
+    })
+
+    it('renders a mermaid fence as a diagram block, not as source', async () => {
+      render(<Markdown>{'```mermaid\nflowchart LR\n  A --> B\n```'}</Markdown>)
+      await waitFor(() => {
+        expect(document.querySelector('[data-streamdown="mermaid-block"]')).not.toBeNull()
+      })
+      expect(document.querySelector('[data-streamdown="code-block"]')).toBeNull()
+    })
+
+    it('still renders a NON-mermaid fence as a code block — the branch is keyed on the language', async () => {
+      render(<Markdown>{'```text\nflowchart LR\n```'}</Markdown>)
+      await waitFor(() => {
+        expect(document.querySelector('[data-streamdown="code-block"]')).not.toBeNull()
+      })
+      expect(document.querySelector('[data-streamdown="mermaid-block"]')).toBeNull()
+    })
+  })
+
   it('renders an unknown fence language as plaintext — no crash, chip kept honest', async () => {
     render(<Markdown>{'```wat-lang\nsome opaque output\n```'}</Markdown>)
     const block = document.querySelector('[data-streamdown="code-block"]')

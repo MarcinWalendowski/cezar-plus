@@ -118,7 +118,7 @@ describe('scanNestedRepos', () => {
 
   /** NEGATIVE CONTROL 3b: Claude Code's agent worktrees. Unlike cezar's own, `registerFolder`
    *  does NOT refuse these, so nothing downstream catches them — and the dialog pre-checks every
-   *  addable row. Measured on `~/loki-labs`: ten real repos and six of these, each a linked
+   *  addable row. Measured on one real workspace folder: ten genuine repos and six of these, each a linked
    *  worktree of a repo already in the list. */
   it('never offers a Claude Code agent worktree', async () => {
     const root = tree();

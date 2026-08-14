@@ -85,7 +85,7 @@ export const PRUNED_DIRS: readonly string[] = [
  * `workspace/projects.ts` uses.
  *
  * The second is Claude Code's, and it is the one that bites in practice. Measured on
- * `~/loki-labs`: ten real repos and **six** `.claude/worktrees/<generated-name>` checkouts, every
+ * one real workspace folder: ten genuine repos and **six** `.claude/worktrees/<generated-name>` checkouts, every
  * one of them a linked worktree of a repo already in the list. They are not refused by
  * `registerFolder`, so nothing downstream catches them — and the dialog pre-checks every addable
  * row, so accepting the proposal wholesale registered six throwaway checkouts of the same project

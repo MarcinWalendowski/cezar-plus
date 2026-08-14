@@ -508,3 +508,22 @@
   font-size: 12px;
   line-height: 1.55;
 }
+/* Streamdown emits one <span> per token LINE with no separator between them, and only gives that
+ * span `display: block` when line numbers are on — which we deliberately turn off, so every fence
+ * rendered as a single long line. `markdown.tsx`'s `withLineBreaks` fixes the tokens WE supply;
+ * this covers the tokens we do not: Streamdown paints its own unhighlighted fallback until the
+ * lazy Shiki chunk answers, and without this rule that first paint is the collapsed one.
+ * Measured against a plain <pre> of the same source: blank lines keep exactly one line box, with
+ * or without the token newline, so the two halves do not double up. */
+.thread-markdown [data-streamdown='code-block-body'] pre > code > span {
+  display: block;
+}
+/* Mermaid emits its diagram as `width="100%"` with the real geometry in `viewBox` + `max-width`.
+ * Streamdown centres that SVG inside a shrink-to-fit flex box, where a percentage width has
+ * nothing definite to resolve against — so the browser falls back to the SVG default (300px wide)
+ * and a 1340px flowchart renders postage-stamp sized. Giving the wrapper a definite width is the
+ * whole fix; the `max-width` mermaid itself sets is what still stops it over-scaling on a
+ * narrow diagram. */
+.thread-markdown [data-streamdown='mermaid'] [role='img'] {
+  width: 100%;
+}
