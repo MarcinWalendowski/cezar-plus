@@ -18,7 +18,7 @@ export interface SourceProjectSource {
   id: string;
   root: string;
   /** `missing` roots are never opened. */
-  status: 'ok' | 'missing' | 'not-git';
+  status: 'ok' | 'missing' | 'not-git' | 'no-commits';
 }
 
 export interface SourceCoordinatorOptions {

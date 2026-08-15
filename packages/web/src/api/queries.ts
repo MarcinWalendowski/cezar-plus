@@ -89,6 +89,8 @@ import {
   getDiscoveredAgentAccounts,
   registerProject,
   scanProjectFolder,
+  preflightGitInit,
+  initGitRepo,
   openAgentAccountFile,
   removeAgentProfile,
   removeProject,
@@ -309,6 +311,14 @@ export const workspaceQueryKeys = {
    *  invalidating the registry (which registering a row does) must not refetch every folder the
    *  dialog has looked at. */
   projectScan: (path: string | null) => ['workspace', 'project-scan', path] as const,
+  /** Every scan answer, whichever folder it was about — the key "Set up git" invalidates, because
+   *  the folder it just turned into a repo can be listed under its parent's scan as well as its
+   *  own, and only one of those two is the path the button was clicked from. */
+  projectScanRoot: ['workspace', 'project-scan'] as const,
+  /** `GET /api/v1/projects/git-preflight?path=` — what "Set up git" would commit and exclude.
+   *  Keyed by folder, and a sibling of `projectScan` for the same reason: a question about the
+   *  filesystem, not about the registry. */
+  gitPreflight: (path: string | null) => ['workspace', 'git-preflight', path] as const,
   // ---- central-hub scaffold (F3 feature A / F4, workspace-level) ----------------------------
   /** `GET /workspace/notes` (D14 — a note is workspace-scoped, never project-scoped). */
   notesRoot: ['workspace', 'notes'] as const,
@@ -482,6 +492,48 @@ export function useProjectFolderScan(path: string | null) {
     queryFn: ({ signal }) => scanProjectFolder(path as string, { signal }),
     enabled: path !== null,
     retry: false,
+  })
+}
+
+/**
+ * What "Set up git" would do to one folder (`GET /api/v1/projects/git-preflight`, spec
+ * `.ai/specs/2026-08-15-import-all-folders-as-projects.md`).
+ *
+ * `path: null` disables it: the dialog asks only for the row whose panel is open, so a list of
+ * twenty folders does not become twenty tree walks nobody looked at. `staleTime: 0` because the
+ * answer is about files on disk that the user may have just changed — a cached "no secrets" from
+ * two minutes ago is not evidence about now.
+ */
+export function useGitPreflight(path: string | null) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.gitPreflight(path),
+    queryFn: ({ signal }) => preflightGitInit(path as string, { signal }),
+    enabled: path !== null,
+    staleTime: 0,
+    retry: false,
+  })
+}
+
+/**
+ * `git init` + first commit (`POST /api/v1/projects/git-init`).
+ *
+ * Invalidates every project scan, because the row that was a folder is now a repo and the dialog
+ * renders directly off that answer — and the registry, because a project already registered at that
+ * root changes status from `not-git` to `ok` at the same moment.
+ *
+ * No retry: it writes. A retried "init" whose first attempt actually succeeded would come back as
+ * the "already a git repository with commits" refusal, which reads as a failure of the thing that
+ * just worked.
+ */
+export function useInitGitRepo() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (path: string) => initGitRepo(path),
+    retry: false,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projectScanRoot })
+      queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects })
+    },
   })
 }
 

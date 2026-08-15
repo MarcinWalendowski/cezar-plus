@@ -55,7 +55,7 @@ export interface WorkspaceRunProjectSource {
   id: string;
   /** Realpath'd repo root. */
   root: string;
-  status: 'ok' | 'missing' | 'not-git';
+  status: 'ok' | 'missing' | 'not-git' | 'no-commits';
   name: string;
 }
 

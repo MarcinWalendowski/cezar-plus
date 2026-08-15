@@ -5,7 +5,7 @@ import { AutomationStore } from './store.ts';
 export interface AutomationProjectSource {
   id: string;
   root: string;
-  status: 'ok' | 'missing' | 'not-git';
+  status: 'ok' | 'missing' | 'not-git' | 'no-commits';
 }
 
 export interface AutomationCoordinatorOptions {

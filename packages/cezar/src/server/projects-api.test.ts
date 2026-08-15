@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -304,7 +305,14 @@ describe('workspace projects API', () => {
     });
 
     it('registers a git repo as status ok and emits project-added once', async () => {
-      mkdirSync(join(otherRoot, '.git'), { recursive: true });
+      // A real repo with a commit, not a bare `.git` directory (2026-08-15): `ok` is the answer for
+      // a repo an agent can actually take a worktree of, and a commitless one now reports
+      // `no-commits` — so a `.git`-only fixture would be asserting `ok` about the one shape that
+      // does not earn it.
+      execFileSync('git', ['init', '-b', 'main'], { cwd: otherRoot });
+      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-m', 'first'], {
+        cwd: otherRoot,
+      });
       clearProjectProbeCache();
       const bus = new WorkspaceEventBus();
       const seen: { event: string; data: unknown }[] = [];

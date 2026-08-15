@@ -52,7 +52,7 @@ export interface WorkspaceKnowledgeRouteDeps {
 function toKnowledgeIndexSource(project: {
   id: string;
   root: string;
-  status: 'ok' | 'missing' | 'not-git';
+  status: 'ok' | 'missing' | 'not-git' | 'no-commits';
   name: string;
 }): WorkspaceKnowledgeProjectSource {
   return { id: project.id, root: project.root, status: project.status, name: project.name || '' };

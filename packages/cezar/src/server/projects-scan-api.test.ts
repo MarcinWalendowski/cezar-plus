@@ -67,10 +67,11 @@ describe('GET /api/v1/projects/scan', () => {
     return dir;
   };
 
-  it('answers each nested repo, with the scanned folder itself reported separately', async () => {
+  it('answers each nested repo and each non-git folder, with the scanned folder reported separately', async () => {
     repo(browseRoot, 'chat');
     repo(browseRoot, 'cezar');
-    mkdirSync(join(browseRoot, 'brand'), { recursive: true }); // not a repo — never offered
+    // Offered too, since 2026-08-15 — as a row that says it has no git, not as a hidden one.
+    mkdirSync(join(browseRoot, 'brand'), { recursive: true });
 
     const res = await scan(browseRoot);
 
@@ -79,8 +80,18 @@ describe('GET /api/v1/projects/scan', () => {
     expect(body.root).toBe(realpathSync(browseRoot));
     expect(body.rootIsRepo).toBe(false);
     expect(body.truncated).toBe(false);
-    expect(body.repos.map((r) => r.relPath).sort()).toEqual(['cezar', 'chat']);
+    expect(body.repos.map((r) => r.relPath).sort()).toEqual(['brand', 'cezar', 'chat']);
     expect(body.repos.every((r) => r.registered === false)).toBe(true);
+    // `isRepo` is what the dialog's warning hangs off, so a hardcoded value on either side of it
+    // is the mutation this pins: both spellings appear, on the right rows.
+    const byRel = new Map(body.repos.map((r) => [r.relPath, r.isRepo]));
+    expect(byRel.get('chat')).toBe(true);
+    expect(byRel.get('brand')).toBe(false);
+    // A `.git` directory with no commit in it is a repo with `hasCommits: false` — the walk's
+    // fixtures here are bare `.git` dirs, which is exactly that shape.
+    expect(body.repos.find((r) => r.relPath === 'chat')?.hasCommits).toBe(false);
+    // …and a folder row answers nothing about commits at all.
+    expect(body.repos.find((r) => r.relPath === 'brand')?.hasCommits).toBeUndefined();
   });
 
   it('reports rootIsRepo for a scanned folder that is itself a repo', async () => {

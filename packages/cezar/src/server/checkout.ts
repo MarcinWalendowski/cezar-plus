@@ -171,18 +171,60 @@ export async function cleanupCheckout(projectsDir: string, target: string): Prom
 export type GitInitRunner = (dir: string) => Promise<{ ok: true } | { ok: false; error: string }>;
 
 /**
- * `git init <dir>`.
+ * `git init <dir>`, **and a first commit**.
  *
  * `execFile`, not `spawn` — unlike a clone there is no progress worth streaming, and nothing here
  * is long enough to need cancellation. `GIT_TERMINAL_PROMPT=0` for the same reason the clone
  * runner sets it: a git that decides to ask something must fail with a message the dialog can
  * show, never block on a prompt nobody can see.
+ *
+ * **The commit is not optional** (added 2026-08-15,
+ * `.ai/specs/2026-08-15-import-all-folders-as-projects.md`). `git init` alone leaves a repo with no
+ * commit, and `git worktree add` on one SUCCEEDS while producing an empty tree — so every blank
+ * project this route created was a project whose isolated task worktrees would have held none of
+ * its files. It went unnoticed because `computeProbe` called such a root `ok` on the strength of
+ * `.git` existing; that probe now says `no-commits`, and this is the other half of the same fix.
+ *
+ * `--allow-empty` because the directory is empty by construction here, and `--no-verify` +
+ * `commit.gpgsign=false` so a machine-wide hook path or a passphrase-protected signing key cannot
+ * hang or fail a folder creation that has nothing to do with either.
  */
-export const defaultGitInit: GitInitRunner = (dir) =>
+export const defaultGitInit: GitInitRunner = async (dir) => {
+  const init = await runGit(['init', dir]);
+  if (!init.ok) return init;
+  return commitEverything(dir);
+};
+
+/**
+ * `git add -A` + the first commit, shared by `defaultGitInit` and the dry-run clone fake.
+ *
+ * Identity is asked for, not assumed: a machine with no `user.email` configured is a normal
+ * machine, and a commit that failed on it would leave exactly the commitless repo above.
+ */
+async function commitEverything(dir: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  const added = await runGit(['-C', dir, 'add', '-A']);
+  if (!added.ok) return added;
+  const configured = await runGit(['-C', dir, 'config', '--get', 'user.email']);
+  const identity = configured.ok ? [] : ['-c', 'user.name=cezar', '-c', 'user.email=cezar@localhost'];
+  return runGit([
+    '-C',
+    dir,
+    ...identity,
+    '-c',
+    'commit.gpgsign=false',
+    'commit',
+    '--allow-empty',
+    '--no-verify',
+    '-m',
+    'initial commit',
+  ]);
+}
+
+const runGit = (args: string[]): Promise<{ ok: true } | { ok: false; error: string }> =>
   new Promise((resolvePromise) => {
     execFile(
       'git',
-      ['init', dir],
+      args,
       { timeout: GIT_INIT_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
       (err, _stdout, stderr) => {
         if (!err) return resolvePromise({ ok: true });
@@ -290,11 +332,13 @@ export const ghCloneRunner: CloneRunner = (ref, dir, onLine, signal) =>
 export const dryRunCloneRunner: CloneRunner = async (ref, dir, onLine) => {
   onLine(`Cloning into '${dir}'...`);
   onLine('remote: Enumerating objects: 3, done.');
-  // A `.git` directory so the registered project probes as a git repo the way
-  // a real clone would — the point of the dry run is the same shape, not the
-  // same bytes.
-  await mkdir(join(dir, '.git'), { recursive: true });
   await writeFile(join(dir, 'README.md'), `# ${ref.repo}\n\n(CEZ_DRY_RUN=1 fake clone)\n`, 'utf8');
+  // A real repo WITH a commit, not a bare `.git` directory (corrected 2026-08-15). The fake's job
+  // is to leave the shape a real clone leaves, and a clone always lands commits: a commitless
+  // `.git` probes as `no-commits` and hands `git worktree add` an empty tree, so the dry-run flow
+  // would have exercised a state `gh clone` cannot produce.
+  const made = await defaultGitInit(dir);
+  if (!made.ok) return made;
   onLine('Receiving objects: 100% (3/3), done.');
   return { ok: true };
 };

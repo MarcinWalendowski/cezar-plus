@@ -60,7 +60,7 @@ import { tokenize, type KnowledgeStatusForSearch } from '../knowledge/search.ts'
 export interface WorkspaceKnowledgeProjectSource {
   id: string;
   root: string;
-  status: 'ok' | 'missing' | 'not-git';
+  status: 'ok' | 'missing' | 'not-git' | 'no-commits';
   name: string;
 }
 

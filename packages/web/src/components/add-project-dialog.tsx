@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 
-import { useProjectFolderScan, useProjects, useRegisterProject } from '@/api/queries'
+import {
+  useGitPreflight,
+  useInitGitRepo,
+  useProjectFolderScan,
+  useProjects,
+  useRegisterProject,
+} from '@/api/queries'
 import type { FsBrowseDir, NestedRepo } from '@open-mercato/cezar-api-client'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -84,7 +90,30 @@ export function AddProjectDialog({
   // The nested-repo proposal for whatever folder is currently targeted. Keyed on `target`, so
   // walking into a subfolder re-asks about THAT folder rather than showing the parent's answer.
   const scan = useProjectFolderScan(target)
-  const nested: NestedRepo[] = scan.data?.repos ?? []
+  const scanned = scan.data
+  const nested: NestedRepo[] = scanned?.repos ?? []
+  // Which row's "Set up git" panel is open — one at a time, by path. A per-row boolean would let
+  // two preflights run at once over two different trees, and the second answer would render under
+  // the first row that finished.
+  const [setup, setSetup] = useState<string | null>(null)
+  useEffect(() => setSetup(null), [scanned?.root])
+  const anyNeedsGit =
+    (scanned !== undefined && !scanned.rootIsRepo) ||
+    nested.some((repo) => !repo.isRepo || repo.hasCommits === false)
+  const repoCount = nested.filter((repo) => repo.isRepo).length
+  const folderCount = nested.length - repoCount
+  // Counts both kinds, because the list now proposes both and a sentence that only counted repos
+  // would leave the user to work out where the other rows came from.
+  const contents = [
+    repoCount === 0 ? null : repoCount === 1 ? '1 git repository' : `${repoCount} git repositories`,
+    folderCount === 0 ? null : folderCount === 1 ? '1 other folder' : `${folderCount} other folders`,
+  ]
+    .filter((part) => part !== null)
+    .join(' and ')
+  const summary =
+    contents === ''
+      ? 'This folder can be added as a project:'
+      : `This folder holds ${contents}. Each can be added as its own project:`
   // Which rows will be registered. Seeded to "everything addable" each time a new scan lands and
   // never re-seeded from a refetch, so an unchecked row stays unchecked while the user is still
   // deciding — the same discipline the onboarding wizard's step state follows.
@@ -177,74 +206,109 @@ export function AddProjectDialog({
           )}
         />
 
-        {nested.length > 0 ? (
+        {scanned !== undefined && (nested.length > 0 || !scanned.rootIsRepo) ? (
           <div data-slot="nested-repos" className="min-w-0 space-y-1.5">
-            <p className="text-[12px] text-soft-foreground">
-              {nested.length === 1
-                ? 'This folder holds a git repository. It can be added as its own project:'
-                : `This folder holds ${nested.length} git repositories. Each can be added as its own project:`}
-            </p>
-            <div className="max-h-40 space-y-1 overflow-y-auto">
+            <p className="text-[12px] text-soft-foreground">{summary}</p>
+            <div className="max-h-52 space-y-1 overflow-y-auto">
               {/* The scanned folder itself, first — it is the row the footer target names, and
                   giving it a checkbox is what lets a container folder (no `.git` of its own, or
                   simply not wanted as a project) be skipped while its repos are kept. */}
-              <label
-                data-slot="nested-row"
-                data-repo="."
-                className="flex cursor-pointer items-center gap-2.5 rounded-md border border-border px-2.5 py-1.5 text-[13px] hover:bg-muted"
-              >
-                <input
-                  type="checkbox"
-                  data-slot="nested-toggle"
-                  checked={!skipRoot}
-                  onChange={() => setSkipRoot((current) => !current)}
-                  className="size-3.5 shrink-0"
-                />
-                <span className="min-w-0 flex-1 truncate font-mono text-foreground">
-                  {target === null ? '' : target.split('/').pop()}
-                </span>
-                <span className="shrink-0 text-[11px] text-muted-foreground">this folder</span>
-              </label>
-              {nested.map((repo) => (
-                <label
-                  key={repo.path}
-                  data-slot="nested-row"
-                  data-repo={repo.relPath}
-                  data-registered={repo.registered ? 'true' : undefined}
-                  className={cn(
-                    'flex items-center gap-2.5 rounded-md border border-border px-2.5 py-1.5 text-[13px]',
-                    repo.registered ? 'opacity-60' : 'cursor-pointer hover:bg-muted',
+              <div key="." data-slot="nested-row" data-repo="." data-git={scanned.rootIsRepo ? 'true' : 'false'}>
+                <div className="flex items-center gap-2.5 rounded-md border border-border px-2.5 py-1.5 text-[13px]">
+                  <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5">
+                    <input
+                      type="checkbox"
+                      data-slot="nested-toggle"
+                      checked={!skipRoot}
+                      onChange={() => setSkipRoot((current) => !current)}
+                      className="size-3.5 shrink-0"
+                    />
+                    <span className="min-w-0 flex-1 truncate font-mono text-foreground">
+                      {target === null ? '' : target.split('/').pop()}
+                    </span>
+                  </label>
+                  <span className="shrink-0 text-[11px] text-muted-foreground">this folder</span>
+                  {scanned.rootIsRepo ? null : <NoGitBadge kind="none" />}
+                  {scanned.rootIsRepo ? null : (
+                    <SetupButton path={scanned.root} open={setup === scanned.root} onOpen={setSetup} />
                   )}
-                >
-                  <input
-                    type="checkbox"
-                    data-slot="nested-toggle"
-                    // An already-registered row is checked AND disabled: it is going to be a
-                    // project either way, and a checkbox that cannot change what the button does
-                    // would be a lie about the button.
-                    checked={repo.registered || !skipped.has(repo.path)}
-                    disabled={repo.registered}
-                    onChange={() => toggle(repo.path)}
-                    className="size-3.5 shrink-0"
-                  />
-                  <span className="min-w-0 flex-1 truncate font-mono text-foreground">{repo.relPath}</span>
-                  {repo.branch ? (
-                    <span className="shrink-0 text-[11px] text-muted-foreground">{repo.branch}</span>
-                  ) : null}
-                  {repo.registered ? (
-                    <Badge variant="ghost" className="shrink-0 text-[10px] text-muted-foreground">
-                      already added
-                    </Badge>
-                  ) : null}
-                </label>
-              ))}
+                </div>
+                {setup === scanned.root ? <SetupPanel path={scanned.root} onClose={() => setSetup(null)} /> : null}
+              </div>
+              {nested.map((repo) => {
+                // Two different rows share one warning: a folder with no `.git` at all, and a repo
+                // whose `.git` holds no commit. They cost the same thing — `git worktree add` on a
+                // commitless repo succeeds and hands back an EMPTY tree — so the second is not a
+                // lesser case of the first, it is the same case wearing a repo's badge.
+                const needsGit = !repo.isRepo || repo.hasCommits === false
+                return (
+                  <div
+                    key={repo.path}
+                    data-slot="nested-row"
+                    data-repo={repo.relPath}
+                    data-git={repo.isRepo ? (repo.hasCommits === false ? 'no-commits' : 'true') : 'false'}
+                    data-registered={repo.registered ? 'true' : undefined}
+                  >
+                    <div
+                      className={cn(
+                        'flex items-center gap-2.5 rounded-md border border-border px-2.5 py-1.5 text-[13px]',
+                        repo.registered ? 'opacity-60' : null,
+                      )}
+                    >
+                      <label
+                        className={cn(
+                          'flex min-w-0 flex-1 items-center gap-2.5',
+                          repo.registered ? null : 'cursor-pointer',
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          data-slot="nested-toggle"
+                          // An already-registered row is checked AND disabled: it is going to be a
+                          // project either way, and a checkbox that cannot change what the button
+                          // does would be a lie about the button.
+                          checked={repo.registered || !skipped.has(repo.path)}
+                          disabled={repo.registered}
+                          onChange={() => toggle(repo.path)}
+                          className="size-3.5 shrink-0"
+                        />
+                        <span className="min-w-0 flex-1 truncate font-mono text-foreground">{repo.relPath}</span>
+                      </label>
+                      {repo.branch ? (
+                        <span className="shrink-0 text-[11px] text-muted-foreground">{repo.branch}</span>
+                      ) : null}
+                      {needsGit ? <NoGitBadge kind={repo.isRepo ? 'no-commits' : 'none'} /> : null}
+                      {repo.registered ? (
+                        <Badge variant="ghost" className="shrink-0 text-[10px] text-muted-foreground">
+                          already added
+                        </Badge>
+                      ) : null}
+                      {needsGit ? (
+                        <SetupButton path={repo.path} open={setup === repo.path} onOpen={setSetup} />
+                      ) : null}
+                    </div>
+                    {setup === repo.path ? <SetupPanel path={repo.path} onClose={() => setSetup(null)} /> : null}
+                  </div>
+                )
+              })}
             </div>
+            {/* The warning is the feature, not decoration. A folder that registers without git is
+                not a slightly-worse project: it loses worktree isolation, it loses PARALLELISM —
+                which is what cezar is for — and it loses the diff every review reads. Generic
+                "no git" copy would let a user accept the row without learning any of that. */}
+            {anyNeedsGit ? (
+              <p data-slot="nested-no-git-warning" className="text-[12px] text-warning">
+                Rows marked “no git” run <strong>in place, one task at a time</strong> — no isolated
+                worktree, no parallel runs, and no diff to review. “Set up git” runs{' '}
+                <code>git init</code> and a first commit, which is what restores all three.
+              </p>
+            ) : null}
             {/* The cap, said out loud. A silently short list reads as "there is nothing else in
                 there", which is the one wrong answer this feature must not give. */}
-            {scan.data?.truncated ? (
+            {scanned.truncated ? (
               <p data-slot="nested-truncated" className="text-[12px] text-warning">
-                Only the first {nested.length} repositories are listed — add the rest by opening
-                them directly.
+                Only the first {nested.length} folders are listed — add the rest by opening them
+                directly.
               </p>
             ) : null}
           </div>
@@ -290,4 +354,143 @@ export function AddProjectDialog({
       </DialogContent>
     </Dialog>
   )
+}
+
+/** `no git` on a plain folder, `no commits` on a repo that has one but has never committed. Two
+ *  badges rather than one because the fix is the same and the CAUSE is not — a user who sees
+ *  "no git" on a directory they know is a repo learns nothing they can act on. */
+function NoGitBadge({ kind }: { kind: 'none' | 'no-commits' }) {
+  return (
+    <Badge data-slot="no-git-badge" variant="outline" className="shrink-0 text-[10px] text-warning">
+      {kind === 'none' ? 'no git' : 'no commits'}
+    </Badge>
+  )
+}
+
+/** Opens the panel below the row. A button, not a link or a checkbox: it is the one control here
+ *  that WRITES to the user's disk, and it must not be reachable by the click that ticks a row. */
+function SetupButton({
+  path,
+  open,
+  onOpen,
+}: {
+  path: string
+  open: boolean
+  onOpen: (path: string | null) => void
+}) {
+  return (
+    <Button
+      data-slot="setup-git"
+      variant="outline"
+      size="sm"
+      className="h-6 shrink-0 px-2 text-[11px]"
+      onClick={(event) => {
+        // The row's label wraps a checkbox; without this the same click would toggle the row's
+        // participation in the add, which is a different decision entirely.
+        event.preventDefault()
+        onOpen(open ? null : path)
+      }}
+    >
+      {open ? 'Cancel' : 'Set up git'}
+    </Button>
+  )
+}
+
+/**
+ * The preflight summary, and the button that applies it.
+ *
+ * Shown BEFORE anything is written, because this is the only place in the dialog where a click
+ * changes files on disk. It reports three things the user cannot otherwise see: how much will be
+ * committed, what will be excluded and why, and whether cezar is refusing outright.
+ *
+ * A refusal disables the button rather than hiding it: a control that vanishes reads as a bug, and
+ * the reason for the refusal is the actionable half.
+ */
+function SetupPanel({ path, onClose }: { path: string; onClose: () => void }) {
+  const preflight = useGitPreflight(path)
+  const init = useInitGitRepo()
+  const data = preflight.data
+  // Every refusal the server would answer with, asked here too so the button is not offered for a
+  // click that can only fail. The server re-checks all of them — this is UI honesty, never the
+  // guard itself.
+  const refusal =
+    data === undefined
+      ? null
+      : data.oversized.length > 0
+        ? `${data.oversized[0]} is too large to commit — move or ignore it, then try again.`
+        : data.truncated
+          ? 'Too many files here for cezar to check them all for secrets.'
+          : data.trackedElsewhere
+            ? 'The git repository above this folder already tracks these files.'
+            : data.alreadyRepo && data.hasCommits
+              ? 'This folder is already a git repository with commits.'
+              : null
+
+  return (
+    <div data-slot="setup-panel" className="mt-1 min-w-0 space-y-1.5 rounded-md border border-border bg-muted/40 px-2.5 py-2 text-[12px]">
+      {preflight.isPending ? <p className="text-muted-foreground">Checking what would be committed…</p> : null}
+      {preflight.isError ? (
+        <p data-slot="setup-error" className="break-words text-danger">
+          {preflight.error instanceof Error ? preflight.error.message : 'could not inspect that folder'}
+        </p>
+      ) : null}
+      {data !== undefined ? (
+        <>
+          <p data-slot="setup-summary" className="text-soft-foreground">
+            {data.alreadyRepo
+              ? 'Already a git repo with no commits. '
+              : 'Runs git init and one commit on branch main. '}
+            {data.files === 1 ? '1 file' : `${data.files} files`} ({formatBytes(data.bytes)}) would be
+            committed.
+          </p>
+          {data.sensitive.length > 0 ? (
+            <p data-slot="setup-excluded" className="break-words text-soft-foreground">
+              Excluded as secrets, written to <code>.gitignore</code>:{' '}
+              <span className="font-mono">{data.sensitive.slice(0, 6).join(', ')}</span>
+              {data.sensitive.length > 6 ? ` and ${data.sensitive.length - 6} more` : ''}
+            </p>
+          ) : null}
+          {refusal !== null ? (
+            <p data-slot="setup-refusal" className="break-words text-warning">
+              {refusal}
+            </p>
+          ) : null}
+          {/* Said out loud, but not in the way of the button: this is the normal shape of a
+              workspace folder that has a couple of files committed at its top, and the new repo is
+              genuinely independent of that one. */}
+          {refusal === null && data.insideRepo ? (
+            <p data-slot="setup-nested-note" className="text-soft-foreground">
+              Inside another git repo, which does not track this folder — the new repo will be
+              independent of it.
+            </p>
+          ) : null}
+        </>
+      ) : null}
+      {init.isError ? (
+        <p data-slot="setup-error" className="break-words text-danger">
+          {init.error instanceof Error ? init.error.message : 'could not set up git'}
+        </p>
+      ) : null}
+      <div className="flex gap-2">
+        <Button
+          data-slot="setup-confirm"
+          size="sm"
+          className="h-6 px-2 text-[11px]"
+          disabled={data === undefined || refusal !== null || init.isPending}
+          onClick={() => {
+            init.mutate(path, { onSuccess: onClose })
+          }}
+        >
+          {init.isPending ? 'Setting up…' : 'Set up git'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/** `18.4 MB` / `212 KB`. Sizes are for a human deciding whether to look before committing. */
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${bytes} B`
 }

@@ -148,7 +148,7 @@ export interface ProjectContextSource {
   id: string;
   root: string;
   /** `missing` roots are never instantiated; `ok`/`not-git` both build. */
-  status: 'ok' | 'missing' | 'not-git';
+  status: 'ok' | 'missing' | 'not-git' | 'no-commits';
   /** Display name. Optional because every caller and test fixture written before W3.1 never set
    *  it; threaded through to `WorkspaceRunIndex` (workspace level, D22a) as `name ?? ''`, which
    *  that module already turns into `basename(root)` when falsy. */

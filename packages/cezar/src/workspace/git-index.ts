@@ -41,7 +41,7 @@ import type { WorkspaceGitProject } from '@open-mercato/cezar-contract';
 export interface WorkspaceGitProjectSource {
   id: string;
   root: string;
-  status: 'ok' | 'missing' | 'not-git';
+  status: 'ok' | 'missing' | 'not-git' | 'no-commits';
   name: string;
 }
 
@@ -157,6 +157,12 @@ export class WorkspaceGitIndex {
       }
       if (source.status === 'not-git') {
         return { id: source.id, name, ok: false, reason: 'not a git repo' };
+      }
+      // A repo with no commit reports its own reason rather than falling through to `getSummary`,
+      // whose git calls all fail on an unborn HEAD and would surface as whatever `describeFailure`
+      // makes of `fatal: ambiguous argument 'HEAD'` — a git error string where a plain fact belongs.
+      if (source.status === 'no-commits') {
+        return { id: source.id, name, ok: false, reason: 'no commits yet' };
       }
       try {
         const summary = await withDeadline(this.getSummary(source.root), this.deadlineMs);

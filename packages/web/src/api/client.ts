@@ -41,6 +41,8 @@ import type {
   FinishResponse,
   FsBrowseResponse,
   GitCommitResponse,
+  GitInitResponse,
+  GitPreflightResponse,
   GitPushResponse,
   GithubChecksData,
   GithubRefStatusData,
@@ -471,6 +473,22 @@ export async function browseFs(
  *  `registerProject` call per row, through the guards every other add goes through. */
 export async function scanProjectFolder(path: string, opts?: ReadOptions): Promise<ProjectScanResponse> {
   return unwrap(await cez.api.v1.projects.scan.$get({ query: { path } }, init(opts)), '/projects/scan')
+}
+
+/** What "Set up git" would do to `path` (`GET /api/v1/projects/git-preflight`, spec
+ *  `.ai/specs/2026-08-15-import-all-folders-as-projects.md`). A read — and a thing to RENDER: the
+ *  POST below re-runs every one of these checks server-side from the path alone. */
+export async function preflightGitInit(path: string, opts?: ReadOptions): Promise<GitPreflightResponse> {
+  return unwrap(
+    await cez.api.v1.projects['git-preflight'].$get({ query: { path } }, init(opts)),
+    '/projects/git-preflight',
+  )
+}
+
+/** `git init` + first commit (`POST /api/v1/projects/git-init`). The body is the path and nothing
+ *  else, deliberately: there is no field a client could use to skip a check. */
+export async function initGitRepo(path: string): Promise<GitInitResponse> {
+  return unwrap(await cez.api.v1.projects['git-init'].$post({ json: { path } }), '/projects/git-init')
 }
 
 /** The authoritative run list — sorted newest-first by the server. */

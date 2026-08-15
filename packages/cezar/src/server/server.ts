@@ -44,6 +44,8 @@ import {
   type GroupVariant,
   type PickVariantResponse,
   type DiscoveredAgentAccountsResponse,
+  type GitInitResponse,
+  type GitPreflightResponse,
   type ProjectScanResponse,
   type RunIndexEntry,
   type RunsIndexResponse,
@@ -51,6 +53,7 @@ import {
 // A contract VALUE, like `workspaceUiStateSchema` in workspace/migrations.ts — the request
 // schema this route validates with is the same one the client compiles against.
 import {
+  gitInitRequestSchema,
   modelDiscoveryRunnerSchema,
   openProjectInSchema,
   updateProjectInputSchema,
@@ -158,6 +161,7 @@ import { PROFILE_CAPABLE_PROVIDERS, profileEnv, supportsProfiles } from '../core
 import { withEnvPrefix } from '../core/shell-env.ts';
 import {
   allocateProjectSlug,
+  clearProjectProbeCache,
   listProjects,
   normalizeProjectTags,
   normalizeRoot,
@@ -169,6 +173,7 @@ import {
 } from '../workspace/projects.ts';
 import { discoverClaudeAccounts } from '../workspace/agent-account-identity.ts';
 import { enrichNestedRepos, scanNestedRepos } from '../workspace/nested-repos.ts';
+import { initGitRepo, preflightGitInit } from '../workspace/git-init.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/ui-state.ts';
 import { checkoutRepo, defaultGitInit, type CloneRunner, type GitInitRunner } from './checkout.ts';
@@ -2968,6 +2973,70 @@ export function createApp(deps: ServerDeps) {
         ),
         truncated: scan.truncated,
       };
+      return c.json(body);
+    })
+
+    /**
+     * What "Set up git" would do to a folder (spec
+     * `.ai/specs/2026-08-15-import-all-folders-as-projects.md`, D4). A READ — it writes nothing,
+     * and the answer is a thing to RENDER, never a thing the POST below trusts.
+     *
+     * Both git routes ask TWO questions, where every route before them asked one, because they are
+     * the first pair that WRITES to an operator-named path:
+     *
+     * 1. `resolveBrowsableDir` — the shared containment gate (lexical, then realpath). Same
+     *    function as `fs/browse` and `/projects/scan`, never a second copy.
+     * 2. `shouldRegisterProject` — `$HOME` and cezar task worktrees. `git init` + `git add -A` in a
+     *    home directory is a far worse outcome than registering one, and this guard is where
+     *    "not a project folder" is already defined.
+     */
+    .get('/projects/git-preflight', queryZodValidator(z.object({ path: queryValue })), async (c) => {
+      if (capabilities().singleProject) {
+        return c.json(singleProjectRefusal('folder browsing'), 409);
+      }
+      const resolved = await resolveBrowsableDir({
+        root: resolveBrowseRoot(await workspaceBrowseRoot()),
+        path: c.req.valid('query').path,
+      });
+      if (!resolved.ok) return c.json({ error: resolved.error }, resolved.status);
+      if (!(await shouldRegisterProject(resolved.real))) {
+        return c.json({ error: 'not a project folder: this is your home directory or a cezar task worktree' }, 400);
+      }
+      const body: GitPreflightResponse = await preflightGitInit(resolved.real);
+      return c.json(body);
+    })
+
+    /**
+     * Run it: `git init -b main`, `.gitignore` for every detected secret, `git add -A`, first
+     * commit (D4/D5).
+     *
+     * The body is a path and NOTHING else, and this handler re-runs `preflightGitInit` itself
+     * inside `initGitRepo`. A request that could carry `sensitive: []` would be a request that can
+     * decide to commit somebody's `.env` — so the shape simply cannot express it.
+     *
+     * Both gates from the preflight above are re-asked here rather than assumed from the GET: the
+     * two calls are separate requests, nothing links them, and a guard that runs only on the read
+     * half is a guard on the wrong half.
+     */
+    .post('/projects/git-init', jsonZodValidator(() => gitInitRequestSchema, { message: 'path must be a non-empty path' }), async (c) => {
+      if (capabilities().singleProject) {
+        return c.json(singleProjectRefusal('folder browsing'), 409);
+      }
+      const resolved = await resolveBrowsableDir({
+        root: resolveBrowseRoot(await workspaceBrowseRoot()),
+        path: c.req.valid('json').path,
+      });
+      if (!resolved.ok) return c.json({ error: resolved.error }, resolved.status);
+      if (!(await shouldRegisterProject(resolved.real))) {
+        return c.json({ error: 'not a project folder: this is your home directory or a cezar task worktree' }, 400);
+      }
+      const result = await initGitRepo(resolved.real);
+      if (!result.ok) return c.json({ error: result.error }, result.status);
+      // The probe cache is keyed on the root and holds `not-git`/`no-commits` for up to its TTL —
+      // stale by exactly the change just made. Dropped here so the registry answers with the repo
+      // that now exists rather than the folder that used to.
+      clearProjectProbeCache();
+      const body: GitInitResponse = result.body;
       return c.json(body);
     })
 

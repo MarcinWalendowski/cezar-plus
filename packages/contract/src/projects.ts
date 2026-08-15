@@ -28,8 +28,17 @@ export const projectListEntrySchema = z.object({
   addedAt: z.string(),
   lastOpenedAt: z.string(),
   source: z.enum(['local', 'checkout']),
-  /** `not-git` is fully usable (degraded single-queue mode); only `missing` blocks. */
-  status: z.enum(['ok', 'missing', 'not-git']),
+  /**
+   * `not-git` and `no-commits` are both fully usable (degraded single-queue mode); only `missing`
+   * blocks.
+   *
+   * `no-commits` (2026-08-15) is a repo whose `.git` exists with no commit in it. It used to report
+   * `ok`, and that was a silent wrong answer: `git worktree add` SUCCEEDS on such a repo and
+   * produces an **empty** tree, so the agent works in a directory holding none of the user's files
+   * while the cockpit calls the project healthy. Degraded-but-honest is the correct answer, and
+   * "Set up git" in the add-project dialog is the repair.
+   */
+  status: z.enum(['ok', 'missing', 'not-git', 'no-commits']),
   /** Current branch when cheaply available (omitted e.g. on an unborn HEAD). */
   branch: z.string().optional(),
   /** Which forge this project's remote belongs to (#698) — classified server-side from the
@@ -261,9 +270,16 @@ export const fsBrowseResponseSchema = z.object({
 });
 export type FsBrowseResponse = z.infer<typeof fsBrowseResponseSchema>;
 
-/** One git repository found inside a folder the user is about to add (spec
- *  `.ai/specs/2026-08-14-nested-repos-as-projects.md`). A PROPOSAL — nothing here is registered
- *  until the dialog posts it to `POST /api/v1/projects` like any other folder. */
+/**
+ * One candidate project found inside a folder the user is about to add (spec
+ * `.ai/specs/2026-08-14-nested-repos-as-projects.md`, widened by
+ * `.ai/specs/2026-08-15-import-all-folders-as-projects.md`). A PROPOSAL — nothing here is
+ * registered until the dialog posts it to `POST /api/v1/projects` like any other folder.
+ *
+ * Named `nestedRepo…` from the day it only carried repos. The name is kept deliberately: this is a
+ * published package, so renaming the export is a breaking change to buy nothing — `isRepo` is what
+ * says which kind of row this is.
+ */
 export const nestedRepoSchema = z.object({
   /** Absolute repo root. Same-origin route, like `ProjectListEntry.root`. */
   path: z.string(),
@@ -273,26 +289,108 @@ export const nestedRepoSchema = z.object({
   name: z.string(),
   branch: z.string().optional(),
   forge: z.literal('github').optional(),
+  /**
+   * Has a `.git` entry. `false` is a plain directory offered as a project in its own right — the
+   * row the 2026-08-15 spec added, and the one that carries the warning.
+   *
+   * A non-git project is not a cosmetic downgrade: `workflows/run.ts` runs it **in place, one task
+   * at a time**, which costs worktree isolation, parallelism and diff-based review. The dialog says
+   * so, which is why the flag is transmitted rather than inferred from `branch` being absent (a
+   * perfectly good repo can have no branch to report).
+   */
+  isRepo: z.boolean(),
+  /**
+   * Repos only (absent on a folder row). `false` means `.git` exists with **no commit yet** —
+   * `git worktree add` then succeeds and produces an EMPTY tree, so the isolation the row promises
+   * is not there. Such a row offers the same "Set up git" repair a non-git folder does.
+   */
+  hasCommits: z.boolean().optional(),
   /** Already in the registry, matched on the realpath the registry stores. The row renders checked
    *  and disabled: a checkbox that cannot change what the button does is a lie about the button. */
   registered: z.boolean(),
 });
 export type NestedRepo = z.infer<typeof nestedRepoSchema>;
 
-/** `GET /api/v1/projects/scan?path=` — every git repo inside `path`, bounded (depth ≤ 3, pruned
- *  build dirs, never descending into a repo, capped at 25). A read: it never writes the registry. */
+/** `GET /api/v1/projects/scan?path=` — every git repo inside `path` (depth ≤ 3, pruned build dirs,
+ *  never descending into a repo) plus every non-git immediate child that does not merely CONTAIN
+ *  those repos, capped at 25 rows in total. A read: it never writes the registry. */
 export const projectScanResponseSchema = z.object({
   /** The realpath'd folder that was scanned — never the spelling asked for, matching `fs/browse`. */
   root: z.string(),
   /** Whether the scanned folder is ITSELF a repo. The dialog's first row is that folder either way
    *  (a non-git folder is a legitimate project), so this only decides its "git" badge. */
   rootIsRepo: z.boolean(),
+  /** Repos first, then folder rows — the cap fills in that order (2026-08-15 spec D3), so a
+   *  truncated list keeps the rows with the strongest evidence of being a unit of work. */
   repos: z.array(nestedRepoSchema),
-  /** True when the 25-repo cap bit. Rendered, not just carried: a silently partial list looks
-   *  exactly like a folder with nothing else in it. */
+  /** True when the 25-row cap bit, for EITHER kind. Rendered, not just carried: a silently partial
+   *  list looks exactly like a folder with nothing else in it. */
   truncated: z.boolean(),
 });
 export type ProjectScanResponse = z.infer<typeof projectScanResponseSchema>;
+
+/**
+ * `GET /api/v1/projects/git-preflight?path=` — what "Set up git" WOULD do to this folder
+ * (`.ai/specs/2026-08-15-import-all-folders-as-projects.md` D4/D5). A read: it writes nothing.
+ *
+ * Rendered, never trusted. `POST /api/v1/projects/git-init` re-runs every one of these checks
+ * server-side from the path alone, because a client that could hand back `sensitive: []` would be
+ * a client that can decide to commit your `.env`.
+ */
+export const gitPreflightResponseSchema = z.object({
+  /** The realpath'd folder inspected — never the spelling asked for, matching `fs/browse`. */
+  path: z.string(),
+  /** Already has a `.git` entry. With `hasCommits: false` this is the REPAIR case: the button
+   *  skips `git init` and does the commit that makes worktrees produce a non-empty tree. */
+  alreadyRepo: z.boolean(),
+  /** A commit exists. `alreadyRepo && hasCommits` ⇒ there is nothing for the button to do. */
+  hasCommits: z.boolean(),
+  /** An ANCESTOR is a git repository and this folder is not it. A NOTE, not a refusal: a workspace
+   *  folder that is itself tracked (doctrine files at the top of a directory of checkouts) is a
+   *  real and common shape, and every checkout inside it is already a repo inside a repo. */
+  insideRepo: z.boolean(),
+  /** That ancestor repo already TRACKS files here — the actual refusal. Two repositories over one
+   *  set of files means each one's history is a lie about the other. The enclosing repo is never
+   *  named in the error: it can sit above the browse root. */
+  trackedElsewhere: z.boolean(),
+  /** Files that would be committed — sensitive and oversized ones excluded from the count. */
+  files: z.number().int(),
+  /** Their total size in bytes. Shown so "commit 1,240 files (18 MB)" is a decision, not a leap. */
+  bytes: z.number().int(),
+  /** Relative POSIX paths that will be written into `.gitignore` INSTEAD of committed — detected
+   *  secrets (`.env`, `*.pem`, `id_rsa`, …). Named, never silently dropped. */
+  sensitive: z.array(z.string()),
+  /** Relative POSIX paths over 10 MB, `path (size)`-spelled. Non-empty ⇒ the POST refuses and
+   *  writes nothing at all: auto-ignoring a 40 MB asset decides for the user that it is not part
+   *  of their project, and committing it blind puts it in history forever. */
+  oversized: z.array(z.string()),
+  /** The count walk hit its own ceiling — `files`/`bytes` are a floor, not a total. */
+  truncated: z.boolean(),
+});
+export type GitPreflightResponse = z.infer<typeof gitPreflightResponseSchema>;
+
+/** `POST /api/v1/projects/git-init` body. The path and nothing else — every check is re-run
+ *  server-side (D4), so there is deliberately no field a caller could use to skip one. */
+export const gitInitRequestSchema = z.object({
+  path: z.string().min(1),
+});
+export type GitInitRequest = z.infer<typeof gitInitRequestSchema>;
+
+/** `POST /api/v1/projects/git-init` — what was actually done. */
+export const gitInitResponseSchema = z.object({
+  path: z.string(),
+  /** The branch the first commit landed on (`main`, unless git refused `-b`). */
+  branch: z.string(),
+  /** Full SHA of that commit. Present ALWAYS: a response without one would describe exactly the
+   *  commitless state this endpoint exists to prevent. */
+  commit: z.string(),
+  /** How many files the commit contains. `0` is legitimate — an empty folder, or one whose whole
+   *  content was excluded — and the commit is still made (`--allow-empty`). */
+  files: z.number().int(),
+  /** The `.gitignore` lines written on the user's behalf, relative POSIX paths. */
+  ignored: z.array(z.string()),
+});
+export type GitInitResponse = z.infer<typeof gitInitResponseSchema>;
 
 /** `GET /api/v1/launch-key` — the bookmarklet auto-start secret (spec 011). Fetched to COMPARE
  *  against the `?key=` query param and to bake into the `javascript:` links the Settings → Skills

@@ -107,12 +107,15 @@ type Confirming = ProjectListEntry | null
 const MAX_PARALLEL_MIN = 1
 const MAX_PARALLEL_MAX = 16
 
-/** Human wording for a registry status probe. `not-git` is fully usable (single-queue
- *  degraded mode), so it reads as a note rather than a fault; only `missing` is a problem.
- *  Exported because the project's own General page states the same status about itself. */
+/** Human wording for a registry status probe. `not-git` and `no-commits` are both fully usable
+ *  (single-queue degraded mode), so they read as a note rather than a fault; only `missing` is a
+ *  problem. Exported because the project's own General page states the same status about itself. */
 export const STATUS_LABEL: Record<ProjectListEntry['status'], string> = {
   ok: 'ok',
   'not-git': 'no git repo',
+  // Says what it COSTS, not just what it is: a repo with no commit still hands `git worktree add`
+  // an empty tree, so this project runs in place exactly like a non-git one.
+  'no-commits': 'no commits yet — runs in place',
   missing: 'folder not found',
 }
 

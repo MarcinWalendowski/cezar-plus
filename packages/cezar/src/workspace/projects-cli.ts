@@ -93,12 +93,16 @@ export async function runProjectsCommand(
 function statusLabel(entry: { status: string; branch?: string }): string {
   if (entry.status === 'missing') return 'missing';
   if (entry.status === 'not-git') return 'not a git repo';
+  // Never falls through to `entry.branch`: a commitless repo has no branch to report, and the
+  // fallback `'ok'` is precisely the wrong answer for the one state that looks fine and is not.
+  if (entry.status === 'no-commits') return 'no commits yet';
   return entry.branch ?? 'ok';
 }
 
 /** Same ✓/✗ vocabulary the `serve` banner uses for its environment checks. */
 function statusMark(status: string): string {
-  return status === 'missing' ? '✗' : status === 'not-git' ? '·' : '✓';
+  if (status === 'missing') return '✗';
+  return status === 'not-git' || status === 'no-commits' ? '·' : '✓';
 }
 
 async function listCommand(

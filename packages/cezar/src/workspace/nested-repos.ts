@@ -1,12 +1,13 @@
 import { readdir, stat } from 'node:fs/promises';
 import { basename, join, relative, sep } from 'node:path';
 import { forgeKindOfRemote, type ForgeKind } from '../server/forge/index.ts';
-import { getRepoInfo } from '../server/git.ts';
+import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 
 /**
  * The bounded walk behind `GET /api/v1/projects/scan` — every git repository inside a folder the
  * user is about to add, offered as its own project row (spec
- * `.ai/specs/2026-08-14-nested-repos-as-projects.md`).
+ * `.ai/specs/2026-08-14-nested-repos-as-projects.md`), **plus every non-git immediate child that
+ * is a unit of work in its own right** (`.ai/specs/2026-08-15-import-all-folders-as-projects.md`).
  *
  * It lives here, beside the registry it feeds, rather than in `server/git.ts`: what it produces is
  * a list of candidate PROJECTS, and `git.ts` is the plumbing it calls.
@@ -21,8 +22,10 @@ import { getRepoInfo } from '../server/git.ts';
  * this walk has already proven are repo roots — so the upward walk cannot fire there either.
  */
 
-/** One discovered repository. `registered` is filled in by the route, which is what holds the
- *  registry. */
+/** One discovered candidate project — a repo, or (since 2026-08-15) a plain directory. Kept named
+ *  `NestedRepo` because the contract's `nestedRepoSchema` is published under that name and renaming
+ *  it buys nothing; `isRepo` is what distinguishes the two kinds. `registered` is filled in by the
+ *  route, which is what holds the registry. */
 export interface NestedRepo {
   /** Absolute path of the repo root, as walked (not realpath'd — see `scanNestedRepos`). */
   path: string;
@@ -32,12 +35,18 @@ export interface NestedRepo {
   name: string;
   branch?: string;
   forge?: ForgeKind;
+  /** Has a `.git` entry. `false` = a plain directory offered as a project, which runs IN PLACE,
+   *  one task at a time (`workflows/run.ts`) — the fact the dialog's warning is about. */
+  isRepo: boolean;
+  /** Repos only, filled in by `enrichNestedRepos`. `false` = `.git` with no commit yet, where
+   *  `git worktree add` succeeds and yields an EMPTY tree. */
+  hasCommits?: boolean;
 }
 
 export interface NestedRepoScan {
   repos: NestedRepo[];
-  /** True when `MAX_REPOS` capped the walk. Never present a partial list as a whole one: a
-   *  silently short list looks exactly like "there are no other repos in there". */
+  /** True when `MAX_REPOS` capped the walk — for EITHER kind of row. Never present a partial list
+   *  as a whole one: a silently short list looks exactly like "there is nothing else in there". */
   truncated: boolean;
 }
 
@@ -115,8 +124,9 @@ async function isRepoRoot(dir: string): Promise<boolean> {
 }
 
 /**
- * Every git repository under `root`, breadth-first, bounded by `MAX_DEPTH`, `PRUNED_DIRS` and
- * `MAX_REPOS`.
+ * Every git repository under `root` (breadth-first, bounded by `MAX_DEPTH`, `PRUNED_DIRS` and
+ * `MAX_REPOS`), plus every non-git IMMEDIATE child of `root` that is not merely a container for
+ * those repositories.
  *
  * `root` itself is NOT included even when it is a repo: the folder the user picked is already the
  * dialog's own row, and returning it here would make the same folder two proposals.
@@ -128,11 +138,50 @@ async function isRepoRoot(dir: string): Promise<boolean> {
  * Paths are returned as walked. Realpath normalization is `registerProject`'s job and it does it on
  * every root it stores, so doing it here as well would only decide WHICH spelling reaches a user's
  * screen — and the walked spelling is the one their filesystem reads like.
+ *
+ * ## The folder rows (2026-08-15)
+ *
+ * Three rules decide them, and each one is load-bearing:
+ *
+ * 1. **Immediate children only**, while repos keep the depth-3 walk. Deliberately asymmetric: a
+ *    `.git` entry is positive evidence that a directory is a unit of work, and it is what makes a
+ *    deep hit trustworthy. A plain directory carries no such evidence, so at depth 3 every `src`,
+ *    `docs` and `assets` under every non-repo child would become a checkbox and the list would stop
+ *    being a decision the user makes.
+ * 2. **Nothing when `root` is a repo that holds no other repos.** Its subdirectories are parts of
+ *    that repo, not sibling projects — the same fact the 2026-08-14 negative control pins for
+ *    `brand/` inside a checkout. A repo that DOES hold nested repos is a workspace folder that
+ *    happens to be tracked (a directory of checkouts with a couple of doctrine files committed at
+ *    the top), and its plain children are units of work like any other.
+ *
+ *    Measured on the workspace this feature was built for, 2026-08-15 — the rule is the
+ *    measurement, not a guess:
+ *
+ *    | scanned folder | nested repos | plain children it would offer |
+ *    |---|---|---|
+ *    | the workspace folder (tracked) | 10 | `brand`, `design-assets`, … — every one real work |
+ *    | `chat` (a checkout) | 0 | `domains`, `infra`, `packages`, `tools` — every one noise |
+ *    | `cezar` (a checkout) | 0 | `docs`, `packages`, `scripts` — every one noise |
+ *
+ *    Both halves matter. Without the relaxation the feature misses its own motivating case; without
+ *    the "holds no other repos" half it turns every checkout's source tree into pre-checked project
+ *    rows.
+ * 3. **No discovered repo beneath it.** Without this, a container like `~/code` whose whole content
+ *    is the five repos already listed is offered as a sixth project that owns all five. A prefix
+ *    test over the repos this walk already collected: no second walk, no extra syscalls.
+ *
+ * Hidden directories are skipped as folder rows (never as repos — a repo under `.claude` is still a
+ * repo, which is the 2026-08-14 positive control). A dot-directory is configuration or tool state by
+ * convention, which is also why the folder picker hides them by default; offering `.vscode` and
+ * `.ai` as projects would bury the rows that matter.
  */
 export async function scanNestedRepos(root: string): Promise<NestedRepoScan> {
   const repos: NestedRepo[] = [];
+  const folders: NestedRepo[] = [];
   let truncated = false;
   let frontier: string[] = [root];
+  // Rule 2 above, asked once, before anything is collected.
+  const rootIsRepo = await isRepoRoot(root);
 
   for (let depth = 0; depth < MAX_DEPTH && frontier.length > 0; depth += 1) {
     const next: string[] = [];
@@ -155,14 +204,16 @@ export async function scanNestedRepos(root: string): Promise<NestedRepoScan> {
             truncated = true;
             continue;
           }
-          repos.push({
-            path: childPath,
-            relPath: relative(root, childPath).split(sep).join('/'),
-            name: basename(childPath),
-          });
+          repos.push(row(root, childPath, true));
           // Do NOT descend: a submodule or a vendored checkout inside a repo is part of that repo,
           // not a sibling project. This is also what keeps a monorepo from multiplying into rows.
           continue;
+        }
+        // A folder CANDIDATE — kept whole, filtered after the walk, because neither "does a repo
+        // live under this" nor "is this folder a workspace" can be answered until the walk that
+        // finds the repos has finished.
+        if (depth === 0 && !entry.name.startsWith('.')) {
+          folders.push(row(root, childPath, false));
         }
         next.push(childPath);
       }
@@ -170,11 +221,37 @@ export async function scanNestedRepos(root: string): Promise<NestedRepoScan> {
     frontier = next;
   }
 
-  return { repos, truncated };
+  // Rule 3, plus D3's ordering. Repos fill the cap first, so a folder row can only ever be emitted
+  // from a COMPLETE repo list: when the repo walk truncated, `repos.length === MAX_REPOS` and the
+  // budget below is zero. That is what keeps this filter from being evaluated against a repo list
+  // missing exactly the entry that would have filtered a container out.
+  const containsARepo = (folder: NestedRepo): boolean =>
+    repos.some((repo) => repo.path.startsWith(`${folder.path}${sep}`));
+  // Rule 2: a repo holding no other repos is a checkout, and a checkout's subdirectories are its
+  // own, never projects.
+  const isPlainCheckout = rootIsRepo && repos.length === 0;
+  const offerable = (isPlainCheckout ? [] : folders)
+    .filter((folder) => !containsARepo(folder))
+    // readdir order is not sorted on every filesystem, and the cap has to bite deterministically:
+    // which folders survive it must not depend on inode order.
+    .sort((a, b) => a.relPath.localeCompare(b.relPath));
+  const budget = Math.max(0, MAX_REPOS - repos.length);
+  if (offerable.length > budget) truncated = true;
+
+  return { repos: [...repos, ...offerable.slice(0, budget)], truncated };
+}
+
+function row(root: string, path: string, isRepo: boolean): NestedRepo {
+  return {
+    path,
+    relPath: relative(root, path).split(sep).join('/'),
+    name: basename(path),
+    isRepo,
+  };
 }
 
 /**
- * Fill in `branch` and `forge` for each discovered repo.
+ * Fill in `branch`, `forge` and `hasCommits` for each discovered repo.
  *
  * Separate from the walk, and not folded into it, for two reasons: the walk stays free of process
  * spawning (so its tests need no git), and this is the part with a real cost — one `getRepoInfo`
@@ -184,6 +261,16 @@ export async function scanNestedRepos(root: string): Promise<NestedRepoScan> {
  *
  * Best-effort throughout: `getRepoInfo` answers `null` rather than throwing (an unborn HEAD, a
  * repo mid-clone), and a repo with neither branch nor remote is still a perfectly good row.
+ *
+ * **A folder row is skipped entirely** — no git process is spawned for a directory with no `.git`.
+ * Not just a saving: `getRepoInfo` walks UPWARD, so run inside a plain directory that sits under a
+ * repo it answers with the ANCESTOR's branch and remote, and the row would render a branch that is
+ * not its own.
+ *
+ * `hasCommits` is asked with `getHeadCommit` rather than inferred from `getRepoInfo` returning
+ * `null`: that null has several causes (no `.git` at all, a repo mid-clone, an unreadable one), and
+ * a status this consequential — it is the difference between an isolated worktree and an empty one
+ * — must not be derived from an ambiguous signal.
  */
 export async function enrichNestedRepos(repos: NestedRepo[], concurrency = 4): Promise<NestedRepo[]> {
   const out = [...repos];
@@ -194,12 +281,15 @@ export async function enrichNestedRepos(repos: NestedRepo[], concurrency = 4): P
       cursor += 1;
       const repo = out[index];
       if (repo === undefined) return;
+      if (!repo.isRepo) continue;
       const info = await getRepoInfo(repo.path).catch(() => null);
       const forge = forgeKindOfRemote(info?.remote);
+      const head = await getHeadCommit(repo.path).catch(() => null);
       out[index] = {
         ...repo,
         ...(info?.branch ? { branch: info.branch } : {}),
         ...(forge ? { forge } : {}),
+        hasCommits: head !== null,
       };
     }
   };

@@ -4,7 +4,12 @@ import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { FsBrowseResponse, ProjectListEntry, ProjectScanResponse } from '@open-mercato/cezar-api-client'
+import type {
+  FsBrowseResponse,
+  GitPreflightResponse,
+  ProjectListEntry,
+  ProjectScanResponse,
+} from '@open-mercato/cezar-api-client'
 import { AddProjectDialog } from '@/components/add-project-dialog'
 
 /**
@@ -75,14 +80,56 @@ type Answers = {
 }
 
 const posted: { root: string }[] = []
+/** Paths `POST /api/v1/projects/git-init` was called with — the assertion that a preview WROTE
+ *  nothing is this list staying empty. */
+const inited: string[] = []
+/** Per-path preflight answers, mutable mid-test so a refusal can be introduced after the rows have
+ *  rendered. */
+const preflights: Record<string, GitPreflightResponse> = {}
+let initAnswer: ((path: string) => Response) | null = null
+
+function preflightOf(over: Partial<GitPreflightResponse> = {}): GitPreflightResponse {
+  return {
+    path: '/home/me/workspace/brand',
+    alreadyRepo: false,
+    hasCommits: false,
+    insideRepo: false,
+    trackedElsewhere: false,
+    files: 12,
+    bytes: 4096,
+    sensitive: ['.env'],
+    oversized: [],
+    truncated: false,
+    ...over,
+  }
+}
+
+const setupButton = (repo: string) =>
+  document.querySelector(`[data-slot="nested-row"][data-repo="${repo}"] [data-slot="setup-git"]`) as HTMLButtonElement
+
+const scanCalls = () =>
+  fetchMock.mock.calls.filter(([input]) => String(input).startsWith('/api/v1/projects/scan')).length
 
 function serve({ browse = { '': json(HOME) }, projects = [], register, scan = {} }: Answers = {}): void {
   posted.length = 0
+  inited.length = 0
+  initAnswer = null
+  for (const key of Object.keys(preflights)) delete preflights[key]
   fetchMock.mockImplementation(async (input, init) => {
     const url = new URL(String(input), 'http://localhost')
     if (url.pathname === '/api/v1/projects/scan') {
       const answer = scan[url.searchParams.get('path') ?? '']
       return answer === undefined ? json({ error: 'no such directory' }, 404) : json(answer)
+    }
+    if (url.pathname === '/api/v1/projects/git-preflight') {
+      const path = url.searchParams.get('path') ?? ''
+      return json(preflights[path] ?? preflightOf({ path }))
+    }
+    if (url.pathname === '/api/v1/projects/git-init' && init?.method === 'POST') {
+      const path = (JSON.parse(String(init.body)) as { path: string }).path
+      if (initAnswer) return initAnswer(path)
+      inited.push(path)
+      return json({ path, branch: 'main', commit: 'a'.repeat(40), files: 12, ignored: ['.env'] })
     }
     if (url.pathname === '/api/v1/projects' && init?.method === 'POST') {
       const root = (JSON.parse(String(init.body)) as { root: string }).root
@@ -281,8 +328,8 @@ describe('AddProjectDialog', () => {
       rootIsRepo: true,
       truncated: false,
       repos: [
-        { path: '/home/me/workspace/chat', relPath: 'chat', name: 'chat', branch: 'main', forge: 'github', registered: false },
-        { path: '/home/me/workspace/cezar', relPath: 'cezar', name: 'cezar', registered: false },
+        { path: '/home/me/workspace/chat', relPath: 'chat', name: 'chat', branch: 'main', forge: 'github', isRepo: true, hasCommits: true, registered: false },
+        { path: '/home/me/workspace/cezar', relPath: 'cezar', name: 'cezar', isRepo: true, hasCommits: true, registered: false },
       ],
       ...over,
     })
@@ -334,8 +381,8 @@ describe('AddProjectDialog', () => {
       await renderScanned(
         scanOf({
           repos: [
-            { path: '/home/me/workspace/chat', relPath: 'chat', name: 'chat', registered: true },
-            { path: '/home/me/workspace/cezar', relPath: 'cezar', name: 'cezar', registered: false },
+            { path: '/home/me/workspace/chat', relPath: 'chat', name: 'chat', isRepo: true, hasCommits: true, registered: true },
+            { path: '/home/me/workspace/cezar', relPath: 'cezar', name: 'cezar', isRepo: true, hasCommits: true, registered: false },
           ],
         }),
       )
@@ -361,10 +408,10 @@ describe('AddProjectDialog', () => {
       expect(document.querySelector('[data-slot="nested-truncated"]')).toBeNull()
     })
 
-    /** A folder with no repos in it, and a scan that fails outright, must both look the same to
+    /** A repo with nothing inside it, and a scan that fails outright, must both look the same to
      *  the user as the dialog did before this feature existed — no section, one POST. */
-    it('shows no section at all when the folder holds no repos', async () => {
-      serve({ browse: { '': json(HOME) }, scan: { '/home/me': { root: '/home/me', rootIsRepo: false, repos: [], truncated: false } } })
+    it('shows no section at all for a git folder that holds no other projects', async () => {
+      serve({ browse: { '': json(HOME) }, scan: { '/home/me': { root: '/home/me', rootIsRepo: true, repos: [], truncated: false } } })
       renderDialog()
       await waitFor(() => expect(addButton().disabled).toBe(false))
       expect(document.querySelector('[data-slot="nested-repos"]')).toBeNull()
@@ -372,6 +419,151 @@ describe('AddProjectDialog', () => {
 
       fireEvent.click(addButton())
       await waitFor(() => expect(posted).toEqual([{ root: '/home/me' }]))
+    })
+  })
+
+  /**
+   * Non-git folders as projects, and the button that fixes them
+   * (`.ai/specs/2026-08-15-import-all-folders-as-projects.md`, phases 2 and 4).
+   */
+  describe('folders without git', () => {
+    const WORKSPACE: FsBrowseResponse = {
+      path: '/home/me/workspace',
+      parent: null,
+      dirs: [{ name: 'chat', path: '/home/me/workspace/chat', isRepo: true }],
+      truncated: false,
+    }
+
+    const MIXED: ProjectScanResponse = {
+      root: '/home/me/workspace',
+      rootIsRepo: false,
+      truncated: false,
+      repos: [
+        { path: '/home/me/workspace/chat', relPath: 'chat', name: 'chat', branch: 'main', isRepo: true, hasCommits: true, registered: false },
+        { path: '/home/me/workspace/brand', relPath: 'brand', name: 'brand', isRepo: false, registered: false },
+        { path: '/home/me/workspace/fresh', relPath: 'fresh', name: 'fresh', isRepo: true, hasCommits: false, registered: false },
+      ],
+    }
+
+    const renderMixed = async (over: Partial<ProjectScanResponse> = {}): Promise<void> => {
+      serve({ browse: { '': json(WORKSPACE) }, scan: { '/home/me/workspace': { ...MIXED, ...over } } })
+      renderDialog()
+      await waitFor(() => expect(nestedRows().length).toBe((over.repos ?? MIXED.repos).length + 1))
+    }
+
+    /** THE guard on the copy. Mutation: replace the warning with a generic "no git" and this fails
+     *  — the three things a non-git project actually costs are the reason the row is warned about
+     *  at all, and `workflows/run.ts` says exactly this when such a project runs. */
+    it('warns that a non-git row runs in place, one task at a time', async () => {
+      await renderMixed()
+      const warning = document.querySelector('[data-slot="nested-no-git-warning"]') as HTMLElement
+      expect(warning.textContent).toContain('in place, one task at a time')
+      expect(warning.textContent).toContain('parallel')
+      expect(warning.textContent).toContain('worktree')
+    })
+
+    it('offers folders and repos alike, all checked, and counts every one on the button', async () => {
+      await renderMixed()
+      expect(nestedRows().map((row) => row.getAttribute('data-repo'))).toEqual(['.', 'chat', 'brand', 'fresh'])
+      expect(nestedRows().every((row) => (row.querySelector('input') as HTMLInputElement).checked)).toBe(true)
+      // The folder itself + 3 rows: a folder row is a project proposal exactly like a repo row.
+      expect(addButton().textContent).toBe('Add 4 projects')
+
+      fireEvent.click(addButton())
+      await waitFor(() => expect(posted).toHaveLength(4))
+      expect(posted.map((call) => call.root)).toContain('/home/me/workspace/brand')
+    })
+
+    /** A commitless repo is badged differently from a folder with no `.git` — same cost, different
+     *  cause, and "no git" on a directory the user knows is a repo teaches them nothing. */
+    it('badges a plain folder and a commitless repo differently, and offers both the button', async () => {
+      await renderMixed()
+      const badge = (repo: string) =>
+        document.querySelector(`[data-slot="nested-row"][data-repo="${repo}"] [data-slot="no-git-badge"]`)
+      expect(badge('brand')?.textContent).toBe('no git')
+      expect(badge('fresh')?.textContent).toBe('no commits')
+      expect(badge('chat')).toBeNull()
+      expect(
+        document.querySelector('[data-slot="nested-row"][data-repo="chat"] [data-slot="setup-git"]'),
+      ).toBeNull()
+      for (const repo of ['brand', 'fresh']) {
+        expect(
+          document.querySelector(`[data-slot="nested-row"][data-repo="${repo}"] [data-slot="setup-git"]`),
+        ).not.toBeNull()
+      }
+    })
+
+    it('previews what would be committed and what would be excluded before writing anything', async () => {
+      await renderMixed()
+      fireEvent.click(setupButton('brand'))
+
+      await waitFor(() => expect(document.querySelector('[data-slot="setup-summary"]')).not.toBeNull())
+      expect(document.querySelector('[data-slot="setup-summary"]')?.textContent).toContain('12 files')
+      expect(document.querySelector('[data-slot="setup-excluded"]')?.textContent).toContain('.env')
+      // Preflight is a READ: nothing has been written at the point the preview renders.
+      expect(inited).toEqual([])
+
+      fireEvent.click(document.querySelector('[data-slot="setup-confirm"]') as HTMLButtonElement)
+      await waitFor(() => expect(inited).toEqual(['/home/me/workspace/brand']))
+    })
+
+    /** Mutation: auto-ignore the oversized file instead of refusing, and this fails. The refusal is
+     *  a decision the user has to make, so the button must not be clickable past it. */
+    it('refuses an oversized file instead of offering to commit it', async () => {
+      await renderMixed()
+      preflights['/home/me/workspace/brand'] = {
+        ...preflightOf(),
+        oversized: ['assets/render.mov (240.0 MB)'],
+      }
+      fireEvent.click(setupButton('brand'))
+
+      await waitFor(() => expect(document.querySelector('[data-slot="setup-refusal"]')).not.toBeNull())
+      expect(document.querySelector('[data-slot="setup-refusal"]')?.textContent).toContain('render.mov')
+      expect((document.querySelector('[data-slot="setup-confirm"]') as HTMLButtonElement).disabled).toBe(true)
+    })
+
+    it('shows the server refusal verbatim when the write itself fails', async () => {
+      await renderMixed()
+      initAnswer = () => json({ error: 'this folder is inside an existing git repository' }, 400)
+      fireEvent.click(setupButton('brand'))
+      await waitFor(() =>
+        expect((document.querySelector('[data-slot="setup-confirm"]') as HTMLButtonElement).disabled).toBe(false),
+      )
+      fireEvent.click(document.querySelector('[data-slot="setup-confirm"]') as HTMLButtonElement)
+
+      await waitFor(() =>
+        expect(document.querySelector('[data-slot="setup-error"]')?.textContent).toBe(
+          'this folder is inside an existing git repository',
+        ),
+      )
+    })
+
+    /** The row the user just fixed has to stop saying it has no git — the dialog renders straight
+     *  off the scan, so the scan is what must be re-asked. */
+    it('re-scans after a successful setup so the fixed row loses its warning', async () => {
+      await renderMixed()
+      fireEvent.click(setupButton('brand'))
+      await waitFor(() =>
+        expect((document.querySelector('[data-slot="setup-confirm"]') as HTMLButtonElement).disabled).toBe(false),
+      )
+
+      const scansBefore = scanCalls()
+      fireEvent.click(document.querySelector('[data-slot="setup-confirm"]') as HTMLButtonElement)
+
+      await waitFor(() => expect(scanCalls()).toBeGreaterThan(scansBefore))
+    })
+
+    /** The scanned folder itself gets the same treatment: browsing INTO a non-git folder is how a
+     *  user reaches one that has nothing inside it, and that is the row they need the button on. */
+    it('offers the setup button on the scanned folder when it is the one without git', async () => {
+      serve({
+        browse: { '': json(HOME) },
+        scan: { '/home/me': { root: '/home/me', rootIsRepo: false, repos: [], truncated: false } },
+      })
+      renderDialog()
+      await waitFor(() => expect(document.querySelector('[data-slot="nested-repos"]')).not.toBeNull())
+      expect(document.querySelector('[data-slot="nested-row"][data-repo="."] [data-slot="setup-git"]')).not.toBeNull()
+      expect(document.querySelector('[data-slot="nested-no-git-warning"]')).not.toBeNull()
     })
   })
 })

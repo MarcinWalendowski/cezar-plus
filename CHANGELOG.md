@@ -31,7 +31,37 @@
 
 ## ✨ Features
 
-- ✨ **Adding a folder that holds git repositories now offers each repo as its own project.**
+- ✨ **Adding a folder now offers every folder in it as a project, not only the git repos — and
+  offers to set git up on the ones without it.** A directory of real work that was never
+  `git init`ed used to be walked *through* by the scan and never listed, so it was invisible in
+  the import dialog. Now each non-git immediate child is offered too, checked like the rest, badged
+  `no git` and carrying a warning that says what it actually costs: **no isolated worktree, no
+  parallel runs, and no diff to review** — one task at a time, in place. A folder that merely
+  *contains* the repos already listed is not offered (that is a container, not a project), and a
+  plain checkout with no nested repos offers no folder rows at all — a repo that holds repos is a
+  workspace, a repo that holds none is a project. Repos fill the 25-row cap before folders, and
+  `truncated` still says so out loud.
+
+  **Set up git** on such a row runs `git init -b main`, writes `.gitignore`, stages, and makes a
+  **first commit** — in that order, because the order is the guarantee. Two new endpoints:
+  `GET /api/v1/projects/git-preflight` (what would be committed: file count, bytes, detected
+  secrets, oversized files) and `POST /api/v1/projects/git-init`. **Apply re-runs every check
+  server-side**; a client-supplied preflight is never trusted. Both refuse a path outside the
+  browse root, judged after `realpath`, and both refuse the same paths registration refuses.
+  Detected secrets (`.env`, `*.pem`, `id_rsa`, …) are written into `.gitignore` **before** anything
+  is staged, so they are never committed, and the response names each one. A file over 10 MB
+  **refuses the whole operation** rather than quietly ignoring it — silently dropping a large asset
+  is not our decision to make.
+
+  **The first commit is the point, not a nicety.** `git worktree add` on a repo with no commits
+  *succeeds* — git infers `--orphan` — and hands back an **empty** tree. A bare `git init` would
+  therefore have replaced an honest "running in place" note with agents working in an empty
+  directory, on a project the cockpit called healthy. Spec
+  `.ai/specs/2026-08-15-import-all-folders-as-projects.md`.
+
+- ✨ **EXTENDED 2026-08-15 — "each repo" is no longer the whole story; every folder is offered now.
+  See the entry above; the rest of this entry still holds.**
+  **Adding a folder that holds git repositories now offers each repo as its own project.**
   "Add project → Open local folder" scans the folder you are on (`GET /api/v1/projects/scan`, a
   read that writes nothing) and lists the repositories inside it, checked, alongside the folder
   itself. Uncheck what you do not want; the button says how many projects it will create and
@@ -318,6 +348,22 @@
   request, no writes, no identity file — and the section's own doc comment records the trade.
 
 ## 🐛 Fixes
+
+- 🐛 **A git repository with no commits was reported as healthy, and it is the one state that looks
+  fine and is not.** `computeProbe` decided a project was `ok` the moment `.git` existed, so a repo
+  you had `git init`ed and not yet committed to showed a green `ok` in Settings, in `cezar projects
+  list`, in the cross-project git index and in the note pass's project catalog — while
+  `git worktree add` against it *succeeds* and produces an **empty** tree, because git infers
+  `--orphan` on an unborn HEAD. An agent given that project would have run in an empty directory.
+  The registry status is now `ok | missing | not-git | no-commits`, and every reader says what the
+  state **costs** rather than only naming it: Settings reads "no commits yet — runs in place", the
+  CLI reads "no commits yet" with the same `·` mark `not-git` gets, the git index returns
+  `no commits yet` instead of falling through to git calls that all fail on an unborn HEAD, and the
+  note-pass prompt flags `[git repo with no commits]` so the model is not told something untrue
+  while it decides where to propose work. Predates the import feature; found while building it.
+  Two producers were making commitless repos themselves — creating a blank project, and the
+  dry-run clone runner — and both now commit.
+  Spec `.ai/specs/2026-08-15-import-all-folders-as-projects.md`.
 
 - 🐛 **Organizations, teams and the account pane were invisible in `npm run dev`.** The Vite dev
   proxy forwarded `/api` only, but `/auth/*` is a ROOT-mounted family (D13/D14), so the cockpit's

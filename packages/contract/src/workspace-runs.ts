@@ -66,7 +66,7 @@ export type WorkspaceRunSummary = z.infer<typeof workspaceRunSummarySchema>;
 export const workspaceProjectHealthSchema = z.object({
   id: z.string(),
   name: z.string(),
-  status: z.enum(['ok', 'missing', 'not-git']),
+  status: z.enum(['ok', 'missing', 'not-git', 'no-commits']),
   ok: z.boolean(),
   reason: z.string().optional(),
   total: z.number().int(),

@@ -67,7 +67,7 @@ const workspaceRunsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 
-function toRunIndexSource(project: { id: string; root: string; status: 'ok' | 'missing' | 'not-git'; name: string }): WorkspaceRunProjectSource {
+function toRunIndexSource(project: { id: string; root: string; status: 'ok' | 'missing' | 'not-git' | 'no-commits'; name: string }): WorkspaceRunProjectSource {
   return { id: project.id, root: project.root, status: project.status, name: project.name || '' };
 }
 

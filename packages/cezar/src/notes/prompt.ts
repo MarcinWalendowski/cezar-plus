@@ -125,7 +125,16 @@ export function buildNotePassPrompt(input: NotePassPromptInput): string {
     for (const project of input.catalog) {
       const tags = project.tags.length > 0 ? project.tags.join(', ') : 'no tags';
       const workflows = project.workflows.length > 0 ? project.workflows.join(', ') : 'none';
-      const flag = project.status === 'not-git' ? ' [not a git repo]' : '';
+      // Both degraded states are flagged, and separately: each one means the project cannot host a
+      // worktree, which is what the pass is deciding when it proposes a task there. `no-commits`
+      // looks like a healthy repo from every other angle, so leaving it unflagged would be the
+      // prompt telling the model something untrue.
+      const flag =
+        project.status === 'not-git'
+          ? ' [not a git repo]'
+          : project.status === 'no-commits'
+            ? ' [git repo with no commits]'
+            : '';
       const aliases = identityAliases(project);
       lines.push(
         `- ${project.id} — ${project.name}${aliases} — ${tags} — workflows: ${workflows}${flag}`,

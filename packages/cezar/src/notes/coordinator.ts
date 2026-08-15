@@ -38,7 +38,7 @@ import { loadWorkflows } from '../workflows/load.ts';
 export interface NoteProjectEntry {
   id: string;
   name: string;
-  status: 'ok' | 'missing' | 'not-git';
+  status: 'ok' | 'missing' | 'not-git' | 'no-commits';
   /** Grouping labels (`storefront`, `infra`). Often the only thing that makes a note's "the api
    *  one" resolvable, so they earn their place in the prompt. */
   tags: string[];
@@ -63,7 +63,7 @@ export interface NoteCoordinatorProject {
   id: string;
   root: string;
   name: string;
-  status: 'ok' | 'missing' | 'not-git';
+  status: 'ok' | 'missing' | 'not-git' | 'no-commits';
   tags?: string[];
   lastOpenedAt?: string;
   /** The remote's web root (`https://github.com/owner/repo`), when the registry has probed one.

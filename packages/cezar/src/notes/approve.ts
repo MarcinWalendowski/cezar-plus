@@ -41,7 +41,7 @@ import type { StoredNote } from './types.ts';
 export interface NoteApproverProject {
   id: string;
   root: string;
-  status: 'ok' | 'missing' | 'not-git';
+  status: 'ok' | 'missing' | 'not-git' | 'no-commits';
 }
 
 export interface NoteApproverDeps {

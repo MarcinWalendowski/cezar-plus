@@ -1,4 +1,13 @@
-# Nested repos register as projects
+# Nested repos register as projects — EXTENDED 2026-08-15, "repos only" no longer holds
+
+**EXTENDED 2026-08-15 by `.ai/specs/2026-08-15-import-all-folders-as-projects.md`.** The heading
+carried the falsehood, so it says so: this spec's list is no longer repos-only. Every non-git
+immediate child of the scanned folder that is not merely a CONTAINER for the repos below it is now
+offered too, with a warning naming what a non-git project costs (`in place, one task at a time`) and
+a "Set up git" button that runs `git init` **and a first commit**. Everything else here stands
+unchanged and is still the reference: the bounded walk (D3), the proposal-not-write model (D2), the
+per-row registration (D4), the shared containment gate (D5), and the 25-row cap — which now covers
+both kinds of row, repos first.
 
 Status: **Draft** — **supersedes D1 of `2026-08-06-nested-repos-cockpit-scope.md`.** That spec
 decided a workspace-shaped folder stays ONE project with a repo selector, and explicitly rejected
@@ -59,6 +68,14 @@ all checked, and the button says how many will be added. Two reasons this is not
   from the boot path in the first place.
 - The same review-gate rule the withdrawn Notes capture obeyed ("an inferred project is a proposal
   shown before the task is created, never applied silently").
+
+### D1a — **EXTENDED 2026-08-15: a non-git folder is a row too**
+
+D1 above says "every git repo found inside it". That is no longer the whole list. A plain directory
+that is an immediate child of the scanned folder, is not pruned, is not hidden, is not a task
+worktree, and has **no discovered repo beneath it**, is offered as its own project row — checked by
+default like any other. See `.ai/specs/2026-08-15-import-all-folders-as-projects.md` D1 for the rule
+and the measurement behind its "plain checkout" exclusion.
 
 ### D3 — the walk, unchanged from the old D2
 
@@ -187,6 +204,9 @@ Runtime E2E, on this machine:
 
 - Add `~/loki-labs`: the list offers `chat`, `cezar`, `bubble-trade`, `aside`, `career-kit` and the
   folder itself; `brand` (no `.git`) is absent; `node_modules` appears nowhere.
+  **CORRECTED 2026-08-15: "`brand` is absent" is no longer the expected result — it is now offered,
+  badged `no git`, which is the whole point of the extending spec. `node_modules` appearing nowhere
+  still holds, and is still checked.**
 - Unchecking two and confirming registers exactly the rest, and the sidebar shows them as separate
   project groups with their own task lists.
 

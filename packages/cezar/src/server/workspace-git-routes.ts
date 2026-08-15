@@ -54,7 +54,7 @@ export interface WorkspaceGitRouteDeps {
 function toGitIndexSource(project: {
   id: string;
   root: string;
-  status: 'ok' | 'missing' | 'not-git';
+  status: 'ok' | 'missing' | 'not-git' | 'no-commits';
   name: string;
 }): WorkspaceGitProjectSource {
   return { id: project.id, root: project.root, status: project.status, name: project.name || '' };

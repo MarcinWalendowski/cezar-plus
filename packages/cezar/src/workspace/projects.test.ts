@@ -339,6 +339,27 @@ describe('workspace projects', () => {
       expect(entry?.branch).toBeUndefined();
     });
 
+    /**
+     * A `.git` with no commit is NOT `ok` (spec
+     * `.ai/specs/2026-08-15-import-all-folders-as-projects.md`, phase 5).
+     *
+     * Mutation: return `ok` on `.git` existing alone — what this did until 2026-08-15 — and this
+     * fails. It has to be its own status rather than a branchless `ok`, because `git worktree add`
+     * SUCCEEDS on such a repo and produces an empty tree: the cockpit was calling healthy the one
+     * state in which an agent works in a directory holding none of the user's files.
+     */
+    it('reports a repo with no commits as no-commits, not ok', async () => {
+      const root = makeDir('unborn');
+      execFileSync('git', ['init', '-b', 'main'], { cwd: root });
+      clearProjectProbeCache();
+      await registerProject(root);
+
+      const [entry] = await listProjects();
+
+      expect(entry?.status).toBe('no-commits');
+      expect(entry?.branch).toBeUndefined();
+    });
+
     it('serves a repeat render from the TTL cache instead of re-probing', async () => {
       const root = makeDir('cached');
       await registerProject(root);

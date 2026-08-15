@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH } from '@open-mercato/cezar-contract';
 import { forgeKindOfRemote, forgeWebRoot, type ForgeKind } from '../server/forge/index.ts';
-import { getRepoInfo } from '../server/git.ts';
+import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 import {
   mergeWriteWorkspaceConfig,
   loadWorkspaceConfig,
@@ -250,10 +250,13 @@ export function normalizeProjectTags(tags: readonly string[] | null | undefined)
   return normalized.length > 0 ? normalized : undefined;
 }
 
-export type ProjectStatus = 'ok' | 'missing' | 'not-git';
+export type ProjectStatus = 'ok' | 'missing' | 'not-git' | 'no-commits';
 
 export interface ProjectListEntry extends WorkspaceProject {
-  /** `missing` = root gone/unreadable; `not-git` = exists but no `.git`. */
+  /** `missing` = root gone/unreadable; `not-git` = exists but no `.git`;
+   *  `no-commits` = a `.git` with nothing committed, where `git worktree add`
+   *  succeeds and hands the agent an EMPTY tree (see `computeProbe`). The last
+   *  two are degraded-but-usable; only `missing` blocks. */
   status: ProjectStatus;
   /** Current branch when cheaply available (omitted e.g. on an unborn HEAD). */
   branch?: string;
@@ -310,6 +313,15 @@ async function computeProbe(root: string): Promise<RootProbe> {
   } catch {
     return { status: 'not-git' };
   }
+  // A `.git` with no commit in it is NOT `ok`, and saying so is the point (2026-08-15,
+  // `.ai/specs/2026-08-15-import-all-folders-as-projects.md` phase 5).
+  //
+  // Measured: `git worktree add` on a commitless repo SUCCEEDS — git infers `--orphan` — and
+  // produces an EMPTY working tree. So the run does get its "isolated" worktree, and the agent
+  // then works in a directory holding none of the user's files, while every surface that reads
+  // this probe renders the project as healthy. `.git` existing was the whole test until today,
+  // which is exactly how that stayed invisible.
+  if ((await getHeadCommit(root)) === null) return { status: 'no-commits' };
   // Branch and forge are best-effort garnish: getRepoInfo never throws (null
   // on e.g. an unborn HEAD), and a repo without either is still status ok.
   const info = await getRepoInfo(root);
