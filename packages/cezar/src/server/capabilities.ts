@@ -215,15 +215,10 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
     sources: env.CEZ_SOURCES === '1',
     // Cross-project by nature: false under singleProject regardless of the flag (see the
     // module docblock) — a single-project cockpit has nothing to aggregate or fan out across.
-    //
-    // INVERTED like `skills` below (2026-08-15, `.ai/specs/2026-08-15-composer-stops-forcing-
-    // choices.md`): the project-less composer this gates is the fix for "the composer forces a
-    // single project", so it has to be reachable without anyone setting a flag. `CEZ_NOTES=0`
-    // is still the one-variable way to turn it off.
-    notes: env.CEZ_NOTES !== '0' && !singleProject,
+    notes: env.CEZ_NOTES === '1' && !singleProject,
     workspaceViews: env.CEZ_WORKSPACE_VIEWS === '1' && !singleProject,
     notify: env.CEZ_NOTIFY === '1',
-    // Two INVERTED gates in this object as of 2026-08-15 — `notes` above, and this one.
+    // The one INVERTED gate in this object: `=== '1'` everywhere above, `!== '0'` here.
     // Skills predates the capability payload, so absent has to keep meaning on — see the
     // `skills` field in `contract/health.ts` for why the asymmetry is deliberate.
     skills: env.CEZ_SKILLS !== '0',

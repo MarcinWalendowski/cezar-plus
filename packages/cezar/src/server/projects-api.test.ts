@@ -1557,7 +1557,7 @@ describe('workspace projects API', () => {
         costMetrics: true,
         knowledge: false,
         sources: false,
-        notes: true,
+        notes: false,
         workspaceViews: false,
         notify: false,
         skills: true,

@@ -1,10 +1,16 @@
 # The composer stops forcing a project and a workflow
 
-> **Status:** draft · **Date:** 2026-08-15 · **Owner decisions:** "by default task
+> **Status:** partially reverted 2026-08-15 — D1 and D2 (the project half: routing "New task" at
+> the project-less `/workspace/new` composer) were reverted on owner review the same day, in place;
+> see the marked sections below. D3, D4 and D5 (the workflow half: "None" as the cold default) stand
+> as shipped. **Date:** 2026-08-15 · **Owner decisions:** "by default task
 > project/directories should be 'auto detect' or 'ALL' — right now I can select only one", and
 > "why do we force users to select workflow? we shouldn't force them — by default task shouldn't
 > have any workflow". Asked how far to go on the first: **make the existing auto-detect composer
-> the default**, not build multi-project fan-out into `POST /runs`.
+> the default**, not build multi-project fan-out into `POST /runs`. **Superseded same day**: the
+> owner reviewed the shipped project half and rejected the two-composer shape — "composer should be
+> one: exactly the same: just allow to select 'all/auto' and do it by default. We don't need
+> notes." — which is what D1/D2 below record as reverted.
 
 ## TLDR
 
@@ -69,7 +75,15 @@ default that means it.
 
 ## Solution
 
-### D1 — `CEZ_NOTES` becomes an inverted gate, following the `skills` precedent
+### D1 — REVERTED 2026-08-15 on owner review — `CEZ_NOTES` becomes an inverted gate, following the `skills` precedent
+
+**Reverted 2026-08-15, same day it shipped, on owner review.** The owner rejected the two-composer
+shape this decision was half of: "composer should be one: exactly the same: just allow to select
+'all/auto' and do it by default. We don't need notes." `capabilities.ts` gates `notes` back to
+`env.CEZ_NOTES === '1' && !singleProject` — its original opt-in polarity, before this spec touched
+it — and the neighbouring comment that called `skills` "the one INVERTED gate in this object" is
+true again. What replaces this: a single composer whose project pill gains an **All/Auto** option
+and defaults to it, specced separately. Original text, unchanged below:
 
 ```ts
 notes: env.CEZ_NOTES !== '0' && !singleProject,
@@ -83,7 +97,14 @@ and the module docblock's reasoning is unchanged.
 `CEZ_NOTES=0` remains the way to turn it off, so anyone relying on the surface being absent has a
 one-variable answer.
 
-### D2 — "New task" means the project-less composer when the capability is on
+### D2 — REVERTED 2026-08-15 on owner review — "New task" means the project-less composer when the capability is on
+
+**Reverted 2026-08-15, same day it shipped, alongside D1.** "New task" points at `/new`
+unconditionally again in `app-shell.tsx`, `command-palette.tsx`, `app-shell-container.tsx` and
+`tasks-overview.tsx` — the `notesAvailable` prop threading added for this is removed. `/workspace/new`
+itself stays mounted and reachable; only the default entry points changed back. What replaces this:
+a single composer whose project pill gains an **All/Auto** option, specced separately — see D1's
+marker. Original text, unchanged below:
 
 `app-shell.tsx`, `command-palette.tsx` and `tasks-overview.tsx` point "New task" at
 `/workspace/new` when `capabilities.notes` is true, and at `/new` otherwise. `/p/:projectId/new`

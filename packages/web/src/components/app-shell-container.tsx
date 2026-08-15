@@ -209,9 +209,7 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
       {/* Global chrome, not a route: ⌘K must work on every URL — except D14's gated onboarding,
           where there is no dashboard to jump to yet (`chromeless`, above). Mounted here (not in
           AppShell) because it needs the query client and router this container already assumes. */}
-      {chromeless ? null : (
-        <CommandPalette notesAvailable={health.data?.capabilities.notes === true} />
-      )}
+      {chromeless ? null : <CommandPalette />}
     </ListViewProvider>
   )
 }

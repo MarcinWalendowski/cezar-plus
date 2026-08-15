@@ -30,15 +30,6 @@
 
 ## ⚠️ Breaking
 
-- **`CEZ_NOTES` is now an opt-OUT, so the workspace surface it gates appears by default.** The gate
-  inverted from `env.CEZ_NOTES === '1'` to `env.CEZ_NOTES !== '0'`, following the precedent `skills`
-  already set in the same object. **This turns on more than the composer it was flipped for**: the
-  `/notes` page and its nav item, the eleven `/api/v1/workspace/notes*` routes, and the workspace
-  nav entries all come with it. `CEZ_NOTES=0` turns the whole surface back off in one variable, and
-  `CEZ_SINGLE_PROJECT=1` still forces it off regardless of the flag — a single-project cockpit has
-  nothing to fan out across, and that clause was deliberately kept.
-  Spec `.ai/specs/2026-08-15-composer-stops-forcing-choices.md`.
-
 - **Every Claude session now runs in `--permission-mode bypassPermissions`, and `CEZ_APPROVAL_GATE`
   is deleted.** cezar runs unattended agents in isolated worktrees; a run that stops to ask is a run
   that is not running, with nobody in front of it to answer. So the mode is now a property of the
@@ -70,26 +61,14 @@
 
 ## ✨ Features
 
-- ✨ **The composer stops forcing you to pick a project and a workflow.** Two separate forced
-  choices, one fix each.
-
-  **Project.** "New task" now opens the project-less composer, whose target reads **Auto detect**:
-  describe the work, and a pass over your whole project catalog proposes which projects it belongs
-  in, each proposal reviewed by you before anything runs, then one run started per approved
-  proposal in its own project. Picking a named project is still one click and still goes straight to
-  that project's composer — `/p/:projectId/new` keeps its URL and every entry point into it. Nothing
-  was removed; a default was repointed. **This composer was not built here** — it shipped with
-  `.ai/specs/2026-08-14-project-less-task-composer.md` and was simply invisible behind a flag nobody
-  set, which is why the fix is a default and four links rather than a feature. There is still no
-  multi-project fan-out through a single `POST /runs`; one request remains one project.
-
-  **Workflow.** The source pill gains a **None** item, listed first, and None is the cold default —
-  a task no longer has to name a workflow. `POST /runs` accepts a body naming **neither** `workflow`
-  nor `steps` (naming both is still a 400) and resolves it to `quick-task`: your project's own file
-  if you have one, the built-in otherwise, the same resolution `POST /todos/:id/start` already used.
-  Additive on the wire, so nothing that works today stops working. Stickiness survives in both
-  directions — a workflow you picked last time is still preselected, and picking None clears it and
-  sticks. Spec `.ai/specs/2026-08-15-composer-stops-forcing-choices.md`.
+- ✨ **The composer stops forcing you to pick a workflow.** The source pill gains a **None** item,
+  listed first, and None is the cold default — a task no longer has to name a workflow. `POST /runs`
+  accepts a body naming **neither** `workflow` nor `steps` (naming both is still a 400) and resolves
+  it to `quick-task`: your project's own file if you have one, the built-in otherwise, the same
+  resolution `POST /todos/:id/start` already used. Additive on the wire, so nothing that works today
+  stops working. Stickiness survives in both directions — a workflow you picked last time is still
+  preselected, and picking None clears it and sticks. Spec
+  `.ai/specs/2026-08-15-composer-stops-forcing-choices.md`.
 
 - ✨ **Adding a folder now offers every folder in it as a project, not only the git repos — and
   offers to set git up on the ones without it.** A directory of real work that was never
