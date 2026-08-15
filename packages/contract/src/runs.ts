@@ -194,6 +194,16 @@ export const runRecordSchema = z.object({
    *  wake-up all count equally). See `stopReason` above and `stepsUsed`'s doc comment in
    *  `runs/store.ts` for why a workflow's fixed step list cannot carry this bound alone. */
   stepsUsed: z.number().optional(),
+  /** Per-run override of `config.stepBudget` (PLAN D27 Phase 3): set once at start by the
+   *  autonomous continuation trigger when the target project's own `stepBudget` is 0/unset, so an
+   *  autonomous implementation run is never unbounded even in a repo that never configured one.
+   *  See `stepBudgetOverride`'s doc comment in `runs/store.ts` for the full reasoning. */
+  stepBudgetOverride: z.number().optional(),
+  /** Repo-relative path of the spec an implementation-triggering `note-to-spec` run reported
+   *  writing, parsed from a `CEZ:SPEC_PATH=` marker in its final turn (PLAN D27 Phase 3, mirrors
+   *  `markerRefs`). Absent until the run declares one, and absent forever on a run that never does
+   *  — a fact worth seeing, not one to paper over with a guessed path. */
+  declaredSpecPath: z.string().max(500).optional(),
   /** `monitoring` while `status === 'running'` and the agent is working on downstream work.
    *  Absent on old runs; cleared on resume/end. */
   activity: runActivitySchema.optional(),

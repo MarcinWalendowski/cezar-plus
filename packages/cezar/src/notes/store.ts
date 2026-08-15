@@ -36,7 +36,10 @@ import {
  *    concurrent launches cannot both claim the entry". Approve takes the claim, and only then calls
  *    `startRun`. That ordering is the whole guard: the worst case becomes a claimed proposal with
  *    no run — visible in the UI and retryable — instead of two agent runs in two repositories from
- *    one click, which is invisible, expensive, and impossible to undo.
+ *    one click, which is invisible, expensive, and impossible to undo. `claimImplementation` /
+ *    `implementationRunId` (PLAN D27 Phase 3) is the same guard applied a second time, to a
+ *    second, independent claim slot: the continuation trigger cannot start two implementation runs
+ *    off one proposal any more than a double-click can start two spec runs.
  * 2. **Every write goes through one in-process mutex.** The routes are async and a pass runs in the
  *    background, so read-modify-write races are the normal case here rather than the exotic one.
  *    `automations/store.ts` is synchronous throughout and gets this for free; this store cannot,
@@ -91,6 +94,25 @@ export class NoteStore {
     return this.notes.get(id);
   }
 
+  /**
+   * Reverse lookup: which note/proposal produced this run, if any (PLAN D27 Phase 3, `.ai/specs/
+   * 2026-08-15-autonomous-implementation-continuation.md`). The continuation trigger starts from a
+   * run id — the spec run a project's store just reported settling — and needs to find the note
+   * that owns it before it can check `autonomous` or claim the implementation leg. A linear scan:
+   * the inbox is capped (`MAX_NOTES`) and this runs once per settled run, not per request.
+   */
+  findResultingRun(
+    runId: string,
+    kind: 'spec' | 'implementation',
+  ): { note: StoredNote; proposalId: string } | undefined {
+    this.load();
+    for (const note of this.notes.values()) {
+      const entry = note.resultingTasks.find((row) => row.runId === runId && row.kind === kind);
+      if (entry) return { note, proposalId: entry.proposalId };
+    }
+    return undefined;
+  }
+
   private load(): void {
     if (this.loaded) return;
     this.loaded = true;
@@ -134,6 +156,8 @@ export class NoteStore {
     sourceRef?: string;
     projectHint?: string;
     title?: string;
+    /** PLAN D27 Phase 3 — see `noteRecordSchema.autonomous`. Omitted defaults to non-autonomous. */
+    autonomous?: boolean;
   }): Promise<StoredNote> {
     return this.serialize(() => {
       this.load();
@@ -151,6 +175,7 @@ export class NoteStore {
         title: input.title?.trim() || firstLineTitle(input.body),
         titleOrigin: input.title?.trim() ? 'user' : 'auto',
         ...(input.projectHint ? { projectHint: input.projectHint } : {}),
+        ...(input.autonomous ? { autonomous: true } : {}),
         resultingTasks: [],
       };
       this.notes.set(note.id, note);
@@ -227,13 +252,15 @@ export class NoteStore {
       this.load();
       const note = this.notes.get(noteId);
       if (!note) return undefined;
-      // ONLY the spec leg writes the claim. `createdRunId` is the first-wins claim on the
-      // PROPOSAL, and the implementation run is a separate, later action taken against a proposal
-      // that is already claimed — letting it overwrite the claim would replace the spec run's id
-      // with the implementation run's, so "has this proposal been turned into a run?" would start
-      // answering with the wrong run, and a re-approve would compare against the wrong one.
+      // Each leg writes only its OWN claim field. `createdRunId` is the first-wins claim on the
+      // PROPOSAL for the spec leg; letting the implementation leg overwrite it would replace the
+      // spec run's id with the implementation run's, so "has this proposal been turned into a
+      // run?" would start answering with the wrong run, and a re-approve would compare against the
+      // wrong one. `implementationRunId` (PLAN D27 Phase 3) is the implementation leg's own,
+      // separate slot — see `claimImplementation`'s doc comment.
       const proposal = note.pass?.proposals.find((row) => row.id === entry.proposalId);
       if (proposal && entry.kind === 'spec') proposal.createdRunId = entry.runId;
+      if (proposal && entry.kind === 'implementation') proposal.implementationRunId = entry.runId;
       note.resultingTasks = [
         ...note.resultingTasks.filter(
           (row) => !(row.proposalId === entry.proposalId && row.kind === entry.kind),
@@ -254,6 +281,43 @@ export class NoteStore {
       const proposal = this.notes.get(noteId)?.pass?.proposals.find((row) => row.id === proposalId);
       if (!proposal) return;
       delete proposal.createdRunId;
+      this.persist();
+    });
+  }
+
+  /**
+   * Claim one proposal's IMPLEMENTATION leg for creation, first wins — the second-leg twin of
+   * `claimProposal` above (guard 1 in the module doc), for PLAN D27 Phase 3. `createdRunId` is
+   * already spent by the spec run; this claims the SEPARATE `implementationRunId` slot so a
+   * double-fired continuation trigger cannot start two implementation runs any more than a
+   * double-click can start two spec runs. Same discipline: call this BEFORE starting the run, and
+   * write the real id back with `recordResultingTask({kind: 'implementation', ...})`; release on
+   * throw with `releaseImplementationClaim`.
+   */
+  async claimImplementation(
+    noteId: string,
+    proposalId: string,
+    placeholderRunId: string,
+  ): Promise<{ claimed: boolean; runId?: string }> {
+    return this.serialize(() => {
+      this.load();
+      const note = this.notes.get(noteId);
+      const proposal = note?.pass?.proposals.find((row) => row.id === proposalId);
+      if (!note || !proposal) return { claimed: false };
+      if (proposal.implementationRunId) return { claimed: false, runId: proposal.implementationRunId };
+      proposal.implementationRunId = placeholderRunId;
+      this.persist();
+      return { claimed: true };
+    });
+  }
+
+  /** Release an implementation claim whose run never started (mirrors `releaseProposal`). */
+  async releaseImplementationClaim(noteId: string, proposalId: string): Promise<void> {
+    await this.serialize(() => {
+      this.load();
+      const proposal = this.notes.get(noteId)?.pass?.proposals.find((row) => row.id === proposalId);
+      if (!proposal) return;
+      delete proposal.implementationRunId;
       this.persist();
     });
   }

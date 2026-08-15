@@ -13,6 +13,10 @@ export interface TaskMarkers {
   pr?: number;
   issue?: number;
   title?: string;
+  /** `CEZ:SPEC_PATH=` (PLAN D27 Phase 3, `.ai/specs/2026-08-15-autonomous-implementation-
+   *  continuation.md`): a `note-to-spec` run's own declaration of the spec file it wrote, the same
+   *  in-band idiom as `pr`/`issue`/`title` above. */
+  specPath?: string;
 }
 
 // Line-anchored so prose that mentions a marker never parses; the instruction
@@ -20,6 +24,7 @@ export interface TaskMarkers {
 const PR_MARKER_RE = /^CEZ:PR=(\d+)\s*$/gm;
 const ISSUE_MARKER_RE = /^CEZ:ISSUE=(\d+)\s*$/gm;
 const TITLE_MARKER_RE = /^CEZ:TITLE=(.+)$/gm;
+const SPEC_PATH_MARKER_RE = /^CEZ:SPEC_PATH=(.+)$/gm;
 
 // Report-tier reference lines (spec 2026-07-21-report-ref-discovery): the
 // human-friendly chaining lines pipeline skills end their reports with —
@@ -67,10 +72,16 @@ export function parseTaskMarkers(text: string): TaskMarkers {
     if (t) title = t;
   }
   if (title !== undefined) markers.title = title;
+  let specPath: string | undefined;
+  for (const match of source.matchAll(SPEC_PATH_MARKER_RE)) {
+    const p = match[1]?.trim();
+    if (p) specPath = p;
+  }
+  if (specPath !== undefined) markers.specPath = specPath;
   return markers;
 }
 
-const MARKER_LINE = /^CEZ:(?:PR=\d+|ISSUE=\d+|TITLE=.+)\s*$/;
+const MARKER_LINE = /^CEZ:(?:PR=\d+|ISSUE=\d+|TITLE=.+|SPEC_PATH=.+)\s*$/;
 
 /**
  * Remove complete marker lines from display text — the `stripDoneMarker`

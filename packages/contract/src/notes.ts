@@ -72,6 +72,15 @@ export const noteProposalSchema = z.object({
   /** First-wins guard (`markProposalCreated`, ported from `todos.ts`'s `markStarted`): written
    *  only by approve, under the store's own lock. */
   createdRunId: z.string().optional(),
+  /**
+   * Second-leg twin of `createdRunId` (PLAN D27 Phase 3, `.ai/specs/2026-08-15-autonomous-
+   * implementation-continuation.md`): the first-wins claim for the IMPLEMENTATION run this
+   * proposal continues into, kept in its own field so claiming it can never disturb the spec
+   * leg's own claim (`notes/store.ts`'s `recordResultingTask` writes only the matching field for
+   * a given `kind`). Absent until an implementation run has been claimed or started for this
+   * proposal — automatically by the continuation trigger, or manually.
+   */
+  implementationRunId: z.string().optional(),
 });
 export type NoteProposal = z.infer<typeof noteProposalSchema>;
 
@@ -113,6 +122,15 @@ export const noteRecordSchema = z.object({
   /** ADVISORY ONLY (Q3): never a default target, never a silent fallback — overrulable by the pass
    *  and by the review screen's per-row project picker. */
   projectHint: z.string().max(64).optional(),
+  /**
+   * Decided at capture, read only after a spec run reaches `done` (PLAN D27 Phase 3, `.ai/specs/
+   * 2026-08-15-autonomous-implementation-continuation.md`): when true, an approved proposal's spec
+   * run starting an implementation run automatically is the whole point — no second "Start
+   * implementation" click. Absent/false is the safe default; every note captured before this field
+   * existed reads back as non-autonomous, which is the only reading that changes nothing about a
+   * note nobody asked to run unattended.
+   */
+  autonomous: z.boolean().optional(),
   processedAt: z.string().optional(),
   /** The LATEST pass only; pass history lives in `notes-log.ndjson`, not on the record. */
   pass: notePassSchema.optional(),
@@ -209,6 +227,8 @@ export const createNoteInputSchema = z.object({
   source: noteSourceSchema.optional(),
   sourceRef: z.string().max(200).optional(),
   projectHint: z.string().max(64).optional(),
+  /** PLAN D27 Phase 3 — see `noteRecordSchema.autonomous`. Omitted defaults to non-autonomous. */
+  autonomous: z.boolean().optional(),
 });
 export type CreateNoteInput = z.input<typeof createNoteInputSchema>;
 
@@ -218,6 +238,8 @@ export const updateNoteInputSchema = z.object({
   /** `null` clears the hint; an absent key leaves it unchanged. */
   projectHint: z.string().max(64).nullable().optional(),
   archived: z.boolean().optional(),
+  /** PLAN D27 Phase 3 — see `noteRecordSchema.autonomous`. An absent key leaves it unchanged. */
+  autonomous: z.boolean().optional(),
 });
 export type UpdateNoteInput = z.input<typeof updateNoteInputSchema>;
 

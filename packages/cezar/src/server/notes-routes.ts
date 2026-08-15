@@ -169,6 +169,7 @@ export function createNotesRoutes(deps: NotesRouteDeps = {}) {
         source: input.source ?? 'api',
         ...(input.sourceRef ? { sourceRef: input.sourceRef } : {}),
         ...(input.projectHint ? { projectHint: input.projectHint } : {}),
+        ...(input.autonomous ? { autonomous: true } : {}),
       });
       // Cheap, bounded, and triggered by the one event that always precedes growth — see
       // `compactLog`'s own note on why this is not a timer.
@@ -208,6 +209,7 @@ export function createNotesRoutes(deps: NotesRouteDeps = {}) {
         patch.archived = input.archived;
         patch.archivedAt = input.archived ? new Date().toISOString() : undefined;
       }
+      if (input.autonomous !== undefined) patch.autonomous = input.autonomous;
 
       const next = await store.update(noteId, patch);
       // The store answers `undefined` only for an unknown id, and the id was just read — but a

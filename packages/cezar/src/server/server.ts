@@ -30,6 +30,7 @@ import { NoteStore } from '../notes/store.ts';
 import { NoteCoordinator } from '../notes/coordinator.ts';
 import { NoteProcessor } from '../notes/processor.ts';
 import { NoteApprover } from '../notes/approve.ts';
+import { NoteContinuationTrigger } from '../notes/continuation.ts';
 import { createWorkspaceRunsRoutes } from './workspace-runs-routes.ts';
 import { createWorkspaceRunMutationRoutes } from './workspace-run-mutations-routes.ts';
 import { createWorkspaceGitRoutes } from './workspace-git-routes.ts';
@@ -6156,6 +6157,33 @@ export function createApp(deps: ServerDeps) {
       approve: (noteId, input) => noteApprover.approve(noteId, input),
     },
   });
+  // The autonomous implementation continuation trigger (PLAN D27 Phase 3, `.ai/specs/2026-08-15-
+  // autonomous-implementation-continuation.md`). One `NoteContinuationTrigger` per project, bound
+  // to that project's own root and manager — mirrors `noteApprover.startRun` above, reversed:
+  // `notes/continuation.ts` has no import path to the run machinery, and `workflows/run.ts` has no
+  // import path back into `notes/`; this is where the two directions meet. Subscribes to each
+  // project's OWN `RunStore`'s `'run'` event (already public — no `RunManager` import needed to
+  // observe it), so a note's spec run reaching `done` in ANY registered project is seen without
+  // this file (or `notes/continuation.ts`) ever building a context that would not otherwise exist.
+  const wireNoteContinuation = (ctx: ProjectContext): void => {
+    const trigger = new NoteContinuationTrigger({
+      store: noteStore,
+      projectId: ctx.id,
+      projectRoot: ctx.root,
+      startRun: async (workflow, task, options) =>
+        ctx.manager.startRun(workflow, {
+          task,
+          ...options,
+          // Same reasoning as the spec run's own start above: the note's own "resulting tasks"
+          // list is the follow-up surface for this pipeline, not the generic inbox.
+          generateFollowups: false,
+        }),
+      warn: (message) => console.warn(message),
+    });
+    ctx.store.on('run', (run) => void trigger.onRunSettled(run));
+  };
+  wireNoteContinuation(bootContext);
+  contexts.onContextBuilt(wireNoteContinuation);
   const workspaceRunsRoutes = createWorkspaceRunsRoutes();
   // The cross-project board's ROW ACTIONS, kept off `/p/:projectId` on purpose: that prefix's
   // `use('*')` scope resolver builds a context for whichever project the path names, and a build

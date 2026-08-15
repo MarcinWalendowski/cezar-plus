@@ -938,6 +938,29 @@ describe('step budget (PLAN D27 Phase 1)', () => {
     expect(run?.status).toBe('failed');
     expect(run?.stopReason).toBeUndefined();
   });
+
+  /**
+   * PLAN D27 Phase 3's own addition: `stepBudgetOverride` (the autonomous continuation trigger's
+   * bound) must win over an unlimited repo-wide `config.stepBudget`, per run — this is the
+   * mechanism `notes/continuation.ts` relies on to make "autonomous and unbounded" unreachable
+   * without changing the default for every manually-started run.
+   */
+  it('a per-run stepBudgetOverride bounds a run even when the repo config is unlimited', async () => {
+    // Mutation that must turn this red: read only `config.stepBudget` in `effectiveStepBudget()`,
+    // ignoring `run.stepBudgetOverride` entirely — confirmed red, then reverted.
+    const manager = managerWithBudget(0); // repo-wide: unlimited
+    const record = manager.startRun(checkWorkflow(['s1', 's2', 's3']), {
+      task: 'do it',
+      worktree: false,
+      stepBudgetOverride: 2,
+    });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    expect(run?.status).toBe('review');
+    expect(run?.stopReason).toBe('budget');
+    expect(run?.steps.map((s) => s.status)).toEqual(['done', 'done', 'pending']);
+  });
 });
 
 /**
@@ -1017,6 +1040,91 @@ describe('step budget bounds an open session self-continuing, not only fresh wor
     expect(finalRun?.stopReason).toBe('budget');
     expect(finalRun?.stepsUsed).toBe(3);
     // The stale `monitoring` sub-state from turns 1–2 must not survive onto the stopped run.
+    expect(finalRun?.activity).toBeUndefined();
+  }, 30_000);
+});
+
+/**
+ * PLAN D27 Phase 3's "trap", closed for real: `AUTONOMOUS_IMPLEMENTATION_WORKFLOW` is itself a
+ * SINGLE step, so it is exactly the shape the block above proves a fixed-length loop-top check
+ * cannot bound — an open session self-continuing turn after turn. This project's OWN
+ * `config.stepBudget` is left at 0 (unlimited, Phase 1's real default), so nothing here is bounded
+ * by the repo config at all: only `NoteContinuationTrigger`'s `stepBudgetOverride` stands between
+ * this run and an unbounded number of turns. Without it, "autonomous and unbounded" is reachable —
+ * this fixture would hang the way the block above's own regression did before 30ff1847.
+ */
+describe('a stepBudgetOverride bounds a self-continuing single-step run even when the project has no budget (PLAN D27 Phase 3)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  let currentId: string | undefined;
+  const savedEnv: Record<string, string | undefined> = {};
+  const SINGLE_STEP: WorkflowDef = {
+    name: 'autonomous-implementation',
+    source: 'built-in',
+    steps: [{ id: 'implement', name: 'Implement', prompt: '{{task}}' }],
+  };
+
+  beforeEach(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-step-budget-override-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    // The trap itself: this project never configured a step budget. `NoteContinuationTrigger`
+    // would set `stepBudgetOverride` here in production (see `notes/continuation.ts`) — this test
+    // sets it directly on `startRun`, the same way `startOptions()` does.
+    writeFileSync(join(repoRoot, '.ai/cezar', 'config.json'), JSON.stringify({ stepBudget: 0 }));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    currentId = undefined;
+  });
+
+  afterEach(() => {
+    if (currentId) manager.cancel(currentId);
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const waitFor = async (id: string, pred: (r: RunRecord | undefined) => boolean, ms = 15_000) => {
+    const deadline = Date.now() + ms;
+    while (!pred(store.getRun(id))) {
+      if (Date.now() > deadline) throw new Error('condition not met in time');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
+
+  it('two self-continuing turns trip a stepBudgetOverride of 2 with the repo config unlimited', async () => {
+    // Mutation that must turn this red: hardcode `startOptions()`'s (`notes/continuation.ts`)
+    // `stepBudgetOverride` to `undefined`, or make `effectiveStepBudget()` (`workflows/run.ts`)
+    // ignore `run.stepBudgetOverride`. Either way the run keeps parking as `monitoring` past turn
+    // 2 instead of stopping, because `config.stepBudget` here is 0 — reachably unbounded. Confirmed
+    // red, then reverted.
+    const record = manager.startRun(SINGLE_STEP, {
+      task: 'mock:monitoring turn 1',
+      worktree: false,
+      autonomous: true,
+      stepBudgetOverride: 2,
+    });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.activity === 'monitoring'); // turn 1: spends 1/2, parks
+    expect(store.getRun(record.id)?.status).toBe('running');
+    expect(store.getRun(record.id)?.stepsUsed).toBe(1);
+
+    expect(manager.sendMessage(record.id, [{ type: 'text', text: 'mock:monitoring turn 2' }])).toBe(true);
+    await waitFor(record.id, (r) => r?.status === 'review'); // turn 2: spends 2/2 — stops, does not park
+
+    const finalRun = store.getRun(record.id);
+    expect(finalRun?.status).toBe('review');
+    expect(finalRun?.stopReason).toBe('budget');
+    expect(finalRun?.stepsUsed).toBe(2);
     expect(finalRun?.activity).toBeUndefined();
   }, 30_000);
 });

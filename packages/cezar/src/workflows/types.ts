@@ -257,7 +257,131 @@ export const NOTE_TO_SPEC_WORKFLOW: WorkflowDef = {
         'find something, say so in the spec rather than inventing it.',
         '',
         'Change NO other file. Write no implementation, no migration, no test. When the spec file',
-        'exists, say its path and stop.',
+        'exists, declare its path on its own line: `CEZ:SPEC_PATH=<repo-relative path>` — this is',
+        'how the note that requested this spec finds it afterwards. Then stop.',
+      ].join('\n'),
+    },
+  ],
+};
+
+/**
+ * The workflow an autonomous note's spec run continues into, unattended (PLAN D27 Phase 3,
+ * `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`). Where `NOTE_TO_SPEC_WORKFLOW`
+ * deliberately stops at the spec, this one **implements it, runs this repo's own gates, and
+ * commits locally** — the second press the owner asked to remove for notes marked autonomous.
+ *
+ * **This is a genuine, knowing privilege escalation over `note-to-spec`, not an oversight.** That
+ * workflow's own `allowedTools` excludes general `Bash` on purpose — an agent that only
+ * investigates and writes has no need for a shell that can install dependencies or touch a
+ * remote. An agent that IMPLEMENTS needs a real one: it has to run whatever build/test/lint
+ * commands this repo defines, which differ per project and cannot be predicted from here. The
+ * escalation is recorded, not hidden — see the spec's "Problem" section, point 1.
+ *
+ * **This workflow cannot reach a git remote — enforced, not merely prompted.** `bashAllowlist`
+ * grants git read/stage/commit and, across the package-manager and task-runner shapes a registered
+ * project might use, ONLY the gate-shaped subcommands (`build`/`test`/`lint`/`typecheck`/`check`/
+ * `format`) — never a bare `npm run`/`pnpm run`/`yarn run`/`make`. That distinction is the whole
+ * guard: a bare prefix would also grant whatever OTHER script a target repo's own
+ * `package.json`/`Makefile` happens to define under it — a `deploy`, `release`, or `publish`
+ * script, for instance — which is a real path to a remote that naming only the gate verbs closes.
+ * No entry is `git push`, or a bare `git` prefix, either. `workflows/types.test.ts` asserts both
+ * shapes structurally: no entry matches a `git push` command, and no script-runner/task-runner
+ * entry is a bare, subcommand-less prefix.
+ *
+ * **Installs are the one deliberate, named exception**, not a gap this array quietly leaves open:
+ * `npm install`/`ci` (and the pnpm/yarn equivalents) stay broad because an implementing agent
+ * genuinely cannot run any gate without its dependencies, and there is no narrower prefix for
+ * "install what the lockfile says." Reaching a package registry and executing that package's own
+ * lifecycle scripts is a real, accepted trade for that one capability — see the allowlist's own
+ * comment, inline, for why it is not narrowed the same way the script runners are.
+ */
+export const AUTONOMOUS_IMPLEMENTATION_WORKFLOW: WorkflowDef = {
+  name: 'autonomous-implementation',
+  description: 'Implement a spec end-to-end: code, gates, commit locally. Never pushes.',
+  source: 'built-in',
+  steps: [
+    {
+      id: 'implement',
+      name: 'Implement the spec',
+      allowedTools: DEFAULT_ALLOWED_TOOLS,
+      bashAllowlist: [
+        // Read-only / discovery.
+        'git status',
+        'git diff',
+        'git log',
+        'git show',
+        'git branch',
+        'git rev-parse',
+        // Stage and commit LOCALLY — never `git push`, and no bare `git` prefix that would grant it.
+        'git add',
+        'git commit',
+        // Installs: the one DELIBERATE exception to "gate-shaped subcommands only" below. An
+        // implementing agent genuinely needs its dependencies to run any gate at all, and there is
+        // no narrower prefix for "install what the lockfile says" — so this is named honestly
+        // rather than claimed away: `npm install`/`ci` (and the pnpm/yarn equivalents) reach a
+        // package registry by definition and execute that package's own lifecycle scripts. Real,
+        // accepted, not a gap this array closes.
+        'npm install',
+        'npm ci',
+        'pnpm install',
+        'yarn install',
+        // Gate-shaped script-runner subcommands ONLY — a bare 'npm run' (or 'pnpm run'/'yarn
+        // run'/'make') is a prefix, and a prefix grants every OTHER script name a target repo's own
+        // package.json/Makefile happens to define under it, including a 'deploy'/'release'/
+        // 'publish' script. Naming the gate verbs here is what keeps this workflow's own guarantee
+        // — no git remote, no registry publish — actually true instead of merely prompted. Prefix
+        // matching still covers e.g. `npm run test:unit`, `npm run build:prod`.
+        'npm run build',
+        'npm run test',
+        'npm run lint',
+        'npm run typecheck',
+        'npm run check',
+        'npm run format',
+        'npm test',
+        'pnpm run build',
+        'pnpm run test',
+        'pnpm run lint',
+        'pnpm run typecheck',
+        'pnpm run check',
+        'pnpm run format',
+        'pnpm test',
+        'yarn run build',
+        'yarn run test',
+        'yarn run lint',
+        'yarn run typecheck',
+        'yarn run check',
+        'yarn run format',
+        'yarn test',
+        'make test',
+        'make build',
+        'make check',
+        'make lint',
+        'cargo build',
+        'cargo test',
+        'cargo check',
+        'go build',
+        'go test',
+        'go vet',
+        'pytest',
+        'python -m pytest',
+      ],
+      prompt: [
+        'You are IMPLEMENTING the spec below. Nobody is watching this run — there is no one to ask',
+        'a clarifying question, so make reasonable assumptions, note them in your final report, and',
+        'proceed.',
+        '',
+        'Spec:',
+        '{{task}}',
+        '',
+        'Read the spec fully, then implement it: write the code, and the tests its own Verification',
+        'section names. Run this repository\'s own gates (typecheck, lint, tests — whatever it uses)',
+        'and fix what they find before you stop.',
+        '',
+        'When the gates are green, COMMIT your changes locally with `git commit`. Do NOT run',
+        '`git push` or any command that publishes, deploys, or otherwise reaches outside this',
+        'machine — commit only. Pushing is a separate, deliberate decision a person takes later.',
+        '',
+        'End your report by stating what you implemented, the gate results, and the commit you made.',
       ].join('\n'),
     },
   ],

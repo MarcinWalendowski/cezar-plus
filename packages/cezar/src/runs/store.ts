@@ -213,6 +213,33 @@ export const runRecordSchema = z.object({
    * unlike `stopReason`, spend already accrued is real work already done.
    */
   stepsUsed: z.number().int().min(0).optional(),
+  /**
+   * Per-run override of `config.stepBudget` (PLAN D27 Phase 3, `.ai/specs/2026-08-15-autonomous-
+   * implementation-continuation.md`). `budgetSpent()` (`workflows/run.ts`) reads
+   * `run.stepBudgetOverride ?? config.stepBudget` — this field, when present, always wins.
+   *
+   * Phase 1 left the repo-wide default at 0/unlimited on purpose: a nonzero ceiling would have
+   * changed the behaviour of every existing manual and retry-heavy run the moment it shipped. But
+   * that default means an autonomous continuation started under it would be genuinely unbounded,
+   * and the step budget is the *only* bound the owner chose for this feature. Rather than refuse to
+   * start when a project never configured one — which would silently defeat "continue
+   * automatically" for the common case of a repo that never touched `stepBudget` — the continuation
+   * trigger (`notes/continuation.ts`) sets this field to its own non-zero default at start time,
+   * for THAT run only, leaving every manually-started run's behaviour untouched. Set once, never
+   * changed by a Continue: the run either got a budget at birth or it did not need one.
+   */
+  stepBudgetOverride: z.number().int().min(1).max(1000).optional(),
+  /**
+   * Repo-relative path of the spec file a `note-to-spec` run reported writing, parsed by
+   * `applyTurnMarkers` from a `CEZ:SPEC_PATH=<path>` line in the run's own turn text (PLAN D27
+   * Phase 3) — the same in-band-declaration idiom `markerRefs`/`titleSummary` already use for
+   * `CEZ:PR=`/`CEZ:ISSUE=`/`CEZ:TITLE=`, never inferred from tool output or guessed from a diff.
+   * Consumed by the continuation trigger to seed the implementation run's task ("implement the spec
+   * this run just wrote"). Absent until the run declares one, and absent forever on a run that
+   * never does — the field exists so that fact stays visible instead of being papered over with an
+   * invented path.
+   */
+  declaredSpecPath: z.string().max(500).optional(),
   /** Sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
    *  `monitoring` while the agent is still working on its own downstream work.
    *  Optional/absent on old runs; cleared when the run resumes or ends. */
@@ -566,6 +593,8 @@ export class RunStore extends EventEmitter {
     agentProfile?: string;
     generateFollowups?: boolean;
     autonomous?: boolean;
+    /** PLAN D27 Phase 3 — see `stepBudgetOverride`'s doc comment on the schema field above. */
+    stepBudgetOverride?: number;
     worktree?: false;
     groupId?: string;
     variant?: string;
@@ -587,6 +616,7 @@ export class RunStore extends EventEmitter {
       agentProfile: input.agentProfile,
       generateFollowups: input.generateFollowups,
       autonomous: input.autonomous,
+      stepBudgetOverride: input.stepBudgetOverride,
       worktree: input.worktree,
       groupId: input.groupId,
       variant: input.variant,

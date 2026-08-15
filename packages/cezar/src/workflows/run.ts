@@ -340,6 +340,10 @@ export interface StartRunInput {
    *  user — turn-ends auto-continue until the agent signals done or the safety
    *  cap is hit. No "needs you" is ever raised. */
   autonomous?: boolean;
+  /** Per-run override of `config.stepBudget` (PLAN D27 Phase 3): set by the notes continuation
+   *  trigger when the target project never configured one, so an autonomous implementation run is
+   *  never unbounded. See `stepBudgetOverride`'s doc comment in `runs/store.ts`. */
+  stepBudgetOverride?: number;
   /** Follow-up inbox generation (spec 007, #444). Omitted means enabled for
    *  compatibility; the handoff journal runs either way. */
   generateFollowups?: boolean;
@@ -797,6 +801,8 @@ export class RunManager {
       // auto-nudge reads `input.autonomous` (`execute`), but the record is the
       // only source those after-the-fact consumers have.
       autonomous: input.autonomous === true,
+      // PLAN D27 Phase 3 — see `stepBudgetOverride`'s doc comment (`runs/store.ts`).
+      stepBudgetOverride: input.stepBudgetOverride,
       // Persist the explicit opt-out so queued-run restart recovery and the
       // session Git routes can distinguish it from a removed isolated worktree.
       worktree: !group && input.worktree === false ? false : undefined,
@@ -2524,7 +2530,7 @@ export class RunManager {
         });
         this.store.appendEvent(runId, {
           type: 'lifecycle',
-          message: `run stopped — step budget (${config.stepBudget}) reached; review before continuing`,
+          message: `run stopped — step budget (${this.effectiveStepBudget(runId, config)}) reached; review before continuing`,
         });
         appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=review (budget)`);
       } else {
@@ -2870,7 +2876,7 @@ export class RunManager {
       });
       emit({
         type: 'lifecycle',
-        message: `run stopped — step budget (${config.stepBudget}) reached; review before continuing`,
+        message: `run stopped — step budget (${this.effectiveStepBudget(runId, config)}) reached; review before continuing`,
       });
     } else {
       await this.settleSuccess(runId);
@@ -3401,6 +3407,10 @@ export class RunManager {
    * regex/namer display tier (the store re-resolves the referenced-PR chip);
    * a declared title takes `titleOrigin: 'marker'`, which beats the namer but
    * never a user rename, and silences the live refresh below.
+   *
+   * `CEZ:SPEC_PATH=` (PLAN D27 Phase 3) is the same idiom, added for `note-to-spec`'s own closing
+   * instruction ("declare it with a line `CEZ:SPEC_PATH=…`"): persisted verbatim to
+   * `RunRecord.declaredSpecPath` for the notes continuation trigger to read once this run settles.
    */
   private applyTurnMarkers(runId: string, run: RunRecord, turnText: string): void {
     const markers = parseTaskMarkers(turnText);
@@ -3416,6 +3426,9 @@ export class RunManager {
       if (validated && validated !== `${refNumber}:`) {
         this.store.updateRun(runId, { titleSummary: validated, titleOrigin: 'marker' });
       }
+    }
+    if (markers.specPath) {
+      this.store.updateRun(runId, { declaredSpecPath: markers.specPath.slice(0, 500) });
     }
   }
 
@@ -3459,14 +3472,25 @@ export class RunManager {
   }
 
   /**
-   * Has this run already spent its step budget (PLAN D27 Phase 1)? `config.stepBudget === 0` means
-   * unlimited. Reads the PERSISTED counter (`RunRecord.stepsUsed`) rather than any in-memory
+   * The budget actually enforced for this run (PLAN D27 Phase 3): `RunRecord.stepBudgetOverride`
+   * when the continuation trigger set one at start, else the repo-wide `config.stepBudget`. Kept
+   * as its own method so every reader of "what is the ceiling" — `budgetSpent` and the two
+   * lifecycle messages that report it — agrees, rather than each re-deriving the precedence.
+   */
+  private effectiveStepBudget(runId: string, config: CezConfig): number {
+    return this.store.getRun(runId)?.stepBudgetOverride ?? config.stepBudget;
+  }
+
+  /**
+   * Has this run already spent its step budget (PLAN D27 Phase 1)? `effectiveStepBudget() === 0`
+   * means unlimited. Reads the PERSISTED counter (`RunRecord.stepsUsed`) rather than any in-memory
    * count: `execute()`'s loop-top check and the `turn-end` handlers in `runAgentStep` and
    * `runContinuation` are three separate call sites — sometimes across a process restart — with no
    * shared closure to hold a running total in.
    */
   private budgetSpent(runId: string, config: CezConfig): boolean {
-    return config.stepBudget > 0 && (this.store.getRun(runId)?.stepsUsed ?? 0) >= config.stepBudget;
+    const budget = this.effectiveStepBudget(runId, config);
+    return budget > 0 && (this.store.getRun(runId)?.stepsUsed ?? 0) >= budget;
   }
 
   /**
