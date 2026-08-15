@@ -182,13 +182,18 @@ export const runRecordSchema = z.object({
   /**
    * Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —
    * PLAN D27, Phase 1 of `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`. Only
-   * ever set alongside `status: 'review'`; today the only value is `'budget'`, meaning the run's
-   * step loop hit its configured `stepBudget` before finishing on its own. `RunStatus` is
+   * ever set alongside `status: 'review'`; today the only value is `'budget'`, meaning `stepsUsed`
+   * (below) reached the configured `stepBudget` before the run finished on its own. `RunStatus` is
    * deliberately NOT widened for this — it is a published union and cezar is a released npm
    * package, so adding a member would break a consumer switching over it exhaustively. This field
    * is new and optional, so an older build round-trips it untouched.
    */
   stopReason: z.enum(['budget']).optional(),
+  /** Cumulative units of budgeted work this run has spent (PLAN D27 Phase 1) — one check-step
+   *  attempt, or one agent turn (opening turn, follow-up, self-continuation nudge, or monitoring
+   *  wake-up all count equally). See `stopReason` above and `stepsUsed`'s doc comment in
+   *  `runs/store.ts` for why a workflow's fixed step list cannot carry this bound alone. */
+  stepsUsed: z.number().optional(),
   /** `monitoring` while `status === 'running'` and the agent is working on downstream work.
    *  Absent on old runs; cleared on resume/end. */
   activity: runActivitySchema.optional(),

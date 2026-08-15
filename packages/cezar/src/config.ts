@@ -46,19 +46,28 @@ const configSchema = z.object({
    */
   worktreeRetention: worktreeRetentionSchema.default(DEFAULT_WORKTREE_RETENTION).catch(DEFAULT_WORKTREE_RETENTION),
   /**
-   * Maximum step EXECUTIONS a single run's `workflows/run.ts` step loop may take before it is
-   * stopped and parked at `review` with `stopReason: 'budget'` (PLAN D27, Phase 1 of
-   * `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`) — every entry into the
-   * loop body counts, whether a fresh step or an `onFail` retry loop-back. There is no
-   * step-budget concept anywhere in run execution today, so a manually started run has no
-   * ceiling at all; this is the general mechanism, usable by any run, not only the autonomous
-   * continuation Phase 3 will add.
+   * Maximum units of budgeted work a single run may spend before it is stopped and parked at
+   * `review` with `stopReason: 'budget'` (PLAN D27, Phase 1 of
+   * `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`). There is no step-budget
+   * concept anywhere in run execution today, so a manually started run has no ceiling at all; this
+   * is the general mechanism, usable by any run, not only the autonomous continuation Phase 3 will
+   * add.
+   *
+   * A unit is one CHECK-step attempt (a fresh step or an `onFail` retry loop-back), or one AGENT
+   * TURN — the step's opening turn, a follow-up, a `CEZ:MONITORING` self-continuation nudge, and a
+   * monitoring wake-up all count equally. Counting workflow-STEP-loop entries alone would not bound
+   * the actual runaway vector: a workflow's `steps` list is fixed (often exactly one, interactive,
+   * agent step), and an open session can take turn after turn — via follow-ups or self-continuation
+   * — without the step loop ever seeing it. `workflows/run.ts` enforces this from three places
+   * (`execute()`'s loop-top check, and the `turn-end` handler in both `runAgentStep` and
+   * `runContinuation`) against one persisted counter (`RunRecord.stepsUsed`), because those are
+   * separate call sites — sometimes across a process restart — with no shared in-memory state.
    *
    * 0 = unlimited, the same convention `worktreeRetention` and `memoryLimitMb` already use.
    * Defaults to unlimited rather than a nonzero ceiling: this file configures runs repo-wide, and
-   * a default that trips on an ordinary multi-step or retry-heavy workflow would change the
-   * behaviour of every existing run the moment this shipped. `.catch(DEFAULT_STEP_BUDGET)` keeps
-   * the key additive-safe like its neighbours.
+   * a default that trips on an ordinary multi-turn or retry-heavy run would change the behaviour
+   * of every existing run the moment this shipped. `.catch(DEFAULT_STEP_BUDGET)` keeps the key
+   * additive-safe like its neighbours.
    */
   stepBudget: z.number().int().min(0).max(1000).default(DEFAULT_STEP_BUDGET).catch(DEFAULT_STEP_BUDGET),
   /**

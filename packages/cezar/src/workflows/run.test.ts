@@ -941,6 +941,87 @@ describe('step budget (PLAN D27 Phase 1)', () => {
 });
 
 /**
+ * The gap the check-only tests above cannot see: a workflow's `steps` list is FIXED, so counting
+ * only `execute()`'s loop-top entries cannot bound the actual runaway vector — a single
+ * interactive agent step self-continuing turn after turn (follow-ups, `CEZ:MONITORING` nudges)
+ * without ever returning to that loop. `runAgentStep`'s `turn-end` handler must check the budget
+ * itself and stop the open session directly. Driven dry through the mock (`mock:monitoring`),
+ * same fixture as the `CEZ:MONITORING` describe block below.
+ */
+describe('step budget bounds an open session self-continuing, not only fresh workflow steps (PLAN D27 Phase 1)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  let currentId: string | undefined;
+  const savedEnv: Record<string, string | undefined> = {};
+  const SINGLE_STEP: WorkflowDef = {
+    name: 'quick-task',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Task', prompt: '{{task}}' }],
+  };
+
+  beforeEach(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-step-budget-turns-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    writeFileSync(join(repoRoot, '.ai/cezar', 'config.json'), JSON.stringify({ stepBudget: 3 }));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    currentId = undefined;
+  });
+
+  afterEach(() => {
+    if (currentId) manager.cancel(currentId); // no-op on an already-terminal run
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const waitFor = async (id: string, pred: (r: RunRecord | undefined) => boolean, ms = 15_000) => {
+    const deadline = Date.now() + ms;
+    while (!pred(store.getRun(id))) {
+      if (Date.now() > deadline) throw new Error('condition not met in time');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
+
+  it('three self-continuing turns on ONE workflow step trip a budget of 3, landing review/budget', async () => {
+    // Mutation that must turn this red: check the budget only in `execute()`'s loop-top (drop the
+    // turn-end check in `runAgentStep`'s onEvent). A single-step, single-agent-step workflow never
+    // re-enters that loop once its one step starts, so with only the loop-top check the run would
+    // keep parking as `monitoring` forever instead of ever stopping. Confirmed red, then reverted.
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring turn 1', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.activity === 'monitoring'); // turn 1: spends 1/3, parks
+    expect(store.getRun(record.id)?.status).toBe('running');
+    expect(store.getRun(record.id)?.stepsUsed).toBe(1);
+
+    expect(manager.sendMessage(record.id, [{ type: 'text', text: 'mock:monitoring turn 2' }])).toBe(true);
+    await waitFor(record.id, (r) => (r?.stepsUsed ?? 0) >= 2); // turn 2: spends 2/3, parks again
+    expect(store.getRun(record.id)?.status).toBe('running');
+    expect(store.getRun(record.id)?.activity).toBe('monitoring');
+
+    expect(manager.sendMessage(record.id, [{ type: 'text', text: 'mock:monitoring turn 3' }])).toBe(true);
+    await waitFor(record.id, (r) => r?.status === 'review'); // turn 3: spends 3/3 — stops, does not park
+
+    const finalRun = store.getRun(record.id);
+    expect(finalRun?.status).toBe('review');
+    expect(finalRun?.stopReason).toBe('budget');
+    expect(finalRun?.stepsUsed).toBe(3);
+    // The stale `monitoring` sub-state from turns 1–2 must not survive onto the stopped run.
+    expect(finalRun?.activity).toBeUndefined();
+  }, 30_000);
+});
+
+/**
  * #490 — the `CEZ:MONITORING` marker parks a still-working turn-end as
  * `running`/`activity:'monitoring'` (a non-attention state) instead of
  * `waiting`, while a markerless turn-end still parks as `waiting`. Resuming

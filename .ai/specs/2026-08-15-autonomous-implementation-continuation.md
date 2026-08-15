@@ -64,6 +64,28 @@ than stuck.
 **The bound.** Every autonomous implementation run carries a step budget. On exhaustion the run
 stops and lands in **`review`**, never `done`, and records `stopReason: 'budget'`.
 
+**What the budget counts, and why the obvious answer is wrong.** A unit of budget is **one check-step
+attempt OR one agent turn** — not one entry into `execute()`'s step loop.
+
+The first implementation counted loop entries, which is the reading "step budget" invites, and it was
+**close to decorative for the shape this feature will actually use.** `execute()` iterates
+`workflow.steps`, a **fixed-length** array. A single-step workflow — which `QUICK_TASK_WORKFLOW`
+already is, and which `AUTONOMOUS_IMPLEMENTATION_WORKFLOW` will be — enters that loop exactly once,
+so the counter reaches 1 and stops. Meanwhile the agent inside that one step can take unbounded
+further turns: follow-ups via `sendMessage`, `CEZ:MONITORING` self-continuation, and monitoring
+wake-ups all reuse the **same open session** through the `turn-end` handler, code the outer loop
+never re-enters. A budget of 3 would not have tripped while an agent took fifty turns.
+
+So the counter is a persisted `RunRecord.stepsUsed`, spent at three call sites against one shared
+helper: the loop top, and the `turn-end` handlers in `runAgentStep` and `runContinuation`. A
+budget-exceeded turn ends the session directly rather than parking `waiting`/`monitoring` or taking
+the autonomous self-nudge, because the outer loop cannot see into an in-flight `await`.
+
+**The lesson, which generalises past this feature:** the enforcement code was correct as written —
+the counter incremented exactly where it said it did. It was counting the wrong *thing*. Reading
+the diff confirms a counter is right; only asking "what can happen without passing this line?"
+confirms it is counting work.
+
 **Why `review` and a new field, rather than a new status.** `RunStatus` is published
 (`queued | running | waiting | review | done | failed | cancelled`) and cezar is a released npm
 package where backward compatibility wins, so widening the union would break consumers that switch

@@ -36,7 +36,7 @@ import { discoverSkills, type Skill } from '../skills.ts';
 import { materializeSkillDir } from '../skills-remote.ts';
 import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
 import { readAgentModelProvider } from '../agent-config/models.ts';
-import { loadConfig, resolveWorktreeRetention } from '../config.ts';
+import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.ts';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 import { loadWorkflows } from './load.ts';
@@ -176,6 +176,17 @@ interface ActiveRun {
    *  going until it signals done or the safety cap is hit. */
   autonomous?: boolean;
   autoContinues?: number;
+  /**
+   * The bound (PLAN D27, Phase 1 of `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`):
+   * set the moment `config.stepBudget` is spent, by whichever turn-end handler (`runAgentStep` or
+   * `runContinuation`) or `execute()`'s loop-top check notices it first. A workflow's `steps` list
+   * is fixed, so counting only step-loop entries cannot bound the actual runaway vector — an open
+   * agent session self-continuing (follow-ups, `CEZ:MONITORING` nudges, monitoring wake-ups) turn
+   * after turn without ever returning to that loop. `state` is what every one of those call sites
+   * shares, so it is what carries this signal between them, telling the caller that just-completed
+   * work must be the LAST work this run does — land `review` + `stopReason: 'budget'`, not `done`.
+   */
+  budgetExceeded?: boolean;
   /** Registry snapshot used to expand `/skill` follow-ups before a backend can
    *  mistake them for its own slash commands (#676). */
   skills?: Skill[];
@@ -2239,6 +2250,9 @@ export class RunManager {
     let turnText = '';
     let sessionError: string | undefined;
     const sink = this.makeUiSink(runId, stepId);
+    // Loaded once, closed over by `onEvent` below — the step budget (PLAN D27 Phase 1) is
+    // checked on every turn-end here too, the twin of `runAgentStep`'s own check.
+    const config = await loadConfig(this.repoRoot);
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
         const saved = this.persistImage(runId, event.mediaType, event.data);
@@ -2284,6 +2298,9 @@ export class RunManager {
         const monitoring =
           sessionOpen && !done && !ask && MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
+        // The step budget (PLAN D27 Phase 1): this turn just happened, so it is spent
+        // unconditionally — including the `done` turn, harmlessly, since nothing spends after it.
+        this.spendBudgetUnit(runId);
         if (askRejection) this.store.appendEvent(runId, { type: 'note', message: askRejection, stepId });
         if (done) {
           // Goal achieved (agent contract, #347) — same as in runAgentStep.
@@ -2292,7 +2309,21 @@ export class RunManager {
           state.session?.end();
           return;
         }
-        if (sessionOpen) {
+        const budgetJustExceeded = sessionOpen && this.budgetSpent(runId, config);
+        if (budgetJustExceeded) {
+          // The bound (PLAN D27 Phase 1): an open session would otherwise self-continue
+          // (autonomous nudge) or park (`waiting`/`monitoring`) for another turn — stop it here,
+          // BEFORE the autonomous nudge below gets a chance to buy one more. `state` carries the
+          // signal to this method's own post-`session.result` wrap-up, which lands `review` +
+          // `stopReason` instead of calling `settleSuccess`.
+          state.budgetExceeded = true;
+          state.session?.end();
+          this.clearIdleTimer(state);
+          this.clearMonitoringWakeTimer(state, runId);
+          this.monitoring.delete(runId);
+          this.waiting.delete(runId);
+          this.releaseSlot();
+        } else if (sessionOpen) {
           // Autonomous (#autonomous): never hand the ball back to the user. Nudge the agent to
           // keep going (bounded by MAX_AUTO_CONTINUES) instead of parking at `waiting`.
           const autoContinued =
@@ -2475,6 +2506,27 @@ export class RunManager {
         this.store.updateRun(runId, { status: 'cancelled', finishedAt: finishedAt(), currentStepId: undefined });
         this.store.appendEvent(runId, { type: 'lifecycle', message: 'run cancelled' });
         appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=cancelled`);
+      } else if (state.budgetExceeded) {
+        // The bound (PLAN D27 Phase 1): the turn-end handler above already ended this session for
+        // budget — land `review` + `stopReason` here instead of falling into `settleSuccess`, the
+        // same precedence `execute()`'s own terminal block gives budget over a plain finish. The
+        // step itself completed its turn; only the RUN is stopped from taking another.
+        this.store.updateStep(runId, stepId, { status: 'done', finishedAt: finishedAt() });
+        this.store.appendEvent(runId, { type: 'step-end', stepId, status: 'done' });
+        this.store.updateRun(runId, {
+          status: 'review',
+          stopReason: 'budget',
+          finishedAt: finishedAt(),
+          currentStepId: undefined,
+          // May have landed while parked `monitoring` on a PRIOR turn of this same continuation —
+          // that sub-state is stale the moment the run is no longer `running` at all.
+          activity: undefined,
+        });
+        this.store.appendEvent(runId, {
+          type: 'lifecycle',
+          message: `run stopped — step budget (${config.stepBudget}) reached; review before continuing`,
+        });
+        appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=review (budget)`);
       } else {
         this.store.updateStep(runId, stepId, { status: 'done', finishedAt: finishedAt() });
         this.store.appendEvent(runId, { type: 'step-end', stepId, status: 'done' });
@@ -2669,10 +2721,11 @@ export class RunManager {
     let runError: string | null = null;
     // The step budget (PLAN D27, Phase 1 of
     // `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`): `config.stepBudget`
-    // (0 = unlimited) caps how many times the loop below may enter its body. Set the moment the
-    // cap would be exceeded, checked ONLY at the top of the loop — so it can only stop the run
-    // BEFORE starting another step, never mid-step, and never in place of a real `runError`.
-    let budgetExceeded = false;
+    // (0 = unlimited) caps the persisted `stepsUsed` counter — see its doc comment
+    // (`runs/store.ts`) for what counts as a unit. `state.budgetExceeded` (not a local variable
+    // here) carries the signal, because it must also be settable from INSIDE `runAgentStep`'s
+    // open-session turn-end handler — this loop does not control an interactive step's session
+    // once its `await` is in flight, so a fixed step list alone cannot carry this bound.
     // `startRun` already persisted task images so a queued bubble can render them
     // (#612). Reuse those files for the agent-facing path note instead of minting
     // duplicate pasted files when execution finally begins.
@@ -2695,14 +2748,12 @@ export class RunManager {
     const lastAgentIdx = findLastAgentStepIndex(workflow);
 
     let i = 0;
-    let stepsExecuted = 0;
     while (i < workflow.steps.length) {
       if (state.cancelled) break;
-      if (config.stepBudget > 0 && stepsExecuted >= config.stepBudget) {
-        budgetExceeded = true;
+      if (this.budgetSpent(runId, config)) {
+        state.budgetExceeded = true;
         break;
       }
-      stepsExecuted++;
       const step = workflow.steps[i] as WorkflowStepDef;
       const kind = stepKind(step);
       const record = this.store.getRun(runId)?.steps.find((s) => s.id === step.id);
@@ -2745,12 +2796,14 @@ export class RunManager {
           runError = `step "${step.id}" failed: ${failure}`;
           break;
         }
+        if (state.budgetExceeded) break; // its own turn-end handler already landed this — see there
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
       }
 
       const { ok, output } = await this.runCheckStep(state, step, emit);
+      this.spendBudgetUnit(runId); // a check attempt is one unit, same as an agent turn
       if (state.cancelled) break;
       if (ok) {
         this.finishStep(runId, step.id, 'done', undefined, emit);
@@ -2800,7 +2853,7 @@ export class RunManager {
     } else if (runError) {
       this.store.updateRun(runId, { status: 'failed', error: runError, finishedAt, currentStepId: undefined });
       emit({ type: 'lifecycle', message: `run failed — ${runError}` });
-    } else if (budgetExceeded) {
+    } else if (state.budgetExceeded) {
       // The bound (PLAN D27, Phase 1): `review`, never `done`, and never `failed` — an agent
       // halted at its ceiling and an agent that finished must not share a terminal state, and an
       // agent we stopped is not an agent that errored. See `stopReason`'s doc comment
@@ -2810,6 +2863,10 @@ export class RunManager {
         stopReason: 'budget',
         finishedAt,
         currentStepId: undefined,
+        // The stop may have landed while the run was parked `monitoring` (a self-continuing
+        // interactive step over several turns) — that sub-state is stale the moment the run is
+        // no longer `running` at all.
+        activity: undefined,
       });
       emit({
         type: 'lifecycle',
@@ -2896,6 +2953,9 @@ export class RunManager {
     const backend = step.runner ?? taskBackend;
     this.store.updateStep(runId, step.id, { sessionId, backend });
 
+    // Loaded once, closed over by `onEvent` below — the step budget (PLAN D27 Phase 1) is
+    // checked on every turn-end, not only at `execute()`'s loop-top.
+    const config = await loadConfig(this.repoRoot);
     const stepRecord = this.store.getRun(runId)?.steps.find((s) => s.id === step.id);
     const startTokens = stepRecord?.tokensUsed ?? 0;
     let stepCost = stepRecord?.costUsd ?? 0;
@@ -2951,6 +3011,9 @@ export class RunManager {
           !ask &&
           MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
+        // The step budget (PLAN D27 Phase 1): this turn just happened, so it is spent
+        // unconditionally — including the `done` turn, harmlessly, since nothing spends after it.
+        this.spendBudgetUnit(runId);
         if (askRejection) emit({ type: 'note', stepId: step.id, message: askRejection });
         if (done) {
           // Goal achieved (agent contract, #347): close the session instead
@@ -2961,7 +3024,20 @@ export class RunManager {
           return;
         }
         const waiting = interactive && sessionOpen;
-        if (waiting) {
+        const budgetJustExceeded = waiting && this.budgetSpent(runId, config);
+        if (budgetJustExceeded) {
+          // The bound (PLAN D27 Phase 1): an open session would otherwise park (`waiting` /
+          // `monitoring`) for another turn — stop it here instead of granting one. `state`
+          // carries the signal back to `execute()`, which cannot see this turn-end directly
+          // while its `await this.runAgentStep(...)` for this very step is still in flight.
+          state.budgetExceeded = true;
+          state.session?.end();
+          this.clearIdleTimer(state);
+          this.clearMonitoringWakeTimer(state, runId);
+          this.monitoring.delete(runId);
+          this.waiting.delete(runId);
+          this.releaseSlot();
+        } else if (waiting) {
           // Turn over, session open. Either the ball is in the user's court
           // (`waiting`) — optionally with a structured `CEZ:ASK` question the
           // cockpit renders as an ask card (#473) — or the agent declared it is
@@ -3380,6 +3456,28 @@ export class RunManager {
       peakRssBytes: Math.max(run?.peakRssBytes ?? 0, peaks.peakRssBytes),
       peakProcCount: Math.max(run?.peakProcCount ?? 0, peaks.peakProcCount),
     });
+  }
+
+  /**
+   * Has this run already spent its step budget (PLAN D27 Phase 1)? `config.stepBudget === 0` means
+   * unlimited. Reads the PERSISTED counter (`RunRecord.stepsUsed`) rather than any in-memory
+   * count: `execute()`'s loop-top check and the `turn-end` handlers in `runAgentStep` and
+   * `runContinuation` are three separate call sites — sometimes across a process restart — with no
+   * shared closure to hold a running total in.
+   */
+  private budgetSpent(runId: string, config: CezConfig): boolean {
+    return config.stepBudget > 0 && (this.store.getRun(runId)?.stepsUsed ?? 0) >= config.stepBudget;
+  }
+
+  /**
+   * Record one more unit of budgeted work (PLAN D27 Phase 1) — a check-step attempt (fresh or an
+   * `onFail` retry), or one agent turn (opening turn, follow-up, self-continuation nudge, or
+   * monitoring wake-up). See `stepBudget`'s doc comment (`config.ts`) for why a turn is the unit,
+   * not a workflow step.
+   */
+  private spendBudgetUnit(runId: string): void {
+    const used = (this.store.getRun(runId)?.stepsUsed ?? 0) + 1;
+    this.store.updateRun(runId, { stepsUsed: used });
   }
 
   /**

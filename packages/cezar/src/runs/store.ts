@@ -183,8 +183,9 @@ export const runRecordSchema = z.object({
   /**
    * Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —
    * PLAN D27, Phase 1 of `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`. Only
-   * ever set alongside `status: 'review'`, and only ever `'budget'` today: the step loop
-   * (`workflows/run.ts`) hit its configured `stepBudget` before the run finished on its own.
+   * ever set alongside `status: 'review'`, and only ever `'budget'` today: `stepsUsed` reached the
+   * configured `stepBudget` before the run finished on its own — see `stepsUsed`, right below, for
+   * exactly what is counted and why the workflow's step loop alone cannot bound it.
    *
    * Landing here rather than widening `RunStatus` is deliberate: cezar is a released npm package
    * and `RunStatus` is a published union, so adding a member would break every consumer that
@@ -197,6 +198,21 @@ export const runRecordSchema = z.object({
    * unanswerable from the record.
    */
   stopReason: z.enum(['budget']).optional(),
+  /**
+   * Cumulative units of budgeted work this run has spent (PLAN D27 Phase 1), checked against
+   * `config.stepBudget` — see that field's own doc comment (`config.ts`) for the default and why
+   * it is 0/unlimited. One unit is: one check-step attempt (including an `onFail` retry), or one
+   * agent TURN (`turn-end`) — a follow-up, a `CEZ:MONITORING` self-continuation nudge, and a
+   * monitoring wake-up each count, same as the step's opening turn. Counting workflow-STEP-loop
+   * entries alone would not bound the actual runaway vector: a workflow's `steps` list is fixed
+   * (often exactly one, interactive, agent step), so the danger is an open session taking turn
+   * after turn without ever returning to that loop — `execute()`'s loop-top check and the
+   * `turn-end` handlers in `runAgentStep`/`runContinuation` all read and increment this ONE
+   * persisted counter, because they are three separate call sites (sometimes across a process
+   * restart) with no shared in-memory state. Absent/0 on a fresh run; never reset by a Continue —
+   * unlike `stopReason`, spend already accrued is real work already done.
+   */
+  stepsUsed: z.number().int().min(0).optional(),
   /** Sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
    *  `monitoring` while the agent is still working on its own downstream work.
    *  Optional/absent on old runs; cleared when the run resumes or ends. */
