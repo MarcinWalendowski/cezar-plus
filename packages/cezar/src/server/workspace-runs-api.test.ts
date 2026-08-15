@@ -122,6 +122,31 @@ describe('GET /api/v1/workspace/runs (W4.10)', () => {
     expect(body.runs.some((r) => r.project === 'default')).toBe(false);
   });
 
+  it('carries `stopReason` over the wire, so a budget-stopped run does not read as plain review (#25)', async () => {
+    // Guard for #25: `workspaceRunSummarySchema` gained `stopReason`, but a schema field
+    // nothing populates looks fixed and changes nothing. The mutation that must turn this red is
+    // dropping `stopReason: run.stopReason` from `toSummary()` (`workspace/run-index.ts`) while
+    // leaving the schema field in place.
+    const boot = await registerProject(repoRoot);
+    writeRuns(repoRoot, [
+      runJson({ id: 'budget-stopped', status: 'review', stopReason: 'budget' }),
+      // Second negative control: a run with no `stopReason` must arrive without one — and, over
+      // the real wire (unlike the in-memory `TrimmedRun`), JSON drops the `undefined` key
+      // entirely, so this also proves the key itself is absent, not merely `undefined`.
+      runJson({ id: 'ordinary-review', status: 'review', createdAt: '2026-08-01T00:00:01.000Z' }),
+    ]);
+    const app = makeApp({ bootProjectId: boot.id });
+
+    const res = await apiRequest(app, '/api/v1/workspace/runs');
+    const body = (await res.json()) as WorkspaceRunsResponse;
+
+    const budgetRow = body.runs.find((r) => r.id === 'budget-stopped');
+    expect(budgetRow?.stopReason).toBe('budget');
+    const ordinaryRow = body.runs.find((r) => r.id === 'ordinary-review');
+    expect(ordinaryRow?.stopReason).toBeUndefined();
+    expect(Object.keys(ordinaryRow!)).not.toContain('stopReason');
+  });
+
   it('C6: one unreadable project degrades to `ok: false` without blanking the others', async () => {
     const healthy = mkdtempSync(join(realpathSync(tmpdir()), 'cez-wsruns-healthy-'));
     const corrupt = mkdtempSync(join(realpathSync(tmpdir()), 'cez-wsruns-corrupt-'));

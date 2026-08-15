@@ -75,6 +75,11 @@ describe('RunManager directional usage accounting', () => {
   });
 
   afterEach(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     store.flush();
     rmSync(repoRoot, { recursive: true, force: true });
   });
@@ -267,6 +272,11 @@ describe('RunManager.recordTurnEnd', () => {
   });
 
   afterAll(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     store.flush();
     rmSync(repoRoot, { recursive: true, force: true });
   });
@@ -431,6 +441,11 @@ describe('RunManager.continueRun override', () => {
   });
 
   afterEach(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     store.flush();
     rmSync(repoRoot, { recursive: true, force: true });
   });
@@ -600,6 +615,11 @@ describe('RunManager.settleSuccess — optional review gate', () => {
   });
 
   afterEach(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     delete process.env.CEZ_REVIEW_GATE;
     // Reset the config file each test so config.reviewGate never leaks across cases.
     rmSync(join(repoRoot, '.ai/cezar', 'config.json'), { force: true });
@@ -691,6 +711,11 @@ describe('a chain of 2 selected skills runs BOTH steps, in order (#410)', () => 
   });
 
   afterAll(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -780,6 +805,11 @@ describe('a single agent step plus a check step gets NO chain note (#410)', () =
   });
 
   afterAll(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -838,12 +868,21 @@ describe('a single agent step plus a check step gets NO chain note (#410)', () =
 describe('step budget (PLAN D27 Phase 1)', () => {
   let repoRoot: string;
   let store: RunStore;
+  /** Every manager `managerWithBudget` hands out, so `afterEach` can stop their queue watchdogs —
+   *  see the dispose note in `afterEach`. A local `const m = new RunManager(...)` inside a helper
+   *  is exactly the shape that escapes a `let manager` teardown. */
+  const managers: RunManager[] = [];
 
   beforeEach(() => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-step-budget-'));
   });
 
   afterEach(() => {
+    // Stop these tests' queue watchdogs before the temp dir goes away. An undisposed RunManager
+    // keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already removed —
+    // harmless until a suite runs longer than one interval, then it writes to a deleted path from
+    // inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    for (const m of managers.splice(0)) m.dispose();
     store.flush();
     rmSync(repoRoot, { recursive: true, force: true });
   });
@@ -854,7 +893,9 @@ describe('step budget (PLAN D27 Phase 1)', () => {
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
     writeFileSync(join(repoRoot, '.ai/cezar', 'config.json'), JSON.stringify({ stepBudget: budget }));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
-    return new RunManager(store, repoRoot);
+    const created = new RunManager(store, repoRoot);
+    managers.push(created);
+    return created;
   }
 
   function checkWorkflow(stepIds: string[]): WorkflowDef {
@@ -999,6 +1040,11 @@ describe('step budget bounds an open session self-continuing, not only fresh wor
   });
 
   afterEach(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     if (currentId) manager.cancel(currentId); // no-op on an already-terminal run
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key];
@@ -1084,6 +1130,11 @@ describe('a stepBudgetOverride bounds a self-continuing single-step run even whe
   });
 
   afterEach(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     if (currentId) manager.cancel(currentId);
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key];
@@ -1317,6 +1368,11 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
   });
 
   afterEach(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     if (currentId) manager.cancel(currentId);
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key];
@@ -1444,6 +1500,11 @@ describe('RunManager.persistImage without a session (#472)', () => {
   });
 
   afterEach(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     rmSync(repoRoot, { recursive: true, force: true });
   });
 
@@ -1529,6 +1590,11 @@ describe('RunManager queued-stack mutators (#472)', () => {
   });
 
   afterEach(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     rmSync(repoRoot, { recursive: true, force: true });
   });
 
@@ -1839,6 +1905,11 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
   });
 
   afterEach(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     rmSync(repoRoot, { recursive: true, force: true });
   });
 
@@ -1958,6 +2029,11 @@ describe('queued stacking reaches the backend (#472)', () => {
   });
 
   afterAll(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -2052,6 +2128,11 @@ describe('recover() carries the queued stack exactly once (#472)', () => {
       expect(jobsOf(manager).get(r.id)?.input.task).toBe(expected);
       // The record is never rewritten — that is what stops the compounding.
       expect(store.getRun(r.id)?.task).toBe('the original task');
+      // Stop this manager's queue watchdog before the next restart replaces it and before the
+      // temp dir goes away: an undisposed RunManager keeps a 60s `setInterval` sweeping a store
+      // whose directory `rmSync` has already removed. This loop simulates restarts, so it is the
+      // one place that leaks TWO of them per test.
+      manager.dispose();
     }
   });
 });
@@ -2082,6 +2163,11 @@ describe('native Codex requestUserInput parks and resumes the run (#565)', () =>
   });
 
   afterEach(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     if (runId) manager.cancel(runId);
     if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN; else process.env.CEZ_DRY_RUN = savedDryRun;
     if (savedCodexBin === undefined) delete process.env.CEZ_CODEX_BIN; else process.env.CEZ_CODEX_BIN = savedCodexBin;
@@ -2156,6 +2242,11 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
   });
 
   afterEach(() => {
+    // Stop this describe's queue watchdog before the temp dir goes away. An undisposed
+    // RunManager keeps a 60s `setInterval` sweeping a store whose directory `rmSync` has already
+    // removed — harmless until a suite runs longer than one interval, then it writes to a deleted
+    // path from inside a torn-down worker. See the watchdog guard in `rescueStalledQueue`.
+    manager?.dispose();
     if (runId) manager.cancel(runId);
     if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
     else process.env.CEZ_DRY_RUN = savedDryRun;

@@ -588,7 +588,20 @@ export class RunManager {
     // Memory guard (#memory-guard): the shared process-tree sampler already ticks ~every 2 s for
     // the runs table; piggyback on it to enforce the per-task memory ceiling.
     this.offUsage = onUsage((snapshot) => void this.enforceMemoryLimit(snapshot));
-    this.queueWatchdog = setInterval(() => void this.rescueStalledQueue(), QUEUE_WATCHDOG_MS);
+    // `void` on a promise discards its rejection, and Node terminates the process on an unhandled
+    // one — so this `.catch` is what stops a failing sweep from killing the cockpit. The per-run
+    // degrade lives inside `rescueStalledQueue`; this is the backstop for everything else it does
+    // (`pump`, the hold scan) and for the same reason: a watchdog may fail, never take the server
+    // with it. The next tick retries.
+    this.queueWatchdog = setInterval(() => {
+      this.rescueStalledQueue().catch((err: unknown) => {
+        console.warn(
+          `[cez] queue watchdog: sweep failed, retrying next tick: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    }, QUEUE_WATCHDOG_MS);
     this.queueWatchdog.unref?.();
   }
 
@@ -1469,7 +1482,27 @@ export class RunManager {
       if (this.pendingJobs.has(run.id) || this.pendingContinuations.has(run.id)) continue;
       if (this.queue.includes(run.id)) continue;
       console.warn(`[cez] queue watchdog: re-adopting queued run ${run.id} the engine had lost`);
-      await this.reviveQueuedRun(run, 'queue watchdog');
+      try {
+        await this.reviveQueuedRun(run, 'queue watchdog');
+      } catch (err) {
+        // One run that cannot be re-adopted must not abort the sweep for the others, and must
+        // never escape to the caller. This method is driven by `setInterval(() => void ...)`, and
+        // `void` on a promise discards its rejection — which Node treats as an **unhandled
+        // rejection and terminates the process for**. So a single unwritable run record (its
+        // project directory deleted under us, a permissions change, a full disk) would take the
+        // whole cockpit down, and take it down again on the very next tick. A watchdog whose job
+        // is to rescue stuck work is the last thing that may kill the server.
+        //
+        // Degrade per-run rather than per-sweep — the same shape as C6 in
+        // `workspace-runs-api.test.ts`, where one unreadable project must not blank the others.
+        // The next tick retries, so a transient cause heals itself; the warn is what keeps a
+        // permanent one visible instead of silently swallowed.
+        console.warn(
+          `[cez] queue watchdog: could not re-adopt ${run.id}, leaving it queued for the next tick: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
     if (this.queue.length === 0) return;
     if (this.busySlots() > 0 || this.starting.size > 0) return;

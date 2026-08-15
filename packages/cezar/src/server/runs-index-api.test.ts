@@ -291,6 +291,37 @@ describe('workspace runs index API', () => {
     });
   });
 
+  it('carries `stopReason`, so a budget-stopped run does not read as plain review (#25)', async () => {
+    // Guard for #25: `runIndexEntrySchema` gained `stopReason`, but a schema field nothing
+    // populates looks fixed and changes nothing — the mutation that must turn this red is
+    // dropping the `...(run.stopReason !== undefined ? { stopReason: run.stopReason } : {})`
+    // line in `runIndexEntry()` (`server.ts`) while leaving the schema field in place.
+    await registerProject(repoRoot);
+    await registerProject(otherRoot);
+    seedColdProject(otherRoot, [
+      storedRun({
+        id: 'budget-stopped',
+        title: 'Ran out of turns',
+        status: 'review',
+        stopReason: 'budget',
+        finishedAt: '2026-07-14T11:00:00Z',
+      }),
+      // Second negative control: a run with no `stopReason` at all must come back without one —
+      // "populate unconditionally" (e.g. defaulting every row to `stopReason: 'budget'`) fails
+      // this just as hard as never populating it would.
+      storedRun({ id: 'ordinary-review', title: 'Ordinary diff review', status: 'review' }),
+    ]);
+
+    const body = await getIndex();
+
+    const budgetRow = body.runs.find((run) => run.id === 'budget-stopped');
+    expect(budgetRow?.stopReason).toBe('budget');
+
+    const ordinaryRow = body.runs.find((run) => run.id === 'ordinary-review');
+    expect(ordinaryRow?.stopReason).toBeUndefined();
+    expect(Object.keys(ordinaryRow!)).not.toContain('stopReason');
+  });
+
   it('reads a crashed process’s `running` row as interrupted, exactly as opening it would', async () => {
     await registerProject(repoRoot);
     await registerProject(otherRoot);

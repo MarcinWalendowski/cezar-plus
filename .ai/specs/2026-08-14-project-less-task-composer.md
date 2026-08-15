@@ -102,8 +102,27 @@ A pill reading `Auto detect` by default, whose menu also lists every registered 
 The named-project branch exists so the pill is not a lie. A control whose only option is its
 default should not be a control.
 
-### D3 — autonomous: explainer yes, toggle NO
+### D3 — autonomous: explainer yes; toggle cut here, RESTORED 2026-08-15 (PLAN D27 Phase 4b)
 
+> **SUPERSEDED 2026-08-15 by `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`
+> (PLAN D27). The toggle ships. Everything below this block is now false as a statement about
+> the current code**, and is kept because the reasoning that cut it is exactly the reasoning
+> that let it come back.
+>
+> The 2026-08-14 correction cut the toggle for one reason and one only: **nothing consumed the
+> field, so on and off produced byte-identical requests.** That is no longer true. As of
+> `9532d1dd`, `createNoteInputSchema.autonomous` is a real field, an autonomous note's spec run
+> finishing starts a bounded implementation run in the same repo (D27 Phases 2+3), and the run
+> is bounded by a step budget that stops it distinctly rather than silently (Phase 4a). The
+> condition the cut was contingent on was met, so the cut expired with it.
+>
+> The **copy** changed with the mechanism, which is the part the original rule was protecting.
+> It no longer says "keeps going and implements it" — an outcome nothing guarantees. It says
+> what is actually true: a bounded run starts in the same repo, **commits locally and never
+> pushes**, and **can stop early on its budget with the work incomplete**, visibly. The two
+> variants swap rather than one gaining a caveat, so the page never states a capability the
+> current toggle state does not have.
+>
 > **CORRECTED 2026-08-14, during implementation, before anything shipped.** As first written this
 > section specified a working toggle and gave it copy reading *"cezar writes a spec in each
 > detected project, then keeps going and implements it."* **That copy is false and the toggle
@@ -226,8 +245,9 @@ composer that accepts text it cannot process.
 | Submit **never** calls any project-scoped path — a request-assertion test in the mould of `new-task-project.test.tsx:352` | issue any `/api/v1/p/…` or unscoped project call (this is the scope-trap guard, and it must fail on the *silent* boot-project hit, not just on a throw) |
 | Picking a named project navigates to `/p/<id>/new` and posts nothing | make it submit in place |
 | The autonomous explainer is visible text, asserted by `getByText` | move it back to a `title` attribute (a `title`-only assertion must not pass) |
-| **No toggle renders** — corrected D3; a control that changes nothing must not ship | render a toggle |
-| The page issues no `autonomous` field on any request, because nothing consumes one | add one (it would be silently ignored, which is the point) |
+| ~~**No toggle renders** — corrected D3; a control that changes nothing must not ship~~ **SUPERSEDED 2026-08-15 (D27 Phase 4b):** the toggle renders, **off by default** | ship it defaulted on, or drop the default assertion |
+| ~~The page issues no `autonomous` field on any request~~ **SUPERSEDED 2026-08-15:** submit sends `autonomous: true` when on **and `autonomous: false` when off** | send the field only in the `true` case — the off assertion is the paired guard that matters most, because an omitted field reads as "not autonomous" today and would pass a one-sided test forever |
+| The explainer **swaps** with the toggle rather than one variant gaining a caveat | make the off copy mention what the on state does (a hedge under an off toggle is still a claim about what submitting does) |
 | `CEZ_NOTES` off → the off state names the flag; the textarea does not accept a submit | render the composer anyway, or 404 |
 
 The scope-trap guard is the one that matters most and the easiest to write vacuously: it must

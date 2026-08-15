@@ -68,6 +68,33 @@ describe('WorkspaceRunIndex', () => {
       expect(result.truncated).toBe(false);
     });
 
+    it('carries `stopReason`, so a budget-stopped run does not read as plain review (#25)', async () => {
+      // Guard for #25: `workspaceRunSummarySchema` gained `stopReason`, but a schema field
+      // nothing populates looks fixed and changes nothing. The mutation that must turn this red
+      // is dropping `stopReason: run.stopReason` from `toSummary()` (`run-index.ts`) while
+      // leaving the schema field in place.
+      const a = await project();
+      await writeRuns(a, [
+        runJson({ id: 'budget-stopped', status: 'review', stopReason: 'budget' }),
+        // Second negative control: a run with no `stopReason` must come back without one —
+        // "populate unconditionally" fails this the same way never populating it would.
+        runJson({ id: 'ordinary-review', status: 'review', createdAt: '2026-08-01T00:00:01.000Z' }),
+      ]);
+      const index = new WorkspaceRunIndex({
+        listProjects: async () => [{ id: 'proj-a', root: a, status: 'ok', name: 'A' }],
+      });
+
+      const result = await index.list();
+
+      const budgetRow = result.runs.find((r) => r.id === 'budget-stopped');
+      expect(budgetRow?.stopReason).toBe('budget');
+      const ordinaryRow = result.runs.find((r) => r.id === 'ordinary-review');
+      expect(ordinaryRow?.stopReason).toBeUndefined();
+      // The absent-on-the-wire half of this guard (JSON drops an `undefined` key; this in-memory
+      // `TrimmedRun` does not, matching `activity`'s own unconditional assignment right above it
+      // in `toSummary()`) lives at the HTTP layer: `workspace-runs-api.test.ts`.
+    });
+
     it('C1 (partial): a stored `running` run is reported as running, never rewritten — unlike RunStore.open without keepLive', async () => {
       const root = await project();
       await writeRuns(root, [runJson({ id: 'live', status: 'running' })]);

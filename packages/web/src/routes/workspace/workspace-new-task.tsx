@@ -14,6 +14,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { scopeTo } from '@/lib/project-router'
 import { newTaskPrefillHref } from '@/routes/new-task-params'
@@ -43,19 +44,20 @@ import { newTaskPrefillHref } from '@/routes/new-task-params'
  * posts nothing on that path, same discipline `useCreateWorkspaceNote`/`useProcessWorkspaceNote`
  * get on the Auto-detect path.
  *
- * **No Autonomous toggle** (corrected in the spec, D3, 2026-08-14). The original draft of D3
- * called for an on/off toggle governing spec-then-stop versus spec-then-implement. It does not
- * ship: neither `createNoteInputSchema` nor `approveNoteInputSchema`
- * (`packages/contract/src/notes.ts`) carries an autonomous field, and `NOTE_TO_SPEC_WORKFLOW`
- * (`packages/cezar/src/workflows/types.ts`) is a single spec-only step whose own description ends
- * "Does not implement" — confirmed against `packages/cezar/src/notes/approve.ts`, which starts
- * exactly that workflow with no branch on anything. A toggle with no wire to pull is two failures
- * at once: a control that changes nothing, and a product claim about a capability that does not
- * exist. So this page keeps only a static explainer of what the shipped engine actually does (see
- * `NewTaskComposer`'s explainer paragraph) — no checkbox, no `autonomous` state, no such field on
- * any request. Autonomous continuation is real future work, not implemented here: it needs an
- * implement step plus a field threaded through `approve`, is engine work, and has its own spec
- * coming — see D3.
+ * **The autonomous toggle is back** (D27 Phase 4b, `.ai/specs/2026-08-15-autonomous-
+ * implementation-continuation.md`). D3 (2026-08-14, `.ai/specs/2026-08-14-project-less-task-
+ * composer.md`) pulled the original toggle because it was wired to nothing: neither
+ * `createNoteInputSchema` nor `NOTE_TO_SPEC_WORKFLOW` had a way to act on it, so shipping it would
+ * have been a control that changes nothing plus a false capability claim. That reasoning no longer
+ * holds — as of `9532d1dd` an autonomous note's spec run finishing starts a bounded implementation
+ * run in the same repo (PLAN D27 Phases 2+3), and `createNoteInputSchema.autonomous` is a real,
+ * already-shipped field (Phase 3) — so the toggle returns because it now means something, which is
+ * the situation D3 was written about not holding anymore. Defaults **off**: a control that starts
+ * unattended agents writing code and committing across several repos is opt-in, never opt-out.
+ * `NewTaskComposer`'s explainer swaps text with the toggle so the page never claims a capability
+ * the current state does not have; both variants say plainly that a run never pushes and can stop
+ * early on its step budget with the work incomplete (Phase 4a — a budget stop no longer renders as
+ * a finish anywhere run status shows).
  *
  * **"Land on the review view for that note" (D2):** on a successful submit this navigates to
  * `/notes`, the existing, unchanged review surface — not a second copy of its
@@ -119,6 +121,9 @@ function NewTaskComposer() {
   const navigate = useNavigate()
   const [body, setBody] = useState('')
   const [error, setError] = useState<string>()
+  // Off by default (PLAN D27 Phase 4b) — opted into, never opted out of, since it starts
+  // unattended agents writing code and committing across every repo the note implies.
+  const [autonomous, setAutonomous] = useState(false)
   const create = useCreateWorkspaceNote()
   const process = useProcessWorkspaceNote()
   const pending = create.isPending || process.isPending
@@ -131,7 +136,7 @@ function NewTaskComposer() {
     try {
       // Sequential, not `Promise.all` — the order is the contract (spec Verification: "drop the
       // `/process` call" must turn this guard red, which requires the note to exist first).
-      const created = await create.mutateAsync({ body: trimmed, source: 'cockpit' })
+      const created = await create.mutateAsync({ body: trimmed, source: 'cockpit', autonomous })
       const noteId = created.note?.id
       if (!noteId) throw new Error('The note was created without an id.')
       await process.mutateAsync(noteId)
@@ -165,18 +170,31 @@ function NewTaskComposer() {
 
       {/* Visible text, not a `title` attribute (D3) — invisible-on-hover is exactly the flaw this
        *  composer is fixing relative to the per-project one. `data-slot` gives the test a stable
-       *  hook independent of the exact wording.
-       *
-       *  TODO(`.ai/specs/2026-08-14-project-less-task-composer.md` D3): this describes ONLY what
-       *  ships today. Autonomous continuation past the spec (spec-then-implement, unattended, in
-       *  repos the user did not name) needs an implement step on `NOTE_TO_SPEC_WORKFLOW` plus a
-       *  field threaded through `approve` — engine work, not this page, with its own spec coming.
-       *  Do not reintroduce a toggle here until that lands; see `WorkspaceNewTaskRoute`'s module
-       *  doc comment for why one shipped and was pulled. */}
-      <p data-slot="autonomous-explainer" className="max-w-lg text-xs text-muted-foreground">
-        cezar reads each detected project and writes a spec there. It stops at the spec — you
-        review the proposals, then start the implementation yourself.
-      </p>
+       *  hook independent of the exact wording. The copy SWAPS with the toggle rather than adding
+       *  a caveat to one paragraph, so the page never states a capability the current state does
+       *  not have — a "this may also do X" hedge under an off toggle is still a claim about what
+       *  submitting does. Both variants are exact — no "autonomous mode" — and both say plainly
+       *  that a run never pushes and can stop early on its step budget with the work incomplete
+       *  (PLAN D27 Phase 4a: a budget stop renders distinctly everywhere run status shows, so this
+       *  is not a silent risk, but the composer still has to say it up front). */}
+      <div className="flex max-w-lg items-start justify-between gap-4 rounded-md border border-border p-3">
+        <div className="flex flex-col gap-1">
+          <label htmlFor="autonomous-toggle" className="text-sm font-medium text-foreground">
+            Continue automatically after the spec
+          </label>
+          <p data-slot="autonomous-explainer" className="text-xs text-muted-foreground">
+            {autonomous
+              ? 'cezar writes a spec in each detected project, then keeps going: a bounded implementation run starts in the same repo, commits locally, and never pushes. A run can stop early on its step budget with the work incomplete — that shows up clearly on the task, never as a finished run.'
+              : 'cezar reads each detected project and writes a spec there. It stops at the spec — you review the proposals, then start the implementation yourself.'}
+          </p>
+        </div>
+        <Switch
+          id="autonomous-toggle"
+          data-slot="autonomous-toggle"
+          checked={autonomous}
+          onCheckedChange={setAutonomous}
+        />
+      </div>
 
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={!body.trim() || pending}>

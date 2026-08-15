@@ -1,11 +1,10 @@
 # Autonomous implementation continuation
 
-> **Status:** **Phases 1, 2, 3 and 4a implemented and pushed · QA Needed** (the runtime E2E has
-> NOT been run, so nothing here is Done). **Phase 4b — the composer's autonomous toggle — is not
-> built**, though the data plumbing is: `autonomous` is settable through `POST`/`PATCH
-> /workspace/notes`, so the trigger is reachable without it. Commits: `3e3b10a8` (the budget),
+> **Status:** **Phases 1, 2, 3, 4a and 4b implemented and pushed · QA Needed** (the runtime E2E has
+> NOT been run, so nothing here is Done). Commits: `3e3b10a8` (the budget),
 > `30ff1847` (the budget counts turns, not workflow steps), `20a7c7b5` (a budget stop no longer
-> renders as a finish), `9532d1dd` (the workflow and the trigger). ·
+> renders as a finish), `9532d1dd` (the workflow and the trigger), and the Phase 4b commit (the
+> composer toggle, `stopReason` on both cross-project boards, and the queue-watchdog fix below). ·
 > **Date:** 2026-08-15, status corrected the same day — this header read "specified, not
 > implemented", which went false as each phase landed, and a header is what a scanning reader keeps
 > **Extends:** `2026-08-14-note-to-spec-pipeline.md`, which built capture → split → route → approve
@@ -207,6 +206,38 @@ payloads as an optional field.
 | Continuation drags context-building onto the read path | Trigger reads status + flag only; the structural guard that the triage path imports neither `server/project-context.ts` nor `workflows/run.ts` stays green |
 | One bad note fans out across every project | **Accepted, on the owner's instruction.** Per-run budget is the only bound; no concurrency cap |
 | A budget too small silently truncates everything | `review` makes truncation visible per run, so a too-small budget shows up as a pile of reviews rather than as quiet damage |
+| **The queue watchdog could kill the whole cockpit** — found while landing Phase 4b, see below | `rescueStalledQueue` degrades per-run and the interval `.catch`es; both guarded, both mutation-tested |
+
+### The queue watchdog could take the server down, and this work is what exposed it
+
+Found 2026-08-15 while gating Phase 4b, and worth recording because **the symptom looked like a
+flaky test and the cause was a production availability defect.**
+
+`RunManager`'s constructor ran `setInterval(() => void this.rescueStalledQueue(), 60_000)`. `void`
+on a promise **discards its rejection**, and Node terminates the process on an unhandled rejection.
+So any failure inside that sweep — a project directory deleted under us, a permissions change, a
+full disk — killed the cockpit, and would kill it again on the next tick. A watchdog whose entire
+job is rescuing stuck work was the one thing that could take the server with it.
+
+What surfaced it: `npm test` began exiting 1 with 5 unhandled rejections **while every one of its
+8,000+ tests passed**. Three facts had to be separated, and each was measured rather than assumed:
+
+- **Not the uncommitted diff.** It touches no engine code.
+- **Not load alone.** Pre-D27 under identical concurrent load: 0 rejections, twice.
+- **Not D27's logic either.** The real cause is a *pre-existing* test leak — 21 `RunManager`s
+  constructed in `run.test.ts`, 2 disposed — where an undisposed 60-second watchdog outlives the
+  `rmSync` of its own temp dir. `QUEUE_WATCHDOG_MS` is 60s and the suite ran ~65s; D27's added
+  tests pushed the worker past one full interval, so the timer finally got to fire. **Our work did
+  not introduce the defect; it made the suite long enough to reach it.**
+
+Both halves are fixed: the engine degrades per-run and can no longer die (`rescueStalledQueue` +
+the interval's `.catch`), and every leaked manager in `run.test.ts` is now disposed. Verified by
+running two full suites concurrently — 5 rejections before, 0 after, across two samples, because a
+single clean run of a racy condition proves nothing.
+
+**The trap for the next session:** an idle machine shows 0 rejections at *every* commit, good and
+bad alike. Reproducing this needs deliberate load. A green `npm test` on a quiet laptop is not
+evidence that a timer-lifetime bug is absent.
 
 ## Verification
 
@@ -223,6 +254,8 @@ Every guard names the mutation that must turn it red. A guard never seen red has
 | A failed spec run starts no implementation run | Trigger on any terminal state instead of `done` |
 | The triage path still builds no `ProjectContext` across a full autonomous cycle (structural + behavioural, `contexts.ids()` unchanged) | Add the import / build a context |
 | The implementation workflow does not push | Add a push to its `bashAllowlist` and assert the guard catches it |
+| The composer's autonomous toggle renders, **off by default**, and submit sends `autonomous: false` when off as well as `true` when on | Send the field only in the `true` case — an omitted field reads as "not autonomous" today, so a one-sided test passes forever |
+| One run the queue watchdog cannot re-adopt neither aborts the sweep nor rejects into the interval | Move the try/catch from the single `reviveQueuedRun` call to around the whole `for` loop — the sweep still resolves, so only the "healthy run behind it is still re-adopted" half catches this |
 
 **Runtime E2E — the gate on Done, and nothing here is Done without it.** With `CEZ_NOTES=1` and at
 least two registered projects: capture an autonomous note naming work in both. Confirm each spec

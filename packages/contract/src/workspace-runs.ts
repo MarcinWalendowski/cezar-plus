@@ -32,6 +32,11 @@ export const workspaceRunSummarySchema = z.object({
   workflow: z.string(),
   status: runStatusSchema,
   activity: z.literal('monitoring').optional(),
+  /** Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —
+   *  PLAN D27, Phase 1/3. Mirrors `RunRecord.stopReason`; carried here for the same reason
+   *  `runIndexEntrySchema` (`runs.ts`) carries it — `deriveAttention` reads it, and without it a
+   *  budget-parked run on this board reads as a plain, unremarkable `review`. */
+  stopReason: z.enum(['budget']).optional(),
   createdAt: z.string(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),

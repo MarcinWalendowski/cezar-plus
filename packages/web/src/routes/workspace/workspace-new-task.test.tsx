@@ -1,7 +1,7 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
 import type { HealthResponse, NoteRecord, ProjectsResponse } from '@open-mercato/cezar-api-client'
@@ -19,6 +19,20 @@ import { WorkspaceNewTaskRoute } from './workspace-new-task'
  * (spec Verification). It is duplicated for the D2 named-project menu path (below), because
  * rendering a project list is exactly where a scoped call would sneak in.
  */
+
+beforeEach(() => {
+  // The autonomous toggle's `Switch` primitive measures itself on mount via
+  // `@radix-ui/react-use-size`, which needs `ResizeObserver` — jsdom ships neither it nor
+  // floating-ui's positioning APIs (`project-filter.test.tsx`/`workspace-tasks.test.tsx` precedent).
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  )
+})
 
 afterEach(() => {
   cleanup()
@@ -285,15 +299,34 @@ describe('WorkspaceNewTaskRoute: the explainer', () => {
     ).toBeTruthy()
   })
 
-  it('renders no autonomous toggle — the spec was corrected to drop it (D3, 2026-08-14)', async () => {
+  it('renders the autonomous toggle, off by default (D27 Phase 4b — it now means something)', async () => {
+    // D3 (2026-08-14) pulled the toggle because nothing consumed the field. Phase 4b restores it
+    // now that `createNoteInputSchema.autonomous` and the continuation trigger both ship. Off by
+    // default: starting unattended agents across repos is opt-in, never opt-out.
     stubFetch()
     renderComposer()
     await composerReady()
 
-    // Corrected in the spec: shipping the toggle with no field to send it on would be a control
-    // that changes nothing PLUS a product claim about a capability the engine does not have.
-    expect(screen.queryByRole('checkbox')).toBeNull()
-    expect(screen.queryByLabelText('Autonomous')).toBeNull()
+    const toggle = screen.getByRole('switch', { name: 'Continue automatically after the spec' })
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('swaps the explainer text with the toggle, and neither variant says "autonomous mode"', async () => {
+    stubFetch()
+    renderComposer()
+    await composerReady()
+
+    expect(screen.getByText(/It stops at the spec — you review the proposals/)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Continue automatically after the spec' }))
+
+    const onCopy = await screen.findByText(/starts in the same repo, commits locally, and never pushes/)
+    expect(onCopy.textContent).not.toContain('autonomous mode')
+    // The two facts that matter most on a control like this: it never pushes, and a run can stop
+    // incomplete on its own budget — Phase 4a's whole point was making that visible everywhere.
+    expect(onCopy.textContent).toContain('never pushes')
+    expect(onCopy.textContent).toContain('stop early on its step budget')
+    expect(screen.queryByText(/It stops at the spec — you review the proposals/)).toBeNull()
   })
 })
 
@@ -324,6 +357,7 @@ describe('WorkspaceNewTaskRoute: Auto-detect submit', () => {
     expect(JSON.parse(created?.body ?? '{}')).toEqual({
       body: 'Ship the exporter in api, and fix the retry backoff in web',
       source: 'cockpit',
+      autonomous: false,
     })
   })
 
@@ -344,6 +378,47 @@ describe('WorkspaceNewTaskRoute: Auto-detect submit', () => {
     fireEvent.change(await composerReady(), { target: { value: '   ' } })
     expect(screen.getByRole('button', { name: 'Start task' })).toHaveProperty('disabled', true)
     expect(sent.some((request) => request.method === 'POST')).toBe(false)
+  })
+})
+
+describe('WorkspaceNewTaskRoute: the autonomous field on submit (D27 Phase 4b)', () => {
+  it('toggle ON sends autonomous: true', async () => {
+    // Guard: dropping the field from the payload must turn this red — a toggle that renders but
+    // sends nothing is exactly the D3 failure mode this phase is undoing.
+    const sent = stubFetch()
+    renderComposer()
+
+    fireEvent.change(await composerReady(), { target: { value: 'Ship the exporter' } })
+    fireEvent.click(screen.getByRole('switch', { name: 'Continue automatically after the spec' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Start task' }))
+
+    await waitFor(() => expect(sent.some((r) => r.path === '/api/v1/workspace/notes')).toBe(true))
+    const created = sent.find((r) => r.path === '/api/v1/workspace/notes')
+    expect(JSON.parse(created?.body ?? '{}')).toEqual({
+      body: 'Ship the exporter',
+      source: 'cockpit',
+      autonomous: true,
+    })
+  })
+
+  it('toggle OFF (default) sends autonomous: false — the paired guard that matters most', async () => {
+    // The dangerous direction, per the task: an implementation that always sends `true` would
+    // pass the test above while doing the single most dangerous thing this control can do —
+    // starting unattended agents across repos nobody opted into. Mutation: send `true`
+    // unconditionally — must turn this red.
+    const sent = stubFetch()
+    renderComposer()
+
+    fireEvent.change(await composerReady(), { target: { value: 'Ship the exporter' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Start task' }))
+
+    await waitFor(() => expect(sent.some((r) => r.path === '/api/v1/workspace/notes')).toBe(true))
+    const created = sent.find((r) => r.path === '/api/v1/workspace/notes')
+    expect(JSON.parse(created?.body ?? '{}')).toEqual({
+      body: 'Ship the exporter',
+      source: 'cockpit',
+      autonomous: false,
+    })
   })
 })
 

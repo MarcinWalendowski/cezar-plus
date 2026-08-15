@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -333,6 +333,48 @@ describe('a run stopped by a usage limit resumes itself', () => {
       .poll(() => store.getRun(waiting.id)?.startedAt, { timeout: 20_000 })
       .toBeDefined();
   }, 60_000);
+
+  it('watchdog: one run it cannot re-adopt neither aborts the sweep nor rejects into the interval', async () => {
+    // The watchdog is driven by `setInterval(() => this.rescueStalledQueue().catch(...))`. Before
+    // that `.catch` existed the callback was `() => void this.rescueStalledQueue()`, and `void` on
+    // a promise DISCARDS its rejection — which Node treats as an unhandled rejection and
+    // terminates the process for. So one run whose record cannot be written (its project
+    // directory deleted under us, a permissions change, a full disk) killed the whole cockpit,
+    // and would kill it again on the very next tick. Found via the test suite under parallel
+    // load, where a torn-down temp dir reproduces exactly that write failure.
+    //
+    // Two things are asserted together, and the second is what makes this non-vacuous:
+    //   1. the sweep RESOLVES rather than rejecting, and
+    //   2. the healthy run BEHIND the broken one is still re-adopted.
+    // Mutation that must turn this red: move the try/catch from around the single
+    // `reviveQueuedRun` call to around the whole `for` loop. The sweep still resolves, so (1)
+    // stays green on its own — only (2) catches it.
+    const unrecoverable = { title: 't', workflow: 'no-such-workflow', task: 'mock:done', steps: [] };
+    store.createRun(unrecoverable);
+    store.createRun(unrecoverable);
+    // Sabotage whichever the sweep reaches FIRST, in the store's own order, so the test does not
+    // depend on `listRuns()` ordering. A directory sitting where the event log's file belongs
+    // makes `appendEvent`'s `appendFileSync` throw EISDIR — a real write failure at the real call
+    // site, not a stubbed rejection.
+    const ids = store.listRuns().map((r) => r.id);
+    expect(ids).toHaveLength(2);
+    const [brokenId, healthyId] = ids as [string, string];
+    mkdirSync(join(repoRoot, '.ai/cezar/runs', `${brokenId}.ndjson`), { recursive: true });
+
+    manager = new RunManager(store, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 1 } }),
+    });
+
+    await expect(manager.rescueStalledQueue()).resolves.toBeUndefined();
+
+    // The broken one still got as far as the status write that precedes the failing append.
+    expect(store.getRun(brokenId)?.status).toBe('failed');
+    // …and the sweep carried on to the next run instead of dying on the first.
+    expect(store.getRun(healthyId)?.status).toBe('failed');
+    expect(
+      store.readEvents(healthyId).some((e) => String(e.message ?? '').includes('queue watchdog')),
+    ).toBe(true);
+  }, 30_000);
 
   it('watchdog: an in-place run it forces through is not handed back at the repo-root gate', async () => {
     // The same wedge as above, but the rescued run is `worktree: false` — and that is the case

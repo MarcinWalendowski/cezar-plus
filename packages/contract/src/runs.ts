@@ -327,6 +327,12 @@ export const runIndexEntrySchema = z.object({
   titleOrigin: z.enum(['user', 'auto', 'marker']).optional(),
   status: runStatusSchema,
   activity: runActivitySchema.optional(),
+  /** Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —
+   *  PLAN D27, Phase 1/3. Mirrors `RunRecord.stopReason` (see its own doc comment there); carried
+   *  here because `deriveAttention` reads it to tell a budget stop apart from an ordinary review
+   *  on the two cross-project boards (`global-tasks.tsx`, `workspace-tasks.tsx`) — without it a
+   *  budget-parked run across every OTHER project reads as a plain, unremarkable `review`. */
+  stopReason: z.enum(['budget']).optional(),
   createdAt: z.string(),
   finishedAt: z.string().optional(),
   /** With `status`/`finishedAt`/`archived`, the four inputs `isUnread` reads — what lets the

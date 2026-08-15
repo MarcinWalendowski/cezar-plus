@@ -128,6 +128,7 @@ function toSummary(run: z.infer<typeof runRecordSchema>): TrimmedRun {
     workflow: run.workflow,
     status: run.status,
     activity: run.activity,
+    stopReason: run.stopReason,
     createdAt: run.createdAt,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
