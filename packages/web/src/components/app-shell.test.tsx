@@ -180,9 +180,11 @@ describe('AppShell', () => {
   })
 
   describe('New task button', () => {
-    it('links to /new', () => {
+    it('links to /new?scope=auto — All / Auto is the composer default from here', () => {
       renderShell()
-      expect(within(sidebar()).getByRole('link', { name: /New task/ }).getAttribute('href')).toBe('/new')
+      expect(within(sidebar()).getByRole('link', { name: /New task/ }).getAttribute('href')).toBe(
+        '/new?scope=auto',
+      )
     })
 
     it('renders the C hint (the browser-usable accelerator; ⌘N only fires in the desktop shell)', () => {
@@ -878,7 +880,7 @@ describe('AppShell', () => {
       link.addEventListener('click', (event) => event.preventDefault(), { once: true })
       fireEvent.click(link)
       await waitFor(() => expect(drawer()).toBeNull())
-      expect(link.getAttribute('href')).toBe('/new')
+      expect(link.getAttribute('href')).toBe('/new?scope=auto')
       expect(screen.getByTestId('location').textContent).toBe('/')
     })
 

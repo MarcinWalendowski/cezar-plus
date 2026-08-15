@@ -751,7 +751,9 @@ describe('TasksOverview — empty and loading states', () => {
     expect(within(empty).getByRole('heading', { name: 'No tasks yet' })).not.toBeNull()
     expect(within(empty).getByText('Describe a task to get started.')).not.toBeNull()
     // Scoped inside the state — the mobile FAB is also a link named "New task".
-    expect(within(empty).getByRole('link', { name: 'New task' }).getAttribute('href')).toBe('/new')
+    expect(within(empty).getByRole('link', { name: 'New task' }).getAttribute('href')).toBe(
+      '/new?scope=auto',
+    )
     // The hero moment: this is the one overview state that gets the decorative backdrop.
     expect(empty.querySelector('[data-slot="twinkle-backdrop"]')).not.toBeNull()
   })
@@ -891,11 +893,11 @@ describe('TasksOverview — mobile cards and FAB', () => {
     expect(location()).toBe('/tasks/c1')
   })
 
-  it('floats the New task FAB, linking to /new', () => {
+  it('floats the New task FAB, linking to /new?scope=auto', () => {
     // A non-empty list, so the FAB is the only "New task" link (the empty state carries its own).
     renderOverview({ runs: [run()] })
     const fab = document.querySelector('[data-slot="new-task-fab"]')
-    expect(fab?.getAttribute('href')).toBe('/new')
+    expect(fab?.getAttribute('href')).toBe('/new?scope=auto')
     expect(fab?.getAttribute('aria-label')).toBe('New task')
   })
 })

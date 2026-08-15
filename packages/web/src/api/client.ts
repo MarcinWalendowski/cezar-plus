@@ -137,6 +137,8 @@ import type {
   NotificationsResponse,
   NotificationLogResponse,
   NotificationLogStatus,
+  TaskFanoutInput,
+  TaskFanoutResponse,
 } from '@open-mercato/cezar-api-client'
 import { parseProviderStatusResponse } from '@/lib/provider-status'
 import {
@@ -2267,6 +2269,34 @@ export async function getWorkspaceKnowledgeSearch(
     ),
     '/workspace/knowledge/search',
   )
+}
+
+/**
+ * `POST /workspace/task-fanout` (`.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md`) — the
+ * composer's All / Auto submit: analyzes the input, retrieves grounding knowledge per work item,
+ * and files one todo per distinct piece of work. Never starts a run (D5) — the response names
+ * what was filed.
+ *
+ * Raw `fetch`, not the typed client: the route is landing alongside this change, so `AppType`
+ * does not know it yet — the same reason `registerProject` above keeps its own `fetch`.
+ * Workspace-level (`WORKSPACE_LEVEL` in `project-scope.ts` already matches `/workspace/`), so it
+ * is never `/p/<id>`-prefixed regardless of the active scope — correct for a call the composer
+ * makes with a project bound, unbound, or All / Auto selected alike.
+ */
+export async function fanoutTasks(input: TaskFanoutInput): Promise<TaskFanoutResponse> {
+  const path = '/workspace/task-fanout'
+  const res = await send(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const body = await res.text()
+  if (!res.ok) throw errorFor(res.status, res.statusText, body)
+  const parsed = parseJson(body)
+  if (parsed === undefined) {
+    throw new ApiError(res.status, `the cezar server answered ${path} with a non-JSON body`)
+  }
+  return parsed as TaskFanoutResponse
 }
 
 /** `GET /workspace/notifications` (F4, `CEZ_NOTIFY`) — the machine-wide outbound transport

@@ -309,9 +309,12 @@ export function TasksOverview({
       </div>
 
       {/* The mobile New-task FAB. The desktop CTA lives in the sidebar. A router Link since
-          R4 step 1.3 re-pointed /new at the React composer — no full page load needed. */}
+          R4 step 1.3 re-pointed /new at the React composer — no full page load needed.
+          `?scope=auto` (2026-08-15-knowledge-grounded-task-fanout D1): a generic entry point,
+          so the composer defaults its project pill to All / Auto rather than the active
+          project — see app-shell.tsx's own comment on the sidebar's twin of this link. */}
       <Link
-        to="/new"
+        to="/new?scope=auto"
         data-slot="new-task-fab"
         aria-label="New task"
         className="fixed right-4 bottom-[calc(16px+env(safe-area-inset-bottom))] z-20 inline-flex size-14 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-modal md:hidden"
@@ -359,7 +362,8 @@ function TasksEmptyState({ view, query }: { view: ListView; query: string }) {
           subtitle="Describe a task to get started."
           actions={
             <Button asChild>
-              <Link to="/new">
+              {/* Also a generic entry point (see the FAB's own comment above) — same marker. */}
+              <Link to="/new?scope=auto">
                 <PlusIcon aria-hidden="true" />
                 New task
               </Link>

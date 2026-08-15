@@ -86,6 +86,7 @@ import {
   markRunUnseen,
   patchRun,
   removeQueuedMessage,
+  fanoutTasks,
   getDiscoveredAgentAccounts,
   registerProject,
   scanProjectFolder,
@@ -128,6 +129,7 @@ import type {
   RunRecord,
   SelectAgentProfileInput,
   SetAgentConfigInput,
+  TaskFanoutInput,
   UpdateAgentProfileInput,
   UpdateNoteInput,
   UpdateProjectInput,
@@ -534,6 +536,22 @@ export function useInitGitRepo() {
       queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projectScanRoot })
       queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects })
     },
+  })
+}
+
+/**
+ * The composer's All / Auto submit (`POST /workspace/task-fanout`,
+ * `.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md` D1/D3).
+ *
+ * No retry: Phase A/B's model calls are not idempotent — re-asking after a real failure can file
+ * a second, different split of the same input rather than repeat the first one. No cache to
+ * invalidate either: nothing here starts a run (D5), and the composer renders the returned
+ * `items`/`unassigned`/`truncated` directly rather than reading them back from a query.
+ */
+export function useFanoutTasks() {
+  return useMutation({
+    mutationFn: (input: TaskFanoutInput) => fanoutTasks(input),
+    retry: false,
   })
 }
 

@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import { mkdirSync, watch, type FSWatcher } from 'node:fs';
+import { closeSync, mkdirSync, openSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 
@@ -9,10 +9,30 @@ import { z } from 'zod';
  * The global follow-up inbox (spec 007): `.ai/cezar/todos.json`, a flat JSON
  * array agents append to (via CEZ_TODOS_FILE). Agent entries are external
  * data — each one is zod-validated on read and malformed ones are skipped
- * with a warning, never fatal. Server writes are serialized with an
- * in-process lock (the janitor `withLock` pattern) and land atomically
- * (tmp + rename, the runs.json pattern).
+ * with a warning, never fatal. Writes land atomically (tmp + rename, the
+ * runs.json pattern).
+ *
+ * **Serialized with a cross-process `O_EXCL` write lease, not an in-process lock
+ * (2026-08-15-knowledge-grounded-task-fanout.md, Phase 1).** Until now the only writer besides the
+ * server was an agent SUBPROCESS appending via `CEZ_TODOS_FILE` (`FOLLOWUP_INSTRUCTIONS` in
+ * `handoff.ts`) — a different OS process the server's old in-process `withLock` (a Promise-chain
+ * mutex, live only in this Node process's memory) could never see. That was survivable while the
+ * server itself never wrote past a delete/start. `createTodo` (below) is a second SERVER writer,
+ * so two concurrent writers — the server and an agent, or two server requests — now race a
+ * read-modify-write of the whole array in earnest. The same "open `wx`, stale-reclaim, retry with
+ * backoff, else lease-timeout" idiom as `auth/identity-store.ts`'s `IdentityStore` closes that:
+ * writes retry-and-block rather than `automations/store.ts`'s "one shot, else skip" — a lost
+ * create is data loss in a way a skipped poll cycle is not.
  */
+
+/** One citation a task-fan-out spec was grounded in — see the wire twin
+ *  (`contract/src/skills.ts`'s `todoKnowledgeRefSchema`) for why the shape is title/slug/project
+ *  only, never a document body. */
+const todoKnowledgeRefSchema = z.object({
+  project: z.string().min(1).max(64),
+  slug: z.string().min(1).max(500),
+  title: z.string().min(1).max(300),
+});
 
 export const todoSchema = z.object({
   id: z.string().min(1).optional(),
@@ -28,30 +48,115 @@ export const todoSchema = z.object({
   runnable: z.boolean().optional(),
   /** Set by the server when "▶ Run" turned this entry into a task. */
   startedTaskId: z.string().optional(),
+  // ---- structured spec (2026-08-15-knowledge-grounded-task-fanout.md, D2/D4) -----------------
+  // All five additive and optional — every existing todos.json entry (an agent's plain append)
+  // carries none of them and still validates unchanged. Bounds mirror `createRunInputSchema`'s
+  // own scale (`contract/src/runs.ts`), the closest sibling shape whose strings reach a spawned
+  // process, rather than inventing new limits.
+  /** Why this exists, what it extends. */
+  context: z.string().max(20_000).optional(),
+  /** The work itself. */
+  whatToDo: z.string().max(100_000).optional(),
+  /** Checkable statements. */
+  acceptanceCriteria: z.array(z.string().min(1).max(500)).max(20).optional(),
+  /** What grounded it. */
+  knowledgeRefs: z.array(todoKnowledgeRefSchema).max(20).optional(),
+  /** Which writer created it. */
+  origin: z.enum(['agent', 'composer']).optional(),
 });
 
 export type TodoItem = z.infer<typeof todoSchema> & { id: string };
+
+/** `POST /:projectId/todos`'s body, server-side: everything `createTodo` accepts from a caller —
+ *  `id`/`ts` are assigned by `createTodo` itself, `taskId`/`startedTaskId` are agent-/server-only.
+ *  Mirrors the wire twin's `createTodoInputSchema` (`contract/src/skills.ts`) field-for-field. */
+export type CreateTodoInput = Omit<TodoItem, 'id' | 'ts' | 'taskId' | 'startedTaskId'>;
 
 export function todosPath(dataDir: string): string {
   return join(dataDir, 'todos.json');
 }
 
-// ---- in-process lock (15-line port of janitor's storage.withLock) ----------
+// ---- cross-process write lease (the `IdentityStore`/`AutomationStore` `O_EXCL` idiom) --------
 
-const locks = new Map<string, Promise<unknown>>();
+const TODOS_LOCK_FILE = 'todos.lock';
+/** Cap on the exponential backoff between lease retries — mirrors `identity-store.ts`'s own
+ *  constant of the same name and role. */
+const MAX_RETRY_DELAY_MS = 200;
 
-async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const prev = locks.get(key) ?? Promise.resolve();
-  let release: () => void = () => undefined;
-  const next = new Promise<void>((r) => {
-    release = r;
-  });
-  locks.set(key, prev.then(() => next));
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+class TodosLease {
+  private released = false;
+
+  constructor(
+    private readonly path: string,
+    private readonly fd: number,
+  ) {}
+
+  release(): void {
+    if (this.released) return;
+    this.released = true;
+    closeSync(this.fd);
+    try {
+      unlinkSync(this.path);
+    } catch {
+      // Already removed during shutdown cleanup.
+    }
+  }
+}
+
+/** One non-blocking attempt at the write lease: open `wx` (fails if the lock file already
+ *  exists), reclaim it if it has sat stale past `staleAfterMs` (a crashed writer), else give up.
+ *  Same idiom as `automations/store.ts#acquireLease`/`sources/store.ts#acquireLease`. */
+function acquireTodosLease(dataDir: string, staleAfterMs = 10 * 60_000): TodosLease | undefined {
+  mkdirSync(dataDir, { recursive: true });
+  const path = join(dataDir, TODOS_LOCK_FILE);
   try {
-    await prev;
+    const fd = openSync(path, 'wx', 0o600);
+    writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+    return new TodosLease(path, fd);
+  } catch {
+    try {
+      if (Date.now() - statSync(path).mtimeMs > staleAfterMs) {
+        unlinkSync(path);
+        return acquireTodosLease(dataDir, staleAfterMs);
+      }
+    } catch {
+      // A contender released it first, or the directory is read-only.
+    }
+    return undefined;
+  }
+}
+
+/** Retries `acquireTodosLease` with bounded exponential backoff until it succeeds or
+ *  `lockTimeoutMs` elapses — "retry and block", not "skip": a create silently losing another
+ *  writer's entry is not an acceptable failure mode for a user-facing action (identity-store.ts's
+ *  own reasoning for the same choice). */
+async function acquireTodosLeaseBlocking(dataDir: string, lockTimeoutMs = 5_000): Promise<TodosLease> {
+  const deadline = Date.now() + lockTimeoutMs;
+  let delay = 10;
+  for (;;) {
+    const lease = acquireTodosLease(dataDir);
+    if (lease) return lease;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error(`todos.json write lease stayed held for over ${lockTimeoutMs}ms — another writer may be stuck`);
+    }
+    await sleep(Math.min(delay, remaining));
+    delay = Math.min(delay * 2, MAX_RETRY_DELAY_MS);
+  }
+}
+
+/** Takes the lease, runs `fn`, always releases — the one helper every write below goes through
+ *  (the `IdentityStore.guardedWrite` precedent), so no call site can touch the file without it. */
+async function withTodosLease<T>(dataDir: string, fn: () => Promise<T>): Promise<T> {
+  const lease = await acquireTodosLeaseBlocking(dataDir);
+  try {
     return await fn();
   } finally {
-    release();
+    lease.release();
   }
 }
 
@@ -106,24 +211,46 @@ async function writeAtomic(dataDir: string, items: TodoItem[]): Promise<void> {
   await fs.rename(tmp, file);
 }
 
+/** Pure read, no lease: `readRaw` never writes, so there is nothing here for a lease to
+ *  serialize against, and taking one unconditionally would mean every read — including the
+ *  cross-project workspace board's read of a project that has never run cezar at all —
+ *  `mkdirSync`s `.ai/cezar` into existence just by looking. "A read must not materialize state"
+ *  (AGENTS.md). The lease is taken below, ONLY on the rare id-backfill write path. */
 export async function readTodos(dataDir: string): Promise<TodoItem[]> {
-  return withLock(dataDir, async () => {
-    const { items, needsRewrite } = await readRaw(dataDir);
-    if (needsRewrite) {
-      await writeAtomic(dataDir, items).catch(() => undefined); // best effort
-    }
-    return items;
-  });
+  const { items, needsRewrite } = await readRaw(dataDir);
+  if (needsRewrite) {
+    // Re-check under the lease, fresh: another writer may have backfilled (or removed) the same
+    // entries between the read above and the lease landing, and this write must never clobber
+    // that. Best effort — an id backfill that loses this race just retries on the next read.
+    await withTodosLease(dataDir, async () => {
+      const fresh = await readRaw(dataDir);
+      if (fresh.needsRewrite) await writeAtomic(dataDir, fresh.items);
+    }).catch(() => undefined);
+  }
+  return items;
 }
 
 /** Check off (delete) an entry. False when the id isn't there. */
 export async function removeTodo(dataDir: string, id: string): Promise<boolean> {
-  return withLock(dataDir, async () => {
+  return withTodosLease(dataDir, async () => {
     const { items } = await readRaw(dataDir);
     const next = items.filter((t) => t.id !== id);
     if (next.length === items.length) return false;
     await writeAtomic(dataDir, next);
     return true;
+  });
+}
+
+/** `POST /:projectId/todos` (2026-08-15-knowledge-grounded-task-fanout.md, Phase 1): assigns
+ *  `id`/`ts` and appends, under the same lease every other writer here takes — so a create
+ *  racing a concurrent create, delete, start, or agent append never loses either side. */
+export async function createTodo(dataDir: string, input: CreateTodoInput): Promise<TodoItem> {
+  return withTodosLease(dataDir, async () => {
+    const { items } = await readRaw(dataDir);
+    const todo: TodoItem = { ...input, id: randomUUID(), ts: new Date().toISOString() };
+    items.push(todo);
+    await writeAtomic(dataDir, items);
+    return todo;
   });
 }
 
@@ -144,9 +271,9 @@ export function todoTaskText(
  *  in the file as an audit trail; the GUI hides started entries. First start wins: an entry
  *  that already carries a `startedTaskId` is left untouched and answers false, so the
  *  best-effort `todoId` bookkeeping on `POST /api/runs` (#374) can never overwrite the audit
- *  trail — the check shares this lock, so two concurrent launches cannot both claim the entry. */
+ *  trail — the check shares this lease, so two concurrent launches cannot both claim the entry. */
 export async function markStarted(dataDir: string, id: string, taskId: string): Promise<boolean> {
-  return withLock(dataDir, async () => {
+  return withTodosLease(dataDir, async () => {
     const { items } = await readRaw(dataDir);
     const item = items.find((t) => t.id === id);
     if (!item || item.startedTaskId) return false;

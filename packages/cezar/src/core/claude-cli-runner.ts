@@ -48,11 +48,21 @@ export interface ClaudeCliRunnerOptions {
 
 /**
  * `AgentRunner` over the Claude Code CLI in headless stream-json mode. Auth =
- * the host's logged-in Pro/Max subscription (no API key needed). Sandboxing is
- * `--allowedTools` (default-deny for anything not listed) + running inside the
- * repo `cwd`; `Bash` is narrowed to `Bash(<prefix>:*)` patterns only when
- * `bashAllowlist` is set — the zero-config default has no allowlist, so `Bash`
- * is unrestricted shell access (#430).
+ * the host's logged-in Pro/Max subscription (no API key needed).
+ *
+ * **CORRECTED 2026-08-15 — there is no tool sandbox.** This paragraph used to
+ * read "Sandboxing is `--allowedTools` (default-deny for anything not listed)
+ * + running inside the repo `cwd`", and the default-deny half is false:
+ * measured against `claude` 2.1.224, `--allowedTools` only GRANTS additively,
+ * it never restricts, so an empty or narrow list denies nothing. Only
+ * `--disallowedTools` removes a tool from the surface. The `cwd` half still
+ * holds, and it is now the only containment a run has, alongside the worktree
+ * it runs in. `spec.allowedTools`/`bashAllowlist` (and so `buildAllowedTools`)
+ * are therefore decorative on a Claude run today — see `buildClaudeArgs` below
+ * and `.ai/specs/2026-08-15-bypass-permissions-claude-sessions.md`, which files
+ * emitting the allow-list's complement as `--disallowedTools` as the fix. Any
+ * caller relying on `allowedTools: []` to mean "no tools" is relying on
+ * something this runner does not do.
  *
  * Session mechanics (multi-turn stdin, EOF watchdog, reopen window) follow
  * github-janitor's `claudeRunner.ts`; the original single-turn adaptation

@@ -20,6 +20,8 @@ export * from './notes.ts';
 export * from './workspace-runs.ts';
 export * from './workspace-git.ts';
 export * from './workspace-knowledge.ts';
+export * from './workspace-todos.ts';
+export * from './task-fanout.ts';
 export * from './notifications.ts';
 export * from './orgs.ts';
 export * from './invites.ts';

@@ -35,6 +35,8 @@ import { createWorkspaceRunsRoutes } from './workspace-runs-routes.ts';
 import { createWorkspaceRunMutationRoutes } from './workspace-run-mutations-routes.ts';
 import { createWorkspaceGitRoutes } from './workspace-git-routes.ts';
 import { createWorkspaceKnowledgeRoutes } from './workspace-knowledge-routes.ts';
+import { createWorkspaceTodosRoutes } from './workspace-todos-routes.ts';
+import { createTaskFanoutRoutes } from './task-fanout-routes.ts';
 import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -49,10 +51,13 @@ import {
   type ProjectScanResponse,
   type RunIndexEntry,
   type RunsIndexResponse,
+  type CreateTodoResponse,
+  type WorkspaceTodosResponse,
 } from '@open-mercato/cezar-contract';
 // A contract VALUE, like `workspaceUiStateSchema` in workspace/migrations.ts — the request
 // schema this route validates with is the same one the client compiles against.
 import {
+  createTodoInputSchema,
   gitInitRequestSchema,
   modelDiscoveryRunnerSchema,
   openProjectInSchema,
@@ -90,7 +95,7 @@ import { discoverSkills } from '../skills.ts';
 import { SkillsUpdateConflictError, SkillsUpdateCoordinator, SkillsUpdateService, type SkillsUpdateState } from '../skills-update.ts';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.ts';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.ts';
-import { markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.ts';
+import { createTodo, markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.ts';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.ts';
 import {
   HistoryCursorError,
@@ -690,7 +695,6 @@ export function projectRouteManifest(app: Hono): ProjectRouteInfo[] {
 }
 
 /** 409 body for the inbox mutators while the follow-up inbox is off (#471). */
-const FOLLOWUPS_OFF = 'the follow-up inbox is disabled — set CEZ_FOLLOWUPS=1 to enable it';
 
 /** 409 body for every automations route while GitHub automations are off (#801). */
 const AUTOMATIONS_OFF = 'GitHub automations are disabled — set CEZ_AUTOMATIONS=1 to enable them';
@@ -5387,11 +5391,18 @@ export function createApp(deps: ServerDeps) {
    * both: the documented status order is unchanged, and `startTodoSchema` becomes visible to
    * `AppType` (and so to `hc`) instead of being parsed invisibly inside the handler.
    *
-   * Deliberately NOT annotated with a return type: the inferred one carries the two typed
-   * responses, which is what keeps the 409 and 404 branches in the route's schema for the client.
+   * Deliberately NOT annotated with a return type: the inferred one carries the typed 404, which
+   * is what keeps that branch in the route's schema for the client.
+   *
+   * **Ungated since D7a (2026-08-15).** This used to answer `409 FOLLOWUPS_OFF` when
+   * `capabilities().followups` was off, and that made the fan-out flow dead-end at its LAST step:
+   * tasks filed (`POST /todos`, ungated), listed on the board (ungated), and then un-startable on
+   * a default install, where `CEZ_FOLLOWUPS` is unset. The line is generation, not storage —
+   * `CEZ_FOLLOWUPS=1` governs whether an agent is ASKED to produce follow-ups at the end of a run
+   * (`handoff.ts`, `FOLLOWUP_INSTRUCTIONS`, still gated at the `generateFollowups` call site), not
+   * whether a task that already exists can be read back and started.
    */
   const todoMustExist = async (c: Context<TodoStartEnv, '/todos/:id/start'>, next: Next) => {
-    if (!capabilities().followups) return c.json({ error: FOLLOWUPS_OFF }, 409);
     const todo = (await readTodos(c.get('project').dataDir)).find((t) => t.id === c.req.param('id'));
     if (!todo) return c.json({ error: 'not found' }, 404);
     c.set('todo', todo);
@@ -5400,12 +5411,34 @@ export function createApp(deps: ServerDeps) {
 
   // ---- chained family: follow-up inbox / todos (project-scoped) ----
   const todosRoutes = new Hono<ProjectApiEnv>()
-    .get('/todos', async (c) => c.json(capabilities().followups ? await readTodos(c.get('project').dataDir) : []))
+    // Ungated since D7a: returning `[]` with the flag off hid a composer-filed task in its own
+    // project while the cross-project board showed it — two surfaces disagreeing about whether a
+    // task exists is worse than either answer alone.
+    .get('/todos', async (c) => c.json(await readTodos(c.get('project').dataDir)))
 
-    // Check off = delete the entry.
+    // The create route (2026-08-15-knowledge-grounded-task-fanout.md, Phase 1; ungated per D7,
+    // added 2026-08-15): the composer's fan-out — and, until Phases 2-4 land, any script or
+    // agent — files a fully-specified task here instead of the out-of-process `CEZ_TODOS_FILE`
+    // append being the only writer. Body validated against the wire twin
+    // (`createTodoInputSchema`), which is `todoItemSchema` minus the server-/agent-assigned
+    // keys, so the two can never drift field-by-field.
+    //
+    // Deliberately NOT gated on `capabilities().followups`, unlike every other route in this
+    // family: this is becoming the composer's DEFAULT submit path, and `followups` (the
+    // follow-up INBOX feature — `GET`/`DELETE`/`:id/start` below) is off by default on every
+    // real install. Storing a task the composer just filed is not conditional on whether that
+    // separate inbox feature happens to be on.
+    .post('/todos', jsonZodValidator(() => createTodoInputSchema), async (c) => {
+      const { dataDir } = c.get('project');
+      const todo = await createTodo(dataDir, c.req.valid('json'));
+      const body: CreateTodoResponse = { todo };
+      return c.json(body, 201);
+    })
+
+    // Check off = delete the entry. Ungated since D7a, for symmetry with create/list/start: a task
+    // you can file and start but not remove is a trap.
     .delete('/todos/:id', async (c) => {
       const { dataDir } = c.get('project');
-      if (!capabilities().followups) return c.json({ error: FOLLOWUPS_OFF }, 409);
       const removed = await removeTodo(dataDir, c.req.param('id'));
       return removed ? c.json({ removed: true }) : c.json({ error: 'not found' }, 404);
     })
@@ -5578,11 +5611,13 @@ export function createApp(deps: ServerDeps) {
           const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
           await stream.writeSSE({ event: 'todos', data: JSON.stringify(items) });
         };
-        // Opt-in inbox (#471): subscribing is what creates this project's
-        // watcher (step 2.3), so with the capability off we never subscribe —
-        // no watcher, no fd. Scoped to this stream's dataDir: another
-        // project's todos.json writes never reach this connection.
-        const offTodos = capabilities().followups ? onTodosChanged(dataDir, () => void sendTodos()) : () => undefined;
+        // Subscribing is what creates this project's watcher (step 2.3), so this costs one fd per
+        // open stream. That cost used to be opt-in behind `capabilities().followups` (#471), but
+        // since D7a (2026-08-15) todos exist on a default install — the composer's fan-out files
+        // them — and a board that never updates while tasks are being written into it is a worse
+        // trade than the fd. Scoped to this stream's dataDir: another project's todos.json writes
+        // never reach this connection.
+        const offTodos = onTodosChanged(dataDir, () => void sendTodos());
         // Live resource telemetry (#348): the sampler ticks ~every 2 s only
         // while some run has a registered process; each tick is relayed as one
         // `usage` message (runId → {cpuPct, rssBytes, procCount}). Never
@@ -5639,9 +5674,12 @@ export function createApp(deps: ServerDeps) {
               data: JSON.stringify({ project, items }),
             });
           };
-          // Same opt-in gate as the per-project stream (#471): no capability, no
-          // watcher — and each subscription is scoped to its own dataDir (2.3).
-          const offTodos = capabilities().followups ? onTodosChanged(dataDir, () => void sendTodos()) : () => undefined;
+          // Ungated alongside the per-project stream (D7a). NOTE the cost is bigger here: this is
+          // the multi-project stream, so it is one watcher per ATTACHED project rather than one
+          // per connection. Accepted for the same reason — the cross-project board is where a
+          // fan-out's tasks appear, and it has to see them arrive. Each subscription is still
+          // scoped to its own dataDir (2.3).
+          const offTodos = onTodosChanged(dataDir, () => void sendTodos());
           store.on('run', onRun);
           store.on('deleted', onDeleted);
           attached.set(project, {
@@ -6279,6 +6317,21 @@ export function createApp(deps: ServerDeps) {
   // `peek`s an already-built store and can never build one, because building recovers and resumes
   // that project's interrupted runs — and typing into a search box must not start agents.
   const workspaceKnowledgeRoutes = createWorkspaceKnowledgeRoutes({ contexts });
+  // The cross-project todo board (D2 of the same spec, Phase 1): `readTodos()` (`../todos.ts`) is
+  // already a plain fs reader keyed on a `dataDir` path, so this family needs no `contexts` seam
+  // at all — it never builds or peeks a `ProjectContext`, only derives each registered project's
+  // `<root>/.ai/cezar` the same way `WorkspaceRunIndex`/`WorkspaceKnowledgeIndex` derive theirs.
+  const workspaceTodosRoutes = createWorkspaceTodosRoutes();
+  // The composer's All / Auto submit (D1/D3 of the same spec, Phases 2-4). Takes `contexts` on
+  // the same `peek`-only terms as the two families above — typing into a composer must not build
+  // a project context and thereby resume that project's interrupted runs — plus the workspace
+  // run index the context map already owns, and the BOOT root the analysis call is configured
+  // from (runner, planner model, agent account), never a target project's.
+  const taskFanoutRoutes = createTaskFanoutRoutes({
+    contexts,
+    runIndex: contexts.runIndex,
+    bootRoot: deps.repoRoot,
+  });
   const notificationsRoutes = createNotificationsRoutes();
 
   // ---- assemble the chained families --------------------------------------
@@ -6475,6 +6528,8 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceRunMutationRoutes)
     .route('/', workspaceGitRoutes)
     .route('/', workspaceKnowledgeRoutes)
+    .route('/', workspaceTodosRoutes)
+    .route('/', taskFanoutRoutes)
     .route('/', notificationsRoutes);
 
   // ---- mount ---------------------------------------------------------------

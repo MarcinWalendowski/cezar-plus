@@ -36,8 +36,18 @@ import type { StoredNote } from './types.ts';
  *    module's transitive import graph and fails if `server/project-context.ts` or
  *    `workflows/run.ts` ever appears in it — transitively, because a one-file grep would be
  *    silenced by a single layer of indirection.
- * 2. **The pass has no tools** (`allowedTools: []`). It sees a note, a catalog and a board
- *    digest, and answers with JSON. It cannot read a repository, so it cannot claim to have.
+ * 2. **CORRECTED 2026-08-15 — the pass ASKS for no tools; it is not denied them.** This item
+ *    used to read "**The pass has no tools** (`allowedTools: []`) … It cannot read a repository,
+ *    so it cannot claim to have", and the second half is false on the Claude backend. Measured
+ *    against `claude` 2.1.224, `--allowedTools` only grants additively and never restricts, so
+ *    `allowedTools: []` denies nothing (`core/claude-cli-runner.ts`,
+ *    `.ai/specs/2026-08-15-bypass-permissions-claude-sessions.md`). What still holds is the
+ *    prompt: the pass is given a note, a catalog and a board digest and asked for JSON, and its
+ *    `cwd` is the boot root rather than any target repository. What no longer holds is the
+ *    STRUCTURAL claim — nothing stops a Claude run here from reading a file, so treat this as an
+ *    intent, not a guarantee, until the runner emits `--disallowedTools` for the allow-list's
+ *    complement (filed in that spec). Property 1 above is unaffected: it is enforced by an
+ *    import-graph test, which is a real structural guard.
  *
  * The pass never creates anything. Approval does, on a human click.
  */
@@ -54,8 +64,10 @@ export interface NoteProcessorDeps {
    * Where the pass's own agent call is configured from: the runner, the planner model and the
    * agent account it bills to all come from this root. The BOOT project — the repo `cezar serve`
    * was started in — because a workspace-level pass has no project of its own and the boot repo is
-   * the one whose config the operator actually set. The pass has no tools, so this is a
-   * configuration lookup and never a working directory anything is read from.
+   * the one whose config the operator actually set. Intended as a configuration lookup rather
+   * than a directory anything is read from — but see property 2 above: on the Claude backend
+   * that is the prompt's intent, not something the runner enforces, so this root is also the
+   * `cwd` a tool-using run could reach.
    */
   bootRoot: string;
   /** Defaults to the real `createRunner`. Injected so a test drives the pass with a scripted

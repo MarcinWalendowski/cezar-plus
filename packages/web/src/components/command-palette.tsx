@@ -200,9 +200,15 @@ export function CommandPalette() {
   const navigate = useNavigate()
 
   useCommandShortcut('k', () => setOpen((current) => !current))
+  // `?scope=auto` (2026-08-15-knowledge-grounded-task-fanout D1): every generic "New task"
+  // entry point marks itself this way, so the freshly-mounted composer defaults its project
+  // pill to All / Auto rather than silently inheriting whichever project is active — see
+  // app-shell.tsx's Link (the sidebar's own copy of this affordance) for the fuller reasoning.
+  // The per-skill row below is deliberately NOT marked — a specific skill belongs to the
+  // project it was picked from.
   const newTask = React.useCallback(() => {
     setOpen(false)
-    navigate('/new')
+    navigate('/new?scope=auto')
   }, [navigate])
   // ⌘N works only in the desktop shell — the browser reserves it (new window), so the page
   // never sees it. `c`-to-create (GitHub/Linear) is the browser-usable accelerator and the one
@@ -395,13 +401,15 @@ function PaletteContent({ close }: { close: () => void }) {
 
         {/* First, headless, and the row an empty query pre-selects: opening ⌘K and pressing
             Enter starts a task. It used to sit ninth in Views with a duplicate down in Actions;
-            one authoritative row at the top is what "New task" being the default means. */}
+            one authoritative row at the top is what "New task" being the default means.
+            `data-nav-to` stays the bare "/new" test hook — the `?scope=auto` marker is only in
+            the actual navigation target, `newTask`'s own comment above has the reasoning. */}
         <CommandGroup>
           <CommandItem
             value="new task"
             data-slot="palette-view"
             data-nav-to="/new"
-            onSelect={() => go('/new')}
+            onSelect={() => go('/new?scope=auto')}
           >
             <PlusIcon aria-hidden="true" />
             New task

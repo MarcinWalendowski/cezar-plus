@@ -10,6 +10,7 @@ import type {
   ProviderStatusResponse,
   RepoResponse,
   Skill,
+  TaskFanoutResponse,
   WorkflowsResponse,
 } from '@open-mercato/cezar-api-client'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
@@ -145,6 +146,29 @@ const OTHER_REPO: RepoResponse = {
   baseBranch: null,
 }
 
+/** One grounded item, one ungrounded item, one unassigned item, and truncated — a single
+ *  fixture that exercises every "renders as X" guard the spec's Verification table names. */
+const FANOUT_RESULT: TaskFanoutResponse = {
+  items: [
+    {
+      projectId: BOOT,
+      projectName: 'cezar',
+      todoId: 'todo-1',
+      title: 'Fix the cezar flake',
+      knowledgeRefs: [{ project: BOOT, slug: 'flake-notes', title: 'Flake notes' }],
+    },
+    {
+      projectId: OTHER,
+      projectName: 'shop-frontend',
+      todoId: 'todo-2',
+      title: 'Ship the storefront',
+      knowledgeRefs: [],
+    },
+  ],
+  unassigned: [{ title: 'unclear scope item', reason: 'could not determine a project' }],
+  truncated: true,
+}
+
 // ---- harness ---------------------------------------------------------------------------------
 
 type Recorded = { method: string; url: string; body?: unknown }
@@ -155,9 +179,11 @@ let requests: Recorded[]
 function serve({
   registry = REGISTRY,
   health = HEALTH,
+  fanout = FANOUT_RESULT,
 }: {
   registry?: ProjectsResponse
   health?: HealthResponse
+  fanout?: TaskFanoutResponse
 } = {}) {
   requests = []
   const json = (payload: unknown, status = 200) =>
@@ -174,6 +200,9 @@ function serve({
       if (url === '/api/v1/projects') return json(registry)
       if (url === '/api/v1/health') return json(health)
       if (url === '/api/v1/providers/status') return json(PROVIDERS)
+      // Workspace-level too (D1/D6): unaffected by which project's scope is currently active,
+      // never prefixed with `/p/<id>` — the fan-out spans the whole workspace by design.
+      if (url === '/api/v1/workspace/task-fanout' && method === 'POST') return json(fanout)
 
       // Split the scope off the path so each route is written once.
       const scoped = url.startsWith(`/api/v1/p/${OTHER}/`)
@@ -256,8 +285,9 @@ describe('the new-task project pill', () => {
     fireEvent.click(projectPill())
     await screen.findByPlaceholderText('search projects…')
     const options = [...document.querySelectorAll(String.raw`[data-slot="project-option"]`)]
-    expect(options.map((o) => o.getAttribute('data-project-id'))).toEqual([BOOT, OTHER])
-    expect(options[1]!.textContent).toContain('develop')
+    // All / Auto (knowledge-grounded-task-fanout.md D1) leads the list, ahead of the registry.
+    expect(options.map((o) => o.getAttribute('data-project-id'))).toEqual(['all', BOOT, OTHER])
+    expect(options[2]!.textContent).toContain('develop')
   })
 
   it('stays hidden when single-project mode pins the registry to the boot project', async () => {
@@ -353,6 +383,8 @@ describe('switching project', () => {
     )
     // The unscoped legacy endpoint must never see it — that would run the task in the wrong repo.
     expect(requests.some((r) => r.method === 'POST' && r.url === '/api/v1/runs')).toBe(false)
+    // A named-project pick keeps today's exact behavior — the fan-out route is All / Auto only.
+    expect(requests.some((r) => r.url === '/api/v1/workspace/task-fanout')).toBe(false)
     const posted = requests.find((r) => r.method === 'POST' && r.url === `/api/v1/p/${OTHER}/runs`)
     expect((posted?.body as { task?: string }).task).toBe('Ship the storefront')
 
@@ -360,5 +392,71 @@ describe('switching project', () => {
     await waitFor(() => expect(pathname()).toBe(`/p/${OTHER}/tasks/run-1`))
     expect(JSON.parse(localStorage.getItem('cez-new-task-draft')!).text).toBe('left behind in cezar')
     expect(JSON.parse(localStorage.getItem(`cez-new-task-draft:${OTHER}`)!).text).toBe('')
+  })
+})
+
+// ---- All / Auto (knowledge-grounded-task-fanout.md, Phase 4) ---------------------------------
+
+describe('All / Auto', () => {
+  it('is the default pill selection when arriving via ?scope=auto', async () => {
+    serve()
+    renderAt(`/p/${BOOT}/new?scope=auto`)
+    await composerReady('None')
+    expect(projectPill().textContent).toContain('All / Auto')
+  })
+
+  it('leads the pill list, and picking it is local — no navigation, unlike picking a project', async () => {
+    serve()
+    renderAt(`/p/${BOOT}/new`)
+    await composerReady('None')
+    // A bare `/p/<id>/new` (no `?scope=auto`) still defaults to the named project, unchanged.
+    expect(projectPill().textContent).toContain('cezar')
+
+    fireEvent.click(projectPill())
+    await screen.findByPlaceholderText('search projects…')
+    fireEvent.click(document.querySelector('[data-slot="project-option"][data-project-id="all"]')!)
+    expect(projectPill().textContent).toContain('All / Auto')
+    // Composer-local state, not a route (D1): picking it never navigates.
+    expect(pathname()).toBe(`/p/${BOOT}/new`)
+
+    // Picking a named project back out of it behaves exactly as it always did.
+    await switchProject(OTHER)
+    await waitFor(() => expect(pathname()).toBe(`/p/${OTHER}/new`))
+    expect(projectPill().textContent).toContain('shop-frontend')
+  })
+
+  it('fans a submit out across the workspace instead of starting a run', async () => {
+    serve()
+    renderAt(`/p/${BOOT}/new?scope=auto`)
+    await composerReady('None')
+    expect(projectPill().textContent).toContain('All / Auto')
+
+    fireEvent.change(textarea(), { target: { value: 'fix the flake and ship the storefront' } })
+    fireEvent.click(screen.getByRole('button', { name: 'File tasks' }))
+
+    await waitFor(() =>
+      expect(
+        requests.some((r) => r.method === 'POST' && r.url === '/api/v1/workspace/task-fanout'),
+      ).toBe(true),
+    )
+    // D5/the spec's own guard: nothing starts a run on submit — no run record may exist after.
+    expect(requests.some((r) => r.method === 'POST' && /\/runs$/.test(r.url))).toBe(false)
+    const posted = requests.find(
+      (r) => r.method === 'POST' && r.url === '/api/v1/workspace/task-fanout',
+    )
+    expect((posted?.body as { input?: string }).input).toBe('fix the flake and ship the storefront')
+
+    // A dialog, not a navigation — the composer stays put.
+    expect(pathname()).toBe(`/p/${BOOT}/new`)
+    expect(await screen.findByText('Fix the cezar flake')).toBeTruthy()
+    expect(screen.getByText('Ship the storefront')).toBeTruthy()
+    // Grounded item shows its citation …
+    expect(screen.getByText('Flake notes')).toBeTruthy()
+    // … an empty knowledgeRefs[] renders as "not grounded", never as nothing (Verification table).
+    expect(screen.getByText('not grounded — no matching knowledge found')).toBeTruthy()
+    // Unassigned work is surfaced, not silently dropped.
+    expect(screen.getByText('unclear scope item', { exact: false })).toBeTruthy()
+    // A truncated batch says so out loud rather than truncating silently.
+    expect(screen.getByText(/more work than one pass could file/)).toBeTruthy()
   })
 })

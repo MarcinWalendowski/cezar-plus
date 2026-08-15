@@ -569,8 +569,14 @@ function SidebarContent({
           {/* A Router Link since R4 Step 1.1: the React /new composer is real, so deliberate
               New task affordances stay inside the SPA. Full document loads of /new (the
               bookmarklet contract) land on the shell like any route (static-ui.ts) — the
-              React composer has owned auto-start parity since R4 Step 1.3. */}
-          <Link to="/new" onClick={onNavigate}>
+              React composer has owned auto-start parity since R4 Step 1.3.
+
+              `?scope=auto` (2026-08-15-knowledge-grounded-task-fanout D1): this is the GENERIC
+              entry point, so it must not silently bind the task to whichever project the sidebar
+              happens to be standing in — the composer reads this once to default its project
+              pill to All / Auto instead of the active project (new-task.tsx). Picking a project
+              from that pill still navigates to `/p/<id>/new`, unaffected. */}
+          <Link to="/new?scope=auto" onClick={onNavigate}>
             <PlusIcon className="size-[15px]" aria-hidden="true" />
             New task
             {/* Decorative: the `c`-to-create accelerator is registered in the command palette.

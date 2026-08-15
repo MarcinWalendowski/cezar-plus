@@ -94,8 +94,22 @@ export function resolveComposerRunMode(input: ComposerRunModeInput): {
  * interactive-skill recommendation and the workspace default. `hasGit` only distinguishes
  * "opted out" from "there is no repository here", which is the difference between a warning
  * and an explanation.
+ *
+ * `allAuto` (D1/D5, `.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md`) is a FOURTH state
+ * and it wins over the other three, because under All / Auto nothing runs at all: submit files
+ * tasks and stops. The composer keeps every pill it has in project mode (one composer, per the
+ * owner's instruction), which means the runner, model, variants and worktree chips are all on
+ * screen stating settings this submit will not use — so this line says so rather than leaving a
+ * user to discover it from a run that never appears.
  */
-export function composerRunModeNote(input: { worktree: boolean; hasGit: boolean }): string {
+export function composerRunModeNote(input: {
+  worktree: boolean
+  hasGit: boolean
+  allAuto?: boolean
+}): string {
+  if (input.allAuto) {
+    return 'All / Auto files tasks on the board — nothing starts, so the run settings below do not apply.'
+  }
   if (input.worktree) return 'Runs in an isolated worktree — review everything before it lands.'
   if (input.hasGit) return 'Runs in the repo working tree — your checkout is modified directly.'
   return 'Runs in place — no git repository detected, so there is no worktree to isolate in.'

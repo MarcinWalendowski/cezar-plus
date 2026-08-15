@@ -350,7 +350,8 @@ describe('Views group', () => {
 
     fireEvent.keyDown(window, { key: 'n', metaKey: true })
 
-    expect(location()).toBe('/new')
+    // `?scope=auto` (D1): a generic entry point, so the composer defaults to All / Auto.
+    expect(location()).toBe('/new?scope=auto')
     expect(dialog()).toBeNull()
   })
 
@@ -359,7 +360,7 @@ describe('Views group', () => {
 
     fireEvent.keyDown(window, { key: 'c' })
 
-    expect(location()).toBe('/new')
+    expect(location()).toBe('/new?scope=auto')
     expect(dialog()).toBeNull()
   })
 
@@ -855,7 +856,8 @@ describe('Actions group', () => {
 
     fireEvent.click(document.querySelector('[data-nav-to="/new"]') as HTMLElement)
 
-    expect(location()).toBe('/new')
+    // `data-nav-to` stays the bare test hook; the actual navigation carries `?scope=auto` (D1).
+    expect(location()).toBe('/new?scope=auto')
     await waitFor(() => expect(dialog()).toBeNull())
   })
 })
