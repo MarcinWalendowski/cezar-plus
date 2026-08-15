@@ -1,7 +1,21 @@
 # Unreleased
 
 ## 🗑 Removed
-- **The workspace notes capture inbox (F3 feature B) is gone.** `CEZ_NOTES` no longer does
+- **SUPERSEDED 2026-08-15 by `11467f44` (the note-to-spec pipeline, spec
+  `.ai/specs/2026-08-14-note-to-spec-pipeline.md`) — every specific claim below is now FALSE, and
+  the entry is kept only because the thing it removed genuinely was removed.** The capture inbox
+  was rebuilt six commits later as a different feature under the **same flag and the same names**,
+  so a reader who acts on the sentences below will be wrong about all four of them. As of today:
+  `CEZ_NOTES=1` gates `capabilities.notes` (`server/capabilities.ts:218`); `notes` is in the health
+  payload (`contract/src/health.ts:114`); the eleven `/api/v1/workspace/notes*` routes ARE
+  registered (`server/notes-routes.ts`, mounted at `server.ts:6462`) and answer normally rather
+  than `404`; the `/notes` page and its nav item are back (`web/src/routes.tsx:411,679`); and
+  `~/.cezar/notes.json` / `notes-log.ndjson` are named by `paths.ts:135` and `:141`. What survives
+  from the entry is only its narrow historical claim: the **inert scaffold** described below,
+  which answered constant empty payloads and rendered "Notes is not built yet", is gone. The
+  pipeline that replaced it is real — it triages a note into per-project proposals behind a human
+  approval gate. Original text, unchanged:
+  **The workspace notes capture inbox (F3 feature B) is gone.** `CEZ_NOTES` no longer does
   anything, `capabilities.notes` is no longer in the `/api/v1/health` payload, the
   `/api/v1/workspace/notes*` routes are unregistered (those paths now answer `404`, like any
   `/api/v1` path that was never registered), the `/notes` page and its nav item are removed, and `~/.cezar/notes.json` /
