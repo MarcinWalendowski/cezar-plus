@@ -279,6 +279,92 @@ describe('NotesRoute: the review gate', () => {
   })
 })
 
+describe('NotesRoute: resulting-run status (D27 Phase 4a)', () => {
+  /**
+   * `resultingTasks` itself carries no status — the row reads it live from the run, by explicit
+   * project id (`getProjectRun`), since `/notes` is workspace-level and the row's project is
+   * usually not whichever one the sidebar has active. These guard that a budget-stopped
+   * implementation run does not read as finished from this list, the same defect class
+   * `attention.test.ts` and `review-panel.test.tsx` guard on the thread surfaces.
+   */
+  const RESULTING_LIST: NotesListResponse = {
+    notes: [
+      {
+        ...(LIST.notes[0] as NonNullable<(typeof LIST.notes)[0]>),
+        resultingTasks: [
+          { proposalId: 'p1', projectId: 'api', runId: 'run_7', createdAt: '2026-08-14T11:00:00.000Z', kind: 'implementation' },
+        ],
+      },
+    ],
+    truncated: false,
+  }
+
+  function stubFetchWithRun(runBody: unknown): SentRequest[] {
+    const sent: SentRequest[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+        const path = String(input)
+        const method = init.method ?? 'GET'
+        sent.push({ path, method, body: typeof init.body === 'string' ? init.body : undefined })
+        if (path === '/api/v1/health') return jsonResponse(HEALTH_ON)
+        if (method === 'GET' && path.startsWith('/api/v1/workspace/notes/')) return jsonResponse({ note: NOTE })
+        if (method === 'GET' && path.startsWith('/api/v1/workspace/notes')) return jsonResponse(RESULTING_LIST)
+        if (method === 'GET' && path === '/api/v1/p/api/runs/run_7') return jsonResponse(runBody)
+        return jsonResponse({})
+      }),
+    )
+    return sent
+  }
+
+  it('a budget-stopped implementation run reads as stopped, not as a plain review', async () => {
+    // Guard: the row must not present a budget-stopped run as "needs review" (which reads as
+    // finished work waiting to be looked at). Mutation that must turn this red: remove the
+    // `<ResultingRunStatus>` render from `ResultingRuns` in notes.tsx — confirmed red, then
+    // reverted (see report).
+    const sent = stubFetchWithRun({ id: 'run_7', status: 'review', stopReason: 'budget' })
+    renderNotes()
+
+    fireEvent.click(await screen.findByText('Ship the exporter'))
+    await screen.findByText('Implementation run')
+
+    await screen.findByText('budget stopped')
+    expect(screen.queryByText('needs review')).toBeNull()
+    expect(sent.some((r) => r.method === 'GET' && r.path === '/api/v1/p/api/runs/run_7')).toBe(true)
+  })
+
+  it('a plain review implementation run — no stopReason — reads as "needs review"', async () => {
+    // The inverse fixture: same row, same project, but a run that actually finished and is
+    // waiting on a human. Distinguishing this from the case above is the whole point.
+    stubFetchWithRun({ id: 'run_7', status: 'review' })
+    renderNotes()
+
+    fireEvent.click(await screen.findByText('Ship the exporter'))
+    await screen.findByText('Implementation run')
+
+    await screen.findByText('needs review')
+    expect(screen.queryByText('budget stopped')).toBeNull()
+  })
+
+  it('reads the run from its OWN project, not the workspace-level scope the page mounts under', async () => {
+    // Guard: a request to the wrong project (or the implicit `queryScope()`/'default' scope)
+    // must not be mistaken for the row's answer. Mutation that must turn this red: swap
+    // `getProjectRun(projectId, id)` for the implicit-scope `getRun(id)` in `useProjectRun` (or
+    // in `ResultingRunStatus`) — the stub below answers nothing for `/api/v1/p/default/runs/*`
+    // or `/api/v1/runs/*`, so the badge would never appear. Confirmed red, then reverted.
+    const sent = stubFetchWithRun({ id: 'run_7', status: 'done' })
+    renderNotes()
+
+    fireEvent.click(await screen.findByText('Ship the exporter'))
+    await screen.findByText('Implementation run')
+
+    await screen.findByText('done')
+    expect(sent.some((r) => r.path.includes('/p/default/runs/') || r.path === '/api/v1/runs/run_7')).toBe(
+      false,
+    )
+  })
+})
+
 describe('NotesRoute: polling', () => {
   /**
    * `.ai/specs/2026-08-14-note-to-spec-pipeline.md`, "Runtime E2E — EXECUTED 2026-08-15": the API

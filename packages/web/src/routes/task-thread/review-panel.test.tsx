@@ -131,6 +131,44 @@ describe('the review gate on the thread', () => {
     expect(document.querySelector('[data-slot="review-panel"]')).toBeNull()
   })
 
+  it('a budget-stopped run (D27 Phase 4a) shows a distinct banner, never the "ready to review" one', () => {
+    // Guard: a run stopped at its step budget must not read as "review the changes before
+    // anything lands" — that phrase means finished work, and a budget stop is the opposite fact.
+    // Mutation that must turn this red: drop the `budgetStopped` branch in `ReviewPanel` so both
+    // cases render the plain violet banner. Confirmed red, then reverted (see report).
+    stubFetch()
+    renderWithProviders(<ReviewPanel run={run('review', { stopReason: 'budget' })} />)
+    const banner = document.querySelector('[data-slot="review-banner"]')
+    expect(banner?.getAttribute('data-stop-reason')).toBe('budget')
+    expect(banner?.textContent).toContain('Stopped — step budget reached, work is incomplete')
+    expect(banner?.textContent).not.toContain('Review the changes before anything lands')
+    // Diff and actions are unchanged underneath — a budget stop still lets you send back,
+    // draft a PR, or accept what got done.
+    expect(document.querySelector('[data-slot="review-actions"]')).not.toBeNull()
+  })
+
+  it('a plain review run — no stopReason — keeps the violet "ready to review" banner untouched', () => {
+    // Guard: the inverse of the test above. Mutation that must turn this red: apply the budget
+    // banner unconditionally (drop the `run.stopReason === 'budget'` check). Confirmed red, then
+    // reverted (see report).
+    stubFetch()
+    renderWithProviders(<ReviewPanel run={run('review')} />)
+    const banner = document.querySelector('[data-slot="review-banner"]')
+    expect(banner?.hasAttribute('data-stop-reason')).toBe(false)
+    expect(banner?.textContent).toContain('Review the changes before anything lands')
+    expect(banner?.textContent).not.toContain('step budget reached')
+  })
+
+  it('✓ Accept still works on a budget-stopped run — incomplete does not mean inert', async () => {
+    const sent = stubFetch()
+    renderWithProviders(<ReviewPanel run={run('review', { stopReason: 'budget' })} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Accept/ }))
+    await waitFor(() => {
+      expect(sent.filter((r) => r.method === 'POST' && r.path === '/api/v1/runs/r1/finish')).toHaveLength(1)
+    })
+  })
+
   it('shows the working spinner ONLY while the run is running (the live heartbeat)', () => {
     stubFetch()
     const { rerenderWithProviders } = renderWithProviders(

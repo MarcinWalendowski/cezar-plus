@@ -27,6 +27,7 @@ import {
   getLaunchKey,
   getOpenTargets,
   getProviderStatus,
+  getProjectRun,
   getProjectRuns,
   getProjects,
   getRunnerModels,
@@ -991,6 +992,25 @@ export function useRun(id: string | undefined) {
     queryKey: queryKeys.runs.detail(id ?? ''),
     queryFn: ({ signal }) => getRun(id as string, { signal }),
     enabled: Boolean(id),
+  })
+}
+
+/**
+ * One run by EXPLICIT project id — `useRun`'s counterpart for a caller that already knows which
+ * project a run lives in without that project being the active scope, the same relationship
+ * `useProjectRuns` bears to `useRuns()` above. Keyed `[projectId, 'runs', 'detail', id]`: for the
+ * ACTIVE project that is the very entry `useRun()` fills, so the two share a cache entry; for any
+ * other project it is that project's own, never bleeding into another project's `'detail'` list.
+ *
+ * First consumer: the notes list's `ResultingRuns` row (D27 Phase 4a) reading a run's
+ * `stopReason` from `/notes`, a workspace-level page where no project is "active" and the row's
+ * project usually is not the one the sidebar has open.
+ */
+export function useProjectRun(projectId: string, id: string, enabled = true) {
+  return useQuery({
+    queryKey: [projectId, 'runs', 'detail', id] as const,
+    queryFn: ({ signal }) => getProjectRun(projectId, id, { signal }),
+    enabled,
   })
 }
 

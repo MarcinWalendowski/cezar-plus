@@ -506,6 +506,21 @@ export async function getRun(id: string, opts?: ReadOptions): Promise<ApiRun> {
   )
 }
 
+/** One run by EXPLICIT project id (`GET /api/p/:projectId/runs/:id`) — the `getProjectRuns`
+ *  pattern (step 3.3) applied to a single run, for a caller that already knows which project a
+ *  run lives in without that project being the active scope. First consumer: the notes list's
+ *  `ResultingRuns` row (D27 Phase 4a), reading a run's `stopReason` from a workspace-level page
+ *  where no project is "active". */
+export async function getProjectRun(projectId: string, id: string, opts?: ReadOptions): Promise<ApiRun> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].$get(
+      { param: { projectId, id: encodeURIComponent(id) } },
+      init(opts),
+    ),
+    runPath(id),
+  )
+}
+
 export async function getRunHistory(
   id: string,
   cursor?: string,

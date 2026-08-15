@@ -5,6 +5,7 @@ import {
   CornerUpLeftIcon,
   ExternalLinkIcon,
   EyeIcon,
+  GaugeIcon,
   GitPullRequestIcon,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
@@ -33,22 +34,47 @@ import { useFinishRun } from './use-finish-run'
  * a notes box with ↩ Send back (`POST /continue` with the `Review feedback:` prefix
  * — legacy semantics verbatim), Draft PR (`POST /pr`; 409 → the copyable `git merge` manual
  * fallback), and ✓ Accept (the shared finish action from use-finish-run.ts).
+ *
+ * **`stopReason: 'budget'` swaps the banner, not the actions** (D27 Phase 4a,
+ * `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`): a run halted at its step
+ * ceiling landed in `review` for the same reason a finished one does — a human has to look —
+ * but "review the changes before anything lands… nothing merges on its own" reads as "this is
+ * done, go check it," which is the opposite fact. Send back / Draft PR / Accept all still make
+ * sense for an incomplete run, so `RunDiff`/`ReviewActions` are unchanged underneath.
  */
 export function ReviewPanel({ run }: { run: ApiRun }) {
+  const budgetStopped = run.stopReason === 'budget'
   return (
     <section data-slot="review-panel" aria-label="Review the changes" className="flex flex-col gap-3">
-      <div
-        data-slot="review-banner"
-        className="flex items-center gap-2.5 rounded-md border border-violet/30 bg-violet/10 px-3.5 py-2.5"
-      >
-        <EyeIcon className="size-4 shrink-0 text-violet" aria-hidden="true" />
-        <p className="min-w-0 text-[13px]">
-          <span className="font-semibold">Review the changes before anything lands.</span>{' '}
-          <span className="text-muted-foreground">
-            Read the diff, send notes back, draft a PR — or accept. Nothing merges on its own.
-          </span>
-        </p>
-      </div>
+      {budgetStopped ? (
+        <div
+          data-slot="review-banner"
+          data-stop-reason="budget"
+          className="flex items-center gap-2.5 rounded-md border border-pending/40 bg-pending/10 px-3.5 py-2.5"
+        >
+          <GaugeIcon className="size-4 shrink-0 text-pending-strong" aria-hidden="true" />
+          <p className="min-w-0 text-[13px]">
+            <span className="font-semibold">Stopped — step budget reached, work is incomplete.</span>{' '}
+            <span className="text-muted-foreground">
+              The agent hit its step ceiling mid-task, not finished work. Read what it got through,
+              send it back with a bigger budget, or accept what is here.
+            </span>
+          </p>
+        </div>
+      ) : (
+        <div
+          data-slot="review-banner"
+          className="flex items-center gap-2.5 rounded-md border border-violet/30 bg-violet/10 px-3.5 py-2.5"
+        >
+          <EyeIcon className="size-4 shrink-0 text-violet" aria-hidden="true" />
+          <p className="min-w-0 text-[13px]">
+            <span className="font-semibold">Review the changes before anything lands.</span>{' '}
+            <span className="text-muted-foreground">
+              Read the diff, send notes back, draft a PR — or accept. Nothing merges on its own.
+            </span>
+          </p>
+        </div>
+      )}
 
       <RunDiff runId={run.id} />
       <ReviewActions run={run} />

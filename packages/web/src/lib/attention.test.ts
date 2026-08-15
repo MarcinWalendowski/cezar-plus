@@ -126,6 +126,58 @@ describe('deriveAttention', () => {
   })
 })
 
+describe('a run stopped at its step budget (D27 Phase 4a)', () => {
+  const budgetStopped = run({ status: 'review', stopReason: 'budget' })
+  const plainReview = run({ status: 'review' })
+
+  it('renders distinctly from a plain review — not violet, not "needs review"', () => {
+    // Guard: render both the same (drop the `stopReason` check) and this must go red. Confirmed
+    // red by temporarily removing the `run.stopReason === 'budget'` branch from `deriveAttention`
+    // and reverting.
+    const attention = deriveAttention(budgetStopped)
+    expect(attention).toEqual({ bucket: 'waiting', tone: 'pending', pulse: true, label: 'budget stopped' })
+    expect(attention).not.toEqual(deriveAttention(plainReview))
+    expect(attention.tone).not.toBe('violet')
+    expect(attention.label).not.toBe('needs review')
+  })
+
+  it('leaves a plain review — no stopReason — completely unchanged', () => {
+    // Guard: apply the budget treatment unconditionally (drop the `=== 'budget'` comparison, or
+    // drop the `stopReason` check entirely) and this must go red. Confirmed red the same way as
+    // above — a version that treats every `review` as budget-stopped fails this immediately.
+    expect(deriveAttention(plainReview)).toEqual({
+      bucket: 'waiting',
+      tone: 'violet',
+      pulse: true,
+      label: 'needs review',
+    })
+  })
+
+  it('still wants attention — same rank as a plain review', () => {
+    expect(wantsAttention(budgetStopped)).toBe(true)
+    expect(ATTENTION_RANK[deriveAttention(budgetStopped).bucket]).toBe(
+      ATTENTION_RANK[deriveAttention(plainReview).bucket],
+    )
+  })
+
+  it('a done run is unaffected — stopReason only means anything alongside status "review"', () => {
+    // Guard: read `stopReason` without also checking `status === 'review'` and this must go red.
+    // Confirmed red by hoisting the budget branch above the status chain (matching on
+    // `stopReason` alone) — a `done` run then wrongly reads as budget-stopped.
+    const doneWithStaleStopReason = run({ status: 'done', stopReason: 'budget' })
+    expect(deriveAttention(doneWithStaleStopReason)).toEqual(deriveAttention(run({ status: 'done' })))
+    expect(deriveAttention(doneWithStaleStopReason).label).toBe('done')
+    expect(deriveAttention(doneWithStaleStopReason).tone).toBe('success')
+  })
+
+  it.each(ALL_STATUSES.filter((status) => status !== 'review'))(
+    'is ignored on every non-review status (%s)',
+    (status) => {
+      expect(deriveAttention(run({ status, stopReason: 'budget' }))).toEqual(deriveAttention(run({ status })))
+    },
+  )
+})
+
 describe('ATTENTION_RANK', () => {
   it('is the spec ladder: permission > error > waiting > running > unseen', () => {
     const order = Object.entries(ATTENTION_RANK)

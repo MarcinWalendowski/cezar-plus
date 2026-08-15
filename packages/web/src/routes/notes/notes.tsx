@@ -8,14 +8,17 @@ import {
   useDeleteWorkspaceNote,
   useHealth,
   useProcessWorkspaceNote,
+  useProjectRun,
   useRejectWorkspaceNote,
   useWorkspaceNote,
   useWorkspaceNotes,
 } from '@/api/queries'
 import { CenteredState } from '@/components/centered-state'
 import { Link, scopeTo } from '@/lib/project-router'
+import { deriveAttention } from '@/lib/attention'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Pill } from '@/components/pill'
 import { Textarea } from '@/components/ui/textarea'
 
 /**
@@ -300,6 +303,7 @@ function ResultingRuns({ note }: { note: NoteSummary }) {
           >
             {row.kind === 'spec' ? 'Spec run' : 'Implementation run'}
           </Link>
+          <ResultingRunStatus projectId={row.projectId} runId={row.runId} />
           {row.specPath ? <span className="text-muted-foreground">{row.specPath}</span> : null}
           {row.kind === 'spec' ? (
             <Link
@@ -312,6 +316,31 @@ function ResultingRuns({ note }: { note: NoteSummary }) {
         </div>
       ))}
     </section>
+  )
+}
+
+/**
+ * The row's live status, read by explicit project id (`useProjectRun`) since `resultingTasks`
+ * itself carries no status field (D14's slim shape) and `/notes` is workspace-level — no project
+ * is "active" here for an implicit-scope fetch to lean on.
+ *
+ * Exists so a budget-stopped implementation run (D27 Phase 4a) does not read as finished from
+ * this list: without it, the row was just a link, silent about what the run actually landed at —
+ * indistinguishable from a run that finished clean. Goes through `deriveAttention`, same as every
+ * other run surface, so this can never disagree with the thread header or the tasks table about
+ * what a `review` + `stopReason: 'budget'` run means.
+ *
+ * Renders nothing while loading or on a failed read — the link above still works regardless; a
+ * missing badge is a quieter degradation than a row that flashes or blocks on this fetch.
+ */
+function ResultingRunStatus({ projectId, runId }: { projectId: string; runId: string }) {
+  const run = useProjectRun(projectId, runId)
+  if (!run.data) return null
+  const attention = deriveAttention(run.data)
+  return (
+    <Pill dot={attention.tone} pulse={attention.pulse}>
+      {attention.label}
+    </Pill>
   )
 }
 

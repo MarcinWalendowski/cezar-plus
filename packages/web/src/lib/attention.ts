@@ -75,8 +75,10 @@ function isUnseen(_run: AttentionInput): boolean {
 /** What attention derivation actually reads. `Pick`ed rather than the full `RunRecord` so
  *  surfaces that only have a status — the compare view's `GroupVariant` columns — can use the
  *  same canonical function instead of inventing a second status-to-tone mapping. `activity` is
- *  optional (#490), so status-only callers keep working unchanged. */
-export type AttentionInput = Pick<RunRecord, 'status' | 'activity' | 'autoResumeAt'>
+ *  optional (#490), so status-only callers keep working unchanged. `stopReason` is optional too
+ *  (D27 Phase 1) — a caller whose type lacks the field entirely (`RunIndexEntry`,
+ *  `WorkspaceRunSummary`) stays assignable, it just cannot distinguish a budget stop (see below). */
+export type AttentionInput = Pick<RunRecord, 'status' | 'activity' | 'autoResumeAt' | 'stopReason'>
 
 /**
  * `RunRecord` → attention.
@@ -85,6 +87,11 @@ export type AttentionInput = Pick<RunRecord, 'status' | 'activity' | 'autoResume
  * lower rung. Tones follow the mockups (`mockups/tasks-home.html`):
  *
  *  - `waiting` → amber/pending: the agent stopped and is asking you something.
+ *  - `review` with `stopReason: 'budget'` → amber/pending too, NOT violet: the run hit its step
+ *    ceiling mid-work, not "here is finished work to look at" (D27 Phase 4a,
+ *    `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`, "a budget stop looks
+ *    exactly like finishing" — the defect this branch exists to prevent). Ahead of the plain
+ *    `review` rung below because the chain is first-match-wins.
  *  - `review` → violet, matching the violet PR chip beside it: there is work to look at.
  *    (The legacy UI painted both amber; the redesign splits them, per the mockup.)
  *  - `running` → violet, pulsing.
@@ -109,6 +116,9 @@ export function deriveAttention(run: AttentionInput): Attention {
   }
   if (run.status === 'waiting') {
     return { bucket: 'waiting', tone: 'pending', pulse: true, label: 'needs you' }
+  }
+  if (run.status === 'review' && run.stopReason === 'budget') {
+    return { bucket: 'waiting', tone: 'pending', pulse: true, label: 'budget stopped' }
   }
   if (run.status === 'review') {
     return { bucket: 'waiting', tone: 'violet', pulse: true, label: 'needs review' }
