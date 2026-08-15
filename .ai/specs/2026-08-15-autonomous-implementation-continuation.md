@@ -1,7 +1,9 @@
 # Autonomous implementation continuation
 
-> **Status:** **Phases 1, 2, 3, 4a and 4b implemented and pushed · QA Needed** (the runtime E2E has
-> NOT been run, so nothing here is Done). Commits: `3e3b10a8` (the budget),
+> **Status:** **Implemented — all phases, and the runtime E2E has been executed and passed**
+> (2026-08-15; see "Runtime E2E — EXECUTED" at the end of Verification for the matrix and the two
+> unrelated defects it turned up). The one thing not driven live is the composer toggle's render in
+> a browser; both halves either side of it are covered. Commits: `3e3b10a8` (the budget),
 > `30ff1847` (the budget counts turns, not workflow steps), `20a7c7b5` (a budget stop no longer
 > renders as a finish), `9532d1dd` (the workflow and the trigger), and the Phase 4b commit (the
 > composer toggle, `stopReason` on both cross-project boards, and the queue-watchdog fix below). ·
@@ -262,6 +264,40 @@ least two registered projects: capture an autonomous note naming work in both. C
 run writes its spec and then, unprompted, an implementation run starts in that same repo against
 that spec. Confirm a deliberately tiny budget produces a run in `review` with `stopReason: 'budget'`
 that the notes UI does **not** present as finished. Confirm nothing was pushed to any remote.
+
+### Runtime E2E — EXECUTED 2026-08-15, passed
+
+Run against the real server (`cezar serve`, `dist/`), real HTTP, real stores, with `CEZ_DRY_RUN=1`
+so the agent is the bundled mock and no model is called. Three throwaway git repos, a **neutral
+boot repo** (`projC`) plus `projA`/`projB` registered through `POST /api/v1/projects`,
+`config.stepBudget: 1`, `CEZ_NOTES=1` and `CEZ_WORKSPACE_VIEWS=1`.
+
+| Step | Result |
+|---|---|
+| `POST /workspace/notes` with `autonomous: true` | persisted `autonomous: true` — the field is real end to end, which is what let Phase 4b's toggle come back |
+| `POST /notes/:id/process` | triage routed to a **registered project id**, one proposal |
+| `POST /notes/:id/approve` | started a `note-to-spec` run; it reached `done` with **no** `stopReason` |
+| *(nothing pressed)* | an `autonomous-implementation` run started **unprompted** in the same project, `autonomous: true` |
+| that run's terminal state | **`review` + `stopReason: 'budget'`, `stepsUsed: 1`** — not `done` |
+| `GET /p/:id/runs` | carries `stopReason: 'budget'` |
+| `GET /workspace/runs` | carries `stopReason: 'budget'` — the cross-project board, and the exact field zod stripped before this change |
+| remotes / push | all three repos have **zero remotes**; no push attempt in either server log |
+
+**Not covered at runtime, stated plainly:** the composer toggle was not driven in a browser. Its
+two halves are each proven separately — toggle → request payload by the paired unit guards (on AND
+off), and payload → behaviour by this E2E — so only the render itself is untested live.
+
+Two things this run found that the suite could not, neither of them D27:
+
+1. **`GET /workspace/runs` is gated behind `CEZ_WORKSPACE_VIEWS`, not `CEZ_NOTES`.** With the flag
+   off it answers `200` with an empty payload by design (D19/D4), so the board looks broken rather
+   than disabled. Correct behaviour, worth knowing before diagnosing an empty board.
+2. **Two `RunStore` instances over one project root silently destroyed run history.** Booting with
+   `--repo <X>` *and* registering that same `X` through `POST /projects` yields two contexts for one
+   root; the empty one flushed last and wrote `[]` over a `runs.json` that held two real runs. The
+   API reported `0 runs` while the file still had them, then the file was truncated on restart.
+   Reproduced, then avoided by booting on a neutral repo — at which point the records survived a
+   restart intact. **Filed separately; it is not part of this spec.**
 
 Gates, in order, and **`npm test -- <path>` never `npx vitest`** (PLAN.md D21): `npm run typecheck`,
 `npm test`, `npm run test:unit`, `npm run build`, `npm run test:package`.
