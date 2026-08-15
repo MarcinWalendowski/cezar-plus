@@ -821,8 +821,9 @@ const streamSSENoBuffer: typeof streamSSE = (c, cb, onError) => {
   return res;
 };
 
-// A run starts from a named workflow OR an inline chain of steps (spec 008 —
-// the approved plan is posted as-is, never written to a file).
+// A run starts from a named workflow, an inline chain of steps (spec 008 — the approved plan is
+// posted as-is, never written to a file), or neither — which falls back to quick-task server-side
+// (2026-08-15, the composer's "None" pill item). Naming BOTH is still refused, below.
 const startRunSchema = z
   .object({
     workflow: z.string().min(1).optional(),
@@ -882,8 +883,8 @@ const startRunSchema = z
     // string here; a todo id is a short generated key.
     todoId: z.string().min(1).max(200, 'must be at most 200 characters').optional(),
   })
-  .refine((b) => Boolean(b.workflow) !== Boolean(b.steps), {
-    message: 'provide either "workflow" or "steps", not both',
+  .refine((b) => !(b.workflow && b.steps), {
+    message: 'provide "workflow" or "steps", not both',
   });
 
 const pickSchema = z.object({
@@ -953,11 +954,15 @@ const appearanceSchema = z.object({
 
 const uiStateSchema = z
   .object({
+    // `null` is the composer's "None" pick (2026-08-15) persisted as a sticky default — distinct
+    // from absent ("nothing chosen yet"), which resolves the same cold-default way. A stored
+    // value from before this change is a plain object and still parses, so no migration runs.
     lastTask: z
       .object({
         source: z.enum(['workflow', 'skill']),
         ref: z.string().min(1).max(200),
       })
+      .nullable()
       .optional(),
     // Composer picker recency (newest first, capped) + the remembered worktree
     // choice for single-skill runs. Additive prefs, like the rest of ui-state.
@@ -4476,10 +4481,16 @@ export function createApp(deps: ServerDeps) {
           source: 'built-in',
           steps: parsed.data.steps,
         };
-      } else {
+      } else if (parsed.data.workflow) {
         const { workflows } = await loadWorkflows(repoRoot);
         workflow = workflows.find((w) => w.name === parsed.data.workflow);
         if (!workflow) return c.json({ error: `unknown workflow: ${parsed.data.workflow}` }, 404);
+      } else {
+        // Neither named (the composer's "None" pill, 2026-08-15): fall back to quick-task, the
+        // same resolution POST /todos/:id/start already uses below — a project's own file wins,
+        // the built-in is the floor, so this branch can never 404.
+        const { workflows } = await loadWorkflows(repoRoot);
+        workflow = workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW;
       }
       const fallback = parsed.data.runner ?? (await loadConfig(repoRoot)).defaultRunner;
       const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback));

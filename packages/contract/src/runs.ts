@@ -677,14 +677,15 @@ export const createRunInputBaseSchema = z
   });
 
 /**
- * `POST /runs`. Exactly one of `workflow` / `steps` — the server rejects both or neither.
+ * `POST /runs`. At most one of `workflow` / `steps` — naming both is a 400; naming neither
+ * resolves server-side to `quick-task` (the composer's "None" pill item, 2026-08-15).
  *
  * Every bound here is the server's own (#429): an unbounded body must never reach a spawned
  * process, so a client that validates before sending gets the same answer the route would give.
  */
 export const createRunInputSchema = createRunInputBaseSchema.refine(
-  (b) => Boolean(b.workflow) !== Boolean(b.steps),
-  { message: 'provide either "workflow" or "steps", not both' },
+  (b) => !(b.workflow && b.steps),
+  { message: 'provide "workflow" or "steps", not both' },
 );
 export type CreateRunInput = z.input<typeof createRunInputSchema>;
 

@@ -195,15 +195,25 @@ export function orderProjects(
   })
 }
 
-export function CommandPalette() {
+export function CommandPalette({ notesAvailable = false }: { notesAvailable?: boolean } = {}) {
   const [open, setOpen] = React.useState(false)
   const navigate = useNavigate()
-
+  // The UNSCOPED twin — `/workspace/new` lives outside every project, and the scope-wrapping
+  // `navigate` would prefix it with the active `/p/<id>` (the same reasoning `PaletteContent`'s
+  // own `goGlobal`, below, is built on).
+  const routerNavigate = useRouterNavigate()
+  // `notesAvailable` is a PROP, not a `useHealth()` call here: the `n`/`c` shortcuts fire even
+  // while the dialog is closed (`PaletteContent` mounts only on open), and calling `useHealth()`
+  // at this top level would fire `/api/v1/health` on every mount regardless of whether the
+  // palette is ever opened — the exact eager-fetch the "palette is lazy" contract forbids. The
+  // caller (`AppShellContainer`) already runs `useHealth()` for its own nav/composer wiring, so
+  // this is the same value threaded down rather than fetched twice.
   useCommandShortcut('k', () => setOpen((current) => !current))
   const newTask = React.useCallback(() => {
     setOpen(false)
-    navigate('/new')
-  }, [navigate])
+    if (notesAvailable) routerNavigate('/workspace/new')
+    else navigate('/new')
+  }, [navigate, routerNavigate, notesAvailable])
   // ⌘N works only in the desktop shell — the browser reserves it (new window), so the page
   // never sees it. `c`-to-create (GitHub/Linear) is the browser-usable accelerator and the one
   // the hint chips advertise; ⌘N stays registered for the Electron shell where it fires.
@@ -315,6 +325,9 @@ function PaletteContent({ close }: { close: () => void }) {
   // Health is cached by the shell's chips; here it gates the forge-gated Views row (R6 1.1) —
   // the palette must not offer a GitHub view the sidebar honestly hides.
   const health = useHealth()
+  // D2: which composer "New task" means — same capability, same target the sidebar CTA and the
+  // `n`/`c` shortcuts (`CommandPalette`, above) resolve to.
+  const notesAvailable = health.data?.capabilities.notes === true
   const now = Date.now()
 
   // Same threshold as the sidebar's grouped nav (`app-shell-container.tsx`): with one registered
@@ -397,11 +410,14 @@ function PaletteContent({ close }: { close: () => void }) {
             Enter starts a task. It used to sit ninth in Views with a duplicate down in Actions;
             one authoritative row at the top is what "New task" being the default means. */}
         <CommandGroup>
+          {/* D2: the project-less composer when the capability is on, else `/new` as before —
+              `goGlobal` for the former since it lives outside every project (see its own comment
+              below), `go` (scope-wrapping) for the latter, exactly as before this change. */}
           <CommandItem
             value="new task"
             data-slot="palette-view"
-            data-nav-to="/new"
-            onSelect={() => go('/new')}
+            data-nav-to={notesAvailable ? '/workspace/new' : '/new'}
+            onSelect={() => (notesAvailable ? goGlobal('/workspace/new') : go('/new'))}
           >
             <PlusIcon aria-hidden="true" />
             New task

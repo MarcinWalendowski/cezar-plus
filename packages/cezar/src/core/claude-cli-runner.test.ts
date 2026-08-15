@@ -1,6 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -51,19 +51,26 @@ describe('buildClaudeArgs systemPrompt', () => {
   });
 });
 
-describe('buildClaudeArgs approval gate', () => {
+/**
+ * spec `.ai/specs/2026-08-15-bypass-permissions-claude-sessions.md`, Verification row 2. The
+ * second case is the one that matters: a test that only asserts the default value would pass
+ * just as happily against `env.CEZ_APPROVAL_GATE === '1' ? 'acceptEdits' : 'bypassPermissions'`
+ * — the ternary the owner explicitly rejected — so it has to set the variable and still see
+ * `bypassPermissions` come out.
+ */
+describe('buildClaudeArgs permission mode', () => {
   const spec = { userPrompt: 'do it', cwd: '/tmp' };
 
-  it('denies unapproved tools without prompting by default', () => {
+  it('always runs bypassPermissions, with no env read', () => {
     const args = buildClaudeArgs(spec, {});
     const idx = args.indexOf('--permission-mode');
-    expect(args[idx + 1]).toBe('dontAsk');
+    expect(args[idx + 1]).toBe('bypassPermissions');
   });
 
-  it('enables Claude approval prompts only when explicitly requested', () => {
+  it('stays bypassPermissions even with CEZ_APPROVAL_GATE=1 in the env — the gate is gone, not inverted', () => {
     const args = buildClaudeArgs(spec, { CEZ_APPROVAL_GATE: '1' });
     const idx = args.indexOf('--permission-mode');
-    expect(args[idx + 1]).toBe('acceptEdits');
+    expect(args[idx + 1]).toBe('bypassPermissions');
   });
 });
 
@@ -275,5 +282,34 @@ describe('ClaudeCliRunner token usage', () => {
     } finally {
       rmSync(cwd, { force: true, recursive: true });
     }
+  });
+});
+
+describe('CEZ_APPROVAL_GATE removal (spec Verification row 3, whole packages/cezar/src tree)', () => {
+  // The name is deleted, not defaulted (D2) — a stale switch that reads as live is the failure
+  // mode this spec exists to close. `SELF` excludes this file: a rule that names what it forbids
+  // cannot pass its own scan.
+  const APPROVAL_GATE_RE = /CEZ_APPROVAL_GATE/;
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+  const TEXT_EXT = /\.(ts|tsx|js|jsx|mjs|cjs)$/i;
+  const SELF = join(import.meta.dirname, 'claude-cli-runner.test.ts');
+
+  function listFiles(dir: string): string[] {
+    return readdirSync(dir, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile() && TEXT_EXT.test(entry.name))
+      .map((entry) => join(entry.parentPath, entry.name));
+  }
+
+  it('no file under packages/cezar/src mentions CEZ_APPROVAL_GATE', () => {
+    const files = listFiles(join(repoRoot, 'packages', 'cezar', 'src')).filter((file) => file !== SELF);
+    // A walk that found nothing would pass this vacuously — the scan has to be shown to have run.
+    expect(files.length).toBeGreaterThan(300);
+    const offenders = files.filter((file) => APPROVAL_GATE_RE.test(readFileSync(file, 'utf8')));
+    expect(offenders.map((file) => file.slice(repoRoot.length + 1))).toEqual([]);
+  });
+
+  it('negative control: the scan actually catches the name when present', () => {
+    expect(APPROVAL_GATE_RE.test('env.CEZ_APPROVAL_GATE === "1" ? "acceptEdits" : "dontAsk"')).toBe(true);
+    expect(APPROVAL_GATE_RE.test('--permission-mode bypassPermissions')).toBe(false);
   });
 });

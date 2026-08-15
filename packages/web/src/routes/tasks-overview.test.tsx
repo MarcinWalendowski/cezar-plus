@@ -756,6 +756,13 @@ describe('TasksOverview — empty and loading states', () => {
     expect(empty.querySelector('[data-slot="twinkle-backdrop"]')).not.toBeNull()
   })
 
+  it('points the empty-state New-task CTA at /workspace/new once the notes capability is on (D2)', () => {
+    renderOverview({ runs: [], notesAvailable: true })
+    const empty = document.querySelector<HTMLElement>('[data-slot="tasks-empty"]')
+    if (!empty) throw new Error('no empty state rendered')
+    expect(within(empty).getByRole('link', { name: 'New task' }).getAttribute('href')).toBe('/workspace/new')
+  })
+
   it('says the archive is empty, plainly — neutral, no backdrop', () => {
     renderOverview({ runs: [run({ status: 'done' })], view: 'archived' })
     const empty = document.querySelector<HTMLElement>('[data-slot="tasks-empty"]')
@@ -896,6 +903,13 @@ describe('TasksOverview — mobile cards and FAB', () => {
     renderOverview({ runs: [run()] })
     const fab = document.querySelector('[data-slot="new-task-fab"]')
     expect(fab?.getAttribute('href')).toBe('/new')
+    expect(fab?.getAttribute('aria-label')).toBe('New task')
+  })
+
+  it('floats the New task FAB at /workspace/new once the notes capability is on (D2, 2026-08-15)', () => {
+    renderOverview({ runs: [run()], notesAvailable: true })
+    const fab = document.querySelector('[data-slot="new-task-fab"]')
+    expect(fab?.getAttribute('href')).toBe('/workspace/new')
     expect(fab?.getAttribute('aria-label')).toBe('New task')
   })
 })
@@ -1082,5 +1096,58 @@ describe('TasksOverviewRoute — wired to the app', () => {
       const listFetches = fetchMock.mock.calls.filter(([path]) => String(path) === '/api/v1/runs')
       expect(listFetches.length).toBeGreaterThan(1)
     })
+  })
+
+  it('threads capabilities.notes from /api/v1/health into the New task FAB (D2, 2026-08-15)', async () => {
+    // renderApp's own fetchMock answers unmocked routes (including /api/v1/health) with a bare
+    // `[]`, so notesAvailable silently defaults to false there — this test is what would have
+    // caught the route wrapper never actually forwarding the prop to <TasksOverview>.
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url === '/api/v1/runs') return json([run({ id: 'has-notes' })])
+      if (url === '/api/v1/health') {
+        return json({
+          version: '0.0.0-test',
+          projects: [],
+          bootProject: 'default',
+          repoRoot: '/repo',
+          repo: { root: '/repo', branch: 'main' },
+          checks: [],
+          defaultRunner: 'claude',
+          forge: null,
+          capabilities: {
+            localHandoff: true,
+            tokenMetrics: true,
+            tokenUsageMetrics: true,
+            costMetrics: true,
+            followups: true,
+            singleProject: false,
+            automations: false,
+            knowledge: false,
+            sources: false,
+            notes: true,
+            workspaceViews: false,
+            notify: false,
+            skills: true,
+          },
+        })
+      }
+      return json([])
+    })
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <MemoryRouter>
+          <ListViewProvider>
+            <TasksOverviewRoute />
+          </ListViewProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    await waitFor(() => expect(tableRow('has-notes')).not.toBeNull())
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="new-task-fab"]')?.getAttribute('href')).toBe(
+        '/workspace/new',
+      ),
+    )
   })
 })

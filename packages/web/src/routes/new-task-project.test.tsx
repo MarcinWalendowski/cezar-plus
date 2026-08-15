@@ -237,9 +237,11 @@ async function switchProject(projectId: string) {
   fireEvent.click(document.querySelector(`[data-slot="project-option"][data-project-id="${projectId}"]`)!)
 }
 
+// Excludes the None item (2026-08-15) — it carries data-slot="source-option" too but no
+// data-source-ref, and this helper is about the project's own skill/workflow catalog.
 const sourceRefs = () =>
-  [...document.querySelectorAll('[data-slot="source-option"]')].map((o) =>
-    o.getAttribute('data-source-ref'),
+  [...document.querySelectorAll('[data-slot="source-option"]:not([data-source-kind="none"])')].map(
+    (o) => o.getAttribute('data-source-ref'),
   )
 
 // ---- the pill itself -------------------------------------------------------------------------
@@ -248,7 +250,7 @@ describe('the new-task project pill', () => {
   it('is preselected from the URL scope and lists the registry with branches', async () => {
     serve()
     renderAt(`/p/${OTHER}/new`)
-    await composerReady('ship-storefront')
+    await composerReady('None')
 
     expect(projectPill().textContent).toContain('shop-frontend')
     fireEvent.click(projectPill())
@@ -269,7 +271,7 @@ describe('the new-task project pill', () => {
       registry: { ...REGISTRY, projects: [REGISTRY.projects[0]!] },
     })
     renderAt(`/p/${BOOT}/new`)
-    await composerReady('quick-task')
+    await composerReady('None')
     expect(screen.queryByRole('button', { name: 'Project' })).toBeNull()
     expect(document.querySelector('[data-slot="source-pill"]')).not.toBeNull()
   })
@@ -281,7 +283,7 @@ describe('switching project', () => {
   it('re-resolves the skills, workflows and config pickers against the new project', async () => {
     serve()
     renderAt(`/p/${BOOT}/new`)
-    await composerReady('quick-task')
+    await composerReady('None')
 
     // The boot project reads the unscoped legacy surface (step 3.1) …
     fireEvent.click(sourcePill())
@@ -291,7 +293,7 @@ describe('switching project', () => {
 
     await switchProject(OTHER)
     await waitFor(() => expect(pathname()).toBe(`/p/${OTHER}/new`))
-    await composerReady('ship-storefront')
+    await composerReady('None')
 
     // … and the second project reads its own, through the `/api/v1/p/<id>` prefix.
     for (const path of ['/skills', '/workflows', '/config', '/repo']) {
@@ -310,11 +312,11 @@ describe('switching project', () => {
   it('keeps drafts isolated per project — one composer never leaks into the other', async () => {
     serve()
     renderAt(`/p/${BOOT}/new`)
-    await composerReady('quick-task')
+    await composerReady('None')
     fireEvent.change(textarea(), { target: { value: 'fix the cezar flake' } })
 
     await switchProject(OTHER)
-    await composerReady('ship-storefront')
+    await composerReady('None')
     // The arriving project starts from ITS draft, which is empty — not the departing text.
     expect(textarea().value).toBe('')
     fireEvent.change(textarea(), { target: { value: 'ship the storefront' } })
@@ -331,18 +333,18 @@ describe('switching project', () => {
     // Switching back restores what was typed there, untouched by the detour.
     await switchProject(BOOT)
     await waitFor(() => expect(pathname()).toBe(`/p/${BOOT}/new`))
-    await composerReady('quick-task')
+    await composerReady('None')
     expect(textarea().value).toBe('fix the cezar flake')
   })
 
   it('submits to the SELECTED project and clears only that project’s draft text', async () => {
     serve()
     renderAt(`/p/${BOOT}/new`)
-    await composerReady('quick-task')
+    await composerReady('None')
     fireEvent.change(textarea(), { target: { value: 'left behind in cezar' } })
 
     await switchProject(OTHER)
-    await composerReady('ship-storefront')
+    await composerReady('None')
     fireEvent.change(textarea(), { target: { value: 'Ship the storefront' } })
     fireEvent.click(screen.getByRole('button', { name: 'Start task' }))
 

@@ -30,6 +30,31 @@
 
 ## ⚠️ Breaking
 
+- **`CEZ_NOTES` is now an opt-OUT, so the workspace surface it gates appears by default.** The gate
+  inverted from `env.CEZ_NOTES === '1'` to `env.CEZ_NOTES !== '0'`, following the precedent `skills`
+  already set in the same object. **This turns on more than the composer it was flipped for**: the
+  `/notes` page and its nav item, the eleven `/api/v1/workspace/notes*` routes, and the workspace
+  nav entries all come with it. `CEZ_NOTES=0` turns the whole surface back off in one variable, and
+  `CEZ_SINGLE_PROJECT=1` still forces it off regardless of the flag — a single-project cockpit has
+  nothing to fan out across, and that clause was deliberately kept.
+  Spec `.ai/specs/2026-08-15-composer-stops-forcing-choices.md`.
+
+- **Every Claude session now runs in `--permission-mode bypassPermissions`, and `CEZ_APPROVAL_GATE`
+  is deleted.** cezar runs unattended agents in isolated worktrees; a run that stops to ask is a run
+  that is not running, with nobody in front of it to answer. So the mode is now a property of the
+  product rather than something you configure: one value, no env read, no branch. `CEZ_APPROVAL_GATE=1`
+  used to opt back into `acceptEdits` and Claude's approval UI — under `bypassPermissions` there is no
+  approval UI to opt into, so the variable is **removed from the code, the README and the tests**
+  rather than left readable-but-inert. A grep for the name now returns only this entry and the spec;
+  a test over all 486 source files enforces that. Owner decision, asked and answered explicitly;
+  spec `.ai/specs/2026-08-15-bypass-permissions-claude-sessions.md`.
+
+  **What this does and does not take away.** It takes away prompting. It does **not** take away a
+  working tool restriction, because there wasn't one — see the `--allowedTools` entry under Fixes
+  below. Treat a run as having full shell access in its worktree and its `--add-dir` paths; the
+  containment is the worktree boundary, and it always was. Unchanged: Codex, OpenCode and the `pi`
+  runner, which have their own permission stories and were not touched.
+
 - **A hosted cezar with no authentication now refuses to boot.** If you run with `CEZ_REMOTE=1`
   or a non-loopback `--bind-host` and set neither `CEZ_AUTH` nor `CEZ_ALLOW_UNAUTHENTICATED=1`,
   `cezar serve` exits non-zero at startup — before it touches `~/.cezar`, reclaims a worktree or
@@ -44,6 +69,27 @@
   forgot. It does not enforce authentication; it enforces choosing.
 
 ## ✨ Features
+
+- ✨ **The composer stops forcing you to pick a project and a workflow.** Two separate forced
+  choices, one fix each.
+
+  **Project.** "New task" now opens the project-less composer, whose target reads **Auto detect**:
+  describe the work, and a pass over your whole project catalog proposes which projects it belongs
+  in, each proposal reviewed by you before anything runs, then one run started per approved
+  proposal in its own project. Picking a named project is still one click and still goes straight to
+  that project's composer — `/p/:projectId/new` keeps its URL and every entry point into it. Nothing
+  was removed; a default was repointed. **This composer was not built here** — it shipped with
+  `.ai/specs/2026-08-14-project-less-task-composer.md` and was simply invisible behind a flag nobody
+  set, which is why the fix is a default and four links rather than a feature. There is still no
+  multi-project fan-out through a single `POST /runs`; one request remains one project.
+
+  **Workflow.** The source pill gains a **None** item, listed first, and None is the cold default —
+  a task no longer has to name a workflow. `POST /runs` accepts a body naming **neither** `workflow`
+  nor `steps` (naming both is still a 400) and resolves it to `quick-task`: your project's own file
+  if you have one, the built-in otherwise, the same resolution `POST /todos/:id/start` already used.
+  Additive on the wire, so nothing that works today stops working. Stickiness survives in both
+  directions — a workflow you picked last time is still preselected, and picking None clears it and
+  sticks. Spec `.ai/specs/2026-08-15-composer-stops-forcing-choices.md`.
 
 - ✨ **Adding a folder now offers every folder in it as a project, not only the git repos — and
   offers to set git up on the ones without it.** A directory of real work that was never
@@ -362,6 +408,25 @@
   request, no writes, no identity file — and the section's own doc comment records the trade.
 
 ## 🐛 Fixes
+
+- 🐛 **`allowedTools` never restricted anything, on any backend — the docs said it did.** A workflow
+  step's `allowedTools` / `bashAllowlist` reads like a per-step sandbox, and cezar implements it by
+  passing `--allowedTools` to the Claude CLI. Measured against `claude` 2.1.224, in a scratch
+  directory, with `--setting-sources ""` and the inherited `CLAUDECODE` env unset: `--allowedTools`
+  **grants additively and never removes a tool**. `--permission-mode default --allowedTools Read` —
+  the strictest combination available — still ran `Bash`. Only `--disallowedTools Bash`, which cezar
+  never emits, took the tool off the surface, and it did so under `bypassPermissions` too. Three
+  permission modes were tested; the two `--disallowedTools` runs are the negative control that makes
+  the other three readable, because a probe whose strictest condition also passes proves nothing.
+
+  Nothing about tool scoping changed in this release — it was already decorative on a Claude run.
+  What changed is that the code and the docs stop claiming otherwise: the `buildClaudeArgs` docblock
+  (which asserted "tools in `--allowedTools` proceed and everything else is denied instead of
+  prompting") and the Security section of `CODE_REVIEW.md` (which told reviewers unapproved tools
+  "are denied without prompting") are both corrected in place. `--allowedTools` is still passed —
+  it is still how a step's declared tools are granted. **Making the restriction real is a follow-up,
+  not a patch:** it means emitting `--disallowedTools` for the allow-list's complement, and
+  "everything else" cannot be enumerated without deciding what the deny set is.
 
 - 🐛 **A git repository with no commits was reported as healthy, and it is the one state that looks
   fine and is not.** `computeProbe` decided a project was `ok` the moment `.git` existed, so a repo

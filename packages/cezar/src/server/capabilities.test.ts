@@ -172,7 +172,8 @@ describe('resolveCapabilities — followups (#471)', () => {
       costMetrics: true,
       knowledge: false,
       sources: false,
-      notes: false,
+      // Opt-OUT like `skills` (2026-08-15) — `true` in an env that sets nothing.
+      notes: true,
       workspaceViews: false,
       notify: false,
       // Opt-OUT, so it is `true` in an env that sets nothing. This `toEqual` is the exhaustive
@@ -268,12 +269,13 @@ describe('resolveCapabilities — skills is the one OPT-OUT capability', () => {
   );
 });
 
-describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources, notes, workspaceViews, notify)', () => {
+describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources, workspaceViews, notify)', () => {
+  // `notes` used to live in this block too, but it stopped being an opt-in exact-"1" flag on
+  // 2026-08-15 — see the dedicated "notes (D1, inverted like skills)" describe block below.
   it('are all off by default', () => {
     expect(resolveCapabilities({})).toMatchObject({
       knowledge: false,
       sources: false,
-      notes: false,
       workspaceViews: false,
       notify: false,
     });
@@ -282,7 +284,6 @@ describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources
   it('turn on independently with their own exact-"1" flag', () => {
     expect(resolveCapabilities({ CEZ_KB: '1' })).toMatchObject({ knowledge: true, sources: false });
     expect(resolveCapabilities({ CEZ_SOURCES: '1' })).toMatchObject({ knowledge: false, sources: true });
-    expect(resolveCapabilities({ CEZ_NOTES: '1' })).toMatchObject({ notes: true });
     expect(resolveCapabilities({ CEZ_WORKSPACE_VIEWS: '1' })).toMatchObject({ workspaceViews: true });
     expect(resolveCapabilities({ CEZ_NOTIFY: '1' })).toMatchObject({ notify: true });
   });
@@ -292,27 +293,24 @@ describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources
       resolveCapabilities({
         CEZ_KB: value,
         CEZ_SOURCES: value,
-        CEZ_NOTES: value,
         CEZ_WORKSPACE_VIEWS: value,
         CEZ_NOTIFY: value,
       }),
     ).toMatchObject({
       knowledge: false,
       sources: false,
-      notes: false,
       workspaceViews: false,
       notify: false,
     });
   });
 
-  it('notes and workspaceViews report false under CEZ_SINGLE_PROJECT=1 regardless of their own flag', () => {
+  it('workspaceViews reports false under CEZ_SINGLE_PROJECT=1 regardless of its own flag', () => {
     expect(
       resolveCapabilities({
         CEZ_SINGLE_PROJECT: '1',
-        CEZ_NOTES: '1',
         CEZ_WORKSPACE_VIEWS: '1',
       }),
-    ).toMatchObject({ singleProject: true, notes: false, workspaceViews: false });
+    ).toMatchObject({ singleProject: true, workspaceViews: false });
   });
 
   it('knowledge, sources and notify are independent of singleProject', () => {
@@ -324,6 +322,44 @@ describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources
         CEZ_NOTIFY: '1',
       }),
     ).toMatchObject({ singleProject: true, knowledge: true, sources: true, notify: true });
+  });
+});
+
+describe('resolveCapabilities — notes (D1, inverted like skills)', () => {
+  // `notes` joined `skills` as the second OPT-OUT capability on 2026-08-15 (spec
+  // 2026-08-15-composer-stops-forcing-choices): the project-less composer at `/workspace/new`
+  // already existed but sat behind an opt-in flag nothing turned on. Same reasoning as skills —
+  // an `=== '1'` polarity would mean every upgrade needs an env change just to keep working.
+  it('is on when the flag is unset', () => {
+    expect(resolveCapabilities({})).toMatchObject({ notes: true });
+  });
+
+  it('is off for exactly "0"', () => {
+    expect(resolveCapabilities({ CEZ_NOTES: '0' })).toMatchObject({ notes: false });
+  });
+
+  it.each(['1', 'true', 'false', 'no', '', 'off'])(
+    'stays ON for %j — only an exact "0" opts out',
+    (value) => {
+      expect(resolveCapabilities({ CEZ_NOTES: value })).toMatchObject({ notes: true });
+    },
+  );
+
+  // The row the Verification table calls out explicitly: `singleProject` must win even when
+  // `CEZ_NOTES` is not just unset (the default-on case) but never mentioned at all — a single-
+  // project deployment has no project switcher, so there is nothing for a project-less composer
+  // to be "less" than.
+  it('is false under CEZ_SINGLE_PROJECT=1 even with CEZ_NOTES unset (the on-by-default case)', () => {
+    expect(resolveCapabilities({ CEZ_SINGLE_PROJECT: '1' })).toMatchObject({
+      singleProject: true,
+      notes: false,
+    });
+  });
+
+  it('stays false under CEZ_SINGLE_PROJECT=1 even when CEZ_NOTES=1 is also set', () => {
+    expect(
+      resolveCapabilities({ CEZ_SINGLE_PROJECT: '1', CEZ_NOTES: '1' }),
+    ).toMatchObject({ singleProject: true, notes: false });
   });
 });
 

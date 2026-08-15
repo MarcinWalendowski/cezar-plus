@@ -63,7 +63,9 @@ describe('the new-task draft store', () => {
   it('starts empty with the never-chosen sentinels', () => {
     expect(readDraft()).toEqual({
       text: '',
-      source: null,
+      // undefined, not null (2026-08-15): untouched must stay distinguishable from an explicit
+      // None pick — see the NewTaskDraft.source doc comment.
+      source: undefined,
       runner: null,
       agentProfile: null,
       model: null,
@@ -150,13 +152,37 @@ describe('the new-task draft store', () => {
     })
   })
 
+  it('an explicit None pick (source: null) round-trips distinctly from untouched (undefined)', () => {
+    writeDraft({
+      text: 'no workflow please',
+      source: null,
+      runner: null,
+      agentProfile: null,
+      model: null,
+      variants: 1,
+      planFirst: false,
+      worktree: null,
+      autonomous: null,
+      generateFollowups: null,
+    })
+    expect(readDraft().source).toBeNull()
+
+    // Cold read (no in-memory cache) must also come back explicitly null, not coerced to
+    // undefined — JSON round-trips `null` faithfully; that is exactly what normalize() must keep.
+    const raw = localStorage.getItem('cez-new-task-draft') as string
+    expect(JSON.parse(raw).source).toBeNull()
+    resetDraft()
+    localStorage.setItem('cez-new-task-draft', raw)
+    expect(readDraft().source).toBeNull()
+  })
+
   it('normalizes a malformed/older stored value instead of throwing', () => {
     // A cold read (cache null after resetDraft) hitting bad JSON must degrade to EMPTY.
     resetDraft()
     localStorage.setItem('cez-new-task-draft', 'not json at all')
     expect(readDraft()).toEqual({
       text: '',
-      source: null,
+      source: undefined,
       runner: null,
       agentProfile: null,
       model: null,
@@ -171,7 +197,8 @@ describe('the new-task draft store', () => {
     localStorage.setItem('cez-new-task-draft', '{"text":42,"variants":9,"source":"nope","worktree":"x"}')
     expect(readDraft()).toEqual({
       text: '',
-      source: null,
+      // A malformed "nope" string is neither a valid source nor an explicit null — untouched.
+      source: undefined,
       runner: null,
       agentProfile: null,
       model: null,

@@ -147,7 +147,7 @@ describe('model option resolution', () => {
   })
 })
 
-describe('resolveSource (candidate validation + cold quick-task default)', () => {
+describe('resolveSource (candidate validation + the None cold default, 2026-08-15)', () => {
   const skills = [skill('om-fix'), skill('deploy', 'global')]
   const workflows = [workflow('quick-task'), workflow('fix-and-verify')]
 
@@ -161,11 +161,32 @@ describe('resolveSource (candidate validation + cold quick-task default)', () =>
     ).toEqual({ source: 'workflow', ref: 'fix-and-verify' })
   })
 
-  it('defaults cold to quick-task, then first skill when quick-task is unavailable', () => {
-    expect(resolveSource([], skills, workflows)).toEqual({ source: 'workflow', ref: 'quick-task' })
-    expect(resolveSource([], skills, [workflow('fix-and-verify')])).toEqual({ source: 'skill', ref: 'om-fix' })
-    expect(resolveSource([], [], workflows)).toEqual({ source: 'workflow', ref: 'quick-task' })
-    expect(resolveSource([], [], [])).toEqual({ source: 'workflow', ref: 'quick-task' })
+  it('defaults cold to None — no client-side guess (2026-08-15: the server resolves quick-task)', () => {
+    expect(resolveSource([], skills, workflows)).toBeNull()
+    expect(resolveSource([], skills, [workflow('fix-and-verify')])).toBeNull()
+    expect(resolveSource([], [], workflows)).toBeNull()
+    expect(resolveSource([], [], [])).toBeNull()
+  })
+
+  it('None also wins when every candidate has gone stale (e.g. a deleted sticky workflow)', () => {
+    expect(
+      resolveSource([{ source: 'workflow', ref: 'deleted' }, { source: 'skill', ref: 'also-gone' }], skills, workflows),
+    ).toBeNull()
+  })
+
+  it('undefined means "no opinion" — skips to the next candidate', () => {
+    expect(
+      resolveSource([undefined, { source: 'workflow', ref: 'fix-and-verify' }], skills, workflows),
+    ).toEqual({ source: 'workflow', ref: 'fix-and-verify' })
+  })
+
+  it('null is a TERMINAL explicit None — stops immediately, never falls through to a later sticky candidate', () => {
+    // The bug this guards: an untouched draft (undefined) and an explicit None pick (null) used
+    // to be indistinguishable, so clicking None while a sticky lastTask existed did nothing —
+    // resolveSource silently fell through to that sticky workflow instead of clearing it.
+    expect(
+      resolveSource([null, { source: 'workflow', ref: 'fix-and-verify' }], skills, workflows),
+    ).toBeNull()
   })
 
   it('sourceExists checks the matching catalog only', () => {
@@ -214,6 +235,25 @@ describe('buildCreateRunBody — the exact POST /api/v1/runs payloads legacy sen
       model: 'sonnet',
       runner: 'claude',
     })
+  })
+
+  it('None source (2026-08-15) omits BOTH workflow and steps from the wire body', () => {
+    const body = buildCreateRunBody({
+      task: 'whatever the server picks',
+      source: null,
+      model: '',
+      runner: 'claude',
+      defaultRunner: 'claude',
+      variants: 1,
+      images: [],
+    })
+    // Not "no workflow set" — assert the actual keys sent over the wire are absent, not just
+    // that they read as falsy/undefined in the object (undefined-but-present would still be a
+    // key `JSON.stringify` may or may not drop depending on the exact producer).
+    const wire = JSON.parse(JSON.stringify(body))
+    expect(wire).not.toHaveProperty('workflow')
+    expect(wire).not.toHaveProperty('steps')
+    expect(wire).toEqual({ task: 'whatever the server picks' })
   })
 
   it('keeps a locked native default visible while omitting it from direct and automation requests', () => {

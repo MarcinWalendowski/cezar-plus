@@ -179,14 +179,24 @@ describe('AppShell', () => {
     })
   })
 
-  describe('New task button', () => {
-    it('links to /new', () => {
-      renderShell()
+  describe('New task button (D2, 2026-08-15: repointed by the notes capability)', () => {
+    it('links to /workspace/new when the notes capability is on (the default)', () => {
+      renderShell('/', { notesAvailable: true })
+      expect(within(sidebar()).getByRole('link', { name: /New task/ }).getAttribute('href')).toBe('/workspace/new')
+    })
+
+    it('links to /new when the notes capability is off', () => {
+      renderShell('/', { notesAvailable: false })
       expect(within(sidebar()).getByRole('link', { name: /New task/ }).getAttribute('href')).toBe('/new')
     })
 
+    it('stays unscoped at /workspace/new even mounted inside a project scope — never /p/<id>/workspace/new', () => {
+      renderShell('/p/shop', { notesAvailable: true })
+      expect(within(sidebar()).getByRole('link', { name: /New task/ }).getAttribute('href')).toBe('/workspace/new')
+    })
+
     it('renders the C hint (the browser-usable accelerator; ⌘N only fires in the desktop shell)', () => {
-      renderShell()
+      renderShell('/', { notesAvailable: false })
       const link = within(sidebar()).getByRole('link', { name: /New task/ })
       expect(within(link).getByText('C').tagName).toBe('KBD')
     })
@@ -871,7 +881,9 @@ describe('AppShell', () => {
     })
 
     it('closes before the New task anchor hands off to the legacy document', async () => {
-      renderShell('/')
+      // notesAvailable: false keeps this on the plain `/new` anchor (the case the comment
+      // describes — a real document hand-off, not an in-app route change).
+      renderShell('/', { notesAvailable: false })
       openMenu()
       const link = within(drawer() as HTMLElement).getByRole('link', { name: /New task/ })
       // jsdom does not implement full document navigation; suppress only that browser default.

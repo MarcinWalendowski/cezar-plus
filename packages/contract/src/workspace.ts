@@ -143,8 +143,13 @@ const taskTableUiStateSchema = z.looseObject({
  * listed it, which made it wider than the route.
  */
 export const uiStateSchema = z.looseObject({
+  /** `null` is the composer's "None" pick (2026-08-15) persisted as a sticky default — distinct
+   *  from absent, which means "nothing chosen yet" and resolves the same cold-default way. A
+   *  stored value from before this change is a plain object and still resolves through
+   *  `sourceExists`, so no migration is needed. */
   lastTask: z
     .object({ source: z.enum(['workflow', 'skill']), ref: z.string() })
+    .nullable()
     .optional(),
   /** Most-recently-run sources, newest first (deduped, capped). Feeds the composer picker's
    *  recency sort. */

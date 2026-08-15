@@ -216,22 +216,29 @@ export function sourceExists(
 
 /**
  * The effective source: the first candidate that still exists (the draft pick, then the
- * persisted `lastTask`), else the zero-config cold default: built-in quick-task.
+ * persisted `lastTask`), else `null` — the composer's "None" cold default (2026-08-15). "None"
+ * sends neither `workflow` nor `steps` (`buildCreateRunBody` below); the server resolves that to
+ * quick-task, so this no longer has to guess one client-side.
+ *
+ * `undefined` and `null` are NOT interchangeable in `candidates`: `undefined` means "this
+ * candidate has no opinion, keep looking" (an untouched draft, an absent `lastTask`); `null`
+ * means "explicit None was picked here" and stops the search immediately, returning `null`. A
+ * candidate naming a since-deleted skill/workflow is neither — it is skipped and the search
+ * continues, exactly like before. Without this distinction, an explicit None pick on a draft
+ * that still has a sticky `lastTask` would silently fall through to that sticky workflow instead
+ * of clearing it — the same bug this function used to have when both meant "skip".
  */
 export function resolveSource(
   candidates: ReadonlyArray<TaskSource | null | undefined>,
   skills: readonly Skill[],
   workflows: readonly WorkflowDef[],
-): TaskSource {
+): TaskSource | null {
   for (const candidate of candidates) {
-    if (candidate && sourceExists(candidate, skills, workflows)) return candidate
+    if (candidate === undefined) continue
+    if (candidate === null) return null
+    if (sourceExists(candidate, skills, workflows)) return candidate
   }
-  if (workflows.some((workflow) => workflow.name === 'quick-task')) {
-    return { source: 'workflow', ref: 'quick-task' }
-  }
-  const firstSkill = skills[0]
-  if (firstSkill) return { source: 'skill', ref: firstSkill.name }
-  return { source: 'workflow', ref: workflows[0]?.name ?? 'quick-task' }
+  return null
 }
 
 /**
@@ -246,7 +253,9 @@ export function resolveSource(
  */
 export function buildCreateRunBody(opts: {
   task: string
-  source: TaskSource
+  /** `null` is the composer's "None" pick (2026-08-15) — omits both `workflow` and `steps`, so
+   *  the server resolves quick-task itself. */
+  source: TaskSource | null
   model: string
   /** Native coding-agent settings stay visible, but a locked model is never a request override. */
   modelsLocked?: boolean
@@ -290,9 +299,12 @@ export function buildCreateRunBody(opts: {
   } = opts
   return {
     task,
-    ...(source.source === 'skill'
-      ? { steps: [{ id: 'task', name: source.ref, skill: source.ref, prompt: '{{task}}' }] }
-      : { workflow: source.ref }),
+    // `source === null` (None): omit both keys on the wire — the server resolves quick-task.
+    ...(source === null
+      ? {}
+      : source.source === 'skill'
+        ? { steps: [{ id: 'task', name: source.ref, skill: source.ref, prompt: '{{task}}' }] }
+        : { workflow: source.ref }),
     model: modelsLocked ? undefined : model || undefined,
     runner: runnerOverride(runner, defaultRunner, runnerExplicit),
     // Sent only when the user picked one — an absent key is "follow the project", which is what

@@ -15,7 +15,12 @@ import type { TaskSource } from './new-task-form'
  */
 export interface NewTaskDraft {
   text: string
-  source: TaskSource | null
+  /** `undefined` (the untouched default) means "no draft-local opinion — defer to the
+   *  persisted `lastTask`". `null` means the composer's "None" pill was explicitly picked
+   *  this session (2026-08-15) — a real, terminal choice, not "unset": `resolveSource`
+   *  (new-task-form.ts) must stop there rather than falling through to a sticky workflow, or
+   *  clicking None while a sticky pick exists would silently do nothing. */
+  source?: TaskSource | null
   runner: Runner | null
   /** Per-task agent account (spec 2026-07-29-agent-profiles). `null` = follow the project's own
    *  selection, which is what every draft that never touched the control means. Sticky like the
@@ -45,7 +50,9 @@ export interface ComposerRunModeInput {
   interactive?: boolean
   configuredAutonomous: boolean | 'source-dependent'
   configuredWorktree: boolean
-  source: TaskSource['source']
+  /** `null` is the composer's "None" pick (2026-08-15) — never a skill, so it takes the same
+   *  `source-dependent` fallback as a workflow. */
+  source: TaskSource['source'] | null
 }
 
 /** Resolve run-mode values once, in precedence order: hard constraints, explicit draft
@@ -96,7 +103,8 @@ export function composerRunModeNote(input: { worktree: boolean; hasGit: boolean 
 
 const EMPTY: NewTaskDraft = {
   text: '',
-  source: null,
+  // Untouched, not "explicitly None" — see the field doc comment above.
+  source: undefined,
   runner: null,
   agentProfile: null,
   model: null,
@@ -130,7 +138,10 @@ function normalize(raw: unknown): NewTaskDraft {
   const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   return {
     text: typeof obj.text === 'string' ? obj.text : '',
-    source: isSource(obj.source) ? obj.source : null,
+    // A stored `null` is an explicit None pick from a previous session (JSON round-trips it
+    // faithfully, unlike `undefined`) — preserve it. Anything else malformed/absent means
+    // untouched, not "explicitly None".
+    source: isSource(obj.source) ? obj.source : obj.source === null ? null : undefined,
     runner: typeof obj.runner === 'string' ? (obj.runner as Runner) : null,
     agentProfile: typeof obj.agentProfile === 'string' ? obj.agentProfile : null,
     model: typeof obj.model === 'string' ? obj.model : null,

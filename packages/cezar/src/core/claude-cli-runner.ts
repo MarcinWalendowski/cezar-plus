@@ -338,9 +338,21 @@ export class ClaudeCliRunner implements AgentRunner {
 /**
  * Build the headless argv. `--input-format stream-json` reads user messages
  * from stdin; `--output-format stream-json --verbose` gives per-event NDJSON;
- * `--permission-mode dontAsk` keeps headless runs non-interactive: tools in
- * `--allowedTools` proceed and everything else is denied instead of prompting.
- * `CEZ_APPROVAL_GATE=1` opts back into Claude's approval UI (#435).
+ * `--permission-mode bypassPermissions` matches what cezar actually is —
+ * unattended agents in isolated worktrees, with nobody in front of a run to
+ * answer a prompt (spec `.ai/specs/2026-08-15-bypass-permissions-claude-sessions.md`).
+ *
+ * `--allowedTools` is still passed below, but measured against `claude`
+ * 2.1.224 it only *grants* tools additively — it does not restrict. `default`
+ * mode with `--allowedTools Read` still ran `Bash`; only `--disallowedTools`
+ * removed the tool from the surface entirely. So `buildAllowedTools` and a
+ * step's `allowedTools`/`bashAllowlist` are decorative on a Claude run today —
+ * fixing that means emitting `--disallowedTools` for the allow-list's
+ * complement, filed as a follow-up in the spec above, not done here.
+ *
+ * `env` stays an explicit, injectable parameter — unused by this function
+ * now, but a test still exercises it to prove the mode no longer branches on
+ * anything read from it.
  */
 export function buildClaudeArgs(
   spec: AgentRunSpec,
@@ -353,7 +365,7 @@ export function buildClaudeArgs(
     'stream-json',
     '--verbose',
     '--permission-mode',
-    env.CEZ_APPROVAL_GATE === '1' ? 'acceptEdits' : 'dontAsk',
+    'bypassPermissions',
   ];
   if (spec.systemPrompt) {
     args.push('--append-system-prompt', spec.systemPrompt);

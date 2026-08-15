@@ -277,6 +277,7 @@ export function AppShell({
     toolsMenu,
     projectGroups,
     singleProject,
+    notesAvailable,
   }
 
   return (
@@ -342,6 +343,10 @@ type NavProps = {
   toolsMenu?: ReactNode
   projectGroups?: ReactNode
   singleProject: boolean
+  /** `capabilities.notes` (D1/D2, `.ai/specs/2026-08-15-composer-stops-forcing-choices.md`) —
+   *  what "New task" points at: the project-less composer with the capability on, the per-project
+   *  one without it. */
+  notesAvailable: boolean
 }
 
 /**
@@ -527,6 +532,7 @@ function SidebarContent({
   toolsMenu,
   projectGroups,
   singleProject,
+  notesAvailable,
   onNavigate,
   headerAction,
 }: NavProps & {
@@ -537,6 +543,9 @@ function SidebarContent({
   /** The drawer's close button. Absent on desktop, which has nothing to close. */
   headerAction?: ReactNode
 }) {
+  // `/workspace/new` is workspace-level (D2) — the plain, unscoped `RouterLink`, exactly like the
+  // workspace-nav band below. `/new` still wants the project-scoped `Link` (`/p/<id>/new`).
+  const NewTaskLink = notesAvailable ? RouterLink : Link
   return (
     <div
       data-slot="sidebar-content"
@@ -569,8 +578,14 @@ function SidebarContent({
           {/* A Router Link since R4 Step 1.1: the React /new composer is real, so deliberate
               New task affordances stay inside the SPA. Full document loads of /new (the
               bookmarklet contract) land on the shell like any route (static-ui.ts) — the
-              React composer has owned auto-start parity since R4 Step 1.3. */}
-          <Link to="/new" onClick={onNavigate}>
+              React composer has owned auto-start parity since R4 Step 1.3.
+
+              D2 (2026-08-15): with `notesAvailable` the project-less composer is what "New task"
+              means, so this points there instead — UNSCOPED (`NewTaskLink` picks the plain
+              `RouterLink`, not the project-scoped `Link`), the same reasoning the workspace nav
+              band below applies to `/workspace/*` targets: the scope-wrapping `Link` would prefix
+              it with the active `/p/<id>`, which is not a route `/workspace/new` answers at. */}
+          <NewTaskLink to={notesAvailable ? '/workspace/new' : '/new'} onClick={onNavigate}>
             <PlusIcon className="size-[15px]" aria-hidden="true" />
             New task
             {/* Decorative: the `c`-to-create accelerator is registered in the command palette.
@@ -582,7 +597,7 @@ function SidebarContent({
             >
               C
             </kbd>
-          </Link>
+          </NewTaskLink>
         </Button>
         {singleProject ? null : <AddProjectMenu />}
       </div>

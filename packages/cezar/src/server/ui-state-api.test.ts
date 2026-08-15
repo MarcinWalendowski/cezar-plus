@@ -75,6 +75,22 @@ describe('the ui-state API — skillUsage (#408)', () => {
     expect(raw.skillUsage).toEqual({ 'om-fix': 1 });
   });
 
+  it('PUT lastTask: null persists and round-trips through GET and the on-disk file (D5 — the "None" pill)', async () => {
+    // Distinct from an object lastTask (above) and from an ABSENT key: null is the composer's
+    // explicit "None" pick persisted as a sticky default (spec 2026-08-15), not "nothing chosen".
+    const res = await put({ lastTask: null });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ lastTask: null });
+    expect(rawFile().lastTask).toBeNull();
+    expect(await (await get()).json()).toMatchObject({ lastTask: null });
+  });
+
+  it('an explicit lastTask: null clears a previously-set sticky workflow, not merges over it', async () => {
+    await put({ lastTask: { source: 'workflow', ref: 'fix-and-verify' } });
+    await put({ lastTask: null });
+    expect(rawFile().lastTask).toBeNull();
+  });
+
   it('rejects a malformed skillUsage value instead of writing garbage', async () => {
     const res = await put({ skillUsage: { 'om-fix': 'a lot' } });
     expect(res.status).toBe(400);

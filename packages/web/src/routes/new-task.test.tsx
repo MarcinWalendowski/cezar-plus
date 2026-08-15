@@ -332,8 +332,10 @@ const textarea = () => screen.getByLabelText('Describe a task for the agent') as
 const sourcePill = () => screen.getByRole('button', { name: 'Choose a skill or workflow' })
 const location = () => screen.getByTestId('location').textContent
 
-/** The pickers resolve once workflows+skills+ui-state answered — wait for the real label. */
-async function pillReady(label = 'quick-task') {
+/** The pickers resolve once workflows+skills+ui-state answered — wait for the real label.
+ *  'None' is the cold default (2026-08-15: the composer no longer guesses quick-task
+ *  client-side; the server resolves an omitted source to quick-task itself). */
+async function pillReady(label = 'None') {
   await waitFor(() => {
     expect(sourcePill().textContent).toContain(label)
     expect(textarea().disabled).toBe(false)
@@ -573,10 +575,10 @@ describe('picker data flows', () => {
     await pillReady('fix-and-verify')
   })
 
-  it('falls back to quick-task when lastTask names something gone', async () => {
+  it('falls back to None (2026-08-15) when lastTask names something gone — no other client-side guess', async () => {
     serve({ uiState: { lastTask: { source: 'skill', ref: 'deleted-skill' } } })
     renderNewTask()
-    await pillReady('quick-task')
+    await pillReady('None')
   })
 
   it('the source menu groups: Project skills (bold), Workflows, Global last', async () => {
@@ -586,7 +588,11 @@ describe('picker data flows', () => {
     fireEvent.click(sourcePill())
     await screen.findByPlaceholderText('search skills & workflows…')
 
-    const options = [...document.querySelectorAll('[data-slot="source-option"]')]
+    // The None item (2026-08-15) also carries data-slot="source-option" but sits outside every
+    // group — excluded here since this test is about the skill/workflow catalog grouping.
+    const options = [
+      ...document.querySelectorAll('[data-slot="source-option"]:not([data-source-kind="none"])'),
+    ]
     expect(options.map((o) => o.getAttribute('data-source-ref'))).toEqual([
       'om-fix', 'quick-task', 'fix-and-verify', 'deploy',
     ])
@@ -639,7 +645,7 @@ describe('provider authentication gate', () => {
     })
     renderNewTask()
 
-    await waitFor(() => expect(sourcePill().textContent).toContain('quick-task'))
+    await waitFor(() => expect(sourcePill().textContent).toContain('None'))
     expect(textarea().disabled).toBe(true)
     expect(textarea().placeholder).toBe('Checking agent providers…')
     expect(screen.queryByRole('link', { name: 'Configure providers' })).toBeNull()
@@ -836,24 +842,59 @@ describe('submit', () => {
     expect(postedBody()).toEqual({ task: 'Ship it', workflow: 'quick-task' })
   })
 
+  it('explicitly picking None sends neither workflow nor steps, and persists lastTask: null (D5, 2026-08-15)', async () => {
+    // Starts on a sticky workflow — proves the pill is NOT already at None before the click,
+    // and that picking None explicitly CLEARS the sticky choice rather than merely not sending it.
+    serve({ createRun: { id: 'run-none' }, uiState: { lastTask: { source: 'workflow', ref: 'fix-and-verify' } } })
+    renderNewTask()
+    await pillReady('fix-and-verify')
+
+    fireEvent.click(sourcePill())
+    await screen.findByPlaceholderText('search skills & workflows…')
+    fireEvent.click(document.querySelector('[data-source-kind="none"]') as HTMLElement)
+    await pillReady('None')
+
+    fireEvent.change(textarea(), { target: { value: 'let the server pick' } })
+    await startTask()
+
+    const wire = JSON.parse(JSON.stringify(postedBody()))
+    expect(wire).not.toHaveProperty('workflow')
+    expect(wire).not.toHaveProperty('steps')
+    expect(wire).toEqual({ task: 'let the server pick' })
+
+    await waitFor(() => expect(location()).toBe('/tasks/run-none'))
+    await waitFor(() =>
+      expect(requests.find((r) => r.method === 'PUT' && r.url === '/api/v1/ui-state')?.body).toMatchObject({
+        lastTask: null,
+      }),
+    )
+  })
+
   it('posts worktree:false after opt-out for every single-step source shape', async () => {
     const cases: Array<{
       label: string
+      /** What the source pill shows once ready — distinct from `label` for the cold-default
+       *  case (2026-08-15: nothing sticky means None, not a client-side quick-task guess). */
+      pillLabel: string
       overrides: NonNullable<Parameters<typeof serve>[0]>
       expected: Record<string, unknown>
     }> = [
       {
-        label: 'quick-task',
+        label: 'cold default',
+        pillLabel: 'None',
         overrides: {},
-        expected: { workflow: 'quick-task' },
+        // Neither `workflow` nor `steps` — the server resolves the None pick to quick-task.
+        expected: {},
       },
       {
         label: 'om-fix',
+        pillLabel: 'om-fix',
         overrides: { uiState: { lastTask: { source: 'skill', ref: 'om-fix' } } },
         expected: { steps: [{ id: 'task', name: 'om-fix', skill: 'om-fix', prompt: '{{task}}' }] },
       },
       {
         label: 'one-step',
+        pillLabel: 'one-step',
         overrides: {
           workflows: {
             workflows: [
@@ -873,7 +914,7 @@ describe('submit', () => {
       resetDraft()
       serve(testCase.overrides)
       renderNewTask()
-      await pillReady(testCase.label)
+      await pillReady(testCase.pillLabel)
       const worktree = document.querySelector('[data-slot="worktree-toggle"]') as HTMLButtonElement
       fireEvent.click(worktree)
       expect(worktree.getAttribute('aria-checked')).toBe('false')
@@ -899,7 +940,9 @@ describe('submit', () => {
     expect(worktree.getAttribute('aria-checked')).toBe('false')
     fireEvent.change(textarea(), { target: { value: 'Use the environment seed' } })
     await startTask()
-    expect(postedBody()).toMatchObject({ workflow: 'quick-task', worktree: false })
+    // Cold default (2026-08-15): no sticky source, so neither workflow nor steps is sent.
+    expect(postedBody()).toMatchObject({ worktree: false })
+    expect(postedBody()).not.toHaveProperty('workflow')
   })
 
   it('picking a model and ×2 variants rides along; {runs} answer navigates to the FIRST variant', async () => {
@@ -922,9 +965,9 @@ describe('submit', () => {
     fireEvent.change(textarea(), { target: { value: 'Race two attempts' } })
     await startTask()
 
+    // Cold default (2026-08-15): no sticky source, so neither workflow nor steps rides along.
     expect(postedBody()).toEqual({
       task: 'Race two attempts',
-      workflow: 'quick-task',
       model: 'sonnet',
       variants: 2,
     })
@@ -957,9 +1000,9 @@ describe('submit', () => {
 
     fireEvent.change(textarea(), { target: { value: 'Use native settings' } })
     await startTask()
+    // Cold default (2026-08-15): no sticky source, so neither workflow nor steps rides along.
     expect(postedBody()).toEqual({
       task: 'Use native settings',
-      workflow: 'quick-task',
       runner: 'codex',
     })
   })

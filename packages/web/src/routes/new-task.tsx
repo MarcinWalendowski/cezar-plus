@@ -180,7 +180,7 @@ export function NewTaskRoute() {
   const sourcesReady =
     skills.data !== undefined && workflows.data !== undefined && !uiState.isPending
   const source = resolveSource([draft.source, uiState.data?.lastTask], skillList, workflowList)
-  const selectedSkill = source.source === 'skill'
+  const selectedSkill = source?.source === 'skill'
     ? skillList.find((skill) => skill.name === source.ref)
     : undefined
 
@@ -193,7 +193,7 @@ export function NewTaskRoute() {
     () => normalizePromptTemplates(uiState.data?.promptTemplates),
     [uiState.data?.promptTemplates],
   )
-  const autoText = autoApplyText(templates, source.source === 'skill' ? [source.ref] : [])
+  const autoText = autoApplyText(templates, source?.source === 'skill' ? [source.ref] : [])
   const draftTextRef = useRef(draft.text)
   draftTextRef.current = draft.text
   const autoAppliedRef = useRef('')
@@ -298,7 +298,7 @@ export function NewTaskRoute() {
       workspaceConfig.data?.composerDefaults?.worktree
       ?? workspaceConfig.data?.composerDefaults?.inheritedWorktree
       ?? true,
-    source: source.source,
+    source: source?.source ?? null,
   })
   const worktreeOn = runMode.worktree
   const autonomousOn = runMode.autonomous
@@ -471,15 +471,19 @@ export function NewTaskRoute() {
     // `saveLastTaskSource`) and float it to the top of the picker next time
     // (recency sort) — fire-and-forget: a failed write only costs the convenience.
     void putUiState({
+      // Sent even when null (None, 2026-08-15): the pick is sticky like every other source, so a
+      // stored workflow from before this task must not keep winning over an explicit None.
       lastTask: source,
-      recentSources: pushRecentSource(recentSources, source),
+      // Recency sort is a catalog concept — None has no catalog entry to float, so only a real
+      // pick touches it.
+      ...(source ? { recentSources: pushRecentSource(recentSources, source) } : {}),
       ...(followupsToggleShown ? { lastGenerateFollowups: generateFollowupsOn } : {}),
       // Frequency sort (#408): only a SKILL pick counts — the map is keyed by skill name, and a
       // workflow choice here doesn't select one directly. Gated on the CURRENT map being known:
       // the PUT merge is shallow, so bumping off an errored ui-state query (`sourcesReady` only
       // rules out `isPending`, not a failed fetch) would send a one-entry map and wipe every
       // accumulated count.
-      ...(source.source === 'skill' && uiState.data !== undefined
+      ...(source?.source === 'skill' && uiState.data !== undefined
         ? { skillUsage: bumpSkillUsage(uiState.data.skillUsage, source.ref) }
         : {}),
     })
@@ -1013,12 +1017,14 @@ function SourcePill({
   workflows,
   onPick,
 }: {
-  source: TaskSource
+  /** `null` is None (2026-08-15) — the cold default; sends no `workflow`/`steps`, the server
+   *  resolves quick-task. */
+  source: TaskSource | null
   ready: boolean
   skills: readonly Skill[]
   skillUsage: Readonly<Record<string, number>> | undefined
   workflows: readonly WorkflowDef[]
-  onPick: (source: TaskSource) => void
+  onPick: (source: TaskSource | null) => void
 }) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -1029,15 +1035,23 @@ function SourcePill({
   const matched = searchSkills(skills, search, skillUsage)
   const { mostUsed, project, global } = partitionSkillsForDisplay(matched, skillUsage)
   const matchedWorkflows = searchWorkflows(workflows, search)
+  // None participates in the same search box as everything else, rather than always showing —
+  // an always-visible row would sit next to "Nothing matches." when a query excludes it too.
+  const query = search.trim().toLowerCase()
+  const noneMatches = query === '' || 'none'.includes(query)
   const nothingMatches =
-    mostUsed.length === 0 && project.length === 0 && global.length === 0 && matchedWorkflows.length === 0
-  const pick = (next: TaskSource) => {
+    !noneMatches
+    && mostUsed.length === 0
+    && project.length === 0
+    && global.length === 0
+    && matchedWorkflows.length === 0
+  const pick = (next: TaskSource | null) => {
     onPick(next)
     setOpen(false)
   }
 
   const skillItem = (skill: Skill, emphasized: boolean) => {
-    const selected = source.source === 'skill' && source.ref === skill.name
+    const selected = source?.source === 'skill' && source.ref === skill.name
     return (
       <CommandItem
         key={skill.path}
@@ -1096,12 +1110,14 @@ function SourcePill({
             disabled={!ready}
             className={cn(chipClass, 'border-foreground/60 font-mono text-[11.5px] font-semibold text-foreground')}
           >
-            {source.source === 'skill' ? (
+            {source === null ? (
+              <WorkflowIcon aria-hidden="true" className="size-3 shrink-0 text-soft-foreground" />
+            ) : source.source === 'skill' ? (
               <SparklesIcon aria-hidden="true" className="size-3 shrink-0 text-violet" />
             ) : (
               <WorkflowIcon aria-hidden="true" className="size-3 shrink-0 text-violet" />
             )}
-            <span className="max-w-44 truncate">{ready ? source.ref : '…'}</span>
+            <span className="max-w-44 truncate">{!ready ? '…' : source === null ? 'None' : source.ref}</span>
             {chevron}
           </button>
         </PopoverTrigger>
@@ -1125,6 +1141,26 @@ function SourcePill({
               className="max-h-[min(18rem,calc(var(--radix-popover-content-available-height)-3rem))]"
             >
               {nothingMatches ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
+              {/* None (2026-08-15): the cold default, listed first — picking it sends neither
+                  `workflow` nor `steps`, and the server resolves quick-task. Participates in the
+                  search box like everything else rather than always showing, so it never sits
+                  next to "Nothing matches." for a query that excludes it too. */}
+              {noneMatches ? (
+                <CommandItem
+                  value="none"
+                  data-slot="source-option"
+                  data-source-kind="none"
+                  onSelect={() => pick(null)}
+                >
+                  <span className="shrink-0 font-mono text-xs">None</span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-soft-foreground">
+                    Runs quick-task — no workflow or skill picked
+                  </span>
+                  {source === null ? (
+                    <CheckIcon aria-hidden="true" className="ml-auto size-3.5 shrink-0 text-primary" />
+                  ) : null}
+                </CommandItem>
+              ) : null}
               {/* Most used leads (#519), then Project skills before Global — the closer a
                   skill lives to the repo, the more likely it's the one being picked. */}
               {mostUsed.length > 0 ? (
@@ -1140,7 +1176,7 @@ function SourcePill({
               {matchedWorkflows.length > 0 ? (
                 <CommandGroup heading="Workflows">
                   {matchedWorkflows.map((workflow) => {
-                    const selected = source.source === 'workflow' && source.ref === workflow.name
+                    const selected = source?.source === 'workflow' && source.ref === workflow.name
                     return (
                       <CommandItem
                         key={workflow.name}

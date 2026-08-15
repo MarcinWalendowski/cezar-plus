@@ -92,6 +92,7 @@ export function TasksOverview({
   showTokens = true,
   showCost = true,
   showWorkspaceSwitch = false,
+  notesAvailable = false,
   expandedColumns = normalizeExpandedColumns(undefined),
   onToggleColumn = () => undefined,
   columnsPending = false,
@@ -120,6 +121,11 @@ export function TasksOverview({
    *  Defaults `false` so a direct render (this file's own test suite, mostly) stays exactly the
    *  pre-scaffold header. */
   showWorkspaceSwitch?: boolean
+  /** `capabilities.notes` (D2, `.ai/specs/2026-08-15-composer-stops-forcing-choices.md`) — what
+   *  the FAB and the empty-state "New task" CTA point at. A prop, not a hook read, for the same
+   *  reason `showWorkspaceSwitch` is: this component stays presentational. Defaults `false` so a
+   *  direct render keeps pointing at `/new`, exactly as before this capability existed. */
+  notesAvailable?: boolean
   /** Workspace-global desktop column choices; absent ids use registry defaults. */
   expandedColumns?: NormalizedExpandedColumns
   onToggleColumn?: (id: TaskColumnId) => void
@@ -220,7 +226,7 @@ export function TasksOverview({
 
       <div className="flex flex-1 flex-col p-3 pb-[calc(90px+env(safe-area-inset-bottom))] md:p-5 md:pb-5">
         {runs === undefined ? null : visible.length === 0 ? (
-          <TasksEmptyState view={view} query={query} />
+          <TasksEmptyState view={view} query={query} notesAvailable={notesAvailable} />
         ) : (
           <>
             {/* ≥md: the table. */}
@@ -309,15 +315,31 @@ export function TasksOverview({
       </div>
 
       {/* The mobile New-task FAB. The desktop CTA lives in the sidebar. A router Link since
-          R4 step 1.3 re-pointed /new at the React composer — no full page load needed. */}
-      <Link
-        to="/new"
-        data-slot="new-task-fab"
-        aria-label="New task"
-        className="fixed right-4 bottom-[calc(16px+env(safe-area-inset-bottom))] z-20 inline-flex size-14 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-modal md:hidden"
-      >
-        <PlusIcon className="size-[22px]" aria-hidden="true" />
-      </Link>
+          R4 step 1.3 re-pointed /new at the React composer — no full page load needed.
+
+          D2 (2026-08-15): with `notesAvailable` this points at the project-less composer instead
+          — UNSCOPED (`RouterLink`, not the project-scoped `Link`), the same reasoning the header's
+          `/workspace/tasks` switch above applies: the scope-wrapping `Link` would prefix it with
+          the active `/p/<id>`, which is not a route `/workspace/new` answers at. */}
+      {notesAvailable ? (
+        <RouterLink
+          to="/workspace/new"
+          data-slot="new-task-fab"
+          aria-label="New task"
+          className="fixed right-4 bottom-[calc(16px+env(safe-area-inset-bottom))] z-20 inline-flex size-14 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-modal md:hidden"
+        >
+          <PlusIcon className="size-[22px]" aria-hidden="true" />
+        </RouterLink>
+      ) : (
+        <Link
+          to="/new"
+          data-slot="new-task-fab"
+          aria-label="New task"
+          className="fixed right-4 bottom-[calc(16px+env(safe-area-inset-bottom))] z-20 inline-flex size-14 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-modal md:hidden"
+        >
+          <PlusIcon className="size-[22px]" aria-hidden="true" />
+        </Link>
+      )}
     </div>
   )
 }
@@ -328,7 +350,15 @@ export function TasksOverview({
  * (spec: textures on hero/empty surfaces only); a missed search or an unswept archive is just
  * a fact, so those stay flat. `heading="h2"` because the page's h1 is the header's "Tasks".
  */
-function TasksEmptyState({ view, query }: { view: ListView; query: string }) {
+function TasksEmptyState({
+  view,
+  query,
+  notesAvailable,
+}: {
+  view: ListView
+  query: string
+  notesAvailable: boolean
+}) {
   const needle = query.trim()
   const kind = needle ? 'search-miss' : view === 'archived' ? 'archive' : 'no-tasks'
   return (
@@ -359,10 +389,19 @@ function TasksEmptyState({ view, query }: { view: ListView; query: string }) {
           subtitle="Describe a task to get started."
           actions={
             <Button asChild>
-              <Link to="/new">
-                <PlusIcon aria-hidden="true" />
-                New task
-              </Link>
+              {/* D2: the project-less composer when the capability is on (unscoped `RouterLink`,
+                  same reasoning as the FAB above), `/new` otherwise. */}
+              {notesAvailable ? (
+                <RouterLink to="/workspace/new">
+                  <PlusIcon aria-hidden="true" />
+                  New task
+                </RouterLink>
+              ) : (
+                <Link to="/new">
+                  <PlusIcon aria-hidden="true" />
+                  New task
+                </Link>
+              )}
             </Button>
           }
         />
@@ -959,6 +998,8 @@ export function TasksOverviewRoute() {
   // "Loading…" plus an unbounded retry loop against a server already answering 500).
   const showWorkspaceSwitch =
     health.data?.capabilities?.workspaceViews === true && (health.data?.projects.length ?? 0) > 1
+  // D2: what the FAB and empty-state "New task" CTA point at.
+  const notesAvailable = health.data?.capabilities?.notes === true
   const [view, setView] = useListView()
   const queryClient = useQueryClient()
   const archive = useMutation({
@@ -1012,6 +1053,7 @@ export function TasksOverviewRoute() {
         showTokens={metricVisibility.tokens}
         showCost={metricVisibility.cost}
         showWorkspaceSwitch={showWorkspaceSwitch}
+        notesAvailable={notesAvailable}
         expandedColumns={taskTableColumns.expandedColumns}
         onToggleColumn={taskTableColumns.toggleColumn}
         columnsPending={taskTableColumns.isPending}
