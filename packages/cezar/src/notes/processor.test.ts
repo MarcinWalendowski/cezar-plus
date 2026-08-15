@@ -1,11 +1,11 @@
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentRunResult, AgentRunSpec, AgentRunner } from '../core/agent-runner.ts';
 import { WorkspaceRunIndex } from '../workspace/run-index.ts';
 import { NoteCoordinator, type NoteCoordinatorProject } from './coordinator.ts';
-import { NoteProcessor } from './processor.ts';
+import { NoteProcessor, sanitizeProposals } from './processor.ts';
 import { buildNotePassPrompt } from './prompt.ts';
 import { NoteStore } from './store.ts';
 
@@ -275,12 +275,174 @@ describe('NoteProcessor', () => {
   });
 });
 
+// ---- identity-aware routing (cezar task #21) ---------------------------------------------------
+
+/**
+ * The runtime E2E's central defect (spec `.ai/specs/2026-08-14-note-to-spec-pipeline.md`,
+ * "Runtime E2E — EXECUTED 2026-08-15", defect 2): a note naming a project by its README title
+ * rather than its registered id put both of that note's proposals on a DIFFERENT, actually
+ * registered project — a confident wrong answer, not a rejected one, because the wrong answer was
+ * still a real id. Reproduced here with the exact shape of the fixture that found it: an id
+ * (`cez-e2e-fixture`) that names nothing the note says, next to a folder/package/README that all
+ * agree on `widget-service`, alongside a second, unrelated project (`aside`) whose id already
+ * matches its own name.
+ *
+ * These tests use REAL directories on disk (not scripted `NoteCoordinatorProject` literals) so
+ * `NoteCoordinator.catalog()`'s file reads are exercised for real, exactly as `coordinator.test.ts`
+ * does — the point being to prove the enriched catalog actually reaches the prompt the pass
+ * reasons over, not merely that a hand-built fixture object has the right shape.
+ */
+describe('identity-aware routing', () => {
+  const savedHome = process.env.CEZ_HOME;
+  let home: string;
+  let bootRoot: string;
+  let workspaceRoot: string;
+  let fixtureRoot: string;
+  let asideRoot: string;
+  let store: NoteStore;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(realpathSync(tmpdir()), 'cez-pass-home-'));
+    bootRoot = mkdtempSync(join(realpathSync(tmpdir()), 'cez-pass-boot-'));
+    workspaceRoot = mkdtempSync(join(realpathSync(tmpdir()), 'cez-pass-projects-'));
+    process.env.CEZ_HOME = home;
+    store = new NoteStore({ paths: { notes: join(home, 'notes.json'), log: join(home, 'notes-log.ndjson') } });
+
+    // The fixture: registered as `cez-e2e-fixture`, but its folder, package.json and README all
+    // call it `widget-service` — exactly the runtime E2E's shape.
+    fixtureRoot = join(workspaceRoot, 'widget-service');
+    mkdirSync(fixtureRoot);
+    writeFileSync(join(fixtureRoot, 'package.json'), JSON.stringify({ name: 'widget-service' }));
+    writeFileSync(join(fixtureRoot, 'README.md'), '# widget-service\n\nLabel formatting helpers.\n');
+
+    // A second, unrelated project whose id already IS its name — nothing to alias, and the wrong
+    // target the runtime bug landed both proposals on.
+    asideRoot = join(workspaceRoot, 'aside');
+    mkdirSync(asideRoot);
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(bootRoot, { recursive: true, force: true });
+    rmSync(workspaceRoot, { recursive: true, force: true });
+    if (savedHome === undefined) delete process.env.CEZ_HOME;
+    else process.env.CEZ_HOME = savedHome;
+  });
+
+  const projectSources = (): NoteCoordinatorProject[] => [
+    { id: 'cez-e2e-fixture', root: fixtureRoot, name: 'Fixture', status: 'ok' },
+    { id: 'aside', root: asideRoot, name: 'Aside', status: 'ok' },
+  ];
+
+  const makeProcessor = (answers: string[]) => {
+    const { runner, prompts } = scriptedRunner(answers);
+    const projects = projectSources();
+    const processor = new NoteProcessor({
+      store,
+      coordinator: new NoteCoordinator({ listProjects: async () => projects }),
+      runIndex: new WorkspaceRunIndex({
+        listProjects: async () => projects.map((p) => ({ id: p.id, root: p.root, status: p.status, name: p.name })),
+      }),
+      bootRoot,
+      runnerFactory: () => runner,
+    });
+    return { processor, prompts };
+  };
+
+  /**
+   * GUARD: the enriched identity signals actually reach the prompt, attached to the right catalog
+   * row. Mutation that must turn this red: strip the enriched fields back to the bare id (revert
+   * `NoteCoordinator.catalog()` to its pre-#21 shape, or `identityAliases` to always return `''`
+   * in `prompt.ts`) — confirmed red below, then reverted.
+   */
+  it("puts the fixture's folder, package and README name in the prompt, next to its registered id", async () => {
+    const note = await store.capture({
+      body: 'the widget-service label code has no test file. separately, aside needs a data export.',
+      source: 'cockpit',
+    });
+    const { processor, prompts } = makeProcessor([
+      JSON.stringify({
+        summary: 'Two pieces of work.',
+        proposals: [
+          { projectId: 'cez-e2e-fixture', title: 'Add a test file', task: 'Spec the missing test.', rationale: '' },
+          { projectId: 'aside', title: 'Data export', task: 'Spec the export.', rationale: '' },
+        ],
+        unassigned: [],
+      }),
+    ]);
+
+    await processor.runPass(note);
+
+    const prompt = prompts[0]!;
+    const fixtureLine = prompt.split('\n').find((line) => line.startsWith('- cez-e2e-fixture'));
+    expect(fixtureLine).toBeDefined();
+    expect(fixtureLine).toContain('widget-service');
+    // `aside`'s id already IS its name, so it carries no alias bracket — asserting its absence
+    // pins that `identityAliases` skips a signal that does not differ from the id, per its doc.
+    const asideLine = prompt.split('\n').find((line) => line.startsWith('- aside'));
+    expect(asideLine).toBeDefined();
+    expect(asideLine).not.toContain('also called');
+  });
+
+  /**
+   * GUARD: two proposals naming two DIFFERENT registered projects route to those two projects,
+   * not one. Mutation that must turn this red: collapse `sanitizeProposals`'s per-row map onto a
+   * single project (e.g. `kept.map(() => kept[0])`) — confirmed red below, then reverted.
+   */
+  it('routes two proposals naming two different projects to those two projects, not one', async () => {
+    const note = await store.capture({
+      body: 'the widget-service label code has no test file. separately, aside needs a data export.',
+      source: 'cockpit',
+    });
+    const { processor } = makeProcessor([
+      JSON.stringify({
+        summary: 'Two pieces of work.',
+        proposals: [
+          { projectId: 'cez-e2e-fixture', title: 'Add a test file', task: 'Spec the missing test.', rationale: '' },
+          { projectId: 'aside', title: 'Data export', task: 'Spec the export.', rationale: '' },
+        ],
+        unassigned: [],
+      }),
+    ]);
+
+    await processor.runPass(note);
+
+    const proposals = store.get(note.id)?.pass?.proposals;
+    expect(proposals?.map((row) => row.projectId)).toEqual(['cez-e2e-fixture', 'aside']);
+  });
+
+  /**
+   * GUARD: a project name the pass could not match to any catalog id is kept, flagged and left
+   * `pending` — needs-review, never a confident wrong target and never zero proposals. Mutation
+   * that must turn this red: fall back to the first catalog project when the id is unknown
+   * (`byId.get(row.projectId) ?? catalog[0]`) — confirmed red below, then reverted.
+   */
+  it('keeps an unmatched project name as a pending, flagged proposal rather than defaulting it', async () => {
+    const note = await store.capture({ body: 'do a thing in the mobile app', source: 'cockpit' });
+    const { processor } = makeProcessor([
+      JSON.stringify({
+        proposals: [{ projectId: 'mobile', title: 'A thing', task: 'Spec it.', rationale: '' }],
+        unassigned: [],
+      }),
+    ]);
+
+    await processor.runPass(note);
+
+    const proposals = store.get(note.id)?.pass?.proposals;
+    expect(proposals).toHaveLength(1);
+    const proposal = proposals?.[0];
+    expect(proposal?.projectId).toBe('mobile');
+    expect(proposal?.issues).toContain('unknown-project');
+    expect(proposal?.decision).toBe('pending');
+  });
+});
+
 // ---- the prompt ------------------------------------------------------------------------------
 
 describe('buildNotePassPrompt', () => {
   const catalog = [
-    { id: 'api', name: 'API', status: 'ok' as const, tags: ['backend'], workflows: ['quick-task'] },
-    { id: 'web', name: 'Web', status: 'ok' as const, tags: [], workflows: [] },
+    { id: 'api', name: 'API', status: 'ok' as const, tags: ['backend'], workflows: ['quick-task'], dirName: 'api' },
+    { id: 'web', name: 'Web', status: 'ok' as const, tags: [], workflows: [], dirName: 'web' },
   ];
 
   /**

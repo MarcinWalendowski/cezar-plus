@@ -7,6 +7,7 @@ import { createQueryClient } from '@/api/query-client'
 import type {
   HealthResponse,
   NoteRecord,
+  NoteSummary,
   NotesListResponse,
 } from '@open-mercato/cezar-api-client'
 
@@ -159,7 +160,7 @@ function stubFetch(health: HealthResponse = HEALTH_ON, list: NotesListResponse =
 }
 
 function renderNotes() {
-  render(
+  return render(
     <QueryClientProvider client={createQueryClient()}>
       <MemoryRouter initialEntries={['/notes']}>
         <Routes>
@@ -276,4 +277,206 @@ describe('NotesRoute: the review gate', () => {
     // The reason is shown too: "we think this is a duplicate" is only actionable with the reason.
     expect(screen.getByText(/run #12 covers it/)).toBeTruthy()
   })
+})
+
+describe('NotesRoute: polling', () => {
+  /**
+   * `.ai/specs/2026-08-14-note-to-spec-pipeline.md`, "Runtime E2E — EXECUTED 2026-08-15": the API
+   * had a note at `processed` while the page kept showing `processing`, and only a manual reload
+   * picked it up. These guard the fix — the list has to leave `processing` on its own, it has to
+   * STOP polling the instant nothing is pending (an idle inbox must not run a timer forever), and
+   * unmounting has to actually clear that timer.
+   *
+   * Real timers, deliberately. The poll rides a mocked `fetch` through two dependent React Query
+   * hooks (`useHealth` gates `useWorkspaceNotes`'s `enabled`), and `vi.useFakeTimers()` here fights
+   * that chain — a first response was observed being silently retried by the query client's own
+   * retry policy, needing an actual elapsed backoff to surface, which fake time never advanced. A
+   * few seconds of real `setTimeout`/`waitFor` against the real `NOTES_POLL_MS` (2s) is slower but
+   * verifiably correct.
+   */
+
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+  function processingList(): NotesListResponse {
+    return {
+      notes: [{ ...(LIST.notes[0] as NonNullable<(typeof LIST.notes)[0]>), status: 'processing' }],
+      truncated: false,
+    }
+  }
+
+  it(
+    'a note that flips to processed on the server shows up on its own — no reload',
+    async () => {
+      let listCalls = 0
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+          const path = String(input)
+          const method = init.method ?? 'GET'
+          if (path === '/api/v1/health') return jsonResponse(HEALTH_ON)
+          if (method === 'GET' && path.startsWith('/api/v1/workspace/notes')) {
+            listCalls += 1
+            // Only the first answer is still processing; the server has already moved on.
+            return jsonResponse(listCalls === 1 ? processingList() : LIST)
+          }
+          return jsonResponse({})
+        }),
+      )
+
+      renderNotes()
+      await screen.findByText('processing')
+
+      // No click, no reload — just the poll interval doing its job.
+      await waitFor(() => expect(screen.getByText('processed')).toBeTruthy(), { timeout: 6000 })
+      expect(listCalls).toBeGreaterThanOrEqual(2)
+    },
+    8000,
+  )
+
+  it(
+    'stops polling the instant every note is terminal',
+    async () => {
+      let listCalls = 0
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+          const path = String(input)
+          const method = init.method ?? 'GET'
+          if (path === '/api/v1/health') return jsonResponse(HEALTH_ON)
+          if (method === 'GET' && path.startsWith('/api/v1/workspace/notes')) {
+            listCalls += 1
+            return jsonResponse(listCalls === 1 ? processingList() : LIST)
+          }
+          return jsonResponse({})
+        }),
+      )
+
+      renderNotes()
+      await screen.findByText('processing')
+      expect(listCalls).toBe(1)
+
+      await waitFor(() => expect(screen.getByText('processed')).toBeTruthy(), { timeout: 6000 })
+      const callsOnceTerminal = listCalls
+      expect(callsOnceTerminal).toBeGreaterThanOrEqual(2)
+
+      // Wait past another whole poll interval. If the stop condition were not actually wired to
+      // note status (e.g. hard-coded `true`), this window picks up an extra request; it must not.
+      await sleep(2800)
+      expect(listCalls).toBe(callsOnceTerminal)
+    },
+    12000,
+  )
+
+  it(
+    'unmounting the route clears the poll timer',
+    async () => {
+      let listCalls = 0
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+          const path = String(input)
+          const method = init.method ?? 'GET'
+          if (path === '/api/v1/health') return jsonResponse(HEALTH_ON)
+          if (method === 'GET' && path.startsWith('/api/v1/workspace/notes')) {
+            listCalls += 1
+            // Stays pending forever — if the timer survives unmount, it keeps firing.
+            return jsonResponse(processingList())
+          }
+          return jsonResponse({})
+        }),
+      )
+
+      const { unmount } = renderNotes()
+      await screen.findByText('processing')
+      const callsAtMount = listCalls
+      expect(callsAtMount).toBe(1)
+
+      unmount()
+      await sleep(2800)
+      expect(listCalls).toBe(callsAtMount)
+    },
+    8000,
+  )
+
+  it(
+    'does not stack a request on top of one already in flight',
+    async () => {
+      let listCalls = 0
+      let resolveSecond: (() => void) | undefined
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+          const path = String(input)
+          const method = init.method ?? 'GET'
+          if (path === '/api/v1/health') return jsonResponse(HEALTH_ON)
+          if (method === 'GET' && path.startsWith('/api/v1/workspace/notes')) {
+            listCalls += 1
+            if (listCalls === 2) {
+              // Hangs until the test releases it, spanning several poll ticks.
+              await new Promise<void>((resolve) => {
+                resolveSecond = resolve
+              })
+            }
+            return jsonResponse(processingList())
+          }
+          return jsonResponse({})
+        }),
+      )
+
+      renderNotes()
+      await screen.findByText('processing')
+      expect(listCalls).toBe(1)
+
+      // The second poll starts and hangs — wait past it plus one more tick. Neither tick that
+      // lands while it is in flight may start a third request.
+      await sleep(4800)
+      expect(listCalls).toBe(2)
+
+      resolveSecond?.()
+      // Freed up: the next tick is allowed to fire again.
+      await waitFor(() => expect(listCalls).toBe(3), { timeout: 4000 })
+    },
+    10000,
+  )
+
+  it(
+    'a status outside the known terminal set is treated as pending, not terminal',
+    async () => {
+      // `'queued'` is not in today's `noteStatusSchema` enum (`raw`/`processing`/`processed`/
+      // `failed`) — it stands in for a status added later that `hasPendingNote` has never heard
+      // of. Cast at the fixture boundary since the real type cannot express this value; that gap
+      // is exactly the scenario being guarded (`TERMINAL_NOTE_STATUSES` in `notes.tsx`).
+      const unknownStatus = 'queued' as unknown as NoteSummary['status']
+      let listCalls = 0
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+          const path = String(input)
+          const method = init.method ?? 'GET'
+          if (path === '/api/v1/health') return jsonResponse(HEALTH_ON)
+          if (method === 'GET' && path.startsWith('/api/v1/workspace/notes')) {
+            listCalls += 1
+            return jsonResponse({
+              notes: [
+                {
+                  ...(LIST.notes[0] as NonNullable<(typeof LIST.notes)[0]>),
+                  status: unknownStatus,
+                },
+              ],
+              truncated: false,
+            })
+          }
+          return jsonResponse({})
+        }),
+      )
+
+      renderNotes()
+      await screen.findByText('queued')
+      expect(listCalls).toBe(1)
+
+      // An unrecognized status must not be mistaken for terminal — the list must keep polling it.
+      await waitFor(() => expect(listCalls).toBeGreaterThanOrEqual(2), { timeout: 4000 })
+    },
+    8000,
+  )
 })

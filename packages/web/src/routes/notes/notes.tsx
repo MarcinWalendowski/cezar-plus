@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { NotebookPenIcon, SparklesIcon, TrashIcon } from 'lucide-react'
 import type { NoteProposal, NoteSummary } from '@open-mercato/cezar-api-client'
 
@@ -43,6 +43,11 @@ export function NotesRoute() {
   // an empty payload (D19), so a fetch made before health arrives comes back indistinguishable
   // from a genuinely empty inbox and paints "no notes yet" over "the feature is off".
   const notes = useWorkspaceNotes({}, healthKnown && !notesOff)
+  const rows = notes.data?.notes ?? []
+
+  // A note that just left "processing" must show up without a reload — found missing in the
+  // 2026-08-15 runtime E2E (see usePollWhilePending below).
+  usePollWhilePending(rows, notes.isFetching, notes.refetch)
 
   if (!healthKnown) {
     return (
@@ -66,8 +71,6 @@ export function NotesRoute() {
     )
   }
 
-  const rows = notes.data?.notes ?? []
-
   return (
     <NotesShell>
       <div className="flex flex-1 flex-col gap-4 p-3 md:p-5">
@@ -83,20 +86,70 @@ export function NotesRoute() {
             heading="h2"
           />
         ) : (
-          <ul className="flex flex-col gap-2" data-testid="notes-list">
-            {rows.map((note) => (
-              <NoteCard
-                key={note.id}
-                note={note}
-                expanded={selected === note.id}
-                onToggle={() => setSelected(selected === note.id ? undefined : note.id)}
-              />
-            ))}
-          </ul>
+          <>
+            {/* A background poll can fail without the list ever being cleared — React Query keeps
+                the last-known-good `data` on a query error. Say so rather than failing silently. */}
+            {notes.isError ? (
+              <p className="text-xs text-destructive">Couldn't refresh the notes list. Retrying…</p>
+            ) : null}
+            <ul className="flex flex-col gap-2" data-testid="notes-list">
+              {rows.map((note) => (
+                <NoteCard
+                  key={note.id}
+                  note={note}
+                  expanded={selected === note.id}
+                  onToggle={() => setSelected(selected === note.id ? undefined : note.id)}
+                />
+              ))}
+            </ul>
+          </>
         )}
       </div>
     </NotesShell>
   )
+}
+
+/**
+ * Refresh cadence while any note is still `raw`/`processing`, the two states the triage pass
+ * moves through before landing on `processed`/`failed` — stops the instant every row is terminal,
+ * so an idle inbox never leaves a timer running. There is no push channel for this list (unlike
+ * `/workspace/events`, which the runs board rides), so a plain client interval is the whole
+ * refresh mechanism, the same role `WORKSPACE_GIT_POLL_MS` plays for `useWorkspaceGit`
+ * (`api/queries.ts`) — just conditioned on note status instead of always-on.
+ *
+ * Found missing in the 2026-08-15 runtime E2E: the API had a note at `processed` while the page
+ * kept showing `processing`, and only a manual reload updated it
+ * (`.ai/specs/2026-08-14-note-to-spec-pipeline.md`, "Runtime E2E — EXECUTED 2026-08-15").
+ */
+const NOTES_POLL_MS = 2_000
+
+// Poll unless every row is TERMINAL. Whitelisting the pending states instead would mean a status
+// added later silently reads as terminal and the list hangs on it — which is the 2026-08-15
+// defect this hook exists to fix, reintroduced by an unrelated change.
+const TERMINAL_NOTE_STATUSES: readonly NoteSummary['status'][] = ['processed', 'failed']
+
+function hasPendingNote(rows: NoteSummary[]): boolean {
+  return rows.some((note) => !TERMINAL_NOTE_STATUSES.includes(note.status))
+}
+
+function usePollWhilePending(rows: NoteSummary[], isFetching: boolean, refetch: () => unknown) {
+  const pending = hasPendingNote(rows)
+  // A ref, not an effect dependency: the interval should start/stop only when whether-to-poll
+  // actually flips, not tear down and rebuild every time a fetch resolves with fresh (but still
+  // pending) data.
+  const latest = useRef({ isFetching, refetch })
+  latest.current = { isFetching, refetch }
+
+  useEffect(() => {
+    if (!pending) return
+    const timer = setInterval(() => {
+      // A tick that lands while a fetch is already in flight is skipped, not stacked on top of
+      // it — the next tick tries again.
+      if (latest.current.isFetching) return
+      void latest.current.refetch()
+    }, NOTES_POLL_MS)
+    return () => clearInterval(timer)
+  }, [pending])
 }
 
 function NotesShell({ children }: { children: React.ReactNode }) {

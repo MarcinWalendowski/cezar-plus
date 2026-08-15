@@ -1,12 +1,16 @@
 # Note to spec pipeline
 
 > **Status:** implemented · **runtime E2E EXECUTED 2026-08-15** — the core loop works end to end
-> (capture → split → route → approve → a real spec run that does not implement). **Still QA Needed:**
-> two defects found at runtime (the Notes list never refreshes off `processing`; routing mis-targets
-> when a note names a project by anything other than its registered id), and the **dedupe** leg was
-> never exercised. See "Runtime E2E — EXECUTED 2026-08-15" at the end of this file. ·
-> **Date:** 2026-08-14, status corrected 2026-08-15 — this header read "the runtime E2E has NOT been
-> run", which went false the moment it was run, and a header is what a scanning reader keeps
+> (capture → split → route → approve → a real spec run that does not implement). **Both runtime
+> defects are FIXED 2026-08-15** (the Notes list now polls while any note is non-terminal; routing
+> now carries folder/package/README/remote aliases into the pass so a note naming a project any
+> other way still lands on its registered id). **Still QA Needed:** the fixes have automated
+> coverage but no second runtime pass, and the **dedupe** leg was never exercised at all. See
+> "Runtime E2E — EXECUTED 2026-08-15" at the end of this file. ·
+> **Date:** 2026-08-14, status corrected 2026-08-15 (twice) — this header read "the runtime E2E has
+> NOT been run", which went false the moment it was run; it then read "Still QA Needed: two defects
+> found at runtime", which went false the moment they were fixed. A header is what a scanning reader
+> keeps, so it is corrected in place each time rather than appended to
 > **Supersedes in part:** `2026-08-14-remove-notes-capture-inbox.md` (same day). That spec deleted
 > the notes scaffold; this one builds the feature it was a scaffold for. See "Relationship to the
 > removal" below — the removal was correct and is not being undone by accident.
@@ -364,6 +368,28 @@ throwaway fixture). Driven both through the HTTP API and through the browser UI.
 | `GET /workspace/git` | ok — real branch/upstream/ahead/dirty/head per project |
 
 **Two defects found, neither caught by any unit test.**
+
+> **BOTH FIXED 2026-08-15.** The findings below are left exactly as written, because *what the
+> runtime pass caught that the suite could not* is the durable lesson here — not the defects
+> themselves. What changed:
+>
+> 1. **Fixed** in `packages/web/src/routes/notes/notes.tsx` — `usePollWhilePending` refreshes every
+>    2s while any row is non-terminal and stops the instant all are. The predicate is written as
+>    "poll unless every row is in `TERMINAL_NOTE_STATUSES`", **not** as a whitelist of pending
+>    states: a status added later would otherwise read as terminal and hang the list, which is this
+>    very defect reintroduced by an unrelated change. Guarded by a test using an out-of-enum status.
+> 2. **Fixed** in `notes/coordinator.ts` + `notes/prompt.ts` — the project catalog now carries
+>    folder basename, `package.json` name, README title and git remote slug, and the prompt renders
+>    them as aliases while requiring the registered id verbatim in the answer. **Half of this defect
+>    turned out not to exist:** `sanitizeProposals` already refused to coerce an unmatched id (it
+>    flags `unknown-project` and holds at `pending`), so the bug was purely that the model had no
+>    way to learn `cez-e2e-fixture` *is* "widget-service". No server-side alias matching was added,
+>    deliberately — resolving an alias in code is the same silent coercion that made this class
+>    invisible; the fix is the model getting better material, not code guessing well.
+>
+> Point 2's last sentence is the reason this section is worth keeping: the test that catches it
+> **must** use a project whose id disagrees with its title, and a fixture where they agree — the
+> natural thing to write — is vacuous by construction.
 
 1. **The Notes list does not refresh while a note is processing.** Submitting from `/workspace/new`
    lands on `/notes` with the note at `processing`, and it stays there indefinitely: the API had it

@@ -48,7 +48,12 @@ export const NOTE_PASS_SYSTEM_PROMPT = [
   '- DEDUPE. Each project lists its live runs. If a proposal restates work already on that board,',
   '  still emit it but set "duplicateOf" naming the run and why. Never silently drop it: you are',
   '  advising a human review screen, and a dropped line is a decision you were not asked to make.',
-  '- "projectId" MUST be an id from the catalog, copied exactly. If a piece of work belongs to no',
+  '- A note may name a project by something other than its id: its folder, its package name, its',
+  '  README title, or its GitHub repo, shown in brackets after a project\'s catalog line when known.',
+  '  Match on ANY of these. When two projects could both fit, weigh every signal you have before',
+  '  choosing — do not default to whichever project you recognise first.',
+  '- "projectId" MUST be the id from the catalog: the token right after "- " on that project\'s',
+  '  line, copied exactly, never an alias from the brackets. If a piece of work belongs to no',
   '  catalogued project, put it in "unassigned" with the reason — never force it into the nearest',
   '  project, and never invent an id.',
   '- "task" is the brief handed to an agent that will investigate inside that repository and write',
@@ -113,7 +118,7 @@ export function buildNotePassPrompt(input: NotePassPromptInput): string {
     );
   }
 
-  lines.push('Projects (id — name — tags — workflows):');
+  lines.push('Projects (id — name [also called: …] — tags — workflows):');
   if (input.catalog.length === 0) {
     lines.push('(no projects registered — put everything in "unassigned")');
   } else {
@@ -121,7 +126,10 @@ export function buildNotePassPrompt(input: NotePassPromptInput): string {
       const tags = project.tags.length > 0 ? project.tags.join(', ') : 'no tags';
       const workflows = project.workflows.length > 0 ? project.workflows.join(', ') : 'none';
       const flag = project.status === 'not-git' ? ' [not a git repo]' : '';
-      lines.push(`- ${project.id} — ${project.name} — ${tags} — workflows: ${workflows}${flag}`);
+      const aliases = identityAliases(project);
+      lines.push(
+        `- ${project.id} — ${project.name}${aliases} — ${tags} — workflows: ${workflows}${flag}`,
+      );
     }
   }
   lines.push('');
@@ -153,4 +161,24 @@ export function buildNotePassPrompt(input: NotePassPromptInput): string {
 
   lines.push('', 'Answer with the JSON object only.');
   return lines.join('\n');
+}
+
+/**
+ * `" [also called: folder \"x\", package \"y\", README \"z\", repo o/r]"`, built only from the
+ * signals a given project actually has, and only when a signal differs from the id already shown
+ * — a project whose folder happens to share its id gains nothing from repeating it. Empty string
+ * when nothing differs, so a project with no distinguishing aliases renders exactly as before this
+ * change (`cezar task #21`).
+ */
+function identityAliases(project: NoteProjectEntry): string {
+  const aliases: string[] = [];
+  if (project.dirName && project.dirName !== project.id) aliases.push(`folder "${project.dirName}"`);
+  if (project.packageName && project.packageName !== project.id) {
+    aliases.push(`package "${project.packageName}"`);
+  }
+  if (project.readmeTitle && project.readmeTitle !== project.id) {
+    aliases.push(`README "${project.readmeTitle}"`);
+  }
+  if (project.remoteSlug) aliases.push(`repo ${project.remoteSlug}`);
+  return aliases.length > 0 ? ` [also called: ${aliases.join(', ')}]` : '';
 }
