@@ -1,7 +1,12 @@
 # Note to spec pipeline
 
-> **Status:** implemented, QA Needed (all four phases built; the runtime E2E has NOT been run) ·
-> **Date:** 2026-08-14
+> **Status:** implemented · **runtime E2E EXECUTED 2026-08-15** — the core loop works end to end
+> (capture → split → route → approve → a real spec run that does not implement). **Still QA Needed:**
+> two defects found at runtime (the Notes list never refreshes off `processing`; routing mis-targets
+> when a note names a project by anything other than its registered id), and the **dedupe** leg was
+> never exercised. See "Runtime E2E — EXECUTED 2026-08-15" at the end of this file. ·
+> **Date:** 2026-08-14, status corrected 2026-08-15 — this header read "the runtime E2E has NOT been
+> run", which went false the moment it was run, and a header is what a scanning reader keeps
 > **Supersedes in part:** `2026-08-14-remove-notes-capture-inbox.md` (same day). That spec deleted
 > the notes scaffold; this one builds the feature it was a scaffold for. See "Relationship to the
 > removal" below — the removal was correct and is not being undone by accident.
@@ -334,3 +339,49 @@ projects; one proposal reports a duplicate of something genuinely on the board; 
 starts a run in **that** project whose spec cites real specs and commits from that repo; and Start
 implementation puts a run in that project's Tasks table and in `/tasks`. Until that has run, this
 ships as QA Needed, not Done.
+
+### Runtime E2E — EXECUTED 2026-08-15
+
+Run against a real cockpit (`node dist/index.js --port 4399`) with `CEZ_NOTES=1 CEZ_KB=1
+CEZ_WORKSPACE_VIEWS=1` and a **sandbox `CEZ_HOME`**, six registered projects (five real repos plus a
+throwaway fixture). Driven both through the HTTP API and through the browser UI.
+
+**What passed.**
+
+| Step | Result |
+|---|---|
+| Capture a note at workspace scope | ok — `POST /workspace/notes` |
+| Triage **splits** a two-feature note | ok — one note → 2 proposals |
+| Triage **routes to the right projects** | ok when the note names projects by their registered id (`cezar` + `bubble-trade`, from 5 considered) |
+| Detection works on a project it has never seen | ok — a fixture registered seconds earlier was picked correctly out of 6 |
+| `fallback: false`, real runner | ok — `claude` runner, 9.6s and 29s on two passes |
+| Approve starts a run **in that project** | ok — `kind: "spec"`, run id returned |
+| The spec run writes a spec and **does not implement** | ok — 239-line spec added, `src/` diff **0 lines** |
+| The spec cites the repo's own prior work | ok — `Extends: 2026-08-01-label-formatting.md`, plus a "What I read first" section naming the actual source file |
+| Work is isolated on a branch | ok — `cez/<runid>`, `main` untouched |
+| `/workspace/new` renders as specified | ok — Auto detect default, **no** template/base-branch/skill controls, explainer present, no toggle |
+| Sidebar shape | ok — Tasks/Git/Knowledge/Notes/Settings above a `PROJECTS` heading, each project nested |
+| `GET /workspace/git` | ok — real branch/upstream/ahead/dirty/head per project |
+
+**Two defects found, neither caught by any unit test.**
+
+1. **The Notes list does not refresh while a note is processing.** Submitting from `/workspace/new`
+   lands on `/notes` with the note at `processing`, and it stays there indefinitely: the API had it
+   at `processed` while the page still showed `processing`, and only a manual reload updated it.
+   A user watching the page concludes the feature hung. There is no polling and no push channel on
+   this list. **This is the first thing a new user sees, so it makes a working pipeline look broken.**
+
+2. **Routing keys on the registered project id, so a note naming a project any other way can
+   mis-route — silently and confidently.** A note saying "the **widget-service** label code has no
+   test file … separately, **aside** needs a data export" put **both** proposals on `aside`. The
+   fixture's registered id was `cez-e2e-fixture` while its README titled it `widget-service`, and
+   nothing reconciles the two. The pass's own summary shows the conflation ("aside project has an
+   already-completed spec run for label pluralisation" — that run was the fixture's). The split was
+   still correct; only the target was wrong. Earlier passes succeeded **because the notes happened
+   to use exact registered ids**, which is exactly the condition a hand-written test would also
+   satisfy — so this class of failure is invisible to the suite by construction.
+
+**Not exercised, and not claimable:** the **dedupe** leg. `boardDigestSize: 0` on every pass, because
+a fresh sandbox `CEZ_HOME` has no prior runs to compare against. `duplicateOf` therefore never had
+input and remains **unverified at runtime**. Also unexercised: Start-implementation from a written
+spec, and the changelog projection (which still has no UI consumer at all).
