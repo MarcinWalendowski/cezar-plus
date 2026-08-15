@@ -825,6 +825,122 @@ describe('a single agent step plus a check step gets NO chain note (#410)', () =
 });
 
 /**
+ * The step budget (PLAN D27, Phase 1 of
+ * `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`). There is no step-budget
+ * concept anywhere in run execution before this, so a manually started run has no ceiling at all
+ * — this is the general mechanism, and it is the whole reason Phase 1 is worth landing alone.
+ *
+ * Every workflow here is CHECK-only (`command: 'true'`, no agent step): a check step is a `bash`
+ * spawn, not a claude-CLI session, so these tests run without `CEZ_DRY_RUN` or a mock agent and
+ * settle in well under a second — the step loop's counting is what is under test, not any
+ * particular step kind.
+ */
+describe('step budget (PLAN D27 Phase 1)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-step-budget-'));
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  /** `manager.startRun` reads `config.stepBudget` fresh on each call (`execute()` loads config at
+   *  the top), so setting it before construction is enough — no reload step needed. */
+  function managerWithBudget(budget: number): RunManager {
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    writeFileSync(join(repoRoot, '.ai/cezar', 'config.json'), JSON.stringify({ stepBudget: budget }));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    return new RunManager(store, repoRoot);
+  }
+
+  function checkWorkflow(stepIds: string[]): WorkflowDef {
+    return {
+      name: 'all-checks',
+      source: 'file',
+      steps: stepIds.map((id) => ({ id, command: 'true' })),
+    };
+  }
+
+  async function waitForTerminal(runId: string, deadlineMs = 10_000): Promise<void> {
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + deadlineMs;
+    while (!terminal.has(store.getRun(runId)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not reach a terminal state in time');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
+  it('a budget-stopped run lands in review with stopReason "budget", not done', async () => {
+    // Mutation that must turn this red: land the budget stop in `done` instead of `review`
+    // (`workflows/run.ts`'s `budgetExceeded` branch) — confirmed red, then reverted.
+    const manager = managerWithBudget(2);
+    const record = manager.startRun(checkWorkflow(['s1', 's2', 's3']), { task: 'do it', worktree: false });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    expect(run?.status).toBe('review');
+    expect(run?.stopReason).toBe('budget');
+    // The step it never reached is untouched — the loop stopped BEFORE starting a third step,
+    // not mid-step.
+    expect(run?.steps.map((s) => ({ id: s.id, status: s.status }))).toEqual([
+      { id: 's1', status: 'done' },
+      { id: 's2', status: 'done' },
+      { id: 's3', status: 'pending' },
+    ]);
+  });
+
+  it('a run that finishes on its own carries no stopReason', async () => {
+    // Mutation that must turn this red: set `stopReason: 'budget'` unconditionally on every
+    // finish, not only on the budget branch — confirmed red, then reverted.
+    const manager = managerWithBudget(0); // unlimited — the shipped default
+    const record = manager.startRun(checkWorkflow(['s1', 's2']), { task: 'do it', worktree: false });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    expect(run?.status).toBe('done');
+    expect(run?.stopReason).toBeUndefined();
+  });
+
+  it('a run whose step count exactly equals the budget completes normally, untouched', async () => {
+    // The boundary the "off-by-one" mutation targets: budget === the number of steps a workflow
+    // actually needs must NOT trip. Paired with the test above (3 steps, budget 2, DOES trip),
+    // this pair pins the exact `>=` comparison — an off-by-one either direction fails one of
+    // the two. Mutation that must turn this red: change the loop's check from
+    // `stepsExecuted >= config.stepBudget` to `stepsExecuted > config.stepBudget` (or the
+    // reverse) — confirmed red, then reverted.
+    const manager = managerWithBudget(2);
+    const record = manager.startRun(checkWorkflow(['s1', 's2']), { task: 'do it', worktree: false });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    expect(run?.status).toBe('done');
+    expect(run?.stopReason).toBeUndefined();
+    expect(run?.steps.map((s) => s.status)).toEqual(['done', 'done']);
+  });
+
+  it('an errored step lands failed, not review, even when the error happens at the budget boundary', async () => {
+    // Mutation that must turn this red: route a real step failure through the budget-stop branch
+    // instead of the `runError` branch — confirmed red, then reverted.
+    const manager = managerWithBudget(1);
+    const workflow: WorkflowDef = {
+      name: 'failing-check',
+      source: 'file',
+      steps: [{ id: 's1', command: 'false' }],
+    };
+    const record = manager.startRun(workflow, { task: 'do it', worktree: false });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    expect(run?.status).toBe('failed');
+    expect(run?.stopReason).toBeUndefined();
+  });
+});
+
+/**
  * #490 — the `CEZ:MONITORING` marker parks a still-working turn-end as
  * `running`/`activity:'monitoring'` (a non-attention state) instead of
  * `waiting`, while a markerless turn-end still parks as `waiting`. Resuming

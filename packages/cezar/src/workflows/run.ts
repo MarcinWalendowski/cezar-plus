@@ -2007,7 +2007,9 @@ export class RunManager {
     }
     const run = this.store.getRun(runId);
     if (run?.status === 'review' && !this.isActive(runId)) {
-      this.store.updateRun(runId, { status: 'done' });
+      // `stopReason` is only ever valid alongside `status: 'review'` (PLAN D27 Phase 1) — accepting
+      // a budget-stopped run as `done` here must not leave the stale reason on a finished record.
+      this.store.updateRun(runId, { status: 'done', stopReason: undefined });
       this.store.appendEvent(runId, { type: 'lifecycle', message: 'review accepted — finished without a PR' });
       return true;
     }
@@ -2201,6 +2203,10 @@ export class RunManager {
       finishedAt: undefined,
       currentStepId: stepId,
       activity: undefined, // resuming a monitoring run — it's actively working again (#490)
+      // `review` is continuable (see `continueRun` below), including a budget stop — Continuing
+      // one is a fresh attempt, so the stale reason must not survive into whatever this attempt
+      // finishes as (PLAN D27 Phase 1; `stopReason` is only ever valid alongside `status: 'review'`).
+      stopReason: undefined,
     });
     this.store.updateStep(runId, stepId, {
       status: 'running',
@@ -2661,6 +2667,12 @@ export class RunManager {
     const retriesUsed = new Map<string, number>();
     let checkFailure: string | null = null;
     let runError: string | null = null;
+    // The step budget (PLAN D27, Phase 1 of
+    // `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`): `config.stepBudget`
+    // (0 = unlimited) caps how many times the loop below may enter its body. Set the moment the
+    // cap would be exceeded, checked ONLY at the top of the loop — so it can only stop the run
+    // BEFORE starting another step, never mid-step, and never in place of a real `runError`.
+    let budgetExceeded = false;
     // `startRun` already persisted task images so a queued bubble can render them
     // (#612). Reuse those files for the agent-facing path note instead of minting
     // duplicate pasted files when execution finally begins.
@@ -2683,8 +2695,14 @@ export class RunManager {
     const lastAgentIdx = findLastAgentStepIndex(workflow);
 
     let i = 0;
+    let stepsExecuted = 0;
     while (i < workflow.steps.length) {
       if (state.cancelled) break;
+      if (config.stepBudget > 0 && stepsExecuted >= config.stepBudget) {
+        budgetExceeded = true;
+        break;
+      }
+      stepsExecuted++;
       const step = workflow.steps[i] as WorkflowStepDef;
       const kind = stepKind(step);
       const record = this.store.getRun(runId)?.steps.find((s) => s.id === step.id);
@@ -2782,6 +2800,21 @@ export class RunManager {
     } else if (runError) {
       this.store.updateRun(runId, { status: 'failed', error: runError, finishedAt, currentStepId: undefined });
       emit({ type: 'lifecycle', message: `run failed — ${runError}` });
+    } else if (budgetExceeded) {
+      // The bound (PLAN D27, Phase 1): `review`, never `done`, and never `failed` — an agent
+      // halted at its ceiling and an agent that finished must not share a terminal state, and an
+      // agent we stopped is not an agent that errored. See `stopReason`'s doc comment
+      // (`runs/store.ts`) for why this is a new field rather than a widened `RunStatus`.
+      this.store.updateRun(runId, {
+        status: 'review',
+        stopReason: 'budget',
+        finishedAt,
+        currentStepId: undefined,
+      });
+      emit({
+        type: 'lifecycle',
+        message: `run stopped — step budget (${config.stepBudget}) reached; review before continuing`,
+      });
     } else {
       await this.settleSuccess(runId);
     }

@@ -2,7 +2,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { RunStore } from './store.ts';
+import { runStatusSchema as contractRunStatusSchema } from '@open-mercato/cezar-contract';
+import { RunStore, runRecordSchema } from './store.ts';
 
 /** A minimal pre-#389 record, exactly as an old runs.json holds it — no
  *  titleSummary, no diffStat. Loading it must keep working (additive proof). */
@@ -1428,5 +1429,72 @@ describe('RunStore — the legacy `claude-cli` runner id (#547)', () => {
       'utf8',
     );
     expect(RunStore.open(dataDir).getRun('legacy-1')).toBeUndefined();
+  });
+});
+
+/**
+ * `stopReason` (PLAN D27, Phase 1 of `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`)
+ * — the field that lets a budget-stopped run be told apart from one that finished on its own,
+ * without widening the published `RunStatus` union. The behavioural half (the step loop actually
+ * setting it, landing in `review` not `done`/`failed`) lives in `../workflows/run.test.ts`; this
+ * file covers the schema: it persists, round-trips, is additive-safe, and `RunStatus` itself stays
+ * exactly the seven members every consumer already switches over.
+ */
+describe('RunStore — stopReason (PLAN D27 Phase 1, step budget)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-stopreason-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('is absent on an ordinary run, and round-trips through runs.json once set', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      title: 'budget stop',
+      workflow: 'quick-task',
+      task: 'do it',
+      steps: [{ id: 'task', name: 'Do the task', kind: 'agent' }],
+    });
+    expect(run.stopReason).toBeUndefined();
+
+    store.updateRun(run.id, { status: 'review', stopReason: 'budget' });
+    expect(store.getRun(run.id)?.stopReason).toBe('budget');
+    store.flush();
+
+    const reopened = RunStore.open(dataDir).getRun(run.id);
+    expect(reopened?.status).toBe('review');
+    expect(reopened?.stopReason).toBe('budget');
+  });
+
+  it('stays absent for a pre-existing record that predates the field (additive proof)', () => {
+    writeFileSync(join(dataDir, 'runs.json'), JSON.stringify([LEGACY_RUN]), 'utf8');
+    expect(RunStore.open(dataDir).getRun(LEGACY_RUN.id)?.stopReason).toBeUndefined();
+  });
+});
+
+describe('RunStatus is not widened for the step budget (PLAN D27 Phase 1)', () => {
+  /** `RunStatus` is published and cezar is a released npm package, so adding a member breaks a
+   *  consumer that switches over it exhaustively — `stopReason` carries the new distinction
+   *  instead. A value-level assertion, not just a type: a source edit that widens the union
+   *  compiles fine (nothing local exercises the new member), so only a runtime check on the
+   *  parsed enum catches it. Mutation: add a member to either schema below — must fail. */
+  it("the store's own schema is exactly the seven published statuses", () => {
+    expect(runRecordSchema.shape.status.options).toEqual([
+      'queued',
+      'running',
+      'waiting',
+      'review',
+      'done',
+      'failed',
+      'cancelled',
+    ]);
+  });
+
+  it('the wire (contract) schema agrees, member for member', () => {
+    expect(contractRunStatusSchema.options).toEqual(runRecordSchema.shape.status.options);
   });
 });

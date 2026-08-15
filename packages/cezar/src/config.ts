@@ -25,6 +25,9 @@ export const DEFAULT_SKILLS_REPOS: SkillsRepoSource[] = [
 /** Last-resort retention when neither the repo nor the workspace says anything. */
 export const DEFAULT_WORKTREE_RETENTION = 10;
 
+/** Unlimited — see `stepBudget`'s doc comment for why the default has no teeth. */
+export const DEFAULT_STEP_BUDGET = 0;
+
 /** Bounds for `worktreeRetention` — shared with the presence probe below, so the
  *  "does this repo set its own?" question is answered by the same rule the
  *  schema enforces (and mirrors the workspace default's bounds). */
@@ -42,6 +45,22 @@ const configSchema = z.object({
    * bad value degrades to the default instead of discarding the rest.
    */
   worktreeRetention: worktreeRetentionSchema.default(DEFAULT_WORKTREE_RETENTION).catch(DEFAULT_WORKTREE_RETENTION),
+  /**
+   * Maximum step EXECUTIONS a single run's `workflows/run.ts` step loop may take before it is
+   * stopped and parked at `review` with `stopReason: 'budget'` (PLAN D27, Phase 1 of
+   * `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`) — every entry into the
+   * loop body counts, whether a fresh step or an `onFail` retry loop-back. There is no
+   * step-budget concept anywhere in run execution today, so a manually started run has no
+   * ceiling at all; this is the general mechanism, usable by any run, not only the autonomous
+   * continuation Phase 3 will add.
+   *
+   * 0 = unlimited, the same convention `worktreeRetention` and `memoryLimitMb` already use.
+   * Defaults to unlimited rather than a nonzero ceiling: this file configures runs repo-wide, and
+   * a default that trips on an ordinary multi-step or retry-heavy workflow would change the
+   * behaviour of every existing run the moment this shipped. `.catch(DEFAULT_STEP_BUDGET)` keeps
+   * the key additive-safe like its neighbours.
+   */
+  stepBudget: z.number().int().min(0).max(1000).default(DEFAULT_STEP_BUDGET).catch(DEFAULT_STEP_BUDGET),
   /**
    * Per-task memory ceiling in MiB (whole process tree). When a running task's
    * RSS crosses this the engine pauses it with a warning and lets the queue

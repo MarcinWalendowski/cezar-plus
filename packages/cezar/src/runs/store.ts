@@ -180,6 +180,23 @@ export const runRecordSchema = z.object({
     })
     .optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
+  /**
+   * Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —
+   * PLAN D27, Phase 1 of `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`. Only
+   * ever set alongside `status: 'review'`, and only ever `'budget'` today: the step loop
+   * (`workflows/run.ts`) hit its configured `stepBudget` before the run finished on its own.
+   *
+   * Landing here rather than widening `RunStatus` is deliberate: cezar is a released npm package
+   * and `RunStatus` is a published union, so adding a member would break every consumer that
+   * switches over it exhaustively. `review` already means "stopped, a human must look", which is
+   * exactly true of a budget stop, and this optional field is additive — an older build round-trips
+   * it untouched, same as `automation`'s free-text `event` above.
+   *
+   * `failed` is deliberately never used for this: an agent that errored and an agent that was
+   * stopped are different facts, and collapsing them would make "bigger budget or bug fix?"
+   * unanswerable from the record.
+   */
+  stopReason: z.enum(['budget']).optional(),
   /** Sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
    *  `monitoring` while the agent is still working on its own downstream work.
    *  Optional/absent on old runs; cleared when the run resumes or ends. */
