@@ -27,7 +27,8 @@ export interface PromptTemplate {
 const LABEL_MAX = 80
 const TEXT_MAX = 2000
 const LIST_MAX = 50
-/** Matches the server's `ref` bound for a skill name (`uiStateSchema.lastTask.ref`). */
+/** Matches the server's `ref` bound for a skill name (`uiStateSchema.recentSources[].ref` —
+ *  was `lastTask.ref` until that field was removed on 2026-08-15; same bound, same shape). */
 const SKILL_NAME_MAX = 200
 /** A template assigned to more skills than this is almost certainly a mis-edit, not a workflow. */
 const SKILLS_MAX = 50

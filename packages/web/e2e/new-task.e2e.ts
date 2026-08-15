@@ -11,8 +11,9 @@ import { AgentBrowser, bootProjectId, cezarCli, fixtureServeEnv } from './agent-
  * The full-screen /new composer (R4 Steps 1.1 + 1.3) end-to-end against a LIVE dry-run server:
  * client navigation from the sidebar CTA reaches the React hero, the cmdk source dropdown lists
  * this repo's project skills first, picking one + typing + submitting starts a real run — and
- * the API readback pins the created run to the exact skill-chain shape plus the persisted
- * `lastTask`. The second describe proves the protected bookmarklet contract (spec 011,
+ * the API readback pins the created run to the exact skill-chain shape plus the recorded
+ * `recentSources` (the picker's recency order). The second describe proves the protected
+ * bookmarklet contract (spec 011,
  * BACKWARD_COMPATIBILITY.md) on full document loads of /new, with the REAL launch key read
  * from `.ai/cezar/launch-key` — the documented on-disk contract.
  */
@@ -184,16 +185,24 @@ describe('the full-screen /new against a live dry-run server', () => {
       expect.objectContaining({ id: 'task', name: 'spec-writer', skill: 'spec-writer', prompt: '{{task}}' }),
     ])
 
-    // And the source persisted as lastTask, so the next visit preselects it.
+    // And the source was recorded for the picker's RECENCY ORDER. Deliberately not `lastTask`:
+    // that field is gone (2026-08-15, owner: "no workflow should be selected by default") —
+    // ordering the list by what you use is kept, choosing from it for you is not.
     const uiState = (await (await fetch(`${baseUrl}/api/v1/ui-state`)).json()) as {
-      lastTask?: { source: string; ref: string }
+      recentSources?: Array<{ source: string; ref: string }>
+      lastTask?: unknown
     }
-    expect(uiState.lastTask).toEqual({ source: 'skill', ref: 'spec-writer' })
+    expect(uiState.recentSources?.[0]).toEqual({ source: 'skill', ref: 'spec-writer' })
+    expect(uiState.lastTask).toBeUndefined()
 
     // The thread really rendered (the run parks at waiting under the dry-run mock).
     browser.waitForFunction(`document.querySelector('[data-slot="composer"] textarea') !== null`)
   }, 90_000)
 
+  // The pick still sticks going back — via this project's own composer DRAFT (localStorage),
+  // not via a server-side sticky default. Same observable behaviour, different mechanism, and
+  // the distinction is the whole point of the 2026-08-15 change: a pick you just made in this
+  // composer persists; a workflow used on some earlier task never preselects itself again.
   it('back on /new the picked source stuck and the spent draft is gone; iPhone hero screenshot', () => {
     browser.click(`[data-slot="sidebar"] a[href="${scoped('/new')}"]`)
     browser.waitForFunction(

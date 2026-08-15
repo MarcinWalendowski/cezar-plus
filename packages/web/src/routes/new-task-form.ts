@@ -19,9 +19,14 @@ import type {
  * table-testable and so drift from legacy is a diff in ONE file, not a scavenger hunt.
  */
 
-/** What the composer runs: a named workflow or a single skill. The same shape the server's
- *  `ui-state.json` stores as `lastTask`, so persistence needs no mapping. */
-export type TaskSource = NonNullable<UiState['lastTask']>
+/** What the composer runs: a named workflow or a single skill.
+ *
+ *  Was `NonNullable<UiState['lastTask']>` until 2026-08-15, when `lastTask` was removed from
+ *  `uiStateSchema` (it preselected a workflow, which is what "no workflow by default" ends).
+ *  Now derived from `recentSources`, the ui-state field that still carries this exact shape —
+ *  still one definition, still no mapping at the persistence boundary, and it moves with the
+ *  contract if the shape ever changes. */
+export type TaskSource = NonNullable<UiState['recentSources']>[number]
 
 /** Prepend `source` to the recency list (newest first), dropping any earlier occurrence of the
  *  same source+ref, and cap the length. Pure so the picker's recency sort is table-testable. */
@@ -215,18 +220,23 @@ export function sourceExists(
 }
 
 /**
- * The effective source: the first candidate that still exists (the draft pick, then the
- * persisted `lastTask`), else `null` — the composer's "None" cold default (2026-08-15). "None"
- * sends neither `workflow` nor `steps` (`buildCreateRunBody` below); the server resolves that to
- * quick-task, so this no longer has to guess one client-side.
+ * The effective source: the first candidate that still exists, else `null` — the composer's
+ * "None" default (2026-08-15). "None" sends neither `workflow` nor `steps`
+ * (`buildCreateRunBody` below); the server resolves that to quick-task, so this no longer has to
+ * guess one client-side.
  *
- * `undefined` and `null` are NOT interchangeable in `candidates`: `undefined` means "this
- * candidate has no opinion, keep looking" (an untouched draft, an absent `lastTask`); `null`
- * means "explicit None was picked here" and stops the search immediately, returning `null`. A
- * candidate naming a since-deleted skill/workflow is neither — it is skipped and the search
- * continues, exactly like before. Without this distinction, an explicit None pick on a draft
- * that still has a sticky `lastTask` would silently fall through to that sticky workflow instead
- * of clearing it — the same bug this function used to have when both meant "skip".
+ * **CORRECTED 2026-08-15 (owner: "no workflow should be selected by default").** The candidate
+ * list used to be `[draft.source, uiState.lastTask]` — the draft pick, then the workflow used on
+ * the previous task. That second candidate is gone. It made "None is the cold default" true only
+ * on a machine that had never run anything: everyone else got a preselected workflow, which is
+ * the thing the owner asked twice to stop. Stickiness *within* a project's own composer draft
+ * stays — a pick you made and can see is not a default.
+ *
+ * `undefined` and `null` are still not interchangeable in `candidates`, because this takes a
+ * list: `undefined` means "no opinion, keep looking" and `null` means "explicit None, stop".
+ * With one candidate they now reach the same answer; the distinction is kept because the
+ * signature is a list and a future second candidate would need it again. A candidate naming a
+ * since-deleted skill/workflow is neither — it is skipped and the search continues.
  */
 export function resolveSource(
   candidates: ReadonlyArray<TaskSource | null | undefined>,

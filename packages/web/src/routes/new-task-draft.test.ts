@@ -176,6 +176,73 @@ describe('the new-task draft store', () => {
     expect(readDraft().source).toBeNull()
   })
 
+  /**
+   * The DRAFT_VERSION migration (2026-08-15, owner: "no workflow should be selected by
+   * default"). A draft written before the None default could hold a `source` that was never an
+   * explicit pick — the composer used to preselect `quick-task` and persist it — so an
+   * unversioned stored draft must come back with no source at all, while keeping everything the
+   * user actually typed and chose. Without this, every machine that had ever used the old
+   * composer would keep showing a preselected workflow no matter how correct the new code is.
+   */
+  describe('the pre-versioning migration', () => {
+    const LEGACY = JSON.stringify({
+      text: 'half a task',
+      source: { source: 'workflow', ref: 'quick-task' },
+      runner: 'codex',
+      agentProfile: 'work',
+      model: 'opus',
+      variants: 2,
+      planFirst: true,
+      worktree: false,
+      autonomous: true,
+      generateFollowups: false,
+    })
+
+    it('drops a source stored without a version marker, and keeps everything else', () => {
+      resetDraft()
+      localStorage.setItem('cez-new-task-draft', LEGACY)
+      const draft = readDraft()
+      expect(draft.source).toBeUndefined()
+      // Not a blanket wipe: the text and every run setting are the user's and survive intact.
+      expect(draft).toMatchObject({
+        text: 'half a task',
+        runner: 'codex',
+        agentProfile: 'work',
+        model: 'opus',
+        variants: 2,
+        planFirst: true,
+        worktree: false,
+        autonomous: true,
+        generateFollowups: false,
+      })
+    })
+
+    it('keeps a source once the draft has been written by this version', () => {
+      // The negative control for the test above: the drop must be keyed on the MISSING marker,
+      // not on "source is always dropped" — otherwise a real pick could never persist at all.
+      resetDraft()
+      writeDraft({
+        text: 'half a task',
+        source: { source: 'workflow', ref: 'quick-task' },
+        runner: null, agentProfile: null, model: null, variants: 1,
+        planFirst: false, worktree: null, autonomous: null, generateFollowups: null,
+      })
+      const stored = localStorage.getItem('cez-new-task-draft') as string
+      resetDraft()
+      localStorage.setItem('cez-new-task-draft', stored)
+      expect(readDraft().source).toEqual({ source: 'workflow', ref: 'quick-task' })
+    })
+
+    it('does not resurrect a source when the marker is a DIFFERENT version', () => {
+      resetDraft()
+      localStorage.setItem(
+        'cez-new-task-draft',
+        JSON.stringify({ ...JSON.parse(LEGACY), v: 1 }),
+      )
+      expect(readDraft().source).toBeUndefined()
+    })
+  })
+
   it('normalizes a malformed/older stored value instead of throwing', () => {
     // A cold read (cache null after resetDraft) hitting bad JSON must degrade to EMPTY.
     resetDraft()

@@ -221,7 +221,10 @@ export function NewTaskRoute() {
   const pillProjectId = pillMode === 'auto' ? null : (urlProjectId ?? null)
   const sourcesReady =
     skills.data !== undefined && workflows.data !== undefined && !uiState.isPending
-  const source = resolveSource([draft.source, uiState.data?.lastTask], skillList, workflowList)
+  // The draft's own pick, and nothing else (2026-08-15, owner: "no workflow should be selected
+  // by default"). `uiState.lastTask` used to be the second candidate here — see `resolveSource`'s
+  // own doc comment for why a previously-used workflow no longer reappears preselected.
+  const source = resolveSource([draft.source], skillList, workflowList)
   const selectedSkill = source?.source === 'skill'
     ? skillList.find((skill) => skill.name === source.ref)
     : undefined
@@ -528,13 +531,15 @@ export function NewTaskRoute() {
         todoId: deepLink.todo,
       }),
     )
-    // Remember what was actually run so the next visit preselects it (legacy
-    // `saveLastTaskSource`) and float it to the top of the picker next time
-    // (recency sort) — fire-and-forget: a failed write only costs the convenience.
+    // Float what was actually run to the top of the picker next time (recency sort) and count it
+    // for the frequency sort — fire-and-forget: a failed write only costs the convenience.
+    //
+    // **No `lastTask` (2026-08-15, owner: "no workflow should be selected by default").** This
+    // used to send `lastTask: source` so the next visit PRESELECTED it. Nothing reads it now, so
+    // writing it would be a mechanism that looks live from the code and does nothing — the field
+    // is gone from `uiStateSchema` too, rather than left written-and-ignored. Ordering the picker
+    // by what you use is a different thing from choosing for you, and only the first survives.
     void putUiState({
-      // Sent even when null (None, 2026-08-15): the pick is sticky like every other source, so a
-      // stored workflow from before this task must not keep winning over an explicit None.
-      lastTask: source,
       // Recency sort is a catalog concept — None has no catalog entry to float, so only a real
       // pick touches it.
       ...(source ? { recentSources: pushRecentSource(recentSources, source) } : {}),

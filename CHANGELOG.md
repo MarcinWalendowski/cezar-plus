@@ -112,13 +112,24 @@
   half of it.
 
 - ✨ **The composer stops forcing you to pick a workflow.** The source pill gains a **None** item,
-  listed first, and None is the cold default — a task no longer has to name a workflow. `POST /runs`
+  listed first, and None is the default — a task no longer has to name a workflow. `POST /runs`
   accepts a body naming **neither** `workflow` nor `steps` (naming both is still a 400) and resolves
   it to `quick-task`: your project's own file if you have one, the built-in otherwise, the same
   resolution `POST /todos/:id/start` already used. Additive on the wire, so nothing that works today
-  stops working. Stickiness survives in both directions — a workflow you picked last time is still
-  preselected, and picking None clears it and sticks. Spec
-  `.ai/specs/2026-08-15-composer-stops-forcing-choices.md`.
+  stops working. Spec `.ai/specs/2026-08-15-composer-stops-forcing-choices.md`.
+
+  **CORRECTED later the same day — no workflow is preselected, full stop.** This entry first said
+  "Stickiness survives in both directions — a workflow you picked last time is still preselected",
+  and that sentence was the bug: a *cold* default only applies to a machine that has never run
+  anything, so everyone else still opened the composer with a workflow chosen for them. The
+  cross-session sticky source (`uiState.lastTask`) is **removed** — from the schema, from the
+  composer's resolution, and from the ui-state write. Picker **ordering** is untouched: what you
+  run still floats to the top (`recentSources`) and still counts toward the frequency sort
+  (`skillUsage`) — ordering the list is not the same as choosing from it. A pick still sticks in
+  that project's own composer draft, because a choice you made and can see is not a default. A
+  draft saved before this change drops **only** its stored source (a `v` marker on the draft, see
+  `new-task-draft.ts`) and keeps your text and every run setting, so the fix reaches machines that
+  already had the old value rather than only new ones.
 
 - ✨ **Adding a folder now offers every folder in it as a project, not only the git repos — and
   offers to set git up on the ones without it.** A directory of real work that was never

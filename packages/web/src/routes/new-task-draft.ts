@@ -5,21 +5,34 @@ import type { TaskSource } from './new-task-form'
  * The new-task draft store (spec: "Queued form state survives navigation (draft store)").
  *
  * localStorage-backed so the form is refresh-resilient: stepping away to check a thread — or
- * accidentally reloading the tab — loses nothing. Nulls mean "the user has not chosen" — the
- * form falls back to persisted/last-used/default values, so an untouched draft never shadows a
- * fresher `lastTask` from the server. Images are deliberately NOT persisted (multi-MB base64
- * would blow the ~5 MB localStorage quota); everything the pickers hold is.
+ * accidentally reloading the tab — loses nothing. Nulls mean "the user has not chosen", and the
+ * form then uses its default. Images are deliberately NOT persisted (multi-MB base64 would blow
+ * the ~5 MB localStorage quota); everything the pickers hold is.
+ *
+ * **Corrected 2026-08-15:** this paragraph used to end "so an untouched draft never shadows a
+ * fresher `lastTask` from the server". There is no `lastTask` any more — this store is now the
+ * ONLY thing that preselects a source, which is what makes the version marker below matter.
  *
  * Every entry point takes the project the draft belongs to (multi-project spec, step 3.4) —
  * see `storageKey` below for what scopes what.
  */
 export interface NewTaskDraft {
   text: string
-  /** `undefined` (the untouched default) means "no draft-local opinion — defer to the
-   *  persisted `lastTask`". `null` means the composer's "None" pill was explicitly picked
-   *  this session (2026-08-15) — a real, terminal choice, not "unset": `resolveSource`
-   *  (new-task-form.ts) must stop there rather than falling through to a sticky workflow, or
-   *  clicking None while a sticky pick exists would silently do nothing. */
+  /**
+   * The source pill's pick for THIS project's composer.
+   *
+   * **CORRECTED 2026-08-15 (owner: "no workflow should be selected by default").** This used to
+   * read: "`undefined` (the untouched default) means 'no draft-local opinion — defer to the
+   * persisted `lastTask`'". There is no longer anything to defer to — the cross-session
+   * `lastTask` fallback is gone (`resolveSource`, new-task-form.ts), so `undefined` now means
+   * exactly **None**, the same as `null`. The two are still spelled differently because
+   * `resolveSource` takes a candidate list and `null` must stop the search; they simply no
+   * longer differ in outcome here.
+   *
+   * A pick made in this composer still persists with the rest of the draft — that is a choice
+   * the user made and can see, not a default. What no longer happens is a workflow used on some
+   * previous task quietly reappearing preselected on the next one.
+   */
   source?: TaskSource | null
   runner: Runner | null
   /** Per-task agent account (spec 2026-07-29-agent-profiles). `null` = follow the project's own
@@ -132,6 +145,22 @@ const EMPTY: NewTaskDraft = {
 const STORAGE_KEY = 'cez-new-task-draft'
 
 /**
+ * Draft schema version, stamped on every write and checked on every read.
+ *
+ * It exists for exactly one job (2026-08-15, owner: "no workflow should be selected by
+ * default"): a draft written **before** the None default shipped can hold a `source` that was
+ * never an explicit pick — the composer used to preselect `quick-task` and persist it, so the
+ * stored value records the old default rather than a decision. Reading it back would keep
+ * showing a preselected workflow on the very machines the change is meant to fix, forever, and
+ * no amount of correct new code would clear it.
+ *
+ * So an unversioned draft keeps its text and every run setting and drops **only** `source`. A
+ * blanket key bump would have thrown away half-typed task text to fix a pill, which is a worse
+ * trade than the bug.
+ */
+const DRAFT_VERSION = 2
+
+/**
  * The per-project storage key (multi-project spec, "New task": `cez-new-task-draft:<projectId>`).
  *
  * Drafts are project state — a half-typed task for the shop frontend must not surface in the
@@ -150,12 +179,22 @@ function storageKey(projectId: string | null): string {
  *  store must survive a hand-edited or older-shape localStorage value without throwing. */
 function normalize(raw: unknown): NewTaskDraft {
   const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  // A draft from before DRAFT_VERSION 2 may carry the OLD preselect-quick-task default in
+  // `source` rather than a real pick — see the constant's own comment. Its text and settings are
+  // still the user's; only the pill is dropped.
+  const sourceTrusted = obj.v === DRAFT_VERSION
   return {
     text: typeof obj.text === 'string' ? obj.text : '',
     // A stored `null` is an explicit None pick from a previous session (JSON round-trips it
     // faithfully, unlike `undefined`) — preserve it. Anything else malformed/absent means
-    // untouched, not "explicitly None".
-    source: isSource(obj.source) ? obj.source : obj.source === null ? null : undefined,
+    // untouched, which since 2026-08-15 also resolves to None.
+    source: !sourceTrusted
+      ? undefined
+      : isSource(obj.source)
+        ? obj.source
+        : obj.source === null
+          ? null
+          : undefined,
     runner: typeof obj.runner === 'string' ? (obj.runner as Runner) : null,
     agentProfile: typeof obj.agentProfile === 'string' ? obj.agentProfile : null,
     model: typeof obj.model === 'string' ? obj.model : null,
@@ -201,7 +240,9 @@ export function writeDraft(next: NewTaskDraft, projectId: string | null = null):
   const key = storageKey(projectId)
   cache.set(key, { ...next })
   try {
-    localStorage.setItem(key, JSON.stringify(next))
+    // `v` rides the stored JSON only — it is a storage concern, not part of the draft the form
+    // holds, so `NewTaskDraft` stays the shape the component reasons about.
+    localStorage.setItem(key, JSON.stringify({ ...next, v: DRAFT_VERSION }))
   } catch {
     // Storage disabled/full — the in-memory cache still survives navigation this session.
   }

@@ -143,14 +143,14 @@ const taskTableUiStateSchema = z.looseObject({
  * listed it, which made it wider than the route.
  */
 export const uiStateSchema = z.looseObject({
-  /** `null` is the composer's "None" pick (2026-08-15) persisted as a sticky default — distinct
-   *  from absent, which means "nothing chosen yet" and resolves the same cold-default way. A
-   *  stored value from before this change is a plain object and still resolves through
-   *  `sourceExists`, so no migration is needed. */
-  lastTask: z
-    .object({ source: z.enum(['workflow', 'skill']), ref: z.string() })
-    .nullable()
-    .optional(),
+  // **REMOVED 2026-08-15 — `lastTask` is gone** (owner: "no workflow should be selected by
+  // default"). It stored the source of the last run so the composer could PRESELECT it next
+  // time, which made "None is the default" true only on a machine that had never run anything.
+  // Nothing reads it and nothing writes it now, so the key is deleted rather than left as a
+  // field that reads like a live preference. This schema is `looseObject`, so a `lastTask` left
+  // in an existing `ui-state.json` still round-trips untouched and harms nothing — it is simply
+  // never consulted. Picker ORDERING is unaffected and stays: see `recentSources` and
+  // `skillUsage` below, which order the list without choosing from it.
   /** Most-recently-run sources, newest first (deduped, capped). Feeds the composer picker's
    *  recency sort. */
   recentSources: z

@@ -2,8 +2,10 @@
 
 > **Status:** partially reverted 2026-08-15 — D1 and D2 (the project half: routing "New task" at
 > the project-less `/workspace/new` composer) were reverted on owner review the same day, in place;
-> see the marked sections below. D3, D4 and D5 (the workflow half: "None" as the cold default) stand
-> as shipped. **Date:** 2026-08-15 · **Owner decisions:** "by default task
+> see the marked sections below. D3 and D4 stand as shipped. **D5 shipped and was then corrected
+> the same day**: "None" as the *cold* default was not enough — the owner, looking at the running
+> composer, said "no workflow should be selected by default", so the cross-session `lastTask`
+> stickiness D5 argued for is gone entirely. See D5's own correction. **Date:** 2026-08-15 · **Owner decisions:** "by default task
 > project/directories should be 'auto detect' or 'ALL' — right now I can select only one", and
 > "why do we force users to select workflow? we shouldn't force them — by default task shouldn't
 > have any workflow". Asked how far to go on the first: **make the existing auto-detect composer
@@ -144,10 +146,34 @@ floor, so the fallback cannot 404.
 **None** item first, and `buildCreateRunBody` omits **both** `workflow` and `steps` when the source
 is null.
 
-**Stickiness survives.** `uiState.lastTask` is an explicit past choice, so a user who picked a
-workflow last time still gets it. Only the *cold* default changes — which is what "by default task
-shouldn't have any workflow" asks for. A user who picks **None** persists None, so the escape is
-one click and it sticks.
+**CORRECTED 2026-08-15 — cross-session stickiness is gone; this paragraph was the bug.** It read:
+
+> **Stickiness survives.** `uiState.lastTask` is an explicit past choice, so a user who picked a
+> workflow last time still gets it. Only the *cold* default changes — which is what "by default
+> task shouldn't have any workflow" asks for. A user who picks **None** persists None, so the
+> escape is one click and it sticks.
+
+The owner looked at the shipped composer and said, plainly: **"no workflow should be selected by
+default."** The reasoning above is what made that false in practice — a *cold* default only ever
+applies to a machine that has never run anything, and every other machine (the owner's included)
+kept getting a preselected workflow. "An explicit past choice" was also generous: the pre-None
+composer preselected `quick-task` and persisted it, so the stored value often recorded the old
+default rather than any decision.
+
+What shipped instead:
+
+- **`uiState.lastTask` is removed** — from `uiStateSchema`, from `resolveSource`'s candidate list,
+  and from the submit's ui-state write. Nothing reads it and nothing writes it, so it is deleted
+  rather than left as a field that reads like a live preference.
+- **Picker ORDERING is untouched.** `recentSources` (recency) and `skillUsage` (frequency) still
+  record every run and still order the menu. Ordering the list by what you use and choosing from
+  it for you are different things; only the second was the complaint.
+- **A pick still sticks inside the composer's own draft**, per project. That is a choice the user
+  made and can see on screen, not a default.
+- **Drafts written before this carry a `v` marker check** (`DRAFT_VERSION`, `new-task-draft.ts`):
+  an unversioned draft drops **only** its `source`, keeping its text and every run setting. Without
+  it, the machines the change exists to fix would have kept showing a preselected workflow forever,
+  and a blanket key bump would have thrown away half-typed task text to fix a pill.
 
 ### D6 — what this spec does NOT do
 

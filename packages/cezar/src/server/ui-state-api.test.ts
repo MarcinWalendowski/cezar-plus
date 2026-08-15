@@ -67,28 +67,30 @@ describe('the ui-state API — skillUsage (#408)', () => {
   });
 
   it('a skillUsage PUT never disturbs unrelated existing keys (additive, #3 BACKWARD_COMPATIBILITY)', async () => {
-    await put({ lastTask: { source: 'skill', ref: 'om-fix' }, lastAutonomous: true });
+    await put({ recentSources: [{ source: 'skill', ref: 'om-fix' }], lastAutonomous: true });
     await put({ skillUsage: { 'om-fix': 1 } });
     const raw = rawFile();
-    expect(raw.lastTask).toEqual({ source: 'skill', ref: 'om-fix' });
+    expect(raw.recentSources).toEqual([{ source: 'skill', ref: 'om-fix' }]);
     expect(raw.lastAutonomous).toBe(true);
     expect(raw.skillUsage).toEqual({ 'om-fix': 1 });
   });
 
-  it('PUT lastTask: null persists and round-trips through GET and the on-disk file (D5 — the "None" pill)', async () => {
-    // Distinct from an object lastTask (above) and from an ABSENT key: null is the composer's
-    // explicit "None" pick persisted as a sticky default (spec 2026-08-15), not "nothing chosen".
-    const res = await put({ lastTask: null });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ lastTask: null });
-    expect(rawFile().lastTask).toBeNull();
-    expect(await (await get()).json()).toMatchObject({ lastTask: null });
-  });
-
-  it('an explicit lastTask: null clears a previously-set sticky workflow, not merges over it', async () => {
+  /**
+   * **REPLACED 2026-08-15** (owner: "no workflow should be selected by default"). Two tests
+   * lived here pinning `lastTask` — that a `null` PUT round-tripped as the composer's sticky
+   * "None" pick, and that it cleared a previously-set sticky workflow. `lastTask` is gone from
+   * `uiStateSchema` and from every reader and writer, so both were pinning a preference nothing
+   * consults. What is worth keeping is the property they relied on and that other keys still
+   * need: this schema is `looseObject`, so a key it does not name survives a write untouched
+   * rather than being stripped. That is what lets an existing `ui-state.json` carrying a stale
+   * `lastTask` sit there harmlessly instead of failing a PUT.
+   */
+  it('keeps an unknown key (a stale lastTask included) rather than stripping it on write', async () => {
     await put({ lastTask: { source: 'workflow', ref: 'fix-and-verify' } });
-    await put({ lastTask: null });
-    expect(rawFile().lastTask).toBeNull();
+    await put({ lastAutonomous: true });
+    const raw = rawFile();
+    expect(raw.lastTask).toEqual({ source: 'workflow', ref: 'fix-and-verify' });
+    expect(raw.lastAutonomous).toBe(true);
   });
 
   it('rejects a malformed skillUsage value instead of writing garbage', async () => {

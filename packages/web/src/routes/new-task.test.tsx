@@ -23,9 +23,22 @@ import { NewTaskRoute } from './new-task'
 /**
  * The /new screen against a mocked API: picker data flows (runner hidden on single-backend
  * hosts, model presets switching per runner, variants gated on git), the EXACT submit bodies
- * (workflow vs skill vs variants — the wire contract with POST /api/v1/runs), lastTask
+ * (workflow vs skill vs variants — the wire contract with POST /api/v1/runs), ui-state
  * persistence, draft survival across unmounts, ?skill/?ref prefill, and the suggested chips.
+ *
+ * **Changed 2026-08-15** (owner: "no workflow should be selected by default"): a preselected
+ * source is arranged with `pickSource()` — the composer's own draft — because `lastTask` no
+ * longer exists. Seeding ui-state can no longer preselect anything, by design.
  */
+
+/** Arrange "the user picked this source in this composer". The draft is now the ONLY thing that
+ *  preselects; every other field is the untouched default so nothing else is implied. */
+function pickSource(source: { source: 'skill' | 'workflow'; ref: string } | null): void {
+  writeDraft({
+    text: '', source, runner: null, agentProfile: null, model: null, variants: 1,
+    planFirst: false, worktree: null, autonomous: null, generateFollowups: null,
+  })
+}
 
 beforeAll(() => {
   // cmdk scrolls the selected item into view; jsdom has no scrollIntoView.
@@ -569,14 +582,23 @@ describe('picker data flows', () => {
     })
   })
 
-  it('preselects the persisted lastTask when it still exists', async () => {
-    serve({ uiState: { lastTask: { source: 'workflow', ref: 'fix-and-verify' } } })
+  /**
+   * **INVERTED 2026-08-15** (owner: "no workflow should be selected by default"). This pair used
+   * to assert "preselects the persisted `lastTask` when it still exists" and "falls back to None
+   * when `lastTask` names something gone". The first is now the bug: a workflow used on a
+   * previous task must not come back preselected, whether or not it still exists, so the
+   * composer no longer reads `lastTask` at all (the field is gone from `uiStateSchema`). Both
+   * cases collapse into one answer — None — and the assertion is kept in two halves so a
+   * reinstated fallback fails on the "still exists" half rather than passing quietly.
+   */
+  it('never preselects a previously-run source — None either way, existing or not', async () => {
+    serve({ uiState: { recentSources: [{ source: 'workflow', ref: 'fix-and-verify' }] } })
     renderNewTask()
-    await pillReady('fix-and-verify')
+    await pillReady('None')
   })
 
-  it('falls back to None (2026-08-15) when lastTask names something gone — no other client-side guess', async () => {
-    serve({ uiState: { lastTask: { source: 'skill', ref: 'deleted-skill' } } })
+  it('None, not a client-side guess, when a stale stored source names something gone', async () => {
+    serve({ uiState: { recentSources: [{ source: 'skill', ref: 'deleted-skill' }] } })
     renderNewTask()
     await pillReady('None')
   })
@@ -780,11 +802,9 @@ describe('provider authentication gate', () => {
 // ---- submit bodies (the wire contract) ---------------------------------------------------------
 
 describe('submit', () => {
-  it('a SKILL source posts the one-step inline chain and persists lastTask, then navigates', async () => {
-    serve({
-      createRun: { id: 'run-9' },
-      uiState: { lastTask: { source: 'skill', ref: 'om-fix' } },
-    })
+  it('a SKILL source posts the one-step inline chain, records usage, then navigates', async () => {
+    pickSource({ source: 'skill', ref: 'om-fix' })
+    serve({ createRun: { id: 'run-9' } })
     renderNewTask()
     await pillReady('om-fix')
     fireEvent.change(textarea(), { target: { value: 'Fix the flaky worktree test' } })
@@ -799,8 +819,9 @@ describe('submit', () => {
     await waitFor(() => expect(location()).toBe('/tasks/run-9'))
     await waitFor(() =>
       expect(requests.find((r) => r.method === 'PUT' && r.url === '/api/v1/ui-state')?.body).toEqual({
-        lastTask: { source: 'skill', ref: 'om-fix' },
-        // The run also lands at the head of the recency list (picker sort)...
+        // NO `lastTask` (2026-08-15): ordering the picker by what you use is kept, choosing for
+        // you is gone. An exhaustive `toEqual` is what makes its ABSENCE an assertion.
+        // The run lands at the head of the recency list (picker sort)...
         recentSources: [{ source: 'skill', ref: 'om-fix' }],
         lastGenerateFollowups: true,
         // ...and bumps its usage count for the #408 frequency sort (a workflow source would
@@ -833,7 +854,8 @@ describe('submit', () => {
   })
 
   it('a WORKFLOW source posts { workflow, task }', async () => {
-    serve({ uiState: { lastTask: { source: 'workflow', ref: 'quick-task' } } })
+    pickSource({ source: 'workflow', ref: 'quick-task' })
+    serve()
     renderNewTask()
     await pillReady('quick-task')
     fireEvent.change(textarea(), { target: { value: 'Ship it' } })
@@ -842,10 +864,11 @@ describe('submit', () => {
     expect(postedBody()).toEqual({ task: 'Ship it', workflow: 'quick-task' })
   })
 
-  it('explicitly picking None sends neither workflow nor steps, and persists lastTask: null (D5, 2026-08-15)', async () => {
-    // Starts on a sticky workflow — proves the pill is NOT already at None before the click,
-    // and that picking None explicitly CLEARS the sticky choice rather than merely not sending it.
-    serve({ createRun: { id: 'run-none' }, uiState: { lastTask: { source: 'workflow', ref: 'fix-and-verify' } } })
+  it('explicitly picking None sends neither workflow nor steps (D5, 2026-08-15)', async () => {
+    // Starts on a picked workflow — proves the pill is NOT already at None before the click, so
+    // reaching None is a real state change and not the default answering for it.
+    pickSource({ source: 'workflow', ref: 'fix-and-verify' })
+    serve({ createRun: { id: 'run-none' } })
     renderNewTask()
     await pillReady('fix-and-verify')
 
@@ -863,11 +886,14 @@ describe('submit', () => {
     expect(wire).toEqual({ task: 'let the server pick' })
 
     await waitFor(() => expect(location()).toBe('/tasks/run-none'))
-    await waitFor(() =>
-      expect(requests.find((r) => r.method === 'PUT' && r.url === '/api/v1/ui-state')?.body).toMatchObject({
-        lastTask: null,
-      }),
-    )
+    // The ui-state write carries no source at all for a None run: `lastTask` is gone
+    // (2026-08-15) and `recentSources` is a catalog list, which None has no entry in.
+    await waitFor(() => expect(location()).toBe('/tasks/run-none'))
+    const nonePut = requests.find((r) => r.method === 'PUT' && r.url === '/api/v1/ui-state')
+    expect(nonePut?.body).not.toHaveProperty('lastTask')
+    expect(nonePut?.body).not.toHaveProperty('recentSources')
+    // The None pick still sticks in the composer's own draft, which is what preselects now.
+    expect(readDraft().source).toBeNull()
   })
 
   it('posts worktree:false after opt-out for every single-step source shape', async () => {
@@ -877,6 +903,8 @@ describe('submit', () => {
        *  case (2026-08-15: nothing sticky means None, not a client-side quick-task guess). */
       pillLabel: string
       overrides: NonNullable<Parameters<typeof serve>[0]>
+      /** The composer draft's picked source, since 2026-08-15 the only thing that preselects. */
+      picked?: { source: 'skill' | 'workflow'; ref: string }
       expected: Record<string, unknown>
     }> = [
       {
@@ -889,7 +917,8 @@ describe('submit', () => {
       {
         label: 'om-fix',
         pillLabel: 'om-fix',
-        overrides: { uiState: { lastTask: { source: 'skill', ref: 'om-fix' } } },
+        overrides: {},
+        picked: { source: 'skill', ref: 'om-fix' },
         expected: { steps: [{ id: 'task', name: 'om-fix', skill: 'om-fix', prompt: '{{task}}' }] },
       },
       {
@@ -903,8 +932,8 @@ describe('submit', () => {
             ],
             issues: [],
           },
-          uiState: { lastTask: { source: 'workflow', ref: 'one-step' } },
         },
+        picked: { source: 'workflow', ref: 'one-step' },
         expected: { workflow: 'one-step' },
       },
     ]
@@ -912,6 +941,7 @@ describe('submit', () => {
     for (const testCase of cases) {
       cleanup()
       resetDraft()
+      if (testCase.picked) pickSource(testCase.picked)
       serve(testCase.overrides)
       renderNewTask()
       await pillReady(testCase.pillLabel)
@@ -1075,12 +1105,10 @@ describe('submit', () => {
   })
 
   it('applies an interactive skill hint to untouched controls while keeping both overridable', async () => {
-    // The cold default is now quick-task, so an interactive skill only drives the recommendation
-    // once it is the selected source — here via the persisted lastTask.
-    serve({
-      skills: [{ ...SKILLS[0]!, interactive: true }, SKILLS[1]!],
-      uiState: { lastTask: { source: 'skill', ref: 'om-fix' } },
-    })
+    // The cold default is None, so an interactive skill only drives the recommendation once it
+    // is the selected source — here by picking it in the composer's own draft.
+    pickSource({ source: 'skill', ref: 'om-fix' })
+    serve({ skills: [{ ...SKILLS[0]!, interactive: true }, SKILLS[1]!] })
     renderNewTask()
     await pillReady('om-fix')
 
@@ -1099,6 +1127,7 @@ describe('submit', () => {
   })
 
   it('lets a multi-step workflow opt out and submits worktree:false', async () => {
+    pickSource({ source: 'workflow', ref: 'fix-and-verify' })
     serve({
       workflows: {
         workflows: [
@@ -1114,7 +1143,6 @@ describe('submit', () => {
         ],
         issues: [],
       },
-      uiState: { lastTask: { source: 'workflow', ref: 'fix-and-verify' } },
     })
     renderNewTask()
     await pillReady('fix-and-verify')
@@ -1371,7 +1399,7 @@ describe('bookmarklet auto-start', () => {
       { task: 'hello', steps: [{ id: 'task', name: 'deploy', skill: 'deploy', prompt: '{{task}}' }] },
     ])
     expect(location()).toBe('/tasks/r1')
-    // Unattended starts do not rewrite the sticky lastTask (legacy parity).
+    // Unattended starts write no ui-state at all (legacy parity).
     expect(requests.some((r) => r.method === 'PUT' && r.url === '/api/v1/ui-state')).toBe(false)
   })
 
