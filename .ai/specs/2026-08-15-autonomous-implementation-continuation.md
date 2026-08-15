@@ -1,6 +1,13 @@
 # Autonomous implementation continuation
 
-> **Status:** specified, not implemented · **Date:** 2026-08-15
+> **Status:** **Phases 1, 2, 3 and 4a implemented and pushed · QA Needed** (the runtime E2E has
+> NOT been run, so nothing here is Done). **Phase 4b — the composer's autonomous toggle — is not
+> built**, though the data plumbing is: `autonomous` is settable through `POST`/`PATCH
+> /workspace/notes`, so the trigger is reachable without it. Commits: `3e3b10a8` (the budget),
+> `30ff1847` (the budget counts turns, not workflow steps), `20a7c7b5` (a budget stop no longer
+> renders as a finish), `9532d1dd` (the workflow and the trigger). ·
+> **Date:** 2026-08-15, status corrected the same day — this header read "specified, not
+> implemented", which went false as each phase landed, and a header is what a scanning reader keeps
 > **Extends:** `2026-08-14-note-to-spec-pipeline.md`, which built capture → split → route → approve
 > → a spec run that deliberately **stops** at the spec. This spec is the decision to let it carry
 > on into implementation, and the bound that keeps that from running away.
