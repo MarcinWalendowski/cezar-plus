@@ -80,6 +80,7 @@ import {
   searchWorkflows,
   skillKeywords,
 } from '@/lib/skills'
+import { displayWorkflowName } from '@/lib/tasks-table'
 import { submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
 import { usableRunners } from '@/lib/provider-status'
@@ -1272,7 +1273,19 @@ function SourcePill({
             ) : (
               <WorkflowIcon aria-hidden="true" className="size-3 shrink-0 text-violet" />
             )}
-            <span className="max-w-44 truncate">{!ready ? '…' : source === null ? 'None' : source.ref}</span>
+            {/* `source.ref` is a SKILL name or a WORKFLOW name, so the workflow display mapping is
+                applied only to the workflow case — a skill that happened to be called
+                `quick-task` is a different thing and keeps its own name. Picker and pill must
+                agree: they sit two clicks apart. */}
+            <span className="max-w-44 truncate">
+              {!ready
+                ? '…'
+                : source === null
+                  ? 'None'
+                  : source.source === 'workflow'
+                    ? displayWorkflowName(source.ref)
+                    : source.ref}
+            </span>
             {chevron}
           </button>
         </PopoverTrigger>
@@ -1342,7 +1355,12 @@ function SourcePill({
                         data-source-ref={workflow.name}
                         onSelect={() => pick({ source: 'workflow', ref: workflow.name })}
                       >
-                        <span className="shrink-0 font-mono text-xs">{workflow.name}</span>
+                        {/* Display text only. `value`, `keywords`, `data-source-ref` and the
+                            `pick()` above all carry `workflow.name` — the identity the composer
+                            posts and the draft persists. */}
+                        <span className="shrink-0 font-mono text-xs">
+                          {displayWorkflowName(workflow.name)}
+                        </span>
                         {workflow.description ? (
                           <span className="min-w-0 flex-1 truncate text-xs text-soft-foreground">
                             {workflow.description}

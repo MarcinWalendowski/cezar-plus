@@ -683,7 +683,11 @@ describe('meta line, tabs, pill and resume hint', () => {
       }),
     )
     const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
-    expect(meta.textContent).toContain('quick-task')
+    // `default`, not `quick-task`: the record still stores `quick-task` (the fixture sets it), but
+    // it is the server's fallback for "no workflow named" and reads as a choice nobody made.
+    // Display only — `displayWorkflowName` in `lib/tasks-table.ts`.
+    expect(meta.textContent).toContain('default')
+    expect(meta.textContent).not.toContain('quick-task')
     // #416 pulled runner/model out of the loose dot-list to cut noise, and that still holds — they
     // are not separate chips beside the workflow. But an icon ALONE made "which agent, account and
     // model produced this?" unanswerable without knowing to click it, which is the one question the

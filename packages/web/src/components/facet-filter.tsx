@@ -105,7 +105,14 @@ export function FacetFilter({
                     value={option.label}
                     onSelect={() => onToggle(option.value)}
                     data-slot="facet-option"
-                    data-value={option.value}
+                    // NOT `data-value`: cmdk writes its own `data-value` from the `value` prop
+                    // above, so an attribute of that name is silently overwritten with the LABEL.
+                    // Harmless while the two matched; it stopped matching when a facet gained a
+                    // display name distinct from its identity (`displayWorkflowName`), and a
+                    // selector written against `data-value` then finds the label and quietly
+                    // misses. `onSelect` has always used `option.value`, so only the attribute
+                    // was ever wrong — this is the one that means what it says.
+                    data-facet-value={option.value}
                     aria-checked={checked}
                     role="option"
                   >

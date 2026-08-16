@@ -148,6 +148,57 @@ describe('workspace runs', () => {
   })
 })
 
+/**
+ * `quick-task` is the workflow the server resolves to when a run names none, so it is what nearly
+ * every row carries — and printed raw it reads as a choice somebody made. It displays as
+ * `default`. **Display only**: the stored name, the API body, the CLI flag and the facet VALUE are
+ * all still `quick-task`, which is what `BACKWARD_COMPATIBILITY.md` protects.
+ */
+describe('the quick-task display name', () => {
+  const wf = (id: string, workflow: string) => run({ id, projectId: 'api', workflow })
+
+  it('groups under the identity but heads the group with the display name', () => {
+    // The mutation: `push(task.run.workflow, task.run.workflow, …)`. The key must stay the raw
+    // name — it is the group's identity, and a label in a key is how display text leaks into
+    // state — while the heading a reader sees is the display text.
+    const groups = groupGlobalTasks(
+      toGlobalTasks([wf('a', 'quick-task'), wf('b', 'plan-first')], PROJECTS),
+      'workflow',
+    )
+    expect(groups.map((group) => [group.key, group.label]).sort()).toEqual(
+      [
+        ['quick-task', 'default'],
+        ['plan-first', 'plan-first'],
+      ].sort(),
+    )
+  })
+
+  it('is findable by BOTH spellings — what the column prints and what the record stores', () => {
+    // The mutation: drop either `task.run.workflow` or `displayWorkflowName(...)` from `haystack`.
+    // Typing what the column shows must find the row; so must typing the name the API, the CLI
+    // and every existing bookmark still use.
+    const tasks = toGlobalTasks([wf('a', 'quick-task'), wf('b', 'plan-first')], PROJECTS)
+    const matched = (query: string) =>
+      filterGlobalTasks(tasks, filters({ query }), 'active').map((task) => task.run.id)
+    expect(matched('default')).toEqual(['a'])
+    expect(matched('quick-task')).toEqual(['a'])
+    // The control: the mapping must not make every row match either word.
+    expect(matched('plan-first')).toEqual(['b'])
+  })
+
+  it('filters on the stored name, so a shared `?workflow=quick-task` link still works', () => {
+    // The display-only contract, made testable. The facet VALUE is the identity; renaming it
+    // would silently break every URL anyone has already shared or bookmarked.
+    const tasks = toGlobalTasks([wf('a', 'quick-task'), wf('b', 'plan-first')], PROJECTS)
+    expect(allWorkflows(tasks)).toEqual(['plan-first', 'quick-task'])
+    expect(
+      filterGlobalTasks(tasks, filters({ workflows: ['quick-task'] }), 'active').map((t) => t.run.id),
+    ).toEqual(['a'])
+    // And not on the label — `default` is not a workflow anybody can filter by.
+    expect(filterGlobalTasks(tasks, filters({ workflows: ['default'] }), 'active')).toEqual([])
+  })
+})
+
 describe('option lists', () => {
   it('dedupes tags across projects, case-insensitively, and sorts them', () => {
     expect(allProjectTags(PROJECTS)).toEqual(['backend', 'infra', 'storefront'])

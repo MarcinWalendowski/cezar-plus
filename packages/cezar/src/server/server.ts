@@ -6349,7 +6349,15 @@ export function createApp(deps: ServerDeps) {
   // prunes orphans, reclaims worktrees and recovers every interrupted run. `contexts` is passed
   // so the family can `peek` at an already-built store; it can never build one.
   // (`.ai/specs/2026-08-14-cross-project-run-mutations.md`.)
-  const workspaceRunMutationRoutes = createWorkspaceRunMutationRoutes({ contexts });
+  // `bootProject`/`bootStore` are what let a row action reach an UNREGISTERED boot repo. The
+  // board began listing that project's runs on 2026-08-16 (the synthetic boot row in
+  // `GET /workspace/runs-index` below), and until this was passed, every one of those rows had
+  // a Read and an Archive button that answered `404 unknown project`.
+  const workspaceRunMutationRoutes = createWorkspaceRunMutationRoutes({
+    contexts,
+    bootProject: () => resolveBootProject(),
+    bootStore: () => bootContext.store,
+  });
   // The cross-project git overview (`.ai/specs/2026-08-14-cross-project-git-overview.md`):
   // same non-instantiating discipline as the two families above, own file, own index.
   const workspaceGitRoutes = createWorkspaceGitRoutes();

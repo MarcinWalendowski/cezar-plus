@@ -857,7 +857,10 @@ describe('submit', () => {
     pickSource({ source: 'workflow', ref: 'quick-task' })
     serve()
     renderNewTask()
-    await pillReady('quick-task')
+    // The pill shows the DISPLAY name while the draft and the request carry the identity — the
+    // whole point of `displayWorkflowName` being display-only. Both halves are asserted here, so
+    // mapping the posted body by mistake fails this too.
+    await pillReady('default')
     fireEvent.change(textarea(), { target: { value: 'Ship it' } })
     await startTask()
 
@@ -1515,7 +1518,9 @@ describe('bookmarklet auto-start', () => {
     await screen.findByText('Unknown skill "ghost" — prefilled for quick-task; review and press Start')
     // Legacy initFromQuery verbatim: the intent goes into the text, quick-task resolves it.
     expect(textarea().value).toBe('Use the "ghost" skill on: hello')
-    await pillReady('quick-task')
+    // The pill displays it as `default`; the toast above still names `quick-task`, which is the
+    // honest spelling for a message about what the SERVER will resolve the prefill to.
+    await pillReady('default')
     expect(runsPosted()).toHaveLength(0)
   })
 
@@ -1953,8 +1958,10 @@ describe('prompt templates on the new-task composer', () => {
     renderNewTask()
     await pillReady()
 
+    // Picked by `data-source-ref` (the identity), read back as the display name — the picker and
+    // the pill sit two clicks apart and must agree.
     await pickSource('quick-task')
-    await waitFor(() => expect(sourcePill().textContent).toContain('quick-task'))
+    await waitFor(() => expect(sourcePill().textContent).toContain('default'))
     expect(textarea().value).toBe('')
   })
 

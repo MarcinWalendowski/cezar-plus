@@ -322,6 +322,65 @@ describe('global tasks page', () => {
     ).toBe('/p/cockpit-boot/tasks/ws1')
   })
 
+  it('prints quick-task as `default`, in the cell and on the facet chip, without renaming it', async () => {
+    // `quick-task` is the server's fallback when a run names no workflow, so it is what nearly
+    // every row carries and reads as a choice nobody made. Display only — the mutation is
+    // reverting the cell to `{run.workflow}` or the facet option's label to the raw name.
+    stubFetch()
+    renderPage()
+    await screen.findByText('Add checkout endpoint')
+
+    // Two of the three fixture runs are quick-task; `w1` is plan-first and must show itself.
+    const table = document.querySelector('[data-slot="global-tasks-table"]')!
+    expect(table.textContent).toContain('default')
+    expect(table.textContent).not.toContain('quick-task')
+    expect(table.textContent).toContain('plan-first')
+
+    // The facet option reads `default` while its VALUE stays `quick-task` — the split that keeps a
+    // shared `?workflow=quick-task` URL working. Both are on the same element, so one assertion
+    // catches a rename of either half.
+    //
+    // Opening the popover needs two jsdom gaps filled, exactly as `command-palette.test.tsx`
+    // fills them: cmdk sizes its list with a ResizeObserver and scrolls the selected item into
+    // view. Scoped to this case rather than the file, since nothing else here opens a popover.
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+    Element.prototype.scrollIntoView = vi.fn()
+    fireEvent.click(screen.getByLabelText('Filter by workflow'))
+    const option = await waitFor(() => {
+      const found = document.querySelector('[data-facet-value="quick-task"]')
+      if (!found) throw new Error('workflow option not rendered')
+      return found
+    })
+    expect(option.textContent).toContain('default')
+    expect(option.textContent).not.toContain('quick-task')
+
+    fireEvent.click(option)
+    await waitFor(() => expect(search()).toBe('?workflow=quick-task'))
+    await waitFor(() => expect(rowIds()).toEqual(['a1', 'i1']))
+  })
+
+  it('restores a `?workflow=quick-task` link — the name in every existing bookmark', async () => {
+    // The compatibility half, entered from the URL alone as a reload would. The mutation: rename
+    // the facet VALUE along with the label, and this link silently matches nothing.
+    stubFetch()
+    renderPage(createQueryClient(), '/tasks?workflow=quick-task')
+    await screen.findByText('Add checkout endpoint')
+
+    expect(rowIds()).toEqual(['a1', 'i1'])
+    // The trigger summarises the active filter by LABEL, so it reads `default` for a URL that
+    // says `quick-task` — the two spellings meeting exactly where they should.
+    const trigger = screen.getByLabelText('Filter by workflow')
+    expect(trigger.getAttribute('data-active')).toBe('true')
+    expect(trigger.textContent).toContain('default')
+  })
+
   it('filters by tag across projects, and toggles back off', async () => {
     stubFetch()
     renderPage()

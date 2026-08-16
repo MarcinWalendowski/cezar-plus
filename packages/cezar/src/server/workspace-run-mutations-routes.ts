@@ -33,6 +33,13 @@ import { listProjects } from '../workspace/projects.ts';
  * neither `./project-context.ts` nor `../workflows/run.ts` — pinned structurally, the same way
  * `run-index.test.ts` pins the read side. Only `peek` is ever called, and `peek` cannot build.
  *
+ * **It never opens a second store over a live root.** Three roads resolve a project id, in this
+ * order: an already-built context (`peek`), the BOOT project (its own live store — see
+ * `bootProject`/`bootStore` on the deps), and only then the registry, which is the one road that
+ * opens a store of its own. Boot has to come before the registry, and has to be answered with the
+ * live store rather than a synthetic registry row, because two stores over one root truncate the
+ * file — the reason is spelled out on `bootStore`.
+ *
  * **It never rewrites a row it was not asked about.** The standalone open passes
  * `keepLive: true`. Without it `RunStore.open` runs `reconcileLoadedRun`, which turns every
  * `running`/`queued`/`waiting` row into `failed` with "interrupted — cezar process exited during
@@ -58,6 +65,24 @@ export interface WorkspaceRunMutationDeps {
   /** Defaults to the plain registry lookup — the same one the read family uses. Injected so a
    *  test can name a fixture root without registering a project. */
   listProjects?: typeof listProjects;
+  /**
+   * The boot project's id and its LIVE store — the third resolution road, and the only one that
+   * can answer for a boot repo that was never registered (`~/cezar/cockpit-boot` is a deliberate
+   * scaffold, so `allocateProjectSlug` invents `cockpit-boot` for a root the registry has never
+   * heard of). Without these, every row the board now shows for that project answered
+   * `404 unknown project`, because `peek` and `listProjects` BOTH miss it: the boot context is
+   * seeded separately and, by an explicit decision in `server.ts`, "never lives in the lazy map".
+   *
+   * **Passing the live store is the whole point, not a convenience.** The registry road below
+   * ends in `RunStore.open`, and a store opened over a root that already has a live one is the
+   * documented way to lose data here: `open` returns a NEW instance every call and `saveNow`
+   * rewrites the entire file from that instance's own map, so flushing a read receipt through a
+   * second store would truncate `runs.json` down to whatever the second store happened to have
+   * read. Resolving boot through a synthetic registry row — the shape the two cross-project
+   * INDEXES use, since they only ever read — would walk straight into it.
+   */
+  bootProject?: () => Promise<string>;
+  bootStore?: () => RunStore;
 }
 
 const archiveBodySchema = z.object({ archived: z.boolean() });
@@ -83,10 +108,19 @@ type Resolved =
  */
 async function resolveStore(
   projectId: string,
-  deps: Required<Pick<WorkspaceRunMutationDeps, 'contexts' | 'listProjects'>>,
+  deps: Pick<WorkspaceRunMutationDeps, 'bootProject' | 'bootStore'> &
+    Required<Pick<WorkspaceRunMutationDeps, 'contexts' | 'listProjects'>>,
 ): Promise<Resolved> {
   const live = deps.contexts.peek(projectId);
   if (live !== undefined) return { ok: true, store: live.store, live: true };
+
+  // Before the registry, and reported as `live` so `persist` leaves it alone: the boot context's
+  // own store is the only store allowed to write this root (see `bootStore` on the deps).
+  if (deps.bootProject !== undefined && deps.bootStore !== undefined) {
+    if (projectId === (await deps.bootProject())) {
+      return { ok: true, store: deps.bootStore(), live: true };
+    }
+  }
 
   const entry = (await deps.listProjects()).find((project) => project.id === projectId);
   if (entry === undefined) return { ok: false, status: 404, error: `unknown project: ${projectId}` };
@@ -108,7 +142,12 @@ function persist(resolved: { store: RunStore; live: boolean }): void {
 }
 
 export function createWorkspaceRunMutationRoutes(deps: WorkspaceRunMutationDeps) {
-  const resolved = { contexts: deps.contexts, listProjects: deps.listProjects ?? listProjects };
+  const resolved = {
+    contexts: deps.contexts,
+    listProjects: deps.listProjects ?? listProjects,
+    bootProject: deps.bootProject,
+    bootStore: deps.bootStore,
+  };
 
   return new Hono<ProjectApiEnv>()
     .post(

@@ -15,6 +15,7 @@ import {
   taskIssueUrl,
   taskReferences,
   usageCells,
+  displayWorkflowName,
   workflowLabel,
 } from '@/lib/tasks-table'
 
@@ -96,9 +97,31 @@ describe('formatCost', () => {
   }
 })
 
+describe('displayWorkflowName', () => {
+  it('prints quick-task as `default` — it is the fallback, not a choice anyone made', () => {
+    // `quick-task` is what the server resolves to when a run names no workflow at all, so it is
+    // what nearly every row carries. The mutation: return the input verbatim.
+    expect(displayWorkflowName('quick-task')).toBe('default')
+  })
+
+  it('passes every other name through verbatim', () => {
+    // The control against a mapping that swallows real picks. A repo's own workflow, the built-in
+    // `note-to-spec`, and the placeholders must all show themselves.
+    for (const name of ['plan-first', 'note-to-spec', 'om-fix', '(planned)', '(inbox)', 'default']) {
+      expect(displayWorkflowName(name)).toBe(name)
+    }
+  })
+})
+
 describe('workflowLabel', () => {
-  it('shows the workflow name as-is', () => {
-    expect(workflowLabel(run({ workflow: 'quick-task' }))).toBe('quick-task')
+  it('applies the display mapping — the column reads `default`, never `quick-task`', () => {
+    // The mutation: `return run.workflow` instead of routing through `displayWorkflowName`. Every
+    // RunRecord surface (per-project table, thread header, workspace board) rides this one line.
+    expect(workflowLabel(run({ workflow: 'quick-task' }))).toBe('default')
+  })
+
+  it('shows any other workflow name as-is', () => {
+    expect(workflowLabel(run({ workflow: 'plan-first' }))).toBe('plan-first')
   })
 
   it('replaces the (planned)/(inbox) placeholders with the first agent step', () => {

@@ -2,6 +2,7 @@ import type { ProjectListEntry, RunIndexEntry } from '@open-mercato/cezar-api-cl
 
 import { allProjectTags } from '@/lib/project-tags'
 import { runTitle } from '@/lib/task-groups'
+import { displayWorkflowName } from '@/lib/tasks-table'
 
 /**
  * The pure half of the global Tasks page (`/tasks`): joining the cross-project run index to the
@@ -246,7 +247,11 @@ function haystack(task: GlobalTask): string {
   return [
     runTitle(task.run),
     task.projectName,
+    // Both spellings, exactly as `filterRuns` searches `run.workflow` AND `workflowLabel(run)`:
+    // the column prints "default", so typing that has to find the row — and `quick-task` is what
+    // the record, the API and the CLI still call it, so typing that has to keep working too.
     task.run.workflow,
+    displayWorkflowName(task.run.workflow),
     task.run.branch ?? '',
     ...task.tags,
   ]
@@ -325,7 +330,10 @@ export function groupGlobalTasks(tasks: readonly GlobalTask[], groupBy: GroupBy)
     } else if (groupBy === 'status') {
       push(task.run.status, task.run.status, task)
     } else if (groupBy === 'workflow') {
-      push(task.run.workflow, task.run.workflow, task)
+      // Key is the identity, label is the display text — the same split the Workspace group makes.
+      // Keying on the label would make a repo that ships its own `quick-task.yaml` collide with
+      // the built-in under one heading, and would put display text in a group key.
+      push(task.run.workflow, displayWorkflowName(task.run.workflow), task)
     } else if (task.tags.length === 0) {
       push(UNTAGGED, 'Untagged', task)
     } else {

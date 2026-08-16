@@ -208,6 +208,54 @@ Rebuilt, checked for live runs (none), restarted the cockpit on `localhost:4321`
 | **Visible WHILE running, not only once finished** | A new workspace run started from the composer (`?scope=auto` opened on the Workspace pill) appeared on `/tasks` at `running` with live CPU 30% / 451 MB, then settled to `done` |
 | The probe changed nothing | Read-only task; `git status --porcelain` in the boot repo and `black` showed only the pre-existing untracked `.ai/`, and this repo's working tree held only this change's own 12 files |
 
+### The THIRD consumer, found by the owner the same day (2026-08-16)
+
+The fix above named two consumers of `listProjects()` and fixed both. There was a third:
+`resolveStore` in `server/workspace-run-mutations-routes.ts`, behind Mark read / Mark unread /
+Archive. Every boot row the board had just started showing carried two buttons that answered
+`404 unknown project: cockpit-boot`, where the same call against a registered project reached the
+run lookup (`404 unknown run: …`) — the control that proves the failure was the *project* lookup.
+
+**Making rows visible is what gave them buttons.** So the board fix did not cause the gap, it
+exposed it, and the row actions had simply never been reachable for an unregistered boot repo.
+`contexts.peek` did not cover it either: the boot context is seeded separately and, by an explicit
+decision in `server.ts`, "never lives in the lazy map."
+
+**The fix could NOT be the synthetic registry row used above, and this is the interesting part.**
+The indexes only read. This family writes, and the registry road ends in `RunStore.open` — a new
+instance per call, whose `saveNow` rewrites the entire file from that instance's own map. A second
+store flushed over a root that already has a live one truncates `runs.json` to whatever the second
+store read. Feeding boot in as a synthetic registry row would have walked straight into that. The
+boot road therefore sits **between** `peek` and the registry, returns the boot context's own live
+store, and reports `live: true` so `persist` leaves it alone.
+
+| Guard | File | Mutation |
+|---|---|---|
+| A row in an UNREGISTERED boot project can be acted on | `server/workspace-run-mutations-routes.test.ts` | Delete the boot branch — 404s, reproducing exactly what the owner saw — **verified red** |
+| The write goes through the LIVE store and never flushes over it | same | Return `live: false` from the boot branch (or resolve boot via a synthetic `listProjects` row, which opens a second store) — **verified red** |
+| A registered project is still answered by the registry | same | Drop the `projectId === bootProject()` condition so the boot road answers unconditionally — **verified red** |
+
+`listProjects` returns **empty** in these fixtures on purpose: that is the real shape of an
+unregistered boot repo, and a fixture that registered it would agree with the bug.
+
+Gates 2026-08-16 after this fix: `typecheck`, `test` (**8197 passed / 443 files**), `test:unit`,
+`build`, `test:package` — all green by exit code.
+
+**Runtime E2E**, on the rebuilt cockpit, against the real record `26418912…`:
+
+| Claim | Result |
+|---|---|
+| The project now resolves | `POST /workspace/runs/cockpit-boot/NOSUCHRUN/read` → `unknown run` (was `unknown project`) |
+| Read receipt round-trips | `unread` → `seenAt` gone, `read` → `seenAt` back; **4 rows in `runs.json` throughout**, no truncation |
+| The buttons work in the UI | Clicked the row's toggle on `/tasks`: icon flipped, no error toast, and the state **survived a reload** — the proof it was the server and not just the optimistic patch |
+| Archive round-trips in the UI | Archived → row left the active list and appeared under `?archived=1`; Restore → left the archived list |
+| The board was left as found | `archived: false`, `seenAt` intact, 9 rows, 4 of them boot |
+
+**The lesson, one step past the previous one.** That entry said a feature producing rows owes its
+list a check. This one adds: a row is not just a thing to look at. **When a list gains rows from a
+new source, every ACTION on a row has to be walked for that source too** — the index and the
+mutation reached the same project by two different roads, and only one of them was widened.
+
 ### Executed — runtime E2E
 
 Ran 2026-08-16 against the real cockpit (`localhost:4321`, booted on `~/cezar/cockpit-boot`),

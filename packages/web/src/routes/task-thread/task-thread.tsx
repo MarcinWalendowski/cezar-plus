@@ -23,7 +23,7 @@ import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
 import { isUnread } from '@/lib/read-state'
-import { taskIssueUrl, taskPrUrl } from '@/lib/tasks-table'
+import { displayWorkflowName, taskIssueUrl, taskPrUrl } from '@/lib/tasks-table'
 import { cn, isHttpUrl } from '@/lib/utils'
 
 import { AutoResumeHint } from './auto-resume-hint'
@@ -560,7 +560,7 @@ function QueuedPlaceholder({ run }: { run: ApiRun }) {
         Waiting for a free agent slot{position !== undefined ? ` — #${position} in queue` : ''}
       </p>
       <p className="text-xs text-soft-foreground">
-        {run.workflow} · starts automatically when a slot frees up
+        {displayWorkflowName(run.workflow)} · starts automatically when a slot frees up
       </p>
     </div>
   )

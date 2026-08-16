@@ -37,6 +37,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { deriveAttention } from '@/lib/attention'
 import { shortAge } from '@/lib/format'
 import {
+  displayWorkflowName,
   formatCost,
   taskReferences,
   usageCells,
@@ -670,7 +671,10 @@ function FilterBar({
           onToggle={(value) => onToggle('workflows', value)}
           onClear={() => onClearFacet('workflows')}
           options={allWorkflows(tasks)
-            .map((workflow) => ({ value: workflow, label: workflow }))
+            // `value` stays the identity — it is what `filters.workflows` matches on and what
+            // rides the URL as `?workflow=quick-task`, so a shared link keeps working and the
+            // label can change again tomorrow without invalidating anyone's bookmark.
+            .map((workflow) => ({ value: workflow, label: displayWorkflowName(workflow) }))
             .map(withCount(counts.workflows))}
           emptyLabel="No tasks to filter"
         />
@@ -943,7 +947,7 @@ function TaskRow({
         )}
       </td>
       <td className={cn(TD_BASE, 'hidden text-[12.5px] text-muted-foreground xl:table-cell')}>
-        {run.workflow}
+        {displayWorkflowName(run.workflow)}
       </td>
       {showCost ? (
         <td

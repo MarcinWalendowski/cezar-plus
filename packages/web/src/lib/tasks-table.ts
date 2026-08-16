@@ -73,14 +73,50 @@ export function scheduledResume(
   }
 }
 
+/**
+ * How a workflow NAME is displayed. Identity in, display text out — nothing else.
+ *
+ * `quick-task` is the zero-config workflow (one agent step whose prompt is `{{task}}`) and, more
+ * to the point, the value the server resolves to when a run names no workflow at all
+ * (`server.ts`'s `resolveRunWorkflow`). So it is what almost every row carries, and "quick-task"
+ * reads as a choice somebody made when it is the absence of one. It prints as **default**.
+ *
+ * **Display only, and that boundary is the whole design.** The stored `RunRecord.workflow`, the
+ * `POST /runs` body, the `--workflow` CLI flag, the catalog entry and the `.ai/cezar/workflows/
+ * quick-task.yaml` override a repo may ship are all untouched — `quick-task` remains the name
+ * every one of those speaks, and BACKWARD_COMPATIBILITY.md protects it in three places (users
+ * commit workflow files and share them across repos). Renaming the identity would break those;
+ * renaming the label costs nothing and can be undone by deleting one map entry.
+ *
+ * **The line is REFERENCING a workflow versus AUTHORING one**, and it is deliberate, not an
+ * oversight to tidy up later. Everything that says "this run used that workflow" goes through
+ * here: both task boards, the per-project table, the thread header, the queued-run note, the
+ * workflow facet, the group-by headings, and the composer's picker *and* its pill (those two sit
+ * two clicks apart and must agree). The Workflows builder page (`routes/workflows/`) does NOT —
+ * its chips load a workflow into an editable draft whose name field becomes
+ * `.ai/cezar/workflows/<name>.yaml`, so a chip reading "default" that populates `quick-task` and
+ * saves `quick-task.yaml` would be a lie about the thing you are editing. There the name IS the
+ * subject; here it is a reference to one.
+ */
+const WORKFLOW_DISPLAY_NAMES: Readonly<Record<string, string>> = { 'quick-task': 'default' }
+
+/** The display text for a workflow name. Unmapped names pass through verbatim, so a real pick
+ *  (`plan-first`, a repo's own file) always shows itself. */
+export function displayWorkflowName(workflow: string): string {
+  return WORKFLOW_DISPLAY_NAMES[workflow] ?? workflow
+}
+
 /** The Workflow column's text. `(planned)` chains and inbox runs carry their meaning in their
- *  first agent step, so that name reads better than the placeholder. Legacy `workflowLabel`. */
+ *  first agent step, so that name reads better than the placeholder. Legacy `workflowLabel`.
+ *
+ *  Takes a `RunRecord` because the step lookup needs `steps[]`; the cross-project boards hold the
+ *  slim `RunIndexEntry`, which deliberately omits them, and reach `displayWorkflowName` directly. */
 export function workflowLabel(run: RunRecord): string {
   if (run.workflow === '(planned)' || run.workflow === '(inbox)') {
     const agent = run.steps.find((step) => step.kind === 'agent')
     if (agent?.name) return agent.name
   }
-  return run.workflow
+  return displayWorkflowName(run.workflow)
 }
 
 /**

@@ -191,6 +191,104 @@ describe('workspace run mutations', () => {
     expect(existsSync(root)).toBe(false);
   });
 
+  /**
+   * The reported bug, 2026-08-16. `~/cezar/cockpit-boot` is a deliberately UNREGISTERED scaffold,
+   * so `allocateProjectSlug` invents `cockpit-boot` for a root `listProjects()` has never heard
+   * of — and the boot context, by an explicit decision in `server.ts`, "never lives in the lazy
+   * map" either. Both roads therefore missed, and every boot row the board had just started
+   * listing answered `404 unknown project: cockpit-boot` from its Read and Archive buttons.
+   *
+   * `listProjects` returns EMPTY here on purpose: that is the real shape of an unregistered boot
+   * repo, and a fixture that registered it would agree with the bug.
+   *
+   * Mutation: delete the `bootProject`/`bootStore` branch in `resolveStore` — this 404s, which is
+   * exactly what the user saw.
+   */
+  it('acts on a row in an UNREGISTERED boot project', async () => {
+    const root = await projectRoot([runJson()]);
+    const store = RunStore.open(join(root, '.ai', 'cezar'), { keepLive: true });
+    const { contexts } = contextsWith(undefined);
+    const routes = createWorkspaceRunMutationRoutes({
+      contexts,
+      listProjects: async () => [],
+      bootProject: async () => 'cockpit-boot',
+      bootStore: () => store,
+    });
+
+    const archive = await routes.request(
+      '/workspace/runs/cockpit-boot/run-1/archive',
+      post({ archived: true }),
+    );
+    expect(archive.status).toBe(200);
+    expect(((await archive.json()) as { archived: boolean }).archived).toBe(true);
+
+    const read = await routes.request('/workspace/runs/cockpit-boot/run-1/read', post());
+    expect(read.status).toBe(200);
+    expect(typeof ((await read.json()) as { seenAt?: string }).seenAt).toBe('string');
+  });
+
+  /**
+   * The reason boot is resolved to its LIVE store rather than to a synthetic registry row (the
+   * shape the two cross-project INDEXES use — they only read, so it costs them nothing).
+   *
+   * `RunStore.open` returns a NEW instance per call and `saveNow` rewrites the whole file from
+   * that instance's own map. A second store opened over a root that already has a live one would
+   * therefore flush away everything the live one had learned since it opened. This asserts the
+   * handler wrote through the injected store and did NOT flush — the live store owns its own save
+   * cadence (a 300ms debounce), so disk staying stale for this tick is the observable proof that
+   * no standalone store was opened and flushed over it.
+   *
+   * Mutation: return `live: false` from the boot branch — `persist` then flushes and the disk
+   * assertion fires. Or resolve boot via a synthetic `listProjects` row instead, which opens a
+   * second store and fires it the same way.
+   */
+  it('writes through the boot project LIVE store and does not flush over it', async () => {
+    const root = await projectRoot([runJson()]);
+    const store = RunStore.open(join(root, '.ai', 'cezar'), { keepLive: true });
+    const { contexts } = contextsWith(undefined);
+    const routes = createWorkspaceRunMutationRoutes({
+      contexts,
+      listProjects: async () => [],
+      bootProject: async () => 'cockpit-boot',
+      bootStore: () => store,
+    });
+
+    await routes.request('/workspace/runs/cockpit-boot/run-1/archive', post({ archived: true }));
+
+    // The injected instance saw it...
+    expect(store.getRun('run-1')?.archived).toBe(true);
+    // ...and the file did not, because this handler never flushed it.
+    expect((await storedRuns(root))[0]!.archived).toBe(false);
+  });
+
+  /**
+   * The boot road is a road for ONE id, not a catch-all. It sits between `peek` and the registry,
+   * and a registered project must still be answered by the registry — otherwise the widening that
+   * fixed the boot repo would quietly redirect every other project's row into the boot store.
+   *
+   * Mutation: drop the `projectId === await deps.bootProject()` condition so the boot branch
+   * answers unconditionally — `shop`'s write lands in the boot store, its own file stays at
+   * `archived: false`, and this fires. (Verified red.)
+   */
+  it('leaves a registered project to the registry, boot id notwithstanding', async () => {
+    const bootRootDir = await projectRoot([runJson({ id: 'boot-run' })]);
+    const shopRoot = await projectRoot([runJson()]);
+    const bootStore = RunStore.open(join(bootRootDir, '.ai', 'cezar'), { keepLive: true });
+    const { contexts } = contextsWith(undefined);
+    const routes = createWorkspaceRunMutationRoutes({
+      contexts,
+      listProjects: async () => [entry(shopRoot, 'shop')],
+      bootProject: async () => 'cockpit-boot',
+      bootStore: () => bootStore,
+    });
+
+    const res = await routes.request('/workspace/runs/shop/run-1/archive', post({ archived: true }));
+    expect(res.status).toBe(200);
+    // Written to the registered project's own file, not the boot store's.
+    expect((await storedRuns(shopRoot))[0]!.archived).toBe(true);
+    expect(bootStore.getRun('run-1')).toBeUndefined();
+  });
+
   it('rejects a malformed archive body rather than guessing', async () => {
     const root = await projectRoot([runJson()]);
     const { routes } = app(root);

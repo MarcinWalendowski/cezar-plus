@@ -485,6 +485,26 @@
   state, so cezar emits a visible unsafe-mode note whenever it is active. (#762)
 
 ## 🔧 Changed
+- 🔧 **The `quick-task` workflow now reads as `default` everywhere a run is DISPLAYED.** The board's
+  Workflow column and its group headings, the workflow facet's option labels and chip, the queued
+  note in a task thread, the run header, and the composer's picker item and source pill all print
+  `default`. One mapping does it — `displayWorkflowName` in `web/src/lib/tasks-table.ts` — because
+  the name is the fallback every task gets when none is chosen, and "quick" said something about
+  the *task* that was never true: it is the same runner, the same permissions and the same
+  subagent surface as any other workflow.
+
+  **Display only — the identity is untouched.** `quick-task` remains the name on disk, in
+  `POST /runs`, in the CLI's `--workflow` default, in every stored run record and in the facet's
+  URL value, all three of which `BACKWARD_COMPATIBILITY.md` protects. So `/tasks?workflow=quick-task`
+  keeps working from an old bookmark, search matches both spellings, and grouping still keys on
+  `quick-task` while the heading reads `default`.
+
+  **One deliberate exception: the Workflows builder page still says `quick-task`.** Its chips load
+  a workflow into an editable draft whose name field becomes `.ai/cezar/workflows/<name>.yaml`, so
+  a chip reading `default` that populated `quick-task` and saved `quick-task.yaml` would be a lie
+  about the thing being edited. Referencing a workflow can use the display name; authoring one
+  cannot.
+
 - 🔧 **GitHub, Skills and Workflows are no longer in the sidebar or the ⌘K Views group.** The
   `/github`, `/skills` and `/workflows` pages, their routes and all of their server machinery are
   untouched and still reachable by URL — only the navigation entries are gone. Owner decision.
@@ -506,6 +526,28 @@
   request, no writes, no identity file — and the section's own doc comment records the trade.
 
 ## 🐛 Fixes
+
+- 🐛 **Mark read, mark unread and archive answered `404` on every boot-repo row the board had just
+  started showing.** Reported from the running cockpit the same day. Measured before the fix:
+  `POST /api/v1/workspace/runs/cockpit-boot/<id>/read` → `{"error":"unknown project: cockpit-boot"}`,
+  where the same call against a registered project reached the run lookup and answered
+  `{"error":"unknown run: …"}`.
+
+  **The same root cause as the entry below, at a THIRD consumer the fix did not name.** Two
+  cross-project indexes enumerate `listProjects()`; so does `resolveStore` in
+  `server/workspace-run-mutations-routes.ts`, and an unregistered boot repo is in none of them.
+  `contexts.peek` did not cover it either — the boot context is seeded separately and, by an
+  explicit decision in `server.ts`, "never lives in the lazy map". So making boot rows *visible*
+  gave them two buttons that could not work.
+
+  **Resolved through the boot project's LIVE store, not through a synthetic registry row.** The
+  indexes only read, so a synthetic row costs them nothing; this family writes, and the registry
+  road ends in `RunStore.open` — which returns a new instance per call and whose `saveNow` rewrites
+  the whole file from that instance's own map. A second store flushed over a root that already has
+  a live one would truncate `runs.json` to whatever the second store happened to have read. The
+  boot road therefore sits between `peek` and the registry, hands back the context's own store, and
+  reports `live: true` so nothing flushes over it. Verified end to end on the real record: read →
+  unread → read and archive → restore, with the file holding at four rows throughout.
 
 - 🐛 **Workspace runs had no surface on `/tasks` — the feature shipped, an hour earlier, showing
   nothing.** A completed workspace run existed at `/p/cockpit-boot/tasks/26418912…` with all twelve

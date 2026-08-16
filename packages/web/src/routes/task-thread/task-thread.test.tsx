@@ -774,7 +774,9 @@ describe('ThreadView', () => {
     renderView(<ThreadView run={run('queued')} thread={reduceThread([])} />)
     const placeholder = document.querySelector('[data-slot="queued-state"]')
     expect(placeholder?.textContent).toContain('Waiting for a free agent slot')
-    expect(placeholder?.textContent).toContain('quick-task · starts automatically')
+    // The stored name is `quick-task` (the fixture's), displayed as `default` — see
+    // `displayWorkflowName`. The queued note is a reference to the workflow, so it maps too.
+    expect(placeholder?.textContent).toContain('default · starts automatically')
     expect(document.querySelector('[data-slot="thread-empty"]')).toBeNull()
   })
 
