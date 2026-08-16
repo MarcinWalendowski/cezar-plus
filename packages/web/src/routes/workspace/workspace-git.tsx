@@ -4,6 +4,7 @@ import { useHealth, useWorkspaceGit } from '@/api/queries'
 import type { WorkspaceGitProject } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Badge } from '@/components/ui/badge'
+import { workspaceViewsOffSubtitle } from '@/lib/capability-copy'
 import { Link, scopeTo } from '@/lib/project-router'
 
 /**
@@ -68,7 +69,7 @@ export function WorkspaceGitRoute() {
           icon={<GitBranchIcon />}
           tone="neutral"
           title="The workspace git overview is off"
-          subtitle="Set CEZ_WORKSPACE_VIEWS=1 and restart cezar to turn it on."
+          subtitle={workspaceViewsOffSubtitle(health.data.capabilities?.singleProject)}
           heading="h2"
         />
       </WorkspaceGitShell>

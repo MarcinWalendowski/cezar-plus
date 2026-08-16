@@ -60,7 +60,9 @@ describe('GET /api/v1/workspace/git — route level', () => {
   });
 
   it('flag off ⇒ 200 with a schema-valid empty payload, never 404, never the injected index’s real data', async () => {
-    delete process.env.CEZ_WORKSPACE_VIEWS;
+    // `=0`, not "unset" — the flag inverted on 2026-08-16 and now defaults ON, so deleting it is
+    // the ON case. The flag-OFF *shape* this test is about is unchanged, which is the point.
+    process.env.CEZ_WORKSPACE_VIEWS = '0';
     const a = app({ gitIndex: nonEmptyGitIndex(), resolveBootProject: async () => 'boot-proj' });
     const res = await a.request('/workspace/git');
     expect(res.status).toBe(200);
@@ -110,13 +112,28 @@ describe('GET /api/v1/workspace/git — route level', () => {
     expect(body).toEqual({ projects: [], bootProject: 'boot-proj' });
   });
 
-  it("'true' is not '1' — stays off", async () => {
-    process.env.CEZ_WORKSPACE_VIEWS = 'true';
+  it("'false' is not '0' — stays ON, because only an exact opt-out counts", async () => {
+    // The inverted twin of the old "'true' is not '1'" case. A typo'd opt-out leaving the board ON
+    // is the safe direction: the other reading fails as a blank page with no error.
+    process.env.CEZ_WORKSPACE_VIEWS = 'false';
+    delete process.env.CEZ_SINGLE_PROJECT;
     const a = app({ gitIndex: nonEmptyGitIndex(), resolveBootProject: async () => 'boot-proj' });
     const res = await a.request('/workspace/git');
     expect(res.status).toBe(200);
     const body = (await res.json()) as WorkspaceGitResponse;
-    expect(body.projects).toEqual([]);
+    expect(body.projects.length).toBeGreaterThan(0);
+  });
+
+  it('unset ⇒ the real aggregate, because the flag defaults ON', async () => {
+    // The case the owner hit: a full multi-project workspace, no flag set, and a board that said
+    // the feature was off.
+    delete process.env.CEZ_WORKSPACE_VIEWS;
+    delete process.env.CEZ_SINGLE_PROJECT;
+    const a = app({ gitIndex: nonEmptyGitIndex(), resolveBootProject: async () => 'boot-proj' });
+    const res = await a.request('/workspace/git');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as WorkspaceGitResponse;
+    expect(body.projects.length).toBeGreaterThan(0);
   });
 
   it('bootProject is resolved even when the flag is off', async () => {

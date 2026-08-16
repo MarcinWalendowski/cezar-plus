@@ -24,17 +24,28 @@ import type { AccountQuota, QuotaWindow } from '../workspace/agent-account-usage
  *   speaks for runs and model discovery — answers `account/rateLimits` with per-window
  *   `used_percent`, a window length and a reset time, plus the plan. That is a fact about how
  *   much is left.
- * - **Claude** reports none. `claude auth status --json` returns
- *   `{loggedIn, authMethod, email, orgName, subscriptionType}` and nothing about usage; there is
- *   no other subcommand, and nothing on disk (`~/.claude/stats-cache.json` is Claude Code's own
- *   lazily-computed *spend* cache, per config dir, and `usage-data/` is a stale HTML report). The
- *   number its `/usage` screen shows comes from `/api/oauth/usage`, reachable only with the
- *   account's OAuth token out of the macOS Keychain.
+ * - **Claude** reports allowance too, but from a different surface and in a different shape:
+ *   `claude -p "/usage" --output-format json` puts the same text its `/usage` screen shows into the
+ *   envelope's `result` field — a percentage and a *localized human* reset string per window, with
+ *   no machine timestamp and no window length. Identity stays where it was, in
+ *   `claude auth status --json`.
  *
- * So `probeClaudeAccount` returns an identity and **no quota**, permanently, and the return types
- * differ on purpose. A shared `AccountProbe { usedPercent: number }` would have forced a number
- * into the Claude branch, and the only numbers available there are spend — which is not allowance,
- * and would have been drawn as a bar beside a Codex bar that means something else entirely.
+ * So the two probes still return different types on purpose, and a window still carries only what
+ * its provider actually said (`workspace/agent-account-usage.ts` documents which field belongs to
+ * whom). A shared `AccountProbe { usedPercent: number, resetsAt: number }` would force one of them
+ * to invent half its answer.
+ *
+ * **CORRECTED 2026-08-16 by `2026-08-16-claude-usage-windows.md`.** This block used to read
+ * "**Claude** reports none … there is no other subcommand, and nothing on disk … The number its
+ * `/usage` screen shows comes from `/api/oauth/usage`, reachable only with the account's OAuth
+ * token out of the macOS Keychain." Two halves of that were checked and one was not:
+ * `claude auth status --json` and the files under `~/.claude` really do carry no allowance
+ * (`stats-cache.json` is a lazily-computed *spend* cache per config dir; `usage-data/` is a stale
+ * HTML report), and the OAuth endpoint really does work — it was probed, and returned
+ * `five_hour 29% / seven_day 66%`. But "no other subcommand" was never tested against `-p` with a
+ * slash command, and that is where the answer was. The Keychain path is rejected rather than
+ * pending: it would make cezar handle the owner's subscription credentials to draw a bar it can
+ * get for free.
  *
  * ## Rules every probe here keeps
  *
@@ -292,4 +303,149 @@ export async function probeClaudeAccount(
   if (status.data.subscriptionType) identity.plan = status.data.subscriptionType;
   if (status.data.orgName) identity.orgName = status.data.orgName;
   return identity;
+}
+
+/**
+ * The arguments that make `/usage` cheap and unblockable. Each one is here for a measured reason:
+ *
+ * - `-p` + `--output-format json` runs the slash command locally and hands back an envelope. It
+ *   costs **nothing**: the captured fixtures carry `num_turns: 0`, `total_cost_usd: 0` and
+ *   `duration_api_ms: 0`. `/usage` is rendered by the CLI, not by a model.
+ * - `--strict-mcp-config` with an empty server map is a **3.2× speedup, measured** (4.2 s → 1.3 s).
+ *   Without it the child boots every MCP server in the user's config before answering a question
+ *   that needs none of them, and this probe runs once per account.
+ * - **`--bare` is deliberately absent.** It is the obvious flag for "minimal, fast, no side
+ *   effects", and it would break this outright: it never reads OAuth or the keychain, so the child
+ *   has no subscription to report on and the answer comes back empty.
+ *
+ * A trust prompt is not a hazard here, measured against a brand-new `git init` directory the CLI
+ * had never seen: `-p` has no TTY, so it answers in ~2 s rather than blocking. The child therefore
+ * inherits the server's cwd like every other probe, and needs no cwd plumbing.
+ */
+const CLAUDE_USAGE_ARGS = [
+  '-p',
+  '/usage',
+  '--output-format',
+  'json',
+  '--strict-mcp-config',
+  '--mcp-config',
+  '{"mcpServers":{}}',
+] as const;
+
+/**
+ * One `Current …: N% used[ · resets …]` line.
+ *
+ * **Anchored on `Current` and on the literal word `used`, and both anchors are load-bearing.** The
+ * same blob carries a "What's contributing to your limits usage?" section full of lines like
+ * `59% of your usage came from subagent-heavy sessions` — percentages that are not windows. A
+ * pattern that merely hunts for `(\d+)%` harvests those as rate-limit windows, and the panel then
+ * shows six bars, four of which are behavioural statistics. That is a negative control in the
+ * suite, not a hypothetical.
+ */
+const CLAUDE_USAGE_LINE = /^Current\s+(.+?):\s*(\d+(?:\.\d+)?)\s*%\s*used\b(.*)$/;
+
+/** The reset clause, which is ABSENT on a window sitting at 0% — verified against a real second
+ *  account, whose idle windows render as a bare `Current session: 0% used`. A parser that requires
+ *  this clause drops exactly the windows a user is most reassured to see. */
+const CLAUDE_RESET_CLAUSE = /resets\s+(\S.*?)\s*$/;
+
+export interface ClaudeUsageProbeOptions {
+  /** The account's `CLAUDE_CONFIG_DIR`, already expanded. Omit for the discovered default. */
+  configDir?: string;
+  bin?: string;
+  timeoutMs?: number;
+  run?: RunProviderCommand;
+  now?: () => Date;
+}
+
+/**
+ * Ask Claude what is left on one account, or `undefined` if it will not say.
+ *
+ * `undefined` covers every failure — not installed, not signed in, a reworded `/usage`, a timeout,
+ * a malformed envelope — and the caller's handling of it is already correct, because "no quota" has
+ * always been a state this panel had to render.
+ */
+export async function probeClaudeUsage(options: ClaudeUsageProbeOptions = {}): Promise<AccountQuota | undefined> {
+  const run = options.run ?? defaultRunProviderCommand;
+  const bin = options.bin ?? process.env.CEZ_CLAUDE_BIN ?? 'claude';
+  const now = options.now ?? (() => new Date());
+  let result;
+  try {
+    result = await run(
+      bin,
+      CLAUDE_USAGE_ARGS,
+      options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS,
+      profileEnv('claude', options.configDir),
+    );
+  } catch {
+    return undefined;
+  }
+  if (result.timedOut || result.errorCode) return undefined;
+
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(result.stdout);
+  } catch {
+    return undefined;
+  }
+  return parseClaudeUsage(envelope, now());
+}
+
+/**
+ * Pull the windows out of a `claude -p "/usage" --output-format json` envelope.
+ *
+ * Exported for its own tests for `parseCodexQuota`'s reason: its input is a vendor format that can
+ * change under us, and it is pinned by fixtures **captured from the live CLI**
+ * (`__fixtures__/claude/usage-print.json` and `…-idle.json`) rather than hand-written. A
+ * hand-written fixture agrees with the parser by construction — and would never have contained the
+ * idle account's missing reset clause, which is the case that actually breaks a naive parser.
+ *
+ * Returns `undefined` when nothing parses, never an empty window list: an empty list renders as a
+ * gauge with no bars, which reads as "0% used" — the most confident possible wrong answer.
+ */
+export function parseClaudeUsage(envelope: unknown, takenAt: Date): AccountQuota | undefined {
+  const text = claudeUsageText(envelope);
+  if (!text) return undefined;
+
+  const windows: QuotaWindow[] = [];
+  for (const line of text.split('\n')) {
+    if (windows.length >= MAX_QUOTA_WINDOWS) break;
+    const window = parseClaudeUsageLine(line.trim());
+    if (window) windows.push(window);
+  }
+  if (windows.length === 0) return undefined;
+  return { takenAt: takenAt.toISOString(), windows };
+}
+
+/** The envelope's `result`, or the text itself if a caller already unwrapped it. `is_error` is
+ *  honoured: an errored turn's `result` is a message about the failure, not a usage report. */
+function claudeUsageText(envelope: unknown): string | undefined {
+  if (typeof envelope === 'string') return envelope;
+  if (!envelope || typeof envelope !== 'object') return undefined;
+  const record = envelope as Record<string, unknown>;
+  if (record.is_error === true) return undefined;
+  return typeof record.result === 'string' ? record.result : undefined;
+}
+
+/**
+ * One line to one window, or nothing.
+ *
+ * The label is Claude's own, minus the `(all models)` qualifier — that parenthetical distinguishes
+ * the weekly window from a per-model one (`week (Fable)`), and once the model-specific window
+ * carries its own name the qualifier is noise in a column two words wide. The distinction survives;
+ * only the wording is shortened.
+ */
+function parseClaudeUsageLine(line: string): QuotaWindow | undefined {
+  const matched = CLAUDE_USAGE_LINE.exec(line);
+  if (!matched) return undefined;
+  const usedPercent = Number(matched[2]);
+  if (!Number.isFinite(usedPercent) || usedPercent < 0) return undefined;
+
+  const label = (matched[1] ?? '').replace(/\s*\(all models\)\s*/i, '').trim();
+  const window: QuotaWindow = { usedPercent };
+  if (label) window.label = label;
+  const reset = CLAUDE_RESET_CLAUSE.exec(matched[3] ?? '');
+  // Verbatim, never parsed into a timestamp — see the field's doc in `agent-account-usage.ts`.
+  if (reset?.[1]) window.resetsText = reset[1];
+  return window;
 }

@@ -1,30 +1,35 @@
-import type { AccountQuota, AccountUsageRow } from '@loki-labs/better-cezar-api-client'
+import type { AccountQuota, AccountQuotaWindow, AccountUsageRow } from '@loki-labs/better-cezar-api-client'
 import { useAccountUsage } from '@/api/queries'
 import { cn } from '@/lib/utils'
 
 /**
- * The sidebar's per-account panel (`.ai/specs/2026-08-16-agent-account-usage-routing.md`).
+ * The sidebar's per-account panel (`.ai/specs/2026-08-16-agent-account-usage-routing.md`, windows
+ * for Claude added by `2026-08-16-claude-usage-windows.md`).
  *
  * ## One rule, and it is the reason this file is worth reading
  *
- * **A quota bar renders only where the provider actually reported allowance.** Today that means
- * Codex and only Codex: `claude auth status --json` answers identity and a plan NAME
- * (`subscriptionType`) with no quantity anywhere, there is no other subcommand, and nothing on
- * disk. So a Claude row shows its plan, its in-flight count and whether it is limited — and
- * nothing shaped like a gauge.
+ * **A quota bar renders only where the provider actually reported allowance**, and it renders only
+ * what that provider said. Codex states a window length and an epoch reset; Claude states a name
+ * and a human reset string, and omits the reset entirely on a window sitting at 0%. Neither gets
+ * the other's fields filled in.
  *
- * The temptation this resists is drawing *something* on the Claude rows for symmetry, from the
- * token spend cezar already measures. Spend is not allowance. A bar built from it would sit beside
- * the Codex bar, look identical, and mean something completely different — and it is the number a
- * user would act on. Two rows that look alike must mean alike.
+ * The temptation this resists is drawing *something* for symmetry, from the token spend cezar
+ * already measures. Spend is not allowance. A bar built from it would sit beside a real one, look
+ * identical, and mean something completely different — and it is the number a user would act on.
+ * Two rows that look alike must mean alike.
  *
  * The server enforces the same rule (`quota` is optional and never synthesized); this is the
  * second half, because a client is free to render a missing value as zero and that is exactly the
  * mistake.
+ *
+ * **CORRECTED 2026-08-16.** This block used to say the rule meant "Codex and only Codex … there is
+ * no other subcommand, and nothing on disk". `claude -p "/usage" --output-format json` reports the
+ * windows for 0 tokens, so Claude rows now draw bars too. The rule is unchanged; only its
+ * consequence was wrong.
  */
 
 /** Windows come back in the provider's order (primary first). "5h" reads better than "300m". */
-function windowLabel(minutes: number): string {
+function minutesLabel(minutes: number): string {
   if (minutes % (60 * 24) === 0) {
     const days = minutes / (60 * 24)
     return days === 7 ? 'week' : days === 30 ? 'month' : `${days}d`
@@ -33,23 +38,59 @@ function windowLabel(minutes: number): string {
   return `${minutes}m`
 }
 
-/** `resetsAt` is UNIX seconds. Shown as a clock time, because "resets 15:22" is actionable and
- *  "resets in 2h" goes stale between renders of a polled panel. */
-function resetLabel(resetsAt: number): string {
-  return new Date(resetsAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+/**
+ * The provider's own name for the window wins over a length derived from minutes.
+ *
+ * Not cosmetic: Claude's two weekly windows ("week", "week (Fable)") have the SAME length, so a
+ * label computed from `windowMinutes` would render them identically and a user could not tell
+ * which bar is the one about to stop them working.
+ */
+function windowLabel(window: AccountQuotaWindow): string {
+  if (window.label) return window.label
+  return window.windowMinutes === undefined ? '' : minutesLabel(window.windowMinutes)
 }
 
-function QuotaBars({ quota }: { quota: AccountQuota }) {
+/**
+ * When the window refills, in whatever form its provider stated it.
+ *
+ * `resetsAt` is UNIX seconds and is shown as a clock time, because "resets 15:22" is actionable and
+ * "resets in 2h" goes stale between renders of a polled panel. `resetsText` is already a clock time
+ * in the user's own zone — the CLI rendered it there — so it is passed through untouched rather
+ * than re-parsed into a date this code would have to guess the year of.
+ */
+function resetLabel(window: AccountQuotaWindow): string {
+  if (window.resetsAt !== undefined) {
+    return new Date(window.resetsAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+  // Claude's string is "Aug 20 at 1am (Europe/Warsaw)" — the zone is the viewer's own, and in a
+  // column this narrow it is the one part that carries no information.
+  return window.resetsText?.replace(/\s*\([^)]*\)\s*$/, '') ?? ''
+}
+
+/** Shared with the Logins cards in Settings, so the two surfaces cannot drift into showing the
+ *  same account's allowance two different ways. */
+export function QuotaBars({ quota }: { quota: AccountQuota }) {
   return (
     <div data-slot="account-quota" className="mt-1 flex flex-col gap-1">
-      {quota.windows.map((window) => {
+      {quota.windows.map((window, index) => {
         // Clamped for the BAR only — a provider may legitimately report an overage, and the
         // number beside it still says 104%. Clamping the text would hide the fact.
         const width = Math.max(0, Math.min(100, window.usedPercent))
+        const reset = resetLabel(window)
         return (
-          <div key={`${window.windowMinutes}:${window.resetsAt}`} className="flex items-center gap-1.5">
-            <span className="w-8 shrink-0 text-[10px] text-soft-foreground">
-              {windowLabel(window.windowMinutes)}
+          <div
+            // Index-keyed on purpose: neither provider offers a stable per-window id, and the two
+            // candidate keys both collide — Claude's weekly windows share a length AND a reset.
+            key={`${windowLabel(window)}:${index}`}
+            data-slot="quota-window"
+            data-window={windowLabel(window)}
+            className="flex items-center gap-1.5"
+          >
+            {/* Titled because it truncates: the sidebar cannot spare the ~80px "week (Fable)" needs
+                without squeezing the bar itself down to a stub, and "week (Fa…" is exactly the part
+                that identifies WHICH per-model window this is. */}
+            <span className="w-16 shrink-0 truncate text-[10px] text-soft-foreground" title={windowLabel(window)}>
+              {windowLabel(window)}
             </span>
             <span className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
               <span
@@ -62,7 +103,9 @@ function QuotaBars({ quota }: { quota: AccountQuota }) {
             <span className="shrink-0 tabular-nums text-[10px] text-soft-foreground">
               {Math.round(window.usedPercent)}%
             </span>
-            <span className="shrink-0 text-[10px] text-soft-foreground">{resetLabel(window.resetsAt)}</span>
+            {/* Absent on an idle Claude window, which states no reset at all. An empty node rather
+                than a placeholder: "—" would read as a reset time that failed to load. */}
+            {reset ? <span className="shrink-0 text-[10px] text-soft-foreground">{reset}</span> : null}
           </div>
         )
       })}

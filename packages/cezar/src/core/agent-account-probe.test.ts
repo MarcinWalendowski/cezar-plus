@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import {
+  parseClaudeUsage,
   parseCodexQuota,
   probeClaudeAccount,
+  probeClaudeUsage,
   probeCodexQuota,
   type ClaudeAccountIdentity,
 } from './agent-account-probe.ts';
@@ -60,6 +62,19 @@ const WINDOW = { usedPercent: 43, windowDurationMins: 300, resetsAt: 1_783_682_7
 /** Captured from a live `codex app-server` on 0.143.0 — see the fixture-parses test below. */
 const liveResponse = JSON.parse(
   readFileSync(fileURLToPath(new URL('__fixtures__/codex/account-rate-limits.json', import.meta.url)), 'utf8'),
+) as unknown;
+
+/**
+ * Captured from a live `claude -p "/usage" --output-format json` on 2.1.224 — TWO accounts, and
+ * the second is not redundant. The default account's windows all carry a reset clause; the idle
+ * account's 0% windows omit it entirely, which is the case a hand-written fixture would never have
+ * contained and the one that breaks a parser requiring `· resets`.
+ */
+const liveClaudeUsage = JSON.parse(
+  readFileSync(fileURLToPath(new URL('__fixtures__/claude/usage-print.json', import.meta.url)), 'utf8'),
+) as unknown;
+const liveClaudeUsageIdle = JSON.parse(
+  readFileSync(fileURLToPath(new URL('__fixtures__/claude/usage-print-idle.json', import.meta.url)), 'utf8'),
 ) as unknown;
 
 describe('parseCodexQuota', () => {
@@ -224,11 +239,12 @@ describe('probeClaudeAccount', () => {
     expect(identity).toEqual({ loggedIn: true, email: 'me@example.com', plan: 'max', orgName: 'Mine' });
   });
 
-  it('carries no usage number, because Claude reports none', () => {
-    // The negative control for the whole honesty argument. `claude auth status --json` answers
-    // `{loggedIn, authMethod, email, orgId, orgName, subscriptionType}` and nothing else — so if a
-    // numeric field ever appears on this type, someone has synthesized allowance from spend and it
-    // will be drawn as a bar beside Codex's real one.
+  it('carries no usage number — identity and allowance are separate probes', () => {
+    // The negative control for the whole honesty argument, and it still holds after Claude gained
+    // real windows (2026-08-16): allowance arrives from `probeClaudeUsage`, and `auth status --json`
+    // answers `{loggedIn, authMethod, email, orgId, orgName, subscriptionType}` and nothing else. If
+    // a numeric field ever appears on THIS type, someone has synthesized allowance from spend on the
+    // identity path, and it will be drawn as a bar beside a real one.
     const identity: ClaudeAccountIdentity = { loggedIn: true, plan: 'max' };
     const numeric = Object.values(identity).filter((value) => typeof value === 'number');
     expect(numeric).toEqual([]);
@@ -279,6 +295,125 @@ describe('probeClaudeAccount', () => {
   it('returns undefined when the runner itself throws', async () => {
     await expect(
       probeClaudeAccount({
+        run: async () => {
+          throw new Error('spawn failed');
+        },
+      }),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe('parseClaudeUsage', () => {
+  it('parses the envelope captured from a live `claude -p "/usage"`', () => {
+    // THE test in this file for Claude, and the counterpart of the codex fixture test above: every
+    // other case here is hand-written, and a hand-written fixture agrees with the parser by
+    // construction. This one was captured from the CLI on 2.1.224.
+    const quota = parseClaudeUsage(liveClaudeUsage, TAKEN_AT);
+    expect(quota?.windows).toEqual([
+      { usedPercent: 0, label: 'session', resetsText: 'Aug 17 at 12am (Europe/Warsaw)' },
+      { usedPercent: 66, label: 'week', resetsText: 'Aug 20 at 1am (Europe/Warsaw)' },
+      { usedPercent: 13, label: 'week (Fable)', resetsText: 'Aug 20 at 1am (Europe/Warsaw)' },
+    ]);
+    expect(quota?.takenAt).toBe(TAKEN_AT.toISOString());
+  });
+
+  it('ignores the “what’s contributing” percentages in the same blob', () => {
+    // The negative control. That section carries lines like "59% of your usage came from
+    // subagent-heavy sessions" — real percentages that are NOT rate-limit windows. A pattern that
+    // hunts for `(\d+)%` instead of `Current <label>: <n>% used` harvests them, and the panel then
+    // draws six bars, half of them behavioural statistics presented as allowance.
+    const quota = parseClaudeUsage(liveClaudeUsage, TAKEN_AT);
+    expect(quota?.windows).toHaveLength(3);
+    expect(quota?.windows.map((window) => window.usedPercent)).not.toContain(59);
+    expect(quota?.windows.map((window) => window.usedPercent)).not.toContain(82);
+  });
+
+  it('keeps a 0% window that states no reset at all', () => {
+    // Captured from the SECOND account, and the reason two fixtures exist. An idle window renders
+    // as a bare `Current session: 0% used` with no ` · resets …` clause, so a parser that requires
+    // the clause silently drops exactly the windows a user is most reassured to see — and the row
+    // then looks like a provider that reports nothing.
+    const quota = parseClaudeUsage(liveClaudeUsageIdle, TAKEN_AT);
+    expect(quota?.windows).toEqual([
+      { usedPercent: 0, label: 'session' },
+      { usedPercent: 9, label: 'week', resetsText: 'Aug 19 at 10:59am (Europe/Warsaw)' },
+      { usedPercent: 0, label: 'week (Fable)' },
+    ]);
+  });
+
+  it('never converts the reset string into a timestamp', () => {
+    // "Aug 20 at 1am (Europe/Warsaw)" has no year and a 12-hour clock. Converting it means guessing
+    // both, and the failure mode is a confidently wrong reset time rather than a missing one.
+    const quota = parseClaudeUsage(liveClaudeUsage, TAKEN_AT);
+    for (const window of quota?.windows ?? []) {
+      expect(window).not.toHaveProperty('resetsAt');
+      expect(window).not.toHaveProperty('windowMinutes');
+    }
+  });
+
+  it('returns undefined rather than an empty window list', () => {
+    // An empty list renders as a gauge with no bars, which reads as "0% used" — the most confident
+    // possible wrong answer. Absence has to stay absence all the way out of the parser.
+    expect(parseClaudeUsage({ result: 'You are currently using your subscription' }, TAKEN_AT)).toBeUndefined();
+    expect(parseClaudeUsage({ result: '' }, TAKEN_AT)).toBeUndefined();
+    expect(parseClaudeUsage({}, TAKEN_AT)).toBeUndefined();
+    expect(parseClaudeUsage(null, TAKEN_AT)).toBeUndefined();
+  });
+
+  it('refuses an errored turn, whose `result` is a failure message rather than a report', () => {
+    expect(
+      parseClaudeUsage({ is_error: true, result: 'Current session: 40% used' }, TAKEN_AT),
+    ).toBeUndefined();
+  });
+
+  it('drops a line whose percentage is not a number, rather than reading it as zero', () => {
+    expect(parseClaudeUsage({ result: 'Current session: lots% used' }, TAKEN_AT)).toBeUndefined();
+  });
+
+  it('caps a runaway list', () => {
+    const many = Array.from({ length: 40 }, (_, i) => `Current w${i}: ${i}% used`).join('\n');
+    expect(parseClaudeUsage({ result: many }, TAKEN_AT)?.windows.length).toBeLessThanOrEqual(8);
+  });
+});
+
+describe('probeClaudeUsage', () => {
+  const ok = (stdout: string): ProviderCommandResult => ({ stdout, stderr: '', exitCode: 0 });
+
+  it('asks for the slash command in print mode, with MCP servers switched off', async () => {
+    let args: readonly string[] = [];
+    await probeClaudeUsage({
+      run: async (_bin, called) => {
+        args = called;
+        return ok(JSON.stringify(liveClaudeUsage));
+      },
+    });
+    expect(args).toEqual(['-p', '/usage', '--output-format', 'json', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']);
+    // `--bare` is the flag that looks right here and breaks it: it never reads OAuth or the
+    // keychain, so the child has no subscription to report on and the answer comes back empty.
+    expect(args).not.toContain('--bare');
+  });
+
+  it('pins the probe to one account’s config dir', async () => {
+    // Without this, two logins on one machine both report the default account's numbers, and the
+    // panel draws one subscription's usage on two rows that look independent.
+    let seen: Record<string, string> | undefined;
+    await probeClaudeUsage({
+      configDir: '/Users/me/.claude-work',
+      run: async (_bin, _args, _timeout, env) => {
+        seen = env;
+        return ok(JSON.stringify(liveClaudeUsage));
+      },
+    });
+    expect(seen).toEqual({ CLAUDE_CONFIG_DIR: '/Users/me/.claude-work' });
+  });
+
+  it('returns undefined on a timeout, an unparseable envelope, or a throwing runner', async () => {
+    await expect(
+      probeClaudeUsage({ run: async () => ({ stdout: '', stderr: '', exitCode: null, timedOut: true }) }),
+    ).resolves.toBeUndefined();
+    await expect(probeClaudeUsage({ run: async () => ok('not json') })).resolves.toBeUndefined();
+    await expect(
+      probeClaudeUsage({
         run: async () => {
           throw new Error('spawn failed');
         },

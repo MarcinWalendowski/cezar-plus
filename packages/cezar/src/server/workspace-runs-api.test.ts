@@ -241,8 +241,10 @@ describe('GET /api/v1/workspace/runs (W4.10)', () => {
   });
 
   describe('C9: gating in both directions, in the D19 shape', () => {
-    it('unset ⇒ 200 with a schema-valid EMPTY payload, never 409 and never 404', async () => {
-      delete process.env.CEZ_WORKSPACE_VIEWS;
+    it("'0' ⇒ 200 with a schema-valid EMPTY payload, never 409 and never 404", async () => {
+      // Was "unset ⇒ …" until 2026-08-16, when the flag inverted and unset became the ON case. The
+      // D19 flag-off SHAPE this asserts is untouched; only the spelling that produces it moved.
+      process.env.CEZ_WORKSPACE_VIEWS = '0';
       const boot = await registerProject(repoRoot);
       writeRuns(repoRoot, [runJson({ id: 'boot-run' })]);
       const app = makeApp({ bootProjectId: boot.id });
@@ -262,15 +264,25 @@ describe('GET /api/v1/workspace/runs (W4.10)', () => {
       expect(body.runs).toHaveLength(1);
     });
 
-    it("'true' is not '1' — stays off", async () => {
-      process.env.CEZ_WORKSPACE_VIEWS = 'true';
+    it("'false' is not '0' — stays ON, because only an exact opt-out counts", async () => {
+      process.env.CEZ_WORKSPACE_VIEWS = 'false';
       const boot = await registerProject(repoRoot);
       writeRuns(repoRoot, [runJson({ id: 'boot-run' })]);
       const app = makeApp({ bootProjectId: boot.id });
       const res = await apiRequest(app, '/api/v1/workspace/runs');
       expect(res.status).toBe(200);
       const body = (await res.json()) as WorkspaceRunsResponse;
-      expect(body.runs).toEqual([]);
+      expect(body.runs).toHaveLength(1);
+    });
+
+    it('unset ⇒ the real aggregate, because the flag defaults ON', async () => {
+      delete process.env.CEZ_WORKSPACE_VIEWS;
+      const boot = await registerProject(repoRoot);
+      writeRuns(repoRoot, [runJson({ id: 'boot-run' })]);
+      const app = makeApp({ bootProjectId: boot.id });
+      const res = await apiRequest(app, '/api/v1/workspace/runs');
+      const body = (await res.json()) as WorkspaceRunsResponse;
+      expect(body.runs).toHaveLength(1);
     });
 
     it('CEZ_SINGLE_PROJECT=1 takes the identical flag-off shape, even with CEZ_WORKSPACE_VIEWS=1', async () => {

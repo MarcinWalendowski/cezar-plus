@@ -77,11 +77,13 @@ function row(id: string): HTMLElement | null {
 }
 
 describe('a bar means allowance, and only allowance', () => {
-  it('draws no bar on a Claude row, which has no allowance to report', async () => {
-    // THE test. `claude auth status --json` answers identity and a plan NAME with no quantity
-    // anywhere — so a bar here could only have been invented, most plausibly from the token spend
-    // cezar already measures. Spend is not allowance, and the bar would be indistinguishable from
-    // the Codex one beside it.
+  it('draws no bar on a row whose provider reported no allowance', async () => {
+    // THE test. (Titled "draws no bar on a Claude row, which has no allowance to report" until
+    // 2026-08-16, when `claude -p "/usage"` turned out to report windows after all — see
+    // `2026-08-16-claude-usage-windows.md`. The rule it guards is unchanged and is not about
+    // Claude: a row with no reported quota gets no bar, because a bar here could only have been
+    // invented, most plausibly from the token spend cezar already measures. Spend is not allowance,
+    // and the bar would be indistinguishable from the real one beside it.)
     renderPanel({ enabled: true, accounts: [CLAUDE, CODEX] })
     await waitFor(() => expect(row('default:codex')).not.toBeNull())
 
@@ -117,6 +119,70 @@ describe('a bar means allowance, and only allowance', () => {
     renderPanel({ enabled: true, accounts: [CLAUDE] })
     await waitFor(() => expect(row('default:claude')).not.toBeNull())
     expect(bars()).toHaveLength(0)
+  })
+
+  it('labels a window by the provider’s own name, so two same-length windows stay distinct', async () => {
+    // Claude's weekly windows have the SAME length and the SAME reset. A label computed from
+    // `windowMinutes` renders both as "week", and a user cannot tell which bar is the one about to
+    // stop them working. The all-models window is also the one whose "(all models)" qualifier is
+    // dropped upstream, so "week" and "week (Fable)" are what arrive here.
+    renderPanel({
+      enabled: true,
+      accounts: [
+        {
+          ...CLAUDE,
+          quota: {
+            takenAt: new Date().toISOString(),
+            windows: [
+              { usedPercent: 66, label: 'week', resetsText: 'Aug 20 at 1am (Europe/Warsaw)' },
+              { usedPercent: 13, label: 'week (Fable)', resetsText: 'Aug 20 at 1am (Europe/Warsaw)' },
+            ],
+          },
+        },
+      ],
+    })
+    await waitFor(() => expect(bars()).toHaveLength(2))
+    const labels = Array.from(document.querySelectorAll<HTMLElement>('[data-slot="quota-window"]')).map(
+      (node) => node.dataset.window,
+    )
+    expect(labels).toEqual(['week', 'week (Fable)'])
+    expect(new Set(labels).size).toBe(2)
+  })
+
+  it('renders a Claude reset string verbatim, minus the timezone it already applied', async () => {
+    renderPanel({
+      enabled: true,
+      accounts: [
+        {
+          ...CLAUDE,
+          quota: {
+            takenAt: new Date().toISOString(),
+            windows: [{ usedPercent: 66, label: 'week', resetsText: 'Aug 20 at 1am (Europe/Warsaw)' }],
+          },
+        },
+      ],
+    })
+    await waitFor(() => expect(bars()).toHaveLength(1))
+    expect(screen.getByText('Aug 20 at 1am')).toBeTruthy()
+  })
+
+  it('says nothing about a reset the provider did not state', async () => {
+    // An idle Claude window is a bare `Current session: 0% used` — no reset clause at all. Passing
+    // an absent value through the Codex path renders `new Date(NaN)`, i.e. the literal string
+    // "Invalid Date" sitting where a time belongs.
+    renderPanel({
+      enabled: true,
+      accounts: [
+        {
+          ...CLAUDE,
+          quota: { takenAt: new Date().toISOString(), windows: [{ usedPercent: 0, label: 'session' }] },
+        },
+      ],
+    })
+    await waitFor(() => expect(bars()).toHaveLength(1))
+    const window = document.querySelector<HTMLElement>('[data-slot="quota-window"]')
+    expect(window?.textContent).toBe('session0%')
+    expect(window?.textContent).not.toContain('Invalid')
   })
 
   it('shows an overage honestly instead of clamping the number', async () => {

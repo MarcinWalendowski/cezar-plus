@@ -102,7 +102,8 @@ describe('workspace knowledge routes — the two-flag capability gate (D6)', () 
 
   it('CEZ_KB on, CEZ_WORKSPACE_VIEWS off -> disabledReason names "workspaceViews", the reverse direction', async () => {
     process.env.CEZ_KB = '1';
-    delete process.env.CEZ_WORKSPACE_VIEWS;
+    // `=0` rather than unset: the flag inverted on 2026-08-16 and unset is now the ON case.
+    process.env.CEZ_WORKSPACE_VIEWS = '0';
     delete process.env.CEZ_SINGLE_PROJECT;
     const app = appWith({ contexts: { peek: () => undefined }, knowledgeIndex: fakeIndex() });
 

@@ -1558,7 +1558,7 @@ describe('workspace projects API', () => {
         knowledge: false,
         sources: false,
         notes: false,
-        workspaceViews: false,
+        workspaceViews: true,
         notify: false,
         accountUsage: false,
         skills: true,

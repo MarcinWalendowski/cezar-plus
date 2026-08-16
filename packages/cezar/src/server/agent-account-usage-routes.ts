@@ -4,7 +4,7 @@ import {
   type AccountUsageResponse,
   type AccountUsageRow,
 } from '@loki-labs/better-cezar-contract';
-import { probeClaudeAccount, probeCodexQuota } from '../core/agent-account-probe.ts';
+import { probeClaudeAccount, probeClaudeUsage, probeCodexQuota } from '../core/agent-account-probe.ts';
 import { PROFILE_CAPABLE_PROVIDERS } from '../core/agent-profiles.ts';
 import {
   accountUsageKey,
@@ -49,6 +49,7 @@ export interface AgentAccountUsageRouteDeps {
   /** Injected in tests. Production probes the real CLIs. */
   probeQuota?: typeof probeCodexQuota;
   probeIdentity?: typeof probeClaudeAccount;
+  probeUsage?: typeof probeClaudeUsage;
   /** Working directory handed to the short-lived codex child. Defaults to the server's cwd. */
   cwd?: string;
   now?: () => number;
@@ -86,19 +87,27 @@ interface CachedIdentity {
 const identityCache = new Map<string, CachedIdentity>();
 const IDENTITY_TTL_MS = 5 * 60_000;
 
-/** Is any account's snapshot old enough to be worth a probe round? */
+/**
+ * Is any account's snapshot old enough to be worth a probe round?
+ *
+ * A Claude account has TWO snapshots with different lifetimes — identity, cached in process for
+ * `IDENTITY_TTL_MS` because it only changes on `claude auth login`, and a quota, which expires in
+ * `QUOTA_STALE_AFTER_MS`. Either being stale is a reason to refresh. Asking about identity alone
+ * (the shape this had while Claude reported no allowance) is the interesting failure: identity is
+ * cached for longer, so the panel would refresh on the identity clock and the freshly-added usage
+ * bar would expire and stay blank between rounds.
+ */
 function needsRefresh(
   profiles: readonly ResolvedAgentProfile[],
   store: AgentAccountUsageStore,
   now: number,
 ): boolean {
   return profiles.some((profile) => {
-    if (profile.provider === 'claude') {
-      const cached = identityCache.get(profileRouteId(profile));
-      return !cached || now - cached.at > IDENTITY_TTL_MS;
-    }
     const entry = usageEntry(store, accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id));
-    return freshQuota(entry.quota, now) === undefined;
+    if (freshQuota(entry.quota, now) === undefined) return true;
+    if (profile.provider !== 'claude') return false;
+    const cached = identityCache.get(profileRouteId(profile));
+    return !cached || now - cached.at > IDENTITY_TTL_MS;
   });
 }
 
@@ -109,9 +118,11 @@ function profileRouteId(profile: ResolvedAgentProfile): string {
 /**
  * Probe every account and write what came back.
  *
- * Codex accounts get a quota; Claude accounts get identity only, because that is all Claude has
- * (see `core/agent-account-probe.ts`). An account whose probe returns nothing has its stored quota
- * LEFT ALONE rather than cleared: `freshQuota` already expires it by age, and clearing on a single
+ * Both providers report a quota, from different surfaces: Codex over its app-server, Claude out of
+ * `claude -p "/usage"` (see `core/agent-account-probe.ts`). Claude accounts are probed twice per
+ * round — once for identity, once for usage — because the two facts live in different commands and
+ * expire on different clocks. An account whose probe returns nothing has its stored quota LEFT
+ * ALONE rather than cleared: `freshQuota` already expires it by age, and clearing on a single
  * failed probe would blank a bar every time the CLI was momentarily busy.
  */
 async function refreshAccounts(
@@ -121,14 +132,21 @@ async function refreshAccounts(
 ): Promise<void> {
   const probeQuota = deps.probeQuota ?? probeCodexQuota;
   const probeIdentity = deps.probeIdentity ?? probeClaudeAccount;
+  const probeUsage = deps.probeUsage ?? probeClaudeUsage;
   const cwd = deps.cwd ?? process.cwd();
 
   const quotas = profiles
-    .filter((profile) => profile.provider === 'codex')
-    .map(async (profile) => ({
-      key: accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id),
-      quota: await probeQuota({ cwd, configDir: profile.isDefault ? undefined : profile.path }),
-    }));
+    .filter((profile) => profile.provider === 'codex' || profile.provider === 'claude')
+    .map(async (profile) => {
+      const configDir = profile.isDefault ? undefined : profile.path;
+      return {
+        key: accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id),
+        quota:
+          profile.provider === 'codex'
+            ? await probeQuota({ cwd, configDir })
+            : await probeUsage({ configDir }),
+      };
+    });
 
   const identities = profiles
     .filter((profile) => profile.provider === 'claude')

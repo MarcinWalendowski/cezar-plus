@@ -73,6 +73,10 @@ function serve(
     /** `GET …/agent-profiles/discovered` — the Claude logins found on the machine. Defaults to an
      *  empty list, which is what every pre-autodetect test in this file expects to see. */
     discovered?: DiscoveredAgentAccount[]
+    /** `GET /workspace/agent-accounts/usage`. Left UNSERVED by default (the stub hangs on unknown
+     *  URLs), which is exactly the state of an install with `CEZ_ACCOUNT_USAGE` unset — so every
+     *  other test in this file keeps asserting a card with no usage block. */
+    usage?: unknown
   } = {},
 ) {
   requests = []
@@ -151,6 +155,9 @@ function serve(
           truncated: false,
         })
       }
+      if (url.includes('/workspace/agent-accounts/usage') && method === 'GET') {
+        return json(options.usage ?? { enabled: false, accounts: [] })
+      }
       if (url === '/api/v1/projects' && method === 'GET') {
         return json({ projects: [], bootProject: 'boot', projectsDir: '~/cezar/projects' })
       }
@@ -171,6 +178,10 @@ function renderAccounts() {
       { name: 'claude', available: true, version: '2.1.220' },
       { name: 'codex', available: false, hint: 'optional: install the Codex CLI' },
     ],
+    // The mount gate for the per-card usage block. On here for every test, which changes nothing
+    // for the ones that do not serve a `usage` payload: the stub's default is the disabled shape
+    // (`{enabled: false, accounts: []}`), so the block still renders nothing.
+    capabilities: { accountUsage: true },
   })
   client.setQueryData(workspaceQueryKeys.projects, {
     projects: [],
@@ -580,6 +591,77 @@ describe('the agent accounts section', () => {
 
       fireEvent.click(toggle())
       await waitFor(() => expect(document.querySelector('[data-slot="account-details"]')).toBeNull())
+    })
+
+    it('shows this login’s usage on its own card', async () => {
+      serve(withFiles() as never, {
+        usage: {
+          enabled: true,
+          accounts: [
+            {
+              id: 'default:claude',
+              provider: 'claude',
+              label: 'Default',
+              isDefault: true,
+              inflight: 0,
+              limited: false,
+              quota: {
+                takenAt: new Date().toISOString(),
+                windows: [{ usedPercent: 66, label: 'week', resetsText: 'Aug 20 at 1am (Europe/Warsaw)' }],
+              },
+            },
+          ],
+        },
+      })
+      renderAccounts()
+      await waitFor(() => expect(rows()).toHaveLength(1))
+
+      fireEvent.click(toggle())
+      await waitFor(() => expect(document.querySelector('[data-slot="account-usage-detail"]')).not.toBeNull())
+      expect(document.querySelector<HTMLElement>('[data-slot="quota-window"]')?.dataset.window).toBe('week')
+      expect(document.querySelector<HTMLElement>('[data-slot="quota-fill"]')?.dataset.percent).toBe('66')
+    })
+
+    it('never shows another login’s usage on this card', async () => {
+      // The whole safety of that component is the `id` match. The response carries every account,
+      // and a card rendering it unfiltered draws the OTHER login's numbers under this login's email
+      // — worse than showing nothing, because a wrong bar is still read as this account's.
+      //
+      // **Both accounts are served, and that is what makes this test mean anything.** A version
+      // serving only the wrong account passed against a component with NO filter at all: the
+      // assertion ran before the usage query resolved, so "absent" was just "not arrived yet".
+      // Waiting for THIS card's own 66% proves the data landed; only then does the missing 91%
+      // say something about the filter. Caught by mutation.
+      const quota = (usedPercent: number) => ({
+        takenAt: new Date().toISOString(),
+        windows: [{ usedPercent, label: 'week', resetsText: 'Aug 20 at 1am (Europe/Warsaw)' }],
+      })
+      serve(withFiles() as never, {
+        usage: {
+          enabled: true,
+          accounts: [
+            { id: 'work', provider: 'claude', label: 'Work', isDefault: false, inflight: 0, limited: false, quota: quota(91) },
+            {
+              id: 'default:claude',
+              provider: 'claude',
+              label: 'Default',
+              isDefault: true,
+              inflight: 0,
+              limited: false,
+              quota: quota(66),
+            },
+          ],
+        },
+      })
+      renderAccounts()
+      await waitFor(() => expect(rows()).toHaveLength(1))
+
+      fireEvent.click(toggle())
+      await waitFor(() =>
+        expect(document.querySelector<HTMLElement>('[data-slot="quota-fill"]')?.dataset.percent).toBe('66'),
+      )
+      expect(document.querySelectorAll('[data-slot="quota-fill"]')).toHaveLength(1)
+      expect(document.body.textContent).not.toContain('91%')
     })
 
     it('says WHY there is nothing rather than showing an empty panel', async () => {

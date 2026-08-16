@@ -236,15 +236,24 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
     // Cross-project by nature: false under singleProject regardless of the flag (see the
     // module docblock) — a single-project cockpit has nothing to aggregate or fan out across.
     notes: env.CEZ_NOTES === '1' && !singleProject,
-    workspaceViews: env.CEZ_WORKSPACE_VIEWS === '1' && !singleProject,
+    // ON unless explicitly switched off — the SECOND inverted gate in this object, and the reason
+    // is the one D7 already acted on for workspace todos: these boards are the cockpit's main
+    // surface on a multi-project install, not an optional side view, and a main path gated on a
+    // flag nobody sets fails as SILENCE rather than as an error. The owner ran a full workspace and
+    // was told "the workspace git overview is off" by a cockpit that had every number it needed.
+    // `CEZ_WORKSPACE_VIEWS=0` is the opt-out; `=1` still reads as on, so no existing install changes
+    // behaviour. Still false under `singleProject` — see the module docblock.
+    workspaceViews: env.CEZ_WORKSPACE_VIEWS !== '0' && !singleProject,
     notify: env.CEZ_NOTIFY === '1',
     // AND-ed with `localHandoff`, not just the flag: this panel names each login's email, org and
     // plan, and the rest of the agent-profiles family is already withheld in hosted mode for the
     // weaker reason that it echoes host paths. See the field's doc in `contract/health.ts`.
     accountUsage: env.CEZ_ACCOUNT_USAGE === '1' && localHandoff,
-    // The one INVERTED gate in this object: `=== '1'` everywhere above, `!== '0'` here.
-    // Skills predates the capability payload, so absent has to keep meaning on — see the
-    // `skills` field in `contract/health.ts` for why the asymmetry is deliberate.
+    // Inverted, like `workspaceViews` above — `=== '1'` everywhere else, `!== '0'` in these two.
+    // (This comment used to claim it was "the one INVERTED gate in this object"; corrected
+    // 2026-08-16 when `workspaceViews` joined it, for a different reason: skills predates the
+    // capability payload, so absent has to keep meaning on — see the `skills` field in
+    // `contract/health.ts` for why that asymmetry is deliberate.)
     skills: env.CEZ_SKILLS !== '0',
     // No `auth` key. `CEZ_AUTH` is read through `resolveAuthProvider` by the two call sites that
     // need it (`requirePrincipal`/`verifyWsUpgrade` in server.ts, the boot gate in index.ts) and

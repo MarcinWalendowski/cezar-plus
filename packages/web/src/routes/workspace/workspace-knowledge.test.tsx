@@ -211,7 +211,10 @@ describe('disabledReason reaches the user', () => {
     stubFetch({ domainsResponse: { domains: [], projects: [], disabledReason: 'workspaceViews' } })
     renderKnowledge()
     await screen.findByText('The cross-project workspace view is off')
-    expect(screen.getByText(/CEZ_WORKSPACE_VIEWS=1/)).toBeTruthy()
+    // `=0`, not `=1`: the flag inverted on 2026-08-16, and telling a user to SET a flag that is
+    // already on by default is advice that cannot work — the same failure the single-project
+    // branch of `workspaceViewsOffSubtitle` exists to avoid.
+    expect(screen.getByText(/CEZ_WORKSPACE_VIEWS=0/)).toBeTruthy()
     expect(screen.queryByText('The knowledge base is off')).toBeNull()
     expect(screen.queryByTestId('workspace-knowledge-domains')).toBeNull()
   })

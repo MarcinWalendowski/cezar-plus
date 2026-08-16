@@ -173,7 +173,11 @@ describe('resolveCapabilities — followups (#471)', () => {
       knowledge: false,
       sources: false,
       notes: false,
-      workspaceViews: false,
+      // Opt-OUT since 2026-08-16, like `skills` below: `true` in an env that sets nothing. Hosted
+      // mode does NOT withhold it — unlike `accountUsage`, which names each login's email and org,
+      // this payload is project names, branches and commit subjects, already behind whatever auth
+      // the deployment runs.
+      workspaceViews: true,
       notify: false,
       accountUsage: false,
       // Opt-OUT, so it is `true` in an env that sets nothing. This `toEqual` is the exhaustive
@@ -270,12 +274,18 @@ describe('resolveCapabilities — skills is the one OPT-OUT capability', () => {
 });
 
 describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources, notes, workspaceViews, notify)', () => {
-  it('are all off by default', () => {
+  it('are all off by default — except workspaceViews, which is ON', () => {
+    // **CHANGED 2026-08-16** (`2026-08-16-claude-usage-windows.md` is a different spec; this is the
+    // workspace-views default flip recorded in CHANGELOG and in the 2026-08-06 spec's Q4). This
+    // block used to assert `workspaceViews: false` here and in the exact-"1" table below, and both
+    // assertions were correct for a flag nobody ever set. The boards it gates are the cockpit's
+    // main surface on a multi-project install, and a main path gated on an unset flag fails as
+    // SILENCE — the owner ran a full workspace and was told the git overview was off.
     expect(resolveCapabilities({})).toMatchObject({
       knowledge: false,
       sources: false,
       notes: false,
-      workspaceViews: false,
+      workspaceViews: true,
       notify: false,
       accountUsage: false,
     });
@@ -285,6 +295,8 @@ describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources
     expect(resolveCapabilities({ CEZ_KB: '1' })).toMatchObject({ knowledge: true, sources: false });
     expect(resolveCapabilities({ CEZ_SOURCES: '1' })).toMatchObject({ knowledge: false, sources: true });
     expect(resolveCapabilities({ CEZ_NOTES: '1' })).toMatchObject({ notes: true });
+    // Still true with the flag set: the flip changed the DEFAULT, so no install that already sets
+    // `=1` behaves differently after it.
     expect(resolveCapabilities({ CEZ_WORKSPACE_VIEWS: '1' })).toMatchObject({ workspaceViews: true });
     expect(resolveCapabilities({ CEZ_NOTIFY: '1' })).toMatchObject({ notify: true });
   });
@@ -295,17 +307,28 @@ describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources
         CEZ_KB: value,
         CEZ_SOURCES: value,
         CEZ_NOTES: value,
-        CEZ_WORKSPACE_VIEWS: value,
         CEZ_NOTIFY: value,
       }),
     ).toMatchObject({
       knowledge: false,
       sources: false,
       notes: false,
-      workspaceViews: false,
       notify: false,
       accountUsage: false,
     });
+  });
+
+  it.each(['1', 'true', 'yes', '', 'on'])(
+    'workspaceViews stays ON for %j — only an exact "0" opts out',
+    (value) => {
+      // The inverted spelling, matching `CEZ_SKILLS`. A typo'd opt-out leaves the boards ON, which
+      // is the safe direction: the failure of the other reading is a blank page with no error.
+      expect(resolveCapabilities({ CEZ_WORKSPACE_VIEWS: value })).toMatchObject({ workspaceViews: true });
+    },
+  );
+
+  it('workspaceViews is off for an exact "0"', () => {
+    expect(resolveCapabilities({ CEZ_WORKSPACE_VIEWS: '0' })).toMatchObject({ workspaceViews: false });
   });
 
   it('notes and workspaceViews report false under CEZ_SINGLE_PROJECT=1 regardless of their own flag', () => {
@@ -316,6 +339,9 @@ describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources
         CEZ_WORKSPACE_VIEWS: '1',
       }),
     ).toMatchObject({ singleProject: true, notes: false, workspaceViews: false });
+    // And with the flag UNSET, which is now the common case — the default-on flip must not sneak
+    // cross-project boards into a single-project cockpit that has nothing to aggregate.
+    expect(resolveCapabilities({ CEZ_SINGLE_PROJECT: '1' })).toMatchObject({ workspaceViews: false });
   });
 
   it('knowledge, sources and notify are independent of singleProject', () => {

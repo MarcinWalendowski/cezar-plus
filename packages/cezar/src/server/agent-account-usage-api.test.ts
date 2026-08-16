@@ -13,9 +13,14 @@ import {
 /**
  * `GET /workspace/agent-accounts/usage` (spec `2026-08-16-agent-account-usage-routing.md`).
  *
- * The test this file exists for is "a Claude row never carries a quota". Everything else here is
- * ordinary route behaviour; that one is the whole honesty argument, and it is the assertion that
- * fails the moment someone decides a percentage can be derived from tokens spent.
+ * The test this file exists for is "a row carries a quota ONLY when its probe reported one".
+ * Everything else here is ordinary route behaviour; that one is the whole honesty argument, and it
+ * is the assertion that fails the moment someone decides a percentage can be derived from tokens
+ * spent.
+ *
+ * **Corrected 2026-08-16 by `2026-08-16-claude-usage-windows.md`**, which is also why that sentence
+ * no longer says "a Claude row NEVER carries a quota". Claude reports windows too, from
+ * `claude -p "/usage"`; what never happens is a bar nobody reported.
  */
 
 const URL_PATH = 'http://x/workspace/agent-accounts/usage';
@@ -58,10 +63,12 @@ describe('agent account usage route', () => {
     writeFileSync(agentAccountUsagePath(), JSON.stringify({ version: 1, accounts }));
   }
 
-  /** No probe ever reaches a real CLI in these tests. */
+  /** No probe ever reaches a real CLI in these tests. All THREE have to be stubbed: `probeUsage`
+   *  joined the round in 2026-08-16, and a stub set that forgets it spawns `claude -p` per test. */
   const silentProbes = {
     probeQuota: async () => undefined,
     probeIdentity: async () => undefined,
+    probeUsage: async () => undefined,
   };
 
   async function get(deps: Parameters<typeof createAgentAccountUsageRoutes>[0]): Promise<AccountUsageResponse> {
@@ -109,14 +116,18 @@ describe('agent account usage route', () => {
       expect(body.accounts.map((a) => a.provider)).toEqual(['claude', 'claude', 'codex']);
     });
 
-    it('never carries a quota on a Claude row', async () => {
-      // THE guard. Claude reports no allowance — `claude auth status --json` has identity and a
-      // plan NAME and nothing else — so a bar on this row could only have been invented, and it
-      // would sit beside Codex's real one looking identical.
+    it('carries no quota on a Claude row when the probe reports none', async () => {
+      // THE guard, and it survives Claude gaining real windows on 2026-08-16 — only its title
+      // changed. (It used to read "never carries a quota on a Claude row", which was the honest
+      // reading while `claude auth status --json` was the only surface anyone had checked.) What it
+      // still catches is the thing that actually matters: an account whose probe said nothing must
+      // end up with NO bar, not one invented from tokens spent, which would sit beside a real one
+      // looking identical.
       writeAccounts();
       const body = await getAfterProbe({
         env: ON,
         probeQuota: async () => undefined,
+        probeUsage: async () => undefined,
         probeIdentity: async () => ({ loggedIn: true, plan: 'max', email: 'me@example.com' }),
       });
       for (const row of body.accounts.filter((a) => a.provider === 'claude')) {
@@ -125,6 +136,91 @@ describe('agent account usage route', () => {
         // The plan is a NAME, and naming it must not smuggle a quantity onto the row.
         expect(row.plan).toBe('max');
       }
+    });
+
+    it('carries the windows a Claude account reported, end to end', async () => {
+      writeAccounts();
+      const body = await getAfterProbe({
+        env: ON,
+        probeQuota: async () => undefined,
+        probeIdentity: async () => ({ loggedIn: true, plan: 'max' }),
+        probeUsage: async () => ({
+          takenAt: new Date().toISOString(),
+          windows: [
+            { usedPercent: 66, label: 'week', resetsText: 'Aug 20 at 1am (Europe/Warsaw)' },
+            { usedPercent: 0, label: 'session' },
+          ],
+        }),
+      });
+      const claude = body.accounts.find((a) => a.id === 'default:claude');
+      expect(claude?.quota?.windows).toEqual([
+        { usedPercent: 66, label: 'week', resetsText: 'Aug 20 at 1am (Europe/Warsaw)' },
+        { usedPercent: 0, label: 'session' },
+      ]);
+      // The idle window survives the trip. `freshQuota` sits between the probe and the response and
+      // is where a reset-time filter would silently eat it.
+      expect(claude?.quota?.windows.filter((w) => w.resetsText === undefined)).toHaveLength(1);
+    });
+
+    it('probes each Claude account against its own config dir', async () => {
+      // Two logins on one machine. Probing both with the default config dir returns ONE
+      // subscription's numbers twice, on two rows that look independent — a wrong bar a user acts
+      // on, not a missing one.
+      writeAccounts();
+      const asked: Array<string | undefined> = [];
+      await getAfterProbe({
+        env: ON,
+        probeQuota: async () => undefined,
+        probeIdentity: async () => undefined,
+        probeUsage: async (options) => {
+          asked.push(options?.configDir);
+          return undefined;
+        },
+      });
+      // Deduped: the second poll of `getAfterProbe` starts another round, because a probe that
+      // returned nothing leaves the snapshot as stale as it found it. The identities asked for are
+      // what matters here, not how many rounds ran.
+      expect([...new Set(asked)]).toEqual([undefined, '/tmp/claude-work']);
+    });
+
+    it('refreshes a Claude account whose quota is stale but whose identity is not', async () => {
+      // The two facts expire on different clocks — identity is cached for 5 minutes because it only
+      // changes on `claude auth login`, while a quota goes stale in the same 5 but is re-read far
+      // more often. Asking about identity alone (the shape this had while Claude reported no
+      // allowance) means the round is skipped whenever identity is warm, so the bar expires and
+      // stays blank until the identity TTL happens to lapse.
+      writeAccounts();
+      // **Every OTHER account has to be satisfied for this test to mean anything.** `needsRefresh`
+      // is a `some()` across all profiles, so the discovered Codex default — which has no stored
+      // quota by default — triggers a round on its own and the assertion below passes no matter
+      // what the Claude branch does. Caught by mutation: reverting the branch to identity-only left
+      // this green until Codex was given a fresh snapshot of its own.
+      writeUsage({
+        'codex:default': {
+          quota: {
+            takenAt: new Date().toISOString(),
+            planType: 'pro',
+            windows: [{ usedPercent: 4, windowMinutes: 300, resetsAt: futureUnixSeconds() }],
+          },
+        },
+      });
+      const deps = {
+        env: ON,
+        probeQuota: async () => undefined,
+        probeIdentity: async () => ({ loggedIn: true, plan: 'max' }),
+        probeUsage: async () => undefined,
+      };
+      // First round warms the identity cache, and stores nothing for Claude.
+      await getAfterProbe(deps);
+      let usageProbes = 0;
+      await getAfterProbe({
+        ...deps,
+        probeUsage: async () => {
+          usageProbes += 1;
+          return undefined;
+        },
+      });
+      expect(usageProbes).toBeGreaterThan(0);
     });
 
     it('carries a fresh quota on a Codex row', async () => {
@@ -184,6 +280,7 @@ describe('agent account usage route', () => {
       const body = await getAfterProbe({
         env: ON,
         probeQuota: async () => undefined,
+        probeUsage: async () => undefined,
         probeIdentity: async () => ({ loggedIn: false }),
       });
       expect(body.accounts.find((a) => a.provider === 'claude')?.signedIn).toBe(false);
@@ -192,7 +289,12 @@ describe('agent account usage route', () => {
     it('keeps a good cached answer when a later probe cannot ask', async () => {
       // A momentarily busy CLI must not turn a working login red.
       let answer: { loggedIn: boolean; plan?: string } | undefined = { loggedIn: true, plan: 'max' };
-      const deps = { env: ON, probeQuota: async () => undefined, probeIdentity: async () => answer };
+      const deps = {
+        env: ON,
+        probeQuota: async () => undefined,
+        probeUsage: async () => undefined,
+        probeIdentity: async () => answer,
+      };
       await getAfterProbe(deps);
       answer = undefined;
       const body = await getAfterProbe(deps);
@@ -252,6 +354,7 @@ describe('agent account usage route', () => {
         env: ON,
         probeIdentity: () => never,
         probeQuota: () => never,
+        probeUsage: () => never,
       });
       expect(body.enabled).toBe(true);
       expect(body.accounts.length).toBeGreaterThan(0);
@@ -269,6 +372,7 @@ describe('agent account usage route', () => {
       const body = await getAfterProbe({
         env: ON,
         probeIdentity: async () => undefined,
+        probeUsage: async () => undefined,
         probeQuota: async () => quota,
       });
       expect(body.accounts.find((a) => a.provider === 'codex')?.quota?.windows[0]?.usedPercent).toBe(12);
@@ -284,6 +388,7 @@ describe('agent account usage route', () => {
       const deps = {
         env: ON,
         probeIdentity: async () => undefined,
+        probeUsage: async () => undefined,
         probeQuota: async () => {
           started += 1;
           return blocked;

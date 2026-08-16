@@ -13,12 +13,17 @@ import { atomicWriteJsonSync } from './config.ts';
  *
  * **Three different kinds of number live here, and they must never be averaged, summed, or
  * rendered alike.** `quota` is a fact a provider stated about remaining allowance. `dispatch` is a
- * count cezar kept. `limited` is an observation about a failure. Only Codex reports the first —
- * `claude auth status --json` has no usage in it at all, and there is no state file to read — so a
- * Claude account legitimately has NO quota, and the honest rendering of that is *absence*, not
- * zero and not a number derived from spend. A percentage invented from tokens-we-spent would be
- * the most believable wrong number in the cockpit, because it would look exactly like the Codex
- * one sitting next to it.
+ * count cezar kept. `limited` is an observation about a failure. A percentage invented from
+ * tokens-we-spent would be the most believable wrong number in the cockpit, because it would look
+ * exactly like a provider-stated one sitting next to it.
+ *
+ * **CORRECTED 2026-08-16 by `2026-08-16-claude-usage-windows.md`: the sentence that used to sit
+ * here — "Only Codex reports the first … so a Claude account legitimately has NO quota" — was
+ * false.** It was measured, but only across `claude auth status --json` and the files under
+ * `~/.claude`; `claude -p "/usage" --output-format json` returns the same subscription windows
+ * Claude Code's own `/usage` screen shows, for 0 tokens, and both providers now report a quota.
+ * What survives is the rule the sentence was serving: a quota is present ONLY where a provider
+ * stated one, and absence is rendered as absence.
  *
  * That is why `quota` is a separate optional field rather than a normalized "usage" number every
  * provider gets: the type makes the absence expressible, so a consumer has to decide what to do
@@ -58,14 +63,33 @@ export const QUOTA_STALE_AFTER_MS = 5 * 60_000;
  */
 export const ASSUMED_LIMIT_COOLDOWN_MS = 60 * 60_000;
 
-/** One rate-limit window as the provider reported it. `resetsAt` is UNIX **seconds** — Codex's own
- *  unit, kept rather than converted so a value can be compared against the wire without a mental
- *  step, and because a millisecond reading of it would be a date in 1970 rather than an error. */
+/**
+ * One rate-limit window as the provider reported it.
+ *
+ * **`usedPercent` is the only required field**, because it is the only one both providers always
+ * state. Everything else is optional and the optionality is load-bearing, not defensive — see
+ * `2026-08-16-claude-usage-windows.md`:
+ *
+ * - `resetsAt` is UNIX **seconds** — Codex's own unit, kept rather than converted so a value can be
+ *   compared against the wire without a mental step, and because a millisecond reading of it would
+ *   be a date in 1970 rather than an error. Claude does not state one.
+ * - `resetsText` is Claude's own localized string (`Aug 20 at 1am (Europe/Warsaw)`), passed through
+ *   verbatim. Converting it to an epoch would mean inferring a year and re-deriving a timezone from
+ *   a 12-hour clock, whose failure mode is a confidently wrong timestamp. Passing it through has no
+ *   failure mode: the CLI already rendered it in the user's own zone.
+ * - `windowMinutes` is Codex's; Claude says "session" / "week" without a length. Writing `300` for
+ *   its documented 5-hour window would be cezar inventing a number the provider did not say.
+ * - `label` is what Claude gives instead, and it does something `windowMinutes` cannot: **"week
+ *   (all models)" and "week (Fable)" have the SAME length**, so a consumer keyed on minutes renders
+ *   two different windows identically and collides on any key derived from it.
+ */
 const quotaWindowSchema = z
   .object({
     usedPercent: z.number().min(0).max(1000),
-    windowMinutes: z.number().int().positive(),
-    resetsAt: z.number().int().nonnegative(),
+    label: z.string().max(64).optional().catch(undefined),
+    windowMinutes: z.number().int().positive().optional().catch(undefined),
+    resetsAt: z.number().int().nonnegative().optional().catch(undefined),
+    resetsText: z.string().max(128).optional().catch(undefined),
   })
   .passthrough();
 
@@ -290,12 +314,20 @@ export function isLimited(limited: AccountLimited | undefined, now: number = Dat
  *
  * Rule 2 is the one that is easy to miss: a fresh read of a rolled-over window is *recent* and
  * *wrong at the same time*, which no age check can catch.
+ *
+ * **Rule 2 applies only where `resetsAt` exists**, and the guard has to be written that way round.
+ * A Claude window states a human reset string and no timestamp, so the obvious spelling
+ * (`window.resetsAt * 1000 > now`) reads its absence as `NaN > now` — false — and silently drops
+ * EVERY Claude window, leaving the snapshot empty and the panel bare. That failure looks exactly
+ * like "this provider reports nothing", which is the state this whole feature exists to end. A
+ * window with no stated reset is bounded by rule 1 alone; a 5-minute snapshot cannot outlive a
+ * 5-hour window by enough to matter.
  */
 export function freshQuota(quota: AccountQuota | undefined, now: number = Date.now()): AccountQuota | undefined {
   if (!quota) return undefined;
   const takenAt = Date.parse(quota.takenAt);
   if (!Number.isFinite(takenAt) || now - takenAt > QUOTA_STALE_AFTER_MS) return undefined;
-  const windows = quota.windows.filter((window) => window.resetsAt * 1000 > now);
+  const windows = quota.windows.filter((window) => window.resetsAt === undefined || window.resetsAt * 1000 > now);
   if (windows.length === 0) return undefined;
   return { ...quota, windows };
 }

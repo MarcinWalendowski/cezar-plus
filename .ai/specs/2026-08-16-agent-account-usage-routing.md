@@ -30,14 +30,27 @@ measurement rather than assumption, and the answer is **asymmetric**:
     exactly what "this provider reports no quota" looks like, so the panel would simply never draw
     a bar and the feature would look finished. That is why the parser is pinned by a fixture
     **captured from the live wire** rather than hand-written.
-- **Claude reports none.** `claude auth status --json` gives identity and plan
+- **SUPERSEDED 2026-08-16 by `2026-08-16-claude-usage-windows.md` — Claude reports usage too.**
+  `claude -p "/usage" --output-format json` returns the same windows the `/usage` screen shows, in
+  the envelope's `result` field, for **0 tokens** (`num_turns: 0`, `total_cost_usd: 0`) and with no
+  credential handling at all. Per-account via `CLAUDE_CONFIG_DIR`, like every other Claude probe
+  here. The asymmetry that survives is narrower and is about SHAPE: Codex states a machine
+  timestamp and a window length, Claude states a name and a localized human string and omits the
+  reset entirely on an idle window. Original text, wrong in its conclusion and right in its
+  evidence: ~~"**Claude reports none.** `claude auth status --json` gives identity and plan
   (`{loggedIn, email, orgName, subscriptionType}`) and **no usage at all**. There is no CLI
   command, no state file, and nothing on disk. The number the `/usage` screen shows comes from
   `/api/oauth/usage`, reachable only with the account's OAuth token out of the macOS Keychain
-  (`Claude Code-credentials-<hash>`, keyed by a hash of the config dir).
+  (`Claude Code-credentials-<hash>`, keyed by a hash of the config dir)."~~ — `auth status` and the
+  files really do carry nothing, and the Keychain path really does work (it was probed: `five_hour
+  29% / seven_day 66%`). What was never tested was `-p` with a slash command, which is where the
+  answer was.
 
-So the panel shows, per account, **only numbers cezar can prove**, each labelled by what it is —
-and it **never renders a percentage for a Claude account**, because there is no denominator and an
+So the panel shows, per account, **only numbers cezar can prove**, each labelled by what it is.
+(Until 2026-08-16 this sentence continued "and it **never renders a percentage for a Claude
+account**"; that clause is superseded — Claude states real percentages, and the rule it served is
+now "a percentage only where a provider stated one".) The reasoning it rested on still holds
+wherever a provider says nothing, because there is no denominator and an
 invented one would be the most believable wrong number in the cockpit.
 
 What makes the feature work anyway: the three signals that decide routing are ones **cezar owns
@@ -78,7 +91,7 @@ where `null` is the discovered default.
 | | Identity + plan | True allowance | Spend |
 |---|---|---|---|
 | **Codex** | `account/read` | **`account/rateLimits/read`** — `usedPercent`, `windowDurationMins`, `resetsAt`, `planType`, credits | `account/usage/read` + cezar's own metrics |
-| **Claude** | `claude auth status --json` — `email`, `subscriptionType` | **none** — no CLI command, no state file; only `/api/oauth/usage` behind a Keychain OAuth token | cezar's own `usage.updated` metrics |
+| **Claude** | `claude auth status --json` — `email`, `subscriptionType` | ~~**none** — no CLI command, no state file; only `/api/oauth/usage` behind a Keychain OAuth token~~ **CORRECTED 2026-08-16: `claude -p "/usage" --output-format json`**, free and per-config-dir | cezar's own `usage.updated` metrics |
 
 `~/.claude/stats-cache.json` and `~/.claude/usage-data/` were both checked and are **not** a source:
 the first is Claude Code's own lazily-computed *spend* cache (and is per-config-dir, so it says
@@ -481,11 +494,14 @@ every test that injected a count had agreed with both bugs.
 
 ## Not in this spec
 
-- **Reading Claude's `/api/oauth/usage`.** It would need the account's OAuth token out of the
-  Keychain under a hash cezar would have to reverse-engineer, against an undocumented endpoint. It
-  is the only way to put a real Claude percentage on the screen, and it is a separate decision with
-  a security dimension — cezar would be handling the owner's subscription credentials, which it
-  does not do today. Flagged, not assumed.
+- **Reading Claude's `/api/oauth/usage`.** Still out, and now for a stronger reason than when this
+  was written: it is no longer "the only way to put a real Claude percentage on the screen"
+  (`2026-08-16-claude-usage-windows.md` does it through the CLI), so the security cost — cezar
+  handling the owner's subscription credentials out of the macOS Keychain — buys nothing the
+  cockpit does not already have. The hash turned out to be plain `sha256(configDir)[0:8]` and the
+  endpoint works; neither fact changes the decision. ~~Original: "It would need the account's OAuth
+  token out of the Keychain under a hash cezar would have to reverse-engineer, against an
+  undocumented endpoint … a separate decision with a security dimension. Flagged, not assumed."~~
 - Cost/billing attribution per account. `usage.updated` already carries cost; aggregating it into a
   spend-per-account report is its own feature.
 - Any change to `bare /new`, the bookmarklet contract, or which provider is the default agent.

@@ -1,6 +1,38 @@
 # Unreleased
 
 ## ✨ Added
+- ✨ **Claude accounts show their real usage now, in the sidebar and on each Logins card.**
+  Spec `.ai/specs/2026-08-16-claude-usage-windows.md`, same `CEZ_ACCOUNT_USAGE=1` flag.
+
+  A Claude row drew no bar because the previous entry concluded Claude publishes no allowance. It
+  does: `claude -p "/usage" --output-format json` returns the same windows the `/usage` screen
+  shows — session, week, and the per-model week — in the envelope's `result`. Measured on this
+  machine: **0 tokens** (`num_turns: 0`, `total_cost_usd: 0`), ~1.3 s per account with MCP servers
+  switched off, and per-account via `CLAUDE_CONFIG_DIR` like every other Claude probe. **No
+  credential handling anywhere** — cezar asks a CLI a question, which is what it already did for
+  `claude auth status`.
+
+  The undocumented `api.anthropic.com/api/oauth/usage` endpoint was probed too, works, and is
+  **rejected**: it needs the account's OAuth token out of the macOS Keychain, which would make
+  cezar a process that handles your subscription credentials to draw a progress bar it can get for
+  free. Recorded in the spec so the next session does not rediscover it and assume nobody looked.
+
+  Three things the shape had to learn, each because the alternative invents a fact:
+
+  - **A window states only what its provider said.** `usedPercent` is the one required field.
+    Codex gives a length and an epoch reset; Claude gives a name and a *localized human* string
+    (`Aug 20 at 1am (Europe/Warsaw)`), passed through verbatim rather than parsed into a timestamp
+    whose year and timezone would both be guesses.
+  - **An idle window states no reset at all** — a bare `Current session: 0% used`. The rollover
+    filter had to learn that absence is not a reset in the past, or every Claude window would have
+    been dropped and the row would have looked exactly like a provider that reports nothing.
+  - **Two of Claude's windows are the same length.** "week" and "week (Fable)" would render
+    identically under a label computed from minutes, so the provider's own name wins.
+
+  The parser is pinned by two fixtures captured from the live CLI, never hand-written, and one of
+  its tests is a negative control: the same text carries a "what's contributing" section full of
+  percentages that are *not* windows, which a regex hunting for `%` harvests happily.
+
 - ✨ **Per-account usage in the sidebar, and account balancing when you pick an agent.**
   Spec `.ai/specs/2026-08-16-agent-account-usage-routing.md`, behind `CEZ_ACCOUNT_USAGE=1`.
 
@@ -12,15 +44,17 @@
   recently used; the login is chosen once at dispatch and written to the run, so a task always says
   which account it actually ran on.
 
-  **Only Codex gets a usage bar, and that is the point.** Codex reports true remaining allowance
-  through its app-server (`account/rateLimits/read`); Claude reports none — `claude auth status
-  --json` answers identity and a plan *name* with no quantity anywhere, there is no other
-  subcommand, and nothing on disk. So a Claude row shows its plan, its in-flight count and whether
-  it is limited, and **nothing shaped like a gauge**. The tempting filler was the token spend cezar
-  already measures, and it would have been the most believable wrong number in the cockpit: a bar
-  built from spend, sitting beside the Codex bar, looking identical and meaning something else.
-  `quota` is optional at every layer — schema, server and component — so the absence cannot be
-  rendered as a zero by accident.
+  **A usage bar appears only where a provider actually reports allowance.** The tempting filler was
+  the token spend cezar already measures, and it would have been the most believable wrong number
+  in the cockpit: a bar built from spend, sitting beside a real one, looking identical and meaning
+  something else. `quota` is optional at every layer — schema, server and component — so the
+  absence cannot be rendered as a zero by accident.
+
+  **SUPERSEDED 2026-08-16 (same day) for the Claude half.** This paragraph opened "**Only Codex
+  gets a usage bar, and that is the point** … Claude reports none — `claude auth status --json`
+  answers identity and a plan *name* with no quantity anywhere, there is no other subcommand, and
+  nothing on disk", and shipped that as a deliberate design statement. `claude -p "/usage"` is the
+  subcommand nobody tried; see the entry below. The rule survives, the claim about Claude does not.
 
   Four bugs worth naming. Three of them were found by running the thing rather than by the suite,
   which was green through every one:
@@ -74,6 +108,26 @@
   (`packages/web/public/open-mercato.svg`). Replaced by `cezar.svg` at all five referencing sites.
 
 ## 🔧 Changed
+- 🔧 **Cross-project views are ON by default.** `CEZ_WORKSPACE_VIEWS` inverted: an exact `'0'`
+  switches the workspace runs board, the git overview and the cross-project knowledge views off,
+  where an exact `'1'` used to switch them on. Recorded against
+  `.ai/specs/2026-08-06-workspace-notes-cross-project.md` Q4, which is corrected in place.
+
+  The old default was defensible and produced the failure it was meant to prevent: nobody set the
+  flag, so opening the git overview on a twelve-project workspace answered "the workspace git
+  overview is off" from a server holding every number it needed. A main path gated on a flag nobody
+  sets **fails as silence, not as an error** — the same reasoning that ungated workspace todos on
+  2026-08-15. Installs already setting `=1` are unaffected.
+
+  The off-state copy changed with it, and not only to swap a digit. `CEZ_SINGLE_PROJECT=1` reports
+  the capability false *regardless* of the flag, so the old "set `CEZ_WORKSPACE_VIEWS=1` and
+  restart" was advice that could not work for those users — they would set it, restart, see the
+  same blank page, and have no way to tell what happened. Each cause now gets its own sentence.
+
+  Verified by running it: with no flag set, `/workspace/git` lists all 12 registered projects with
+  branch, ahead/behind and dirty counts, including the `no commits yet` repo as a **visible failed
+  row** rather than a dropped one.
+
 - 🔧 **The packages are `@loki-labs/better-cezar*`.** `@open-mercato/cezar`, `-web`, `-contract`
   and `-api-client` were renamed across ~525 references, and the unscoped `cezar-cli` alias — which
   is *upstream's own npm package name* — became `@loki-labs/better-cezar-cli`. The **binaries are

@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { BookOpenIcon, SearchIcon, TriangleAlertIcon, XIcon } from 'lucide-react'
 
-import { useWorkspaceKnowledgeDomains, useWorkspaceKnowledgeSearch } from '@/api/queries'
+import { useHealth, useWorkspaceKnowledgeDomains, useWorkspaceKnowledgeSearch } from '@/api/queries'
 import type {
   WorkspaceKnowledgeDomain,
   WorkspaceKnowledgeProjectHealth,
   WorkspaceKnowledgeResult,
 } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
+import { workspaceViewsOffSubtitle } from '@/lib/capability-copy'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Link, scopeTo } from '@/lib/project-router'
@@ -90,6 +91,10 @@ export function WorkspaceKnowledgeRoute() {
 /** Names WHICH of the two ANDed capabilities is off, and the exact env var plus restart — the one
  *  thing a generic "disabled" message cannot do (D6). */
 function DisabledState({ reason }: { reason: 'knowledge' | 'workspaceViews' }) {
+  // Read here rather than threaded in: the two halves of the ANDed gate now need DIFFERENT kinds of
+  // advice, and only the `workspaceViews` half depends on topology. `useHealth` is already cached
+  // by every parent on this page, so this costs nothing.
+  const health = useHealth()
   const copy =
     reason === 'knowledge'
       ? {
@@ -98,7 +103,7 @@ function DisabledState({ reason }: { reason: 'knowledge' | 'workspaceViews' }) {
         }
       : {
           title: 'The cross-project workspace view is off',
-          subtitle: 'Set CEZ_WORKSPACE_VIEWS=1 and restart cezar to turn it on.',
+          subtitle: workspaceViewsOffSubtitle(health.data?.capabilities?.singleProject),
         }
   return (
     <div data-slot="workspace-knowledge-disabled" data-reason={reason} className="flex flex-1 flex-col p-3 md:p-5">

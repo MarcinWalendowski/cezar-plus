@@ -131,8 +131,38 @@ describe('agent account usage store', () => {
     });
 
     it('has nothing to report for an account no provider gave a quota for', () => {
-      // A Claude account's permanent state: absent, never zero.
+      // Absent, never zero — the state every account is in before its first probe lands.
       expect(freshQuota(undefined, now)).toBeUndefined();
+    });
+
+    it('keeps a window that states no reset time at all', () => {
+      // Claude's shape: a percentage and a human string, no epoch — and on an idle window, not even
+      // that. The obvious spelling of the rollover filter (`window.resetsAt * 1000 > now`) reads the
+      // absence as `NaN > now`, which is false, so it drops EVERY Claude window and leaves the
+      // snapshot empty. That failure is invisible: it looks exactly like a provider that reports
+      // nothing, which is the state this whole feature exists to end.
+      const quota = {
+        takenAt: new Date(now - 30_000).toISOString(),
+        windows: [
+          { usedPercent: 66, label: 'week', resetsText: 'Aug 20 at 1am (Europe/Warsaw)' },
+          { usedPercent: 0, label: 'session' },
+        ],
+      };
+      expect(freshQuota(quota, now)?.windows).toHaveLength(2);
+    });
+
+    it('still drops a rolled-over window that DOES state its reset', () => {
+      // The other half of the same guard: widening it for Claude must not switch rollover off for
+      // Codex. A stated reset in the past still expires that window, in the same snapshot as an
+      // unstated one that survives.
+      const quota = {
+        takenAt: new Date(now - 1_000).toISOString(),
+        windows: [
+          { usedPercent: 98, windowMinutes: 300, resetsAt: Math.floor(now / 1000) - 60 },
+          { usedPercent: 0, label: 'session' },
+        ],
+      };
+      expect(freshQuota(quota, now)?.windows).toEqual([{ usedPercent: 0, label: 'session' }]);
     });
 
     it('drops a snapshot with an unparseable timestamp', () => {

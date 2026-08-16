@@ -5,6 +5,7 @@ import { Fragment, useState } from 'react'
 import { ApiError, putWorkspaceConfig } from '@/api/client'
 
 import {
+  useAccountUsage,
   useAgentAccountDetails,
   useAgentProfiles,
   useHealth,
@@ -32,6 +33,7 @@ import {
   type Runner,
   type SetWorkspaceConfigInput,
 } from '@loki-labs/better-cezar-api-client'
+import { QuotaBars } from '@/components/account-usage-panel'
 import { CenteredState } from '@/components/centered-state'
 import {
   AlertDialog,
@@ -686,6 +688,40 @@ function AccountRow({ account, onRemove }: { account: AgentProfile; onRemove: ()
   )
 }
 
+/**
+ * This login's remaining allowance, on the card that is already about this login
+ * (`.ai/specs/2026-08-16-claude-usage-windows.md`).
+ *
+ * Reads the same `GET /workspace/agent-accounts/usage` the sidebar panel does, and renders it with
+ * the sidebar's own `QuotaBars`, so the two surfaces cannot drift into presenting one account's
+ * allowance two different ways.
+ *
+ * **The row is matched by `id`, and that match is the whole safety of this component.** The
+ * response carries every account; rendering it unfiltered would draw the other login's numbers on
+ * this card, which is worse than showing nothing because a wrong bar is still read as this
+ * account's. `agentAccountRouteId` is the shared encoding both sides key on.
+ *
+ * Absent for every reason at once — the provider states no allowance, the snapshot went stale —
+ * and that is deliberate: a card with no bars reads as "nothing to say here", which is true in all
+ * of them.
+ *
+ * **The capability gate is this component's MOUNT, not an `enabled` on the query**, matching
+ * `app-shell.tsx` and the explicit instruction in `useAccountUsage`'s own doc comment. Gating the
+ * query instead would be the same rule spelled twice, and the two spellings eventually disagree
+ * about whether a 15-second poll is running.
+ */
+function AccountUsageDetail({ routeId }: { routeId: string }) {
+  const usage = useAccountUsage()
+  const quota = usage.data?.accounts.find((account) => account.id === routeId)?.quota
+  if (!quota) return null
+  return (
+    <div data-slot="account-usage-detail" className="mt-3 border-t border-border/60 pt-2.5">
+      <p className="mb-1 text-xs text-muted-foreground">Usage</p>
+      <QuotaBars quota={quota} />
+    </div>
+  )
+}
+
 /** The opt-in half of a row: who this login is, its own config files, and managing it. */
 function AccountDetails({
   account,
@@ -697,6 +733,9 @@ function AccountDetails({
   onRemove: () => void
 }) {
   const details = useAgentAccountDetails(routeId, true)
+  // The mount gate for the usage block below — see `AccountUsageDetail`'s doc comment for why the
+  // capability is checked here rather than as an `enabled` on the query.
+  const usageOn = useHealth().data?.capabilities?.accountUsage === true
   const open = useOpenAgentAccountFile()
   const targets = useOpenTargets()
   const [renaming, setRenaming] = useState(false)
@@ -749,6 +788,8 @@ function AccountDetails({
           {details.data.reason ?? 'No account details to show.'}
         </p>
       )}
+
+      {usageOn ? <AccountUsageDetail routeId={routeId} /> : null}
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2.5">
         <span className="mr-1 text-xs text-muted-foreground">Config files</span>

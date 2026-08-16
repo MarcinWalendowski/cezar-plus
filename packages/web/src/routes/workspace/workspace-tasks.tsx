@@ -5,6 +5,7 @@ import { Link as RouterLink, useSearchParams } from 'react-router'
 
 import { putWorkspaceUiState } from '@/api/client'
 import { useHealth, useWorkspaceRuns, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
+import { workspaceViewsOffSubtitle } from '@/lib/capability-copy'
 import type { RunRecord, WorkspaceRunSummary } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { DiffStatLabel } from '@/components/diff-stat'
@@ -164,7 +165,7 @@ export function WorkspaceTasksRoute() {
             icon={<ListChecksIcon />}
             tone="neutral"
             title="The cross-project board is off"
-            subtitle="Set CEZ_WORKSPACE_VIEWS=1 and restart cezar to turn it on."
+            subtitle={workspaceViewsOffSubtitle(health.data?.capabilities?.singleProject)}
             heading="h2"
           />
         ) : !workspaceViewsAvailable ? null : (
