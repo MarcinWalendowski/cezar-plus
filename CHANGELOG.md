@@ -1,5 +1,9 @@
 # Unreleased
 
+## 🔄 Synced from upstream
+
+- 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
+
 ## 🔧 Changed
 - 🔧 **Balancing a pool now looks at how used each login actually is, not just whether it is
   nearly dead.** Specs `.ai/specs/2026-08-16-agent-account-usage-routing.md` (Solution C) and
