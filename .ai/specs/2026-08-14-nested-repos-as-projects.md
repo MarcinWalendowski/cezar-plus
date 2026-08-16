@@ -9,7 +9,7 @@ unchanged and is still the reference: the bounded walk (D3), the proposal-not-wr
 per-row registration (D4), the shared containment gate (D5), and the 25-row cap — which now covers
 both kinds of row, repos first.
 
-Status: **Draft** — **supersedes D1 of `2026-08-06-nested-repos-cockpit-scope.md`.** That spec
+Status: **Implemented, QA Needed** (corrected 2026-08-16 — was stale-marked `Draft`; all four phases already shipped in `e8fc6d2e` + `bfa201b9`, and a verify-only implementer pass on 2026-08-16 found the tree matches this spec 1:1 with the full gate green. Owner `~/loki-labs` browser pass still outstanding.) — **supersedes D1 of `2026-08-06-nested-repos-cockpit-scope.md`.** That spec
 decided a workspace-shaped folder stays ONE project with a repo selector, and explicitly rejected
 the design below. The owner reversed it on 2026-08-14 (see Problem 2). Everything else in that
 spec — D2's bounded walk, D3's `exact` mode, D5–D8 — is unaffected and still the reference for how
