@@ -1,5 +1,56 @@
 # Unreleased
 
+## 🔧 Changed
+- 🔧 **Balancing a pool now looks at how used each login actually is, not just whether it is
+  nearly dead.** Specs `.ai/specs/2026-08-16-agent-account-usage-routing.md` (Solution C) and
+  `.ai/specs/2026-08-16-claude-usage-windows.md`.
+
+  Quota entered the balancer as a single yes/no — "past 95%, sort last" — written when quota was
+  believed to be a Codex-only fact. It stopped being one the same morning, and as a binary it saw
+  **no difference between a login at 66% of its week and one at 9%**. So the two live signals
+  alternated between them and the gap never closed.
+
+  Ordering is now `limited → usage band → fewest in-flight → least recently dispatched`, where the
+  band is `floor(worstUsedPercent / 10)` over the account's fresh windows. Four choices inside
+  that, each because the obvious alternative fails a specific way:
+
+  - **A band, not the raw percent.** Raw percent is a near-unique key: it would win almost every
+    comparison, making in-flight unreachable in practice, and it would reorder the pool on a number
+    the panel re-polls every 15 seconds. A band says "materially more used" and lets the live
+    signals decide inside it.
+  - **The max across windows, not the average** — being out of any one window stops the account.
+    This is also why it converges without a second mechanism: a burst on the fresher login raises
+    its **5h session** percentage quickly, climbs it a band, and hands work back.
+  - **The band applies only when every candidate has a fresh reading**, decided once over the set.
+    A measured account and an unmeasured one are not comparable, and the tempting default —
+    unmeasured sorts best — would hand every run to whichever login the probe is failing on.
+  - **A quota whose windows have all rolled over is unmeasured, not 0%**, which would otherwise be
+    the *best* band on the strength of an expired window.
+
+  `POOL_QUOTA_CEILING` retires **with a replacement, not by lowering the floor**: band ordering
+  avoids high usage from 10% upward where 95 avoided it only at 95, and sorting-last-never-excluding
+  is preserved, so a pool whose every login is exhausted still returns one. With `CEZ_ACCOUNT_USAGE`
+  off, or the cockpit closed so nothing polls, nothing is measured and balancing degrades to exactly
+  its previous behaviour.
+
+## 🐛 Fixed
+- 🐛 **The usage bars were invisible, and had been since they shipped.** The fill was `bg-accent`
+  against a `bg-muted` track, and `--accent` is a shadcn alias for `--muted` in the token sheet — a
+  surface token, not the brand accent. Fill and track were literally the same colour, so 0%, 4% and
+  66% all rendered as one flat grey line. Only the `>= 90%` danger branch was ever a different
+  colour, and no account had been there, so nothing ever looked wrong.
+
+  The fill is now graded — emerald under 75%, amber to 89%, red at 90% and over — on a track one
+  step taller, so the colour carries the reading and a sliver of fill has a shape. Both surfaces
+  change together, because Settings → Logins reuses the same component. Clamping is untouched: the
+  **bar** clamps to 0–100, the **number** does not, so a provider reporting an overage still reads
+  `104%`.
+
+  The suite was green through all of it, and would have stayed green under a "fill class ≠ track
+  class" assertion, since the two are different strings resolving to the same colour and jsdom
+  loads no stylesheet to tell them apart. The guard that works checks the fill against an allowlist
+  of *ink* tokens.
+
 ## ✨ Added
 - ✨ **Claude accounts show their real usage now, in the sidebar and on each Logins card.**
   Spec `.ai/specs/2026-08-16-claude-usage-windows.md`, same `CEZ_ACCOUNT_USAGE=1` flag.

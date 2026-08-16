@@ -202,6 +202,70 @@ describe('a bar means allowance, and only allowance', () => {
   })
 })
 
+/**
+ * The fill colour, guarded because this bar shipped **invisible** and no test noticed.
+ *
+ * The fill was `bg-accent` on a `bg-muted` track, and `--accent` is a shadcn alias for `--muted`
+ * in `styles/index.css` — a surface token, not the brand accent. Fill and track were the same
+ * colour, so 0%, 4% and 66% all rendered as one flat grey line; only the `>= 90` danger branch was
+ * ever visible, and no account had been there.
+ *
+ * **A "fill class ≠ track class" assertion would NOT have caught it** — `bg-accent` and `bg-muted`
+ * are different strings that resolve to the same colour, and jsdom loads no stylesheet to tell them
+ * apart. So these guard the class against an allowlist of tokens known to be *ink*, which is the
+ * only form of the check that has the shipped bug on the wrong side of it.
+ */
+describe('the fill has to be visible against the track', () => {
+  /** The three sanctioned fill tokens. Every other `bg-*` here is a surface. */
+  const FILL_TOKENS = ['bg-success', 'bg-pending', 'bg-danger']
+
+  const fillToken = (bar: HTMLElement) =>
+    bar.className.split(/\s+/).find((cls) => cls.startsWith('bg-'))
+
+  const withPercent = (usedPercent: number): AccountUsageResponse => ({
+    enabled: true,
+    accounts: [
+      {
+        ...CODEX,
+        quota: {
+          takenAt: new Date().toISOString(),
+          windows: [{ usedPercent, windowMinutes: 300, resetsAt: future() }],
+        },
+      },
+    ],
+  })
+
+  it('paints a barely-used window in a colour, never in a surface token', async () => {
+    // 4% is the case the bug hid behind: a sliver of fill that has to be a different COLOUR from
+    // the track, because at that width shape alone tells you nothing. Mutation: revert the fill to
+    // `bg-accent` (or any surface token) and this goes red.
+    renderPanel(withPercent(4))
+    await waitFor(() => expect(bars()).toHaveLength(1))
+    expect(FILL_TOKENS).toContain(fillToken(bars()[0]!))
+    expect(bars()[0]!.className).not.toContain('bg-accent')
+  })
+
+  it('grades the colour by how used the window is', async () => {
+    // Below 75 emerald, 75–89 amber, 90+ red — the colour carries the reading, so the bar means
+    // something at a glance and not only when measured against its own track. Mutation: collapse
+    // the three branches to one token and the distinctness assertion fails.
+    const tones: (string | undefined)[] = []
+    for (const percent of [40, 80, 95]) {
+      renderPanel(withPercent(percent))
+      await waitFor(() => expect(bars()).toHaveLength(1))
+      tones.push(fillToken(bars()[0]!))
+      cleanup()
+    }
+    expect(tones).toEqual(['bg-success', 'bg-pending', 'bg-danger'])
+  })
+
+  it('grades on the clamped width, so an overage is red rather than off the scale', async () => {
+    renderPanel(withPercent(104))
+    await waitFor(() => expect(bars()).toHaveLength(1))
+    expect(fillToken(bars()[0]!)).toBe('bg-danger')
+  })
+})
+
 describe('status line', () => {
   it('names the plan when there is nothing more urgent to say', async () => {
     renderPanel({ enabled: true, accounts: [CLAUDE] })

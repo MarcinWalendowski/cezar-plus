@@ -53,9 +53,13 @@ now "a percentage only where a provider stated one".) The reasoning it rested on
 wherever a provider says nothing, because there is no denominator and an
 invented one would be the most believable wrong number in the cockpit.
 
-What makes the feature work anyway: the three signals that decide routing are ones **cezar owns
-and measures exactly** — in-flight runs per account, recent dispatch order, and observed
-limit-hits. Codex's real quota refines that where it exists; nothing depends on it.
+What makes the feature work anyway: the signals that decide routing are ones **cezar owns and
+measures exactly** — in-flight runs per account, recent dispatch order, and observed limit-hits.
+Real quota refines that where it exists; nothing depends on it.
+
+**CORRECTED 2026-08-16 (same day):** this paragraph read "the **three** signals … Codex's real
+quota refines that where it exists". There are four now, and quota is no longer Codex's alone. See
+Solution C, where the 95% ceiling is superseded by a usage band.
 
 ## Problem
 
@@ -182,15 +186,60 @@ pill still read "balance". Split on the FIRST colon only (`parseChoiceValue`).
 what the owner asked for, and it is why the route sits *above* the per-provider selection map rather
 than inside it.
 
-**The balancing policy, in strict order, all three signals cezar owns:**
+**The balancing policy, in strict order. SUPERSEDED 2026-08-16 (same day) — the ceiling is now a
+band; the new policy is stated immediately below.**
 
-1. **Skip** accounts in `limited` whose `until` has not passed. This is the point of the feature:
-   route around an exhausted login instead of failing on it.
+~~1. **Skip** accounts in `limited` whose `until` has not passed. This is the point of the feature:
+route around an exhausted login instead of failing on it.
 2. **Fewest in-flight runs.** Exact, real-time, needs no vendor API.
-3. **Least recently dispatched.** Breaks the tie and makes the spread even over a session.
+3. **Least recently dispatched.** Breaks the tie and makes the spread even over a session.~~
 
-Codex quota refines step 2 *only when fresh*: an account over a `used_percent` ceiling sorts last.
-It is never required — a machine that has never probed still balances correctly.
+~~Codex quota refines step 2 *only when fresh*: an account over a `used_percent` ceiling sorts last.
+It is never required — a machine that has never probed still balances correctly.~~
+
+**What replaced it, and why (2026-08-16).** Both sentences above were built on a claim that was
+false by the time they shipped: that quota is a Codex-only fact, so scarce that a single yes/no was
+all it could support. `2026-08-16-claude-usage-windows.md` landed Claude windows the same morning.
+As a binary at 95%, quota saw **no difference between a login at 66% of its week and one at 9%** —
+the measured state of this machine — so signals 2 and 3 alternated between them and the gap never
+closed.
+
+**The policy, as built:**
+
+1. **Skip** accounts in `limited` whose `until` has not passed. Unchanged, and still a filter rather
+   than a sort key: it must beat every later signal at once.
+2. **Lowest usage band**, `floor(worstUsedPercent / 10)`.
+3. **Fewest in-flight runs.**
+4. **Least recently dispatched.**
+
+Four decisions inside step 2, each because the obvious alternative fails a specific way:
+
+- **A band, not the raw percent.** Raw percent is a near-unique key: it would win essentially every
+  comparison, making in-flight unreachable in practice, and it would reorder the pool on a number
+  the panel re-polls every 15 seconds. A band says "materially more used" and lets the live signals
+  decide inside it.
+- **The max across fresh windows, not the average.** Unchanged from the ceiling — being out of any
+  one window stops the account. It is also *why this converges without a second mechanism*: because
+  the band is the max, a burst on the fresher login raises its **5h session** percentage quickly,
+  climbs it a band, and hands work back. Concurrency still spreads inside a band.
+- **The band key applies only when every compared candidate has a fresh quota**, decided once over
+  the set before sorting so the comparator stays a total order. A measured account and an unmeasured
+  one are not comparable, and the tempting default — unmeasured sorts best — would hand every run to
+  whichever login the probe happens to be failing on. A partially measured pool balances exactly as
+  it did before quota existed.
+- **A quota whose windows have all rolled over is unmeasured, not 0%.** `freshQuota` answers
+  `undefined` once nothing is left, and reading that as zero would put the account in the best band
+  on the strength of an expired window.
+
+**`POOL_QUOTA_CEILING` retires with a replacement, not by lowering the floor.** The hazard it named
+— routing onto an account about to be rejected — is covered *more strongly* by band ordering, which
+avoids high usage from 10% upward instead of only at 95%. Its other property is preserved verbatim:
+sorting last never excludes, so when every candidate is exhausted one is still returned.
+
+Nothing else moved. `resolvePoolForDispatch` still reads the cached snapshot and **never probes on
+the dispatch path** — the 15s panel poll (`useAccountUsage`) is what keeps quota inside the 5-minute
+`QUOTA_STALE_AFTER_MS`. With the cockpit closed, or `CEZ_ACCOUNT_USAGE` off, nothing is measured and
+balancing degrades to exactly the pre-band behaviour.
 
 **Resolution happens once, at dispatch, and the chosen account is recorded on the run**
 (`runs.agentProfile`, overwritten in `execute()`, plus `runs.runner` when `pool:*` picked the
@@ -359,8 +408,23 @@ Every guard names the mutation that must turn it red.
 | A limited account is skipped by the pool | `workspace/agent-route-select.test.ts` | Sort by in-flight only — the exhausted login gets picked first, since it is running nothing ✅ |
 | The pool falls back when *every* account is limited | same | Return no account — dispatch would fail instead of trying ✅ |
 | Fewest-in-flight beats least-recent | same | Swap the comparator order — a busy account keeps winning while it is the oldest ✅ |
-| Quota is exhausted when ANY window is | same | Average the windows — a fresh 5h window hides an exhausted week ✅ |
-| The balancer works with no quota at all | same | Require a quota — Claude-only machines, i.e. most of them, would stop balancing ✅ |
+| ~~Quota is exhausted when ANY window is~~ **superseded by the band rows below, same mutation** | same | ~~Average the windows — a fresh 5h window hides an exhausted week ✅~~ |
+| The balancer works with no quota at all | same | Require a quota — an unprobed cockpit would stop balancing ✅ |
+
+**Added 2026-08-16 with the usage band** (all executed; each mutation was applied to the source and
+turned exactly the named guard red):
+
+| Guard | File | Mutation |
+|---|---|---|
+| 66% loses to 9% at equal in-flight, and keeps losing | `workspace/agent-route-select.test.ts` | Restore the binary ceiling — the pick returns to `['default','work','default','work']` ✅ |
+| Inside one band, fewest in-flight still wins | same | Drop `inflight` from `compare` ✅, or order on the raw percent ✅ (both were run; each kills this guard alone) |
+| One unmeasured candidate ⇒ no reordering by band at all | same | Let an unmeasured account sort as band 0 ✅ |
+| A quota with every window rolled over is unmeasured | same | Read an absent/emptied quota as 0% ✅ |
+| Bands on the WORST window, not the average | same | Average the windows ✅ |
+| Every candidate exhausted still returns one | same | Exclude band-10 accounts instead of sorting them last — `reduce` over an empty pool ✅ |
+| `limited` is still skipped first, whatever the bands say | same | Move `limited` below the band in `compare` ✅ |
+| A 4% fill is not the track's own surface token | `components/account-usage-panel.test.tsx` | Revert the fill to `bg-accent` ✅ |
+| 40% is emerald, 80% amber, 95% red | same | Collapse the three branches to one colour ✅ |
 | A stored pool selection is resolved, not just the task's own | `workspace/agent-route-dispatch.test.ts` | Read only `input.agentProfile` — a pool set in Settings silently does nothing ✅ |
 | The dispatch cursor advances at the choice | same | Record on completion — a burst all reads the same LRU account ✅ |
 | A pool id survives the composer's `runner:account` split | `components/agent-pool-rows.test.tsx` | `value.split(':')` — yields `'pool'`, which degrades to the default login while the pill reads "balance" ✅ |
@@ -437,6 +501,33 @@ because the naive reading of "the count is 0 after a restart" is not the propert
    reported that step as `running`, so the assertion is not vacuous: the record says one thing, the
    count answers from execution and says the other. This is the exact shape that measured `1`
    forever before the fix.
+
+### Runtime E2E for the usage band + visible bars — executed 2026-08-16, all five steps passed
+
+Not a formality: the previous two rounds of this feature each shipped a defect a green suite could
+not see (a phantom in-flight count; an invisible fill).
+
+1. ✅ Rebuilt, restarted on `localhost:4321` with `CEZ_ACCOUNT_USAGE=1`, v0.10.0.
+2. ✅ The three rows draw a **coloured** (emerald) fill against a visibly darker track, and
+   `week 68%` is plainly fuller than `week 9%`. The 9% and 12% slivers are legible, which is the
+   case the old fill could not render at all.
+3. ✅ Settings → Logins → Show details: the same bars under **Usage**, same colours, on the opened
+   card only — the second card, closed, shows none.
+4. ✅ `GET /api/v1/workspace/agent-accounts/usage` reports exactly what the bars draw:
+   `claude · Default` session 12 / week 68 / week (Fable) 13; `owner` 0 / 9 / 0;
+   `codex` 0.
+5. ✅ **Balance across claude**, two runs back to back. Both resolved to
+   `owner-example-com` (9%), neither to `Default` (68%), and the dispatch cursor on disk
+   confirms it: `claude:default` still sits at its 15:30 entry while the second login took both.
+   Under the retired ceiling the first would have gone to `Default` and the second would have
+   alternated back.
+
+**One trap this E2E surfaced, for whoever runs it next.** The run header renders the login from the
+**step's** `profileId`, not the run's `agentProfile`, so a run whose step is still `pending` shows a
+bare `claude · <model>` with no account name — which reads exactly like "it chose the discovered
+default". Here run 2 sat pending on the working-tree lock (the scratch project is not a git repo, so
+it is one task at a time) and looked like alternation for about a minute. Read `agentProfile` off
+the run, or wait for the step to dispatch, before concluding anything from the header.
 
 ### In-flight counting must include the boot project
 

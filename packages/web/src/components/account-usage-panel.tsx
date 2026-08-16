@@ -67,6 +67,26 @@ function resetLabel(window: AccountQuotaWindow): string {
   return window.resetsText?.replace(/\s*\([^)]*\)\s*$/, '') ?? ''
 }
 
+/**
+ * The fill colour, graded so the COLOUR carries the reading and not only the width.
+ *
+ * **This function exists because the bar shipped invisible.** The fill was `bg-accent` against a
+ * `bg-muted` track, and `--accent` in this codebase is a shadcn alias for `--muted` (a surface
+ * token, not the brand accent — that is `--primary`). Fill and track were literally the same
+ * colour, so every bar below 90% painted nothing onto an identical strip and 0%, 4% and 66% all
+ * rendered as one flat grey line. Only the `>= 90` branch was ever visible, and no account had
+ * been there, so the bug had no witness.
+ *
+ * Every token here is a sanctioned FILL token. `--pending` is amber-400 and the design guardian
+ * bans `text-pending` for contrast reasons that do not apply to a fill; `bg-pending` is the
+ * spelling that rule leaves open, so no raw hex is introduced.
+ */
+function fillTone(percent: number): string {
+  if (percent >= 90) return 'bg-danger'
+  if (percent >= 75) return 'bg-pending'
+  return 'bg-success'
+}
+
 /** Shared with the Logins cards in Settings, so the two surfaces cannot drift into showing the
  *  same account's allowance two different ways. */
 export function QuotaBars({ quota }: { quota: AccountQuota }) {
@@ -92,11 +112,13 @@ export function QuotaBars({ quota }: { quota: AccountQuota }) {
             <span className="w-16 shrink-0 truncate text-[10px] text-soft-foreground" title={windowLabel(window)}>
               {windowLabel(window)}
             </span>
-            <span className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
+            {/* h-1.5, not h-1: the track has no border, so its only way to read as a groove is to
+                be tall enough for the fill inside it to have a shape. */}
+            <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
               <span
                 data-slot="quota-fill"
                 data-percent={window.usedPercent}
-                className={cn('block h-full rounded-full', width >= 90 ? 'bg-danger' : 'bg-accent')}
+                className={cn('block h-full rounded-full', fillTone(width))}
                 style={{ width: `${width}%` }}
               />
             </span>

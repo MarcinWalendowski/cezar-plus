@@ -18,31 +18,32 @@ import { listAgentProfiles, type ResolvedAgentProfile } from './agent-profiles.t
  * Which login a pool route resolves to (`.ai/specs/2026-08-16-agent-account-usage-routing.md`,
  * Phase C).
  *
- * ## The three signals, and why they are in this order
+ * ## The four signals, and why they are in this order
  *
  * 1. **Skip a limited account.** This is the feature. Routing around an exhausted login instead of
  *    failing on it is the whole reason a pool exists.
- * 2. **Fewest in-flight runs.** Exact, live, and needs no vendor API — it is the only signal that
+ * 2. **Lowest usage band.** `floor(worstUsedPercent / 10)` over the account's fresh quota — see
+ *    `usageBand` for why a band and not the raw percent, and for the condition under which this
+ *    key applies at all.
+ * 3. **Fewest in-flight runs.** Exact, live, and needs no vendor API — it is the only signal that
  *    describes *right now* rather than the past.
- * 3. **Least recently dispatched.** Breaks the tie, and is what makes the spread even over a
+ * 4. **Least recently dispatched.** Breaks the tie, and is what makes the spread even over a
  *    session rather than pinning every run to whichever account sorts first.
  *
- * Quota refines (2) and never replaces it: an account past `POOL_QUOTA_CEILING` sorts last. It is
- * applied ONLY when the snapshot is fresh, so a machine that has never probed — or one whose only
- * provider reports no allowance at all, which today is every Claude account — still balances
- * correctly on signals 2 and 3. A balancer that needed quota would not work for Claude, which is
- * where most of these accounts are.
- */
-
-/**
- * Past this, a fresh quota sorts an account last within its in-flight tier.
+ * **CORRECTED 2026-08-16.** Signal 2 did not exist; quota entered as a single boolean
+ * `usedPercent >= POOL_QUOTA_CEILING` (95), and this block justified that with "a machine … whose
+ * only provider reports no allowance at all, **which today is every Claude account**". That clause
+ * was already false when it was written — `2026-08-16-claude-usage-windows.md` shipped Claude
+ * windows the same morning — and it is the sentence that made quota look like a yes/no worth
+ * having. As a binary it saw no difference between a login at 66% of its week and one at 9%, so
+ * signals 3 and 4 round-robined the two and the gap never closed. The ceiling's hazard (routing
+ * onto an account about to be rejected) is not weakened by its removal: a band avoids high usage
+ * from 10% upward, where 95 avoided it only at 95.
  *
- * Not a hard exclusion, deliberately. At 100% the provider will reject the run, but cezar's
- * `usedPercent` can be minutes old and the window may have rolled; excluding outright would take a
- * working account out of rotation on the strength of a stale number. Sorting last achieves the same
- * thing whenever any alternative exists, and degrades to "use it anyway" when none does.
+ * Quota still never *decides*. It is applied only when every compared candidate has a fresh
+ * reading, so a machine that has never probed, or one running with `CEZ_ACCOUNT_USAGE` off,
+ * balances exactly as it did before on signals 3 and 4.
  */
-export const POOL_QUOTA_CEILING = 95;
 
 export interface PoolChoice {
   provider: ProviderId;
@@ -53,9 +54,36 @@ export interface PoolChoice {
 interface Ranked {
   profile: ResolvedAgentProfile;
   limited: boolean;
-  overCeiling: boolean;
+  /** `undefined` = unmeasured. NOT zero — see `usageBand`. */
+  band: number | undefined;
   inflight: number;
   lastDispatchMs: number;
+}
+
+/**
+ * How used an account is, in tens of a percent, or `undefined` when nothing fresh says.
+ *
+ * **Bands, not the raw percent, deliberately.** Raw percent is a near-unique key, so it would win
+ * essentially every comparison and make in-flight unreachable in practice — every run would stack
+ * onto the single least-used login until its own number caught up. It would also reorder the pool
+ * on a value the panel re-polls every 15 seconds. A band says "materially more used" and leaves the
+ * live signals to decide inside it.
+ *
+ * **The max across windows, not the average**, which is the rule the retired ceiling already used
+ * and is unchanged: a provider reports several windows (5h AND weekly) and being out of ANY of them
+ * stops the account, so an average would let a fresh session window hide an exhausted week. It is
+ * also what makes this converge without a second mechanism — a burst on the fresher login raises
+ * its *5h session* percentage quickly, climbs it a band, and hands work back.
+ *
+ * **A quota with no fresh windows left is unmeasured, not 0%.** `freshQuota` drops windows that
+ * have rolled over and answers `undefined` once none remain, which is the live path here; the
+ * empty-list arm below covers a caller that hands over an unfiltered quota, because `Math.max()` of
+ * an empty list is `-Infinity` and would sort that account *better than every measured one* — the
+ * most-favoured position, handed to the account we know the least about.
+ */
+function usageBand(quota: { windows: readonly { usedPercent: number }[] } | undefined): number | undefined {
+  if (!quota || quota.windows.length === 0) return undefined;
+  return Math.floor(Math.max(...quota.windows.map((window) => window.usedPercent)) / 10);
 }
 
 /** Candidates for a route: one provider's logins, or every provider's. */
@@ -92,13 +120,10 @@ export function selectPoolAccount(options: {
   const ranked: Ranked[] = candidates.map((profile) => {
     const key = accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id);
     const entry = usageEntry(store, key);
-    const quota = freshQuota(entry.quota, now);
     return {
       profile,
       limited: isLimited(entry.limited, now),
-      // `some`, not an average: a provider reports several windows (5h AND weekly) and being out of
-      // ANY of them stops the account. Averaging would let a fresh 5h window hide an exhausted week.
-      overCeiling: quota?.windows.some((window) => window.usedPercent >= POOL_QUOTA_CEILING) ?? false,
+      band: usageBand(freshQuota(entry.quota, now)),
       inflight: inflight[key] ?? 0,
       // Never dispatched sorts FIRST (epoch 0) — an unused account is the best possible spread, and
       // it is also the zero-config first run, which must not always land on the same login.
@@ -108,7 +133,16 @@ export function selectPoolAccount(options: {
 
   const eligible = ranked.filter((row) => !row.limited);
   const pool = eligible.length > 0 ? eligible : ranked;
-  const best = pool.reduce((a, b) => (compare(a, b) <= 0 ? a : b));
+  // Decided ONCE over the set about to be compared, never per pair, so the comparator stays a total
+  // order (a per-pair rule would be intransitive the moment one candidate is unmeasured).
+  //
+  // A measured account and an unmeasured one are not comparable by usage, and the tempting default
+  // — unmeasured sorts best — is the dangerous one: it would hand every run to whichever login the
+  // probe happens to be failing on. Sorting it *worst* is no better, since a cockpit that never
+  // probes at all would then have a stable arbitrary favourite. So a partially measured pool simply
+  // balances the way it did before quota existed.
+  const byBand = pool.every((row) => row.band !== undefined);
+  const best = pool.reduce((a, b) => (compare(a, b, byBand) <= 0 ? a : b));
   return {
     provider: best.profile.provider,
     accountId: best.profile.isDefault ? 'default' : best.profile.id,
@@ -116,8 +150,8 @@ export function selectPoolAccount(options: {
 }
 
 /** Ordering key, lowest wins. Ties fall through to the next signal, never to array order. */
-function compare(a: Ranked, b: Ranked): number {
-  if (a.overCeiling !== b.overCeiling) return a.overCeiling ? 1 : -1;
+function compare(a: Ranked, b: Ranked, byBand: boolean): number {
+  if (byBand && a.band !== b.band) return (a.band ?? 0) - (b.band ?? 0);
   if (a.inflight !== b.inflight) return a.inflight - b.inflight;
   return a.lastDispatchMs - b.lastDispatchMs;
 }

@@ -150,6 +150,35 @@ may now carry `quota`. `windowMinutes` and `resetsAt` are no longer guaranteed o
 4. Sidebar renders the widened window; Settings → Logins renders the same bars per account.
 5. The four false claims corrected in place.
 
+### The bars shipped invisible, and the suite could not see it — added 2026-08-16
+
+Every guard in this spec was green and the sidebar was, in fact, drawing nothing. The fill was
+`bg-accent` on a `bg-muted` track, and in `styles/index.css` **`--accent` is a shadcn alias for
+`--muted`** — a surface token, not the brand accent (that is `--primary`). Fill and track were the
+same colour, so `session 3%`, `week 66%` and `week (Fable) 13%` all rendered as one flat grey line.
+Only the `>= 90` danger branch was ever a different colour, and no account had been there, so the
+bug had no witness. It predates this spec — it came in with the Codex bars — and this spec doubled
+the number of rows painting it.
+
+Three things worth carrying forward, because the shape recurs:
+
+- **The percentage was right everywhere it was checked.** `data-percent`, the number beside the
+  bar, the API response and the CLI all agreed. Runtime step 3 of the Verification below says "the
+  sidebar draws three bars per Claude row, labelled …" — and it does; a zero-width-looking bar is
+  still a bar element with the right label. The step verified structure and read as verifying the
+  render.
+- **A "fill class ≠ track class" assertion would not have caught it.** `bg-accent` and `bg-muted`
+  are different strings resolving to the same colour, and jsdom loads no stylesheet to tell them
+  apart. The guard that does work checks the fill against an **allowlist of ink tokens**
+  (`bg-success` / `bg-pending` / `bg-danger`), which puts the shipped bug on the wrong side of it.
+- **`bg-pending` is the sanctioned amber.** The design guardian bans `text-pending` for a contrast
+  reason that does not apply to a fill, so grading the bar needed no new token and no raw hex.
+
+Fixed by making the colour carry the reading rather than the width alone: `< 75%` emerald,
+`75–89%` amber, `>= 90%` red, on a track one step taller (`h-1` → `h-1.5`) so a sliver of fill has
+a shape. Clamping is untouched — the **bar** clamps to 0–100, the **number** does not, so an
+overage still reads `104%` beside a full red bar.
+
 ## Risks
 
 - **The text format is not a contract.** A Claude Code release can reword it. Mitigation: the
@@ -216,7 +245,11 @@ and the real CLIs on this machine — passed.**
 
 - The OAuth usage endpoint (see the rejection above), and with it `extra_usage` credit balances,
   which only that source carries.
-- Routing on Claude allowance. The balancer's inputs are unchanged; `quota` is displayed, not yet
+- ~~Routing on Claude allowance. The balancer's inputs are unchanged; `quota` is displayed, not yet
   consulted. Turning a parsed percentage into a routing decision deserves its own measurement of
-  how the two windows interact.
+  how the two windows interact.~~ **DONE 2026-08-16, same day** — see
+  `2026-08-16-agent-account-usage-routing.md` → Solution C, where the 95% ceiling is superseded by
+  a usage band. The measurement this deferred for is the one that settled it: the two windows
+  interact through the **max**, and it is the 5h session window climbing fast under a burst that
+  makes the band hand work back without a second mechanism.
 - Any change to the `CEZ_ACCOUNT_USAGE` gate or its hosted-mode withholding.
