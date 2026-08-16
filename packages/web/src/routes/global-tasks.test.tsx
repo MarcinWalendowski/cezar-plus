@@ -114,6 +114,7 @@ function stubFetch({
   costMetrics = true,
   refStatus,
   indexStatuses,
+  todos = [],
 }: {
   runs?: RunIndexEntry[]
   projects?: ProjectListEntry[]
@@ -126,6 +127,8 @@ function stubFetch({
   refStatus?: Record<string, { prs?: Record<number, string>; issues?: Record<number, string> }>
   /** What the runs-index itself already knew — the free, no-round-trip path. */
   indexStatuses?: Record<string, { prs: Record<number, string>; issues: Record<number, string> }>
+  /** Filed-but-unstarted todos, as `GET /workspace/todos` answers them. */
+  todos?: Array<{ project: string; todo: { id: string; ts: string; summary: string } }>
 } = {}) {
   sent = []
   seenAt = undefined
@@ -158,6 +161,16 @@ function stubFetch({
           // Statuses the server already had, riding along with the rows — see `indexedStatuses`.
           referenceStatuses: indexStatuses ?? {},
         })
+      }
+      if (path === '/api/v1/workspace/todos') {
+        // Note what the health stub above does NOT carry: `followups` and `workspaceViews` are
+        // both absent, i.e. off — the default install. The Filed section must still render, which
+        // is the whole point of this route being ungated (D7a on the client).
+        return jsonResponse({ todos, projects: [] })
+      }
+      const startTodo = /^\/api\/v1\/p\/([^/]+)\/todos\/([^/]+)\/start$/.exec(path)
+      if (startTodo && method === 'POST') {
+        return jsonResponse({ run: { id: `run-from-${startTodo[2]}` } }, 201)
       }
       const status = /^\/api\/v1\/p\/([^/]+)\/github\/ref-status/.exec(path)
       if (status) {
@@ -1033,5 +1046,84 @@ describe('global tasks page', () => {
     expect(
       await screen.findByText('Tasks across projects did not load', {}, { timeout: 5000 }),
     ).toBeTruthy()
+  })
+})
+
+/**
+ * Filed-but-unstarted tasks (2026-08-15).
+ *
+ * The composer's All / Auto submit writes todos across projects and starts nothing. Until this
+ * section existed they had no reachable surface anywhere in the cockpit — this page listed runs,
+ * `/workspace/tasks` listed runs, and `/inbox` is hidden from the nav (and says the inbox is off)
+ * unless `CEZ_FOLLOWUPS=1`. So filing twelve tasks and filing none looked identical, which is how
+ * the bug was reported: "I just tried to add a task and nothing happened."
+ */
+describe('the Filed section', () => {
+  const TODOS = [
+    { project: 'api', todo: { id: 'todo-1', ts: '2026-07-14T09:00:00Z', summary: 'Add a rate limit to /checkout' } },
+    { project: 'web', todo: { id: 'todo-2', ts: '2026-07-14T09:00:01Z', summary: 'Ship the storefront banner' } },
+  ]
+
+  it('lists filed tasks above the runs, with the project each one belongs to', async () => {
+    stubFetch({ todos: TODOS })
+    renderPage()
+
+    const section = await screen.findByText('Add a rate limit to /checkout')
+    expect(section).toBeTruthy()
+    expect(screen.getByText('Ship the storefront banner')).toBeTruthy()
+    // Each row names its own repository: these come from different projects and the page stands
+    // in none of them.
+    const rows = [...document.querySelectorAll('[data-slot="filed-task"]')]
+    expect(rows.map((row) => row.getAttribute('data-project'))).toEqual(['api', 'web'])
+    expect(document.querySelector('[data-slot="filed-tasks-count"]')?.textContent).toBe('2')
+  })
+
+  it('renders with no capability flag set — the default install is the case that needs it', async () => {
+    // The health stub carries neither `followups` nor `workspaceViews`. Re-gating the section on
+    // either turns this red, which is exactly the regression: filed tasks invisible on the very
+    // installs the fan-out serves.
+    stubFetch({ todos: TODOS })
+    renderPage()
+    expect(await screen.findByText('Add a rate limit to /checkout')).toBeTruthy()
+  })
+
+  it('starts a filed task in ITS OWN project and follows it to the run', async () => {
+    stubFetch({ todos: TODOS })
+    renderPage()
+    await screen.findByText('Ship the storefront banner')
+
+    const webRow = document.querySelector('[data-slot="filed-task"][data-project="web"]')!
+    fireEvent.click(webRow.querySelector('[data-slot="filed-task-start"]')!)
+
+    await waitFor(() =>
+      expect(
+        sent.some((r) => r.method === 'POST' && r.path === '/api/v1/p/web/todos/todo-2/start'),
+      ).toBe(true),
+    )
+    // Never against `api` (the boot project, and the first row) — the row's project is the truth.
+    expect(sent.some((r) => r.path.startsWith('/api/v1/p/api/todos/'))).toBe(false)
+  })
+
+  it('renders nothing at all when nothing is filed', async () => {
+    // No empty header hovering above the runs table: a workspace that never files is the common
+    // case, and permanent furniture advertising an unused feature is its own kind of noise.
+    stubFetch({ todos: [] })
+    renderPage()
+    await screen.findByText('Add checkout endpoint')
+    expect(document.querySelector('[data-slot="filed-tasks"]')).toBeNull()
+  })
+
+  it('stays off the Archived view — a filed task has never run, so it cannot be archived', async () => {
+    // Arrives on Active and WAITS for the rows first. Landing straight on `?archived=1` and
+    // asserting the section is absent passes whether the view hides it or the query simply had
+    // not answered yet — absence is the loading state too. Seeing the rows, then switching, is
+    // what makes this assertion mean anything.
+    stubFetch({ todos: TODOS })
+    renderPage()
+    await screen.findByText('Add a rate limit to /checkout')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Archived' }))
+    await waitFor(() => expect(search()).toBe('?archived=1'))
+    expect(document.querySelector('[data-slot="filed-tasks"]')).toBeNull()
   })
 })

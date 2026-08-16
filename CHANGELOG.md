@@ -1,6 +1,32 @@
 # Unreleased
 
 ## 🗑 Removed
+- 🗑 **The knowledge-grounded task fan-out is gone, one day after it shipped.**
+  `POST /api/v1/workspace/task-fanout`, `packages/cezar/src/fanout/` (Phase A splitting, Phase B
+  per-project specification), `packages/contract/src/task-fanout.ts`, and the client's
+  `useFanoutTasks` / `useFanoutState` / `useDismissFanout` / `FANOUT_MUTATION_KEY`,
+  `FanoutPendingBanner` / `FanoutResultPanel` / `FanoutErrorPanel`, and `fanoutToastMessage` /
+  `useFanoutCompletionToast` are all deleted. Replaced by the workspace run (see Features) —
+  a removal, not a rename: there is no equivalent request shape, and nothing files todos on submit
+  any more.
+
+  **Why:** the owner rejected the premise rather than the implementation, which did exactly what
+  its spec said. Roughly half the deleted client code existed only to make a ~60-second submit
+  *visible* — the operation produced nothing to navigate to, so its result had to be parked in the
+  TanStack MutationCache and surfaced through a banner, a panel and a shell toast, each having to
+  survive an unmount. A submit that starts a run needs none of that. This is also why the report
+  that opened the thread ("I tried to add a task and nothing happened") is fixed by the
+  replacement rather than by the visibility patch it first got: fixing the visibility was fixing
+  the wrong layer.
+
+  **Nothing to migrate:** the surviving half is the five structured todo fields (`context`,
+  `whatToDo`, `acceptanceCriteria`, `knowledgeRefs`, `origin`), `GET /api/v1/workspace/todos` and
+  the FILED section on `/tasks`. Their writer is now `POST /todos`. Docblocks that named the
+  fan-out as the writer were corrected in place rather than deleted. The D7/D7a ungating of the
+  follow-up inbox routes is unchanged. Spec
+  `.ai/specs/2026-08-15-cross-project-workspace-run.md`; supersedes
+  `.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md`.
+
 - **SUPERSEDED 2026-08-15 by `11467f44` (the note-to-spec pipeline, spec
   `.ai/specs/2026-08-14-note-to-spec-pipeline.md`) — every specific claim below is now FALSE, and
   the entry is kept only because the thing it removed genuinely was removed.** The capture inbox
@@ -83,7 +109,39 @@
 
 ## ✨ Features
 
-- ✨ **One composer, and its project pill now has All / Auto — describe work once and get one
+- ✨ **The project pill has a Workspace option — describe work once and get ONE run that spans
+  every project.** Selecting **Workspace** (the default whenever you reach the composer
+  generically) and hitting Start begins a single run that is not scoped to any project: it runs in
+  place with **no worktree**, and can read and write in every registered project directory. One
+  transcript, one output, changes across every checkout — and it starts immediately, so the run
+  thread is there before the composer finishes clearing.
+
+  The composer says so above the box: *"Runs once across every project — your real checkouts are
+  modified directly, with no worktree."* It also **hides** the Worktree chip and the variants pill
+  in this mode, because a workspace run honours neither — a control that is silently discarded on
+  submit is worse than no control.
+
+  Because there is no worktree, the run is told **not to commit, stash, reset or push**: every edit
+  lands beside whatever you already had in progress, so a helpful `git commit -am` would commit
+  your work, not its own. Only one workspace run happens at a time (it takes the boot repo's
+  working-tree lease) — two agents editing the same checkouts concurrently is a hazard, not
+  throughput. `diffStat` is empty for it, as for every in-place run; the transcript is the output.
+
+  New route `POST /api/v1/workspace/runs`. Granted directories are deduped by containment (12
+  registered roots collapse to 2 on a typical workspace) and are also written into the prompt as
+  absolute paths, because `--add-dir` is Claude-only and that text is the only thing a codex or
+  opencode run ever learns about where the work is. Spec
+  `.ai/specs/2026-08-15-cross-project-workspace-run.md`.
+
+- **SUPERSEDED 2026-08-16 by the Workspace entry above — the feature below was removed one day
+  after it shipped, and every claim in it is now false.** `POST /api/v1/workspace/task-fanout` and
+  `src/fanout/` are deleted. The owner rejected the premise, not the implementation: work that
+  spans projects is *one* piece of work, and splitting it up front produces N briefs to read and N
+  runs to start instead of one answer. What survives is the five todo fields listed below and the
+  cross-project board that shows them — their writer is now `POST /todos`. Kept because the
+  knowledge-as-evidence result and the injection probe below are real and still hold. Original
+  text, unchanged:
+  ✨ **One composer, and its project pill now has All / Auto — describe work once and get one
   fully-specified task per project it belongs to.** The pill leads with **All / Auto**, which is
   the default whenever you arrive at the composer generically (the sidebar's New task, the mobile
   FAB, the command palette); an explicit `/p/<id>/new` link still means that project and only that

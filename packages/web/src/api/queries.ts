@@ -1,4 +1,11 @@
-import { useMutation, useQueries, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import {
+  useMutation,
+  useMutationState,
+  useQueries,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo } from 'react'
 
 import { mergeProviderStatusResponse } from '@/lib/provider-status'
@@ -72,6 +79,7 @@ import {
   approveWorkspaceNote,
   rejectWorkspaceNote,
   getWorkspaceRuns,
+  getWorkspaceTodos,
   getWorkspaceGit,
   getWorkspaceKnowledgeDomains,
   getWorkspaceKnowledgeSearch,
@@ -86,7 +94,7 @@ import {
   markRunUnseen,
   patchRun,
   removeQueuedMessage,
-  fanoutTasks,
+  startWorkspaceRun,
   getDiscoveredAgentAccounts,
   registerProject,
   scanProjectFolder,
@@ -129,7 +137,7 @@ import type {
   RunRecord,
   SelectAgentProfileInput,
   SetAgentConfigInput,
-  TaskFanoutInput,
+  WorkspaceRunStartInput,
   UpdateAgentProfileInput,
   UpdateNoteInput,
   UpdateProjectInput,
@@ -330,6 +338,13 @@ export const workspaceQueryKeys = {
   /** `GET /workspace/runs` — the cross-project aggregate. */
   workspaceRuns: (filters: { projects?: string; view?: string } = {}) =>
     ['workspace', 'runs', filters.projects ?? null, filters.view ?? null] as const,
+  /** `GET /workspace/todos` — every filed-but-unstarted task, across every project. No parameters
+   *  in v1, so no filter arguments in the key. Invalidated by starting one of its rows (which
+   *  turns a todo into a run and takes it off this list).
+   *
+   *  **CORRECTED 2026-08-16:** this also named "a completed fan-out" as an invalidator. The
+   *  fan-out is deleted — the composer starts one cross-project run and files no todos. */
+  workspaceTodos: ['workspace', 'todos'] as const,
   /** `GET /workspace/git` (`.ai/specs/2026-08-14-cross-project-git-overview.md`) — the
    *  cross-project git overview. No parameters in v1, so no filter arguments in the key. */
   git: ['workspace', 'git'] as const,
@@ -540,18 +555,34 @@ export function useInitGitRepo() {
 }
 
 /**
- * The composer's All / Auto submit (`POST /workspace/task-fanout`,
- * `.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md` D1/D3).
+ * The composer's Workspace submit (`POST /workspace/runs`,
+ * `.ai/specs/2026-08-15-cross-project-workspace-run.md`) — ONE cross-project run, started
+ * immediately.
  *
- * No retry: Phase A/B's model calls are not idempotent — re-asking after a real failure can file
- * a second, different split of the same input rather than repeat the first one. No cache to
- * invalidate either: nothing here starts a run (D5), and the composer renders the returned
- * `items`/`unassigned`/`truncated` directly rather than reading them back from a query.
+ * **SUPERSEDES `useFanoutTasks` and the three hooks that surrounded it** (`useFanoutState`,
+ * `useDismissFanout`, `FANOUT_MUTATION_KEY`), all deleted with the fan-out. Those existed to make
+ * a ~60 s analysis pass survivable: the mutation was parked in the MutationCache under a fixed key
+ * so a pending banner, a result panel and a shell toast could each read it from wherever the user
+ * had navigated. None of that is needed now, and that is the point of the redesign rather than an
+ * accident of it — this mutation resolves in the time a run takes to be created, and the RUN
+ * THREAD is the surface. The composer navigates to it, so there is nothing to keep alive across
+ * an unmount.
+ *
+ * No retry: a re-ask after a real failure would start a SECOND cross-project run, editing real
+ * checkouts, rather than repeat the first.
  */
-export function useFanoutTasks() {
+export function useStartWorkspaceRun() {
+  const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (input: TaskFanoutInput) => fanoutTasks(input),
+    mutationFn: (input: WorkspaceRunStartInput) => startWorkspaceRun(input),
     retry: false,
+    onSuccess: () => {
+      // The run landed in the boot project's `runs.json`, so every board that lists runs is stale.
+      // The `['workspace','runs']` PREFIX, not one filtered key: the cross-project board is keyed
+      // by its filters, and a new run belongs on every one of those views.
+      void queryClient.invalidateQueries({ queryKey: ['workspace', 'runs'] })
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.runsIndex })
+    },
   })
 }
 
@@ -2235,6 +2266,24 @@ export function useWorkspaceRuns(filters: { projects?: string; view?: 'active' |
   return useQuery({
     queryKey: workspaceQueryKeys.workspaceRuns(filters),
     queryFn: ({ signal }) => getWorkspaceRuns(filters, { signal }),
+  })
+}
+
+/**
+ * `GET /workspace/todos` — every filed-but-unstarted task across the workspace, for the Tasks
+ * board's "Filed" section.
+ *
+ * **Takes no `enabled` capability gate**, unlike `useWorkspaceGit` below and `useTodos` above.
+ * That asymmetry is the point: `CEZ_FOLLOWUPS` and `CEZ_WORKSPACE_VIEWS` are both off on a
+ * default install, and the composer's All / Auto submit files through these todo stores — so
+ * gating the read would hide the user's own filed work on exactly the installs that have it.
+ * D7a drew this line server-side (the routes stopped 409ing); this is the same line on the
+ * client. See `getWorkspaceTodos` in `api/client.ts`.
+ */
+export function useWorkspaceTodos() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.workspaceTodos,
+    queryFn: ({ signal }) => getWorkspaceTodos({ signal }),
   })
 }
 

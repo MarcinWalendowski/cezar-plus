@@ -27,6 +27,7 @@ import {
   getTodos,
   getUiState,
   getWorkflows,
+  getWorkspaceTodos,
   openRunInCli,
   patchRun,
   pickVariant,
@@ -37,6 +38,7 @@ import {
   sendMessage,
   setProviderEnabled,
   startTodo,
+  startWorkspaceTodo,
   retryProviderAuth,
 } from './client'
 import { setApiScope } from '@open-mercato/cezar-api-client'
@@ -368,6 +370,28 @@ describe('project scope (multi-project spec, step 3.1)', () => {
     reply({ version: '0.0.0' })
     await getHealth()
     expect(lastCall().path).toBe('/api/v1/health')
+
+    // The cross-project todo board is workspace-level for the same reason: it answers for every
+    // project at once, so no scope owns it.
+    reply({ todos: [], projects: [] })
+    await getWorkspaceTodos()
+    expect(lastCall().path).toBe('/api/v1/workspace/todos')
+  })
+
+  it('starts a filed task in ITS OWN project, not the active scope', async () => {
+    // The guard that makes the workspace Tasks board safe. Its rows come from many projects while
+    // the cockpit stands in exactly one, so resolving the project from scope — what `startTodo`
+    // correctly does for the Inbox — would run `proj-b`'s task inside `proj-a`.
+    setApiScope('proj-a')
+    reply({ run: { id: 'run-9' } })
+    await startWorkspaceTodo('proj-b', 'todo/1')
+    expect(lastCall().path).toBe('/api/v1/p/proj-b/todos/todo%2F1/start')
+
+    // …and unscoped it still names the project rather than falling back to the bare legacy path.
+    setApiScope(null)
+    reply({ run: { id: 'run-10' } })
+    await startWorkspaceTodo('proj-b', 'todo/1')
+    expect(lastCall().path).toBe('/api/v1/p/proj-b/todos/todo%2F1/start')
   })
 })
 

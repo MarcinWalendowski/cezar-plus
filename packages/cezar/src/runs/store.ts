@@ -10,6 +10,9 @@ import { workflowDefSchema } from '../workflows/types.ts';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 
 import type { RunnerId } from '../core/agent-runner.ts';
+// Type-only, so no runtime edge is added from the store to the contract package — one definition
+// of a workspace run's grant entry, shared rather than re-declared.
+import type { WorkspaceGrantProject } from '@open-mercato/cezar-contract';
 
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'review' | 'done' | 'failed' | 'cancelled';
 /**
@@ -307,6 +310,20 @@ export const runRecordSchema = z.object({
   /** Explicit execution policy. `false` means the run intentionally uses the repo root;
    *  absent on older runs and for the default isolated-worktree mode. */
   worktree: z.literal(false).optional(),
+  /** A workspace run's directory grant (`.ai/specs/2026-08-15-cross-project-workspace-run.md`):
+   *  every registered project it may reach outside its cwd. Decided once at creation and
+   *  persisted, so a project registered or removed mid-run never widens or narrows the grant of
+   *  a run already in flight — see the field's doc comment in `contract/src/runs.ts`. */
+  workspaceProjects: z
+    .array(
+      z.object({
+        id: z.string(),
+        name: z.string(),
+        root: z.string(),
+        status: z.enum(['ok', 'missing', 'not-git', 'no-commits']),
+      }),
+    )
+    .optional(),
   /** Task worktree (spec 006) — absent for in-place runs and after explicit cleanup. */
   worktreePath: z.string().optional(),
   /** The task's own branch (`cez/<id8>`), created off `baseBranch`. */
@@ -596,6 +613,8 @@ export class RunStore extends EventEmitter {
     /** PLAN D27 Phase 3 — see `stepBudgetOverride`'s doc comment on the schema field above. */
     stepBudgetOverride?: number;
     worktree?: false;
+    /** A workspace run's grant — see the schema field above. */
+    workspaceProjects?: WorkspaceGrantProject[];
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
@@ -618,6 +637,7 @@ export class RunStore extends EventEmitter {
       autonomous: input.autonomous,
       stepBudgetOverride: input.stepBudgetOverride,
       worktree: input.worktree,
+      workspaceProjects: input.workspaceProjects,
       groupId: input.groupId,
       variant: input.variant,
       status: 'queued',

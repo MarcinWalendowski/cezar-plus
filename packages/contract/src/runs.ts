@@ -125,6 +125,27 @@ export const processUsageSchema = z.object({
 export type ProcessUsage = z.infer<typeof processUsageSchema>;
 
 /**
+ * One registered project inside a workspace run's grant
+ * (`.ai/specs/2026-08-15-cross-project-workspace-run.md`).
+ *
+ * Deliberately NOT `workspaceProjectHealthSchema` (`./workspace-runs.ts`), which is the shape of a
+ * BOARD row: it carries `ok`/`reason`/`total` (derived at read time from a `runs.json` parse) and
+ * carries no `root` at all. This is the opposite — the root is the whole point, and nothing here
+ * is derived at read time, because the grant must mean the same thing on a resume six hours later.
+ */
+export const workspaceGrantProjectSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  /** Absolute path. What `--add-dir` receives (after containment dedupe) and what the run's
+   *  system prompt states verbatim — the portable half, for runners that ignore `--add-dir`. */
+  root: z.string(),
+  /** As probed at creation. `missing` grants no directory but is still rendered, so a moved
+   *  checkout reads as unavailable rather than as never having been registered. */
+  status: z.enum(['ok', 'missing', 'not-git', 'no-commits']),
+});
+export type WorkspaceGrantProject = z.infer<typeof workspaceGrantProjectSchema>;
+
+/**
  * The stored run record, as `runs.json` holds it (`src/runs/store.ts`).
  *
  * `archived` is required although the store schema defaults it: a default fills on PARSE, so the
@@ -250,6 +271,24 @@ export const runRecordSchema = z.object({
   worktree: z.literal(false).optional(),
   /** Absent for in-place runs and after an isolated worktree is removed. */
   worktreePath: z.string().optional(),
+  /**
+   * A WORKSPACE RUN's directory grant (`.ai/specs/2026-08-15-cross-project-workspace-run.md`) —
+   * every registered project this run may read and write outside its cwd. Present only on
+   * workspace runs; an ordinary project run never carries it.
+   *
+   * **Persisted, not re-derived, and that is the point.** The registry is mutable: a project
+   * added or removed while a run is alive would silently widen or narrow the grant of a run
+   * already in flight the moment it resumed. The grant is decided once, at creation, and every
+   * later step and every restart-and-resume re-applies exactly this list.
+   *
+   * **The PROJECT list, not the granted directory list**, because the two are deliberately
+   * different: `--add-dir` gets the same set deduped by containment (twelve registered projects
+   * collapse to two directories on the owner's own workspace), while the prompt must name all
+   * twelve so the agent knows what is there. Both are derived from this one field by
+   * `buildWorkspaceGrant` (`workspace/granted-roots.ts`) — a pure function, so nothing re-reads
+   * the registry mid-run.
+   */
+  workspaceProjects: z.array(workspaceGrantProjectSchema).optional(),
   branch: z.string().optional(),
   /** Stable baseline for session git views: a worktree's fork ref, or an in-place run's starting commit. */
   baseBranch: z.string().optional(),

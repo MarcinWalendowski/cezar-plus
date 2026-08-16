@@ -3,6 +3,7 @@ import type {
   BackendCheck,
   CreateRunInput,
   CreateRunResponse,
+  WorkspaceRunStartInput,
   ImageInput,
   ModelDiscoveryRunner,
   Runner,
@@ -328,6 +329,30 @@ export function buildCreateRunBody(opts: {
     generateFollowups: generateFollowups === false ? false : undefined,
     todoId: todoId || undefined,
   }
+}
+
+/**
+ * `POST /workspace/runs` — the composer's Workspace submit
+ * (`.ai/specs/2026-08-15-cross-project-workspace-run.md`).
+ *
+ * Delegates to `buildCreateRunBody` rather than re-serializing, so a skill pick still becomes an
+ * inline step, a locked model is still dropped, and `runnerOverride` still decides whether the
+ * runner is sent — three rules that a hand-written second body would silently get wrong the first
+ * time one of them changed. Only the three keys a workspace run FIXES are removed:
+ * `variants`/`worktree` (there is no repository to isolate into) and `todoId` (per-project inbox
+ * provenance). The route rejects them anyway; dropping them here means the client never asks for
+ * something the server will ignore.
+ */
+export function buildWorkspaceRunBody(
+  opts: Omit<Parameters<typeof buildCreateRunBody>[0], 'variants' | 'worktree' | 'todoId'>,
+): WorkspaceRunStartInput {
+  const {
+    variants: _variants,
+    worktree: _worktree,
+    todoId: _todoId,
+    ...body
+  } = buildCreateRunBody({ ...opts, variants: 1 })
+  return body
 }
 
 /** The automation editor persists the exact New task serialization, with only the transport-

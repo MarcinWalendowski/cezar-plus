@@ -1,6 +1,34 @@
-# One composer: knowledge-grounded task fan-out across projects
+# SUPERSEDED — One composer: knowledge-grounded task fan-out across projects
 
-> **Status:** **implemented** — all four phases built, every gate green, and the runtime E2E below
+> **Status: SUPERSEDED 2026-08-16 by `2026-08-15-cross-project-workspace-run.md`. Do not build on
+> this.** The fan-out shipped, worked, and was rejected on sight. The owner's verdict, in full:
+>
+> > *"it's non sense — i don't want to have task per each project — it should be still one task
+> > that makes me one output and apply changes across all directories/projects"*
+>
+> **The premise is what failed, not the execution.** Every decision below is downstream of "split
+> one request into N per-project work items", and that split is the thing that was wrong. So the
+> replacement is not a fix to this design — it deletes it: `POST /workspace/task-fanout`, the
+> two-phase engine (`src/fanout/`), the `task-fanout` contract, and every composer surface built
+> around the ~60 s wait are gone. The composer's Workspace submit now starts **one** run, in place,
+> granted read/write access to every registered project directory. Read
+> `2026-08-15-cross-project-workspace-run.md` instead.
+>
+> **What survived, and is still live:** `GET /workspace/todos` and the ungated **FILED** section on
+> `/tasks` (D2, D7a) — a cross-project todo board is still the only surface a filed todo has on a
+> default install, whatever writes it. `todoItemSchema`'s structured spec fields (`context`,
+> `whatToDo`, `acceptanceCriteria`, `knowledgeRefs`) also stand; their writer is now `POST /todos`
+> rather than the fan-out route, and `handoff.test.ts` was repointed accordingly.
+>
+> **The one measurement worth carrying forward** (D7's own note, still true and still load-bearing):
+> `--allowedTools` **grants and never restricts** on the Claude backend, so `allowedTools: []` is an
+> ask, not a guarantee — what actually bounds a pass is its `cwd`. And `CEZ_FOLLOWUPS`,
+> `CEZ_WORKSPACE_VIEWS`, `CEZ_NOTES`, `CEZ_KB` are all **off on a default install**, which is why a
+> main path must never be gated on one.
+>
+> ---
+>
+> **Original status (kept unchanged below):** **implemented** — all four phases built, every gate green, and the runtime E2E below
 > executed and passed on 2026-08-15 against the real cockpit (see "Executed" at the end). The two
 > decisions flagged for review were left to the implementer and stand as written: **D4** keeps
 > excerpts rather than full bodies (E2E showed they are *not* too thin — a real fan-out cited four

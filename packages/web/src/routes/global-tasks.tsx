@@ -13,13 +13,14 @@ import {
 import * as React from 'react'
 import { Link, useSearchParams } from 'react-router'
 
-import { archiveProjectRun, setProjectRunRead } from '@/api/client'
+import { archiveProjectRun, setProjectRunRead, startWorkspaceTodo } from '@/api/client'
 import {
   queryKeys,
   rememberReferenceStatuses,
   useHealth,
   useProjects,
   useRunsIndex,
+  useWorkspaceTodos,
   workspaceQueryKeys,
 } from '@/api/queries'
 import type { ProjectListEntry, RunIndexEntry, RunsIndexResponse } from '@open-mercato/cezar-api-client'
@@ -68,7 +69,7 @@ import {
   type GlobalTasksUrlState,
   type GroupBy,
 } from '@/lib/global-tasks'
-import { scopeTo } from '@/lib/project-router'
+import { scopeTo, useNavigate } from '@/lib/project-router'
 import { allProjectTags } from '@/lib/project-tags'
 import { canBeUnread, isReadDoneItem, isUnread } from '@/lib/read-state'
 import { runTitle, type ListView } from '@/lib/task-groups'
@@ -418,6 +419,12 @@ export function GlobalTasksRoute() {
           </p>
         ) : null}
 
+        {/* Filed-but-unstarted work, above the runs (2026-08-15). This page is where a user looks
+            after filing something — it is called Tasks — and until now it answered with runs only,
+            so a fan-out that had written twelve tasks looked exactly like a fan-out that had done
+            nothing. Only on Active: a filed task has not run, so it cannot be archived. */}
+        {view === 'active' ? <FiledTasks /> : null}
+
         {index.data === undefined ? null : visible.length === 0 ? (
           <GlobalTasksEmptyState view={view} filtered={hasActiveFilters(filters)} />
         ) : (
@@ -463,6 +470,89 @@ export function GlobalTasksRoute() {
       </div>
     </div>
   )
+}
+
+/**
+ * The "Filed" section: tasks that exist on the board but have never run.
+ *
+ * **Why it is here at all.** The composer's All / Auto submit writes todos across projects and
+ * starts nothing (D5, `.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md`). Before this,
+ * those todos had no reachable surface anywhere in the cockpit: this page and `/workspace/tasks`
+ * both list runs, and `/inbox` is hidden from the nav — and tells you the inbox is off — unless
+ * `CEZ_FOLLOWUPS=1`. So filing worked, and looked identical to filing failing.
+ *
+ * **Deliberately ungated.** No `capabilities.followups` / `workspaceViews` check: those flags are
+ * off on a default install, and gating the read here would put the bug straight back. D7a already
+ * drew this line on the server; `useWorkspaceTodos` carries it to the client.
+ *
+ * Renders nothing at all when there is nothing filed — an empty section header above the runs
+ * table would be a permanent piece of furniture advertising a feature most workspaces never use.
+ */
+function FiledTasks() {
+  const todos = useWorkspaceTodos()
+  const start = useStartFiledTask()
+  const entries = todos.data?.todos ?? []
+  if (entries.length === 0) return null
+
+  return (
+    <section data-slot="filed-tasks">
+      <h2 className="mb-1.5 flex items-center gap-2 text-[12px] font-semibold tracking-[0.04em] text-soft-foreground uppercase">
+        Filed — not started yet
+        <span data-slot="filed-tasks-count" className="font-mono text-[11px] font-medium tabular-nums">
+          {entries.length}
+        </span>
+      </h2>
+      <ul className="space-y-1.5">
+        {entries.map((entry) => (
+          <li
+            key={`${entry.project}:${entry.todo.id}`}
+            data-slot="filed-task"
+            data-project={entry.project}
+            className="flex items-center gap-3 rounded-lg border border-border bg-card px-3 py-2"
+          >
+            <Link
+              to={scopeTo(entry.project, '/')}
+              data-slot="filed-task-project"
+              className="shrink-0 font-mono text-[11px] text-soft-foreground hover:text-foreground hover:underline"
+            >
+              {entry.project}
+            </Link>
+            <span className="min-w-0 flex-1 truncate text-[13.5px]">{entry.todo.summary}</span>
+            <button
+              type="button"
+              data-slot="filed-task-start"
+              // The project comes from the ROW, never from the active scope — these rows are from
+              // different repositories, so starting one against "wherever the cockpit is pointed"
+              // would run a task filed for `chat` inside whatever project is open.
+              onClick={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
+              disabled={start.isPending}
+              className="shrink-0 rounded-md border border-border px-2.5 py-1 text-[12px] font-medium transition-colors hover:bg-muted disabled:opacity-50"
+            >
+              Start
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+/** Start one filed task in its own project and follow it into the run — the `startTodo` mutation
+ *  the Inbox card already uses, with the project named explicitly rather than taken from scope. */
+function useStartFiledTask() {
+  const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  return useMutation({
+    mutationFn: ({ projectId, todoId }: { projectId: string; todoId: string }) =>
+      startWorkspaceTodo(projectId, todoId),
+    onSuccess: (result, { projectId }) => {
+      // The todo is now a run: it leaves this list and joins the table below it.
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.workspaceTodos })
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.runsIndex })
+      void navigate(scopeTo(projectId, `/tasks/${result.run.id}`))
+    },
+    onError: (error) => toast(error.message, { tone: 'danger' }),
+  })
 }
 
 function ViewTab({

@@ -1,7 +1,14 @@
-import type { ReactNode } from 'react'
+import { type ReactNode } from 'react'
 import { useLocation } from 'react-router'
 
-import { useHealth, useProjectRuns, useProjects, useRuns, useSkillsUpdate, useTodos } from '@/api/queries'
+import {
+  useHealth,
+  useProjectRuns,
+  useProjects,
+  useRuns,
+  useSkillsUpdate,
+  useTodos,
+} from '@/api/queries'
 import type { HealthResponse, SkillsUpdateState } from '@open-mercato/cezar-api-client'
 import { AppShell, type RepoChip } from '@/components/app-shell'
 import { CommandPalette } from '@/components/command-palette'

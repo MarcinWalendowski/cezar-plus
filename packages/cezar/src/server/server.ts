@@ -36,7 +36,7 @@ import { createWorkspaceRunMutationRoutes } from './workspace-run-mutations-rout
 import { createWorkspaceGitRoutes } from './workspace-git-routes.ts';
 import { createWorkspaceKnowledgeRoutes } from './workspace-knowledge-routes.ts';
 import { createWorkspaceTodosRoutes } from './workspace-todos-routes.ts';
-import { createTaskFanoutRoutes } from './task-fanout-routes.ts';
+import { createWorkspaceRunRoutes } from './workspace-run-routes.ts';
 import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -65,7 +65,7 @@ import {
 } from '@open-mercato/cezar-contract';
 import { detectEnvironment } from '../core/backend-detect.ts';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
-import type { ContentBlock } from '../core/agent-runner.ts';
+import type { ContentBlock, RunnerId } from '../core/agent-runner.ts';
 import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
 import { discoverCodexModels } from '../core/codex-model-catalog.ts';
 import { discoverOpencodeModels } from '../core/opencode-model-catalog.ts';
@@ -2032,6 +2032,60 @@ export function createApp(deps: ServerDeps) {
     const stored = accounts.find((a) => a.id === profileId && a.provider === provider);
     if (!stored) return { error: `unknown ${provider} account: ${profileId}` };
     return { profile: resolveStoredProfile(stored) };
+  };
+
+  /**
+   * Workflow resolution for a run-creation body, shared by `POST /runs` and `POST
+   * /workspace/runs` (spec 2026-08-15-cross-project-workspace-run).
+   *
+   * Extracted from the `/runs` handler rather than copied into the workspace route: the two must
+   * answer identically for the same body, and "an inline chain, a named workflow, or the
+   * `quick-task` floor" is three rules that would drift the first time a fourth arrived. The
+   * bare-neither branch is why this can never 404 without a name being given.
+   */
+  const resolveRunWorkflow = async (
+    root: string,
+    body: { workflow?: string; steps?: WorkflowDef['steps'] },
+  ): Promise<{ workflow: WorkflowDef } | { error: string; status: 400 | 404 }> => {
+    if (body.steps) {
+      const issue = stepsIssue(body.steps);
+      if (issue) return { error: issue, status: 400 };
+      return { workflow: { name: '(planned)', source: 'built-in', steps: body.steps } };
+    }
+    const { workflows } = await loadWorkflows(root);
+    if (body.workflow) {
+      const named = workflows.find((w) => w.name === body.workflow);
+      return named
+        ? { workflow: named }
+        : { error: `unknown workflow: ${body.workflow}`, status: 404 };
+    }
+    return { workflow: workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW };
+  };
+
+  /**
+   * The pre-start guards a run-creation body must clear, shared by the same two routes and for the
+   * same reason: model policy, provider availability, and the named agent account. Each keeps the
+   * status code the `/runs` route has always answered with (409 for a policy or availability
+   * refusal, 400 for an account id that does not exist).
+   */
+  const guardRunStart = async (
+    root: string,
+    workflow: WorkflowDef,
+    body: { model?: string; runner?: string; agentProfile?: string },
+  ): Promise<{ error: string; status: 400 | 409 } | null> => {
+    if (agentModelsLocked(root) && body.model?.trim()) {
+      return { error: AGENT_MODELS_LOCKED_ERROR, status: 409 };
+    }
+    const fallback = (body.runner as RunnerId | undefined) ?? (await loadConfig(root)).defaultRunner;
+    const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback));
+    if (blocked) return { error: blocked, status: 409 };
+    // A composer override names an account the user just picked, so a stale id (deleted since the
+    // page loaded) is answered honestly instead of quietly running on the default.
+    if (body.agentProfile !== undefined) {
+      const account = await resolveWorkspaceProfile(fallback, body.agentProfile);
+      if ('error' in account) return { error: account.error, status: 400 };
+    }
+    return null;
   };
 
   /**
@@ -4472,41 +4526,27 @@ export function createApp(deps: ServerDeps) {
     .post('/runs', jsonZodValidator(startRunSchema), async (c) => {
       const { root: repoRoot, dataDir, manager } = c.get('project');
       const parsed = { data: c.req.valid('json') };
-      if (agentModelsLocked(repoRoot) && parsed.data.model?.trim()) {
-        return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
+      // Workflow resolution and the pre-start guards live in `resolveRunWorkflow`/`guardRunStart`
+      // above — shared verbatim with `POST /workspace/runs`, which must answer identically for
+      // the same body (spec 2026-08-15-cross-project-workspace-run). Behaviour here is unchanged:
+      // an inline chain wins, a named workflow 404s when unknown, and naming neither falls back
+      // to quick-task (the composer's "None" pill), which is why this can never 404 unasked.
+      const resolvedWorkflow = await resolveRunWorkflow(repoRoot, {
+        ...(parsed.data.workflow === undefined ? {} : { workflow: parsed.data.workflow }),
+        ...(parsed.data.steps === undefined ? {} : { steps: parsed.data.steps }),
+      });
+      if ('error' in resolvedWorkflow) {
+        return c.json({ error: resolvedWorkflow.error }, resolvedWorkflow.status);
       }
-      let workflow: WorkflowDef | undefined;
-      if (parsed.data.steps) {
-        // Inline chain (spec 008): an approved plan runs as an ad-hoc workflow.
-        const issue = stepsIssue(parsed.data.steps);
-        if (issue) return c.json({ error: issue }, 400);
-        workflow = {
-          name: '(planned)',
-          source: 'built-in',
-          steps: parsed.data.steps,
-        };
-      } else if (parsed.data.workflow) {
-        const { workflows } = await loadWorkflows(repoRoot);
-        workflow = workflows.find((w) => w.name === parsed.data.workflow);
-        if (!workflow) return c.json({ error: `unknown workflow: ${parsed.data.workflow}` }, 404);
-      } else {
-        // Neither named (the composer's "None" pill, 2026-08-15): fall back to quick-task, the
-        // same resolution POST /todos/:id/start already uses below — a project's own file wins,
-        // the built-in is the floor, so this branch can never 404.
-        const { workflows } = await loadWorkflows(repoRoot);
-        workflow = workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW;
-      }
-      const fallback = parsed.data.runner ?? (await loadConfig(repoRoot)).defaultRunner;
-      const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback));
-      if (blocked) return c.json({ error: blocked }, 409);
-      // A composer override names an account the user just picked, so a stale id (deleted since
-      // the page loaded) is answered honestly instead of quietly running on the default — the
-      // opposite of how RESOLUTION treats a dangling reference, and deliberately so: a run
-      // replaying a stored id has no better answer than the default, a user does.
-      if (parsed.data.agentProfile !== undefined) {
-        const account = await resolveWorkspaceProfile(fallback, parsed.data.agentProfile);
-        if ('error' in account) return c.json({ error: account.error }, 400);
-      }
+      const workflow = resolvedWorkflow.workflow;
+      const guarded = await guardRunStart(repoRoot, workflow, {
+        ...(parsed.data.model === undefined ? {} : { model: parsed.data.model }),
+        ...(parsed.data.runner === undefined ? {} : { runner: parsed.data.runner }),
+        ...(parsed.data.agentProfile === undefined
+          ? {}
+          : { agentProfile: parsed.data.agentProfile }),
+      });
+      if (guarded) return c.json({ error: guarded.error }, guarded.status);
       const images = parsed.data.images?.map((img): ContentBlock => ({
         type: 'image',
         source: { type: 'base64', media_type: img.mediaType, data: img.data },
@@ -6322,15 +6362,24 @@ export function createApp(deps: ServerDeps) {
   // at all — it never builds or peeks a `ProjectContext`, only derives each registered project's
   // `<root>/.ai/cezar` the same way `WorkspaceRunIndex`/`WorkspaceKnowledgeIndex` derive theirs.
   const workspaceTodosRoutes = createWorkspaceTodosRoutes();
-  // The composer's All / Auto submit (D1/D3 of the same spec, Phases 2-4). Takes `contexts` on
-  // the same `peek`-only terms as the two families above — typing into a composer must not build
-  // a project context and thereby resume that project's interrupted runs — plus the workspace
-  // run index the context map already owns, and the BOOT root the analysis call is configured
-  // from (runner, planner model, agent account), never a target project's.
-  const taskFanoutRoutes = createTaskFanoutRoutes({
-    contexts,
-    runIndex: contexts.runIndex,
+  // The composer's Workspace submit (`.ai/specs/2026-08-15-cross-project-workspace-run.md`): ONE
+  // run, not scoped to any project, granted read/write in every registered project directory.
+  //
+  // Replaces `createTaskFanoutRoutes`, which answered this same submit by splitting the request
+  // into N per-project todos — the mechanism the owner rejected ("i don't want to have task per
+  // each project"). Deleted rather than left mounted: a dead path that still answers reads as
+  // live to the next person here.
+  //
+  // Takes `bootContext` directly, never `contexts.context(id)`: the boot context already exists
+  // in this process, so a workspace run builds nothing and resumes nothing. That is the same
+  // justification `noteApprover.startRun` records for the one notes path allowed to build a
+  // context — a person asked for a run, and starting one is what that means.
+  const workspaceRunRoutes = createWorkspaceRunRoutes({
+    bootProject: () => resolveBootProject(),
     bootRoot: deps.repoRoot,
+    startRun: (workflow, input) => bootContext.manager.startRun(workflow, input),
+    resolveWorkflow: resolveRunWorkflow,
+    guard: guardRunStart,
   });
   const notificationsRoutes = createNotificationsRoutes();
 
@@ -6529,7 +6578,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceGitRoutes)
     .route('/', workspaceKnowledgeRoutes)
     .route('/', workspaceTodosRoutes)
-    .route('/', taskFanoutRoutes)
+    .route('/', workspaceRunRoutes)
     .route('/', notificationsRoutes);
 
   // ---- mount ---------------------------------------------------------------

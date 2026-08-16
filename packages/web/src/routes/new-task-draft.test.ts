@@ -313,20 +313,23 @@ describe('composerRunModeNote (#793)', () => {
     }
   })
 
-  // All / Auto (D1/D5, knowledge-grounded-task-fanout.md) is a fourth state that wins over the
-  // other three — nothing runs, so worktree/hasGit describe settings this submit will not use.
-  it('allAuto wins over worktree/hasGit — nothing runs, so their note would be a false promise', () => {
+  // Workspace (cross-project-workspace-run.md) is a fourth state that wins over the other three:
+  // the run lands in every project's REAL working tree at once, so a note promising an isolated
+  // worktree would be false in the most consequential direction available.
+  it('workspace wins over worktree/hasGit, and never promises isolation', () => {
     for (const worktree of [true, false]) {
       for (const hasGit of [true, false]) {
-        expect(composerRunModeNote({ worktree, hasGit, allAuto: true })).toBe(
-          'All / Auto files tasks on the board — nothing starts, so the run settings below do not apply.',
+        const note = composerRunModeNote({ worktree, hasGit, workspace: true })
+        expect(note).toBe(
+          'Runs once across every project — your real checkouts are modified directly, with no worktree.',
         )
+        expect(note).not.toContain('isolated')
       }
     }
   })
 
-  it('allAuto: false behaves exactly like omitting it', () => {
-    expect(composerRunModeNote({ worktree: true, hasGit: true, allAuto: false })).toBe(
+  it('workspace: false behaves exactly like omitting it', () => {
+    expect(composerRunModeNote({ worktree: true, hasGit: true, workspace: false })).toBe(
       composerRunModeNote({ worktree: true, hasGit: true }),
     )
   })

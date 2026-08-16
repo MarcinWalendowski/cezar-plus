@@ -131,14 +131,15 @@ import type {
   ApproveNoteInput,
   RejectNoteInput,
   WorkspaceRunsResponse,
+  WorkspaceTodosResponse,
   WorkspaceGitResponse,
   WorkspaceKnowledgeSearchResponse,
   WorkspaceKnowledgeDomainsResponse,
   NotificationsResponse,
   NotificationLogResponse,
   NotificationLogStatus,
-  TaskFanoutInput,
-  TaskFanoutResponse,
+  WorkspaceRunStartInput,
+  WorkspaceRunStartResponse,
 } from '@open-mercato/cezar-api-client'
 import { parseProviderStatusResponse } from '@/lib/provider-status'
 import {
@@ -1391,6 +1392,34 @@ export async function startTodo(
   )
 }
 
+/**
+ * Start a todo that lives in a NAMED project rather than the active one.
+ *
+ * Same route and same server behaviour as `startTodo` above — the only difference is that the
+ * `projectId` param comes from the caller instead of `queryScope()`. That difference is the whole
+ * point: the workspace Tasks board lists todos from every project at once, so starting the row
+ * for `chat` while the cockpit's active scope is `cockpit-boot` must start it in `chat`. Reusing
+ * `startTodo` there would silently run it in whatever project you happened to be looking at.
+ */
+export async function startWorkspaceTodo(
+  projectId: string,
+  id: string,
+  opts: StartTodoOptions = {},
+): Promise<StartTodoResponse> {
+  const body = {
+    ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
+    ...(opts.model !== undefined ? { model: opts.model } : {}),
+    ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
+  }
+  return unwrap(
+    await cez.api.v1.p[':projectId'].todos[':id'].start.$post({
+      param: { projectId, id: encodeURIComponent(id) },
+      json: Object.keys(body).length > 0 ? body : undefined,
+    }),
+    `/todos/${encodeURIComponent(id)}/start`,
+  )
+}
+
 /** "Pick this one" (spec 010): the winner rests at `review` for the gate; the losers are
  *  cancelled if alive, archived, and their worktrees + branches removed. 409 while the picked
  *  variant is still active — the server's words come back verbatim in the ApiError. */
@@ -2228,6 +2257,26 @@ export async function getWorkspaceRuns(
   )
 }
 
+/**
+ * `GET /workspace/todos` — every filed-but-unstarted task, across every project, in one list.
+ *
+ * **Ungated on purpose**, unlike its `getWorkspaceRuns` neighbour above. `CEZ_FOLLOWUPS` /
+ * `CEZ_WORKSPACE_VIEWS` are both **off on a default install** (measured on the owner's own
+ * cockpit), so a capability check here would hide filed work on exactly the machines that have
+ * nowhere else to see it — the Inbox is gated on `CEZ_FOLLOWUPS` too. The flag gates whether
+ * AGENTS are asked to leave follow-ups; it does not gate reading what exists.
+ *
+ * **CORRECTED 2026-08-16.** This said the ungating existed because "the composer's All / Auto
+ * submit writes through these same todo stores" (D7a of
+ * `.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md`). That fan-out is deleted — the
+ * composer starts one cross-project run instead (`startWorkspaceRun`) and files no todos at all.
+ * The ungating stands on its own reason, above: a default install has no other surface for a
+ * filed todo, whatever wrote it.
+ */
+export async function getWorkspaceTodos(opts?: ReadOptions): Promise<WorkspaceTodosResponse> {
+  return unwrap(await cez.api.v1.workspace.todos.$get({}, init(opts)), '/workspace/todos')
+}
+
 /** `GET /workspace/git` (`.ai/specs/2026-08-14-cross-project-git-overview.md`, D1) — one row per
  *  registered project: branch, ahead/behind, dirty count, last commit. Also reports the flag-off
  *  shape under `CEZ_SINGLE_PROJECT=1`, same as its own flag being off — matching `getWorkspaceRuns`
@@ -2272,19 +2321,26 @@ export async function getWorkspaceKnowledgeSearch(
 }
 
 /**
- * `POST /workspace/task-fanout` (`.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md`) — the
- * composer's All / Auto submit: analyzes the input, retrieves grounding knowledge per work item,
- * and files one todo per distinct piece of work. Never starts a run (D5) — the response names
- * what was filed.
+ * `POST /workspace/runs` (`.ai/specs/2026-08-15-cross-project-workspace-run.md`) — the composer's
+ * Workspace submit: ONE run, not scoped to any project, granted read and write access to every
+ * registered project directory. Starts immediately and returns the run, exactly like
+ * `createRun` — there is no analysis pass in front of it.
+ *
+ * **Replaces `fanoutTasks`**, which answered this same submit by filing one todo per project after
+ * a ~60 s pass. That whole shape is gone (owner: *"i don't want to have task per each project"*),
+ * and with it the pending/result/toast surfaces that existed only to make the wait bearable.
  *
  * Raw `fetch`, not the typed client: the route is landing alongside this change, so `AppType`
  * does not know it yet — the same reason `registerProject` above keeps its own `fetch`.
  * Workspace-level (`WORKSPACE_LEVEL` in `project-scope.ts` already matches `/workspace/`), so it
- * is never `/p/<id>`-prefixed regardless of the active scope — correct for a call the composer
- * makes with a project bound, unbound, or All / Auto selected alike.
+ * is never `/p/<id>`-prefixed regardless of the active scope. That is the point: the response's
+ * own `project` field names where the run landed, and the caller navigates there — the active
+ * scope has no say in it.
  */
-export async function fanoutTasks(input: TaskFanoutInput): Promise<TaskFanoutResponse> {
-  const path = '/workspace/task-fanout'
+export async function startWorkspaceRun(
+  input: WorkspaceRunStartInput,
+): Promise<WorkspaceRunStartResponse> {
+  const path = '/workspace/runs'
   const res = await send(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -2296,7 +2352,7 @@ export async function fanoutTasks(input: TaskFanoutInput): Promise<TaskFanoutRes
   if (parsed === undefined) {
     throw new ApiError(res.status, `the cezar server answered ${path} with a non-JSON body`)
   }
-  return parsed as TaskFanoutResponse
+  return parsed as WorkspaceRunStartResponse
 }
 
 /** `GET /workspace/notifications` (F4, `CEZ_NOTIFY`) — the machine-wide outbound transport

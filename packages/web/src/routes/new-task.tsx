@@ -4,6 +4,7 @@ import {
   ChevronDownIcon,
   EyeIcon,
   FolderOpenIcon,
+  LoaderCircleIcon,
   SparklesIcon,
   SquareIcon,
   WorkflowIcon,
@@ -12,14 +13,14 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useParams, useSearchParams } from 'react-router'
 
-import { Link, useNavigate } from '@/lib/project-router'
+import { Link, scopeTo, useNavigate } from '@/lib/project-router'
 
 import { createRun, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
 import { useProjectScope } from '@/api/project-scope-context'
 import {
   queryKeys,
   useAgentProfiles,
-  useFanoutTasks,
+  useStartWorkspaceRun,
   useConfig,
   useHealth,
   useProviderStatus,
@@ -37,7 +38,6 @@ import type {
   RepoResponse,
   Runner,
   Skill,
-  TaskFanoutResponse,
   WorkflowDef,
 } from '@open-mercato/cezar-api-client'
 import { TwinkleBackdrop } from '@/components/centered-state'
@@ -100,6 +100,7 @@ import {
 } from './new-task-draft'
 import {
   buildCreateRunBody,
+  buildWorkspaceRunBody,
   modelsForRunner,
   modelCatalogStatus,
   pushRecentSource,
@@ -143,7 +144,7 @@ export function NewTaskRoute() {
   const projects = useProjects()
 
   // The project pill's own selection (D1, `.ai/specs/2026-08-15-knowledge-grounded-task-
-  // fanout.md`) — 'auto' is All / Auto, 'project' follows `urlProjectId` as the pill always did
+  // workspace-run.md`) — 'auto' is Workspace, 'project' follows `urlProjectId` as the pill did
   // before this spec. Genuine local state, DECOUPLED from the URL, and deliberately not derived
   // from `urlProjectId` alone: `/new` permanently redirects to `/p/<boot>/new`
   // (BACKWARD_COMPATIBILITY.md's protected bookmarklet contract — `routes.test.tsx`'s `/new
@@ -212,11 +213,11 @@ export function NewTaskRoute() {
   // simply does not render, which is the honest state: there is no second project to offer.
   const projectList = projects.data?.projects ?? []
   // Same gate the pill always used ("the same rule the sidebar's project groups follow"): with
-  // one project or none there is nothing to fan out ACROSS, so the pill stays hidden and submit
+  // one project or none there is nothing to run ACROSS, so the pill stays hidden and submit
   // keeps its single-project behavior byte-for-byte, whatever `pillMode` says.
   const showProjectPill = projectList.length > 1
-  const allAutoActive = showProjectPill && pillMode === 'auto'
-  // The pill's displayed selection: null renders "All / Auto"; falls back to `urlProjectId` for
+  const workspaceActive = showProjectPill && pillMode === 'auto'
+  // The pill's displayed selection: null renders "Workspace"; falls back to `urlProjectId` for
   // the named-project case exactly as before this spec.
   const pillProjectId = pillMode === 'auto' ? null : (urlProjectId ?? null)
   const sourcesReady =
@@ -315,12 +316,22 @@ export function NewTaskRoute() {
   // registered project (#791) — the same per-project sweep as #700 (forge) and #699 (runner
   // defaults). Loading still assumes git so the controls do not flicker.
   const hasGit = repo.data === undefined || repo.data.info !== null
-  const variants = hasGit ? draft.variants : 1
+  const variants = hasGit && !workspaceActive ? draft.variants : 1
 
   // Worktree opt-out (#worktree-toggle): any ordinary run in a git repo may use the current
   // checkout. Parallel variants are the one hard constraint because each competing run needs
   // its own tree; a non-git repo already runs in place.
-  const worktreeToggleShown = hasGit
+  //
+  // A WORKSPACE run offers neither, and hides both rather than disabling them. It is exactly one
+  // run with no worktree — `workspaceRunStartInputSchema` is `.strict()` and 400s on either key
+  // (D10), and `buildWorkspaceRunBody` strips them before the post. So a tickable Worktree box
+  // here would be silently discarded: the user ticks it, sees it ticked, and gets a run with no
+  // worktree — the "we heard you and did something else" answer D10 exists to refuse, smuggled
+  // back in one layer above the API. Same rule, same reason as `followupsToggleShown` below:
+  // the server pins the value regardless, so a control would be a lie. Nothing is lost by
+  // hiding them, because `composerRunModeNote`'s workspace line already STATES both facts
+  // ("Runs once across every project … with no worktree").
+  const worktreeToggleShown = hasGit && !workspaceActive
   const worktreeForced = variants > 1
 
   // Autonomous (#autonomous): the run never pauses for the user. An explicit toggle this session
@@ -365,12 +376,17 @@ export function NewTaskRoute() {
   const [planning, setPlanning] = useState(false)
   const [starting, setStarting] = useState(false)
 
-  // ---- task fan-out (All / Auto, knowledge-grounded-task-fanout.md) ------------------------
-  // A separate result slot from `plan`: fan-out never starts a run (D5), so there is nothing to
-  // "start" the way `startPlanned` starts a reviewed plan — the dialog below is read-only and
-  // its only actions are "file more" (dismiss, back to the composer) or navigate to a filed todo.
-  const [fanoutResult, setFanoutResult] = useState<TaskFanoutResponse | null>(null)
-  const fanout = useFanoutTasks()
+  // ---- workspace run (cross-project-workspace-run.md) --------------------------------------
+  // Submitting with the Workspace pill starts ONE run across every registered project. It behaves
+  // exactly like the ordinary start path below — same `starting` flag, same navigation to the
+  // thread — because it IS an ordinary run, just one whose grant covers the whole workspace.
+  //
+  // **This replaces the fan-out, and the difference is the fix.** That path ran a ~60 s analysis
+  // before anything existed, which is what produced "I just tried to add a task and nothing
+  // happened" (2026-08-15): no run to navigate to, so the result had to be parked in the
+  // MutationCache and surfaced through a pending banner, a result panel and a shell toast. A run
+  // that exists immediately needs none of that — the thread is the surface.
+  const workspaceRun = useStartWorkspaceRun()
 
   // ---- bookmarklet deep-link (spec 011 — legacy handleDeepLink, verbatim) -------------------
   // `auto=1` with a ref arms the unattended start; the composer stays hidden behind a
@@ -469,16 +485,36 @@ export function NewTaskRoute() {
   }, [notice, sourcesReady]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = async (text: string, images: ImageInput[]) => {
-    if (allAutoActive) {
-      // All / Auto never starts a run (D5): no provider/runner/source gate applies — the
-      // server-side analysis needs none of them. It also has no image field yet, so an attached
-      // image is a hard stop here rather than a silent drop.
-      if (images.length > 0) {
-        throw new Error('All / Auto does not support attached images yet — pick a project.')
+    if (workspaceActive) {
+      // A workspace run IS a run, so it clears the same provider gate the project path does —
+      // unlike the fan-out this replaces, which needed none of them because it started nothing.
+      if (!providersReady || runner === null) {
+        throw new Error(
+          providers.isPending
+            ? 'Checking agent providers…'
+            : 'Connect an agent provider before starting a task.',
+        )
       }
-      const result = await fanout.mutateAsync({ input: text })
-      setFanoutResult(result)
+      const started = await workspaceRun.mutateAsync(
+        buildWorkspaceRunBody({
+          task: text,
+          source,
+          model,
+          modelsLocked,
+          runner,
+          runnerExplicit: draft.runner !== null,
+          agentProfile,
+          defaultRunner,
+          images,
+          autonomous: autonomousOn,
+          generateFollowups: generateFollowupsOn,
+        }),
+      )
       clearDraftText(draftProjectId)
+      // Explicitly scoped to the project the run actually landed in (the boot project), NOT the
+      // active scope: `startedRunPath` returns a scope-relative path, and a workspace run is
+      // started from whichever project the composer happened to be under.
+      navigate(scopeTo(started.project, `/tasks/${started.run.id}`))
       return
     }
     if (!providersReady || runner === null) {
@@ -637,7 +673,7 @@ export function NewTaskRoute() {
               unconditionally made this line false for every run the user opted out of — and
               for a non-git folder, where there is no worktree to opt into. */}
           <p data-slot="run-mode-note" className="mt-1.5 text-[13.5px] text-muted-foreground max-md:text-xs">
-            {composerRunModeNote({ worktree: worktreeOn, hasGit, allAuto: allAutoActive })}
+            {composerRunModeNote({ worktree: worktreeOn, hasGit, workspace: workspaceActive })}
           </p>
         </header>
 
@@ -649,21 +685,20 @@ export function NewTaskRoute() {
           autoFocus
           placeholder="Describe a task for the agent — / for skills…"
           ariaLabel="Describe a task for the agent"
-          sendAriaLabel={
-            allAutoActive ? 'File tasks' : draft.planFirst ? 'Plan task' : 'Start task'
-          }
-          // D7's principle carried to the client: filing todos needs no agent provider, so
-          // All / Auto must not inherit the run gate below — a fresh install with no connected
-          // provider would otherwise disable the composer's own default submit path.
-          disabled={allAutoActive ? starting : !providersReady || starting}
+          sendAriaLabel={draft.planFirst && !workspaceActive ? 'Plan task' : 'Start task'}
+          // One gate for both paths now. The fan-out this replaces was deliberately EXEMPT from
+          // the provider check because it started nothing — a workspace run spawns an agent like
+          // any other run, so exempting it would only move the failure to a spawn that cannot
+          // happen. `workspaceRun.isPending` closes the double-submit the old path left open.
+          disabled={!providersReady || starting || workspaceRun.isPending}
           disabledReason={
-            allAutoActive
-              ? undefined
-              : providers.isPending
-                ? 'Checking agent providers…'
-                : providers.isError
-                  ? 'Provider authentication could not be verified.'
-                  : 'Connect an agent provider before starting a task.'
+            providers.isPending
+              ? 'Checking agent providers…'
+              : providers.isError
+                ? 'Provider authentication could not be verified.'
+                : !providersReady
+                  ? 'Connect an agent provider before starting a task.'
+                  : undefined
           }
           autocompleteSkills
           footerStart={
@@ -680,7 +715,7 @@ export function NewTaskRoute() {
                   projectId={pillProjectId}
                   onPick={(next) => {
                     if (next === null) {
-                      // All / Auto is composer-local state, not a route: it stays on whichever
+                      // Workspace is composer-local state, not a route: it stays on whichever
                       // project URL is already active (the fan-out call itself is unscoped) so
                       // switching to it never navigates.
                       setPillMode('auto')
@@ -747,6 +782,7 @@ export function NewTaskRoute() {
                 options={models.map((m) => ({ value: m.id, label: m.label, desc: m.desc }))}
                 status={modelCatalogStatus(displayRunner, catalog.data, catalog.isError)}
               />
+              {workspaceActive ? null : (
               <PickerPill
                 slot="variants-pill"
                 ariaLabel="Parallel variants"
@@ -762,6 +798,7 @@ export function NewTaskRoute() {
                   { value: '3', label: '×3 variants', desc: 'Three competing runs — pick the diff you keep' },
                 ]}
               />
+              )}
               {worktreeToggleShown ? (
                 <WorktreeToggle
                   on={worktreeOn}
@@ -840,152 +877,7 @@ export function NewTaskRoute() {
         />
       ) : null}
 
-      {fanoutResult !== null ? (
-        <FanoutResultPanel result={fanoutResult} onClose={() => setFanoutResult(null)} />
-      ) : null}
     </div>
-  )
-}
-
-/**
- * All / Auto's submit result (knowledge-grounded-task-fanout.md, D5 "nothing runs on submit"):
- * read-only, modeled on PlanReview's dialog chrome. There is nothing to start from here — the
- * fan-out already wrote one todo per item, and the board (not this dialog) is where a filed
- * task gets started later via `POST /todos/:id/start`. The only action is closing it.
- */
-function FanoutResultPanel({
-  result,
-  onClose,
-}: {
-  result: TaskFanoutResponse
-  onClose: () => void
-}) {
-  const empty = result.items.length === 0 && result.unassigned.length === 0
-
-  return (
-    <Dialog open onOpenChange={(open) => (open ? undefined : onClose())}>
-      <DialogContent
-        data-slot="fanout-result"
-        showCloseButton={false}
-        className={cn(
-          'top-0 left-0 flex h-dvh w-full max-w-full translate-x-0 translate-y-0 flex-col gap-0 rounded-none p-0',
-          'sm:top-1/2 sm:left-1/2 sm:h-auto sm:max-h-[85dvh] sm:max-w-[680px] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-xl',
-        )}
-      >
-        <DialogHeader className="gap-1 border-b border-border px-5 pt-4 pb-3.5 text-left sm:text-left">
-          <div className="flex items-start justify-between gap-3">
-            <DialogTitle className="text-[11px] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
-              Filed to the workspace
-            </DialogTitle>
-            <DialogClose
-              aria-label="Close"
-              className="-mt-1 -mr-1 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              <XIcon aria-hidden="true" className="size-4" />
-            </DialogClose>
-          </div>
-          <DialogDescription className="text-[13.5px] text-foreground">
-            {result.items.length === 1
-              ? '1 task filed — nothing was started.'
-              : `${result.items.length} tasks filed — nothing was started.`}
-            {' '}Start any of them from the workspace board when you're ready.
-          </DialogDescription>
-          {/* Guard: "item count above the cap truncates and says so" — silently dropping the
-              rest would look like the input was fully understood when it was not. */}
-          {result.truncated ? (
-            <p
-              data-slot="fanout-truncated"
-              className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-warning"
-            >
-              The input described more work than one pass could file — some of it was dropped.
-              Submit the rest separately.
-            </p>
-          ) : null}
-        </DialogHeader>
-
-        <div data-slot="fanout-items" className="flex-1 space-y-2 overflow-y-auto px-5 py-4">
-          {empty ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">
-              Nothing came back — try describing the work differently.
-            </p>
-          ) : (
-            <>
-              {result.items.map((item) => (
-                <div
-                  key={item.todoId}
-                  data-slot="fanout-item"
-                  data-project-id={item.projectId}
-                  className="rounded-lg border border-border bg-card-2 px-3 py-2.5"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span
-                      data-slot="fanout-item-project"
-                      className="shrink-0 rounded-full bg-muted px-1.5 py-px text-[10.5px] font-medium text-muted-foreground"
-                    >
-                      {item.projectName}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">
-                      {item.title}
-                    </span>
-                  </div>
-                  {item.knowledgeRefs.length > 0 ? (
-                    <ul
-                      data-slot="fanout-item-refs"
-                      className="mt-1.5 flex flex-wrap gap-1.5"
-                    >
-                      {item.knowledgeRefs.map((ref) => (
-                        <li
-                          key={`${ref.project}/${ref.slug}`}
-                          title={ref.title}
-                          className="max-w-full truncate rounded-full bg-violet/15 px-1.5 py-px font-mono text-[10.5px] font-medium text-violet"
-                        >
-                          {ref.title}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    // Guard: "knowledgeRefs[] empty renders as 'not grounded' rather than
-                    // nothing" — an ungrounded task must never look like grounding was checked
-                    // and found fine, per D4's framing of a retrieval that found nothing.
-                    <p
-                      data-slot="fanout-item-ungrounded"
-                      className="mt-1.5 text-[11.5px] text-soft-foreground italic"
-                    >
-                      not grounded — no matching knowledge found
-                    </p>
-                  )}
-                </div>
-              ))}
-              {result.unassigned.length > 0 ? (
-                <div data-slot="fanout-unassigned" className="pt-1">
-                  <p className="text-[11px] font-semibold tracking-[0.06em] text-muted-foreground uppercase">
-                    Not filed
-                  </p>
-                  <ul className="mt-1.5 space-y-1.5">
-                    {result.unassigned.map((entry, index) => (
-                      <li
-                        key={index}
-                        className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground"
-                      >
-                        <span className="font-medium text-foreground">{entry.title}</span>
-                        {' — '}
-                        {entry.reason}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-            </>
-          )}
-        </div>
-
-        <div className="flex items-center justify-end px-5 py-3.5 pb-[max(14px,env(safe-area-inset-bottom))]">
-          <Button type="button" onClick={onClose}>
-            Done
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
   )
 }
 
@@ -1148,8 +1040,10 @@ function ProjectPill({
   onPick,
 }: {
   projects: readonly ProjectListEntry[]
-  /** `null` is All / Auto (knowledge-grounded-task-fanout.md D1) — the composer's default:
-   *  submit fans the input out across the workspace instead of running in one project. */
+  /** `null` is Workspace (`.ai/specs/2026-08-15-cross-project-workspace-run.md`) — the
+   *  composer's default: submit starts ONE run with read/write access to every registered
+   *  project, instead of a run scoped to one. Was labelled "All / Auto" while this same pick
+   *  fanned the input out into one task per project; that mechanism is deleted. */
   projectId: string | null
   onPick: (projectId: string | null) => void
 }) {
@@ -1160,7 +1054,8 @@ function ProjectPill({
   // Same idiom as SourcePill's None: participates in the search box rather than always
   // showing, so it never sits next to "Nothing matches." for a query that excludes it too.
   const query = search.trim().toLowerCase()
-  const allAutoMatches = query === '' || 'all'.includes(query) || 'auto'.includes(query)
+  const workspaceMatches =
+    query === '' || 'workspace'.includes(query) || 'all'.includes(query)
 
   return (
     <Popover
@@ -1182,7 +1077,7 @@ function ProjectPill({
           {/* The registry is authoritative for the display name; the raw id is the fallback
               while it is still loading, so the pill never renders an empty label. */}
           <span className="max-w-40 truncate">
-            {projectId === null ? 'All / Auto' : (selected?.name ?? projectId)}
+            {projectId === null ? 'Workspace' : (selected?.name ?? projectId)}
           </span>
           {chevron}
         </button>
@@ -1199,15 +1094,16 @@ function ProjectPill({
             data-slot="project-menu"
             className="max-h-[min(18rem,calc(var(--radix-popover-content-available-height)-3rem))]"
           >
-            {!allAutoMatches && matched.length === 0 ? (
+            {!workspaceMatches && matched.length === 0 ? (
               <CommandEmpty>Nothing matches.</CommandEmpty>
             ) : null}
-            {/* All / Auto (D1): the composer's default, listed first — picking it fans the
-                submit out across the workspace instead of running in one project. */}
-            {allAutoMatches ? (
+            {/* Workspace: the composer's default, listed first — picking it starts one run that
+                reaches every registered project rather than one scoped to a single repo. `all`
+                stays a search keyword so muscle memory from "All / Auto" still finds it. */}
+            {workspaceMatches ? (
               <CommandItem
-                value="all auto"
-                keywords={['all', 'auto']}
+                value="workspace"
+                keywords={['workspace', 'all', 'auto', 'every project']}
                 data-slot="project-option"
                 data-project-id="all"
                 onSelect={() => {
@@ -1215,8 +1111,8 @@ function ProjectPill({
                   setOpen(false)
                 }}
               >
-                <span className="min-w-0 flex-1 truncate text-xs font-medium">All / Auto</span>
-                <span className="shrink-0 text-[11px] text-soft-foreground">files across projects</span>
+                <span className="min-w-0 flex-1 truncate text-xs font-medium">Workspace</span>
+                <span className="shrink-0 text-[11px] text-soft-foreground">one run, every project</span>
                 {projectId === null ? (
                   <CheckIcon aria-hidden="true" className="size-3.5 shrink-0 text-primary" />
                 ) : null}

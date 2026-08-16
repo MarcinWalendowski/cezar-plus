@@ -10,7 +10,7 @@ import type {
   ProviderStatusResponse,
   RepoResponse,
   Skill,
-  TaskFanoutResponse,
+  WorkspaceRunStartResponse,
   WorkflowsResponse,
 } from '@open-mercato/cezar-api-client'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
@@ -146,27 +146,25 @@ const OTHER_REPO: RepoResponse = {
   baseBranch: null,
 }
 
-/** One grounded item, one ungrounded item, one unassigned item, and truncated — a single
- *  fixture that exercises every "renders as X" guard the spec's Verification table names. */
-const FANOUT_RESULT: TaskFanoutResponse = {
-  items: [
-    {
-      projectId: BOOT,
-      projectName: 'cezar',
-      todoId: 'todo-1',
-      title: 'Fix the cezar flake',
-      knowledgeRefs: [{ project: BOOT, slug: 'flake-notes', title: 'Flake notes' }],
-    },
-    {
-      projectId: OTHER,
-      projectName: 'shop-frontend',
-      todoId: 'todo-2',
-      title: 'Ship the storefront',
-      knowledgeRefs: [],
-    },
-  ],
-  unassigned: [{ title: 'unclear scope item', reason: 'could not determine a project' }],
-  truncated: true,
+/**
+ * What `POST /workspace/runs` answers. `project` is the BOOT project deliberately — the run lives
+ * in the boot project's `runs.json` however the composer was scoped when it was started, and the
+ * navigation guard below depends on this differing from the active scope.
+ */
+const WORKSPACE_RUN: WorkspaceRunStartResponse = {
+  run: {
+    id: 'ws-run-1',
+    title: 'fix the flake and ship the storefront',
+    workflow: 'quick-task',
+    task: 'fix the flake and ship the storefront',
+    status: 'queued',
+    createdAt: '2026-08-16T00:00:00.000Z',
+    tokensUsed: 0,
+    archived: false,
+    steps: [],
+  },
+  project: BOOT,
+  grantedRoots: ['/home/u/cezar', '/home/u/shop-frontend'],
 }
 
 // ---- harness ---------------------------------------------------------------------------------
@@ -179,11 +177,11 @@ let requests: Recorded[]
 function serve({
   registry = REGISTRY,
   health = HEALTH,
-  fanout = FANOUT_RESULT,
+  workspaceRun = WORKSPACE_RUN,
 }: {
   registry?: ProjectsResponse
   health?: HealthResponse
-  fanout?: TaskFanoutResponse
+  workspaceRun?: WorkspaceRunStartResponse
 } = {}) {
   requests = []
   const json = (payload: unknown, status = 200) =>
@@ -200,9 +198,9 @@ function serve({
       if (url === '/api/v1/projects') return json(registry)
       if (url === '/api/v1/health') return json(health)
       if (url === '/api/v1/providers/status') return json(PROVIDERS)
-      // Workspace-level too (D1/D6): unaffected by which project's scope is currently active,
-      // never prefixed with `/p/<id>` — the fan-out spans the whole workspace by design.
-      if (url === '/api/v1/workspace/task-fanout' && method === 'POST') return json(fanout)
+      // Workspace-level too: unaffected by which project's scope is currently active, never
+      // prefixed with `/p/<id>` — a workspace run spans the whole workspace by design.
+      if (url === '/api/v1/workspace/runs' && method === 'POST') return json(workspaceRun, 201)
 
       // Split the scope off the path so each route is written once.
       const scoped = url.startsWith(`/api/v1/p/${OTHER}/`)
@@ -234,9 +232,11 @@ function LocationProbe() {
   return <output data-testid="location">{location.pathname}</output>
 }
 
-function renderAt(entry: string) {
+/** `client` is normally this render's own, but can be shared across two renders to model what
+ *  navigating away and back does: the component tree is rebuilt, the cache is not. */
+function renderAt(entry: string, client = createQueryClient()) {
   return render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[entry]}>
         <AppRoutes />
         <LocationProbe />
@@ -285,7 +285,7 @@ describe('the new-task project pill', () => {
     fireEvent.click(projectPill())
     await screen.findByPlaceholderText('search projects…')
     const options = [...document.querySelectorAll(String.raw`[data-slot="project-option"]`)]
-    // All / Auto (knowledge-grounded-task-fanout.md D1) leads the list, ahead of the registry.
+    // Workspace (cross-project-workspace-run.md) leads the list, ahead of the registry.
     expect(options.map((o) => o.getAttribute('data-project-id'))).toEqual(['all', BOOT, OTHER])
     expect(options[2]!.textContent).toContain('develop')
   })
@@ -383,8 +383,8 @@ describe('switching project', () => {
     )
     // The unscoped legacy endpoint must never see it — that would run the task in the wrong repo.
     expect(requests.some((r) => r.method === 'POST' && r.url === '/api/v1/runs')).toBe(false)
-    // A named-project pick keeps today's exact behavior — the fan-out route is All / Auto only.
-    expect(requests.some((r) => r.url === '/api/v1/workspace/task-fanout')).toBe(false)
+    // A named-project pick keeps today's exact behavior — the workspace route is Workspace only.
+    expect(requests.some((r) => r.url === '/api/v1/workspace/runs' && r.method === 'POST')).toBe(false)
     const posted = requests.find((r) => r.method === 'POST' && r.url === `/api/v1/p/${OTHER}/runs`)
     expect((posted?.body as { task?: string }).task).toBe('Ship the storefront')
 
@@ -395,14 +395,14 @@ describe('switching project', () => {
   })
 })
 
-// ---- All / Auto (knowledge-grounded-task-fanout.md, Phase 4) ---------------------------------
+// ---- Workspace (cross-project-workspace-run.md) ----------------------------------------------
 
-describe('All / Auto', () => {
+describe('Workspace', () => {
   it('is the default pill selection when arriving via ?scope=auto', async () => {
     serve()
     renderAt(`/p/${BOOT}/new?scope=auto`)
     await composerReady('None')
-    expect(projectPill().textContent).toContain('All / Auto')
+    expect(projectPill().textContent).toContain('Workspace')
   })
 
   it('leads the pill list, and picking it is local — no navigation, unlike picking a project', async () => {
@@ -415,8 +415,8 @@ describe('All / Auto', () => {
     fireEvent.click(projectPill())
     await screen.findByPlaceholderText('search projects…')
     fireEvent.click(document.querySelector('[data-slot="project-option"][data-project-id="all"]')!)
-    expect(projectPill().textContent).toContain('All / Auto')
-    // Composer-local state, not a route (D1): picking it never navigates.
+    expect(projectPill().textContent).toContain('Workspace')
+    // Composer-local state, not a route: picking it never navigates.
     expect(pathname()).toBe(`/p/${BOOT}/new`)
 
     // Picking a named project back out of it behaves exactly as it always did.
@@ -425,38 +425,86 @@ describe('All / Auto', () => {
     expect(projectPill().textContent).toContain('shop-frontend')
   })
 
-  it('fans a submit out across the workspace instead of starting a run', async () => {
+  it('starts ONE run on the workspace route, never a project-scoped one', async () => {
     serve()
     renderAt(`/p/${BOOT}/new?scope=auto`)
     await composerReady('None')
-    expect(projectPill().textContent).toContain('All / Auto')
+    expect(projectPill().textContent).toContain('Workspace')
 
     fireEvent.change(textarea(), { target: { value: 'fix the flake and ship the storefront' } })
-    fireEvent.click(screen.getByRole('button', { name: 'File tasks' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Start task' }))
 
     await waitFor(() =>
-      expect(
-        requests.some((r) => r.method === 'POST' && r.url === '/api/v1/workspace/task-fanout'),
-      ).toBe(true),
+      expect(requests.some((r) => r.method === 'POST' && r.url === '/api/v1/workspace/runs')).toBe(true),
     )
-    // D5/the spec's own guard: nothing starts a run on submit — no run record may exist after.
-    expect(requests.some((r) => r.method === 'POST' && /\/runs$/.test(r.url))).toBe(false)
-    const posted = requests.find(
-      (r) => r.method === 'POST' && r.url === '/api/v1/workspace/task-fanout',
-    )
-    expect((posted?.body as { input?: string }).input).toBe('fix the flake and ship the storefront')
+    // Exactly one run, and it is NOT the per-project route — that is the whole redesign. The old
+    // fan-out answered this same submit by writing one task per project.
+    expect(requests.filter((r) => r.method === 'POST' && /\/runs$/.test(r.url))).toHaveLength(1)
+    expect(requests.some((r) => r.method === 'POST' && r.url === `/api/v1/p/${OTHER}/runs`)).toBe(false)
 
-    // A dialog, not a navigation — the composer stays put.
-    expect(pathname()).toBe(`/p/${BOOT}/new`)
-    expect(await screen.findByText('Fix the cezar flake')).toBeTruthy()
-    expect(screen.getByText('Ship the storefront')).toBeTruthy()
-    // Grounded item shows its citation …
-    expect(screen.getByText('Flake notes')).toBeTruthy()
-    // … an empty knowledgeRefs[] renders as "not grounded", never as nothing (Verification table).
-    expect(screen.getByText('not grounded — no matching knowledge found')).toBeTruthy()
-    // Unassigned work is surfaced, not silently dropped.
-    expect(screen.getByText('unclear scope item', { exact: false })).toBeTruthy()
-    // A truncated batch says so out loud rather than truncating silently.
-    expect(screen.getByText(/more work than one pass could file/)).toBeTruthy()
+    const posted = requests.find((r) => r.method === 'POST' && r.url === '/api/v1/workspace/runs')
+    expect((posted?.body as { task?: string }).task).toBe('fix the flake and ship the storefront')
+    // The three keys a workspace run FIXES are never asked for — `buildWorkspaceRunBody` drops
+    // them, so the client never requests something the server then ignores.
+    for (const key of ['worktree', 'variants', 'todoId']) {
+      expect(posted?.body as Record<string, unknown>).not.toHaveProperty(key)
+    }
+  })
+
+  it('navigates to the project the RESPONSE names, not the scope it was submitted from', async () => {
+    // The run lives in the boot project's `runs.json` whatever the composer was scoped to. Reading
+    // the active scope here instead would send the user to `/p/shop-frontend/tasks/ws-run-1`, a
+    // thread that does not exist — a 404 for a run that started perfectly.
+    serve()
+    renderAt(`/p/${OTHER}/new?scope=auto`)
+    await composerReady('None')
+    fireEvent.change(textarea(), { target: { value: 'touch every project' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Start task' }))
+
+    await waitFor(() => expect(pathname()).toBe(`/p/${BOOT}/tasks/ws-run-1`))
+  })
+
+  it('warns that real checkouts are modified, and never promises isolation', async () => {
+    // CORRECTED 2026-08-16: this used to read "the composer keeps its Worktree chip on screen in
+    // this mode, so the header line is the only thing that says the chip does not apply." The chip
+    // is now HIDDEN (see the case below), so this line is no longer a lone caveat over a
+    // contradicting control — it is the only place either fact is stated, which is why it asserts
+    // BOTH of them. Under the fan-out this same line said "nothing starts" — the most dangerous
+    // sentence to leave above a submit that edits twelve repos.
+    serve()
+    renderAt(`/p/${BOOT}/new?scope=auto`)
+    await composerReady('None')
+    const note = document.querySelector('[data-slot="run-mode-note"]')!.textContent ?? ''
+    expect(note).toContain('every project')
+    expect(note).toContain('no worktree')
+    expect(note).not.toContain('isolated')
+    expect(note).not.toContain('nothing starts')
+  })
+
+  it('offers no Worktree or variants control, because it would honour neither', async () => {
+    // The submit-side case above proves `worktree`/`variants` are never SENT. On its own that is
+    // the bug, not the fix: a chip the user can tick, that is then stripped before the post, is
+    // the "we heard you and did something else" answer `.strict()` (D10) refuses at the API and
+    // would have smuggled back in one layer above it. The server 400s on either key; the only
+    // honest client is one that does not ask.
+    //
+    // Both controls are asserted PRESENT for a named project in the same render path, so this
+    // cannot pass by the chips having been deleted outright, or by the selector going stale.
+    serve()
+    renderAt(`/p/${BOOT}/new`)
+    await composerReady('None')
+    expect(projectPill().textContent).toContain('cezar')
+    expect(document.querySelector('[data-slot="worktree-toggle"]')).not.toBeNull()
+    expect(document.querySelector('[data-slot="variants-pill"]')).not.toBeNull()
+
+    fireEvent.click(projectPill())
+    await screen.findByPlaceholderText('search projects…')
+    fireEvent.click(document.querySelector('[data-slot="project-option"][data-project-id="all"]')!)
+    expect(projectPill().textContent).toContain('Workspace')
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="worktree-toggle"]')).toBeNull(),
+    )
+    expect(document.querySelector('[data-slot="variants-pill"]')).toBeNull()
   })
 })

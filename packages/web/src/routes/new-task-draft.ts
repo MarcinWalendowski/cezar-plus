@@ -108,20 +108,24 @@ export function resolveComposerRunMode(input: ComposerRunModeInput): {
  * "opted out" from "there is no repository here", which is the difference between a warning
  * and an explanation.
  *
- * `allAuto` (D1/D5, `.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md`) is a FOURTH state
- * and it wins over the other three, because under All / Auto nothing runs at all: submit files
- * tasks and stops. The composer keeps every pill it has in project mode (one composer, per the
- * owner's instruction), which means the runner, model, variants and worktree chips are all on
- * screen stating settings this submit will not use — so this line says so rather than leaving a
- * user to discover it from a run that never appears.
+ * `workspace` (`.ai/specs/2026-08-15-cross-project-workspace-run.md`) is a FOURTH state and it
+ * wins over the other three, because a workspace run lands somewhere none of them describe: in
+ * EVERY registered project's real working tree at once, with no worktree between the agent and
+ * the user's uncommitted work. That is the most consequential thing this header can say, and it
+ * is the one state where the Worktree chip on screen states a setting this submit ignores.
+ *
+ * **CORRECTED 2026-08-16.** This parameter was `allAuto`, and the line it printed said "All /
+ * Auto files tasks on the board — nothing starts". That was true of the task fan-out, which is
+ * deleted: submit now starts one run immediately. A note claiming nothing starts, above a submit
+ * that edits twelve checkouts, is the worst possible version of this line to leave behind.
  */
 export function composerRunModeNote(input: {
   worktree: boolean
   hasGit: boolean
-  allAuto?: boolean
+  workspace?: boolean
 }): string {
-  if (input.allAuto) {
-    return 'All / Auto files tasks on the board — nothing starts, so the run settings below do not apply.'
+  if (input.workspace) {
+    return 'Runs once across every project — your real checkouts are modified directly, with no worktree.'
   }
   if (input.worktree) return 'Runs in an isolated worktree — review everything before it lands.'
   if (input.hasGit) return 'Runs in the repo working tree — your checkout is modified directly.'

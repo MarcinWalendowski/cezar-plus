@@ -53,6 +53,12 @@ import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.ts';
 import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidateTitle } from '../runs/auto-name.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { resolveProfileEnvForRoot } from '../workspace/agent-profiles.ts';
+import {
+  buildWorkspaceGrant,
+  workspaceGrantSystemPrompt,
+  type GrantedProject,
+  type WorkspaceGrant,
+} from '../workspace/granted-roots.ts';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
 import { UiEventSink } from '../runs/ui-event-sink.ts';
 import type { UiEvent } from '../core/ui-events.ts';
@@ -336,6 +342,12 @@ export interface StartRunInput {
    *  working tree instead of an isolated worktree. Undefined/`true` keeps the
    *  default per-task worktree. Ignored for variants (they always isolate). */
   worktree?: boolean;
+  /** WORKSPACE RUN (spec 2026-08-15-cross-project-workspace-run): every registered project this
+   *  run may read and write outside its cwd. Set only by `POST /api/v1/workspace/runs`; an
+   *  ordinary project run leaves it undefined and behaves exactly as it always has. Persisted at
+   *  creation and re-applied from the RECORD on every later step, so the grant cannot drift when
+   *  the registry changes mid-run. */
+  workspaceProjects?: GrantedProject[];
   /** Autonomous mode (#autonomous): the run never parks at `waiting` for the
    *  user — turn-ends auto-continue until the agent signals done or the safety
    *  cap is hit. No "needs you" is ever raised. */
@@ -395,6 +407,23 @@ export function composeSystemPrompt(...parts: Array<string | undefined>): string
  */
 export function agentDirectories(runsDir: string, env: Record<string, string>): string[] {
   return env.TMPDIR ? [runsDir, env.TMPDIR] : [runsDir];
+}
+
+/**
+ * A workspace run's grant, rebuilt from its OWN RECORD — never from the registry
+ * (spec 2026-08-15-cross-project-workspace-run).
+ *
+ * That distinction is the whole reason this is a function and not an inline read. `buildWorkspaceGrant`
+ * is pure, so calling it here on every step and every resume costs nothing and can never observe a
+ * registry that changed since the run started: a project added an hour into a long run does not
+ * silently join the grant, and one removed does not silently leave it. `undefined` for every
+ * ordinary project run, which is every run that is not this one kind.
+ */
+export function workspaceGrantOf(
+  run: { workspaceProjects?: GrantedProject[] } | undefined,
+): WorkspaceGrant | undefined {
+  const projects = run?.workspaceProjects;
+  return projects && projects.length > 0 ? buildWorkspaceGrant(projects) : undefined;
 }
 
 /**
@@ -819,6 +848,11 @@ export class RunManager {
       // Persist the explicit opt-out so queued-run restart recovery and the
       // session Git routes can distinguish it from a removed isolated worktree.
       worktree: !group && input.worktree === false ? false : undefined,
+      // A workspace run's directory grant, frozen at creation (spec 2026-08-15-cross-project-
+      // workspace-run). Never re-read from the registry afterwards — see the field's doc comment
+      // in `contract/src/runs.ts`. Variants never carry one: they exist to isolate, and a
+      // workspace run has nothing to isolate into.
+      workspaceProjects: group ? undefined : input.workspaceProjects,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -2492,6 +2526,8 @@ export class RunManager {
     }
     this.store.updateStep(runId, stepId, { profileId: continueProfile.profileId });
 
+    // From the RECORD, not the registry — see `workspaceGrantOf`.
+    const continueGrant = workspaceGrantOf(record);
     const runner = createRunner(continueBackend);
     state.currentStepId = stepId;
     this.beginUsageInvocation(runId, state, stepId);
@@ -2508,6 +2544,10 @@ export class RunManager {
         systemPrompt: composeSystemPrompt(
           record?.systemPrompt,
           generateFollowups ? HANDOFF_INSTRUCTIONS : HANDOFF_ONLY_INSTRUCTIONS,
+          // Before the knowledge block on purpose: this says where the work IS. A Continue turn
+          // is a FRESH agent session, so without it the second turn of a workspace run would
+          // have the directories granted and no idea they exist.
+          workspaceGrantSystemPrompt(continueGrant),
           knowledgeSystemPrompt(continueProfile.knowledgeSummary),
         ),
         userPrompt: attachments.length
@@ -2519,6 +2559,7 @@ export class RunManager {
         additionalDirectories: [
           ...agentDirectories(join(this.dataDir, 'runs'), continueProfile.env),
           ...(continueProfile.knowledgeSummary?.roots.map((r) => r.path) ?? []),
+          ...(continueGrant?.roots ?? []),
         ],
         env: continueProfile.env,
         model: continueModel,
@@ -3159,6 +3200,10 @@ export class RunManager {
     }
     this.store.updateStep(runId, step.id, { profileId: stepProfile.profileId });
 
+    // From the RECORD, not the registry, and not from `input` — see `workspaceGrantOf`. Reading
+    // `input.workspaceProjects` here would work on the first step and be wrong after a restart,
+    // where the run is revived from `runs.json` and `input` is rebuilt.
+    const stepGrant = workspaceGrantOf(this.store.getRun(runId));
     const runner = createRunner(stepBackend);
     let session: AgentSession;
     state.currentStepId = step.id;
@@ -3174,6 +3219,10 @@ export class RunManager {
             followupsEnabled() && input.generateFollowups !== false
               ? HANDOFF_INSTRUCTIONS
               : HANDOFF_ONLY_INSTRUCTIONS,
+            // Before the knowledge block on purpose: this says where the work IS. The cwd of a
+            // workspace run is a scratch repo that contains none of it, so an agent given only
+            // `--add-dir` and no text has directories it can reach and no reason to look.
+            workspaceGrantSystemPrompt(stepGrant),
             knowledgeSystemPrompt(stepProfile.knowledgeSummary),
           ),
           userPrompt,
@@ -3190,6 +3239,9 @@ export class RunManager {
           additionalDirectories: [
             ...agentDirectories(join(this.dataDir, 'runs'), stepProfile.env),
             ...(stepProfile.knowledgeSummary?.roots.map((r) => r.path) ?? []),
+            // A workspace run's granted project roots (spec 2026-08-15-cross-project-workspace-
+            // run). Empty for every ordinary run, so nothing about them changes.
+            ...(stepGrant?.roots ?? []),
           ],
           env: stepProfile.env,
           model: backendModel,
