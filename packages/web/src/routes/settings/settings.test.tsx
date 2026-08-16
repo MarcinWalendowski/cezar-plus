@@ -135,6 +135,11 @@ const GLOBAL_SECTIONS = [
   // gate, so it is never absent from THIS list (which only reflects the synchronous `hidden`/
   // `scope`/`capability` gates `visibleSettingsSections` actually has).
   'account',
+  // Backup (spec 2026-08-16-provider-agnostic-platform-backup) — declared unconditionally like
+  // `account`/`teams`, for the same reason: `CEZ_BACKUP` is deliberately not a health capability
+  // (byte-identical health), so visibility is an async probe inside `backup-section.tsx` (it reads
+  // `GET /api/v1/backup`), never a synchronous registry gate — so it is always present in THIS list.
+  'backup',
 ]
 
 describe('the section registry', () => {
@@ -162,7 +167,7 @@ describe('the section registry', () => {
     // possibly several logins in an org with more than one team, and can still have a session to
     // sign out of — none of that is "how many projects".
     expect(visibleSettingsSections('global', { singleProject: true, sources: false }).map((s) => s.id)).toEqual([
-      'appearance', 'notifications', 'resources', 'accounts', 'teams', 'account',
+      'appearance', 'notifications', 'resources', 'accounts', 'teams', 'account', 'backup',
     ])
     expect(
       visibleSettingsSections('global', { singleProject: false, sources: false }).map((s) => s.id),
