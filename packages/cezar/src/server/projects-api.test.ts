@@ -338,6 +338,45 @@ describe('workspace projects API', () => {
       expect((await getProjects()).projects).toHaveLength(1);
     });
 
+    /**
+     * The reported bug, `.ai/specs/2026-08-15-duplicate-project-context-wipes-runs.md`: booting
+     * on `repoRoot` and then registering that SAME root through this route used to find no
+     * registry match (the boot project deliberately carries no row of its own — D3,
+     * `suppressBootRegistration`) and allocate a FRESH slug for it — a second registry row over
+     * the identical `.ai/cezar`. `ProjectContexts.build()` then opens a SECOND `RunStore` over the
+     * same `runs.json` the boot context's own store already owns: two independent in-memory
+     * copies of one file, and whichever flushes last (its own 300ms debounce, or shutdown)
+     * truncates the other's writes away.
+     *
+     * Mutation: drop the boot-root short-circuit in `registerFolder` — this then observes a fresh
+     * slug (and the registry gaining a row) instead of the boot identity.
+     */
+    it("registering the boot repo's own root is idempotent: 200 with the boot identity, no registry write, no event", async () => {
+      const bus = new WorkspaceEventBus();
+      const seen: string[] = [];
+      bus.on((event) => seen.push(event));
+      const expectedBootId = allocateProjectSlug(repoRoot, []);
+
+      const { status, body } = await post({ root: repoRoot }, { workspaceEvents: bus });
+
+      expect(status).toBe(200);
+      expect(body.project.id).toBe(expectedBootId);
+      expect(body.project.root).toBe(await realpath(repoRoot));
+      expect(body.error).toBeUndefined();
+      // Not a new project — no event, no registry row.
+      expect(seen).toEqual([]);
+      expect((await loadWorkspaceConfig()).projects).toEqual([]);
+      expect((await getProjects()).projects).toEqual([]);
+    });
+
+    it("registering the boot repo's own root normalizes the same way every other dedupe does (trailing slash)", async () => {
+      const expectedBootId = allocateProjectSlug(repoRoot, []);
+      const { status, body } = await post({ root: `${repoRoot}/` });
+      expect(status).toBe(200);
+      expect(body.project.id).toBe(expectedBootId);
+      expect((await loadWorkspaceConfig()).projects).toEqual([]);
+    });
+
     it('400s a non-absolute path, a missing folder, a file, and a malformed body', async () => {
       const file = join(otherRoot, 'not-a-dir.txt');
       writeFileSync(file, 'x', 'utf8');

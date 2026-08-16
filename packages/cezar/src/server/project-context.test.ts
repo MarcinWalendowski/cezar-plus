@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,6 +6,7 @@ import { AutomationStore } from '../automations/store.ts';
 import { emitUsageForTest } from '../core/process-usage.ts';
 import { KnowledgeStore } from '../knowledge/store.ts';
 import { NotificationOutbox } from '../notifications/outbox.ts';
+import { RunStore } from '../runs/store.ts';
 import { SourceStore } from '../sources/store.ts';
 import {
   ProjectContextError,
@@ -187,6 +188,107 @@ describe('ProjectContexts', () => {
     emitUsageForTest({});
     expect(spyA).not.toHaveBeenCalled();
     expect(spyB).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `.ai/specs/2026-08-15-duplicate-project-context-wipes-runs.md`: a registry row can name the
+ * boot project's own root under a DIFFERENT id — the boot project deliberately carries no row of
+ * its own (`suppressBootRegistration`, D3), so `registerProject`'s own boot short-circuit is what
+ * keeps such a row from ever being WRITTEN going forward, but a registry pre-dating that fix (or a
+ * row written by a concurrent `cezar projects add`) could still hold one. Without `deps.bootRoot`,
+ * `build()` would open a SECOND `RunStore` over the identical `.ai/cezar` dir the boot context's
+ * own store already owns — two independent in-memory copies of `runs.json`, and whichever flushes
+ * last (its own 300ms debounce, or process shutdown) truncates the other's writes away.
+ */
+describe('ProjectContexts — boot-root duplication guard', () => {
+  let rootA: string;
+
+  beforeEach(() => {
+    // realpath the tmp base FIRST (matching `projects-api.test.ts`'s own fixtures): on macOS
+    // `/tmp` is itself a symlink into `/private/tmp`, so an un-normalized `rootA` would never
+    // equal what `resolveBootRoot()`'s `normalizeRoot()` produces from the identical string —
+    // exactly the mismatch a REAL registry row never has, since `registerProject` always writes
+    // the realpath'd spelling.
+    rootA = mkdtempSync(join(realpathSync(tmpdir()), 'cez-ctx-boot-'));
+  });
+
+  afterEach(() => {
+    rmSync(rootA, { recursive: true, force: true });
+  });
+
+  /** Mutation: delete the `bootRoot`/`project.root` comparison in `build()` (or the throw itself)
+   *  — this then resolves instead of rejecting, and `contexts.peek('proja')` returns a freshly
+   *  opened context with its OWN `RunStore` over `rootA`. */
+  it('refuses to build a context for a registry row whose root duplicates deps.bootRoot', async () => {
+    const contexts = new ProjectContexts({
+      listProjects: async () => [{ id: 'proja', root: rootA, status: 'not-git' }],
+      bootRoot: rootA,
+    });
+
+    await expect(contexts.context('proja')).rejects.toMatchObject({
+      name: 'ProjectContextError',
+      reason: 'boot-root-conflict',
+      projectId: 'proja',
+    });
+    // Refused, not merged or shared: nothing cached under the duplicate id, and no store opened.
+    expect(contexts.peek('proja')).toBeUndefined();
+    expect(existsSync(join(rootA, '.ai/cezar'))).toBe(false);
+  });
+
+  it('a registered root that is NOT the boot root still builds normally with deps.bootRoot set', async () => {
+    const rootB = mkdtempSync(join(tmpdir(), 'cez-ctx-boot-b-'));
+    try {
+      const contexts = new ProjectContexts({
+        listProjects: async () => [{ id: 'b', root: rootB, status: 'not-git' }],
+        bootRoot: rootA,
+      });
+      const ctx = await contexts.context('b');
+      expect(ctx.root).toBe(rootB);
+      contexts.disposeAll();
+    } finally {
+      rmSync(rootB, { recursive: true, force: true });
+    }
+  });
+
+  it('omitting deps.bootRoot skips the check entirely — every existing fixture and caller', async () => {
+    const contexts = new ProjectContexts({
+      listProjects: async () => [{ id: 'proja', root: rootA, status: 'not-git' }],
+    });
+    const ctx = await contexts.context('proja');
+    expect(ctx.root).toBe(rootA);
+    contexts.disposeAll();
+  });
+
+  /**
+   * The actual data-loss mechanism, asserted on the FILE — never an API read (the read that
+   * "looked fine while the file was being truncated" is exactly what the spec names as the
+   * misleading signal). The boot store creates two runs and flushes them to disk; a registry row
+   * duplicating its root is then asked for, is refused, and the file is asserted unchanged.
+   *
+   * Mutation: same as the first test above — once `build()` stops refusing, this test's second
+   * read of `runs.json` (after the would-be second store opens and this fixture's cleanup flushes
+   * it) drops back toward `[]`, i.e. the record count DECREASES across the simulated restart.
+   */
+  it('never lets a duplicate registry row over the boot root truncate runs.json', async () => {
+    const boot = RunStore.open(join(rootA, '.ai/cezar'), { keepLive: true });
+    boot.createRun({ title: 'a', workflow: 'w', task: 'a', steps: [] });
+    boot.createRun({ title: 'b', workflow: 'w', task: 'b', steps: [] });
+    boot.flush();
+    const before = JSON.parse(readFileSync(join(rootA, '.ai/cezar/runs.json'), 'utf8'));
+    expect(before).toHaveLength(2);
+
+    const contexts = new ProjectContexts({
+      listProjects: async () => [{ id: 'proja', root: rootA, status: 'not-git' }],
+      bootRoot: rootA,
+    });
+    await expect(contexts.context('proja')).rejects.toBeInstanceOf(ProjectContextError);
+
+    // No second RunStore was ever opened over rootA, so nothing else could flush an emptier
+    // in-memory copy over the boot store's own writes.
+    const after = JSON.parse(readFileSync(join(rootA, '.ai/cezar/runs.json'), 'utf8'));
+    expect(after).toHaveLength(before.length); // never decreases across the "restart"
+    boot.flush();
   });
 });
 

@@ -10,6 +10,7 @@ import { NotificationSender } from '../notifications/sender.ts';
 import { reclaimWorktrees } from '../runs/retention.ts';
 import { RunStore } from '../runs/store.ts';
 import { SourceStore } from '../sources/store.ts';
+import { normalizeRoot } from '../workspace/projects.ts';
 import { WorkspaceRunIndex, type WorkspaceRunProjectSource } from '../workspace/run-index.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from '../workflows/run.ts';
@@ -199,9 +200,21 @@ export interface ProjectContextDeps {
   notificationRuntime?: NotificationRuntime;
   /** Test seam for the workspace run index (W1.11). Production builds one from `listProjects`. */
   runIndex?: WorkspaceRunIndex;
+  /**
+   * The boot project's own root (spec `2026-08-15-duplicate-project-context-wipes-runs`), RAW
+   * and unresolved exactly as `server.ts` received it (`deps.repoRoot`) — this class normalizes
+   * it once, lazily, the same way the registry keys itself (`normalizeRoot`). The boot project
+   * deliberately carries no row of its own in the registry (`suppressBootRegistration`, D3), so a
+   * row CAN name this same root under a different id — pre-dating `registerProject`'s own boot
+   * short-circuit, or written by a concurrent `cezar projects add` in another process. `build()`
+   * below refuses to open a context for such a row rather than opening a second `RunStore` over
+   * the identical `.ai/cezar` dir the boot context's store already owns; see its own comment.
+   * Omitted by every fixture with no boot project of its own — the check is then simply skipped.
+   */
+  bootRoot?: string;
 }
 
-export type ProjectContextFailure = 'unknown-project' | 'missing-root';
+export type ProjectContextFailure = 'unknown-project' | 'missing-root' | 'boot-root-conflict';
 
 /** Typed failure so the route layer can map reasons to statuses (404/409)
  *  without string matching. */
@@ -213,7 +226,9 @@ export class ProjectContextError extends Error {
     super(
       reason === 'unknown-project'
         ? `unknown project: ${projectId}`
-        : `project root is missing: ${projectId}`,
+        : reason === 'missing-root'
+          ? `project root is missing: ${projectId}`
+          : `project ${projectId} duplicates the boot project's root — refusing to open a second RunStore over it`,
     );
     this.name = 'ProjectContextError';
   }
@@ -253,6 +268,10 @@ export class ProjectContexts {
    *  it failed: a degraded cockpit rather than a boot failure (`AGENTS.md`: "a missing
    *  dependency, an absent peer, a read-only home: degrade... never fail the boot"). */
   private readonly notificationRuntime: NotificationRuntime | undefined;
+  /** `deps.bootRoot`, realpath'd once and cached — the boot root does not change during the
+   *  process lifetime, so every `build()` after the first reuses this instead of re-stat'ing it.
+   *  `undefined` (never populated) when `deps.bootRoot` was omitted. */
+  private bootRootReal: Promise<string> | undefined;
 
   constructor(private readonly deps: ProjectContextDeps) {
     this.semaphore = deps.semaphore ?? new WorkspaceSemaphore();
@@ -369,11 +388,36 @@ export class ProjectContexts {
     this.notificationRuntime?.sender.stop();
   }
 
+  /** Lazily realpath's `deps.bootRoot` and caches the promise (see `bootRootReal`'s own comment).
+   *  `undefined` when no boot root was injected — every existing test fixture, which never
+   *  wires this dep, is unaffected by the `build()` check below. */
+  private resolveBootRoot(): Promise<string> | undefined {
+    if (this.deps.bootRoot === undefined) return undefined;
+    if (!this.bootRootReal) this.bootRootReal = normalizeRoot(this.deps.bootRoot);
+    return this.bootRootReal;
+  }
+
   private async build(projectId: string): Promise<ProjectContext> {
     const projects = await this.deps.listProjects();
     const project = projects.find((p) => p.id === projectId);
     if (!project) throw new ProjectContextError('unknown-project', projectId);
     if (project.status === 'missing') throw new ProjectContextError('missing-root', projectId);
+
+    // A registry row can duplicate the boot project's own root under a DIFFERENT id (spec
+    // 2026-08-15-duplicate-project-context-wipes-runs) — `registerProject`'s own boot short-
+    // circuit (`server.ts`'s `registerFolder`) refuses to WRITE such a row going forward, so
+    // reaching this branch means one pre-dates that fix or was written by a concurrent `cezar
+    // projects add` in another process. Refuse rather than silently sharing or duplicating:
+    // sharing the live boot `ProjectContext` object under a second id would let a later
+    // `dispose(projectId)` (e.g. "remove project") tear the running server's own boot context
+    // down, and opening a SECOND `RunStore` over the identical `.ai/cezar` dir is the data-loss
+    // bug itself — two independent in-memory copies of `runs.json` that do not observe each
+    // other's writes, and whichever flushes last (its own 300ms debounce, or shutdown)
+    // truncates the other's away.
+    const bootRoot = await this.resolveBootRoot();
+    if (bootRoot !== undefined && bootRoot === project.root) {
+      throw new ProjectContextError('boot-root-conflict', projectId);
+    }
 
     const dataDir = join(project.root, '.ai/cezar');
     // keepLive + recover() (#367), same as serveCommand: runs that were live

@@ -218,13 +218,36 @@ export async function shouldRegisterProject(repoRoot: string): Promise<boolean> 
  * Register `root` in the workspace registry (idempotent). Known root (by
  * realpath) → bump its `lastOpenedAt` and return the existing entry, id and
  * all. Unknown → allocate a slug and append a new entry via merge-write.
+ *
+ * `bootProject`, when given, is the CALLER's own boot identity — `server.ts`'s `registerFolder`
+ * passes `{ id: <resolveBootProject()>, root: <normalizeRoot(bootRoot)> }` (spec
+ * `2026-08-15-duplicate-project-context-wipes-runs`). The boot project deliberately carries no
+ * row of its own in `config.projects` (`suppressBootRegistration`, D3), so without this the
+ * `existing` lookup below would never match it: registering the boot repo's own root would
+ * allocate a FRESH slug and append a SECOND row for the identical root. `ProjectContexts.build()`
+ * later resolves each registry row to its own `RunStore.open(dataDir)` — two independent
+ * in-memory copies of the SAME `runs.json`, neither aware of the other's writes, and whichever
+ * flushes last (its own 300ms debounce, or process shutdown) truncates the other's away. This
+ * check makes the boot root idempotent the same way an already-registered root already is: no
+ * registry write, just the existing identity handed back.
  */
 export async function registerProject(
   root: string,
   source: 'local' | 'checkout' = 'local',
+  bootProject?: { id: string; root: string },
 ): Promise<WorkspaceProject> {
   const real = await normalizeRoot(root);
   const now = new Date().toISOString();
+  if (bootProject && bootProject.root === real) {
+    return {
+      id: bootProject.id,
+      root: real,
+      name: basename(real),
+      addedAt: '',
+      lastOpenedAt: now,
+      source,
+    };
+  }
   let entry: WorkspaceProject | undefined;
   await mergeWriteWorkspaceConfig((config) => {
     const existing = config.projects.find((p) => p.root === real);

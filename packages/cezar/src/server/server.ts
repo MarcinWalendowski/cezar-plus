@@ -1480,6 +1480,13 @@ export function createApp(deps: ServerDeps) {
       return listProjects(selector);
     },
     semaphore: deps.semaphore,
+    // Defense-in-depth for `.ai/specs/2026-08-15-duplicate-project-context-wipes-runs.md`:
+    // `registerFolder`'s own boot short-circuit (above) is what keeps a duplicate row from ever
+    // being WRITTEN, but a registry pre-dating that fix — or a row written by a concurrent
+    // `cezar projects add` in another process — could still name this root under a different id.
+    // `build()` refuses to open a second `RunStore` over it rather than silently sharing or
+    // duplicating; see that method's own comment.
+    bootRoot,
   });
   // Workspace-level SSE bus (step 2.8) — the registry mutators and the
   // checkout flow (Phase 4) emit here; /api/workspace/events relays.
@@ -1750,9 +1757,17 @@ export function createApp(deps: ServerDeps) {
       c.set('project', await contexts.context(raw));
     } catch (err) {
       if (err instanceof ProjectContextError) {
-        return err.reason === 'missing-root'
-          ? c.json({ error: `project folder not found: ${err.projectId}` }, 409)
-          : c.json({ error: err.message }, 404);
+        if (err.reason === 'missing-root') {
+          return c.json({ error: `project folder not found: ${err.projectId}` }, 409);
+        }
+        // `boot-root-conflict` (2026-08-15-duplicate-project-context-wipes-runs): a real registry
+        // row, but one whose root duplicates the boot project's — 409, matching `missing-root`'s
+        // "this id names a row, but its state makes it unsafe to open right now", not `unknown-
+        // project`'s plain 404.
+        if (err.reason === 'boot-root-conflict') {
+          return c.json({ error: err.message }, 409);
+        }
+        return c.json({ error: err.message }, 404);
       }
       throw err;
     }
@@ -3552,6 +3567,27 @@ export function createApp(deps: ServerDeps) {
     // a case-differing spelling on a case-insensitive filesystem cannot dodge
     // that PK — see its own doc comment in `workspace/projects.ts`).
     const real = await normalizeRoot(requested);
+
+    // Idempotent no-op: `requested` IS the boot project's own root
+    // (`.ai/specs/2026-08-15-duplicate-project-context-wipes-runs.md`). The boot project
+    // deliberately carries no row of its own in the registry (D3, `suppressBootRegistration`),
+    // so the `known` check below would find no match and fall through to `registerProject`,
+    // which would allocate a FRESH slug and append a SECOND registry row over the identical
+    // root — `ProjectContexts.build()` then opens a SECOND `RunStore` over the SAME
+    // `.ai/cezar/runs.json` the boot context's own store already owns. Two independent
+    // in-memory copies of one file do not observe each other's writes, and whichever flushes
+    // last (its own 300ms debounce, or shutdown) truncates the other's away — the reported
+    // data-loss bug. Resolve to the boot identity instead: no registry write, no team claim, no
+    // `project-added` event — it is not a new project.
+    if (real === (await normalizeRoot(bootRoot))) {
+      const entry = await registerProject(requested, source, {
+        id: await resolveBootProject(),
+        root: real,
+      });
+      const project: ProjectListEntry = { ...entry, status: 'ok' };
+      return { status: 200, body: { project } };
+    }
+
     let known = false;
     try {
       known = (await loadWorkspaceConfig()).projects.some((p) => p.root === real);

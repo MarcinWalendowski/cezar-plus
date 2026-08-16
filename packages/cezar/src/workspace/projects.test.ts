@@ -245,6 +245,45 @@ describe('workspace projects', () => {
       await registerProject(root);
       expect(readdirSync(root)).toEqual(['keep.txt']);
     });
+
+    /**
+     * The root cause of `.ai/specs/2026-08-15-duplicate-project-context-wipes-runs.md`: the boot
+     * project deliberately carries no row of its own (`suppressBootRegistration`, D3), so without
+     * the `bootProject` param this call would find no `existing` match and allocate a FRESH slug
+     * for a root that already has an identity — a SECOND registry row over the same root as the
+     * boot project, which later gets its own `RunStore` and truncates the boot store's writes.
+     *
+     * Mutation: drop the `bootProject` short-circuit (or the `bootProject.root === real`
+     * comparison) — this test then observes a fresh `web-2`-style slug and a
+     * `config.projects` array that grew by one, exactly the reported bug's registry shape.
+     */
+    it('registering the boot project\'s own root is idempotent: returns the boot identity, writes nothing', async () => {
+      const root = makeDir('boot-repo');
+      const before = (await loadWorkspaceConfig()).projects;
+
+      const entry = await registerProject(root, 'local', { id: 'boot-id', root });
+      expect(entry).toMatchObject({ id: 'boot-id', root, name: 'boot-repo', source: 'local' });
+
+      // No registry write at all — same array, same length, boot project still absent.
+      expect((await loadWorkspaceConfig()).projects).toEqual(before);
+      expect((await loadWorkspaceConfig()).projects).toHaveLength(0);
+    });
+
+    it('the boot-project short-circuit compares by realpath, like every other dedupe here', async () => {
+      const root = makeDir('boot-repo-2');
+      const entry = await registerProject(`${root}/`, 'local', { id: 'boot-id', root });
+      expect(entry.id).toBe('boot-id');
+      expect((await loadWorkspaceConfig()).projects).toHaveLength(0);
+    });
+
+    it('a root that is NOT the boot project registers normally even when a bootProject is given', async () => {
+      const bootRoot = makeDir('boot-repo-3');
+      const otherRoot = makeDir('other-repo-3');
+      const entry = await registerProject(otherRoot, 'local', { id: 'boot-id', root: bootRoot });
+      expect(entry.id).not.toBe('boot-id');
+      expect(entry.root).toBe(otherRoot);
+      expect((await loadWorkspaceConfig()).projects).toHaveLength(1);
+    });
   });
 
   describe('allocateProjectSlug', () => {
