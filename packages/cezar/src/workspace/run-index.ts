@@ -122,6 +122,11 @@ const MAX_ARCHIVED_PER_PROJECT = 500;
 
 function toSummary(run: z.infer<typeof runRecordSchema>): TrimmedRun {
   return {
+    // A WORKSPACE RUN, derived from the grant the record persists — the same one definition
+    // `runIndexEntry()` (`server/server.ts`) reads, so the two boards cannot drift. Deliberately
+    // NOT `worktree === false`: every workspace run is in-place, but so is every ordinary run
+    // someone turned the worktree off for.
+    workspace: run.workspaceProjects && run.workspaceProjects.length > 0 ? true : undefined,
     id: run.id,
     title: run.title,
     titleSummary: run.titleSummary,

@@ -122,6 +122,58 @@ describe('GET /api/v1/workspace/runs (W4.10)', () => {
     expect(body.runs.some((r) => r.project === 'default')).toBe(false);
   });
 
+  it('includes an UNREGISTERED boot project — the same gap `/workspace/runs-index` had', async () => {
+    // This board enumerated the registry too, so a boot repo outside it (a dedicated scaffold like
+    // `~/cezar/cockpit-boot`) contributed nothing — and since
+    // `.ai/specs/2026-08-15-cross-project-workspace-run.md` D1 that repo is where every WORKSPACE
+    // run's record lives. The mutation: drop `withBootProject`'s synthetic row, or stop calling it
+    // from `defaultRunIndex` — `boot-run` disappears while `other-run` stays, which is the bug.
+    const other = mkdtempSync(join(realpathSync(tmpdir()), 'cez-wsruns-unreg-'));
+    try {
+      const otherProject = await registerProject(other);
+      writeRuns(repoRoot, [runJson({ id: 'boot-run' })]);
+      writeRuns(other, [runJson({ id: 'other-run' })]);
+      // No `bootProjectId` and no `registerProject(repoRoot)`: the boot repo is genuinely
+      // unregistered, exactly as the owner's install has it.
+      const res = await apiRequest(makeApp(), '/api/v1/workspace/runs');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as WorkspaceRunsResponse;
+      expect(body.runs.map((r) => r.id).sort()).toEqual(['boot-run', 'other-run']);
+      // Under the slug the unregistered root falls back to — `bootProject` names the same one, so
+      // the row keys against a project the payload itself identifies.
+      expect(body.runs.find((r) => r.id === 'boot-run')?.project).toBe(body.bootProject);
+      expect(body.projects.map((p) => p.id).sort()).toEqual(
+        [body.bootProject, otherProject.id].sort(),
+      );
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('marks a workspace run over the wire, and only a workspace run', async () => {
+    const boot = await registerProject(repoRoot);
+    writeRuns(repoRoot, [
+      runJson({
+        id: 'ws',
+        worktree: false,
+        workspaceProjects: [{ id: 'api', name: 'API', root: '/repos/api', status: 'ok' }],
+      }),
+      // The control that decides the derivation: an ORDINARY in-place run. Reading the marker off
+      // `worktree === false` in `toSummary()` would mislabel this row — every workspace run is
+      // in-place, but not every in-place run is a workspace run. Hardcoding `true` fails here too.
+      runJson({ id: 'in-place', worktree: false, createdAt: '2026-08-01T00:00:01.000Z' }),
+    ]);
+    const app = makeApp({ bootProjectId: boot.id });
+
+    const res = await apiRequest(app, '/api/v1/workspace/runs');
+    const body = (await res.json()) as WorkspaceRunsResponse;
+
+    expect(body.runs.find((r) => r.id === 'ws')?.workspace).toBe(true);
+    const ordinary = body.runs.find((r) => r.id === 'in-place')!;
+    expect(ordinary.workspace).toBeUndefined();
+    expect(Object.keys(ordinary)).not.toContain('workspace');
+  });
+
   it('carries `stopReason` over the wire, so a budget-stopped run does not read as plain review (#25)', async () => {
     // Guard for #25: `workspaceRunSummarySchema` gained `stopReason`, but a schema field
     // nothing populates looks fixed and changes nothing. The mutation that must turn this red is

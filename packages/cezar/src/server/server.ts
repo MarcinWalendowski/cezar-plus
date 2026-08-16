@@ -167,6 +167,7 @@ import { withEnvPrefix } from '../core/shell-env.ts';
 import {
   allocateProjectSlug,
   clearProjectProbeCache,
+  isRegisteredRoot,
   listProjects,
   normalizeProjectTags,
   normalizeRoot,
@@ -6452,6 +6453,10 @@ export function createApp(deps: ServerDeps) {
     const usage = currentUsage(run.id);
     return {
     projectId,
+    // Derived from the grant the record already persists, never from a second definition: an
+    // in-place run (`worktree === false`) is NOT the same set — every workspace run is in-place,
+    // but so is every ordinary run someone ticked the worktree off for.
+    ...(run.workspaceProjects && run.workspaceProjects.length > 0 ? { workspace: true } : {}),
     id: run.id,
     title: run.title,
     ...(run.titleSummary !== undefined ? { titleSummary: run.titleSummary } : {}),
@@ -6496,6 +6501,15 @@ export function createApp(deps: ServerDeps) {
    * for anything this process already owns, disk otherwise) — and never `contexts.context()`,
    * which would build a context, prune worktrees and `recover()` running agents. Typing in a
    * search box must not resume work; see `runs/run-index.ts`.
+   *
+   * **The boot project is indexed whether or not it is REGISTERED.** `listProjects()` is the
+   * registry, and a boot repo can legitimately sit outside it — a dedicated scaffold like
+   * `~/cezar/cockpit-boot` is deliberately unregistered so it stays out of the sidebar and the
+   * composer's project pills. That was a harmless blind spot until
+   * `.ai/specs/2026-08-15-cross-project-workspace-run.md` D1 made the boot repo the home of every
+   * WORKSPACE run's record: from then on the board that shows "every project's tasks" showed none
+   * of the runs that span every project. So a synthetic boot row is appended below, guarded on
+   * `isRegisteredRoot` so a registered boot repo is still listed exactly once.
    */
   const runsIndexRoutes = new Hono()
     .get('/workspace/runs-index', async (c) => {
@@ -6509,7 +6523,28 @@ export function createApp(deps: ServerDeps) {
         // unreadable workspace — an empty index, never a 500. The palette degrades to the
         // active project's own run list, which it holds either way.
       }
+      // Resolved from the REGISTRY list, before the synthetic row joins it: `resolveBootProject`
+      // matches the boot root against what it is given, so appending first would let it match
+      // the row it is being asked to name.
       const bootId = await resolveBootProject(projects);
+      if (!(await isRegisteredRoot(projects, bootRoot))) {
+        // Status `ok`, not probed: `missing` is the one value the loop below skips, and this root
+        // is the folder the server is running in. `name` falls back to the slug for the same
+        // reason `probeRoot` is not called — an unregistered project has no registry name, and
+        // this row exists to carry runs, not to be displayed as a project.
+        projects = [
+          ...projects,
+          {
+            id: bootId,
+            root: bootRoot,
+            name: bootId,
+            addedAt: '',
+            lastOpenedAt: '',
+            source: 'local',
+            status: 'ok',
+          },
+        ];
+      }
       const runs: RunIndexEntry[] = [];
       const truncated: string[] = [];
       // Statuses the server already holds, shipped WITH the rows that carry the references. The

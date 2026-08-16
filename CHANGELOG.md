@@ -507,6 +507,39 @@
 
 ## 🐛 Fixes
 
+- 🐛 **Workspace runs had no surface on `/tasks` — the feature shipped, an hour earlier, showing
+  nothing.** A completed workspace run existed at `/p/cockpit-boot/tasks/26418912…` with all twelve
+  projects granted, and the board could not see it. Measured on the live cockpit before the fix:
+  `GET /api/v1/workspace/runs-index` answered **5 rows, none from the boot repo**, while three
+  finished workspace runs sat in its `runs.json`.
+
+  **One cause, two surfaces.** Both cross-project indexes (`/workspace/runs-index`, and the
+  `CEZ_WORKSPACE_VIEWS` board at `/workspace/runs`) enumerate `listProjects()` — the *registry* —
+  and a boot repo can legitimately sit outside it: `~/cezar/cockpit-boot` is a dedicated scaffold,
+  deliberately unregistered so it stays out of the sidebar and the composer's project pills. That
+  was a harmless blind spot until D1 of `.ai/specs/2026-08-15-cross-project-workspace-run.md` made
+  the boot repo the home of every workspace run's record. Both now receive a synthetic boot row,
+  guarded on a realpath match so a *registered* boot repo is still listed exactly once. Nothing
+  registers it: `GET /projects` is unchanged, and the sidebar and composer are untouched.
+
+  **A workspace run now reads as `Workspace`, not as `cockpit-boot`.** New optional
+  `workspace: true` on `RunIndexEntry` and `WorkspaceRunSummary`, derived server-side from the
+  `workspaceProjects` grant the record already persists — so there is one definition of "is a
+  workspace run" and no second one to drift. It qualifies `projectId` rather than replacing it; D1
+  calls the boot repo "a storage fact, not a scoping claim", and this is that made visible. The
+  label is applied at the join (`toGlobalTasks`), so the cell, the group-by-project heading and the
+  search text all follow from one line, and the cell renders a plain chip: a workspace run spans
+  every project, so there is no project home to link to. An ordinary run that genuinely lives in
+  the boot repo is untouched and still shows its project — the two group apart even though they
+  share a project id.
+
+  **Why the original verification passed.** Both of that spec's E2E passes ended at the run
+  *thread*, because the bug they were answering was "I tried to add a task and nothing happened".
+  Every claim they made is still true. But verifying that what you created is *reachable* is not
+  verifying it is *findable*, and no row in either table looked at a list. The spec's Verification
+  section now says so, and carries the eight guards added here with the mutation that turns each
+  one red.
+
 - 🐛 **`allowedTools` never restricted anything, on any backend — the docs said it did.** A workflow
   step's `allowedTools` / `bashAllowlist` reads like a per-step sandbox, and cezar implements it by
   passing `--allowedTools` to the Claude CLI. Measured against `claude` 2.1.224, in a scratch

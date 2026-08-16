@@ -54,6 +54,17 @@ export interface GlobalTask {
  *  tag it stores, so no real one can collide with it. */
 export const UNTAGGED = ' untagged'
 
+/** What a WORKSPACE run shows where every other row shows its project. Not a project name and not
+ *  a link: the run spans all of them, so there is no project home to go to. */
+export const WORKSPACE_LABEL = 'Workspace'
+
+/** The group-by-project key workspace runs bucket under. It has to be distinct from every project
+ *  id, because the boot repo can hold BOTH kinds of run: keyed on `projectId` alone, an ordinary
+ *  `cockpit-boot` run and a workspace run would land in one group whose heading is whichever
+ *  arrived first — a heading that is a coin flip. The leading space keeps it out of the reachable
+ *  id space (`PROJECT_ID_RE` allows no whitespace), the same trick `UNTAGGED` uses. */
+export const WORKSPACE_GROUP = ' workspace'
+
 /** How the table is grouped. `'none'` renders one flat list — the default, because a workspace
  *  small enough to read at a glance should not be pre-sorted into boxes. */
 export type GroupBy = 'none' | 'project' | 'tag' | 'status' | 'workflow'
@@ -150,6 +161,16 @@ export function canReset(state: Pick<GlobalTasksUrlState, 'filters' | 'groupBy'>
 /**
  * Join the index to the registry. Order is preserved — the server already sorts newest-first
  * across every project, and re-sorting here would only invent a second opinion about "recent".
+ *
+ * **A workspace run is labelled `Workspace`, not by its project** (`run.workspace`, from
+ * `.ai/specs/2026-08-15-cross-project-workspace-run.md` D1). Its record lives in the boot repo
+ * because a `RunManager` has to be bound to some repository — "a storage fact, not a scoping
+ * claim", in D1's own words — and the run is about every registered project, not that one. Doing
+ * it HERE rather than in the table cell is what makes the label first-class: the cell, the
+ * group-by-project heading and the search text all read `projectName`, so one line keeps them
+ * agreeing instead of three places deciding separately.
+ *
+ * An ordinary run that genuinely lives in the boot repo is untouched and still shows its project.
  */
 export function toGlobalTasks(
   runs: readonly RunIndexEntry[],
@@ -161,7 +182,7 @@ export function toGlobalTasks(
     return {
       run,
       project,
-      projectName: project?.name || run.projectId,
+      projectName: run.workspace ? WORKSPACE_LABEL : project?.name || run.projectId,
       tags: project?.tags ?? [],
     }
   })
@@ -298,7 +319,9 @@ export function groupGlobalTasks(tasks: readonly GlobalTask[], groupBy: GroupBy)
 
   for (const task of tasks) {
     if (groupBy === 'project') {
-      push(task.run.projectId, task.projectName, task)
+      // Key on the label's own source, not on `projectId`: a workspace run and an ordinary boot-repo
+      // run share a project id and are two different groups (see `WORKSPACE_GROUP`).
+      push(task.run.workspace ? WORKSPACE_GROUP : task.run.projectId, task.projectName, task)
     } else if (groupBy === 'status') {
       push(task.run.status, task.run.status, task)
     } else if (groupBy === 'workflow') {

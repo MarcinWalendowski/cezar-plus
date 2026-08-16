@@ -7,7 +7,7 @@ import { resolveCapabilities } from './capabilities.ts';
 import { queryZodValidator } from './validators.ts';
 import type { ProjectApiEnv } from './server.ts';
 import { WorkspaceRunIndex, type WorkspaceRunProjectSource } from '../workspace/run-index.ts';
-import { allocateProjectSlug, listProjects } from '../workspace/projects.ts';
+import { allocateProjectSlug, isRegisteredRoot, listProjects } from '../workspace/projects.ts';
 
 /**
  * The WORKSPACE RUNS family of `/api/v1/workspace` (F3 feature A, `CEZ_WORKSPACE_VIEWS=1`). See
@@ -20,9 +20,11 @@ import { allocateProjectSlug, listProjects } from '../workspace/projects.ts';
  *
  * **READ never instantiates.** This file never imports `../server/project-context.ts`,
  * `../runs/store.ts` or `../workflows/run.ts` — the same invariant `run-index.ts` guards
- * structurally (`run-index.test.ts`'s C2). `deps.runIndex` defaults to a fresh
- * `WorkspaceRunIndex` built from the plain, already-exported `listProjects()` registry lookup
- * (`../workspace/projects.ts`) — functionally identical to the workspace-level singleton at
+ * structurally (`run-index.test.ts`'s C2). `deps.runIndex` defaults to a lazily built
+ * `WorkspaceRunIndex` over the plain, already-exported `listProjects()` registry lookup
+ * (`../workspace/projects.ts`) **plus a synthetic row for an unregistered boot project** — see
+ * `withBootProject` below for why the registry alone is not the whole workspace. Otherwise
+ * functionally identical to the workspace-level singleton at
  * `ProjectContexts.runIndex` (W3.1), since both ultimately read the same `~/.cezar/config.json`
  * through the same function. It is a SEPARATE cache instance rather than the shared one: this
  * family's own `server.ts` mount line (`createWorkspaceRunsRoutes()`) is scaffold-owned (W1.1) and
@@ -48,8 +50,9 @@ import { allocateProjectSlug, listProjects } from '../workspace/projects.ts';
  */
 
 export interface WorkspaceRunsRouteDeps {
-  /** Defaults to a fresh `WorkspaceRunIndex` reading the real registry (see the module doc).
-   *  Injected so tests hand it a hermetic fixture instead of `~/.cezar`. */
+  /** Defaults to a `WorkspaceRunIndex` reading the real registry plus the boot project (see the
+   *  module doc and `withBootProject`). Injected so tests hand it a hermetic fixture instead of
+   *  `~/.cezar` — an injected index supplies its own project list, boot row included or not. */
   runIndex?: WorkspaceRunIndex;
   /** Defaults to a standalone re-derivation of `server.ts`'s own `resolveBootProject()`, given
    *  THIS request's boot root. Injected so a test can pin the answer without registering a
@@ -71,10 +74,38 @@ function toRunIndexSource(project: { id: string; root: string; status: 'ok' | 'm
   return { id: project.id, root: project.root, status: project.status, name: project.name || '' };
 }
 
-function defaultRunIndex(): WorkspaceRunIndex {
-  return new WorkspaceRunIndex({
-    listProjects: async () => (await listProjects()).map(toRunIndexSource),
-  });
+/**
+ * The registry, plus the BOOT project when the registry does not already hold it.
+ *
+ * Same gap and same fix as `GET /workspace/runs-index` (`server.ts`): a boot repo can legitimately
+ * sit outside the registry — a dedicated scaffold like `~/cezar/cockpit-boot` is deliberately
+ * unregistered so it stays out of the sidebar and the composer's pills — and since
+ * `.ai/specs/2026-08-15-cross-project-workspace-run.md` D1 that repo is where every WORKSPACE run's
+ * record lives. Without this row the board that exists to show every project's runs is blind to
+ * the only runs that span every project.
+ *
+ * `isRegisteredRoot` is what keeps a REGISTERED boot repo listed once. `dedupeByRoot` inside
+ * `WorkspaceRunIndex` is the second net — it exists for exactly this synthetic row (see its
+ * comment) — but it collapses on `resolve()`, not on the realpath, so `/tmp/x` against a stored
+ * `/private/tmp/x` would slip past it. The explicit check is the one that actually holds.
+ */
+function withBootProject(bootRoot: string, resolveBoot: (root: string) => Promise<string>) {
+  return async (): Promise<WorkspaceRunProjectSource[]> => {
+    const registry = await listProjects();
+    const sources = registry.map(toRunIndexSource);
+    if (await isRegisteredRoot(registry, bootRoot)) return sources;
+    const id = await resolveBoot(bootRoot);
+    // `status: 'ok'` rather than a probe: `missing` is the only value the index treats as
+    // unreadable, and this is the folder the server is running in.
+    return [...sources, { id, root: bootRoot, status: 'ok', name: id }];
+  };
+}
+
+function defaultRunIndex(
+  bootRoot: string,
+  resolveBoot: (root: string) => Promise<string>,
+): WorkspaceRunIndex {
+  return new WorkspaceRunIndex({ listProjects: withBootProject(bootRoot, resolveBoot) });
 }
 
 /** The standalone twin of `server.ts`'s `resolveBootProject()`: match `bootRoot` against the
@@ -101,8 +132,19 @@ function parseProjectsFilter(raw: string | undefined): string[] | undefined {
 }
 
 export function createWorkspaceRunsRoutes(deps: WorkspaceRunsRouteDeps = {}) {
-  const runIndex = deps.runIndex ?? defaultRunIndex();
   const resolveBoot = deps.resolveBootProject ?? defaultResolveBootProject;
+  // Built on first use, then KEPT: the `mtimeMs`+`size` cache inside `WorkspaceRunIndex` is the
+  // whole reason it must not be rebuilt per request. It cannot be built at construction time any
+  // more, because the row it appends is the boot root's and that root arrives per request
+  // (`c.get('project').root`) — see the module doc on why this file cannot reach `server.ts`'s own
+  // closure. Keyed on the root rather than assumed constant so a second boot root, if one ever
+  // reached the same routes object, gets its own index instead of the first one's boot row.
+  let cached: { root: string; index: WorkspaceRunIndex } | undefined;
+  const indexFor = (bootRoot: string): WorkspaceRunIndex => {
+    if (deps.runIndex) return deps.runIndex;
+    if (cached?.root !== bootRoot) cached = { root: bootRoot, index: defaultRunIndex(bootRoot, resolveBoot) };
+    return cached.index;
+  };
 
   return new Hono<ProjectApiEnv>().get(
     '/workspace/runs',
@@ -116,7 +158,8 @@ export function createWorkspaceRunsRoutes(deps: WorkspaceRunsRouteDeps = {}) {
         return c.json({ error: `invalid projects query: at most ${MAX_PROJECTS_FILTER} ids` }, 400);
       }
 
-      const bootProject = await resolveBoot(c.get('project').root);
+      const bootRoot = c.get('project').root;
+      const bootProject = await resolveBoot(bootRoot);
 
       // D19/D4: off (or CEZ_SINGLE_PROJECT=1, which reports the capability false) ⇒ 200 with a
       // schema-valid empty payload, never 404 and never 409 on a read. `bootProject` still names
@@ -127,7 +170,11 @@ export function createWorkspaceRunsRoutes(deps: WorkspaceRunsRouteDeps = {}) {
         return c.json(body);
       }
 
-      const result = await runIndex.list({ projects, view: query.view, limit: query.limit });
+      const result = await indexFor(bootRoot).list({
+        projects,
+        view: query.view,
+        limit: query.limit,
+      });
       const body: WorkspaceRunsResponse = { ...result, bootProject };
       return c.json(body);
     },

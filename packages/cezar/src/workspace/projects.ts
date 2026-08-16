@@ -161,6 +161,32 @@ export async function normalizeRoot(root: string): Promise<string> {
   }
 }
 
+/**
+ * Is `root` already one of `projects`? The question every CROSS-PROJECT INDEX has to ask before it
+ * appends a synthetic row for the boot project.
+ *
+ * Both indexes (`GET /workspace/runs-index`, `GET /workspace/runs`) enumerate this registry, so a
+ * boot repo that was never registered contributes nothing — and since
+ * `.ai/specs/2026-08-15-cross-project-workspace-run.md` D1 the boot repo is where every WORKSPACE
+ * run's record lives. A dedicated boot scaffold (`~/cezar/cockpit-boot`) is exactly that case: it
+ * is deliberately unregistered, so it stays out of the sidebar and the composer's project pills.
+ * The fix is to hand each index the boot project as an extra source; this is the guard that keeps a
+ * REGISTERED boot repo from then being listed twice.
+ *
+ * Compared on the realpath, not the literal string, because that is the spelling the registry
+ * stores (`normalizeRoot`, at `registerProject` time) while a boot root arrives as whatever
+ * `--repo`/cwd handed the process — `/tmp/x` against a stored `/private/tmp/x` is the ordinary case
+ * on macOS, not an edge one. The raw spelling is compared too, matching `resolveBootProject`'s own
+ * match in `server.ts`.
+ */
+export async function isRegisteredRoot(
+  projects: readonly { root: string }[],
+  root: string,
+): Promise<boolean> {
+  const real = await normalizeRoot(root);
+  return projects.some((project) => project.root === real || project.root === root);
+}
+
 /** True when `path` sits inside a cezar task worktree (`…/.ai/cezar/worktrees/…`). */
 function isInsideTaskWorktree(path: string): boolean {
   const marker = `${sep}.ai${sep}cezar${sep}worktrees${sep}`;

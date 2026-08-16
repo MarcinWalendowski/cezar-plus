@@ -5,7 +5,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { RunsIndexResponse } from '@open-mercato/cezar-contract';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
-import { clearProjectProbeCache, listProjects, registerProject } from '../workspace/projects.ts';
+import {
+  allocateProjectSlug,
+  clearProjectProbeCache,
+  listProjects,
+  registerProject,
+} from '../workspace/projects.ts';
 import { ProjectContexts } from './project-context.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp, type ServerDeps } from './server.ts';
@@ -96,6 +101,76 @@ describe('workspace runs index API', () => {
     expect(body.runs.map((run) => run.id)).toEqual(['cold-1', live.id]);
     expect(body.runs.map((run) => run.projectId)).toEqual([other.id, boot.id]);
     expect(body.truncated).toEqual([]);
+  });
+
+  it('indexes the boot project even when it is NOT registered — where workspace runs live', async () => {
+    // The reported bug. `~/cezar/cockpit-boot` is a dedicated scaffold, deliberately unregistered
+    // so it stays out of the sidebar and the composer's project pills — and this route enumerates
+    // the REGISTRY, so its runs never appeared on `/tasks` at all. Harmless until
+    // `.ai/specs/2026-08-15-cross-project-workspace-run.md` D1 made the boot repo the home of every
+    // WORKSPACE run's record; from then on the board that shows every project's tasks showed none
+    // of the runs that span every project.
+    //
+    // The mutation: drop the synthetic boot row from `runsIndexRoutes`. The boot run below
+    // vanishes, which is the bug exactly as it was reported.
+    const other = await registerProject(otherRoot);
+    const live = store.createRun({ title: 'Workspace task', workflow: 'build', task: 't', steps: [] });
+    seedColdProject(otherRoot, [
+      storedRun({ id: 'cold-1', title: 'Cold task', createdAt: '2026-07-01T10:00:00Z' }),
+    ]);
+
+    const body = await getIndex();
+
+    const bootRow = body.runs.find((run) => run.id === live.id);
+    expect(bootRow).toBeDefined();
+    // Named by the slug an unregistered root would be allocated — the same fallback
+    // `resolveBootProject()` already uses, so the row keys and fetches like any other.
+    expect(bootRow?.projectId).toBe(allocateProjectSlug(repoRoot, [other.id]));
+    // The registered project is unaffected: this adds a source, it does not replace the registry.
+    expect(body.runs.map((run) => run.id)).toContain('cold-1');
+  });
+
+  it('lists a REGISTERED boot project once, not twice', async () => {
+    // The other half of the same change. The mutation: remove the `isRegisteredRoot` guard, so the
+    // synthetic row is appended on top of the registry's own and every boot run is indexed twice.
+    const boot = await registerProject(repoRoot);
+    const live = store.createRun({ title: 'Boot task', workflow: 'build', task: 't', steps: [] });
+
+    const body = await getIndex();
+
+    expect(body.runs.filter((run) => run.id === live.id)).toHaveLength(1);
+    expect(body.runs[0]?.projectId).toBe(boot.id);
+  });
+
+  it('marks a workspace run — and nothing else, including an ordinary in-place run', async () => {
+    await registerProject(repoRoot);
+    await registerProject(otherRoot);
+    seedColdProject(otherRoot, [
+      storedRun({
+        id: 'ws',
+        title: 'Bump the lint rule everywhere',
+        createdAt: '2026-07-15T10:00:00Z',
+        worktree: false,
+        workspaceProjects: [{ id: 'api', name: 'API', root: '/repos/api', status: 'ok' }],
+      }),
+      // The negative control that decides the derivation. Reading the marker off
+      // `worktree === false` would satisfy every other assertion here and still mislabel this row:
+      // every workspace run is in-place, but not every in-place run is a workspace run.
+      storedRun({
+        id: 'in-place',
+        title: 'Plain in-place run',
+        createdAt: '2026-07-15T09:00:00Z',
+        worktree: false,
+      }),
+    ]);
+
+    const body = await getIndex();
+
+    expect(body.runs.find((run) => run.id === 'ws')?.workspace).toBe(true);
+    // Absent, not `false` — and hardcoding `true` fails right here.
+    const ordinary = body.runs.find((run) => run.id === 'in-place')!;
+    expect(ordinary.workspace).toBeUndefined();
+    expect(Object.keys(ordinary)).not.toContain('workspace');
   });
 
   it('never builds a project context — a search must not resume agents', async () => {

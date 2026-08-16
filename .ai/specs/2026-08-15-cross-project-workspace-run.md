@@ -52,7 +52,7 @@ A **workspace run**: an in-place run in the boot project, granted every register
 
 | Decision | Value | Why |
 |---|---|---|
-| **D1** Where the record lives | The boot project's `runs.json` | Every `RunManager` is bound to a repository, and the boot repo is the one every workspace-level pass already uses. A storage fact, not a scoping claim. |
+| **D1** Where the record lives | The boot project's `runs.json` | Every `RunManager` is bound to a repository, and the boot repo is the one every workspace-level pass already uses. A storage fact, not a scoping claim. **CORRECTED 2026-08-16 — this shipped with no board surface at all.** Both cross-project indexes enumerate `listProjects()`, the *registry*, and a boot repo can legitimately sit outside it: `~/cezar/cockpit-boot` is a dedicated scaffold, deliberately unregistered so it stays out of the sidebar and the composer's pills. So *every* workspace run was invisible on `/tasks` — a benign blind spot the moment D1 made that repo the home of every workspace run. Fixed by handing both indexes a synthetic boot row (`isRegisteredRoot` keeps a registered boot repo listed once), and a workspace run now renders as a **Workspace** chip rather than as `cockpit-boot`: D1's own "storage fact, not a scoping claim", made visible. `runIndexEntry.workspace` / `WorkspaceRunSummary.workspace`, derived from `workspaceProjects` (**D5**) so there is no second definition to drift. |
 | **D2** cwd | The boot root (`~/cezar/cockpit-boot` on the owner's install — an empty scaffold repo) | A neutral cwd containing none of the work, so no project is accidentally privileged. The agent works by absolute path. |
 | **D3** Access | `--add-dir` per granted root, deduped by containment | Registering a parent and its children is normal, not an edge case: 12 registered roots collapse to 2 on the owner's workspace. Passing all 12 would work but claims precision the grant does not have. |
 | **D4** Worktree | Forced `false`, server-side, not offered | There is no single repo to branch. Consequence, stated rather than discovered: an in-place run takes the boot repo's exclusive-tree lease, so **one workspace run at a time** — correct, since two agents editing the same checkouts concurrently is a hazard, not throughput. |
@@ -161,6 +161,52 @@ Every guard names the mutation that must turn it red.
 
 Gates: `npm run typecheck`, `npm test` (**8177 passed / 443 files**), `npm run test:unit`,
 `npm run build`, `npm run test:package` — all green 2026-08-16, judged by exit code.
+
+### The gap this verification missed, and why (added 2026-08-16)
+
+**Nothing above looks at a board.** Both E2E passes ended at the run thread — the API pass
+navigated to `/p/cockpit-boot/tasks/15cdbad4…`, the browser pass to `…/be176a55…` — because the
+reported bug was *"I tried to add a task and nothing happened"*, and the thread existing is what
+answers it. Every claim in both tables is still true. But a run can exist, be reachable by its own
+URL, and appear on **no list**, and no row above would notice: the closest, *"Not scoped to a
+project — response `project: "cockpit-boot"`"*, reads the POST response, not the index. So a
+feature shipped with no surface on `/tasks`, and D1 above implied the opposite without ever having
+been checked. The lesson is narrow and repeatable: **verifying the thing you created is reachable
+is not the same as verifying it is findable.** A feature that produces rows owes its list a check.
+
+Confirmed against the live cockpit before the fix: `GET /api/v1/workspace/runs-index` answered
+**5 rows, none from `cockpit-boot`** while three completed workspace runs sat in its `runs.json`.
+
+| Guard | File | Mutation |
+|---|---|---|
+| An unregistered boot project's runs appear in the index | `server/runs-index-api.test.ts` | Drop the synthetic row — the run vanishes, reproducing the reported bug — **verified red** |
+| A **registered** boot project is not listed twice | same | Remove the `isRegisteredRoot` check — **verified red** (3 tests, including two pre-existing ones) |
+| `workspace: true` only for runs carrying `workspaceProjects` | same | Hardcode `true`, or derive from `worktree === false` (which every in-place run shares) — **verified red**. The fixture carries an ordinary `worktree: false` run as the control |
+| The same, on the `CEZ_WORKSPACE_VIEWS` board | `server/workspace-runs-api.test.ts` | Drop `withBootProject`'s row / derive from `worktree` in `toSummary` — **verified red, both** |
+| `toGlobalTasks` labels a workspace run `Workspace` | `web/lib/global-tasks.test.ts` | Return `projectName: run.projectId` — grouping silently reverts to `cockpit-boot` — **verified red** |
+| An ordinary boot-repo run still shows `cockpit-boot` | same | Label every boot run `Workspace` — **verified red** |
+| The two group apart under group-by-project | same | Key the group on `projectId` alone — the heading becomes whichever row arrived first — **verified red** |
+| The cell renders a chip, not a project link | `web/routes/global-tasks.test.tsx` | Restore the `<Link>` — **verified red** |
+
+Gates re-run 2026-08-16 after the fix: `npm run typecheck`, `npm test` (**8186 passed / 443
+files**), `npm run test:unit`, `npm run build`, `npm run test:package` — all green, by exit code.
+
+### Executed — runtime E2E of the board fix (2026-08-16)
+
+Rebuilt, checked for live runs (none), restarted the cockpit on `localhost:4321` against
+`~/cezar/cockpit-boot`.
+
+| Claim | Result |
+|---|---|
+| The index carries the boot repo's runs | 5 rows → **8**; `26418912`, `be176a55`, `15cdbad4` all present with `workspace: true` |
+| The twelve registered projects are unaffected | Same 5 rows as before, same projects, `truncated: []` |
+| The registry itself is untouched | `GET /projects` still 12, `cockpit-boot` still **not** among them; sidebar and composer pills unchanged |
+| The board shows them | `/tasks` reads **8 of 8**, the three workspace runs at the top |
+| Rendered as `Workspace`, not as a project | Chip is a `SPAN` with no ancestor `<a>`; ordinary rows keep their `A` → `/p/black/`, `/p/anymail-mcp/` … |
+| The thread is still reachable | Clicking the reported run opened `/p/cockpit-boot/tasks/26418912…` — the run that started this |
+| Group-by-project buckets them apart | A **WORKSPACE 4** heading over the four workspace runs; `BLACK 2`, `ANYMAIL-MCP 1`, `CHAT 1`, `MW-SITE 1` below |
+| **Visible WHILE running, not only once finished** | A new workspace run started from the composer (`?scope=auto` opened on the Workspace pill) appeared on `/tasks` at `running` with live CPU 30% / 451 MB, then settled to `done` |
+| The probe changed nothing | Read-only task; `git status --porcelain` in the boot repo and `black` showed only the pre-existing untracked `.ai/`, and this repo's working tree held only this change's own 12 files |
 
 ### Executed — runtime E2E
 

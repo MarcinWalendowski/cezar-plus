@@ -360,6 +360,20 @@ export type ApiRun = z.infer<typeof apiRunSchema>;
 export const runIndexEntrySchema = z.object({
   /** The registered project this run belongs to. Joins against `GET /projects`. */
   projectId: z.string(),
+  /**
+   * A WORKSPACE RUN (`.ai/specs/2026-08-15-cross-project-workspace-run.md`) — one run granted every
+   * registered project root, whose record happens to live in the boot project's `runs.json`.
+   *
+   * It QUALIFIES `projectId` rather than replacing it: D1's storage fact stays true, and the row
+   * still needs a project to be keyed and fetched by. What it says is that `projectId` is not a
+   * scoping claim here, so a cross-project board must not present the boot repo as the work's home.
+   *
+   * Derived server-side from `RunRecord.workspaceProjects` — the field the record already
+   * persists — so there is exactly one definition of "is a workspace run" and no second one to
+   * drift. Absent (never `false`) on an ordinary run, including an ordinary run that genuinely
+   * lives in the boot repo.
+   */
+  workspace: z.boolean().optional(),
   id: z.string(),
   title: z.string(),
   titleSummary: z.string().optional(),

@@ -5,6 +5,8 @@ import type { ProjectListEntry, RunIndexEntry } from '@open-mercato/cezar-api-cl
 import {
   NO_FILTERS,
   UNTAGGED,
+  WORKSPACE_GROUP,
+  WORKSPACE_LABEL,
   activeFacetCount,
   allStatuses,
   canReset,
@@ -99,6 +101,50 @@ describe('toGlobalTasks', () => {
 
   it('preserves the server’s newest-first order rather than inventing its own', () => {
     expect(ids(tasks)).toEqual(['a1', 'w1', 'i1', 'l1', 'old'])
+  })
+})
+
+/**
+ * A WORKSPACE run (`.ai/specs/2026-08-15-cross-project-workspace-run.md`) is stored in the boot
+ * project's `runs.json` because a `RunManager` has to be bound to a repository — "a storage fact,
+ * not a scoping claim", D1's own words. It is about every registered project, so the board must
+ * not present the boot repo as its home.
+ */
+describe('workspace runs', () => {
+  // The owner's own install: the boot repo is a dedicated, unregistered scaffold, so it has no
+  // registry row at all — which is why nothing here appears in `PROJECTS`.
+  const workspaceRun = run({ id: 'ws', projectId: 'cockpit-boot', title: 'Bump the lint rule', workspace: true })
+  const bootRun = run({ id: 'boot', projectId: 'cockpit-boot', title: 'Tidy the scaffold' })
+
+  it('labels a workspace run `Workspace` rather than the repo its record lives in', () => {
+    // The mutation: `projectName: project?.name || run.projectId`, ignoring `run.workspace`. The
+    // cell, this label and the group-by-project heading all read this one field, so reverting it
+    // silently puts `cockpit-boot` back in all three.
+    const [task] = toGlobalTasks([workspaceRun], PROJECTS)
+    expect(task?.projectName).toBe(WORKSPACE_LABEL)
+  })
+
+  it('leaves an ORDINARY run that lives in the boot repo showing its own project', () => {
+    // The control that keeps the label from becoming "anything in the boot repo": labelling every
+    // boot-repo row `Workspace` fails here. Unregistered, so it falls back to the raw id exactly
+    // as any other unknown project does.
+    const [task] = toGlobalTasks([bootRun], PROJECTS)
+    expect(task?.projectName).toBe('cockpit-boot')
+  })
+
+  it('groups the two apart, even though they share a project id', () => {
+    // Keyed on `projectId` alone the two would land in one group whose heading is whichever row
+    // arrived first — a heading decided by a coin flip. The mutation: drop the `run.workspace`
+    // branch from `groupGlobalTasks`.
+    const groups = groupGlobalTasks(toGlobalTasks([workspaceRun, bootRun], PROJECTS), 'project')
+    // Sorted by key for the assertion: the two are the same size, so their ORDER is the module's
+    // ordinary size-then-label tie-break and not what this test is about.
+    expect(
+      groups.map((group) => [group.key, group.label, ...group.tasks.map((task) => task.run.id)]).sort(),
+    ).toEqual([
+      [WORKSPACE_GROUP, WORKSPACE_LABEL, 'ws'],
+      ['cockpit-boot', 'cockpit-boot', 'boot'],
+    ].sort())
   })
 })
 

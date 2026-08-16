@@ -26,6 +26,10 @@ export const workspaceRunSummarySchema = z.object({
   /** Canonical registry slug. The boot project appears under its OWN slug (via
    *  `resolveBootProject()`), never the reserved `'default'` alias. */
   project: z.string(),
+  /** A WORKSPACE RUN — the same marker `runIndexEntrySchema.workspace` carries, derived from the
+   *  same `RunRecord.workspaceProjects`, so both cross-project boards render the same chip from
+   *  one definition. Qualifies `project` rather than replacing it; see that field's own note. */
+  workspace: z.boolean().optional(),
   id: z.string(),
   title: z.string(),
   titleSummary: z.string().optional(),

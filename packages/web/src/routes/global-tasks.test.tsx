@@ -272,6 +272,56 @@ describe('global tasks page', () => {
     )
   })
 
+  it('shows a workspace run as a chip with no project link, and still reaches its thread', async () => {
+    // A WORKSPACE run (`.ai/specs/2026-08-15-cross-project-workspace-run.md`) is stored in the boot
+    // project because a `RunManager` must be bound to a repository — a storage fact, not a scoping
+    // claim. Every other row's project name leads to that project's home; this one spans them all,
+    // so `/p/cockpit-boot/` would be a destination that means nothing.
+    //
+    // The mutation: restore the unconditional `<Link to={scopeTo(run.projectId, '/')}>`. The chip
+    // becomes a link to a project the run is not about — and, because it would then be found by
+    // role `link`, `getByRole` below turns red rather than merely reading differently.
+    stubFetch({
+      runs: [
+        {
+          projectId: 'cockpit-boot',
+          id: 'ws1',
+          title: 'Bump the lint rule everywhere',
+          status: 'done',
+          createdAt: '2026-07-14T11:00:00Z',
+          archived: false,
+          workflow: 'quick-task',
+          workspace: true,
+        },
+        // The control: an ordinary run in the SAME repo. It keeps its project link, so the chip is
+        // about the run's kind and not about which folder the record happens to sit in.
+        {
+          projectId: 'cockpit-boot',
+          id: 'boot1',
+          title: 'Tidy the scaffold',
+          status: 'done',
+          createdAt: '2026-07-14T10:30:00Z',
+          archived: false,
+          workflow: 'quick-task',
+        },
+      ],
+    })
+    renderPage()
+
+    await screen.findByText('Bump the lint rule everywhere')
+    const chip = document.querySelector('[data-slot="workspace-chip"]')!
+    expect(chip.textContent).toBe('Workspace')
+    expect(chip.closest('a')).toBeNull()
+    // Exactly one project link in the table, and it belongs to the ordinary row.
+    expect(screen.getByRole('link', { name: 'cockpit-boot' }).getAttribute('href')).toBe(
+      '/p/cockpit-boot/',
+    )
+    // The row's own link is untouched — the thread is where the work is.
+    expect(
+      screen.getByRole('link', { name: 'Bump the lint rule everywhere' }).getAttribute('href'),
+    ).toBe('/p/cockpit-boot/tasks/ws1')
+  })
+
   it('filters by tag across projects, and toggles back off', async () => {
     stubFetch()
     renderPage()

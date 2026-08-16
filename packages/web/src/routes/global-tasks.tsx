@@ -903,9 +903,25 @@ function TaskRow({
       </td>
       {showProject ? (
         <td className={cn(TD_BASE, 'text-[12.5px] text-muted-foreground')}>
-          <Link to={scopeTo(run.projectId, '/')} className="truncate hover:text-foreground">
-            {task.projectName}
-          </Link>
+          {run.workspace ? (
+            // A chip, deliberately NOT a link. Every other row's project name leads to that
+            // project's home; a workspace run spans all of them, so there is no home to lead to
+            // and `/p/cockpit-boot/` would be a destination that means nothing — the boot repo is
+            // where the record is stored, not what the run is about. The row's title link still
+            // opens the run thread, which is where the work is.
+            <span
+              data-slot="workspace-chip"
+              title="Workspace run — granted every registered project"
+              className="inline-flex max-w-full items-center gap-1 truncate rounded-full bg-muted px-1.5 py-px text-[10.5px] font-medium text-muted-foreground"
+            >
+              <LayersIcon className="size-3 shrink-0" aria-hidden="true" />
+              {task.projectName}
+            </span>
+          ) : (
+            <Link to={scopeTo(run.projectId, '/')} className="truncate hover:text-foreground">
+              {task.projectName}
+            </Link>
+          )}
         </td>
       ) : null}
       <td className={cn(TD_BASE, 'hidden xl:table-cell')}>
