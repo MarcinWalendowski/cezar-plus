@@ -1,6 +1,6 @@
 # Every Claude session runs in bypass permission mode
 
-> **Status:** draft · **Date:** 2026-08-15 · **Owner decision:** yes — "all claude sessions should
+> **Status:** **implemented, QA Needed** (corrected 2026-08-16 — was stale-marked `draft`; shipped in commit `7e166fb3` on 2026-08-15, verified 2026-08-16 matching this spec 1:1 with the full gate green and the `CEZ_APPROVAL_GATE=1`-still-bypasses negative control mutation-checked red. Runtime E2E — a real cockpit run needing an unlisted tool proceeding with no permission stop — still outstanding.) · **Date:** 2026-08-15 · **Owner decision:** yes — "all claude sessions should
 > be run in bypass permission mode", and, asked whether to keep an escape hatch, "bypass always,
 > drop the gate".
 
