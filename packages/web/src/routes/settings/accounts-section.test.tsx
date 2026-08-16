@@ -9,7 +9,7 @@ import type {
   AgentProfile,
   AgentProfilesResponse,
   DiscoveredAgentAccount,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { AppRoutes } from '@/routes'
 

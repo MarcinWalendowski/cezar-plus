@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { type WorkspaceTodosResponse } from '@open-mercato/cezar-contract';
+import { type WorkspaceTodosResponse } from '@loki-labs/better-cezar-contract';
 import type { ProjectApiEnv } from './server.ts';
 import { WorkspaceTodoIndex, type WorkspaceTodoProjectSource } from '../workspace/todo-index.ts';
 import { listProjects } from '../workspace/projects.ts';

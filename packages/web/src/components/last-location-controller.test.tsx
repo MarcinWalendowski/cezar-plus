@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
 import { workspaceQueryKeys } from '@/api/queries'
-import type { ProjectsResponse, WorkspaceLastLocation } from '@open-mercato/cezar-api-client'
+import type { ProjectsResponse, WorkspaceLastLocation } from '@loki-labs/better-cezar-api-client'
 import { LAST_LOCATION_STORAGE_KEY } from '@/lib/last-location'
 import { LastLocationController } from './last-location-controller'
 

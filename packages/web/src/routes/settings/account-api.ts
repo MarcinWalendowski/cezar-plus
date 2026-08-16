@@ -1,4 +1,4 @@
-import { getApiBaseUrl } from '@open-mercato/cezar-api-client'
+import { getApiBaseUrl } from '@loki-labs/better-cezar-api-client'
 
 import { ApiError } from '@/api/client'
 import { isJsonResponse } from '@/routes/onboarding/onboarding-api'

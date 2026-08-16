@@ -1,7 +1,7 @@
 import { ChevronDownIcon, SettingsIcon } from 'lucide-react'
 import { Link } from '@/lib/project-router'
 
-import type { BackendCheck, HealthResponse } from '@open-mercato/cezar-api-client'
+import type { BackendCheck, HealthResponse } from '@loki-labs/better-cezar-api-client'
 import { StatusDot } from '@/components/status-dot'
 import {
   DropdownMenu,

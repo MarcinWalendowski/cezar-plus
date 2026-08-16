@@ -1,6 +1,6 @@
 import { useMemo, type ReactNode } from 'react'
 
-import type { ApiRun } from '@open-mercato/cezar-api-client'
+import type { ApiRun } from '@loki-labs/better-cezar-api-client'
 
 import { groupThreadItems, type ThreadBlock } from './thread-groups'
 import {

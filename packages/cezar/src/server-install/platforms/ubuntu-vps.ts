@@ -778,7 +778,7 @@ export function parseSystemdEnvironmentProperty(showOutput: string): NodeJS.Proc
 /**
  * **Upgrade safety for a host installed BEFORE D1's boot gate existed.** ADDED 2026-08-07.
  *
- * The released `@open-mercato/cezar` 0.9.2 installer wrote a unit carrying `Environment=CEZ_REMOTE=1`
+ * The released `@loki-labs/better-cezar` 0.9.2 installer wrote a unit carrying `Environment=CEZ_REMOTE=1`
  * and `Environment=PATH=…` and nothing else. D1's gate then shipped, refusing to boot a hosted
  * deployment that names neither `CEZ_AUTH` nor `CEZ_ALLOW_UNAUTHENTICATED` — and D1's amendment 2
  * added the flag to `systemdUnit` so a FRESH install is fine. It never reaches an existing host on

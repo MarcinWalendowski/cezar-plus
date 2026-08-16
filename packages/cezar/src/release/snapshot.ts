@@ -9,7 +9,7 @@
  *
  *  Deliberately name-agnostic: package names come from the checked-out manifests
  *  at call time, never from constants — so the `@pat-lewczuk/cezar` →
- *  `@open-mercato/cezar` rename (PR #501) lands independently of this pipeline.
+ *  `@loki-labs/better-cezar` rename (PR #501) lands independently of this pipeline.
  */
 
 import { stampManifestSet, type ReleaseManifests as ReleaseManifestSet } from './manifests.ts';

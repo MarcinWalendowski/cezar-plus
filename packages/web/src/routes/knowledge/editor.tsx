@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-import type { KnowledgeDocument } from '@open-mercato/cezar-api-client'
+import type { KnowledgeDocument } from '@loki-labs/better-cezar-api-client'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'

@@ -1,6 +1,6 @@
 import type { ExtractSchema } from 'hono/types';
 import { describe, expect, it } from 'vitest';
-import { setWorkspaceUiStateInputSchema } from '@open-mercato/cezar-contract';
+import { setWorkspaceUiStateInputSchema } from '@loki-labs/better-cezar-contract';
 import type { z } from 'zod';
 import type { AppType } from './app-type.ts';
 
@@ -67,8 +67,6 @@ describe('every mutating route carries a typed body into AppType', () => {
     Assert<HasTypedBody<'/api/v1/ui-state', '$put'>>,
     Assert<HasTypedBody<'/api/v1/workspace/config', '$put'>>,
     Assert<HasTypedBody<'/api/v1/workspace/ui-state', '$put'>>,
-    Assert<HasTypedBody<'/api/v1/workspace/skills-update/check', '$post'>>,
-    Assert<HasTypedBody<'/api/v1/workspace/skills-update/apply', '$post'>>,
 
     // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`), inert families:
     // every route below answers only a 409 today (D19) — the assertion is about the BODY reaching
@@ -86,6 +84,11 @@ describe('every mutating route carries a typed body into AppType', () => {
     Assert<HasTypedBody<'/api/v1/workspace/notifications', '$put'>>,
     Assert<HasTypedBody<'/api/v1/workspace/notifications/transports', '$post'>>,
     Assert<HasTypedBody<'/api/v1/workspace/notifications/transports/:id', '$put'>>,
+    // `POST /api/v1/backup/restore` declares its typed body from the scaffold on
+    // (`backupRestoreInputSchema`), even while the handler is inert — spec
+    // `.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`. `run`/`verify`/`gc` take no
+    // body, so they are not listed here.
+    Assert<HasTypedBody<'/api/v1/backup/restore', '$post'>>,
   ];
 
   type WorkspaceUiStatePutBody = Schema['/api/v1/workspace/ui-state']['$put']['input']['json'];
@@ -107,7 +110,6 @@ describe('every mutating route carries a typed body into AppType', () => {
     Assert<HasTypedInput<'/api/v1/github/prs/:number/merge-state', '$get', 'param'>>,
     Assert<HasTypedInput<'/api/v1/models', '$get', 'query'>>,
     Assert<HasTypedInput<'/api/v1/providers/status', '$get', 'query'>>,
-    Assert<HasTypedInput<'/api/v1/workspace/skills-update', '$get', 'query'>>,
     // The reads the cockpit's typed client needs a `query` argument for. `hc` offers one only
     // for keys a validator declares, so a route that reverted to `c.req.query('x')` would fail
     // here — and would otherwise fail nowhere, since the handler keeps working either way.

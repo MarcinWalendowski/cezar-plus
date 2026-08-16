@@ -197,6 +197,15 @@ describe('project-route alias parity (unprefixed vs /api/v1/p/<boot> vs /api/v1/
       'GET /workspace/agent-profiles/:id/details',
       'GET /workspace/agent-profiles/:id/status',
       'POST /workspace/agent-profiles/:id/open',
+      // Backup is workspace-level and single-mount (a backup describes the machine, not one repo),
+      // so none of its routes may be mirrored under /api/v1/p/ — spec
+      // `.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`.
+      'GET /backup',
+      'GET /backup/snapshots',
+      'POST /backup/run',
+      'POST /backup/restore',
+      'POST /backup/verify',
+      'POST /backup/gc',
     ]) {
       expect(keys, workspaceOnly).not.toContain(workspaceOnly);
     }

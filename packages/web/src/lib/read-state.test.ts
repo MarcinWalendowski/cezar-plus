@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { RunRecord } from '@open-mercato/cezar-api-client'
+import type { RunRecord } from '@loki-labs/better-cezar-api-client'
 import {
   canBeUnread,
   isDoneItem,

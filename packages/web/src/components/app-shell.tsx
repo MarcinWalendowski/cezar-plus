@@ -48,12 +48,12 @@ import {
   writeStoredSidebarWidth,
 } from '@/lib/sidebar-width'
 import { cn } from '@/lib/utils'
-// The Open Mercato brand mark. A `public/` asset, not a bundled import: the service serves the
-// same file at this exact path (`GET /open-mercato.svg` — the favicon index.html points at), so
+// The cezar brand mark. A `public/` asset, not a bundled import: the service serves the
+// same file at this exact path (`GET /cezar.svg` — the favicon index.html points at), so
 // a second, hashed URL for the same picture would be one cache entry too many. Vite serves
 // `public/` at the root in dev and copies it into the build, so the path holds in both.
 // Its own gradient + rounded corners ARE the tile.
-const brandLogoUrl = '/open-mercato.svg'
+const brandLogoUrl = '/cezar.svg'
 
 /** Tailwind's `md`. The drawer is the `<md` affordance, so this must stay in step with the
  *  `md:hidden` / `md:flex` classes below — they are the same breakpoint expressed twice, once
@@ -79,8 +79,6 @@ export type AppShellProps = {
   /** Unread done-items count for the Tasks badge (#unread-done-items). Null/0 renders no badge;
    *  the container derives it from the run list via `unreadDoneCount`. */
   unreadCount?: number | null
-  /** A quiet, accessible marker on Skills when a checked update remains actionable. */
-  skillsUpdateAvailable?: boolean
   /** cezar version for the footer chip. Null until Step 3.1 reads it from `/api/health`. */
   version?: string | null
   /** The npm registry's newer version, when the server's update check found one (#368). The
@@ -177,7 +175,6 @@ export function AppShell({
   repo = null,
   inboxCount = null,
   unreadCount = null,
-  skillsUpdateAvailable = false,
   version = null,
   latestVersion = null,
   taskQuickList,
@@ -270,7 +267,6 @@ export function AppShell({
     // The badge belongs to the Inbox item — with the item gone there is nothing to badge.
     inboxCount: inboxAvailable ? inboxCount : null,
     unreadCount,
-    skillsUpdateAvailable,
     version,
     latestVersion,
     taskQuickList,
@@ -335,7 +331,6 @@ type NavProps = {
   repo: RepoChip | null
   inboxCount: number | null
   unreadCount: number | null
-  skillsUpdateAvailable: boolean
   version: string | null
   latestVersion: string | null
   taskQuickList?: ReactNode
@@ -520,7 +515,6 @@ function SidebarContent({
   repo,
   inboxCount,
   unreadCount,
-  skillsUpdateAvailable,
   version,
   latestVersion,
   taskQuickList,
@@ -721,15 +715,6 @@ function SidebarContent({
                       {unreadCount}
                     </span>
                   ) : null}
-                  {item.badge === 'skills-update' && skillsUpdateAvailable ? (
-                    <span
-                      data-slot="nav-update-marker"
-                      className="ml-auto flex items-center"
-                    >
-                      <span className="size-1.5 rounded-full bg-violet" aria-hidden="true" />
-                      <span className="sr-only">Skills update available</span>
-                    </span>
-                  ) : null}
                 </Link>
               )
             })}
@@ -914,7 +899,7 @@ function VersionChip({ version, latestVersion }: { version: string; latestVersio
   )
 }
 
-/** The Open Mercato brand mark. The SVG carries its own gradient and rounded corners, so it is
+/** The cezar brand mark. The SVG carries its own gradient and rounded corners, so it is
  *  the tile — no wrapper background. */
 function BrandTile() {
   return (

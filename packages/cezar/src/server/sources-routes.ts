@@ -21,7 +21,7 @@ import {
   type SourceRemovedResponse,
   type SourceSyncState,
   type SourcesListResponse,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import { jsonZodValidator, queryZodValidator } from './validators.ts';
 import type { ProjectApiEnv } from './server.ts';
 import { NOTION_SOURCE_KIND } from '../sources/notion/provider.ts';

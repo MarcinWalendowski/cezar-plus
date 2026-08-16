@@ -23,5 +23,6 @@ export * from './workspace-knowledge.ts';
 export * from './workspace-todos.ts';
 export * from './workspace-run-start.ts';
 export * from './notifications.ts';
+export * from './backup.ts';
 export * from './orgs.ts';
 export * from './invites.ts';

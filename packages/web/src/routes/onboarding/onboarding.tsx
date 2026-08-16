@@ -20,7 +20,7 @@ import type {
   RenameOnboardingTeamInput,
   Role,
   Team,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { useHealth } from '@/api/queries'
 // The local brand glyph, not a lucide icon — `app-shell.tsx`'s own "Clone from GitHub…" menu
 // item uses this exact one, and lucide dropped brand icons.

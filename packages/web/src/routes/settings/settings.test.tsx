@@ -122,7 +122,6 @@ const GLOBAL_SECTIONS = [
   'appearance',
   'notifications',
   'resources',
-  'skills',
   // Agent accounts (spec 2026-07-29-agent-profiles) sit beside Projects: both describe the
   // machine and the person at it, not any one repo.
   'accounts',
@@ -163,7 +162,7 @@ describe('the section registry', () => {
     // possibly several logins in an org with more than one team, and can still have a session to
     // sign out of — none of that is "how many projects".
     expect(visibleSettingsSections('global', { singleProject: true, sources: false }).map((s) => s.id)).toEqual([
-      'appearance', 'notifications', 'resources', 'skills', 'accounts', 'teams', 'account',
+      'appearance', 'notifications', 'resources', 'accounts', 'teams', 'account',
     ])
     expect(
       visibleSettingsSections('global', { singleProject: false, sources: false }).map((s) => s.id),
@@ -223,8 +222,8 @@ describe('the settings shell', () => {
     expect(nav.querySelector('[data-section="resources"]')?.getAttribute('href')).toBe(
       '/settings/global/resources',
     )
-    expect(nav.querySelector('[data-section="skills"]')?.getAttribute('href')).toBe(
-      '/settings/global/skills',
+    expect(nav.querySelector('[data-section="projects"]')?.getAttribute('href')).toBe(
+      '/settings/global/projects',
     )
   })
 

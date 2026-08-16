@@ -39,7 +39,7 @@ import type {
   Runner,
   Skill,
   WorkflowDef,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { TwinkleBackdrop } from '@/components/centered-state'
 import { Composer, type ComposerHandle } from '@/components/composer/composer'
 import { GhostCodeBackdrop } from '@/components/ghost-code-backdrop'

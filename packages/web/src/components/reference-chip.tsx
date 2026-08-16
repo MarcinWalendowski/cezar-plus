@@ -11,7 +11,7 @@ import {
   MessageSquareWarningIcon,
   type LucideIcon,
 } from 'lucide-react'
-import type { ReferenceStatus } from '@open-mercato/cezar-api-client'
+import type { ReferenceStatus } from '@loki-labs/better-cezar-api-client'
 
 import { useReferenceStatus } from '@/components/reference-status'
 import type { ReferenceStatusEntry } from '@/api/queries'

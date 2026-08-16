@@ -1,4 +1,4 @@
-import type { ApproveNoteInput, ApproveNoteResponse } from '@open-mercato/cezar-contract';
+import type { ApproveNoteInput, ApproveNoteResponse } from '@loki-labs/better-cezar-contract';
 import type { StoredNote } from './types.ts';
 
 /**

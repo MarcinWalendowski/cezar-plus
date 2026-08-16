@@ -15,29 +15,29 @@
   ],
   "scripts": {
     "build": "npm run build:server && npm run build:web && npm run check:pack",
-    "build:server": "npm run build -w @open-mercato/cezar",
-    "build:web": "npm run build -w @open-mercato/cezar-web",
-    "check:pack": "npm run check:pack -w @open-mercato/cezar",
+    "build:server": "npm run build -w @loki-labs/better-cezar",
+    "build:web": "npm run build -w @loki-labs/better-cezar-web",
+    "check:pack": "npm run check:pack -w @loki-labs/better-cezar",
     "dev": "node scripts/dev.mjs",
-    "dev:server": "npm run dev -w @open-mercato/cezar --",
-    "dev:web": "npm run dev -w @open-mercato/cezar-web --",
-    "install-as-command": "npm run install-as-command -w @open-mercato/cezar",
-    "install-as-command:global": "npm run install-as-command:global -w @open-mercato/cezar",
-    "uninstall-as-command": "npm run uninstall-as-command -w @open-mercato/cezar",
-    "server-install": "npm run server-install -w @open-mercato/cezar --",
-    "server-deploy": "npm run server-deploy -w @open-mercato/cezar --",
-    "server-uninstall": "npm run server-uninstall -w @open-mercato/cezar --",
+    "dev:server": "npm run dev -w @loki-labs/better-cezar --",
+    "dev:web": "npm run dev -w @loki-labs/better-cezar-web --",
+    "install-as-command": "npm run install-as-command -w @loki-labs/better-cezar",
+    "install-as-command:global": "npm run install-as-command:global -w @loki-labs/better-cezar",
+    "uninstall-as-command": "npm run uninstall-as-command -w @loki-labs/better-cezar",
+    "server-install": "npm run server-install -w @loki-labs/better-cezar --",
+    "server-deploy": "npm run server-deploy -w @loki-labs/better-cezar --",
+    "server-uninstall": "npm run server-uninstall -w @loki-labs/better-cezar --",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:unit": "npm run test:unit -w @open-mercato/cezar",
-    "test:package": "npm run test:package -w @open-mercato/cezar",
+    "test:unit": "npm run test:unit -w @loki-labs/better-cezar",
+    "test:package": "npm run test:package -w @loki-labs/better-cezar",
     "test:e2e": "sh .ai/scripts/e2e.sh",
     "pretypecheck": "npm run build:server",
     "typecheck": "npm run typecheck:contract && npm run typecheck:client && npm run typecheck:server && npm run typecheck:web",
-    "typecheck:client": "npm run typecheck -w @open-mercato/cezar-api-client",
-    "typecheck:server": "npm run typecheck -w @open-mercato/cezar",
-    "typecheck:web": "npm run typecheck -w @open-mercato/cezar-web",
-    "typecheck:contract": "npm run typecheck -w @open-mercato/cezar-contract"
+    "typecheck:client": "npm run typecheck -w @loki-labs/better-cezar-api-client",
+    "typecheck:server": "npm run typecheck -w @loki-labs/better-cezar",
+    "typecheck:web": "npm run typecheck -w @loki-labs/better-cezar-web",
+    "typecheck:contract": "npm run typecheck -w @loki-labs/better-cezar-contract"
   },
   "devDependencies": {
     "tsx": "^4.19.0",
@@ -46,6 +46,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/open-mercato/cezar"
+    "url": "https://github.com/MarcinWalendowski/cezar"
   }
 }

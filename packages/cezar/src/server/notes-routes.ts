@@ -13,7 +13,7 @@ import {
   type NoteSummary,
   type NotesListResponse,
   type ProcessNoteResponse,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import { jsonZodValidator, queryZodValidator } from './validators.ts';
 import { resolveCapabilities } from './capabilities.ts';
 import { NoteStore } from '../notes/store.ts';

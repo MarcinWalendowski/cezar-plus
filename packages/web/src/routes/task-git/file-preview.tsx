@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { ApiError, runFileRawUrl } from '@/api/client'
 import { useRunFile } from '@/api/queries'
-import type { WorktreeEntry } from '@open-mercato/cezar-api-client'
+import type { WorktreeEntry } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { highlight, highlightSync, langForPath, type SynToken } from '@/lib/highlighter'
 import { cn } from '@/lib/utils'

@@ -7,7 +7,7 @@ import type {
   knowledgeProposalsResponseSchema,
   knowledgeResponseSchema,
   knowledgeSearchResponseSchema,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import type { AppType } from './app-type.ts';
 
 /**

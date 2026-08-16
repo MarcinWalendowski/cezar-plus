@@ -2,7 +2,7 @@ import { ChevronRightIcon, CornerLeftUpIcon, FolderIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import { useFsBrowse } from '@/api/queries'
-import type { FsBrowseDir } from '@open-mercato/cezar-api-client'
+import type { FsBrowseDir } from '@loki-labs/better-cezar-api-client'
 import { cn } from '@/lib/utils'
 
 /**

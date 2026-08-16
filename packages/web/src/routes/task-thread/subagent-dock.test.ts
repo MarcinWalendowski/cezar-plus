@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ToolStatus, UiToolItem } from '@open-mercato/cezar-api-client'
+import type { ToolStatus, UiToolItem } from '@loki-labs/better-cezar-api-client'
 
 import {
   activeSubagent,

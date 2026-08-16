@@ -143,18 +143,18 @@ describe('computeSnapshot', () => {
 
 describe('stampManifests', () => {
   const set = (): ReleaseManifests => ({
-    contract: { name: '@open-mercato/cezar-contract', version: '0.1.5' },
-    apiClient: { name: '@open-mercato/cezar-api-client', version: '0.1.5' },
+    contract: { name: '@loki-labs/better-cezar-contract', version: '0.1.5' },
+    apiClient: { name: '@loki-labs/better-cezar-api-client', version: '0.1.5' },
     cezar: {
-      name: '@open-mercato/cezar',
+      name: '@loki-labs/better-cezar',
       version: '0.1.5',
       bin: { cezar: 'dist/index.js' },
-      devDependencies: { '@open-mercato/cezar-api-client': '^0.1.5' },
+      devDependencies: { '@loki-labs/better-cezar-api-client': '^0.1.5' },
     },
     alias: {
       name: 'cezar-cli',
       version: '0.1.5',
-      dependencies: { '@open-mercato/cezar': '^0.1.5' },
+      dependencies: { '@loki-labs/better-cezar': '^0.1.5' },
     },
   });
 
@@ -165,9 +165,9 @@ describe('stampManifests', () => {
     expect(stamped.alias.version).toBe('0.1.5-pr482.123');
     // Exact, no range: `npx cezar-cli@<v>` must run this PR's code, and the service must
     // resolve the api-client it was cut with.
-    expect(stamped.alias.dependencies).toEqual({ '@open-mercato/cezar': '0.1.5-pr482.123' });
+    expect(stamped.alias.dependencies).toEqual({ '@loki-labs/better-cezar': '0.1.5-pr482.123' });
     expect(stamped.cezar.devDependencies).toEqual({
-      '@open-mercato/cezar-api-client': '0.1.5-pr482.123',
+      '@loki-labs/better-cezar-api-client': '0.1.5-pr482.123',
     });
   });
 
@@ -189,7 +189,7 @@ describe('stampManifests', () => {
     const manifests = set();
     const stamped = stampManifests(manifests, '0.1.5-main.9');
     expect(manifests.cezar.version).toBe('0.1.5');
-    expect(manifests.alias.dependencies).toEqual({ '@open-mercato/cezar': '^0.1.5' });
+    expect(manifests.alias.dependencies).toEqual({ '@loki-labs/better-cezar': '^0.1.5' });
     expect(stamped.cezar.bin).toEqual({ cezar: 'dist/index.js' });
   });
 

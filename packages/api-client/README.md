@@ -1,4 +1,4 @@
-# @open-mercato/cezar-api-client
+# @loki-labs/better-cezar-api-client
 
 The typed client for a [cezar](https://github.com/open-mercato/cezar) service, and the shared
 contract types behind it.
@@ -17,8 +17,8 @@ those shrink with every family that is.
 ## Use
 
 ```ts
-import { createCezarClient } from '@open-mercato/cezar-api-client'
-import type { AppType } from '@open-mercato/cezar/app-type'
+import { createCezarClient } from '@loki-labs/better-cezar-api-client'
+import type { AppType } from '@loki-labs/better-cezar/app-type'
 
 const cez = createCezarClient<AppType>({ baseUrl: 'http://127.0.0.1:4321' })
 

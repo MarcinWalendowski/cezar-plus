@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/api/client'
 import { AskCard } from './ask-card'
 import type { ThreadAsk } from './thread-state'
-import type { ApiRun, ProviderStatusResponse, StepState } from '@open-mercato/cezar-api-client'
+import type { ApiRun, ProviderStatusResponse, StepState } from '@loki-labs/better-cezar-api-client'
 
 const mutateAsync = vi.fn().mockResolvedValue({})
 const continueAsync = vi.fn().mockResolvedValue({})

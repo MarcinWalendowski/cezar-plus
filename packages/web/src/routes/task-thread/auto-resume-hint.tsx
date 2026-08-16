@@ -3,7 +3,7 @@ import { Link as GlobalLink } from 'react-router'
 
 import { cancelAutoResume } from '@/api/client'
 import { queryKeys } from '@/api/queries'
-import type { ApiRun } from '@open-mercato/cezar-api-client'
+import type { ApiRun } from '@loki-labs/better-cezar-api-client'
 import { StatusDot } from '@/components/status-dot'
 import { toast } from '@/components/ui/toaster'
 

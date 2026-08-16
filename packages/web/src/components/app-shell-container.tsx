@@ -6,10 +6,9 @@ import {
   useProjectRuns,
   useProjects,
   useRuns,
-  useSkillsUpdate,
   useTodos,
 } from '@/api/queries'
-import type { HealthResponse, SkillsUpdateState } from '@open-mercato/cezar-api-client'
+import type { HealthResponse } from '@loki-labs/better-cezar-api-client'
 import { AppShell, type RepoChip } from '@/components/app-shell'
 import { CommandPalette } from '@/components/command-palette'
 import { ListViewProvider } from '@/components/list-view'
@@ -41,12 +40,6 @@ export function repoChipOf(health: HealthResponse | undefined): RepoChip | null 
   const name = repo.root.replace(/[\\/]+$/, '').split(/[\\/]/).pop()
   if (!name) return null
   return { name, branch: repo.branch }
-}
-
-/** Only a checked, still-actionable result earns chrome. An update failure may retain a proven
- * available scope, so keep that signal; all unknown/transient/degraded states stay quiet. */
-export function skillsUpdateMarkerOf(state: SkillsUpdateState | undefined): boolean {
-  return state?.available === true && (state.status === 'available' || state.status === 'error')
 }
 
 /**
@@ -87,10 +80,6 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
   // it the nav must not offer a tab whose every request would 409.
   const automationsAvailable = health.data?.capabilities.automations === true
   const todos = useTodos(inboxAvailable)
-  // One query in the shell feeds every rendering of the active project's navigation (desktop,
-  // mobile drawer, and grouped sidebar). Routes reuse this TanStack Query cache entry.
-  const skillsUpdate = useSkillsUpdate(projectId ?? '', projectId !== null)
-  const skillsUpdateAvailable = skillsUpdateMarkerOf(skillsUpdate.data)
   // Unread done items (#unread-done-items) for the Tasks badge. Reads the same active-scope run
   // list the sidebar quick-list and Tasks table already hold — one cache entry, no extra fetch.
   const runs = useRuns()
@@ -163,7 +152,6 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // Same `?? null` honesty: no badge while the list is unknown; a loaded list with none
         // unread is 0, which AppShell also renders as no badge.
         unreadCount={runs.data ? unreadDoneCount(runs.data) : null}
-        skillsUpdateAvailable={skillsUpdateAvailable}
         // Hidden until health confirms the forge driver (R6 Step 1.1) — same honesty rule as
         // the chips: the nav must not claim a GitHub tab it cannot back. The Tools menu's
         // forge note says why it is absent.
@@ -204,7 +192,6 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
               // rather than a capability that happened to default off — see the prop's own note.
               notesAvailable={health.data?.capabilities.notes === true}
               inboxCount={todos.data?.length ?? null}
-              skillsUpdateAvailable={skillsUpdateAvailable}
             />
           ) : undefined
         }

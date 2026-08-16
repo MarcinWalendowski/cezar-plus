@@ -31,7 +31,7 @@ import {
   type ProviderId,
   type Runner,
   type SetWorkspaceConfigInput,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import {
   AlertDialog,

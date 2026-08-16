@@ -104,7 +104,6 @@ import type {
   WorkflowsResponse,
   WorkspaceConfigResponse,
   WorkspaceUiState,
-  SkillsUpdateState,
   // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`) — the five inert
   // families' GET response shapes. Mutator wrappers are deliberately NOT added yet: every
   // mutating route answers ONLY a 409 today (D19), with no 2xx branch for a wrapper to type
@@ -140,7 +139,9 @@ import type {
   NotificationLogStatus,
   WorkspaceRunStartInput,
   WorkspaceRunStartResponse,
-} from '@open-mercato/cezar-api-client'
+  BackupOverviewResponse,
+  BackupSnapshotsResponse,
+} from '@loki-labs/better-cezar-api-client'
 import { parseProviderStatusResponse } from '@/lib/provider-status'
 import {
   API_PREFIX,
@@ -149,11 +150,11 @@ import {
   getApiBaseUrl,
   getApiScope,
   queryScope,
-} from '@open-mercato/cezar-api-client'
-import type { Ok, OkJson } from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
+import type { Ok, OkJson } from '@loki-labs/better-cezar-api-client'
 import type { ClientResponse } from 'hono/client'
 import type { ResponseFormat } from 'hono/types'
-import type { AppType } from '@open-mercato/cezar/app-type'
+import type { AppType } from '@loki-labs/better-cezar/app-type'
 
 /**
  * The cockpit's client for its own HTTP API.
@@ -249,7 +250,7 @@ function errorFor(status: number, statusText: string, body: string): ApiError {
 }
 
 /**
- * The typed client over the same service (`@open-mercato/cezar-api-client`).
+ * The typed client over the same service (`@loki-labs/better-cezar-api-client`).
  *
  * Routes are being moved onto this one at a time. What it buys is compile-time checking of the
  * path, the request body and the response shape against the server's OWN handlers — the thing
@@ -1911,34 +1912,6 @@ export async function removeAgentProfile(id: string): Promise<RemoveAgentProfile
   )
 }
 
-/** Cached Open Mercato update state for one registered project. The GET is immediate; the
- * server may start a stale detection-only refresh after taking its snapshot. */
-export async function getSkillsUpdate(
-  projectId: string,
-  opts?: ReadOptions,
-): Promise<SkillsUpdateState> {
-  return unwrap(
-    await cez.api.v1.workspace['skills-update'].$get({ query: { projectId } }, init(opts)),
-    `/workspace/skills-update?projectId=${encodeURIComponent(projectId)}`,
-  )
-}
-
-/** Force a bounded detection pass. The browser supplies identity only, never executable input. */
-export async function checkSkillsUpdate(projectId: string): Promise<SkillsUpdateState> {
-  return unwrap(
-    await cez.api.v1.workspace['skills-update'].check.$post({ json: { projectId } }),
-    '/workspace/skills-update/check',
-  )
-}
-
-/** Apply the server-owned, lock-authorized update set. Identity is the only browser input. */
-export async function applySkillsUpdate(projectId: string): Promise<SkillsUpdateState> {
-  return unwrap(
-    await cez.api.v1.workspace['skills-update'].apply.$post({ json: { projectId } }),
-    '/workspace/skills-update/apply',
-  )
-}
-
 /** Partial update — absent keys stay untouched; answers the merged config. A `projectsDir`
  *  the server cannot write to comes back as a 400 `ApiError` whose message is the reason,
  *  which is exactly what the Projects pane renders inline (step 4.4). */
@@ -2275,6 +2248,20 @@ export async function getWorkspaceRuns(
  */
 export async function getWorkspaceTodos(opts?: ReadOptions): Promise<WorkspaceTodosResponse> {
   return unwrap(await cez.api.v1.workspace.todos.$get({}, init(opts)), '/workspace/todos')
+}
+
+/** `GET /backup` (`.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`) — the backup
+ *  overview the cockpit gates its own visibility on (`enabled`). Always answers `200`: with
+ *  `CEZ_BACKUP` unset it is `{enabled:false, provider:null, lastRun:null, snapshotCount:0,
+ *  includeSummary:null}`, never a 404. No query parameters. */
+export async function getWorkspaceBackup(opts?: ReadOptions): Promise<BackupOverviewResponse> {
+  return unwrap(await cez.api.v1.backup.$get({}, init(opts)), '/backup')
+}
+
+/** `GET /backup/snapshots` — the stored snapshots, newest-first (each carries stored ISO
+ *  timestamps only). `200 {snapshots:[]}` when backup is off. */
+export async function getWorkspaceBackupSnapshots(opts?: ReadOptions): Promise<BackupSnapshotsResponse> {
+  return unwrap(await cez.api.v1.backup.snapshots.$get({}, init(opts)), '/backup/snapshots')
 }
 
 /** `GET /workspace/git` (`.ai/specs/2026-08-14-cross-project-git-overview.md`, D1) — one row per

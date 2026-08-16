@@ -7,7 +7,7 @@ import { Link, useNavigate } from '@/lib/project-router'
 
 import { ApiError, pickVariant } from '@/api/client'
 import { queryKeys, useGroup, useHealth, useRuns } from '@/api/queries'
-import type { GroupVariant } from '@open-mercato/cezar-api-client'
+import type { GroupVariant } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { DirectionalUsage } from '@/components/directional-usage'
 import { Pill } from '@/components/pill'

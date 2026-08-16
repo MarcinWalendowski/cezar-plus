@@ -2,7 +2,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo } from 'react'
 
 import { queryKeys } from '@/api/queries'
-import type { ApiRun, RunEvent } from '@open-mercato/cezar-api-client'
+import type { ApiRun, RunEvent } from '@loki-labs/better-cezar-api-client'
 
 /**
  * The thread's stale-record healer.

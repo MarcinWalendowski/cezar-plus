@@ -1,4 +1,4 @@
-import type { ForgeInfo, RunStatus } from '@open-mercato/cezar-api-client'
+import type { ForgeInfo, RunStatus } from '@loki-labs/better-cezar-api-client'
 
 /**
  * The git action policy object (spec §"Session git view — Changes & Files tabs (#390)",

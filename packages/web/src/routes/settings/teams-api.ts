@@ -1,4 +1,4 @@
-import { getApiBaseUrl } from '@open-mercato/cezar-api-client'
+import { getApiBaseUrl } from '@loki-labs/better-cezar-api-client'
 import type {
   CreateTeamInput,
   CreateTeamResponse,
@@ -6,7 +6,7 @@ import type {
   RenameTeamInput,
   RenameTeamResponse,
   Team,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 
 import { ApiError } from '@/api/client'
 

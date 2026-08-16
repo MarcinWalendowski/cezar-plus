@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, type ReactNode } from 'react'
 
-import { API_PREFIX, getApiScope, setApiScope } from '@open-mercato/cezar-api-client'
+import { API_PREFIX, getApiScope, setApiScope } from '@loki-labs/better-cezar-api-client'
 
 /**
  * The React face of the project scope (multi-project spec, step 3.1): components read

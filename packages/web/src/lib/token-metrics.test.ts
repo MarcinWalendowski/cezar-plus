@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HealthResponse } from '@open-mercato/cezar-api-client'
+import type { HealthResponse } from '@loki-labs/better-cezar-api-client'
 
 import { usageMetricVisibility } from './token-metrics'
 

@@ -8,7 +8,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 
-import type { DiffStat } from '@open-mercato/cezar-api-client'
+import type { DiffStat } from '@loki-labs/better-cezar-api-client'
 import { DiffStatLabel } from '@/components/diff-stat'
 import type { DiffMode } from '@/components/diff'
 import { Button } from '@/components/ui/button'

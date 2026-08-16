@@ -8,7 +8,7 @@ import {
   useProjects,
   useRegisterProject,
 } from '@/api/queries'
-import type { FsBrowseDir, NestedRepo } from '@open-mercato/cezar-api-client'
+import type { FsBrowseDir, NestedRepo } from '@loki-labs/better-cezar-api-client'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {

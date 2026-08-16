@@ -1,0 +1,12 @@
+<svg width="176" height="176" viewBox="0 0 176 176" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>cezar</title>
+  <path d="M0 24C0 10.7452 10.7452 0 24 0H152C165.255 0 176 10.7452 176 24V152C176 165.255 165.255 176 152 176H24C10.7452 176 0 165.255 0 152V24Z" fill="url(#cezar-tile)"/>
+  <path d="M115 55.8A42 42 0 1 0 115 120.2" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" fill="none"/>
+  <circle cx="126" cy="88" r="9.5" fill="#FFFFFF" fill-opacity="0.92"/>
+  <defs>
+    <linearGradient id="cezar-tile" x1="0" y1="0" x2="176" y2="176" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6D3BF5"/>
+      <stop offset="1" stop-color="#A855F7"/>
+    </linearGradient>
+  </defs>
+</svg>

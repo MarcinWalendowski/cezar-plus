@@ -28,10 +28,10 @@ describe('shouldPassiveFetch', () => {
 
 describe('bareDirFor', () => {
   it('keys the global cache on owner__name regardless of URL shape', () => {
-    const expected = bareDirFor('open-mercato/skills');
-    expect(bareDirFor('https://github.com/open-mercato/skills.git')).toBe(expected);
-    expect(bareDirFor('git@github.com:open-mercato/skills')).toBe(expected);
-    expect(expected.endsWith('open-mercato__skills')).toBe(true);
+    const expected = bareDirFor('acme/skills');
+    expect(bareDirFor('https://github.com/acme/skills.git')).toBe(expected);
+    expect(bareDirFor('git@github.com:acme/skills')).toBe(expected);
+    expect(expected.endsWith('acme__skills')).toBe(true);
   });
 });
 

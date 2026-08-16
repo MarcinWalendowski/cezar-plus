@@ -1,4 +1,4 @@
-import type { ProviderStatus, ProviderStatusResponse, Runner } from '@open-mercato/cezar-api-client'
+import type { ProviderStatus, ProviderStatusResponse, Runner } from '@loki-labs/better-cezar-api-client'
 
 const RUNNER_ORDER: readonly Runner[] = ['claude', 'codex', 'opencode', 'pi']
 const PROVIDER_STATES = new Set(['connected', 'disconnected', 'not-installed', 'unknown'])

@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import type { KnowledgeDocument, KnowledgeFacetBucket } from '@open-mercato/cezar-contract';
+import type { KnowledgeDocument, KnowledgeFacetBucket } from '@loki-labs/better-cezar-contract';
 import {
   WorkspaceKnowledgeIndex,
   type WorkspaceKnowledgeContexts,

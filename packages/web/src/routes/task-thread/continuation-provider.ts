@@ -1,5 +1,5 @@
 import { useProviderStatus } from '@/api/queries'
-import type { ApiRun, Runner } from '@open-mercato/cezar-api-client'
+import type { ApiRun, Runner } from '@loki-labs/better-cezar-api-client'
 import { usableRunners } from '@/lib/provider-status'
 import { resolveRunner } from '@/routes/new-task-form'
 

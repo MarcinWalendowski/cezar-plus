@@ -46,7 +46,7 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
       { cwd: consumerDir, maxBuffer: 10 * 1024 * 1024 },
     );
 
-    const packageRoot = join(consumerDir, 'node_modules', '@open-mercato', 'cezar');
+    const packageRoot = join(consumerDir, 'node_modules', '@loki-labs', 'better-cezar');
     const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as {
       bin: { cezar: string; cez: string; 'cezar-cli': string };
     };

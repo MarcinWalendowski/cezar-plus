@@ -1,5 +1,5 @@
 import { resolveAuthProvider, resolveCapabilities } from './server/capabilities.ts';
-import type { AuthProvider } from '@open-mercato/cezar-contract';
+import type { AuthProvider } from '@loki-labs/better-cezar-contract';
 
 /**
  * D1's boot gate (spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`), as a pure decision

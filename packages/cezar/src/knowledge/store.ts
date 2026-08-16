@@ -8,7 +8,7 @@ import type {
   KnowledgeFacetBucket,
   KnowledgeFacets,
   KnowledgeRoot,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import {
   assembleDocuments,
   DEFAULT_SCAN_CAPS,

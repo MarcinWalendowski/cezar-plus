@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ProjectScopeProvider } from '@/api/project-scope-context'
 import { createQueryClient } from '@/api/query-client'
-import type { HealthResponse, ProjectsResponse, Skill } from '@open-mercato/cezar-api-client'
+import type { HealthResponse, ProjectsResponse, Skill } from '@loki-labs/better-cezar-api-client'
 import { BookmarkletPanel } from './bookmarklets-section'
 
 /**

@@ -1,7 +1,7 @@
 import type {
   ProjectsResponse,
   WorkspaceLastLocation,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 
 import { pathnameProjectId } from './project-router'
 

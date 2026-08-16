@@ -32,7 +32,7 @@ import type {
   GithubMergeMethod,
   GithubPrMergeState,
   UiState,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Diff, type DiffFileChange } from '@/components/diff'
 import type { EnginePick } from '@/components/engine-pills'

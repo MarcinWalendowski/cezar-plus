@@ -2,7 +2,7 @@ import { cleanup, render } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import type { KnowledgeLink } from '@open-mercato/cezar-api-client'
+import type { KnowledgeLink } from '@loki-labs/better-cezar-api-client'
 
 import { BacklinksPanel, type BacklinksPanelProps } from './backlinks'
 

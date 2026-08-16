@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { HealthResponse } from '@open-mercato/cezar-api-client'
+import type { HealthResponse } from '@loki-labs/better-cezar-api-client'
 import { AppShell } from './app-shell'
 import { ThemeProvider } from './theme-provider'
 import { ToolsMenu, forgeNote, toolsTooltip } from './tools-menu'

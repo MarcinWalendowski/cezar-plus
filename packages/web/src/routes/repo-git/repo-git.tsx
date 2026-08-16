@@ -1,7 +1,7 @@
 import { GitBranchIcon, TriangleAlertIcon } from 'lucide-react'
 
 import { useRepo } from '@/api/queries'
-import type { RepoInfo, RepoResponse } from '@open-mercato/cezar-api-client'
+import type { RepoInfo, RepoResponse } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { TabLink } from '@/components/tab-link'
 

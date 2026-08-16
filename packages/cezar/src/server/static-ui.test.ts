@@ -55,7 +55,7 @@ describe('resolveGetRequest', () => {
 
     // The static routes registered before the catch-all keep their files.
     { name: '/assets/index-abc123.js → passthrough', path: '/assets/index-abc123.js', target: 'passthrough' },
-    { name: '/open-mercato.svg (favicon) → passthrough', path: '/open-mercato.svg', target: 'passthrough' },
+    { name: '/cezar.svg (favicon) → passthrough', path: '/cezar.svg', target: 'passthrough' },
     // Passthrough is about ownership, not about the build being there.
     { name: '/assets/x.js with no build → still passthrough', path: '/assets/x.js', distExists: false, target: 'passthrough' },
     // R7: the legacy asset routes are gone — these are SPA paths like any other.
@@ -116,7 +116,7 @@ describe('assetContentType', () => {
   const cases: Array<[string, string]> = [
     ['index-D1sxO2Tm.js', 'text/javascript; charset=utf-8'],
     ['index-VovY6R-i.css', 'text/css; charset=utf-8'],
-    ['open-mercato-toBr6SOa.svg', 'image/svg+xml'],
+    ['cezar-toBr6SOa.svg', 'image/svg+xml'],
     ['inter-latin-wght-normal-Dx4kXJAl.woff2', 'font/woff2'],
     ['logo-abc123.PNG', 'image/png'],
     ['something-abc123.bin', 'application/octet-stream'],

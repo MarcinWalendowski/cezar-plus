@@ -1,4 +1,4 @@
-import type { RunStatus } from '@open-mercato/cezar-contract';
+import type { RunStatus } from '@loki-labs/better-cezar-contract';
 import type {
   Notification,
   NotificationEvent,

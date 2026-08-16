@@ -1,7 +1,7 @@
 import { ChevronDownIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 
-import { DEFAULT_AGENT_ACCOUNT_ID, type Runner } from '@open-mercato/cezar-api-client'
+import { DEFAULT_AGENT_ACCOUNT_ID, type Runner } from '@loki-labs/better-cezar-api-client'
 import {
   DropdownMenu,
   DropdownMenuContent,

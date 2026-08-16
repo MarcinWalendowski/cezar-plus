@@ -1,4 +1,4 @@
-import type { RunEvent, RunStatus } from '@open-mercato/cezar-api-client'
+import type { RunEvent, RunStatus } from '@loki-labs/better-cezar-api-client'
 import {
   toolDisplay,
   type PlanEntry,
@@ -7,7 +7,7 @@ import {
   type UiAskQuestion,
   type UiItem,
   type UiToolItem,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 
 /**
  * The thread reducer: folds one run's ordered event list (`useRunEvents` — v1 lines and

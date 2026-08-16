@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
-import type { ReferenceStatus } from '@open-mercato/cezar-api-client'
+import type { ReferenceStatus } from '@loki-labs/better-cezar-api-client'
 
 import { ReferenceChip } from './reference-chip'
 import { REFERENCE_STATUS } from '@/lib/reference-status'

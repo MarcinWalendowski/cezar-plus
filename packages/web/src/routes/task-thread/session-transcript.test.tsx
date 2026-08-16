@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { ApiRun, RunEvent, UiToolItem } from '@open-mercato/cezar-api-client'
+import type { ApiRun, RunEvent, UiToolItem } from '@loki-labs/better-cezar-api-client'
 
 import claudeSubagent from '../../../../cezar/src/core/__fixtures__/claude/subagent-task.expected.json'
 import codexReview from '../../../../cezar/src/core/__fixtures__/codex/review-mode.expected.json'

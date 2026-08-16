@@ -327,23 +327,6 @@ describe('AppShell', () => {
       expect(document.querySelector('[data-slot="nav-badge"]')).toBeNull()
     })
 
-    /** **The Skills update marker is unreachable from the nav since 2026-08-14.** It renders on
-     *  the row carrying `badge: 'skills-update'`, and that row was the Skills item, which is
-     *  hidden — so an actionable update now produces no marker anywhere. Pinned as a fact rather
-     *  than deleted: the shell still accepts and threads `skillsUpdateAvailable`, and this is the
-     *  test that tells whoever restores the Skills row that the marker comes back with it. */
-    it('renders no Skills update marker while the Skills row is hidden', () => {
-      renderShell('/', { skillsUpdateAvailable: true })
-      expect(document.querySelectorAll('[data-slot="nav-update-marker"]')).toHaveLength(0)
-      fireEvent.click(screen.getByRole('button', { name: 'Open menu' }))
-      expect(document.querySelectorAll('[data-slot="nav-update-marker"]')).toHaveLength(0)
-    })
-
-    it('renders no Skills marker without an actionable update', () => {
-      renderShell()
-      expect(document.querySelector('[data-slot="nav-update-marker"]')).toBeNull()
-    })
-
     it('reserves the quick-list, tools and composer slots for later Steps', () => {
       renderShell()
       for (const slot of ['task-quick-list', 'tools-menu', 'composer']) {

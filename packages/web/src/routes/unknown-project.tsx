@@ -1,7 +1,7 @@
 import { FolderSearchIcon } from 'lucide-react'
 import { Link } from 'react-router'
 
-import type { ProjectsResponse } from '@open-mercato/cezar-api-client'
+import type { ProjectsResponse } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 
 /**

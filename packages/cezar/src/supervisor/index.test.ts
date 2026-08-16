@@ -10,7 +10,7 @@ import {
   type SupervisorBootGateIo,
 } from './index.ts';
 import { resolveBootstrapClaim } from '../auth/bootstrap-claim.ts';
-import type { AuthProvider } from '@open-mercato/cezar-contract';
+import type { AuthProvider } from '@loki-labs/better-cezar-contract';
 import { IdentityStore } from '../auth/identity-store.ts';
 import { OrgProcessRegistryStore } from './org-registry-store.ts';
 

@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { setApiScope } from '@open-mercato/cezar-api-client'
+import { setApiScope } from '@loki-labs/better-cezar-api-client'
 import { parseRunEvent, useRunEvents } from './run-events'
 
 /**

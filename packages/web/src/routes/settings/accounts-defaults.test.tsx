@@ -8,7 +8,7 @@ import { createQueryClient } from '@/api/query-client'
 import type {
   AgentProfilesResponse,
   WorkspaceConfigResponse,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { AppRoutes } from '@/routes'
 
@@ -77,8 +77,6 @@ function serve({
   const state: WorkspaceConfigResponse = {
     browseRoot: '~/',
     projectsDir: '~/cezar/projects',
-    skillsAutoUpdate: null,
-    effectiveSkillsAutoUpdate: true,
     composerDefaults: {
       autonomous: null,
       worktree: null,
@@ -189,8 +187,6 @@ describe('Agent accounts → Defaults for new projects', () => {
           return json({
             browseRoot: '~/',
             projectsDir: '~/cezar/projects',
-            skillsAutoUpdate: null,
-            effectiveSkillsAutoUpdate: true,
             composerDefaults: {
               autonomous: null,
               worktree: null,

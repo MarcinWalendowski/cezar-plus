@@ -7,7 +7,7 @@ import type {
   CreateSourceConnectionInput,
   SourceConnectionWire,
   SourceProviderInfo,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { SourceStatusBadge } from '@/components/source-status-badge'
 import { Button } from '@/components/ui/button'

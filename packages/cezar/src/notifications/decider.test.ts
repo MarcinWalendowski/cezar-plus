@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { notificationLogStatusSchema, transportHealthCountersSchema } from '@open-mercato/cezar-contract';
+import { notificationLogStatusSchema, transportHealthCountersSchema } from '@loki-labs/better-cezar-contract';
 import {
   EVENT_CATALOG,
   applyQuietHours,
@@ -490,7 +490,7 @@ describe('notifications/decider: the one mapping table lives here (source-level 
   });
 
   it('negative control: the type-name scan catches a run-typed import, and comment stripping does not blind either scan', () => {
-    expect(RUN_TYPE_RE.test("import type { RunStatus } from '@open-mercato/cezar-contract';")).toBe(true);
+    expect(RUN_TYPE_RE.test("import type { RunStatus } from '@loki-labs/better-cezar-contract';")).toBe(true);
     expect(RUN_TYPE_RE.test('const x = 1;')).toBe(false);
     // Stripping removes comments only — code on the same line as a trailing comment survives.
     expect(stripComments("const s = 'waiting'; // a `waiting` run")).toContain("'waiting'");

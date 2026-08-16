@@ -1,6 +1,6 @@
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { cn } from '@/lib/utils'
-import type { SourceSyncState } from '@open-mercato/cezar-api-client'
+import type { SourceSyncState } from '@loki-labs/better-cezar-api-client'
 
 /**
  * The shared status pill for a mirrored source connection's `syncState` (F2, `CEZ_SOURCES`,

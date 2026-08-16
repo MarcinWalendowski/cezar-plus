@@ -9,7 +9,7 @@ import type {
   GitPreflightResponse,
   ProjectListEntry,
   ProjectScanResponse,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { AddProjectDialog } from '@/components/add-project-dialog'
 
 /**

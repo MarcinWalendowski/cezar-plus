@@ -7,7 +7,7 @@ import {
   type Org as WireOrg,
   type RenameOnboardingTeamResponse,
   type Team as WireTeam,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import { jsonZodValidator } from '../server/validators.ts';
 import { identityDir } from '../paths.ts';
 import type { SessionResolver } from '../server/server.ts';

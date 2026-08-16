@@ -1,4 +1,4 @@
-import type { AgentProfile, ProviderStatusResponse, Runner } from '@open-mercato/cezar-api-client'
+import type { AgentProfile, ProviderStatusResponse, Runner } from '@loki-labs/better-cezar-api-client'
 import { cn } from '@/lib/utils'
 import { providerStatusFor } from '@/lib/provider-status'
 import { RUNNERS } from '@/routes/new-task-form'

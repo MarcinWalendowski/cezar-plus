@@ -11,7 +11,7 @@ import type {
   KnowledgeDocumentResponse,
   KnowledgeResponse,
   KnowledgeSearchResponse,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 
 import { KnowledgeRoute } from './knowledge'
 

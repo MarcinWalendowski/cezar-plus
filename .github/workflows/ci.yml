@@ -63,7 +63,7 @@ jobs:
       # nobody publishes. `alias-cezar` is not a workspace, so it packs from its own directory.
       - name: Verify release packages
         run: |
-          npm pack --dry-run --ignore-scripts -w @open-mercato/cezar
+          npm pack --dry-run --ignore-scripts -w @loki-labs/better-cezar
           (cd alias-cezar && npm pack --dry-run --ignore-scripts)
 
   # npm preview publishing (spec .ai/specs/2026-07-18-npm-preview-publish.md, #482).

@@ -394,7 +394,23 @@ describe('upstream purity (spec Verification #10, whole tree)', () => {
   // named a downstream workspace's products, which W2.4 could not edit under its own file
   // ownership. Those are gone now, so the claim this file can make truthfully is the whole
   // invariant, and making it here is what stops the next fixture from reintroducing one.
+  //
+  // NARROWED 2026-08-16 (`.ai/specs/2026-08-16-remove-open-mercato-coupling.md`). The rule used to
+  // be D2 of `2026-08-06-knowledge-base-mounts-search.md` — "no Loki string ever enters cezar
+  // `src/`" — whose stated reason was that a workspace-named thing "is not upstreamable". That
+  // reason is spent: this fork renamed its packages to `@loki-labs/better-cezar*` and will not be
+  // contributed upstream again. So the ONE permitted spelling is the fork's own package specifier,
+  // stripped before the scan.
+  //
+  // The rest of the rule is untouched and still load-bearing, because it protects a DIFFERENT
+  // hazard from the one D2 named: `lokimessages` and `imsg` are the messaging product, and a
+  // coding cockpit that starts quoting its URLs or its internals has leaked a neighbour's domain
+  // into a tool that knows nothing about it. Stripping (rather than loosening the pattern) is what
+  // keeps `loki` itself forbidden everywhere else — a bare "loki" in prose still fails.
+  /** The fork's own scope. The only spelling exempted, and exempted by removal, not by pattern. */
+  const OWN_PACKAGE_RE = /@loki-labs\/better-cezar(?:-[a-z-]+)?/g;
   const FORBIDDEN_RE = /loki|lokimessages|imsg/i;
+  const scannable = (text: string): string => text.replace(OWN_PACKAGE_RE, '');
   const repoRoot = join(import.meta.dirname, '..', '..', '..', '..', '..');
   const TEXT_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|css|html|json|ndjson|md|txt|svg)$/i;
   /** This file, and only this file: a rule that names what it forbids cannot pass its own scan. */
@@ -406,15 +422,27 @@ describe('upstream purity (spec Verification #10, whole tree)', () => {
       .map((entry) => join(entry.parentPath, entry.name));
   }
 
-  it('no file under packages/{cezar,web}/src spells loki, lokimessages or imsg', () => {
+  it('no file under packages/{cezar,web}/src spells loki, lokimessages or imsg outside the package name', () => {
     const files = [
       ...listFiles(join(repoRoot, 'packages', 'cezar', 'src')),
       ...listFiles(join(repoRoot, 'packages', 'web', 'src')),
     ].filter((file) => file !== SELF);
     // A walk that found nothing would pass this vacuously — the scan has to be shown to have run.
     expect(files.length).toBeGreaterThan(500);
-    const offenders = files.filter((file) => FORBIDDEN_RE.test(readFileSync(file, 'utf8')));
+    const offenders = files.filter((file) => FORBIDDEN_RE.test(scannable(readFileSync(file, 'utf8'))));
     expect(offenders.map((file) => file.slice(repoRoot.length + 1))).toEqual([]);
+  });
+
+  /** The exemption is the part most likely to rot into a blindfold, so it gets its own control:
+   *  stripping the package specifier must not stop the scan seeing anything else on the line. */
+  it('negative control: the package-name exemption does not blind the scan', () => {
+    expect(FORBIDDEN_RE.test(scannable("import x from '@loki-labs/better-cezar-contract'"))).toBe(false);
+    expect(FORBIDDEN_RE.test(scannable("import x from '@loki-labs/better-cezar'"))).toBe(false);
+    // Same line, one extra word: the strip must not swallow it.
+    expect(FORBIDDEN_RE.test(scannable("'@loki-labs/better-cezar' posts to lokimessages.com"))).toBe(true);
+    // A bare workspace name is still forbidden — only the full specifier is exempt.
+    expect(FORBIDDEN_RE.test(scannable('the loki workspace'))).toBe(true);
+    expect(FORBIDDEN_RE.test(scannable('@loki-labs/some-other-package'))).toBe(true);
   });
 
   it('negative control: the scan actually catches the words when present, and ignores unrelated prose', () => {

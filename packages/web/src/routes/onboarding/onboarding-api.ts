@@ -1,4 +1,4 @@
-import { getApiBaseUrl } from '@open-mercato/cezar-api-client'
+import { getApiBaseUrl } from '@loki-labs/better-cezar-api-client'
 import type {
   CreateOnboardingOrgInput,
   CreateOnboardingOrgResponse,
@@ -8,7 +8,7 @@ import type {
   RenameOnboardingTeamResponse,
   Role,
   Team,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 
 import { ApiError } from '@/api/client'
 

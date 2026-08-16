@@ -146,7 +146,7 @@ the [`codex` CLI](https://github.com/openai/codex), or
 ```bash
 cd your-repo
 npx cezar-cli              # start the cockpit for the current repo
-#   or: npx @open-mercato/cezar
+#   or: npx @loki-labs/better-cezar
 ```
 
 The cockpit opens at `http://localhost:4321` (auto-picks the next free port if
@@ -181,7 +181,7 @@ npx cezar-cli@nightly      # everything merged as of last night
 **Come build this with us.** cezar is shaped by the people who run it on real
 repos: if you try a nightly and something feels wrong — a workflow that stalls, a
 diff that reads badly, a runner that should exist — [open an
-issue](https://github.com/open-mercato/cezar/issues) and tell us. That feedback,
+issue](https://github.com/MarcinWalendowski/cezar/issues) and tell us. That feedback,
 early, is worth more than a bug report six weeks after a release, and it is how
 most of the features here got their final shape.
 
@@ -524,7 +524,6 @@ Useful environment variables:
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | The agents' **own** variables, honoured where the vendor documents one. Setting one moves that agent's **default account** — the config folder cezar discovers. A *second* login of the same CLI is deliberately not an environment setting, since one process-wide value cannot differ per project: add it under **Settings → Agent accounts** and pick it per project. |
 | `CEZ_BROWSE_ROOT=~/` | Default root for **Add project → Open local folder…**. The picker cannot navigate above it; a saved workspace value overrides the environment default and must name an existing folder. |
 | `CEZ_PROJECTS_DIR=~/cezar/projects` | Default destination for **Clone from GitHub**. Saved workspace settings override it, and missing directories are created recursively. |
-| `CEZ_SKILLS_AUTO_UPDATE=0` | Disable automatic checks and updates for upstream-CLI-tracked Open Mercato skill installations. On by default; a saved global Skills setting overrides this environment default. Checks are delayed, bounded, cached, and non-blocking. |
 | `CEZ_AUTONOMOUS_DEFAULT=0` | Seed the New Task Autonomous default (`0` or `1`). Without a seed, skills default on and workflows off; a saved global Resources setting overrides it. |
 | `CEZ_WORKTREE_DEFAULT=1` | Seed the New Task Worktree default (`0` or `1`). Without a seed, eligible runs default on; a saved global Resources setting overrides it. |
 | `CEZ_DISABLE_REPO_LOCK=1` | **Dangerous escape hatch:** allow any run executing in the repository root — an explicit `worktree=false` run, non-Git degradation, or a continuation whose worktree cannot be restored — to proceed without Cezar’s repository-root lease. Agents can overwrite each other’s files or Git state; isolated worktree runs are unaffected. Off by default; only the exact value `1` enables it. |
@@ -540,7 +539,6 @@ Useful environment variables:
 | `CEZ_TITLE_UPDATES=0` | Turn off the live task-title refresh (namer re-runs on each turn end). The Settings → Agents toggle overrides this default. |
 | `CEZ_AUTONAME=0` | Disable ALL LLM task naming (creation + live) — titles stay heuristic (`437: /om-auto-review-pr`). Under `CEZ_DRY_RUN=1` naming is already off unless forced with `CEZ_AUTONAME=1`. |
 | `CEZ_REVIEW_GATE=1` | Turn ON the optional diff-first review gate (#489): a successful, non-autonomous run with changes parks at `review` (Accept / Send back / Draft PR) instead of finishing. Off by default — changed runs settle to `done` with the diff left in the worktree. Only `1` enables. The Settings → Agents toggle overrides this; autonomous runs always skip it. |
-| `CEZ_NO_BANNER=1` | Skip the `open-mercato/skills` banner on `cezar serve` startup. (The cockpit no longer shows a banner — its skills now live on the Skills page's Manage panel — so this env var is the terminal banner's only switch.) |
 | `CEZ_AUTH=oidc` | Require a sign-in, against a generic OIDC provider (`oidc`) or Google (`google` — the same flow with a pinned issuer, not a second code path). Only those two exact spellings enable it; anything else, including a typo, is treated as unset. **Unset is the default and does zero I/O**: no identity storage is created, no session middleware is mounted, and no login route is registered. **CORRECTED 2026-08-07 by D13: "so the single-user local cockpit is unchanged" no longer follows.** On loopback (the npm default bind) the local cockpit now offers to create an organization and workspaces through `/onboarding`. *Authentication* is what stays unaffected — no session middleware, no login route, no cookie, no 401, ever — but *org scope* is not: "identity storage is created" is now conditional on the user actually completing that wizard rather than a blanket "never". See the `.ai/specs/2026-08-06-org-team-auth-onboarding.md` D13 decision for the full "this is not an authorization change" reasoning. Needs `CEZ_PUBLIC_URL`, `CEZ_OIDC_CLIENT_ID` and `CEZ_OIDC_CLIENT_SECRET` (plus `CEZ_OIDC_ISSUER` for `oidc`); a missing or invalid setting is reported once at boot and every `/auth/*` route answers 500 with the exact reason rather than failing at first login. |
 | `CEZ_ALLOW_UNAUTHENTICATED=1` | Say out loud that your network or reverse proxy is the perimeter. **A hosted deployment (`CEZ_REMOTE=1`, or a non-loopback `--bind-host`) with neither `CEZ_AUTH` nor this flag refuses to boot**, exits non-zero, and names the reason: cezar executes agents, and `POST /api/v1/workflows` accepts a free-form `command` that a check step runs through `spawn('bash', ['-lc', …])`. That is not auth enforcement — it is a forced choice, so nobody exposes a shell by forgetting a variable. With the flag set the server boots and logs a warning naming the exposure on every start. `cezar server-install --platform ubuntu-vps` writes it into the systemd unit it generates, because that platform installs an nginx `auth_basic` vhost in front of the service. |
 | `CEZ_PUBLIC_URL=https://cezar.example.com` | The deployment's own public origin, exact and absolute. The OIDC `redirect_uri` is derived from it at boot and validated there — this is the one thing a hosted deployment must not infer from a request header, because trusting a forwarded `Host` for it is how open redirects happen. Required whenever `CEZ_AUTH` is set. |
@@ -807,7 +805,7 @@ never blocks startup):
 
 ```jsonc
 {
-  "skillsRepos": [{ "repo": "open-mercato/skills", "ref": "main" }], // team skills; [] disables
+  "skillsRepos": [], // team skills; empty is the default — cezar ships no vendor repo
   // Team-skill repos are code-trusted: a skill body becomes an agent system prompt.
   // Only owner/name, https/ssh URLs, or local paths (`/abs`, `./rel`, `~/dir`,
   // `C:\dir`) are accepted — no ext::/fd:: transport helpers. Write a relative
@@ -866,7 +864,7 @@ as in [Quick start](#quick-start)).
 **2. Clone & install**
 
 ```bash
-git clone https://github.com/open-mercato/cezar.git
+git clone https://github.com/MarcinWalendowski/cezar.git
 cd cezar
 npm install
 ```
@@ -916,9 +914,9 @@ npm run uninstall-as-command    # removes cezar / cez / cezar-cli (either flavor
 - **`EACCES` / permission denied** → your global prefix is root-owned. Point npm
   at a user-writable one and retry — **never** sudo:
   `npm config set prefix ~/.npm-global`.
-- **Already installed the published `@open-mercato/cezar` globally?** The
+- **Already installed the published `@loki-labs/better-cezar` globally?** The
   link/snapshot install replaces it; `uninstall-as-command` removes ours, and
-  `npm i -g @open-mercato/cezar` brings the published one back.
+  `npm i -g @loki-labs/better-cezar` brings the published one back.
 
 ### In-checkout scripts
 

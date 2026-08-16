@@ -76,7 +76,7 @@
  */
 
 import { followupsEnabled } from '../handoff.ts';
-import type { AuthProvider, Capabilities } from '@open-mercato/cezar-contract';
+import type { AuthProvider, Capabilities } from '@loki-labs/better-cezar-contract';
 
 /** Every IPv4 address in 127.0.0.0/8, anchored. Anchoring is load-bearing: a
  *  `startsWith('127.')` test also matches attacker-controlled *hostnames* like
@@ -174,13 +174,32 @@ export function isLoopbackHostHeader(host: string | null | undefined): boolean {
  * something other than `'none'`.
  *
  * `'supervisor'` added 2026-08-07 (D10, phase 6/7 fill unit 5 — see `authProviderSchema`'s own
- * doc comment, `@open-mercato/cezar-contract`, for what this value means and does not mean). This
+ * doc comment, `@loki-labs/better-cezar-contract`, for what this value means and does not mean). This
  * function needed exactly the one added literal below — the boot gate, the D4 project-team
  * registry seam (`server/server.ts#openProjectTeamRegistry`) and every other reader of this
  * function's return value already treat "any non-`'none'` provider" uniformly.
  */
 export function resolveAuthProvider(env: NodeJS.ProcessEnv = process.env): AuthProvider {
   return env.CEZ_AUTH === 'oidc' || env.CEZ_AUTH === 'google' || env.CEZ_AUTH === 'supervisor' ? env.CEZ_AUTH : 'none';
+}
+
+/**
+ * `CEZ_BACKUP=1` (exact string) ⇒ the provider-agnostic platform backup subsystem exists
+ * (spec `.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`, D4). Unset — or any other
+ * spelling — is off: no due-scheduler job, no network, no credential read, and every
+ * `/api/v1/backup` mutator answers `409`.
+ *
+ * **Deliberately its own reader and NOT a member of `resolveCapabilities`/`capabilitiesSchema`**,
+ * exactly like `resolveAuthProvider` above and for the same reason (see `authProviderSchema`'s
+ * docblock in `@loki-labs/better-cezar-contract`): the plan requires the flag-off `/api/v1/health`
+ * body to stay byte-identical to today, and a required capability key would grow it and force the
+ * fixture-wide edit that makes the health-payload control meaningless. The cockpit learns whether
+ * backup is on from `GET /api/v1/backup`'s own `enabled` field, never from health — the same way
+ * the account section probes rather than reading a capability key. The routes and the scheduler
+ * bootstrap read this function directly.
+ */
+export function backupEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CEZ_BACKUP === '1';
 }
 
 /** `CEZ_REMOTE=1` or a non-loopback bind host ⇒ hosted mode (no local handoff).

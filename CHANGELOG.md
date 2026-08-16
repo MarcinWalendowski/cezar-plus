@@ -1,6 +1,49 @@
 # Unreleased
 
 ## 🗑 Removed
+- 🗑 **Open Mercato is out of cezar — the vendor skills repo, the promo banner, the auto-updater
+  and the brand mark.** Spec `.ai/specs/2026-08-16-remove-open-mercato-coupling.md`.
+
+  `DEFAULT_SKILLS_REPOS` is now `[]`. It used to be `open-mercato/skills`, which on a live cockpit
+  supplied **37 of 47 catalog skills** — every `om-*` entry — and crowded the composer picker with
+  a vendor's names. A zero-config cockpit now gets exactly the skills on the machine
+  (`.ai/skills`, `~/.claude/skills`, …); a team repo is opt-in via `skillsRepos` in
+  `.ai/cezar/config.json`. `gatedSkillsRepos` is untouched and becomes live again for whatever
+  repo you name there.
+
+  Deleted with it: `src/skills-banner.ts` (the 5-line promo printed on every `serve`) and
+  `CEZ_NO_BANNER`; the whole skills-update feature — `src/skills-update.ts`, the three
+  `/api/v1/workspace/skills-update{,/check,/apply}` routes, the `SkillsUpdate*` contract schemas,
+  the api-client functions and hooks, the update card, the Settings → Skills section, the
+  `/om-apply-upgrade-notes` dialog, and `CEZ_SKILLS_AUTO_UPDATE`. It selected on the literal
+  predicate `isOpenMercatoSkillsSource`, so with no vendor repo it could only ever answer
+  "nothing tracked" — live code that reads as working. `WorkspaceConfigResponse` loses
+  `skillsAutoUpdate` / `effectiveSkillsAutoUpdate`; `WorkspaceUiState.dismissedSkillsBanner` is
+  gone (already legacy). `importedSkills` **stays** — it is general curation, not vendor state.
+
+  The favicon and sidebar tile were the Open Mercato company mark
+  (`packages/web/public/open-mercato.svg`). Replaced by `cezar.svg` at all five referencing sites.
+
+## 🔧 Changed
+- 🔧 **The packages are `@loki-labs/better-cezar*`.** `@open-mercato/cezar`, `-web`, `-contract`
+  and `-api-client` were renamed across ~525 references, and the unscoped `cezar-cli` alias — which
+  is *upstream's own npm package name* — became `@loki-labs/better-cezar-cli`. The **binaries are
+  unchanged**: `cezar`, `cez` and `cezar-cli` all still work, so no documented command changes.
+
+  **This makes future upstream merges conflict on essentially every file that imports anything**,
+  and that is accepted rather than overlooked: this fork is a private cockpit, not a contribution
+  branch. Upstream was last merged at `a1301dd4` (0.9.3).
+
+  Consequently **D2 of `.ai/specs/2026-08-06-knowledge-base-mounts-search.md` ("no Loki string ever
+  enters cezar `src/`") is partly superseded**, marked in place there. Its reason — that a
+  workspace-named thing "is not upstreamable" — is spent. The guard enforcing it
+  (`notifications/transports/webhook.test.ts`, "upstream purity") was **narrowed, not deleted**: it
+  now strips the fork's own package specifier before scanning and still forbids `loki`,
+  `lokimessages` and `imsg` everywhere else, with a new negative control proving the exemption does
+  not blind the scan. That second hazard — the messaging product's URLs and internals leaking into
+  a coding cockpit — is unrelated to D2's reason and is still real.
+
+## 🗑 Removed
 - 🗑 **The knowledge-grounded task fan-out is gone, one day after it shipped.**
   `POST /api/v1/workspace/task-fanout`, `packages/cezar/src/fanout/` (Phase A splitting, Phase B
   per-project specification), `packages/contract/src/task-fanout.ts`, and the client's

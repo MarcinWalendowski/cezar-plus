@@ -12,7 +12,7 @@ import path from 'node:path';
 
 /** Scoped package name — both install flavors register globally under it, so
  *  uninstall is a single `npm rm --global` of this name regardless of flavor. */
-export const PACKAGE_NAME = '@open-mercato/cezar';
+export const PACKAGE_NAME = '@loki-labs/better-cezar';
 
 /** Every bin the main package installs. `cezar-cli` is added (spec 013) so a
  *  single link / global-install exposes the same name as `npx cezar-cli`. */

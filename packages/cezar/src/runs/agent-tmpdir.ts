@@ -84,7 +84,7 @@ export class AgentTempDirError extends Error {
 }
 
 /** Opt-out spelling matches the house style for default-on behaviour
- *  (`CEZ_AUTONAME=0`, `CEZ_SKILLS_AUTO_UPDATE=0`): only an exact `0` disables. */
+ *  (`CEZ_AUTONAME=0`, `CEZ_SKILLS=0`): only an exact `0` disables. */
 export function agentTmpDirEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.CEZ_AGENT_TMPDIR !== '0';
 }

@@ -1,4 +1,4 @@
-import type { HealthResponse } from '@open-mercato/cezar-api-client'
+import type { HealthResponse } from '@loki-labs/better-cezar-api-client'
 
 export interface UsageMetricVisibility {
   tokens: boolean

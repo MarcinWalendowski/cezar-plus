@@ -1,4 +1,4 @@
-import type { ProjectsResponse, WorkspaceLastLocation } from '@open-mercato/cezar-api-client'
+import type { ProjectsResponse, WorkspaceLastLocation } from '@loki-labs/better-cezar-api-client'
 import { describe, expect, it } from 'vitest'
 
 import { locationToRestore, locationToSave, sameLastLocation } from './last-location'

@@ -1,4 +1,4 @@
-import type { ImageInput } from '@open-mercato/cezar-api-client'
+import type { ImageInput } from '@loki-labs/better-cezar-api-client'
 
 /**
  * The composer's image intake — paperclip, ⌘V paste, and drag-drop all funnel here, exactly

@@ -5,7 +5,7 @@ import { Link as RouterLink, useSearchParams } from 'react-router'
 
 import { putWorkspaceUiState } from '@/api/client'
 import { useHealth, useWorkspaceRuns, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
-import type { RunRecord, WorkspaceRunSummary } from '@open-mercato/cezar-api-client'
+import type { RunRecord, WorkspaceRunSummary } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { DiffStatLabel } from '@/components/diff-stat'
 import { Pill } from '@/components/pill'

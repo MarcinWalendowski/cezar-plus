@@ -8,7 +8,7 @@ import { clearProjectProbeCache, listProjects, registerProject } from '../worksp
 import { ProjectContexts } from './project-context.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp, type ServerDeps } from './server.ts';
-import type { WorkspaceRunsResponse } from '@open-mercato/cezar-contract';
+import type { WorkspaceRunsResponse } from '@loki-labs/better-cezar-contract';
 
 /**
  * `GET /api/v1/workspace/runs` (W4.10). See

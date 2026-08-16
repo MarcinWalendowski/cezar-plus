@@ -18,9 +18,18 @@ const skillsRepoSchema = z.object({
 
 export type SkillsRepoSource = z.infer<typeof skillsRepoSchema>;
 
-export const DEFAULT_SKILLS_REPOS: SkillsRepoSource[] = [
-  { repo: 'open-mercato/skills', ref: 'main' },
-];
+/**
+ * Empty by design (2026-08-16-remove-open-mercato-coupling). cezar ships no vendor skills
+ * repo: a zero-config cockpit gets exactly the skills that are on the machine — `.ai/skills`,
+ * `.agents/skills`, `~/.claude/skills` — and a team repo is something you opt into by naming it
+ * in `.ai/cezar/config.json`. It used to default to `open-mercato/skills`, which supplied 37 of
+ * the 47 skills in a live catalog and crowded the composer picker with a vendor's names.
+ *
+ * `gatedSkillsRepos` (src/skills.ts) still treats whatever is listed here as the *default*
+ * (opt-out-able) tier, so configuring a repo restores that behaviour for it — the gate was never
+ * Open-Mercato-specific and is left intact.
+ */
+export const DEFAULT_SKILLS_REPOS: SkillsRepoSource[] = [];
 
 /** Last-resort retention when neither the repo nor the workspace says anything. */
 export const DEFAULT_WORKTREE_RETENTION = 10;

@@ -1,7 +1,7 @@
 import { ChevronDownIcon, CircleCheckIcon, CircleIcon, CircleXIcon, LoaderCircleIcon } from 'lucide-react'
 import { useState } from 'react'
 
-import type { StepState, StepStatus } from '@open-mercato/cezar-api-client'
+import type { StepState, StepStatus } from '@loki-labs/better-cezar-api-client'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
 

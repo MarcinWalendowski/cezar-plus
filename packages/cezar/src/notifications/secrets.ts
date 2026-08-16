@@ -31,7 +31,7 @@ import { collectSecretValues } from '../core/secret-redaction.ts';
  *  transport either names where to look, or carries the value, never both.
  *
  *  Deliberately NOT `.passthrough()` on either branch, unlike most schemas in this file's
- *  neighbourhood — matching `notificationTransportAuthInputSchema` in `@open-mercato/cezar-contract`,
+ *  neighbourhood — matching `notificationTransportAuthInputSchema` in `@loki-labs/better-cezar-contract`,
  *  the equivalent write-side shape, which makes the same choice for the same reason: a passthrough
  *  index signature on BOTH union members makes `'envVar' in auth` stop narrowing (every member
  *  structurally "has" every string key), which is exactly the discrimination `resolveAuth` and
@@ -73,7 +73,7 @@ export function resolveAuth(auth: WebhookAuth | undefined, env: NodeJS.ProcessEn
 }
 
 /** The read-side (GET) view of a credential — presence and provenance, never a value. Mirrors
- *  `transportAuthViewSchema` in `@open-mercato/cezar-contract`. `hint` is the last four characters
+ *  `transportAuthViewSchema` in `@loki-labs/better-cezar-contract`. `hint` is the last four characters
  *  of an inline secret, and only ever populated at length >= 12 (below that a "hint" is most of
  *  the secret). */
 export type AuthView =

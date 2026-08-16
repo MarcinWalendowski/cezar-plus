@@ -6,7 +6,7 @@ import { Link } from '@/lib/project-router'
 
 import { ApiError } from '@/api/client'
 import { useRun, useRunCommit, useRunCommits } from '@/api/queries'
-import type { ApiRun, RunCommit } from '@open-mercato/cezar-api-client'
+import type { ApiRun, RunCommit } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Diff, type DiffMode } from '@/components/diff'
 import { DiffStatLabel } from '@/components/diff-stat'

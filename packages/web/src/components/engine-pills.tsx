@@ -1,5 +1,5 @@
 import { useConfig, useProviderStatus, useRunnerModels } from '@/api/queries'
-import type { CreateRunInput, Runner } from '@open-mercato/cezar-api-client'
+import type { CreateRunInput, Runner } from '@loki-labs/better-cezar-api-client'
 import { PickerPill, RunnerPill } from '@/components/picker-pill'
 import { usableRunners } from '@/lib/provider-status'
 import {

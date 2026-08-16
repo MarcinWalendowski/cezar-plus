@@ -1,4 +1,4 @@
-import type { WorktreeEntry } from '@open-mercato/cezar-api-client'
+import type { WorktreeEntry } from '@loki-labs/better-cezar-api-client'
 
 /**
  * Pure decisions for the Files tab (R5 Step 1.6): what a worktree file entry previews as,

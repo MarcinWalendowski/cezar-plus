@@ -6,7 +6,7 @@
 //
 //   --mode link       build → `npm link`             (live; `npm run build` refreshes it)
 //   --mode global     build → `npm install --global .` (self-contained snapshot)
-//   --mode uninstall                  `npm rm --global @open-mercato/cezar`
+//   --mode uninstall                  `npm rm --global @loki-labs/better-cezar`
 //   --no-build        skip the build (relink an already-built dist)
 //
 // The install decisions live in the unit-tested src/install-as-command.ts
@@ -69,7 +69,7 @@ const plannerPath = path.join(distDir, 'install-as-command.js');
 if (existsSync(plannerPath)) {
   planner = await import(pathToFileURL(plannerPath).href);
 }
-const PACKAGE_NAME = planner?.PACKAGE_NAME ?? '@open-mercato/cezar';
+const PACKAGE_NAME = planner?.PACKAGE_NAME ?? '@loki-labs/better-cezar';
 const steps = planner
   ? planner.planInstall({ mode, build }).steps
   : [{ args: ['rm', '--global', PACKAGE_NAME], label: `remove global ${PACKAGE_NAME}` }];

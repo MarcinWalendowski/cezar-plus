@@ -246,7 +246,7 @@ describe('resolveWorktreeRetention', () => {
 
 /**
  * `gatedSkillsRepos` decides which repos are opt-in per skill (the "Import skills" flow). The
- * invariant: the vendor default (`open-mercato/skills`) is gated for the zero-config majority,
+ * invariant: a repo listed as the *default* `skillsRepos` is gated (opt-out per skill),
  * and a repo that sets its OWN `skillsRepos` gates nothing (it took control — everything it lists
  * auto-loads). Detection must probe the raw file because the schema's `.default()` erases the
  * "did the user set this?" distinction — the same reason `resolveWorktreeRetention` probes it.

@@ -1,7 +1,7 @@
 import { ChevronDownIcon } from 'lucide-react'
 import { useState } from 'react'
 
-import type { PlanEntry, PlanStatus } from '@open-mercato/cezar-api-client'
+import type { PlanEntry, PlanStatus } from '@loki-labs/better-cezar-api-client'
 import { cn } from '@/lib/utils'
 
 /**

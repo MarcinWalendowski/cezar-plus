@@ -17,7 +17,7 @@ import {
   type NotificationDroppedReason,
   type NotificationLogRow,
   type NotificationLogStatus,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import { redactDeep } from '../core/secret-redaction.ts';
 import { assertCezarHomeWriteIsSandboxed, cezarHomeDir } from '../paths.ts';
 import type { Notification } from './types.ts';

@@ -16,7 +16,7 @@ import {
  * they are testable without a network clone — the gated repo set is otherwise a vendor default.
  */
 
-const OM = 'open-mercato/skills';
+const OM = 'acme/skills';
 const tempDirs: string[] = [];
 
 afterEach(async () => {

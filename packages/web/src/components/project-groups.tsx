@@ -3,7 +3,7 @@ import * as React from 'react'
 import { useLocation } from 'react-router'
 
 import { useHealth, useProjectRuns } from '@/api/queries'
-import type { ProjectListEntry } from '@open-mercato/cezar-api-client'
+import type { ProjectListEntry } from '@loki-labs/better-cezar-api-client'
 import { useSidebarNavigate } from '@/components/app-shell'
 import { useListView } from '@/components/list-view'
 import { activeNavPath, visibleNavItems } from '@/components/nav-items'
@@ -72,7 +72,6 @@ export function ProjectGroups({
   knowledgeAvailable = false,
   notesAvailable = false,
   inboxCount = null,
-  skillsUpdateAvailable = false,
 }: {
   projects: ProjectListEntry[]
   /** The project a flat, unprefixed URL resolves to — so the boot project is the one that
@@ -100,7 +99,6 @@ export function ProjectGroups({
    *  deleted. Passing the real capability makes the filter load-bearing, and therefore testable. */
   notesAvailable?: boolean
   inboxCount?: number | null
-  skillsUpdateAvailable?: boolean
 }) {
   const { pathname } = useLocation()
   // The shell renders outside the routes, so there is no `ProjectScopeProvider` above it — the
@@ -154,7 +152,6 @@ export function ProjectGroups({
           knowledgeAvailable={knowledgeAvailable}
           notesAvailable={notesAvailable}
           inboxCount={inboxCount}
-          skillsUpdateAvailable={skillsUpdateAvailable}
           showTokens={metricVisibility.tokens}
           showCost={metricVisibility.cost}
         />
@@ -178,7 +175,6 @@ function ProjectGroup({
   knowledgeAvailable,
   notesAvailable,
   inboxCount,
-  skillsUpdateAvailable,
   showTokens,
   showCost,
 }: {
@@ -199,7 +195,6 @@ function ProjectGroup({
   knowledgeAvailable: boolean
   notesAvailable: boolean
   inboxCount: number | null
-  skillsUpdateAvailable: boolean
   showTokens: boolean
   showCost: boolean
 }) {
@@ -374,12 +369,6 @@ function ProjectGroup({
                       className="ml-auto rounded-full bg-violet px-1.5 py-px text-[10.5px] font-semibold text-violet-foreground"
                     >
                       {inboxCount}
-                    </span>
-                  ) : null}
-                  {item.badge === 'skills-update' && active && skillsUpdateAvailable ? (
-                    <span data-slot="nav-update-marker" className="ml-auto flex items-center">
-                      <span className="size-1.5 rounded-full bg-violet" aria-hidden="true" />
-                      <span className="sr-only">Skills update available</span>
                     </span>
                   ) : null}
                 </Link>

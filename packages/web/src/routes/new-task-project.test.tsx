@@ -12,7 +12,7 @@ import type {
   Skill,
   WorkspaceRunStartResponse,
   WorkflowsResponse,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
 import { AppRoutes } from '@/routes'
 

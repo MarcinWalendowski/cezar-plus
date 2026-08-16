@@ -1,5 +1,5 @@
 import { basename, join } from 'node:path';
-import type { WorkspaceProjectHealth } from '@open-mercato/cezar-contract';
+import type { WorkspaceProjectHealth } from '@loki-labs/better-cezar-contract';
 import { readTodos, type TodoItem } from '../todos.ts';
 
 /**

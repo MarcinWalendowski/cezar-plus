@@ -1,7 +1,7 @@
 import { BotIcon, ChevronDownIcon } from 'lucide-react'
 import { useState } from 'react'
 
-import type { ToolStatus } from '@open-mercato/cezar-api-client'
+import type { ToolStatus } from '@loki-labs/better-cezar-api-client'
 import { cn } from '@/lib/utils'
 
 import { activeSubagent, subagentActivityText, subagentCounts, type SubagentSummary } from './subagent-dock'

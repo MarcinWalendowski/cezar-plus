@@ -6,7 +6,7 @@ import { z } from 'zod';
 // Contract VALUES, like `workspaceUiStateSchema` in workspace/migrations.ts: the tag bounds this
 // file must not `.catch` away are the same constants the PATCH route validates against, so they
 // are imported rather than repeated.
-import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH } from '@open-mercato/cezar-contract';
+import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH } from '@loki-labs/better-cezar-contract';
 import { PROVIDER_IDS, type ProviderId } from '../core/provider-auth.ts';
 import { assertCezarHomeWriteIsSandboxed, workspaceConfigPath } from '../paths.ts';
 
@@ -186,9 +186,6 @@ const workspaceConfigSchema = z
      *  `~` is expanded by the checkout flow, not here); validated writable
      *  when *changed*, never at load. */
     projectsDir: workspacePathSchema('CEZ_PROJECTS_DIR', '~/cezar/projects'),
-    /** Optional auto-update override. Absence inherits the environment/default
-     *  and must stay absent on unrelated merge-writes. */
-    skillsAutoUpdate: z.boolean().optional().catch(undefined),
     /** Global opt-in model policy. The native coding-agent model becomes
      * authoritative while runner choice remains available. */
     modelsLocked: z.boolean().optional().catch(undefined),
@@ -218,17 +215,6 @@ const workspaceConfigSchema = z
   .passthrough();
 
 export type WorkspaceConfig = z.infer<typeof workspaceConfigSchema>;
-
-/** Resolve the auto-update preference without mutating or materializing it. */
-export function effectiveSkillsAutoUpdate(
-  config: Pick<WorkspaceConfig, 'skillsAutoUpdate'>,
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  if (config.skillsAutoUpdate !== undefined) return config.skillsAutoUpdate;
-  if (env.CEZ_SKILLS_AUTO_UPDATE === '0') return false;
-  if (env.CEZ_SKILLS_AUTO_UPDATE === '1') return true;
-  return true;
-}
 
 export function effectiveComposerDefault(
   stored: boolean | undefined,

@@ -2,7 +2,7 @@ import type {
   ProviderId,
   ProviderStatusResponse,
   WorkspaceUiState,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 
 const PROVIDERS: readonly ProviderId[] = ['claude', 'codex', 'opencode', 'pi']
 const LABELS: Record<ProviderId, string> = {

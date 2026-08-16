@@ -36,6 +36,7 @@ import { createWorkspaceRunMutationRoutes } from './workspace-run-mutations-rout
 import { createWorkspaceGitRoutes } from './workspace-git-routes.ts';
 import { createWorkspaceKnowledgeRoutes } from './workspace-knowledge-routes.ts';
 import { createWorkspaceTodosRoutes } from './workspace-todos-routes.ts';
+import { createBackupRoutes } from './backup-routes.ts';
 import { createWorkspaceRunRoutes } from './workspace-run-routes.ts';
 import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -53,7 +54,7 @@ import {
   type RunsIndexResponse,
   type CreateTodoResponse,
   type WorkspaceTodosResponse,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 // A contract VALUE, like `workspaceUiStateSchema` in workspace/migrations.ts — the request
 // schema this route validates with is the same one the client compiles against.
 import {
@@ -62,7 +63,7 @@ import {
   modelDiscoveryRunnerSchema,
   openProjectInSchema,
   updateProjectInputSchema,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import { detectEnvironment } from '../core/backend-detect.ts';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 import type { ContentBlock, RunnerId } from '../core/agent-runner.ts';
@@ -92,7 +93,6 @@ import {
 } from '../workflows/types.ts';
 import { planChain, slugify } from '../planner.ts';
 import { discoverSkills } from '../skills.ts';
-import { SkillsUpdateConflictError, SkillsUpdateCoordinator, SkillsUpdateService, type SkillsUpdateState } from '../skills-update.ts';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.ts';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.ts';
 import { createTodo, markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.ts';
@@ -110,7 +110,7 @@ import {
   runEventsQuerySchema,
   runHistoryQuerySchema,
   runIdParamSchema,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import type { RunManager } from '../workflows/run.ts';
 import { removeWorktree, worktreeDiff, worktreeDiffStat, worktreeSizeBytes } from '../git-worktree.ts';
 import { isReclaimable, reclaimWorktrees } from '../runs/retention.ts';
@@ -136,7 +136,6 @@ import { readAccountIdentity } from '../agent-config/account-identity.ts';
 import {
   PROJECT_ID_RE,
   defaultWorkspaceConfig,
-  effectiveSkillsAutoUpdate,
   loadWorkspaceConfig,
   mergeWriteWorkspaceConfig,
   effectiveComposerDefault,
@@ -337,9 +336,6 @@ export interface ServerDeps {
    *  directory the test had already deleted. `deps.openTerminal` did NOT cover that path — this
    *  route calls `openInApp`. Upstream reached the same conclusion independently in #820. */
   openApp?: typeof openInApp;
-  /** Process-wide Open Mercato skills update detector. Injected in tests and
-   * shared by every workspace route/project; createApp owns the default. */
-  skillsUpdate?: SkillsUpdateService;
   /** WebSocket subscription hub (`/api/v1/ws`, src/server/ws.ts). `createApp`
    *  only registers topics on it — `startServer` builds one and attaches it
    *  to the HTTP server it binds. Optional so legacy callers/tests change
@@ -752,9 +748,6 @@ export interface WorkspaceConfigResponse {
   browseRoot: string;
   /** Checkout root for GUI-cloned projects — stored as written (`~` kept). */
   projectsDir: string;
-  /** Stored override; null means inherit CEZ_SKILLS_AUTO_UPDATE, then true. */
-  skillsAutoUpdate: boolean | null;
-  effectiveSkillsAutoUpdate: boolean;
   composerDefaults: {
     autonomous: boolean | null;
     worktree: boolean | null;
@@ -1029,11 +1022,6 @@ const uiStateSchema = z
       .max(50)
       .optional(),
     // Skills promo banner (#391): set once the cockpit banner is dismissed, never unset.
-    // Server-persisted (not a cookie) so the "shown once" promise holds across browsers.
-    // Retained for backward compatibility — the banner is gone, replaced by the workspace-level
-    // `importedSkills` curation (see `workspaceUiStateSchema`); `.passthrough()` would preserve
-    // the key regardless, but keep it typed.
-    dismissedSkillsBanner: z.boolean().optional(),
   })
   .passthrough();
 
@@ -1376,7 +1364,6 @@ export function createApp(deps: ServerDeps) {
   const openTerminal = deps.openTerminal ?? openInTerminal;
   const openFile = deps.openFile ?? openFileInDefaultApp;
   const openApp = deps.openApp ?? openInApp;
-  const skillsUpdate = deps.skillsUpdate ?? new SkillsUpdateService();
 
   // ---- workspace boot-project identity (multi-project spec) ----------------
   // The boot flow (`initWorkspace` in src/index.ts) registers the boot repo
@@ -1757,7 +1744,7 @@ export function createApp(deps: ServerDeps) {
   };
 
   // ---- static GUI ----------------------------------------------------------
-  // `/assets/:file` + `/open-mercato.svg`, and the SPA shell responder used by the catch-all at
+  // `/assets/:file` + `/cezar.svg`, and the SPA shell responder used by the catch-all at
   // the bottom of this function. Both now live in `./shell-routes.ts` — the SAME module
   // `supervisor/server.ts` mounts, so the login host and every org host serve byte-identical
   // bytes from byte-identical paths (see that module's own doc comment for the phase-6/7 defect
@@ -3680,60 +3667,6 @@ export function createApp(deps: ServerDeps) {
     return ctx.store.listRuns().filter((run) => ACTIVE_RUN_STATUSES.has(run.status)).length;
   };
 
-  // Workspace-level by design: update state spans project and global installs,
-  // but the selected registered project supplies the safe, server-owned cwd.
-  const skillsUpdateInputSchema = z.object({ projectId: projectIdSchema }).strict();
-  const resolveSkillsUpdateRoot = async (raw: string): Promise<
-    { root: string } | { status: 404 | 409; error: string }
-  > => {
-    if (!projectIdSchema.safeParse(raw).success) return { status: 404, error: `unknown project: ${raw}` };
-    const bootId = await resolveBootProject();
-    if (raw === 'default' || raw === bootId) return { root: bootRoot };
-    const project = (await loadWorkspaceConfig()).projects.find((entry) => entry.id === raw);
-    if (!project) return { status: 404, error: `unknown project: ${raw}` };
-    if ((await probeProjectStatus(project.root)).status === 'missing') {
-      return { status: 409, error: `project folder not found: ${raw}` };
-    }
-    return { root: project.root };
-  };
-
-  const skillsUpdateResponse = async (state: SkillsUpdateState): Promise<SkillsUpdateState> => {
-    const config = await loadWorkspaceConfig();
-    return { ...state, autoUpdateEnabled: effectiveSkillsAutoUpdate(config), inherited: config.skillsAutoUpdate === undefined };
-  };
-
-  // ---- chained family: skills updates (workspace-level) ----
-  const skillsUpdateRoutes = new Hono<ProjectApiEnv>()
-    .get('/workspace/skills-update', queryZodValidator(skillsUpdateInputSchema, { message: 'projectId is required' }), async (c) => {
-      const parsed = { data: c.req.valid('query') };
-      const resolved = await resolveSkillsUpdateRoot(parsed.data.projectId);
-      if ('error' in resolved) return c.json({ error: resolved.error }, resolved.status);
-      const state: SkillsUpdateState = skillsUpdate.snapshot(resolved.root);
-      void skillsUpdate.check(resolved.root).catch(() => {});
-      return c.json(await skillsUpdateResponse(state));
-    })
-
-    .post('/workspace/skills-update/check', jsonZodValidator(skillsUpdateInputSchema, { message: 'body must contain only projectId' }), async (c) => {
-      const parsed = { data: c.req.valid('json') };
-      const resolved = await resolveSkillsUpdateRoot(parsed.data.projectId);
-      if ('error' in resolved) return c.json({ error: resolved.error }, resolved.status);
-      return c.json(await skillsUpdateResponse(await skillsUpdate.check(resolved.root, true)));
-    })
-
-    .post('/workspace/skills-update/apply', jsonZodValidator(skillsUpdateInputSchema, { message: 'body must contain only projectId' }), async (c) => {
-      const parsed = { data: c.req.valid('json') };
-      const resolved = await resolveSkillsUpdateRoot(parsed.data.projectId);
-      if ('error' in resolved) return c.json({ error: resolved.error }, resolved.status);
-      try {
-        return c.json(await skillsUpdateResponse(await skillsUpdate.update(resolved.root, true)));
-      } catch (error) {
-        if (error instanceof SkillsUpdateConflictError) {
-          return c.json({ error: 'another skills update operation is running', state: await skillsUpdateResponse(skillsUpdate.snapshot(resolved.root)) }, 409);
-        }
-        throw error;
-      }
-    });
-
   // ---- GUI clone (multi-project spec, step 4.3) ----------------------------
   // "Add project → Clone from GitHub": clone into the checkout root, then
   // register the result through `registerFolder` above (same guards, same
@@ -3793,8 +3726,6 @@ export function createApp(deps: ServerDeps) {
   const workspaceConfigBody = (config: WorkspaceConfig): WorkspaceConfigResponse => ({
     browseRoot: config.browseRoot,
     projectsDir: config.projectsDir,
-    skillsAutoUpdate: config.skillsAutoUpdate ?? null,
-    effectiveSkillsAutoUpdate: effectiveSkillsAutoUpdate(config),
     composerDefaults: {
       autonomous: config.composerDefaults.autonomous ?? null,
       worktree: config.composerDefaults.worktree ?? null,
@@ -3832,7 +3763,7 @@ export function createApp(deps: ServerDeps) {
 
     .put('/workspace/config', jsonZodValidator(() => workspaceConfigUpdateSchema), async (c) => {
       const parsed = { data: c.req.valid('json') };
-      const { browseRoot, projectsDir, skillsAutoUpdate, composerDefaults, resources, agentDefaults } = parsed.data;
+      const { browseRoot, projectsDir, composerDefaults, resources, agentDefaults } = parsed.data;
       for (const [configuredRoot, create] of [
         [browseRoot, false],
         [projectsDir, true],
@@ -3866,8 +3797,6 @@ export function createApp(deps: ServerDeps) {
           // Roots are stored as written (`~` kept); only the probe expands them.
           if (browseRoot !== undefined) config.browseRoot = browseRoot;
           if (projectsDir !== undefined) config.projectsDir = projectsDir;
-          if (skillsAutoUpdate === null) delete config.skillsAutoUpdate;
-          else if (skillsAutoUpdate !== undefined) config.skillsAutoUpdate = skillsAutoUpdate;
           if (composerDefaults?.autonomous === null) delete config.composerDefaults.autonomous;
           else if (composerDefaults?.autonomous !== undefined) {
             config.composerDefaults.autonomous = composerDefaults.autonomous;
@@ -3948,7 +3877,6 @@ export function createApp(deps: ServerDeps) {
   const workspaceConfigUpdateSchema = z.object({
     browseRoot: z.string().trim().min(1).max(4096).optional(),
     projectsDir: z.string().trim().min(1).max(4096).optional(),
-    skillsAutoUpdate: z.boolean().nullable().optional(),
     composerDefaults: z
       .object({
         autonomous: z.boolean().nullable().optional(),
@@ -4018,9 +3946,10 @@ export function createApp(deps: ServerDeps) {
     })
 
     // The opt-in catalog for the "Import skills" panel: every skill a default
-    // (vendor) repo offers — `open-mercato/skills` — regardless of import state,
-    // so the panel can present them all with a per-skill toggle. Empty once a repo
-    // configures its own `skillsRepos` (nothing is gated then). `wait=1` lets the
+    // (vendor) repo offers, regardless of import state, so the panel can present
+    // them all with a per-skill toggle. Empty when no default repo is configured
+    // (cezar ships none), and empty once a repo configures its own `skillsRepos`
+    // (nothing is gated then). `wait=1` lets the
     // panel wait out a cold team-skill cache, same as `GET /skills` (spec 005).
     .get('/skills/importable', queryZodValidator(waitQuery), async (c) => {
       const repoRoot = c.get('project').root;
@@ -6391,6 +6320,11 @@ export function createApp(deps: ServerDeps) {
     guard: guardRunStart,
   });
   const notificationsRoutes = createNotificationsRoutes();
+  // Provider-agnostic platform backup (`.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`):
+  // workspace-level, single-mount, gated on `CEZ_BACKUP=1` read per request inside the family.
+  // Scaffold (Phase 1) is inert — GETs answer the empty payload, mutators `409`. Needs no
+  // `contexts` seam: the engine only reads corpus files off disk, never builds a `ProjectContext`.
+  const backupRoutes = createBackupRoutes();
 
   // ---- assemble the chained families --------------------------------------
   // Every chained family is registered ONCE and mounted into the versioned table. There is no
@@ -6609,7 +6543,6 @@ export function createApp(deps: ServerDeps) {
     .route('/', providersRoutes)
     .route('/', projectsRoutes)
     .route('/', agentProfilesRoutes)
-    .route('/', skillsUpdateRoutes)
     .route('/', workspaceConfigRoutes)
     .route('/', fsBrowseRoutes)
     .route('/', automationChecksRoutes)
@@ -6622,7 +6555,8 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceKnowledgeRoutes)
     .route('/', workspaceTodosRoutes)
     .route('/', workspaceRunRoutes)
-    .route('/', notificationsRoutes);
+    .route('/', notificationsRoutes)
+    .route('/', backupRoutes);
 
   // ---- mount ---------------------------------------------------------------
   // Scoped first, then the unscoped alias bound to the boot project. The paths are disjoint (no
@@ -6681,7 +6615,6 @@ export function createApp(deps: ServerDeps) {
 
 export function startServer(deps: ServerDeps, port: number): ServerType {
   const workspaceEvents = deps.workspaceEvents ?? new WorkspaceEventBus();
-  const skillsUpdate = deps.skillsUpdate ?? new SkillsUpdateService({ invalidateCatalog: refreshTeamSkills });
   // The subscription hub rides the same HTTP server (one port, zero config):
   // createApp registers the topics, the `upgrade` hook below owns the socket.
   const socketHub = deps.socketHub ?? createSocketHub();
@@ -6704,7 +6637,6 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     contexts: sharedContexts,
     automationStore: bootAutomationStore,
     workspaceEvents,
-    skillsUpdate,
     socketHub,
     automationsChanged: () => rescheduleAutomations(),
   });
@@ -6718,8 +6650,6 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     port,
     hostname: deps.bindHost ?? '127.0.0.1',
   });
-  const coordinator = new SkillsUpdateCoordinator(skillsUpdate, async () =>
-    effectiveSkillsAutoUpdate(await loadWorkspaceConfig()));
   const automationProjects = new Map<string, { root: string; owner: string; repo: string }>();
   const automationScheduler = new WorkspaceAutomationScheduler({
     coordinator: automationCoordinator,
@@ -6762,7 +6692,6 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     if (event === 'project-added') {
       const project = (data as { project?: { id?: unknown; root?: unknown; status?: unknown } }).project;
       if (project && typeof project.id === 'string' && typeof project.root === 'string' && project.status !== 'missing') {
-        coordinator.add(project.id, project.root);
         void getRepoInfo(project.root).then((info) => {
           const parsed = parseRemote(info?.remote ?? '');
           if (parsed?.host === 'github.com') automationProjects.set(project.id as string, { root: project.root as string, owner: parsed.owner, repo: parsed.repo });
@@ -6771,7 +6700,6 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
       }
     } else if (event === 'project-removed') {
       const id = (data as { id?: unknown }).id;
-      if (typeof id === 'string') coordinator.remove(id);
       if (typeof id === 'string') {
         automationCoordinator.remove(id);
         automationProjects.delete(id);
@@ -6783,10 +6711,8 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     void listProjects().then((projects) => {
       const all = projects.some((project) => project.root === deps.repoRoot)
         ? projects : [{ id: deps.bootProjectId ?? 'default', root: deps.repoRoot, status: 'ok' as const }, ...projects];
-      coordinator.start(all);
       // #801: with automations off there is nothing to warm — no remote to resolve, no receipts
-      // to reconcile, and above all no scheduler to start. The skills-update coordinator above is
-      // a separate feature and starts either way.
+      // to reconcile, and above all no scheduler to start.
       if (!automationsEnabled()) return;
       void Promise.all(all.map(async (project) => {
         const parsed = parseRemote((await getRepoInfo(project.root))?.remote ?? '');
@@ -6799,7 +6725,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
       })).then(() => automationScheduler.start()).catch(() => undefined);
     }).catch(() => undefined);
   });
-  server.once('close', () => { unsubscribe(); coordinator.stop(); automationScheduler.stop(); });
+  server.once('close', () => { unsubscribe(); automationScheduler.stop(); });
   socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost, deps.sessionResolver));
   return server;
 }

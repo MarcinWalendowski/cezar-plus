@@ -1,5 +1,5 @@
 import { serve, type ServerType } from '@hono/node-server';
-import type { AuthProvider } from '@open-mercato/cezar-contract';
+import type { AuthProvider } from '@loki-labs/better-cezar-contract';
 import { identityDir } from '../paths.ts';
 import { resolveAuthProvider } from '../server/capabilities.ts';
 import { IdentityStore } from '../auth/identity-store.ts';

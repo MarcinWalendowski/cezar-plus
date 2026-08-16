@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { ProviderStatusResponse } from '@open-mercato/cezar-api-client'
+import type { ProviderStatusResponse } from '@loki-labs/better-cezar-api-client'
 import { ProviderBanner } from './provider-banner'
 
 const DEFINITIVE_MISSING: ProviderStatusResponse = {

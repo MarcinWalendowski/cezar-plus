@@ -10,7 +10,7 @@ import { useState, type DragEvent, type ReactNode } from 'react'
 
 import { ApiError, createWorkflow } from '@/api/client'
 import { queryKeys } from '@/api/queries'
-import type { WorkflowStepDef } from '@open-mercato/cezar-api-client'
+import type { WorkflowStepDef } from '@loki-labs/better-cezar-api-client'
 import {
   AlertDialog,
   AlertDialogAction,

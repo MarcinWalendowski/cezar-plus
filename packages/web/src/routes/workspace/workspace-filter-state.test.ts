@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { WorkspaceUiState } from '@open-mercato/cezar-api-client'
+import type { WorkspaceUiState } from '@loki-labs/better-cezar-api-client'
 import {
   parseWorkspaceTasksSearch,
   readStoredWorkspaceTasksFilter,

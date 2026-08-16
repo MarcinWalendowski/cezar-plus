@@ -1,5 +1,5 @@
 import { sep } from 'node:path';
-import type { WorkspaceGrantProject } from '@open-mercato/cezar-contract';
+import type { WorkspaceGrantProject } from '@loki-labs/better-cezar-contract';
 import { listProjects } from './projects.ts';
 
 /**

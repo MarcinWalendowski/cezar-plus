@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { createTodoInputSchema } from '@open-mercato/cezar-contract';
+import { createTodoInputSchema } from '@loki-labs/better-cezar-contract';
 import { HANDOFF_INSTRUCTIONS } from './handoff.ts';
 import { todoSchema } from './todos.ts';
 

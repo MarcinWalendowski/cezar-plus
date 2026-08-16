@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Building2Icon, LockIcon, LogInIcon, TriangleAlertIcon } from 'lucide-react'
 import { useState } from 'react'
 
-import type { CreateTeamInput, RenameTeamInput, Team } from '@open-mercato/cezar-api-client'
+import type { CreateTeamInput, RenameTeamInput, Team } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'

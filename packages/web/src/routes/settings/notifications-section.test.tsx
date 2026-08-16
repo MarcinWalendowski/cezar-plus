@@ -2,7 +2,7 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { NotificationsResponse, TransportView } from '@open-mercato/cezar-api-client'
+import type { NotificationsResponse, TransportView } from '@loki-labs/better-cezar-api-client'
 import { createQueryClient } from '@/api/query-client'
 import { NotificationsSection } from './notifications-section'
 

@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import type { TransportHealth as TransportHealthValue } from '@open-mercato/cezar-api-client'
+import type { TransportHealth as TransportHealthValue } from '@loki-labs/better-cezar-api-client'
 import { TransportHealth } from './transport-health'
 
 /**

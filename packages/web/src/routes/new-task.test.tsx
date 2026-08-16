@@ -14,7 +14,7 @@ import type {
   Skill,
   WorkspaceConfigResponse,
   WorkflowsResponse,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
 
 import { readDraft, resetDraft, writeDraft } from './new-task-draft'
@@ -169,8 +169,6 @@ const WORKSPACE_CONFIG: WorkspaceConfigResponse = {
   agentDefaults: {},
   browseRoot: '~/',
   projectsDir: '~/cezar/projects',
-  skillsAutoUpdate: null,
-  effectiveSkillsAutoUpdate: true,
   composerDefaults: {
     autonomous: null,
     worktree: null,

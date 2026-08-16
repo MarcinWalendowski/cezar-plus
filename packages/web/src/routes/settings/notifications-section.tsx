@@ -14,7 +14,7 @@ import {
   type NotificationTransportResponse,
   type TransportView,
   type UpdateNotificationTransportInput,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { ApiError, putWorkspaceUiState } from '@/api/client'
 import { useWorkspaceNotifications, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
 import { subscribeTopic } from '@/api/ws'

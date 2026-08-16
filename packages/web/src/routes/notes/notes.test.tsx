@@ -9,7 +9,7 @@ import type {
   NoteRecord,
   NoteSummary,
   NotesListResponse,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 
 import { NotesRoute } from './notes'
 

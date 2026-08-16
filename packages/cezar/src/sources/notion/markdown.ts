@@ -1,4 +1,4 @@
-import type { SourceLossyKind } from '@open-mercato/cezar-contract';
+import type { SourceLossyKind } from '@loki-labs/better-cezar-contract';
 import { notionRichTextSchema, type NotionBlockNode, type NotionBlockObject, type NotionRichText } from './client.ts';
 
 /**

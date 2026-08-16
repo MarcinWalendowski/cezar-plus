@@ -1,4 +1,4 @@
-import type { RunRecord } from '@open-mercato/cezar-api-client'
+import type { RunRecord } from '@loki-labs/better-cezar-api-client'
 
 /**
  * The one canonical attention function (spec, "Design system" → status grammar).

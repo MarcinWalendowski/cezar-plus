@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { toolDisplay as webToolDisplay } from '@open-mercato/cezar-api-client';
+import { toolDisplay as webToolDisplay } from '@loki-labs/better-cezar-api-client';
 import { toolDisplay, type ToolDisplay } from '../core/tool-display.ts';
 
 /**

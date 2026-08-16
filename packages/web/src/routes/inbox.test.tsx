@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { ProviderStatusResponse, RunRecord, TodoItem } from '@open-mercato/cezar-api-client'
+import type { ProviderStatusResponse, RunRecord, TodoItem } from '@loki-labs/better-cezar-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 
 import { InboxRoute, isTodoRunnable, visibleTodos } from './inbox'

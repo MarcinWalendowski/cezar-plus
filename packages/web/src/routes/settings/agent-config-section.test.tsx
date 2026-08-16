@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { AgentConfigFile, AgentConfigListing } from '@open-mercato/cezar-api-client'
+import type { AgentConfigFile, AgentConfigListing } from '@loki-labs/better-cezar-api-client'
 import { Toaster } from '@/components/ui/toaster'
 import { AgentConfigSection } from './agent-config-section'
 

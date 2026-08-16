@@ -5,7 +5,7 @@ import type { z } from 'zod';
 import type {
   agentConfigFileContentSchema,
   agentConfigListingSchema,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import type {
   createTodoResponseSchema,
   importableSkillSchema,
@@ -13,7 +13,7 @@ import type {
   skillSchema,
   startTodoResponseSchema,
   todoItemSchema,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import type {
   deleteWorkflowResponseSchema,
   groupResponseSchema,
@@ -22,7 +22,7 @@ import type {
   planResponseSchema,
   saveWorkflowResponseSchema,
   workflowsResponseSchema,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import type { AppType } from './app-type.ts';
 
 /**

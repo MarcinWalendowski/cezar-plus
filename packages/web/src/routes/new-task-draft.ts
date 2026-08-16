@@ -1,4 +1,4 @@
-import type { Runner } from '@open-mercato/cezar-api-client'
+import type { Runner } from '@loki-labs/better-cezar-api-client'
 import type { TaskSource } from './new-task-form'
 
 /**

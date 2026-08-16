@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useParams } from 'react-router'
 import { ClockIcon, PlayIcon, PlusIcon, WorkflowIcon, ZapIcon } from 'lucide-react'
-import type { AutomationDefinition, AutomationLogRecord, AutomationsResponse } from '@open-mercato/cezar-api-client'
+import type { AutomationDefinition, AutomationLogRecord, AutomationsResponse } from '@loki-labs/better-cezar-api-client'
 
 import { checkAutomation, createAutomation, getAutomationCheck, getAutomationLog, getAutomations, setAutomationEnabled, updateAutomation } from '@/api/client'
 import { useHealth } from '@/api/queries'

@@ -11,7 +11,7 @@ import {
   type TransportCapabilities,
   type NotificationQuietHours,
   type NotificationRateLimit,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import { cezarHomeDir } from '../paths.ts';
 import { atomicWriteJsonSync } from '../workspace/config.ts';
 import {
@@ -137,7 +137,7 @@ const transportRowSchema = z
     enabled: z.boolean().default(true).catch(true),
     /** Per-event opt-in; a genuine partial map (an absent key means that event's own default,
      *  decided by W1.7's decider) — `z.record(z.string(), …)` rather than an exhaustive record over
-     *  the event enum, mirroring `transportViewSchema.events` in `@open-mercato/cezar-contract`. */
+     *  the event enum, mirroring `transportViewSchema.events` in `@loki-labs/better-cezar-contract`. */
     events: z
       .record(z.string(), z.boolean())
       .default(() => ({}))

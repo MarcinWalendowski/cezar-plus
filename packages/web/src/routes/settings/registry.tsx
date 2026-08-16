@@ -6,9 +6,9 @@ import {
   FolderGit2Icon,
   FoldersIcon,
   GaugeIcon,
+  HardDriveIcon,
   IdCardIcon,
   LogOutIcon,
-  PackageCheckIcon,
   KeyboardIcon,
   NotebookPenIcon,
   PaletteIcon,
@@ -17,11 +17,12 @@ import {
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 
-import type { Capabilities } from '@open-mercato/cezar-api-client'
+import type { Capabilities } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { AccountSection } from './account-section'
 import { AccountsSection } from './accounts-section'
 import { AgentConfigSection } from './agent-config-section'
+import { BackupSection } from './backup-section'
 import { AgentsSection } from './agents-section'
 import { AppearanceSection } from './appearance'
 import { BookmarkletsSection } from './bookmarklets-section'
@@ -29,7 +30,6 @@ import { NotificationsSection } from './notifications-section'
 import { ProjectsSection } from './projects-section'
 import { PromptTemplatesSection } from './prompt-templates-section'
 import { ResourcesSection } from './resources-section'
-import { SkillsSection } from './skills-section'
 // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`, F2): a placeholder the
 // scaffold creates so this registry is edited exactly once — see the file's own docblock. W4.8
 // takes over and fills it.
@@ -66,9 +66,9 @@ export type SettingsSectionId =
   | 'notifications'
   | 'prompt-templates'
   | 'keyboard'
-  | 'skills'
   | 'sources'
   | 'teams'
+  | 'backup'
 
 /** Which settings area a section belongs to — and therefore which store it writes. */
 export type SettingsScope = 'project' | 'global'
@@ -182,14 +182,6 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     scope: 'global',
   },
   {
-    id: 'skills',
-    title: 'Skills',
-    description: 'Updates for skills installed on this machine.',
-    icon: PackageCheckIcon,
-    component: SkillsSection,
-    scope: 'global',
-  },
-  {
     id: 'accounts',
     title: 'Agent accounts',
     description: 'Second logins, and the agent and models a project uses when it has chosen none.',
@@ -226,6 +218,20 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     description: 'Sign out of this cezar deployment.',
     icon: LogOutIcon,
     component: AccountSection,
+    scope: 'global',
+  },
+  {
+    // Backup (spec `.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`, `CEZ_BACKUP=1`).
+    // Registered UNCONDITIONALLY with no `capability:` field, on the `account` precedent above:
+    // `capabilitiesSchema` deliberately carries no `backup` key (byte-identical health), so there
+    // is no synchronous signal a registry gate could read. Visibility lives in the PANEL instead —
+    // `backup-section.tsx` self-gates on `GET /api/v1/backup`'s `enabled` field, rendering a
+    // "backups are off" state when `CEZ_BACKUP` is unset.
+    id: 'backup',
+    title: 'Backup',
+    description: 'Encrypted, incremental backup of the platform corpus to S3 or a local disk.',
+    icon: HardDriveIcon,
+    component: BackupSection,
     scope: 'global',
   },
   {

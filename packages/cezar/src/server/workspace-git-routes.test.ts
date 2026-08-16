@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { WorkspaceGitResponse } from '@open-mercato/cezar-contract';
+import type { WorkspaceGitResponse } from '@loki-labs/better-cezar-contract';
 import { createWorkspaceGitRoutes, type WorkspaceGitRouteDeps } from './workspace-git-routes.ts';
 import { WorkspaceGitIndex } from '../workspace/git-index.ts';
 import type { ProjectApiEnv } from './server.ts';

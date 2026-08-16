@@ -99,13 +99,13 @@ export function cockpitAssetRoutes(): Hono {
         headers: { 'content-type': assetContentType(file), 'cache-control': ASSET_CACHE_CONTROL },
       });
     })
-    .get('/open-mercato.svg', (c) => {
+    .get('/cezar.svg', (c) => {
       // Served out of the Vite build: the file is a `public/` asset of the web package, which the
       // build copies verbatim into `web/dist`. One home, one URL — the same bytes this route
-      // hands out are what the bundle's own `<img src="/open-mercato.svg">` asks for. Without a
+      // hands out are what the bundle's own `<img src="/cezar.svg">` asks for. Without a
       // build there is nothing to serve, which is a 404 rather than a crash (the shell route
       // answers the same dev-only state with its build hint).
-      const path = join(webDistDir(), 'open-mercato.svg');
+      const path = join(webDistDir(), 'cezar.svg');
       if (!existsSync(path)) return c.json({ error: 'not found' }, 404);
       return new Response(readFileSync(path), { headers: { 'content-type': 'image/svg+xml' } });
     });

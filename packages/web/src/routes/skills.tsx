@@ -6,9 +6,8 @@ import { useSearchParams } from 'react-router'
 import { Link } from '@/lib/project-router'
 
 import { refreshSkills } from '@/api/client'
-import { queryKeys, useImportableSkills, useProjects, useSkills, useWorkflows } from '@/api/queries'
-import { useProjectScope } from '@/api/project-scope-context'
-import type { Skill } from '@open-mercato/cezar-api-client'
+import { queryKeys, useImportableSkills, useSkills, useWorkflows } from '@/api/queries'
+import type { Skill } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { ImportSkillsPanel } from '@/components/skills-import-panel'
 import { SkillDetailBody, SkillSourceTag } from '@/components/skill-detail'
@@ -61,9 +60,6 @@ function SkillsCatalog() {
   const [searchParams] = useSearchParams()
   const [query, setQuery] = useState('')
   const queryClient = useQueryClient()
-  const projects = useProjects()
-  const scope = useProjectScope()
-  const updateProjectId = scope.projectId ?? projects.data?.bootProject ?? ''
 
   const refresh = useMutation({
     mutationFn: () => refreshSkills(),
@@ -218,7 +214,7 @@ function SkillsCatalog() {
           </Link>
 
           {selection === IMPORT ? (
-            <ImportSkillsPanel projectId={updateProjectId} />
+            <ImportSkillsPanel />
           ) : selection === BOOKMARKLETS ? (
             <BookmarkletPanel skills={skills} />
           ) : selected ? (

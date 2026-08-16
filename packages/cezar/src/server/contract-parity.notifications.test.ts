@@ -2,7 +2,7 @@ import type { InferResponseType } from 'hono/client';
 import { hc } from 'hono/client';
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
-import type { notificationLogResponseSchema, notificationsResponseSchema } from '@open-mercato/cezar-contract';
+import type { notificationLogResponseSchema, notificationsResponseSchema } from '@loki-labs/better-cezar-contract';
 import type { AppType } from './app-type.ts';
 
 /**

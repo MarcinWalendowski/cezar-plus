@@ -4,7 +4,7 @@ import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { HealthResponse, WorkspaceGitResponse } from '@open-mercato/cezar-api-client'
+import type { HealthResponse, WorkspaceGitResponse } from '@loki-labs/better-cezar-api-client'
 
 import { WorkspaceGitRoute } from './workspace-git'
 

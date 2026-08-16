@@ -4,7 +4,7 @@ import {
   type WorkspaceKnowledgeChangelogResponse,
   type WorkspaceKnowledgeDomainsResponse,
   type WorkspaceKnowledgeSearchResponse,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import { resolveCapabilities } from './capabilities.ts';
 import type { ProjectApiEnv } from './server.ts';
 import {

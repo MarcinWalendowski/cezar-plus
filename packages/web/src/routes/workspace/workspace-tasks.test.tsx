@@ -4,7 +4,7 @@ import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { HealthResponse, WorkspaceRunsResponse, WorkspaceUiState } from '@open-mercato/cezar-api-client'
+import type { HealthResponse, WorkspaceRunsResponse, WorkspaceUiState } from '@loki-labs/better-cezar-api-client'
 
 import { WorkspaceTasksRoute } from './workspace-tasks'
 

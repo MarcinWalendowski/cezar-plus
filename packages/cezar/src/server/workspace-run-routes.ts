@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import {
   workspaceRunStartInputSchema,
   type WorkspaceRunStartResponse,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import { jsonZodValidator } from './validators.ts';
 import type { ProjectApiEnv } from './server.ts';
 import type { RunRecord } from '../runs/store.ts';

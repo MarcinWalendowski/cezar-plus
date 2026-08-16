@@ -15,7 +15,7 @@ import {
   type ProjectListEntry,
   type ProjectsResponse,
   type WorkspaceConfigResponse,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'

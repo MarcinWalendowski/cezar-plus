@@ -15,7 +15,7 @@ import {
   type KnowledgeRemovedResponse,
   type KnowledgeResponse,
   type KnowledgeSearchResponse,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import type { SearchFilters } from '../knowledge/search.ts';
 import { jsonZodValidator, queryZodValidator } from './validators.ts';
 import type { ProjectApiEnv } from './server.ts';

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ProjectListEntry, RunIndexEntry } from '@open-mercato/cezar-api-client'
+import type { ProjectListEntry, RunIndexEntry } from '@loki-labs/better-cezar-api-client'
 
 import {
   NO_FILTERS,

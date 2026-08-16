@@ -4,7 +4,7 @@ import { useState } from 'react'
 
 import { putConfig } from '@/api/client'
 import { queryKeys, useConfig } from '@/api/queries'
-import type { ConfigResponse, SetConfigInput } from '@open-mercato/cezar-api-client'
+import type { ConfigResponse, SetConfigInput } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'

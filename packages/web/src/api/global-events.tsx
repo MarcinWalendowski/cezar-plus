@@ -12,14 +12,14 @@ import {
   type GlobalEvent,
   type UsageStore,
 } from './events'
-import { apiPath, getApiScope } from '@open-mercato/cezar-api-client'
+import { apiPath, getApiScope } from '@loki-labs/better-cezar-api-client'
 import { queryKeys, useHealthSubscription, workspaceQueryKeys } from './queries'
 import type {
   ApiRun,
   HealthResponse,
   ProcessUsage,
   ProviderStatusResponse,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 
 /**
  * The app's one connection to `GET /api/workspace/events`, and the two halves of the sync

@@ -13,7 +13,7 @@ import type {
   ProviderStatusResponse,
   RunEvent,
   RunStatus,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 
 import { TaskThreadRoute, ThreadView } from './task-thread'
 import { buildTranscriptRows, mainTranscriptSections } from './session-transcript'

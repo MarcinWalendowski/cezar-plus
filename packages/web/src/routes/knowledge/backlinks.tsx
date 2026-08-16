@@ -1,6 +1,6 @@
 import { Link2OffIcon, LinkIcon } from 'lucide-react'
 
-import type { KnowledgeLink } from '@open-mercato/cezar-api-client'
+import type { KnowledgeLink } from '@loki-labs/better-cezar-api-client'
 import { Badge } from '@/components/ui/badge'
 import { Link } from '@/lib/project-router'
 import { cn } from '@/lib/utils'

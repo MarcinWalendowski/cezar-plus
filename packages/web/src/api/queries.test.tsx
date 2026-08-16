@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from './client'
 import { createQueryClient } from './query-client'
-import { setApiScope } from '@open-mercato/cezar-api-client'
+import { setApiScope } from '@loki-labs/better-cezar-api-client'
 import { ProjectScopeContext } from './project-scope-context'
-import type { GithubRefStatusData } from '@open-mercato/cezar-api-client'
+import type { GithubRefStatusData } from '@loki-labs/better-cezar-api-client'
 import {
   refStatusRecheckAfter,
   useReferenceProjectId,
@@ -26,7 +26,6 @@ import {
   useRunChanges,
   useRuns,
   useSkills,
-  useSkillsUpdate,
   workspaceQueryKeys,
 } from './queries'
 
@@ -493,40 +492,6 @@ describe('useSkills', () => {
       expect(result.current.data?.map((skill) => skill.name)).toEqual(['local', 'om-fix']),
     )
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual(['/api/v1/skills', '/api/v1/skills?wait=1'])
-  })
-})
-
-describe('useSkillsUpdate', () => {
-  it('retries a transient snapshot conservatively until the background server check converges', async () => {
-    fetchMock.mockResolvedValue(json({
-      status: 'idle',
-      available: false,
-      autoUpdateEnabled: false,
-      inherited: false,
-      checkedAt: null,
-      updatedAt: null,
-      scopes: [],
-      needsUpgradeNotes: false,
-    }))
-    const client = createQueryClient()
-    const key = workspaceQueryKeys.skillsUpdate('boot')
-    const { result } = renderHook(() => useSkillsUpdate('boot'), {
-      wrapper: ({ children }: { children: ReactNode }) => (
-        <QueryClientProvider client={client}>{children}</QueryClientProvider>
-      ),
-    })
-    await waitFor(() => expect(result.current.data?.status).toBe('idle'))
-
-    const query = client.getQueryCache().find({ queryKey: key })
-    const interval = query?.observers[0]?.options.refetchInterval
-    expect(typeof interval).toBe('function')
-    expect((interval as (current: typeof query) => number | false)(query)).toBe(60_000)
-
-    client.setQueryData(key, { ...result.current.data!, status: 'current' })
-    expect((interval as (current: typeof query) => number | false)(query)).toBe(false)
-
-    client.setQueryData(key, { ...result.current.data!, status: 'available' })
-    expect((interval as (current: typeof query) => number | false)(query)).toBe(false)
   })
 })
 

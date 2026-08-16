@@ -6,7 +6,7 @@ import type {
   WorkspaceKnowledgeDomain,
   WorkspaceKnowledgeProjectHealth,
   WorkspaceKnowledgeResult,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'

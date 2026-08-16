@@ -80,14 +80,12 @@ import {
   rejectWorkspaceNote,
   getWorkspaceRuns,
   getWorkspaceTodos,
+  getWorkspaceBackup,
   getWorkspaceGit,
   getWorkspaceKnowledgeDomains,
   getWorkspaceKnowledgeSearch,
   getWorkspaceNotifications,
   getWorkspaceNotificationsLog,
-  getSkillsUpdate,
-  checkSkillsUpdate,
-  applySkillsUpdate,
   getWorktrees,
   editQueuedMessage,
   markRunSeen,
@@ -110,7 +108,7 @@ import {
   putAgentConfigFile,
   retryProviderAuth,
 } from './client'
-import { queryScope, REFERENCE_STATUS_MAX, runnerDiscoversModels } from '@open-mercato/cezar-api-client'
+import { queryScope, REFERENCE_STATUS_MAX, runnerDiscoversModels } from '@loki-labs/better-cezar-api-client'
 import { useProjectScope } from './project-scope-context'
 import { isReferenceStatus } from '@/lib/reference-status'
 import { githubRepoBase } from '@/lib/tasks-table'
@@ -141,7 +139,7 @@ import type {
   UpdateAgentProfileInput,
   UpdateNoteInput,
   UpdateProjectInput,
-} from '@open-mercato/cezar-api-client'
+} from '@loki-labs/better-cezar-api-client'
 import { subscribeTopic } from './ws'
 
 /**
@@ -309,7 +307,6 @@ export const workspaceQueryKeys = {
   /** One account's auth state — a child of `agentProfiles`, so removing an account drops it too. */
   agentAccountStatus: (routeId: string) =>
     ['workspace', 'agent-profiles', 'status', routeId] as const,
-  skillsUpdate: (projectId: string) => ['workspace', 'skills-update', projectId] as const,
   /** One directory listing from `GET /api/fs/browse` (step 4.2's folder picker). Keyed by the
    *  browsed path — `null` is the browse root, whose absolute location only the server knows.
    *  Not scope-led: there is one filesystem behind the workspace, not one per project. */
@@ -345,6 +342,11 @@ export const workspaceQueryKeys = {
    *  **CORRECTED 2026-08-16:** this also named "a completed fan-out" as an invalidator. The
    *  fan-out is deleted — the composer starts one cross-project run and files no todos. */
   workspaceTodos: ['workspace', 'todos'] as const,
+  /** `GET /backup` — the backup overview the Settings → Backup section gates its own visibility
+   *  on (`enabled`). No parameters. */
+  backup: ['workspace', 'backup'] as const,
+  /** `GET /backup/snapshots` — a child of `backup`, so a run/restore invalidation drops both. */
+  backupSnapshots: ['workspace', 'backup', 'snapshots'] as const,
   /** `GET /workspace/git` (`.ai/specs/2026-08-14-cross-project-git-overview.md`) — the
    *  cross-project git overview. No parameters in v1, so no filter arguments in the key. */
   git: ['workspace', 'git'] as const,
@@ -1409,40 +1411,6 @@ export function useAgentProfiles() {
   })
 }
 
-export function useSkillsUpdate(projectId: string, enabled = true) {
-  return useQuery({
-    queryKey: workspaceQueryKeys.skillsUpdate(projectId),
-    queryFn: ({ signal }) => getSkillsUpdate(projectId, { signal }),
-    enabled,
-    // GET deliberately answers the current snapshot and starts a stale check in the
-    // background. Retry only while that snapshot is transient so an initial `idle`
-    // response converges. Checks may legitimately take tens of seconds, so a one-minute cadence
-    // avoids repeatedly challenging authenticated remote sessions while still converging after
-    // a long-running operation. The initial mount remains the session's one automatic check.
-    refetchInterval: (query) => {
-      const status = query.state.data?.status
-      return status === undefined || status === 'idle' || status === 'checking' || status === 'updating'
-        ? 60_000
-        : false
-    },
-  })
-}
-
-export function useCheckSkillsUpdate(projectId: string) {
-  const queryClient = useQueryClient()
-  const key = workspaceQueryKeys.skillsUpdate(projectId)
-  return useMutation({
-    mutationFn: () => checkSkillsUpdate(projectId),
-    onSuccess: (state) => queryClient.setQueryData(key, state),
-  })
-}
-
-export function useApplySkillsUpdate(projectId: string) {
-  const queryClient = useQueryClient()
-  const key = workspaceQueryKeys.skillsUpdate(projectId)
-  return useMutation({ mutationFn: () => applySkillsUpdate(projectId), onSuccess: (state) => queryClient.setQueryData(key, state) })
-}
-
 /** Rename a run (#389): `PATCH /api/runs/:id`. Invalidates `runs.*` so the list and the detail
  *  view refetch the authoritative record. The run header's inline title edit sits on this. */
 export function usePatchRun(id: string) {
@@ -2284,6 +2252,21 @@ export function useWorkspaceTodos() {
   return useQuery({
     queryKey: workspaceQueryKeys.workspaceTodos,
     queryFn: ({ signal }) => getWorkspaceTodos({ signal }),
+  })
+}
+
+/**
+ * `GET /backup` — the backup overview (`.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`).
+ * The Settings → Backup section reads it to gate its own visibility: `backup` is deliberately NOT a
+ * health capability (byte-identical health), so the section can't read `capabilities.backup` the
+ * way its siblings do — it asks this route and self-gates on `enabled`, the same way the account
+ * section probes `/auth/me`. Always asks (no `enabled` gate): the answer's own `enabled` field is
+ * what it renders.
+ */
+export function useWorkspaceBackup() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.backup,
+    queryFn: ({ signal }) => getWorkspaceBackup({ signal }),
   })
 }
 

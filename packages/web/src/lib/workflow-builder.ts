@@ -1,4 +1,4 @@
-import type { PlanResponse, SaveWorkflowInput, WorkflowStepDef } from '@open-mercato/cezar-api-client'
+import type { PlanResponse, SaveWorkflowInput, WorkflowStepDef } from '@loki-labs/better-cezar-api-client'
 
 /**
  * The workflow builder's pure rules (R6 Step 1.6, spec §"Skills, Workflows, Inbox"), ported

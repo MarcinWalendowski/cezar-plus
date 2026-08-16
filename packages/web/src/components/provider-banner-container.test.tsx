@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
 import { workspaceQueryKeys } from '@/api/queries'
-import type { ProviderStatusResponse, WorkspaceUiState } from '@open-mercato/cezar-api-client'
+import type { ProviderStatusResponse, WorkspaceUiState } from '@loki-labs/better-cezar-api-client'
 import { ProviderBannerContainer } from '@/components/provider-banner-container'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
 

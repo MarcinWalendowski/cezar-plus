@@ -11,7 +11,7 @@ import type {
   agentProfilesResponseSchema,
   openAgentAccountFileResponseSchema,
   removeAgentProfileResponseSchema,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import type {
   fsBrowseResponseSchema,
   launchKeyResponseSchema,
@@ -19,8 +19,8 @@ import type {
   registerProjectResponseSchema,
   removeProjectResponseSchema,
   updateProjectResponseSchema,
-} from '@open-mercato/cezar-contract';
-import type { runsIndexResponseSchema } from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
+import type { runsIndexResponseSchema } from '@loki-labs/better-cezar-contract';
 import type {
   configResponseSchema,
   openProjectInResponseSchema,
@@ -29,11 +29,10 @@ import type {
   providerStatusResponseSchema,
   runnerModelCatalogResponseSchema,
   setConfigResponseSchema,
-  skillsUpdateStateSchema,
   uiStateSchema,
   workspaceConfigResponseSchema,
   workspaceUiStateSchema,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import type { AppType } from './app-type.ts';
 
 /**
@@ -96,17 +95,6 @@ describe('src/contract projects/workspace schemas match the routes exactly', () 
   type SetWorkspaceUiState200 = InferResponseType<(typeof client.api.v1.workspace)['ui-state']['$put'], 200>;
   type Config200 = InferResponseType<typeof client.api.v1.config.$get, 200>;
   type SetConfig200 = InferResponseType<typeof client.api.v1.config.$put, 200>;
-
-  // ---- skills updates ---------------------------------------------------------------------
-  type SkillsUpdate200 = InferResponseType<(typeof client.api.v1.workspace)['skills-update']['$get'], 200>;
-  type SkillsUpdateCheck200 = InferResponseType<
-    (typeof client.api.v1.workspace)['skills-update']['check']['$post'],
-    200
-  >;
-  type SkillsUpdateApply200 = InferResponseType<
-    (typeof client.api.v1.workspace)['skills-update']['apply']['$post'],
-    200
-  >;
 
   // ---- providers, models, open targets ----------------------------------------------------
   type ProviderStatus200 = InferResponseType<typeof client.api.v1.providers.status.$get, 200>;
@@ -183,10 +171,6 @@ describe('src/contract projects/workspace schemas match the routes exactly', () 
     Assert<ExactOpen<z.infer<typeof workspaceUiStateSchema>, SetWorkspaceUiState200>>,
     Assert<Exact<z.infer<typeof configResponseSchema>, Config200>>,
     Assert<Exact<z.infer<typeof setConfigResponseSchema>, SetConfig200>>,
-    // skills updates
-    Assert<Exact<z.infer<typeof skillsUpdateStateSchema>, SkillsUpdate200>>,
-    Assert<Exact<z.infer<typeof skillsUpdateStateSchema>, SkillsUpdateCheck200>>,
-    Assert<Exact<z.infer<typeof skillsUpdateStateSchema>, SkillsUpdateApply200>>,
     // providers, models, open targets
     Assert<Exact<z.infer<typeof providerStatusResponseSchema>, ProviderStatus200>>,
     Assert<Exact<z.infer<typeof providerStatusResponseSchema>, ProviderEnabled200>>,

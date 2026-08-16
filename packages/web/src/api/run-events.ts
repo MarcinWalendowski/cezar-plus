@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
-import { apiPath } from '@open-mercato/cezar-api-client'
-import type { RunEvent } from '@open-mercato/cezar-api-client'
+import { apiPath } from '@loki-labs/better-cezar-api-client'
+import type { RunEvent } from '@loki-labs/better-cezar-api-client'
 
 /**
  * The per-run event stream (`GET /api/runs/:id/events`), as a raw ordered list — R2 Step 2.4's

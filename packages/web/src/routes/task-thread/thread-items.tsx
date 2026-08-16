@@ -18,7 +18,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ZoomableImage } from '@/components/zoomable-image'
 import { Link } from '@/lib/project-router'
-import type { FileDiff, ToolKind, UiToolItem } from '@open-mercato/cezar-api-client'
+import type { FileDiff, ToolKind, UiToolItem } from '@loki-labs/better-cezar-api-client'
 import { cn } from '@/lib/utils'
 
 import { Markdown } from './markdown'

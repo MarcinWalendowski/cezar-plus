@@ -18,8 +18,8 @@ Three packages are in the release, always at the same version; two of them ship:
 
 | Package | Ships? | What it is |
 |---|---|---|
-| `@open-mercato/cezar-api-client` | **no — `private`** | the typed client and shared contract types (`packages/api-client`) |
-| `@open-mercato/cezar` | yes | the service + CLI, ships the built cockpit (`packages/cezar`) |
+| `@loki-labs/better-cezar-api-client` | **no — `private`** | the typed client and shared contract types (`packages/api-client`) |
+| `@loki-labs/better-cezar` | yes | the service + CLI, ships the built cockpit (`packages/cezar`) |
 | `cezar-cli` | yes | the unscoped bin alias, so `npx cezar-cli` works (`alias-cezar`) |
 
 That table is also the **publish order**, and it is load-bearing: each package
@@ -143,7 +143,7 @@ On **npmjs.com** (as an owner of the npm org and of the `cezar-cli` package):
    orgs via teams) — run as the current `cezar-cli` owner:
    `npm access grant read-write <org>:developers cezar-cli`.
 3. Create a **granular access token**: *Read and write*; packages and scopes =
-   the org **scope** (`@open-mercato/*`) rather than a hand-picked package
+   the org **scope** (`@loki-labs/*`) rather than a hand-picked package
    list, **plus** the `cezar-cli` package; set an expiry per your policy (CI
    fails loudly with `E401`/`E404` when it lapses).
    - Selecting the scope instead of individual packages is load-bearing: a
@@ -151,7 +151,7 @@ On **npmjs.com** (as an owner of the npm org and of the `cezar-cli` package):
      reports that as a misleading `E404 Not Found - PUT <name>` rather than a
      `403`. Every package added to the release set fails its first publish
      until the token can create packages in the scope —
-     `@open-mercato/cezar-api-client` was the first to hit this.
+     `@loki-labs/better-cezar-api-client` was the first to hit this.
 4. For every package: Settings → *Publishing access* → **"Require two-factor
    authentication or an automation or granular access token"** (CI publishes
    with the token; humans still need 2FA).

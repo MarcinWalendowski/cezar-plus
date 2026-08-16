@@ -4,7 +4,7 @@ import { useRef, useState, type ReactNode } from 'react'
 
 import { putUiState } from '@/api/client'
 import { queryKeys, useSkills, useUiState } from '@/api/queries'
-import type { Skill } from '@open-mercato/cezar-api-client'
+import type { Skill } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import {

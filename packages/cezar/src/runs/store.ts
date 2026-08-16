@@ -12,7 +12,7 @@ import { RUNNER_IDS } from '../core/agent-runner.ts';
 import type { RunnerId } from '../core/agent-runner.ts';
 // Type-only, so no runtime edge is added from the store to the contract package — one definition
 // of a workspace run's grant entry, shared rather than re-declared.
-import type { WorkspaceGrantProject } from '@open-mercato/cezar-contract';
+import type { WorkspaceGrantProject } from '@loki-labs/better-cezar-contract';
 
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'review' | 'done' | 'failed' | 'cancelled';
 /**

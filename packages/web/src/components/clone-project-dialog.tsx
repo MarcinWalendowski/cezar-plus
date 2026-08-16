@@ -4,7 +4,7 @@ import { Link as RouterLink, useNavigate } from 'react-router'
 
 import { onWorkspaceEvent } from '@/api/global-events'
 import { useCheckoutProject, useProjects } from '@/api/queries'
-import type { CheckoutProgressEvent } from '@open-mercato/cezar-api-client'
+import type { CheckoutProgressEvent } from '@loki-labs/better-cezar-api-client'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,

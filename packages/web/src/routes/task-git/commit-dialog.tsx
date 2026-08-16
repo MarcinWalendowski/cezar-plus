@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { commitRun } from '@/api/client'
 import { queryKeys } from '@/api/queries'
-import type { ApiRun } from '@open-mercato/cezar-api-client'
+import type { ApiRun } from '@loki-labs/better-cezar-api-client'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,

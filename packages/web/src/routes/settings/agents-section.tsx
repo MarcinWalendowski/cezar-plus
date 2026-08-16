@@ -14,7 +14,7 @@ import {
   useSelectAgentProfile,
 } from '@/api/queries'
 import { useProjectScope } from '@/api/project-scope-context'
-import type { ConfigResponse, Runner, SetConfigInput } from '@open-mercato/cezar-api-client'
+import type { ConfigResponse, Runner, SetConfigInput } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'

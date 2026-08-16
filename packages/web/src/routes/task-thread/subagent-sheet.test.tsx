@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import type { UiToolItem } from '@open-mercato/cezar-api-client'
+import type { UiToolItem } from '@loki-labs/better-cezar-api-client'
 
 import { SubagentSheet } from './subagent-sheet'
 import type { SubagentSummary } from './subagent-dock'

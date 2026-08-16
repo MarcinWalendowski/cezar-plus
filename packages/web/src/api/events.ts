@@ -1,4 +1,4 @@
-import type { ApiRun, ProcessUsage, RunRecord, TodoItem } from '@open-mercato/cezar-api-client'
+import type { ApiRun, ProcessUsage, RunRecord, TodoItem } from '@loki-labs/better-cezar-api-client'
 
 /**
  * The global stream's data layer: parse one SSE message, and fold it into cached state.

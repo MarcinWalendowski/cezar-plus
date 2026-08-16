@@ -142,6 +142,20 @@ export function notesLogPath(): string {
 }
 
 /**
+ * Backup config — provider backend, cadence, encryption key env-var names, and any extra include
+ * paths (spec `.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`, `CEZ_BACKUP=1`). Its own
+ * file under `cezarHomeDir()`, on the `notesPath()`/`agentAccountsPath()` precedent: a cezar that
+ * has never heard of backup does not open it, so it cannot drop it. It never holds a secret — the
+ * S3 access key/secret and the encryption key live in env, named here by variable name only (see
+ * the spec's Data Models). Deliberately EXCLUDED from the backup set itself (a `*.json` sibling of
+ * `config.json`, but see `backup/paths.ts`'s classification): restoring a machine's backup config
+ * onto a different machine is not wanted.
+ */
+export function backupConfigPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(cezarHomeDir(env), 'backup.json');
+}
+
+/**
  * Identity storage — orgs, teams, users, memberships, sessions (D7,
  * `.ai/specs/2026-08-06-org-team-auth-onboarding.md`). Its own directory under `cezarHomeDir()`,
  * on the `agentAccountsPath()`/`notesPath()` precedent.

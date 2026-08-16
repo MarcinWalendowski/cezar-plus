@@ -3,7 +3,7 @@ import { useParams } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { BookOpenIcon, SearchXIcon, TriangleAlertIcon } from 'lucide-react'
 
-import { queryScope, type KnowledgeDocument, type KnowledgeFacetBucket } from '@open-mercato/cezar-api-client'
+import { queryScope, type KnowledgeDocument, type KnowledgeFacetBucket } from '@loki-labs/better-cezar-api-client'
 import { searchKnowledge } from '@/api/client'
 import { queryKeys, useHealth, useKnowledge, useKnowledgeDocument } from '@/api/queries'
 import { subscribeTopic } from '@/api/ws'

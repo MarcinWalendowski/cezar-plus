@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { NotebookPenIcon, SparklesIcon, TrashIcon } from 'lucide-react'
-import type { NoteProposal, NoteSummary } from '@open-mercato/cezar-api-client'
+import type { NoteProposal, NoteSummary } from '@loki-labs/better-cezar-api-client'
 
 import {
   useApproveWorkspaceNote,

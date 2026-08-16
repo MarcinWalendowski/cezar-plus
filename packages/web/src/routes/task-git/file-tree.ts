@@ -1,4 +1,4 @@
-import type { ChangedFile } from '@open-mercato/cezar-api-client'
+import type { ChangedFile } from '@loki-labs/better-cezar-api-client'
 
 /**
  * The Changes tab's file tree, as pure data (R5 Step 1.5): changed paths → nested folders

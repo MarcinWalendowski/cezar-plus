@@ -20,7 +20,7 @@ import {
   type TransportHealth,
   type TransportHealthCounters,
   type TransportView,
-} from "@open-mercato/cezar-contract";
+} from "@loki-labs/better-cezar-contract";
 import { jsonZodValidator, queryZodValidator } from "./validators.ts";
 import { resolveCapabilities } from "./capabilities.ts";
 import { loadServerState } from "../server-install/state.ts";

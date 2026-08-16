@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import type { UiToolItem } from '@open-mercato/cezar-api-client'
+import type { UiToolItem } from '@loki-labs/better-cezar-api-client'
 
 import { ToolCard } from './thread-items'
 import { ThreadCardCache, clearOpenCardCache } from './thread-open-cards'

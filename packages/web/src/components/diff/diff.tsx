@@ -1,6 +1,6 @@
 import { useEffect, useImperativeHandle, useRef, useState, type ComponentType } from 'react'
 
-import type { DiffStat } from '@open-mercato/cezar-api-client'
+import type { DiffStat } from '@loki-labs/better-cezar-api-client'
 import { DiffStatLabel } from '@/components/diff-stat'
 import { cn } from '@/lib/utils'
 

@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { runStatusSchema as contractRunStatusSchema } from '@open-mercato/cezar-contract';
+import { runStatusSchema as contractRunStatusSchema } from '@loki-labs/better-cezar-contract';
 import { RunStore, runRecordSchema } from './store.ts';
 
 /** A minimal pre-#389 record, exactly as an old runs.json holds it — no

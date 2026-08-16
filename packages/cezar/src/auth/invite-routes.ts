@@ -9,7 +9,7 @@ import {
   type ListOrgInvitesResponse,
   type RedeemInviteResponse,
   type RevokeInviteResponse,
-} from '@open-mercato/cezar-contract';
+} from '@loki-labs/better-cezar-contract';
 import { jsonZodValidator } from '../server/validators.ts';
 import { identityDir } from '../paths.ts';
 import type { SessionResolver } from '../server/server.ts';

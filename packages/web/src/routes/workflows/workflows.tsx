@@ -33,7 +33,7 @@ import { useParams } from 'react-router'
 
 import { ApiError, createWorkflow, deleteWorkflow, parseWorkflow, postPlan } from '@/api/client'
 import { queryKeys, useSkills, useUiState, useWorkflows } from '@/api/queries'
-import type { Skill, WorkflowDef, WorkflowStepDef } from '@open-mercato/cezar-api-client'
+import type { Skill, WorkflowDef, WorkflowStepDef } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { SkillEmptyHintCompact } from '@/components/skill-empty-hint'
 import {
