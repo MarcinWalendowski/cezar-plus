@@ -220,8 +220,9 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
   const tokenUsageMetrics = !hideAllUsage && env.CEZ_HIDE_TOKEN_USAGE !== '1';
   const costMetrics = !hideAllUsage && env.CEZ_HIDE_COST !== '1';
   const singleProject = env.CEZ_SINGLE_PROJECT === '1';
+  const localHandoff = env.CEZ_REMOTE !== '1' && isLoopbackHost(bindHost);
   return {
-    localHandoff: env.CEZ_REMOTE !== '1' && isLoopbackHost(bindHost),
+    localHandoff,
     // Deliberately not re-derived here: RunManager enforces the same predicate,
     // and two spellings of "is the inbox on" would eventually disagree.
     followups: followupsEnabled(env),
@@ -237,6 +238,10 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
     notes: env.CEZ_NOTES === '1' && !singleProject,
     workspaceViews: env.CEZ_WORKSPACE_VIEWS === '1' && !singleProject,
     notify: env.CEZ_NOTIFY === '1',
+    // AND-ed with `localHandoff`, not just the flag: this panel names each login's email, org and
+    // plan, and the rest of the agent-profiles family is already withheld in hosted mode for the
+    // weaker reason that it echoes host paths. See the field's doc in `contract/health.ts`.
+    accountUsage: env.CEZ_ACCOUNT_USAGE === '1' && localHandoff,
     // The one INVERTED gate in this object: `=== '1'` everywhere above, `!== '0'` here.
     // Skills predates the capability payload, so absent has to keep meaning on — see the
     // `skills` field in `contract/health.ts` for why the asymmetry is deliberate.

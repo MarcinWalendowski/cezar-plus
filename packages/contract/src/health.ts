@@ -117,6 +117,16 @@ export const capabilitiesSchema = z.object({
   workspaceViews: z.boolean(),
   /** `CEZ_NOTIFY=1` (F4, outbound notification transports). */
   notify: z.boolean(),
+  /**
+   * `CEZ_ACCOUNT_USAGE=1` (`.ai/specs/2026-08-16-agent-account-usage-routing.md`) — the sidebar
+   * panel showing what each agent account is doing and how close it is to its limit.
+   *
+   * Also `false` in HOSTED mode regardless of the flag, and that is not symmetry for its own sake:
+   * the panel names the logged-in account's email, org and plan per login. The rest of the
+   * agent-profiles family is already withheld when `localHandoff` is false because it echoes host
+   * paths — this discloses who the operator is, which is strictly more than a path.
+   */
+  accountUsage: z.boolean(),
   /** The Skills surface. **Opt-OUT, and the only capability here that is** — `CEZ_SKILLS=0`
    *  hides it; every other value, including unset, leaves it on. Inverted deliberately: every
    *  flag above gates a feature that did not exist before it, so absent-means-off is the honest

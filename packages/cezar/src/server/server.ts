@@ -26,6 +26,12 @@ import { jsonZodValidator, paramZodValidator, queryZodValidator } from './valida
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
 import { createNotesRoutes } from './notes-routes.ts';
+import {
+  createAgentAccountUsageRoutes,
+  type AgentAccountUsageRouteDeps,
+} from './agent-account-usage-routes.ts';
+import { isAgentPoolId } from '@loki-labs/better-cezar-contract';
+import { inflightFromRuns } from '../workspace/agent-account-usage.ts';
 import { NoteStore } from '../notes/store.ts';
 import { NoteCoordinator } from '../notes/coordinator.ts';
 import { NoteProcessor } from '../notes/processor.ts';
@@ -310,6 +316,14 @@ export interface ServerDeps {
    *  against real temp dirs without depending on a `git` binary or on its exit codes. Same
    *  reasoning, and the same shape, as `cloneRunner` above. */
   gitInitRunner?: GitInitRunner;
+  /** Account-usage PROBES only (`.ai/specs/2026-08-16-agent-account-usage-routing.md`). Injected so
+   *  a test can exercise the real endpoint without spawning a `claude`/`codex` child per account.
+   *
+   *  Note what is deliberately absent: the `inflight` closure. It is the part that shipped broken —
+   *  it enumerated `contexts.ids()`, which structurally cannot name the boot project — and every
+   *  test that injected a store list agreed with the bug. So the count stays un-injectable, and a
+   *  test that wants to assert on it has to go through the real thing. */
+  accountUsageProbes?: Pick<AgentAccountUsageRouteDeps, 'probeQuota' | 'probeIdentity'>;
   /** Host-wide model discovery service. Tests inject a deterministic adapter. */
   modelCatalog?: RunnerModelCatalog;
   /** Host-wide provider authentication discovery. Tests inject deterministic probes. */
@@ -2069,9 +2083,17 @@ export function createApp(deps: ServerDeps) {
     if (blocked) return { error: blocked, status: 409 };
     // A composer override names an account the user just picked, so a stale id (deleted since the
     // page loaded) is answered honestly instead of quietly running on the default.
-    if (body.agentProfile !== undefined) {
+    //
+    // A POOL is exempt: it names a SET, and the login is chosen at dispatch by
+    // `resolvePoolForDispatch`. Refusing it here is not a cosmetic gap — it is a 400 on every
+    // pooled task, which is how this was found (the composer's own value bounced off its own
+    // create route). Gated on the capability for the selection route's reason: a pool the server
+    // would never resolve must not be accepted as though it had been.
+    if (body.agentProfile !== undefined && !isAgentPoolId(body.agentProfile)) {
       const account = await resolveWorkspaceProfile(fallback, body.agentProfile);
       if ('error' in account) return { error: account.error, status: 400 };
+    } else if (body.agentProfile !== undefined && !capabilities().accountUsage) {
+      return { error: 'account balancing is off on this server (CEZ_ACCOUNT_USAGE=1)', status: 409 };
     }
     return null;
   };
@@ -2680,10 +2702,19 @@ export function createApp(deps: ServerDeps) {
           root = await projectRootFor(resolvedId);
           if (root === null) return c.json({ error: `unknown project: ${projectId}` }, 404);
         }
+        // A pool is a ROUTE, not an account, so there is nothing to resolve here — it names the set
+        // to balance over and the login is picked at dispatch. Gated on the same capability that
+        // maintains the signals it balances on (dispatch cursor, limits, quota): storing a pool a
+        // flagless server would never act on is a setting that reads as applied and is not. It then
+        // skips the existence check below, which would 400 on it by design.
+        const pool = isAgentPoolId(profileId);
+        if (pool && !capabilities().accountUsage) {
+          return c.json({ error: 'account balancing is off on this server (CEZ_ACCOUNT_USAGE=1)' }, 409);
+        }
         // A user naming an account that does not exist gets told so — the opposite of how RUN
         // resolution treats a dangling stored id, and deliberately: a run has no better answer
         // than the default, a person does.
-        if (profileId !== null && profileId !== DEFAULT_AGENT_ACCOUNT_ID) {
+        if (!pool && profileId !== null && profileId !== DEFAULT_AGENT_ACCOUNT_ID) {
           const account = await resolveWorkspaceProfile(provider, profileId);
           if ('error' in account) return c.json({ error: account.error }, 400);
         }
@@ -6238,6 +6269,32 @@ export function createApp(deps: ServerDeps) {
     },
     warn: (message) => console.warn(message),
   });
+  /**
+   * Every run this process is executing right now, per agent account — the sidebar panel's count
+   * and the pool balancer's signal 2, from ONE source.
+   *
+   * Asked of the shared semaphore rather than assembled here, and both halves of that are the
+   * product of a bug this feature actually shipped:
+   *
+   * 1. **Enumerating project contexts misses the boot project.** `resolveProjectScope`
+   *    short-circuits both of its spellings straight to `bootContext`, so `contexts.ids()` can
+   *    never name it — and the boot repo is where workspace runs live. The first version of this
+   *    closure walked that map and read **0 through an entire real `running` step**, which is also
+   *    exactly what "nothing is running" looks like. Every manager REGISTERS with the semaphore, so
+   *    registration cannot forget one the way enumeration can.
+   * 2. **A record's `status` is not a fact about this process.** Stores here open with
+   *    `keepLive: true`, so a crashed cockpit's `running` steps come back from disk still saying
+   *    `running` (deliberately — `recover()` needs them). Counting those reports a phantom run
+   *    forever. `RunManager.accountInflight` answers from its in-memory `active` map instead, which
+   *    a dead process cannot leave behind.
+   *
+   * `deps.semaphore` is optional only for legacy callers and tests that build no managers; absent,
+   * nothing is running here to count and `{}` is the correct answer rather than a degraded one.
+   */
+  const agentAccountUsageRoutes = createAgentAccountUsageRoutes({
+    inflight: () => deps.semaphore?.accountInflight() ?? {},
+    ...deps.accountUsageProbes,
+  });
   const notesRoutes = createNotesRoutes({
     store: noteStore,
     pipeline: {
@@ -6543,6 +6600,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', providersRoutes)
     .route('/', projectsRoutes)
     .route('/', agentProfilesRoutes)
+    .route('/', agentAccountUsageRoutes)
     .route('/', workspaceConfigRoutes)
     .route('/', fsBrowseRoutes)
     .route('/', automationChecksRoutes)

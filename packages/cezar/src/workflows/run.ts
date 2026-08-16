@@ -53,6 +53,9 @@ import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.ts';
 import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidateTitle } from '../runs/auto-name.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { resolveProfileEnvForRoot } from '../workspace/agent-profiles.ts';
+import { accountUsageKey, countInflight, type InflightStep } from '../workspace/agent-account-usage.ts';
+import { resolvePoolForDispatch } from '../workspace/agent-route-select.ts';
+import type { ProviderId } from '../core/provider-auth.ts';
 import {
   buildWorkspaceGrant,
   workspaceGrantSystemPrompt,
@@ -284,12 +287,22 @@ function accountHeldFor(
  * that names no runner has not started yet and will take the configured default, which is what
  * `fallbackRunner` carries; a run that HAS started always carries its resolved runner (execute
  * persists it), and only started runs can be holding.
+ *
+ * Spelled through `accountUsageKey` rather than re-composed here. It is the same key the usage
+ * registry, the sidebar panel and the pool balancer are all keyed on, and two `${a}:${b}` templates
+ * for one concept is a drift waiting to happen — the moment either side changes how it spells the
+ * discovered account, holds stop matching usage and neither reports an error.
+ *
+ * A run still carrying a `pool:` route has not been resolved yet, so it names no account; the pool
+ * string becomes its own key, which can only ever match another unresolved run on the same pool.
+ * That is the conservative reading — `execute()` overwrites `agentProfile` with the concrete login
+ * before the run can hold anything.
  */
 export function runAccountKey(
   run: Pick<RunRecord, 'runner' | 'agentProfile'>,
   fallbackRunner: RunnerId,
 ): string {
-  return `${run.runner ?? fallbackRunner}:${run.agentProfile ?? 'default'}`;
+  return accountUsageKey((run.runner ?? fallbackRunner) as ProviderId, run.agentProfile);
 }
 
 /**
@@ -613,6 +626,7 @@ export class RunManager {
       pump: () => this.pump(),
       oldestQueuedAt: () => this.oldestQueuedAt(),
       accountHolds: () => this.accountHolds(),
+      accountInflight: () => this.accountInflight(),
     });
     // Memory guard (#memory-guard): the shared process-tree sampler already ticks ~every 2 s for
     // the runs table; piggyback on it to enforce the per-task memory ceiling.
@@ -1573,6 +1587,40 @@ export class RunManager {
    * Deliberately excludes a deadline that has already passed — that run is about to resume, and
    * holding the queue for it would only stall the very work the window reopened for.
    */
+  /**
+   * Runs THIS manager is executing right now, per agent account (`accountUsageKey`).
+   *
+   * Keyed on `this.active` — the map of runs with a live `ActiveRun` — and NOT on the records'
+   * `status === 'running'`. That distinction is the whole correctness of this method, and it was
+   * found by SIGKILLing a cockpit mid-run:
+   *
+   * The server opens every store with `keepLive: true`, so `reconcileLoadedRun` does **nothing** on
+   * load — a crashed process's `running` steps come back from disk still saying `running`, on
+   * purpose, so `recover()` can resume them. A count derived from those records therefore reports a
+   * run that no process is executing, and it does so **permanently**: nothing will ever move that
+   * step again. The balancer would then route away from that account forever, and the sidebar would
+   * show a busy login that is idle. Measured after one SIGKILL: the recovered run's first step was
+   * reconciled to `failed` while its `continue-1` step stayed `running`, leaking a phantom 1.
+   *
+   * `active` cannot leak that way — it is in-memory, so a process that dies takes it with it, and
+   * the answer after a restart is zero until something genuinely starts.
+   *
+   * `currentStepId` rather than "every running-looking step": a run executes one step at a time, so
+   * counting each `running` step would multiply a single agent across an interrupted run's history.
+   */
+  accountInflight(): Record<string, number> {
+    const steps: InflightStep[] = [];
+    for (const [runId, state] of this.active) {
+      const run = this.store.getRun(runId);
+      if (!run || !state.currentStepId) continue;
+      const step = run.steps.find((candidate) => candidate.id === state.currentStepId);
+      // Forced to `running`: `active` + `currentStepId` IS the fact that it is running, and the
+      // record's own status can lag a tick behind the manager that owns it.
+      if (step?.backend) steps.push({ backend: step.backend, profileId: step.profileId, status: 'running' });
+    }
+    return countInflight(steps);
+  }
+
   accountHolds(now = Date.now()): AccountHolds {
     const deadline = new Set<string>();
     const inFlight = new Set<string>();
@@ -2652,7 +2700,20 @@ export class RunManager {
     // Resolve the agent backend for this run: the task choice (GUI) wins over
     // the config default. Per-step `runner` can still override it below.
     const config = await loadConfig(this.repoRoot);
-    const taskBackend: RunnerId = input.runner ?? config.defaultRunner;
+    // A pool route resolves HERE, once, and never again (spec 2026-08-16, Phase C). This is the
+    // moment the run stops being a plan and starts being work, and it is late enough that the
+    // balancer sees the real state of the workspace — a run queued ten minutes ago must not be
+    // routed on ten-minute-old in-flight counts. `pool:*` picks the PROVIDER too, which is why this
+    // sits above `taskBackend` rather than inside the account lookup.
+    const pooled = await resolvePoolForDispatch({
+      agentProfile: input.agentProfile,
+      fallbackProvider: (input.runner ?? config.defaultRunner) as ProviderId,
+      repoRoot: this.repoRoot,
+      // Workspace-wide, via the semaphore every manager registers with — the boot project's
+      // included, which no project-context map can see. See `SemaphoreParticipant.accountInflight`.
+      inflight: this.semaphore.accountInflight(),
+    });
+    const taskBackend: RunnerId = pooled?.provider ?? input.runner ?? config.defaultRunner;
     // The account may have gone into a usage-limit hold since this run was dequeued — the queue
     // gate cannot be the only one, because dequeue is not the moment of no return. Nothing has
     // happened yet here, so the run goes back to the queue untouched (spec
@@ -2683,6 +2744,11 @@ export class RunManager {
       runner: taskBackend,
       systemPrompt: extraSystemPrompt,
       modelIdentity,
+      // The pool is spent here. From this line on the record names a concrete login, so resume
+      // reads the account that actually ran, the thread header keeps meaning what it means, and
+      // "which account spent this" stays answerable after the fact. A record that stayed `pool:…`
+      // would re-balance on every resume and could answer differently each time.
+      ...(pooled ? { agentProfile: pooled.accountId } : {}),
     });
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 

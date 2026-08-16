@@ -175,6 +175,7 @@ describe('resolveCapabilities — followups (#471)', () => {
       notes: false,
       workspaceViews: false,
       notify: false,
+      accountUsage: false,
       // Opt-OUT, so it is `true` in an env that sets nothing. This `toEqual` is the exhaustive
       // one — it is what forces every new capability to be declared here rather than added
       // silently, and it is why the polarity of a new key cannot slip through unnoticed.
@@ -276,6 +277,7 @@ describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources
       notes: false,
       workspaceViews: false,
       notify: false,
+      accountUsage: false,
     });
   });
 
@@ -302,6 +304,7 @@ describe('resolveCapabilities — central-hub scaffold flags (knowledge, sources
       notes: false,
       workspaceViews: false,
       notify: false,
+      accountUsage: false,
     });
   });
 

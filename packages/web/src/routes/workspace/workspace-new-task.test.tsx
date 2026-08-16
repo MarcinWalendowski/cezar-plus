@@ -59,6 +59,7 @@ const HEALTH_ON: HealthResponse = {
     notes: true,
     workspaceViews: false,
     notify: false,
+    accountUsage: false,
     skills: true,
   },
   projects: [

@@ -262,7 +262,14 @@ const DESCRIPTORS: readonly ProviderDescriptor[] = [
   },
 ];
 
-function defaultRunProviderCommand(
+/**
+ * Exported so the account probes (`core/agent-account-probe.ts`) run their read-only CLI calls
+ * through THIS wrapper rather than a second `execFile` of their own. The env handling below is the
+ * part that must not be re-derived: inherit-then-override is what lets a probe reach the host's
+ * PATH while still being pinned to one account's config dir, and two spellings of that rule would
+ * drift into a probe that reads the wrong login and reports it confidently.
+ */
+export function defaultRunProviderCommand(
   executable: string,
   args: readonly string[],
   timeoutMs: number,

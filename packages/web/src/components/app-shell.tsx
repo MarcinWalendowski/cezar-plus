@@ -12,6 +12,7 @@ import * as React from 'react'
 import type { ReactNode } from 'react'
 import { Link as RouterLink, matchPath, useLocation } from 'react-router'
 
+import { AccountUsagePanel } from '@/components/account-usage-panel'
 import { AddProjectDialog } from '@/components/add-project-dialog'
 import { BlankProjectDialog } from '@/components/blank-project-dialog'
 import { CloneProjectDialog } from '@/components/clone-project-dialog'
@@ -111,6 +112,10 @@ export type AppShellProps = {
   /** Single-project capability gating: hides workspace-expansion affordances. Defaults off so
    *  standalone and older callers preserve the multi-project shell. */
   singleProject?: boolean
+  /** `CEZ_ACCOUNT_USAGE=1` (`.ai/specs/2026-08-16-agent-account-usage-routing.md`). Off by
+   *  default, so a cockpit that never set the flag — and every older caller — renders the sidebar
+   *  it always had, with no request made for usage it will not show. */
+  accountUsage?: boolean
   /** Global chrome banner, rendered in its own row above the scroller. Absent renders nothing —
    *  the slot is generic and currently unused (the #391 skills promo it once held is gone,
    *  replaced by the opt-in Import panel on the Skills page). */
@@ -186,6 +191,7 @@ export function AppShell({
   skillsAvailable = true,
   automationsAvailable = true,
   singleProject = false,
+  accountUsage = false,
   banner,
   projectGroups,
   chromeless = false,
@@ -273,6 +279,7 @@ export function AppShell({
     toolsMenu,
     projectGroups,
     singleProject,
+    accountUsage,
   }
 
   return (
@@ -337,6 +344,7 @@ type NavProps = {
   toolsMenu?: ReactNode
   projectGroups?: ReactNode
   singleProject: boolean
+  accountUsage: boolean
 }
 
 /**
@@ -521,6 +529,7 @@ function SidebarContent({
   toolsMenu,
   projectGroups,
   singleProject,
+  accountUsage,
   onNavigate,
   headerAction,
 }: NavProps & {
@@ -734,6 +743,13 @@ function SidebarContent({
        *  line 2. `flex-col` rather than `flex-wrap` on purpose — the previous single wrapping row
        *  overflowed the 264px column and silently stranded the theme toggle on a line of its own,
        *  and a column cannot regress into that no matter what a future control's width is. */}
+      {/* Above the footer, below the scrolling project list: the panel is about the machine, like
+          the footer's controls, but it is READ rather than clicked, so it sits outside the row of
+          affordances. It renders nothing at all when the capability is off or no account has
+          anything to say, so the default cockpit's sidebar is unchanged
+          (`.ai/specs/2026-08-16-agent-account-usage-routing.md`). */}
+      {accountUsage ? <AccountUsagePanel /> : null}
+
       <div
         data-slot="sidebar-footer"
         className="flex flex-col gap-1.5 border-t border-border px-3.5 py-2.5"

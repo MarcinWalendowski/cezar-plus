@@ -1560,6 +1560,7 @@ describe('workspace projects API', () => {
         notes: false,
         workspaceViews: false,
         notify: false,
+        accountUsage: false,
         skills: true,
       });
       // New fields: registered projects enumerated, boot project named.

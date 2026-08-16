@@ -13,6 +13,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useParams, useSearchParams } from 'react-router'
 
+import { isAgentPoolId } from '@loki-labs/better-cezar-api-client'
 import { Link, scopeTo, useNavigate } from '@/lib/project-router'
 
 import { createRun, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
@@ -281,13 +282,18 @@ export function NewTaskRoute() {
     label: profile.label,
     configDir: profile.configDir,
   }))
+  // Pools (spec 2026-08-16, Phase C) ride the same slot as an account id and are offered only with
+  // the `accountUsage` capability, which is what maintains the signals they balance on.
+  const poolsOffered = health.data?.capabilities?.accountUsage === true
   // A draft account belonging to ANOTHER runner is ignored rather than sent: switching runner must
-  // not silently carry a foreign account along.
-  const agentProfile = accountChoices.some(
-    (choice) => choice.provider === displayRunner && choice.id === draft.agentProfile,
-  )
-    ? draft.agentProfile
-    : null
+  // not silently carry a foreign account along. A POOL is exempt — it names no runner's login, so
+  // there is no foreign account to carry, and dropping it here would silently downgrade every
+  // pooled task to a single login the moment the runner pill re-rendered.
+  const agentProfile =
+    (poolsOffered && isAgentPoolId(draft.agentProfile)) ||
+    accountChoices.some((choice) => choice.provider === displayRunner && choice.id === draft.agentProfile)
+      ? draft.agentProfile
+      : null
   // Which account each runner falls back to until the task overrides it. Selections are keyed by
   // repo ROOT — the same key the store uses — and the root comes from `useRepo`, which is
   // project-scoped and so already answers for the ACTIVE project; going through the projects list
@@ -747,13 +753,15 @@ export function NewTaskRoute() {
               {/* Shown when there is a choice to make: more than one runner, or more than one
                   login for one of them. A host with neither sees no pill, exactly as before. */}
               {runners.length > 1
-              || runners.some((id) => accountChoices.filter((c) => c.provider === id).length > 1) ? (
+              || runners.some((id) => accountChoices.filter((c) => c.provider === id).length > 1)
+              || (poolsOffered && accountChoices.length > 1) ? (
                 <RunnerPill
                   runners={runners}
                   value={displayRunner}
                   accounts={accountChoices}
                   account={agentProfile}
                   repoAccount={repoAccount}
+                  pools={poolsOffered}
                   // Changing the AGENT clears the model pin: presets are per-runner, so a kept
                   // model would be one the new runner does not have. Changing only the account
                   // keeps it — the model catalog is the same either way.

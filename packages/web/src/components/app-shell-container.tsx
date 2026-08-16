@@ -170,6 +170,7 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         automationsAvailable={automationsAvailable}
         banner={<ProviderBannerContainer />}
         singleProject={health.data?.capabilities.singleProject === true}
+        accountUsage={health.data?.capabilities.accountUsage === true}
         taskQuickList={<TaskQuickListContainer />}
         // Present only in a multi-project workspace; `AppShell` renders the flat nav and the
         // quick-list above whenever this slot is absent.

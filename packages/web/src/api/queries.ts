@@ -22,6 +22,7 @@ import {
   getAgentConfigFile,
   getAgentAccountDetails,
   getAgentAccountStatus,
+  getAccountUsage,
   getAgentProfiles,
   getConfig,
   getGithub,
@@ -296,6 +297,11 @@ export const workspaceQueryKeys = {
   /** Agent accounts via `GET /api/v1/workspace/agent-profiles` (spec 2026-07-29-agent-profiles).
    *  Workspace-led like the registry: an account describes the machine, not a repo. */
   agentProfiles: ['workspace', 'agent-profiles'] as const,
+  /** Per-account usage for the sidebar panel (spec 2026-08-16-agent-account-usage-routing).
+   *  Its OWN key, not a child of `agentProfiles`: the accounts list changes when someone adds a
+   *  login, this changes every few seconds, and sharing a key would make one poll invalidate the
+   *  other's cache. */
+  accountUsage: ['workspace', 'agent-accounts', 'usage'] as const,
   /** One account's identity, keyed by its route id. A child of `agentProfiles` so removing an
    *  account drops any details cached for it in the same invalidation. */
   agentAccountDetails: (routeId: string) =>
@@ -1408,6 +1414,26 @@ export function useAgentProfiles() {
   return useQuery({
     queryKey: workspaceQueryKeys.agentProfiles,
     queryFn: ({ signal }) => getAgentProfiles({ signal }),
+  })
+}
+
+/**
+ * Per-account usage for the sidebar panel (spec 2026-08-16-agent-account-usage-routing).
+ *
+ * Polled, because the two numbers that matter — in-flight runs and quota — both move without any
+ * action in this tab. The interval is deliberately unhurried: the server answers from a stored
+ * snapshot and refreshes probes in the background, so a faster poll would not produce fresher
+ * numbers, only more requests.
+ *
+ * There is no `enabled` option here on purpose: the capability gate is the panel's MOUNT, in
+ * `app-shell.tsx`. A second gate on the query would be the same rule spelled twice, and the two
+ * would eventually disagree about whether a poll is running.
+ */
+export function useAccountUsage() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.accountUsage,
+    queryFn: ({ signal }) => getAccountUsage({ signal }),
+    refetchInterval: 15_000,
   })
 }
 

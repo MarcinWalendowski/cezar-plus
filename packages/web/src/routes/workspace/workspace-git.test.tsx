@@ -33,6 +33,7 @@ const CAPABILITIES_ON: HealthResponse['capabilities'] = {
   notes: false,
   workspaceViews: true,
   notify: false,
+  accountUsage: false,
   skills: true,
 }
 

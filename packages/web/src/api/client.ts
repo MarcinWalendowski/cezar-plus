@@ -4,6 +4,7 @@ import type {
   AgentAccountStatusResponse,
   AgentProfileResponse,
   AgentProfileSelectionsResponse,
+  AccountUsageResponse,
   AgentProfilesResponse,
   CreateAgentProfileInput,
   DiscoveredAgentAccountsResponse,
@@ -1788,6 +1789,25 @@ export async function getWorkspaceConfig(opts?: ReadOptions): Promise<WorkspaceC
  * job this module already does for provider status — means every consumer can trust the shape, and
  * the next additive field is one line here instead of a hunt for missing `??`s.
  */
+/**
+ * What each agent account is doing right now (`.ai/specs/2026-08-16-agent-account-usage-routing.md`,
+ * `CEZ_ACCOUNT_USAGE=1`). Workspace-level, so never scope-prefixed.
+ *
+ * The flag-off answer is `{enabled: false, accounts: []}` — a 200, not a 404, following the notes
+ * family. `enabled` is what separates "the feature is off" from "you have no accounts", which are
+ * the same empty list and completely different empty states.
+ *
+ * Normalized here for the same version-skew reason `getAgentProfiles` gives: an older server
+ * answering without `accounts` must not crash the panel on `.map` of undefined.
+ */
+export async function getAccountUsage(opts?: ReadOptions): Promise<AccountUsageResponse> {
+  const answer = await unwrap(
+    await cez.api.v1.workspace['agent-accounts'].usage.$get({}, init(opts)),
+    '/workspace/agent-accounts/usage',
+  )
+  return { enabled: answer.enabled ?? false, accounts: answer.accounts ?? [] }
+}
+
 export async function getAgentProfiles(opts?: ReadOptions): Promise<AgentProfilesResponse> {
   const answer = await unwrap(
     await cez.api.v1.workspace['agent-profiles'].$get({}, init(opts)),

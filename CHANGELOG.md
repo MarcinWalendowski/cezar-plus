@@ -1,5 +1,54 @@
 # Unreleased
 
+## ✨ Added
+- ✨ **Per-account usage in the sidebar, and account balancing when you pick an agent.**
+  Spec `.ai/specs/2026-08-16-agent-account-usage-routing.md`, behind `CEZ_ACCOUNT_USAGE=1`.
+
+  An **Accounts** panel at the foot of the sidebar lists every agent login on the machine: what it
+  is running right now, whether it is inside a rate-limit window, and its plan. The agent picker —
+  in the composer *and* both Settings scopes — gains `balance across <agent>` and
+  `balance across everything`, which spread runs across your logins instead of pinning them to one.
+  Balancing skips a limited account, then prefers the fewest runs in flight, then the least
+  recently used; the login is chosen once at dispatch and written to the run, so a task always says
+  which account it actually ran on.
+
+  **Only Codex gets a usage bar, and that is the point.** Codex reports true remaining allowance
+  through its app-server (`account/rateLimits/read`); Claude reports none — `claude auth status
+  --json` answers identity and a plan *name* with no quantity anywhere, there is no other
+  subcommand, and nothing on disk. So a Claude row shows its plan, its in-flight count and whether
+  it is limited, and **nothing shaped like a gauge**. The tempting filler was the token spend cezar
+  already measures, and it would have been the most believable wrong number in the cockpit: a bar
+  built from spend, sitting beside the Codex bar, looking identical and meaning something else.
+  `quota` is optional at every layer — schema, server and component — so the absence cannot be
+  rendered as a zero by accident.
+
+  Four bugs worth naming. Three of them were found by running the thing rather than by the suite,
+  which was green through every one:
+
+  - **The in-flight count read zero through an entire real run.** It enumerated the project-context
+    map, which structurally cannot contain the boot project (`resolveProjectScope` short-circuits
+    both of its spellings), and the boot repo is where workspace runs live. 8367 tests were green;
+    a `0` is also what "nothing is running" looks like. Two other cross-project readers had already
+    shipped with the same gap.
+  - **The same count then read one forever after a crash.** It derived from record status, and the
+    server opens every store with `keepLive: true` — deliberately, so `recover()` can resume
+    interrupted work — which means a SIGKILLed cockpit's `running` steps come back from disk still
+    saying `running`. Nothing would ever move that step again, so the balancer would have routed
+    away from a perfectly idle login permanently. The count now comes from what each manager is
+    executing, aggregated through the semaphore every manager registers with, so neither a forgotten
+    project nor a dead process can distort it.
+  - **The composer addresses a picker row as `runner:account`**, and a pool id carries its own
+    colon, so `split(':')` yielded `'pool'` — neither a pool nor an account. That degrades to the
+    discovered login silently, so every "balance" pick would have run on one account while the pill
+    still read "balance".
+  - **`POST /runs` refused every pool it had just offered**, validating `agentProfile` as an account
+    id and answering `400 unknown claude account: pool:claude` — the composer's own value bouncing
+    off its own create route. No test caught it because every existing test posted a real account.
+
+  Off by default and only the exact value `1` enables it: without the flag the panel is absent, no
+  pools are offered, and the picker is byte-identical to before. Withheld in hosted mode like the
+  rest of the agent-account family — the rows carry each login's email, org and plan.
+
 ## 🗑 Removed
 - 🗑 **Open Mercato is out of cezar — the vendor skills repo, the promo banner, the auto-updater
   and the brand mark.** Spec `.ai/specs/2026-08-16-remove-open-mercato-coupling.md`.

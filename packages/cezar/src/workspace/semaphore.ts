@@ -106,6 +106,19 @@ export interface SemaphoreParticipant {
    * and any caller that predates the hold — keeps working; absent simply holds nothing.
    */
   accountHolds?(): AccountHolds;
+  /**
+   * Runs this participant is executing right now, per agent account (`accountUsageKey`).
+   *
+   * Here rather than plumbed from the server for one structural reason: **every** manager in the
+   * workspace registers with this semaphore, the boot project's included. A reader assembled from
+   * the project-context map instead would silently miss the boot repo — `resolveProjectScope`
+   * short-circuits it, so it never enters that map — and the boot repo is where workspace runs
+   * live. That exact miss already shipped once in the sidebar panel's count; see the spec's
+   * "In-flight counting must include the boot project". Registration cannot forget a participant.
+   *
+   * Optional like `accountHolds`, and absent means "contributes nothing" rather than zero-for-all.
+   */
+  accountInflight?(): Record<string, number>;
 }
 
 const DEFAULT_LIMITS: WorkspaceResourceLimits = {
@@ -227,6 +240,25 @@ export class WorkspaceSemaphore {
       for (const key of holds.inFlight) inFlight.add(key);
     }
     return { deadline, inFlight };
+  }
+
+  /**
+   * Runs in flight across the WHOLE workspace, per agent account — the pool balancer's signal 2.
+   *
+   * Summed across participants, not unioned like `accountHolds`: a hold is a boolean fact about an
+   * account ("closed"), while this is a quantity, and two projects each running one task on the
+   * same login is two runs on it. Asked live for `accountHolds`'s reason — the answer changes on
+   * every schedule, resume and cancel, and a cached one would route into an account that is already
+   * saturated.
+   */
+  accountInflight(): Record<string, number> {
+    const totals: Record<string, number> = {};
+    for (const participant of this.participants) {
+      const counts = participant.accountInflight?.();
+      if (!counts) continue;
+      for (const [key, count] of Object.entries(counts)) totals[key] = (totals[key] ?? 0) + count;
+    }
+    return totals;
   }
 
   /**

@@ -124,6 +124,25 @@ export function agentAccountsPath(): string {
 }
 
 /**
+ * Per-account usage state — dispatch fairness cursor, observed limit-hits, and the last quota
+ * snapshot a provider was willing to report (spec `2026-08-16-agent-account-usage-routing.md`,
+ * `CEZ_ACCOUNT_USAGE=1`). Its OWN file on the `agentAccountsPath()`/`notesPath()` precedent.
+ *
+ * Deliberately NOT a key inside `agent-accounts.json`, even though it is keyed by the same account
+ * ids: that file is the user's configuration — hand-editable, and the thing a second cezar build
+ * must be able to read without losing anything. This one is churn. It is rewritten on every
+ * dispatch and every probe, and a write storm against the file that holds the account list is a
+ * way to lose the account list. Separating them also means deleting this file is a supported repair
+ * (routing falls back to first-listed order and the panel goes quiet), which is not true of
+ * `agent-accounts.json`.
+ *
+ * It holds no secret and no credential: a percentage, a reset timestamp, a count and two dates.
+ */
+export function agentAccountUsagePath(): string {
+  return join(cezarHomeDir(), 'agent-account-usage.json');
+}
+
+/**
  * Notes — a workspace-scoped capture inbox (`.ai/specs/2026-08-06-workspace-notes-cross-project.md`,
  * F3/feature B, `CEZ_NOTES=1`). Its OWN file, on the `agentAccountsPath()` precedent above: a cezar
  * that has never heard of notes does not open `notes.json`, so it cannot drop them, whereas a key

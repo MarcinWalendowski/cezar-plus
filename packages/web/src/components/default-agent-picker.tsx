@@ -1,14 +1,18 @@
 import type { AgentProfile, ProviderStatusResponse, Runner } from '@loki-labs/better-cezar-api-client'
+import { AGENT_POOL_ALL, agentPoolId } from '@loki-labs/better-cezar-api-client'
 import { cn } from '@/lib/utils'
 import { providerStatusFor } from '@/lib/provider-status'
 import { RUNNERS } from '@/routes/new-task-form'
 
 /**
- * "Which agent, and which of its logins" as ONE flat list (spec 2026-07-29-agent-profiles):
+ * "Which agent, and which of its logins" as ONE flat list (spec 2026-07-29-agent-profiles), plus
+ * the pools that balance across them (spec 2026-08-16-agent-account-usage-routing, Phase C):
  *
  *     claude · Default
  *     claude · Klaudiusz
+ *     claude · Balance across claude      ← pool, with CEZ_ACCOUNT_USAGE=1
  *     codex
+ *     Balance across everything           ← pool, with CEZ_ACCOUNT_USAGE=1
  *
  * The same shape the composer's runner pill uses, and shared by BOTH settings scopes — the repo's
  * default and the machine-wide one are the same question asked about a different subject, so they
@@ -16,26 +20,51 @@ import { RUNNERS } from '@/routes/new-task-form'
  *
  * An agent with a single login stays a single row, which is why a machine with no extra accounts
  * sees exactly the segmented control it always saw.
+ *
+ * **Pools are rows here rather than a second control.** This function is the one builder all three
+ * surfaces share, so a row added here reaches the composer and both settings scopes at once — and
+ * more to the point, a pool cannot end up *selectable in one place and not another*, which is how a
+ * routing choice quietly stops applying to half the runs.
+ *
+ * **A pool travels in the `account` slot** (`pool:claude`, `pool:*`) rather than a new field, for
+ * the reason `contract/agent-route.ts` gives at length: the account id already flows through every
+ * store, route and prop on this path, and a parallel field would have to be threaded through all of
+ * them — with each consumer that missed it silently continuing to route to one login.
  */
 
 export interface AgentPickerRow {
   runner: (typeof RUNNERS)[number]
-  /** `null` is the discovered account — stored as absence, never the reserved `default` id. */
+  /** `null` is the discovered account — stored as absence, never the reserved `default` id.
+   *  A `pool:` value is a route, not an account; see `contract/agent-route.ts`. */
   account: string | null
   label: string
   desc: string
   missing: boolean
+  /** Pool rows only: `provider` balances this agent's logins, `all` balances every agent's.
+   *  Absent on an ordinary account row — which is what lets the render gate an `all` row on ANY
+   *  provider being connected rather than on its nominal runner's. */
+  pool?: 'provider' | 'all'
 }
 
-/** Build the rows once, so the caller's `checked` logic and the render agree by construction. */
-export function agentPickerRows(profiles: readonly AgentProfile[]): AgentPickerRow[] {
-  return RUNNERS.flatMap((runner) => {
+/**
+ * Build the rows once, so the caller's `checked` logic and the render agree by construction.
+ *
+ * `pools` is the `accountUsage` capability. Off, this returns byte-identical rows to before pools
+ * existed — deliberately, because the balancer's inputs (dispatch cursor, limits, quota) are only
+ * maintained while that flag is on, and offering a routing mode whose signals nobody is recording
+ * would be a control that looks live and is not.
+ */
+export function agentPickerRows(
+  profiles: readonly AgentProfile[],
+  options: { pools?: boolean } = {},
+): AgentPickerRow[] {
+  const rows = RUNNERS.flatMap((runner) => {
     const logins = profiles.filter((p) => p.provider === runner.id)
     // One login is not a choice, so the agent is the row.
     if (logins.length < 2) {
       return [{ runner, account: null, label: runner.label, desc: runner.desc, missing: false }]
     }
-    return logins.map((login) => ({
+    const accounts: AgentPickerRow[] = logins.map((login) => ({
       runner,
       account: login.isDefault ? null : login.id,
       label: `${runner.label} · ${login.label}`,
@@ -46,7 +75,42 @@ export function agentPickerRows(profiles: readonly AgentProfile[]): AgentPickerR
       desc: login.exists ? login.configDir : `${login.configDir} — folder not created yet`,
       missing: !login.exists,
     }))
+    // A pool of one is not a pool — it is the same login with a longer name, and it would make the
+    // balancer look like it is doing something on a machine where it cannot.
+    if (!options.pools) return accounts
+    return [
+      ...accounts,
+      {
+        runner,
+        account: agentPoolId(runner.id),
+        label: `${runner.label} · Balance across ${runner.label}`,
+        desc: `spreads runs over this agent's ${logins.length} logins, skipping any that are rate limited`,
+        missing: false,
+        pool: 'provider' as const,
+      },
+    ]
   })
+
+  // "Everything" needs at least two accounts to spread over, counted ACROSS providers — two
+  // discovered logins (one claude, one codex) is a real choice even though neither provider has a
+  // second account of its own, and it is the case that makes this row worth having on a
+  // zero-config machine.
+  if (!options.pools || profiles.length < 2) return rows
+  return [
+    ...rows,
+    {
+      // Nominal only: `pool:*` picks the provider at dispatch, so this is the runner the choice is
+      // FILED under, not the one it runs on. The render gates this row on any provider being
+      // connected — see `providerConnected` — because filing it under claude must not make it
+      // unavailable on a machine where only codex is signed in.
+      runner: RUNNERS[0]!,
+      account: AGENT_POOL_ALL,
+      label: 'Balance across everything',
+      desc: `spreads runs over all ${profiles.length} accounts, skipping any that are rate limited`,
+      missing: false,
+      pool: 'all' as const,
+    },
+  ]
 }
 
 /** True once any agent has a second login — what turns the strip into a stacked list. */
@@ -91,15 +155,25 @@ export function DefaultAgentPicker({
     >
       {rows.map((row) => {
         const provider = providerStatusFor(providerStatus.data, row.runner.id)
+        const answered = !providerStatus.isPending && !providerStatus.isError
+        const connectedFor = (id: Runner) => {
+          const status = providerStatusFor(providerStatus.data, id)
+          return status?.enabled === true && status.status === 'connected'
+        }
+        // "Balance across everything" is filed under one runner and runs on whichever the balancer
+        // picks, so its gate is ANY connected provider. Gating it on its nominal runner would hide
+        // the workspace-wide pool on a machine signed into codex and not claude — the setup it is
+        // most useful on.
         const providerConnected =
-          !providerStatus.isPending &&
-          !providerStatus.isError &&
-          provider?.enabled === true &&
-          provider.status === 'connected'
+          answered && (row.pool === 'all' ? RUNNERS.some((r) => connectedFor(r.id)) : connectedFor(row.runner.id))
         const providerReason = providerStatus.isPending
           ? 'Checking provider authentication…'
           : providerStatus.isError
             ? 'Provider authentication could not be verified.'
+            : row.pool === 'all'
+              ? providerConnected
+                ? undefined
+                : 'Connect at least one provider before selecting this.'
             : provider?.enabled === false
               ? 'This provider is disabled. Enable it above or choose another provider.'
             : providerConnected

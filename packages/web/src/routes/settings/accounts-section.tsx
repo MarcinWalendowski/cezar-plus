@@ -454,6 +454,7 @@ function DefaultsForNewProjects({ profiles }: { profiles: AgentProfilesResponse 
   const queryClient = useQueryClient()
   const config = useWorkspaceConfig()
   const providerStatus = useProviderStatus()
+  const health = useHealth()
   // A row per runner, so every runner's own host catalog is needed at once (#794).
   const catalogs = useRunnerModelCatalogs()
   const select = useSelectAgentProfile()
@@ -466,7 +467,9 @@ function DefaultsForNewProjects({ profiles }: { profiles: AgentProfilesResponse 
 
   if (config.data === undefined) return null
 
-  const rows = agentPickerRows(profiles.profiles)
+  const rows = agentPickerRows(profiles.profiles, {
+    pools: health.data?.capabilities?.accountUsage === true,
+  })
   // Absent means "no opinion", and the built-in fallback is claude — the same answer a project with
   // no config gets today. Showing it checked is honest: it IS what an unconfigured project runs.
   const runner = config.data.agentDefaults.runner ?? 'claude'

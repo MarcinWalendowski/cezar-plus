@@ -7,6 +7,7 @@ import {
   queryKeys,
   useAgentProfiles,
   useConfig,
+  useHealth,
   useProjects,
   useProviderStatus,
   useRepo,
@@ -359,6 +360,7 @@ function DefaultAgentField({
   const scope = useProjectScope()
   const repo = useRepo()
   const select = useSelectAgentProfile()
+  const health = useHealth()
 
   // `projectId: null` is the boot project, which every route addresses by the reserved `default`
   // alias. The repo ROOT is the key the account store uses, and `useRepo` is project-scoped so it
@@ -369,7 +371,9 @@ function DefaultAgentField({
   // checked row is the account a task would really run under rather than a guess.
   const selection = repoRoot ? profiles.data?.selections[repoRoot] : undefined
   const machine = profiles.data?.defaults
-  const rows = agentPickerRows(profiles.data?.profiles ?? [])
+  const rows = agentPickerRows(profiles.data?.profiles ?? [], {
+    pools: health.data?.capabilities?.accountUsage === true,
+  })
   const hasAccounts = hasAgentAccounts(rows)
 
   return (

@@ -50,8 +50,29 @@ function LocationProbe() {
 const nav = () => screen.getByRole('navigation', { name: 'Main' })
 const sidebar = () => document.querySelector('[data-slot="sidebar"]') as HTMLElement
 const footer = () => document.querySelector('[data-slot="sidebar-footer"]') as HTMLElement
+const accountsPanel = () => document.querySelector('[data-slot="account-usage-panel"]')
 
 describe('AppShell', () => {
+  /**
+   * The account panel's capability gate (`.ai/specs/2026-08-16-agent-account-usage-routing.md`).
+   *
+   * It lives at the MOUNT rather than inside the panel, and this is the guard for that: the panel
+   * uses a react-query hook, so mounting it unconditionally would both start a poll a flag-off
+   * cockpit never renders from AND force a `QueryClientProvider` onto this presentational shell —
+   * which every test in this file renders without one, on purpose.
+   */
+  describe('account usage panel', () => {
+    it('is absent by default, and the shell still renders with no QueryClient', () => {
+      renderShell('/')
+      expect(accountsPanel()).toBeNull()
+    })
+
+    it('is absent when the capability is explicitly off', () => {
+      renderShell('/', { accountUsage: false })
+      expect(accountsPanel()).toBeNull()
+    })
+  })
+
   it('renders the routed view in the main region', () => {
     renderShell('/', {}, <p>route content</p>)
     expect(within(screen.getByRole('main')).getByText('route content')).toBeTruthy()
