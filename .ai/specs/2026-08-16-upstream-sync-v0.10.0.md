@@ -1,6 +1,6 @@
 # Upstream sync — v0.9.3 → v0.10.0 (`6a97d0ff..1912f2f2`)
 
-**Date:** 2026-08-16 · **Status:** Spec — not implemented (planning only, no merge performed) ·
+**Date:** 2026-08-16 · **Status:** Implemented (merged to `origin/main` in `e43b912d`; **QA Needed** — runtime cockpit smoke pending) ·
 **Range:** `origin/main` (our fork) vs `upstream/main` = 11 commits · **Merge-base:** `6a97d0ff`
 (the exact endpoint of the prior sync, `.ai/runs/2026-08-13-upstream-merge-triage/PLAN.md`).
 
