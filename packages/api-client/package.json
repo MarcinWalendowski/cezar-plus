@@ -1,6 +1,6 @@
 {
   "name": "@loki-labs/better-cezar-api-client",
-  "version": "0.9.2",
+  "version": "0.10.0",
   "description": "Typed client and shared contract types for the cezar cockpit HTTP API.",
   "license": "MIT",
   "private": true,
@@ -21,7 +21,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.test.json"
   },
   "dependencies": {
-    "@loki-labs/better-cezar-contract": "^0.9.2",
+    "@loki-labs/better-cezar-contract": "^0.10.0",
     "hono": "^4.6.0"
   },
   "devDependencies": {
