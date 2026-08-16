@@ -142,6 +142,11 @@ import type {
   WorkspaceRunStartResponse,
   BackupOverviewResponse,
   BackupSnapshotsResponse,
+  BackupRunResponse,
+  BackupRestoreInput,
+  BackupRestoreResponse,
+  BackupVerifyResponse,
+  BackupGcResponse,
 } from '@loki-labs/better-cezar-api-client'
 import { parseProviderStatusResponse } from '@/lib/provider-status'
 import {
@@ -2282,6 +2287,32 @@ export async function getWorkspaceBackup(opts?: ReadOptions): Promise<BackupOver
  *  timestamps only). `200 {snapshots:[]}` when backup is off. */
 export async function getWorkspaceBackupSnapshots(opts?: ReadOptions): Promise<BackupSnapshotsResponse> {
   return unwrap(await cez.api.v1.backup.snapshots.$get({}, init(opts)), '/backup/snapshots')
+}
+
+/** `POST /backup/run` — a single incremental run of the engine (a no-change run uploads
+ *  nothing, N2). `409` when `CEZ_BACKUP` is off, another run is already in flight, or no
+ *  provider/key is configured yet — the server's own `{error}` names which. */
+export async function runWorkspaceBackup(): Promise<BackupRunResponse> {
+  return unwrap(await cez.api.v1.backup.run.$post(), '/backup/run')
+}
+
+/** `POST /backup/verify` — checks the encryption key and provider reachability with a sample
+ *  round-trip, without touching a snapshot. `409` when backup is off. */
+export async function verifyWorkspaceBackup(): Promise<BackupVerifyResponse> {
+  return unwrap(await cez.api.v1.backup.verify.$post(), '/backup/verify')
+}
+
+/** `POST /backup/gc` — prunes blobs no live snapshot references. `409` when backup is off. */
+export async function gcWorkspaceBackup(): Promise<BackupGcResponse> {
+  return unwrap(await cez.api.v1.backup.gc.$post(), '/backup/gc')
+}
+
+/** `POST /backup/restore` — fail-closed (N6): restoring into a non-empty target without
+ *  `force: true` refuses with a `409` whose `{error}` names the refusal ("refusing to
+ *  overwrite …"), so a caller can offer that as a second, explicit confirm before retrying with
+ *  `force: true`. `409` too when backup is off. */
+export async function restoreWorkspaceBackup(input: BackupRestoreInput): Promise<BackupRestoreResponse> {
+  return unwrap(await cez.api.v1.backup.restore.$post({ json: input }), '/backup/restore')
 }
 
 /** `GET /workspace/git` (`.ai/specs/2026-08-14-cross-project-git-overview.md`, D1) — one row per

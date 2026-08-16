@@ -82,6 +82,11 @@ import {
   getWorkspaceRuns,
   getWorkspaceTodos,
   getWorkspaceBackup,
+  getWorkspaceBackupSnapshots,
+  runWorkspaceBackup,
+  verifyWorkspaceBackup,
+  gcWorkspaceBackup,
+  restoreWorkspaceBackup,
   getWorkspaceGit,
   getWorkspaceKnowledgeDomains,
   getWorkspaceKnowledgeSearch,
@@ -117,6 +122,7 @@ import { normalizeTagsForDisplay } from '@/lib/project-tags'
 import type { ContinueOptions } from './client'
 import type {
   ApproveNoteInput,
+  BackupRestoreInput,
   CheckoutProjectInput,
   CreateBlankProjectInput,
   CreateAgentProfileInput,
@@ -2293,6 +2299,66 @@ export function useWorkspaceBackup() {
   return useQuery({
     queryKey: workspaceQueryKeys.backup,
     queryFn: ({ signal }) => getWorkspaceBackup({ signal }),
+  })
+}
+
+/** `GET /backup/snapshots` — the stored snapshots, newest-first, for the cockpit's snapshot list
+ *  and restore controls. `200 {snapshots:[]}` when backup is off (D19), same discipline as
+ *  `useWorkspaceBackup` above. */
+export function useWorkspaceBackupSnapshots() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.backupSnapshots,
+    queryFn: ({ signal }) => getWorkspaceBackupSnapshots({ signal }),
+  })
+}
+
+/** A run/restore/gc all move both the overview (`lastRun`/`snapshotCount`) and the snapshot
+ *  list, so every mutating backup call invalidates both keys explicitly — the `useNotesInvalidator`
+ *  discipline above, spelled out rather than relying on `backupSnapshots`' prefix under `backup`. */
+function useBackupInvalidator() {
+  const queryClient = useQueryClient()
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.backup })
+    void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.backupSnapshots })
+  }
+}
+
+/** `POST /backup/run` — a single incremental run (N2: a no-change run uploads nothing). */
+export function useRunWorkspaceBackup() {
+  const invalidate = useBackupInvalidator()
+  return useMutation({
+    mutationFn: () => runWorkspaceBackup(),
+    retry: false,
+    onSuccess: invalidate,
+  })
+}
+
+/** `POST /backup/verify` — a read-only key/provider check, so it changes nothing to invalidate. */
+export function useVerifyWorkspaceBackup() {
+  return useMutation({
+    mutationFn: () => verifyWorkspaceBackup(),
+    retry: false,
+  })
+}
+
+/** `POST /backup/gc` — prunes unreferenced blobs; the overview's stored counts move too. */
+export function useGcWorkspaceBackup() {
+  const invalidate = useBackupInvalidator()
+  return useMutation({
+    mutationFn: () => gcWorkspaceBackup(),
+    retry: false,
+    onSuccess: invalidate,
+  })
+}
+
+/** `POST /backup/restore` — fail-closed (N6). The caller passes `force` explicitly; see
+ *  `backup-section.tsx`'s two-step confirm for why a bare retry on failure is never automatic. */
+export function useRestoreWorkspaceBackup() {
+  const invalidate = useBackupInvalidator()
+  return useMutation({
+    mutationFn: (input: BackupRestoreInput) => restoreWorkspaceBackup(input),
+    retry: false,
+    onSuccess: invalidate,
   })
 }
 

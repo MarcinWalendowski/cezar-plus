@@ -35,6 +35,7 @@ import { loadWorkspaceConfig } from './workspace/config.ts';
 import { runMigrations } from './workspace/migrations.ts';
 import { shouldRegisterProject } from './workspace/projects.ts';
 import { runProjectsCommand } from './workspace/projects-cli.ts';
+import { runBackupCommand } from './backup/cli.ts';
 import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 // FIX 6 (D13 repair pass 1): the production `listRegisteredProjectRoots` supplier lives in
 // `./registered-project-roots.ts` for the same reason `./auth-boot-gate.ts` was extracted from this
@@ -54,6 +55,9 @@ Usage:
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
   cezar projects            list the projects this cockpit serves
                             (also: projects add [<dir>] · projects remove <id>)
+  cezar backup              encrypted platform backup (CEZ_BACKUP=1): status ·
+                            run · snapshots · verify · gc · restore [--snapshot
+                            <id>] [--force]
   cezar server-install      interactive wizard to host cezar on a server
   cezar server-deploy       redeploy a new version (reload the service) + verify
   cezar server-uninstall    reverse a server-install
@@ -103,6 +107,20 @@ you list under skillsRepos in .ai/cezar/config.json (none by default);
 workflows in .ai/cezar/workflows/.`;
 
 async function main(): Promise<void> {
+  // `backup` owns its own flag namespace (`--snapshot`, `--force`), so route it straight from raw
+  // argv BEFORE the strict top-level `parseArgs` below — which, being strict, rejects those flags
+  // as unknown options and never reaches the command switch. Backup is workspace/registry-scoped
+  // (the home plus every registered project), so `--repo` is not one of its concerns; like
+  // `projects` it resolves its root from cwd. `runBackupCommand` parses `--snapshot`/`--force`
+  // itself and gates on `CEZ_BACKUP=1` internally.
+  const rawArgs = process.argv.slice(2);
+  if (rawArgs[0] === 'backup') {
+    const backupCwd = resolve(process.cwd());
+    const backupRepoRoot = (await getRepoInfo(backupCwd))?.root ?? backupCwd;
+    process.exitCode = await runBackupCommand(rawArgs.slice(1), { defaultRoot: backupRepoRoot });
+    return;
+  }
+
   const { values, positionals } = parseArgs({
     options: {
       port: { type: 'string', short: 'p', default: '4321' },
@@ -169,6 +187,12 @@ async function main(): Promise<void> {
         ? await initWorkspace(repoRoot)
         : undefined;
       process.exitCode = await runProjectsCommand(projectArgs, { defaultRoot: repoRoot, bootProjectId });
+      return;
+    case 'backup':
+      // Registry-only (no server, no HTTP) — the engine reads config + provider and works directly
+      // against the filesystem. Gated on CEZ_BACKUP=1 inside `runBackupCommand` (prints the enable
+      // hint and returns non-zero when the flag is off), so it stays inert like every other surface.
+      process.exitCode = await runBackupCommand(positionals.slice(1), { defaultRoot: repoRoot });
       return;
     case 'server-install':
       await serverCommand('install', repoRoot, values.platform, {

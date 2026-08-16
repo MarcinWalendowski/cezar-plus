@@ -1,6 +1,12 @@
 # Provider-agnostic platform backup & restore
 
-Status: **Partial** — scaffold + engine landing incrementally (see Phases). Flag: `CEZ_BACKUP=1`.
+Status: **Implemented — QA Needed.** All phases (1–8) built, integrated, and wired; the full
+5-command gate is green (typecheck · test 8409 passed · test:unit · build · test:package), and
+N2/N3/N4/N5/N6/N7 are verified by the automated suite plus a real-binary CLI smoke against the
+`local` provider (run → snapshots → verify → zero-knowledge → refuse-without-force → restore
+`--force` → `--snapshot`). **QA Needed** covers what the suite can't reach: a real S3/R2 endpoint
+(only the SigV4 vector + fetch-stubbed transport are covered), the scheduler firing on a live
+server timer, and the cockpit in a browser. Flag: `CEZ_BACKUP=1`.
 Upstreamable (generic, no fork-private strings — D2). Additive only (released npm package).
 
 ## TLDR
@@ -124,11 +130,18 @@ and `todos.json` as machine-local, but backup *includes* them because they are d
 cezar-owned state worth restoring. Backup ≠ gitignore; they answer different questions.
 
 **Home (`~/.cezar/`) — INCLUDE:** `config.json`, `identity/identity.json`, `notes.json`,
-`notes-log.ndjson`, `agent-accounts.json`, `ui-state.json`.
+`notes-log.ndjson`, `agent-accounts.json`, `ui-state.json`, `notifications.json` (durable,
+non-secret transport config — the S3/webhook secrets are in env), and **`backup.json`** itself (the
+backup subsystem's own config; secrets are env, only their var names appear in the file). The last
+two refine this list as originally written: N5's total-classification requirement forced the call,
+and leaving `backup.json` unclassified silently dropped it from every backup (and would refuse
+every run once the walk fails closed — below).
 **Home — EXCLUDE:** `*.bak` and `identity/*.bak-*` (e.g. `config.json.bak`,
-`identity/identity.json.bak-*`), all `*.lock` (`notifications/outbox.lock`, `server.install.lock`),
-`server.json` + `server-instances/*` (machine-pinned install state), `supervisor/*` (runtime),
-`notifications/outbox.ndjson` (transient outbox).
+`identity/identity.json.bak-*`), all `*.lock` (`notifications/outbox.lock`, `server.install.lock`,
+the run lease `backup.lock`), `server.json` + `server-instances/*` (machine-pinned install state),
+`supervisor/*` (runtime), `notifications/outbox.ndjson` (transient outbox). Filesystem junk that can
+appear in any directory (`.DS_Store`, AppleDouble `._*`) is excluded in **both** scopes, so a stray
+never trips the fail-closed walk.
 
 **Per registered project (`<root>/.ai/cezar/`) — INCLUDE:** `knowledge/**` (the writable KB
 content), `config.json`, `sources.json`, `sources/**` (mirrored external content),
@@ -143,12 +156,19 @@ streams: `*-state.json` (`automation-state.json`, `source-state.json`),
 Optional: config `include[]` may add extra **absolute** paths to the include set (e.g. a custom
 knowledge mount), each sandboxed through `paths.ts`.
 
-**The classification is total and fail-closed.** `backup/paths.ts` exposes `classify(relPath,
-scope)` returning `'include' | 'exclude'`, enumerated against every filename each store module
-can emit (cross-checked against `.ai/cezar/.gitignore`'s `wanted` list and the home path
-helpers in `paths.ts`). A path matching neither list is a **failure**, not a default — so a new
-store added upstream later cannot silently fall out of, or into, the backup. This is asserted by
-the N5 negative-control test.
+**The classification is total and fail-closed, at two layers.** `backup/paths.ts` exposes
+`classify(scope, relPath)` returning `'include' | 'exclude' | null`, enumerated against every
+filename each store module can emit (cross-checked against `.ai/cezar/.gitignore`'s `wanted` list
+and the home path helpers in `paths.ts`). A path matching neither list is `null` — a **failure**,
+not a default. Two layers enforce it: (1) at **test** time the N5 negative-control enumerates every
+emittable filename and fails if any classifies to `null`, so a new store added upstream cannot
+silently fall out of, or into, the backup; (2) at **run** time the walker (`backup/walk.ts`)
+**refuses the whole run** — throwing and naming the path — the moment it meets a `null`-classified
+file, rather than silently dropping it (a durable file lost, discovered only at restore) or shipping
+it (a future store's secret leaking into the ciphertext). Because `backup.json` and OS junk are
+classified, that throw fires only on a genuinely new cezar-written file whose classification a dev
+has not added yet — exactly the case that must be loud (it surfaces as a failed run and a staling
+`lastRun` in the cockpit).
 
 ## Architecture
 
@@ -251,19 +271,20 @@ directions parity-checked by `contract-parity.backup.test.ts`.
 Construction phases (2–8) → `spec-implementer` on Sonnet 5. Spec, scaffold (1), and
 activation/e2e (9) stay on the session model.
 
-1. **Scaffold (SOLO, session model).** `backupEnabled()` in `capabilities.ts`; contract domain
-   `contract/src/backup.ts` + `index.ts` re-export; **inert** `server/backup-routes.ts` chained
+1. **Scaffold (SOLO, session model).** ✅ `backupEnabled()` in `capabilities.ts`; contract domain
+   `contract/src/backup.ts` + `index.ts` re-export; `server/backup-routes.ts` chained
    into `workspaceV1`; `BACKWARD_COMPATIBILITY.md` route inventory; `contract-parity.backup.test.ts`,
-   `route-parity`/`typed-bodies` rows; nav item + lazy route + typed client stubs; `.env.example`;
-   `backup/paths.ts` + the include/exclude classification manifest & its N5 negative-control test.
-2. **Provider seam + local provider** (`provider-types.ts`, `registry.ts`, `providers/local.ts` + tests).
-3. **S3 provider** (`providers/s3.ts` + SigV4 signing-vector test + a `local`-backed integration test).
-4. **Crypto** (`backup/crypto.ts`: scrypt KDF, AES-GCM, HMAC storage keys, key-check token + round-trip tests).
-5. **Snapshot engine + manifest** (incremental diff, content-addressing, `gc`; wired to due-scheduler + `O_EXCL` lease).
-6. **Restore** (staging + atomic apply + fail-closed overwrite guard).
-7. **CLI** (`backup/cli.ts`).
-8. **Cockpit** (Settings → Backup section + components).
-9. **e2e (SOLO, W5.1-style exclusive) + CHANGELOG + QA evidence.**
+   `route-parity`/`typed-bodies` rows; the Settings → Backup section (self-gating, `account`-style —
+   no nav-item/route edit); `.env.example` + README env-var row; `backup/paths.ts` + the
+   include/exclude classification manifest & its N5 negative-control test.
+2. **Provider seam + local provider** ✅ (`provider-types.ts`, `registry.ts`, `providers/local.ts` + tests).
+3. **S3 provider** ✅ (`providers/s3.ts` + `providers/sigv4.ts`, SigV4 published-vector test + fetch-stubbed transport test).
+4. **Crypto** ✅ (`backup/crypto.ts`: scrypt KDF, AES-GCM, HMAC storage keys, key-check token + round-trip tests).
+5. **Snapshot engine + manifest** ✅ (`walk.ts`/`manifest.ts`/`snapshot.ts`: incremental diff, content-addressing, `gc`, `O_EXCL` lease; `scheduler.ts` over the due-scheduler). Walk is fail-closed on an unclassified path.
+6. **Restore** ✅ (`restore.ts`: staging + atomic apply + sha256 verify + fail-closed overwrite guard that throws → 409).
+7. **CLI** ✅ (`backup/cli.ts` + `cez backup` wired into `index.ts` — routed from raw argv so its `--snapshot`/`--force` flags survive the strict top-level `parseArgs`).
+8. **Cockpit** ✅ (Settings → Backup section: provider/last-run/coverage/snapshots + Back-up-now/Verify/GC actions + a two-step force-confirm restore dialog; client mutations + query/mutation hooks).
+9. **Activation + e2e (SOLO, session model).** ✅ Real route handlers behind the `CEZ_BACKUP` gate, `BackupScheduler` wired into `startServer` (armed only when flag on **and** `backup.json` `enabled`), the full gate run green, and the real-binary CLI smoke. CHANGELOG + Notion sync in the same session. Runtime R2 / live-server / browser E2E → QA Needed (see Status).
 
 ## Risks
 

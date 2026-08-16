@@ -43,6 +43,8 @@ import { createWorkspaceGitRoutes } from './workspace-git-routes.ts';
 import { createWorkspaceKnowledgeRoutes } from './workspace-knowledge-routes.ts';
 import { createWorkspaceTodosRoutes } from './workspace-todos-routes.ts';
 import { createBackupRoutes } from './backup-routes.ts';
+import { BackupScheduler } from '../backup/scheduler.ts';
+import { loadBackupConfig } from '../backup/config.ts';
 import { createWorkspaceRunRoutes } from './workspace-run-routes.ts';
 import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -197,7 +199,7 @@ import {
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { readUiState, uiStatePath } from '../ui-state.ts';
 import { agentHomePaths, expandTilde } from '../paths.ts';
-import { isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCapabilities } from './capabilities.ts';
+import { backupEnabled, isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCapabilities } from './capabilities.ts';
 // D3's single construction of "who is this request". Imported STATICALLY, unlike most other
 // `../auth/*` modules (which `src/index.ts` reaches only through a `CEZ_AUTH`-gated dynamic
 // `import()`), and that asymmetry is deliberate: `auth/principal.ts` has no runtime imports of
@@ -6765,6 +6767,19 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
       }
     }
   });
+  // The platform backup scheduler (`.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`).
+  // Constructed always (inert until `start()`), but armed only when `CEZ_BACKUP=1` AND the backup
+  // is turned on in `backup.json` (`enabled`) — so a flag-off, or flag-on-but-not-configured, cezar
+  // never arms a timer (N1). Manual `POST /api/v1/backup/run` still works whenever the flag is on;
+  // this only governs the unattended cadence. Toggling `enabled` in config takes effect on restart,
+  // matching how the automation/source schedulers gate at boot.
+  const backupScheduler = new BackupScheduler({ listProjects });
+  server.once('listening', () => {
+    if (!backupEnabled(process.env)) return;
+    void loadBackupConfig()
+      .then((config) => (config.enabled ? backupScheduler.start() : undefined))
+      .catch(() => undefined);
+  });
   server.once('listening', () => {
     void listProjects().then((projects) => {
       const all = projects.some((project) => project.root === deps.repoRoot)
@@ -6783,7 +6798,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
       })).then(() => automationScheduler.start()).catch(() => undefined);
     }).catch(() => undefined);
   });
-  server.once('close', () => { unsubscribe(); automationScheduler.stop(); });
+  server.once('close', () => { unsubscribe(); automationScheduler.stop(); backupScheduler.stop(); });
   socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost, deps.sessionResolver));
   return server;
 }

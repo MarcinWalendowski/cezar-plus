@@ -22,6 +22,8 @@ const HOME_EMITS: Array<[relPath: string, expected: 'include' | 'exclude']> = [
   ['notes.json', 'include'],
   ['notes-log.ndjson', 'include'],
   ['notifications.json', 'include'],
+  ['backup.json', 'include'], // the backup subsystem's own config (secrets are env; only var names here)
+  ['backup.lock', 'exclude'], // the O_EXCL single-run lease held during a run
   ['identity/identity.json', 'include'],
   ['identity/identity.json.bak-20260815-162021', 'exclude'],
   ['identity/identity.lock', 'exclude'],
@@ -33,6 +35,10 @@ const HOME_EMITS: Array<[relPath: string, expected: 'include' | 'exclude']> = [
   ['supervisor/state.json', 'exclude'],
   // the atomic-write temp suffix that momentarily exists beside any home file
   ['config.json.12345.deadbeef.tmp', 'exclude'],
+  ['backup.json.4711.abcd.tmp', 'exclude'],
+  // OS filesystem junk that can appear in any dir — excluded so a stray never bricks a run
+  ['.DS_Store', 'exclude'],
+  ['._config.json', 'exclude'],
 ];
 
 /** Every basename/relpath a store writes under `<root>/.ai/cezar/`. */
@@ -65,6 +71,8 @@ const PROJECT_EMITS: Array<[relPath: string, expected: 'include' | 'exclude']> =
   ['knowledge-index/manifest.json', 'exclude'],
   ['worktrees/task-1/README.md', 'exclude'],
   ['tmp/scratch.json', 'exclude'],
+  ['.DS_Store', 'exclude'], // OS junk — excluded in every scope
+  ['._config.json', 'exclude'],
 ];
 
 describe('backup scope classification is total and fail-closed', () => {

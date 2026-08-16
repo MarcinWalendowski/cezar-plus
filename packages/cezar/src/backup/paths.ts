@@ -34,6 +34,12 @@ export const HOME_INCLUDE: readonly string[] = [
   'notes-log.ndjson', // its pass-receipt log
   'agent-accounts.json', // second logins + per-project agent selection
   'ui-state.json', // cross-project GUI prefs
+  // `backup.json` is the backup subsystem's OWN config (provider/cadence/retention/include set);
+  // every secret is in env and only its VAR NAME appears here, so the file is durable and
+  // non-secret. Restoring it means a recovered machine keeps its backup settings, so it is
+  // INCLUDED — it is `config.json`'s sibling under `~/.cezar/`. Leaving it unclassified silently
+  // dropped it from every backup (and, once the walk fails closed, would have refused every run).
+  'backup.json',
   // `notifications.json` is durable, non-secret transport config (the S3/webhook secrets live in
   // env, resolved at use time — `notifications/secrets.ts`). Restoring a machine's notification
   // setup is wanted, so it is INCLUDED. This refines the spec's representative home-include list,
@@ -59,8 +65,18 @@ export const PROJECT_INCLUDE_DIRS: readonly string[] = [
 /** A basename that is a backup/lock/temp artefact, in EITHER scope — never backed up. */
 function isTransientArtefact(relPath: string): boolean {
   const base = relPath.slice(relPath.lastIndexOf('/') + 1);
-  // `.bak`, `.bak-20260815-162021`; `*.lock`; the atomic-write temp suffix `*.tmp`.
-  return /\.bak(-|$)/.test(base) || base.endsWith('.lock') || base.endsWith('.tmp');
+  // Backup/lock/temp artefacts: `.bak`, `.bak-20260815-162021`; `*.lock`; the atomic-write temp
+  // suffix `*.tmp`. Plus filesystem junk that can appear in any directory — macOS `.DS_Store` and
+  // AppleDouble `._*` sidecars (created on non-native volumes). Excluding OS detritus keeps the
+  // engine's fail-closed walk refusing only on a genuinely-unclassified *cezar* file, never on
+  // stray junk that would otherwise brick every scheduled run.
+  return (
+    /\.bak(-|$)/.test(base) ||
+    base.endsWith('.lock') ||
+    base.endsWith('.tmp') ||
+    base === '.DS_Store' ||
+    base.startsWith('._')
+  );
 }
 
 function classifyHome(relPath: string): Classification | null {
