@@ -1,11 +1,9 @@
 # Workspace knowledge: kill the 5s load, preview in place
 
-- **Status:** Implemented — deployed to cockpit.example.com (`75f6abaa`), Verification items 1-5
-  executed 2026-08-17; "filters on top" amendment implemented, then its client-only index-doc pin
-  found dead on the real corpus during runtime E2E and fixed server-side (browse-mode
-  `WorkspaceKnowledgeIndex.search()` now pins page composition) — gates green this session, not
-  yet deployed or re-verified against the real corpus; real-device QA (mobile toggle, chip layout
-  on a phone) and a real-corpus re-check of the alfredo fix both remain with the owner
+- **Status:** Implemented — deployed to cockpit.example.com (`80c7ee36`, filters-on-top
+  amendment + server-side index-doc pin included), Verification items 1-5 and the amendment's
+  real-corpus runtime checks executed 2026-08-17; only real-device QA (mobile toggle, chip
+  layout on a phone) remains with the owner
 - **Date:** 2026-08-17
 - **Owner report (verbatim):** "no it doesn't it opens new path, eveyrthing should be on one
   page, knowlage page is very slow at initial loading - it take 5s to load: can we somejow
@@ -441,12 +439,25 @@ as a defensive/idempotent fallback rather than the primary mechanism.
   (re-confirmed then against an unmodified sibling file at `HEAD`, which also "fails" bare
   prettier); not run with `--write`.
 
-**Runtime/prod (item 5's repeat):** not executed this round. The server-side pin fix changes
-`search()`'s page COMPOSITION in browse mode (which rows land on page 1), not its per-request
-compute cost, so it shouldn't move the previously recorded `domains()` timing numbers — but that
-assumption itself, and the actual "alfredo" browse-mode fix, are both unverified against the real
-corpus this round; only the fake-store unit tests above ran. The owner's/orchestrator's next
-runtime pass should re-check `GET /workspace/knowledge/search?domain=alfredo` specifically, to
-confirm the index doc now lands on page 1 for real, alongside the pending chip-row layout QA (mobile wrap
-behaviour, chip tap targets, whether "+N more" is reachable one-handed) — component tests pin the
-structure and class tokens; no device pass has covered it yet.
+**Runtime/prod (item 5's repeat) — executed 2026-08-17 by the orchestrating session:**
+
+- **Real-corpus pin re-check (local, rebuilt dist on :4399):**
+  `GET /workspace/knowledge/search?domain=alfredo` now returns `notion-c99c754479a2`
+  (slug `alfredo`, title "Alfredo") as the FIRST row of page 1 — the exact document that
+  previously could never enter the page (id-ascending tie-break placed it past row 20 of 398).
+  Same check for `domain=loki` → `notion-f6bf3721e24d` first. In the browser, the pinned row
+  renders with the INDEX DOC badge at the top of the results.
+- **Layout (local + prod, 1512×802 real Chrome):** search input at the very top, one compact
+  chip row (`loki (667)`, `predicts (424)`, … "+4 more") under it, clicking a chip shows the
+  filtered rows immediately with zero scrolling; active chip highlighted with ×; reader pane
+  right. Verified on cockpit.example.com after deploying `80c7ee36` (same click-through:
+  active `alfredo (398) ×` chip, pinned "Alfredo — INDEX DOC" first row).
+- **No perf regression:** the deploy's restart answered loopback in 3 ms; the pin changes page
+  composition only, and prod page behavior matched local.
+- Deploy note: the same restart removed the now-inert `CEZ_AUTH_BOOTSTRAP_OPEN=1` from
+  `/etc/cezar/cezar.env` (deployment claimed — today's boot logs no unclaimed warning; backup
+  at `cezar.env.bak-20260817`); authenticated access re-verified after the change.
+
+Still pending (owner): the real-phone chip-row pass (mobile wrap, tap targets, "+N more"
+reachability) and the mobile list/detail toggle — component tests pin structure and class
+tokens; no device pass has covered them.
