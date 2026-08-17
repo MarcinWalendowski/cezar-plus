@@ -130,6 +130,18 @@ function SettingsSkillsRedirect() {
   )
 }
 
+/** `/knowledge/:id` moved to `/knowledge?doc=<id>` (skills-preview parity,
+ *  `.ai/specs/2026-08-17-knowledge-skills-preview-parity.md`) — the Knowledge page now selects
+ *  through a query param, exactly like `?skill=` on `/skills`. This redirect exists for stale
+ *  bookmarks/history only; every in-repo link producer (`knowledge.tsx`'s own rows and
+ *  `hrefForId`, `workspace-knowledge.tsx`'s `SearchResultRow`) writes the new shape directly. The
+ *  scoped `Navigate` keeps the redirect inside the active project, same as
+ *  `SettingsSkillsRedirect` below. */
+function KnowledgeDocRedirect() {
+  const { id } = useParams<{ id: string }>()
+  return <ScopedNavigate to={`/knowledge?doc=${encodeURIComponent(id ?? '')}`} replace />
+}
+
 /** A settings section that MOVED from the project area to the global one. Its own hop, not an
  *  inline `<Navigate>`, because `settingsSectionPath` returns a bare pathname: only a component
  *  can read `useLocation` and carry the query and hash across. Legacy flat URLs reach here on a
@@ -600,9 +612,11 @@ export function AppRoutes() {
 
           {/* The knowledge base (central-hub scaffold F1, `CEZ_KB=1`): project-scoped, like Git.
               Reachable even off — off just means `KnowledgeRoute` renders its own "disabled" state,
-              same as `/inbox` does for `followups` (D19: a switched-off feature is never a 404). */}
+              same as `/inbox` does for `followups` (D19: a switched-off feature is never a 404).
+              Selection is a query param (`?doc=<id>`), skills-preview parity — `knowledge/:id`
+              redirects rather than routing, matching `settings/skills` below. */}
           <Route path="knowledge" element={<KnowledgeRoute />} />
-          <Route path="knowledge/:id" element={<KnowledgeRoute />} />
+          <Route path="knowledge/:id" element={<KnowledgeDocRedirect />} />
 
           {/* The workflow builder (R6 Step 1.6): /workflows opens the canvas on the repo's first
               saved chain, /workflows/:name deep-links a specific one. */}

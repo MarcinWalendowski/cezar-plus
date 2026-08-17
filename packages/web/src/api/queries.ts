@@ -62,6 +62,7 @@ import {
   getWorkspaceUiState,
   getKnowledge,
   searchKnowledge,
+  getKnowledgeDocuments,
   getKnowledgeProposals,
   getKnowledgeDocument,
   getSources,
@@ -259,6 +260,12 @@ export const queryKeys = {
     return [queryScope(), 'knowledge'] as const
   },
   knowledgeSearch: (query: string) => [queryScope(), 'knowledge', 'search', query] as const,
+  /** Under the `'knowledge'` prefix on purpose (skills-preview parity) — the `knowledge` WS
+   *  topic's invalidation (`knowledge.tsx`) invalidates `queryKeys.knowledge`, and TanStack
+   *  Query's prefix match means this key gets swept up in the same call. */
+  get knowledgeDocuments() {
+    return [queryScope(), 'knowledge', 'documents'] as const
+  },
   get knowledgeProposals() {
     return [queryScope(), 'knowledge', 'proposals'] as const
   },
@@ -2067,6 +2074,15 @@ export function useKnowledge() {
   return useQuery({
     queryKey: queryKeys.knowledge,
     queryFn: ({ signal }) => getKnowledge({ signal }),
+  })
+}
+
+/** `GET /knowledge/documents` (skills-preview parity) — the always-populated catalog the
+ *  Knowledge page's list pane loads once and filters client-side. */
+export function useKnowledgeDocuments() {
+  return useQuery({
+    queryKey: queryKeys.knowledgeDocuments,
+    queryFn: ({ signal }) => getKnowledgeDocuments({ signal }),
   })
 }
 

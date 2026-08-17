@@ -103,6 +103,7 @@ const GET_ROUTES_OFF = [
   ['/api/v1/knowledge', { enabled: false, roots: [], counts: { documents: 0, idCollisions: 0 }, facets: { types: [], tags: [], statuses: [], roots: [], domains: [] }, scan: { truncated: false, filesScanned: 0, bytesScanned: 0, skipped: 0 }, formatVersion: 0 }],
   ['/api/v1/knowledge/search', { query: '', total: 0, truncated: false, results: [] }],
   ['/api/v1/knowledge/search?q=anything', { query: 'anything', total: 0, truncated: false, results: [] }],
+  ['/api/v1/knowledge/documents', { documents: [], total: 0, truncated: false }],
   ['/api/v1/knowledge/proposals', { proposals: [] }],
   ['/api/v1/knowledge/some-id', { document: null }],
 ] as const;
@@ -277,6 +278,116 @@ describe('knowledge routes — flag on: CRUD wired to the real KnowledgeStore', 
     const second = (await (await apiRequest(app, '/api/v1/knowledge/search?q=shared')).json()) as { results: { id: string }[] };
     expect(first.results.map((r) => r.id)).toEqual(second.results.map((r) => r.id));
     expect(first.results.length).toBe(2);
+  });
+});
+
+describe('GET /knowledge/documents — the browseable catalog (skills-preview parity)', () => {
+  it('returns entries sorted updatedAt desc / id tie-break, carrying no body and no links', async () => {
+    const { project } = await buildProject();
+    const app = appWithProject(project);
+    const json = (body: unknown): RequestInit => ({
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    // Explicit frontmatter `updatedAt` (not mtime), so ordering is deterministic rather than
+    // timing-dependent — `parse.ts` prefers frontmatter `updatedAt` over the file's mtime.
+    await apiRequest(
+      app,
+      '/api/v1/knowledge',
+      json({
+        scope: 'project',
+        path: 'older.md',
+        content: '---\nupdatedAt: 2026-01-01T00:00:00.000Z\n---\n# Older\n\nolder body',
+      }),
+    );
+    await apiRequest(
+      app,
+      '/api/v1/knowledge',
+      json({
+        scope: 'project',
+        path: 'newer.md',
+        content: '---\nupdatedAt: 2026-06-01T00:00:00.000Z\n---\n# Newer\n\nnewer body',
+      }),
+    );
+
+    const res = await apiRequest(app, '/api/v1/knowledge/documents');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      documents: Array<Record<string, unknown>>;
+      total: number;
+      truncated: boolean;
+    };
+
+    expect(body.total).toBe(2);
+    expect(body.truncated).toBe(false);
+    expect(body.documents.map((d) => d.title)).toEqual(['Newer', 'Older']);
+    for (const doc of body.documents) {
+      expect(doc.body).toBeUndefined();
+      expect(doc.links).toBeUndefined();
+      expect(doc.title).toBeTruthy();
+    }
+  });
+
+  it('tie-breaks equal updatedAt by id ascending', async () => {
+    const { project } = await buildProject();
+    const app = appWithProject(project);
+    const json = (body: unknown): RequestInit => ({
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const sameStamp = '2026-03-01T00:00:00.000Z';
+    await apiRequest(app, '/api/v1/knowledge', json({ scope: 'project', path: 'b.md', content: `---\nupdatedAt: ${sameStamp}\n---\n# B\n\nbody` }));
+    await apiRequest(app, '/api/v1/knowledge', json({ scope: 'project', path: 'a.md', content: `---\nupdatedAt: ${sameStamp}\n---\n# A\n\nbody` }));
+
+    const res = await apiRequest(app, '/api/v1/knowledge/documents');
+    const body = (await res.json()) as { documents: Array<{ id: string }> };
+    expect(body.documents).toHaveLength(2);
+    const [first, second] = body.documents;
+    expect(first!.id.localeCompare(second!.id)).toBeLessThan(0);
+  });
+
+  it('truncated propagates from the store scan', async () => {
+    const repoRoot = await tempDir('cez-kb-docs-trunc-');
+    const dataDir = join(repoRoot, '.ai/cezar');
+    await mkdir(dataDir, { recursive: true });
+    const runStore = RunStore.open(dataDir);
+    openRunStores.push(runStore);
+
+    // A one-file cap forces `scan.truncated: true` once a second document exists — same cap
+    // shape `KnowledgeStoreOptions.caps` (`catalog.ts`'s `ScanCaps`) the store exposes for tests.
+    const knowledgeStore = KnowledgeStore.create(repoRoot, dataDir, {
+      disableWatchers: true,
+      caps: { maxFileBytes: 1_000_000, maxFiles: 1, maxTotalBytes: 10_000_000 },
+    });
+    openKnowledgeStores.push(knowledgeStore);
+    await knowledgeStore.initialize();
+
+    const project: ProjectContext = {
+      id: 'proj',
+      root: repoRoot,
+      dataDir,
+      store: runStore,
+      manager: {} as RunManager,
+      automationStore: {} as AutomationStore,
+      knowledgeStore,
+      launchKey: 'test-launch-key',
+    };
+    const app = appWithProject(project);
+    const json = (body: unknown): RequestInit => ({
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    await apiRequest(app, '/api/v1/knowledge', json({ scope: 'project', path: 'one.md', content: '# One\n\nbody' }));
+    await apiRequest(app, '/api/v1/knowledge', json({ scope: 'project', path: 'two.md', content: '# Two\n\nbody' }));
+    await knowledgeStore.reindexNow();
+
+    const res = await apiRequest(app, '/api/v1/knowledge/documents');
+    const body = (await res.json()) as { truncated: boolean };
+    expect(body.truncated).toBe(true);
   });
 });
 

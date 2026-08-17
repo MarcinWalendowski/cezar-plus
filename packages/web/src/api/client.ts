@@ -112,6 +112,7 @@ import type {
   // response (W4.1, W4.6, W4.7, P2.3, W4.10) adds the matching mutator function here.
   KnowledgeResponse,
   KnowledgeSearchResponse,
+  KnowledgeDocumentsResponse,
   KnowledgeProposalsResponse,
   KnowledgeDocumentResponse,
   SourcesListResponse,
@@ -2079,6 +2080,17 @@ export async function searchKnowledge(
       init(opts),
     ),
     '/knowledge/search',
+  )
+}
+
+/** `GET /knowledge/documents` (skills-preview parity) — the browseable catalog: every indexed
+ *  document, bodyless AND linkless, sorted `updatedAt` desc / `id` tie-break server-side. The
+ *  Knowledge page's always-populated list pane loads this once and filters it client-side
+ *  (`lib/knowledge.ts`'s `filterKnowledgeDocs`) rather than re-fetching per keystroke. */
+export async function getKnowledgeDocuments(opts?: ReadOptions): Promise<KnowledgeDocumentsResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].knowledge.documents.$get({ param: { projectId: queryScope() } }, init(opts)),
+    '/knowledge/documents',
   )
 }
 

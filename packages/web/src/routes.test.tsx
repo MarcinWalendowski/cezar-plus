@@ -273,6 +273,16 @@ describe('scoped route map (/p/:projectId)', () => {
     expect(screen.queryByRole('heading', { name: 'Loading task…' })).toBeNull()
   })
 
+  // Skills-preview parity (`.ai/specs/2026-08-17-knowledge-skills-preview-parity.md`):
+  // `/knowledge/:id` moved to `/knowledge?doc=<id>` — the old path-segment shape now redirects,
+  // scope-preserving, same as `SettingsSkillsRedirect`.
+  it(`/p/${BOOT}/knowledge/abc redirects to /p/${BOOT}/knowledge?doc=abc`, () => {
+    renderAt(`/p/${BOOT}/knowledge/abc`)
+    expect(currentPathname()).toBe(`/p/${BOOT}/knowledge`)
+    expect(currentSearch()).toBe('?doc=abc')
+    expect(routeName()).toBe('knowledge')
+  })
+
   // MCP lives inside Agent config; keyboard remains hidden and unrouted.
   const unknown = [
     '/nope-404',

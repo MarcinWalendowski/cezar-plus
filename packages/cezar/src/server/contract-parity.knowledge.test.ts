@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 import type {
   knowledgeDocumentResponseSchema,
+  knowledgeDocumentsResponseSchema,
   knowledgeProposalsResponseSchema,
   knowledgeResponseSchema,
   knowledgeSearchResponseSchema,
@@ -36,12 +37,14 @@ describe('src/contract knowledge schemas match the routes exactly', () => {
 
   type Knowledge200 = InferResponseType<typeof client.api.v1.knowledge.$get, 200>;
   type KnowledgeSearch200 = InferResponseType<typeof client.api.v1.knowledge.search.$get, 200>;
+  type KnowledgeDocuments200 = InferResponseType<typeof client.api.v1.knowledge.documents.$get, 200>;
   type KnowledgeProposals200 = InferResponseType<typeof client.api.v1.knowledge.proposals.$get, 200>;
   type KnowledgeDocument200 = InferResponseType<(typeof client.api.v1.knowledge)[':id']['$get'], 200>;
 
   type _Checks = [
     Assert<Exact<z.infer<typeof knowledgeResponseSchema>, Knowledge200>>,
     Assert<Exact<z.infer<typeof knowledgeSearchResponseSchema>, KnowledgeSearch200>>,
+    Assert<Exact<z.infer<typeof knowledgeDocumentsResponseSchema>, KnowledgeDocuments200>>,
     Assert<Exact<z.infer<typeof knowledgeProposalsResponseSchema>, KnowledgeProposals200>>,
     Assert<Exact<z.infer<typeof knowledgeDocumentResponseSchema>, KnowledgeDocument200>>,
   ];

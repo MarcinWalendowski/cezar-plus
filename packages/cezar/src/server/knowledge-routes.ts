@@ -8,7 +8,9 @@ import {
   knowledgeProposalSchema,
   updateKnowledgeDocumentInputSchema,
   type ApplyKnowledgeProposalsResponse,
+  type KnowledgeDocumentList,
   type KnowledgeDocumentResponse,
+  type KnowledgeDocumentsResponse,
   type KnowledgeProposal,
   type KnowledgeProposalsResponse,
   type KnowledgeReindexResponse,
@@ -74,6 +76,13 @@ const EMPTY_KNOWLEDGE_RESPONSE: KnowledgeResponse = {
   facets: { types: [], tags: [], statuses: [], roots: [], domains: [] },
   scan: { truncated: false, filesScanned: 0, bytesScanned: 0, skipped: 0 },
   formatVersion: 0,
+};
+
+/** Schema-valid empty payload for `GET /knowledge/documents`, same D19 discipline. */
+const EMPTY_KNOWLEDGE_DOCUMENTS_RESPONSE: KnowledgeDocumentsResponse = {
+  documents: [],
+  total: 0,
+  truncated: false,
 };
 
 const knowledgeSearchQuerySchema = z.object({
@@ -184,6 +193,26 @@ export function createKnowledgeRoutes(_deps: KnowledgeRouteDeps = {}) {
         offset,
       });
       return c.json(result satisfies KnowledgeSearchResponse);
+    })
+
+    // ---- browseable catalog (skills-preview parity, 2026-08-17) -------------------------------
+    // `store.listDocuments()` is bodyless already (`catalogEntrySchema` omits `body`) but still
+    // carries `links` and its own `(root, path)` order; this route strips `links` (no use on a
+    // list row) and re-sorts `updatedAt` desc / `id` tie-break SERVER-SIDE, so the ordering is
+    // deterministic and independent of the store's internal iteration order (D8).
+    .get('/knowledge/documents', (c) => {
+      const store = c.get('project').knowledgeStore;
+      if (!store) return c.json(EMPTY_KNOWLEDGE_DOCUMENTS_RESPONSE);
+      const documents: KnowledgeDocumentList[] = store
+        .listDocuments()
+        .map(({ links: _links, ...entry }) => entry)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
+      const body: KnowledgeDocumentsResponse = {
+        documents,
+        total: documents.length,
+        truncated: store.getScan().truncated,
+      };
+      return c.json(body);
     })
 
     .get('/knowledge/proposals', async (c) => {

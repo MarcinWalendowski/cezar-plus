@@ -255,7 +255,7 @@ describe('search', () => {
     const indexRow = results.querySelector('[data-doc-id="shop-idx1"]') as HTMLElement
     expect(within(indexRow).getByText('Index doc')).toBeTruthy()
     const link = within(indexRow).getByRole('link')
-    expect(link.getAttribute('href')).toBe('/p/shop/knowledge/shop-idx1')
+    expect(link.getAttribute('href')).toBe('/p/shop/knowledge?doc=shop-idx1')
 
     const otherRow = results.querySelector('[data-doc-id="shop-other"]') as HTMLElement
     expect(within(otherRow).queryByText('Index doc')).toBeNull()

@@ -320,7 +320,7 @@ function SearchResultRow({ result, isIndexDoc }: { result: WorkspaceKnowledgeRes
   return (
     <li data-project-id={result.project} data-doc-id={result.document.id}>
       <Link
-        to={scopeTo(result.project, `/knowledge/${result.document.id}`)}
+        to={scopeTo(result.project, `/knowledge?doc=${encodeURIComponent(result.document.id)}`)}
         className="flex flex-wrap items-center gap-1.5 rounded-md px-2 py-1.5 text-left hover:bg-accent/60"
       >
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{result.document.title}</span>

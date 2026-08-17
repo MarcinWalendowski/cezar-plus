@@ -129,6 +129,16 @@ export const knowledgeDocumentSchema = z.object({
 });
 export type KnowledgeDocument = z.infer<typeof knowledgeDocumentSchema>;
 
+/**
+ * `GET /knowledge/documents` (skills-preview parity, `.ai/specs/2026-08-17-knowledge-skills-preview-
+ * parity.md`) — the browseable catalog projection: the catalog entry minus `body` (never carried
+ * outside `GET /knowledge/:id`) AND minus `links` (a per-document resolved-wikilink array with no
+ * use on a list row; the reader still gets it from `GET /knowledge/:id`). Narrower than
+ * `catalogEntrySchema` (which keeps `links`) on purpose — this is what the wire actually sends.
+ */
+export const knowledgeDocumentListSchema = knowledgeDocumentSchema.omit({ body: true, links: true });
+export type KnowledgeDocumentList = z.infer<typeof knowledgeDocumentListSchema>;
+
 // ---- GET /knowledge: roots, facets, scan, counts ----------------------------------------------
 
 export const knowledgeRootSchema = z.object({
@@ -210,6 +220,19 @@ export type KnowledgeSearchResponse = z.infer<typeof knowledgeSearchResponseSche
  */
 export const knowledgeDocumentResponseSchema = z.object({ document: knowledgeDocumentSchema.nullable() });
 export type KnowledgeDocumentResponse = z.infer<typeof knowledgeDocumentResponseSchema>;
+
+/**
+ * `GET /knowledge/documents`. Flag off answers `{documents: [], total: 0, truncated: false}` (D19)
+ * — the same empty-payload discipline as every other read in this family. `truncated` mirrors the
+ * store's own scan-truncation flag (same source `GET /knowledge`'s `scan.truncated` reads): a
+ * capped scan must not read to a client as a complete catalog.
+ */
+export const knowledgeDocumentsResponseSchema = z.object({
+  documents: z.array(knowledgeDocumentListSchema),
+  total: z.number().int(),
+  truncated: z.boolean(),
+});
+export type KnowledgeDocumentsResponse = z.infer<typeof knowledgeDocumentsResponseSchema>;
 
 export const knowledgeRemovedResponseSchema = z.object({ removed: z.literal(true) });
 export type KnowledgeRemovedResponse = z.infer<typeof knowledgeRemovedResponseSchema>;
