@@ -96,7 +96,11 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'], workspaceTo: '/workspace/git' },
   { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true, automations: true },
   { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true, workspaceTo: '/workspace/knowledge' },
-  { to: '/skills', label: 'Skills', icon: SparklesIcon, match: ['/skills'], skills: true },
+  // Pinned to the workspace band too (owner request 2026-08-17): `workspaceTo: '/skills'` reuses the
+  // flat -> boot-project redirect (`LegacyPathRedirect`, routes.tsx) instead of a dedicated
+  // `/workspace/skills` route, so the band row lands on the boot project's skills. Still
+  // project-scoped, so it ALSO renders inside each project group via `to` (no `workspace: true`).
+  { to: '/skills', label: 'Skills', icon: SparklesIcon, match: ['/skills'], skills: true, workspaceTo: '/skills' },
   { to: '/notes', label: 'Notes', icon: NotebookPenIcon, match: ['/notes'], notes: true, workspace: true, workspaceTo: '/notes' },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'], workspaceTo: '/settings/global' },
 ]

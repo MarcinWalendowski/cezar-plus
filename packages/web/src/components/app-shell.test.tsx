@@ -507,6 +507,22 @@ describe('AppShell', () => {
       expect(row('Git')).not.toBeNull()
       expect(row('Git')!.getAttribute('href')).toBe('/workspace/git')
     })
+
+    /** Owner request 2026-08-17: Skills pins to the band as well, so it stays visible through the
+     *  flat->groups transition instead of vanishing into the project groups. Unlike Git it is
+     *  opt-OUT gated (`skills`), so it is present by default and gone only on `CEZ_SKILLS=0`.
+     *  `workspaceTo: '/skills'` reuses the flat->boot redirect (`LegacyPathRedirect`), so the band
+     *  row lands on the boot project's skills. */
+    it('renders a Skills row in the band unless CEZ_SKILLS=0 hides it', () => {
+      renderShell('/', { projectGroups: <p>groups</p>, skillsAvailable: true })
+      expect(row('Skills')).not.toBeNull()
+      expect(row('Skills')!.getAttribute('href')).toBe('/skills')
+      cleanup()
+      renderShell('/', { projectGroups: <p>groups</p>, skillsAvailable: false })
+      expect(row('Skills')).toBeNull()
+      // The negative case must not be "the band is empty" — that would pass with the band broken.
+      expect(row('Tasks')).not.toBeNull()
+    })
   })
 
   describe('banner slot', () => {
