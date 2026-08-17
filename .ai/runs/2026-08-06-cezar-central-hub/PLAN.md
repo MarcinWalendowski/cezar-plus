@@ -90,6 +90,18 @@ can reach a phone.
 land: the `report_issue` D1 dual-write (7-day agreement window, see W1.9) and an owner
 decision on the auth model for a shared instance.
 
+> **AMENDED 2026-08-17 — the cutover happened, by owner declaration, on a different
+> mechanism than planned.** Precondition (2) landed 2026-08-16 (`CEZ_AUTH=oidc` behind
+> Cloudflare Access on prod-host). Precondition (1) — the W1.9 D1 dual-write
+> with a 7-day agreement window — was never built and is **superseded**: the owner
+> declared the cutover outright ("let's switch to cezar now, don't push to notion
+> anymore"), and `report_issue` now stages reports in the chatbots worker's BOT_KV,
+> drained into the corpus by `~/loki-labs/tools/reports-drain/drain.mjs` — no dual
+> write, no agreement window (`chat/.ai/specs/SPEC-526-2026-08-17-user-reports-to-cezar.md`).
+> The knowledge/tasks/changelog record moved as a bulk export + corpus-only sync
+> (`cezar/.ai/specs/2026-08-17-notion-export-cezar-import.md`, cutover addendum).
+> The rest of Phase 3 (ops-board ticket entity, multi-player) remains not started.
+
 ---
 
 ## Package table

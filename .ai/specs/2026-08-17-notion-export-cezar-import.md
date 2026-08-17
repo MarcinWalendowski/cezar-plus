@@ -1,6 +1,21 @@
 # Notion export → cezar import
 
 **Status:** Implemented (2026-08-17, local; runtime E2E executed — results in Verification. QA Needed only for the owner's one-glance cockpit-UI browse of the Knowledge tab; hosted move stays out of scope per Phases)
+
+> **CUTOVER ADDENDUM (2026-08-17, later the same day).** The owner declared the
+> Notion cutover ("let's switch to cezar now, don't push to notion anymore"), which
+> supersedes every "Notion stays the source of truth until cutover" statement in this
+> spec, including in the TLDR below. Since then: the corpus IS the record; `/cezar-sync`
+> writes corpus-only (no Notion leg); new items use `local:` identifiers; the exporter
+> is retired except `--only raw-input` (a full run would resurrect stale Notion state
+> over the living corpus); `/notion-sync` is retired except the Raw Input drain; and
+> user reports bypass Notion entirely via `chat/.ai/specs/SPEC-526-2026-08-17-user-reports-to-cezar.md`
+> (worker stages to BOT_KV, `tools/reports-drain/drain.mjs` writes
+> `notion-export/reports/`). The PLAN Phase 3 precondition (owner decision on
+> shared-instance auth) was satisfied by the 2026-08-16 prod deploy
+> (`CEZ_AUTH=oidc` behind Cloudflare Access). The corpus was also deployed to the
+> production host (`/var/lib/cezar/loki-labs/notion-export/`, served at
+> cockpit.example.com) the same day.
 **Owner:** Marcin Walendowski
 **Program:** central hub (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` outranks this spec on any conflict)
 **Related:** `2026-08-06-knowledge-base-mounts-search.md` (F1), `2026-08-06-external-source-connectors-notion.md` (F2), `2026-08-14-knowledge-domains-and-changelog.md`, `2026-08-06-ops-board-notion-cutover.md` (F5, proposed), `2026-08-10-global-tasks-and-project-tags.md`
