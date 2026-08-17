@@ -239,21 +239,22 @@ describe('opening and closing', () => {
 })
 
 describe('Views group', () => {
-  it('leads with New task and its C hint, then the 5 nav destinations', async () => {
+  it('leads with New task and its C hint, then the 6 nav destinations', async () => {
     renderPalette({ automations: true })
     openWith({ metaKey: true })
     await screen.findByRole('dialog')
 
     // The Automations row waits on the health answer (forge gate) — settle before asserting.
     await waitFor(() =>
-      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(6),
+      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(7),
     )
     const views = [...document.querySelectorAll('[data-slot="palette-view"]')]
     // New task FIRST — an empty query pre-selects it, so ⌘K then Enter starts a task.
-    // GitHub, Skills and Workflows are hidden from the nav (2026-08-14) and the palette renders
-    // through the same `visibleNavItems`, so they are absent HERE without a second edit.
+    // GitHub and Workflows are hidden from the nav (2026-08-14) and the palette renders through the
+    // same `visibleNavItems`, so they are absent HERE. Skills was restored 2026-08-17, so it IS
+    // present (opt-out gate, on by default).
     expect(views.map((view) => view.getAttribute('data-nav-to'))).toEqual([
-      '/new', '/', '/inbox', '/git', '/automations', '/settings',
+      '/new', '/', '/inbox', '/git', '/automations', '/skills', '/settings',
     ])
     expect(views[0]?.textContent).toContain('New task')
     // The chip advertises `c` — ⌘N is browser-reserved and only fires in the desktop shell.
@@ -268,11 +269,11 @@ describe('Views group', () => {
     await screen.findByRole('dialog')
 
     await waitFor(() =>
-      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(5),
+      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(6),
     )
     const views = [...document.querySelectorAll('[data-slot="palette-view"]')]
     expect(views.map((view) => view.getAttribute('data-nav-to'))).toEqual([
-      '/new', '/', '/inbox', '/git', '/settings',
+      '/new', '/', '/inbox', '/git', '/skills', '/settings',
     ])
   })
 
@@ -281,7 +282,7 @@ describe('Views group', () => {
     openWith({ metaKey: true })
     await screen.findByRole('dialog')
     await waitFor(() =>
-      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(6),
+      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(7),
     )
 
     const newTaskRows = [...document.querySelectorAll('[data-nav-to="/new"]')]
@@ -311,7 +312,7 @@ describe('Views group', () => {
     await screen.findByRole('dialog')
 
     await waitFor(() =>
-      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(5),
+      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(6),
     )
     const targets = [...document.querySelectorAll('[data-slot="palette-view"]')].map((view) =>
       view.getAttribute('data-nav-to'),
@@ -320,18 +321,19 @@ describe('Views group', () => {
     expect(targets).not.toContain('/automations')
   })
 
-  /** The hidden trio, asserted with the forge ON — the state that used to render `/github`. */
+  /** The hidden pair (GitHub, Workflows — Skills was restored 2026-08-17), asserted with the forge
+   *  ON, the state that used to render `/github`. */
   it('never offers the hidden views, forge or no forge', async () => {
     renderPalette({ forge: true, automations: true })
     openWith({ metaKey: true })
     await screen.findByRole('dialog')
     await waitFor(() =>
-      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(6),
+      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(7),
     )
     const targets = [...document.querySelectorAll('[data-slot="palette-view"]')].map((view) =>
       view.getAttribute('data-nav-to'),
     )
-    for (const hidden of ['/github', '/skills', '/workflows']) expect(targets).not.toContain(hidden)
+    for (const hidden of ['/github', '/workflows']) expect(targets).not.toContain(hidden)
   })
 
   it('navigates to the selected view and closes', async () => {

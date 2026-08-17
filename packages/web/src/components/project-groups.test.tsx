@@ -194,11 +194,13 @@ describe('ProjectGroups', () => {
 
     await waitFor(() => expect(header('shop').getAttribute('aria-expanded')).toBe('true'))
     const shopNav = within(group('shop')).getByRole('navigation', { name: 'shop navigation' })
-    // GitHub, Skills and Workflows were hidden from the nav on 2026-08-14 (`nav-items.ts`), and a
-    // group's rows come from the same `visibleNavItems`, so they are gone from every group too.
+    // GitHub and Workflows were hidden from the nav on 2026-08-14 (`nav-items.ts`), and a group's
+    // rows come from the same `visibleNavItems`, so they are gone from every group too. Skills was
+    // restored 2026-08-17 (opt-out, on by default), so each group carries its scoped `/p/<id>/skills`.
     expect(within(shopNav).getAllByRole('link').map((a) => a.getAttribute('href'))).toEqual([
       '/p/shop/',
       '/p/shop/git',
+      '/p/shop/skills',
       '/p/shop/settings',
     ])
     // Only the group that owns the URL lights a nav row — `/p/cezar/` is the Tasks area of

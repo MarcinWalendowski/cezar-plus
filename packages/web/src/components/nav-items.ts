@@ -5,6 +5,7 @@ import {
   InboxIcon,
   ListChecksIcon,
   SettingsIcon,
+  SparklesIcon,
   ZapIcon,
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
@@ -33,11 +34,10 @@ export type NavItem = {
    *  opt-OUT, because Skills predates the capability payload and absent must keep meaning on.
    *  See `visibleNavItems`.
    *
-   *  **No item carries it today** — Skills was hidden on 2026-08-14 (owner decision; see
-   *  `NAV_ITEMS`). Kept, like `workspace?` below, because restoring the item is meant to be one
-   *  line, and because the server still reports the capability: `capabilities.skills` is
-   *  upstream's, still computed from `CEZ_SKILLS` (`server/capabilities.ts`), and this is the
-   *  only thing that ever read it. */
+   *  **The Skills item carries it again** — hidden 2026-08-14, RESTORED 2026-08-17 (owner
+   *  decision; see `NAV_ITEMS`), so `CEZ_SKILLS=0` once more hides the item on an install that set
+   *  the flag. `capabilities.skills` is upstream's, still computed from `CEZ_SKILLS`
+   *  (`server/capabilities.ts`), and this gate is the only thing that reads it. */
   skills?: boolean
   /** Notes-gated (`.ai/specs/2026-08-14-note-to-spec-pipeline.md`): the item exists only while
    *  `/api/health` reports `capabilities.notes` — opt-in via `CEZ_NOTES=1`. */
@@ -83,11 +83,12 @@ export type NavItem = {
  *  the spec requires Tasks to stay active while a task thread (`/tasks/:id`) or a variant
  *  compare (`/compare/:groupId`) is open.
  *
- *  **GitHub, Skills and Workflows are hidden in this fork (owner decision, 2026-08-14.)** Nav
- *  items only: `/github`, `/skills` and `/workflows` still render for anyone who types the URL,
- *  every route and every server surface behind them is untouched, and restoring one is putting its
- *  line back here. That is why the `forge` and `skills` gates below survive with no item left
- *  carrying `skills` — see `NavItem.skills`.
+ *  **GitHub and Workflows are hidden in this fork (owner decision, 2026-08-14).** Nav items only:
+ *  `/github` and `/workflows` still render for anyone who types the URL, every route and every
+ *  server surface behind them is untouched, and restoring one is putting its line back here — that
+ *  is why the `forge` gate below survives with no item carrying it. **Skills was hidden the same
+ *  day but RESTORED 2026-08-17** for the self-hosted deployment (workspace-level skills are used
+ *  there); it carries the `skills` gate again, so `CEZ_SKILLS=0` hides it — see `NavItem.skills`.
  */
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare'], badge: 'tasks-unread', workspaceTo: '/tasks' },
@@ -95,6 +96,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'], workspaceTo: '/workspace/git' },
   { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true, automations: true },
   { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true, workspaceTo: '/workspace/knowledge' },
+  { to: '/skills', label: 'Skills', icon: SparklesIcon, match: ['/skills'], skills: true },
   { to: '/notes', label: 'Notes', icon: NotebookPenIcon, match: ['/notes'], notes: true, workspace: true, workspaceTo: '/notes' },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'], workspaceTo: '/settings/global' },
 ]

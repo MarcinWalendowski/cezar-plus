@@ -131,6 +131,7 @@ describe('AppShell', () => {
       'Git',
       'Automations',
       'Knowledge',
+      'Skills',
       'Notes',
       'Settings',
     ])
@@ -141,6 +142,7 @@ describe('AppShell', () => {
       '/git',
       '/automations',
       '/knowledge',
+      '/skills',
       '/notes',
       '/settings',
     ])
@@ -148,16 +150,28 @@ describe('AppShell', () => {
 
   /** Hidden 2026-08-14 (owner decision, `nav-items.ts`). The shell renders `visibleNavItems()`,
    *  so this holds under EVERY availability combination rather than only the default one — a
-   *  forge appearing must not bring the GitHub row back, which is exactly what it used to do. */
-  it('never renders a GitHub, Skills or Workflows row', () => {
+   *  forge appearing must not bring the GitHub row back, which is exactly what it used to do.
+   *  (Skills was RESTORED 2026-08-17 and follows its own opt-out gate — asserted just below.) */
+  it('never renders a GitHub or Workflows row', () => {
     for (const forgeAvailable of [true, false]) {
       for (const skillsAvailable of [true, false]) {
         cleanup()
         renderShell('/', { forgeAvailable, skillsAvailable, automationsAvailable: true })
         const hrefs = within(nav()).getAllByRole('link').map((a) => a.getAttribute('href'))
-        for (const hidden of ['/github', '/skills', '/workflows']) expect(hrefs).not.toContain(hidden)
+        for (const hidden of ['/github', '/workflows']) expect(hrefs).not.toContain(hidden)
       }
     }
+  })
+
+  /** Skills is an opt-OUT row (restored 2026-08-17): present by default, gone only when health
+   *  reports `capabilities.skills === false` (`CEZ_SKILLS=0`). */
+  it('renders the Skills row unless CEZ_SKILLS=0 hides it', () => {
+    cleanup()
+    renderShell('/', { skillsAvailable: true })
+    expect(within(nav()).getAllByRole('link').map((a) => a.getAttribute('href'))).toContain('/skills')
+    cleanup()
+    renderShell('/', { skillsAvailable: false })
+    expect(within(nav()).getAllByRole('link').map((a) => a.getAttribute('href'))).not.toContain('/skills')
   })
 
   // #801: same degradation for the opt-in automations capability — the item disappears, it does

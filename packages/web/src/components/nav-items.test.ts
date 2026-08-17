@@ -18,17 +18,18 @@ describe('activeNavPath', () => {
     ['/git', '/git'],
     ['/knowledge', '/knowledge'],
     ['/knowledge/abc123', '/knowledge'],
+    ['/skills', '/skills'],
 
     // Hidden 2026-08-14 (owner decision, `NAV_ITEMS`): the ROUTES still render, so these URLs
     // are reachable by hand — they just have no nav item to light up any more, which is the same
     // `null` every off-nav surface answers. Kept as cases rather than deleted because that is the
-    // observable consequence of the hide, and a restored item must flip them back.
+    // observable consequence of the hide, and a restored item must flip them back. (Skills was
+    // restored 2026-08-17 — it lights `/skills` above; GitHub and Workflows stay hidden.)
     ['/github', null],
     ['/github/issues/42', null],
     ['/github/prs/7', null],
     ['/workflows', null],
     ['/workflows/ship-it', null],
-    ['/skills', null],
 
     // The nested Settings area: deeper routes fall to the Settings item.
     ['/settings', '/settings'],
@@ -62,6 +63,7 @@ describe('activeNavItem', () => {
   it('returns the item, so the mobile bar can title itself', () => {
     expect(activeNavItem('/tasks/abc123')?.label).toBe('Tasks')
     expect(activeNavItem('/knowledge/abc123')?.label).toBe('Knowledge')
+    expect(activeNavItem('/skills')?.label).toBe('Skills')
   })
 
   it('returns null off-nav', () => {
@@ -69,9 +71,9 @@ describe('activeNavItem', () => {
   })
 
   /** The hidden routes (2026-08-14) reach the same answer as `/new`: they render, and the mobile
-   *  bar titles itself from the route rather than from a nav item that no longer exists. */
+   *  bar titles itself from the route rather than from a nav item that no longer exists. (Skills
+   *  was restored 2026-08-17, so it is no longer among them — GitHub and Workflows stay hidden.) */
   it('returns null for a hidden surface', () => {
-    expect(activeNavItem('/skills')).toBeNull()
     expect(activeNavItem('/workflows')).toBeNull()
     expect(activeNavItem('/github')).toBeNull()
   })
@@ -85,6 +87,7 @@ describe('NAV_ITEMS', () => {
       'Git',
       'Automations',
       'Knowledge',
+      'Skills',
       'Notes',
       'Settings',
     ])
@@ -93,12 +96,13 @@ describe('NAV_ITEMS', () => {
   /** The hide is a property of THIS list and nothing else (owner decision, 2026-08-14): no gate,
    *  no capability, no flag — so the only thing that can bring an item back is editing the array.
    *  Asserted by name because the label list above would also pass if a rename, rather than the
-   *  hide, had removed them. */
-  it('carries no GitHub, Skills or Workflows item', () => {
+   *  hide, had removed them. (Skills was restored 2026-08-17 — it IS in the list now, gated by
+   *  `skills`; GitHub and Workflows stay hidden.) */
+  it('carries no GitHub or Workflows item', () => {
     const labels = NAV_ITEMS.map((item) => item.label)
     const paths = NAV_ITEMS.map((item) => item.to)
-    for (const hidden of ['GitHub', 'Skills', 'Workflows']) expect(labels).not.toContain(hidden)
-    for (const hidden of ['/github', '/skills', '/workflows']) expect(paths).not.toContain(hidden)
+    for (const hidden of ['GitHub', 'Workflows']) expect(labels).not.toContain(hidden)
+    for (const hidden of ['/github', '/workflows']) expect(paths).not.toContain(hidden)
     // …and no item's `match` reaches them either, which is what `activeNavPath` reads.
     expect(NAV_ITEMS.flatMap((item) => item.match)).not.toContain('/github')
   })
@@ -139,6 +143,7 @@ describe('visibleNavItems', () => {
       'Inbox',
       'Git',
       'Knowledge',
+      'Skills',
       'Notes',
       'Settings',
     ])
@@ -150,6 +155,7 @@ describe('visibleNavItems', () => {
       'Git',
       'Automations',
       'Knowledge',
+      'Skills',
       'Notes',
       'Settings',
     ])
@@ -161,6 +167,7 @@ describe('visibleNavItems', () => {
       'Inbox',
       'Git',
       'Automations',
+      'Skills',
       'Notes',
       'Settings',
     ])
@@ -177,6 +184,7 @@ describe('visibleNavItems', () => {
       'Git',
       'Automations',
       'Knowledge',
+      'Skills',
       'Settings',
     ])
   })
@@ -190,6 +198,7 @@ describe('visibleNavItems', () => {
       'Tasks',
       'Inbox',
       'Git',
+      'Skills',
       'Settings',
     ])
   })
@@ -197,15 +206,22 @@ describe('visibleNavItems', () => {
   it('drops everything gated when nothing is available', () => {
     expect(
       labelsOf({ forge: false, inbox: false, knowledge: false, automations: false }),
-    ).toEqual(['Tasks', 'Git', 'Settings'])
+    ).toEqual(['Tasks', 'Git', 'Skills', 'Settings'])
   })
 
-  /** The `skills` gate outlived its item (see `NavItem.skills`). Pinned so the dead clause stays
-   *  visibly dead: with no item carrying it, `CEZ_SKILLS=0` must change NOTHING — if a later edit
-   *  puts the Skills item back without deciding what the gate means, this fails rather than
-   *  silently hiding the restored item on an install that set the flag years ago. */
-  it('the surviving skills gate now removes nothing', () => {
-    expect(labelsOf({ ...ALL, skills: false })).toEqual(labelsOf(ALL))
+  /** The `skills` gate owns the Skills item again (restored 2026-08-17, see `NavItem.skills`):
+   *  it is the lone opt-OUT here, so `CEZ_SKILLS=0` → `skills: false` from health → exactly the
+   *  Skills item drops, and nothing else. */
+  it('without the skills opt-out, exactly the Skills item drops (CEZ_SKILLS=0)', () => {
+    expect(labelsOf({ ...ALL, skills: false })).toEqual([
+      'Tasks',
+      'Inbox',
+      'Git',
+      'Automations',
+      'Knowledge',
+      'Notes',
+      'Settings',
+    ])
   })
 
   // The two gates on that one item are ANDed: a forge alone does not resurrect it, which is the
@@ -218,6 +234,7 @@ describe('visibleNavItems', () => {
     expect(labelsOf({ forge: false, inbox: false, automations: false })).toEqual([
       'Tasks',
       'Git',
+      'Skills',
       'Settings',
     ])
   })
