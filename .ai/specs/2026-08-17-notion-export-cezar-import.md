@@ -162,3 +162,31 @@ Original plan (kept for the record):
 5. **Comment sweep honesty:** the number of rows swept and comments found is reported; zero is reported as zero.
 6. **Skill dry-run:** `/cezar-sync` pull answers a knowledge question from the corpus without touching Notion; push writes one status flip + one changelog file and a re-query shows both (fs.watch reindex); the Notion mirror leg is then exercised once.
 7. **PII gate:** `git -C ~/loki-labs status --porcelain` shows nothing from `notion-export/` before and after; `reports/` files exist only under the untracked root.
+
+## Addendum 2026-08-17 (evening) — open tasks migrated onto the Tasks board; QA Needed bulk-closed
+
+The corpus import above put every task (all statuses, id parity 628/628 at the time of this
+addendum) into `tasks/*.md` — but the cockpit's Tasks board never reads the KB: it renders
+`GET /api/v1/workspace/todos`, i.e. each registered project's `.ai/cezar/todos.json` inbox
+(`workspace/todo-index.ts`, `global-tasks.tsx`). So post-cutover the board showed zero open
+tasks and the migration looked partial. On the owner's instruction ("mark all tasks QA Needed
+as Done and then migrate all tasks to cezar"), two data moves — no cezar code changed:
+
+1. **Corpus status flip:** all 174 QA Needed task files → `boardStatus: "Done"` +
+   `status/done` tag + a dated Status note recording that the pending device/QA passes were
+   closed by the owner's bulk acceptance, not by recorded test runs. Notion not written
+   (read-only archive; its Status column now intentionally lags).
+2. **Inbox migration:** the 92 open tasks (49 Todo / 27 In Progress / 16 Blocked) became
+   todo entries routed by product → repo: 83 → `chat`, 8 → `cezar`, 1 → `aside`. Mapping:
+   `summary` = `[status] title` (prefix only for non-Todo — todos carry no status field),
+   `context` = provenance line (status, priority, product, corpus doc path, Notion URL) +
+   the task's Context section, `whatToDo` = What-to-do section (whole body as fallback),
+   `acceptanceCriteria` = parsed bullets (≤20 × ≤500 chars; overflow retained in
+   `whatToDo`), `origin: "composer"`. Entry ids minted once and written to BOTH cockpits
+   (local `~/loki-labs`, prod `/var/lib/cezar/loki-labs`) under the server's `todos.lock`
+   lease; payload pre-validated through the real `readTodos()` (92/92 accepted).
+
+Verified on cockpit.example.com: Tasks board "Filed — not started yet · 92" stamped per
+project; the KB fs.watch re-indexed the rsynced flips with no restart (a flipped doc renders
+`status/done` + its Status note). Doctrine recorded in the corpus knowledge note
+"Open tasks live in the cezar todo inbox; corpus tasks/ is the archive of record".

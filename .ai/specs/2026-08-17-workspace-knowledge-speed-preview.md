@@ -1,9 +1,10 @@
 # Workspace knowledge: kill the 5s load, preview in place
 
-- **Status:** Implemented — deployed to cockpit.example.com (`80c7ee36`, filters-on-top
+- **Status:** Implemented + Done — deployed to cockpit.example.com (`80c7ee36`, filters-on-top
   amendment + server-side index-doc pin included), Verification items 1-5 and the amendment's
-  real-corpus runtime checks executed 2026-08-17; only real-device QA (mobile toggle, chip
-  layout on a phone) remains with the owner
+  real-corpus runtime checks executed 2026-08-17. The real-device QA residue (mobile toggle,
+  chip layout on a phone) was closed 2026-08-17 by the owner's bulk QA acceptance at the
+  cutover — waived, not executed
 - **Date:** 2026-08-17
 - **Owner report (verbatim):** "no it doesn't it opens new path, eveyrthing should be on one
   page, knowlage page is very slow at initial loading - it take 5s to load: can we somejow
@@ -297,8 +298,10 @@ authenticated Chrome):**
   `/workspace/knowledge?project=loki-labs&doc=notion-8d4c3ec3b97e` and rendered SPEC-281's full
   body in the right pane. The "everything on one page" behaviour the owner asked for.
 
-Remaining for owner device QA: the mobile list/detail toggle on a real phone (component tests
-pin the class tokens; no device pass has covered it — same residue as the parity spec's task).
+~~Remaining for owner device QA: the mobile list/detail toggle on a real phone (component tests
+pin the class tokens; no device pass has covered it — same residue as the parity spec's task).~~
+**Closed 2026-08-17:** the owner bulk-accepted all QA Needed tasks at the cutover; the device
+pass was waived, not executed.
 
 ## Amendment — filters on top, results immediately visible (owner QA, 2026-08-17)
 
