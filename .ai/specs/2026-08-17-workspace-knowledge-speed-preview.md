@@ -1,6 +1,6 @@
 # Workspace knowledge: kill the 5s load, preview in place
 
-- **Status:** Implemented (server + web, items 1-3 verified this session; items 4-5 pending owner's runtime/prod pass)
+- **Status:** Implemented — deployed to cockpit.example.com (`75f6abaa`), Verification items 1-5 executed 2026-08-17; only the real-phone mobile-toggle glance remains with the owner
 - **Date:** 2026-08-17
 - **Owner report (verbatim):** "no it doesn't it opens new path, eveyrthing should be on one
   page, knowlage page is very slow at initial loading - it take 5s to load: can we somejow
@@ -272,5 +272,27 @@ Concrete and executable; results to be filled in below each item.
   reformat every touched file away from the surrounding codebase's own style. Treated as N/A for
   this repo rather than a red gate.
 
-Items 4-5 (runtime E2E timing the warm `domains()` call, and the prod repeat after deploy) are
-left for the owner, per this session's brief.
+**4. Runtime E2E (local, real corpus — executed 2026-08-17, real Chrome against the rebuilt
+`dist` on `localhost:4399`, `--repo ~/loki-labs`, `CEZ_KB=1 CEZ_WORKSPACE_VIEWS=1`):**
+
+- `GET /workspace/knowledge/domains`: first load (12 cold standalone stores) **760 ms**; warm
+  repeat (`cache: no-store`) **97 ms** — target was < 300 ms, was 4.6 s before the change.
+- Click-through: domain card click sets the filter chip in place; clicking a search result kept
+  the tab on `/workspace/knowledge?project=loki-labs&doc=…` (same pathname, no navigation entry)
+  and rendered the document in the right pane with the project badge and the
+  "Open in loki-labs →" secondary link.
+
+**5. Prod (cockpit.example.com, commit `75f6abaa` deployed 2026-08-17, measured from the owner's
+authenticated Chrome):**
+
+- `GET /workspace/knowledge/domains`: first call after the fresh process **3,873 ms** (one-time
+  per boot: 12 standalone stores parsing their corpora — previously this cost was paid ON TOP of
+  the ~4.6 s recompute on every request); warm repeats **259 ms** then **56 ms** (was 4,646 ms
+  warm before — ~50× faster, under the < 300 ms target). All 12 projects `ok:true`.
+- Click-through on prod: cross-project search for "NECP denial" returned rows from four
+  projects; clicking the top hit stayed on
+  `/workspace/knowledge?project=loki-labs&doc=notion-8d4c3ec3b97e` and rendered SPEC-281's full
+  body in the right pane. The "everything on one page" behaviour the owner asked for.
+
+Remaining for owner device QA: the mobile list/detail toggle on a real phone (component tests
+pin the class tokens; no device pass has covered it — same residue as the parity spec's task).
