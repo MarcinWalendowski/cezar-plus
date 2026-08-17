@@ -410,6 +410,24 @@ export class WorkspaceKnowledgeIndex {
     const merged = browse
       ? outcomes.flatMap((o) => o.results).sort(byUpdatedAtThenId)
       : roundRobinMerge(outcomes.map((o) => o.results));
+
+    // Browse mode pins the filtered domain's own index document (`slug === domain`) to the front
+    // of the FULL merged sequence, before pagination, so page 1 always carries it regardless of
+    // where `byUpdatedAtThenId` would otherwise place it (SPEC "Workspace knowledge: kill the 5s
+    // load, preview in place" amendment). Real-data evidence: a bulk import ties hundreds of
+    // documents on one `updatedAt` and tie-breaks by id ascending, which can put a domain's index
+    // doc many pages deep — the web client's own reorder (`workspace-knowledge.tsx`'s
+    // `SearchResults`) has nothing to move if the doc never arrives in the fetched page at all.
+    // Ranked mode is untouched: a text query should rank honestly, never have a domain's "front
+    // page" artificially inserted ahead of a genuinely better match.
+    if (browse && options.domain) {
+      const pinIndex = merged.findIndex((row) => row.document.slug === options.domain);
+      if (pinIndex > 0) {
+        const [pinned] = merged.splice(pinIndex, 1);
+        merged.unshift(pinned!);
+      }
+    }
+
     const total = merged.length;
     const truncated = offset + limit < total;
     const results = merged.slice(offset, offset + limit);

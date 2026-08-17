@@ -382,6 +382,81 @@ describe('WorkspaceKnowledgeIndex.search — peek vs standalone', () => {
     });
   });
 
+  describe('browse mode pins the domain\'s own index document to page 1 (amendment, real-data defect)', () => {
+    // 24 ordinary documents plus one whose `slug` equals the domain itself (the "index doc"),
+    // ALL sharing one `updatedAt` — the real-corpus shape a bulk import produces (evidence:
+    // GET /workspace/knowledge/search?domain=alfredo on the live local server ties every alfredo
+    // doc on updatedAt 2026-08-17T07:45 and tie-breaks by id ascending; alfredo's own index doc,
+    // notion-c99c754479a2, never appeared in page 1 of 398). `notion-99` sorts AFTER
+    // `notion-01`..`notion-24` lexically, so `byUpdatedAtThenId` places it dead last — well past
+    // any single page — reproducing the defect the client-side reorder alone could never fix
+    // (nothing to move once the doc isn't even in the fetched page).
+    function manyTiedDocs(): KnowledgeDocument[] {
+      const ordinary = Array.from({ length: 24 }, (_, i) =>
+        doc({ id: `notion-${String(i + 1).padStart(2, '0')}`, slug: `alfredo-doc-${i + 1}`, domain: 'alfredo' }),
+      );
+      const indexDoc = doc({ id: 'notion-99', slug: 'alfredo', domain: 'alfredo' });
+      return [...ordinary, indexDoc];
+    }
+
+    it('page 1 carries the index document first, even though its id sorts outside the default 20-row page', async () => {
+      const index = new WorkspaceKnowledgeIndex({
+        listProjects: async () => [source()],
+        contexts: NO_LIVE_CONTEXTS,
+        createStore: async () => fakeStore({ listDocuments: manyTiedDocs }),
+      });
+      const result = await index.search('', { domain: 'alfredo' });
+      expect(result.total).toBe(25);
+      expect(result.results).toHaveLength(20);
+      expect(result.results[0]!.document.id).toBe('notion-99');
+      // The rest of the page keeps the original tie-break order (ascending id) with the pinned
+      // doc's own slot simply removed — a reorder, not a reshuffle of everything else.
+      expect(result.results.slice(1).map((r) => r.document.id)).toEqual(
+        Array.from({ length: 19 }, (_, i) => `notion-${String(i + 1).padStart(2, '0')}`),
+      );
+    });
+
+    it('ranked mode (real query text) never reorders — a text search ranks honestly', async () => {
+      const index = new WorkspaceKnowledgeIndex({
+        listProjects: async () => [source()],
+        contexts: NO_LIVE_CONTEXTS,
+        createStore: async () =>
+          fakeStore({
+            search: (q) => ({
+              query: q,
+              total: 2,
+              truncated: false,
+              // The index doc (slug === domain) ranked SECOND by BM25 — if the browse-mode pin
+              // logic accidentally ran here too, it would move to the front. It must not.
+              results: [
+                doc({ id: 'better-match', slug: 'alfredo-onboarding', domain: 'alfredo' }),
+                doc({ id: 'notion-99', slug: 'alfredo', domain: 'alfredo' }),
+              ],
+            }),
+            listDocuments: () => {
+              throw new Error('listDocuments() must not be called when a real query is present');
+            },
+          }),
+      });
+      const result = await index.search('onboarding', { domain: 'alfredo' });
+      expect(result.results.map((r) => r.document.id)).toEqual(['better-match', 'notion-99']);
+    });
+
+    it('offset > 0 stays deterministic — two identical requests return byte-identical pages (D8)', async () => {
+      const index = new WorkspaceKnowledgeIndex({
+        listProjects: async () => [source()],
+        contexts: NO_LIVE_CONTEXTS,
+        createStore: async () => fakeStore({ listDocuments: manyTiedDocs }),
+      });
+      const first = await index.search('', { domain: 'alfredo', offset: 20, limit: 20 });
+      const second = await index.search('', { domain: 'alfredo', offset: 20, limit: 20 });
+      expect(first).toEqual(second);
+      // Page 2 (offset 20 of 25) — the pinned doc already left its old slot for the front of page
+      // 1, so it never reappears here; this page is exactly what tie-break order left behind.
+      expect(first.results.map((r) => r.document.id)).toEqual(['notion-20', 'notion-21', 'notion-22', 'notion-23', 'notion-24']);
+    });
+  });
+
   describe('concurrency cap (D6)', () => {
     it('caps at N standalone builds in flight at once — a real high-water mark, not a call count', async () => {
       const CAP = 4;

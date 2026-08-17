@@ -16,17 +16,24 @@ import { WorkspaceKnowledgeRoute } from './workspace-knowledge'
 
 /**
  * `/workspace/knowledge` (`.ai/specs/2026-08-17-workspace-knowledge-speed-preview.md`, Phase 2 —
- * rewrite of `.ai/specs/2026-08-14-knowledge-domains-and-changelog.md` Phase 3's own test file).
- * Rendered directly (not through `AppRoutes`), same convention as `workspace-git.test.tsx` — this
- * route mounts OUTSIDE `ProjectScopeRoute` and needs no `:projectId` param to resolve.
+ * rewrite of `.ai/specs/2026-08-14-knowledge-domains-and-changelog.md` Phase 3's own test file —
+ * and its "filters on top" amendment). Rendered directly (not through `AppRoutes`), same
+ * convention as `workspace-git.test.tsx` — this route mounts OUTSIDE `ProjectScopeRoute` and needs
+ * no `:projectId` param to resolve.
  *
- * The domain-list/project-health/disabled-state coverage below is carried over from the Phase 3
- * predecessor's test file (those surfaces did not change shape). New in this rewrite: a
- * search-result click stays on `/workspace/knowledge` and sets `?project=&doc=` instead of
- * navigating to the per-project page (the owner's "everything on one page" complaint), the right
- * pane renders the selected document via `GET /workspace/knowledge/document`, the domains list
- * shows a skeleton rather than a full-page "Loading…" while its query is in flight, the mobile
- * list/detail toggle, and the widened-but-still-scoped request allowlist.
+ * The project-health/disabled-state coverage below is carried over from the Phase 3 predecessor's
+ * test file (those surfaces did not change shape). Carried over from the original rewrite:
+ * a search-result click stays on `/workspace/knowledge` and sets `?project=&doc=` instead of
+ * navigating to the per-project page, the right pane renders the selected document via
+ * `GET /workspace/knowledge/document`, and the widened-but-still-scoped request allowlist.
+ *
+ * **New in the amendment:** domains render as a compact chip row (not tall cards), so the
+ * "domain with no index doc" test now checks the chip's `data-has-index-doc` attribute rather
+ * than a caption (the caption moved to the pinned index-doc result row); the skeleton renders
+ * chips, not cards; a layout describe block pins the structural DOM-order assertion (search input
+ * above the chip row, outside the rows' scroll container); a chip-cap describe block covers the
+ * "+N more" expander and the active-chip × clearing the filter; a pinned-index-doc-row describe
+ * block covers the reorder.
  */
 
 interface SentRequest {
@@ -74,6 +81,16 @@ const DOMAINS_RESPONSE: WorkspaceKnowledgeDomainsResponse = {
   ],
 }
 
+/** 10 domains, ranked by doc count desc — exercises the amendment's chip cap (top 8, "+2 more"). */
+const DOMAINS_RESPONSE_MANY: WorkspaceKnowledgeDomainsResponse = {
+  domains: Array.from({ length: 10 }, (_, i) => ({
+    domain: `domain-${String(i).padStart(2, '0')}`,
+    docCount: 10 - i,
+    projects: ['shop'],
+  })),
+  projects: [{ id: 'shop', name: 'Shop', ok: true }],
+}
+
 const SEARCH_RESPONSE_BILLING: WorkspaceKnowledgeSearchResponse = {
   query: '',
   total: 2,
@@ -86,6 +103,14 @@ const SEARCH_RESPONSE_BILLING: WorkspaceKnowledgeSearchResponse = {
     },
   ],
   projects: [{ id: 'shop', name: 'Shop', ok: true }],
+}
+
+/** Same two documents as {@link SEARCH_RESPONSE_BILLING}, but the index doc (`shop-idx1`) is
+ *  ranked SECOND by the server — proves the pinned-row reorder actually moves it, rather than
+ *  merely happening to match an already-first result. */
+const SEARCH_RESPONSE_BILLING_INDEX_DOC_RANKED_SECOND: WorkspaceKnowledgeSearchResponse = {
+  ...SEARCH_RESPONSE_BILLING,
+  results: [...SEARCH_RESPONSE_BILLING.results].reverse(),
 }
 
 const DOCUMENT_RESPONSES: Record<string, WorkspaceKnowledgeDocumentResponse> = {
@@ -184,9 +209,9 @@ function domainsList(): HTMLElement {
   return el as HTMLElement
 }
 
-function domainRow(domain: string): HTMLElement {
+function domainChip(domain: string): HTMLElement {
   const row = domainsList().querySelector(`[data-domain="${domain}"]`)
-  if (!row) throw new Error(`no row for domain ${domain}`)
+  if (!row) throw new Error(`no chip for domain ${domain}`)
   return row as HTMLElement
 }
 
@@ -201,8 +226,8 @@ function classTokens(el: Element): string[] {
   return el.className.split(/\s+/).filter(Boolean)
 }
 
-describe('the landing view is the domains list, not a search box', () => {
-  it('renders one row per domain on load, before any search has run', async () => {
+describe('the landing view is the domains chip row, not a search box', () => {
+  it('renders one chip per domain on load, before any search has run', async () => {
     stubFetch()
     renderKnowledge()
     await screen.findByText('billing')
@@ -212,20 +237,18 @@ describe('the landing view is the domains list, not a search box', () => {
 })
 
 describe('a domain with documents but no index document', () => {
-  it('still renders, visibly marked as lacking one — never dropped', async () => {
+  it('still renders as a plain chip — never dropped from the row', async () => {
     stubFetch()
     renderKnowledge()
     await screen.findByText('billing')
 
-    const withIndex = domainRow('billing')
+    const withIndex = domainChip('billing')
     expect(withIndex.getAttribute('data-has-index-doc')).toBe('true')
-    expect(within(withIndex).getByText('Index doc')).toBeTruthy()
 
-    const withoutIndex = domainRow('auth')
+    const withoutIndex = domainChip('auth')
     expect(withoutIndex.getAttribute('data-has-index-doc')).toBe('false')
-    expect(within(withoutIndex).getByText('No index doc yet')).toBeTruthy()
 
-    // Both rows exist — the row lacking an index document is not filtered out of the list.
+    // Both chips exist — the domain lacking an index document is not filtered out of the row.
     expect(domainsList().querySelectorAll('[data-domain]')).toHaveLength(2)
   })
 })
@@ -282,7 +305,7 @@ describe('disabledReason reaches the user', () => {
   })
 })
 
-describe('no full-page "Loading…" — the domains section alone shows a skeleton', () => {
+describe('no full-page "Loading…" — the chip row alone shows a skeleton', () => {
   it('renders the shell (header, search box) immediately, before the domains response has landed', async () => {
     let releaseDomains: () => void = () => {}
     const gate = new Promise<void>((resolve) => {
@@ -303,12 +326,74 @@ describe('no full-page "Loading…" — the domains section alone shows a skelet
   })
 })
 
+describe('layout: search on top, results immediately visible (amendment)', () => {
+  it('search input renders above the chip row, and outside the rows scroll container', async () => {
+    stubFetch()
+    renderKnowledge()
+    await screen.findByText('billing')
+
+    const input = screen.getByLabelText('Search knowledge across every project')
+    const rows = document.querySelector('[data-slot="workspace-knowledge-rows"]')
+    if (!rows) throw new Error('the rows scroll container did not render')
+
+    // DOM order: the input precedes the rows container (and therefore the chip row inside it).
+    const positionMask = input.compareDocumentPosition(rows)
+    expect(Boolean(positionMask & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true)
+    // The input is not nested inside the scrollable rows region at all.
+    expect(rows.contains(input)).toBe(false)
+    // The rows container is the one carrying the scroll classes — the same pin style
+    // `knowledge.tsx`'s `knowledge-rows` container uses.
+    expect(classTokens(rows)).toEqual(expect.arrayContaining(['overflow-y-auto', 'flex-1', 'min-h-0']))
+
+    // The chip row lives inside the rows container, below the input.
+    const chips = domainsList()
+    expect(rows.contains(chips)).toBe(true)
+  })
+
+  it('the search input\'s own header is not the scrollable region', () => {
+    stubFetch()
+    renderKnowledge()
+    const input = screen.getByLabelText('Search knowledge across every project')
+    const header = input.closest('div.shrink-0')
+    if (!header) throw new Error('search input header not found')
+    expect(classTokens(header)).not.toContain('overflow-y-auto')
+  })
+})
+
+describe('domain chip cap (amendment)', () => {
+  it('shows the top 8 domains by doc count, with a "+2 more" expander for the rest', async () => {
+    stubFetch({ domainsResponse: DOMAINS_RESPONSE_MANY })
+    renderKnowledge()
+    await screen.findByText('domain-00')
+
+    const chips = domainsList().querySelectorAll('[data-domain]')
+    expect(chips).toHaveLength(8)
+    // Ranked by doc count desc — domain-00 (count 10) through domain-07 (count 3) are visible;
+    // domain-08/09 (counts 2/1) are behind the toggle.
+    expect(domainsList().querySelector('[data-domain="domain-07"]')).not.toBeNull()
+    expect(domainsList().querySelector('[data-domain="domain-08"]')).toBeNull()
+    expect(screen.getByText('+2 more')).toBeTruthy()
+  })
+
+  it('expanding the toggle reveals every domain and flips its own label', async () => {
+    stubFetch({ domainsResponse: DOMAINS_RESPONSE_MANY })
+    renderKnowledge()
+    await screen.findByText('domain-00')
+
+    fireEvent.click(screen.getByText('+2 more'))
+    expect(domainsList().querySelectorAll('[data-domain]')).toHaveLength(10)
+    expect(domainsList().querySelector('[data-domain="domain-09"]')).not.toBeNull()
+    expect(screen.getByText('Show fewer')).toBeTruthy()
+    expect(screen.queryByText('+2 more')).toBeNull()
+  })
+})
+
 describe('the scope trap', () => {
   it('requests only the workspace-level knowledge surface — an allowlist, not a `/p/` blocklist', async () => {
     const sent = stubFetch()
     renderKnowledge()
     await screen.findByText('billing')
-    fireEvent.click(within(domainRow('billing')).getByText('billing'))
+    fireEvent.click(domainChip('billing'))
     const results = await screen.findByTestId('workspace-knowledge-search-results')
     await waitFor(() => expect(results.querySelector('[data-doc-id="shop-idx1"]')).not.toBeNull())
     fireEvent.click(within(results.querySelector('[data-doc-id="shop-idx1"]') as HTMLElement).getByRole('link'))
@@ -344,7 +429,7 @@ describe('search', () => {
     stubFetch()
     renderKnowledge()
     await screen.findByText('billing')
-    fireEvent.click(within(domainRow('billing')).getByText('billing'))
+    fireEvent.click(domainChip('billing'))
 
     const results = await screen.findByTestId('workspace-knowledge-search-results')
     await waitFor(() => expect(results.querySelector('[data-doc-id="shop-idx1"]')).not.toBeNull())
@@ -360,7 +445,7 @@ describe('search', () => {
     stubFetch()
     renderKnowledge()
     await screen.findByText('billing')
-    fireEvent.click(within(domainRow('billing')).getByText('billing'))
+    fireEvent.click(domainChip('billing'))
     const results = await screen.findByTestId('workspace-knowledge-search-results')
     const indexRow = await waitFor(() => {
       const el = results.querySelector('[data-doc-id="shop-idx1"]')
@@ -372,8 +457,94 @@ describe('search', () => {
 
     fireEvent.click(link)
     await waitFor(() => expect(locationText()).toBe('/workspace/knowledge?project=shop&doc=shop-idx1'))
-    // The list is still on screen too — this was a param change, not a route change.
-    expect(domainRow('billing')).toBeTruthy()
+    // The chip row is still on screen too — this was a param change, not a route change.
+    expect(domainChip('billing')).toBeTruthy()
+  })
+
+  it('clicking the active domain chip again clears the filter, back to the idle placeholder', async () => {
+    stubFetch()
+    renderKnowledge()
+    await screen.findByText('billing')
+    fireEvent.click(domainChip('billing'))
+    await screen.findByTestId('workspace-knowledge-search-results')
+    expect(domainChip('billing').getAttribute('aria-pressed')).toBe('true')
+
+    fireEvent.click(domainChip('billing'))
+    expect(domainChip('billing').getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByText('Type a query or pick a domain above to search.')).toBeTruthy()
+    expect(screen.queryByTestId('workspace-knowledge-search-results')).toBeNull()
+  })
+})
+
+describe('pinned index-doc row (amendment)', () => {
+  // The server now pins a browse-mode domain's own index document to the front of the FULL
+  // result sequence BEFORE pagination (`WorkspaceKnowledgeIndex.search`, amendment follow-up) —
+  // real-data evidence: alfredo's index doc never appeared in the first 20 (of 398) results
+  // because a bulk import ties every doc on `updatedAt` and tie-breaks by id ascending, which
+  // put the index doc many pages deep. So the REAL shape as of this fix is: it already arrives
+  // first from the server. The client-side reorder below (`SearchResults`'s `orderedResults`)
+  // stays as a defensive fallback — idempotent when the doc is already first, and still useful
+  // for a response the client receives out of order for any other reason.
+  it('marks the server-pinned index document data-pinned — the real shape now that the server itself puts it first', async () => {
+    stubFetch() // SEARCH_RESPONSE_BILLING already returns shop-idx1 first, the server-pinned shape.
+    renderKnowledge()
+    await screen.findByText('billing')
+    fireEvent.click(domainChip('billing'))
+
+    const results = await screen.findByTestId('workspace-knowledge-search-results')
+    await waitFor(() => expect(results.querySelectorAll('[data-doc-id]')).toHaveLength(2))
+
+    const rows = results.querySelectorAll('li')
+    expect(rows[0]?.getAttribute('data-doc-id')).toBe('shop-idx1')
+    expect(rows[0]?.getAttribute('data-pinned')).toBe('true')
+    expect(rows[1]?.getAttribute('data-doc-id')).toBe('shop-other')
+    expect(rows[1]?.getAttribute('data-pinned')).toBe('false')
+  })
+
+  it('defensive fallback: still reorders it to the top if a response ever ranks it second', async () => {
+    stubFetch({ searchResponse: SEARCH_RESPONSE_BILLING_INDEX_DOC_RANKED_SECOND })
+    renderKnowledge()
+    await screen.findByText('billing')
+    fireEvent.click(domainChip('billing'))
+
+    const results = await screen.findByTestId('workspace-knowledge-search-results')
+    await waitFor(() => expect(results.querySelectorAll('[data-doc-id]')).toHaveLength(2))
+
+    const rows = results.querySelectorAll('li')
+    expect(rows[0]?.getAttribute('data-doc-id')).toBe('shop-idx1')
+    expect(rows[0]?.getAttribute('data-pinned')).toBe('true')
+    expect(rows[1]?.getAttribute('data-doc-id')).toBe('shop-other')
+    expect(rows[1]?.getAttribute('data-pinned')).toBe('false')
+  })
+
+  it('pins nothing when no domain is active — a plain text search keeps server order', async () => {
+    stubFetch()
+    renderKnowledge()
+    await screen.findByText('billing')
+
+    const input = screen.getByLabelText('Search knowledge across every project')
+    fireEvent.change(input, { target: { value: 'billing' } })
+
+    const results = await screen.findByTestId('workspace-knowledge-search-results')
+    await waitFor(() => expect(results.querySelectorAll('[data-doc-id]')).toHaveLength(2))
+    for (const row of results.querySelectorAll('li')) expect(row.getAttribute('data-pinned')).toBe('false')
+  })
+
+  it('pins nothing for a domain with no index document', async () => {
+    stubFetch({
+      domainsResponse: {
+        domains: [{ domain: 'auth', docCount: 1, projects: ['shop'] }],
+        projects: [{ id: 'shop', name: 'Shop', ok: true }],
+      },
+      searchResponse: SEARCH_RESPONSE_BILLING,
+    })
+    renderKnowledge()
+    await screen.findByText('auth')
+    fireEvent.click(domainChip('auth'))
+
+    const results = await screen.findByTestId('workspace-knowledge-search-results')
+    await waitFor(() => expect(results.querySelectorAll('[data-doc-id]')).toHaveLength(2))
+    for (const row of results.querySelectorAll('li')) expect(row.getAttribute('data-pinned')).toBe('false')
   })
 })
 

@@ -1,6 +1,11 @@
 # Workspace knowledge: kill the 5s load, preview in place
 
-- **Status:** Implemented — deployed to cockpit.example.com (`75f6abaa`), Verification items 1-5 executed 2026-08-17; only the real-phone mobile-toggle glance remains with the owner
+- **Status:** Implemented — deployed to cockpit.example.com (`75f6abaa`), Verification items 1-5
+  executed 2026-08-17; "filters on top" amendment implemented, then its client-only index-doc pin
+  found dead on the real corpus during runtime E2E and fixed server-side (browse-mode
+  `WorkspaceKnowledgeIndex.search()` now pins page composition) — gates green this session, not
+  yet deployed or re-verified against the real corpus; real-device QA (mobile toggle, chip layout
+  on a phone) and a real-corpus re-check of the alfredo fix both remain with the owner
 - **Date:** 2026-08-17
 - **Owner report (verbatim):** "no it doesn't it opens new path, eveyrthing should be on one
   page, knowlage page is very slow at initial loading - it take 5s to load: can we somejow
@@ -296,3 +301,152 @@ authenticated Chrome):**
 
 Remaining for owner device QA: the mobile list/detail toggle on a real phone (component tests
 pin the class tokens; no device pass has covered it — same residue as the parity spec's task).
+
+## Amendment — filters on top, results immediately visible (owner QA, 2026-08-17)
+
+Owner feedback on the shipped layout, verbatim: *"UI is not really good, I need to scroll down
+to see a filtered by project specs - it should be somewhere on the top and then content on the
+right."* Reproduced during this session's own E2E: the left pane stacks 12 tall domain **cards**
+first and puts the search box + result rows BELOW them, so after picking a domain the filtered
+rows start roughly two screens down. The reader pane (content on the right) is fine; the left
+pane's internal order is wrong.
+
+### Revised left-pane structure (top to bottom)
+
+1. **Search input at the very top** of the list pane — always visible, never scrolled away
+   (the pane's scroll region starts BELOW it; same structure as the per-project page's filter
+   input).
+2. **Domains as one compact chip row** directly under the search input — `domain (count)` chips
+   that wrap, capped at the top 8 by doc count with a "+N more" expander (the exact
+   FACET_VISIBLE_CAP convention from the per-project page), active chip highlighted with an ×
+   to clear. The tall cards are deleted. Chip click = same domain filter as today.
+3. **Result rows fill the remaining height** — the scrollable region is the rows themselves,
+   so filtered results are visible without any scrolling past controls.
+4. Carried over unchanged: `?project=&doc=` selection, right-pane `DocumentReader`,
+   project-health banner (compact, above the rows), both `disabledReason` states, skeleton
+   (now covering the chip row + rows area, search box still rendered immediately), the mobile
+   list/detail toggle, and the scope-trap test posture.
+
+### Displaced card content
+
+- **Doc count** moves into the chip label.
+- **Project badge** on cards (`loki-labs`) is dropped from the chip — it already appears on
+  every result row; the health banner still names broken projects.
+- **Index doc**: when the active domain has an `indexDocId`, render a pinned "Index doc" row
+  at the TOP of the results list (selectable like any other row, marked visually). No domain
+  selected → no pinned row. This replaces the card's "Index doc" caption.
+
+  **CORRECTED same day, follow-up fix (real-data defect found in the orchestrator's own runtime
+  E2E after this amendment first shipped):** a purely client-side reorder cannot pin anything
+  that never arrives in the fetched page. Evidence from the live local server:
+  `GET /workspace/knowledge/search?domain=alfredo` ties every alfredo document on
+  `updatedAt: 2026-08-17T07:45` (a bulk import) and tie-breaks by id ascending — alfredo's own
+  index doc, `notion-c99c754479a2`, landed on page 20 of 398, never in page 1. **Pinning is now
+  primarily SERVER-side**: `WorkspaceKnowledgeIndex.search()` (`packages/cezar/src/workspace/
+  knowledge-index.ts`), in BROWSE mode (no query tokens) with `options.domain` set, moves the row
+  whose `document.slug === options.domain` to the front of the FULL sorted `merged` sequence
+  BEFORE the offset/limit slice — so page 1 always carries it. Ranked mode (real query text) is
+  untouched; a text search still ranks honestly. The client-side reorder described above
+  (`workspace-knowledge.tsx`'s `SearchResults`) is kept, now as a defensive, idempotent fallback
+  — a no-op once the server already puts the doc first, still useful if a response ever arrives
+  out of order for any other reason.
+
+### Amendment verification
+
+- Component: the search input renders ABOVE the chip row and outside the rows' scroll
+  container (structural assertion on DOM order + the scroll container's class tokens, the same
+  pin style the per-project page uses); chips capped at 8 with "+N more" expanding; active-chip
+  × clears the filter; pinned "Index doc" row appears only when the active domain has one;
+  all prior suite assertions still pass (rewire, don't delete).
+- Runtime: on a 1470×800 window with no scrolling, after clicking a domain chip the first
+  result rows are visible; measured in a real browser, local + prod after deploy.
+
+### Amendment verification results
+
+**Follow-up fix (real-data defect, found in the orchestrator's own runtime E2E): pinning moved
+server-side.** The first cut's client-only reorder was provably dead on the real corpus — see the
+"Index doc" bullet above for the measured evidence (alfredo's index doc on page 20 of 398).
+`WorkspaceKnowledgeIndex.search()` (`packages/cezar/src/workspace/knowledge-index.ts`) now pins
+the domain's own index document (`document.slug === options.domain`) to the front of the full
+`merged` sequence in BROWSE mode, before the offset/limit slice; ranked mode (real query text) is
+untouched. The client's reorder in `workspace-knowledge.tsx` is unchanged in code, now documented
+as a defensive/idempotent fallback rather than the primary mechanism.
+
+**Server (`knowledge-index.test.ts`) — new describe block, 3 tests, all pass:**
+
+- A 25-document browse-mode fixture shaped like the real failure (24 ordinary docs plus one whose
+  `slug` equals the domain, ALL sharing one `updatedAt` so the tie-break sorts purely by id
+  ascending, and the index doc's id — `notion-99` — sorts dead last) asserts page 1 (default
+  limit 20) still returns the index doc FIRST, with the remaining 19 slots holding the original
+  ascending-id order minus the pinned doc's own old slot (a reorder, not a reshuffle of the rest).
+- A negative: with real query text (ranked mode), a server response that ranks the index doc
+  SECOND is returned unchanged — pinning must never override an honest BM25 ranking.
+- `offset > 0` determinism (D8): two identical `{domain, offset: 20, limit: 20}` requests against
+  the same 25-doc fixture return byte-identical pages (`toEqual`), and that page is exactly what
+  tie-break order leaves behind once the pinned doc has already left for page 1 (it never
+  reappears on page 2).
+- Ran: `npx vitest run packages/cezar/src/workspace/knowledge-index.test.ts` — 45/45 pass (was 42
+  before this fix).
+
+**Component (`workspace-knowledge.test.tsx`) — 29/29 pass (20 carried over/rewired + 9 new):**
+
+- **Layout structure** (new describe block): `input.compareDocumentPosition(rows) &
+  DOCUMENT_POSITION_FOLLOWING` proves the search input precedes the rows scroll container in DOM
+  order; `rows.contains(input)` is `false` — the input is not nested inside the scrollable region
+  at all; the rows container (`data-slot="workspace-knowledge-rows"`) carries the exact
+  `overflow-y-auto flex-1 min-h-0` class combination — the same brittle-by-design pin style
+  `knowledge.test.tsx`'s "the list pane scrolls, not the page" block uses, guarding against the
+  same class of regression (an unbounded block sitting outside the scroll container, silently
+  reintroducing the page-level scroll bug); a second test confirms the search input's own
+  `shrink-0` header carries no `overflow-y-auto` class.
+- **Domain chip cap** (new describe block, 10-domain fixture ranked by doc count desc): the top 8
+  chips render (`domain-00`..`domain-07`), `domain-08`/`domain-09` are absent, and a "+2 more"
+  toggle is present; clicking it reveals all 10 and flips the toggle's own label to "Show fewer" —
+  same ranking/cap/expander convention as `knowledge.tsx`'s `FacetGroup`, applied to domains.
+- **Active-chip clears on a second click** (new test in the `search` describe block): clicking
+  the `billing` chip sets `aria-pressed="true"` and shows results; clicking the SAME chip again
+  flips `aria-pressed` back to `false` and returns to the idle "Type a query or pick a domain…"
+  placeholder — one click target does both jobs, no separate × control.
+- **Pinned index-doc row** (new describe block, reworked after the server-side fix, 4 tests): the
+  FIRST test now reflects the real shape — the fixture already returns the index doc first (the
+  server-pinned shape), and the row renders `data-pinned="true"`; a SECOND test is kept as the
+  defensive-fallback path, a fixture with the index doc ranked SECOND
+  (`SEARCH_RESPONSE_BILLING_INDEX_DOC_RANKED_SECOND`) still renders it first client-side; a plain
+  text search with no active domain renders every row `data-pinned="false"` (nothing to pin
+  without a domain); a domain fixture with no `indexDocId` also renders every row
+  `data-pinned="false"`.
+- **Rewired, not deleted:** "a domain with documents but no index document" now asserts the chip's
+  `data-has-index-doc` attribute and that both chips still render (the domain is never dropped from
+  the row) instead of the old caption text, since the amendment moves that information to the
+  pinned result row; the domain-select click helper (`domainChip`) now targets the chip `<button>`
+  directly instead of `within(<li>).getByText(domain)` since the tall `<li>` card is gone; every
+  other describe block (disabled-reason states, project health banner, skeleton, scope trap,
+  search-badge marking, right-pane preview, superseded trail, "Open in", mobile toggle, empty
+  registry) is unchanged in intent, only re-pointed at the chip helper where it used to click a
+  card.
+- Ran: `npx vitest run packages/web/src/routes/workspace/workspace-knowledge.test.tsx` — 29/29
+  pass.
+
+**Gates — all green, same order, run from the repo root after the server-side follow-up fix:**
+
+- `npm run typecheck` — clean (contract, api-client, server, web).
+- `npm test` — 463 files, 8623 tests passed (+4 from this follow-up: 3 server, net +1 component),
+  1 skipped (pre-existing, unrelated).
+- `npm run test:unit` — 35/35 pass, 1 pre-existing unrelated skip.
+- `npm run build` — clean; `check:pack` ok, 990 files.
+- `npm run test:package` — 15/15 pass.
+- `npx prettier --check` on all four touched files (`workspace-knowledge.tsx`,
+  `workspace-knowledge.test.tsx`, `knowledge-index.ts`, `knowledge-index.test.ts`) still flags
+  formatting on pre-existing, untouched lines too — same N/A finding as the original session
+  (re-confirmed then against an unmodified sibling file at `HEAD`, which also "fails" bare
+  prettier); not run with `--write`.
+
+**Runtime/prod (item 5's repeat):** not executed this round. The server-side pin fix changes
+`search()`'s page COMPOSITION in browse mode (which rows land on page 1), not its per-request
+compute cost, so it shouldn't move the previously recorded `domains()` timing numbers — but that
+assumption itself, and the actual "alfredo" browse-mode fix, are both unverified against the real
+corpus this round; only the fake-store unit tests above ran. The owner's/orchestrator's next
+runtime pass should re-check `GET /workspace/knowledge/search?domain=alfredo` specifically, to
+confirm the index doc now lands on page 1 for real, alongside the pending chip-row layout QA (mobile wrap
+behaviour, chip tap targets, whether "+N more" is reachable one-handed) — component tests pin the
+structure and class tokens; no device pass has covered it yet.
