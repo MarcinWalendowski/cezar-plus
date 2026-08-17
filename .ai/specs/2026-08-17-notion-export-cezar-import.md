@@ -176,7 +176,10 @@ as Done and then migrate all tasks to cezar"), two data moves — no cezar code 
    `status/done` tag + a dated Status note recording that the pending device/QA passes were
    closed by the owner's bulk acceptance, not by recorded test runs. Notion not written
    (read-only archive; its Status column now intentionally lags).
-2. **Inbox migration:** the 92 open tasks (49 Todo / 27 In Progress / 16 Blocked) became
+2. **Inbox migration** (v1 — **superseded same evening by
+   `2026-08-17-filed-tasks-table-statuses.md`**, whose v2 migration put ALL 631 tasks on the
+   board with real `status`/`priority`/`archivedAt` fields, replacing the prefix encoding
+   below): the 92 open tasks (49 Todo / 27 In Progress / 16 Blocked) became
    todo entries routed by product → repo: 83 → `chat`, 8 → `cezar`, 1 → `aside`. Mapping:
    `summary` = `[status] title` (prefix only for non-Todo — todos carry no status field),
    `context` = provenance line (status, priority, product, corpus doc path, Notion URL) +

@@ -1,6 +1,13 @@
 # Filed tasks: table, statuses, detail view, archive
 
-- **Status:** Approved — implementation pending
+- **Status:** Implemented + Done — shipped in `c65ca0bf`, deployed to cockpit.example.com same
+  evening; Phase 3 executed: all 631 tasks migrated as v2 todos (chat 589 / cezar 33 / aside 8 /
+  career-kit 1; 539 done+archived, 49 todo, 27 in-progress, 16 blocked; payload validated 631/631
+  through the real `readTodos()`, identical ids on both cockpits), and the Verification item 5
+  runtime E2E passed in a real browser on prod: newest-first table with status pills and no
+  summary prefixes, detail dialog with markdown body + acceptance checklist, status filter counts
+  49/27/16/0 with `?fstatus=blocked` → 16 rows, Archived tab 539, archive round-trip
+  92→91/540 with the archived to-do keeping its status pill, restore back to 92/539
 - **Date:** 2026-08-17
 - **Owner instructions (verbatim, three messages same evening):** "I can't open task to see
   details or to archive it instead of starting. migrate DONE tasks as well and 'blocked' as
