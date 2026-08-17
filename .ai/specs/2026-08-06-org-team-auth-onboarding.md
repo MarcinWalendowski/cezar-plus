@@ -1052,6 +1052,15 @@ to your own subdomain" ergonomics, which stays open for whoever revisits the ngi
 **Flag this to the owner as a product-flow decision, not an implementation detail**, per all three
 recon passes' independent conclusion.
 
+> **DECIDED 2026-08-17 (owner): ship the `orgSlug` body field; hostname-based claim
+> routing is declined for now.** The claim/join mechanism is the already-scaffolded
+> `orgSlug` field on `POST /auth/onboarding/org` — the user types the slug, told it
+> out-of-band by the operator over the same channel as the per-org code. The nginx
+> `auth_request` perimeter stays closed; `/onboarding` is **not** carved out of the org
+> vhost gate. The "walk up to your own subdomain" ergonomics remain open for whoever
+> revisits the perimeter later, but are not built here. Security property preserved:
+> claiming org B still requires knowing org B's own per-org code, not just its slug.
+
 **Wire seams (`packages/contract/src`, all landed this pass. CORRECTED 2026-08-07: "none yet consumed by a route" is no longer true — every row below now has its consuming route):**
 
 | File | What | Consumed by |
@@ -1672,13 +1681,24 @@ which is now *load-bearing* rather than latent, because the `user-already-member
 at this stage are what keep a second membership from ever existing to be silently ignored), and
 the ungated `teamId` field above.
 
+> **DECIDED 2026-08-17 (owner): the `teamId` reassignment PATCH is GATED on org
+> membership.** The actor must have org scope — be a member/admin of the project's org —
+> for `PATCH /api/v1/projects/:id { teamId }` to take effect; with no org scope
+> (local/no-auth, or no org created) the field is rejected, not silently applied. This
+> closes the ungated hole and, together with Fill unit 3's `?? null` guard, the
+> maxParallel-clearing trap. F4's first-membership pinning stays open.
+
 Added to the list at the repair stage:
 - **No member roster and no member-removal surface** — D12 names "removing members" and nothing
   implements it. Full reasoning, and why the irreversible half is nonetheless closed, in the GAP
   note at the end of D12.
-- **An `admin` can mint an `owner` invite** — inert under D12's flat role model, live the moment
-  anything becomes owner-only. Recorded as an OPEN question at the end of D12 rather than decided
-  in an implementation pass.
+- **An `admin` can mint an `owner` invite** — **DECIDED 2026-08-17 (owner): NO.** Only an
+  `owner` may create `owner`-role invites; an `admin` may invite up to `admin`/`member`. The
+  invite-create path validates the requested role against the actor's own role and refuses an
+  `owner` invite from a non-owner. Least-privilege, closing the escalation path *before* anything
+  becomes owner-only rather than after. *Original open question, kept for context:* inert under
+  D12's flat role model, live the moment anything becomes owner-only. Recorded as an OPEN question
+  at the end of D12 rather than decided in an implementation pass.
 - **The auth-off cockpit shows a "Teams" item in global settings.** The nav registry has three
   gates (`hidden`, `scope`, `capability`) and none can express "auth is on" — by design, since
   D1's Risks entry below forbids a `capabilities.auth` key and a test enforces its absence. The
