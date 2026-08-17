@@ -145,6 +145,51 @@ describe('resolveCapabilities — localHandoff', () => {
   });
 });
 
+describe('resolveCapabilities — accountUsage (hosted opt-in, added 2026-08-17)', () => {
+  it('is off by default', () => {
+    expect(resolveCapabilities({}, undefined).accountUsage).toBe(false);
+  });
+
+  it('is on with CEZ_ACCOUNT_USAGE=1 alone, in local mode', () => {
+    expect(resolveCapabilities({ CEZ_ACCOUNT_USAGE: '1' }, undefined).accountUsage).toBe(true);
+  });
+
+  it('stays off with CEZ_ACCOUNT_USAGE=1 alone when hosted — the pre-override behavior, must not regress', () => {
+    expect(resolveCapabilities({ CEZ_ACCOUNT_USAGE: '1', CEZ_REMOTE: '1' }, undefined).accountUsage).toBe(false);
+  });
+
+  it('is on when hosted with BOTH CEZ_ACCOUNT_USAGE=1 and CEZ_ACCOUNT_USAGE_HOSTED=1', () => {
+    expect(
+      resolveCapabilities({ CEZ_ACCOUNT_USAGE: '1', CEZ_ACCOUNT_USAGE_HOSTED: '1', CEZ_REMOTE: '1' }, undefined)
+        .accountUsage,
+    ).toBe(true);
+  });
+
+  it('the override alone, without the base flag, never enables it', () => {
+    expect(
+      resolveCapabilities({ CEZ_ACCOUNT_USAGE_HOSTED: '1', CEZ_REMOTE: '1' }, undefined).accountUsage,
+    ).toBe(false);
+    expect(resolveCapabilities({ CEZ_ACCOUNT_USAGE_HOSTED: '1' }, undefined).accountUsage).toBe(false);
+  });
+
+  it.each(['0', 'true', 'yes', '', 'on'])(
+    'CEZ_ACCOUNT_USAGE_HOSTED=%j stays off when hosted — only an exact "1" opts in',
+    (value) => {
+      expect(
+        resolveCapabilities({ CEZ_ACCOUNT_USAGE: '1', CEZ_ACCOUNT_USAGE_HOSTED: value, CEZ_REMOTE: '1' }, undefined)
+          .accountUsage,
+      ).toBe(false);
+    },
+  );
+
+  it('does not affect localHandoff itself — the override is scoped to this one field', () => {
+    expect(
+      resolveCapabilities({ CEZ_ACCOUNT_USAGE: '1', CEZ_ACCOUNT_USAGE_HOSTED: '1', CEZ_REMOTE: '1' }, undefined)
+        .localHandoff,
+    ).toBe(false);
+  });
+});
+
 describe('resolveCapabilities — followups (#471)', () => {
   it('is OFF by default — the global inbox is opt-in', () => {
     expect(resolveCapabilities({}, undefined).followups).toBe(false);

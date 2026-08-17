@@ -151,6 +151,23 @@ argument in one rule: two rows that look alike must mean alike.
 Gated behind a capability flag like every other optional surface (`CEZ_ACCOUNT_USAGE`), default off,
 so the zero-config cockpit is unchanged.
 
+**Also `false` in hosted mode regardless of the flag** — this shipped in `resolveCapabilities`
+(`server/capabilities.ts`) the same day as the rest of the feature, but was never written down
+here, so this is filling that gap rather than correcting it. The panel names each logged-in
+account's real email, org and plan; the rest of the agent-profiles family is already withheld in
+hosted mode for the weaker reason that it echoes host paths, so this one follows the same
+default. See the field's doc in `contract/health.ts`.
+
+#### B1. Hosted opt-in — `CEZ_ACCOUNT_USAGE_HOSTED` (added 2026-08-17)
+
+Some hosted deployments have a known, trusted audience where the disclosure above is a non-issue —
+the motivating case is `cockpit.example.com`, a single-owner (+ one invited friend) box gated
+entirely by Cloudflare Access email-OTP. Rather than drop the hosted block for every deployment
+(this is an `@open-mercato/cezar` fork other people also run in hosted mode), `resolveCapabilities`
+takes a second, independent, exact-`'1'` flag: `CEZ_ACCOUNT_USAGE_HOSTED=1`, set alongside
+`CEZ_ACCOUNT_USAGE=1`, unlocks the panel on that one install. Every hosted deployment that doesn't
+set it — including every other fork/upstream install — keeps the original behavior unchanged.
+
 ### C. Routing modes
 
 The route becomes a small union instead of an account id, and **pools are rows in the existing

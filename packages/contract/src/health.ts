@@ -125,6 +125,12 @@ export const capabilitiesSchema = z.object({
    * the panel names the logged-in account's email, org and plan per login. The rest of the
    * agent-profiles family is already withheld when `localHandoff` is false because it echoes host
    * paths — this discloses who the operator is, which is strictly more than a path.
+   *
+   * `CEZ_ACCOUNT_USAGE_HOSTED=1` (added 2026-08-17), set alongside `CEZ_ACCOUNT_USAGE=1`, is the
+   * per-install override for a hosted deployment whose operator has decided the disclosure is fine
+   * for its actual audience (e.g. a single-owner box behind Cloudflare Access). It is its own
+   * exact-`'1'` gate, not a redefinition of hosted mode itself — every hosted install that doesn't
+   * set it keeps this field `false`, exactly as before.
    */
   accountUsage: z.boolean(),
   /** The Skills surface. **Opt-OUT, and the only capability here that is** — `CEZ_SKILLS=0`

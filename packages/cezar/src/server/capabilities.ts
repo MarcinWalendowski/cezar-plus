@@ -248,7 +248,16 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
     // AND-ed with `localHandoff`, not just the flag: this panel names each login's email, org and
     // plan, and the rest of the agent-profiles family is already withheld in hosted mode for the
     // weaker reason that it echoes host paths. See the field's doc in `contract/health.ts`.
-    accountUsage: env.CEZ_ACCOUNT_USAGE === '1' && localHandoff,
+    //
+    // `CEZ_ACCOUNT_USAGE_HOSTED=1` (added 2026-08-17) is the escape hatch: a SECOND, independent
+    // exact-`'1'` flag an operator sets only when they've decided the disclosure is fine for THIS
+    // deployment's audience (e.g. a single-owner box gated by Cloudflare Access). It still requires
+    // `CEZ_ACCOUNT_USAGE=1` too — setting only the override does nothing — and every hosted install
+    // that doesn't set it, including every other fork/upstream deployment, keeps today's behavior
+    // unchanged. Deliberately not a redefinition of `localHandoff` itself: that predicate is shared
+    // by `isLocalOrgModeActive`, the boot gate and the workspace-browse confinement, none of which
+    // should be swayed by a decision that is specific to this one panel.
+    accountUsage: env.CEZ_ACCOUNT_USAGE === '1' && (localHandoff || env.CEZ_ACCOUNT_USAGE_HOSTED === '1'),
     // Inverted, like `workspaceViews` above — `=== '1'` everywhere else, `!== '0'` in these two.
     // (This comment used to claim it was "the one INVERTED gate in this object"; corrected
     // 2026-08-16 when `workspaceViews` joined it, for a different reason: skills predates the
