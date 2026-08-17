@@ -1,8 +1,11 @@
 # Knowledge skills-preview parity — the Knowledge page opens/previews like the Skills page
 
-- **Status:** Approved (owner instruction 2026-08-17: "knowledge base should open/preview
-  the same way as we preview skills — it appears on the right side: just copy this UI and
-  search behaviour", referencing `/p/<project>/skills?skill=cloudflare`)
+- **Status:** Implemented — shipped in `a960f1bf`, deployed to cockpit.example.com 2026-08-17;
+  Verification items 1-4 executed (gates + real-corpus browser E2E, three fix rounds recorded
+  below); owner device QA (real-phone mobile toggle) pending. (Original owner instruction
+  2026-08-17: "knowledge base should open/preview the same way as we preview skills — it
+  appears on the right side: just copy this UI and search behaviour", referencing
+  `/p/<project>/skills?skill=cloudflare`)
 - **Owner ask date:** 2026-08-17
 - **Depends on:** `2026-08-17-notion-export-cezar-import.md` (the 2,066-doc corpus is the
   primary dataset this page now serves)
