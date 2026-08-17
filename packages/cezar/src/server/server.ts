@@ -61,6 +61,7 @@ import {
   type RunIndexEntry,
   type RunsIndexResponse,
   type CreateTodoResponse,
+  type UpdateTodoResponse,
   type WorkspaceTodosResponse,
 } from '@loki-labs/better-cezar-contract';
 // A contract VALUE, like `workspaceUiStateSchema` in workspace/migrations.ts — the request
@@ -71,6 +72,7 @@ import {
   modelDiscoveryRunnerSchema,
   openProjectInSchema,
   updateProjectInputSchema,
+  updateTodoInputSchema,
 } from '@loki-labs/better-cezar-contract';
 import { detectEnvironment } from '../core/backend-detect.ts';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
@@ -103,7 +105,16 @@ import { planChain, slugify } from '../planner.ts';
 import { discoverSkills } from '../skills.ts';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.ts';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.ts';
-import { createTodo, markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.ts';
+import {
+  createTodo,
+  markStarted,
+  onTodosChanged,
+  readTodos,
+  removeTodo,
+  todoTaskText,
+  updateTodo,
+  type TodoItem,
+} from '../todos.ts';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.ts';
 import {
   HistoryCursorError,
@@ -5472,6 +5483,20 @@ export function createApp(deps: ServerDeps) {
       const todo = await createTodo(dataDir, c.req.valid('json'));
       const body: CreateTodoResponse = { todo };
       return c.json(body, 201);
+    })
+
+    // The Filed table's status/priority edits and its Archive/Restore action
+    // (2026-08-17-filed-tasks-table-statuses.md), all through one PATCH rather than three routes.
+    // Ungated, same as create/list/delete/start: a task filed by the composer's default path must
+    // stay editable regardless of the separate follow-up-INBOX flag. Body validated against the
+    // wire twin (`updateTodoInputSchema`, `.refine`'d to require at least one key), beside the
+    // create route above.
+    .patch('/todos/:id', jsonZodValidator(updateTodoInputSchema), async (c) => {
+      const { dataDir } = c.get('project');
+      const todo = await updateTodo(dataDir, c.req.param('id'), c.req.valid('json'));
+      if (!todo) return c.json({ error: 'not found' }, 404);
+      const body: UpdateTodoResponse = { todo };
+      return c.json(body);
     })
 
     // Check off = delete the entry. Ungated since D7a, for symmetry with create/list/start: a task

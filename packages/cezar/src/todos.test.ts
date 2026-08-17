@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createTodo, onTodosChanged, readTodos, todoSchema, todosPath, todosWatchActive } from './todos.ts';
+import { todoItemSchema } from '@loki-labs/better-cezar-contract';
+import { createTodo, onTodosChanged, readTodos, todoSchema, todosPath, todosWatchActive, updateTodo } from './todos.ts';
 
 /**
  * Per-dataDir todos watch (multi-project spec, step 2.3): each project's
@@ -174,6 +175,153 @@ describe('todoSchema (2026-08-15 structured spec, D2/Phase 1)', () => {
     });
     expect(result.success).toBe(false);
   });
+});
+
+/**
+ * `todoSchema`'s status/priority/archive extension (2026-08-17-filed-tasks-table-statuses.md):
+ * three additive optional fields, same "legacy entries keep validating" discipline as D2/Phase 1
+ * above — an agent's plain append carries none of them, and nothing here writes `status` for it
+ * (absent reads as `'todo'` in the Filed table, not stamped on disk).
+ */
+describe('todoSchema (2026-08-17 status/priority/archive)', () => {
+  it('accepts status, priority and archivedAt when present', () => {
+    const result = todoSchema.safeParse({
+      summary: 'Ship it',
+      status: 'in-progress',
+      priority: 'high',
+      archivedAt: '2026-08-17T00:00:00.000Z',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('a legacy entry with none of the three still validates, all three undefined', () => {
+    const result = todoSchema.safeParse({ summary: 'Bare minimum' });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.status).toBeUndefined();
+      expect(result.data.priority).toBeUndefined();
+      expect(result.data.archivedAt).toBeUndefined();
+    }
+  });
+
+  it('rejects a status outside the closed enum', () => {
+    expect(todoSchema.safeParse({ summary: 'x', status: 'archived' }).success).toBe(false);
+  });
+
+  it('rejects a priority outside the closed enum', () => {
+    expect(todoSchema.safeParse({ summary: 'x', priority: 'urgent' }).success).toBe(false);
+  });
+});
+
+/**
+ * The wire twin (`contract/src/skills.ts`'s `todoItemSchema`) and this server-side `todoSchema`
+ * must carry the SAME field names — the Risk this spec names by name ("Two schema twins drift").
+ * A value forgotten on one side is silent: the server would happily store a field the wire schema
+ * never validates, or vice versa. This only checks the field-name SET, not per-field types
+ * (`id` is optional here and required on the wire, by design — ids are backfilled on read), which
+ * is exactly the granularity a name added to one side and not the other would fail.
+ */
+describe('todoSchema field-set parity with the contract twin (todoItemSchema)', () => {
+  it('carries exactly the same keys as the wire schema', () => {
+    expect(Object.keys(todoSchema.shape).sort()).toEqual(Object.keys(todoItemSchema.shape).sort());
+  });
+});
+
+/**
+ * `updateTodo` (2026-08-17-filed-tasks-table-statuses.md) — the primitive behind
+ * `PATCH /:projectId/todos/:id`. `todos-patch.test.ts` covers the same behaviour through the HTTP
+ * route; these exercise the primitive directly, the same split `createTodo`'s tests above use.
+ */
+describe('updateTodo', () => {
+  let root: string;
+  let dataDir: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cez-todos-update-'));
+    dataDir = join(root, '.ai/cezar');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const seed = async (todo: object) => {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(join(dataDir, 'todos.json'), JSON.stringify([todo]), 'utf8');
+  };
+
+  it('sets status, round-tripped through disk', async () => {
+    await seed({ id: 't1', summary: 'Ship it' });
+    const result = await updateTodo(dataDir, 't1', { status: 'in-progress' });
+    expect(result?.status).toBe('in-progress');
+    const [stored] = await readTodos(dataDir);
+    expect(stored?.status).toBe('in-progress');
+  });
+
+  it('sets priority', async () => {
+    await seed({ id: 't1', summary: 'Ship it' });
+    const result = await updateTodo(dataDir, 't1', { priority: 'medium' });
+    expect(result?.priority).toBe('medium');
+  });
+
+  it('archive stamps an ISO archivedAt', async () => {
+    await seed({ id: 't1', summary: 'Ship it' });
+    const result = await updateTodo(dataDir, 't1', { archived: true });
+    expect(typeof result?.archivedAt).toBe('string');
+    expect(Number.isNaN(Date.parse(result?.archivedAt as string))).toBe(false);
+  });
+
+  it('restore removes the archivedAt KEY entirely — not a value, an absence', async () => {
+    await seed({ id: 't1', summary: 'Ship it', archivedAt: '2026-08-01T00:00:00.000Z' });
+    const result = await updateTodo(dataDir, 't1', { archived: false });
+    expect(result).toBeDefined();
+    expect('archivedAt' in (result as object)).toBe(false);
+    const [stored] = await readTodos(dataDir);
+    expect('archivedAt' in (stored as object)).toBe(false);
+  });
+
+  it('returns undefined for an unknown id and writes nothing', async () => {
+    await seed({ id: 't1', summary: 'Ship it' });
+    const result = await updateTodo(dataDir, 'nope', { status: 'done' });
+    expect(result).toBeUndefined();
+    const items = await readTodos(dataDir);
+    expect(items[0]?.status).toBeUndefined();
+  });
+
+  it('updates a legacy entry carrying none of the three fields, leaving its old fields untouched', async () => {
+    await seed({ id: 't1', summary: 'Rotate the key', action: 'Rotate it in the dashboard' });
+    const result = await updateTodo(dataDir, 't1', { status: 'blocked' });
+    expect(result?.status).toBe('blocked');
+    expect(result?.action).toBe('Rotate it in the dashboard');
+  });
+
+  it('a write blocked on a held lease waits, then applies once the lease frees', async () => {
+    await seed({ id: 't1', summary: 'Ship it' });
+
+    // Simulate an external writer already holding the lease — a REAL held lock file, not an
+    // in-process ordering accident (the same reasoning IdentityStore's own lease test uses:
+    // `identity-store.test.ts`, "the write lease actually serializes concurrent writers").
+    const lockPath = join(dataDir, 'todos.lock');
+    const fd = openSync(lockPath, 'wx', 0o600);
+    writeFileSync(fd, JSON.stringify({ pid: 999_999, startedAt: new Date().toISOString() }));
+
+    const updatePromise = updateTodo(dataDir, 't1', { status: 'done' });
+    let settled = false;
+    void updatePromise.then(() => {
+      settled = true;
+    });
+
+    // Several retry cycles' worth of time (backoff starts at 10ms, caps at 200ms) — long enough
+    // to prove the write is actually WAITING on the lease, not failing fast or skipping silently.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(settled).toBe(false);
+
+    closeSync(fd);
+    unlinkSync(lockPath);
+
+    const result = await updatePromise;
+    expect(result?.status).toBe('done');
+  }, 10_000);
 });
 
 /**

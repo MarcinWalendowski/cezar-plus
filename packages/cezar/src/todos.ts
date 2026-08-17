@@ -48,6 +48,14 @@ export const todoSchema = z.object({
   runnable: z.boolean().optional(),
   /** Set by the server when "▶ Run" turned this entry into a task. */
   startedTaskId: z.string().optional(),
+  // ---- statuses, priority, archive (2026-08-17-filed-tasks-table-statuses.md) ----------------
+  // Additive and optional, like the five below — see the wire twin (`contract/src/skills.ts`'s
+  // `todoItemSchema`) for why. Absent `status` reads as `'todo'` in the Filed table, not written
+  // here.
+  status: z.enum(['todo', 'in-progress', 'blocked', 'done']).optional(),
+  priority: z.enum(['high', 'medium', 'low']).optional(),
+  /** Set by `updateTodo`'s `archived: true`; an archived entry leaves the Active board. */
+  archivedAt: z.string().optional(),
   // ---- structured spec (2026-08-15-knowledge-grounded-task-fanout.md, D2/D4) -----------------
   // All five additive and optional — every existing todos.json entry (an agent's plain append)
   // carries none of them and still validates unchanged. Bounds mirror `createRunInputSchema`'s
@@ -68,9 +76,10 @@ export const todoSchema = z.object({
 export type TodoItem = z.infer<typeof todoSchema> & { id: string };
 
 /** `POST /:projectId/todos`'s body, server-side: everything `createTodo` accepts from a caller —
- *  `id`/`ts` are assigned by `createTodo` itself, `taskId`/`startedTaskId` are agent-/server-only.
+ *  `id`/`ts` are assigned by `createTodo` itself, `taskId`/`startedTaskId` are agent-/server-only,
+ *  `archivedAt` is stamped by `updateTodo`'s archive action, never client-supplied on create.
  *  Mirrors the wire twin's `createTodoInputSchema` (`contract/src/skills.ts`) field-for-field. */
-export type CreateTodoInput = Omit<TodoItem, 'id' | 'ts' | 'taskId' | 'startedTaskId'>;
+export type CreateTodoInput = Omit<TodoItem, 'id' | 'ts' | 'taskId' | 'startedTaskId' | 'archivedAt'>;
 
 export function todosPath(dataDir: string): string {
   return join(dataDir, 'todos.json');
@@ -251,6 +260,40 @@ export async function createTodo(dataDir: string, input: CreateTodoInput): Promi
     items.push(todo);
     await writeAtomic(dataDir, items);
     return todo;
+  });
+}
+
+/** `PATCH /:projectId/todos/:id`'s body, server-side — mirrors the wire twin's
+ *  `updateTodoInputSchema` (`contract/src/skills.ts`) field-for-field. */
+export type UpdateTodoPatch = {
+  status?: TodoItem['status'];
+  priority?: TodoItem['priority'];
+  archived?: boolean;
+};
+
+/**
+ * `PATCH /:projectId/todos/:id` (2026-08-17-filed-tasks-table-statuses.md) — the Filed table's
+ * status/priority edits and Archive/Restore, under the same lease every other writer here takes.
+ * `undefined` for an unknown id (the route turns that into 404); the caller has already checked
+ * `patch` carries at least one key (the wire schema's `.refine`).
+ *
+ * `archived: true` stamps `archivedAt` to now; `false` DELETES the key rather than writing an
+ * explicit `undefined` — the `seenAt` precedent (`runs/store.ts`'s `setUnread`): every reader
+ * keys on the field being ABSENT, and a written `undefined` would still leave the key present in
+ * the in-memory item (`'archivedAt' in item` stays `true`) even though `JSON.stringify` drops it
+ * on disk — an in-memory/on-disk split this avoids entirely.
+ */
+export async function updateTodo(dataDir: string, id: string, patch: UpdateTodoPatch): Promise<TodoItem | undefined> {
+  return withTodosLease(dataDir, async () => {
+    const { items } = await readRaw(dataDir);
+    const item = items.find((t) => t.id === id);
+    if (!item) return undefined;
+    if (patch.status !== undefined) item.status = patch.status;
+    if (patch.priority !== undefined) item.priority = patch.priority;
+    if (patch.archived === true) item.archivedAt = new Date().toISOString();
+    else if (patch.archived === false) delete item.archivedAt;
+    await writeAtomic(dataDir, items);
+    return item;
   });
 }
 

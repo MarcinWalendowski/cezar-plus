@@ -32,16 +32,22 @@ import { todoSchema } from './todos.ts';
  * used to satisfy the old check, where a schema key cannot be faked.
  */
 describe('HANDOFF_INSTRUCTIONS', () => {
-  /** The server assigns these on read/start — an agent never writes them. */
-  const SERVER_MANAGED = new Set(['id', 'startedTaskId']);
+  /** The server assigns these on read/start/archive — an agent never writes them. `archivedAt`
+   *  joined this set with the filed-tasks table (2026-08-17-filed-tasks-table-statuses.md):
+   *  stamped by `updateTodo`'s `archived: true`, never client- or agent-supplied. */
+  const SERVER_MANAGED = new Set(['id', 'startedTaskId', 'archivedAt']);
 
   /**
-   * Written through `POST /todos` by an API client, never by an agent's append (D2/D4).
-   * Documenting them in FOLLOWUP_INSTRUCTIONS is a live option — an agent could file a
-   * fully-specified follow-up the same way a client does — but it is a deliberate NON-decision
-   * today: five optional fields would lengthen a system prompt appended to every agent step, for
-   * a writer we have not asked for it. If that changes, move the field out of this set rather
-   * than widening the set.
+   * Written through `POST /todos` or `PATCH /todos/:id` by an API client, never by an agent's
+   * append (D2/D4). Documenting them in FOLLOWUP_INSTRUCTIONS is a live option — an agent could
+   * file a fully-specified follow-up the same way a client does — but it is a deliberate
+   * NON-decision today: seven optional fields would lengthen a system prompt appended to every
+   * agent step, for a writer we have not asked for it. If that changes, move the field out of
+   * this set rather than widening the set.
+   *
+   * `status`/`priority` joined this set with the filed-tasks table
+   * (2026-08-17-filed-tasks-table-statuses.md): the Filed table's own edits and any future
+   * client-created todo set them, never an agent's plain append.
    */
   const CLIENT_WRITTEN = new Set([
     'context',
@@ -49,6 +55,8 @@ describe('HANDOFF_INSTRUCTIONS', () => {
     'acceptanceCriteria',
     'knowledgeRefs',
     'origin',
+    'status',
+    'priority',
   ]);
 
   it('documents every agent-writable field of todoSchema', () => {

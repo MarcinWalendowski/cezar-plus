@@ -80,6 +80,14 @@ export const todoItemSchema = z.object({
   /** Set once a task was started from this entry — it then leaves the inbox and stays as
    *  the audit trail. A later launch never overwrites the first. */
   startedTaskId: z.string().optional(),
+  // ---- statuses, priority, archive (2026-08-17-filed-tasks-table-statuses.md) ----------------
+  // Additive and optional, like the five below: an agent's plain append carries none of them and
+  // still validates unchanged. Absent `status` reads as `'todo'` (the Filed table's own default,
+  // not a value written here).
+  status: z.enum(['todo', 'in-progress', 'blocked', 'done']).optional(),
+  priority: z.enum(['high', 'medium', 'low']).optional(),
+  /** Set by the archive action; an archived entry leaves the Active board. Server-stamped. */
+  archivedAt: z.string().optional(),
   // ---- structured spec (2026-08-15-knowledge-grounded-task-fanout.md, D2/D4) -----------------
   // All five additive and optional: an agent's plain append (`FOLLOWUP_INSTRUCTIONS` in
   // `handoff.ts`) carries none of them and still validates unchanged. Bounds follow
@@ -103,12 +111,17 @@ export type TodoItem = z.infer<typeof todoItemSchema>;
  * Phase 1): everything a caller may specify, `id`/`ts`/`taskId`/`startedTaskId` withheld because
  * they are server- or agent-assigned, never client-supplied. Built by `.omit()` off the wire
  * item itself so the two shapes can never drift apart field-by-field.
+ *
+ * `archivedAt` joined the omit list with the filed-tasks table (2026-08-17-filed-tasks-table-
+ * statuses.md): it is stamped by the archive action, never client-supplied on create. `status`
+ * and `priority` stay creatable — a caller may file a task as already `blocked`, say.
  */
 export const createTodoInputSchema = todoItemSchema.omit({
   id: true,
   ts: true,
   taskId: true,
   startedTaskId: true,
+  archivedAt: true,
 });
 export type CreateTodoInput = z.infer<typeof createTodoInputSchema>;
 
@@ -117,6 +130,34 @@ export const createTodoResponseSchema = z.object({
   todo: todoItemSchema,
 });
 export type CreateTodoResponse = z.infer<typeof createTodoResponseSchema>;
+
+/**
+ * `PATCH /:projectId/todos/:id` (2026-08-17-filed-tasks-table-statuses.md) — the Filed table's
+ * status/priority edits and its Archive/Restore action, all sharing one route rather than three.
+ * At least one key required (`.refine`): a body with none would be a 200 that changed nothing,
+ * which is worse than rejecting it — the `updateProjectInputSchema` precedent (`projects.ts`).
+ *
+ * `archived: true` stamps `archivedAt`; `false` REMOVES the key rather than writing an explicit
+ * `null`/`undefined` — every reader (`GET /workspace/todos`'s Archived split, the Filed table)
+ * keys on the field being ABSENT, the `seenAt` precedent (`runs/store.ts`).
+ */
+export const updateTodoInputSchema = z
+  .object({
+    status: z.enum(['todo', 'in-progress', 'blocked', 'done']).optional(),
+    priority: z.enum(['high', 'medium', 'low']).optional(),
+    archived: z.boolean().optional(),
+  })
+  .refine(
+    (body) => body.status !== undefined || body.priority !== undefined || body.archived !== undefined,
+    'specify status, priority or archived',
+  );
+export type UpdateTodoInput = z.infer<typeof updateTodoInputSchema>;
+
+/** `PATCH /:projectId/todos/:id` — 200 with the stored todo. */
+export const updateTodoResponseSchema = z.object({
+  todo: todoItemSchema,
+});
+export type UpdateTodoResponse = z.infer<typeof updateTodoResponseSchema>;
 
 /**
  * `DELETE /todos/:id` — Dismiss checks the entry off.

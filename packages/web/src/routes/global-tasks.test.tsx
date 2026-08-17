@@ -4,7 +4,11 @@ import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { ProjectListEntry, RunIndexEntry } from '@loki-labs/better-cezar-api-client'
+import type {
+  ProjectListEntry,
+  RunIndexEntry,
+  WorkspaceTodoEntry,
+} from '@loki-labs/better-cezar-api-client'
 import { ListViewProvider, useListView } from '@/components/list-view'
 import { __clearRememberedStatusesForTests, workspaceQueryKeys } from '@/api/queries'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
@@ -115,6 +119,7 @@ function stubFetch({
   refStatus,
   indexStatuses,
   todos = [],
+  todoPatchStatus = 200,
 }: {
   runs?: RunIndexEntry[]
   projects?: ProjectListEntry[]
@@ -128,13 +133,17 @@ function stubFetch({
   /** What the runs-index itself already knew — the free, no-round-trip path. */
   indexStatuses?: Record<string, { prs: Record<number, string>; issues: Record<number, string> }>
   /** Filed-but-unstarted todos, as `GET /workspace/todos` answers them. */
-  todos?: Array<{ project: string; todo: { id: string; ts: string; summary: string } }>
+  todos?: WorkspaceTodoEntry[]
+  /** What `PATCH /todos/:id` answers with — 200 by default, or a status the mutation must roll
+   *  back from (the same shape `archiveStatus` gives the runs side). */
+  todoPatchStatus?: number
 } = {}) {
   sent = []
   seenAt = undefined
   // Stateful, like the real server: an archive really flips the flag, so the invalidation
   // refetch answers with the moved row rather than putting the old one back.
   let index = runs.map((run) => ({ ...run }))
+  let todoBoard = todos.map((entry) => ({ ...entry, todo: { ...entry.todo } }))
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -166,11 +175,37 @@ function stubFetch({
         // Note what the health stub above does NOT carry: `followups` and `workspaceViews` are
         // both absent, i.e. off — the default install. The Filed section must still render, which
         // is the whole point of this route being ungated (D7a on the client).
-        return jsonResponse({ todos, projects: [] })
+        return jsonResponse({ todos: todoBoard, projects: [] })
       }
       const startTodo = /^\/api\/v1\/p\/([^/]+)\/todos\/([^/]+)\/start$/.exec(path)
       if (startTodo && method === 'POST') {
         return jsonResponse({ run: { id: `run-from-${startTodo[2]}` } }, 201)
+      }
+      // PATCH .../todos/:id — never `/start`, which is matched (and returned) above first.
+      const patchTodo = /^\/api\/v1\/p\/([^/]+)\/todos\/([^/]+)$/.exec(path)
+      if (patchTodo && method === 'PATCH') {
+        if (todoPatchStatus !== 200) return jsonResponse({ error: 'lease held elsewhere' }, todoPatchStatus)
+        const [, projectId, id] = patchTodo
+        const patch = JSON.parse(String(init.body)) as {
+          status?: string
+          priority?: string
+          archived?: boolean
+        }
+        let patched: WorkspaceTodoEntry | undefined
+        todoBoard = todoBoard.map((entry) => {
+          if (entry.project !== projectId || entry.todo.id !== id) return entry
+          const todo = { ...entry.todo }
+          if (patch.status !== undefined) todo.status = patch.status as WorkspaceTodoEntry['todo']['status']
+          if (patch.priority !== undefined) {
+            todo.priority = patch.priority as WorkspaceTodoEntry['todo']['priority']
+          }
+          if (patch.archived === true) todo.archivedAt = '2026-07-14T12:00:00Z'
+          else if (patch.archived === false) delete todo.archivedAt
+          patched = { ...entry, todo }
+          return patched
+        })
+        if (!patched) return jsonResponse({ error: 'not found' }, 404)
+        return jsonResponse({ todo: patched.todo })
       }
       const status = /^\/api\/v1\/p\/([^/]+)\/github\/ref-status/.exec(path)
       if (status) {
@@ -1168,10 +1203,13 @@ describe('global tasks page', () => {
  * the bug was reported: "I just tried to add a task and nothing happened."
  */
 describe('the Filed section', () => {
-  const TODOS = [
+  const TODOS: WorkspaceTodoEntry[] = [
     { project: 'api', todo: { id: 'todo-1', ts: '2026-07-14T09:00:00Z', summary: 'Add a rate limit to /checkout' } },
     { project: 'web', todo: { id: 'todo-2', ts: '2026-07-14T09:00:01Z', summary: 'Ship the storefront banner' } },
   ]
+
+  const filedRows = () => [...document.querySelectorAll('[data-slot="filed-task-row"]')]
+  const filedRowIds = () => filedRows().map((row) => row.getAttribute('data-todo-id'))
 
   it('lists filed tasks above the runs, with the project each one belongs to', async () => {
     stubFetch({ todos: TODOS })
@@ -1181,9 +1219,8 @@ describe('the Filed section', () => {
     expect(section).toBeTruthy()
     expect(screen.getByText('Ship the storefront banner')).toBeTruthy()
     // Each row names its own repository: these come from different projects and the page stands
-    // in none of them.
-    const rows = [...document.querySelectorAll('[data-slot="filed-task"]')]
-    expect(rows.map((row) => row.getAttribute('data-project'))).toEqual(['api', 'web'])
+    // in none of them. Newest-first (the default sort): todo-2 was filed a second after todo-1.
+    expect(filedRows().map((row) => row.getAttribute('data-project'))).toEqual(['web', 'api'])
     expect(document.querySelector('[data-slot="filed-tasks-count"]')?.textContent).toBe('2')
   })
 
@@ -1201,8 +1238,8 @@ describe('the Filed section', () => {
     renderPage()
     await screen.findByText('Ship the storefront banner')
 
-    const webRow = document.querySelector('[data-slot="filed-task"][data-project="web"]')!
-    fireEvent.click(webRow.querySelector('[data-slot="filed-task-start"]')!)
+    const webRow = document.querySelector('[data-slot="filed-task-row"][data-project="web"]')!
+    fireEvent.click(webRow.querySelector('[data-action="start-filed-task"]')!)
 
     await waitFor(() =>
       expect(
@@ -1222,11 +1259,50 @@ describe('the Filed section', () => {
     expect(document.querySelector('[data-slot="filed-tasks"]')).toBeNull()
   })
 
-  it('stays off the Archived view — a filed task has never run, so it cannot be archived', async () => {
+  it('renders on BOTH tabs now, and a row’s own state — not the tab it lands on — decides which one it sits under', async () => {
+    // 2026-08-17-filed-tasks-table-statuses.md: the section used to be gated on `view === 'active'`
+    // outright, so switching to Archived hid it regardless of content. It is now unconditional,
+    // and `matchesFiledView` alone decides: archived-or-done sits under Archived, everything else
+    // under Active — independent of whether the row was ever explicitly archived.
+    const mixed: WorkspaceTodoEntry[] = [
+      ...TODOS,
+      {
+        project: 'api',
+        todo: {
+          id: 'todo-3',
+          ts: '2026-07-13T09:00:00Z',
+          summary: 'Retire the legacy webhook',
+          status: 'done',
+        },
+      },
+      {
+        project: 'web',
+        todo: {
+          id: 'todo-4',
+          ts: '2026-07-12T09:00:00Z',
+          summary: 'Draft the pricing page',
+          archivedAt: '2026-07-13T00:00:00Z',
+        },
+      },
+    ]
+    stubFetch({ todos: mixed })
+    renderPage()
+    await screen.findByText('Add a rate limit to /checkout')
+    // Newest-first: todo-2 was filed a second after todo-1.
+    expect(filedRowIds()).toEqual(['todo-2', 'todo-1'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Archived' }))
+    await waitFor(() => expect(search()).toBe('?archived=1'))
+    // `todo-3` (done, never archived) and `todo-4` (archived, still `todo`) both qualify.
+    await waitFor(() => expect(filedRowIds()).toEqual(['todo-3', 'todo-4']))
+  })
+
+  it('stays off the Archived view when nothing filed qualifies for it', async () => {
     // Arrives on Active and WAITS for the rows first. Landing straight on `?archived=1` and
     // asserting the section is absent passes whether the view hides it or the query simply had
     // not answered yet — absence is the loading state too. Seeing the rows, then switching, is
-    // what makes this assertion mean anything.
+    // what makes this assertion mean anything. Neither TODOS entry is archived or done, so —
+    // unlike the mixed fixture above — Archived has nothing to show.
     stubFetch({ todos: TODOS })
     renderPage()
     await screen.findByText('Add a rate limit to /checkout')
@@ -1234,5 +1310,67 @@ describe('the Filed section', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Archived' }))
     await waitFor(() => expect(search()).toBe('?archived=1'))
     expect(document.querySelector('[data-slot="filed-tasks"]')).toBeNull()
+  })
+
+  it('archives a filed task from the row action, and the row leaves Active', async () => {
+    stubFetch({ todos: TODOS })
+    renderPage()
+    await screen.findByText('Add a rate limit to /checkout')
+
+    const apiRow = document.querySelector('[data-slot="filed-task-row"][data-project="api"]')!
+    fireEvent.click(apiRow.querySelector('[data-action="archive-filed-task"]')!)
+
+    await waitFor(() =>
+      expect(sent.some((r) => r.method === 'PATCH' && r.path === '/api/v1/p/api/todos/todo-1')).toBe(
+        true,
+      ),
+    )
+    expect(sent.find((r) => r.method === 'PATCH')?.body).toEqual({ archived: true })
+    await waitFor(() => expect(filedRowIds()).toEqual(['todo-2']))
+  })
+
+  it('puts a refused archive back and shows the server’s reason', async () => {
+    // Same shape as the runs table's own "puts a refused archive back" test: the assertion is on
+    // the settled toast and the restored row set, not on the transient optimistic frame — the
+    // mock's PATCH rejects with no artificial delay, so the optimistic patch and its own rollback
+    // can land within the same microtask turn `waitFor`'s first poll would observe.
+    stubFetch({ todos: TODOS, todoPatchStatus: 409 })
+    renderPage()
+    await screen.findByText('Add a rate limit to /checkout')
+
+    const apiRow = document.querySelector('[data-slot="filed-task-row"][data-project="api"]')!
+    fireEvent.click(apiRow.querySelector('[data-action="archive-filed-task"]')!)
+
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('lease held elsewhere'))
+    // Rolled back: both rows are still on Active, in the default sort's order.
+    await waitFor(() => expect(filedRowIds()).toEqual(['todo-2', 'todo-1']))
+  })
+
+  it('opens the detail dialog and renders only the sections the entry actually carries', async () => {
+    const rich: WorkspaceTodoEntry[] = [
+      {
+        project: 'api',
+        todo: {
+          id: 'todo-1',
+          ts: '2026-07-14T09:00:00Z',
+          summary: 'Add a rate limit to /checkout',
+          context: 'Checkout is getting hammered by one client.',
+          whatToDo: 'Add a token-bucket limiter in front of /checkout.',
+        },
+      },
+      TODOS[1]!,
+    ]
+    stubFetch({ todos: rich })
+    renderPage()
+    await screen.findByText('Add a rate limit to /checkout')
+
+    fireEvent.click(screen.getByText('Add a rate limit to /checkout'))
+    const dialog = await screen.findByRole('dialog')
+
+    expect(within(dialog).getByText('Checkout is getting hammered by one client.')).toBeTruthy()
+    expect(within(dialog).getByText('Add a token-bucket limiter in front of /checkout.')).toBeTruthy()
+    // No acceptance criteria and no knowledge refs on this entry — no section for either.
+    expect(dialog.querySelector('[data-slot="filed-task-acceptance-criteria"]')).toBeNull()
+    expect(dialog.querySelector('[data-slot="filed-task-knowledge-refs"]')).toBeNull()
   })
 })

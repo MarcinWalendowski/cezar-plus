@@ -101,6 +101,8 @@ import type {
   Skill,
   StartTodoResponse,
   TodoItem,
+  UpdateTodoInput,
+  UpdateTodoResponse,
   UiState,
   WorkflowsResponse,
   WorkspaceConfigResponse,
@@ -1472,6 +1474,29 @@ export async function startWorkspaceTodo(
       json: Object.keys(body).length > 0 ? body : undefined,
     }),
     `/todos/${encodeURIComponent(id)}/start`,
+  )
+}
+
+/**
+ * The Filed table's status/priority edit and its Archive/Restore action
+ * (2026-08-17-filed-tasks-table-statuses.md) — one PATCH, project named explicitly.
+ *
+ * Same shape as `startWorkspaceTodo` above and for the same reason: the Filed table lists todos
+ * from every project at once, so `queryScope()` would stamp the edit on the boot project rather
+ * than the row's own. `patch` must carry at least one key — the server's `.refine` 400s an empty
+ * one, so callers always pass a real change.
+ */
+export async function updateWorkspaceTodo(
+  projectId: string,
+  id: string,
+  patch: UpdateTodoInput,
+): Promise<UpdateTodoResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].todos[':id'].$patch({
+      param: { projectId, id: encodeURIComponent(id) },
+      json: patch,
+    }),
+    `/todos/${encodeURIComponent(id)}`,
   )
 }
 

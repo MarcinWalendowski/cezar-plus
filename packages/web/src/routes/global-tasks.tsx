@@ -2,10 +2,12 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
+  CheckIcon,
   EyeIcon,
   EyeOffIcon,
   LayersIcon,
   ListChecksIcon,
+  PlayIcon,
   SearchIcon,
   SearchXIcon,
   XIcon,
@@ -13,7 +15,7 @@ import {
 import * as React from 'react'
 import { Link, useSearchParams } from 'react-router'
 
-import { archiveProjectRun, setProjectRunRead, startWorkspaceTodo } from '@/api/client'
+import { archiveProjectRun, setProjectRunRead, startWorkspaceTodo, updateWorkspaceTodo } from '@/api/client'
 import {
   queryKeys,
   rememberReferenceStatuses,
@@ -23,18 +25,43 @@ import {
   useWorkspaceTodos,
   workspaceQueryKeys,
 } from '@/api/queries'
-import type { ProjectListEntry, RunIndexEntry, RunsIndexResponse } from '@loki-labs/better-cezar-api-client'
+import type {
+  ProjectListEntry,
+  RunIndexEntry,
+  RunsIndexResponse,
+  UpdateTodoInput,
+  WorkspaceTodoEntry,
+  WorkspaceTodosResponse,
+} from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { FacetFilter, SegmentedControl, ToggleChip } from '@/components/facet-filter'
 import { useListView } from '@/components/list-view'
 import { Pill } from '@/components/pill'
 import { ReferenceChip } from '@/components/reference-chip'
 import { ReferenceStatusProvider } from '@/components/reference-status'
-import { StatusDot } from '@/components/status-dot'
+import { StatusDot, type StatusDotTone } from '@/components/status-dot'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { deriveAttention } from '@/lib/attention'
+import {
+  FILED_PRIORITY_VALUES,
+  FILED_ROW_PAGE_SIZE,
+  FILED_STATUS_VALUES,
+  NO_FILED_FILTERS,
+  applyFiledPatch,
+  filedFacetCounts,
+  filedStatus,
+  filedTasksExcludingFacet,
+  filterFiledTasks,
+  sortFiledTasks,
+  type FiledFacetId,
+  type FiledPriority,
+  type FiledSort,
+  type FiledStatus,
+  type FiledTaskFilters,
+} from '@/lib/filed-tasks'
 import { shortAge } from '@/lib/format'
 import {
   displayWorkflowName,
@@ -74,6 +101,7 @@ import { scopeTo, useNavigate } from '@/lib/project-router'
 import { allProjectTags } from '@/lib/project-tags'
 import { canBeUnread, isReadDoneItem, isUnread } from '@/lib/read-state'
 import { runTitle, type ListView } from '@/lib/task-groups'
+import { Markdown } from '@/routes/task-thread/markdown'
 import { usageMetricVisibility } from '@/lib/token-metrics'
 import { useNow } from '@/lib/use-now'
 import { cn } from '@/lib/utils'
@@ -236,7 +264,7 @@ export function GlobalTasksRoute() {
   // source of truth means a refresh, a pasted link and the Back button all land on the same
   // filtered view, with no effect syncing two copies that can disagree.
   const [searchParams, setSearchParams] = useSearchParams()
-  const { filters, groupBy, view } = React.useMemo(
+  const { filters, groupBy, view, filedFilters, filedSort } = React.useMemo(
     () => urlStateFromSearchParams(searchParams),
     [searchParams],
   )
@@ -267,6 +295,9 @@ export function GlobalTasksRoute() {
     commit((state) => ({ ...state, filters: next(state.filters) }))
   const setGroupBy = (groupBy: GroupBy) => commit((state) => ({ ...state, groupBy }))
   const setView = (nextView: ListView) => commit((state) => ({ ...state, view: nextView }))
+  const setFiledFilters = (next: (current: FiledTaskFilters) => FiledTaskFilters) =>
+    commit((state) => ({ ...state, filedFilters: next(state.filedFilters) }))
+  const setFiledSort = (nextSort: FiledSort) => commit((state) => ({ ...state, filedSort: nextSort }))
 
   /**
    * The search box types locally and reaches the URL on a delay.
@@ -420,11 +451,24 @@ export function GlobalTasksRoute() {
           </p>
         ) : null}
 
-        {/* Filed-but-unstarted work, above the runs (2026-08-15). This page is where a user looks
-            after filing something — it is called Tasks — and until now it answered with runs only,
-            so a fan-out that had written twelve tasks looked exactly like a fan-out that had done
-            nothing. Only on Active: a filed task has not run, so it cannot be archived. */}
-        {view === 'active' ? <FiledTasks /> : null}
+        {/* Filed work — table, statuses, detail dialog, archive (2026-08-17-filed-tasks-table-
+            statuses.md). Above the runs (2026-08-15): this page is where a user looks after
+            filing something — it is called Tasks — and answering with runs only made a fan-out
+            that had written twelve tasks look identical to one that had done nothing.
+            Renders on BOTH tabs now (it used to be Active-only): Active shows open filed work,
+            Archived shows archived-or-done filed work, the same split the runs table below it
+            uses for its own rows. */}
+        <FiledTasks
+          view={view}
+          query={filters.query}
+          filedFilters={filedFilters}
+          filedSort={filedSort}
+          onToggleFacet={(facet, value) =>
+            setFiledFilters((current) => ({ ...current, [facet]: toggleFacetValue(current[facet], value) }))
+          }
+          onClearFacet={(facet) => setFiledFilters((current) => ({ ...current, [facet]: [] }))}
+          onSortChange={setFiledSort}
+        />
 
         {index.data === undefined ? null : visible.length === 0 ? (
           <GlobalTasksEmptyState view={view} filtered={hasActiveFilters(filters)} />
@@ -473,8 +517,38 @@ export function GlobalTasksRoute() {
   )
 }
 
+/** Human labels + dot tones for the closed status enum, kept beside the components that render
+ *  them. `pending` reads as amber in this design system — `lib/attention.ts`'s own "waiting →
+ *  amber/pending" note — the closest existing tone to "needs attention" for a blocked task,
+ *  without inventing a new dot color for one status. */
+const FILED_STATUS_LABEL: Record<FiledStatus, string> = {
+  todo: 'To do',
+  'in-progress': 'In progress',
+  blocked: 'Blocked',
+  done: 'Done',
+}
+const FILED_STATUS_TONE: Record<FiledStatus, StatusDotTone> = {
+  todo: 'neutral',
+  'in-progress': 'violet',
+  blocked: 'pending',
+  done: 'success',
+}
+
+const FILED_PRIORITY_LABEL: Record<FiledPriority, string> = {
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+}
+
+const FILED_SORT_OPTIONS: readonly { value: FiledSort; label: string }[] = [
+  { value: 'created-desc', label: 'Newest' },
+  { value: 'created-asc', label: 'Oldest' },
+]
+
 /**
- * The "Filed" section: tasks that exist on the board but have never run.
+ * The "Filed" section: a real table now (2026-08-17-filed-tasks-table-statuses.md) of tasks that
+ * exist on the board but have never run — status pill, title (opens the detail dialog), project,
+ * priority, age, and Start/Archive per row.
  *
  * **Why it is here at all.** The composer's All / Auto submit writes todos across projects and
  * starts nothing (D5, `.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md`). Before this,
@@ -486,55 +560,508 @@ export function GlobalTasksRoute() {
  * off on a default install, and gating the read here would put the bug straight back. D7a already
  * drew this line on the server; `useWorkspaceTodos` carries it to the client.
  *
- * Renders nothing at all when there is nothing filed — an empty section header above the runs
- * table would be a permanent piece of furniture advertising a feature most workspaces never use.
+ * **Renders on BOTH tabs now** (it used to be Active-only): `view` is the SAME Active/Archived
+ * split the page and the runs table below it already read, so this section answers the one
+ * question the tab asks rather than needing a tab of its own. Renders nothing at all when there
+ * is nothing filed for the CURRENT view (before facet/query narrowing) — a permanent section
+ * header advertising a feature most workspaces never use would be worse than silence; once
+ * something is filed, a search/filter that narrows it to zero still shows the section with an
+ * inline "no match" message, since the section itself is not what emptied it.
  */
-function FiledTasks() {
+function FiledTasks({
+  view,
+  query,
+  filedFilters,
+  filedSort,
+  onToggleFacet,
+  onClearFacet,
+  onSortChange,
+}: {
+  view: ListView
+  /** The page's own search box (`?q=`) — one box narrows both the runs table and this one. */
+  query: string
+  filedFilters: FiledTaskFilters
+  filedSort: FiledSort
+  onToggleFacet: (facet: FiledFacetId, value: string) => void
+  onClearFacet: (facet: FiledFacetId) => void
+  onSortChange: (sort: FiledSort) => void
+}) {
   const todos = useWorkspaceTodos()
   const start = useStartFiledTask()
-  const entries = todos.data?.todos ?? []
-  if (entries.length === 0) return null
+  const update = useUpdateFiledTodo()
+  const now = useNow(30_000)
+  const [detail, setDetail] = React.useState<WorkspaceTodoEntry | null>(null)
+  const [shown, setShown] = React.useState(FILED_ROW_PAGE_SIZE)
+
+  const all = todos.data?.todos ?? []
+  // Unfiltered-by-facet/query, so the section's own "is there anything filed at all" question and
+  // the count badge's denominator both answer against the same set the tab itself defines.
+  const viewEntries = React.useMemo(() => filterFiledTasks(all, NO_FILED_FILTERS, view, ''), [all, view])
+  const filtered = React.useMemo(
+    () => filterFiledTasks(all, filedFilters, view, query),
+    [all, filedFilters, view, query],
+  )
+  const sorted = React.useMemo(() => sortFiledTasks(filtered, filedSort), [filtered, filedSort])
+
+  // One `filedFacetCounts` per facet, counted against the list as filtered by the OTHER facet —
+  // the same discipline the runs `FilterBar` above uses, so unticking a value shows how many rows
+  // would return rather than a number that already assumes the tick.
+  const counts = React.useMemo(() => {
+    const per = (except: FiledFacetId, valueOf: (entry: WorkspaceTodoEntry) => string | undefined) =>
+      filedFacetCounts(filedTasksExcludingFacet(all, filedFilters, view, query, except), valueOf)
+    return {
+      statuses: per('statuses', (entry) => filedStatus(entry)),
+      priorities: per('priorities', (entry) => entry.todo.priority),
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [all, filedFilters, view, query])
+
+  // A filter/sort/search change re-narrows the set; a stale "300 shown" carried over from a wider
+  // set would otherwise dump every row of a brand-new, unrelated filter onto the screen at once.
+  React.useEffect(() => {
+    setShown(FILED_ROW_PAGE_SIZE)
+  }, [view, filedFilters, filedSort, query])
+
+  if (viewEntries.length === 0) return null
+
+  const rows = sorted.slice(0, shown)
+  const hasMore = sorted.length > rows.length
 
   return (
-    <section data-slot="filed-tasks">
+    <section data-slot="filed-tasks" data-view={view}>
       <h2 className="mb-1.5 flex items-center gap-2 text-[12px] font-semibold tracking-[0.04em] text-soft-foreground uppercase">
-        Filed — not started yet
+        Filed
         <span data-slot="filed-tasks-count" className="font-mono text-[11px] font-medium tabular-nums">
-          {entries.length}
+          {filtered.length === viewEntries.length
+            ? viewEntries.length
+            : `${filtered.length} of ${viewEntries.length}`}
         </span>
       </h2>
-      <ul className="space-y-1.5">
-        {entries.map((entry) => (
-          <li
-            key={`${entry.project}:${entry.todo.id}`}
-            data-slot="filed-task"
-            data-project={entry.project}
-            className="flex items-center gap-3 rounded-lg border border-border bg-card px-3 py-2"
-          >
-            <Link
-              to={scopeTo(entry.project, '/')}
-              data-slot="filed-task-project"
-              className="shrink-0 font-mono text-[11px] text-soft-foreground hover:text-foreground hover:underline"
-            >
-              {entry.project}
-            </Link>
-            <span className="min-w-0 flex-1 truncate text-[13.5px]">{entry.todo.summary}</span>
-            <button
-              type="button"
-              data-slot="filed-task-start"
-              // The project comes from the ROW, never from the active scope — these rows are from
-              // different repositories, so starting one against "wherever the cockpit is pointed"
-              // would run a task filed for `chat` inside whatever project is open.
-              onClick={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
-              disabled={start.isPending}
-              className="shrink-0 rounded-md border border-border px-2.5 py-1 text-[12px] font-medium transition-colors hover:bg-muted disabled:opacity-50"
-            >
-              Start
-            </button>
-          </li>
-        ))}
-      </ul>
+
+      <FiledControlsRow
+        filedFilters={filedFilters}
+        filedSort={filedSort}
+        counts={counts}
+        onToggleFacet={onToggleFacet}
+        onClearFacet={onClearFacet}
+        onSortChange={onSortChange}
+      />
+
+      {filtered.length === 0 ? (
+        <p data-slot="filed-tasks-empty" className="mt-2 text-[12.5px] text-soft-foreground">
+          No filed tasks match these filters.
+        </p>
+      ) : (
+        <div
+          data-slot="filed-tasks-table"
+          className="mt-2 overflow-x-auto rounded-lg border border-border bg-card shadow-xs"
+        >
+          <TooltipProvider>
+            <table className="w-full border-collapse">
+              <thead>
+                <tr>
+                  <Th className="w-[104px]">Status</Th>
+                  <Th>Task</Th>
+                  <Th className="w-[124px]">Project</Th>
+                  <Th className="w-[84px]">Priority</Th>
+                  <Th className="w-[64px] text-right">Age</Th>
+                  <Th className="w-[64px] text-right">
+                    <span className="sr-only">Actions</span>
+                  </Th>
+                </tr>
+              </thead>
+              <tbody className="[&>tr:last-child>td]:border-b-0">
+                {rows.map((entry) => (
+                  <FiledRow
+                    key={`${entry.project}:${entry.todo.id}`}
+                    entry={entry}
+                    now={now}
+                    onOpenDetail={() => setDetail(entry)}
+                    onStart={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
+                    onArchive={(archived) => update.mutate({ entry, patch: { archived } })}
+                    startBusy={start.isPending}
+                    archiveBusy={update.isPending}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </TooltipProvider>
+          {hasMore ? (
+            <div className="flex justify-center border-t border-border p-2">
+              <button
+                type="button"
+                data-action="filed-tasks-show-more"
+                onClick={() => setShown((current) => current + FILED_ROW_PAGE_SIZE)}
+                className="rounded-md px-3 py-1.5 text-[12.5px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                Show {Math.min(FILED_ROW_PAGE_SIZE, sorted.length - rows.length)} more
+              </button>
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      <FiledDetailDialog
+        entry={detail}
+        onClose={() => setDetail(null)}
+        onStart={(entry) => {
+          setDetail(null)
+          start.mutate({ projectId: entry.project, todoId: entry.todo.id })
+        }}
+        onArchive={(entry, archived) => update.mutate({ entry, patch: { archived } })}
+        startPending={start.isPending}
+        archivePending={update.isPending}
+      />
     </section>
+  )
+}
+
+/** The Filed table's controls row: status/priority multi-select facets (with counts) and the
+ *  created-date sort toggle, all URL-state — the page's `commit()` is the only writer, this row
+ *  only ever calls the setters handed down from it. */
+function FiledControlsRow({
+  filedFilters,
+  filedSort,
+  counts,
+  onToggleFacet,
+  onClearFacet,
+  onSortChange,
+}: {
+  filedFilters: FiledTaskFilters
+  filedSort: FiledSort
+  counts: { statuses: Map<string, number>; priorities: Map<string, number> }
+  onToggleFacet: (facet: FiledFacetId, value: string) => void
+  onClearFacet: (facet: FiledFacetId) => void
+  onSortChange: (sort: FiledSort) => void
+}) {
+  return (
+    <div
+      data-slot="filed-tasks-filters"
+      className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-card p-2"
+    >
+      {/* The full closed enum, always — unlike the runs `FilterBar`'s workflow/status facets
+          (derived from the data on screen), status and priority here are a small, fixed
+          vocabulary the reader should always be able to reach, even at a count of zero. */}
+      <FacetFilter
+        slot="filed-status"
+        label="Status"
+        selected={filedFilters.statuses}
+        onToggle={(value) => onToggleFacet('statuses', value)}
+        onClear={() => onClearFacet('statuses')}
+        options={FILED_STATUS_VALUES.map((status) => ({
+          value: status,
+          label: FILED_STATUS_LABEL[status],
+          count: counts.statuses.get(status) ?? 0,
+        }))}
+        emptyLabel="No filed tasks to filter"
+      />
+      <FacetFilter
+        slot="filed-priority"
+        label="Priority"
+        selected={filedFilters.priorities}
+        onToggle={(value) => onToggleFacet('priorities', value)}
+        onClear={() => onClearFacet('priorities')}
+        options={FILED_PRIORITY_VALUES.map((priority) => ({
+          value: priority,
+          label: FILED_PRIORITY_LABEL[priority],
+          count: counts.priorities.get(priority) ?? 0,
+        }))}
+        emptyLabel="No filed tasks to filter"
+      />
+      <span className="mx-1 h-5 w-px bg-border" aria-hidden="true" />
+      <span className="text-[11px] font-medium text-soft-foreground">Sort</span>
+      <SegmentedControl
+        slot="filed-sort"
+        label="Sort filed tasks by creation date"
+        value={filedSort}
+        options={FILED_SORT_OPTIONS}
+        onChange={onSortChange}
+      />
+    </div>
+  )
+}
+
+/** A closed-enum status pill — `todo`/`in-progress`/`blocked`/`done` painted in the design
+ *  system's dot grammar, same idiom `TaskRow`'s attention pill above uses. */
+function FiledStatusPill({ status }: { status: FiledStatus }) {
+  return <Pill dot={FILED_STATUS_TONE[status]}>{FILED_STATUS_LABEL[status]}</Pill>
+}
+
+/** A dim, quiet chip — priority is context for the row, not its status, so it does not compete
+ *  with the status pill for attention. Absent priority renders `—` at the call site instead. */
+function FiledPriorityChip({ priority }: { priority: FiledPriority }) {
+  return (
+    <span
+      data-slot="filed-priority-chip"
+      className="inline-flex items-center rounded-full bg-muted px-1.5 py-px text-[10.5px] font-medium text-muted-foreground"
+    >
+      {FILED_PRIORITY_LABEL[priority]}
+    </span>
+  )
+}
+
+/** One filed row: status, a title BUTTON (not a link — there is no run yet to navigate to; it
+ *  opens the detail dialog), project link, priority, age with a tooltip carrying the full date,
+ *  and Start / Archive-or-Restore. */
+function FiledRow({
+  entry,
+  now,
+  onOpenDetail,
+  onStart,
+  onArchive,
+  startBusy,
+  archiveBusy,
+}: {
+  entry: WorkspaceTodoEntry
+  now: number
+  onOpenDetail: () => void
+  onStart: () => void
+  onArchive: (archived: boolean) => void
+  startBusy: boolean
+  archiveBusy: boolean
+}) {
+  const status = filedStatus(entry)
+  // Archived is the STAMP, not the tab: a `done` row visible under Archived only because of its
+  // status (never explicitly archived) still offers "Archive" — clicking it adds the stamp — not
+  // a "Restore" that would be a no-op (the row stays Archived either way, since `status === 'done'`
+  // is the OTHER, independent reason it is there). See `matchesFiledView` in `lib/filed-tasks.ts`.
+  const archived = entry.todo.archivedAt !== undefined
+  return (
+    <tr
+      data-slot="filed-task-row"
+      data-project={entry.project}
+      data-todo-id={entry.todo.id}
+      className="hover:bg-muted"
+    >
+      <td className={TD_BASE}>
+        <FiledStatusPill status={status} />
+      </td>
+      <td className={cn(TD_BASE, 'min-w-[320px] max-w-0')}>
+        <button
+          type="button"
+          data-slot="filed-task-title"
+          onClick={onOpenDetail}
+          title={entry.todo.summary}
+          className="min-w-0 max-w-full truncate text-left text-[13px] font-medium hover:underline"
+        >
+          {entry.todo.summary}
+        </button>
+      </td>
+      <td className={cn(TD_BASE, 'text-[12.5px] text-muted-foreground')}>
+        <Link to={scopeTo(entry.project, '/')} className="truncate hover:text-foreground">
+          {entry.project}
+        </Link>
+      </td>
+      <td className={TD_BASE}>
+        {entry.todo.priority ? <FiledPriorityChip priority={entry.todo.priority} /> : <Dash />}
+      </td>
+      <td className={cn(TD_BASE, 'text-right text-xs text-soft-foreground tabular-nums')}>
+        {entry.todo.ts ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span>{shortAge(entry.todo.ts, now)}</span>
+            </TooltipTrigger>
+            <TooltipContent side="left">{new Date(entry.todo.ts).toLocaleString()}</TooltipContent>
+          </Tooltip>
+        ) : (
+          <Dash />
+        )}
+      </td>
+      <td className={cn(TD_BASE, 'text-right')}>
+        <span className="inline-flex items-center gap-0.5">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                data-action="start-filed-task"
+                aria-label={`Start ${entry.todo.summary}`}
+                disabled={startBusy}
+                onClick={onStart}
+                className="inline-flex size-7 items-center justify-center rounded-md text-soft-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-wait disabled:opacity-50"
+              >
+                <PlayIcon className="size-3.5" aria-hidden="true" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="left">Start</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                data-action={archived ? 'restore-filed-task' : 'archive-filed-task'}
+                aria-label={
+                  archived
+                    ? `Restore ${entry.todo.summary} to the active list`
+                    : `Archive ${entry.todo.summary}`
+                }
+                disabled={archiveBusy}
+                onClick={() => onArchive(!archived)}
+                className="inline-flex size-7 items-center justify-center rounded-md text-soft-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-wait disabled:opacity-50"
+              >
+                {archived ? (
+                  <ArchiveRestoreIcon className="size-3.5" aria-hidden="true" />
+                ) : (
+                  <ArchiveIcon className="size-3.5" aria-hidden="true" />
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="left">{archived ? 'Restore' : 'Archive'}</TooltipContent>
+          </Tooltip>
+        </span>
+      </td>
+    </tr>
+  )
+}
+
+/**
+ * The detail dialog (spec: "I can't open task to see details" — the owner's own complaint this
+ * whole feature answers). `context`/`whatToDo`/`acceptanceCriteria` render through the same
+ * `Markdown` component the skill/thread surfaces use (`skill-detail.tsx`'s precedent); absent
+ * fields render nothing at all, since most existing entries (and every legacy agent append) are
+ * summary-only. `knowledgeRefs` link into the Knowledge tab that grounded the task.
+ */
+function FiledDetailDialog({
+  entry,
+  onClose,
+  onStart,
+  onArchive,
+  startPending,
+  archivePending,
+}: {
+  entry: WorkspaceTodoEntry | null
+  onClose: () => void
+  onStart: (entry: WorkspaceTodoEntry) => void
+  onArchive: (entry: WorkspaceTodoEntry, archived: boolean) => void
+  startPending: boolean
+  archivePending: boolean
+}) {
+  return (
+    <Dialog open={entry !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
+      <DialogContent data-slot="filed-task-detail" className="block max-h-[80dvh] overflow-y-auto sm:max-w-2xl">
+        {entry ? (
+          <FiledDetailBody entry={entry} onStart={onStart} onArchive={onArchive} startPending={startPending} archivePending={archivePending} />
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function FiledDetailBody({
+  entry,
+  onStart,
+  onArchive,
+  startPending,
+  archivePending,
+}: {
+  entry: WorkspaceTodoEntry
+  onStart: (entry: WorkspaceTodoEntry) => void
+  onArchive: (entry: WorkspaceTodoEntry, archived: boolean) => void
+  startPending: boolean
+  archivePending: boolean
+}) {
+  const { todo } = entry
+  const archived = todo.archivedAt !== undefined
+  return (
+    <div className="min-w-0">
+      {/* Visible title/description feed the dialog a11y contract — the `SkillPreviewDialog`
+          precedent (`skill-detail.tsx`) uses the same sr-only pairing over a custom heading. */}
+      <DialogTitle className="text-lg font-semibold break-words">{todo.summary}</DialogTitle>
+      <DialogDescription className="sr-only">Filed task detail</DialogDescription>
+
+      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+        <FiledStatusPill status={filedStatus(entry)} />
+        {todo.priority ? <FiledPriorityChip priority={todo.priority} /> : null}
+        <Link
+          to={scopeTo(entry.project, '/')}
+          className="font-mono text-[11px] text-soft-foreground hover:text-foreground hover:underline"
+        >
+          {entry.project}
+        </Link>
+        {todo.ts ? (
+          <span className="text-[11px] text-soft-foreground">Filed {new Date(todo.ts).toLocaleString()}</span>
+        ) : null}
+      </div>
+
+      {todo.context ? (
+        <section className="mt-4">
+          <h4 className="text-[11px] font-semibold tracking-[.04em] text-soft-foreground uppercase">Context</h4>
+          <div data-slot="filed-task-context" className="mt-1.5 text-sm">
+            <Markdown>{todo.context}</Markdown>
+          </div>
+        </section>
+      ) : null}
+
+      {todo.whatToDo ? (
+        <section className="mt-4">
+          <h4 className="text-[11px] font-semibold tracking-[.04em] text-soft-foreground uppercase">
+            What to do
+          </h4>
+          <div data-slot="filed-task-what-to-do" className="mt-1.5 text-sm">
+            <Markdown>{todo.whatToDo}</Markdown>
+          </div>
+        </section>
+      ) : null}
+
+      {todo.acceptanceCriteria && todo.acceptanceCriteria.length > 0 ? (
+        <section className="mt-4">
+          <h4 className="text-[11px] font-semibold tracking-[.04em] text-soft-foreground uppercase">
+            Acceptance criteria
+          </h4>
+          <ul data-slot="filed-task-acceptance-criteria" className="mt-1.5 flex flex-col gap-1">
+            {todo.acceptanceCriteria.map((item, index) => (
+              // Index keys are safe here: this list is never reordered or edited in place, only
+              // ever rendered whole from the entry the dialog was opened with.
+              // eslint-disable-next-line react/no-array-index-key
+              <li key={index} className="flex items-start gap-1.5 text-sm">
+                <CheckIcon className="mt-0.5 size-3.5 shrink-0 text-soft-foreground" aria-hidden="true" />
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {todo.knowledgeRefs && todo.knowledgeRefs.length > 0 ? (
+        <section className="mt-4">
+          <h4 className="text-[11px] font-semibold tracking-[.04em] text-soft-foreground uppercase">
+            Grounded in
+          </h4>
+          <ul data-slot="filed-task-knowledge-refs" className="mt-1.5 flex flex-col gap-1">
+            {todo.knowledgeRefs.map((ref) => (
+              <li key={`${ref.project}/${ref.slug}`}>
+                <Link
+                  to={`/workspace/knowledge?project=${encodeURIComponent(ref.project)}&doc=${encodeURIComponent(ref.slug)}`}
+                  className="text-sm font-medium text-violet hover:underline"
+                >
+                  {ref.title}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      <div className="mt-5 flex items-center gap-2">
+        <button
+          type="button"
+          data-action="filed-task-detail-start"
+          onClick={() => onStart(entry)}
+          disabled={startPending}
+          className="rounded-md border border-border px-2.5 py-1.5 text-[12.5px] font-medium transition-colors hover:bg-muted disabled:opacity-50"
+        >
+          Start
+        </button>
+        <button
+          type="button"
+          data-action={archived ? 'filed-task-detail-restore' : 'filed-task-detail-archive'}
+          onClick={() => onArchive(entry, !archived)}
+          disabled={archivePending}
+          className="rounded-md border border-border px-2.5 py-1.5 text-[12.5px] font-medium transition-colors hover:bg-muted disabled:opacity-50"
+        >
+          {archived ? 'Restore' : 'Archive'}
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -553,6 +1080,49 @@ function useStartFiledTask() {
       void navigate(scopeTo(projectId, `/tasks/${result.run.id}`))
     },
     onError: (error) => toast(error.message, { tone: 'danger' }),
+  })
+}
+
+/**
+ * The status/priority edit and Archive/Restore action for one filed row
+ * (2026-08-17-filed-tasks-table-statuses.md) — the Filed table's twin of `useIndexedRunMutation`
+ * above, but patching the WORKSPACE TODOS cache instead of the runs index.
+ *
+ * Optimistic, keyed by the `(project, id)` PAIR: two projects could only theoretically share a
+ * uuid, but that pair is what the row key (`${entry.project}:${entry.todo.id}`) already uses, so
+ * it is what the cache patch keys on too (the spec's own Risks note).
+ */
+function useUpdateFiledTodo() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ entry, patch }: { entry: WorkspaceTodoEntry; patch: UpdateTodoInput }) =>
+      updateWorkspaceTodo(entry.project, entry.todo.id, patch),
+    onMutate: async ({ entry, patch }) => {
+      await queryClient.cancelQueries({ queryKey: workspaceQueryKeys.workspaceTodos })
+      const previous = queryClient.getQueryData<WorkspaceTodosResponse>(workspaceQueryKeys.workspaceTodos)
+      queryClient.setQueryData<WorkspaceTodosResponse>(workspaceQueryKeys.workspaceTodos, (current) =>
+        current === undefined
+          ? current
+          : {
+              ...current,
+              todos: current.todos.map((row) =>
+                row.project === entry.project && row.todo.id === entry.todo.id
+                  ? { ...row, todo: applyFiledPatch(row.todo, patch) }
+                  : row,
+              ),
+            },
+      )
+      return { previous }
+    },
+    onError: (error: Error, _variables, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(workspaceQueryKeys.workspaceTodos, context.previous)
+      }
+      toast(error.message, { tone: 'danger' })
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.workspaceTodos })
+    },
   })
 }
 

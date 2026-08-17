@@ -175,6 +175,7 @@ describe('project-route alias parity (unprefixed vs /api/v1/p/<boot> vs /api/v1/
       'PUT /agent-config/:id',
       'DELETE /runs/:id',
       'PATCH /runs/:id',
+      'PATCH /todos/:id',
       'POST /todos/:id/start',
       'GET /repo/commit/:sha',
     ]) {
@@ -237,6 +238,7 @@ describe('project-route alias parity (unprefixed vs /api/v1/p/<boot> vs /api/v1/
     // 404: unknown ids.
     await expectParity('/runs/no-such-run/archive', json('POST', {}));
     await expectParity('/runs/no-such-run', json('PATCH', { title: 't' }));
+    await expectParity('/todos/no-such-todo', json('PATCH', { status: 'done' }));
     await expectParity('/workflows/no-such-workflow', () => ({
       method: 'DELETE',
     }));

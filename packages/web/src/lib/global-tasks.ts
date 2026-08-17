@@ -1,6 +1,16 @@
 import type { ProjectListEntry, RunIndexEntry } from '@loki-labs/better-cezar-api-client'
 
 import { allProjectTags } from '@/lib/project-tags'
+import {
+  DEFAULT_FILED_SORT,
+  FILED_SEARCH_PARAMS,
+  NO_FILED_FILTERS,
+  isFiledPriority,
+  isFiledSort,
+  isFiledStatus,
+  type FiledSort,
+  type FiledTaskFilters,
+} from '@/lib/filed-tasks'
 import { runTitle } from '@/lib/task-groups'
 import { displayWorkflowName } from '@/lib/tasks-table'
 
@@ -114,11 +124,11 @@ export const NO_FILTERS: GlobalTaskFilters = {
 }
 
 /** Add or remove one value from a facet — what every chip click and checkbox does. Returns a new
- *  array, so it composes with `setState` without a mutation nobody can see. */
-export function toggleFacetValue(
-  values: readonly string[],
-  value: string,
-): string[] {
+ *  array, so it composes with `setState` without a mutation nobody can see. Generic over the
+ *  facet's own value type (plain `string` here, `FiledStatus`/`FiledPriority` for the Filed
+ *  section's facets in `lib/filed-tasks.ts`) rather than duplicated per facet space — the logic
+ *  is identical, only the type narrows. */
+export function toggleFacetValue<T extends string>(values: readonly T[], value: T): T[] {
   return values.includes(value) ? values.filter((v) => v !== value) : [...values, value]
 }
 
@@ -383,6 +393,13 @@ export const SEARCH_PARAMS = {
   workflow: 'workflow',
   groupBy: 'group',
   archived: 'archived',
+  // The Filed section's own facets — namespaced as distinct KEYS here (not spread) because
+  // `FILED_SEARCH_PARAMS.status` would otherwise silently overwrite the runs facet's `status`
+  // above; the `f`-prefixed wire VALUES ('fstatus' etc.) still come from that one source, so
+  // `lib/filed-tasks.ts` stays the single place the actual param names are spelled out.
+  filedStatus: FILED_SEARCH_PARAMS.status,
+  filedPriority: FILED_SEARCH_PARAMS.priority,
+  filedSort: FILED_SEARCH_PARAMS.sort,
 } as const
 
 const GROUP_BY_VALUES = new Set<string>(GROUP_BY_OPTIONS.map((option) => option.value))
@@ -395,6 +412,12 @@ export interface GlobalTasksUrlState {
   /** Active/Archived. Also mirrored into the shared `useListView()` context by the route, so the
    *  rest of the cockpit keeps answering the same question. */
   view: ListViewValue
+  /** The Filed section's own status/priority facets — a separate set from `filters` above,
+   *  because the two tables filter different things (runs vs. filed todos) even though they
+   *  share the page's `filters.query` box and `view`. */
+  filedFilters: FiledTaskFilters
+  /** The Filed section's sort — `created-desc` (newest first) by default. */
+  filedSort: FiledSort
 }
 
 /** The local spelling of `ListView`, so this module's public shape does not depend on a
@@ -406,6 +429,8 @@ export const DEFAULT_URL_STATE: GlobalTasksUrlState = {
   filters: NO_FILTERS,
   groupBy: 'none',
   view: 'active',
+  filedFilters: NO_FILED_FILTERS,
+  filedSort: DEFAULT_FILED_SORT,
 }
 
 /**
@@ -428,6 +453,9 @@ export function urlStateToSearchParams(state: GlobalTasksUrlState): URLSearchPar
   for (const workflow of state.filters.workflows) params.append(SEARCH_PARAMS.workflow, workflow)
   if (state.groupBy !== 'none') params.set(SEARCH_PARAMS.groupBy, state.groupBy)
   if (state.view === 'archived') params.set(SEARCH_PARAMS.archived, '1')
+  for (const status of state.filedFilters.statuses) params.append(SEARCH_PARAMS.filedStatus, status)
+  for (const priority of state.filedFilters.priorities) params.append(SEARCH_PARAMS.filedPriority, priority)
+  if (state.filedSort !== DEFAULT_FILED_SORT) params.set(SEARCH_PARAMS.filedSort, state.filedSort)
   return params
 }
 
@@ -442,6 +470,7 @@ export function urlStateFromSearchParams(params: URLSearchParams): GlobalTasksUr
   const tags = params.getAll(SEARCH_PARAMS.tag).filter((tag) => tag !== '')
   if (params.get(SEARCH_PARAMS.untagged) === '1') tags.push(UNTAGGED)
   const group = params.get(SEARCH_PARAMS.groupBy) ?? ''
+  const filedSort = params.get(SEARCH_PARAMS.filedSort) ?? ''
   return {
     filters: {
       query: params.get(SEARCH_PARAMS.query) ?? '',
@@ -451,5 +480,10 @@ export function urlStateFromSearchParams(params: URLSearchParams): GlobalTasksUr
     },
     groupBy: GROUP_BY_VALUES.has(group) ? (group as GroupBy) : 'none',
     view: params.get(SEARCH_PARAMS.archived) === '1' ? 'archived' : 'active',
+    filedFilters: {
+      statuses: params.getAll(SEARCH_PARAMS.filedStatus).filter(isFiledStatus),
+      priorities: params.getAll(SEARCH_PARAMS.filedPriority).filter(isFiledPriority),
+    },
+    filedSort: isFiledSort(filedSort) ? filedSort : DEFAULT_FILED_SORT,
   }
 }

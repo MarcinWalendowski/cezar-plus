@@ -470,6 +470,45 @@ describe('URL state', () => {
     )
   })
 
+  it('round-trips the Filed section’s own facets and sort under their `f`-prefixed keys', () => {
+    const over = {
+      filedFilters: { statuses: ['blocked', 'done'], priorities: ['high'] },
+      filedSort: 'created-asc' as const,
+    }
+    expect(roundTrip(over)).toEqual(state(over))
+    const params = urlStateToSearchParams(state(over))
+    expect(params.getAll('fstatus')).toEqual(['blocked', 'done'])
+    expect(params.getAll('fpriority')).toEqual(['high'])
+    expect(params.get('fsort')).toBe('created-asc')
+  })
+
+  it('never lets the Filed facets collide with the runs facets sharing the same param names', () => {
+    // `SEARCH_PARAMS.status` (runs) and `FILED_SEARCH_PARAMS.status` (filed todos) both use the
+    // key name `status` internally — the wire values must stay `status` and `fstatus`, or one
+    // facet silently narrows the other's rows.
+    const over = {
+      filters: filters({ statuses: ['running'] }),
+      filedFilters: { statuses: ['blocked'], priorities: [] },
+    }
+    const params = urlStateToSearchParams(state(over))
+    expect(params.getAll(SEARCH_PARAMS.status)).toEqual(['running'])
+    expect(params.getAll('fstatus')).toEqual(['blocked'])
+    expect(roundTrip(over)).toEqual(state(over))
+  })
+
+  it('omits the Filed sort key at the default, since created-desc is what a bare page means', () => {
+    expect(urlStateToSearchParams(DEFAULT_URL_STATE).has('fsort')).toBe(false)
+    expect(urlStateFromSearchParams(new URLSearchParams('')).filedSort).toBe('created-desc')
+  })
+
+  it('drops an unknown Filed status/priority/sort rather than letting it through unchecked', () => {
+    const params = new URLSearchParams('fstatus=bogus&fstatus=blocked&fpriority=urgent&fsort=title-asc')
+    const parsed = urlStateFromSearchParams(params)
+    expect(parsed.filedFilters.statuses).toEqual(['blocked'])
+    expect(parsed.filedFilters.priorities).toEqual([])
+    expect(parsed.filedSort).toBe('created-desc')
+  })
+
   it('forgives whatever a pasted or hand-edited URL carries', () => {
     // An unknown grouping is not grouped — never a blank page.
     expect(urlStateFromSearchParams(new URLSearchParams('group=bogus')).groupBy).toBe('none')
