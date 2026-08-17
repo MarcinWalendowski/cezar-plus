@@ -171,8 +171,6 @@ const DEFAULT_DEADLINE_MS = 5_000;
  *  so the cross-project merge has enough per-project candidates before the workspace-level
  *  `limit`/`offset` is applied over the merged sequence. */
 const MAX_PER_PROJECT_RESULTS = 100;
-/** Bounds the best-effort `indexDocId` lookup below. */
-const INDEX_DOC_SEARCH_LIMIT = 20;
 /** `search.ts`'s own `DEFAULT_LIMIT` — `changelog()` has no `offset` (spec API contract), so this
  *  is the whole page size unless the caller asks for more. */
 const CHANGELOG_DEFAULT_LIMIT = 20;
@@ -453,7 +451,7 @@ export class WorkspaceKnowledgeIndex {
 
     const domains: WorkspaceKnowledgeDomainRow[] = [];
     for (const [domain, agg] of [...byDomain.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-      const indexDocId = await this.findIndexDocId(domain, outcomes);
+      const indexDocId = this.findIndexDocId(domain, outcomes);
       domains.push({ domain, docCount: agg.docCount, projects: [...agg.projects].sort(), indexDocId });
     }
 
@@ -461,35 +459,50 @@ export class WorkspaceKnowledgeIndex {
   }
 
   /**
-   * Best-effort lookup for "the document whose `slug` equals the domain id" (D1). There is no
-   * exact-slug accessor on `KnowledgeStore` (only `search()`, BM25 over a query, and
-   * `getDocument(id)`, which needs the opaque id this is trying to find) — reusing `search()` is a
-   * deliberate, documented compromise rather than adding a new store method here (this module's
-   * allowlist is the index and its route, not `knowledge/store.ts`). In practice this is reliable:
-   * an index document's title is what its slug is DERIVED from (`slugify(title)`,
-   * `knowledge/catalog.ts`), and title tokens are weighted 3x in BM25, so searching the domain
-   * string itself surfaces its own index document as the top hit in every realistic corpus size.
+   * Lookup for "the document whose `slug` equals the domain id" (D1), now an exact
+   * `KnowledgeStore.findBySlug` call instead of a BM25 probe (SPEC "Workspace knowledge: kill the
+   * 5s load, preview in place" — this used to run a full `search()` per domain per request, which
+   * re-tokenized the entire corpus from scratch every time; `findBySlug` is O(1)ish against the
+   * store's own generation-gated slug index and never touches BM25 at all).
    *
-   * **This CAN return the wrong document.** `slugify()` has no uniqueness pass, so two documents
-   * that title-slugify to the same string (same project, or two different projects each with
-   * their own "Overview"-style doc for the domain) are genuinely ambiguous: `.find()` below
-   * returns the first BM25 hit whose `slug` matches, not "the" canonical one, and across
-   * projects `outcomes` is walked in registry order, so a tie is silently broken by whichever
-   * project happens to sort first — never reported as a tie. `indexDocId` is therefore a
-   * best guess, not an identity lookup, and callers should treat it accordingly (e.g. a "view
-   * index doc" link, not an authority check).
-   *
-   * A proper `findBySlug` on `KnowledgeStore` (unique by construction, or explicit about
-   * collisions) would remove this caveat entirely; noted as a follow-up.
+   * **Collisions are resolved exactly as before, still not reported as ambiguous.**
+   * `slugify()` has no uniqueness pass, so two documents that title-slugify to the same string are
+   * genuinely ambiguous: `findBySlug` returns ALL of them, in the store's own deterministic
+   * `(root, path)` order, and this keeps the same "first hit" pick the old BM25-based lookup made
+   * (there, "first" meant BM25's top-ranked hit; here it means registry order across `outcomes`,
+   * then `(root, path)` order within one project's own matches) — a best guess, not an identity
+   * lookup, same caveat as before for callers (e.g. a "view index doc" link, not an authority
+   * check).
    */
-  private async findIndexDocId(domain: string, outcomes: readonly DomainOutcome[]): Promise<string | undefined> {
+  private findIndexDocId(domain: string, outcomes: readonly DomainOutcome[]): string | undefined {
     for (const outcome of outcomes) {
       if (!outcome.health.ok || !outcome.store) continue;
       if (!outcome.buckets.some((b) => b.value === domain)) continue;
-      const hit = outcome.store.search(domain, { limit: INDEX_DOC_SEARCH_LIMIT }).results.find((d) => d.slug === domain);
-      if (hit) return hit.id;
+      const hits = outcome.store.findBySlug(domain);
+      if (hits.length > 0) return hits[0]!.id;
     }
     return undefined;
+  }
+
+  /**
+   * `GET /workspace/knowledge/document` (this spec's own addition): one project's own document by
+   * id, through the SAME peek -> instance cache -> standalone-store-under-deadline machinery every
+   * other read here uses (`resolveSources`/`resolveStore`) — never a second read path, never a
+   * context build (the module's own "READ never instantiates" invariant). An unregistered or
+   * missing project and an unknown doc id both collapse to `{ok: false}`; the route layer turns
+   * that into 404. A store that fails to build or trips the deadline collapses here too, same as
+   * every other failure mode this index reports — the spec's own Risks note: "reported as the
+   * endpoint's 404/error path if tripped", not a distinct error shape.
+   */
+  async getDocument(projectId: string, docId: string): Promise<{ ok: true; document: KnowledgeDocument } | { ok: false }> {
+    const sources = await this.resolveSources();
+    const source = sources.find((s) => s.id === projectId);
+    if (!source || source.status === 'missing') return { ok: false };
+    const resolved = await this.resolveStore(source);
+    if (!resolved.ok) return { ok: false };
+    const document = resolved.store.getDocument(docId);
+    if (!document) return { ok: false };
+    return { ok: true, document };
   }
 
   /**

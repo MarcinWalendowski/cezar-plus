@@ -71,12 +71,16 @@ function fakeStore(
       domains: KnowledgeFacetBucket[];
     };
     listDocuments?: () => KnowledgeDocument[];
+    findBySlug?: (slug: string) => KnowledgeDocument[];
+    getDocument?: (id: string) => KnowledgeDocument | null;
   } = {},
 ): KnowledgeStore {
   const search = overrides.search ?? ((query: string) => ({ query, total: 0, truncated: false, results: [] }));
   const getFacets = overrides.getFacets ?? (() => ({ types: [], tags: [], statuses: [], roots: [], domains: [] }));
   const listDocuments = overrides.listDocuments ?? (() => []);
-  return { search, getFacets, listDocuments } as unknown as KnowledgeStore;
+  const findBySlug = overrides.findBySlug ?? (() => []);
+  const getDocument = overrides.getDocument ?? (() => null);
+  return { search, getFacets, listDocuments, findBySlug, getDocument } as unknown as KnowledgeStore;
 }
 
 function contextsWith(live: Record<string, KnowledgeStore | undefined>): WorkspaceKnowledgeContexts {
@@ -471,13 +475,8 @@ describe('WorkspaceKnowledgeIndex.domains', () => {
             roots: [],
             domains: [{ value: 'billing', count: 2 }],
           }),
-          // Neither result's slug is "billing" — no index doc exists for this domain.
-          search: () => ({
-            query: '',
-            total: 2,
-            truncated: false,
-            results: [doc({ id: 'd1', slug: 'rate-change' }), doc({ id: 'd2', slug: 'refund-policy' })],
-          }),
+          // No document's slug is "billing" — no index doc exists for this domain.
+          findBySlug: () => [],
         }),
     });
     const result = await index.domains();
@@ -504,12 +503,7 @@ describe('WorkspaceKnowledgeIndex.domains', () => {
             roots: [],
             domains: [{ value: 'billing', count: 2 }],
           }),
-          search: () => ({
-            query: '',
-            total: 2,
-            truncated: false,
-            results: [doc({ id: 'idx-doc', slug: 'billing' }), doc({ id: 'other', slug: 'rate-change' })],
-          }),
+          findBySlug: (slug) => (slug === 'billing' ? [doc({ id: 'idx-doc', slug: 'billing' })] : []),
         }),
     });
     const result = await index.domains();
@@ -521,6 +515,53 @@ describe('WorkspaceKnowledgeIndex.domains', () => {
         indexDocId: 'idx-doc',
       },
     ]);
+  });
+
+  it('picks the first of a slug collision, in the order findBySlug itself returns', async () => {
+    const index = new WorkspaceKnowledgeIndex({
+      listProjects: async () => [source()],
+      contexts: NO_LIVE_CONTEXTS,
+      createStore: async () =>
+        fakeStore({
+          getFacets: () => ({
+            types: [],
+            tags: [],
+            statuses: [],
+            roots: [],
+            domains: [{ value: 'billing', count: 2 }],
+          }),
+          findBySlug: (slug) =>
+            slug === 'billing' ? [doc({ id: 'first', slug: 'billing' }), doc({ id: 'second', slug: 'billing' })] : [],
+        }),
+    });
+    const result = await index.domains();
+    expect(result.domains[0]).toMatchObject({ indexDocId: 'first' });
+  });
+
+  it('never calls store.search() — findIndexDocId is now an exact findBySlug lookup', async () => {
+    let searchCalled = false;
+    const index = new WorkspaceKnowledgeIndex({
+      listProjects: async () => [source()],
+      contexts: NO_LIVE_CONTEXTS,
+      createStore: async () =>
+        fakeStore({
+          getFacets: () => ({
+            types: [],
+            tags: [],
+            statuses: [],
+            roots: [],
+            domains: [{ value: 'billing', count: 2 }],
+          }),
+          search: () => {
+            searchCalled = true;
+            return { query: '', total: 0, truncated: false, results: [] };
+          },
+          findBySlug: (slug) => (slug === 'billing' ? [doc({ id: 'idx-doc', slug: 'billing' })] : []),
+        }),
+    });
+    const result = await index.domains();
+    expect(searchCalled).toBe(false);
+    expect(result.domains[0]).toMatchObject({ indexDocId: 'idx-doc' });
   });
 
   it('a project whose store fails to build is an ok:false row; every other project\'s domains still return', async () => {
@@ -778,5 +819,100 @@ describe('WorkspaceKnowledgeIndex.changelog (D3)', () => {
       expect(result.entries).toHaveLength(1);
       expect(result.sinceExcludedAll).toBeUndefined();
     });
+  });
+});
+
+describe('WorkspaceKnowledgeIndex.getDocument (SPEC "Workspace knowledge: kill the 5s load, preview in place")', () => {
+  it('a project with a live context is read through THAT store, never a second one', async () => {
+    let standaloneBuilds = 0;
+    const live = fakeStore({ getDocument: (id) => (id === 'd1' ? doc({ id: 'd1' }) : null) });
+    const index = new WorkspaceKnowledgeIndex({
+      listProjects: async () => [source({ id: 'p1' })],
+      contexts: contextsWith({ p1: live }),
+      createStore: async () => {
+        standaloneBuilds++;
+        return fakeStore();
+      },
+    });
+    const result = await index.getDocument('p1', 'd1');
+    expect(result).toEqual({ ok: true, document: doc({ id: 'd1' }) });
+    expect(standaloneBuilds).toBe(0);
+  });
+
+  it('a project with no live context opens a standalone store, through the same resolveStore machinery search() uses', async () => {
+    const calls: string[] = [];
+    const index = new WorkspaceKnowledgeIndex({
+      listProjects: async () => [source({ id: 'p1' })],
+      contexts: NO_LIVE_CONTEXTS,
+      createStore: async (root) => {
+        calls.push(root);
+        return fakeStore({ getDocument: (id) => (id === 'd1' ? doc({ id: 'd1' }) : null) });
+      },
+    });
+    const result = await index.getDocument('p1', 'd1');
+    expect(result).toEqual({ ok: true, document: doc({ id: 'd1' }) });
+    expect(calls).toEqual(['/fake/proj']);
+  });
+
+  it('an unregistered project id is {ok: false}, without calling createStore', async () => {
+    let builds = 0;
+    const index = new WorkspaceKnowledgeIndex({
+      listProjects: async () => [source({ id: 'p1' })],
+      contexts: NO_LIVE_CONTEXTS,
+      createStore: async () => {
+        builds++;
+        return fakeStore();
+      },
+    });
+    const result = await index.getDocument('no-such-project', 'd1');
+    expect(result).toEqual({ ok: false });
+    expect(builds).toBe(0);
+  });
+
+  it('a project whose root is missing is {ok: false}, without calling createStore', async () => {
+    const index = new WorkspaceKnowledgeIndex({
+      listProjects: async () => [source({ id: 'gone', status: 'missing' })],
+      contexts: NO_LIVE_CONTEXTS,
+      createStore: async () => fakeStore(),
+    });
+    const result = await index.getDocument('gone', 'd1');
+    expect(result).toEqual({ ok: false });
+  });
+
+  it('an unknown doc id within a resolved project is {ok: false}', async () => {
+    const index = new WorkspaceKnowledgeIndex({
+      listProjects: async () => [source({ id: 'p1' })],
+      contexts: NO_LIVE_CONTEXTS,
+      createStore: async () => fakeStore({ getDocument: () => null }),
+    });
+    const result = await index.getDocument('p1', 'no-such-doc');
+    expect(result).toEqual({ ok: false });
+  });
+
+  it('a store that fails to build is {ok: false} — the same 404/error path a tripped deadline takes everywhere else in this index', async () => {
+    const index = new WorkspaceKnowledgeIndex({
+      listProjects: async () => [source({ id: 'p1' })],
+      contexts: NO_LIVE_CONTEXTS,
+      createStore: async () => {
+        throw new Error('disk full');
+      },
+    });
+    const result = await index.getDocument('p1', 'd1');
+    expect(result).toEqual({ ok: false });
+  });
+
+  it('a standalone store built by getDocument is cached and reused by a later search()', async () => {
+    let builds = 0;
+    const index = new WorkspaceKnowledgeIndex({
+      listProjects: async () => [source({ id: 'p1' })],
+      contexts: NO_LIVE_CONTEXTS,
+      createStore: async () => {
+        builds++;
+        return fakeStore({ getDocument: (id) => (id === 'd1' ? doc({ id: 'd1' }) : null) });
+      },
+    });
+    await index.getDocument('p1', 'd1');
+    await index.search('q', { projects: ['p1'] });
+    expect(builds).toBe(1);
   });
 });

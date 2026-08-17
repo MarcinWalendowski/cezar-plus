@@ -136,6 +136,7 @@ import type {
   WorkspaceGitResponse,
   WorkspaceKnowledgeSearchResponse,
   WorkspaceKnowledgeDomainsResponse,
+  WorkspaceKnowledgeDocumentResponse,
   NotificationsResponse,
   NotificationLogResponse,
   NotificationLogStatus,
@@ -2413,6 +2414,23 @@ export async function getWorkspaceKnowledgeSearch(
       init(opts),
     ),
     '/workspace/knowledge/search',
+  )
+}
+
+/** `GET /workspace/knowledge/document` (`.ai/specs/2026-08-17-workspace-knowledge-speed-preview.md`)
+ *  — the right-pane preview read behind `/workspace/knowledge`'s search-result and domain-index-doc
+ *  links: the ONE workspace-knowledge route that carries a full document body, so a click never has
+ *  to leave that page for the per-project one. Same `disabledReason` shape as the family's other
+ *  reads; an unknown project or doc id is a 404 the caller (`unwrap`) turns into a rejected promise,
+ *  never `{document: null}` — that shape is reserved for the flag-off case. */
+export async function getWorkspaceKnowledgeDocument(
+  project: string,
+  doc: string,
+  opts?: ReadOptions,
+): Promise<WorkspaceKnowledgeDocumentResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.knowledge.document.$get({ query: { project, doc } }, init(opts)),
+    '/workspace/knowledge/document',
   )
 }
 

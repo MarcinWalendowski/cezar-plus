@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import {
   type WorkspaceKnowledgeChangelogResponse,
+  type WorkspaceKnowledgeDocumentResponse,
   type WorkspaceKnowledgeDomainsResponse,
   type WorkspaceKnowledgeSearchResponse,
 } from '@loki-labs/better-cezar-contract';
@@ -17,10 +18,12 @@ import { listProjects } from '../workspace/projects.ts';
 import { queryZodValidator } from './validators.ts';
 
 /**
- * `GET /api/v1/workspace/knowledge/search`, `GET /api/v1/workspace/knowledge/domains`, and
- * `GET /api/v1/workspace/knowledge/changelog` — the cross-project knowledge read (D3/D5/D6,
- * `.ai/specs/2026-08-14-knowledge-domains-and-changelog.md`). `changelog` is a projection over the
- * same read path (`WorkspaceKnowledgeIndex.changelog()`), not a fourth mechanism.
+ * `GET /api/v1/workspace/knowledge/search`, `GET /api/v1/workspace/knowledge/domains`,
+ * `GET /api/v1/workspace/knowledge/document`, and `GET /api/v1/workspace/knowledge/changelog` —
+ * the cross-project knowledge read (D3/D5/D6, `.ai/specs/2026-08-14-knowledge-domains-and-
+ * changelog.md`; `document` added by `.ai/specs/2026-08-17-workspace-knowledge-speed-preview.md`
+ * for the right-pane preview). `changelog` and `document` are both projections over the same read
+ * path (`WorkspaceKnowledgeIndex`), not separate mechanisms.
  *
  * **READ never instantiates.** `deps.contexts` is injected, narrowed to `peek` only (the
  * `workspace-run-mutations-routes.ts` precedent) — this file never imports `./project-context.ts`
@@ -87,6 +90,11 @@ const EMPTY_DOMAINS: Omit<WorkspaceKnowledgeDomainsResponse, 'disabledReason'> =
   projects: [],
 };
 
+const documentQuerySchema = z.object({
+  project: z.string().min(1).max(200),
+  doc: z.string().min(1).max(200),
+});
+
 const changelogQuerySchema = z.object({
   domain: z.string().max(200).optional(),
   project: z.string().max(200).optional(),
@@ -146,6 +154,24 @@ export function createWorkspaceKnowledgeRoutes(deps: WorkspaceKnowledgeRouteDeps
       }
       const result = await index.domains();
       const body: WorkspaceKnowledgeDomainsResponse = { ...result };
+      return c.json(body);
+    })
+
+    // `GET /workspace/knowledge/document` (`.ai/specs/2026-08-17-workspace-knowledge-speed-
+    // preview.md`) — the right-pane preview read: 200 `{document: null}` when a capability is
+    // off (D19, same as every other read here), 404 for an unregistered project or an unknown
+    // doc id once both are on — that null is reserved for "the feature is off", never "not
+    // found" (the same split `./knowledge-routes.ts`'s `GET /knowledge/:id` already makes).
+    .get('/workspace/knowledge/document', queryZodValidator(documentQuerySchema), async (c) => {
+      const { project, doc } = c.req.valid('query');
+      const reason = disabledReason();
+      if (reason) {
+        const body: WorkspaceKnowledgeDocumentResponse = { project, document: null, disabledReason: reason };
+        return c.json(body);
+      }
+      const result = await index.getDocument(project, doc);
+      if (!result.ok) return c.json({ error: 'no such document' }, 404);
+      const body: WorkspaceKnowledgeDocumentResponse = { project, document: result.document };
       return c.json(body);
     })
 

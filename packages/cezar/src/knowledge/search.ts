@@ -63,6 +63,13 @@ export interface SearchOptions extends SearchFilters {
    *  runs BM25 alone with no pin stage, so the identifier-lookup failure the pin exists to fix
    *  is directly reproducible rather than merely asserted. Defaults to `true`. */
   identifierPinning?: boolean;
+  /** A prebuilt {@link KnowledgeSearchIndex} to reuse instead of rebuilding BM25/identifier
+   *  indexes from scratch. Built over the FULL corpus it came from — filters here only restrict
+   *  which of ITS documents are candidates, so IDF/avgLength come from the whole indexed corpus,
+   *  not the filtered subset (the standard Lucene-style boolean-filter model). Absent -> both
+   *  indexes are built internally over just the filtered set, exactly as before this option
+   *  existed - every caller that omits it keeps its original scores unchanged. */
+  index?: KnowledgeSearchIndex;
 }
 
 export interface SearchResult<T> {
@@ -139,16 +146,39 @@ function weightedTokens(doc: SearchableDocument): string[] {
   return tokens;
 }
 
-interface Bm25Doc {
+// Exported (not just the index below) because `KnowledgeSearchIndex`'s declaration emit needs
+// both: TS7 refuses to publish an exported type that references a private one.
+export interface Bm25Doc {
   termFreq: Map<string, number>;
   length: number;
 }
 
-interface Bm25Index {
+export interface Bm25Index {
   docs: Map<string, Bm25Doc>;
   docFreq: Map<string, number>;
   totalDocs: number;
   avgLength: number;
+}
+
+/**
+ * A prebuilt search index (SPEC "Workspace knowledge: kill the 5s load, preview in place"): the
+ * BM25 index, the identifier index, and the doc list they were built from, bundled so a caller
+ * that owns a stable corpus (`KnowledgeStore`) can build this ONCE per catalog generation and hand
+ * it to every `search()` call via `opts.index`, instead of paying `buildBm25Index`/
+ * `buildIdentifierIndex` — a full tokenize-and-rebuild over every document's body — on every call.
+ */
+export interface KnowledgeSearchIndex {
+  readonly bm25: Bm25Index;
+  readonly identifiers: Map<string, Set<string>>;
+  readonly docs: readonly SearchableDocument[];
+}
+
+/** Builds a {@link KnowledgeSearchIndex} over the full `docs` array. Callers that filter (`type`,
+ *  `tag`, `status`, `root`) still pass their FULL corpus here — `search()`'s own filtering narrows
+ *  the candidate set at call time; building the index over a pre-filtered slice would just mean
+ *  rebuilding it per filter combination, defeating the whole point of sharing one. */
+export function buildSearchIndex<T extends SearchableDocument>(docs: readonly T[]): KnowledgeSearchIndex {
+  return { bm25: buildBm25Index(docs), identifiers: buildIdentifierIndex(docs), docs };
 }
 
 // Field weighting is realised as weighted token repetition (title/headings tokens counted 3x)
@@ -233,7 +263,7 @@ export function search<T extends SearchableDocument>(
   const queryTokens = tokenize(query);
   if (queryTokens.length === 0) return { results: [], total: 0, truncated: false };
 
-  const bmIndex = buildBm25Index(filtered);
+  const bmIndex = options.index?.bm25 ?? buildBm25Index(filtered);
   // Superseded demotion, not suppression (Q5): a superseded document that is the only hit is
   // still returned, just ranked as if half as relevant.
   const effectiveScore = (doc: T): number => {
@@ -243,7 +273,7 @@ export function search<T extends SearchableDocument>(
 
   const pinnedIds = new Set<string>();
   if (pinningEnabled) {
-    const identifierIndex = buildIdentifierIndex(filtered);
+    const identifierIndex = options.index?.identifiers ?? buildIdentifierIndex(filtered);
     for (const identifier of extractIdentifiers(query)) {
       for (const docId of identifierIndex.get(identifier) ?? []) pinnedIds.add(docId);
     }
@@ -253,10 +283,15 @@ export function search<T extends SearchableDocument>(
   const rest: T[] = [];
   for (const doc of filtered) (pinnedIds.has(doc.id) ? pinned : rest).push(doc);
 
+  // Precompute once per query rather than recomputing BM25 on every comparator call - the same
+  // `filtered` doc can otherwise be scored O(n log n) times during the sort below.
+  const scoreById = new Map<string, number>();
+  for (const doc of filtered) scoreById.set(doc.id, effectiveScore(doc));
+
   // Deterministic tie-break by id: two consecutive identical queries must return byte-identical
   // bodies (D8), and a bare score-descending sort is not stable across engines/inputs on ties.
   const byScoreThenId = (a: T, b: T): number => {
-    const diff = effectiveScore(b) - effectiveScore(a);
+    const diff = (scoreById.get(b.id) ?? 0) - (scoreById.get(a.id) ?? 0);
     if (diff !== 0) return diff;
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   };
@@ -265,7 +300,7 @@ export function search<T extends SearchableDocument>(
   // A pinned document is included regardless of its BM25 score - it may legitimately score 0
   // (the identifier lived only in frontmatter, say) and that is exactly the case the pin exists
   // to rescue. A non-pinned document with no lexical overlap at all contributes nothing.
-  const restRanked = rest.filter((doc) => effectiveScore(doc) > 0).sort(byScoreThenId);
+  const restRanked = rest.filter((doc) => (scoreById.get(doc.id) ?? 0) > 0).sort(byScoreThenId);
 
   const ordered = [...pinned, ...restRanked];
   const total = ordered.length;

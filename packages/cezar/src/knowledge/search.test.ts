@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractIdentifiers, search, tokenize, type SearchableDocument } from './search.ts';
+import { buildSearchIndex, extractIdentifiers, search, tokenize, type SearchableDocument } from './search.ts';
 
 /**
  * `.ai/specs/2026-08-06-knowledge-base-mounts-search.md` ("Search and the link graph", Q5, C1,
@@ -134,6 +134,66 @@ describe('search: filters', () => {
   it('narrows by root', () => {
     const { results } = search(docs, 'widgets', { root: 'project' });
     expect(results.map((r) => r.id)).toEqual(['note-1']);
+  });
+});
+
+describe('search: opts.index (SPEC "Workspace knowledge: kill the 5s load, preview in place")', () => {
+  it('a shared index built over the same docs as the internal build is interchangeable — omitting it changes nothing', () => {
+    const docs: SearchableDocument[] = [
+      makeDoc({ id: 'note-1', title: 'note about widgets', body: 'widgets widgets widgets', type: 'note', tags: ['hardware'], root: 'project' }),
+      makeDoc({ id: 'spec-1', title: 'spec about widgets', body: 'widgets widgets widgets', type: 'spec', tags: ['hardware'], root: 'specs' }),
+      makeDoc({ id: 'spec-2', title: 'spec about widgets', body: 'widgets widgets widgets', type: 'spec', tags: ['software'], root: 'specs' }),
+    ];
+    const withoutIndex = search(docs, 'widgets', { type: 'spec' });
+    const index = buildSearchIndex(docs);
+    const withIndex = search(docs, 'widgets', { type: 'spec', index });
+    expect(withIndex).toEqual(withoutIndex);
+  });
+
+  it('candidates strictly respect filters even though the shared index was built over a wider corpus', () => {
+    // Two candidates (type: 'target'), symmetric except for which query term each one carries —
+    // see the scoring test below for why that symmetry matters. 18 filler docs (type: 'filler')
+    // exist ONLY to skew the corpus-wide term statistics; none of them may ever appear in a
+    // `type: 'target'`-filtered result, no matter how well they'd score.
+    const docX = makeDoc({ id: 'doc-x', title: 'x', type: 'target', body: 'alpha alpha alpha' });
+    const docY = makeDoc({ id: 'doc-y', title: 'y', type: 'target', body: 'beta beta beta' });
+    const filler = Array.from({ length: 18 }, (_, i) => makeDoc({ id: `filler-${i + 1}`, type: 'filler', body: 'alpha' }));
+    const allDocs = [docX, docY, ...filler];
+    const index = buildSearchIndex(allDocs);
+
+    const { results, total } = search(allDocs, 'alpha beta', { type: 'target', index });
+    expect(total).toBe(2);
+    expect(new Set(results.map((r) => r.id))).toEqual(new Set(['doc-x', 'doc-y']));
+  });
+
+  it('IDF/avgLength come from the whole corpus, not the filtered subset — a filtered tie under a local index is not a tie under a shared one', () => {
+    // Within the filtered pair alone, 'alpha' and 'beta' are equally rare (docFreq 1 each) — a
+    // locally-built index scores docX (all 'alpha') and docY (all 'beta') identically, so the tie
+    // is broken by id, docX first. Add 18 filler docs (excluded from the `target` filter, but
+    // present in the SHARED index) that all carry 'alpha' — globally 'alpha' becomes common
+    // (low IDF) while 'beta' stays rare (high IDF), which must flip the ranking once the shared,
+    // corpus-wide index is used instead of a per-call rebuild over just the filtered pair.
+    const docX = makeDoc({ id: 'doc-x', title: 'x', type: 'target', body: 'alpha alpha alpha' });
+    const docY = makeDoc({ id: 'doc-y', title: 'y', type: 'target', body: 'beta beta beta' });
+    const filler = Array.from({ length: 18 }, (_, i) => makeDoc({ id: `filler-${i + 1}`, type: 'filler', body: 'alpha' }));
+    const allDocs = [docX, docY, ...filler];
+
+    const local = search(allDocs, 'alpha beta', { type: 'target' });
+    expect(local.results.map((r) => r.id)).toEqual(['doc-x', 'doc-y']);
+
+    const index = buildSearchIndex(allDocs);
+    const shared = search(allDocs, 'alpha beta', { type: 'target', index });
+    expect(shared.results.map((r) => r.id)).toEqual(['doc-y', 'doc-x']);
+  });
+
+  it('two consecutive calls against the same shared index return byte-identical bodies (D8)', () => {
+    const docs: SearchableDocument[] = Array.from({ length: 5 }, (_, i) =>
+      makeDoc({ id: `doc-${i}`, title: 'apple orchard notes', body: 'apple orchard notes about seasonal fruit.' }),
+    );
+    const index = buildSearchIndex(docs);
+    const first = search(docs, 'apple', { index });
+    const second = search(docs, 'apple', { index });
+    expect(second).toEqual(first);
   });
 });
 

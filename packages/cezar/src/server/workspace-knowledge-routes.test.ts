@@ -69,6 +69,7 @@ function fakeIndex(overrides: {
   search?: WorkspaceKnowledgeIndex['search'];
   domains?: WorkspaceKnowledgeIndex['domains'];
   changelog?: WorkspaceKnowledgeIndex['changelog'];
+  getDocument?: WorkspaceKnowledgeIndex['getDocument'];
 } = {}): WorkspaceKnowledgeIndex {
   const index = new WorkspaceKnowledgeIndex({
     listProjects: async () => [] as WorkspaceKnowledgeProjectSource[],
@@ -77,6 +78,7 @@ function fakeIndex(overrides: {
   if (overrides.search) index.search = overrides.search;
   if (overrides.domains) index.domains = overrides.domains;
   if (overrides.changelog) index.changelog = overrides.changelog;
+  if (overrides.getDocument) index.getDocument = overrides.getDocument;
   return index;
 }
 
@@ -98,6 +100,10 @@ describe('workspace knowledge routes — the two-flag capability gate (D6)', () 
     const changelog = await apiRequest(app, '/api/v1/workspace/knowledge/changelog');
     expect(changelog.status).toBe(200);
     expect(await changelog.json()).toEqual({ entries: [], projects: [], disabledReason: 'knowledge' });
+
+    const document = await apiRequest(app, '/api/v1/workspace/knowledge/document?project=p1&doc=d1');
+    expect(document.status).toBe(200);
+    expect(await document.json()).toEqual({ project: 'p1', document: null, disabledReason: 'knowledge' });
   });
 
   it('CEZ_KB on, CEZ_WORKSPACE_VIEWS off -> disabledReason names "workspaceViews", the reverse direction', async () => {
@@ -115,6 +121,9 @@ describe('workspace knowledge routes — the two-flag capability gate (D6)', () 
 
     const changelog = await apiRequest(app, '/api/v1/workspace/knowledge/changelog');
     expect(await changelog.json()).toMatchObject({ disabledReason: 'workspaceViews' });
+
+    const document = await apiRequest(app, '/api/v1/workspace/knowledge/document?project=p1&doc=d1');
+    expect(await document.json()).toMatchObject({ disabledReason: 'workspaceViews' });
   });
 
   it('both on -> no disabledReason, and the index is actually called', async () => {
@@ -122,6 +131,7 @@ describe('workspace knowledge routes — the two-flag capability gate (D6)', () 
     let searchCalled = false;
     let domainsCalled = false;
     let changelogCalled = false;
+    let getDocumentCalled = false;
     const app = appWith({
       contexts: { peek: () => undefined },
       knowledgeIndex: fakeIndex({
@@ -136,6 +146,10 @@ describe('workspace knowledge routes — the two-flag capability gate (D6)', () 
         changelog: async () => {
           changelogCalled = true;
           return { entries: [], projects: [] };
+        },
+        getDocument: async () => {
+          getDocumentCalled = true;
+          return { ok: true, document: doc() };
         },
       }),
     });
@@ -154,6 +168,11 @@ describe('workspace knowledge routes — the two-flag capability gate (D6)', () 
     const changelogBody = (await changelog.json()) as { disabledReason?: string };
     expect(changelogBody.disabledReason).toBeUndefined();
     expect(changelogCalled).toBe(true);
+
+    const document = await apiRequest(app, '/api/v1/workspace/knowledge/document?project=p1&doc=d1');
+    const documentBody = (await document.json()) as { disabledReason?: string };
+    expect(documentBody.disabledReason).toBeUndefined();
+    expect(getDocumentCalled).toBe(true);
   });
 
   it('CEZ_SINGLE_PROJECT=1 reports workspaceViews false, so it answers the same as the flag being off', async () => {
@@ -305,5 +324,52 @@ describe('workspace knowledge routes — wire shape, both flags on', () => {
     });
     const res = await apiRequest(app, '/api/v1/workspace/knowledge/changelog?since=2027-01-01T00:00:00.000Z');
     expect(await res.json()).toMatchObject({ entries: [], sinceExcludedAll: true });
+  });
+});
+
+describe('workspace knowledge routes — GET /workspace/knowledge/document (`.ai/specs/2026-08-17-workspace-knowledge-speed-preview.md`)', () => {
+  it('forwards project/doc and returns the full document on a hit', async () => {
+    enableBoth();
+    let received: unknown;
+    const app = appWith({
+      contexts: { peek: () => undefined },
+      knowledgeIndex: fakeIndex({
+        getDocument: async (project, docId) => {
+          received = { project, docId };
+          return { ok: true, document: doc({ id: 'd1', body: 'full body here' }) };
+        },
+      }),
+    });
+    const res = await apiRequest(app, '/api/v1/workspace/knowledge/document?project=p1&doc=d1');
+    expect(res.status).toBe(200);
+    expect(received).toEqual({ project: 'p1', docId: 'd1' });
+    expect(await res.json()).toEqual({ project: 'p1', document: doc({ id: 'd1', body: 'full body here' }) });
+  });
+
+  it('an unknown project or doc id is 404, never the flag-off {document: null} shape', async () => {
+    enableBoth();
+    const app = appWith({
+      contexts: { peek: () => undefined },
+      knowledgeIndex: fakeIndex({ getDocument: async () => ({ ok: false }) }),
+    });
+    const res = await apiRequest(app, '/api/v1/workspace/knowledge/document?project=no-such&doc=d1');
+    expect(res.status).toBe(404);
+  });
+
+  it('gate off answers 200 with {document: null, disabledReason}, project echoed back', async () => {
+    process.env.CEZ_WORKSPACE_VIEWS = '1';
+    delete process.env.CEZ_KB;
+    delete process.env.CEZ_SINGLE_PROJECT;
+    const app = appWith({ contexts: { peek: () => undefined }, knowledgeIndex: fakeIndex() });
+    const res = await apiRequest(app, '/api/v1/workspace/knowledge/document?project=p1&doc=d1');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ project: 'p1', document: null, disabledReason: 'knowledge' });
+  });
+
+  it('missing project or doc query params is a 400, not a 404', async () => {
+    enableBoth();
+    const app = appWith({ contexts: { peek: () => undefined }, knowledgeIndex: fakeIndex() });
+    const res = await apiRequest(app, '/api/v1/workspace/knowledge/document?project=p1');
+    expect(res.status).toBe(400);
   });
 });

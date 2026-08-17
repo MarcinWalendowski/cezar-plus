@@ -91,6 +91,7 @@ import {
   getWorkspaceGit,
   getWorkspaceKnowledgeDomains,
   getWorkspaceKnowledgeSearch,
+  getWorkspaceKnowledgeDocument,
   getWorkspaceNotifications,
   getWorkspaceNotificationsLog,
   getWorktrees,
@@ -387,6 +388,11 @@ export const workspaceQueryKeys = {
       filters.type ?? null,
       filters.status ?? null,
     ] as const,
+  /** `GET /workspace/knowledge/document` (`.ai/specs/2026-08-17-workspace-knowledge-speed-
+   *  preview.md`) — the right-pane preview read, keyed by the pair a selection actually is:
+   *  neither half alone identifies a document (the same opaque id can exist in more than one
+   *  project's store). */
+  knowledgeDocument: (project: string, doc: string) => ['workspace', 'knowledge', 'document', project, doc] as const,
   /** `GET /workspace/notifications` — the machine-wide outbound transport registry, distinct
    *  from `uiState` (which owns the per-browser desktop-notification toggle). */
   notifications: ['workspace', 'notifications'] as const,
@@ -2429,6 +2435,19 @@ export function useWorkspaceKnowledgeSearch(
     queryKey: workspaceQueryKeys.knowledgeSearch(filters),
     queryFn: ({ signal }) => getWorkspaceKnowledgeSearch(filters, { signal }),
     enabled,
+  })
+}
+
+/** `GET /workspace/knowledge/document` (`.ai/specs/2026-08-17-workspace-knowledge-speed-
+ *  preview.md`) — the right-pane preview read behind `/workspace/knowledge`'s search-result and
+ *  domain-index-doc links. `enabled` defaults to "both halves of the selection are present": a
+ *  page whose URL carries only `?project=` or only `?doc=` (a partial or stale link) must not
+ *  fire a request that can only 404. */
+export function useWorkspaceKnowledgeDocument(project: string | undefined, doc: string | undefined, enabled = true) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.knowledgeDocument(project ?? '', doc ?? ''),
+    queryFn: ({ signal }) => getWorkspaceKnowledgeDocument(project ?? '', doc ?? '', { signal }),
+    enabled: enabled && project !== undefined && doc !== undefined,
   })
 }
 

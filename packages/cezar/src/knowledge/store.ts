@@ -30,7 +30,14 @@ import {
   workspaceKnowledgeRoot,
 } from './paths.ts';
 import { CATALOG_FORMAT_VERSION, emptyScanStats, type CatalogEntry, type ResolvedKnowledgeRoot, type ScanStats } from './types.ts';
-import { search as runSearch, type SearchFilters, type SearchOptions, type SearchableDocument } from './search.ts';
+import {
+  buildSearchIndex,
+  search as runSearch,
+  type KnowledgeSearchIndex,
+  type SearchFilters,
+  type SearchOptions,
+  type SearchableDocument,
+} from './search.ts';
 
 // `SourceSink` (F2, W1.5) — imported for typing only, never re-exported: this feature never owns
 // the port, only an implementation of it (Q14). Reading it does not "touch" `sources/`.
@@ -91,6 +98,25 @@ export class KnowledgeStore {
   private scan: ScanStats = emptyScanStats();
   private idCollisions = 0;
   private initialized = false;
+
+  /** Bumped once per completed `performReindex()` — `initialize()` and every write path
+   *  (`createDocument`/`updateDocument`/`deleteDocument`) all funnel through it, so one counter
+   *  here covers "the catalog or working bodies changed" everywhere (SPEC "Workspace knowledge:
+   *  kill the 5s load, preview in place", D8 intact: a generation bump is monotonic, never reused). */
+  private catalogGeneration = 0;
+  /** `search()`'s memo: the `SearchableDocument` projection plus its `KnowledgeSearchIndex`,
+   *  reused while `generation` still matches `catalogGeneration` — rebuilt lazily on the first
+   *  search after a change, never eagerly on reindex itself (a reindex with no search in between
+   *  must not pay the tokenize cost for nothing). */
+  private searchMemo?: { generation: number; searchable: SearchableDocument[]; index: KnowledgeSearchIndex };
+  /** How many times the memo above was actually rebuilt — a tiny, always-on stat (same family as
+   *  `getCounts()`/`getScan()`), not a test-only hook, that exists so the memo-reuse invariant is
+   *  directly observable rather than inferred from timing. */
+  private searchIndexBuilds = 0;
+  /** `findBySlug()`'s memo: `slug -> ids`, ids in the store's own deterministic `(root, path)`
+   *  order — same generation-gated reuse as `searchMemo`, built independently so a `findBySlug`-only
+   *  caller (`domains()`) never pays for a BM25 rebuild it does not need. */
+  private slugIndexMemo?: { generation: number; index: Map<string, string[]> };
 
   private readonly watchers = new Map<string, FSWatcher>();
   private readonly debounceTimers = new Map<string, NodeJS.Timeout>();
@@ -206,6 +232,11 @@ export class KnowledgeStore {
       const { documents, idCollisions } = assembleDocuments([...this.working.values()]);
       this.idCollisions = idCollisions;
       this.documents = new Map(documents.map((d) => [d.entry.id, d.entry]));
+      // Every write path (`createDocument`/`updateDocument`/`deleteDocument`) and `initialize()`
+      // reach here through `performReindex()` — bumping once, in the one place both change
+      // triggers (D15) and every write converge, is what keeps `searchMemo`/`slugIndexMemo` from
+      // ever serving a stale index without needing a second bump call anywhere else.
+      this.catalogGeneration++;
 
       await this.persist();
       // A root that did not exist yet (e.g. `project`, before its first write) may exist now —
@@ -379,7 +410,20 @@ export class KnowledgeStore {
     truncated: boolean;
     results: KnowledgeDocument[];
   } {
-    const searchable: SearchableDocument[] = this.orderedEntries().map((entry) => ({
+    const memo = this.getSearchMemo();
+    const opts: SearchOptions = { ...options, index: memo.index };
+    const result = runSearch(memo.searchable, query, opts);
+    const byId = this.documents;
+    return {
+      query,
+      total: result.total,
+      truncated: result.truncated,
+      results: result.results.map((doc) => byId.get(doc.id)!).filter((entry): entry is CatalogEntry => !!entry),
+    };
+  }
+
+  private buildSearchable(): SearchableDocument[] {
+    return this.orderedEntries().map((entry) => ({
       id: entry.id,
       title: entry.title,
       headings: entry.headings,
@@ -390,15 +434,52 @@ export class KnowledgeStore {
       tags: entry.tags,
       root: entry.root,
     }));
-    const opts: SearchOptions = { ...options };
-    const result = runSearch(searchable, query, opts);
-    const byId = this.documents;
-    return {
-      query,
-      total: result.total,
-      truncated: result.truncated,
-      results: result.results.map((doc) => byId.get(doc.id)!).filter((entry): entry is CatalogEntry => !!entry),
-    };
+  }
+
+  /** Reuses the memo while `catalogGeneration` still matches; rebuilds — over the FULL corpus,
+   *  never a filtered slice — on the first call after `initialize()` or any write (SPEC "Workspace
+   *  knowledge: kill the 5s load, preview in place"). This is what turns a per-`search()`-call BM25
+   *  rebuild (the measured ~380ms/call cost) into a per-catalog-generation one. */
+  private getSearchMemo(): { generation: number; searchable: SearchableDocument[]; index: KnowledgeSearchIndex } {
+    if (this.searchMemo && this.searchMemo.generation === this.catalogGeneration) return this.searchMemo;
+    const searchable = this.buildSearchable();
+    const index = buildSearchIndex(searchable);
+    this.searchIndexBuilds++;
+    this.searchMemo = { generation: this.catalogGeneration, searchable, index };
+    return this.searchMemo;
+  }
+
+  /** How many times `search()`'s BM25/identifier index was actually rebuilt, cumulative for the
+   *  life of this store. Not test-only plumbing — the same small always-on stat family as
+   *  `getCounts()`/`getScan()` — but its purpose IS to make the "N `search()` calls on an unchanged
+   *  store build the index once" memo-reuse invariant directly assertable rather than inferred
+   *  from timing (a real-clock assertion this repo's own doctrine treats as flaky by default). */
+  getSearchIndexBuildCount(): number {
+    return this.searchIndexBuilds;
+  }
+
+  /** Exact, non-ranking lookup for "every document whose `slug` equals `slug`" — returns ALL
+   *  matches, in the store's own deterministic `(root, path)` order, so a collision stays visible
+   *  to the caller instead of being silently first-picked here (a caller that wants "just the
+   *  first one, registry order" — `WorkspaceKnowledgeIndex.findIndexDocId` — makes that choice
+   *  itself). Same generation-gated memo discipline as `search()`, built independently so this
+   *  never pays for a BM25 rebuild it does not need. */
+  findBySlug(slug: string): CatalogEntry[] {
+    const index = this.getSlugIndexMemo();
+    const ids = index.get(slug) ?? [];
+    return ids.map((id) => this.documents.get(id)).filter((entry): entry is CatalogEntry => !!entry);
+  }
+
+  private getSlugIndexMemo(): Map<string, string[]> {
+    if (this.slugIndexMemo && this.slugIndexMemo.generation === this.catalogGeneration) return this.slugIndexMemo.index;
+    const index = new Map<string, string[]>();
+    for (const entry of this.orderedEntries()) {
+      const ids = index.get(entry.slug) ?? [];
+      ids.push(entry.id);
+      index.set(entry.slug, ids);
+    }
+    this.slugIndexMemo = { generation: this.catalogGeneration, index };
+    return index;
   }
 
   /** `GET /knowledge/:id` — the only read that carries `body`. */

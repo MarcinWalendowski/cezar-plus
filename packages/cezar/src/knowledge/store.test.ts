@@ -241,6 +241,93 @@ describe('KnowledgeStore — listDocuments() (D3, added for the cross-project ch
   });
 });
 
+describe('KnowledgeStore — search index memo (SPEC "Workspace knowledge: kill the 5s load, preview in place")', () => {
+  it('N search() calls on an unchanged store build the index once', async () => {
+    const repoRoot = await tempDir('cez-kb-store-memo-');
+    const { store } = await openStore(repoRoot, { disableWatchers: true });
+    await store.createDocument({ scope: 'project', path: 'a.md', content: '# A\n\nwidgets everywhere.' });
+    await store.createDocument({ scope: 'project', path: 'b.md', content: '# B\n\nmore widgets.' });
+    const before = store.getSearchIndexBuildCount();
+
+    store.search('widgets');
+    store.search('widgets');
+    store.search('everywhere');
+
+    expect(store.getSearchIndexBuildCount()).toBe(before + 1);
+  });
+
+  it('a write invalidates the memo — the very next search rebuilds and sees the new content', async () => {
+    const repoRoot = await tempDir('cez-kb-store-memo-invalidate-');
+    const { store } = await openStore(repoRoot, { disableWatchers: true });
+    const created = await store.createDocument({ scope: 'project', path: 'doc.md', content: '# Doc\n\noriginal content here.' });
+    if (!created.ok) throw new Error('setup failed');
+
+    // Prime the memo — this is the state a stale-index bug would leave untouched.
+    expect(store.search('freshword').results).toHaveLength(0);
+    const buildsAfterFirstSearch = store.getSearchIndexBuildCount();
+
+    const updated = await store.updateDocument(created.document.id, {
+      content: '# Doc\n\nfreshword now lives in the body.',
+      version: created.document.hash,
+    });
+    if (!updated.ok) throw new Error('update failed');
+
+    // The write bumped `catalogGeneration` (via `performReindex`) — the next search must rebuild,
+    // not reuse the memo built before the write, and it must actually SEE the new content.
+    const found = store.search('freshword').results.find((d) => d.id === created.document.id);
+    expect(found).toBeDefined();
+    expect(store.getSearchIndexBuildCount()).toBe(buildsAfterFirstSearch + 1);
+  });
+});
+
+describe('KnowledgeStore — findBySlug', () => {
+  it('an exact slug hit returns the matching document', async () => {
+    const repoRoot = await tempDir('cez-kb-store-slug-hit-');
+    const { store } = await openStore(repoRoot);
+    const created = await store.createDocument({ scope: 'project', path: 'onboarding-flow.md', content: '# Onboarding flow\n\nBody.' });
+    if (!created.ok) throw new Error('setup failed');
+
+    const hits = store.findBySlug(created.document.slug);
+    expect(hits.map((d) => d.id)).toEqual([created.document.id]);
+  });
+
+  it('a miss returns an empty array, never throws', async () => {
+    const repoRoot = await tempDir('cez-kb-store-slug-miss-');
+    const { store } = await openStore(repoRoot);
+    expect(store.findBySlug('no-such-slug')).toEqual([]);
+  });
+
+  it('a collision returns every match, in (root, path) order', async () => {
+    const repoRoot = await tempDir('cez-kb-store-slug-collision-');
+    const { store } = await openStore(repoRoot);
+    // Same title -> same slugify() output in two different subdirectories, so `path` (not
+    // creation order) is what must decide the returned order.
+    await store.createDocument({ scope: 'project', path: 'z-dir/overview.md', content: '# Overview\n\nZ.' });
+    await store.createDocument({ scope: 'project', path: 'a-dir/overview.md', content: '# Overview\n\nA.' });
+
+    const hits = store.findBySlug('overview');
+    expect(hits).toHaveLength(2);
+    const paths = hits.map((d) => d.path);
+    expect(paths).toEqual([...paths].sort());
+  });
+
+  it('a write invalidates the slug memo — a document created after the first lookup is still found', async () => {
+    const repoRoot = await tempDir('cez-kb-store-slug-memo-');
+    const { store } = await openStore(repoRoot, { disableWatchers: true });
+    await store.createDocument({ scope: 'project', path: 'one.md', content: '# One' });
+
+    // Primes the memo before "two" exists at all.
+    expect(store.findBySlug('one')).toHaveLength(1);
+    expect(store.findBySlug('two')).toEqual([]);
+
+    const created = await store.createDocument({ scope: 'project', path: 'two.md', content: '# Two' });
+    if (!created.ok) throw new Error('setup failed');
+
+    // The write bumped `catalogGeneration` — this lookup must rebuild, not reuse the stale memo.
+    expect(store.findBySlug('two').map((d) => d.id)).toEqual([created.document.id]);
+  });
+});
+
 describe('KnowledgeStore — C17: the mirror wire', () => {
   it('a document dropped straight into the sources mirror root is indexed with root: "sources"', async () => {
     const repoRoot = await tempDir('cez-kb-store-mirror-');

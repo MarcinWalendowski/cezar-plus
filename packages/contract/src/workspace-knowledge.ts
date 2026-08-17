@@ -115,3 +115,26 @@ export const workspaceKnowledgeChangelogResponseSchema = z.object({
   disabledReason: workspaceKnowledgeDisabledReasonSchema.optional(),
 });
 export type WorkspaceKnowledgeChangelogResponse = z.infer<typeof workspaceKnowledgeChangelogResponseSchema>;
+
+/**
+ * `GET /workspace/knowledge/document?project=<registryId>&doc=<docId>`
+ * (`.ai/specs/2026-08-17-workspace-knowledge-speed-preview.md`) — the workspace-scoped single-
+ * document read the right-pane preview needs, so a search-result click never has to leave
+ * `/workspace/knowledge` for the per-project page. Unlike every other shape in this file,
+ * `document` here carries the FULL body (`./knowledge.ts`'s own `knowledgeDocumentSchema`,
+ * unomitted) — matching that family's own `knowledgeDocumentResponseSchema` for `GET
+ * /knowledge/:id`, the one route allowed to carry one.
+ *
+ * `project` echoes the query param back even in the flag-off/no-document case, so a caller never
+ * has to remember what it asked for (matching the family's other GETs that echo an input, e.g.
+ * `search`'s own `query`). Off (either capability): 200, `document: null`, `disabledReason` set —
+ * the family's D19 discipline. On: an unregistered project or an unknown doc id is a 404 at the
+ * route layer, never this shape's `document: null` — that null is reserved for "the feature is
+ * off", not "not found" (same split `./knowledge.ts`'s `GET /knowledge/:id` already makes).
+ */
+export const workspaceKnowledgeDocumentResponseSchema = z.object({
+  project: z.string(),
+  document: knowledgeDocumentSchema.nullable(),
+  disabledReason: workspaceKnowledgeDisabledReasonSchema.optional(),
+});
+export type WorkspaceKnowledgeDocumentResponse = z.infer<typeof workspaceKnowledgeDocumentResponseSchema>;
