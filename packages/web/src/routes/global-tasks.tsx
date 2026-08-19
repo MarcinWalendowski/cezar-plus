@@ -65,10 +65,12 @@ import {
 } from '@/lib/filed-tasks'
 import { shortAge } from '@/lib/format'
 import {
+  contextCell,
   displayWorkflowName,
   formatCost,
   taskReferences,
   usageCells,
+  type ContextCell,
   type TaskReference,
   type UsageCell,
 } from '@/lib/tasks-table'
@@ -1469,6 +1471,7 @@ function TaskTable({
               {showCost ? <Th className="hidden w-[64px] text-right lg:table-cell">Cost</Th> : null}
               <Th className="hidden w-[56px] text-right xl:table-cell">CPU</Th>
               <Th className="hidden w-[84px] text-right xl:table-cell">Mem</Th>
+              <Th className="hidden w-[104px] text-right xl:table-cell">Context</Th>
               <Th className="w-[56px] text-right">Age</Th>
               <Th className="w-[64px] text-right">
                 <span className="sr-only">Actions</span>
@@ -1646,6 +1649,7 @@ function TaskRow({
       ) : null}
       <UsageTd column="cpu" cell={usage.cpu} />
       <UsageTd column="memory" cell={usage.mem} />
+      <ContextTd cell={contextCell(run)} />
       <td className={cn(TD_BASE, 'text-right text-xs text-soft-foreground tabular-nums')}>
         {shortAge(run.startedAt ?? run.createdAt, now)}
       </td>
@@ -1946,6 +1950,28 @@ function UsageTd({ column, cell }: { column: 'cpu' | 'memory'; cell: UsageCell }
         cell.kind === 'peak' && 'text-[11.5px] text-soft-foreground',
         cell.kind === 'none' && 'text-xs text-soft-foreground',
       )}
+    >
+      {cell.text || '—'}
+    </td>
+  )
+}
+
+/** The cross-project Context cell (`45k / 200k`): current window occupancy over the model's max,
+ *  tinted amber past 75% and danger past 90%. Hidden below `xl` like the CPU/Mem cells, and
+ *  reading straight off the index row (`run.contextTokens`/`contextWindow`). */
+function ContextTd({ cell }: { cell: ContextCell }) {
+  const tint =
+    cell.ratio === undefined
+      ? 'text-muted-foreground'
+      : cell.ratio >= 0.9
+        ? 'text-danger'
+        : cell.ratio >= 0.75
+          ? 'text-pending-strong'
+          : 'text-muted-foreground'
+  return (
+    <td
+      data-context-ratio={cell.ratio !== undefined ? cell.ratio.toFixed(2) : undefined}
+      className={cn(TD_BASE, 'hidden text-right font-mono text-xs tabular-nums xl:table-cell', tint)}
     >
       {cell.text || '—'}
     </td>

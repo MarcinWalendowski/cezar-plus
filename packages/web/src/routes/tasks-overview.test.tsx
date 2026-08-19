@@ -213,7 +213,7 @@ describe('TasksOverview — the table', () => {
       ],
     })
 
-    // Status | Task | Workflow | Branch | ± | PR | IN/OUT | Cost | CPU | Mem | Started
+    // Status | Task | Workflow | Branch | ± | PR | IN/OUT | Cost | CPU | Mem | Context | Started
     expect(cellsOf('full')).toEqual([
       'needs review',
       'Structured changes endpoint',
@@ -225,12 +225,26 @@ describe('TasksOverview — the table', () => {
       '$0.31',
       '—', // no live sample, CPU has no persisted peak
       '—',
+      '—', // no context recorded on this run
       '12m',
     ])
     // No branch, no PR, no diff recorded, no cost yet — dashes, not zeros (a pre-R2 record has
     // no diffStat, and `+0 −0` would claim a measurement that never happened). Started falls
     // back to createdAt.
-    expect(cellsOf('bare')).toEqual(['needs you', 'Bare minimum', 'default', '—', '—', '—', '— / —', '—', '—', '—', '26m'])
+    expect(cellsOf('bare')).toEqual([
+      'needs you',
+      'Bare minimum',
+      'default',
+      '—',
+      '—',
+      '—',
+      '— / —',
+      '—',
+      '—',
+      '—',
+      '—',
+      '26m',
+    ])
     // The pair is two colored halves, not one string — green adds, red dels (design tokens).
     const diff = tableRow('full')?.querySelector('[data-slot="diff-stat"]')
     expect(diff?.querySelector('.text-success')?.textContent).toBe('+128')
@@ -276,7 +290,7 @@ describe('TasksOverview — the table', () => {
     const headers = [...document.querySelectorAll('[data-slot="tasks-table"] th')].map(
       (cell) => cell.textContent,
     )
-    expect(headers).toEqual(['Status', 'Task', 'Workflow', 'Branch', '±', 'Ref', 'CPU', 'Mem', 'Started'])
+    expect(headers).toEqual(['Status', 'Task', 'Workflow', 'Branch', '±', 'Ref', 'CPU', 'Mem', 'Context', 'Started'])
     expect(cellsOf('hidden')).toEqual([
       'done',
       'Hidden metrics',
@@ -286,11 +300,12 @@ describe('TasksOverview — the table', () => {
       '—',
       '—',
       '—',
+      '—',
       '1m',
     ])
 
     const queued = tableRow('queued-hidden') as HTMLElement
-    expect(queued.querySelectorAll('td')).toHaveLength(8)
+    expect(queued.querySelectorAll('td')).toHaveLength(9)
     expect(queued.querySelector('[data-slot="queue-note"]')?.getAttribute('colspan')).toBe('2')
     expect(queued.textContent).not.toContain('12.0k')
     expect(queued.textContent).not.toContain('$0.02')
@@ -331,7 +346,7 @@ describe('TasksOverview — the table', () => {
     expect(screen.getByRole('button', { name: 'Expand Workflow column', pressed: false })).not.toBeNull()
     expect(screen.getByRole('button', { name: 'Fold Branch column', pressed: true })).not.toBeNull()
     expect(screen.getByRole('button', { name: 'Fold CPU column', pressed: true })).not.toBeNull()
-    expect(document.querySelectorAll('[data-slot="tasks-table"] thead button')).toHaveLength(9)
+    expect(document.querySelectorAll('[data-slot="tasks-table"] thead button')).toHaveLength(10)
     expect(document.querySelector('th[data-column-id="status"]')?.textContent).toBe('Status')
     expect(document.querySelector('th[data-column-id="task"]')?.textContent).toBe('Task')
   })
@@ -622,6 +637,22 @@ describe('TasksOverview — usage cells', () => {
     expect(usageCell('live1', 'cpu')?.getAttribute('data-usage-kind')).toBe('live')
     expect(usageCell('live1', 'mem')?.textContent).toBe('612 MB')
     expect(usageCell('live1', 'mem')?.getAttribute('data-usage-kind')).toBe('live')
+  })
+
+  it('shows the context column as used / max, tinted as the window fills', () => {
+    renderWithUsage([
+      run({ id: 'ctx-full', status: 'running', contextTokens: 190_000, contextWindow: 200_000 }),
+      run({ id: 'ctx-mid', status: 'running', contextTokens: 160_000, contextWindow: 200_000 }),
+      run({ id: 'ctx-nomax', status: 'running', contextTokens: 45_000 }),
+    ])
+
+    const ctx = (id: string) => tableRow(id)?.querySelector('td[data-column-id="context"]')
+    expect(ctx('ctx-full')?.textContent).toBe('190k / 200k')
+    // Past 90% reads as danger; the mid run (80%) as the sanctioned amber ink.
+    expect(ctx('ctx-full')?.className).toContain('text-danger')
+    expect(ctx('ctx-mid')?.className).toContain('text-pending-strong')
+    // No modelled window → only the current figure, no invented denominator.
+    expect(ctx('ctx-nomax')?.textContent).toBe('45k')
   })
 
   it('shows a finished run its dimmed peaks, and never a live sample', () => {

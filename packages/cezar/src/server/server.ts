@@ -6562,6 +6562,8 @@ export function createApp(deps: ServerDeps) {
     ...(run.referencedIssueUrl !== undefined ? { referencedIssueUrl: run.referencedIssueUrl } : {}),
     ...(run.markerRefs !== undefined ? { markerRefs: run.markerRefs } : {}),
     ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
+    ...(run.contextTokens !== undefined ? { contextTokens: run.contextTokens } : {}),
+    ...(run.contextWindow !== undefined ? { contextWindow: run.contextWindow } : {}),
     ...(run.peakRssBytes !== undefined ? { peakRssBytes: run.peakRssBytes } : {}),
     ...(run.peakProcCount !== undefined ? { peakProcCount: run.peakProcCount } : {}),
     // The live sample, on the same terms as `GET /runs`: process-wide sampler, so a

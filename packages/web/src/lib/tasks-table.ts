@@ -34,6 +34,36 @@ export function formatMem(bytes: number | undefined): string {
   return `${Math.round(bytes / 1024)} kB`
 }
 
+/** Compact token count for a narrow cell: `512`, `45k`, `1.2M`. Thousands round to whole `k`
+ *  (a column this narrow has no room for `44.7k`); millions keep one decimal until ten, where
+ *  it too stops mattering. Used by the Context column's `used / max` pair. */
+export function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens >= 10_000_000 ? 0 : 1)}M`
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`
+  return `${Math.round(tokens)}`
+}
+
+/** One Context cell: current window occupancy over the model's max (spec
+ *  2026-08-19-context-usage-in-tasks-table). `text` is '' when the run has recorded no
+ *  context yet — the cell renders its own em dash. `ratio` (used/max, only when both are
+ *  known) drives the amber/danger tint as the window fills. */
+export interface ContextCell {
+  text: string
+  ratio?: number
+}
+
+export type ContextCellInput = Pick<RunRecord, 'contextTokens' | 'contextWindow'>
+
+export function contextCell(run: ContextCellInput): ContextCell {
+  const used = run.contextTokens
+  if (used === undefined) return { text: '' }
+  const max = run.contextWindow
+  // Without a modelled max (a runner whose window we do not size) the cell is honest and shows
+  // only the current figure rather than dividing by an invented denominator.
+  if (!max) return { text: formatTokenCount(used) }
+  return { text: `${formatTokenCount(used)} / ${formatTokenCount(max)}`, ratio: used / max }
+}
+
 /** `$0.31` / `$12` — two decimals until the cents stop mattering. Legacy `fmtCost`; '' when the
  *  run has no recorded spend, because `$0.00` reads as "measured: free" and it was not measured. */
 export function formatCost(usd: number | undefined): string {

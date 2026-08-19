@@ -90,6 +90,53 @@ describe('RunStore — directional usage persistence', () => {
   });
 });
 
+describe('RunStore — context occupancy roll-up (spec 2026-08-19-context-usage-in-tasks-table)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('mirrors the LATEST turn (overwrite), never a sum, and sizes the window from the model', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      title: 'metered task',
+      workflow: 'quick-task',
+      task: 'metered task',
+      model: 'opus',
+      steps: [{ id: 'task', name: 'Do the task', kind: 'agent' }],
+    });
+    store.updateStep(run.id, 'task', { iterations: 1, contextTokens: 40_000 });
+    expect(store.getRun(run.id)).toMatchObject({ contextTokens: 40_000, contextWindow: 200_000 });
+    // A later turn OVERWRITES — the window is "now", not the sum of turns.
+    store.updateStep(run.id, 'task', { iterations: 2, contextTokens: 52_000 });
+    expect(store.getRun(run.id)?.contextTokens).toBe(52_000);
+    store.flush();
+    expect(RunStore.open(dataDir).getRun(run.id)).toMatchObject({
+      contextTokens: 52_000,
+      contextWindow: 200_000,
+    });
+  });
+
+  it('leaves the window absent for an unmodelled model rather than inventing one', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      title: 'codex task',
+      workflow: 'quick-task',
+      task: 'codex task',
+      model: 'gpt-5',
+      steps: [{ id: 'task', name: 'Do the task', kind: 'agent' }],
+    });
+    store.updateStep(run.id, 'task', { iterations: 1, contextTokens: 12_000 });
+    expect(store.getRun(run.id)?.contextTokens).toBe(12_000);
+    expect(store.getRun(run.id)?.contextWindow).toBeUndefined();
+  });
+});
+
 describe('RunStore — titleSummary + diffStat (#389)', () => {
   let dataDir: string;
 

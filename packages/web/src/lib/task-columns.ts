@@ -10,6 +10,7 @@ export const TASK_COLUMN_IDS = [
   'cost',
   'cpu',
   'memory',
+  'context',
   'started',
 ] as const
 
@@ -23,6 +24,7 @@ export type TaskColumnIcon =
   | 'cost'
   | 'cpu'
   | 'memory'
+  | 'context'
   | 'started'
 
 export interface TaskColumnDefinition {
@@ -101,6 +103,15 @@ export const TASK_COLUMNS = [
     align: 'right',
     width: '88px',
     icon: 'memory',
+  },
+  {
+    id: 'context',
+    label: 'Context',
+    canFold: true,
+    defaultExpanded: true,
+    align: 'right',
+    width: '116px',
+    icon: 'context',
   },
   {
     id: 'started',

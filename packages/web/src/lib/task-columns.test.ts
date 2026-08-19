@@ -21,6 +21,7 @@ describe('TASK_COLUMNS', () => {
       'cost',
       'cpu',
       'memory',
+      'context',
       'started',
     ])
     expect(TASK_COLUMNS.slice(0, 2).map((column) => column.canFold)).toEqual([false, false])
@@ -41,6 +42,7 @@ describe('TASK_COLUMNS', () => {
       cost: true,
       cpu: true,
       memory: true,
+      context: true,
       started: true,
     })
   })
@@ -83,6 +85,7 @@ describe('TASK_COLUMNS', () => {
       'cost',
       'cpu',
       'memory',
+      'context',
       'started',
     ])
     expect(TASK_COLUMNS.map((column) => column.id)).toContain('tokens')

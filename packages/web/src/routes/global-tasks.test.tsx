@@ -999,6 +999,28 @@ describe('global tasks page', () => {
       )
     })
 
+    it('shows the context window as used / max, tinted as it fills', async () => {
+      stubFetch({
+        runs: [{ ...RUNS[0]!, status: 'running', contextTokens: 190_000, contextWindow: 200_000 }],
+      })
+      renderPage()
+      await screen.findByText('Add checkout endpoint')
+
+      const ctx = document.querySelector('[data-context-ratio]')!
+      expect(ctx.textContent).toBe('190k / 200k')
+      // Past 90% of the window reads as danger.
+      expect(ctx.className).toContain('text-danger')
+    })
+
+    it('shows only the current context figure when the model window is unknown', async () => {
+      stubFetch({ runs: [{ ...RUNS[0]!, status: 'running', contextTokens: 45_000 }] })
+      renderPage()
+      await screen.findByText('Add checkout endpoint')
+
+      expect(document.querySelector('[data-context-ratio]')).toBeNull()
+      expect(screen.getByText('45k')).toBeTruthy()
+    })
+
     it('drops the Cost column when the host hides cost metrics', async () => {
       stubFetch({ costMetrics: false, runs: [{ ...RUNS[0]!, costUsd: 0.31 }] })
       renderPage()

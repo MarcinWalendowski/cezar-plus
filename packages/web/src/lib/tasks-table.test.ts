@@ -3,10 +3,12 @@ import { describe, expect, it } from 'vitest'
 import type { ProcessUsage, RunRecord } from '@loki-labs/better-cezar-api-client'
 import {
   compareGroups,
+  contextCell,
   filterRuns,
   finishedRunCount,
   formatCost,
   formatMem,
+  formatTokenCount,
   githubRepoBase,
   prNumber,
   scheduledResume,
@@ -53,6 +55,47 @@ describe('formatMem', () => {
   for (const [input, expected] of cases) {
     it(`${input} → "${expected}"`, () => expect(formatMem(input)).toBe(expected))
   }
+})
+
+describe('formatTokenCount', () => {
+  const cases: Array<[input: number, expected: string]> = [
+    [0, '0'],
+    [512, '512'],
+    [999, '999'],
+    [1_000, '1k'],
+    [44_700, '45k'],
+    [128_000, '128k'],
+    [1_200_000, '1.2M'],
+    [12_000_000, '12M'],
+  ]
+  for (const [input, expected] of cases) {
+    it(`${input} → "${expected}"`, () => expect(formatTokenCount(input)).toBe(expected))
+  }
+})
+
+describe('contextCell', () => {
+  it('shows used / max with the ratio when both are known', () => {
+    expect(contextCell(run({ contextTokens: 45_000, contextWindow: 200_000 }))).toEqual({
+      text: '45k / 200k',
+      ratio: 45_000 / 200_000,
+    })
+  })
+
+  it('shows only the current figure when the window is unknown', () => {
+    expect(contextCell(run({ contextTokens: 45_000 }))).toEqual({ text: '45k' })
+  })
+
+  it('is empty when no context has been recorded — the cell renders its own dash', () => {
+    expect(contextCell(run({}))).toEqual({ text: '' })
+    // A window with no reading is still nothing to show: never `0 / 200k`.
+    expect(contextCell(run({ contextWindow: 200_000 }))).toEqual({ text: '' })
+  })
+
+  it('surfaces a ratio the cell can tint as the window fills', () => {
+    expect(contextCell(run({ contextTokens: 190_000, contextWindow: 200_000 })).ratio).toBeCloseTo(
+      0.95,
+    )
+  })
 })
 
 describe('scheduledResume', () => {

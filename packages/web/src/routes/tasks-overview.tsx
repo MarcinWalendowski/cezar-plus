@@ -9,6 +9,7 @@ import {
   CpuIcon,
   DollarSignIcon,
   FileDiffIcon,
+  GaugeIcon,
   GitBranchIcon,
   ListChecksIcon,
   LinkIcon,
@@ -56,6 +57,7 @@ import {
 import { listCounts, queuePositions, runTitle, sortRuns, type ListView } from '@/lib/task-groups'
 import {
   compareGroups,
+  contextCell,
   filterRuns,
   finishedRunCount,
   formatCost,
@@ -63,6 +65,7 @@ import {
   taskReference,
   usageCells,
   workflowLabel,
+  type ContextCell,
   type UsageCell,
 } from '@/lib/tasks-table'
 import { usageMetricVisibility } from '@/lib/token-metrics'
@@ -517,6 +520,8 @@ function TaskColumnIconView({ icon }: { icon?: TaskColumnIcon }) {
       return <CpuIcon className={className} aria-hidden="true" />
     case 'memory':
       return <MemoryStickIcon className={className} aria-hidden="true" />
+    case 'context':
+      return <GaugeIcon className={className} aria-hidden="true" />
     case 'started':
       return <Clock3Icon className={className} aria-hidden="true" />
     default:
@@ -695,6 +700,8 @@ function TaskTableCell({
           {cost || <Dash />}
         </td>
       )
+    case 'context':
+      return <ContextTd cell={contextCell(run)} />
     case 'started':
       return (
         <td data-column-id={column.id} className={cn(TD_BASE, 'text-right text-xs text-soft-foreground tabular-nums')}>
@@ -705,6 +712,30 @@ function TaskTableCell({
     case 'memory':
       return null
   }
+}
+
+/** The Context cell (`45k / 200k`): current window occupancy over the model's max, tinted amber
+ *  past 75% and danger past 90% as the window fills — the sanctioned `--pending-strong` amber
+ *  ink, never `text-pending` (design guardian). Reads straight off the run record (updated per
+ *  turn on the `run` SSE), not the 2s process stream the CPU/Mem cells use. */
+function ContextTd({ cell }: { cell: ContextCell }) {
+  const tint =
+    cell.ratio === undefined
+      ? 'text-muted-foreground'
+      : cell.ratio >= 0.9
+        ? 'text-danger'
+        : cell.ratio >= 0.75
+          ? 'text-pending-strong'
+          : 'text-muted-foreground'
+  return (
+    <td
+      data-column-id="context"
+      data-context-ratio={cell.ratio !== undefined ? cell.ratio.toFixed(2) : undefined}
+      className={cn(TD_BASE, 'text-right font-mono text-xs tabular-nums', tint)}
+    >
+      {cell.text || <Dash />}
+    </td>
+  )
 }
 
 function FoldedTd({ column }: { column: TaskColumnId }) {
@@ -847,6 +878,7 @@ function TaskCard({
   const unread = isUnread(run)
   const readDone = isReadDoneItem(run)
   const cost = formatCost(run.costUsd)
+  const context = contextCell(run)
   const hasDirectionalUsage = run.inputTokens !== undefined || run.outputTokens !== undefined
 
   return (
@@ -919,6 +951,14 @@ function TaskCard({
               <>
                 <Sep />
                 <span>{cost}</span>
+              </>
+            ) : null}
+            {context.text ? (
+              <>
+                <Sep />
+                <span data-slot="card-context" title="Context window used / max">
+                  {context.text}
+                </span>
               </>
             ) : null}
           </>
