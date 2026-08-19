@@ -9,7 +9,7 @@ import { ApiError } from '@/api/client'
  * - **cezar's own `401`.** `server.ts`'s `requirePrincipal` refuses every `/api/*` route without
  *   a session. The shell is static and unguarded, so the cockpit rendered in full with every
  *   query failing — a page that looks signed in and shows nothing.
- * - **An identity gate's cross-origin redirect.** `cockpit.example.com` sits behind a
+ * - **An identity gate's cross-origin redirect.** A hosted deployment can sit behind a
  *   Cloudflare Access app that answers `302 → https://<team>.cloudflareaccess.com/…` for every
  *   path once the cookie is gone. `fetch` follows redirects by default, CORS rejects the
  *   off-origin response, and the `TypeError` became `ApiError(0, 'cannot reach the cezar

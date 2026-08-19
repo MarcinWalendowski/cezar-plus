@@ -676,7 +676,7 @@ describe('history responses are validated at the boundary (#827)', () => {
 /**
  * `.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`, test 3.
  *
- * Cloudflare Access in front of `cockpit.example.com` answers **every** path with a 302 to
+ * A Cloudflare Access app in front of a hosted deployment answers **every** path with a 302 to
  * `https://<team>.cloudflareaccess.com/…` once its cookie is gone. `fetch` follows redirects by
  * default, so that bounce was chased off-origin, rejected by CORS, and surfaced as a `TypeError`
  * — which this module reported as "cannot reach the cezar server", blaming a server that was

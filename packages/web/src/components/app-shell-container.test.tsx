@@ -565,7 +565,7 @@ describe('D14 onboarding gate (chromeless)', () => {
   /**
    * **INVERTED 2026-08-19** (`.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`, test 2). This
    * case used to be named `'signed-out never gates'` and asserted the sidebar rendered — it was
-   * pinning the bug. An owner report against cockpit.example.com: clearing site data left the
+   * pinning the bug. An owner report against a hosted deployment: clearing site data left the
    * whole cockpit on screen with every `/api/*` query 401ing behind it, and no way to sign in.
    *
    * `signed-out` is reachable only from the `oidc`/`google` boot branch, which mounts

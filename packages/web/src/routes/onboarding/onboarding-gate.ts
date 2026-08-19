@@ -50,7 +50,7 @@ export function useOnboardingEntryProbe() {
  *
  * **WIDENED 2026-08-19 to include `signed-out`** — spec
  * `.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`, from an owner report against
- * cockpit.example.com: *"if I clear application/website data I'm still in cezar, but I can't see
+ * a hosted deployment: *"if I clear application/website data I'm still in cezar, but I can't see
  * any tasks, git, etc. I should be always enforced to relogin there."*
  *
  * Not gating it meant an unauthenticated visitor got the **whole cockpit** — sidebar, nav,
