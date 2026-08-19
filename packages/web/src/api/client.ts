@@ -117,6 +117,16 @@ import type {
   KnowledgeDocumentsResponse,
   KnowledgeProposalsResponse,
   KnowledgeDocumentResponse,
+  // Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`) — rides the knowledge
+  // base, and unlike the scaffold families above it ships with real success branches on every
+  // mutator, so the mutator wrappers belong here from the start.
+  ReportsResponse,
+  ReportDetailResponse,
+  ReportApproveResponse,
+  ReportDismissResponse,
+  ReportReopenResponse,
+  ReportProcessPendingResponse,
+  ReportStatus,
   SourcesListResponse,
   SourceProvidersResponse,
   SourceCollectionsResponse,
@@ -2209,6 +2219,100 @@ export async function getKnowledgeDocument(
       init(opts),
     ),
     '/knowledge/:id',
+  )
+}
+
+// ---- report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`) ------------------
+//
+// Reports are knowledge documents carrying the reports tag, so the whole family is gated on
+// `capabilities.knowledge`: with `CEZ_KB` unset the GETs answer `enabled: false` with empty
+// payloads and the mutators 409. The cockpit hides the surface on that capability rather than
+// discovering it from a failed call.
+
+/** `GET /reports` — the triage queue: pending first, then newest filed. `counts` always describes
+ *  the WHOLE set, so a filtered view's badges still say how much there is. */
+export async function getReports(
+  query: { status?: ReportStatus; domain?: string; limit?: number; offset?: number } = {},
+  opts?: ReadOptions,
+): Promise<ReportsResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].reports.$get(
+      {
+        param: { projectId: queryScope() },
+        query: {
+          status: query.status,
+          domain: query.domain,
+          // Numbers, not strings: `reportsQuerySchema` coerces, and Hono types the request from the
+          // schema's INPUT side, which for `z.coerce.number()` is the number.
+          limit: query.limit,
+          offset: query.offset,
+        },
+      },
+      init(opts),
+    ),
+    '/reports',
+  )
+}
+
+/** `GET /reports/:key` — one report plus its markdown body. */
+export async function getReport(key: string, opts?: ReadOptions): Promise<ReportDetailResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].reports[':key'].$get(
+      { param: { projectId: queryScope(), key: encodeURIComponent(key) } },
+      init(opts),
+    ),
+    `/reports/${encodeURIComponent(key)}`,
+  )
+}
+
+/** `POST /reports/:key/approve` — mint the todo this report becomes. Idempotent: a second approve
+ *  returns the same todo with `alreadyApproved: true` rather than a duplicate. */
+export async function approveReport(
+  key: string,
+  body: { todoProjectId?: string; priority?: 'high' | 'medium' | 'low' } = {},
+): Promise<ReportApproveResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].reports[':key'].approve.$post({
+      param: { projectId: queryScope(), key: encodeURIComponent(key) },
+      json: body,
+    }),
+    `/reports/${encodeURIComponent(key)}/approve`,
+  )
+}
+
+/** `POST /reports/:key/dismiss`. The reason is required by the server — a dismissal without one is
+ *  a report quietly lost — so this signature makes it required too rather than letting the 400
+ *  teach the caller. */
+export async function dismissReport(key: string, reason: string): Promise<ReportDismissResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].reports[':key'].dismiss.$post({
+      param: { projectId: queryScope(), key: encodeURIComponent(key) },
+      json: { reason },
+    }),
+    `/reports/${encodeURIComponent(key)}/dismiss`,
+  )
+}
+
+/** `POST /reports/:key/reopen` — back to pending. Any todo an earlier approve minted is NAMED in
+ *  the response, never deleted: by now it may be started or done. */
+export async function reopenReport(key: string): Promise<ReportReopenResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].reports[':key'].reopen.$post({
+      param: { projectId: queryScope(), key: encodeURIComponent(key) },
+    }),
+    `/reports/${encodeURIComponent(key)}/reopen`,
+  )
+}
+
+/** `POST /reports/process-pending` — convert every pending report at once. A POST, never a GET: it
+ *  writes, and a side-effecting GET is one a browser or a crawler may replay. 409 unless auto mode
+ *  is on (`CEZ_REPORTS_AUTO=1`, or `reports.auto` in the project config). */
+export async function processPendingReports(): Promise<ReportProcessPendingResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].reports['process-pending'].$post({
+      param: { projectId: queryScope() },
+    }),
+    '/reports/process-pending',
   )
 }
 
