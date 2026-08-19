@@ -32,6 +32,7 @@ import {
   getGithubRefStatus,
   getGroup,
   getHealth,
+  getHostMetrics,
   getLaunchKey,
   getOpenTargets,
   getProviderStatus,
@@ -308,6 +309,8 @@ export const workspaceQueryKeys = {
   /** The cross-project task index behind ⌘K. Workspace-led for the same reason the registry is:
    *  it answers for every project at once, so no scope owns it. */
   runsIndex: ['workspace', 'runs-index'] as const,
+  /** Whole-host CPU%/memory% for the dashboard header. Host-level, so no scope owns it. */
+  hostMetrics: ['workspace', 'host-metrics'] as const,
   /** `~/.cezar/ui-state.json` via `GET/PUT /api/workspace/ui-state` (step 2.7) — cross-project
    *  GUI prefs, e.g. the sidebar's per-project collapse map (step 3.3), and — since step 3.5 —
    *  appearance + notifications, which describe the user rather than a repo. */
@@ -1036,6 +1039,21 @@ export function useHealth() {
   return useQuery({
     queryKey: queryKeys.health,
     queryFn: ({ signal }) => getHealth({ signal }),
+  })
+}
+
+/**
+ * Whole-host CPU%/memory% for the dashboard header. Unlike `useHealth`, nothing pushes host
+ * load over the socket, so the poll interval is the sole freshness mechanism — the sampler
+ * server-side averages over a 2 s window, so 3 s is a matched cadence. `staleTime` keeps the
+ * many header mounts sharing one in-flight request rather than each firing its own.
+ */
+export function useHostMetrics(refetchIntervalMs = 3_000) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.hostMetrics,
+    queryFn: ({ signal }) => getHostMetrics({ signal }),
+    refetchInterval: refetchIntervalMs,
+    staleTime: refetchIntervalMs,
   })
 }
 

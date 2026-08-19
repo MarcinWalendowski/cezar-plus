@@ -91,6 +91,7 @@ import {
 import { applyProviderEnablement } from '../core/provider-availability.ts';
 import { RunnerModelCatalog } from '../core/runner-model-catalog.ts';
 import { currentUsage, onUsage } from '../core/process-usage.ts';
+import { currentHostMetrics } from '../core/host-metrics.ts';
 import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.ts';
 import {
   QUICK_TASK_WORKFLOW,
@@ -1961,6 +1962,12 @@ export function createApp(deps: ServerDeps) {
   };
 
   const healthRoutes = new Hono().get('/health', async (c) => c.json(await healthForRequest(c)));
+
+  // Whole-HOST CPU%/memory% for the dashboard header (spec
+  // `.ai/specs/2026-08-19-host-machine-usage-in-dashboard.md`). Workspace-level — one host serves
+  // every project. UNLIKE `/health`, this rides the normal `/api/v1` auth perimeter: it is not a
+  // CORS-open discovery route, so it is deliberately NOT added to the health exemptions.
+  const hostMetricsRoutes = new Hono().get('/host-metrics', (c) => c.json(currentHostMetrics()));
 
   // The push twin of the poll it replaced (#369): while at least one cockpit
   // holds the `health` topic the server re-reads the snapshot on the old 5 s
@@ -6670,6 +6677,7 @@ export function createApp(deps: ServerDeps) {
   // project-scoped spelling, which would be a second surface to protect with no consumer.
   const workspaceV1 = new Hono()
     .route('/', healthRoutes)
+    .route('/', hostMetricsRoutes)
     .route('/', modelsRoutes)
     .route('/', providersRoutes)
     .route('/', projectsRoutes)

@@ -26,7 +26,7 @@ import { Link, useNavigate } from '@/lib/project-router'
 
 import { archiveFinished, markAllRunsSeen, patchRun } from '@/api/client'
 import { useRunUsage } from '@/api/global-events'
-import { queryKeys, useHealth, useReferenceProjectId, useRuns } from '@/api/queries'
+import { queryKeys, useHealth, useHostMetrics, useReferenceProjectId, useRuns } from '@/api/queries'
 import type { RunRecord } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { DiffStatLabel } from '@/components/diff-stat'
@@ -95,6 +95,7 @@ export function TasksOverview({
   expandedColumns = normalizeExpandedColumns(undefined),
   onToggleColumn = () => undefined,
   columnsPending = false,
+  hostUsage = null,
 }: {
   /** Undefined while `/api/runs` has not answered: the header renders, the body stays empty —
    *  an empty state before we know there are no runs would be a lie. */
@@ -125,6 +126,10 @@ export function TasksOverview({
   onToggleColumn?: (id: TaskColumnId) => void
   /** Prevent a shallow write before the authoritative workspace state can preserve siblings. */
   columnsPending?: boolean
+  /** Live whole-host CPU%/memory% stat for the header. A node, not a hook read here — same
+   *  presentational discipline as `showWorkspaceSwitch`: `TasksOverviewRoute` has query access
+   *  and passes `<HostUsageStat />`; a direct render leaves it absent. */
+  hostUsage?: React.ReactNode
 }) {
   const [query, setQuery] = React.useState('')
   const all = runs ?? []
@@ -202,6 +207,7 @@ export function TasksOverview({
             Archive finished
           </Button>
         ) : null}
+        {hostUsage}
         <div className="relative w-60">
           <SearchIcon
             className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-soft-foreground"
@@ -1019,7 +1025,47 @@ export function TasksOverviewRoute() {
         expandedColumns={taskTableColumns.expandedColumns}
         onToggleColumn={taskTableColumns.toggleColumn}
         columnsPending={taskTableColumns.isPending}
+        hostUsage={<HostUsageStat />}
       />
     </ReferenceStatusProvider>
+  )
+}
+
+/**
+ * Live whole-HOST CPU%/memory% in the overview header (spec
+ * `.ai/specs/2026-08-19-host-machine-usage-in-dashboard.md`). Distinct from the per-run
+ * `cpu`/`memory` table columns (`UsageTds`): this is the machine as a whole. Renders nothing
+ * until the first poll answers so the header does not flash a placeholder; CPU% shows `—` for
+ * the one interval before the sampler has two snapshots to diff.
+ */
+function HostUsageStat() {
+  const metrics = useHostMetrics().data
+  if (!metrics) return null
+  const cpu = metrics.cpuPercent === null ? '—' : `${Math.round(metrics.cpuPercent)}%`
+  const mem = `${Math.round(metrics.memoryPercent)}%`
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div
+            data-slot="host-usage"
+            className="hidden items-center gap-2.5 text-[12.5px] text-muted-foreground tabular-nums lg:flex"
+          >
+            <span className="inline-flex items-center gap-1">
+              <CpuIcon className="size-3.5" aria-hidden="true" />
+              {cpu}
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <MemoryStickIcon className="size-3.5" aria-hidden="true" />
+              {mem}
+            </span>
+          </div>
+        </TooltipTrigger>
+        <TooltipContent>
+          Host machine · CPU {cpu} · memory {mem}
+          {metrics.cpuCount ? ` (${metrics.cpuCount} CPU${metrics.cpuCount === 1 ? '' : 's'})` : ''}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }

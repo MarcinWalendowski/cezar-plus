@@ -55,6 +55,7 @@ import type {
   GithubPrChangesData,
   GroupResponse,
   HealthResponse,
+  HostMetricsResponse,
   ImageInput,
   LaunchKeyResponse,
   MessageInput,
@@ -520,6 +521,11 @@ const runPath = (id: string, suffix = ''): string => `/runs/${encodeURIComponent
 /** Version, update check, repo/branch, and the tool probes behind the Tools menu. */
 export async function getHealth(opts?: ReadOptions): Promise<HealthResponse> {
   return unwrap(await cez.api.v1.health.$get({}, init(opts)), '/health')
+}
+
+/** Whole-host CPU%/memory% for the dashboard header. Workspace-level: one host per install. */
+export async function getHostMetrics(opts?: ReadOptions): Promise<HostMetricsResponse> {
+  return unwrap(await cez.api.v1['host-metrics'].$get({}, init(opts)), '/host-metrics')
 }
 
 /** Host-local catalog for one discovery runner (`codex`, `opencode` — #794). Workspace-level:
