@@ -137,13 +137,18 @@ describe('AppShell', () => {
       'Settings',
     ])
     // Deep-linkable per Step 2.1: every nav row is an <a href>, not a button with an onClick.
+    // Reports' href is `/workspace/reports`, not `/reports`, since 2026-08-19 (`nav-items.ts`):
+    // it carries `workspace: true` now, same shape as Notes below it, but this flat single-
+    // project render has no separate workspace band to put it in (`projectGroups` is unset), so
+    // it renders inline here like every other visible item — see `app-shell.tsx`'s `items.map`
+    // branch, taken only when `projectGroups` is absent.
     expect(links.map((a) => a.getAttribute('href'))).toEqual([
       '/',
       '/inbox',
       '/git',
       '/automations',
       '/knowledge',
-      '/reports',
+      '/workspace/reports',
       '/skills',
       '/notes',
       '/settings',

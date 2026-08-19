@@ -1,6 +1,8 @@
 # Reports triage — a separate inbox with approve / dismiss
 
-**Status:** Proposed (2026-08-19)
+**Status:** Implemented 2026-08-19 — then **amended the same day from project scope to WORKSPACE scope**;
+see "Amendment — Reports is a workspace tab" at the end. Everything below that predates the amendment
+describes the project-scoped design and is marked where it is now false.
 **Owner:** Marcin Walendowski
 **Related:** `2026-08-17-notion-export-cezar-import.md` (the corpus is the record),
 `2026-08-17-filed-tasks-table-statuses.md` (the todo inbox and its status model),
@@ -86,6 +88,15 @@ and unique per report. A document with no identifier falls back to the catalog i
 
 ### Routing a report to a project
 
+**CORRECTED 2026-08-19 by "Amendment — Reports is a workspace tab": the map moved to the
+operator's file.** `reports.routeByDomain` (with `tags`, `handledTags` and `auto`) is read from
+the **`reports` key of `~/.cezar/config.json`**, never from a repo's `.ai/cezar/config.json`,
+through a tolerant reader on `readWorkspaceKnowledgeMountConfig`'s contract — never cached, never
+throwing, every failure degrading to defaults. The fallback is the row's **canonical `project`**
+(the first registered project that resolves the document), because a workspace-mounted report has
+no repo that owns it. The reasoning below is unchanged and is in fact what forced the move: the map
+is deployment-specific, and a deployment is the operator's, not any one repo's. Original text:
+
 `domain` on the report document (`alfredo`, `grocey`, `beside`, `predicts`, …) is a *product*
 axis, while a todo inbox is a *repo*. The map between them is deployment-specific, so it is
 configuration, never source: `reports.routeByDomain` in the project's `.ai/cezar/config.json`,
@@ -93,6 +104,14 @@ falling back to the project the report document itself belongs to. This keeps th
 generic — cezar ships no knowledge of any particular product line.
 
 ## Architecture
+
+**CORRECTED 2026-08-19 by "Amendment — Reports is a workspace tab": the two boxes at the bottom of
+this diagram are wrong about scope.** The routes are `/api/v1/workspace/reports…` (workspace-level,
+single-mount, never mirrored under `/api/v1/p/:projectId`), and the triage store is **one** file at
+`~/.cezar/reports-triage.json` — not one per project. The `O_EXCL` lease is unchanged and matters
+more at this scope, since it now serializes every project's cockpit tab against a single file. The
+join fans out over every registered project's knowledge base and de-duplicates on the triage key, so
+one document resolved by N projects is one row. Diagram as originally drawn:
 
 ```
    worker report_issue ──► BOT_KV ──► reports drain (systemd timer on the box)
@@ -111,6 +130,10 @@ generic — cezar ships no knowledge of any particular product line.
 - **No new storage technology.** The triage store is the `todos.json` idiom verbatim: one JSON
   file per project under `.ai/cezar`, written tmp+rename under an `O_EXCL` lease, read
   leniently (an unparseable row is dropped with a warning, never fatal).
+  **CORRECTED 2026-08-19 (same amendment): "one JSON file per project under `.ai/cezar`" is now
+  one JSON file per MACHINE at `~/.cezar/reports-triage.json`**, on the
+  `notesPath()`/`agentAccountsPath()` precedent. The idiom — tmp+rename under an `O_EXCL` lease,
+  lenient per-row read — is unchanged; only the scope of the file is.
 - **The join is in the route, not the store.** The KB stays the only index of documents; the
   triage store knows nothing about report content.
 
@@ -124,7 +147,20 @@ generic — cezar ships no knowledge of any particular product line.
 | P4 | Auto mode | `process-pending` + systemd timer on the box; off by default |
 | P5 | Deploy + verify | Build, gates, rsync to `/opt/cezar`, restart, run the Verification matrix |
 
+**CORRECTED 2026-08-19 by "Amendment — Reports is a workspace tab":** P2's routes are the
+`/api/v1/workspace/reports…` family, and P3's nav item is a **workspace-band** item carrying a
+`workspaceTo`, not a per-project one. It shipped as written above first; the amendment moved it the
+same day.
+
 ## Data Models
+
+**CORRECTED 2026-08-19 by "Amendment — Reports is a workspace tab": the path below is wrong, and
+`ReportListItem` is missing two fields.** The store is `~/.cezar/reports-triage.json` — one per
+machine, keyed on the globally unique provenance identifier, which is what makes a single store
+over many corpora safe. `ReportListItem` additionally carries `project` (the canonical project the
+document link resolves through) and `projects: string[]` (every project that resolves the same
+document), and the list response gained `projects: WorkspaceProjectHealth[]`. The row shape itself
+is unchanged. Original text:
 
 `<projectRoot>/.ai/cezar/reports-triage.json` — a JSON array:
 
@@ -159,6 +195,16 @@ type ReportListItem = {
 
 ## API Contracts
 
+**SUPERSEDED 2026-08-19 by "Amendment — Reports is a workspace tab": the scope sentence below is
+false, and it is the single most load-bearing falsehood in this spec.** Every path in the table
+that follows is now `/api/v1/workspace/reports…` — workspace-level, single-mount, **never** mirrored
+under `/api/v1/p/:projectId`, so `route-parity.test.ts` deliberately does not cover it. The six
+project-scoped paths are deleted, not aliased; they 404. The list query gained `project`, a
+**membership** test over the row's `projects` rather than equality against `project`. The
+behaviours in the table (idempotent approve, reopen naming the orphan, the 409 on
+`process-pending`, the flag-off shapes) are unchanged, and the list gained `projects[]` per-project
+health rows. Original text:
+
 All project-scoped, mounted like every other family so they answer at `/api/v1/*`,
 `/api/v1/p/:projectId/*` and `/api/v1/p/default/*` identically.
 
@@ -190,6 +236,10 @@ Mutators answer 409 with a fixed flag-naming message when the KB is off, followi
   the record on the box and the Mac copy is retired, only the box's store is authoritative —
   but nothing enforces that. Mitigation: doctrine, and the fact that reports now only ever
   arrive on the box.
+  **CORRECTED 2026-08-19 (same amendment): the file is `~/.cezar/reports-triage.json`, one per
+  MACHINE.** The risk above is unchanged in kind — two machines, two stores — but the risk this
+  spec did not see is the one that actually bit, and it was one machine with **twelve** stores:
+  see the amendment. What remains true here is that only the box's store is authoritative.
 - **Purity guard.** `packages/{cezar,web}/src` must not mention Loki products. The routing map
   is configuration; the tag name is configuration; no product name enters source.
 
@@ -215,7 +265,11 @@ Automated:
 Runtime, on production, after deploy:
 
 5. `GET /api/v1/p/loki-labs/reports` lists the reports currently at `status/new`, including
-   the two 2026-08-15/16 ones and the two e2e probes.
+   the two 2026-08-15/16 ones and the two e2e probes. **CORRECTED 2026-08-19 by "Amendment —
+   Reports is a workspace tab": that URL no longer exists** (it 404s). The step is now
+   `GET /api/v1/workspace/reports`, one queue for the whole registry, and it must list each of
+   those reports **once** rather than once per project that resolves it — see the amendment's
+   own verification.
 6. Approve one report in the cockpit; confirm a todo appears on the Tasks board for the routed
    project, and that the report leaves pending.
 7. Dismiss a probe report with a reason; confirm it leaves pending and stays searchable in the
@@ -343,7 +397,10 @@ Two further things were verified in passing, neither of which the unit tests cou
 
 - **`reports.routeByDomain` is read per request** — it was added to the live
   `.ai/cezar/config.json` (merged, preserving the `notion-export` knowledge mount) and the very next
-  approve routed to `chat` with **no restart**.
+  approve routed to `chat` with **no restart**. **CORRECTED 2026-08-19 by "Amendment — Reports is a
+  workspace tab": the file is now `~/.cezar/config.json`.** Read-per-request still holds and is
+  still the property worth having; the block simply lives beside the knowledge mount that produced
+  the reports, in the operator's file, rather than in a repo's.
 - **Idempotency holds against the real 595-entry inbox file**, not just a temp dir: a second approve
   of the same report returned `alreadyApproved: true` with the same `todoId`.
 
@@ -392,3 +449,128 @@ Gates after this amendment: `npm run typecheck` green (all four projects); `npm 
 reverting only this change's three files and seeing the same failures, and by re-running them with the
 change restored (route-parity passed twice, `store.test.ts` failed once and passed once on identical
 code). The upstream purity gate passes: these new comments name no downstream deployment.
+
+### Amendment — Reports is a workspace tab (2026-08-19)
+
+**The rationale for project scope was measured wrong, and it is the part of this spec most likely to
+be re-derived if left standing.** It read, in `nav-items.ts` beside the item this spec added and in
+the "All project-scoped" line of API Contracts above:
+
+> triage is per-corpus (one project's reports, one project's todo inbox), and a cross-project report
+> queue would need a cross-project answer for where an approval files its task.
+
+Both halves are false on any deployment that mounts its corpus at workspace scope, which is the
+normal shape rather than an exotic one:
+
+- **"Per-corpus" is not per-project.** A knowledge mount is declared in the OPERATOR's
+  `~/.cezar/config.json` (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md` D3), so **all 12
+  registered projects resolved the same 196 reports.** Verified per project rather than inferred:
+  `loki-labs`, `chat`, `cezar`, `aside`, `career-kit` and `brand` each returned the same report
+  document.
+- **So the Reports nav item rendered inside every project group** — 12 identical queues over one
+  corpus. Deduplicated at 196 documents × 12 projects, an undeduplicated workspace queue would be
+  **2352 rows**; the project-scoped design did not avoid that number, it spread it across twelve
+  pages.
+- **Triage was stored per project, so a decision made in one was invisible in the others.** Two
+  triage stores existed on the box. The second
+  (`/var/lib/cezar/loki-labs/chat/.ai/cezar/reports-triage.json`, written 17:20, `by` = the owner)
+  re-dismissed two probe reports with reason `"test"` and re-approved a report already approved
+  under `loki-labs` at 09:20. **The same questions were answered twice because the UI asked twice.**
+- **The cross-project answer exists.** Where an approval files its task is `reports.routeByDomain`
+  at workspace scope, falling back to the row's canonical project — the same map the original design
+  already needed, simply read from the operator's file.
+
+Reports **are** knowledge documents, and knowledge mounts belong to the operator rather than to any
+repo. The queue and the decision belong at the same scope as the corpus they describe.
+
+**What changed**
+
+1. **The triage store moved to workspace scope.** `reportsTriagePath()` was
+   `<project dataDir>/reports-triage.json`; it is now `~/.cezar/reports-triage.json`, on the
+   `notesPath()` / `agentAccountsPath()` precedent (`packages/cezar/src/paths.ts`). One store over
+   many corpora is safe because triage keys are provenance identifiers (`notion:<uuid>`,
+   `local:report:<ts>-<hash>`), globally unique; the weaker `catalog-id` fallback still carries
+   `keyKind`, so it stays visibly weaker rather than being treated as equal. **No migration code
+   ships** — the family was added today and has never been in a published release, so there is no
+   older per-project file in anyone's repo to read. The two that existed on the box were merged by
+   hand.
+2. **Config moved to the operator's file.** The `reports` block (`tags`, `handledTags`, `auto`,
+   `routeByDomain`) left the per-project `.ai/cezar/config.json` schema and is read from the
+   `reports` key of `~/.cezar/config.json`, through a new tolerant reader copying
+   `readWorkspaceKnowledgeMountConfig`'s contract: never cached (a `routeByDomain` edit is live on
+   the next request, no restart), never throwing, every failure degrading to the family's defaults.
+3. **The routes moved.** `GET /api/v1/reports`, `GET /api/v1/reports/:key`,
+   `POST /api/v1/reports/:key/{approve,dismiss,reopen}` and `POST /api/v1/reports/process-pending`
+   are **deleted** — they 404, with no alias and no redirect — and replaced by the same six under
+   `/api/v1/workspace/reports…`. Workspace-level, single-mount, never mirrored under
+   `/api/v1/p/:projectId`. Deleting rather than keeping both is the point: two surfaces over one
+   store is a second place to make the same decision, which is the failure above.
+4. **The queue de-duplicates.** A document resolved by N projects is ONE row carrying
+   `projects: string[]` plus a canonical `project` (the first in registry order, so two identical
+   requests name the same one) that the document link resolves through — never a claim that any repo
+   owns the report.
+5. **New response fields.** `ReportListItem` gains `project` and `projects`. `ReportsResponse` gains
+   `projects: WorkspaceProjectHealth[]`, the same per-project health shape every sibling workspace
+   board reports, with a dead project present as an `ok: false` row rather than dropped — a corpus
+   that vanished must not read as "nothing to triage". Each row's `total` is that project's own
+   count **before** the dedupe, so the rows deliberately sum to more than `counts.total`; that is
+   not a discrepancy to reconcile. `reportsQuerySchema` gains `project` as a **membership** test over
+   `projects`, not equality against `project` — equality would hide a shared report from every
+   project but one, which is this same bug in a query parameter.
+6. **Gated on `capabilities.knowledge` ONLY**, deliberately not the `knowledge && workspaceViews`
+   AND-gate the workspace-knowledge family uses. `workspaceViews` is false under
+   `CEZ_SINGLE_PROJECT=1`, and since this is now the only Reports surface, that gate would not
+   narrow the feature there — it would delete it. `workspace-todos-routes.ts` removed the same gate
+   for the same reason (its D7: *a main path gated on a flag nobody sets is invisible, failing as
+   silence rather than as an error*). One conjunct also means nothing needs disambiguating, which is
+   why this family carries `enabled` and no `disabledReason`. Off is still 200-with-empty-payload for
+   GETs and 409 naming `CEZ_KB=1` for mutators; 404 still means "no such report", never "no such
+   feature".
+
+**Verification for the amendment** — the steps that would fail if the move were done badly, not
+re-runs of the steps above. Written here as the required matrix; anything not yet executed when this
+section was written is called out as such rather than rounded up.
+
+Automated:
+
+A1. **The old surface is gone, not copied.** All six `/api/v1/reports*` paths 404, including under
+    `/api/v1/p/:projectId` and `/api/v1/p/default` — the negative control against a "move" that
+    quietly leaves the project mount registered, which would restore the two-places-to-decide bug
+    while every new test passed.
+A2. **Dedupe.** Two projects resolving one document produce ONE row whose `projects` names both, in
+    sorted order, with `project` the first in registry order. Negative control: a document only one
+    project resolves keeps `projects.length === 1`, so the test cannot pass by always collapsing.
+A3. **One decision, seen from everywhere.** A triage row written against a key reads back identically
+    under every project filter — the direct regression test for the two-stores incident above.
+A4. **`?project=` is membership.** Filtering by a **non-canonical** member of `projects` still
+    returns the row. An equality implementation passes any test that only ever filters by the
+    canonical project, which is exactly the vacuous-assertion shape the counts test fell into earlier
+    in this spec (see "Results — automated": a filter that agrees with the bug proves nothing).
+A5. **The gate.** The family serves under `CEZ_SINGLE_PROJECT=1` (`workspaceViews` false) with
+    `CEZ_KB=1`. Mutation: ANDing `workspaceViews` into the gate must turn this red — otherwise the
+    thing that would silently delete reports on a single-project install is untested.
+A6. **Health rows.** A failed/missing project is an `ok: false` row with a reason, never a dropped
+    one, and on a shared mount the per-project `total`s sum to **more** than `counts.total`. Assert
+    the inequality explicitly; a fixture where they happen to be equal cannot see the pre-dedupe
+    contract at all.
+A7. **Config.** The `reports` block is read from `~/.cezar/config.json`; a missing or corrupt block
+    degrades to defaults rather than throwing, and is re-read per request. Negative control: a
+    `reports` block in a repo's `.ai/cezar/config.json` is **not** read, so a leftover from the
+    project-scoped afternoon cannot appear to still work.
+A8. **Store.** The existing lease/lenient-read/atomicity tests continue to pass against the
+    workspace path — the lease matters more here, since it now serializes every project's cockpit tab
+    against a single file rather than each against its own.
+
+Runtime, on production, after deploy:
+
+A9. `GET /api/v1/workspace/reports` lists each report **once** — one queue, not twelve, and not
+    2352 rows — and `counts.total` matches the pre-move total for the corpus (196 at the time of the
+    move).
+A10. The Reports nav item appears **once**, in the workspace band, and no longer inside any project
+     group.
+A11. An approve routes through `~/.cezar/config.json`'s `reports.routeByDomain` with no restart, and
+     the resulting todo lands on the mapped project's board; a second approve of the same report is
+     still `alreadyApproved: true` with the same `todoId`.
+A12. No stale per-project `reports-triage.json` remains on the box under any project's `.ai/cezar/`
+     — a leftover file is invisible to the new code and would read as "triage was lost" to anyone who
+     found it.

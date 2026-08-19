@@ -142,39 +142,11 @@ const configSchema = z.object({
    * false preserves the ordinary per-runner model selector.
    */
   modelsLocked: z.boolean().optional().catch(undefined),
-  /**
-   * Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`). Every key optional
-   * and the whole section `.catch(undefined)`, like `defaultModels` above: a repo that says nothing
-   * gets the family's own defaults, and a malformed section degrades to that rather than discarding
-   * the rest of the config.
-   */
-  reports: z
-    .object({
-      /** Which knowledge tags mark a document as a report. Unset = the family's own default set. */
-      tags: z.array(z.string().trim().min(1).max(64)).max(20).optional(),
-      /**
-       * Which knowledge tags mean the report was ALREADY handled, by whatever tracker filed it,
-       * before triage existed here. Such a report opens as `approved` with no triage row and is
-       * never auto-converted. Unset = the family's default (`status/processed`); an explicit `[]`
-       * turns the behaviour off and puts every report back in the pending queue.
-       */
-      handledTags: z.array(z.string().trim().min(1).max(64)).max(20).optional(),
-      /**
-       * Permit `POST /reports/process-pending` to convert every pending report into a todo without
-       * a human deciding each one. Absent reads as OFF — auto-conversion has to be asked for, so a
-       * corpus nobody has configured can never be mass-converted by a stray call.
-       */
-      auto: z.boolean().optional(),
-      /**
-       * Report `domain` → the project id whose todo inbox that report's work belongs in. A report's
-       * `domain` is a PRODUCT axis (`beside`, `predicts`) while a todo inbox is a REPO, and only
-       * this deployment knows the mapping. An unmapped domain mints into the report's own project,
-       * which is always a valid target.
-       */
-      routeByDomain: z.record(z.string(), z.string().trim().min(1).max(200)).optional(),
-    })
-    .optional()
-    .catch(undefined),
+  // NOTE: there is deliberately no `reports` key here. It was added on 2026-08-19 and removed the
+  // same day: reports arrive through a knowledge mount declared in the OPERATOR's
+  // `~/.cezar/config.json`, so every registered project resolved the same corpus and a repo-local
+  // routing map would be twelve copies of one answer. It lives in `../reports-config.ts`, read from
+  // the workspace file. Do not re-add it here without re-reading that module's doc comment.
 });
 
 export type CezConfig = z.infer<typeof configSchema>;

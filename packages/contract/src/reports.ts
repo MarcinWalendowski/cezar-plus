@@ -1,24 +1,37 @@
 import { z } from 'zod';
 import { todoItemSchema } from './skills.ts';
+import { workspaceProjectHealthSchema } from './workspace-runs.ts';
 
 /**
- * The REPORTS family of `/api/v1` — triage over the report documents already in a project's
- * knowledge base. See `.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`.
+ * The REPORTS family of `/api/v1/workspace` — triage over the report documents in the knowledge
+ * bases of every registered project. See `.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`
+ * and its "Reports is a workspace tab" amendment.
  *
  * A report is an ordinary knowledge document carrying the reports tag; presence of that tag is
  * what makes it one, exactly as `changeType` is what makes a document a changelog entry
  * (`./knowledge.ts`). This family adds **no** document type and **no** new index: the list is a
- * left join of "documents carrying the tag" against a small per-project triage store, and a
- * report with neither a triage row nor a handled tag of its own reads as `pending`. That is why a
- * freshly arrived report needs no write anywhere to appear in the inbox — and why a report the
- * previous tracker already processed does not reappear as a question (see
+ * left join of "documents carrying the tag" against one small triage store, and a report with
+ * neither a triage row nor a handled tag of its own reads as `pending`. That is why a freshly
+ * arrived report needs no write anywhere to appear in the inbox — and why a report the previous
+ * tracker already processed does not reappear as a question (see
  * {@link reportStatusSourceSchema}).
+ *
+ * **WORKSPACE-SCOPED, and that is the whole point (CHANGED 2026-08-19).** This used to be
+ * `/api/v1/reports`, mounted per project. It could not stay there: a knowledge mount is declared
+ * in the OPERATOR's `~/.cezar/config.json` (`.ai/specs/2026-08-19-tasks-page-and-start-
+ * grounding.md` D3), so on the deployment that motivated this every one of 12 projects resolved
+ * the same 196 reports — 12 identical queues, each with its own triage store, each able to answer
+ * the same question differently. Measured, not hypothetical: two stores existed on the box and the
+ * second one re-dismissed two reports the first had already decided. One queue, one decision.
  *
  * **Triage never lives in the report's own frontmatter.** Report documents arrive from a mount
  * that may be read-only, they are owned by whatever writer drains them (which re-writes the same
  * filename on retry), and their bodies are end-user text. A second writer editing their
  * frontmatter would turn a safe re-drain into a clobber. So triage is a separate store, keyed on
- * the document's provenance identifier.
+ * the document's provenance identifier — and that key is what makes ONE store at workspace scope
+ * safe: an identifier is globally unique, so two projects with genuinely different reports cannot
+ * collide (see {@link reportKeyKindSchema} for the weaker fallback key, which stays visibly
+ * weaker).
  *
  * As in `./knowledge.ts`, these shapes are the CLOSED wire half — every key a route answers with
  * and no index signature. `contract-parity.reports.test.ts` checks each response schema against
@@ -28,6 +41,9 @@ import { todoItemSchema } from './skills.ts';
  * answers 200 with a schema-valid empty payload and every mutator answers 409 — never 404,
  * because the feature is switched off, not missing. The schemas below are shaped so the empty
  * payload is a normal value of the same type as the "on" response, never a second shape.
+ * `capabilities.workspaceViews` is deliberately NOT part of that gate, unlike the workspace
+ * KNOWLEDGE family's AND-gate: it is false under `CEZ_SINGLE_PROJECT=1`, and since this is now the
+ * ONLY reports surface, ANDing it in would delete reports outright on a single-project install.
  */
 
 // ---- shared vocabulary -----------------------------------------------------------------------
@@ -112,10 +128,23 @@ export type ReportTriageRow = z.infer<typeof reportTriageRowSchema>;
 // ---- the derived list item -------------------------------------------------------------------
 
 export const reportListItemSchema = z.object({
-  /** The triage key — what every mutator addresses this report by. */
+  /** The triage key — what every mutator addresses this report by. Workspace-unique: the queue is
+   *  DEDUPED on it, so one document resolved by twelve projects is one row here, not twelve. */
   key: z.string().min(1).max(500),
   /** The knowledge catalog id, for fetching the document body. */
   docId: z.string().min(1),
+  /**
+   * The registry id of the project this row's document link resolves through — the FIRST project in
+   * registry order that resolves it, so two identical requests name the same one. Never "the project
+   * that owns this report": a workspace knowledge mount belongs to the operator, not to any repo.
+   */
+  project: z.string().min(1),
+  /**
+   * EVERY project whose knowledge base resolves this same document, sorted, `project` included.
+   * Length > 1 is the normal case for a workspace mount and is exactly what the old per-project
+   * queue rendered as N separate rows with N separate answers.
+   */
+  projects: z.array(z.string()),
   title: z.string(),
   domain: z.string().optional(),
   tags: z.array(z.string()),
@@ -153,6 +182,15 @@ export const reportsResponseSchema = z.object({
   counts: reportCountsSchema,
   /** True when `limit` cut the list short, so a caller never reads a page as the whole set. */
   truncated: z.boolean(),
+  /**
+   * One row per project the fan-out considered, dead ones included with `ok: false` and a reason —
+   * the same `workspaceProjectHealthSchema` every sibling workspace board reports, reused rather
+   * than re-declared. A project that fails is a ROW, never a silently dropped one: a corpus that
+   * vanished would otherwise read as "nothing to triage", which is the opposite of true. `total`
+   * is that project's own report count BEFORE the cross-project dedupe, so the numbers deliberately
+   * sum to more than `counts.total` whenever a mount is shared.
+   */
+  projects: z.array(workspaceProjectHealthSchema),
 });
 export type ReportsResponse = z.infer<typeof reportsResponseSchema>;
 
@@ -213,6 +251,10 @@ export type ReportProcessPendingResponse = z.infer<typeof reportProcessPendingRe
 export const reportsQuerySchema = z.object({
   status: reportStatusSchema.optional(),
   domain: z.string().trim().min(1).max(64).optional(),
+  /** Keep only rows whose `projects` CONTAINS this registry id — a membership test, not equality
+   *  against `project`, because a row belongs to every project that resolves it and filtering on
+   *  the canonical one alone would hide a shared report from all but one of them. */
+  project: z.string().trim().min(1).max(200).optional(),
   limit: z.coerce.number().int().positive().max(500).optional(),
   offset: z.coerce.number().int().nonnegative().optional(),
 });

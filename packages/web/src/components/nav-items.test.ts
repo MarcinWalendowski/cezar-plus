@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { NAV_ITEMS, activeNavItem, activeNavPath, visibleNavItems } from './nav-items'
+import { NAV_ITEMS, activeNavItem, activeNavPath, visibleNavItems, workspaceNavItems } from './nav-items'
 
 /** Which nav item owns a URL. This is the rule that decides what the user sees lit up, and it
  *  is not a plain equality check — items own areas, and the Settings area nests. */
@@ -275,5 +275,46 @@ describe('visibleNavItems', () => {
         }
       }
     }
+  })
+})
+
+/**
+ * The project vs. workspace BAND split. `project-groups.tsx` renders one nav item per registered
+ * project by filtering `visibleNavItems(...).filter((item) => !item.workspace)` — reproduced here
+ * so a regression is caught at this level, not only by rendering the whole shell.
+ * `workspaceNavItems` is the OTHER band, the row above the project groups (D1).
+ *
+ * Reports moved from the project band to the workspace band on 2026-08-19
+ * (`nav-items.ts`'s own corrected doc comment: the knowledge mount the reports live in is
+ * declared once, by the operator, not per project — 12 registered projects used to render 12
+ * identical queues over the SAME corpus). Both directions are asserted, not just one: a test
+ * that only checked `workspaceNavItems` contains it would also pass an item left in BOTH bands,
+ * which is not what `workspace: true` means (see `NavItem.workspace`'s own doc comment — "an
+ * item whose workspace destination is its ONLY destination").
+ */
+describe('the project vs. workspace band split', () => {
+  const projectBandLabels = (opts?: Parameters<typeof visibleNavItems>[0]) =>
+    visibleNavItems(opts)
+      .filter((item) => !item.workspace)
+      .map((item) => item.label)
+  const workspaceBandLabels = (opts?: Parameters<typeof workspaceNavItems>[0]) =>
+    workspaceNavItems(opts).map((item) => item.label)
+
+  it('Reports leaves the project band and joins the workspace band', () => {
+    expect(projectBandLabels({ knowledge: true })).not.toContain('Reports')
+    expect(workspaceBandLabels({ knowledge: true })).toContain('Reports')
+  })
+
+  it('a gated-off Reports (CEZ_KB unset) is absent from BOTH bands, not stranded in one', () => {
+    expect(projectBandLabels({ knowledge: false })).not.toContain('Reports')
+    expect(workspaceBandLabels({ knowledge: false })).not.toContain('Reports')
+  })
+
+  // Notes and Reports share the same shape (`workspace: true` + `workspaceTo` equal to `to`) —
+  // Notes already proved this split before Reports joined it, so it earns a place in the same
+  // assertion rather than a one-off case.
+  it('Notes has always been workspace-only, the shape Reports now matches', () => {
+    expect(projectBandLabels({ notes: true })).not.toContain('Notes')
+    expect(workspaceBandLabels({ notes: true })).toContain('Notes')
   })
 })

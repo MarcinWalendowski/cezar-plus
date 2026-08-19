@@ -278,18 +278,6 @@ export const queryKeys = {
     return [queryScope(), 'knowledge', 'proposals'] as const
   },
   knowledgeDocument: (id: string) => [queryScope(), 'knowledge', 'document', id] as const,
-  /** Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`). NOT under the
-   *  `'knowledge'` prefix, deliberately: the `knowledge` WS topic fires on every corpus change and
-   *  sweeping the reports queue with it would be right, but the reverse is not — a triage decision
-   *  changes no document, so it must not invalidate the 2,000-row catalog. The Reports view
-   *  subscribes to `knowledge` itself and invalidates BOTH prefixes; a triage mutation invalidates
-   *  only this one. */
-  get reports() {
-    return [queryScope(), 'reports'] as const
-  },
-  reportsList: (query: { status?: string; domain?: string }) =>
-    [queryScope(), 'reports', 'list', query.status ?? null, query.domain ?? null] as const,
-  report: (key: string) => [queryScope(), 'reports', 'detail', key] as const,
   get sources() {
     return [queryScope(), 'sources'] as const
   },
@@ -412,6 +400,21 @@ export const workspaceQueryKeys = {
    *  neither half alone identifies a document (the same opaque id can exist in more than one
    *  project's store). */
   knowledgeDocument: (project: string, doc: string) => ['workspace', 'knowledge', 'document', project, doc] as const,
+  /** Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`, "Reports is a
+   *  workspace tab" amendment — CHANGED 2026-08-19 from a project-scoped `queryKeys.reports`
+   *  family: a knowledge mount is declared in the OPERATOR's config, not in any repo, so every
+   *  registered project used to resolve the SAME reports through N different scoped keys and N
+   *  different triage stores. One queue, one key family, at workspace scope.
+   *
+   *  Own top-level prefix, NOT under `['workspace','knowledge',...]`, for the same reason the old
+   *  key was not under `'knowledge'`: a triage decision changes no document, so it must not
+   *  invalidate the (up to) 2,000-row knowledge catalog. The Reports view subscribes to the
+   *  `knowledge` WS topic itself and invalidates BOTH prefixes; a triage mutation invalidates
+   *  only this one (see `useReportTriage` below). */
+  reportsRoot: ['workspace', 'reports'] as const,
+  reports: (query: { status?: string; domain?: string; project?: string } = {}) =>
+    [...workspaceQueryKeys.reportsRoot, 'list', query.status ?? null, query.domain ?? null, query.project ?? null] as const,
+  report: (key: string) => [...workspaceQueryKeys.reportsRoot, 'detail', key] as const,
   /** `GET /workspace/notifications` — the machine-wide outbound transport registry, distinct
    *  from `uiState` (which owns the per-browser desktop-notification toggle). */
   notifications: ['workspace', 'notifications'] as const,
@@ -2137,21 +2140,22 @@ export function useKnowledgeDocument(id: string, enabled = true) {
   })
 }
 
-// ---- report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`) ------------------
+// ---- report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`, workspace-scoped
+// since the "Reports is a workspace tab" amendment) -----------------------------------------
 
-/** `GET /reports` — the triage queue. Safe to mount unconditionally like the hooks above: with
- *  `CEZ_KB` unset the server answers `enabled: false` rather than an error. */
-export function useReports(query: { status?: ReportStatus; domain?: string } = {}) {
+/** `GET /workspace/reports` — the triage queue. Safe to mount unconditionally like the hooks
+ *  above: with `CEZ_KB` unset the server answers `enabled: false` rather than an error. */
+export function useReports(query: { status?: ReportStatus; domain?: string; project?: string } = {}) {
   return useQuery({
-    queryKey: queryKeys.reportsList(query),
+    queryKey: workspaceQueryKeys.reports(query),
     queryFn: ({ signal }) => getReports(query, { signal }),
   })
 }
 
-/** `GET /reports/:key` — the selected report's body. */
+/** `GET /workspace/reports/:key` — the selected report's body. */
 export function useReport(key: string | null) {
   return useQuery({
-    queryKey: queryKeys.report(key ?? ''),
+    queryKey: workspaceQueryKeys.report(key ?? ''),
     queryFn: ({ signal }) => getReport(key ?? '', { signal }),
     enabled: key !== null && key !== '',
   })
@@ -2165,19 +2169,20 @@ export function useReport(key: string | null) {
  * things to replay silently, and one rule across three sibling mutations is easier to keep true
  * than three.
  *
- * Every one invalidates `queryKeys.reports` (both the list and the open detail, by prefix) AND
- * `queryKeys.todos` — approve mints a todo, so the Filed table is stale the moment this returns,
- * and a board that still shows the old list is how a user comes to approve the same report twice
- * looking for the todo they were promised.
- */
+ * Every one invalidates `workspaceQueryKeys.reportsRoot` (both the list and the open detail, by
+ * prefix) AND the cross-project `workspaceQueryKeys.workspaceTodos` aggregate — approve mints a
+ * todo into SOME registered project's board, and this page has no ambient project scope to name
+ * which one (the same "scope trap" `workspace-tasks.tsx` documents for a scope-led query key), so
+ * the one Filed board this hook CAN correctly invalidate is the cross-project one. A visit to that
+ * project's own Tasks page still refetches its own `queryKeys.todos` on mount as usual. */
 function useReportTriage<TArgs, TResult>(mutationFn: (args: TArgs) => Promise<TResult>) {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn,
     retry: false,
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.reports })
-      void queryClient.invalidateQueries({ queryKey: queryKeys.todos })
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.reportsRoot })
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.workspaceTodos })
     },
   })
 }

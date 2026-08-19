@@ -2,11 +2,11 @@ import { useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
-import { CheckIcon, FlagIcon, TriangleAlertIcon, Undo2Icon, WandSparklesIcon } from 'lucide-react'
+import { CheckIcon, FlagIcon, TriangleAlertIcon, Undo2Icon, UsersIcon, WandSparklesIcon } from 'lucide-react'
 
 import type { ReportListItem, ReportStatus } from '@loki-labs/better-cezar-api-client'
 import {
-  queryKeys,
+  workspaceQueryKeys,
   useApproveReport,
   useDismissReport,
   useHealth,
@@ -17,32 +17,72 @@ import {
 } from '@/api/queries'
 import { subscribeTopic } from '@/api/ws'
 import { CenteredState } from '@/components/centered-state'
+import { PickerPill } from '@/components/picker-pill'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/toaster'
 import { shortAge } from '@/lib/format'
-import { Link } from '@/lib/project-router'
+import { Link, scopeTo } from '@/lib/project-router'
 import { cn } from '@/lib/utils'
 
 /**
- * `/p/:projectId/reports` — the user-report triage queue
- * (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`).
+ * `/workspace/reports` — the user-report triage queue
+ * (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`, "Reports is a workspace tab"
+ * amendment).
  *
- * **Why this surface exists.** Reports arrive as knowledge documents, and the Tasks board renders
- * `todos.json` — it never reads the knowledge base. So a report landing in the corpus is invisible
- * to the board that decides what gets worked on: it is filed, and nothing more happens. This page
- * is the missing act. Approve mints the todo (which is what puts it on the board), dismiss records
- * a reason, and neither touches the report document itself.
+ * **MOVED HERE 2026-08-19 from `/p/:projectId/reports` (`routes/reports/reports.tsx`, deleted).**
+ * The project-scoped version's own doc comment used to justify having no `workspaceTo` with:
+ * "triage is per-corpus (one project's reports, one project's todo inbox), and a cross-project
+ * report queue would need a cross-project answer for where an approval files its task." That
+ * reasoning was WRONG, measured on the production box: the knowledge mount that holds the
+ * reports is declared in the OPERATOR's `~/.cezar/config.json`, not in any repo, so all 12
+ * registered projects resolved the SAME 196 reports. The Reports item rendered inside every
+ * project group — 12 identical queues over one corpus — and because triage was stored per
+ * project, a decision made in one was invisible in the others: two triage stores existed on the
+ * box and the second one re-answered questions the first had already answered. The fix is one
+ * queue, one decision, at workspace scope — this file, reached only through `nav-items.ts`'s
+ * `workspace: true` band item, never through a per-project sidebar group.
  *
- * **Gated on `capabilities.knowledge`, not a capability of its own.** Reports ride the knowledge
- * base, so `CEZ_KB=1` is exactly the condition under which they can exist. The route stays
- * reachable while off — off renders its own "switched off" state rather than a 404, the rule every
- * flag-gated route here follows.
+ * **Mounted OUTSIDE `ProjectScopeRoute`** (`routes.tsx`), the same placement as
+ * `workspace-knowledge.tsx` / `workspace-tasks.tsx` / `workspace-git.tsx`. This file reads only
+ * `useReports`, `useReport` and the triage mutation hooks, all workspace-level
+ * (`GET/POST /workspace/reports*`) — never a scope-led query or client function (the "scope
+ * trap": with no `ProjectScopeRoute` above it, `queryScope()` would silently resolve to the boot
+ * project's `'default'` sentinel).
  *
- * **Tabs are server-filtered, badges are not.** `GET /reports` returns `counts` over the WHOLE set
- * regardless of the `status` filter, so the badge on "Dismissed" is right while you are standing on
- * "Pending". A client-side count over the filtered page would say 0.
+ * **A row belongs to N projects, not one.** `ReportListItem.project` is the canonical project its
+ * document link resolves through (first in registry order); `.projects` is every project that
+ * resolves the same document. `ReportProjectMeta` below renders the two differently on purpose:
+ * one project reads as an owner, `projects.length > 1` reads as SHARED (a compact "N projects"
+ * pill with a people icon and the full list on hover) — never as N separate chips, which would
+ * just be noise, and never as a single chip, which is the exact bug this move exists to fix (a
+ * shared report reading as though one project owned it).
+ *
+ * **The project filter is a single-select, unlike `ProjectFilter`** (the multi-select the Tasks
+ * and Notes boards share). `ReportsQuery.project` is one id — a MEMBERSHIP test against a row's
+ * `projects` array, not a comma-joined list — so this reuses `PickerPill` (the composer's
+ * single-choice control) instead. Options come from the response's own `projects` health rows
+ * (`ReportsResponse.projects`, one row per project the server's fan-out considered, dead ones
+ * included with a reason) — the authoritative list, not the registry, because a project the
+ * fan-out could not read still belongs in the picker with its reason visible. Selecting a project
+ * changes `items`, never `counts` — the server describes the whole set there regardless of any
+ * filter, the same contract the status tabs already rely on.
+ *
+ * **The "open document" link builds an explicit `/p/<project>/knowledge?doc=…` path**, via
+ * `scopeTo` rather than the ambient scoped `Link`. Verified against `routes.tsx`: `knowledge` is
+ * registered under `ProjectScopeRoute` as `<Route path="knowledge" element={<KnowledgeRoute />}
+ * />`, so `/p/<project>/knowledge?doc=<id>` resolves. This page has no ambient project scope of
+ * its own (`useActiveProjectId()` falls back to the URL's `/p/:id` prefix, which `/workspace/…`
+ * never carries), so a plain `to="/knowledge?doc=…"` through the scope-aware `Link` would resolve
+ * to the unscoped, unregistered `/knowledge` and 404. `scopeTo(item.project, …)` builds the
+ * already-scoped path explicitly — the same pattern `workspace-knowledge.tsx`'s "Open in
+ * `<project>` →" link uses — and the scoped `Link` leaves an already-`/p/…` target untouched
+ * (`project-router.ts`'s `scopePathname`), so passing the pre-scoped path through it is safe.
+ *
+ * **Tabs are server-filtered, badges are not.** `GET /workspace/reports` returns `counts` over the
+ * WHOLE set regardless of the `status` (or `project`) filter, so the badge on "Dismissed" is right
+ * while you are standing on "Pending" filtered to one project.
  *
  * Selection lives in the URL as `?report=<key>`, the skills/knowledge parity shape, so a triage
  * decision is linkable and the browser Back button works through the queue.
@@ -54,19 +94,19 @@ const TABS: { status: ReportStatus; label: string }[] = [
   { status: 'dismissed', label: 'Dismissed' },
 ]
 
-export function ReportsRoute() {
+export function WorkspaceReportsRoute() {
   const health = useHealth()
   const knowledgeAvailable = health.data?.capabilities.knowledge === true
   const reportsOff = health.data !== undefined && !knowledgeAvailable
 
   return (
-    <div data-route="reports" className="flex min-h-full flex-col">
+    <div data-route="workspace-reports" className="flex min-h-full flex-col">
       <header className="sticky top-0 z-10 hidden h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-5 md:flex">
         <h1 className="text-base font-semibold">Reports</h1>
         <p className="text-[13px] text-soft-foreground">
           {reportsOff
             ? 'Reports ride on the knowledge base, which is off for this server.'
-            : 'What users flagged from a live conversation. Approve one to put it on the board.'}
+            : 'What users flagged from a live conversation, across every registered project. Approve one to put it on the board.'}
         </p>
       </header>
 
@@ -91,20 +131,28 @@ function ReportsQueue() {
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const [status, setStatus] = useState<ReportStatus>('pending')
+  const [project, setProject] = useState<string | undefined>(undefined)
 
   // Demand-driven, like every other topic subscriber: a report arriving in the corpus is a
-  // knowledge change, so the `knowledge` topic is what announces it. Both prefixes are invalidated
-  // — the queue AND the catalog — because a new report changes both.
+  // knowledge change, so the `knowledge` topic is what announces it. Both prefixes are
+  // invalidated — the queue AND the workspace knowledge catalog (domains/search/document, the
+  // `['workspace','knowledge']` prefix) — because a new report changes both, the same reasoning
+  // `workspaceQueryKeys.reportsRoot`'s own doc comment gives for keeping the two prefixes
+  // separate the rest of the time.
   useEffect(() => {
     return subscribeTopic('knowledge', () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.reports })
-      void queryClient.invalidateQueries({ queryKey: queryKeys.knowledge })
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.reportsRoot })
+      void queryClient.invalidateQueries({ queryKey: ['workspace', 'knowledge'] })
     })
   }, [queryClient])
 
-  const reportsQuery = useReports({ status })
+  const reportsQuery = useReports({ status, project })
   const counts = reportsQuery.data?.counts
   const items = reportsQuery.data?.items ?? []
+  // The authoritative project list for the filter — every project the fan-out considered, dead
+  // ones included with a reason. Stays the WHOLE list across a project selection, same contract
+  // as `counts` (the server never narrows this array to the current filter).
+  const projectHealth = reportsQuery.data?.projects ?? []
 
   const selected = searchParams.get('report')
   const selectReport = (key: string | null) => {
@@ -156,6 +204,14 @@ function ReportsQueue() {
             </Badge>
           </button>
         ))}
+        <ProjectFilterPill
+          projects={projectHealth}
+          selected={project}
+          onChange={(next) => {
+            setProject(next)
+            selectReport(null)
+          }}
+        />
         <span className="flex-1" />
         {status === 'pending' && items.length > 0 ? (
           <Button
@@ -223,6 +279,66 @@ function ReportsQueue() {
   )
 }
 
+/** The single-select project filter (see the module doc comment for why this is `PickerPill`, not
+ *  the multi-select `ProjectFilter` the Tasks/Notes boards share). `undefined` means "All
+ *  projects", the same "absent means every project" contract `ProjectFilter` uses. A dead project
+ *  (`!ok`) still gets an option — a reader who cannot triage a project's reports still deserves to
+ *  know it exists and why it failed. */
+function ProjectFilterPill({
+  projects,
+  selected,
+  onChange,
+}: {
+  projects: ReadonlyArray<{ id: string; name: string; ok: boolean; reason?: string; total: number }>
+  selected: string | undefined
+  onChange: (next: string | undefined) => void
+}) {
+  const options = [
+    { value: '__all__', label: 'All projects' },
+    ...projects.map((project) => ({
+      value: project.id,
+      label: project.name,
+      desc: project.ok ? `${project.total} report${project.total === 1 ? '' : 's'}` : project.reason,
+    })),
+  ]
+  const selectedLabel = projects.find((project) => project.id === selected)?.name ?? 'All projects'
+  return (
+    <PickerPill
+      slot="reports-project-filter"
+      ariaLabel="Filter reports by project"
+      label={selectedLabel}
+      value={selected ?? '__all__'}
+      options={options}
+      onPick={(next) => onChange(next === '__all__' ? undefined : next)}
+    />
+  )
+}
+
+/** One project reads as an owner; more than one reads as SHARED, compactly — never as N separate
+ *  chips (noise on a corpus one mount shares with a dozen projects) and never as a single chip
+ *  (the exact bug this move fixes: a shared report implying one project owns it). */
+function ReportProjectMeta({ item }: { item: ReportListItem }) {
+  if (item.projects.length <= 1) {
+    return (
+      <Badge data-slot="report-project" data-shared="false" variant="outline" className="shrink-0 text-[10px] uppercase">
+        {item.project}
+      </Badge>
+    )
+  }
+  return (
+    <Badge
+      data-slot="report-project"
+      data-shared="true"
+      variant="outline"
+      title={`Resolved through every one of: ${item.projects.join(', ')}`}
+      className="shrink-0 gap-1 text-[10px] uppercase"
+    >
+      <UsersIcon aria-hidden="true" className="size-2.5" />
+      {item.projects.length} projects
+    </Badge>
+  )
+}
+
 function ReportCard({
   item,
   expanded,
@@ -271,12 +387,15 @@ function ReportCard({
             data-slot="report-meta"
             className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-soft-foreground"
           >
+            <ReportProjectMeta item={item} />
             {item.filedAt ? <span>{shortAge(item.filedAt)} ago</span> : null}
             {item.domain ? <span data-slot="report-domain">{item.domain}</span> : null}
             {/* The document is the record; this page only decides what happens next, so it always
-                offers the way through to it. */}
+                offers the way through to it. Explicitly scoped to the row's CANONICAL project —
+                see the module doc comment for why the ambient scoped `Link` cannot be trusted
+                here. */}
             <Link
-              to={`/knowledge?doc=${encodeURIComponent(item.docId)}`}
+              to={scopeTo(item.project, `/knowledge?doc=${encodeURIComponent(item.docId)}`)}
               data-slot="report-doc-link"
               className="text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground"
             >

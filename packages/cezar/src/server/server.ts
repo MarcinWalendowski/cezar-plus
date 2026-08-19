@@ -25,7 +25,7 @@ import { streamSSE } from 'hono/streaming';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
-import { createReportsRoutes, DEFAULT_HANDLED_TAGS, DEFAULT_REPORT_TAGS } from './reports-routes.ts';
+import { createWorkspaceReportsRoutes } from './workspace-reports-routes.ts';
 import { createNotesRoutes } from './notes-routes.ts';
 import {
   createAgentAccountUsageRoutes,
@@ -6300,29 +6300,6 @@ export function createApp(deps: ServerDeps) {
   const knowledgeRoutes = createKnowledgeRoutes();
   const sourcesRoutes = createSourcesRoutes();
 
-  // ---- report triage (2026-08-19-reports-triage-approve-dismiss) -----------
-  // Rides on the knowledge base rather than adding a store: reports ARE knowledge documents, and
-  // this family is the join that lets one be approved into a todo or dismissed with a reason. Its
-  // config is resolved per request off the project being addressed — never snapshotted here —
-  // because `.ai/cezar/config.json` is shared with every other cezar process on the machine.
-  const reportsRoutes = createReportsRoutes({
-    listProjects,
-    reportsConfig: async (projectRoot) => {
-      const { reports } = await loadConfig(projectRoot);
-      return {
-        // An explicit `"tags": []` is respected as the opt-out it reads like (the `skillsRepos: []`
-        // precedent), NOT quietly replaced by the defaults — so a deployment can switch reports off
-        // by naming no tag. Only an ABSENT key falls back.
-        tags: reports?.tags ?? DEFAULT_REPORT_TAGS,
-        handledTags: reports?.handledTags ?? DEFAULT_HANDLED_TAGS,
-        // The env flag is the deployment-wide switch, the config key the per-repo one; either turns
-        // it on. `=== '1'` exactly, matching every other `CEZ_*` gate.
-        auto: reports?.auto ?? process.env.CEZ_REPORTS_AUTO === '1',
-        routeByDomain: reports?.routeByDomain ?? {},
-      };
-    },
-  });
-
   // ---- the notes pipeline (P2.2/P2.3) --------------------------------------
   // ONE store, shared by the routes and the pipeline. `NoteStore` caches the inbox in memory
   // after its first read, so two instances over one `notes.json` would each hold a stale half of
@@ -6439,6 +6416,16 @@ export function createApp(deps: ServerDeps) {
   // `peek`s an already-built store and can never build one, because building recovers and resumes
   // that project's interrupted runs — and typing into a search box must not start agents.
   const workspaceKnowledgeRoutes = createWorkspaceKnowledgeRoutes({ contexts });
+
+  // ---- report triage (2026-08-19-reports-triage-approve-dismiss, workspace-tab amendment) ----
+  // Rides on the knowledge base rather than adding a store: reports ARE knowledge documents, and
+  // this family is the join that lets one be approved into a todo or dismissed with a reason.
+  // WORKSPACE-scoped, and it has to be: a knowledge mount is declared in the operator's
+  // `~/.cezar/config.json`, so a project-scoped queue rendered the same corpus once per project and
+  // stored a separate answer for each — see `../workspace/reports-index.ts`. Both the config and
+  // the triage store now live beside that mount declaration, and both are read per request rather
+  // than snapshotted here, because the file is shared with every other cezar process on the box.
+  const workspaceReportsRoutes = createWorkspaceReportsRoutes({ contexts });
   // The cross-project todo board (D2 of the same spec, Phase 1): `readTodos()` (`../todos.ts`) is
   // already a plain fs reader keyed on a `dataDir` path, so this family needs no `contexts` seam
   // at all — it never builds or peeks a `ProjectContext`, only derives each registered project's
@@ -6500,7 +6487,6 @@ export function createApp(deps: ServerDeps) {
     .route('/', configRoutes)
     .route('/', agentConfigRoutes)
     .route('/', knowledgeRoutes)
-    .route('/', reportsRoutes)
     .route('/', sourcesRoutes);
 
   // ---- chained family: the cross-project run index (workspace-level) -------
@@ -6699,6 +6685,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceRunMutationRoutes)
     .route('/', workspaceGitRoutes)
     .route('/', workspaceKnowledgeRoutes)
+    .route('/', workspaceReportsRoutes)
     .route('/', workspaceTodosRoutes)
     .route('/', workspaceRunRoutes)
     .route('/', notificationsRoutes)

@@ -97,12 +97,31 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'], workspaceTo: '/workspace/git' },
   { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true, automations: true },
   { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true, workspaceTo: '/workspace/knowledge' },
-  // Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`). Carries the SAME
-  // `knowledge` gate as the item above rather than a gate of its own: reports are knowledge
-  // documents, so `CEZ_KB=1` is exactly the condition under which any exist. No `workspaceTo` —
-  // triage is per-corpus (one project's reports, one project's todo inbox), and a cross-project
-  // report queue would need a cross-project answer for where an approval files its task.
-  { to: '/reports', label: 'Reports', icon: FlagIcon, match: ['/reports'], knowledge: true },
+  // Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`, "Reports is a
+  // workspace tab" amendment, 2026-08-19). Carries the SAME `knowledge` gate as the item above
+  // rather than a gate of its own: reports are knowledge documents, so `CEZ_KB=1` is exactly the
+  // condition under which any exist.
+  //
+  // **CORRECTED 2026-08-19.** This item used to carry no `workspaceTo`, on the reasoning "triage
+  // is per-corpus (one project's reports, one project's todo inbox), and a cross-project report
+  // queue would need a cross-project answer for where an approval files its task." That was
+  // wrong, measured on the production box: the knowledge mount that holds the reports is
+  // declared in the OPERATOR's `~/.cezar/config.json`, not in any repo, so all 12 registered
+  // projects resolved the SAME 196 reports — 12 identical queues over one corpus, rendered once
+  // per project group. Because triage was stored per project, a decision made in one queue was
+  // invisible in the others: two triage stores existed on the box and the second one re-answered
+  // questions the first had already answered. One queue, one decision, at workspace scope — the
+  // Notes shape (`workspace: true` + `workspaceTo`), not the Skills shape. See
+  // `routes/workspace/workspace-reports.tsx` for the moved page.
+  {
+    to: '/workspace/reports',
+    label: 'Reports',
+    icon: FlagIcon,
+    match: ['/workspace/reports'],
+    knowledge: true,
+    workspace: true,
+    workspaceTo: '/workspace/reports',
+  },
   // Pinned to the workspace band too (owner request 2026-08-17): `workspaceTo: '/skills'` reuses the
   // flat -> boot-project redirect (`LegacyPathRedirect`, routes.tsx) instead of a dedicated
   // `/workspace/skills` route, so the band row lands on the boot project's skills. Still

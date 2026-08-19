@@ -42,11 +42,11 @@ import { AutomationsRoute } from './routes/automations/automations'
 // imported like `InboxRoute`/`TasksOverviewRoute`: today each is a tiny placeholder, not a heavy
 // chunk, so there is nothing here yet worth lazy-loading.
 import { KnowledgeRoute } from './routes/knowledge/knowledge'
-import { ReportsRoute } from './routes/reports/reports'
 import { NotesRoute } from './routes/notes/notes'
 import { WorkspaceGitRoute } from './routes/workspace/workspace-git'
 import { WorkspaceKnowledgeRoute } from './routes/workspace/workspace-knowledge'
 import { WorkspaceNewTaskRoute } from './routes/workspace/workspace-new-task'
+import { WorkspaceReportsRoute } from './routes/workspace/workspace-reports'
 import { WorkspaceTasksRoute } from './routes/workspace/workspace-tasks'
 
 /** Lazy ON PURPOSE: the thread view carries the markdown stack (Streamdown + remark/rehype,
@@ -421,12 +421,12 @@ const PAGE_TITLE_ROUTES = [
   { pattern: '/skills', pageLabel: 'Skills' },
   { pattern: '/inbox', pageLabel: 'Inbox' },
   { pattern: '/knowledge/*', pageLabel: 'Knowledge' },
-  { pattern: '/reports', pageLabel: 'Reports' },
   { pattern: '/notes', pageLabel: 'Notes' },
   { pattern: '/workspace/new', pageLabel: 'New task' },
   { pattern: '/workspace/tasks', pageLabel: 'Tasks' },
   { pattern: '/workspace/git', pageLabel: 'Git' },
   { pattern: '/workspace/knowledge', pageLabel: 'Knowledge' },
+  { pattern: '/workspace/reports', pageLabel: 'Reports' },
   { pattern: '/onboarding', pageLabel: 'Onboarding' },
   { pattern: '/workflows/*', pageLabel: 'Workflows' },
   { pattern: '/settings/*', pageLabel: 'Settings' },
@@ -620,12 +620,6 @@ export function AppRoutes() {
           <Route path="knowledge" element={<KnowledgeRoute />} />
           <Route path="knowledge/:id" element={<KnowledgeDocRedirect />} />
 
-          {/* Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`): reports ARE
-              knowledge documents, so this rides the same `CEZ_KB=1` gate as the route above and is
-              reachable while off, rendering its own "switched off" state. Selection is `?report=`,
-              the same query-param shape Knowledge uses for `?doc=`. */}
-          <Route path="reports" element={<ReportsRoute />} />
-
           {/* The workflow builder (R6 Step 1.6): /workflows opens the canvas on the repo's first
               saved chain, /workflows/:name deep-links a specific one. */}
           <Route
@@ -719,6 +713,20 @@ export function AppRoutes() {
             that tells them nothing (D19). Gating the route as well would collapse those two very
             different situations into the same dead end. */}
         <Route path="/workspace/knowledge" element={<WorkspaceKnowledgeRoute />} />
+
+        {/* Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`, "Reports is a
+            workspace tab" amendment, 2026-08-19), mounted for the identical reason as Knowledge
+            and Git above: the knowledge mount the reports live in is declared once, by the
+            operator, not per project — a project-scoped route would render the SAME corpus once
+            per registered project (measured: 12 identical queues on the box that motivated this
+            move). `nav-items.ts` gives the Reports item `workspaceTo: '/workspace/reports'`, so
+            this route is what keeps that band row from navigating into the 404 page. Reports
+            still carries the `knowledge` gate (rides the same `CEZ_KB=1` flag as Knowledge), but
+            the ROUTE is unconditional for the same D19 reason as its neighbours: a bookmark or a
+            flag flipped off after landing here must reach the page's own "switched off" state,
+            not a 404 that names nothing. Selection is `?report=`, the same query-param shape
+            Knowledge uses for `?doc=`. */}
+        <Route path="/workspace/reports" element={<WorkspaceReportsRoute />} />
 
         {/* The global Tasks page (#845) — a third non-project area, for the same reason as the
             two above: "every project's tasks" scoped to one project is a contradiction. Its data

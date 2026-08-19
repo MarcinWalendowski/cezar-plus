@@ -2222,26 +2222,39 @@ export async function getKnowledgeDocument(
   )
 }
 
-// ---- report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`) ------------------
+// ---- report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`, "Reports is a
+// workspace tab" amendment) -----------------------------------------------------------------
 //
-// Reports are knowledge documents carrying the reports tag, so the whole family is gated on
+// WORKSPACE-SCOPED, single-mount, never mirrored under `/api/v1/p/` (CHANGED 2026-08-19). This
+// family used to be `/api/v1/reports`, project-scoped like Knowledge. It could not stay there: a
+// knowledge mount is declared in the OPERATOR's `~/.cezar/config.json`, not in any repo, so on
+// the deployment that motivated the move every one of 12 registered projects resolved the SAME
+// 196 reports — 12 identical queues, each with its own triage store, each able to answer the
+// same question differently. Measured, not hypothetical: two stores existed on the box and the
+// second one re-decided reports the first had already triaged. One queue, one decision, at
+// workspace scope — see `contract/src/reports.ts`'s own doc comment for the full account.
+//
+// Reports are knowledge documents carrying the reports tag, so the whole family is still gated on
 // `capabilities.knowledge`: with `CEZ_KB` unset the GETs answer `enabled: false` with empty
 // payloads and the mutators 409. The cockpit hides the surface on that capability rather than
 // discovering it from a failed call.
 
-/** `GET /reports` — the triage queue: pending first, then newest filed. `counts` always describes
- *  the WHOLE set, so a filtered view's badges still say how much there is. */
+/** `GET /workspace/reports` — the triage queue: pending first, then newest filed. `counts`
+ *  always describes the WHOLE set, so a filtered view's badges still say how much there is.
+ *  `project` is a MEMBERSHIP filter (`ReportsQuery.project`, matched against a row's `projects`
+ *  array), never equality against the row's canonical `project` — a report resolved by several
+ *  projects stays visible under every one of them. */
 export async function getReports(
-  query: { status?: ReportStatus; domain?: string; limit?: number; offset?: number } = {},
+  query: { status?: ReportStatus; domain?: string; project?: string; limit?: number; offset?: number } = {},
   opts?: ReadOptions,
 ): Promise<ReportsResponse> {
   return unwrap(
-    await cez.api.v1.p[':projectId'].reports.$get(
+    await cez.api.v1.workspace.reports.$get(
       {
-        param: { projectId: queryScope() },
         query: {
           status: query.status,
           domain: query.domain,
+          project: query.project,
           // Numbers, not strings: `reportsQuerySchema` coerces, and Hono types the request from the
           // schema's INPUT side, which for `z.coerce.number()` is the number.
           limit: query.limit,
@@ -2250,69 +2263,67 @@ export async function getReports(
       },
       init(opts),
     ),
-    '/reports',
+    '/workspace/reports',
   )
 }
 
-/** `GET /reports/:key` — one report plus its markdown body. */
+/** `GET /workspace/reports/:key` — one report plus its markdown body. */
 export async function getReport(key: string, opts?: ReadOptions): Promise<ReportDetailResponse> {
   return unwrap(
-    await cez.api.v1.p[':projectId'].reports[':key'].$get(
-      { param: { projectId: queryScope(), key: encodeURIComponent(key) } },
+    await cez.api.v1.workspace.reports[':key'].$get(
+      { param: { key: encodeURIComponent(key) } },
       init(opts),
     ),
-    `/reports/${encodeURIComponent(key)}`,
+    `/workspace/reports/${encodeURIComponent(key)}`,
   )
 }
 
-/** `POST /reports/:key/approve` — mint the todo this report becomes. Idempotent: a second approve
- *  returns the same todo with `alreadyApproved: true` rather than a duplicate. */
+/** `POST /workspace/reports/:key/approve` — mint the todo this report becomes. Idempotent: a
+ *  second approve returns the same todo with `alreadyApproved: true` rather than a duplicate. */
 export async function approveReport(
   key: string,
   body: { todoProjectId?: string; priority?: 'high' | 'medium' | 'low' } = {},
 ): Promise<ReportApproveResponse> {
   return unwrap(
-    await cez.api.v1.p[':projectId'].reports[':key'].approve.$post({
-      param: { projectId: queryScope(), key: encodeURIComponent(key) },
+    await cez.api.v1.workspace.reports[':key'].approve.$post({
+      param: { key: encodeURIComponent(key) },
       json: body,
     }),
-    `/reports/${encodeURIComponent(key)}/approve`,
+    `/workspace/reports/${encodeURIComponent(key)}/approve`,
   )
 }
 
-/** `POST /reports/:key/dismiss`. The reason is required by the server — a dismissal without one is
- *  a report quietly lost — so this signature makes it required too rather than letting the 400
- *  teach the caller. */
+/** `POST /workspace/reports/:key/dismiss`. The reason is required by the server — a dismissal
+ *  without one is a report quietly lost — so this signature makes it required too rather than
+ *  letting the 400 teach the caller. */
 export async function dismissReport(key: string, reason: string): Promise<ReportDismissResponse> {
   return unwrap(
-    await cez.api.v1.p[':projectId'].reports[':key'].dismiss.$post({
-      param: { projectId: queryScope(), key: encodeURIComponent(key) },
+    await cez.api.v1.workspace.reports[':key'].dismiss.$post({
+      param: { key: encodeURIComponent(key) },
       json: { reason },
     }),
-    `/reports/${encodeURIComponent(key)}/dismiss`,
+    `/workspace/reports/${encodeURIComponent(key)}/dismiss`,
   )
 }
 
-/** `POST /reports/:key/reopen` — back to pending. Any todo an earlier approve minted is NAMED in
- *  the response, never deleted: by now it may be started or done. */
+/** `POST /workspace/reports/:key/reopen` — back to pending. Any todo an earlier approve minted is
+ *  NAMED in the response, never deleted: by now it may be started or done. */
 export async function reopenReport(key: string): Promise<ReportReopenResponse> {
   return unwrap(
-    await cez.api.v1.p[':projectId'].reports[':key'].reopen.$post({
-      param: { projectId: queryScope(), key: encodeURIComponent(key) },
+    await cez.api.v1.workspace.reports[':key'].reopen.$post({
+      param: { key: encodeURIComponent(key) },
     }),
-    `/reports/${encodeURIComponent(key)}/reopen`,
+    `/workspace/reports/${encodeURIComponent(key)}/reopen`,
   )
 }
 
-/** `POST /reports/process-pending` — convert every pending report at once. A POST, never a GET: it
- *  writes, and a side-effecting GET is one a browser or a crawler may replay. 409 unless auto mode
- *  is on (`CEZ_REPORTS_AUTO=1`, or `reports.auto` in the project config). */
+/** `POST /workspace/reports/process-pending` — convert every pending report at once. A POST,
+ *  never a GET: it writes, and a side-effecting GET is one a browser or a crawler may replay.
+ *  409 unless auto mode is on (`CEZ_REPORTS_AUTO=1`, or `reports.auto` in the project config). */
 export async function processPendingReports(): Promise<ReportProcessPendingResponse> {
   return unwrap(
-    await cez.api.v1.p[':projectId'].reports['process-pending'].$post({
-      param: { projectId: queryScope() },
-    }),
-    '/reports/process-pending',
+    await cez.api.v1.workspace.reports['process-pending'].$post(),
+    '/workspace/reports/process-pending',
   )
 }
 

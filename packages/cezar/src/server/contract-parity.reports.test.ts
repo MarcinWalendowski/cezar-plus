@@ -14,13 +14,20 @@ import type { AppType } from './app-type.ts';
 
 /**
  * `packages/contract/src/reports.ts` must describe EXACTLY what the REPORTS family
- * (`./reports-routes.ts`) sends — no wider, no narrower. Same guard and same reasoning as
+ * (`./workspace-reports-routes.ts`) sends — no wider, no narrower. Same guard and same reasoning as
  * `contract-parity.knowledge.test.ts`: each schema is checked against the ROUTE's own inferred
  * type, in BOTH directions, because one-way assignability stays green on real drift.
  *
  * Unlike the KNOWLEDGE family when it was a scaffold, every route here has a real success branch
  * from the start, so all six are asserted — there is no "the 200 does not exist yet" exemption to
  * claim.
+ *
+ * **The paths below are `api.v1.workspace.reports…` and that is load-bearing, not cosmetic**
+ * (CHANGED 2026-08-19). This family moved from `/api/v1/reports` to `/api/v1/workspace/reports`,
+ * and the old routes are DELETED rather than kept alongside — two surfaces over one triage store is
+ * a second place to make the same decision. Because these are property lookups on the inferred
+ * `AppType`, a route that failed to move would not merely mismatch: `api.v1.reports` would stop
+ * existing and this file would fail to compile, which is the guard doing its job.
  *
  * Compile-time; `npm run typecheck` enforces it. The `it()` keeps the file visible as a test.
  */
@@ -32,12 +39,13 @@ describe('src/contract reports schemas match the routes exactly', () => {
   type Exact<Schema, Route> = Mutual<Schema, Route>;
   type Assert<T extends true> = T;
 
-  type Reports200 = InferResponseType<typeof client.api.v1.reports.$get, 200>;
-  type ReportDetail200 = InferResponseType<(typeof client.api.v1.reports)[':key']['$get'], 200>;
-  type ReportApprove200 = InferResponseType<(typeof client.api.v1.reports)[':key']['approve']['$post'], 200>;
-  type ReportDismiss200 = InferResponseType<(typeof client.api.v1.reports)[':key']['dismiss']['$post'], 200>;
-  type ReportReopen200 = InferResponseType<(typeof client.api.v1.reports)[':key']['reopen']['$post'], 200>;
-  type ProcessPending200 = InferResponseType<typeof client.api.v1.reports['process-pending']['$post'], 200>;
+  type Reports = typeof client.api.v1.workspace.reports;
+  type Reports200 = InferResponseType<Reports['$get'], 200>;
+  type ReportDetail200 = InferResponseType<Reports[':key']['$get'], 200>;
+  type ReportApprove200 = InferResponseType<Reports[':key']['approve']['$post'], 200>;
+  type ReportDismiss200 = InferResponseType<Reports[':key']['dismiss']['$post'], 200>;
+  type ReportReopen200 = InferResponseType<Reports[':key']['reopen']['$post'], 200>;
+  type ProcessPending200 = InferResponseType<Reports['process-pending']['$post'], 200>;
 
   type _Checks = [
     Assert<Exact<z.infer<typeof reportsResponseSchema>, Reports200>>,
