@@ -2188,11 +2188,21 @@ export function useReport(key: string | null) {
  * than three.
  *
  * Every one invalidates `workspaceQueryKeys.reportsRoot` (both the list and the open detail, by
- * prefix) AND the cross-project `workspaceQueryKeys.workspaceTodos` aggregate — approve mints a
- * todo into SOME registered project's board, and this page has no ambient project scope to name
- * which one (the same "scope trap" `workspace-tasks.tsx` documents for a scope-led query key), so
- * the one Filed board this hook CAN correctly invalidate is the cross-project one. A visit to that
- * project's own Tasks page still refetches its own `queryKeys.todos` on mount as usual. */
+ * prefix) AND every Filed board in every scope — approve mints a todo into SOME registered
+ * project's board, and this page has no ambient project scope to name which one (the same "scope
+ * trap" `workspace-tasks.tsx` documents for a scope-led query key).
+ *
+ * **Which is why the todos invalidation is a PREDICATE, not a key (CORRECTED 2026-08-19).** It
+ * first invalidated only `workspaceQueryKeys.workspaceTodos`, reasoning that the cross-project
+ * aggregate is the one board this hook can name correctly and that "a visit to that project's own
+ * Tasks page still refetches its own `queryKeys.todos` on mount as usual". That last part is
+ * false here: `query-client.ts` sets a global `staleTime` of 5 minutes with
+ * `refetchOnWindowFocus: false`, and `useTodos` overrides neither, so mounting inside that window
+ * serves the cached board and the freshly minted todo is simply missing for up to five minutes.
+ * `queryKeys.todos` is `[queryScope(), 'todos']`, so no single key can name another scope's
+ * board — but a predicate can match all of them, including the `['workspace','todos']` aggregate,
+ * in one call. Over-invalidating a Filed board costs one refetch; under-invalidating it hides the
+ * task the user just created. */
 function useReportTriage<TArgs, TResult>(mutationFn: (args: TArgs) => Promise<TResult>) {
   const queryClient = useQueryClient()
   return useMutation({
@@ -2200,7 +2210,9 @@ function useReportTriage<TArgs, TResult>(mutationFn: (args: TArgs) => Promise<TR
     retry: false,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.reportsRoot })
-      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.workspaceTodos })
+      // `[<scope>, 'todos']` for every scope, plus `['workspace', 'todos']` — both put 'todos'
+      // at index 1, so one predicate reaches every Filed board whatever scope minted the task.
+      void queryClient.invalidateQueries({ predicate: (q) => q.queryKey[1] === 'todos' })
     },
   })
 }

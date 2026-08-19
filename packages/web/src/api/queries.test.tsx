@@ -26,6 +26,7 @@ import {
   useRunChanges,
   useRuns,
   useSkills,
+  useApproveReport,
   workspaceQueryKeys,
 } from './queries'
 
@@ -1010,5 +1011,56 @@ describe('refStatusRecheckAfter', () => {
     // Still loading, or errored out — `retry` owns the immediate attempt; this is the backstop
     // that keeps the query from going silent forever.
     expect(refStatusRecheckAfter(undefined)).toBeGreaterThan(0)
+  })
+})
+
+describe('report triage invalidation reaches every Filed board', () => {
+  /**
+   * Approve mints a todo into SOME project's inbox, and the Reports page is workspace-scoped, so
+   * it cannot name which. This first shipped invalidating only `workspaceQueryKeys.workspaceTodos`,
+   * on the reasoning that a visit to that project's own Tasks page would refetch on mount anyway —
+   * which `query-client.ts` disproves: `staleTime` is 5 minutes and `useTodos` does not override
+   * it, so a mount inside that window serves the stale board and the new task is missing.
+   *
+   * The assertion that matters is the PROJECT-scoped board, seeded under a scope that is not the
+   * active one. No single query key can name it from here, so this fails on the shipped behaviour
+   * and passes only on the predicate.
+   */
+  it('invalidates a project-scoped board it cannot name, not just the workspace aggregate', async () => {
+    const client = createQueryClient()
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+
+    // Two projects' Filed boards plus the cross-project aggregate, all seeded FRESH — with the
+    // 5-minute staleTime these would not refetch on their own.
+    client.setQueryData(['proj-a', 'todos'], [{ id: 'seeded-a' }])
+    client.setQueryData(['proj-b', 'todos'], [{ id: 'seeded-b' }])
+    client.setQueryData([...workspaceQueryKeys.workspaceTodos], [{ id: 'seeded-ws' }])
+    // A neighbour that must NOT be swept up — proves the predicate is keyed, not a blanket
+    // invalidateQueries() that would trivially satisfy every assertion below.
+    client.setQueryData(['proj-a', 'runs'], [{ id: 'seeded-run' }])
+
+    const isStale = (key: readonly unknown[]) => client.getQueryState(key)?.isInvalidated === true
+    expect([
+      isStale(['proj-a', 'todos']),
+      isStale(['proj-b', 'todos']),
+      isStale([...workspaceQueryKeys.workspaceTodos]),
+      isStale(['proj-a', 'runs']),
+    ]).toEqual([false, false, false, false])
+
+    fetchMock.mockResolvedValue(json({ item: { key: 'local:report:1', status: 'approved' } }))
+    const { result } = renderHook(() => useApproveReport(), { wrapper: Wrapper })
+    await act(async () => {
+      await result.current.mutateAsync({ key: 'local:report:1' })
+    })
+
+    await waitFor(() => {
+      expect(isStale(['proj-a', 'todos'])).toBe(true)
+    })
+    expect(isStale(['proj-b', 'todos'])).toBe(true)
+    expect(isStale([...workspaceQueryKeys.workspaceTodos])).toBe(true)
+    // The floor: an unkeyed sweep would mark this too, making the three assertions above vacuous.
+    expect(isStale(['proj-a', 'runs'])).toBe(false)
   })
 })
