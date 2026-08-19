@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   reportApproveResponseSchema,
@@ -19,7 +19,7 @@ import { readReportTriage } from '../reports-triage.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { createReportsRoutes, type ReportsConfig } from './reports-routes.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
-import type { ProjectApiEnv, ProjectContext } from './server.ts';
+import type { Principal, ProjectApiEnv, ProjectContext } from './server.ts';
 
 /**
  * `reports-routes.ts` — the REPORTS family
@@ -81,7 +81,14 @@ function reportMarkdown(seed: ReportSeed): string {
 }
 
 async function buildProject(
-  options: { withKnowledge?: boolean; reports?: ReportSeed[]; config?: Partial<ReportsConfig> } = {},
+  options: {
+    withKnowledge?: boolean;
+    reports?: ReportSeed[];
+    config?: Partial<ReportsConfig>;
+    /** Set on the context the way `server.ts`'s `/api/*` middleware does, for the `by` tests.
+     *  Omitted in every other test — which is itself the "no middleware, no author" case. */
+    principal?: Principal;
+  } = {},
 ): Promise<{ project: ProjectContext; app: Hono<ProjectApiEnv>; dataDir: string }> {
   const repoRoot = await tempDir('cez-reports-api-');
   const dataDir = join(repoRoot, '.ai/cezar');
@@ -115,6 +122,11 @@ async function buildProject(
   const app = new Hono<ProjectApiEnv>()
     .use('*', async (c, next) => {
       c.set('project', project);
+      // Same cast `server.ts` uses to publish the principal, so what the handler reads here is what
+      // it reads in the real app rather than a second, friendlier shape.
+      if (options.principal) {
+        (c as unknown as Context<{ Variables: { principal: Principal } }>).set('principal', options.principal);
+      }
       await next();
     })
     .route(
@@ -144,6 +156,14 @@ const json = (body: unknown, method = 'POST'): RequestInit => ({
 async function parsed<T>(res: Response, schema: { parse(v: unknown): T }): Promise<T> {
   return schema.parse(await res.json());
 }
+
+const SESSION_PRINCIPAL: Principal = {
+  kind: 'session',
+  userId: 'user-alice',
+  orgId: 'org-1',
+  teamId: 'team-1',
+  role: 'owner',
+};
 
 const DIGEST: ReportSeed = {
   path: 'digest.md',
@@ -618,5 +638,120 @@ describe('reports routes — automatic processing', () => {
     expect((await readReportTriage(dataDir)).has('report-2026-08-18-digest')).toBe(false);
     const list = await parsed(await apiRequest(app, '/api/v1/reports'), reportsResponseSchema);
     expect(list.counts).toEqual({ pending: 1, approved: 1, dismissed: 0, total: 2 });
+  });
+});
+
+describe('reports routes — `by`: who triaged, when there is a signed-in user to name', () => {
+  it('a signed-in approval and dismissal are attributed; nothing else changes', async () => {
+    const { app, dataDir } = await buildProject({ reports: [DIGEST], principal: SESSION_PRINCIPAL });
+
+    const approved = await parsed(
+      await apiRequest(app, '/api/v1/reports/report-2026-08-18-digest/approve', json({})),
+      reportApproveResponseSchema,
+    );
+    // On the WIRE, not only in the store: a client that wants to show an author must be able to.
+    expect(approved.item.triage?.by).toBe('user-alice');
+    expect((await readReportTriage(dataDir)).get('report-2026-08-18-digest')?.by).toBe('user-alice');
+
+    const dismissed = await parsed(
+      await apiRequest(app, '/api/v1/reports/report-2026-08-18-digest/dismiss', json({ reason: 'duplicate' })),
+      reportDismissResponseSchema,
+    );
+    expect(dismissed.item.triage?.by).toBe('user-alice');
+  });
+
+  it('an unauthenticated deployment stamps NOBODY — the machine is not a person', async () => {
+    // The negative control that matters: `local` is a real principal on the context, so a handler
+    // that stamped `principal.userId` unconditionally would pass the test above and fail here.
+    const { app, dataDir } = await buildProject({
+      reports: [DIGEST],
+      principal: { kind: 'local', userId: 'local-user', orgId: null, teamId: null, role: 'owner' },
+    });
+    const body = await parsed(
+      await apiRequest(app, '/api/v1/reports/report-2026-08-18-digest/approve', json({})),
+      reportApproveResponseSchema,
+    );
+    expect(body.item.triage?.by).toBeUndefined();
+    expect((await readReportTriage(dataDir)).get('report-2026-08-18-digest')?.by).toBeUndefined();
+    // The rest of the row is unaffected — this is about the author field only.
+    expect(body.item.triage).toMatchObject({ status: 'approved', todoProjectId: 'proj' });
+  });
+
+  it('no principal on the context at all leaves `by` absent rather than throwing', async () => {
+    const { app } = await buildProject({ reports: [DIGEST] });
+    const body = await parsed(
+      await apiRequest(app, '/api/v1/reports/report-2026-08-18-digest/approve', json({})),
+      reportApproveResponseSchema,
+    );
+    expect(body.item.triage?.by).toBeUndefined();
+  });
+
+  it('re-approving keeps the FIRST approver; dismissing overwrites with the one who dismissed', async () => {
+    const { project, dataDir } = await buildProject({ reports: [DIGEST], principal: SESSION_PRINCIPAL });
+    // Two apps over ONE project, so the second request is a different signed-in user against the
+    // same store — which is the only way to tell "kept" from "never written twice".
+    const appFor = (principal: Principal): Hono<ProjectApiEnv> =>
+      new Hono<ProjectApiEnv>()
+        .use('*', async (c, next) => {
+          c.set('project', project);
+          (c as unknown as Context<{ Variables: { principal: Principal } }>).set('principal', principal);
+          await next();
+        })
+        .route(
+          '/api/v1',
+          createReportsRoutes({
+            reportsConfig: async () => ({
+              tags: ['user-report'],
+              handledTags: ['status/processed'],
+              auto: false,
+              routeByDomain: {},
+            }),
+          }),
+        ) as unknown as Hono<ProjectApiEnv>;
+
+    const alice = appFor(SESSION_PRINCIPAL);
+    const bob = appFor({ ...SESSION_PRINCIPAL, userId: 'user-bob' });
+
+    const first = await parsed(
+      await apiRequest(alice, '/api/v1/reports/report-2026-08-18-digest/approve', json({})),
+      reportApproveResponseSchema,
+    );
+    expect(first.item.triage?.by).toBe('user-alice');
+    const firstAt = first.item.triage?.at;
+
+    const again = await parsed(
+      await apiRequest(bob, '/api/v1/reports/report-2026-08-18-digest/approve', json({})),
+      reportApproveResponseSchema,
+    );
+    expect(again.alreadyApproved).toBe(true);
+    // Bob clicking approve does not rewrite the record of who approved it, or when.
+    expect(again.item.triage?.by).toBe('user-alice');
+    expect(again.item.triage?.at).toBe(firstAt);
+
+    const dropped = await parsed(
+      await apiRequest(bob, '/api/v1/reports/report-2026-08-18-digest/dismiss', json({ reason: 'not a bug' })),
+      reportDismissResponseSchema,
+    );
+    // A dismissal IS a fresh decision, so its owner is Bob — and the todo pointer survives.
+    expect(dropped.item.triage?.by).toBe('user-bob');
+    expect(dropped.item.triage?.todoId).toBe(first.todo.id);
+    expect((await readReportTriage(dataDir)).get('report-2026-08-18-digest')?.by).toBe('user-bob');
+  });
+
+  it('an automatic pass records who ran it AND that it was automatic', async () => {
+    const { app, dataDir } = await buildProject({
+      reports: [DIGEST],
+      config: { auto: true },
+      principal: SESSION_PRINCIPAL,
+    });
+    const body = await parsed(
+      await apiRequest(app, '/api/v1/reports/process-pending', { method: 'POST' }),
+      reportProcessPendingResponseSchema,
+    );
+    expect(body.converted).toBe(1);
+    const row = (await readReportTriage(dataDir)).get('report-2026-08-18-digest');
+    // Both, not either: `by` alone would read as a hand decision, `auto` alone loses who asked.
+    expect(row?.by).toBe('user-alice');
+    expect(row?.auto).toBe(true);
   });
 });

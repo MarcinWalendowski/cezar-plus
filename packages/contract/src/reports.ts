@@ -82,7 +82,20 @@ export const reportTriageRowSchema = z.object({
   status: reportTriageStatusSchema,
   /** Server-stamped, never client-supplied. */
   at: z.string(),
-  /** The principal who triaged, when auth is on. Absent on an unauthenticated deployment. */
+  /**
+   * The **user id** of the signed-in principal who triaged this, when auth is on — not their email
+   * or display name, which live in the identity store a project-scoped route has no business
+   * reading. Absent on an unauthenticated deployment (`CEZ_AUTH=none`'s identity is the machine, not
+   * a person) and on a row written before this field was populated.
+   *
+   * Approve keeps the FIRST approver on a re-approve; dismiss overwrites, because dropping a report
+   * is a fresh decision with a fresh owner. `process-pending` stamps whoever ran the pass and marks
+   * the row `auto: true`, so "converted by a batch" stays distinguishable from "decided one by one".
+   *
+   * **Nothing renders this yet.** It is an audit field in the store and on the wire; the cockpit
+   * shows the timestamp and the reason, and would need to resolve an id to a name to show an author.
+   * Do not read its absence from the UI as the field being unused.
+   */
   by: z.string().max(320).optional(),
   /** Required for `dismissed`, meaningless for `approved` — enforced by the input schemas, not
    *  here, because a stored row read back must never fail validation over a rule that changed. */

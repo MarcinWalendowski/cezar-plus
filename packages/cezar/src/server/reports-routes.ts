@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import {
   approveReportInputSchema,
   dismissReportInputSchema,
@@ -21,7 +21,7 @@ import type { CatalogEntry } from '../knowledge/types.ts';
 import { createTodo, readTodos } from '../todos.ts';
 import { readReportTriage, updateReportTriage } from '../reports-triage.ts';
 import { jsonZodValidator, queryZodValidator } from './validators.ts';
-import type { ProjectApiEnv } from './server.ts';
+import type { Principal, ProjectApiEnv } from './server.ts';
 
 /**
  * The REPORTS family of `/api/v1` — triage over the report documents already in a project's
@@ -164,6 +164,26 @@ function derivedStatus(
   // timestamp, reason or todo id here that would not be invented.
   if (entry.tags.some((t) => handledTags.includes(t))) return { status: 'approved', statusSource: 'document' };
   return { status: 'pending', statusSource: 'default' };
+}
+
+/**
+ * Who to stamp on a row's `by` — the signed-in user's id, or `undefined` when there is no signed-in
+ * user to name.
+ *
+ * Read through a cast rather than by widening {@link ProjectApiEnv}, which is what `server.ts`'s
+ * four existing principal readers do and for the reason its own comment gives: widening the env
+ * broke assignability for the ~30 callers that annotate a plain `Hono`.
+ *
+ * **`kind === 'local'` deliberately yields nothing.** The contract says `by` is absent on an
+ * unauthenticated deployment, and `CEZ_AUTH=none`'s implicit identity is the machine, not a person —
+ * stamping it would make "whoever was at this laptop" read in the audit trail exactly like a named
+ * colleague's decision. `undefined` also covers a test that mounts this family without `server.ts`'s
+ * `/api/*` middleware, which is every test in `reports-api.test.ts` that does not opt in.
+ */
+function triagedBy(c: Context<ProjectApiEnv>): string | undefined {
+  const withPrincipal = c as unknown as Context<{ Variables: { principal: Principal } }>;
+  const principal = withPrincipal.get('principal') as Principal | undefined;
+  return principal?.kind === 'session' ? principal.userId : undefined;
 }
 
 /** `keyKind` is deliberately NOT a field of the list item: it describes the row, and a report with
@@ -326,6 +346,10 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
         // because its own document says so must never be converted by an automatic pass.
         .filter((entry) => derivedStatus(entry, triage.get(triageKeyFor(entry).key), handledTags).status === 'pending');
 
+      // Stamped even though every row this pass writes carries `auto: true`: the pass did the
+      // converting, but a person asked for it, and "who turned 40 reports into tasks" is exactly the
+      // question an audit trail exists to answer. `auto` is what keeps the two distinguishable.
+      const by = triagedBy(c);
       const outcomes: ReportProcessOutcome[] = [];
       for (const entry of pending) {
         const { key, keyKind } = triageKeyFor(entry);
@@ -349,6 +373,7 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
               keyKind,
               status: 'approved',
               at: new Date().toISOString(),
+              ...(by ? { by } : {}),
               todoId: todo.id,
               todoProjectId: target.projectId,
               auto: true,
@@ -411,15 +436,17 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
       });
 
       const { keyKind } = triageKeyFor(entry);
+      const by = triagedBy(c);
       const row = await updateReportTriage(dataDir, key, (current) => {
-        // Re-approving keeps the FIRST approval's timestamp and todo — the record of when this was
-        // triaged is not something a second click gets to overwrite.
+        // Re-approving keeps the FIRST approval's timestamp, todo AND author — the record of who
+        // triaged this and when is not something a second click gets to overwrite.
         if (current?.status === 'approved') return current;
         return {
           key,
           keyKind,
           status: 'approved',
           at: new Date().toISOString(),
+          ...(by ? { by } : {}),
           todoId: todo.id,
           todoProjectId: target.projectId,
         };
@@ -442,11 +469,15 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
       if (!entry) return c.json({ error: 'no such report' }, 404);
       const { reason } = c.req.valid('json');
       const { keyKind } = triageKeyFor(entry);
+      const by = triagedBy(c);
       const row = await updateReportTriage(dataDir, key, (current) => ({
         key,
         keyKind,
         status: 'dismissed',
         at: new Date().toISOString(),
+        // Unlike approve, a dismissal DOES overwrite `by`: it is a fresh decision to drop a report,
+        // and the person accountable for it is whoever dismissed it, not whoever approved it first.
+        ...(by ? { by } : {}),
         reason,
         // A dismissal after an approval keeps the todo pointer: the work exists, and losing the
         // link would make the todo unattributable.

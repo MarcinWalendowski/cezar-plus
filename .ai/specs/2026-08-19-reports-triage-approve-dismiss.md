@@ -307,8 +307,88 @@ This also corrected the contract comment claiming `triage` is "absent exactly wh
 `pending`", which stopped being true the moment `document` existed; the presence check is keyed on
 `statusSource` now, and the old wording was amended in place rather than appended to.
 
-### Still QA Needed
+### Results — production runtime pass, EXECUTED 2026-08-19 (was "Still QA Needed")
 
-Steps 5 to 8 (the production runtime pass) have **not** run — this is committed and gates-green, not
-Done. Step 8 in particular is the only one that proves arrival → inbox unattended, and it needs a
-real `feedback:` message to a production bot plus one drain-timer tick.
+**This heading said "Still QA Needed" until the pass ran.** Steps 5 to 8 have now all been executed
+against `prod-host`, so the old title was exactly the kind of false a future session acts on.
+
+The box requires OIDC (`CEZ_AUTH=oidc`), and only `/api/v1/health` is exempt — so a loopback `curl`
+answers `401 unauthenticated` for every other route. There is no bearer/API-token path for the app
+API. The pass therefore ran behind a **15-minute session minted the same way a login does**
+(`createSession(userId, ttl)` out of the built `dist/auth/session.js`, as the `cezar` user with
+`HOME=/var/lib/cezar`), which is safe to do out of process because `identity-store.ts` re-parses
+`identity.json` on every read and caches nothing.
+
+| # | Step | Result |
+| --- | --- | --- |
+| 5 | queue lists only the `status/new` reports | **pass** — `counts: {pending: 4, approved: 191, dismissed: 0, total: 195}`, and every one of the 191 came back `statusSource: 'document'`. The two 2026-08-15/16 reports and both e2e probes were the 4 pending. |
+| 6 | approve mints a todo on the routed board | **pass** — `alreadyApproved: false`, `keyKind: 'identifier'`, and the todo appears in `GET /p/chat/todos` at `todo/medium` carrying the user's own feedback text. |
+| 7 | dismiss with a reason | **pass** — both probes dismissed, reason stored. Negative controls: a **bodyless** dismiss and a whitespace-only reason both `400`. |
+| 8 | fresh report reaches the queue unattended | **pass** — see the timeline below. |
+
+Step 8's timeline, the one that actually answers "does this work without the Mac":
+
+- `09:21:13Z` — a real `feedback:` iMessage sent to the production bot.
+- `09:23:11Z` — the **on-box** `cezar-reports-drain.timer` (5-minute cadence) logged
+  `1 staged report(s) → /var/lib/cezar/loki-labs/notion-export/reports`. No Mac involvement in this
+  step or any later one.
+- `09:23:31Z` — the deployed queue shows it `pending` (`total` 195 → 196) and the KB search finds it.
+
+**A read at `09:23:11Z` showed `pending: 0` — twenty seconds after the file existed on disk.** That is
+the reindex lag, not a failure, but it is the shape a future session will misread as "the drain
+didn't work": the drain and the index are two steps, and only the second one makes a report visible.
+Poll for ~30 s before concluding anything.
+
+Two further things were verified in passing, neither of which the unit tests could reach:
+
+- **`reports.routeByDomain` is read per request** — it was added to the live
+  `.ai/cezar/config.json` (merged, preserving the `notion-export` knowledge mount) and the very next
+  approve routed to `chat` with **no restart**.
+- **Idempotency holds against the real 595-entry inbox file**, not just a temp dir: a second approve
+  of the same report returned `alreadyApproved: true` with the same `todoId`.
+
+Housekeeping done as part of the pass: the first approval had landed in `loki-labs` before the routing
+map existed, so it was reopened (which named its orphaned todo), the orphan deleted, and re-approved
+into `chat`. Both real reports are now tasks on the `chat` board; both probes are dismissed.
+
+### Amendment — `by` was a promise no route kept (2026-08-19)
+
+Found by reading the production approve response, not by a test: `triage.by` came back absent on a
+deployment where auth is **on**, because no route ever wrote it. The contract described it as "the
+principal who triaged, when auth is on", the store round-tripped it, the cockpit renders the
+timestamp beside it — so every reader of that field would have concluded triage is unattributable,
+while the field itself sat there looking live.
+
+Now stamped by approve, dismiss and `process-pending`, read off `c.get('principal')` through the same
+cast `server.ts`'s four existing principal readers use (widening `ProjectApiEnv` breaks assignability
+for ~30 callers that annotate a plain `Hono`). Three deliberate choices, each with a test:
+
+- **`kind: 'local'` stamps nobody.** `CEZ_AUTH=none`'s identity is the machine; putting it in an audit
+  field would make "whoever was at this laptop" read like a named colleague's decision. This is the
+  negative control that matters — a handler stamping `principal.userId` unconditionally passes the
+  happy-path test and fails only here.
+- **Approve keeps the first approver, dismiss overwrites.** Re-approving is not a new decision;
+  dismissing is, and its owner is whoever dismissed it.
+- **`process-pending` stamps who ran the pass AND keeps `auto: true`.** Either alone lies: `by` alone
+  reads as a hand decision, `auto` alone loses who asked for it.
+
+The stored value is the **user id**, not an email — resolving one to the other means reading the
+identity store, which a project-scoped route family has no business doing. Nothing renders it yet;
+the contract comment now says so, so its absence from the UI is not read as the field being unused.
+
+Mutation-tested, five mutations, all caught (`reports-api.test.ts` is 25 → 30 tests):
+
+| Mutation | Expected | Observed |
+| --- | --- | --- |
+| `triagedBy` drops the `kind === 'session'` check | the local-deployment control fails | 1 failed |
+| approve never stamps `by` | the attribution tests fail | 2 failed |
+| dismiss keeps the first author instead of overwriting | the Bob-dismisses test fails | 1 failed |
+| `process-pending` drops `by` | the automatic-pass test fails | 1 failed |
+| approve overwrites the author on re-approve | the first-approver test fails | 1 failed |
+
+Gates after this amendment: `npm run typecheck` green (all four projects); `npm test` **red only in
+`server/config-api.test.ts` (4, the machine's real native model) plus `fs.watch` flakes in
+`todos.test.ts` / `knowledge/store.test.ts` / `route-parity.test.ts`** — the flakes were confirmed by
+reverting only this change's three files and seeing the same failures, and by re-running them with the
+change restored (route-parity passed twice, `store.test.ts` failed once and passed once on identical
+code). The upstream purity gate passes: these new comments name no downstream deployment.
