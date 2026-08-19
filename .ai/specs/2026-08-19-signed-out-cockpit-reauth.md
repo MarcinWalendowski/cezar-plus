@@ -189,11 +189,32 @@ Automated — `npm run typecheck` and `npm test` from `cezar/`:
 | 4 | `reauth`: 401 → `location.assign('/auth/login')`, once | no such module | 403 / 404 / 500 / `ApiError(0)` **without** `identityGate` / a plain `Error` must not navigate |
 | 5 | `reauth`: a second signed-out within 30 s does not navigate, `reauthSuppressed()` is true | — | after 30 s it navigates again — the guard expires, never latches |
 
-Runtime E2E on production, after deploy — **required before this is Done**:
+**Executed 2026-08-19.** All five automated rows pass. Full gate set green — `npm run typecheck`,
+`npm test` (8790 passing; two unrelated `todos.test.ts` failures belong to a concurrent session's
+lane and reproduce in isolation without this change), `npm run test:unit`, `npm run build`,
+`npm run test:package`. Every guard was mutation-tested rather than assumed: reverting the
+`signed-out` gate line, dropping `throwIfIdentityGate`, emptying `NO_REDIRECT`, widening
+`isSignedOutError` to any `ApiError`, and making the guard latch instead of expire — each turns
+its own test red, and each restores green.
 
-- **Cause 1** — with a live Access session, delete only cezar's own session cookie and reload:
-  must land on `/auth/login`, not on an empty cockpit.
-- **Cause 2, the report verbatim** — open `cockpit.example.com`, clear application/website data
-  in DevTools, **do not reload**, wait for the next query: the tab must navigate to the
-  Access/IdP login by itself.
-- Sign in again: cockpit returns with tasks, git and knowledge intact.
+> **The web project's gates are not this repo's gates.** `typecheck` plus the web suite passed
+> while `packages/cezar/src/notifications/transports/webhook.test.ts` — the scan forbidding
+> `loki`/`lokimessages`/`imsg` under `packages/{cezar,web}/src` — was red on four comments in this
+> change that quoted the deployment's hostname. A web-only change can break a gate that lives in
+> the server project's tests, and only `npm test` runs both. Fixed in `80eb6112`.
+
+Runtime E2E on production, deployed and **executed 2026-08-19**:
+
+- **Cause 1 — PASSED.** A signed-out load of the deployed cockpit auto-redirected to cezar's own
+  OIDC login (the `aud` in the Access meta JWT is the OIDC client id, not the front self-hosted
+  app — so the request had passed the edge and cezar's SPA is what navigated). Previously this
+  same state rendered the full cockpit.
+- **The gate and the loop guard — PASSED, together.** A third load inside the 30 s window did
+  *not* redirect again: it stopped on a chromeless `/onboarding` reading "Sign-in did not
+  complete", with no sidebar, no nav and no tabs. That screen exists only in this change, so it
+  is also the proof that the deployed bundle is the fixed one.
+- **Cause 2 — NOT executed on production.** Exercising it means clearing the Cloudflare Access
+  cookie, which costs the owner a fresh email OTP. The mechanism is covered automatically (test
+  3: `opaqueredirect` plus all five redirect statuses, with a negative control over 304/4xx/5xx)
+  and it feeds the same `forceReauth` the two rows above just demonstrated in production. Worth
+  one owner pass at a convenient moment; not a blocker.
