@@ -222,10 +222,26 @@ export function isReportDocument(entry: CatalogEntry, tags: readonly string[]): 
 // ---- the index -----------------------------------------------------------------------------
 
 export class WorkspaceReportsIndex {
-  /** Standalone stores this index opened itself, keyed by registry project id — built lazily,
-   *  reused for the LIFE of this index instance. A live `contexts.peek()` store is never cached
-   *  here; it is already owned and kept live by its context. */
-  private readonly stores = new Map<string, KnowledgeStore>();
+  /**
+   * Standalone store BUILDS this index started itself, keyed by registry project id — started
+   * lazily, reused for the LIFE of this index instance. A live `contexts.peek()` store is never
+   * cached here; it is already owned and kept live by its context.
+   *
+   * **This caches the in-flight promise, not the settled store, and that is the whole point
+   * (FIXED 2026-08-19).** It held `KnowledgeStore` at first, assigned only after
+   * `withDeadline` resolved — which meant a build slower than `deadlineMs` had its result thrown
+   * away even though `withDeadline` deliberately leaves the underlying promise to settle. The next
+   * request found nothing cached and started a SECOND build of the same corpus, so a project that
+   * could not make the deadline once could never make it: it rebuilt on every request, forever,
+   * answering `ok:false, reason:"timed out"` each time while burning a full scan in the background.
+   * Measured on the deployment this was written for — 12 projects over one 2081-file mount, where
+   * the first call resolved 5 and the second 10, non-deterministically, at 15s and 9.7s.
+   *
+   * Caching the promise fixes both halves: a slow build is ADOPTED when it lands, so the project
+   * succeeds on a later request, and a concurrent request joins the build already running instead
+   * of racing a duplicate against it.
+   */
+  private readonly stores = new Map<string, Promise<KnowledgeStore>>();
   private readonly createStoreFn: (root: string, dataDir: string) => Promise<KnowledgeStore>;
   private readonly dataDirForFn: (root: string) => string;
   private readonly concurrency: number;
@@ -246,23 +262,36 @@ export class WorkspaceReportsIndex {
     }
   }
 
-  /** The store for one project, without building a context. Peek first — a live context's store is
-   *  the only one allowed to own that project's watchers/writes. Falls back to this index's own
-   *  cache, then to a freshly built standalone store, raced against the shared deadline. */
+  /**
+   * The store for one project, without building a context. Peek first — a live context's store is
+   * the only one allowed to own that project's watchers/writes. Falls back to this index's own
+   * in-flight-or-settled build, started here if this is the first ask.
+   *
+   * The deadline races only THIS CALL's wait, never the build itself: the build stays in
+   * {@link stores} and keeps going, so tripping the deadline costs this request an `ok:false` row
+   * and costs the next request nothing. A build that REJECTS is evicted, so a project broken by
+   * something transient (a root that was briefly unreadable) retries on the next request rather
+   * than caching its own failure for the life of the process.
+   */
   private async resolveStore(source: WorkspaceReportsProjectSource): Promise<StoreResolution> {
     const live = this.deps.contexts.peek(source.id);
     if (live?.knowledgeStore) return { ok: true, store: live.knowledgeStore };
 
-    const cached = this.stores.get(source.id);
-    if (cached) return { ok: true, store: cached };
+    let build = this.stores.get(source.id);
+    if (!build) {
+      build = this.createStoreFn(source.root, this.dataDirForFn(source.root));
+      this.stores.set(source.id, build);
+      // Evict on failure only. Attached here rather than in the `catch` below so eviction happens
+      // once per BUILD, not once per waiter — and so a build whose only waiter already gave up on
+      // the deadline is still cleaned up. `.catch` on a detached copy: this must never add an
+      // unhandled rejection, and must not replace the cached promise with a resolved one.
+      build.catch(() => {
+        if (this.stores.get(source.id) === build) this.stores.delete(source.id);
+      });
+    }
 
     try {
-      const store = await withDeadline(
-        this.createStoreFn(source.root, this.dataDirForFn(source.root)),
-        this.deadlineMs,
-      );
-      this.stores.set(source.id, store);
-      return { ok: true, store };
+      return { ok: true, store: await withDeadline(build, this.deadlineMs) };
     } catch (err) {
       return { ok: false, reason: describeFailure(err) };
     }

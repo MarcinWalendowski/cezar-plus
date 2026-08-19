@@ -254,6 +254,71 @@ describe('WorkspaceReportsIndex — peek vs standalone', () => {
     expect(builds).toBe(1);
   });
 
+  /**
+   * The regression that shipped to production on 2026-08-19 and was caught there.
+   *
+   * `resolveStore` used to cache the SETTLED store, assigned after `withDeadline` resolved — so a
+   * build slower than the deadline had its result discarded even though `withDeadline` leaves the
+   * underlying promise running on purpose. Nothing was cached, so the next request started a
+   * SECOND full build, which missed the deadline too. A project too slow to make the deadline once
+   * could therefore never make it: permanent `ok:false`, a fresh corpus scan burned per request.
+   * Measured on the box as 12 projects over one 2081-file mount answering 5 then 10 of 12, at 15s
+   * and 9.7s.
+   *
+   * `builds === 1` is the load-bearing half. Without it this passes on the bug: the second call
+   * would eventually go green anyway once a rebuild happened to beat the deadline, so asserting
+   * only "the second call succeeds" would not have caught this.
+   */
+  it('a build that misses the deadline is ADOPTED, not rebuilt, and succeeds next call', async () => {
+    let builds = 0;
+    let release!: (store: KnowledgeStore) => void;
+    const index = new WorkspaceReportsIndex({
+      listProjects: async () => [source({ id: 'slow' })],
+      contexts: NO_LIVE_CONTEXTS,
+      deadlineMs: 5,
+      createStore: () => {
+        builds++;
+        return new Promise<KnowledgeStore>((r) => {
+          release = r;
+        });
+      },
+    });
+
+    const first = await index.list({ tags: TAGS });
+    expect(first.projects[0]).toMatchObject({ id: 'slow', ok: false, reason: 'timed out' });
+    expect(first.rows).toHaveLength(0);
+
+    // The build lands late — exactly the case the old code threw away.
+    release(fakeStore({ listDocuments: () => [doc({ identifiers: ['r1'] })] }));
+    await Promise.resolve();
+
+    const second = await index.list({ tags: TAGS });
+    expect(second.projects[0]).toMatchObject({ id: 'slow', ok: true, total: 1 });
+    expect(second.rows.map((r) => r.key)).toEqual(['r1']);
+    expect(builds).toBe(1);
+  });
+
+  it('a REJECTED build is evicted so the next call retries it', async () => {
+    let builds = 0;
+    const index = new WorkspaceReportsIndex({
+      listProjects: async () => [source({ id: 'flaky' })],
+      contexts: NO_LIVE_CONTEXTS,
+      createStore: async () => {
+        builds++;
+        if (builds === 1) throw new Error('root briefly unreadable');
+        return fakeStore({ listDocuments: () => [doc({ identifiers: ['r1'] })] });
+      },
+    });
+
+    const first = await index.list({ tags: TAGS });
+    expect(first.projects[0]).toMatchObject({ ok: false, reason: 'root briefly unreadable' });
+
+    // A cached rejection would make this the same failure forever, and `builds` would stay 1.
+    const second = await index.list({ tags: TAGS });
+    expect(second.projects[0]).toMatchObject({ ok: true, total: 1 });
+    expect(builds).toBe(2);
+  });
+
   it('never resolves more than `concurrency` projects at once', async () => {
     let inflight = 0;
     let peak = 0;

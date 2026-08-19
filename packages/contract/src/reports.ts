@@ -134,15 +134,22 @@ export const reportListItemSchema = z.object({
   /** The knowledge catalog id, for fetching the document body. */
   docId: z.string().min(1),
   /**
-   * The registry id of the project this row's document link resolves through — the FIRST project in
-   * registry order that resolves it, so two identical requests name the same one. Never "the project
-   * that owns this report": a workspace knowledge mount belongs to the operator, not to any repo.
+   * The registry id of the project this row's document link resolves through — the first project in
+   * registry order that resolves it. Never "the project that owns this report": a workspace
+   * knowledge mount belongs to the operator, not to any repo.
+   *
+   * **Stable once every project's store is warm, and NOT before (CORRECTED 2026-08-19).** This said
+   * "so two identical requests name the same one", full stop, which the deployment disproved: both
+   * this and `projects` are derived from the projects that answered within the server's per-project
+   * deadline, and a cold store may miss it. Read `projects` in the response envelope to tell the two
+   * apart — a row whose membership looks short while some project reports `ok: false` is a warmup
+   * artifact, not a fact about the corpus.
    */
   project: z.string().min(1),
   /**
-   * EVERY project whose knowledge base resolves this same document, sorted, `project` included.
-   * Length > 1 is the normal case for a workspace mount and is exactly what the old per-project
-   * queue rendered as N separate rows with N separate answers.
+   * Every project whose knowledge base resolves this same document AND answered within the
+   * deadline, sorted, `project` included. Length > 1 is the normal case for a workspace mount and is
+   * exactly what the old per-project queue rendered as N separate rows with N separate answers.
    */
   projects: z.array(z.string()),
   title: z.string(),
