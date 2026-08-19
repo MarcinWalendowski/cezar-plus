@@ -11,7 +11,7 @@ import {
   type FiledSort,
   type FiledTaskFilters,
 } from '@/lib/filed-tasks'
-import { runTitle } from '@/lib/task-groups'
+import { isInFlight, runTitle } from '@/lib/task-groups'
 import { displayWorkflowName } from '@/lib/tasks-table'
 
 /**
@@ -301,6 +301,46 @@ export function tasksExcludingFacet(
   except: FacetId,
 ): GlobalTask[] {
   return filterGlobalTasks(tasks, { ...filters, [except]: [] }, view)
+}
+
+/**
+ * The Running section's rows: the work in flight, in the page's own order
+ * (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md`, D1).
+ *
+ * Takes the ALREADY-FILTERED list, not the raw one. The section is a view over what the page is
+ * currently showing, so the filter bar, the search box and "Clear" keep meaning one thing across
+ * every section — a Running list that ignored the active filters would be the one row on the page
+ * that a filter could not reach.
+ *
+ * "In flight" is `lib/task-groups`'s `isInFlight`, never a status list spelled again here: the
+ * sidebar quick-list, the per-project board and this section have to agree about what is running,
+ * and they only can while there is one definition.
+ *
+ * **Order is preserved, deliberately — this is a FILTER, not a sort.** The obvious-looking move is
+ * to rank these rows by `sortRuns`' status weight (needs-you, running, scheduled, queued), and the
+ * first cut did. It re-ordered rows that the page renders in index order everywhere else, which is
+ * a second ordering rule nobody asked for and one more thing that can disagree with the table
+ * below. Pinning the section answers "where do I look?"; it is not licence to also answer "in what
+ * order?".
+ *
+ * `archived` yields `[]` by construction (nothing archived is in flight), which is what makes the
+ * component's "render nothing on the Archived tab" fall out of the data rather than out of a
+ * second condition in the JSX. The archived check is spelled here rather than borrowed from
+ * `sortRuns`, so this holds for a caller that hands over an unfiltered list.
+ */
+export function inFlightGlobalTasks(
+  tasks: readonly GlobalTask[],
+  view: 'active' | 'archived',
+  groupBy: GroupBy = 'none',
+): GlobalTask[] {
+  if (view === 'archived') return []
+  // An explicit grouping OWNS the list. Pinning is the page's DEFAULT organisation, not a layer
+  // over whatever else is chosen: with `groupBy: 'tag'` the reader has asked for every task under
+  // every tag its project carries, and lifting the running ones into a box above would answer a
+  // question nobody asked while silently emptying the boxes they did ask for. Pressing Clear
+  // returns `groupBy` to `'none'` and the pin comes back with it.
+  if (groupBy !== 'none') return []
+  return tasks.filter((task) => !task.run.archived && isInFlight(task.run, view))
 }
 
 /** One rendered group: a heading and its rows. `key` is stable identity (a project id, a tag,

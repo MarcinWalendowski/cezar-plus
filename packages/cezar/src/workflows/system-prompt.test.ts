@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { HANDOFF_INSTRUCTIONS, HANDOFF_ONLY_INSTRUCTIONS } from '../handoff.ts';
 import { RunStore } from '../runs/store.ts';
+import { todoTaskText } from '../todos.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import type { WorkflowDef } from './types.ts';
 import {
@@ -89,6 +90,38 @@ describe('skill-aware task naming (#432)', () => {
     // A bare number without a skill stays bare — no `469: 469`.
     expect(makeRunTitle('469', workflow)).toBe('469');
     expect(makeRunTitle('#469', workflow)).toBe('#469');
+  });
+
+  /**
+   * The regression `2026-08-19-tasks-page-and-start-grounding.md` D2 could have shipped.
+   *
+   * Start now hands the agent the WHOLE filed entry — headline, then `## Context`, `## What to
+   * do`, `## Acceptance criteria` — and that same string becomes the run's title through
+   * `makeRunTitle`. It survives only because the headline is a bare first line and this function
+   * reads exactly one line. Lead the task text with a heading instead, or let a section slip
+   * above the summary, and every task on the board is titled `# Context` or a wall of markdown,
+   * with nothing else in the suite going red.
+   *
+   * Asserted against the real builder rather than a hand-written multi-line string: a fixture
+   * copy here would keep passing after `todoTaskText` changed shape, which is the whole thing
+   * this guards.
+   */
+  it('titles a full filed spec by its summary alone (todoTaskText × makeRunTitle)', () => {
+    const workflow: WorkflowDef = {
+      name: 'quick-task',
+      source: 'built-in',
+      steps: [{ id: 'task', prompt: '{{task}}' }],
+    };
+    const task = todoTaskText({
+      summary: 'Fix the login bug',
+      context: 'It extends the 2026-08-01 decision.',
+      whatToDo: '- Read the spec\n- Then write the code',
+      acceptanceCriteria: ['Gates green'],
+      knowledgeRefs: [{ project: 'billing', slug: 'webhook-retries', title: 'Webhook retry policy' }],
+    });
+    expect(task).toContain('## What to do');
+    expect(task.split('\n').length).toBeGreaterThan(5);
+    expect(makeRunTitle(task, workflow)).toBe('Fix the login bug');
   });
 });
 

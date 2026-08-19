@@ -1,12 +1,16 @@
 {
   "_comment": [
-    "The task text an inbox entry turns into (#374). TWO implementations must agree: the",
-    "server's `todoTaskText` (src/todos.ts, used by POST /api/todos/:id/start) and the",
-    "cockpit's copy (web/app/src/routes/inbox.tsx), which prefills /new with it. They run in",
-    "different processes and share no module, so these cases are the contract between them:",
-    "test/unit/todo-task-text.test.ts asserts the server against it, inbox.test.tsx asserts the",
-    "cockpit. Change one builder and its suite goes red here; update this file and the OTHER",
-    "suite goes red too — neither side can drift alone."
+    "The task text a filed entry turns into — the contract for `todoTaskText` (src/todos.ts),",
+    "which `POST /api/todos/:id/start` uses to build `run.task`.",
+    "",
+    "Corrected 2026-08-19: this file used to describe itself as a CROSS-PROCESS drift guard",
+    "between the server builder and a copy in the cockpit (web/app/src/routes/inbox.tsx). That",
+    "copy is gone — inbox.tsx and the Filed table both POST to /todos/:id/start and build no task",
+    "text — so half the guard had been asserting nothing. One builder, one fixture.",
+    "",
+    "The first seven cases predate the structured spec and must stay byte-identical forever: they",
+    "are what proves 2026-08-19-tasks-page-and-start-grounding.md's D2 widened the output without",
+    "moving the legacy path. The rest cover the four spec sections."
   ],
   "cases": [
     {
@@ -47,6 +51,62 @@
       "name": "an empty summary with no prompt stays empty",
       "todo": { "summary": "" },
       "expected": ""
+    },
+    {
+      "name": "context becomes a Context section",
+      "todo": { "summary": "Ship it", "context": "It extends the 2026-08-01 decision." },
+      "expected": "Ship it\n\n## Context\n\nIt extends the 2026-08-01 decision."
+    },
+    {
+      "name": "whatToDo becomes a What to do section, keeping its own markdown",
+      "todo": { "summary": "Ship it", "whatToDo": "- Read the spec\n- Then write the code" },
+      "expected": "Ship it\n\n## What to do\n\n- Read the spec\n- Then write the code"
+    },
+    {
+      "name": "acceptance criteria become an unchecked checklist",
+      "todo": { "summary": "Ship it", "acceptanceCriteria": ["Gates green", "E2E passed"] },
+      "expected": "Ship it\n\n## Acceptance criteria\n\n- [ ] Gates green\n- [ ] E2E passed"
+    },
+    {
+      "name": "knowledge refs become a Knowledge section",
+      "todo": {
+        "summary": "Ship it",
+        "knowledgeRefs": [{ "project": "billing", "slug": "webhook-retries", "title": "Webhook retry policy" }]
+      },
+      "expected": "Ship it\n\n## Knowledge\n\n- Webhook retry policy (billing/webhook-retries)"
+    },
+    {
+      "name": "every section together, in spec order, after the Arguments line",
+      "todo": {
+        "summary": "Ship it",
+        "suggestedArgs": "--dry-run",
+        "context": "Why this exists.",
+        "whatToDo": "The work itself.",
+        "acceptanceCriteria": ["It works"],
+        "knowledgeRefs": [{ "project": "billing", "slug": "webhook-retries", "title": "Webhook retry policy" }]
+      },
+      "expected": "Ship it\n\nArguments: --dry-run\n\n## Context\n\nWhy this exists.\n\n## What to do\n\nThe work itself.\n\n## Acceptance criteria\n\n- [ ] It works\n\n## Knowledge\n\n- Webhook retry policy (billing/webhook-retries)"
+    },
+    {
+      "name": "blank and empty fields contribute no heading at all",
+      "todo": {
+        "summary": "Ship it",
+        "context": "   ",
+        "whatToDo": "",
+        "acceptanceCriteria": [],
+        "knowledgeRefs": []
+      },
+      "expected": "Ship it"
+    },
+    {
+      "name": "a blank acceptance criterion is dropped, the section survives",
+      "todo": { "summary": "Ship it", "acceptanceCriteria": ["  ", "It works"] },
+      "expected": "Ship it\n\n## Acceptance criteria\n\n- [ ] It works"
+    },
+    {
+      "name": "sections attach to the suggested prompt headline, not the summary",
+      "todo": { "summary": "Ship it", "suggestedPrompt": "Cut the release notes", "context": "Why." },
+      "expected": "Cut the release notes\n\n## Context\n\nWhy."
     }
   ]
 }

@@ -16,6 +16,7 @@ import {
   filterGlobalTasks,
   groupGlobalTasks,
   hasActiveFilters,
+  inFlightGlobalTasks,
   tagValuesOf,
   tasksExcludingFacet,
   GROUP_BY_OPTIONS,
@@ -273,6 +274,81 @@ describe('filterGlobalTasks', () => {
 
   it('does not match the run id — the table never prints it', () => {
     expect(filterGlobalTasks(tasks, filters({ query: 'a1' }), 'active')).toEqual([])
+  })
+})
+
+/**
+ * The Running section's row set (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md`, D1).
+ *
+ * The fixture above only has `running`/`review`/`done`, so these build their own: the point of the
+ * section is which statuses count as in flight, and a set that never contains a `queued` or an
+ * auto-resuming row cannot tell a correct answer from one that just happens to match.
+ */
+describe('inFlightGlobalTasks', () => {
+  const LIVE_RUNS: RunIndexEntry[] = [
+    run({ id: 'q', projectId: 'api', status: 'queued', createdAt: '2026-07-14T09:00:00Z' }),
+    run({ id: 'q2', projectId: 'api', status: 'queued', createdAt: '2026-07-14T08:00:00Z' }),
+    run({ id: 'r', projectId: 'api', status: 'running' }),
+    run({ id: 'w', projectId: 'web', status: 'waiting' }),
+    run({ id: 'rev', projectId: 'web', status: 'review' }),
+    run({ id: 'sched', projectId: 'infra', status: 'failed', autoResumeAt: '2026-07-14T12:00:00Z' }),
+    run({ id: 'done', projectId: 'infra', status: 'done' }),
+    run({ id: 'failed', projectId: 'infra', status: 'failed' }),
+    run({ id: 'cancelled', projectId: 'loose', status: 'cancelled' }),
+    run({ id: 'gone', projectId: 'loose', status: 'running', archived: true }),
+  ]
+  const live = toGlobalTasks(LIVE_RUNS, PROJECTS)
+
+  it('keeps every status that is work, and drops every status that is an outcome', () => {
+    const inFlight = ids(inFlightGlobalTasks(live, 'active'))
+    expect(new Set(inFlight)).toEqual(new Set(['q', 'q2', 'r', 'w', 'rev', 'sched']))
+    // The negative control that makes the assertion above mean something: without it, a helper
+    // that simply returned everything would pass.
+    expect(inFlight).not.toContain('done')
+    expect(inFlight).not.toContain('failed')
+    expect(inFlight).not.toContain('cancelled')
+  })
+
+  it('preserves the page order rather than imposing a second one', () => {
+    // A FILTER, not a sort (see the helper's own note): the first cut ranked these by status
+    // weight, which silently re-ordered rows the rest of the page renders in index order. The
+    // fixture is deliberately in an order no status ranking would produce.
+    expect(ids(inFlightGlobalTasks(live, 'active'))).toEqual(['q', 'q2', 'r', 'w', 'rev', 'sched'])
+  })
+
+  it('drops an archived run even when its status says running', () => {
+    // `bucketOf` answers on status alone, so this row IS "in flight" by status and must still be
+    // dropped — the archived split is what `sortRuns` applies, and the helper is built from its
+    // output for exactly this case.
+    expect(ids(inFlightGlobalTasks(live, 'active'))).not.toContain('gone')
+  })
+
+  it('is empty on the archived view — nothing archived is in flight', () => {
+    expect(inFlightGlobalTasks(live, 'archived')).toEqual([])
+  })
+
+  it('is empty when nothing is running, which is what hides the section entirely', () => {
+    const settled = toGlobalTasks(
+      [run({ id: 'd', projectId: 'api', status: 'done' })],
+      PROJECTS,
+    )
+    expect(inFlightGlobalTasks(settled, 'active')).toEqual([])
+  })
+
+  it('steps aside entirely when an explicit grouping is chosen', () => {
+    // Pinning is the DEFAULT organisation, not a layer over the chosen one. Lifting rows out
+    // while `groupBy: 'tag'` is in force would empty the very boxes the reader asked for.
+    for (const groupBy of ['project', 'tag', 'status', 'workflow'] as const) {
+      expect(inFlightGlobalTasks(live, 'active', groupBy)).toEqual([])
+    }
+    // …and the default is still the pinned one, which is what makes the line above a narrowing
+    // rather than a switch that happens to be off.
+    expect(ids(inFlightGlobalTasks(live, 'active', 'none')).length).toBeGreaterThan(0)
+  })
+
+  it('is a view over the ALREADY-FILTERED list, so the page filters reach it', () => {
+    const narrowed = filterGlobalTasks(live, filters({ tags: ['infra'] }), 'active')
+    expect(ids(inFlightGlobalTasks(narrowed, 'active'))).toEqual(['sched'])
   })
 })
 

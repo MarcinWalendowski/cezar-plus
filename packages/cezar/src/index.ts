@@ -36,6 +36,7 @@ import { runMigrations } from './workspace/migrations.ts';
 import { shouldRegisterProject } from './workspace/projects.ts';
 import { runProjectsCommand } from './workspace/projects-cli.ts';
 import { runBackupCommand } from './backup/cli.ts';
+import { runKnowledgeCommand } from './knowledge/cli.ts';
 import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 // FIX 6 (D13 repair pass 1): the production `listRegisteredProjectRoots` supplier lives in
 // `./registered-project-roots.ts` for the same reason `./auth-boot-gate.ts` was extracted from this
@@ -55,6 +56,9 @@ Usage:
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
   cezar projects            list the projects this cockpit serves
                             (also: projects add [<dir>] · projects remove <id>)
+  cezar kb                  knowledge base (CEZ_KB=1): search "<query>" · show
+                            <id> · list · write — the same commands the agent
+                            system prompt tells a run to use
   cezar backup              encrypted platform backup (CEZ_BACKUP=1): status ·
                             run · snapshots · verify · gc · restore [--snapshot
                             <id>] [--force]
@@ -118,6 +122,26 @@ async function main(): Promise<void> {
     const backupCwd = resolve(process.cwd());
     const backupRepoRoot = (await getRepoInfo(backupCwd))?.root ?? backupCwd;
     process.exitCode = await runBackupCommand(rawArgs.slice(1), { defaultRoot: backupRepoRoot });
+    return;
+  }
+
+  // `kb` is routed here for exactly the reason `backup` above is: it owns its own flag namespace
+  // (`--json`, `--type`, `--tag`, `--status`, `--root`, `--limit`, `--offset`, `--content`), and
+  // the strict `parseArgs` below rejects every one of them as an unknown option and throws long
+  // before the command switch. Registry-only (no server, no HTTP), root resolved from cwd, gated
+  // on CEZ_KB=1 inside `runKnowledgeCommand` so it stays inert with the flag off.
+  //
+  // **Wired 2026-08-19 (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md`, D4). It never
+  // was before.** `runKnowledgeCommand` shipped complete and covered by `knowledge/cli.test.ts`,
+  // imported by nothing but that test — so `cez kb search`, the exact command
+  // `knowledgeSystemPrompt` instructs EVERY agent run to use, answered `unknown command: kb` on
+  // every install since the knowledge base existed. A green unit suite over a function no entry
+  // point calls says nothing about whether the feature is REACHABLE; these lines are what make it
+  // so, and `knowledge/cli-wiring.test.ts` is what keeps them.
+  if (rawArgs[0] === 'kb') {
+    const kbCwd = resolve(process.cwd());
+    const kbRepoRoot = (await getRepoInfo(kbCwd))?.root ?? kbCwd;
+    process.exitCode = await runKnowledgeCommand(rawArgs.slice(1), { repoRoot: kbRepoRoot });
     return;
   }
 

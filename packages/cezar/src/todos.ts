@@ -297,17 +297,67 @@ export async function updateTodo(dataDir: string, id: string, patch: UpdateTodoP
   });
 }
 
-/** The task text "▶ Run" turns an entry into: the suggested prompt (or the summary when the
- *  entry carries none), plus the suggested args as a trailing line. The single server-side
- *  source for `POST /api/todos/:id/start`; the cockpit's prefill copy
- *  (`packages/web/src/routes/inbox.tsx`, #374) lives in another process and cannot import this, so
- *  the two are pinned to the shared cases in `test/fixtures/todo-task-text.json`. */
+/** One rendered section of the task text, or `undefined` when the entry carries nothing for it.
+ *  Blank-but-present is the same as absent: a whitespace-only `context` must not leave a bare
+ *  `## Context` heading pointing at nothing. */
+function taskSection(heading: string, body: string | undefined): string | undefined {
+  const trimmed = body?.trim();
+  return trimmed ? `## ${heading}\n\n${trimmed}` : undefined;
+}
+
+/**
+ * The task text "▶ Run" turns an entry into — the WHOLE filed entry, not its headline
+ * (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md`, D2).
+ *
+ * Headline first (the suggested prompt, or the summary when the entry carries none) then the
+ * suggested args, both byte-identical to what this produced before the structured fields existed;
+ * then the spec the composer actually wrote, as markdown sections, each omitted when empty. A
+ * legacy summary-only entry therefore produces exactly the string it always did.
+ *
+ * **Why the headline stays a bare first line.** `makeRunTitle` (`workflows/run.ts`) takes the
+ * first line and truncates it at 80 characters, and `seedHandoffFile` writes the whole thing into
+ * `## Goal`. Leading with a heading would make every run title `# something`; leading with the
+ * summary keeps titles exactly as they are and gives a resumed run the full brief for free.
+ *
+ * **Corrected 2026-08-19.** This used to say the cockpit kept a copy in
+ * `web/app/src/routes/inbox.tsx` that had to be pinned to the same fixture. It no longer does —
+ * `inbox.tsx` POSTs to `/todos/:id/start` and builds no task text, and neither does the Filed
+ * table's Start button. There is ONE builder, this one; `test/fixtures/todo-task-text.json` is
+ * its contract, no longer a cross-process drift guard.
+ *
+ * `knowledgeRefs` are emitted as the three strings the composer persisted (title, project, slug)
+ * and nothing more. That is not in tension with `knowledge/prompt.ts`'s Q12 rule against lifting
+ * titles and slugs into a prompt: Q12 bounds text read out of MOUNTED DOCUMENTS this feature does
+ * not own, whereas these are the citation as stored on the todo — the same strings the Filed
+ * detail dialog already renders verbatim.
+ */
 export function todoTaskText(
-  todo: Pick<TodoItem, 'summary' | 'suggestedPrompt' | 'suggestedArgs'>,
+  todo: Pick<
+    TodoItem,
+    | 'summary'
+    | 'suggestedPrompt'
+    | 'suggestedArgs'
+    | 'context'
+    | 'whatToDo'
+    | 'acceptanceCriteria'
+    | 'knowledgeRefs'
+  >,
 ): string {
   let task = (todo.suggestedPrompt ?? todo.summary).trim() || todo.summary;
   if (todo.suggestedArgs) task += `\n\nArguments: ${todo.suggestedArgs}`;
-  return task;
+
+  const criteria = (todo.acceptanceCriteria ?? []).map((line) => line.trim()).filter(Boolean);
+  const refs = (todo.knowledgeRefs ?? []).filter((ref) => ref.title.trim() && ref.slug.trim());
+  const sections = [
+    taskSection('Context', todo.context),
+    taskSection('What to do', todo.whatToDo),
+    criteria.length ? `## Acceptance criteria\n\n${criteria.map((line) => `- [ ] ${line}`).join('\n')}` : undefined,
+    refs.length
+      ? `## Knowledge\n\n${refs.map((ref) => `- ${ref.title.trim()} (${ref.project}/${ref.slug.trim()})`).join('\n')}`
+      : undefined,
+  ].filter((section): section is string => section !== undefined);
+
+  return sections.length ? `${task}\n\n${sections.join('\n\n')}` : task;
 }
 
 /** Record that "▶ Run" turned the entry into task `taskId`. The entry stays

@@ -90,7 +90,7 @@ describe('bucketOf', () => {
     expect(bucketOf(scheduled, 'active')).toBe('Working')
     expect(bucketOf(run({ status: 'failed' }), 'active')).toBe('Recent')
     // Archived still collapses everything, schedule or not.
-    expect(bucketOf({ ...scheduled, archived: true }, 'archived')).toBe('Archived')
+    expect(bucketOf(run({ ...scheduled, archived: true }), 'archived')).toBe('Archived')
   })
 })
 

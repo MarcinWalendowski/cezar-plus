@@ -47,7 +47,7 @@ const STATUS_ORDER: Partial<Record<RunRecord['status'], number>> = {
  *  is the same rule the status pill and the sidebar bucket read (`lib/attention.ts`). */
 const SCHEDULED_WEIGHT = 3
 
-const statusWeight = (run: RunRecord): number =>
+const statusWeight = (run: BucketInput): number =>
   run.status === 'failed' && run.autoResumeAt !== undefined
     ? SCHEDULED_WEIGHT
     : STATUS_ORDER[run.status] ?? 9
@@ -75,12 +75,22 @@ export interface QuickListBucket {
 }
 
 /**
+ * The two fields `bucketOf` reads, rather than a whole `RunRecord` — the same widening
+ * `RunTitleInput` and `AttentionInput` already made, and for the same reason: the cross-project
+ * index (`RunIndexEntry`) is a slim row, not a record, and the global Tasks page's Running
+ * section has to ask "is this in flight?" of exactly ONE definition
+ * (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md`, D1). A local re-implementation over
+ * `status` there is how the sidebar and the page start disagreeing about what is running.
+ */
+export type BucketInput = Pick<RunRecord, 'status' | 'autoResumeAt'>
+
+/**
  * The label a run sits under.
  *
  * Archived collapses the whole list into one bucket regardless of status: in that view the
  * outcome is history, and "Needs you" over a run nobody will touch again would be a lie.
  */
-export function bucketOf(run: RunRecord, view: ListView): BucketLabel {
+export function bucketOf(run: BucketInput, view: ListView): BucketLabel {
   if (view === 'archived') return 'Archived'
   if (run.status === 'waiting' || run.status === 'review') return 'Needs you'
   if (run.status === 'running' || run.status === 'queued') return 'Working'
@@ -89,6 +99,19 @@ export function bucketOf(run: RunRecord, view: ListView): BucketLabel {
   // flight, not filed under Recent as an outcome. It asks for nothing, so never "Needs you".
   if (run.status === 'failed' && run.autoResumeAt) return 'Working'
   return 'Recent'
+}
+
+/**
+ * Is this run IN FLIGHT — work that is happening or about to, as opposed to an outcome?
+ *
+ * Defined as the two buckets that are not outcomes, so there is no second status list to keep in
+ * step with `bucketOf`: add a status there and it lands here without anyone remembering to. The
+ * global Tasks page's Running section is the caller (D1); `view` is taken rather than assumed
+ * because Archived collapses every bucket and nothing in it is in flight by definition.
+ */
+export function isInFlight(run: BucketInput, view: ListView): boolean {
+  const bucket = bucketOf(run, view)
+  return bucket === 'Needs you' || bucket === 'Working'
 }
 
 /**
@@ -193,7 +216,9 @@ export function queuePositions(runs: readonly RunRecord[]): Map<string, number> 
  * ISO-8601 strings compare lexicographically because every timestamp cezar writes is UTC
  * (`toISOString()` → trailing `Z`), the same reason `read-state.ts` compares them directly.
  */
-export function sortRuns(runs: readonly RunRecord[], view: ListView): RunRecord[] {
+export type SortRunInput = BucketInput & Pick<RunRecord, 'archived' | 'createdAt'>
+
+export function sortRuns<T extends SortRunInput>(runs: readonly T[], view: ListView): T[] {
   return runs
     .filter((run) => (view === 'archived' ? run.archived : !run.archived))
     .sort((a, b) => {

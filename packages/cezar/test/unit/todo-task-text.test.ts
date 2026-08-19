@@ -2,18 +2,25 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { todoTaskText, type TodoItem } from '../../src/todos.js';
+import { todoTaskText } from '../../src/todos.js';
 
 /**
- * The server half of the cross-process drift guard (#374). `POST /api/todos/:id/start` builds
- * the task text here; the cockpit rebuilds it in the bundle (`todoTaskText` in
- * web/app/src/routes/inbox.tsx) to prefill `/new` with exactly what that route would have run.
- * Nothing links the two at compile time — different process, different bundle — so both assert
- * the same fixture. Change this builder and this suite goes red; "fix" it by editing the
- * fixture and inbox.test.tsx goes red instead. The drift always surfaces.
+ * The contract for the ONE task-text builder: `POST /api/todos/:id/start` turns a filed entry
+ * into `run.task` through `todoTaskText`, and these cases are what that is allowed to produce.
+ *
+ * **Corrected 2026-08-19** (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md`). This used
+ * to describe a CROSS-PROCESS drift guard (#374): the cockpit was said to rebuild the same text
+ * in `web/app/src/routes/inbox.tsx` to prefill `/new`, with `inbox.test.tsx` asserting the same
+ * fixture from the other side, so "the drift always surfaces". That copy no longer exists —
+ * `inbox.tsx` and the Filed table's Start button both POST to `/todos/:id/start` and build no
+ * task text at all — so the second half of that guard has been asserting nothing. Nothing broke;
+ * a claim in a comment simply outlived the thing it described.
+ *
+ * The first seven cases are the pre-2026-08-19 output and must stay byte-identical: they are the
+ * proof that widening the builder to carry the whole filed spec (D2) did not move the legacy path.
  */
 interface Fixture {
-  cases: Array<{ name: string; todo: Pick<TodoItem, 'summary' | 'suggestedPrompt' | 'suggestedArgs'>; expected: string }>;
+  cases: Array<{ name: string; todo: Parameters<typeof todoTaskText>[0]; expected: string }>;
 }
 
 const fixture = JSON.parse(
@@ -21,7 +28,7 @@ const fixture = JSON.parse(
 ) as Fixture;
 
 test('the shared fixture is the whole contract, not a token case', () => {
-  assert.ok(fixture.cases.length >= 5);
+  assert.ok(fixture.cases.length >= 14);
 });
 
 for (const { name, todo, expected } of fixture.cases) {

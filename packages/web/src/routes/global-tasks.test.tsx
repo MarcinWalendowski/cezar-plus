@@ -1202,6 +1202,128 @@ describe('global tasks page', () => {
  * unless `CEZ_FOLLOWUPS=1`. So filing twelve tasks and filing none looked identical, which is how
  * the bug was reported: "I just tried to add a task and nothing happened."
  */
+/**
+ * The Running section (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md`, D1).
+ *
+ * Asserted on DOCUMENT ORDER, not on both sections merely existing: "Running is above Filed" is
+ * the entire owner-facing change, and a test that only checks both are on the page passes just as
+ * happily with them the other way round — which is the state this spec was written to fix.
+ */
+describe('the Running section', () => {
+  const TODOS: WorkspaceTodoEntry[] = [
+    { project: 'api', todo: { id: 'todo-1', ts: '2026-07-14T09:00:00Z', summary: 'Add a rate limit to /checkout' } },
+  ]
+
+  const positionOf = (slot: string) => {
+    const node = document.querySelector(`[data-slot="${slot}"]`)
+    return node ? [...document.querySelectorAll('[data-slot]')].indexOf(node) : -1
+  }
+
+  it('renders above the Filed section', async () => {
+    stubFetch({ todos: TODOS })
+    renderPage()
+    await screen.findByText('Add a rate limit to /checkout')
+
+    const running = document.querySelector('[data-slot="running-tasks"]')!
+    const filed = document.querySelector('[data-slot="filed-tasks"]')!
+    expect(running).toBeTruthy()
+    expect(filed).toBeTruthy()
+    // `DOCUMENT_POSITION_FOLLOWING` = filed comes after running in the document.
+    expect(running.compareDocumentPosition(filed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(positionOf('running-tasks')).toBeLessThan(positionOf('filed-tasks'))
+  })
+
+  it('holds the work in flight and nothing that has finished', async () => {
+    stubFetch()
+    renderPage()
+    await screen.findByText('Add checkout endpoint')
+
+    const running = document.querySelector('[data-slot="running-tasks"]') as HTMLElement
+    // a1 is `running`, w1 is `review` — both in flight. i1 is `done` and belongs below.
+    expect(within(running).getByText('Add checkout endpoint')).toBeTruthy()
+    expect(within(running).getByText('Checkout page')).toBeTruthy()
+    expect(within(running).queryByText('Bump the runner')).toBeNull()
+    expect(document.querySelector('[data-slot="running-tasks-count"]')?.textContent).toBe('2')
+  })
+
+  /**
+   * Lifted, not copied — the correction this section's first cut needed.
+   *
+   * Rendering the running rows in BOTH places turned 39 existing cases red with "found multiple
+   * elements", which is the same thing a reader would see: one task, twice, on one screen. This
+   * pins the fix, and `getByText` (which throws on more than one match) is doing the real work —
+   * a `queryBy` here would pass against the duplicated version.
+   */
+  it('lifts its rows OUT of the table below rather than duplicating them', async () => {
+    stubFetch()
+    renderPage()
+    await screen.findByText('Add checkout endpoint')
+
+    expect(screen.getByText('Add checkout endpoint')).toBeTruthy()
+    expect(screen.getAllByText('Add checkout endpoint')).toHaveLength(1)
+    // The settled row is below, in the grouped table, and appears exactly once there too.
+    const groups = document.querySelector('[data-slot="task-group"]') as HTMLElement
+    expect(within(groups).getByText('Bump the runner')).toBeTruthy()
+    expect(within(groups).queryByText('Add checkout endpoint')).toBeNull()
+  })
+
+  it('leaves no empty-state claim when every visible row is running', async () => {
+    // `settled` is empty here but the page is emphatically not: "no tasks" over a table of live
+    // work would be the worst possible answer.
+    stubFetch({ runs: RUNS.filter((run) => run.id !== 'i1') })
+    renderPage()
+    await screen.findByText('Add checkout endpoint')
+    expect(document.querySelector('[data-slot="running-tasks"]')).toBeTruthy()
+    expect(document.querySelector('[data-slot="tasks-empty"]')).toBeNull()
+    expect(screen.queryByText(/no tasks/i)).toBeNull()
+  })
+
+  it('renders nothing at all when nothing is in flight', async () => {
+    stubFetch({ runs: RUNS.map((run) => ({ ...run, status: 'done' as const })) })
+    renderPage()
+    await screen.findByText('Add checkout endpoint')
+    expect(document.querySelector('[data-slot="running-tasks"]')).toBeNull()
+  })
+
+  it('renders nothing on the Archived tab, where a "Running" heading would be a lie', async () => {
+    stubFetch({ runs: RUNS.map((run) => ({ ...run, archived: true })) })
+    renderPage(createQueryClient(), '/tasks?archived=1')
+    await screen.findByText('Add checkout endpoint')
+    expect(document.querySelector('[data-slot="running-tasks"]')).toBeNull()
+  })
+
+  it('steps aside when a grouping is chosen, handing its rows back to the groups', async () => {
+    stubFetch()
+    renderPage(createQueryClient(), '/tasks?group=project')
+    await screen.findByText('Add checkout endpoint')
+
+    expect(document.querySelector('[data-slot="running-tasks"]')).toBeNull()
+    // Handed BACK, not lost: the running row is under its project heading again. Without this the
+    // "steps aside" assertion above is satisfied just as well by dropping the rows on the floor.
+    const apiGroup = document.querySelector('[data-slot="task-group"][data-group-key="api"]') as HTMLElement
+    expect(within(apiGroup).getByText('Add checkout endpoint')).toBeTruthy()
+  })
+
+  /**
+   * Reference chips are painted from React context, so a section rendered OUTSIDE
+   * `ReferenceStatusProvider` shows neutral chips forever while the identical row below is
+   * coloured. The first cut of this section did exactly that.
+   *
+   * `a1` (running, PR #42) now lives in the Running section, so this asserts the colour INSIDE it
+   * — scoped with `within`, or the chip in the table below would satisfy it just as well.
+   */
+  it('paints reference chips inside the section, not only in the table below', async () => {
+    stubFetch({ indexStatuses: { api: { prs: { 42: 'merged' }, issues: {} } } })
+    renderPage()
+    await screen.findByText('Add checkout endpoint')
+
+    const running = document.querySelector('[data-slot="running-tasks"]') as HTMLElement
+    await waitFor(() =>
+      expect(running.querySelector('[data-slot="pr-chip"]')?.getAttribute('data-status')).toBe('merged'),
+    )
+  })
+})
+
 describe('the Filed section', () => {
   const TODOS: WorkspaceTodoEntry[] = [
     { project: 'api', todo: { id: 'todo-1', ts: '2026-07-14T09:00:00Z', summary: 'Add a rate limit to /checkout' } },

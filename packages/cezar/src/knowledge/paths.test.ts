@@ -225,3 +225,132 @@ describe('resolveKnowledgeRoots', () => {
     });
   });
 });
+
+/**
+ * Workspace-scoped mounts (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md`, D3): one entry
+ * in `~/.cezar/config.json`, indexed by every project.
+ *
+ * The reason this exists at all: the knowledge corpus a workspace reads before every task lives
+ * beside the repos, not inside any one of them, so a repo-local mount cannot reach it from a
+ * sibling project — and in hosted mode cannot reach it at all.
+ */
+describe('resolveKnowledgeRoots — workspace-scoped mounts', () => {
+  async function fixture(prefix: string) {
+    const repoRoot = await tempDir(`cez-kb-ws-${prefix}-repo-`);
+    const dataDir = join(repoRoot, '.ai/cezar');
+    const cezHome = await tempDir(`cez-kb-ws-${prefix}-home-`);
+    const corpus = await tempDir(`cez-kb-ws-${prefix}-corpus-`);
+    const env = { CEZ_HOME: cezHome };
+    const writeWorkspaceMounts = (mounts: unknown[]) =>
+      writeFile(join(cezHome, 'config.json'), JSON.stringify({ knowledge: { mounts } }), 'utf8');
+    const writeRepoMounts = async (mounts: unknown[]) => {
+      await mkdir(dataDir, { recursive: true });
+      await writeFile(join(dataDir, 'config.json'), JSON.stringify({ knowledge: { mounts } }), 'utf8');
+    };
+    return { repoRoot, dataDir, cezHome, corpus, env, writeWorkspaceMounts, writeRepoMounts };
+  }
+
+  it('indexes a workspace mount that lies outside every repo root, INCLUDING under hosted', async () => {
+    const f = await fixture('hosted');
+    await f.writeWorkspaceMounts([{ id: 'corpus', path: f.corpus }]);
+
+    for (const hosted of [false, true]) {
+      const roots = await resolveKnowledgeRoots({ repoRoot: f.repoRoot, dataDir: f.dataDir, env: f.env, hosted });
+      expect(roots.find((r) => r.id === 'corpus')).toMatchObject({
+        indexed: true,
+        writable: false,
+        kind: 'configured',
+        path: f.corpus,
+      });
+    }
+  });
+
+  /**
+   * The negative control, and the whole reason the hosted rule could be split rather than deleted.
+   * Without it, "workspace mounts are indexed under hosted" reads as "external mounts now work" —
+   * and a repo-committed path pointing anywhere on the host would quietly start being scanned.
+   */
+  it('still refuses a REPO-declared external mount under hosted — the rule was split, not lifted', async () => {
+    const f = await fixture('control');
+    await f.writeRepoMounts([{ id: 'repo-ext', path: f.corpus }]);
+    await f.writeWorkspaceMounts([{ id: 'ws-ext', path: f.corpus }]);
+
+    const roots = await resolveKnowledgeRoots({
+      repoRoot: f.repoRoot,
+      dataDir: f.dataDir,
+      env: f.env,
+      hosted: true,
+    });
+    // Same directory, two declarations, two different answers — which is exactly the distinction.
+    expect(roots.find((r) => r.id === 'repo-ext')).toMatchObject({
+      indexed: false,
+      reason: 'external mount is local only',
+    });
+    expect(roots.find((r) => r.id === 'ws-ext')).toMatchObject({ indexed: true });
+  });
+
+  it('drops a workspace mount whose real path a repo mount already claimed, leaving the repo id', async () => {
+    // The project that ALSO declares the corpus locally must not scan it twice under two ids.
+    const f = await fixture('dedupe');
+    const inside = join(f.repoRoot, 'corpus');
+    await mkdir(inside, { recursive: true });
+    await f.writeRepoMounts([{ id: 'notion', path: 'corpus' }]);
+    await f.writeWorkspaceMounts([{ id: 'shared-corpus', path: inside }]);
+
+    const roots = await resolveKnowledgeRoots({ repoRoot: f.repoRoot, dataDir: f.dataDir, env: f.env });
+    expect(roots.filter((r) => r.path === inside).map((r) => r.id)).toEqual(['notion']);
+    expect(roots.find((r) => r.id === 'shared-corpus')).toBeUndefined();
+  });
+
+  it('lets a repo mount win an id collision rather than rendering the id twice', async () => {
+    const f = await fixture('collision');
+    const inside = join(f.repoRoot, 'local');
+    await mkdir(inside, { recursive: true });
+    await f.writeRepoMounts([{ id: 'shared', path: 'local' }]);
+    await f.writeWorkspaceMounts([{ id: 'shared', path: f.corpus }]);
+
+    const roots = await resolveKnowledgeRoots({ repoRoot: f.repoRoot, dataDir: f.dataDir, env: f.env });
+    expect(roots.filter((r) => r.id === 'shared')).toHaveLength(1);
+    expect(roots.find((r) => r.id === 'shared')?.path).toBe(inside);
+  });
+
+  it('reports a missing workspace mount as unavailable rather than dropping it silently', async () => {
+    const f = await fixture('missing');
+    await f.writeWorkspaceMounts([{ id: 'gone', path: join(f.corpus, 'nope') }]);
+    const roots = await resolveKnowledgeRoots({ repoRoot: f.repoRoot, dataDir: f.dataDir, env: f.env });
+    expect(roots.find((r) => r.id === 'gone')).toMatchObject({
+      indexed: false,
+      reason: 'root is not available',
+    });
+  });
+
+  it('answers byte-identically twice in a row — D8, the ordering contract GET /knowledge rests on', async () => {
+    const f = await fixture('stable');
+    const inside = join(f.repoRoot, 'local');
+    await mkdir(inside, { recursive: true });
+    await f.writeRepoMounts([{ id: 'local', path: 'local' }]);
+    await f.writeWorkspaceMounts([{ id: 'corpus', path: f.corpus }]);
+    const once = await resolveKnowledgeRoots({ repoRoot: f.repoRoot, dataDir: f.dataDir, env: f.env });
+    const twice = await resolveKnowledgeRoots({ repoRoot: f.repoRoot, dataDir: f.dataDir, env: f.env });
+    expect(JSON.stringify(once)).toBe(JSON.stringify(twice));
+    // Workspace-configured mounts come LAST, after the repo-configured ones.
+    expect(once.map((r) => r.id)).toEqual([
+      'project',
+      'workspace',
+      'sources',
+      'specs',
+      'docs',
+      'analysis',
+      'local',
+      'corpus',
+    ]);
+  });
+
+  it('degrades to no workspace mounts when the config is missing or malformed', async () => {
+    const f = await fixture('tolerant');
+    const baseline = await resolveKnowledgeRoots({ repoRoot: f.repoRoot, dataDir: f.dataDir, env: f.env });
+    await writeFile(join(f.cezHome, 'config.json'), '{ not json', 'utf8');
+    const broken = await resolveKnowledgeRoots({ repoRoot: f.repoRoot, dataDir: f.dataDir, env: f.env });
+    expect(broken.map((r) => r.id)).toEqual(baseline.map((r) => r.id));
+  });
+});

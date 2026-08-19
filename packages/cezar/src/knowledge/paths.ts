@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { realpath as realpathAsync } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { cezarHomeDir, expandTilde } from '../paths.ts';
+import { cezarHomeDir, expandTilde, workspaceConfigPath } from '../paths.ts';
 import { knowledgeConfigSchema, type KnowledgeMountConfig, type ResolvedKnowledgeRoot } from './types.ts';
 
 /**
@@ -65,9 +65,44 @@ export function discoveredRoots(repoRoot: string): ReadonlyArray<{ id: string; p
  * file, malformed JSON, or a `knowledge` block the schema refuses all degrade to `{ mounts: [] }`.
  */
 export async function readKnowledgeMountConfig(repoRoot: string): Promise<KnowledgeMountConfig[]> {
+  return readMountsFrom(join(repoRoot, '.ai/cezar', 'config.json'));
+}
+
+/**
+ * The WORKSPACE-scoped twin: `~/.cezar/config.json`'s own `knowledge.mounts[]`, indexed by every
+ * project rather than by the one repo that declares it
+ * (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md`, D3).
+ *
+ * It exists because a repo-local mount cannot express "this corpus is knowledge for everything I
+ * work on". Pointing at it from each repo means one entry per repo, each with a path that only
+ * makes sense on one machine, committed into repositories that have nothing to do with it — and in
+ * hosted mode it does not work at all, because such a mount is necessarily outside its own repo
+ * root and `resolveKnowledgeRoots` refuses those.
+ *
+ * **Why that hosted refusal does not apply here.** The rule exists so a path committed into a
+ * REPOSITORY cannot make a hosted deployment index arbitrary host directories: a repo is shared,
+ * and its config travels with every clone. The workspace config is neither shared nor cloned — it
+ * is the operator's own file on the operator's own box, and it is already the file that lists
+ * every project root this server will ever open (`workspace/config.ts`'s `projects[]`). A mount
+ * written there is trusted by exactly the argument that makes `projects[].root` trusted. Nothing
+ * about the repo-declared case is loosened; see `resolveKnowledgeRoots`.
+ *
+ * Same tolerant contract as the repo-local reader above (Q11): never cached, never throws, every
+ * failure degrades to `[]`. `workspaceConfigSchema` is `.passthrough()`, so an older cezar sharing
+ * this home preserves the key on its next write rather than dropping it.
+ */
+export async function readWorkspaceKnowledgeMountConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<KnowledgeMountConfig[]> {
+  return readMountsFrom(workspaceConfigPath(env));
+}
+
+/** The shared body of the two readers above — one tolerant parse, so the repo-local and
+ *  workspace-scoped configs cannot drift in how forgiving they are. */
+async function readMountsFrom(configPath: string): Promise<KnowledgeMountConfig[]> {
   let raw: string;
   try {
-    raw = await readFile(join(repoRoot, '.ai/cezar', 'config.json'), 'utf8');
+    raw = await readFile(configPath, 'utf8');
   } catch {
     return [];
   }
@@ -172,45 +207,65 @@ export async function resolveKnowledgeRoots(options: ResolveRootsOptions): Promi
 
   const configured = await readKnowledgeMountConfig(repoRoot);
   const realRepoRoot = (await realpathOrNull(repoRoot)) ?? resolve(repoRoot);
-  for (const mount of configured) {
+
+  /**
+   * Every real path already claimed, so a mount cannot be indexed twice under two ids.
+   *
+   * This is not hypothetical: a workspace mount is by design visible to every project, and the one
+   * project that ALSO declares it repo-locally would otherwise scan the same corpus twice, doubling
+   * its catalog and its watchers for no new documents. Repo-local mounts are resolved first, so
+   * that project keeps the root id it already has and its manifest does not churn.
+   */
+  const claimedPaths = new Set(roots.map((root) => root.path));
+  const claimedIds = new Set(roots.map((root) => root.id));
+
+  const pushMount = async (mount: KnowledgeMountConfig, scope: 'repo' | 'workspace'): Promise<void> => {
+    // A workspace mount losing an id race is SKIPPED, not rendered as unavailable: the repo-local
+    // entry with that id is already in the list, and two rows sharing an id is worse than one.
+    if (scope === 'workspace' && claimedIds.has(mount.id)) return;
     const expanded = expandTilde(mount.path);
-    const absolute = isAbsolute(expanded) ? expanded : resolve(repoRoot, expanded);
-    const present = await exists(absolute);
-    if (!present) {
-      roots.push({
-        id: mount.id,
-        path: absolute,
-        kind: 'configured',
-        writable: false,
-        format: mount.format,
-        indexed: false,
-        reason: 'root is not available',
-      });
-      continue;
-    }
-    const realMount = (await realpathOrNull(absolute)) ?? absolute;
-    const isExternal = !containsPath(realRepoRoot, realMount);
-    if (isExternal && hosted) {
-      roots.push({
-        id: mount.id,
-        path: absolute,
-        kind: 'configured',
-        writable: false,
-        format: mount.format,
-        indexed: false,
-        reason: 'external mount is local only',
-      });
-      continue;
-    }
-    roots.push({
+    // A workspace mount has no repo to be relative TO — a bare `notion-export` there would
+    // otherwise resolve differently for every project and mean nothing. Relative is repo-local
+    // only; elsewhere it is an unresolvable path, reported as such rather than guessed at.
+    const absolute = isAbsolute(expanded)
+      ? expanded
+      : scope === 'repo'
+        ? resolve(repoRoot, expanded)
+        : resolve(cezarHomeDir(env), expanded);
+    const base = {
       id: mount.id,
       path: absolute,
-      kind: 'configured',
+      kind: 'configured' as const,
       writable: false,
       format: mount.format,
-      indexed: true,
-    });
-  }
+    };
+    const present = await exists(absolute);
+    if (!present) {
+      roots.push({ ...base, indexed: false, reason: 'root is not available' });
+      return;
+    }
+    const realMount = (await realpathOrNull(absolute)) ?? absolute;
+    // The hosted refusal is REPO-SCOPED, deliberately (2026-08-19-tasks-page-and-start-grounding.md
+    // D3): it stops a path committed into a shared, cloneable repository from making a hosted
+    // deployment index arbitrary host directories. The workspace config is the operator's own file
+    // on their own box — the same file that already names every project root the server opens — so
+    // a mount declared there is trusted on the same terms as `projects[].root`. The repo-local case
+    // below is byte-for-byte what it always was.
+    if (scope === 'repo' && hosted && !containsPath(realRepoRoot, realMount)) {
+      roots.push({ ...base, indexed: false, reason: 'external mount is local only' });
+      return;
+    }
+    if (claimedPaths.has(absolute)) return;
+    claimedPaths.add(absolute);
+    claimedIds.add(mount.id);
+    roots.push({ ...base, indexed: true });
+  };
+
+  for (const mount of configured) await pushMount(mount, 'repo');
+  // Last, and so lowest precedence on both id and path — see `claimedIds`/`claimedPaths` above.
+  // Order is fixed (project, workspace, sources, discovered, repo-configured, workspace-configured)
+  // because `GET /knowledge` must answer byte-identically twice in a row (D8).
+  for (const mount of await readWorkspaceKnowledgeMountConfig(env)) await pushMount(mount, 'workspace');
 
   return roots;
 }

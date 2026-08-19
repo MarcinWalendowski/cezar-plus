@@ -84,6 +84,7 @@ import {
   urlStateToSearchParams,
   groupGlobalTasks,
   hasActiveFilters,
+  inFlightGlobalTasks,
   tagValuesOf,
   tasksExcludingFacet,
   resetCount,
@@ -346,7 +347,28 @@ export function GlobalTasksRoute() {
     () => filterGlobalTasks(tasks, filters, view),
     [tasks, filters, view],
   )
-  const groups = React.useMemo(() => groupGlobalTasks(visible, groupBy), [visible, groupBy])
+  /**
+   * The page splits in two (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md`, D1): work in
+   * flight is LIFTED into the Running section at the top, and the grouped table below holds
+   * everything else.
+   *
+   * Lifted, not copied. The first cut of this rendered running rows in both places, on the theory
+   * that the table below should stay the complete record — and 39 DOM tests went red with "found
+   * multiple elements", which is the machine saying out loud what a reader would have hit: the
+   * same task, twice, on one screen. The header's `N of M` still counts `visible`, and it is still
+   * honest, because every one of those rows is on the page — once.
+   *
+   * A consequence worth naming: with `groupBy: 'status'` there is no longer a `running` group
+   * below. That is the intent, not a casualty — the whole point of pinning is that live work is
+   * not scattered across group boxes.
+   */
+  const running = React.useMemo(() => inFlightGlobalTasks(visible, view, groupBy), [visible, view, groupBy])
+  const settled = React.useMemo(() => {
+    if (running.length === 0) return visible
+    const lifted = new Set<GlobalTask>(running)
+    return visible.filter((task) => !lifted.has(task))
+  }, [visible, running])
+  const groups = React.useMemo(() => groupGlobalTasks(settled, groupBy), [settled, groupBy])
   /**
    * Every tracker reference on screen, asked about ONCE.
    *
@@ -451,10 +473,39 @@ export function GlobalTasksRoute() {
           </p>
         ) : null}
 
+        {/* One provider over every section that paints a reference chip. It has to sit ABOVE the
+            Running section, not only around the grouped list: the chips are painted from context,
+            so a section rendered outside it shows neutral chips forever while the identical row
+            below it is coloured — which is what the first cut of this shipped, and what three
+            reference-chip cases caught. Filed carries no chips and is simply inside it. */}
+        <ReferenceStatusProvider requests={referenceRequests}>
+        {/* Work in flight, pinned to the top (2026-08-19-tasks-page-and-start-grounding.md, D1).
+            LIFTED out of the list below rather than duplicated into a second copy — see the
+            `settled` memo above for why that was the wrong first answer. */}
+        <RunningTasks
+          tasks={running}
+          now={now}
+          onArchive={(task, archived) => archive.mutate({ task, archived })}
+          onSetRead={(task, read) => setRead.mutate({ task, read })}
+          busy={archive.isPending || setRead.isPending}
+          showCost={metrics.cost}
+        />
+
         {/* Filed work — table, statuses, detail dialog, archive (2026-08-17-filed-tasks-table-
-            statuses.md). Above the runs (2026-08-15): this page is where a user looks after
-            filing something — it is called Tasks — and answering with runs only made a fan-out
-            that had written twelve tasks look identical to one that had done nothing.
+            statuses.md).
+
+            **Superseded 2026-08-19 by 2026-08-19-tasks-page-and-start-grounding.md (D1):** Filed
+            is no longer the top of the page. The original reasoning is kept below because it is
+            still true about Filed vs. the RUNS TABLE — it is only wrong about Filed vs. work in
+            flight, which now has its own section above this one. What changed is scale: the
+            argument was written when Filed was a short list, and after the 2026-08-17 migration
+            it is 49 active rows with its own controls row, so a running task sat below a
+            screenful of backlog.
+
+            ~~Above the runs (2026-08-15): this page is where a user looks after filing something
+            — it is called Tasks — and answering with runs only made a fan-out that had written
+            twelve tasks look identical to one that had done nothing.~~
+
             Renders on BOTH tabs now (it used to be Active-only): Active shows open filed work,
             Archived shows archived-or-done filed work, the same split the runs table below it
             uses for its own rows. */}
@@ -470,13 +521,20 @@ export function GlobalTasksRoute() {
           onSortChange={setFiledSort}
         />
 
+        {/* The empty state keys on `visible`, not on `settled`: a page whose only rows are in the
+            Running section is not empty, and telling the reader "nothing here" over a table of
+            live work would be plainly false. */}
         {index.data === undefined ? null : visible.length === 0 ? (
           <GlobalTasksEmptyState view={view} filtered={hasActiveFilters(filters)} />
         ) : (
           // No `projectId` on the provider, uniquely on this page: every chip under it names its
           // own, because the rows next to each other belong to different repositories.
-          <ReferenceStatusProvider requests={referenceRequests}>
-            {groups.map((group) => (
+          //
+          // It wraps the Running section too, and must: the chips are painted by context, so a
+          // section rendered OUTSIDE this provider gets neutral chips forever while the identical
+          // row below it is coloured — which is exactly what the first cut shipped, and what
+          // three reference-chip cases caught.
+          <>{groups.map((group) => (
               <section key={group.key} data-slot="task-group" data-group-key={group.key}>
                 {groupBy === 'none' ? null : (
                   <h2 className="mb-1.5 flex items-center gap-2 text-[12px] font-semibold tracking-[0.04em] text-soft-foreground uppercase">
@@ -509,11 +567,66 @@ export function GlobalTasksRoute() {
                   showCost={metrics.cost}
                 />
               </section>
-            ))}
-          </ReferenceStatusProvider>
+            ))}</>
         )}
+        </ReferenceStatusProvider>
       </div>
     </div>
+  )
+}
+
+/**
+ * The "Running" section: work in flight, pinned to the top of the page
+ * (`.ai/specs/2026-08-19-tasks-page-and-start-grounding.md`, D1).
+ *
+ * Reuses `TaskTable` outright rather than growing a second row grammar. There is one visual
+ * difference from the table below and it is the point of the section, not decoration: `showProject`
+ * is always on here, because these rows are read as a set ("what is my machine doing right now?")
+ * across repositories, whereas the table below may already be grouped by project.
+ *
+ * Renders NOTHING for an empty list — which covers both "nothing is running" and the Archived tab,
+ * because `inFlightGlobalTasks` (the caller's one source for this set) answers `[]` for archived
+ * by construction. No second condition here means no second place for "is anything running?" to
+ * be answered differently.
+ *
+ * Presentational: the caller passes the rows, already filtered and lifted out of the table below,
+ * so the two lists cannot disagree about which rows this section owns.
+ */
+function RunningTasks({
+  tasks,
+  now,
+  onArchive,
+  onSetRead,
+  busy,
+  showCost,
+}: {
+  tasks: readonly GlobalTask[]
+  now: number
+  onArchive: (task: GlobalTask, archived: boolean) => void
+  onSetRead: (task: GlobalTask, read: boolean) => void
+  busy: boolean
+  showCost: boolean
+}) {
+  if (tasks.length === 0) return null
+
+  return (
+    <section data-slot="running-tasks">
+      <h2 className="mb-1.5 flex items-center gap-2 text-[12px] font-semibold tracking-[0.04em] text-soft-foreground uppercase">
+        Running
+        <span data-slot="running-tasks-count" className="font-mono text-[11px] font-medium tabular-nums">
+          {tasks.length}
+        </span>
+      </h2>
+      <TaskTable
+        tasks={tasks}
+        now={now}
+        showProject
+        onArchive={onArchive}
+        onSetRead={onSetRead}
+        busy={busy}
+        showCost={showCost}
+      />
+    </section>
   )
 }
 
