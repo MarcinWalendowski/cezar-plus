@@ -15,7 +15,7 @@ import {
   type TransportView,
   type UpdateNotificationTransportInput,
 } from '@loki-labs/better-cezar-api-client'
-import { ApiError, putWorkspaceUiState } from '@/api/client'
+import { ApiError, NO_REDIRECT, putWorkspaceUiState, throwIfIdentityGate } from '@/api/client'
 import { useWorkspaceNotifications, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
 import { subscribeTopic } from '@/api/ws'
 import { TransportHealth } from '@/components/transport-health'
@@ -193,11 +193,13 @@ async function requestNotificationsJson<T>(path: string, init: RequestInit = {})
       ...init,
       credentials: 'include',
       headers: { 'content-type': 'application/json', ...(init.headers as Record<string, string> | undefined) },
+      ...NO_REDIRECT,
     })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
     throw new ApiError(0, `cannot reach the cezar server (${path})`, { cause })
   }
+  throwIfIdentityGate(res, path)
   const body = await res.text()
   let parsed: unknown
   try {

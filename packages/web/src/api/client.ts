@@ -209,11 +209,27 @@ export class ApiError extends Error {
   readonly command?: string
   /** `POST /api/workflows`: the file is already there — the caller may retry with `overwrite`. */
   readonly exists?: boolean
+  /**
+   * An identity gate in front of cezar answered instead of cezar — a redirect off this origin
+   * that a `fetch` may not follow (`.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`).
+   *
+   * `status` is 0 because the request never reached the server, which is the same status an
+   * offline failure carries; this flag is what tells the two apart. Without it a Cloudflare
+   * Access bounce is indistinguishable from "the server is down", and the cockpit blames a
+   * server that is answering fine. `lib/reauth.ts#isSignedOutError` is the reader.
+   */
+  readonly identityGate?: boolean
 
   constructor(
     status: number,
     message: string,
-    extras: { manual?: string; command?: string; exists?: boolean; cause?: unknown } = {},
+    extras: {
+      manual?: string
+      command?: string
+      exists?: boolean
+      identityGate?: boolean
+      cause?: unknown
+    } = {},
   ) {
     super(message, extras.cause !== undefined ? { cause: extras.cause } : undefined)
     this.name = 'ApiError'
@@ -221,6 +237,7 @@ export class ApiError extends Error {
     this.manual = extras.manual
     this.command = extras.command
     this.exists = extras.exists
+    this.identityGate = extras.identityGate
   }
 }
 
@@ -405,13 +422,62 @@ async function unwrapValidated<R extends ClientResponse<unknown, number, Respons
  *   An abort is re-thrown untouched: that is the caller cancelling, not the server failing.
  */
 async function fetchOrThrow(url: string, init?: RequestInit): Promise<Response> {
+  let res: Response
   try {
-    return await fetch(url, { ...init, credentials: 'include' })
+    res = await fetch(url, { ...init, credentials: 'include', ...NO_REDIRECT })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
     throw new ApiError(0, `cannot reach the cezar server (${url})`, { cause })
   }
+  throwIfIdentityGate(res, url)
+  return res
 }
+
+/**
+ * Do not chase a redirect — report it (`.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`).
+ *
+ * Spread into every request this cockpit makes, and safe on all of them **because no cezar route
+ * answers 3xx to a fetch**: the only two `c.redirect(...)` calls in the whole server are
+ * `/auth/login` and `/auth/callback` (`packages/cezar/src/auth/routes.ts`), and both are reached
+ * by a top-level `<a href>` navigation. So a redirect arriving here never came from cezar — it
+ * came from something in front of it.
+ *
+ * Following it is what hid the bug. `fetch` follows by default, so a Cloudflare Access bounce to
+ * `https://<team>.cloudflareaccess.com/…` was chased off-origin, rejected by CORS, and surfaced
+ * as a `TypeError` — which this module then reported as "cannot reach the cezar server", blaming
+ * a server that was answering fine. Not following turns that bounce into a fact.
+ */
+export const NO_REDIRECT: Pick<RequestInit, 'redirect'> = { redirect: 'manual' }
+
+/**
+ * Throw when an identity gate in front of cezar answered instead of cezar.
+ *
+ * With `redirect: 'manual'` a browser hands back an **opaque redirect** — `type` is
+ * `'opaqueredirect'`, `status` is 0, and nothing about it is readable, which is fine: the fact
+ * that a cezar path redirected at all is the whole signal. The status check beside it is not
+ * redundant — `fetch` implementations outside a browser (and the test stubs in this repo) surface
+ * the real 3xx instead, and a detector that only works in one of the two would be a gate that
+ * passes vacuously wherever it is tested.
+ *
+ * Exported because the three hand-rolled `/auth/*` probes (`onboarding-api.ts`, `teams-api.ts`,
+ * `settings/account-api.ts`) each keep their own `fetch` for reasons their own comments give, and
+ * an identity gate sits in front of *those* routes too. Their duplication is deliberate; this
+ * check being duplicated four ways would not be — a copy that drifts is a tab that never
+ * notices it is signed out.
+ */
+export function throwIfIdentityGate(res: Response, url: string): void {
+  if (res.type === 'opaqueredirect' || REDIRECT_STATUSES.has(res.status)) {
+    throw new ApiError(
+      0,
+      `signed out — ${url} was answered by an identity provider, not by cezar`,
+      { identityGate: true },
+    )
+  }
+}
+
+/** The redirect statuses that carry a `Location`. Not "any 3xx": a `304` is a cache answer to a
+ *  conditional request, not a gate turning us away. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 
 async function send(path: string, init: RequestInit): Promise<Response> {
   // Resolved here so the error names the URL that actually failed, not the route the caller

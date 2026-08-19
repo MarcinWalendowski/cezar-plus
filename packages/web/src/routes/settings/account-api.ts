@@ -1,6 +1,6 @@
 import { getApiBaseUrl } from '@loki-labs/better-cezar-api-client'
 
-import { ApiError } from '@/api/client'
+import { ApiError, NO_REDIRECT, throwIfIdentityGate } from '@/api/client'
 import { isJsonResponse } from '@/routes/onboarding/onboarding-api'
 
 /**
@@ -42,11 +42,20 @@ function authUrl(path: string): string {
 export async function probeAccountAvailable(signal?: AbortSignal): Promise<boolean> {
   let res: Response
   try {
-    res = await fetch(authUrl('/auth/me'), { method: 'GET', credentials: 'include', signal })
+    res = await fetch(authUrl('/auth/me'), {
+      method: 'GET',
+      credentials: 'include',
+      signal,
+      ...NO_REDIRECT,
+    })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
     return false
   }
+  // Not folded into the `return false` above: an identity gate is not "this deployment has no
+  // sign-in surface", it is "you are signed out of one". Reporting it as absence would hide the
+  // very state this probe sits next to.
+  throwIfIdentityGate(res, '/auth/me')
   const available = isJsonResponse(res)
   // Nothing in either body is ours to read here — drain it so the connection can be reused.
   await res.text().catch(() => undefined)
@@ -79,11 +88,17 @@ function errorMessageFrom(status: number, statusText: string, text: string): str
 export async function logout(signal?: AbortSignal): Promise<void> {
   let res: Response
   try {
-    res = await fetch(authUrl('/auth/logout'), { method: 'POST', credentials: 'include', signal })
+    res = await fetch(authUrl('/auth/logout'), {
+      method: 'POST',
+      credentials: 'include',
+      signal,
+      ...NO_REDIRECT,
+    })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
     throw new ApiError(0, 'cannot reach the cezar server (/auth/logout)', { cause })
   }
+  throwIfIdentityGate(res, '/auth/logout')
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new ApiError(res.status, errorMessageFrom(res.status, res.statusText, text))

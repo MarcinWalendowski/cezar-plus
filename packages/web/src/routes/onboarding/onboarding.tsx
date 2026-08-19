@@ -30,6 +30,7 @@ import { BlankProjectDialog } from '@/components/blank-project-dialog'
 import { CloneProjectDialog } from '@/components/clone-project-dialog'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
+import { forceReauth, reauthSuppressed } from '@/lib/reauth'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 // `POST /auth/teams` — the same public function Settings → Workspaces uses
@@ -239,16 +240,41 @@ function fromProbe(probe: OnboardingProbe): WizardState {
 
 // ---- step 1: sign in ------------------------------------------------------------------------------
 
-/** A real navigation, not a client-side route change: `GET /auth/login` 302s to the IdP, which a
- *  fetch cannot follow into a top-level browser redirect. `asChild` hands the button's styling to
- *  a plain `<a>`, same pattern `clone-project-dialog.tsx` uses for its settings link. */
+/**
+ * A real navigation, not a client-side route change: `GET /auth/login` 302s to the IdP, which a
+ * fetch cannot follow into a top-level browser redirect. `asChild` hands the button's styling to
+ * a plain `<a>`, same pattern `clone-project-dialog.tsx` uses for its settings link.
+ *
+ * **Auto-redirects on mount since 2026-08-19** (spec
+ * `.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`; owner's explicit choice, "I should be
+ * always enforced to relogin there"). Reaching this screen at all now means the cockpit has
+ * decided there is no session, so making the user click through a screen that has exactly one
+ * action is a step with no decision in it.
+ *
+ * **The button is not dead code — it is the loop guard's surface.** `forceReauth` refuses to
+ * navigate twice inside 30s, so an identity provider that hands us back still signed out lands
+ * here a second time and stops, with a screen naming what happened and a button to try again by
+ * hand. That is the whole reason this stayed a screen rather than becoming a bare effect: the
+ * failure mode of an auto-redirect is invisible, and this is where it becomes visible.
+ */
 function SignInStep() {
+  const suppressed = reauthSuppressed()
+  useEffect(() => {
+    // No dependency on `suppressed`: `forceReauth` re-checks the guard itself, and reading a
+    // stale render-time value here would be a second, disagreeing copy of that decision.
+    forceReauth()
+  }, [])
+
   return (
     <CenteredState
       icon={<LogInIcon />}
       tone="primary"
-      title="Sign in to set up your organization"
-      subtitle="This cezar instance requires sign-in. Continue with your identity provider to create or join an organization."
+      title={suppressed ? 'Sign-in did not complete' : 'Signing you in…'}
+      subtitle={
+        suppressed
+          ? 'Your identity provider sent you back without a session. Try signing in again, and check that cookies are allowed for this site.'
+          : 'Your session has ended. Taking you to your identity provider to sign in again.'
+      }
       actions={
         <Button asChild data-slot="onboarding-sign-in">
           <a href="/auth/login">Sign in</a>

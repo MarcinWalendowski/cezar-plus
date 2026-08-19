@@ -8,7 +8,7 @@ import type {
   Team,
 } from '@loki-labs/better-cezar-api-client'
 
-import { ApiError } from '@/api/client'
+import { ApiError, NO_REDIRECT, throwIfIdentityGate } from '@/api/client'
 
 /**
  * `GET /auth/teams` — every team in the caller's own org (`packages/contract/src/orgs.ts`'s own
@@ -71,11 +71,17 @@ function errorMessageFrom(status: number, statusText: string, body: unknown): st
 export async function listOrgTeams(signal?: AbortSignal): Promise<Team[]> {
   let res: Response
   try {
-    res = await fetch(authUrl('/auth/teams'), { method: 'GET', credentials: 'include', signal })
+    res = await fetch(authUrl('/auth/teams'), {
+      method: 'GET',
+      credentials: 'include',
+      signal,
+      ...NO_REDIRECT,
+    })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
     throw new ApiError(0, 'cannot reach the cezar server (/auth/teams)', { cause })
   }
+  throwIfIdentityGate(res, '/auth/teams')
   if (!isJsonResponse(res)) {
     // The SPA shell, not `/auth/teams` — drain the body (nothing in it is ours to read) and
     // report the org as carrying no teams rather than trying to interpret HTML as a list.
@@ -132,12 +138,18 @@ export type TeamsProbe =
  *  `onboarding-api.ts` (a different Fill unit's file) — see this file's own module doc comment on
  *  why duplication, not a shared helper, is the deliberate choice here. */
 async function fetchAuth(path: string, init: RequestInit = {}): Promise<Response> {
+  let res: Response
   try {
-    return await fetch(authUrl(path), { ...init, credentials: 'include' })
+    res = await fetch(authUrl(path), { ...init, credentials: 'include', ...NO_REDIRECT })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
     throw new ApiError(0, `cannot reach the cezar server (${path})`, { cause })
   }
+  // An identity gate in front of cezar answers these routes too — and `/auth/onboarding` is the
+  // one whose 401 the cockpit reads as "signed out", so a gate swallowing it is exactly how the
+  // tab stopped noticing (`.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`).
+  throwIfIdentityGate(res, path)
+  return res
 }
 
 /** `GET /auth/teams`, read as a `TeamsProbe` rather than folded into `[]` — see this section's own

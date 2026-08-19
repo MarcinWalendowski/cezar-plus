@@ -10,7 +10,7 @@ import type {
   Team,
 } from '@loki-labs/better-cezar-api-client'
 
-import { ApiError } from '@/api/client'
+import { ApiError, NO_REDIRECT, throwIfIdentityGate } from '@/api/client'
 
 /**
  * The hand-rolled client for the four onboarding-only calls this wizard makes.
@@ -61,12 +61,18 @@ function authUrl(path: string): string {
  *  cookie, D6), and a request that never reached the server becomes an `ApiError` with status 0
  *  rather than a raw `TypeError` — one error type for every caller in this module. */
 async function fetchAuth(path: string, init: RequestInit = {}): Promise<Response> {
+  let res: Response
   try {
-    return await fetch(authUrl(path), { ...init, credentials: 'include' })
+    res = await fetch(authUrl(path), { ...init, credentials: 'include', ...NO_REDIRECT })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
     throw new ApiError(0, `cannot reach the cezar server (${path})`, { cause })
   }
+  // An identity gate in front of cezar answers these routes too — and `/auth/onboarding` is the
+  // one whose 401 the cockpit reads as "signed out", so a gate swallowing it is exactly how the
+  // tab stopped noticing (`.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`).
+  throwIfIdentityGate(res, path)
+  return res
 }
 
 /** Whether a response is real JSON from a mounted route, rather than the SPA catch-all's

@@ -183,13 +183,69 @@ describe('no onboarding surface at all (hosted, unauthenticated) — the wizard 
 })
 
 describe('signed out', () => {
-  it('shows a real <a href> to /auth/login, not a client-side navigation', async () => {
-    stubFetch({ onboarding: () => jsonResponse({ error: 'unauthenticated' }, 401) })
-    renderAt()
+  /**
+   * **UPDATED 2026-08-19** (`.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`): this screen now
+   * redirects itself on mount rather than waiting for a click — the owner's explicit choice, "I
+   * should be always enforced to relogin there". The `<a href>` assertion is kept, unchanged and
+   * still load-bearing: it is the surface the loop guard falls back to when an identity provider
+   * hands the tab back with no session, and a client-side navigation could never reach an IdP.
+   */
+  it('redirects to /auth/login on mount, and still offers a real <a href>', async () => {
+    const assign = vi.fn()
+    const realLocation = window.location
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      writable: true,
+      value: { ...realLocation, assign },
+    })
+    window.sessionStorage.removeItem('cezar:reauth-at')
 
-    await screen.findByText('Sign in to set up your organization')
-    const link = screen.getByRole('link', { name: 'Sign in' })
-    expect(link.getAttribute('href')).toBe('/auth/login')
+    try {
+      stubFetch({ onboarding: () => jsonResponse({ error: 'unauthenticated' }, 401) })
+      renderAt()
+
+      await screen.findByText('Signing you in…')
+      await waitFor(() => expect(assign).toHaveBeenCalledWith('/auth/login'))
+
+      const link = screen.getByRole('link', { name: 'Sign in' })
+      expect(link.getAttribute('href')).toBe('/auth/login')
+    } finally {
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        writable: true,
+        value: realLocation,
+      })
+      window.sessionStorage.removeItem('cezar:reauth-at')
+    }
+  })
+
+  /** The guard's visible half: a second landing here inside the window stops redirecting and says
+   *  what went wrong, instead of bouncing the browser between cezar and the IdP forever. */
+  it('a second landing inside the guard window stops and explains', async () => {
+    const assign = vi.fn()
+    const realLocation = window.location
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      writable: true,
+      value: { ...realLocation, assign },
+    })
+    window.sessionStorage.setItem('cezar:reauth-at', String(Date.now()))
+
+    try {
+      stubFetch({ onboarding: () => jsonResponse({ error: 'unauthenticated' }, 401) })
+      renderAt()
+
+      await screen.findByText('Sign-in did not complete')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(assign).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        writable: true,
+        value: realLocation,
+      })
+      window.sessionStorage.removeItem('cezar:reauth-at')
+    }
   })
 })
 

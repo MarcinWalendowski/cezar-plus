@@ -55,8 +55,13 @@ export function repoChipOf(health: HealthResponse | undefined): RepoChip | null 
  * reconcile — not a change here.
  *
  * **D14 (`.ai/specs/2026-08-06-org-team-auth-onboarding.md`): the sidebar/nav/banner/command
- * palette are all suppressed while the shared onboarding probe (`onboarding-gate.ts`) answers
- * `needs-org`** — "no dashboard element renders before the first organization exists." `children`
+ * palette are all suppressed while the shared onboarding probe (`onboarding-gate.ts`) says to
+ * gate** — "no dashboard element renders before the first organization exists." The condition is
+ * `needsOnboardingGate`'s, never spelled out here, because it has already been widened twice:
+ * D15 added `ready` with no project yet, and 2026-08-19 added **`signed-out`**
+ * (`.ai/specs/2026-08-19-signed-out-cockpit-reauth.md` — until then a signed-out visitor got the
+ * whole cockpit with every query 401ing behind it). This comment used to name `needs-org` alone,
+ * which is the kind of half-truth a reader carries away intact. `children`
  * (`<AppRoutes/>`, ultimately `<OnboardingRoute/>` once `routes.tsx#OnboardingEntryGate` has
  * navigated there) is passed to `<AppShell>` UNCONDITIONALLY either way — only `chromeless` and
  * the slot props change — because toggling whether `<AppShell>` wraps `children` at ALL would

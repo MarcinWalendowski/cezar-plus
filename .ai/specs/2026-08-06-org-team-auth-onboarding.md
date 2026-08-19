@@ -1449,7 +1449,33 @@ directory, or imported from GitHub.
 `!hasProjects`). Everything D14 says about what must NOT gate is unchanged and
 still load-bearing: `unavailable` must never gate (it would brick the hosted +
 `CEZ_AUTH` unset + `CEZ_ALLOW_UNAUTHENTICATED=1` topology behind a wizard that
-deployment can never satisfy), and neither may `signed-out` or `needs-invite`.
+deployment can never satisfy), and neither may ~~`signed-out` or~~ `needs-invite`.
+
+> **CORRECTED 2026-08-19 for `signed-out`, which now DOES gate.** See
+> `2026-08-19-signed-out-cockpit-reauth.md`. The sentence above excluded three
+> states in one breath but argued only one of them, and `signed-out` was carried
+> along by the sentence rather than by a reason. What it cost: on
+> `cockpit.example.com`, an unauthenticated visitor got the **entire cockpit** —
+> sidebar, nav, command palette, every tab — with every `/api/*` query 401ing
+> behind it and no sign-in affordance anywhere on the page. The owner's words,
+> 2026-08-19: *"if I clear application/website data I'm still in cezar, but I
+> can't see any tasks, git, etc. I should be always enforced to relogin there."*
+>
+> `signed-out` does not share `unavailable`'s hazard, and the boot wiring is the
+> proof. It requires `GET /auth/onboarding` to answer a JSON **401**, which
+> `src/index.ts` produces from exactly one of its three branches — the
+> `oidc`/`google` one, which sets `authRoutes` **and** `onboardingRoutes`
+> together. Local mode never 401s (D13 invariant 1); the supervisor and
+> hosted-unauthenticated branches mount no `/auth/*` at all and probe as
+> `unavailable`. So **`signed-out` implies `/auth/login` is mounted**: the gate it
+> raises is always satisfiable, which is precisely what `unavailable` lacks and
+> was excluded for. `needs-invite` is untouched and still never gates — that user
+> HAS a session, so it is a different problem.
+>
+> The gated surface for `signed-out` is `onboarding.tsx#SignInStep`, which since
+> the same date **redirects to `/auth/login` on mount** rather than waiting for a
+> click (owner's choice), with a 30 s one-shot guard so an IdP that returns
+> without a session lands on the screen instead of looping.
 
 **`hasProjects` already exists and already means the right thing.** It is
 computed in `auth/onboarding-routes.ts` as

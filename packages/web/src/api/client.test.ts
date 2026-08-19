@@ -672,3 +672,74 @@ describe('history responses are validated at the boundary (#827)', () => {
     expect(error.message).toBe('run not found')
   })
 })
+
+/**
+ * `.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`, test 3.
+ *
+ * Cloudflare Access in front of `cockpit.example.com` answers **every** path with a 302 to
+ * `https://<team>.cloudflareaccess.com/…` once its cookie is gone. `fetch` follows redirects by
+ * default, so that bounce was chased off-origin, rejected by CORS, and surfaced as a `TypeError`
+ * — which this module reported as "cannot reach the cezar server", blaming a server that was
+ * answering fine. The tab then sat there, still showing the cockpit, waiting.
+ *
+ * So the assertion is not merely "an error is thrown" — an error was ALWAYS thrown. It is that
+ * the error says *signed out* (`identityGate`) rather than *unreachable*, because that
+ * distinction is the entire difference between redirecting to sign in and showing an outage.
+ */
+describe('an identity gate in front of cezar (#signed-out-cockpit-reauth)', () => {
+  it('does not follow redirects — `redirect: manual` on every request', async () => {
+    reply({ ok: true })
+    await getHealth().catch(() => undefined)
+    const call = fetchMock.mock.calls.at(-1) as [string, RequestInit]
+    expect(call[1].redirect).toBe('manual')
+  })
+
+  /** What a BROWSER hands back for a cross-origin 302 under `redirect: 'manual'`: status 0, no
+   *  headers, `type: 'opaqueredirect'`. `Response.error()`-style opacity cannot be built with the
+   *  constructor, so the type is forced the same way the runtime presents it. */
+  it('an opaque redirect is a signed-out error, not an unreachable one', async () => {
+    const opaque = new Response(null, { status: 200 })
+    Object.defineProperty(opaque, 'type', { value: 'opaqueredirect' })
+    Object.defineProperty(opaque, 'status', { value: 0 })
+    fetchMock.mockResolvedValue(opaque)
+
+    const error = (await getTodos().catch((e: unknown) => e)) as ApiError
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error.identityGate).toBe(true)
+    expect(error.status).toBe(0)
+    expect(error.message).toContain('signed out')
+  })
+
+  /** Outside a browser — and in every stub in this suite — `redirect: 'manual'` surfaces the real
+   *  3xx instead of an opaque one. A detector that only understood `opaqueredirect` would pass
+   *  vacuously everywhere it is tested and work only in production, which is the wrong way round. */
+  it.each([301, 302, 303, 307, 308])('a bare %i is a signed-out error too', async (status) => {
+    fetchMock.mockResolvedValue(
+      new Response(null, { status, headers: { location: 'https://idp.example/login' } }),
+    )
+    const error = (await getTodos().catch((e: unknown) => e)) as ApiError
+    expect(error.identityGate).toBe(true)
+  })
+
+  /**
+   * THE control. Every one of these is a real answer from cezar that must keep flowing through
+   * untouched — a detector that swallowed any of them would turn an ordinary error into a
+   * redirect to an identity provider that cannot fix it. `304` is in here on purpose: it is a
+   * 3xx that carries no `Location` and means "your cache is fine", not "you are turned away".
+   */
+  it('leaves every non-redirect answer alone', async () => {
+    reply({ version: '0.10.0', checks: [] })
+    await expect(getHealth()).resolves.toBeTruthy()
+
+    for (const status of [304, 400, 401, 403, 404, 409, 500, 502]) {
+      // A 304 legally carries no body, so the constructor refuses one — build it null-bodied
+      // rather than dropping the case, which is the one 3xx this detector must let through.
+      const body = status === 304 ? null : JSON.stringify({ error: 'nope' })
+      fetchMock.mockResolvedValue(
+        new Response(body, { status, headers: { 'content-type': 'application/json' } }),
+      )
+      const error = (await getTodos().catch((e: unknown) => e)) as ApiError
+      expect(error.identityGate, `status ${status} must not be read as an identity gate`).toBeUndefined()
+    }
+  })
+})

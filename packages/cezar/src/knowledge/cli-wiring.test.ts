@@ -100,4 +100,24 @@ describe('the kb command is wired into the CLI entry point', () => {
     const { stdout } = await cli(['--help']);
     expect(stdout).toContain('cezar kb');
   });
+
+  it('advertises only subcommands that exist — the help cannot drift from the dispatch', async () => {
+    // The first version of this help block listed `list`, which `runKnowledgeCommand` has never
+    // had: production answered `unknown kb subcommand: list` to the only discovery surface a
+    // reader has. Caught by hand on the box, not by the suite — so the two sources are compared
+    // here instead of both being written down twice and trusted to stay equal.
+    const usage = await cli(['kb']);
+    const real = new Set(
+      [...`${usage.stdout}${usage.stderr}`.matchAll(/cez kb ([a-z]+)/g)].map((m) => m[1]),
+    );
+    expect(real.size).toBeGreaterThan(3); // floor: a parse that found nothing must not pass
+
+    const { stdout: help } = await cli(['--help']);
+    const block = help.slice(help.indexOf('cezar kb'));
+    const advertised = [...block.slice(0, block.indexOf('cezar backup')).matchAll(/·\s*([a-z]+)/g)]
+      .map((m) => m[1])
+      .filter((word) => word !== 'json');
+    expect(advertised.length).toBeGreaterThan(2); // floor: an empty list agrees with anything
+    for (const word of advertised) expect([...real]).toContain(word);
+  });
 });

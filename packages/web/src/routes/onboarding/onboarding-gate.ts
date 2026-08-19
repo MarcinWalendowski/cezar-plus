@@ -45,7 +45,35 @@ export function useOnboardingEntryProbe() {
 }
 
 /**
- * The states that gate: `needs-org`, and (D15) `ready` while the org owns NO project yet.
+ * The states that gate: `needs-org`, (D15) `ready` while the org owns NO project yet, and
+ * (2026-08-19) `signed-out`.
+ *
+ * **WIDENED 2026-08-19 to include `signed-out`** — spec
+ * `.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`, from an owner report against
+ * cockpit.example.com: *"if I clear application/website data I'm still in cezar, but I can't see
+ * any tasks, git, etc. I should be always enforced to relogin there."*
+ *
+ * Not gating it meant an unauthenticated visitor got the **whole cockpit** — sidebar, nav,
+ * command palette, every tab — with every `/api/*` query 401ing behind it. A page that looks
+ * signed in and shows nothing, with no way to sign in anywhere on it. (The shell itself is
+ * static and unguarded: `GET /` answers `200 text/html` with no session, verified on the
+ * production box.)
+ *
+ * **Why `signed-out` is not like the two states below it.** D15 excluded all three in one
+ * sentence — *"neither may `signed-out` or `needs-invite`"* — but argued only `unavailable`,
+ * whose hazard is real and specific: gating it would brick the hosted + `CEZ_AUTH` unset +
+ * `CEZ_ALLOW_UNAUTHENTICATED=1` topology behind a wizard that deployment can never satisfy.
+ * `signed-out` carries no such hazard, and the boot wiring is the proof. It requires
+ * `/auth/onboarding` to answer a JSON **401**, which `src/index.ts` produces from exactly one of
+ * its three branches — the `oidc`/`google` one, which sets `authRoutes` and `onboardingRoutes`
+ * **together**. Local mode never 401s (D13 invariant 1, "no 401 in local mode, ever"); the
+ * supervisor and hosted-unauthenticated branches mount no `/auth/*` at all and probe as
+ * `unavailable`. So `signed-out` *implies* `/auth/login` is mounted: the gate it raises is
+ * always satisfiable, which is the whole thing `unavailable` was excluded for lacking.
+ *
+ * `unavailable` and `needs-invite` still never gate, unchanged. `needs-invite` for the reason
+ * D14 gave (that user HAS a session — an authorized-but-membership-less cockpit is a different
+ * problem, and D8's invite-redemption screen is still unbuilt).
  *
  * **WIDENED 2026-08-07 by D15 — was `needs-org` alone.** D14 gated on the first organization, and
  * that turned out to be half a gate: after naming an org and accepting a workspace, a first-run
@@ -54,11 +82,13 @@ export function useOnboardingEntryProbe() {
  * Onboarding is not complete until the org owns at least one project, so the surface stays gated
  * through the wizard's project step, not only its org step.
  *
- * `unavailable`, `signed-out` and `needs-invite` must STILL never gate, for exactly the reasons
- * D14 gave and this widening does not touch: `unavailable` because that deployment (hosted +
- * `CEZ_AUTH` unset + `CEZ_ALLOW_UNAUTHENTICATED=1`, which mounts no `/auth/*` at all) can never
- * satisfy the wizard it would be bricked behind, the other two because the probe already answered
- * something more specific than "this org has no project". `undefined` (still loading, or the query
+ * ~~`unavailable`, `signed-out` and `needs-invite` must STILL never gate~~ **— corrected
+ * 2026-08-19 for `signed-out`, which now gates (see the block above for why it never belonged in
+ * this list).** The rest stands, for exactly the reasons D14 gave and D15's widening does not
+ * touch: `unavailable` because that deployment (hosted + `CEZ_AUTH` unset +
+ * `CEZ_ALLOW_UNAUTHENTICATED=1`, which mounts no `/auth/*` at all) can never satisfy the wizard
+ * it would be bricked behind, and `needs-invite` because the probe already answered something
+ * more specific than "this org has no project". `undefined` (still loading, or the query
  * errored) also reads as false: a slow or failed probe must not strand a returning user behind a
  * blank gate on every page load.
  *
@@ -70,6 +100,7 @@ export function useOnboardingEntryProbe() {
  */
 export function needsOnboardingGate(probe: OnboardingProbe | undefined): boolean {
   if (probe === undefined) return false
+  if (probe.kind === 'signed-out') return true
   if (probe.kind === 'needs-org') return true
   return probe.kind === 'ready' && !probe.hasProjects
 }

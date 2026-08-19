@@ -57,8 +57,9 @@ Usage:
   cezar projects            list the projects this cockpit serves
                             (also: projects add [<dir>] · projects remove <id>)
   cezar kb                  knowledge base (CEZ_KB=1): search "<query>" · show
-                            <id> · list · write — the same commands the agent
-                            system prompt tells a run to use
+                            <id> · roots · reindex · write · proposals — the
+                            same commands the agent system prompt tells a run
+                            to use (run "cezar kb" for the full usage)
   cezar backup              encrypted platform backup (CEZ_BACKUP=1): status ·
                             run · snapshots · verify · gc · restore [--snapshot
                             <id>] [--force]

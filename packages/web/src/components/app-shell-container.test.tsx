@@ -562,7 +562,17 @@ describe('D14 onboarding gate (chromeless)', () => {
     expect(document.querySelector('[data-slot="app-shell"]')?.getAttribute('data-chromeless')).toBeNull()
   })
 
-  it('signed-out never gates', async () => {
+  /**
+   * **INVERTED 2026-08-19** (`.ai/specs/2026-08-19-signed-out-cockpit-reauth.md`, test 2). This
+   * case used to be named `'signed-out never gates'` and asserted the sidebar rendered — it was
+   * pinning the bug. An owner report against cockpit.example.com: clearing site data left the
+   * whole cockpit on screen with every `/api/*` query 401ing behind it, and no way to sign in.
+   *
+   * `signed-out` is reachable only from the `oidc`/`google` boot branch, which mounts
+   * `/auth/login` in the same breath, so gating here can never brick a topology — the hazard the
+   * `unavailable` case above exists for, and the reason these two must NOT be tested as one.
+   */
+  it('signed-out gates: no cockpit renders to a caller with no session', async () => {
     serve({
       '/api/v1/health': HEALTH,
       '/api/v1/todos': [],
@@ -573,9 +583,14 @@ describe('D14 onboarding gate (chromeless)', () => {
     })
     renderShell()
 
-    await waitFor(() => expect(repoChip()).not.toBeNull())
-    await new Promise((resolve) => setTimeout(resolve, 30))
-    expect(document.querySelector('[data-slot="sidebar"]')).not.toBeNull()
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="app-shell"]')?.getAttribute('data-chromeless')).toBe(''),
+    )
+    expect(document.querySelector('[data-slot="sidebar"]')).toBeNull()
+    expect(document.querySelector('[data-slot="mobile-top-bar"]')).toBeNull()
+    // `children` still renders — the sign-in screen IS the surface, not a blank page (the same
+    // rule the `needs-org` case above holds).
+    expect(screen.getByText('route content')).toBeTruthy()
   })
 
   it('ready (an org already exists) never gates', async () => {
