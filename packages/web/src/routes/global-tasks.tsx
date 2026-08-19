@@ -35,6 +35,7 @@ import type {
 } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { FacetFilter, SegmentedControl, ToggleChip } from '@/components/facet-filter'
+import { HostUsageStat } from '@/components/host-usage-stat'
 import { useListView } from '@/components/list-view'
 import { Pill } from '@/components/pill'
 import { ReferenceChip } from '@/components/reference-chip'
@@ -440,6 +441,7 @@ export function GlobalTasksRoute() {
           </ViewTab>
         </div>
         <div className="flex-1" />
+        <HostUsageStat />
         <span data-slot="global-tasks-count" className="text-[12.5px] text-soft-foreground tabular-nums">
           {visible.length} of {tasks.length}
         </span>

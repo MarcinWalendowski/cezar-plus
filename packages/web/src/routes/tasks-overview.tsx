@@ -26,10 +26,11 @@ import { Link, useNavigate } from '@/lib/project-router'
 
 import { archiveFinished, markAllRunsSeen, patchRun } from '@/api/client'
 import { useRunUsage } from '@/api/global-events'
-import { queryKeys, useHealth, useHostMetrics, useReferenceProjectId, useRuns } from '@/api/queries'
+import { queryKeys, useHealth, useReferenceProjectId, useRuns } from '@/api/queries'
 import type { RunRecord } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { DiffStatLabel } from '@/components/diff-stat'
+import { HostUsageStat } from '@/components/host-usage-stat'
 import { DirectionalUsage } from '@/components/directional-usage'
 import { TitleEditInput, useTitleEditor } from '@/components/editable-title'
 import { useListView } from '@/components/list-view'
@@ -1031,45 +1032,3 @@ export function TasksOverviewRoute() {
   )
 }
 
-/**
- * Live whole-HOST CPU%/memory% in the overview header (spec
- * `.ai/specs/2026-08-19-host-machine-usage-in-dashboard.md`). Distinct from the per-run
- * `cpu`/`memory` table columns (`UsageTds`): this is the machine as a whole. Renders nothing
- * until the first poll answers so the header does not flash a placeholder; CPU% shows `—` for
- * the one interval before the sampler has two snapshots to diff.
- */
-function HostUsageStat() {
-  const metrics = useHostMetrics().data
-  if (!metrics) return null
-  const cpu = metrics.cpuPercent === null ? '—' : `${Math.round(metrics.cpuPercent)}%`
-  const mem = `${Math.round(metrics.memoryPercent)}%`
-  return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <div
-            data-slot="host-usage"
-            className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2 py-1 text-[12.5px] text-muted-foreground tabular-nums"
-          >
-            {/* "Host" label is load-bearing: the table's own `cpu`/`memory` columns show PER-RUN
-                process usage, so without it this whole-machine stat reads as just another run's
-                numbers (owner feedback 2026-08-19). */}
-            <span className="font-medium text-foreground/70">Host</span>
-            <span className="inline-flex items-center gap-1">
-              <CpuIcon className="size-3.5" aria-hidden="true" />
-              {cpu}
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <MemoryStickIcon className="size-3.5" aria-hidden="true" />
-              {mem}
-            </span>
-          </div>
-        </TooltipTrigger>
-        <TooltipContent>
-          Host machine · CPU {cpu} · memory {mem}
-          {metrics.cpuCount ? ` (${metrics.cpuCount} CPU${metrics.cpuCount === 1 ? '' : 's'})` : ''}
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  )
-}

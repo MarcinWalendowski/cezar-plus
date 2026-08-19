@@ -9,6 +9,7 @@ import { workspaceViewsOffSubtitle } from '@/lib/capability-copy'
 import type { RunRecord, WorkspaceRunSummary } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { DiffStatLabel } from '@/components/diff-stat'
+import { HostUsageStat } from '@/components/host-usage-stat'
 import { Pill } from '@/components/pill'
 import { ProjectFilter } from '@/components/project-filter'
 import { ReferenceChip } from '@/components/reference-chip'
@@ -151,7 +152,8 @@ export function WorkspaceTasksRoute() {
             (`nav-items.ts` stays untouched, per the spec's Architecture section). Unconditional:
             it is gated by `CEZ_WORKSPACE_VIEWS`, not `CEZ_NOTES`, and the destination already
             renders its own honest "off" state when notes is off (D19's pattern), never a 404. */}
-        <Button asChild size="sm" className="ml-auto">
+        <HostUsageStat className="ml-auto" />
+        <Button asChild size="sm">
           <RouterLink to="/workspace/new">
             <PlusIcon />
             New task
