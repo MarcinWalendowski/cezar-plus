@@ -286,6 +286,15 @@ function ReportCard({
               <span data-slot="report-reason">dismissed: {item.triage.reason}</span>
             ) : null}
             {item.triage?.auto ? <span data-slot="report-auto">converted automatically</span> : null}
+            {item.statusSource === 'document' ? (
+              // Said plainly, because "approved" here is NOT somebody's decision: the report
+              // document itself says the tracker that filed it had already dealt with it. There is
+              // no timestamp, no reason and no task to point at, and implying otherwise would
+              // invent a person.
+              <span data-slot="report-prior-status" title="From the report document's own status tag">
+                already handled before triage existed
+              </span>
+            ) : null}
             {item.triage?.keyKind === 'catalog-id' ? (
               // An honest warning, not decoration: a catalog id can change on a reindex, so this
               // report's triage can be orphaned and the row would come back as pending.
@@ -296,7 +305,12 @@ function ReportCard({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5 self-center">
-          {item.status === 'pending' ? (
+          {/* Keyed on `statusSource`, not on `status`. A report the old tracker marked processed
+              reads as approved but has NO triage row and NO task on this board — so Reopen would be
+              a button that visibly does nothing (deleting a row that is not there leaves the
+              document's own tag in charge), while Approve is the action that actually helps: it
+              files the task nobody ever filed. */}
+          {item.statusSource !== 'triage' ? (
             <>
               <Button
                 type="button"

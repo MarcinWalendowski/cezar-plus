@@ -36,6 +36,7 @@ const PENDING: ReportListItem = {
   tags: ['user-report'],
   filedAt: '2026-08-18T21:04:00.000Z',
   status: 'pending',
+  statusSource: 'default',
 }
 
 const APPROVED: ReportListItem = {
@@ -45,6 +46,7 @@ const APPROVED: ReportListItem = {
   tags: ['user-report'],
   filedAt: '2026-08-17T09:00:00.000Z',
   status: 'approved',
+  statusSource: 'triage',
   triage: {
     key: 'report-2026-08-17-share',
     keyKind: 'identifier',
@@ -62,6 +64,7 @@ const DISMISSED: ReportListItem = {
   tags: ['user-report'],
   filedAt: '2026-08-16T09:00:00.000Z',
   status: 'dismissed',
+  statusSource: 'triage',
   triage: {
     key: 'report-2026-08-16-typo',
     keyKind: 'catalog-id',
@@ -255,6 +258,46 @@ describe('reports route — the queue', () => {
     await waitFor(() => expect(cards()[0]?.dataset.status).toBe('approved'))
     expect(action(cards()[0]!, 'report-approve')).toBeNull()
     expect(action(cards()[0]!, 'report-reopen')).toBeTruthy()
+  })
+
+  /** The corpus this feature shipped against carries 191 reports the previous tracker had already
+   *  processed. Those read as `approved` with `statusSource: 'document'` — approved, but by nobody
+   *  here, with no task on this board. The row has to say so, and it has to offer the action that
+   *  actually helps. */
+  it('a report handled before triage existed says so, and offers Approve rather than Reopen', async () => {
+    const HANDLED: ReportListItem = {
+      key: 'notion:396b9863',
+      docId: 'reports-999888777666',
+      title: 'Handled by the old tracker',
+      tags: ['notion-report', 'status/processed'],
+      status: 'approved',
+      statusSource: 'document',
+    }
+    stubFetch({ items: [HANDLED] })
+    renderReports()
+    // The tabs only exist once health has resolved the capability, so wait for them rather than
+    // clicking into a null.
+    await waitFor(() => expect(tab('approved')).toBeTruthy())
+    fireEvent.click(tab('approved'))
+    await waitFor(() => expect(cards()).toHaveLength(1))
+
+    expect(cards()[0]!.querySelector('[data-slot="report-prior-status"]')).toBeTruthy()
+    // Reopen would delete a row that is not there, leaving the document's tag in charge — a button
+    // that visibly does nothing. Approve files the task nobody ever filed.
+    expect(action(cards()[0]!, 'report-reopen')).toBeNull()
+    expect(action(cards()[0]!, 'report-approve')).toBeTruthy()
+
+    // NEGATIVE CONTROL: the same row with a real triage row gets the opposite pair, so the two
+    // assertions above are keyed on `statusSource` and not on something incidental.
+    cleanup()
+    stubFetch({ items: [{ ...HANDLED, statusSource: 'triage', triage: APPROVED.triage }] })
+    renderReports()
+    await waitFor(() => expect(tab('approved')).toBeTruthy())
+    fireEvent.click(tab('approved'))
+    await waitFor(() => expect(cards()).toHaveLength(1))
+    expect(cards()[0]!.querySelector('[data-slot="report-prior-status"]')).toBeNull()
+    expect(action(cards()[0]!, 'report-reopen')).toBeTruthy()
+    expect(action(cards()[0]!, 'report-approve')).toBeNull()
   })
 
   it('expanding a row loads the report body and puts the key in the URL', async () => {

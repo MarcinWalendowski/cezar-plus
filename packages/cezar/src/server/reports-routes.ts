@@ -14,6 +14,7 @@ import {
   type ReportReopenResponse,
   type ReportsResponse,
   type ReportStatus,
+  type ReportStatusSource,
   type ReportTriageRow,
 } from '@loki-labs/better-cezar-contract';
 import type { CatalogEntry } from '../knowledge/types.ts';
@@ -28,8 +29,9 @@ import type { ProjectApiEnv } from './server.ts';
  *
  * **The list is a join, not a store.** Reports are knowledge documents carrying the reports tag;
  * this family adds no document type, no second index, and writes nothing on a read. A report with
- * no triage row reads as `pending`, which is what lets a freshly arrived report appear in the
- * inbox the moment `fs.watch` indexes the file — no write anywhere.
+ * no triage row and no handled tag of its own reads as `pending`, which is what lets a freshly
+ * arrived report appear in the inbox the moment `fs.watch` indexes the file — no write anywhere.
+ * See {@link derivedStatus} for why the document's own status tag is part of that derivation.
  *
  * **Why this family exists at all.** A report reaching the knowledge base is invisible on the
  * Tasks board, which renders `todos.json` and never reads the KB. That is not a bug to fix by
@@ -57,10 +59,25 @@ const AUTO_OFF = 'automatic report processing is off — set CEZ_REPORTS_AUTO=1 
  *  by default because corpora migrated from an earlier tracker carry it on historical rows. */
 export const DEFAULT_REPORT_TAGS = ['user-report', 'notion-report'] as const;
 
+/**
+ * Tags that mean "this report was already handled, before this feature existed".
+ *
+ * `status/processed` is the vocabulary a tracker migration writes: a corpus imported from an earlier
+ * issue tracker typically carries it on nearly every historical row (measured on one such corpus:
+ * 191 of 193 reports processed, 2 new). Without this, the queue would open on all of them and
+ * re-ask questions someone already answered — and an automatic pass would mint a task for each. So
+ * the document's own statement about itself is honoured as the INITIAL state, and the triage store
+ * overrides it; `statusSource` on the wire keeps the two distinguishable rather than pretending a
+ * migrated tag is somebody's decision.
+ */
+export const DEFAULT_HANDLED_TAGS = ['status/processed'] as const;
+
 /** Every knob this family reads, resolved per request for the project being addressed. */
 export interface ReportsConfig {
   /** Which tags mark a document as a report. */
   tags: readonly string[];
+  /** Which tags mean the report was already handled elsewhere — see {@link DEFAULT_HANDLED_TAGS}. */
+  handledTags: readonly string[];
   /** Whether `process-pending` is permitted. */
   auto: boolean;
   /** `domain` on the report document → the project id whose inbox its work belongs in. A report's
@@ -71,6 +88,7 @@ export interface ReportsConfig {
 
 const DEFAULT_REPORTS_CONFIG: ReportsConfig = {
   tags: DEFAULT_REPORT_TAGS,
+  handledTags: DEFAULT_HANDLED_TAGS,
   auto: false,
   routeByDomain: {},
 };
@@ -129,10 +147,34 @@ function findReport(
   return store.listDocuments().find((entry) => isReport(entry, tags) && triageKeyFor(entry).key === key);
 }
 
-/** `keyKind` is deliberately NOT a field of the list item: it describes the row, and a pending
- *  report has no row. A client that needs it before triage reads it off the key it was given. */
-function toListItem(entry: CatalogEntry, triage: ReportTriageRow | undefined): ReportListItem {
+/**
+ * The one place a report's status is derived, so nothing can disagree with the list: a stored row
+ * wins, else the document's own handled tag, else pending. Every caller — the list, the detail
+ * route, and `process-pending`'s own pending filter — goes through {@link derivedStatus} below, so
+ * turning auto mode on can never convert a report the queue was not showing as pending.
+ */
+function derivedStatus(
+  entry: CatalogEntry,
+  triage: ReportTriageRow | undefined,
+  handledTags: readonly string[],
+): { status: ReportStatus; statusSource: ReportStatusSource } {
+  if (triage) return { status: triage.status, statusSource: 'triage' };
+  // The document's own statement about itself. `approved` rather than `dismissed` because a
+  // processed report in the source tracker had become work — but with NO row, because there is no
+  // timestamp, reason or todo id here that would not be invented.
+  if (entry.tags.some((t) => handledTags.includes(t))) return { status: 'approved', statusSource: 'document' };
+  return { status: 'pending', statusSource: 'default' };
+}
+
+/** `keyKind` is deliberately NOT a field of the list item: it describes the row, and a report with
+ *  no row has none. A client that needs it before triage reads it off the key it was given. */
+function toListItem(
+  entry: CatalogEntry,
+  triage: ReportTriageRow | undefined,
+  handledTags: readonly string[],
+): ReportListItem {
   const { key } = triageKeyFor(entry);
+  const { status, statusSource } = derivedStatus(entry, triage, handledTags);
   return {
     key,
     docId: entry.id,
@@ -143,7 +185,8 @@ function toListItem(entry: CatalogEntry, triage: ReportTriageRow | undefined): R
     ...(entry.domain ? { domain: entry.domain } : {}),
     tags: [...entry.tags],
     ...(entry.updatedAt ? { filedAt: entry.updatedAt } : {}),
-    status: (triage?.status ?? 'pending') satisfies ReportStatus,
+    status,
+    statusSource,
     ...(triage ? { triage } : {}),
   };
 }
@@ -227,12 +270,12 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
       const { root, dataDir, knowledgeStore } = c.get('project');
       if (!knowledgeStore) return c.json(EMPTY_REPORTS_RESPONSE);
       const { status, domain, limit, offset } = c.req.valid('query');
-      const { tags } = await loadReportsConfig(root);
+      const { tags, handledTags } = await loadReportsConfig(root);
       const triage = await readReportTriage(dataDir);
       const all = knowledgeStore
         .listDocuments()
         .filter((entry) => isReport(entry, tags))
-        .map((entry) => toListItem(entry, triage.get(triageKeyFor(entry).key)));
+        .map((entry) => toListItem(entry, triage.get(triageKeyFor(entry).key), handledTags));
 
       // Counts describe the WHOLE set, before status/domain filtering and before paging — a
       // filtered count would make the tab badges disagree with the tabs.
@@ -271,14 +314,17 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
     .post('/reports/process-pending', async (c) => {
       const { id, root, dataDir, knowledgeStore } = c.get('project');
       if (!knowledgeStore) return c.json({ error: REPORTS_OFF }, 409);
-      const { tags, auto, routeByDomain } = await loadReportsConfig(root);
+      const { tags, handledTags, auto, routeByDomain } = await loadReportsConfig(root);
       if (!auto) return c.json({ error: AUTO_OFF }, 409);
 
       const triage = await readReportTriage(dataDir);
       const pending = knowledgeStore
         .listDocuments()
         .filter((entry) => isReport(entry, tags))
-        .filter((entry) => !triage.has(triageKeyFor(entry).key));
+        // `derivedStatus`, NOT `!triage.has(key)`. The two agreed until handled tags existed, and
+        // the difference is 191 tasks on the real corpus: a report the queue shows as approved
+        // because its own document says so must never be converted by an automatic pass.
+        .filter((entry) => derivedStatus(entry, triage.get(triageKeyFor(entry).key), handledTags).status === 'pending');
 
       const outcomes: ReportProcessOutcome[] = [];
       for (const entry of pending) {
@@ -325,14 +371,14 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
       const { root, dataDir, knowledgeStore } = c.get('project');
       if (!knowledgeStore) return c.json(EMPTY_DETAIL_RESPONSE);
       const key = c.req.param('key');
-      const { tags } = await loadReportsConfig(root);
+      const { tags, handledTags } = await loadReportsConfig(root);
       const entry = findReport(knowledgeStore, tags, key);
       if (!entry) return c.json({ error: 'no such report' }, 404);
       const triage = await readReportTriage(dataDir);
       const document = knowledgeStore.getDocument(entry.id);
       const body: ReportDetailResponse = {
         enabled: true,
-        item: toListItem(entry, triage.get(key)),
+        item: toListItem(entry, triage.get(key), handledTags),
         body: document?.body ?? '',
       };
       return c.json(body);
@@ -346,7 +392,7 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
       const { id, root, dataDir, knowledgeStore } = c.get('project');
       if (!knowledgeStore) return c.json({ error: REPORTS_OFF }, 409);
       const key = c.req.param('key');
-      const { tags, routeByDomain } = await loadReportsConfig(root);
+      const { tags, handledTags, routeByDomain } = await loadReportsConfig(root);
       const entry = findReport(knowledgeStore, tags, key);
       if (!entry) return c.json({ error: 'no such report' }, 404);
 
@@ -380,7 +426,7 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
       });
 
       const body: ReportApproveResponse = {
-        item: toListItem(entry, row),
+        item: toListItem(entry, row, handledTags),
         todo,
         alreadyApproved: reused,
       };
@@ -391,7 +437,7 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
       const { root, dataDir, knowledgeStore } = c.get('project');
       if (!knowledgeStore) return c.json({ error: REPORTS_OFF }, 409);
       const key = c.req.param('key');
-      const { tags } = await loadReportsConfig(root);
+      const { tags, handledTags } = await loadReportsConfig(root);
       const entry = findReport(knowledgeStore, tags, key);
       if (!entry) return c.json({ error: 'no such report' }, 404);
       const { reason } = c.req.valid('json');
@@ -407,7 +453,7 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
         ...(current?.todoId ? { todoId: current.todoId } : {}),
         ...(current?.todoProjectId ? { todoProjectId: current.todoProjectId } : {}),
       }));
-      const body: ReportDismissResponse = { item: toListItem(entry, row) };
+      const body: ReportDismissResponse = { item: toListItem(entry, row, handledTags) };
       return c.json(body);
     })
 
@@ -415,7 +461,7 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
       const { root, dataDir, knowledgeStore } = c.get('project');
       if (!knowledgeStore) return c.json({ error: REPORTS_OFF }, 409);
       const key = c.req.param('key');
-      const { tags } = await loadReportsConfig(root);
+      const { tags, handledTags } = await loadReportsConfig(root);
       const entry = findReport(knowledgeStore, tags, key);
       if (!entry) return c.json({ error: 'no such report' }, 404);
 
@@ -428,7 +474,7 @@ export function createReportsRoutes(deps: ReportsRouteDeps = {}) {
       });
 
       const body: ReportReopenResponse = {
-        item: toListItem(entry, undefined),
+        item: toListItem(entry, undefined, handledTags),
         // A todo minted by an earlier approve is NOT deleted: by now it may be started or done.
         // Named so the caller can decide rather than being silently left behind.
         ...(orphanedTodoId ? { orphanedTodoId } : {}),

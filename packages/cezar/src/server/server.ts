@@ -25,7 +25,7 @@ import { streamSSE } from 'hono/streaming';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
-import { createReportsRoutes, DEFAULT_REPORT_TAGS } from './reports-routes.ts';
+import { createReportsRoutes, DEFAULT_HANDLED_TAGS, DEFAULT_REPORT_TAGS } from './reports-routes.ts';
 import { createNotesRoutes } from './notes-routes.ts';
 import {
   createAgentAccountUsageRoutes,
@@ -6314,6 +6314,7 @@ export function createApp(deps: ServerDeps) {
         // precedent), NOT quietly replaced by the defaults — so a deployment can switch reports off
         // by naming no tag. Only an ABSENT key falls back.
         tags: reports?.tags ?? DEFAULT_REPORT_TAGS,
+        handledTags: reports?.handledTags ?? DEFAULT_HANDLED_TAGS,
         // The env flag is the deployment-wide switch, the config key the per-repo one; either turns
         // it on. `=== '1'` exactly, matching every other `CEZ_*` gate.
         auto: reports?.auto ?? process.env.CEZ_REPORTS_AUTO === '1',

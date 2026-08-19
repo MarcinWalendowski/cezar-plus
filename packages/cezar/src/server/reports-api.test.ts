@@ -122,6 +122,7 @@ async function buildProject(
       createReportsRoutes({
         reportsConfig: async () => ({
           tags: ['user-report'],
+          handledTags: ['status/processed'],
           auto: false,
           routeByDomain: {},
           ...options.config,
@@ -242,6 +243,78 @@ describe('reports routes — the list is a join over the knowledge base', () => 
     // read approved here. The store is not empty, so this cannot pass by the file being missing.
     expect(body.items[0]?.status).toBe('pending');
     expect(body.counts).toEqual({ pending: 1, approved: 0, dismissed: 0, total: 1 });
+  });
+
+  it('a report whose own document says it was already handled opens as approved, not pending', async () => {
+    const { app, dataDir } = await buildProject({
+      reports: [
+        DIGEST,
+        { path: 'old.md', title: 'Handled by the old tracker', identifier: 'r-old', tags: ['user-report', 'status/processed'] },
+      ],
+    });
+    const body = await parsed(await apiRequest(app, '/api/v1/reports'), reportsResponseSchema);
+    // The reason this exists: 191 of the 193 reports in the real corpus carry `status/processed`,
+    // and without it the queue opens on all 193.
+    expect(body.counts).toEqual({ pending: 1, approved: 1, dismissed: 0, total: 2 });
+    const old = body.items.find((i) => i.key === 'r-old')!;
+    expect(old.status).toBe('approved');
+    // …and it is NOT presented as somebody's decision: no row, and the source says where it came
+    // from. A client showing "approved by" here would be inventing a person.
+    expect(old.statusSource).toBe('document');
+    expect(old.triage).toBeUndefined();
+    expect(body.items.find((i) => i.key === DIGEST.identifier)?.statusSource).toBe('default');
+    // Nothing was written to make that happen.
+    await expect(readFile(join(dataDir, 'reports-triage.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('an automatic pass never converts a document-handled report', async () => {
+    const { app, dataDir } = await buildProject({
+      reports: [
+        DIGEST,
+        { path: 'old.md', title: 'Handled by the old tracker', identifier: 'r-old', tags: ['user-report', 'status/processed'] },
+      ],
+      config: { auto: true },
+    });
+    const body = await parsed(
+      await apiRequest(app, '/api/v1/reports/process-pending', { method: 'POST' }),
+      reportProcessPendingResponseSchema,
+    );
+    // One todo, not two. `process-pending` shares the list's derivation rather than keying on
+    // "has no triage row", which is exactly the 191-task difference on the real corpus.
+    expect(body.outcomes.map((o) => o.key)).toEqual([DIGEST.identifier]);
+    expect(await readTodos(dataDir)).toHaveLength(1);
+    expect((await readReportTriage(dataDir)).has('r-old')).toBe(false);
+  });
+
+  it('a triage decision overrides the document, and reopen falls back to it', async () => {
+    const { app } = await buildProject({
+      reports: [{ path: 'old.md', title: 'Handled', identifier: 'r-old', tags: ['user-report', 'status/processed'] }],
+    });
+    const dismissed = await parsed(
+      await apiRequest(app, '/api/v1/reports/r-old/dismiss', json({ reason: 'not worth it' })),
+      reportDismissResponseSchema,
+    );
+    expect(dismissed.item.status).toBe('dismissed');
+    expect(dismissed.item.statusSource).toBe('triage');
+
+    const reopened = await parsed(
+      await apiRequest(app, '/api/v1/reports/r-old/reopen', { method: 'POST' }),
+      reportReopenResponseSchema,
+    );
+    // Reopen deletes the ROW, so the derivation falls back to the document — which still says
+    // handled. It does not go to pending, and claiming it did would be a lie about the corpus.
+    expect(reopened.item.status).toBe('approved');
+    expect(reopened.item.statusSource).toBe('document');
+  });
+
+  it('an explicit empty handledTags puts every report back in the queue', async () => {
+    const { app } = await buildProject({
+      reports: [{ path: 'old.md', title: 'Handled', identifier: 'r-old', tags: ['user-report', 'status/processed'] }],
+      config: { handledTags: [] },
+    });
+    const body = await parsed(await apiRequest(app, '/api/v1/reports'), reportsResponseSchema);
+    // The opt-out is respected as the opt-out it reads like, not quietly replaced by the default.
+    expect(body.items[0]).toMatchObject({ status: 'pending', statusSource: 'default' });
   });
 
   it('a report with no identifier is keyed on the catalog id, and the row says so', async () => {

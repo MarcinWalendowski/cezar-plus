@@ -197,6 +197,10 @@ Mutators answer 409 with a fixed flag-naming message when the KB is off, followi
 
 Automated:
 
+0. **Amended 2026-08-19** — see "the corpus's own status tag is part of the derivation" below:
+   a report whose document says it was already handled opens as `approved`/`statusSource: 'document'`
+   with no triage row, is never auto-converted, and an explicit `reports.handledTags: []` puts it
+   back in the queue.
 1. Store unit tests: lease serialization (two concurrent writers, both survive), lenient read
    of a corrupt row, tmp+rename atomicity.
 2. Route tests: flag-off shape for all six routes; approve mints exactly one todo and is
@@ -224,11 +228,11 @@ end to end, unattended.
 
 ### Results — automated (2026-08-19)
 
-Steps 1 to 4 are **executed and green**. Files: `packages/cezar/src/reports-triage.test.ts` (9),
-`packages/cezar/src/server/reports-api.test.ts` (21), `packages/cezar/src/server/contract-parity.reports.test.ts`
-(compile-time, all six responses, both directions), `packages/web/src/routes/reports/reports.test.tsx` (14).
+Steps 0 to 4 are **executed and green** (49 tests). Files: `packages/cezar/src/reports-triage.test.ts` (9),
+`packages/cezar/src/server/reports-api.test.ts` (25), `packages/cezar/src/server/contract-parity.reports.test.ts`
+(compile-time, all six responses, both directions), `packages/web/src/routes/reports/reports.test.tsx` (15).
 
-Each of the three claims most worth doubting was **mutation-tested** rather than trusted, because a
+Each of the four claims most worth doubting was **mutation-tested** rather than trusted, because a
 guard that cannot fail is the failure mode this suite is most exposed to:
 
 | Mutation | Expected | Observed |
@@ -239,6 +243,7 @@ guard that cannot fail is the failure mode this suite is most exposed to:
 | counts computed after the `status` filter | a badge test fails | **0 failed — the assertion was vacuous** |
 | cockpit badges count the rendered page | a badge test fails | 1 failed (after the fix below) |
 | dismiss confirm drops its `reason.trim()` guard | the required-reason test fails | 1 failed |
+| `process-pending` filters on `!triage.has(key)` instead of the shared derivation | the document-handled test fails | 1 failed |
 
 The fourth row is the finding. The first version of the counts test only requested
 `?status=pending`, and a `pending` count that wrongly honoured the filter is **still 1** there — so
@@ -265,6 +270,42 @@ away: `components/nav-items.test.ts` and `components/app-shell.test.tsx` both pi
 verbatim. `nav-items.test.ts`'s "without knowledge, **exactly** the Knowledge item drops out" case
 was also *renamed and corrected in place* — the `knowledge` gate now owns two items, so the old
 title had become false, and it is the kind of false a future session enforces.
+
+### Amendment — the corpus's own status tag is part of the derivation (2026-08-19)
+
+Found while preparing the deploy, by reading the real corpus rather than assuming it: of the 193
+report documents in `loki-labs`, **191 carry `status/processed`** and 2 carry `status/new`. The
+first implementation derived pending from "no triage row" alone, so the queue would have opened on
+all 193 — re-asking 191 questions someone had already answered — and turning auto mode on would have
+minted 191 tasks. Verification step 5 already said the queue should list *the reports currently at
+`status/new`*, so this was the spec being unimplemented, not the spec changing.
+
+Resolved by making the document's own status tag the INITIAL state, with the triage store overriding
+it, through one shared `derivedStatus()` that the list, the detail route AND `process-pending`'s
+pending filter all call:
+
+| triage row | handled tag | `status` | `statusSource` |
+| --- | --- | --- | --- |
+| yes | — | the row's | `triage` |
+| no | yes | `approved` | `document` |
+| no | no | `pending` | `default` |
+
+`statusSource` is on the wire because the three are not interchangeable. A `document` report is
+approved by **nobody here**: there is no row, no timestamp, no reason and no todo, so synthesizing a
+triage row for it would invent a person. The cockpit says "already handled before triage existed" and
+offers **Approve** rather than Reopen on such a row — Reopen would delete a row that is not there,
+leaving the document's tag in charge, i.e. a button that visibly does nothing, while Approve files
+the task nobody ever filed. `reports.handledTags` configures the vocabulary; an explicit `[]` opts
+out and puts every report back in the queue.
+
+Mutation-tested: reverting `process-pending`'s filter to the naive `!triage.has(key)` fails "an
+automatic pass never converts a document-handled report" (1 failed). The cockpit half has its own
+negative control — the same row with a real triage row gets the opposite button pair, so the
+assertions are keyed on `statusSource` and not on something incidental.
+
+This also corrected the contract comment claiming `triage` is "absent exactly when `status` is
+`pending`", which stopped being true the moment `document` existed; the presence check is keyed on
+`statusSource` now, and the old wording was amended in place rather than appended to.
 
 ### Still QA Needed
 

@@ -9,8 +9,10 @@ import { todoItemSchema } from './skills.ts';
  * what makes it one, exactly as `changeType` is what makes a document a changelog entry
  * (`./knowledge.ts`). This family adds **no** document type and **no** new index: the list is a
  * left join of "documents carrying the tag" against a small per-project triage store, and a
- * report with no triage row reads as `pending`. That is why a freshly arrived report needs no
- * write anywhere to appear in the inbox.
+ * report with neither a triage row nor a handled tag of its own reads as `pending`. That is why a
+ * freshly arrived report needs no write anywhere to appear in the inbox — and why a report the
+ * previous tracker already processed does not reappear as a question (see
+ * {@link reportStatusSourceSchema}).
  *
  * **Triage never lives in the report's own frontmatter.** Report documents arrive from a mount
  * that may be read-only, they are owned by whatever writer drains them (which re-writes the same
@@ -52,6 +54,26 @@ export type ReportTriageStatus = z.infer<typeof reportTriageStatusSchema>;
 export const reportKeyKindSchema = z.enum(['identifier', 'catalog-id']);
 export type ReportKeyKind = z.infer<typeof reportKeyKindSchema>;
 
+/**
+ * WHERE a report's `status` came from — carried on the wire because the three sources are not
+ * interchangeable and a client that cannot tell them apart will mislead its reader.
+ *
+ * - `triage` — a real row in this project's triage store: somebody decided this, here, and the row
+ *   says when and (for a dismissal) why.
+ * - `document` — the report document's own status tag says it was already handled, by whatever
+ *   tracker filed it, before this feature existed. There is no row, no timestamp we could honestly
+ *   claim, and no todo to point at. It is NOT an approval, it is a report that is not asking a
+ *   question any more.
+ * - `default` — no row and no such tag: pending.
+ *
+ * This distinction exists because of a measured corpus, not a hypothetical: 191 of its 193 reports
+ * carried `status/processed` from the tracker they were migrated out of. Deriving pending from "no
+ * triage row" alone would open the queue on all 193 and re-ask 191 questions someone already
+ * answered — and worse, an automatic pass would mint 191 tasks.
+ */
+export const reportStatusSourceSchema = z.enum(['triage', 'document', 'default']);
+export type ReportStatusSource = z.infer<typeof reportStatusSourceSchema>;
+
 // ---- the triage row --------------------------------------------------------------------------
 
 export const reportTriageRowSchema = z.object({
@@ -87,7 +109,17 @@ export const reportListItemSchema = z.object({
   /** The document's `updatedAt` — when the report was filed, not when it was indexed. */
   filedAt: z.string().optional(),
   status: reportStatusSchema,
-  /** Absent exactly when `status` is `pending`. */
+  /** Where `status` came from — see {@link reportStatusSourceSchema}. Read this before showing a
+   *  status as somebody's decision: `document` means nobody decided it here. */
+  statusSource: reportStatusSourceSchema,
+  /**
+   * The stored triage row, present exactly when `statusSource` is `triage`.
+   *
+   * **CORRECTED 2026-08-19.** This said "absent exactly when `status` is `pending`", which stopped
+   * being true the moment `statusSource: 'document'` existed: such a report is `approved` with NO
+   * row, because there is nothing to store that would not be invented. Key the presence check on
+   * `statusSource`, never on `status`.
+   */
   triage: reportTriageRowSchema.optional(),
 });
 export type ReportListItem = z.infer<typeof reportListItemSchema>;

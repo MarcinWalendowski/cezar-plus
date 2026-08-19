@@ -153,6 +153,13 @@ const configSchema = z.object({
       /** Which knowledge tags mark a document as a report. Unset = the family's own default set. */
       tags: z.array(z.string().trim().min(1).max(64)).max(20).optional(),
       /**
+       * Which knowledge tags mean the report was ALREADY handled, by whatever tracker filed it,
+       * before triage existed here. Such a report opens as `approved` with no triage row and is
+       * never auto-converted. Unset = the family's default (`status/processed`); an explicit `[]`
+       * turns the behaviour off and puts every report back in the pending queue.
+       */
+      handledTags: z.array(z.string().trim().min(1).max(64)).max(20).optional(),
+      /**
        * Permit `POST /reports/process-pending` to convert every pending report into a todo without
        * a human deciding each one. Absent reads as OFF — auto-conversion has to be asked for, so a
        * corpus nobody has configured can never be mass-converted by a stray call.
