@@ -1,5 +1,5 @@
 import { sep } from 'node:path';
-import type { WorkspaceGrantProject } from '@loki-labs/better-cezar-contract';
+import type { WorkspaceGrantProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { listProjects } from './projects.ts';
 
 /**
@@ -36,8 +36,16 @@ export interface WorkspaceGrant {
    *  RENDERED as unavailable rather than silently dropped (the same rule
    *  `workspaceProjectHealthSchema` follows on every workspace board). */
   projects: GrantedProject[];
-  /** The deduped, on-disk root set handed to `--add-dir`. */
+  /** The deduped, on-disk root set handed to `--add-dir`. When the run is isolated
+   *  (`isolated: true`), these are per-project WORKTREE paths, not the real checkouts. */
   roots: string[];
+  /** True on a parallel workspace run: `roots` point at isolated `cez/<id8>` worktrees, applied
+   *  back to the real checkouts when the run finishes
+   *  (`.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md`). The system prompt says so. */
+  isolated: boolean;
+  /** project root → the path the agent should work in (its worktree, or the real root when that
+   *  project has no worktree). The prompt names these; drives nothing on a non-isolated grant. */
+  paths: ReadonlyMap<string, string>;
 }
 
 /**
@@ -74,12 +82,24 @@ function stripTrailingSep(root: string): string {
  * a spawn-time failure on the Claude CLI, and a workspace run must not die because one registered
  * checkout was moved. It stays in `projects` so the prompt can say so.
  */
-export function buildWorkspaceGrant(projects: readonly GrantedProject[]): WorkspaceGrant {
+export function buildWorkspaceGrant(
+  projects: readonly GrantedProject[],
+  worktrees: readonly WorkspaceWorktree[] = [],
+): WorkspaceGrant {
+  const worktreeByRoot = new Map(worktrees.map((wt) => [wt.root, wt.worktreePath]));
+  const isolated = worktrees.length > 0;
+  // The path the agent works in per project: its worktree when it has one, else the real root
+  // (a non-git or worktree-failed project, granted in place — see materializeWorkspaceWorktrees).
+  const paths = new Map<string, string>();
+  for (const project of projects) {
+    if (project.status === 'missing') continue;
+    paths.set(project.root, worktreeByRoot.get(project.root) ?? project.root);
+  }
   return {
     projects: [...projects],
-    roots: dedupeContainedRoots(
-      projects.filter((project) => project.status !== 'missing').map((project) => project.root),
-    ),
+    roots: dedupeContainedRoots([...paths.values()]),
+    isolated,
+    paths,
   };
 }
 
@@ -97,6 +117,7 @@ export function workspaceGrantSystemPrompt(grant: WorkspaceGrant | undefined): s
   if (reachable.length === 0) return undefined;
 
   const missing = (grant?.projects ?? []).filter((project) => project.status === 'missing');
+  const pathFor = (project: GrantedProject) => grant?.paths?.get(project.root) ?? project.root;
   const lines = [
     '## Workspace run — every registered project',
     '',
@@ -104,7 +125,7 @@ export function workspaceGrantSystemPrompt(grant: WorkspaceGrant | undefined): s
     'holds none of the work; the work is in the projects below, and you reach them by ABSOLUTE',
     'path. You have read and write access to all of them.',
     '',
-    ...reachable.map((project) => `- ${project.name || project.id}: ${project.root}`),
+    ...reachable.map((project) => `- ${project.name || project.id}: ${pathFor(project)}`),
   ];
 
   if (missing.length > 0) {
@@ -116,13 +137,26 @@ export function workspaceGrantSystemPrompt(grant: WorkspaceGrant | undefined): s
     );
   }
 
-  lines.push(
-    '',
-    'There is no worktree and no branch for this run: every edit lands directly in the real',
-    'working tree of each project, alongside whatever the user already had in progress. So do',
-    'NOT commit, stash, reset, or push in any of them unless the task explicitly asks for it —',
-    'you would be committing changes that are not yours. Report what you changed, per project.',
-  );
+  if (grant?.isolated) {
+    // Parallel workspace run: the paths above are ISOLATED worktrees, not the real checkouts
+    // (`.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md`). Editing there is why several
+    // workspace runs can run at once without colliding.
+    lines.push(
+      '',
+      'Each path above is an ISOLATED git worktree for that project, not its real checkout. Do all',
+      'your work there. When this task finishes, cezar applies your changes back into each real',
+      'checkout automatically and removes the worktree — so do NOT commit, stash, reset, or push,',
+      'and never edit a project outside its worktree path. Report what you changed, per project.',
+    );
+  } else {
+    lines.push(
+      '',
+      'There is no worktree and no branch for this run: every edit lands directly in the real',
+      'working tree of each project, alongside whatever the user already had in progress. So do',
+      'NOT commit, stash, reset, or push in any of them unless the task explicitly asks for it —',
+      'you would be committing changes that are not yours. Report what you changed, per project.',
+    );
+  }
 
   return lines.join('\n');
 }

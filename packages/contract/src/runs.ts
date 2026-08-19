@@ -69,6 +69,11 @@ export const stepStateSchema = z.object({
   tokensUsed: z.number(),
   inputTokens: usageCounterSchema.optional(),
   outputTokens: usageCounterSchema.optional(),
+  /** Current context-window occupancy: the MOST RECENT turn's prompt size
+   *  (`input + cacheRead + cacheWrite`), OVERWRITTEN each turn rather than summed like
+   *  `inputTokens` — it tracks "how full is the window now", not the running total (spec
+   *  2026-08-19-context-usage-in-tasks-table). Absent until the first turn ends. */
+  contextTokens: usageCounterSchema.optional(),
   usageInvocationsStarted: usageCounterSchema.optional(),
   usageInvocationsObserved: usageCounterSchema.optional(),
   usageTurnsStarted: usageCounterSchema.optional(),
@@ -144,6 +149,19 @@ export const workspaceGrantProjectSchema = z.object({
   status: z.enum(['ok', 'missing', 'not-git', 'no-commits']),
 });
 export type WorkspaceGrantProject = z.infer<typeof workspaceGrantProjectSchema>;
+
+/** One granted project's isolated worktree on a parallel workspace run
+ *  (`.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md`). */
+export const workspaceWorktreeSchema = z.object({
+  /** The real project root the worktree mirrors and is applied back into. */
+  root: z.string(),
+  worktreePath: z.string(),
+  /** `cez/<id8>` — same name across repos, distinct repos. */
+  branch: z.string(),
+  /** Fork ref / starting commit, the apply-back diff base. */
+  baseBranch: z.string(),
+});
+export type WorkspaceWorktree = z.infer<typeof workspaceWorktreeSchema>;
 
 /**
  * The stored run record, as `runs.json` holds it (`src/runs/store.ts`).
@@ -244,6 +262,14 @@ export const runRecordSchema = z.object({
   tokensUsed: z.number(),
   inputTokens: usageCounterSchema.optional(),
   outputTokens: usageCounterSchema.optional(),
+  /** Current context-window occupancy — the latest agent step's `contextTokens` (the
+   *  current session's most recent turn). NOT a sum: it is "how full the window is now"
+   *  (spec 2026-08-19-context-usage-in-tasks-table). Absent until the first turn ends. */
+  contextTokens: usageCounterSchema.optional(),
+  /** The model's maximum context window, the denominator in the cockpit's `45k / 200k`.
+   *  Derived from the model string (`contextWindowForModel`); absent for a runner/model
+   *  whose window we do not model, so the cell shows only the current figure. */
+  contextWindow: usageCounterSchema.optional(),
   costUsd: z.number().optional(),
   pullRequestUrl: z.string().optional(),
   /** The PR this task is ABOUT (#407) — auto-discovered from conversation references. Display
@@ -289,6 +315,17 @@ export const runRecordSchema = z.object({
    * the registry mid-run.
    */
   workspaceProjects: z.array(workspaceGrantProjectSchema).optional(),
+  /**
+   * A parallel WORKSPACE RUN's per-project worktrees
+   * (`.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md`). At start, every granted git
+   * project is isolated in its own `cez/<id8>` worktree; the agent works there instead of the real
+   * checkouts, so N workspace runs run concurrently without colliding. When the run finishes each
+   * worktree's diff is applied back into its real checkout and the worktree is removed.
+   *
+   * Persisted, not re-derived (like `workspaceProjects`, D5): the apply-back step must find these
+   * after a restart, and after the process that created them is gone.
+   */
+  workspaceWorktrees: z.array(workspaceWorktreeSchema).optional(),
   branch: z.string().optional(),
   /** Stable baseline for session git views: a worktree's fork ref, or an in-place run's starting commit. */
   baseBranch: z.string().optional(),
@@ -431,6 +468,11 @@ export const runIndexEntrySchema = z.object({
   /** What the run has cost so far. Absent means nothing was recorded, which is NOT `$0` — the
    *  cockpit prints an em dash rather than claiming a measurement that never happened. */
   costUsd: z.number().optional(),
+  /** Current context occupancy and the model's max window — the cross-project mirror of
+   *  `RunRecord.contextTokens`/`contextWindow`, so the global Tasks table's Context column
+   *  answers exactly as the per-project one does (spec 2026-08-19-context-usage-in-tasks-table). */
+  contextTokens: usageCounterSchema.optional(),
+  contextWindow: usageCounterSchema.optional(),
   /** The persisted high-water marks a FINISHED run leaves behind. `usage` below stops existing
    *  the moment the process tree does, so without these a finished row could say nothing at all
    *  about what it took to run. */

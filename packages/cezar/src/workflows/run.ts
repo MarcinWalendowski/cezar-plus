@@ -62,6 +62,11 @@ import {
   type GrantedProject,
   type WorkspaceGrant,
 } from '../workspace/granted-roots.ts';
+import {
+  applyWorkspaceWorktrees,
+  materializeWorkspaceWorktrees,
+} from '../workspace/workspace-worktrees.ts';
+import type { WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
 import { UiEventSink } from '../runs/ui-event-sink.ts';
 import type { UiEvent } from '../core/ui-events.ts';
@@ -466,10 +471,13 @@ export function agentDirectories(runsDir: string, env: Record<string, string>): 
  * ordinary project run, which is every run that is not this one kind.
  */
 export function workspaceGrantOf(
-  run: { workspaceProjects?: GrantedProject[] } | undefined,
+  run: { workspaceProjects?: GrantedProject[]; workspaceWorktrees?: WorkspaceWorktree[] } | undefined,
 ): WorkspaceGrant | undefined {
   const projects = run?.workspaceProjects;
-  return projects && projects.length > 0 ? buildWorkspaceGrant(projects) : undefined;
+  if (!projects || projects.length === 0) return undefined;
+  // Parallel workspace run (spec 2026-08-19): once its per-project worktrees exist, the grant —
+  // both `--add-dir` and the prompt text — points at the worktrees, not the real checkouts.
+  return buildWorkspaceGrant(projects, run?.workspaceWorktrees ?? []);
 }
 
 /**
@@ -973,6 +981,26 @@ export class RunManager {
     return this.active.size + this.starting.size - ordinaryWaiting - exemptMonitoring;
   }
 
+  /** Is this run a WORKSPACE RUN — one granted every registered project (spec 2026-08-15), now
+   *  isolated per-project in worktrees (spec 2026-08-19)? Read from the record so it holds across a
+   *  restart, and `false` for every ordinary project run. */
+  private isWorkspaceRun(runId: string): boolean {
+    return (this.store.getRun(runId)?.workspaceProjects?.length ?? 0) > 0;
+  }
+
+  /** Busy slots held by NON-workspace in-place runs — the only ones the non-git single-slot cap in
+   *  `pump()` must still serialize. Workspace runs isolate in worktrees, so they neither count here
+   *  nor are blocked by it. `waiting` runs hold no slot, matching `busySlots()`. */
+  private nonWorkspaceInPlaceBusy(): number {
+    let n = 0;
+    for (const runId of new Set([...this.active.keys(), ...this.starting])) {
+      if (this.waiting.has(runId)) continue;
+      if (this.isWorkspaceRun(runId)) continue;
+      n += 1;
+    }
+    return n;
+  }
+
   /** Epoch ms of this manager's oldest queued run (the semaphore's fairness
    *  key when a freed slot is broadcast), or null when nothing is queued.
    *  `queue` is FIFO — `startRun` pushes and `recover()` re-queues by
@@ -1034,7 +1062,11 @@ export class RunManager {
         const capacity = () =>
           this.semaphore.busy() < maxParallel &&
           this.busySlots() < projectMax &&
-          (repo !== null || this.busySlots() < 1);
+          // Non-git degradation (spec 006): a non-git root can't isolate an ordinary in-place run,
+          // so those serialize to one. A WORKSPACE run is exempt — it isolates each project in its
+          // own worktree (spec 2026-08-19, W3) — so only NON-workspace in-place runs count here,
+          // letting several workspace runs start on the non-git boot root up to maxParallel.
+          (repo !== null || this.nonWorkspaceInPlaceBusy() < 1);
         // The usage-limit hold (spec 2026-08-03-auto-resume-after-usage-limit).
         //
         // A limit closes an ACCOUNT, not a run — so starting the next queued task walks it into
@@ -2331,7 +2363,22 @@ export class RunManager {
     const state: ActiveRun = { cancelled: false, interrupt: () => undefined, cwd };
     this.active.set(runId, state);
     this.starting.delete(runId);
-    if (state.cwd === this.repoRoot) {
+    // A resumed WORKSPACE run stays isolated and lease-free (spec 2026-08-19). Re-materialize its
+    // worktrees if a prior settle applied and removed them (continuing a finished workspace run),
+    // so the resumed session works in worktrees rather than falling back to the real checkouts.
+    const workspaceRun = (record?.workspaceProjects?.length ?? 0) > 0;
+    if (workspaceRun) {
+      const live = (record?.workspaceWorktrees ?? []).filter((w) => existsSync(w.worktreePath));
+      if (live.length === 0) {
+        const worktrees = await materializeWorkspaceWorktrees(
+          runId,
+          record?.workspaceProjects ?? [],
+          (m) => this.store.appendEvent(runId, { type: 'note', message: m }),
+        );
+        this.store.updateRun(runId, { workspaceWorktrees: worktrees });
+      }
+    }
+    if (state.cwd === this.repoRoot && !workspaceRun) {
       if (repositoryRootLockDisabled()) {
         this.store.appendEvent(runId, {
           type: 'note',
@@ -2790,7 +2837,25 @@ export class RunManager {
     // that requests isolation fails closed if the worktree cannot be
     // established; only explicit opt-out and non-Git modes run in place.
     const repo = await getRepoInfo(this.repoRoot);
-    if (repo && input.worktree === false) {
+    // A parallel WORKSPACE RUN (spec 2026-08-19): isolate each granted git project in its own
+    // `cez/<id8>` worktree, run up to maxParallel — no boot repo-root lease (below) and not counted
+    // by the non-git cap in `pump()`. cwd stays the boot scratch repo; the grant (--add-dir + the
+    // prompt) is redirected to the worktrees by `workspaceGrantOf` reading `workspaceWorktrees`.
+    const isWorkspaceRun = (this.store.getRun(runId)?.workspaceProjects?.length ?? 0) > 0;
+    if (isWorkspaceRun) {
+      const projects = this.store.getRun(runId)?.workspaceProjects ?? [];
+      const worktrees = await materializeWorkspaceWorktrees(runId, projects, (m) =>
+        emit({ type: 'note', message: m }),
+      );
+      this.store.updateRun(runId, { workspaceWorktrees: worktrees });
+      emit({
+        type: 'note',
+        message:
+          worktrees.length > 0
+            ? `workspace run — ${worktrees.length} project worktree(s) isolated; changes apply back on finish`
+            : 'workspace run — no git projects to isolate; running in place',
+      });
+    } else if (repo && input.worktree === false) {
       // Composer opt-out: run in the repo working tree, no branch/worktree. The
       // repository-root lease serializes these runs by default; the explicit
       // CEZ_DISABLE_REPO_LOCK=1 escape hatch allows unsafe overlap.
@@ -2861,7 +2926,12 @@ export class RunManager {
     }
 
     if (state.cwd === this.repoRoot) {
-      if (repositoryRootLockDisabled()) {
+      // A workspace run does NOT take the lease: its work is isolated in per-project worktrees, so
+      // the boot scratch tree it shares with other workspace runs holds none of it (spec
+      // 2026-08-19, W3). Ordinary in-place runs still serialize on the boot tree as before.
+      if (isWorkspaceRun) {
+        // no lease — parallel by design
+      } else if (repositoryRootLockDisabled()) {
         emit({
           type: 'note',
           message: REPOSITORY_ROOT_LOCK_DISABLED_NOTE,
@@ -3480,9 +3550,16 @@ export class RunManager {
       return;
     }
     invocation.recordedTurns.add(event.turnId);
+    // Context occupancy is the LATEST turn's prompt size (`input + cacheRead + cacheWrite`,
+    // excluding generated `output`) — overwritten, not accumulated like the token totals
+    // above, so it tracks how full the window is right now (spec
+    // 2026-08-19-context-usage-in-tasks-table). Cache fields absent on a backend that omits
+    // them → they count as 0, and a plain-input turn still reports a truthful occupancy.
+    const contextTokens = input + (event.usage?.cacheRead ?? 0) + (event.usage?.cacheWrite ?? 0);
     this.persistUsageCheckpoint(runId, invocation.stepId, {
       inputTokens: (step.inputTokens ?? 0) + input,
       outputTokens: (step.outputTokens ?? 0) + output,
+      contextTokens,
       usageTurnsRecorded: (step.usageTurnsRecorded ?? 0) + 1,
     });
   }
@@ -3700,7 +3777,44 @@ export class RunManager {
    * OFF) AND the run is not autonomous. Autonomous runs — and runs with the gate
    * off — settle straight to `done`, leaving the diff in the worktree untouched.
    */
+  /**
+   * Apply a parallel workspace run's per-project worktrees back to their real checkouts
+   * (spec 2026-08-19, W4/W6). A clean apply lands the changes unstaged in the real tree and the
+   * worktree is removed inside `applyWorkspaceWorktrees`; a conflict keeps the `cez/<id8>` branch as
+   * the recovery point, and only those survive on the record. A no-op for every other run.
+   */
+  private async applyWorkspaceRun(runId: string): Promise<void> {
+    const worktrees = this.store.getRun(runId)?.workspaceWorktrees;
+    if (!worktrees || worktrees.length === 0) return;
+    this.store.appendEvent(runId, {
+      type: 'note',
+      message: `applying ${worktrees.length} project worktree(s) back to their checkouts…`,
+    });
+    const reports = await applyWorkspaceWorktrees(worktrees);
+    const kept: WorkspaceWorktree[] = [];
+    for (const report of reports) {
+      if (report.outcome === 'applied') {
+        this.store.appendEvent(runId, { type: 'note', message: `applied changes to ${report.root}` });
+      } else if (report.outcome === 'nothing') {
+        this.store.appendEvent(runId, { type: 'note', message: `no changes in ${report.root}` });
+      } else {
+        const wt = worktrees.find((w) => w.root === report.root);
+        if (wt) kept.push(wt);
+        this.store.appendEvent(runId, {
+          type: 'note',
+          message: `${report.root}: ${report.outcome} on apply — kept worktree branch ${report.branch}${
+            report.detail ? ` (${report.detail})` : ''
+          }`,
+        });
+      }
+    }
+    // Keep only the worktrees that could not be applied (conflicts), so a re-run does not try to
+    // re-apply what already landed; clear the field entirely once everything is in.
+    this.store.updateRun(runId, { workspaceWorktrees: kept.length > 0 ? kept : undefined });
+  }
+
   private async settleSuccess(runId: string): Promise<void> {
+    await this.applyWorkspaceRun(runId);
     const run = this.store.getRun(runId);
     let review = false;
     if (run?.worktreePath && existsSync(run.worktreePath)) {

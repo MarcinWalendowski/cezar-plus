@@ -8,6 +8,7 @@ import { collectSecretValues, redactDeep, redactSecrets } from '../core/secret-r
 import { workflowDefSchema } from '../workflows/types.ts';
 
 import { RUNNER_IDS } from '../core/agent-runner.ts';
+import { contextWindowForModel } from '../core/context-window.ts';
 
 import type { RunnerId } from '../core/agent-runner.ts';
 // Type-only, so no runtime edge is added from the store to the contract package — one definition
@@ -68,6 +69,10 @@ const stepStateSchema = z.object({
   tokensUsed: z.number(),
   inputTokens: usageCounterSchema.optional(),
   outputTokens: usageCounterSchema.optional(),
+  /** Latest turn's context-window occupancy (`input + cacheRead + cacheWrite`), overwritten
+   *  each turn — see the contract's `stepStateSchema` (spec
+   *  2026-08-19-context-usage-in-tasks-table). */
+  contextTokens: usageCounterSchema.optional(),
   usageInvocationsStarted: usageCounterSchema.optional(),
   usageInvocationsObserved: usageCounterSchema.optional(),
   usageTurnsStarted: usageCounterSchema.optional(),
@@ -268,6 +273,11 @@ export const runRecordSchema = z.object({
   tokensUsed: z.number(),
   inputTokens: usageCounterSchema.optional(),
   outputTokens: usageCounterSchema.optional(),
+  /** Current context occupancy (latest agent step's `contextTokens`) and the model's max
+   *  window — see the contract's `runRecordSchema` (spec
+   *  2026-08-19-context-usage-in-tasks-table). Recomputed on every step update. */
+  contextTokens: usageCounterSchema.optional(),
+  contextWindow: usageCounterSchema.optional(),
   costUsd: z.number().optional(),
   /** First GitHub PR URL spotted in the transcript (the janitor trick). */
   pullRequestUrl: z.string().optional(),
@@ -321,6 +331,20 @@ export const runRecordSchema = z.object({
         name: z.string(),
         root: z.string(),
         status: z.enum(['ok', 'missing', 'not-git', 'no-commits']),
+      }),
+    )
+    .optional(),
+  /** A parallel workspace run's per-project worktrees (spec
+   *  2026-08-19-parallel-workspace-runs-worktrees). Each granted git project is isolated in its own
+   *  `cez/<id8>` worktree; the diff is applied back to the real checkout and the worktree removed on
+   *  finish. Mirrors `workspaceWorktreeSchema` in `contract/src/runs.ts` — keep the two in sync. */
+  workspaceWorktrees: z
+    .array(
+      z.object({
+        root: z.string(),
+        worktreePath: z.string(),
+        branch: z.string(),
+        baseBranch: z.string(),
       }),
     )
     .optional(),
@@ -761,6 +785,18 @@ export class RunStore extends EventEmitter {
     run.outputTokens = directionalComplete
       ? startedAgentSteps.reduce((sum, candidate) => sum + (candidate.outputTokens ?? 0), 0)
       : undefined;
+    // Context occupancy is "now", not a total: the CURRENT session is the last started agent
+    // step, so the run mirrors that step's latest-turn `contextTokens` rather than summing —
+    // a run continued three times shows the live window, not the sum of three windows (spec
+    // 2026-08-19-context-usage-in-tasks-table).
+    const latestContextStep = [...startedAgentSteps]
+      .reverse()
+      .find((candidate) => candidate.contextTokens !== undefined);
+    run.contextTokens = latestContextStep?.contextTokens;
+    // The max window is a property of the model, recomputed here so an `auto` run picks it up
+    // once `modelIdentity` resolves. Absent for a model we do not size — the cell then shows
+    // only the current figure rather than dividing by an invented max.
+    run.contextWindow = contextWindowForModel(run.model, run.modelIdentity);
     const cost = run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
     run.costUsd = cost > 0 ? cost : undefined;
     this.touch(run);

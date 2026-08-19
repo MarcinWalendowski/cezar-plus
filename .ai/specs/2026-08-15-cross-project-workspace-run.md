@@ -2,6 +2,12 @@
 
 > **Status:** implemented — every gate green; runtime E2E recorded under "Executed" below.
 > · **Date:** 2026-08-15 (implemented 2026-08-16)
+> **PARTIALLY SUPERSEDED 2026-08-19** by `2026-08-19-parallel-workspace-runs-worktrees.md`:
+> decisions **D2/D4/D7** below (in place, no worktree, one-run-at-a-time via the boot lease, no
+> commits) no longer describe how a workspace run executes. It now isolates each granted git
+> project in its own `cez/<id8>` worktree, runs **up to `maxParallel`**, and **auto-applies** each
+> worktree back into the real checkout on finish (removing the worktree after the merge). D1/D3/D5/D6
+> still hold. Read the newer spec before touching workspace-run execution.
 > **Supersedes:** `2026-08-15-knowledge-grounded-task-fanout.md`, entirely. That spec's mechanism —
 > split one request into N per-project todos — is the thing this one deletes.
 > **Keeps from it:** `GET /workspace/todos` + the ungated FILED section on `/tasks` (D2/D7a), and

@@ -86,12 +86,60 @@ describe('buildWorkspaceGrant', () => {
   });
 });
 
+describe('buildWorkspaceGrant — isolated (per-project worktrees, spec 2026-08-19)', () => {
+  const wt = (root: string, worktreePath: string) => ({
+    root,
+    worktreePath,
+    branch: 'cez/abcd1234',
+    baseBranch: 'main',
+  });
+
+  it('grants the WORKTREE path, not the real checkout, for a project that has one', () => {
+    // The whole point: --add-dir must point at the isolated worktree so N runs never collide.
+    const grant = buildWorkspaceGrant(
+      [project('cezar', '/w/cezar'), project('chat', '/w/chat')],
+      [wt('/w/cezar', '/w/cezar/.ai/cezar/worktrees/r1'), wt('/w/chat', '/w/chat/.ai/cezar/worktrees/r1')],
+    );
+    expect(grant.isolated).toBe(true);
+    expect(new Set(grant.roots)).toEqual(
+      new Set(['/w/cezar/.ai/cezar/worktrees/r1', '/w/chat/.ai/cezar/worktrees/r1']),
+    );
+  });
+
+  it('falls back to the real root for a project that has no worktree (non-git / failed)', () => {
+    const grant = buildWorkspaceGrant(
+      [project('cezar', '/w/cezar'), project('plain', '/w/plain', 'not-git')],
+      [wt('/w/cezar', '/w/cezar/.ai/cezar/worktrees/r1')],
+    );
+    expect(new Set(grant.roots)).toEqual(
+      new Set(['/w/cezar/.ai/cezar/worktrees/r1', '/w/plain']),
+    );
+  });
+
+  it('the prompt names the worktree paths and tells the agent cezar applies them back', () => {
+    const grant = buildWorkspaceGrant(
+      [project('cezar', '/w/cezar')],
+      [wt('/w/cezar', '/w/cezar/.ai/cezar/worktrees/r1')],
+    );
+    const prompt = workspaceGrantSystemPrompt(grant) ?? '';
+    expect(prompt).toContain('/w/cezar/.ai/cezar/worktrees/r1');
+    expect(prompt).toMatch(/ISOLATED git worktree/i);
+    expect(prompt).toMatch(/applies your changes back/i);
+    expect(prompt).toMatch(/do\s+NOT commit/i);
+  });
+});
+
 describe('workspaceGrantSystemPrompt', () => {
   const grant = buildWorkspaceGrant([
     project('cezar', '/home/u/monorepo/cezar'),
     project('mw-site', '/home/u/monorepo/mw-site'),
     project('gone', '/w/gone', 'missing'),
   ]);
+
+  it('is not isolated (real checkouts) when no worktrees are given', () => {
+    expect(grant.isolated).toBe(false);
+    expect(workspaceGrantSystemPrompt(grant)).not.toMatch(/ISOLATED git worktree/i);
+  });
 
   it('names every reachable project by ABSOLUTE path', () => {
     // The portable half: this text is all a codex/opencode run ever sees of the grant, and the
