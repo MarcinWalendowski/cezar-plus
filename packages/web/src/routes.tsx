@@ -42,6 +42,7 @@ import { AutomationsRoute } from './routes/automations/automations'
 // imported like `InboxRoute`/`TasksOverviewRoute`: today each is a tiny placeholder, not a heavy
 // chunk, so there is nothing here yet worth lazy-loading.
 import { KnowledgeRoute } from './routes/knowledge/knowledge'
+import { ReportsRoute } from './routes/reports/reports'
 import { NotesRoute } from './routes/notes/notes'
 import { WorkspaceGitRoute } from './routes/workspace/workspace-git'
 import { WorkspaceKnowledgeRoute } from './routes/workspace/workspace-knowledge'
@@ -420,6 +421,7 @@ const PAGE_TITLE_ROUTES = [
   { pattern: '/skills', pageLabel: 'Skills' },
   { pattern: '/inbox', pageLabel: 'Inbox' },
   { pattern: '/knowledge/*', pageLabel: 'Knowledge' },
+  { pattern: '/reports', pageLabel: 'Reports' },
   { pattern: '/notes', pageLabel: 'Notes' },
   { pattern: '/workspace/new', pageLabel: 'New task' },
   { pattern: '/workspace/tasks', pageLabel: 'Tasks' },
@@ -617,6 +619,12 @@ export function AppRoutes() {
               redirects rather than routing, matching `settings/skills` below. */}
           <Route path="knowledge" element={<KnowledgeRoute />} />
           <Route path="knowledge/:id" element={<KnowledgeDocRedirect />} />
+
+          {/* Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`): reports ARE
+              knowledge documents, so this rides the same `CEZ_KB=1` gate as the route above and is
+              reachable while off, rendering its own "switched off" state. Selection is `?report=`,
+              the same query-param shape Knowledge uses for `?doc=`. */}
+          <Route path="reports" element={<ReportsRoute />} />
 
           {/* The workflow builder (R6 Step 1.6): /workflows opens the canvas on the repo's first
               saved chain, /workflows/:name deep-links a specific one. */}

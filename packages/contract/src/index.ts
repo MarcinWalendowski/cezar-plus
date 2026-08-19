@@ -17,6 +17,7 @@ export * from './agent-account-usage.ts';
 export * from './agent-route.ts';
 export * from './automations.ts';
 export * from './knowledge.ts';
+export * from './reports.ts';
 export * from './sources.ts';
 export * from './notes.ts';
 export * from './workspace-runs.ts';

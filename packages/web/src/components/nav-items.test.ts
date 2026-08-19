@@ -87,6 +87,7 @@ describe('NAV_ITEMS', () => {
       'Git',
       'Automations',
       'Knowledge',
+      'Reports',
       'Skills',
       'Notes',
       'Settings',
@@ -120,7 +121,12 @@ describe('NAV_ITEMS', () => {
  *  the Inbox item exactly while it reports the opt-in `capabilities.followups` (#471), the
  *  Knowledge item exactly while it reports `capabilities.knowledge` (central-hub F1), and the
  *  Automations item exactly while it reports a forge AND the opt-in `capabilities.automations`
- *  (#801). Each gate owns ONLY its own item, and all default to absent while health is unknown. */
+ *  (#801). All default to absent while health is unknown.
+ *
+ *  **Each gate owns exactly one item, EXCEPT `knowledge`, which owns two** (Knowledge and Reports,
+ *  since 2026-08-19) — reports are knowledge documents, so one flag decides both. Corrected here
+ *  because the old wording ("Each gate owns ONLY its own item") reads as a rule a future session
+ *  would enforce. */
 describe('visibleNavItems', () => {
   const ALL: Required<Parameters<typeof visibleNavItems>[0]> = {
     forge: true,
@@ -143,6 +149,7 @@ describe('visibleNavItems', () => {
       'Inbox',
       'Git',
       'Knowledge',
+      'Reports',
       'Skills',
       'Notes',
       'Settings',
@@ -155,13 +162,19 @@ describe('visibleNavItems', () => {
       'Git',
       'Automations',
       'Knowledge',
+      'Reports',
       'Skills',
       'Notes',
       'Settings',
     ])
   })
 
-  it('without knowledge, exactly the Knowledge item drops out (central-hub F1)', () => {
+  /** **CORRECTED 2026-08-19.** This case used to be titled "exactly the Knowledge item drops out",
+   *  and that is no longer true: the `knowledge` gate owns TWO items since report triage
+   *  (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`), because reports ARE knowledge
+   *  documents and `CEZ_KB=1` is the condition under which any exist. It is the one gate here that
+   *  is not one-item — see the `describe` block's own note. */
+  it('without knowledge, BOTH the Knowledge and Reports items drop out (central-hub F1)', () => {
     expect(labelsOf({ ...ALL, knowledge: false })).toEqual([
       'Tasks',
       'Inbox',
@@ -171,6 +184,10 @@ describe('visibleNavItems', () => {
       'Notes',
       'Settings',
     ])
+    // Named, not just implied by the list above: a Reports tab on a server with no knowledge base
+    // would open a page that can never have a single row in it.
+    expect(labelsOf({ ...ALL, knowledge: false })).not.toContain('Reports')
+    expect(labelsOf(ALL)).toContain('Reports')
   })
 
   /** The notes gate owns only its own item, and — the half worth pinning — the Notes item is the
@@ -184,6 +201,7 @@ describe('visibleNavItems', () => {
       'Git',
       'Automations',
       'Knowledge',
+      'Reports',
       'Skills',
       'Settings',
     ])
@@ -219,6 +237,7 @@ describe('visibleNavItems', () => {
       'Git',
       'Automations',
       'Knowledge',
+      'Reports',
       'Notes',
       'Settings',
     ])

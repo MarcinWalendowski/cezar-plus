@@ -25,6 +25,7 @@ import { streamSSE } from 'hono/streaming';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
+import { createReportsRoutes, DEFAULT_REPORT_TAGS } from './reports-routes.ts';
 import { createNotesRoutes } from './notes-routes.ts';
 import {
   createAgentAccountUsageRoutes,
@@ -6299,6 +6300,28 @@ export function createApp(deps: ServerDeps) {
   const knowledgeRoutes = createKnowledgeRoutes();
   const sourcesRoutes = createSourcesRoutes();
 
+  // ---- report triage (2026-08-19-reports-triage-approve-dismiss) -----------
+  // Rides on the knowledge base rather than adding a store: reports ARE knowledge documents, and
+  // this family is the join that lets one be approved into a todo or dismissed with a reason. Its
+  // config is resolved per request off the project being addressed — never snapshotted here —
+  // because `.ai/cezar/config.json` is shared with every other cezar process on the machine.
+  const reportsRoutes = createReportsRoutes({
+    listProjects,
+    reportsConfig: async (projectRoot) => {
+      const { reports } = await loadConfig(projectRoot);
+      return {
+        // An explicit `"tags": []` is respected as the opt-out it reads like (the `skillsRepos: []`
+        // precedent), NOT quietly replaced by the defaults — so a deployment can switch reports off
+        // by naming no tag. Only an ABSENT key falls back.
+        tags: reports?.tags ?? DEFAULT_REPORT_TAGS,
+        // The env flag is the deployment-wide switch, the config key the per-repo one; either turns
+        // it on. `=== '1'` exactly, matching every other `CEZ_*` gate.
+        auto: reports?.auto ?? process.env.CEZ_REPORTS_AUTO === '1',
+        routeByDomain: reports?.routeByDomain ?? {},
+      };
+    },
+  });
+
   // ---- the notes pipeline (P2.2/P2.3) --------------------------------------
   // ONE store, shared by the routes and the pipeline. `NoteStore` caches the inbox in memory
   // after its first read, so two instances over one `notes.json` would each hold a stale half of
@@ -6476,6 +6499,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', configRoutes)
     .route('/', agentConfigRoutes)
     .route('/', knowledgeRoutes)
+    .route('/', reportsRoutes)
     .route('/', sourcesRoutes);
 
   // ---- chained family: the cross-project run index (workspace-level) -------

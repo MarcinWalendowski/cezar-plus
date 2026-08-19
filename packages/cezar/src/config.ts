@@ -142,6 +142,32 @@ const configSchema = z.object({
    * false preserves the ordinary per-runner model selector.
    */
   modelsLocked: z.boolean().optional().catch(undefined),
+  /**
+   * Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`). Every key optional
+   * and the whole section `.catch(undefined)`, like `defaultModels` above: a repo that says nothing
+   * gets the family's own defaults, and a malformed section degrades to that rather than discarding
+   * the rest of the config.
+   */
+  reports: z
+    .object({
+      /** Which knowledge tags mark a document as a report. Unset = the family's own default set. */
+      tags: z.array(z.string().trim().min(1).max(64)).max(20).optional(),
+      /**
+       * Permit `POST /reports/process-pending` to convert every pending report into a todo without
+       * a human deciding each one. Absent reads as OFF — auto-conversion has to be asked for, so a
+       * corpus nobody has configured can never be mass-converted by a stray call.
+       */
+      auto: z.boolean().optional(),
+      /**
+       * Report `domain` → the project id whose todo inbox that report's work belongs in. A report's
+       * `domain` is a PRODUCT axis (`beside`, `predicts`) while a todo inbox is a REPO, and only
+       * this deployment knows the mapping. An unmapped domain mints into the report's own project,
+       * which is always a valid target.
+       */
+      routeByDomain: z.record(z.string(), z.string().trim().min(1).max(200)).optional(),
+    })
+    .optional()
+    .catch(undefined),
 });
 
 export type CezConfig = z.infer<typeof configSchema>;

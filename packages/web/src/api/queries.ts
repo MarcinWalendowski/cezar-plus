@@ -65,6 +65,12 @@ import {
   getKnowledgeDocuments,
   getKnowledgeProposals,
   getKnowledgeDocument,
+  getReports,
+  getReport,
+  approveReport,
+  dismissReport,
+  reopenReport,
+  processPendingReports,
   getSources,
   getSourceProviders,
   getSourceCollections,
@@ -141,6 +147,7 @@ import type {
   GithubRefStatusData,
   ProviderStatusResponse,
   ReferenceStatus,
+  ReportStatus,
   RunRecord,
   SelectAgentProfileInput,
   SetAgentConfigInput,
@@ -271,6 +278,18 @@ export const queryKeys = {
     return [queryScope(), 'knowledge', 'proposals'] as const
   },
   knowledgeDocument: (id: string) => [queryScope(), 'knowledge', 'document', id] as const,
+  /** Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`). NOT under the
+   *  `'knowledge'` prefix, deliberately: the `knowledge` WS topic fires on every corpus change and
+   *  sweeping the reports queue with it would be right, but the reverse is not — a triage decision
+   *  changes no document, so it must not invalidate the 2,000-row catalog. The Reports view
+   *  subscribes to `knowledge` itself and invalidates BOTH prefixes; a triage mutation invalidates
+   *  only this one. */
+  get reports() {
+    return [queryScope(), 'reports'] as const
+  },
+  reportsList: (query: { status?: string; domain?: string }) =>
+    [queryScope(), 'reports', 'list', query.status ?? null, query.domain ?? null] as const,
+  report: (key: string) => [queryScope(), 'reports', 'detail', key] as const,
   get sources() {
     return [queryScope(), 'sources'] as const
   },
@@ -2116,6 +2135,71 @@ export function useKnowledgeDocument(id: string, enabled = true) {
     queryFn: ({ signal }) => getKnowledgeDocument(id, { signal }),
     enabled,
   })
+}
+
+// ---- report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`) ------------------
+
+/** `GET /reports` — the triage queue. Safe to mount unconditionally like the hooks above: with
+ *  `CEZ_KB` unset the server answers `enabled: false` rather than an error. */
+export function useReports(query: { status?: ReportStatus; domain?: string } = {}) {
+  return useQuery({
+    queryKey: queryKeys.reportsList(query),
+    queryFn: ({ signal }) => getReports(query, { signal }),
+  })
+}
+
+/** `GET /reports/:key` — the selected report's body. */
+export function useReport(key: string | null) {
+  return useQuery({
+    queryKey: queryKeys.report(key ?? ''),
+    queryFn: ({ signal }) => getReport(key ?? '', { signal }),
+    enabled: key !== null && key !== '',
+  })
+}
+
+/**
+ * The three triage decisions, as one hook per action.
+ *
+ * `retry: false` on all three, for `useInitGitRepo`'s reason: they write. Approve is genuinely
+ * idempotent server-side, so a retry there would be harmless — but dismiss and reopen are not
+ * things to replay silently, and one rule across three sibling mutations is easier to keep true
+ * than three.
+ *
+ * Every one invalidates `queryKeys.reports` (both the list and the open detail, by prefix) AND
+ * `queryKeys.todos` — approve mints a todo, so the Filed table is stale the moment this returns,
+ * and a board that still shows the old list is how a user comes to approve the same report twice
+ * looking for the todo they were promised.
+ */
+function useReportTriage<TArgs, TResult>(mutationFn: (args: TArgs) => Promise<TResult>) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn,
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.reports })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.todos })
+    },
+  })
+}
+
+export function useApproveReport() {
+  return useReportTriage(({ key, priority }: { key: string; priority?: 'high' | 'medium' | 'low' }) =>
+    approveReport(key, priority === undefined ? {} : { priority }),
+  )
+}
+
+export function useDismissReport() {
+  return useReportTriage(({ key, reason }: { key: string; reason: string }) => dismissReport(key, reason))
+}
+
+export function useReopenReport() {
+  return useReportTriage(({ key }: { key: string }) => reopenReport(key))
+}
+
+/** `POST /reports/process-pending` — the bulk convert. 409 unless auto mode is on, and that 409's
+ *  message comes back verbatim in the `ApiError` rather than being rewritten here. */
+export function useProcessPendingReports() {
+  return useReportTriage(() => processPendingReports())
 }
 
 /** `GET /sources` (F2). Project-scoped. */
