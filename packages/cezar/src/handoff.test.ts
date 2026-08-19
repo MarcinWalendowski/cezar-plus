@@ -57,6 +57,10 @@ describe('HANDOFF_INSTRUCTIONS', () => {
     'origin',
     'status',
     'priority',
+    // `autostart` (2026-08-19-file-tasks-from-a-running-task.md, Phase 2): set by `cezar todo add
+    // --start` (a CLI client, `todo-cli.ts`), never by an agent's `CEZ_TODOS_FILE` append — the
+    // "Filing a task" section documents the COMMAND, not this raw JSON field.
+    'autostart',
   ]);
 
   it('documents every agent-writable field of todoSchema', () => {

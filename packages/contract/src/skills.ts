@@ -103,6 +103,13 @@ export const todoItemSchema = z.object({
   knowledgeRefs: z.array(todoKnowledgeRefSchema).max(20).optional(),
   /** Which writer created it. */
   origin: z.enum(['agent', 'composer']).optional(),
+  // ---- autostart (2026-08-19-file-tasks-from-a-running-task.md, Phase 2) ---------------------
+  // Additive and optional, like the fields above: an entry with none of them still validates
+  // unchanged. Set only by `cezar todo add --start`; cleared server-side the moment the entry
+  // becomes a run, so it is never true at the same time as `startedTaskId`.
+  /** File this todo AS a run the moment the running cockpit notices it, instead of waiting for a
+   *  person to click ▶ Run. */
+  autostart: z.boolean().optional(),
 });
 export type TodoItem = z.infer<typeof todoItemSchema>;
 

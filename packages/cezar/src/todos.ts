@@ -71,6 +71,13 @@ export const todoSchema = z.object({
   knowledgeRefs: z.array(todoKnowledgeRefSchema).max(20).optional(),
   /** Which writer created it. */
   origin: z.enum(['agent', 'composer']).optional(),
+  // ---- autostart (2026-08-19-file-tasks-from-a-running-task.md, Phase 2) ---------------------
+  // Additive and optional, like the fields above: an entry with none of them still validates
+  // unchanged. Set only by `cezar todo add --start` (`todo-cli.ts`); cleared by `markStarted` the
+  // moment the entry becomes a run, so it is never true at the same time as `startedTaskId`.
+  /** File this todo AS a run the moment the running cockpit notices it, instead of waiting for a
+   *  person to click ▶ Run. See `todo-autostart.ts`. */
+  autostart: z.boolean().optional(),
 });
 
 export type TodoItem = z.infer<typeof todoSchema> & { id: string };
@@ -371,6 +378,12 @@ export async function markStarted(dataDir: string, id: string, taskId: string): 
     const item = items.find((t) => t.id === id);
     if (!item || item.startedTaskId) return false;
     item.startedTaskId = taskId;
+    // Phase 2 autostart (`todo-autostart.ts`): the flag's only job was getting the entry to this
+    // point, and leaving it `true` next to a `startedTaskId` would read as "still pending" to the
+    // next reconcile pass. Deleted rather than set to `false` — same "absent, not falsy" contract
+    // `archivedAt`/`seenAt` use elsewhere in this file. A no-op for the ordinary "▶ Run" path,
+    // where the field was never set.
+    delete item.autostart;
     await writeAtomic(dataDir, items);
     return true;
   });

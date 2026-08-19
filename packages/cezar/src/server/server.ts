@@ -117,6 +117,7 @@ import {
   updateTodo,
   type TodoItem,
 } from '../todos.ts';
+import { watchTodoAutostart, type TodoAutostartProject } from '../todo-autostart.ts';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.ts';
 import {
   HistoryCursorError,
@@ -132,7 +133,7 @@ import {
   runHistoryQuerySchema,
   runIdParamSchema,
 } from '@loki-labs/better-cezar-contract';
-import type { RunManager } from '../workflows/run.ts';
+import { resolveTodoWorkflow, type RunManager } from '../workflows/run.ts';
 import { removeWorktree, worktreeDiff, worktreeDiffStat, worktreeSizeBytes } from '../git-worktree.ts';
 import { isReclaimable, reclaimWorktrees } from '../runs/retention.ts';
 import { getBranches, getCommit, getDiff, getLog, getRepoInfo, getStatus } from './git.ts';
@@ -1529,6 +1530,24 @@ export function createApp(deps: ServerDeps) {
   }
   contexts.onStoreCreated((store) => providerRuntimeAuth.watch(store));
   contexts.onContextBuilt((ctx) => providerRuntimeAuth.watch(ctx.store));
+
+  // Phase 2 todo autostart (`.ai/specs/2026-08-19-file-tasks-from-a-running-task.md`,
+  // `todo-autostart.ts`) — wired the same way `providerRuntimeAuth` above covers the boot
+  // context, every already-built context, and every context built later. Unlike
+  // `providerRuntimeAuth.watch` (a store event listener, cleaned up by `teardown()`'s
+  // `store.removeAllListeners()`), `watchTodoAutostart` owns its own `fs.watch` lease and
+  // self-heals on a rebuilt context — see its own doc comment.
+  const todoAutostartProject = (ctx: { root: string; dataDir: string; manager: RunManager }): TodoAutostartProject => ({
+    repoRoot: ctx.root,
+    dataDir: ctx.dataDir,
+    manager: ctx.manager,
+  });
+  watchTodoAutostart(todoAutostartProject(bootContext));
+  for (const id of contexts.ids()) {
+    const ctx = contexts.peek(id);
+    if (ctx) watchTodoAutostart(todoAutostartProject(ctx));
+  }
+  contexts.onContextBuilt((ctx) => watchTodoAutostart(todoAutostartProject(ctx)));
 
   const app = new Hono();
 
@@ -5545,29 +5564,9 @@ export function createApp(deps: ServerDeps) {
         let task = todoTaskText(todo);
         if (parsed.data?.prompt) task += `\n\n${parsed.data.prompt}`;
 
-        let workflow: WorkflowDef | undefined;
-        if (todo.suggestedSkill) {
-          const skills = await discoverSkills(repoRoot);
-          if (skills.some((s) => s.name === todo.suggestedSkill)) {
-            workflow = {
-              name: '(inbox)',
-              description: `Follow-up from the inbox — skill "${todo.suggestedSkill}"`,
-              source: 'built-in',
-              steps: [
-                {
-                  id: 'task',
-                  name: 'Do the task',
-                  skill: todo.suggestedSkill,
-                  prompt: '{{task}}',
-                },
-              ],
-            };
-          }
-        }
-        if (!workflow) {
-          const { workflows } = await loadWorkflows(repoRoot);
-          workflow = workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW;
-        }
+        // Shared with the todo autostart path (`todo-autostart.ts`, Phase 2) — see
+        // `resolveTodoWorkflow`'s own doc comment.
+        const workflow = await resolveTodoWorkflow(repoRoot, todo);
 
         const fallback = parsed.data?.runner ?? (await loadConfig(repoRoot)).defaultRunner;
         const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback));

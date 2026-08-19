@@ -37,6 +37,7 @@ import { shouldRegisterProject } from './workspace/projects.ts';
 import { runProjectsCommand } from './workspace/projects-cli.ts';
 import { runBackupCommand } from './backup/cli.ts';
 import { runKnowledgeCommand } from './knowledge/cli.ts';
+import { runTodoCommand } from './todo-cli.ts';
 import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 // FIX 6 (D13 repair pass 1): the production `listRegisteredProjectRoots` supplier lives in
 // `./registered-project-roots.ts` for the same reason `./auth-boot-gate.ts` was extracted from this
@@ -60,6 +61,11 @@ Usage:
                             <id> · roots · reindex · write · proposals — the
                             same commands the agent system prompt tells a run
                             to use (run "cezar kb" for the full usage)
+  cezar todo                file (and optionally auto-start) a workspace task:
+                            add "<summary>" [--project <id|path>] [--start] ·
+                            list — the same command the agent system prompt
+                            tells a run to use (run "cezar todo" for the full
+                            usage)
   cezar backup              encrypted platform backup (CEZ_BACKUP=1): status ·
                             run · snapshots · verify · gc · restore [--snapshot
                             <id>] [--force]
@@ -143,6 +149,23 @@ async function main(): Promise<void> {
     const kbCwd = resolve(process.cwd());
     const kbRepoRoot = (await getRepoInfo(kbCwd))?.root ?? kbCwd;
     process.exitCode = await runKnowledgeCommand(rawArgs.slice(1), { repoRoot: kbRepoRoot });
+    return;
+  }
+
+  // `todo` is routed here for the same reason `kb` above is: it owns its own flag namespace
+  // (`--project`, `--context`, `--acceptance` (repeatable), `--priority`, `--skill`, `--spec`,
+  // `--start`, `--json`), which the strict `parseArgs` below would reject as unknown options
+  // before the command switch is ever reached. Filesystem-only (no HTTP, no auth wall — see
+  // `todo-cli.ts`'s own doc comment), root resolved from cwd exactly like `kb`.
+  //
+  // `.ai/specs/2026-08-19-file-tasks-from-a-running-task.md`, Phase 1: this is what lets a
+  // RUNNING task file another workspace task — `cezar todo add "…" [--start]` — the same way
+  // `cezar kb write` lets it write a knowledge document, and it is documented next to `cezar kb`
+  // in the agent system prompt (`handoff.ts`).
+  if (rawArgs[0] === 'todo') {
+    const todoCwd = resolve(process.cwd());
+    const todoRepoRoot = (await getRepoInfo(todoCwd))?.root ?? todoCwd;
+    process.exitCode = await runTodoCommand(rawArgs.slice(1), { repoRoot: todoRepoRoot });
     return;
   }
 

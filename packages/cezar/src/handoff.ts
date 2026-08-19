@@ -152,7 +152,10 @@ Structured question marker: when you are blocked on a decision that is genuinely
 Task reference markers: as soon as you know which GitHub pull request or issue this task is ABOUT (it was named in the task, or you just opened it), declare it by emitting, on its own line in your message text: CEZ:PR=<number> and/or CEZ:ISSUE=<number>. Re-emit with the new number if the subject changes (e.g. you open a PR later in the task). Declare only the task's own subject — never a PR/issue you merely mention, list, or compare against. You may also emit CEZ:TITLE=<terse gerund phrase, max 40 chars, e.g. "implementing comment threads"> once the work has a clearer shape than its current title; cez uses these instead of guessing from the transcript. Put markers in plain message text, never inside a code fence.
 
 ## Pasted attachments
-User-pasted screenshots/files are saved as real files; their absolute paths are listed in the message that carries them. Use those paths when a task needs the file itself (saving, uploading, attaching to issues/PRs); the inline image is for viewing only.`;
+User-pasted screenshots/files are saved as real files; their absolute paths are listed in the message that carries them. Use those paths when a task needs the file itself (saving, uploading, attaching to issues/PRs); the inline image is for viewing only.
+
+## Filing a task (cezar)
+To hand off follow-up work as a real workspace task — not just a mention in your final message — run: cezar todo add "<summary>" [--project <id|path>] [--context "..."] [--acceptance "..." ...] [--priority low|medium|high] [--skill <name>] [--spec <path>] [--start]. --project defaults to this task's own repo; give a registered project's id or path to file into a different one. Without --start the todo is a backlog entry (visible on /tasks and /workspace/todos, startable later); with --start the running cockpit picks it up and executes it itself, queued behind its own concurrency cap and working-tree lease like any other task. This works from Bash the same way \`cezar kb\` does, and is always available, on every install, regardless of any other follow-up setting.`;
 
 export const FOLLOWUP_INSTRUCTIONS = `## Follow-ups (cezar)
 
