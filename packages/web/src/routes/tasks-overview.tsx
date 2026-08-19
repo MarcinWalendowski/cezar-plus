@@ -1049,8 +1049,12 @@ function HostUsageStat() {
         <TooltipTrigger asChild>
           <div
             data-slot="host-usage"
-            className="hidden items-center gap-2.5 text-[12.5px] text-muted-foreground tabular-nums lg:flex"
+            className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2 py-1 text-[12.5px] text-muted-foreground tabular-nums"
           >
+            {/* "Host" label is load-bearing: the table's own `cpu`/`memory` columns show PER-RUN
+                process usage, so without it this whole-machine stat reads as just another run's
+                numbers (owner feedback 2026-08-19). */}
+            <span className="font-medium text-foreground/70">Host</span>
             <span className="inline-flex items-center gap-1">
               <CpuIcon className="size-3.5" aria-hidden="true" />
               {cpu}
