@@ -403,3 +403,61 @@ passed this ships as QA Needed, per AGENTS.md):
    section, and the thread's first user message shows it.
 11. Re-run the owner's own task (`73c0400a-…`) — it is the reason this exists, and its brief
     explicitly asks for cross-plane evidence the first attempt never saw.
+
+---
+
+## Status — 2026-08-19: Implemented, QA Needed
+
+Commit `63de653c` (D1–D4) plus `c9fe2fa9` (help correction, below). Deployed to
+`prod-host` the same day as a `dist/`-only rsync from a clean worktree, deliberately not
+from the working tree: two other sessions had uncommitted features in it, and a build there would
+have shipped them.
+
+### What verification actually found
+
+Steps 1–7 (automated) are green: 246 tests over the changed files, `npm run typecheck` clean. The
+five red tests in the full-suite run are attributed and none of them is this change — two
+`todos.test.ts` `fs.watch` timing cases reproduce with `todos.ts` stashed, and `app-shell`,
+`bc-route-inventory` and the upstream-purity gate are red from the other sessions' uncommitted
+work (a `Reports` nav entry, `/api/v1/reports*` routes, and `web/src/lib/reauth.ts` naming a
+domain the purity gate forbids).
+
+Steps 8 and 9 **passed, and in doing so found a fourth defect this spec had not predicted.** Step 8
+was run as written and `cez kb roots` answered `unknown kb subcommand: list` to the subcommand the
+help block added in D4 advertised — `runKnowledgeCommand` has never had a `list`. The only
+discovery surface a reader has was pointing at a command that cannot run. Corrected in `c9fe2fa9`
+to the real set (`search · show · roots · reindex · write · proposals`), with a guard that parses
+the subcommands out of `cez kb`'s own usage and asserts every word the top-level help advertises is
+one of them, both halves floored so an empty parse cannot pass. Mutation-verified: reintroducing
+`list` turns exactly that case red.
+
+This is the same failure mode as D4 itself, one level up. D4's bug was a covered function no entry
+point called; this was a help string no test compared against the thing it describes. Writing the
+same fact down in two places and trusting them to stay equal is what both have in common.
+
+Step 9 was run through the CLI rather than `GET /api/v1/p/chat/knowledge`, which answers
+`{"error":"unauthenticated"}` to an unauthenticated loopback request. `cez kb roots` reads the same
+resolver and needs no session:
+
+- `chat` — was `specs` only at 539 docs; now also `notion [indexed, read-only] 2086 docs`.
+- `loki-labs` — still exactly one `notion` root, not two. The repo-local mount keeps its id and the
+  workspace mount dedupes against it, which is the id-collision case asserted in the unit tests
+  showing up in production.
+
+Step 10's D2 half is verified against production data with the deployed code: `todoTaskText` over
+the owner's own todo `73c0400a-…` produces 3278 characters across 35 lines with `## Context`,
+`## What to do` and `## Acceptance criteria`, where the run that prompted this spec was handed the
+113-character summary alone. `makeRunTitle` over that same text still returns the summary truncated
+at 80, confirming the headline stayed a bare first line.
+
+### What is still owed
+
+- **Step 10's browser half and step 11 are the owner's device pass.** Signing in to the cockpit is
+  not something this session can do, so "Running renders above Filed in a real browser" and the
+  re-run of `73c0400a-…` are unverified here. The Running section is present in the deployed bundle
+  and covered by DOM-order tests; that is evidence, not the gate.
+- **The installer does not create the `cez` wrapper** — filed as todo
+  `7583ce12-f903-4a25-aa21-e27ac1cb6f31` on the `cezar` project. D4 made `cez kb` reachable *in the
+  CLI*; on this box a `cez` on PATH exists only because it was created by hand, and a fresh install
+  still has none. The agent-facing half of D4 therefore depends on manual host state until that
+  todo lands.
