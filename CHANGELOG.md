@@ -77,6 +77,20 @@
     apply-backs, and that path has still never been executed.
 
   Remaining waves are carried by cezar todo `9159228c`.
+
+  **REDEPLOYED 2026-08-20 19:58 UTC (same run, `deploy` step): `/opt/cezar/.deployed-commit` is now
+  `34a80bb9` and both `.ai/deploy-targets.json` probes exit 0.** Worth recording because it is a
+  trap this repo will hit again: the `document` step's own commits moved `HEAD` past the marker, and
+  probe 1 string-compares the marker against `git rev-parse HEAD` — so *writing the changelog turned
+  the deploy probe red* while nothing shippable had changed. The docs-only carve-out applies, and
+  this time it was **verified instead of asserted**: a full `npm run build` at `34a80bb9`, diffed
+  against the deployed tree, found `web/dist` byte-identical (222/222) and `dist` 787/787 with zero
+  `.js`/`.json` differing — `dist/index.js`, `reopen-requests.js`, `reopen-watch.js` and
+  `runs/reopen-cli.js` all hash-matching. The only three differing files are `.d.ts` declarations
+  where tsc emitted the same inferred Hono response union in a different member order. Marker
+  advanced, **no tree swap and no restart** — withheld deliberately, because the watcher is resident
+  MainPID `3683619` and `b1684fe9` was still running. **The deploy step deployed; it did not run the
+  sweep.** Waves B, C and D are still unrun.
 - 📜 **cezar always self-deploys now — the "do not self-deploy from a running session" rule is
   removed, not merely marked stale.** Owner instruction 2026-08-20.
 
