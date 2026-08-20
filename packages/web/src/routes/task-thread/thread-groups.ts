@@ -1,6 +1,4 @@
-import type { UiToolItem } from '@loki-labs/better-cezar-api-client'
-
-import type { ThreadEntry } from './thread-state'
+import type { ThreadEntry, TimedToolItem } from './thread-state'
 
 /**
  * Pure display grouping over one turn's reduced entries (spec §"Task thread"; the opencode
@@ -29,7 +27,7 @@ export interface EntryBlock {
 export interface ToolCardBlock {
   kind: 'tool-card'
   id: string
-  item: UiToolItem
+  item: TimedToolItem
   /** Sub-agent items (`parentItemId` → this tool), in stream order. One level deep. */
   children: ThreadEntry[]
 }
@@ -37,7 +35,7 @@ export interface ToolCardBlock {
 export interface ContextGroupBlock {
   kind: 'context-group'
   id: string
-  tools: UiToolItem[]
+  tools: TimedToolItem[]
   files: number
   searches: number
   label: string
@@ -56,10 +54,10 @@ export type ThreadBlock = EntryBlock | ToolCardBlock | ContextGroupBlock | Strea
 /** How many trailing tool blocks stay visible before older ones fold (legacy STREAK_TAIL). */
 export const STREAK_TAIL = 3
 
-const isTool = (entry: ThreadEntry): entry is UiToolItem => entry.kind === 'tool'
+const isTool = (entry: ThreadEntry): entry is TimedToolItem => entry.kind === 'tool'
 
 /** Context-group membership: exploration tools only, and only once they finished. */
-const isGroupable = (item: UiToolItem): boolean =>
+const isGroupable = (item: TimedToolItem): boolean =>
   (item.toolKind === 'read' || item.toolKind === 'search') && item.status === 'completed'
 
 const plural = (n: number, noun: string, nouns: string): string => `${n} ${n === 1 ? noun : nouns}`
@@ -130,7 +128,7 @@ export function groupThreadItems(allEntries: ThreadEntry[]): ThreadBlock[] {
 
   // Pass 2 — context groups over the top level.
   const blocks: ThreadBlock[] = []
-  let run: UiToolItem[] = []
+  let run: TimedToolItem[] = []
   const flushRun = () => {
     if (run.length >= 2) {
       const files = run.filter((item) => item.toolKind === 'read').length

@@ -1025,3 +1025,49 @@ describe('meta line, tabs, pill and resume hint', () => {
     expect(document.querySelector('[data-slot="resume-hint"]')).toBeNull()
   })
 })
+
+/**
+ * The run keeps its total when it ends (spec 2026-08-20-step-and-tool-call-durations §Phase 3).
+ * The gap this closes: the live timer was gated on `status === 'running'`, so the elapsed time
+ * was REMOVED from the screen at the exact moment it became the answer to "how long did that
+ * take".
+ */
+describe('run total', () => {
+  const total = () => document.querySelector('[data-slot="run-total"]')
+
+  it('a finished run keeps the number, in the slot the live timer vacated', () => {
+    stubFetch()
+    renderHeader(
+      run('done', { startedAt: '2026-08-20T14:24:44.121Z', finishedAt: '2026-08-20T15:07:03.121Z' }),
+    )
+    expect(total()?.textContent).toBe('took 42:19')
+    expect(document.querySelector('[data-slot="live-duration"]')).toBeNull()
+  })
+
+  it.each<RunStatus>(['failed', 'cancelled'])('a %s run kept the time it burned', (status) => {
+    stubFetch()
+    renderHeader(run(status, { startedAt: '2026-08-20T14:00:00.000Z', finishedAt: '2026-08-20T14:01:04.000Z' }))
+    expect(total()?.textContent).toBe('took 1:04')
+  })
+
+  it('a running run still ticks and shows no total — one clock at a time', () => {
+    stubFetch()
+    renderHeader(run('running', { startedAt: new Date(Date.now() - 62_000).toISOString() }))
+    expect(document.querySelector('[data-slot="live-duration"]')?.textContent).toBe('1:02')
+    expect(total()).toBeNull()
+  })
+
+  it('a run with no finishedAt (queued, or parked waiting) shows nothing rather than a zero', () => {
+    stubFetch()
+    renderHeader(run('waiting', { startedAt: '2026-08-20T14:00:00.000Z' }))
+    expect(total()).toBeNull()
+  })
+
+  it('an unparseable stamp renders nothing, never `took NaN:0-3`', () => {
+    stubFetch()
+    renderHeader(run('done', { startedAt: 'not-a-date', finishedAt: '2026-08-20T14:01:04.000Z' }))
+    expect(total()).toBeNull()
+    expect(screen.queryByText(/NaN/)).toBeNull()
+  })
+})
+

@@ -163,3 +163,95 @@ describe('WorkflowSteps — the collapsible header summary', () => {
     expect(document.querySelector('[data-slot="step-row"]')).toBeNull()
   })
 })
+
+/**
+ * The step clock (spec 2026-08-20-step-and-tool-call-durations §Phase 1). A MEASUREMENT, never a
+ * verdict: these assert a number is present and correct, and there is deliberately no threshold,
+ * colour or "slow" label to assert on.
+ */
+describe('step clocks', () => {
+  const clocks = () => Array.from(document.querySelectorAll('[data-slot="step-duration"], [data-slot="live-duration"]'))
+
+  it('a running step ticks — a LEAF <time>, not a number frozen at render', () => {
+    render(<StepRail steps={[step('a', 'running', { startedAt: new Date(Date.now() - 62_000).toISOString() })]} />)
+    const live = document.querySelector('[data-slot="live-duration"]')
+    expect(live).not.toBeNull()
+    expect(live!.textContent).toBe('1:02')
+    expect(document.querySelector('[data-slot="step-duration"]')).toBeNull()
+  })
+
+  it('a finished step is frozen at finishedAt − startedAt', () => {
+    render(
+      <StepRail
+        steps={[step('a', 'done', { startedAt: '2026-08-20T14:24:46.939Z', finishedAt: '2026-08-20T14:28:58.939Z' })]}
+      />,
+    )
+    const total = document.querySelector('[data-slot="step-duration"]')
+    expect(total?.textContent).toBe('4:12')
+    expect(document.querySelector('[data-slot="live-duration"]')).toBeNull()
+  })
+
+  it('a pending step renders no clock at all — an empty slot is honest, 0:00 is not', () => {
+    render(<StepRail steps={[step('a', 'pending')]} />)
+    expect(clocks()).toHaveLength(0)
+  })
+
+  it('a step CEZAR stopped keeps its duration next to the pause glyph', () => {
+    render(
+      <StepRail
+        steps={[
+          step('a', 'failed', {
+            startedAt: '2026-08-20T14:24:46.939Z',
+            finishedAt: '2026-08-20T14:26:58.939Z',
+            stopReason: 'inactivity',
+          }),
+        ]}
+      />,
+    )
+    expect(document.querySelector('[data-slot="step-duration"]')?.textContent).toBe('2:12')
+    expect(document.querySelector('[data-slot="step-stop-reason"]')).not.toBeNull()
+  })
+
+  it('a six-step run: finished steps frozen, the active one ticking, pending ones blank', () => {
+    render(
+      <StepRail
+        steps={[
+          step('spec', 'done', { startedAt: '2026-08-20T14:24:46.939Z', finishedAt: '2026-08-20T14:28:58.939Z' }),
+          step('implement', 'running', { startedAt: new Date(Date.now() - 5_000).toISOString() }),
+          step('tests', 'pending'),
+          step('commit', 'pending'),
+          step('document', 'pending'),
+          step('deploy', 'pending'),
+        ]}
+      />,
+    )
+    expect(document.querySelectorAll('[data-slot="step-duration"]')).toHaveLength(1)
+    expect(document.querySelectorAll('[data-slot="live-duration"]')).toHaveLength(1)
+    expect(clocks()).toHaveLength(2)
+  })
+
+  it('the collapsed summary carries the CURRENT step\'s clock, so the common case needs no expand', () => {
+    render(
+      <WorkflowSteps
+        runId="clock-summary"
+        steps={[
+          step('spec', 'done', { startedAt: '2026-08-20T14:24:46.939Z', finishedAt: '2026-08-20T14:28:58.939Z' }),
+          step('implement', 'running', { startedAt: new Date(Date.now() - 90_000).toISOString() }),
+        ]}
+      />,
+    )
+    // Collapsed: exactly one clock, and it is the running step's.
+    expect(clocks()).toHaveLength(1)
+    expect(document.querySelector('[data-slot="live-duration"]')?.textContent).toBe('1:30')
+  })
+
+  it('every clock says what interval it measures', () => {
+    render(
+      <StepRail
+        steps={[step('a', 'done', { startedAt: '2026-08-20T14:24:46.939Z', finishedAt: '2026-08-20T14:28:58.939Z' })]}
+      />,
+    )
+    expect(document.querySelector('[data-slot="step-duration"]')?.getAttribute('title')).toMatch(/current attempt/i)
+  })
+})
+

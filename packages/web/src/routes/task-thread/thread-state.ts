@@ -73,7 +73,26 @@ export interface ThreadProviderAuthRequired {
   authFailureId: string
 }
 
-export type ThreadEntry = UiItem | ThreadNote | ThreadImage | ThreadAsk | ThreadProviderAuthRequired
+/**
+ * Wall-clock bounds of one thread item, in epoch ms, derived from the `ts` the store stamps on
+ * every persisted frame. `endedAt` absent = still in flight.
+ *
+ * WEB-LOCAL: never sent, never persisted, and deliberately NOT added to `UiToolItem` — the
+ * api-client mirror is pinned against the server's declaration by `api-types.test.ts`, so
+ * widening it there would (correctly) fail typecheck. The reducer attaches this to the CLONE it
+ * already makes, so the event object off the wire stays untouched.
+ */
+export interface ItemTiming {
+  startedAt: number
+  endedAt?: number
+}
+
+/** A tool item carrying the reducer's derived timing — what `ToolCard` renders its chip from. */
+export type TimedToolItem = UiToolItem & { timing?: ItemTiming }
+/** Any agent item carrying the derived timing. Only tools render it today. */
+export type TimedUiItem = UiItem & { timing?: ItemTiming }
+
+export type ThreadEntry = TimedUiItem | ThreadNote | ThreadImage | ThreadAsk | ThreadProviderAuthRequired
 
 export interface ThreadTurn {
   /** Stable source-derived render key. The opening event sequence survives prepended pages;
@@ -284,8 +303,20 @@ function resultText(value: unknown): string {
   }
 }
 
-const isUiItem = (entry: ThreadEntry): entry is UiItem =>
+const isUiItem = (entry: ThreadEntry): entry is TimedUiItem =>
   entry.kind === 'message' || entry.kind === 'reasoning' || entry.kind === 'tool'
+
+/** Epoch ms for a frame's `ts`, or `undefined` for a missing/unparseable one — a junk stamp
+ *  costs that item its chip, never a `NaN` duration and never a throw. */
+function frameInstant(ts: unknown): number | undefined {
+  if (typeof ts !== 'string') return undefined
+  const ms = new Date(ts).getTime()
+  return Number.isNaN(ms) ? undefined : ms
+}
+
+/** A tool that has stopped running. v2 emits the terminal status on the item itself, so a card
+ *  can settle on an `item.updated` a beat before its `item.completed` frame. */
+const TERMINAL_TOOL_STATUSES: ReadonlySet<string> = new Set(['completed', 'failed', 'declined'])
 
 /** Every `PlanStatus`, so an unrecognized status is the only thing that falls back to
  *  `pending` below. `Set<PlanStatus>` accepts a subset without complaint, so this list
@@ -342,9 +373,9 @@ export function reduceThread(events: RunEvent[], options: ThreadReduceOptions = 
     return stepId === undefined ? itemId : `${stepId}:${itemId}`
   }
 
-  const upsertV2 = (turn: DraftTurn, raw: UiItem, key: string) => {
+  const upsertV2 = (turn: DraftTurn, raw: UiItem, key: string, event: RunEvent) => {
     // Clone: deltas append in place, and the event object off the wire must stay untouched.
-    const item = { ...raw }
+    const item: TimedUiItem = { ...raw }
     if (!turn.v2Items) {
       // The dedup latch flips: this turn is v2-covered, so every v1-synthesized TOOL in it is
       // a duplicate of something v2 already describes (or is about to). Tools can be dropped
@@ -362,12 +393,34 @@ export function reduceThread(events: RunEvent[], options: ThreadReduceOptions = 
       }
       turn.entries = turn.entries.filter((e) => !(e.origin === 'v1' && e.entry.kind === 'tool'))
     }
+    const at = frameInstant(event.ts)
     const existing = itemsById.get(key)
     if (existing && existing.turn === turn) {
+      // THE carry-forward. `existing.entry.entry = item` REPLACES the object, so a timing that
+      // is not copied onto the new clone vanishes — and the chip would appear and disappear as
+      // frames arrive (spec risk R10, the single most likely bug in this change).
+      const previous = existing.entry.entry
+      const timing = isUiItem(previous) ? previous.timing : undefined
+      if (timing !== undefined) {
+        item.timing = { ...timing }
+        // Freeze on the FIRST terminal frame: `endedAt` is when the tool stopped, and a later
+        // repaint of the same finished item must not push the number forward.
+        const ended =
+          event.type === 'item.completed' ||
+          (item.kind === 'tool' && TERMINAL_TOOL_STATUSES.has(item.status))
+        if (ended && item.timing.endedAt === undefined && at !== undefined) item.timing.endedAt = at
+      }
       existing.entry.entry = item
       itemsById.set(key, existing)
       return
     }
+    // First sighting. A start is only ever taken from a frame that OPENS an item: progressive
+    // history paging serves 100 items a page, so a thread can legitimately hold an
+    // `item.completed` whose `item.started` sits on a page the browser never fetched. Stamping
+    // a start from that would print `0ms` for a nine-minute call, so it gets no chip at all
+    // (spec risk R7). An `item.updated` for an unknown item IS an opening frame — a mid-stream
+    // item honestly starts when we first saw it.
+    if (at !== undefined && event.type !== 'item.completed') item.timing = { startedAt: at }
     const draft: DraftEntry = { origin: 'v2', entry: item }
     turn.entries.push(draft)
     itemsById.set(key, { turn, entry: draft })
@@ -444,7 +497,7 @@ export function reduceThread(events: RunEvent[], options: ThreadReduceOptions = 
         const item = event.item as unknown as UiItem
         const key = itemKey(event, item.id)
         const located = itemsById.get(key)
-        upsertV2(located?.turn ?? currentTurn(), item, key)
+        upsertV2(located?.turn ?? currentTurn(), item, key, event)
         break
       }
       case 'item.delta': {
@@ -489,7 +542,8 @@ export function reduceThread(events: RunEvent[], options: ThreadReduceOptions = 
           const plan = planFromTodos(event.input)
           if (plan !== undefined) turn.planEntries = plan
         }
-        const item: UiToolItem = {
+        const startedAt = frameInstant(event.ts)
+        const item: TimedToolItem = {
           kind: 'tool',
           id: str(event.id) ?? `v1:${event.seq}`,
           name,
@@ -497,6 +551,7 @@ export function reduceThread(events: RunEvent[], options: ThreadReduceOptions = 
           title: display.title,
           status: 'running',
           input: event.input,
+          ...(startedAt !== undefined ? { timing: { startedAt } } : {}),
         }
         const draft: DraftEntry = { origin: 'v1', entry: item }
         turn.entries.push(draft)
@@ -510,6 +565,11 @@ export function reduceThread(events: RunEvent[], options: ThreadReduceOptions = 
         if (item.kind !== 'tool') break
         item.status = 'completed'
         item.output = resultText(event.result)
+        // v1 mutates the item in place (no clone-and-swap), so the timing is simply closed.
+        const endedAt = frameInstant(event.ts)
+        if (item.timing !== undefined && item.timing.endedAt === undefined && endedAt !== undefined) {
+          item.timing.endedAt = endedAt
+        }
         break
       }
 

@@ -7,12 +7,15 @@ import bashAndScreenshot from '../../../../cezar/src/core/__fixtures__/claude/ba
 import failedAndDenied from '../../../../cezar/src/core/__fixtures__/claude/failed-and-denied.expected.json'
 import textTurn from '../../../../cezar/src/core/__fixtures__/claude/text-turn.expected.json'
 import thinkingEditWriteTodo from '../../../../cezar/src/core/__fixtures__/claude/thinking-edit-write-todo.expected.json'
+import timingTranscript from './__fixtures__/run-6af4b894.timing.json'
 import {
   latestPlanEntries,
   reduceThread,
   threadFilePaths,
   threadFooter,
   type ThreadEntry,
+  type TimedToolItem,
+  type TimedUiItem,
 } from './thread-state'
 
 /**
@@ -33,6 +36,11 @@ const line = (seq: number, type: string, rest: Record<string, unknown> = {}): Ru
   ({ seq, ts: '2026-07-14T12:00:00.000Z', type, ...rest }) as RunEvent
 
 const kinds = (items: ThreadEntry[]) => items.map((item) => item.kind)
+
+/** What `line()` stamps, in epoch ms — every hand-built frame shares one instant, so the
+ *  reducer's derived `timing` on these items is `{ startedAt: TS_MS }` (plus an equal
+ *  `endedAt` once a completion lands). */
+const TS_MS = Date.parse('2026-07-14T12:00:00.000Z')
 
 describe('reduceThread — golden v2 fixtures', () => {
   it('text-turn: one turn, one assistant message, completion recorded', () => {
@@ -106,10 +114,22 @@ describe('reduceThread — item ids across workflow steps', () => {
 
     expect(turns).toHaveLength(2)
     expect(turns[0]!.items).toEqual([
-      { kind: 'reasoning', id: 'item_1', text: 'Earlier thinking survives.' },
+      // Every item carries the reducer's derived timing, though only tool cards render it.
+      {
+        kind: 'reasoning',
+        id: 'item_1',
+        text: 'Earlier thinking survives.',
+        timing: { startedAt: TS_MS, endedAt: TS_MS },
+      },
     ])
     expect(turns[1]!.items).toEqual([
-      { kind: 'message', id: 'item_1', role: 'assistant', text: 'Resumed response.' },
+      {
+        kind: 'message',
+        id: 'item_1',
+        role: 'assistant',
+        text: 'Resumed response.',
+        timing: { startedAt: TS_MS, endedAt: TS_MS },
+      },
     ])
   })
 
@@ -126,7 +146,13 @@ describe('reduceThread — item ids across workflow steps', () => {
     ])
 
     expect(turns[0]!.items).toEqual([
-      { kind: 'message', id: 'item_1', role: 'assistant', text: 'Legacy response.' },
+      {
+        kind: 'message',
+        id: 'item_1',
+        role: 'assistant',
+        text: 'Legacy response.',
+        timing: { startedAt: TS_MS, endedAt: TS_MS },
+      },
     ])
   })
 })
@@ -875,5 +901,211 @@ describe('reduceThread — AskUser cards (#473)', () => {
     ])
     const msg = turns.at(-1)!.items.find((i) => i.kind === 'message') as { text: string } | undefined
     expect(msg?.text).toBe(raw)
+  })
+})
+
+/**
+ * Item TIMING — the per-tool-call durations (spec 2026-08-20-step-and-tool-call-durations
+ * §Phase 2). Nothing here is a contract field: the reducer derives every number from the `ts`
+ * the store stamps on each persisted frame, which is why it works retroactively on transcripts
+ * recorded long before this feature existed (the replay at the bottom proves that on a real one).
+ */
+describe('reduceThread — item timing', () => {
+  /** One v2 item frame at an explicit instant. */
+  const itemLine = (seq: number, ts: string, type: string, item: Record<string, unknown>): RunEvent =>
+    ({ seq, ts, type, stepId: 'implement', item }) as unknown as RunEvent
+
+  const tool = (status: string, extra: Record<string, unknown> = {}) => ({
+    kind: 'tool',
+    id: 'toolu_1',
+    name: 'Bash',
+    toolKind: 'execute',
+    title: 'Ran npm test',
+    status,
+    ...extra,
+  })
+
+  const timingOf = (events: RunEvent[]): TimedUiItem['timing'] => {
+    const items = reduceThread(events).turns.flatMap((t) => t.items)
+    const found = items.find((entry): entry is TimedToolItem => entry.kind === 'tool')
+    return found?.timing
+  }
+
+  it('pairs item.started with item.completed, taking both instants from the frames', () => {
+    const timing = timingOf([
+      itemLine(1, '2026-08-20T14:24:52.829Z', 'item.started', tool('running')),
+      itemLine(2, '2026-08-20T14:24:56.180Z', 'item.completed', tool('completed', { output: 'ok' })),
+    ])
+    expect(timing).toEqual({
+      startedAt: Date.parse('2026-08-20T14:24:52.829Z'),
+      endedAt: Date.parse('2026-08-20T14:24:56.180Z'),
+    })
+    expect(timing!.endedAt! - timing!.startedAt).toBe(3_351)
+  })
+
+  it('carries the start through every intermediate update (risk R10 — upsertV2 swaps the object)', () => {
+    // The failure this pins is visible, not subtle: without the explicit carry-forward the chip
+    // appears on the started frame and VANISHES on the next one, then reappears at the end with
+    // a wrong (or absent) number.
+    const timing = timingOf([
+      itemLine(1, '2026-08-20T14:00:00.000Z', 'item.started', tool('running')),
+      itemLine(2, '2026-08-20T14:00:10.000Z', 'item.updated', tool('running', { output: 'a' })),
+      itemLine(3, '2026-08-20T14:00:20.000Z', 'item.updated', tool('running', { output: 'ab' })),
+      itemLine(4, '2026-08-20T14:00:30.000Z', 'item.completed', tool('completed', { output: 'abc' })),
+    ])
+    expect(timing).toEqual({
+      startedAt: Date.parse('2026-08-20T14:00:00.000Z'),
+      endedAt: Date.parse('2026-08-20T14:00:30.000Z'),
+    })
+  })
+
+  it('a still-running item has a start and no end — the chip ticks', () => {
+    const timing = timingOf([
+      itemLine(1, '2026-08-20T14:00:00.000Z', 'item.started', tool('running')),
+      itemLine(2, '2026-08-20T14:00:10.000Z', 'item.updated', tool('running', { output: 'a' })),
+    ])
+    expect(timing).toEqual({ startedAt: Date.parse('2026-08-20T14:00:00.000Z') })
+    expect(timing!.endedAt).toBeUndefined()
+  })
+
+  it('a tool that reaches a terminal status on an item.updated stops there', () => {
+    for (const status of ['completed', 'failed', 'declined']) {
+      const timing = timingOf([
+        itemLine(1, '2026-08-20T14:00:00.000Z', 'item.started', tool('running')),
+        itemLine(2, '2026-08-20T14:00:05.000Z', 'item.updated', tool(status)),
+        // A later repaint of the same finished item must NOT push the number forward.
+        itemLine(3, '2026-08-20T14:00:45.000Z', 'item.completed', tool(status)),
+      ])
+      expect(timing!.endedAt).toBe(Date.parse('2026-08-20T14:00:05.000Z'))
+    }
+  })
+
+  it('an item first seen ALREADY COMPLETE gets no timing (risk R7 — history paging)', () => {
+    // A thread legitimately holds an `item.completed` whose `item.started` sits on a page the
+    // browser never fetched. Stamping a start from the completion would print `0ms` for what
+    // might have been a nine-minute call, so it gets no chip instead.
+    const timing = timingOf([itemLine(9, '2026-08-20T14:00:30.000Z', 'item.completed', tool('completed', { output: 'x' }))])
+    expect(timing).toBeUndefined()
+  })
+
+  it('an item.updated for an unknown item DOES open a clock — a mid-stream item starts when seen', () => {
+    const timing = timingOf([itemLine(9, '2026-08-20T14:00:30.000Z', 'item.updated', tool('running', { output: 'x' }))])
+    expect(timing).toEqual({ startedAt: Date.parse('2026-08-20T14:00:30.000Z') })
+  })
+
+  it('a junk or missing ts costs that item its chip and nothing else', () => {
+    expect(
+      timingOf([
+        itemLine(1, 'not-a-timestamp', 'item.started', tool('running')),
+        itemLine(2, '2026-08-20T14:00:30.000Z', 'item.completed', tool('completed', { output: 'x' })),
+      ]),
+    ).toBeUndefined()
+    const state = reduceThread([
+      { seq: 1, type: 'item.started', stepId: 'implement', item: tool('running') } as unknown as RunEvent,
+      { seq: 2, type: 'item.completed', stepId: 'implement', item: tool('completed') } as unknown as RunEvent,
+    ])
+    // Still one rendered card — a missing stamp loses the number, never the tool call.
+    expect(kinds(state.turns[0]!.items)).toEqual(['tool'])
+  })
+
+  it('deltas do not disturb a clock (they never replay, and they only append output)', () => {
+    const timing = timingOf([
+      itemLine(1, '2026-08-20T14:00:00.000Z', 'item.started', tool('running', { output: '' })),
+      { seq: 2, ts: '2026-08-20T14:00:03.000Z', type: 'item.delta', stepId: 'implement', itemId: 'toolu_1', field: 'output', delta: 'tail' } as unknown as RunEvent,
+      itemLine(3, '2026-08-20T14:00:09.000Z', 'item.completed', tool('completed', { output: 'tail' })),
+    ])
+    expect(timing).toEqual({
+      startedAt: Date.parse('2026-08-20T14:00:00.000Z'),
+      endedAt: Date.parse('2026-08-20T14:00:09.000Z'),
+    })
+  })
+
+  it('v1 tool-call / tool-result carry a timing too, so OLD transcripts get chips', () => {
+    const timing = timingOf([
+      { seq: 1, ts: '2026-07-01T09:00:00.000Z', type: 'tool-call', id: 'call_1', tool: 'Bash', input: { command: 'ls' } } as unknown as RunEvent,
+      { seq: 2, ts: '2026-07-01T09:00:01.400Z', type: 'tool-result', toolCallId: 'call_1', result: 'a\nb' } as unknown as RunEvent,
+    ])
+    expect(timing).toEqual({
+      startedAt: Date.parse('2026-07-01T09:00:00.000Z'),
+      endedAt: Date.parse('2026-07-01T09:00:01.400Z'),
+    })
+  })
+
+  it('a v1 tool with no result yet is open, exactly like its v2 twin', () => {
+    const timing = timingOf([
+      { seq: 1, ts: '2026-07-01T09:00:00.000Z', type: 'tool-call', id: 'call_1', tool: 'Bash', input: { command: 'ls' } } as unknown as RunEvent,
+    ])
+    expect(timing).toEqual({ startedAt: Date.parse('2026-07-01T09:00:00.000Z') })
+  })
+
+  it('check-output gets NO timing — one frame is not an interval (risk R9)', () => {
+    // A check step's command arrives as a single line with its exit code already in it; there is
+    // no "started" instant to measure from. The step rail's own clock is the honest answer, and
+    // it sits directly above.
+    const timing = timingOf([
+      { seq: 1, ts: '2026-08-20T14:00:00.000Z', type: 'check-output', command: 'npm test', exitCode: 0, text: 'ok' } as unknown as RunEvent,
+    ])
+    expect(timing).toBeUndefined()
+  })
+
+  it('two items in the same step keep separate clocks', () => {
+    const events: RunEvent[] = [
+      itemLine(1, '2026-08-20T14:00:00.000Z', 'item.started', tool('running')),
+      itemLine(2, '2026-08-20T14:00:00.500Z', 'item.started', { ...tool('running'), id: 'toolu_2' }),
+      itemLine(3, '2026-08-20T14:00:10.000Z', 'item.completed', { ...tool('completed'), id: 'toolu_2' }),
+      itemLine(4, '2026-08-20T14:00:20.000Z', 'item.completed', tool('completed')),
+    ]
+    const tools = reduceThread(events).turns.flatMap((t) => t.items).filter((e): e is TimedToolItem => e.kind === 'tool')
+    expect(tools).toHaveLength(2)
+    // Parallel calls OVERLAP by design: 20.0s and 9.5s over a 20s window. The chips report
+    // elapsed time, not exclusive time, and must not be expected to add up (risk R8).
+    expect(tools[0]!.timing!.endedAt! - tools[0]!.timing!.startedAt).toBe(20_000)
+    expect(tools[1]!.timing!.endedAt! - tools[1]!.timing!.startedAt).toBe(9_500)
+  })
+})
+
+/**
+ * Verification §5 — the retroactivity claim, checked against REAL recorded data rather than a
+ * hand-built sequence. The fixture is this feature's own run transcript
+ * (`.ai/cezar/runs/6af4b894-….ndjson`), reduced to its turn/item frames with every input, output
+ * and diff body dropped and long titles elided; every `seq`, `ts`, `stepId` and item id is
+ * verbatim. The independently-measured numbers it has to reproduce: 100 tool pairs, median
+ * 76ms, 98 of them under a second, longest 10.61s.
+ */
+describe('reduceThread — replayed against a real transcript', () => {
+  const events = timingTranscript as unknown as RunEvent[]
+  const tools = reduceThread(events)
+    .turns.flatMap((turn) => turn.items)
+    .filter((entry): entry is TimedToolItem => entry.kind === 'tool')
+  const durations = tools
+    .filter((item) => item.timing?.endedAt !== undefined)
+    .map((item) => item.timing!.endedAt! - item.timing!.startedAt)
+    .sort((a, b) => a - b)
+
+  it('derives a timing for every tool call in the file', () => {
+    expect(tools.length).toBeGreaterThanOrEqual(40)
+    expect(tools.every((item) => item.timing !== undefined)).toBe(true)
+  })
+
+  it('the one call with no completion frame is OPEN, not zero', () => {
+    // The transcript was captured while the run was still going, so its last tool call has a
+    // start and no end — the live case, on real data. It is the only one.
+    const open = tools.filter((item) => item.timing?.endedAt === undefined)
+    expect(open).toHaveLength(1)
+    expect(open[0]!.id).toBe(tools.at(-1)!.id)
+    expect(durations).toHaveLength(tools.length - 1)
+  })
+
+  it('reproduces the distribution measured independently of the reducer', () => {
+    const median = durations[Math.floor(durations.length / 2)]!
+    expect(median).toBeLessThan(1_000)
+    expect(durations.filter((ms) => ms < 1_000).length / durations.length).toBeGreaterThan(0.9)
+    // Sub-second precision is not a preference — this is why `formatToolDuration` exists.
+    expect(durations[0]).toBeLessThan(1_000)
+    expect(Math.max(...durations)).toBeGreaterThan(5_000)
+  })
+
+  it('never derives a negative interval', () => {
+    expect(durations.every((ms) => ms >= 0)).toBe(true)
   })
 })

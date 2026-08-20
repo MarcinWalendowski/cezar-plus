@@ -52,3 +52,23 @@ export function formatDuration(ms: number): string {
   const pad = (value: number) => String(value).padStart(2, '0')
   return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
 }
+
+/**
+ * Tool-scale elapsed — `0ms` / `70ms` / `999ms` / `1.0s` / `59.9s` / `1:00` / `1:00:00`.
+ *
+ * A second formatter exists because the measured distribution demands it: replaying a real
+ * six-step run's transcript, 42 of 44 tool calls finished under one second (median 70ms). A
+ * `m:ss` clock would print `0:00` on nearly every card and say nothing at all. So: milliseconds
+ * below a second, one decimal of seconds below a minute, and above that it hands off to
+ * `formatDuration` so a long command reads in the same units as the step and run clocks.
+ *
+ * Truncates rather than rounds, like `compactTokens`: `59_999` reads `59.9s`, never a `60.0s`
+ * that is really a minute. Negative and non-finite clamp to `0ms` — clock skew between the
+ * frame that opened a tool and the one that closed it must not print `-3ms`.
+ */
+export function formatToolDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0ms'
+  if (ms < 1_000) return `${Math.floor(ms)}ms`
+  if (ms < 60_000) return `${(Math.floor(ms / 100) / 10).toFixed(1)}s`
+  return formatDuration(ms)
+}

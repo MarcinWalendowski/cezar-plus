@@ -15,31 +15,26 @@ import {
 } from 'lucide-react'
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 
+import { LiveDuration } from '@/components/live-duration'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ZoomableImage } from '@/components/zoomable-image'
-import { formatDuration } from '@/lib/format'
+import { formatToolDuration } from '@/lib/format'
 import { Link } from '@/lib/project-router'
-import { useNow } from '@/lib/use-now'
-import type {
-  FileDiff,
-  RunActivity,
-  RunEvent,
-  ToolKind,
-  UiToolItem,
-} from '@loki-labs/better-cezar-api-client'
+import type { FileDiff, ToolKind, UiToolItem } from '@loki-labs/better-cezar-api-client'
 import { cn } from '@/lib/utils'
 
-import { IDLE_TIMEOUT_MS, liveStatus } from './live-status'
 import { Markdown } from './markdown'
 import { splitToolTitle, streakLabel, type ContextGroupBlock } from './thread-groups'
 import { useThreadCardCache } from './thread-open-cards'
 import { isNearBottom } from './thread-scroll'
 import type {
+  ItemTiming,
   ThreadEntry,
   ThreadImage,
   ThreadNote,
   ThreadProviderAuthRequired,
   ThreadState,
+  TimedToolItem,
 } from './thread-state'
 
 // The stick rule lives with the rest of the scroll math now; re-exported because this is
@@ -333,89 +328,6 @@ export function ReasoningItem({ text }: { text: string }) {
   )
 }
 
-/**
- * Live "the agent is working" affordance for an active session — the CLI's status line
- * (spec 2026-08-20-live-run-status-line-and-timer). A running run streams in bursts with quiet
- * gaps between turns (thinking, tool setup), and the old fixed `Working…` was equally true for
- * all of them, which is exactly why it could not tell a healthy 40-minute step from a wedged one.
- *
- * Four fields, all derived by `liveStatus()`: what the agent is doing (the live item's own
- * title), the last line of whatever it is streaming right now, how long this item has taken,
- * and — past the threshold — how long it has been quiet. The silence is STATED, never diagnosed:
- * a liveness signal cannot distinguish work from noise, so this says `quiet 2:14`, never "stuck".
- *
- * `data-slot="working-indicator"` survives the rename on purpose — it is the DOM handle other
- * suites use for "is this thread live", and that assertion is still exactly true.
- *
- * Owns the 1s tick itself (`useNow`) BECAUSE it is a leaf: the route must not hold it, or the
- * whole transcript would re-render 60×/minute for a clock (spec risk R2, pinned by the design
- * guardian's `no-tick-in-thread-containers` rule).
- */
-export function RunStatusLine({
-  state,
-  events,
-  activity,
-}: {
-  /** The reduced thread — its newest item is what the agent is doing. */
-  state: ThreadState
-  /** The same run's raw frames, for the two clocks (`item.started` ts, newest ts). */
-  events: RunEvent[]
-  /** `monitoring` suppresses the quiet escalation: that run is quiet by design. */
-  activity?: RunActivity
-}) {
-  const now = useNow(1000)
-  const status = liveStatus({ state, events, now, activity })
-  const idleMinutes = Math.round(IDLE_TIMEOUT_MS / 60_000)
-  return (
-    <div
-      data-slot="working-indicator"
-      data-tone={status.tone}
-      className="flex min-w-0 flex-col gap-0.5 py-1 text-[13px] text-soft-foreground"
-    >
-      <div className="flex min-w-0 items-center gap-2">
-        <LoaderCircleIcon role="status" aria-label="Working" className="size-3.5 shrink-0 animate-spin" />
-        {/* A subagent's item is real work and is shown, but never mislabelled as the main
-            session's (spec risk R8 — the distinction the Agents dock already draws). */}
-        {status.subagent ? (
-          <span aria-hidden className="shrink-0 text-muted-foreground">
-            &#8627;
-          </span>
-        ) : null}
-        <span className="shimmer min-w-0 truncate font-medium">{status.headline}</span>
-        {status.itemMs !== undefined ? (
-          <span data-slot="status-item-clock" className="shrink-0 tabular-nums">
-            {formatDuration(status.itemMs)}
-          </span>
-        ) : null}
-        {status.tone === 'normal' ? null : (
-          <span
-            data-slot="status-quiet"
-            title={`Nothing has been written for ${formatDuration(status.silentMs)}. A step is ended after ${idleMinutes} minutes with no output at all.`}
-            className={cn(
-              'shrink-0 tabular-nums',
-              status.tone === 'stale' ? 'text-pending-strong' : undefined,
-            )}
-          >
-            {status.tone === 'stale' ?
-              `· no output for ${formatDuration(status.silentMs)}`
-            : `· quiet ${formatDuration(status.silentMs)}`}
-          </span>
-        )}
-      </div>
-      {/* The streamed tail: one line, no markdown, clipped. The same content the tool card below
-          already renders, so it exposes nothing new (risk R7). */}
-      {status.detail ? (
-        <div
-          data-slot="status-detail"
-          className="truncate pl-[22px] font-mono text-[11px] text-muted-foreground"
-        >
-          {status.detail}
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
 const TOOL_ICONS: Record<ToolKind, typeof WrenchIcon> = {
   read: FileTextIcon,
   edit: SquarePenIcon,
@@ -559,6 +471,48 @@ function defaultOpen(item: UiToolItem): boolean {
   return item.toolKind === 'execute' && item.status === 'running' && item.output !== undefined
 }
 
+/** What the chip measures, said where a reader can hover it. Parallel tool calls overlap by
+ *  design, so the chips on a burst of them sum to more than the wall-clock the burst took —
+ *  this is elapsed time, never exclusive time (spec risk R8). */
+const TOOL_CLOCK_TITLE = 'Elapsed from the frame that started this call to the one carrying its result. Parallel calls overlap, so these do not add up.'
+
+/**
+ * How long a tool call took, or has been taking — a chip beside the exit-code pill
+ * (spec 2026-08-20-step-and-tool-call-durations §Phase 2).
+ *
+ * Sub-second precision (`70ms`, not `0:00`) because that is what the calls actually are: on a
+ * real six-step run, 42 of 44 finished inside a second. A MEASUREMENT only — no threshold, no
+ * colour, no "slow".
+ *
+ * No timing at all → no chip. That is the honest answer for a `check-output` frame (one event,
+ * no interval) and for an item whose opening frame sits on a history page the browser never
+ * fetched (spec risks R7 and R9).
+ *
+ * The running case is a `<LiveDuration/>` LEAF: a `useNow` in `ToolCard`'s body would re-render
+ * that card's entire output block every second (spec risk R2, and the reason the design
+ * guardian's `no-tick-in-thread-containers` rule now covers this file).
+ */
+function ToolDuration({ timing }: { timing: ItemTiming | undefined }) {
+  if (timing === undefined || !Number.isFinite(timing.startedAt)) return null
+  const tone = 'shrink-0 text-[11px] text-soft-foreground tabular-nums'
+  if (timing.endedAt === undefined) {
+    return (
+      <LiveDuration
+        since={new Date(timing.startedAt).toISOString()}
+        format={formatToolDuration}
+        label="Running for"
+        title={TOOL_CLOCK_TITLE}
+        className={tone}
+      />
+    )
+  }
+  return (
+    <span data-slot="tool-duration" title={TOOL_CLOCK_TITLE} className={tone}>
+      {formatToolDuration(timing.endedAt - timing.startedAt)}
+    </span>
+  )
+}
+
 /**
  * One tool invocation as a shadcn Collapsible card (mockup `.tool-card`, issue #381).
  * Locked (no chevron, trigger disabled) until the item has any detail to show. `nested` is the
@@ -574,7 +528,7 @@ export function ToolCard({
   cacheKey,
   renderNested,
 }: {
-  item: UiToolItem
+  item: TimedToolItem
   nested?: readonly ThreadEntry[]
   cacheKey?: string
   renderNested?: (entries: readonly ThreadEntry[], scope: string) => ReactNode
@@ -639,6 +593,7 @@ export function ToolCard({
           {busy ? (
             <LoaderCircleIcon role="status" aria-label="Running" className="size-3.5 animate-spin text-soft-foreground" />
           ) : null}
+          <ToolDuration timing={item.timing} />
           {item.status === 'failed' ? <span className="text-xs text-muted-foreground">failed</span> : null}
           {item.status === 'declined' ? <span className="text-xs text-soft-foreground">declined</span> : null}
           {item.toolKind === 'execute' && typeof item.exitCode === 'number' ? (

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { compactTokens, formatDuration, shortAge } from '@/lib/format'
+import { compactTokens, formatDuration, formatToolDuration, shortAge } from '@/lib/format'
 
 describe('shortAge', () => {
   const now = Date.parse('2026-07-14T12:00:00.000Z')
@@ -78,5 +78,49 @@ describe('formatDuration', () => {
 
   it.each([Number.NaN, Number.POSITIVE_INFINITY])('renders %s as 0:00', (ms) => {
     expect(formatDuration(ms)).toBe('0:00')
+  })
+})
+
+describe('formatToolDuration', () => {
+  // The boundary table from spec 2026-08-20-step-and-tool-call-durations §Data models. It exists
+  // because of a measurement, not a preference: replaying a real run's transcript, 98 of 100 tool
+  // calls finished under one second (median 76ms), so a `m:ss` clock would have printed `0:00` on
+  // nearly every card.
+  it.each([
+    [0, '0ms'],
+    [1, '1ms'],
+    [70, '70ms'],
+    [940, '940ms'],
+    [999, '999ms'],
+    [1_000, '1.0s'],
+    [1_449, '1.4s'],
+    [1_500, '1.5s'],
+    [10_610, '10.6s'],
+    // Truncation, never rounding: 59_999ms is still 59 seconds, and printing `60.0s` for it
+    // would be a minute that says it is not one.
+    [59_949, '59.9s'],
+    [59_999, '59.9s'],
+    // Past a minute it hands off to formatDuration, so a long command reads in the same units
+    // as the step and run clocks above it.
+    [60_000, '1:00'],
+    [64_000, '1:04'],
+    [3_600_000, '1:00:00'],
+  ])('%dms -> %s', (ms, expected) => {
+    expect(formatToolDuration(ms)).toBe(expected)
+  })
+
+  it('clamps a negative elapsed to 0ms (the two frames stamped out of order)', () => {
+    expect(formatToolDuration(-1)).toBe('0ms')
+    expect(formatToolDuration(-5_000)).toBe('0ms')
+  })
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])('renders %s as 0ms', (ms) => {
+    expect(formatToolDuration(ms)).toBe('0ms')
+  })
+
+  it('never prints a bare number without a unit', () => {
+    for (const ms of [0, 5, 999, 1_000, 59_000, 60_000, 7_200_000]) {
+      expect(formatToolDuration(ms)).toMatch(/(?:ms|s|:)/)
+    }
   })
 })

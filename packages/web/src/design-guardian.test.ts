@@ -105,11 +105,13 @@ const RULES: Rule[] = [
   },
   {
     name: 'no-tick-in-thread-containers',
-    why: 'a 1s useNow re-renders its OWNER every second — in the task-thread route or the run-header body that is a 300-row transcript re-rendered 60x/minute for a clock. The ticking clocks are LEAVES (components/live-duration.tsx, and the status line in thread-items.tsx), which is the whole reason they are separate components (spec 2026-08-20-live-run-status-line-and-timer, risk R2)',
+    why: 'a 1s useNow re-renders its OWNER every second — in the task-thread route, the run-header body, the step rail or a tool card that is a 300-row transcript (or six rail rows, or a whole tool output block) re-rendered 60x/minute for a clock. The ticking clocks are LEAVES (components/live-duration.tsx, and run-status-line.tsx), which is the whole reason they are separate components (specs 2026-08-20-live-run-status-line-and-timer risk R2, 2026-08-20-step-and-tool-call-durations risk R2)',
     pattern: /\buseNow\b/g,
     applies: (f) =>
       f.rel === 'src/routes/task-thread/task-thread.tsx' ||
-      f.rel === 'src/routes/task-thread/run-header.tsx',
+      f.rel === 'src/routes/task-thread/run-header.tsx' ||
+      f.rel === 'src/routes/task-thread/step-rail.tsx' ||
+      f.rel === 'src/routes/task-thread/thread-items.tsx',
   },
   {
     name: 'no-100vh',

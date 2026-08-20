@@ -73,6 +73,7 @@ import {
   taskReferences,
   workflowLabel,
 } from '@/lib/tasks-table'
+import { formatDuration } from '@/lib/format'
 import { usageMetricVisibility } from '@/lib/token-metrics'
 import { isHttpUrl } from '@/lib/utils'
 
@@ -81,6 +82,32 @@ import { useContinuationProvider } from './continuation-provider'
 import { cliTargetResumes, cliTargetRunner, finishTitle, resumeHint, runActionFlags } from './run-actions'
 import { WorkflowSteps } from './step-rail'
 import { useFinishRun } from './use-finish-run'
+
+/**
+ * What the whole run cost in wall-clock, kept in the same pill slot the live timer vacates
+ * (spec 2026-08-20-step-and-tool-call-durations §Phase 3).
+ *
+ * The gap it closes: the timer used to be gated on `status === 'running'`, so the elapsed time
+ * was REMOVED from the screen at the exact instant it became the answer to "how long did that
+ * take". Same slot and the same `formatDuration`, so the running and the finished reading are
+ * visibly the same quantity.
+ *
+ * Static by construction — a finished run's total does not tick, so no `useNow` is involved and
+ * this stays legal under the guardian's `no-tick-in-thread-containers` rule.
+ */
+function RunTotal({ run }: { run: ApiRun }) {
+  if (run.startedAt === undefined || run.finishedAt === undefined) return null
+  const start = new Date(run.startedAt).getTime()
+  const end = new Date(run.finishedAt).getTime()
+  // An unparseable stamp renders nothing rather than `took NaN:0-3` — the rule `shortAge` and
+  // `LiveDuration` already follow (spec risk R6).
+  if (Number.isNaN(start) || Number.isNaN(end)) return null
+  return (
+    <time data-slot="run-total" dateTime={run.finishedAt} className="text-muted-foreground tabular-nums">
+      took {formatDuration(end - start)}
+    </time>
+  )
+}
 
 /**
  * The run header (spec §"Task thread" → Header): editable title + status pill, the meta line,
@@ -156,7 +183,9 @@ export function RunHeader({
                   label="Running for"
                   className="text-muted-foreground"
                 />
-              ) : null}
+              ) : (
+                <RunTotal run={run} />
+              )}
             </Pill>
             <ActionsKebab run={run} actions={actions} onToggleNotes={() => setNotesOpen((open) => !open)} />
           </span>

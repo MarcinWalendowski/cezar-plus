@@ -20,7 +20,7 @@ import {
   ToolCard,
   ToolStreak,
 } from './thread-items'
-import { reduceThread } from './thread-state'
+import { reduceThread, type TimedToolItem } from './thread-state'
 import { SessionTranscript } from './session-transcript'
 
 afterEach(cleanup)
@@ -170,6 +170,61 @@ describe('ToolCard — exit-code pill (execute kind)', () => {
   it('no exit code reported (the golden claude Bash) → no pill invented', () => {
     render(<ToolCard item={goldenItem(bashAndScreenshot, 'toolu_mock_1', 'completed')} />)
     expect(document.querySelector('[data-slot="tool-exit"]')).toBeNull()
+  })
+})
+
+/**
+ * The duration chip (spec 2026-08-20-step-and-tool-call-durations §Phase 2). Sub-second
+ * precision is the point: on the run this shipped from, 98 of 100 tool calls finished inside a
+ * second, so a `m:ss` clock would have printed `0:00` on nearly every card. A MEASUREMENT only —
+ * there is no threshold, no colour and no "slow" label to assert on, deliberately.
+ */
+describe('ToolCard — duration chip', () => {
+  const base = goldenItem(bashAndScreenshot, 'toolu_mock_1', 'completed')
+  const chip = () => document.querySelector('[data-slot="tool-duration"]')
+
+  it('a finished call is frozen at endedAt − startedAt, in tool units', () => {
+    render(<ToolCard item={{ ...base, timing: { startedAt: 1_000_000, endedAt: 1_000_070 } }} />)
+    expect(chip()?.textContent).toBe('70ms')
+  })
+
+  it('a slow call reads in seconds, next to (not instead of) its exit-code pill', () => {
+    const item = goldenItem(opencodeToolLifecycle, 'prt_01J8ZE21TOOL', 'completed')
+    render(<ToolCard item={{ ...item, timing: { startedAt: 0, endedAt: 10_610 } }} />)
+    expect(chip()?.textContent).toBe('10.6s')
+    expect(document.querySelector('[data-slot="tool-exit"]')?.textContent).toBe('0')
+  })
+
+  it('a still-running call ticks, in the SAME units it will freeze in', () => {
+    // The chip must not read `0:00` while running and `70ms` a moment later — a card that
+    // changes units on completion is a card the reader cannot compare against its neighbours.
+    const running = goldenItem(bashAndScreenshot, 'toolu_mock_1', 'running')
+    render(<ToolCard item={{ ...running, timing: { startedAt: Date.now() - 1_400 } }} />)
+    expect(chip()).toBeNull()
+    expect(document.querySelector('[data-slot="live-duration"]')?.textContent).toBe('1.4s')
+  })
+
+  it('no timing → NO chip: a check-output card, or an item whose opening frame was never paged in', () => {
+    render(<ToolCard item={base} />)
+    expect(chip()).toBeNull()
+    expect(document.querySelector('[data-slot="live-duration"]')).toBeNull()
+  })
+
+  it('says what it measures, including that parallel calls do not add up', () => {
+    render(<ToolCard item={{ ...base, timing: { startedAt: 0, endedAt: 500 } }} />)
+    expect(chip()?.getAttribute('title')).toMatch(/parallel/i)
+  })
+
+  it('rides through the reducer end to end — real frames in, a real chip out', () => {
+    const events = asRunEvents(bashAndScreenshot).map((event, index) => ({
+      ...event,
+      ts: new Date(Date.parse('2026-08-20T14:00:00.000Z') + index * 250).toISOString(),
+    }))
+    const items = reduceThread(events).turns.flatMap((turn) => turn.items)
+    const tool = items.find((entry): entry is TimedToolItem => entry.kind === 'tool')!
+    expect(tool.timing?.endedAt).toBeDefined()
+    render(<ToolCard item={tool} />)
+    expect(chip()?.textContent).toMatch(/^\d+(?:\.\d)?(?:ms|s)$/)
   })
 })
 

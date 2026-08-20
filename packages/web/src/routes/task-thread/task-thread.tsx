@@ -27,7 +27,7 @@ import { displayWorkflowName, taskIssueUrl, taskPrUrl } from '@/lib/tasks-table'
 import { cn, isHttpUrl } from '@/lib/utils'
 
 import { AutoResumeHint } from './auto-resume-hint'
-import { RunStatusLine } from './thread-items'
+import { RunStatusLine } from './run-status-line'
 import { useContinueAction } from './follow-up-engine'
 import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
