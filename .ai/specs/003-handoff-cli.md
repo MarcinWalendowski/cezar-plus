@@ -22,6 +22,13 @@ Zero konfiguracji, zero wyboru terminala — wykrywamy sami.
 ## Zakres
 
 1. **„Kontynuuj"** (in-process resume): `POST /api/runs/:id/continue`
+   > **Amended 2026-08-20 (`0cbb65a4`) — this HTTP route is no longer the only door, and on
+   > production it is a door an agent cannot open.** The prod cockpit runs `CEZ_AUTH=oidc` behind
+   > Cloudflare Access, so an on-box agent with no browser and no session cannot call it at all.
+   > There is now a second, principal-free door onto the same `RunManager.continueRun`:
+   > `cezar runs reopen` writes an intent file which `reopen-watch.ts` (wired in
+   > `server/server.ts`) executes through the manager. See
+   > `.ai/specs/2026-08-20-reopen-finished-tasks-merge-audit.md`.
    `{text?}` → `RunManager.continue(runId)`:
    - bierze `sessionId` ostatniego kroku agentowego,
    - spawn `claude --resume <sessionId>` (stream-json, ta sama konfiguracja

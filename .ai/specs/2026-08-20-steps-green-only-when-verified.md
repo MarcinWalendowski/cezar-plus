@@ -32,6 +32,15 @@ from the last two days:
 
 > A step's status must be a claim about the WORLD, not about the agent. `done` means a
 > machine-checkable post-condition held after the step ran.
+>
+> **Corrected 2026-08-20 by `2e421370` — this thesis holds OUTSIDE a dry run only.** Under
+> `CEZ_DRY_RUN=1` every post-condition now short-circuits green with a `simulated, not verified`
+> verdict, because the dry-run agent is a mock that commits and deploys nothing: evaluating its
+> post-conditions for real made `everything-committed` truthfully report a dirty tree and killed
+> every dry run at `commit-push`, breaking `npm run test:package` and `npm run test:e2e` on every
+> branch. In a dry run, `done` is a claim about the SIMULATION. The unknown-builtin-id check is
+> deliberately evaluated first, so a workflow naming a post-condition that does not exist is
+> still caught. See the `Fixed` entry for `2e421370` in `CHANGELOG.md`.
 
 ## Problem
 
@@ -187,10 +196,14 @@ In `packages/cezar/src/workflows/types.test.ts`:
 In `packages/cezar/src/workflows/run.test.ts` (check-only workflows — no agent, sub-second):
 
 11. a step whose work succeeds but whose post-condition fails ends **`failed`, not `done`**, and
-    the run ends `failed` — the core claim;
+    the run ends `failed` — the core claim (**outside a dry run only — see 14**);
 12. that step is re-run `max` times first, and a post-condition that passes on the retry ends the
     step `done`;
 13. a step with no `verify` is untouched.
+14. **Added 2026-08-20 by `2e421370`:** under `CEZ_DRY_RUN=1` a post-condition returns green
+    without running — including one that would otherwise fail — while an unknown `builtin` id
+    still throws. This qualifies claim 11: outside a dry run a failed post-condition ends the
+    step `failed`; inside one, nothing is verified at all. +3 tests in `postconditions.test.ts`.
 
 Gates: `npm run typecheck` (root, not `typecheck:web` alone) and `npm test`.
 

@@ -59,6 +59,33 @@ export interface PostconditionContext {
   /** Per-probe bound. Defaults to `PROBE_TIMEOUT_MS`; injectable so the timeout behaviour can be
    *  tested in milliseconds instead of by waiting a minute. */
   probeTimeoutMs?: number;
+  /**
+   * A DRY RUN (`CEZ_DRY_RUN=1`). Defaults to reading the environment; injectable so both branches
+   * are testable without mutating `process.env`. See `dryRunVerdict` for why it passes.
+   */
+  dryRun?: boolean;
+}
+
+/**
+ * Under `CEZ_DRY_RUN=1` every agent CLI is replaced by `scripts/mock-claude.mjs`, which emits a
+ * scripted transcript and performs no real work: it never commits and it never deploys. Asking
+ * "did the agent really commit / really deploy?" of a mock therefore asks a question the mode is
+ * defined to answer no to, and a post-condition that can only ever be red makes a dry run
+ * structurally unable to finish — which is what it did between `57fc8807` (the commit that
+ * introduced `verify`) and this fix: `npm run test:package`'s `run mock:done` died at
+ * `commit-push`, and so did every `npm run test:e2e` boot, both of which run with `CEZ_DRY_RUN=1`.
+ *
+ * Passing here is the same call the rest of the codebase already makes for the same reason — dry
+ * run simulates the push, the PR and the `gh` availability probe rather than performing them
+ * (`server/forge/github.ts`). The post-condition LOGIC keeps its real coverage in
+ * `postconditions.test.ts`, which drives these built-ins against real `mkdtemp` git repos and real
+ * probes, so nothing this module exists to catch is weakened outside dry run.
+ */
+function dryRunVerdict(id: string): PostconditionResult {
+  return {
+    ok: true,
+    detail: `dry run (CEZ_DRY_RUN=1) — the agent is a mock that performs no real work, so "${id}" is simulated, not verified`,
+  };
 }
 
 interface GitResult {
@@ -301,6 +328,10 @@ export async function evaluatePostcondition(
   if (!builtin) {
     return { ok: false, detail: `unknown post-condition "${id}" — cannot verify this step` };
   }
+  // AFTER the unknown-id check on purpose: a typo in a workflow definition is a fact about the
+  // WORKFLOW, not about the world, so a dry run — the cheapest way to exercise a workflow end to
+  // end — must still catch it. Only the world-observing part is skipped.
+  if (ctx.dryRun ?? process.env.CEZ_DRY_RUN === '1') return dryRunVerdict(id);
   try {
     return await builtin(ctx);
   } catch (err) {

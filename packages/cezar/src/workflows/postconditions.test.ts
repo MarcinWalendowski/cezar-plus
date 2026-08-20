@@ -33,6 +33,8 @@ const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
  * | ALL probes must pass | change `failed.length > 0` to require every probe to fail |
  * | A missing targets file fails | make the `readFile` catch return `ok: true` |
  * | An empty target list passes | make `targets.length === 0` red |
+ * | A dry run passes every built-in | delete the `ctx.dryRun` guard in `evaluatePostcondition` |
+ * | A dry run still fails an unknown id | move that guard ABOVE the unknown-id check |
  */
 
 async function git(cwd: string, args: string[]): Promise<void> {
@@ -304,14 +306,52 @@ describe('evaluatePostcondition', () => {
   it('dispatches the built-ins by name', async () => {
     const plain = mkdtempSync(join(tmpdir(), 'cez-postcond-dispatch-'));
     try {
-      await expect(evaluatePostcondition('everything-committed', { cwd: plain })).resolves.toMatchObject({
-        ok: true,
-      });
-      await expect(evaluatePostcondition('all-services-deployed', { cwd: plain })).resolves.toMatchObject({
-        ok: false,
-      });
+      // `dryRun: false` explicitly: an ambient CEZ_DRY_RUN=1 (every cockpit-launched test run has
+      // one) would otherwise short-circuit both calls and this case would assert nothing.
+      await expect(
+        evaluatePostcondition('everything-committed', { cwd: plain, dryRun: false }),
+      ).resolves.toMatchObject({ ok: true });
+      await expect(
+        evaluatePostcondition('all-services-deployed', { cwd: plain, dryRun: false }),
+      ).resolves.toMatchObject({ ok: false });
     } finally {
       rmSync(plain, { recursive: true, force: true });
     }
+  });
+
+  it('passes every built-in in a dry run, because the agent is a mock that does no real work', async () => {
+    // The regression this guards: between 57fc8807 and the fix, `commit-push`'s post-condition
+    // was evaluated against a repo the MOCK agent had dirtied and never committed, so every
+    // CEZ_DRY_RUN=1 run — `npm run test:package`'s `run mock:done` and every `npm run test:e2e`
+    // boot — died at step 4 and could never reach `done`.
+    const dirty = mkdtempSync(join(tmpdir(), 'cez-postcond-dryrun-'));
+    try {
+      await git(dirty, ['init', '--initial-branch=main']);
+      writeFileSync(join(dirty, 'notes.md'), 'mock notes\n');
+
+      // The control: with the world actually observed, this repo is red.
+      await expect(
+        evaluatePostcondition('everything-committed', { cwd: dirty, dryRun: false }),
+      ).resolves.toMatchObject({ ok: false });
+
+      const committed = await evaluatePostcondition('everything-committed', { cwd: dirty, dryRun: true });
+      expect(committed.ok).toBe(true);
+      expect(committed.detail).toContain('dry run');
+
+      const deployed = await evaluatePostcondition('all-services-deployed', { cwd: dirty, dryRun: true });
+      expect(deployed.ok).toBe(true);
+      expect(deployed.detail).toContain('dry run');
+    } finally {
+      rmSync(dirty, { recursive: true, force: true });
+    }
+  });
+
+  it('still catches an unknown post-condition in a dry run', async () => {
+    // A typo in a workflow is a fact about the WORKFLOW, not the world — and a dry run is the
+    // cheapest way to exercise a workflow end to end, so it must not swallow one.
+    const result = await evaluatePostcondition('no-such-check', { cwd: process.cwd(), dryRun: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain('unknown post-condition');
   });
 });

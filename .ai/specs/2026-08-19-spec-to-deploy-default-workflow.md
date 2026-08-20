@@ -20,6 +20,13 @@ fails. Read `.ai/specs/2026-08-20-steps-green-only-when-verified.md` before reas
 step status described below — the "Solution" and "Architecture" sections here still describe the
 pre-P4 unconditional `done`.
 
+**Further amended 2026-08-20 (P5), commit `2e421370` — "must hold after the step's work" above
+is unqualified and should read *outside a dry run*.** Under `CEZ_DRY_RUN=1` every post-condition
+short-circuits green (`simulated, not verified`): the dry-run agent is a mock that never commits
+or deploys, so evaluating its post-conditions for real killed every dry run of this workflow at
+`commit-push` and broke `npm run test:package` and `npm run test:e2e` on every branch. A green
+dry run of `spec-to-deploy` therefore proves its shape, not that any step's goal was met.
+
 ## TLDR
 
 Add a new built-in workflow that codifies the owner's standard operating pipeline as a
