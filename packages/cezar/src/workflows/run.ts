@@ -40,6 +40,7 @@ import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 import { loadWorkflows } from './load.ts';
+import { evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
 import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/store.ts';
 import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.ts';
 import {
@@ -3335,6 +3336,10 @@ export class RunManager {
     // its own, and the one that skipped this leaked raw `/skill` text to the backend (#811).
     state.skills = skills;
     const retriesUsed = new Map<string, number>();
+    /** Re-runs a step has had because its POST-CONDITION failed. Separate ledger from
+     *  `retriesUsed`: that one counts a check step looping BACK to an earlier step, this one
+     *  counts a step being re-entered to finish its own unfinished job. */
+    const verifyRetries = new Map<string, number>();
     let checkFailure: string | null = null;
     let runError: string | null = null;
     // The step budget (PLAN D27, Phase 1 of
@@ -3484,6 +3489,20 @@ export class RunManager {
           break;
         }
         if (state.budgetExceeded) break; // its own turn-end handler already landed this — see there
+
+        const verdict = await this.runStepVerify(runId, state, step, emit);
+        if (state.cancelled) break;
+        if (!verdict.ok) {
+          const attempt = this.retryAfterFailedPostcondition(runId, step, verdict, verifyRetries, emit);
+          if (attempt) {
+            checkFailure = attempt;
+            continue; // same `i` — the step re-runs to finish its own job
+          }
+          this.finishStep(runId, step.id, 'failed', `post-condition failed — ${verdict.detail}`, emit);
+          runError = `step "${step.id}" did not meet its post-condition: ${verdict.detail}`;
+          break;
+        }
+
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
@@ -3493,6 +3512,19 @@ export class RunManager {
       this.spendBudgetUnit(runId); // a check attempt is one unit, same as an agent turn
       if (state.cancelled) break;
       if (ok) {
+        const verdict = await this.runStepVerify(runId, state, step, emit);
+        if (state.cancelled) break;
+        if (!verdict.ok) {
+          // Deliberately NOT stashed in `checkFailure`: that channel appends text to a retried
+          // AGENT's prompt, and a check step has no prompt to carry it into — leaving it set would
+          // leak this verdict into whatever agent step ran next.
+          if (this.retryAfterFailedPostcondition(runId, step, verdict, verifyRetries, emit)) {
+            continue; // same `i`
+          }
+          this.finishStep(runId, step.id, 'failed', `post-condition failed — ${verdict.detail}`, emit);
+          runError = `step "${step.id}" did not meet its post-condition: ${verdict.detail}`;
+          break;
+        }
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
@@ -4557,8 +4589,82 @@ export class RunManager {
     step: WorkflowStepDef,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
   ): Promise<{ ok: boolean; output: string }> {
-    const command = step.command as string;
-    emit({ type: 'note', stepId: step.id, message: `$ ${command}` });
+    return this.runShell(state, step.id, step.command as string, emit);
+  }
+
+  /**
+   * A step's POST-CONDITION (`.ai/specs/2026-08-20-steps-green-only-when-verified.md`): what has
+   * to be true about the world before the step may be called done. A step with no `verify` passes
+   * untouched, so every workflow that predates this keeps its exact behaviour.
+   *
+   * The verdict is emitted as a `check-output` event — the cockpit already renders those as an
+   * execute card carrying an exit-code verdict, so the failure is visible with no web change.
+   */
+  private async runStepVerify(
+    runId: string,
+    state: ActiveRun,
+    step: WorkflowStepDef,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): Promise<PostconditionResult> {
+    const verify = step.verify;
+    if (!verify) return { ok: true, detail: '' };
+
+    if (verify.command) {
+      const { ok, output } = await this.runShell(state, step.id, verify.command, emit);
+      return { ok, detail: ok ? output : `\`${verify.command}\` exited non-zero:\n${output}` };
+    }
+
+    // A workspace run applies its per-project worktrees back UNSTAGED on purpose, so it is
+    // supposed to commit nothing — `everything-committed` has to know that or it fails them all.
+    const workspaceRun = (this.store.getRun(runId)?.workspaceProjects?.length ?? 0) > 0;
+    const result = await evaluatePostcondition(verify.builtin as string, { cwd: state.cwd, workspaceRun });
+    emit({
+      type: 'check-output',
+      stepId: step.id,
+      command: `post-condition: ${verify.builtin}`,
+      text: result.detail,
+      exitCode: result.ok ? 0 : 1,
+    });
+    return result;
+  }
+
+  /**
+   * Decide whether a failed post-condition gets another attempt at the SAME step. Returns the text
+   * to append to the retried prompt, or `undefined` when the budget is spent and the step must
+   * fail. Re-entering the step is the point: the agent is told exactly what it did not achieve —
+   * the files it left uncommitted, the service that is not live — and gets to finish the job.
+   */
+  private retryAfterFailedPostcondition(
+    runId: string,
+    step: WorkflowStepDef,
+    verdict: PostconditionResult,
+    ledger: Map<string, number>,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): string | undefined {
+    const max = step.verify?.max ?? 0;
+    const used = ledger.get(step.id) ?? 0;
+    if (used >= max) return undefined;
+    ledger.set(step.id, used + 1);
+    emit({
+      type: 'note',
+      stepId: step.id,
+      message: `post-condition failed — re-running "${step.id}" (attempt ${used + 1}/${max}): ${verdict.detail}`,
+    });
+    // Back to `pending` so the GUI rail reads top-to-bottom truthfully while the step re-runs,
+    // exactly as a check step's loop-back does.
+    this.store.updateStep(runId, step.id, { status: 'pending', error: undefined });
+    return `This step's post-condition FAILED, so its goal was not met:\n\n${verdict.detail}`;
+  }
+
+  /** One bash spawn, output-capped, reported as a `check-output` card. Shared by check steps and
+   *  by a `verify.command` post-condition so both read identically in the thread. */
+  private runShell(
+    state: ActiveRun,
+    stepId: string,
+    command: string,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): Promise<{ ok: boolean; output: string }> {
+    emit({ type: 'note', stepId, message: `$ ${command}` });
     return new Promise((resolve) => {
       // Check steps run in the same cwd as the agent steps — the worktree.
       const child = spawn('bash', ['-lc', command], { cwd: state.cwd, env: process.env });
@@ -4576,13 +4682,13 @@ export class RunManager {
       child.on('error', (err) => {
         state.interrupt = () => undefined;
         const message = `failed to spawn: ${err.message}`;
-        emit({ type: 'check-output', stepId: step.id, command, text: message, exitCode: -1 });
+        emit({ type: 'check-output', stepId, command, text: message, exitCode: -1 });
         resolve({ ok: false, output: message });
       });
       child.on('close', (code) => {
         state.interrupt = () => undefined;
         const trimmed = output.trim() || '(no output)';
-        emit({ type: 'check-output', stepId: step.id, command, text: trimmed, exitCode: code ?? -1 });
+        emit({ type: 'check-output', stepId, command, text: trimmed, exitCode: code ?? -1 });
         resolve({ ok: code === 0, output: trimmed });
       });
     });

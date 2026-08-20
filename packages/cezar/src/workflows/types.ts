@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
+import { POSTCONDITION_IDS } from './postconditions.ts';
 
 /**
  * A workflow is an ordered list of steps. Two step kinds:
@@ -36,6 +37,30 @@ export const workflowStepSchema = z
       .object({
         retry: z.string().min(1),
         max: z.number().int().positive().default(2),
+      })
+      .optional(),
+    /**
+     * POST-CONDITION (`.ai/specs/2026-08-20-steps-green-only-when-verified.md`): what has to be
+     * TRUE about the world for this step to count as done. Without one, a step is green whenever
+     * its agent exits without erroring — which is how `commit-push` reported done on run
+     * `23221162` leaving 7 modified and 5 untracked files and no commit.
+     *
+     * `builtin` names an in-process check (`workflows/postconditions.ts`) whose verdict is a
+     * sentence; `command` is an arbitrary shell command where exit 0 is the only green. Exactly
+     * one of the two. On failure the step is RE-RUN up to `max` times with the verdict appended to
+     * its prompt (the same channel a failing `check` step uses), and only then marked `failed`.
+     *
+     * `max` carries a `.default(1)`, so the OUTPUT shape has it present whenever `verify` is —
+     * the same reason `onFail.max` does.
+     */
+    verify: z
+      .object({
+        builtin: z.enum(POSTCONDITION_IDS).optional(),
+        command: z.string().min(1).optional(),
+        max: z.number().int().nonnegative().default(1),
+      })
+      .refine((v) => Boolean(v.builtin) !== Boolean(v.command), {
+        message: 'a step\'s verify names either a builtin or a command, not both',
       })
       .optional(),
   })
@@ -115,7 +140,7 @@ export function skillStackOf(steps: WorkflowStepDef[]): string[] | null {
     if (stepKind(s) !== 'agent' || !s.skill) return null;
     if (s.prompt !== undefined && s.prompt !== '{{task}}') return null;
     if (s.name !== undefined && s.name !== s.skill) return null;
-    if (s.model || s.runner || s.allowedTools || s.bashAllowlist || s.onFail) return null;
+    if (s.model || s.runner || s.allowedTools || s.bashAllowlist || s.onFail || s.verify) return null;
     skills.push(s.skill);
   }
   return skills.length ? skills : null;
@@ -593,6 +618,11 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'commit-push',
       name: 'Commit & push / merge',
+      // The step is green only if the tree is CLEAN and (where a remote is reachable) nothing is
+      // unpushed — owner instruction 2026-08-20 on run `23221162`, which reported `status=done`
+      // leaving 7 modified and 5 untracked files and no commit: "everything must be committed in
+      // the commit step". One re-run first, carrying the list of files it left behind.
+      verify: { builtin: 'everything-committed', max: 1 },
       // Owner decision 2026-08-19 ("commit & push/merge"): a SCOPED remote-reaching grant — git
       // (incl. `git push`, branch/merge plumbing) and `gh pr` only. This is the one step that ships
       // to the remote. It is still an allowlist, NOT unrestricted bash: no arbitrary shell, only the
@@ -639,6 +669,9 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'document',
       name: 'Document the decision',
+      // This step COMMITS too (spec status, KB, tracker), so it inherits the same post-condition:
+      // a record written into an uncommitted file is a record the next session never reads.
+      verify: { builtin: 'everything-committed', max: 1 },
       // `Task` for the same measured reason `spec` has it (Phase 4): 361 s of model time against
       // 109 s of tool time, and its three reads — what the KB already says, what the spec claims,
       // what the tracker thinks — are independent. It WRITES (Edit/Write are granted), so the
@@ -689,6 +722,11 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'deploy',
       name: 'Deploy',
+      // Green only when EVERY service in `.ai/deploy-targets.json` probes live — the whole
+      // ask: cezar is the UI tree AND the backend service, and shipping one alone used to end this
+      // step green. A repo that declares no targets file is RED, not green: "nobody said what this
+      // deploys" is not evidence it deployed. See `workflows/postconditions.ts`.
+      verify: { builtin: 'all-services-deployed', max: 1 },
       // Fixed grant (owner decision 2026-08-19): UNRESTRICTED Bash on purpose. Deploy mechanics
       // differ per project and cannot be enumerated here, so this step runs the target repo's OWN
       // documented deploy scripts. See this workflow's doc comment for why this reverses the

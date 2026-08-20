@@ -2548,3 +2548,155 @@ describe('a continuation cannot finish an unfinished chain (P2)', () => {
     expect(store.getRun(record.id)?.status).toBe('done');
   }, 90_000);
 });
+
+/**
+ * STEP POST-CONDITIONS in the step loop
+ * (`.ai/specs/2026-08-20-steps-green-only-when-verified.md`).
+ *
+ * Check-only workflows again (`command: 'true'`, no agent step): a check step is a `bash` spawn,
+ * not a claude-CLI session, so these settle in well under a second. What is under test is the
+ * loop's `done`-gate, which is shared by both step kinds — the same `runStepVerify` call sits in
+ * the agent branch, so proving it here proves it for `commit-push` and `deploy`.
+ *
+ * | Guard | Mutation that must turn it red |
+ * |---|---|
+ * | A step whose post-condition fails is NOT done | restore the unconditional `finishStep(…, 'done')` |
+ * | The run fails with it, rather than continuing | drop the `runError` assignment in the verify branch |
+ * | It is re-run `max` times first | make `retryAfterFailedPostcondition` always return undefined |
+ * | A retry that satisfies it lands `done` | make the verify branch terminal on first failure |
+ * | A step with no `verify` is untouched | make `runStepVerify` fail an absent post-condition |
+ */
+describe('a step is green only when its post-condition holds', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  const managers: RunManager[] = [];
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-postcondition-'));
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+  });
+
+  afterEach(() => {
+    // Same teardown reason as the step-budget suite: stop the queue watchdogs before the temp dir
+    // goes away.
+    for (const m of managers.splice(0)) m.dispose();
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  function manager(): RunManager {
+    const created = new RunManager(store, repoRoot);
+    managers.push(created);
+    return created;
+  }
+
+  async function waitForTerminal(runId: string, deadlineMs = 15_000): Promise<void> {
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + deadlineMs;
+    while (!terminal.has(store.getRun(runId)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not reach a terminal state in time');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
+  it('a step whose work succeeds but whose post-condition fails ends FAILED, not done', async () => {
+    // The core claim. Before this, `command: 'true'` exiting 0 was the whole test of success —
+    // exactly as an agent session ending without erroring was.
+    const workflow: WorkflowDef = {
+      name: 'unverified',
+      source: 'file',
+      steps: [
+        { id: 'ship', command: 'true', verify: { command: 'false', max: 0 } },
+        { id: 'after', command: 'true' },
+      ],
+    };
+    const record = manager().startRun(workflow, { task: 'ship it', worktree: false });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    expect(run?.steps.find((s) => s.id === 'ship')?.status).toBe('failed');
+    expect(run?.steps.find((s) => s.id === 'ship')?.error).toContain('post-condition failed');
+    // The run stops rather than carrying a false premise into the next step — the failure mode
+    // the incident's later steps inherited ("this is implemented, tested and shipped").
+    expect(run?.status).toBe('failed');
+    expect(run?.steps.find((s) => s.id === 'after')?.status).toBe('pending');
+  }, 20_000);
+
+  it('re-runs the step first, and lands DONE when the retry satisfies the post-condition', async () => {
+    // The post-condition fails once, then passes: the marker file only exists on the second
+    // evaluation. This is the shape that matters in production — the agent is handed the verdict
+    // and finishes the job it left half-done.
+    const marker = join(repoRoot, 'attempted');
+    const workflow: WorkflowDef = {
+      name: 'verified-on-retry',
+      source: 'file',
+      steps: [
+        {
+          id: 'ship',
+          command: 'true',
+          verify: { command: `test -f ${JSON.stringify(marker)} || { touch ${JSON.stringify(marker)}; exit 1; }`, max: 1 },
+        },
+      ],
+    };
+    const record = manager().startRun(workflow, { task: 'ship it', worktree: false });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    const ship = run?.steps.find((s) => s.id === 'ship');
+    expect(ship?.status).toBe('done');
+    expect(ship?.error).toBeUndefined();
+    // Re-ENTERED, not merely re-evaluated: the step ran twice.
+    expect(ship?.iterations).toBe(2);
+    expect(run?.status).toBe('done');
+  }, 20_000);
+
+  it('gives up after `max` re-runs rather than looping forever', async () => {
+    const workflow: WorkflowDef = {
+      name: 'never-satisfied',
+      source: 'file',
+      steps: [{ id: 'ship', command: 'true', verify: { command: 'false', max: 2 } }],
+    };
+    const record = manager().startRun(workflow, { task: 'ship it', worktree: false });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    const ship = run?.steps.find((s) => s.id === 'ship');
+    expect(ship?.status).toBe('failed');
+    // The first attempt plus the two re-runs `max: 2` buys.
+    expect(ship?.iterations).toBe(3);
+  }, 25_000);
+
+  it('leaves a step with no post-condition exactly as it was', async () => {
+    // Every workflow that predates this keeps its behaviour — the whole compatibility claim.
+    const workflow: WorkflowDef = {
+      name: 'unchanged',
+      source: 'file',
+      steps: [{ id: 's1', command: 'true' }, { id: 's2', command: 'true' }],
+    };
+    const record = manager().startRun(workflow, { task: 'do it', worktree: false });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    expect(run?.status).toBe('done');
+    expect(run?.steps.map((s) => s.status)).toEqual(['done', 'done']);
+    expect(run?.steps.every((s) => s.iterations === 1)).toBe(true);
+  }, 20_000);
+
+  it('reports the verdict of a BUILTIN post-condition through the same gate', async () => {
+    // `repoRoot` is not a git repo and declares no deploy targets, so `all-services-deployed` is
+    // red — proving the builtin path is wired into the loop, not just the shell path.
+    const workflow: WorkflowDef = {
+      name: 'builtin-verify',
+      source: 'file',
+      steps: [{ id: 'deploy', command: 'true', verify: { builtin: 'all-services-deployed', max: 0 } }],
+    };
+    const record = manager().startRun(workflow, { task: 'deploy it', worktree: false });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    const deploy = run?.steps.find((s) => s.id === 'deploy');
+    expect(deploy?.status).toBe('failed');
+    expect(deploy?.error).toContain('.ai/deploy-targets.json');
+  }, 20_000);
+});
