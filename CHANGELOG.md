@@ -142,6 +142,41 @@
   of *ink* tokens.
 
 ## ✨ Added
+- ✨ **A running task now says what it is doing, and for how long.** Spec
+  `.ai/specs/2026-08-20-live-run-status-line-and-timer.md`, commit `d353944c`. Web-only — no
+  server, contract or protocol change.
+
+  The task detail view had one static word for a running run — `Working…` — and no clock, so a
+  healthy 40-minute `implement` step and a wedged CLI looked exactly the same. Owner report:
+  *"sometimes I don't know if it's stuck or working."* It now borrows the CLI's grammar:
+
+  - a **ticking elapsed timer** beside the status pill, off `run.startedAt`;
+  - a **live status line** at the tail of the thread that names the current activity using the
+    tool card's own `title` — the same canonical string, so the line and the card below it can
+    never disagree — and **streams the last line** of whatever is being produced right now;
+  - a **turn clock** on the current item, and after a silence threshold a `quiet 2:14` badge
+    escalating to amber, with the real 30-minute inactivity bound named in its `title`.
+
+  Two wording decisions are load-bearing, both inherited from
+  `2026-08-20-agent-step-inactivity-timeout.md` risk R1 — **a liveness signal cannot tell work
+  from noise.** So this reports silence and never claims *stuck*: `quiet 2:14` / `no output for
+  6:31` is a measurement, `stuck` is an accusation. And a run parked in `monitoring` is quiet on
+  purpose (`2026-07-18-subagent-monitoring-status.md`), so it never escalates at all.
+
+  Client-side by construction, not by shortcut: duration, current item, streamed tail and
+  last-event time are **all already in the browser**. A server-side `lastActivityAt` would be a
+  persisted, migrated duplicate of a timestamp the client holds, refreshing at record cadence
+  instead of delta cadence — strictly worse *for this view*. It is only worth paying for on the
+  tasks list, which has no event stream; that is the spec's deferred Phase 4.
+
+  The 1s tick lives in **leaf** components only — in the route or the header body it would
+  re-render a 300-row transcript 60×/minute — and that is pinned by a new
+  `no-tick-in-thread-containers` design-guardian rule rather than by a one-off assertion, so it
+  also catches the next person who inlines one.
+
+  **QA needed, not done:** the spec's Verification §4, the real-browser runtime pass, has not
+  been executed yet.
+
 - ✨ **Claude accounts show their real usage now, in the sidebar and on each Logins card.**
   Spec `.ai/specs/2026-08-16-claude-usage-windows.md`, same `CEZ_ACCOUNT_USAGE=1` flag.
 

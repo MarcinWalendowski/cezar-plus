@@ -246,6 +246,41 @@ npm test -- --testTimeout=30000 path/to/one.test.ts
 npm test -- -t "the name of one test"
 ```
 
+### Two environment traps that make the gates LIE
+
+Both were hit on 2026-08-20 (spec `.ai/specs/2026-08-20-live-run-status-line-and-timer.md`), and
+both produce a *plausible* failure that reads as "this suite cannot run here". Neither is a
+sandbox limitation. **Scrub the environment before you conclude anything about a test.**
+
+```bash
+env -u NODE_ENV -u CEZ_REMOTE -u CEZ_OIDC_ISSUER -u CEZ_OIDC_CLIENT_ID \
+    -u CEZ_PROJECTS_DIR -u CEZ_KB -u CEZ_KB_ROOTS -u CEZ_KB_WRITE_FILE -u CEZ_TODOS_FILE \
+    npm ci && npm test
+```
+
+1. **`NODE_ENV=production` makes `npm ci` install ZERO devDependencies.** cezar's own agent
+   sessions run with it set, so a worktree installed under it has no vitest, no React and no
+   testing-library in the tree at all. The symptom is not "missing module": it is
+   **`TypeError: React.act is not a function`** out of every component test, which invites the
+   conclusion that React tests are unrunnable in this environment. They are not — `unset
+   NODE_ENV`, reinstall, and 174 files / 3782 tests go green. The corollary trap: reaching for
+   `npx vitest` when the local binary is missing "makes it work" by fetching an unpinned vitest
+   off the registry, which is exactly the silently-different run the rule above forbids. A
+   missing local vitest is a signal to fix the install, never to route around it.
+
+2. **A cockpit session exports its own knobs into the test run.** `CEZ_REMOTE=1`,
+   `CEZ_OIDC_ISSUER`, `CEZ_OIDC_CLIENT_ID`, `CEZ_PROJECTS_DIR`, `CEZ_KB`, `CEZ_KB_ROOTS`,
+   `CEZ_KB_WRITE_FILE`, `CEZ_TODOS_FILE` are all live in a run's environment, and the server
+   suites assert on exactly those knobs — 26 unrelated failures, none of them about your change.
+
+**The method, which generalises past these two.** "It fails on an untouched file at clean HEAD
+too" feels like proof that the code is innocent and the environment is broken. It is proof of the
+first half only. The same install, the same env and the same runner feed both checkouts, so a
+control that fails identically **localises the fault to what they share** — it does not license
+"unrunnable here". Name the shared thing and test it directly before writing an environmental
+caveat into a spec, because a caveat is what the next session will obey instead of running the
+gate.
+
 ### Debugging an intermittent failure — cross-file pollution is NOT a possible cause
 
 **`isolate` is unset here, so it is vitest's default `true`: every test FILE gets its own fresh

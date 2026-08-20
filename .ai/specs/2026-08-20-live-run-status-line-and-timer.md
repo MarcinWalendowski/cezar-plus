@@ -1,7 +1,29 @@
 # A running task must say what it is doing, and for how long
 
-**Status:** implemented (Phases 1-3) — **QA needed**: Verification §4, the real runtime pass, has NOT been executed
+**Status: IMPLEMENTED (Phases 1-3) and SHIPPED 2026-08-20** as commit `d353944c` on
+`origin/main` — **QA needed**: Verification §4, the real-browser runtime pass, has NOT been
+executed, so this is *not* done. Phase 4 (the same answer on the tasks list) is deferred by
+design and is not in this spec's scope.
 **Date:** 2026-08-20
+
+> **Corrected 2026-08-20, after the fact, by this spec's own documentation pass.** The
+> implementation session recorded that the cockpit's React component tests "cannot be executed
+> in this sandbox" (`TypeError: React.act is not a function`). **That conclusion was wrong**,
+> and it is marked at both sites below rather than only here, because a reader who believed it
+> would skip the one gate that covers the rename this spec performs.
+>
+> The real cause was environmental and fixable: **`NODE_ENV=production` is set in cezar cockpit
+> sessions, so `npm ci` installs ZERO devDependencies** — the worktree had no vitest, no React
+> and no testing-library at all. Reinstalled with `NODE_ENV` unset, every one of those suites
+> runs and passes. Re-verified first-hand during this documentation pass, at the shipped commit:
+> `npm test -- --project web packages/web/src/routes/task-thread packages/web/src/lib/format.test.ts packages/web/src/design-guardian.test.ts`
+> → **27 files, 699 tests, all passed**, `review-panel.test.tsx`'s
+> `[data-slot="working-indicator"]` assertion among them (`✓ shows the working spinner ONLY
+> while the run is running (the live heartbeat)`). The full web project is 174 files / 3782
+> tests green.
+>
+> The durable form of this lesson now lives in `AGENTS.md` § Validation ("Two environment traps
+> that make the gates lie"), which is where the next session will actually read it.
 
 ## TLDR
 
@@ -228,7 +250,9 @@ doing / how quiet is it" answer on `/` and `/tasks` needs a server-side field, b
 those views hold no event stream: a `lastEventAt` on `StepState`/`RunRecord` plus a copy
 onto `RunIndexEntry`, exactly the shape `2026-08-19-context-usage-in-tasks-table.md` used
 for `contextTokens`. Named here so the next session does not re-derive it; explicitly not
-built now.
+built now. **Filed 2026-08-20 as workspace todo `e755a560`** at low priority, gated behind the
+runtime QA (`98bbd957`): if the streaming grammar turns out to be wrong on screen, the list
+version would inherit the mistake.
 
 ## Analytics
 
@@ -259,9 +283,13 @@ Concrete and executable. Run from the repo root.
 2. **Pure unit tests** — the load-bearing logic is deliberately in pure modules so it is
    testable without a DOM:
    ```
-   npx vitest run packages/web/src/lib/format.test.ts \
-                  packages/web/src/routes/task-thread/live-status.test.ts
+   npm test -- --project web packages/web/src/lib/format.test.ts \
+                             packages/web/src/routes/task-thread/live-status.test.ts
    ```
+   > **Corrected 2026-08-20.** As written this said `npx vitest run …`, which `AGENTS.md`
+   > § Validation forbids outright: vitest is a devDependency here, and `npx` reaches past the
+   > pinned binary to fetch a different version off the registry. The implementation session
+   > ran the `npx` form and got a silently-different runner. Use `npm test --`.
    Cases the new suite must contain:
    - `formatDuration`: `0 → 0:00`; `64_000 → 1:04`; `3_600_000 → 1:00:00`;
      `7_384_000 → 2:03:04`; negative input clamps to `0:00`.
@@ -277,14 +305,26 @@ Concrete and executable. Run from the repo root.
      (the reducer's totality rule applies here too).
 3. **Existing suites must stay green** — the rename touches a shared component:
    ```
-   npx vitest run packages/web/src/routes/task-thread
+   npm test -- --project web packages/web/src/routes/task-thread
    ```
    `review-panel.test.tsx` (`[data-slot="working-indicator"]`) is the specific assertion
-   that proves the DOM handle survived the rename.
-   **Known environmental caveat:** React component tests in this sandbox fail on
-   `React.act` / `node:` resolution errors unrelated to any change. If that is what the
-   output shows, say so and quote it — do not report the suite as passing, and fall back to
-   step 4 for the component-level evidence.
+   that proves the DOM handle survived the rename. **It runs, and it passes** — verified at
+   the shipped commit, 27 files / 699 tests green for this directory plus `format.test.ts`
+   and `design-guardian.test.ts`.
+
+   > ~~**Known environmental caveat:** React component tests in this sandbox fail on
+   > `React.act` / `node:` resolution errors unrelated to any change. If that is what the
+   > output shows, say so and quote it — do not report the suite as passing, and fall back to
+   > step 4 for the component-level evidence.~~
+   >
+   > **Struck 2026-08-20: this caveat was false, and it was load-bearing in the wrong
+   > direction.** There is no sandbox limitation. `React.act is not a function` means
+   > `NODE_ENV=production` was set when `npm ci` ran, so npm installed **no devDependencies**
+   > and there was no React, no testing-library and no pinned vitest in the tree at all — the
+   > "unrelated errors" were the absence of the test stack, reported as a React bug. Anything
+   > that reproduces "even on an untouched file at clean HEAD" is evidence of an
+   > *environment*, not of an unrunnable suite: the same install feeds both. `unset NODE_ENV`
+   > before `npm ci` and the suites run. See `AGENTS.md` § Validation.
 4. **Real runtime pass — required before this is called done, not "gates green".**
    Open the cockpit on a genuinely running task (this very run is one) and observe, on
    screen:
@@ -311,9 +351,28 @@ needed**, not done.
 | --- | --- |
 | 1 — `npm run typecheck` | **clean** (contract, client, server, web) |
 | 2 — the two new pure suites | **68 passed**, 0 failed |
-| 3 — `npx vitest run packages/web/src/routes/task-thread` | **cannot be executed in this sandbox.** 17 of 25 files fail with `TypeError: React.act is not a function`, and so does an *untouched* `packages/web/src/components/pill.test.tsx` run against a clean HEAD checkout — the caveat above, confirmed rather than assumed. Restricted to the 9 DOM-free suites in that directory: **306 passed**, and the only failure is `run-reconcile.test.ts`, which fails on the same `React.act` error because it uses `renderHook`. `review-panel.test.tsx`'s `[data-slot="working-indicator"]` assertion is therefore **unverified by execution**; the slot, the `role="status"`/`aria-label="Working"` spinner and the bare `Working` headline for an empty thread are all preserved by construction and are covered as data by `live-status.test.ts`. |
-| 4 — real runtime pass | **not executed.** Outstanding. |
-| 5 — deploy class | **web-only**: `packages/web/**` + this spec, nothing under `packages/cezar/**` or `packages/contract/**`. |
+| 3 — the task-thread suites | ~~**cannot be executed in this sandbox.** 17 of 25 files fail with `TypeError: React.act is not a function`, and so does an *untouched* `packages/web/src/components/pill.test.tsx` run against a clean HEAD checkout — the caveat above, confirmed rather than assumed. Restricted to the 9 DOM-free suites in that directory: **306 passed**… `review-panel.test.tsx`'s `[data-slot="working-indicator"]` assertion is therefore **unverified by execution**.~~ **Retracted 2026-08-20 — see the correction at the top.** `NODE_ENV=production` had made `npm ci` skip every devDependency, so the test stack was simply absent. With `NODE_ENV` unset the suites run: `npm test -- --project web packages/web/src/routes/task-thread packages/web/src/lib/format.test.ts packages/web/src/design-guardian.test.ts` → **27 files / 699 tests, all passed**, including `review-panel.test.tsx`'s working-indicator assertion and the `no-tick-in-thread-containers` guardian rule. Whole web project: **174 files / 3782 tests green.** |
+| 3b — the rest of the gate suite | `npm run typecheck`, `npm test`, `npm run test:unit`, `npm run build` (incl. `check:pack`) and `npm run test:package` — **all green**. One unrelated red: `packages/cezar/src/knowledge/catalog.test.ts` C18 index-build perf budget, which is **pre-existing** (reproduced at clean HEAD with this work stashed) — a machine-speed benchmark reading 61–68 ms/MiB against a 40 ms line on a box at load average 5–7 across 8 cores. Left alone: out of scope, and loosening it would gut a deliberate guardrail. |
+| 4 — real runtime pass | **NOT EXECUTED. Still outstanding** — this is the single reason the status above says *QA needed* rather than *done*. Tracked as workspace todo `98bbd957` (`cezar todo list`), spec-linked, with the four on-screen acceptance checks from § Verification 4 written into it. |
+| 5 — deploy class | **web-only**: `packages/web/**` + this spec, nothing under `packages/cezar/**` or `packages/contract/**`. Per `AGENTS.md` this is the class that swaps into `/opt/cezar` with no `systemctl restart`, and is therefore safe to ship from inside a live session. |
+
+### What shipped, and where
+
+**Commit `d353944c`** — *"feat: a running task says what it is doing, and for how long"* — on
+`origin/main` (pushed `817b6971..d353944c`), one commit for the whole feature, referencing this
+spec. Ten files, +921 / −17:
+
+| File | |
+| --- | --- |
+| `packages/web/src/lib/format.ts` (+ `.test.ts`) | `formatDuration(ms)` beside `shortAge`/`compactTokens` |
+| `packages/web/src/components/live-duration.tsx` | the ticking leaf — `useNow(1000)` + `formatDuration` |
+| `packages/web/src/routes/task-thread/live-status.ts` (+ `.test.ts`) | `liveStatus()`, `lastEventAt()`, `lastLine()`, and the exported thresholds `QUIET_MS` / `STALE_MS` / `IDLE_TIMEOUT_MS` |
+| `packages/web/src/routes/task-thread/thread-items.tsx` | `WorkingIndicator` → `RunStatusLine`, `data-slot="working-indicator"` kept |
+| `packages/web/src/routes/task-thread/task-thread.tsx` | wires run + thread + events into the line |
+| `packages/web/src/routes/task-thread/run-header.tsx` | `<LiveDuration>` beside the status pill |
+| `packages/web/src/design-guardian.test.ts` | the `no-tick-in-thread-containers` rule pinning risk R2 |
+
+No contract change, no persisted field, no migration — as designed.
 
 Two implementation notes that differ from the sketch above, both deliberate:
 
