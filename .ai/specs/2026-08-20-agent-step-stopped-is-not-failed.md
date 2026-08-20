@@ -1,8 +1,25 @@
 # A step cezar stopped is not a step that failed
 
-**Status:** implemented 2026-08-20. Extends
-`.ai/specs/2026-08-20-agent-step-inactivity-timeout.md` (implemented `e3f542df`), which fixed the
-CAUSE of the reported kills. This spec fixes the CONSEQUENCE that one left untouched.
+**Status: IMPLEMENTED, DEPLOYED and LIVE 2026-08-20 — one verification step still open
+(the in-the-wild stop, see § Verification).**
+
+Commit `62a41d30`, pushed to `origin/main` (confirmed on the remote by `git ls-remote origin
+refs/heads/main`, not by a local ref). Built and swapped into `/opt/cezar` at 13:26–13:27 UTC;
+`/opt/cezar/.deployed-commit` = `62a41d30…`. It is genuinely live, not merely staged: the service
+process started **13:28:09 UTC, after the swap**, and the deployed artefacts carry the change —
+`dist/core/agent-runner.js` has `inactivity`, `dist/workflows/run.js` has `stopReason`,
+`dist/core/pi-runner.js` has `defaultIdleTimeoutMs`, and the web bundle
+(`web/dist/assets/task-thread-*.js`) has the new banner string "the agent went silent, work is
+incomplete".
+
+**What is NOT verified:** no production run has been stopped under this code yet, so the
+`review` + `stopReason` + resume-once path is verified by unit and engine-level test only, never
+by a live stop. Do not upgrade this line without that observation. Tracked as a todo in the cezar
+project; the sibling in-the-wild confirmation for `e3f542df` is todo `e1a111a1`.
+
+Extends `.ai/specs/2026-08-20-agent-step-inactivity-timeout.md` (implemented `e3f542df`), which
+fixed the CAUSE of the reported kills. This spec fixes the CONSEQUENCE that one left untouched —
+and corrects three claims that spec made, marked in place there.
 
 ## TLDR
 

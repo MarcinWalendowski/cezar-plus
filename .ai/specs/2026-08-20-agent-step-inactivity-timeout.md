@@ -1,13 +1,39 @@
 # A long step is not a hung step: bound agent runs by SILENCE, not total duration
 
-**Status: IMPLEMENTED and DEPLOYED 2026-08-20 — one verification step still open (§ 4).**
+**Status: IMPLEMENTED and DEPLOYED 2026-08-20 — one verification step still open (§ 4),
+and PARTIALLY CORRECTED the same day by `62a41d30` (see the correction notice below).**
+
+> **Corrected 2026-08-20 by commit `62a41d30`
+> (`.ai/specs/2026-08-20-agent-step-stopped-is-not-failed.md`).** Three claims this spec makes
+> were false when it was written, and are marked at each site below rather than only here:
+>
+> 1. **"all three runners" was not all of them.** `pi-runner.ts` was never converted, so a `pi`
+>    step kept the original 30-minute WALL CLOCK — the exact defect this spec exists to remove,
+>    surviving on the one backend nobody enumerated. Converted in `62a41d30`; there are FOUR
+>    runners.
+> 2. **"same SIGTERM → SIGKILL escalation" was not the same.** The deadline handler destroyed
+>    `stdout` immediately, so the 10s grace window bought nothing and the CLI's parting frames
+>    (final message, handoff write, `CEZ:SPEC_PATH`) were dropped exactly when they mattered
+>    most. It now drains until the stream really ends. The "One note on the tests as built" at
+>    the end of § Verification, executed described that destruction as a property to work
+>    around; it was a defect.
+> 3. **The CONSEQUENCE of a stop was left wrong.** This spec removed the false positive but not
+>    the false LABEL: a genuinely stopped step was still recorded `failed`, still failed the
+>    whole run, and still abandoned the chain's remaining steps into `continue-N` chat.
+>    `62a41d30` gives the stop a `stopReason`, parks the run at `review`, leaves later steps
+>    `pending`, and re-enters the stopped step once.
+>
+> The deployed commit has also moved on: `/opt/cezar/.deployed-commit` is now `62a41d30`
+> (swapped 13:26–13:27 UTC, service restarted 13:28:09 UTC), not `e3f542df`. § 4 below is still
+> open and is tracked by todo `e1a111a1`.
 
 Commit `e3f542df`, pushed to `origin/main`, built and swapped into `/opt/cezar` at 12:47:07 UTC
 (`/opt/cezar/.deployed-commit` = `e3f542df9bf586bcd76ac830d0870a661bd095be`;
 `DEFAULT_RUN_IDLE_TIMEOUT_MS` and the new "produced no output for" message are present in all three
-deployed runners). §§ 1–3 of Verification executed and recorded below, including the red-without-
-the-fix proof. **§ 4 — the in-the-wild confirmation that a chain step actually survives past 30
-minutes — has NOT been observed yet**, because no step has run that long since the swap. Until it
+deployed runners — ~~all~~ **three of the four**, see the correction above). §§ 1–3 of Verification
+executed and recorded below, including the red-without-the-fix proof. **§ 4 — the in-the-wild
+confirmation that a chain step actually survives past 30 minutes — has NOT been observed yet**,
+because no step has run that long since the swap. Until it
 has, the fix is verified by unit test and by inspection of the deployed artifact, not by a live
 long step. What to look for: `produced no output for 30m` must appear only for a genuinely silent
 agent, never for one that is streaming. Do not upgrade this line without that observation.
@@ -65,11 +91,22 @@ Both steps completed real work; neither failed. `implement` produced the entire 
 fix. The label is false, and — because a failed step stops the chain through `runError` — a
 30-minute step now ends the run.
 
+> **Note added 2026-08-20 (`62a41d30`).** This spec fixes only the first half of that sentence:
+> the false positive. The second half — a stop ending the run and killing the chain — stayed true
+> after `e3f542df` and is fixed in
+> `.ai/specs/2026-08-20-agent-step-stopped-is-not-failed.md`.
+
 ## Solution
 
 **One idea: the deadline measures SILENCE.** Arm it at spawn as today, and re-arm it every time a
-stream line arrives from the agent. Nothing else changes: same constant, same SIGTERM → SIGKILL
-escalation, same `timeoutMs: 0` opt-out, same event shape.
+stream line arrives from the agent. Nothing else changes: same constant, ~~same SIGTERM → SIGKILL
+escalation~~, same `timeoutMs: 0` opt-out, same event shape.
+
+> **Corrected 2026-08-20 by `62a41d30`.** "Same SIGTERM → SIGKILL escalation" was not true of the
+> code this spec shipped into: the deadline handler called `stdout.destroy()` and the read loop
+> broke on the flag, so the grace window drained nothing. The escalation is real only after
+> `62a41d30`, which drains until the stream ends. The event shape also changed there — `error`
+> now carries `reason: AgentStopReason` when cezar initiated the stop.
 
 ### Why not simply `timeoutMs: 0` for every step
 
@@ -103,8 +140,15 @@ spawn ──► arm(limitMs) ──┐
 | `core/codex-app-server-runner.ts` | same re-arm on each decoded message |
 | `core/opencode-server-runner.ts` | same re-arm on each event |
 | `workflows/run.ts` | unchanged — `timeoutMs: interactive ? 0 : undefined` now means the right thing |
+| ~~(missing)~~ `core/pi-runner.ts` | **NOT converted by this spec — the omission was the bug.** Same re-arm added later by `62a41d30` |
 
 No config, no persisted field, no contract change.
+
+> **Corrected 2026-08-20 by `62a41d30`.** This table is the whole reason `pi` kept the wall clock:
+> it enumerated the runners by hand and stopped at three. `62a41d30` adds `CEZ_RUN_IDLE_TIMEOUT_MS`
+> (config), `stopReason` on step and run (persisted), and a `reason` field on the runner error
+> event (contract) — so "no config, no persisted field, no contract change" describes `e3f542df`
+> only, not the mechanism as it stands today.
 
 ## Risks
 
@@ -144,10 +188,17 @@ AssertionError: expected [ 'SIGTERM' ] to deeply equal []
 
   The old wall clock kills a streaming agent — the production failure, reproduced in a unit test.
 
-One note on the tests as built: the "goes quiet" case asserts SIGTERM and `child.killed`, not the
+~~One note on the tests as built: the "goes quiet" case asserts SIGTERM and `child.killed`, not the
 SIGTERM→SIGKILL escalation. Consuming stdout means the destroyed stream ends the read loop, whose
 `finally` clears the kill timer before fake time reaches it. Escalation is pinned by the
-pre-existing `timeoutMs: 20` case, which writes no output.
+pre-existing `timeoutMs: 20` case, which writes no output.~~
+
+> **Corrected 2026-08-20 by `62a41d30`.** The paragraph above rationalised a DEFECT as a test
+> constraint. "The destroyed stream ends the read loop" was not an artefact of consuming stdout in
+> a test — it was the production grace window failing to drain, throwing away the agent's final
+> frames on every stop. The destroy is gone; the loop now drains to real end-of-stream, and
+> `claude-cli-runner.test.ts` pins it with a case that goes red if either the `destroy()` or the
+> early break is restored.
 
 ## Deployment, executed
 

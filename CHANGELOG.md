@@ -38,6 +38,49 @@
   its previous behaviour.
 
 ## 🐛 Fixed
+- 🐛 **A step cezar stopped was recorded as a step that failed — and took the rest of the
+  workflow down with it.** Spec `.ai/specs/2026-08-20-agent-step-stopped-is-not-failed.md`, commit
+  `62a41d30`.
+
+  The inactivity fix below stopped steps being killed for working hard. It left untouched what
+  happens when a stop is genuinely warranted, and there three things were still wrong, all of them
+  visible on run `9d09795a`: the step was recorded `failed`, indistinguishable from a real agent
+  failure; the whole RUN was marked `failed`; and the workflow's remaining steps were abandoned,
+  the run degrading into `continue-N` chat. That run's stopped `implement` step had its code
+  written, its gates green and its commit made, and the owner still had to hand-annotate the
+  handoff to explain that it had not failed.
+
+  A stop cezar chose is not an outcome the agent produced. The runner now says **why**: the `error`
+  event carries `reason: AgentStopReason` when cezar initiated the stop and nothing at all when the
+  agent genuinely failed, emitted through one shared `stopMessage()` so log, record and cockpit
+  read the same sentence. The engine acts on it — the step records `stopReason: 'inactivity'`, the
+  run parks at `review` (never `failed` + `runError`, following the precedent `stopReason: 'budget'`
+  set for exactly this category of fact), the steps after the stopped one are never touched so the
+  chain is still there to finish, and the stopped step is re-entered **once** against the same
+  session with a prompt telling it to land what it has. A second stop is terminal. The cockpit
+  shows amber "stopped" rather than a failure, with a banner saying the work is incomplete.
+
+  `RunStatus` and `StepStatus` are deliberately **not** widened — both are published unions in a
+  released npm package, and adding a member breaks every consumer switching over them exhaustively;
+  `stopReason` carries the fact `status` cannot, so an older cockpit renders exactly what it renders
+  today.
+
+  Two defects found while implementing, fixed here. **The SIGTERM→SIGKILL grace window was a lie**:
+  the handler destroyed `stdout` at once and the read loop broke on the flag, so the 10s window
+  bought nothing and the CLI's parting frames — final message, handoff write, `CEZ:SPEC_PATH`
+  declaration — were thrown away exactly when they mattered most; it now drains until the stream
+  really ends. And **`pi-runner` was never converted** by the fix below, which changed claude, codex
+  and opencode only — so a `pi` step was still killed for DURATION: the original defect surviving on
+  the one backend nobody enumerated.
+
+  `CEZ_RUN_IDLE_TIMEOUT_MS` gives the bound the operator seam it never had (30 minutes was a
+  hard-coded constant, so tuning it meant patching source). An unparseable or negative value reads
+  as unset, never as `0` — a typo must not silently disable a safety bound.
+
+  Known residual gap, deliberately out of scope and documented in the spec: the workflow's **last**
+  agent step is interactive and spawned with `timeoutMs: 0`, so it carries no inactivity bound at
+  all. `IDLE_TIMEOUT_MS` covers it between turns; a turn that wedges mid-flight there is unbounded.
+
 - 🐛 **A run could be marked `done` while five of its six workflow steps had never run.** Spec
   `.ai/specs/2026-08-20-chain-integrity-restart-and-continuation.md`, commits `ee74a158` /
   `5774bf95`.

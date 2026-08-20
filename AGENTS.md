@@ -90,12 +90,45 @@ change of workload shape, and the review it needs is a sweep of every timeout, c
 **A bound on a working process must measure health, not elapsed time.** The 30-minute step cap
 was a `setTimeout` armed at spawn that nothing ever reset, so it killed a busy agent and a
 wedged one identically, and wrote `failed` on both. It now re-arms on every line the agent
-emits — `DEFAULT_RUN_IDLE_TIMEOUT_MS`, all three runners — and says `produced no output for
-30m`, a diagnosis rather than an accusation. The reaping guarantee is unchanged, because a
-wedged CLI holding a `maxParallel` slot is exactly the silent case. Note what was NOT done:
-`timeoutMs: 0` for every step would have removed the only thing that reaps a non-interactive
-step, which `IDLE_TIMEOUT_MS` never covers because such a step is never parked at `waiting`.
-Bound the failure mode you actually mean; do not delete the bound because it misfires.
+emits — `DEFAULT_RUN_IDLE_TIMEOUT_MS`, ~~all three runners~~ **all four runners** — and says
+`produced no output for 30m`, a diagnosis rather than an accusation. The reaping guarantee is
+unchanged, because a wedged CLI holding a `maxParallel` slot is exactly the silent case. Note
+what was NOT done: `timeoutMs: 0` for every step would have removed the only thing that reaps a
+non-interactive step, which `IDLE_TIMEOUT_MS` never covers because such a step is never parked
+at `waiting`. Bound the failure mode you actually mean; do not delete the bound because it
+misfires. (**Corrected 2026-08-20 by `62a41d30`:** "all three runners" was written from the
+spec's own file table, which enumerated claude, codex and opencode and stopped. `pi-runner.ts`
+was never converted, so a `pi` step kept the wall clock for another day — the defect surviving
+on the one backend nobody counted. This is the "grep the TYPE, not the field" lesson below,
+arriving as a runner instead of a construction site: when you convert a mechanism, enumerate
+its implementations from the type or the factory, never from prose.)
+
+**A stop you chose is not a failure they produced — and a record that cannot tell them apart
+costs you the work.** `e3f542df` fixed why steps were being stopped; it left what a stop MEANS
+untouched, and that was the expensive half. A stopped step was written `failed`, the run was
+written `failed`, and the chain's remaining steps were abandoned into `continue-N` chat — so
+on run `9d09795a` a step whose code was written, gates green and commit made read as a defect
+in the work rather than a decision by the harness, and the owner had to hand-annotate the
+handoff to say so. The runner now reports `reason` on the `error` event when cezar initiated
+the stop and nothing at all when the agent genuinely failed; the engine parks the run at
+`review` with `stopReason`, leaves later steps `pending`, and re-enters the stopped step once
+against the same session (`.ai/specs/2026-08-20-agent-step-stopped-is-not-failed.md`). Two
+rules generalise. **Every mechanism that terminates someone else's work owes the record a
+reason** — an outcome field alone cannot carry the difference between "it broke" and "we
+stopped it", and the next reader will believe the field. And **when you widen what a system
+can say, do not widen a published union to say it**: `RunStatus`/`StepStatus` ship in an npm
+package and every exhaustive `switch` downstream breaks; a new optional field beside the
+status carries the fact and leaves old consumers rendering exactly what they render today.
+
+**A grace window that does not drain is not a grace window.** The SIGTERM→SIGKILL escalation
+looked correct and bought nothing: the deadline handler called `stdout.destroy()` immediately
+and the read loop broke on the flag, so the ten seconds bought for the CLI to land its final
+message, write its handoff and declare `CEZ:SPEC_PATH` discarded all of it — at the one moment
+the output matters most, on a process being killed mid-work. Fixed in `62a41d30` (drain to real
+end-of-stream), and pinned by a test that goes red if either the `destroy()` or the early break
+returns. The spec that shipped the bug had even written the behaviour down, as a note explaining
+why a test could not assert escalation. When a test cannot observe the thing the code claims to
+do, the first hypothesis is that the code does not do it — not that the harness is awkward.
 
 **Find every construction site of a shared in-memory object — grep the TYPE, not the
 field.** `ActiveRun` is built in `execute` AND in `runContinuation`; #811 populated
