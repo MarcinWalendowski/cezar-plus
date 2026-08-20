@@ -1,5 +1,5 @@
 import { loadWorkflows } from '../workflows/load.ts';
-import { stepsIssue, type WorkflowDef } from '../workflows/types.ts';
+import { DEFAULT_WORKFLOW_NAME, stepsIssue, type WorkflowDef } from '../workflows/types.ts';
 import type { RunStore } from '../runs/store.ts';
 import type { RunManager, StartRunInput } from '../workflows/run.ts';
 import type { GithubCandidate } from './github-poller.ts';
@@ -51,8 +51,8 @@ export async function launchAutomationRun(options: {
     workflow = { name: '(planned)', source: 'built-in', steps: definition.task.steps };
   } else {
     const loaded = await loadWorkflows(options.root);
-    workflow = loaded.workflows.find((item) => item.name === (definition.task.workflow ?? 'quick-task'));
-    if (!workflow) throw new Error(`unknown workflow: ${definition.task.workflow ?? 'quick-task'}`);
+    workflow = loaded.workflows.find((item) => item.name === (definition.task.workflow ?? DEFAULT_WORKFLOW_NAME));
+    if (!workflow) throw new Error(`unknown workflow: ${definition.task.workflow ?? DEFAULT_WORKFLOW_NAME}`);
   }
   const input: StartRunInput = {
     task: renderAutomationTask(definition, candidate),

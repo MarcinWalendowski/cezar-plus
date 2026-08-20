@@ -32,11 +32,11 @@ describe('bookmarkletRunBody', () => {
       },
     ],
     [
-      'no skill → quick-task (legacy verbatim)',
+      'no skill → spec-to-deploy (the default workflow)',
       params({ ref: 'do the thing' }),
       {
         task: 'do the thing',
-        workflow: 'quick-task',
+        workflow: 'spec-to-deploy',
         model: undefined,
         runner: undefined,
         variants: undefined,
@@ -61,7 +61,7 @@ describe('bookmarkletRunBody', () => {
     const sent = JSON.parse(
       JSON.stringify(bookmarkletRunBody(params({ ref: 'x' }), 'codex', 'claude')),
     ) as CreateRunInput
-    expect(sent).toEqual({ task: 'x', workflow: 'quick-task', runner: 'codex' })
+    expect(sent).toEqual({ task: 'x', workflow: 'spec-to-deploy', runner: 'codex' })
   })
 })
 
@@ -80,7 +80,7 @@ describe('deepLinkToast', () => {
   })
   it('an unknown skill on a plain prefill is called out honestly', () => {
     expect(deepLinkToast({ kind: 'prefill' }, 'ghost')).toEqual({
-      message: 'Unknown skill "ghost" — prefilled for quick-task; review and press Start',
+      message: 'Unknown skill "ghost" — prefilled for spec-to-deploy; review and press Start',
       tone: 'danger',
     })
   })

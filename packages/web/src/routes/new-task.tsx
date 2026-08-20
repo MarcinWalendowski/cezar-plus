@@ -465,7 +465,7 @@ export function NewTaskRoute() {
   }, [config.isPending, defaultRunner, providers.isPending, providersReady, runner]) // eslint-disable-line react-hooks/exhaustive-deps
   // The prefill toast waits for the pickers' data: whether the skill exists decides the
   // wording, and the unknown-skill case rewrites the draft the way legacy did (intent into
-  // the text, quick-task as the source — its planner resolves skills from prose).
+  // the text, the default workflow as the source).
   useEffect(() => {
     if (notice === null || !sourcesReady) return
     setNotice(null)
@@ -476,8 +476,8 @@ export function NewTaskRoute() {
     if (unknownSkill !== '') {
       update({
         text: unknownSkillPrefillText(deepLink.skill, deepLink.ref),
-        ...(workflowList.some((w) => w.name === 'quick-task')
-          ? { source: { source: 'workflow', ref: 'quick-task' } as TaskSource }
+        ...(workflowList.some((w) => w.name === 'spec-to-deploy')
+          ? { source: { source: 'workflow', ref: 'spec-to-deploy' } as TaskSource }
           : {}),
       })
     }

@@ -182,7 +182,7 @@ function AutomationEditor({ automation, onSaved }: { automation?: AutomationDefi
           expectedRevision: automation.revision,
         })
       } else {
-        await createAutomation({ name, events: ['issue.opened'], intervalSeconds: 300, filters: { lookbackDays: 7, maxRecords: 25 }, task: { prompt, workflow: 'quick-task' }, enable })
+        await createAutomation({ name, events: ['issue.opened'], intervalSeconds: 300, filters: { lookbackDays: 7, maxRecords: 25 }, task: { prompt, workflow: 'spec-to-deploy' }, enable })
       }
       onSaved()
     } catch (cause) { setError(String(cause)) }

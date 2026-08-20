@@ -613,14 +613,18 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
 /**
  * The workflow a run FLOORS to when it names none — the "default workflow" (owner decision
  * 2026-08-19: `spec-to-deploy` replaces `quick-task` here). This is the single source of truth for
- * that name: the user-initiated floors (`POST /runs` / composer, the inbox ▶ Run, the CLI) all
- * read it, so the default moves in one edit instead of drifting across hardcoded literals.
+ * that name: every floor reads it, so the default moves in one edit instead of drifting across
+ * hardcoded literals.
  *
- * **Deliberately NOT wired to the unattended integration paths** — automations, GitHub-triggered
- * tasks and the bookmarklet keep their explicit `quick-task` fallback. `spec-to-deploy` can
- * `git push` and runs an unrestricted-Bash deploy step; a run that a person did not consciously
- * start (a CI event, a note typed on a phone) must not inherit that by default. Those paths name a
- * workflow explicitly or floor to the no-ceremony `quick-task`, on purpose.
+ * **Owner decision 2026-08-20: default EVERYTHING to this workflow — user-initiated AND unattended.**
+ * The `POST /runs`/composer, inbox ▶ Run and CLI floors read this constant; the automation
+ * fallback (`automations/task-template.ts`) reads it too; and the web integration fallbacks
+ * (GitHub-triggered tasks, the bookmarklet, the unknown-skill prefill) now hardcode `spec-to-deploy`
+ * to match. An earlier revision deliberately kept those unattended paths on `quick-task` so a
+ * CI-triggered or phone-note run could not inherit `git push` + the unrestricted-Bash deploy step;
+ * the owner has since asked for the full pipeline everywhere, so that carve-out is removed. (The
+ * deploy step still degrades safely: it discovers a repo's own deploy script and stops if there is
+ * none, rather than improvising.)
  */
 export const DEFAULT_WORKFLOW_NAME = SPEC_TO_DEPLOY_WORKFLOW.name;
 

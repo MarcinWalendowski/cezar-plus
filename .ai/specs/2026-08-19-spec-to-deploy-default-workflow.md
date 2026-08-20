@@ -5,8 +5,10 @@ runs the repo's existing deploy scripts). Amended 2026-08-19: split into six ste
 **run tests** and a **commit & push/merge** step (scoped git+gh grant) between implement and
 document, per owner request. Amended 2026-08-19 (P2): `spec-to-deploy` is now **the default
 workflow** — it replaces `quick-task` as the floor for user-initiated runs (composer/None,
-todo ▶ Run, CLI) via a new `DEFAULT_WORKFLOW_NAME` constant; unattended integration paths
-(automations, GitHub, bookmarklet) deliberately stay on `quick-task`.
+todo ▶ Run, CLI) via a new `DEFAULT_WORKFLOW_NAME` constant. Amended 2026-08-20 (P3): **default
+EVERYTHING** — the earlier carve-out that kept the unattended paths (automations, GitHub-triggered
+tasks, bookmarklet, unknown-skill prefill) on `quick-task` is REMOVED; they now default to
+`spec-to-deploy` too, per owner instruction "default everything to this workflow".
 
 ## TLDR
 
@@ -106,14 +108,22 @@ None new. Reuses `WorkflowDef` / `workflowStepSchema`. The composer's workflow l
   pill resolves through), `workflows/run.ts` `resolveTodoWorkflow` (todo ▶ Run / autostart),
   and the CLI default in `index.ts`. UI truthfulness: the composer "None" subtitle now reads
   "Runs spec-to-deploy", and the `WORKFLOW_DISPLAY_NAMES` `default` label moves from
-  `quick-task` → `spec-to-deploy` (`web/src/lib/tasks-table.ts`). **Deliberately left on
-  `quick-task`:** the unattended integration fallbacks — automations (`task-template.ts`),
-  GitHub (`web/src/lib/github-task.ts`), bookmarklet (`web/src/routes/new-task-autostart.ts`)
-  — so a run a person did not consciously start cannot inherit push + unrestricted-deploy.
-  Tests updated: `run-source-fallback.test.ts`, `tasks-table.test.ts`, and the composer
-  copy/label assertions. **Done** (backend + web typecheck green, backend + `tasks-table` +
-  composer pure-fn tests green; `new-task.test.tsx` component render is blocked by the
-  sandbox's `React.act` env issue — QA in CI).
+  `quick-task` → `spec-to-deploy` (`web/src/lib/tasks-table.ts`). Initially left the unattended
+  integration fallbacks on `quick-task` (reversed in P3). **Done + deployed 2026-08-20.**
+
+- **P3 — default EVERYTHING (owner instruction 2026-08-20 "default everything to this
+  workflow").** Removed the P2 carve-out: the unattended fallbacks now default to `spec-to-deploy`
+  too. Backend automations (`automations/task-template.ts`) reads `DEFAULT_WORKFLOW_NAME`; the web
+  integration fallbacks hardcode `spec-to-deploy` to match — GitHub (`web/src/lib/github-task.ts`),
+  bookmarklet (`web/src/routes/new-task-autostart.ts`), the automations-create default
+  (`web/src/routes/automations/automations.tsx`), and the composer unknown-skill prefill
+  (`web/src/routes/new-task.tsx`, incl. its toast copy). Reversed the `DEFAULT_WORKFLOW_NAME` doc
+  comment's "not wired to unattended paths" note. Tests updated: `github-task.test.ts`,
+  `new-task-autostart.test.ts`, `github.test.tsx`, `new-task.test.tsx`. Trade-off accepted: a
+  CI/webhook/bookmarklet-triggered run can now inherit `git push` + the unrestricted-Bash deploy
+  step; the deploy step still degrades safely (discovers a repo's deploy script, stops if none).
+  **Done** (backend + web typecheck green; backend + web pure-fn tests green; component tests are
+  sandbox-`React.act`-blocked — QA in CI).
 
 ## Risks
 

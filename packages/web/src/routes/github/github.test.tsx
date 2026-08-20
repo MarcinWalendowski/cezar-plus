@@ -1158,7 +1158,7 @@ describe('the hand-to-agent backend pills (#401)', () => {
     fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
 
     await waitFor(() => expect(postedRun(sent)).toBeDefined())
-    expect(postedRun(sent)).toMatchObject({ workflow: 'quick-task' })
+    expect(postedRun(sent)).toMatchObject({ workflow: 'spec-to-deploy' })
     expect((postedRun(sent) as { runner?: string }).runner).toBe('claude')
     expect((postedRun(sent) as { model?: string }).model).toBeUndefined()
   })
@@ -1193,7 +1193,7 @@ describe('the hand-to-agent backend pills (#401)', () => {
 
     await waitFor(() => expect(postedRun(sent)).toBeDefined())
     expect(postedRun(sent)).toMatchObject({
-      workflow: 'quick-task',
+      workflow: 'spec-to-deploy',
       runner: 'codex',
       model: 'gpt-future',
     })
@@ -1308,7 +1308,7 @@ describe('the hand-to-agent backend pills (#401)', () => {
     fireEvent.click(run)
 
     await waitFor(() => expect(postedRun(sent)).toBeDefined())
-    expect(postedRun(sent)).toMatchObject({ runner: 'codex', workflow: 'quick-task' })
+    expect(postedRun(sent)).toMatchObject({ runner: 'codex', workflow: 'spec-to-deploy' })
   })
 
   it('excludes a connected disabled default runner and sends the enabled fallback', async () => {
@@ -1333,7 +1333,7 @@ describe('the hand-to-agent backend pills (#401)', () => {
     fireEvent.click(run)
 
     await waitFor(() => expect(postedRun(sent)).toBeDefined())
-    expect(postedRun(sent)).toMatchObject({ runner: 'codex', workflow: 'quick-task' })
+    expect(postedRun(sent)).toMatchObject({ runner: 'codex', workflow: 'spec-to-deploy' })
   })
 })
 
@@ -1407,7 +1407,7 @@ describe('the hand-to-agent agent account', () => {
     fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
 
     await waitFor(() => expect(postedRun(sent)).toBeDefined())
-    expect(postedRun(sent)).toMatchObject({ workflow: 'quick-task', agentProfile: 'klaudiusz' })
+    expect(postedRun(sent)).toMatchObject({ workflow: 'spec-to-deploy', agentProfile: 'klaudiusz' })
   })
 
   /**
@@ -1663,7 +1663,7 @@ describe('the hand-to-agent pickers (#385)', () => {
 })
 
 describe('the hand-to-agent run (legacy three-way body)', () => {
-  it('nothing selected → quick-task, and the queued affordance links the new run', async () => {
+  it('nothing selected → spec-to-deploy (the default), and the queued affordance links the new run', async () => {
     const sent = stubFetch()
     await openDetail()
     await waitForAgentRunEnabled()
@@ -1672,7 +1672,7 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
 
     await waitFor(() => expect(document.querySelector('[data-slot="gh-queued"]')).not.toBeNull())
     const posted = sent.find((request) => request.method === 'POST' && request.path === '/api/v1/runs')
-    expect(posted?.body).toMatchObject({ workflow: 'quick-task' })
+    expect(posted?.body).toMatchObject({ workflow: 'spec-to-deploy' })
     expect((posted?.body as { task: string }).task).toContain('Fix GitHub issue #142')
     expect((posted?.body as { task: string }).task).toContain(ISSUE_142.url)
 
@@ -1916,9 +1916,9 @@ describe('a remembered pick the catalog no longer has (#408)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
     await waitFor(() => expect(document.querySelector('[data-slot="gh-queued"]')).not.toBeNull())
-    // The run falls back to quick-task instead of 404-ing on a workflow that is gone.
+    // The run falls back to the default workflow (spec-to-deploy) instead of 404-ing on a gone one.
     expect(sent.find((request) => request.method === 'POST' && request.path === '/api/v1/runs')?.body)
-      .toMatchObject({ workflow: 'quick-task' })
+      .toMatchObject({ workflow: 'spec-to-deploy' })
     // Dropped from storage too — otherwise the next reload restores it right back.
     expect(readFollowupSelection().workflow).toBeNull()
   })

@@ -33,7 +33,7 @@ export function bookmarkletRunBody(
   const source: TaskSource =
     params.skill !== ''
       ? { source: 'skill', ref: params.skill }
-      : { source: 'workflow', ref: 'quick-task' }
+      : { source: 'workflow', ref: 'spec-to-deploy' }
   return buildCreateRunBody({
     task: params.ref,
     source,
@@ -70,7 +70,7 @@ export function deepLinkToast(
   }
   if (unknownSkill !== '') {
     return {
-      message: `Unknown skill "${unknownSkill}" — prefilled for quick-task; review and press Start`,
+      message: `Unknown skill "${unknownSkill}" — prefilled for spec-to-deploy; review and press Start`,
       tone: 'danger',
     }
   }

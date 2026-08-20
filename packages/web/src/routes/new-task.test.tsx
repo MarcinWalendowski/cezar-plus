@@ -1438,18 +1438,18 @@ describe('bookmarklet auto-start', () => {
     expect(screen.getByRole('link', { name: 'Configure providers' })).toBeTruthy()
   })
 
-  it('ref only (no skill) + valid key → quick-task, exactly like legacy', async () => {
+  it('ref only (no skill) + valid key → spec-to-deploy (the default workflow)', async () => {
     serve()
     renderNewTask('/new?ref=hello&auto=1&key=k-real')
     await waitFor(() => expect(screen.queryByTestId('elsewhere')).not.toBeNull())
-    expect(runsPosted().map((r) => r.body)).toEqual([{ task: 'hello', workflow: 'quick-task' }])
+    expect(runsPosted().map((r) => r.body)).toEqual([{ task: 'hello', workflow: 'spec-to-deploy' }])
   })
 
   it('the legacy `task` alias for ref still auto-starts', async () => {
     serve()
     renderNewTask('/new?task=hello&auto=1&key=k-real')
     await waitFor(() => expect(screen.queryByTestId('elsewhere')).not.toBeNull())
-    expect(runsPosted().map((r) => r.body)).toEqual([{ task: 'hello', workflow: 'quick-task' }])
+    expect(runsPosted().map((r) => r.body)).toEqual([{ task: 'hello', workflow: 'spec-to-deploy' }])
   })
 
   it('an unknown skill with a valid key STILL starts (legacy never validated it client-side)', async () => {
@@ -1510,16 +1510,16 @@ describe('bookmarklet auto-start', () => {
     expect(keyFetched()).toBe(false)
   })
 
-  it('an unknown skill on the prefill path → honest toast + the legacy quick-task embedding', async () => {
+  it('an unknown skill on the prefill path → honest toast + the default-workflow embedding', async () => {
     serve()
     renderNewTask('/new?skill=ghost&ref=hello')
-    await screen.findByText('Unknown skill "ghost" — prefilled for quick-task; review and press Start')
-    // Legacy initFromQuery verbatim: the intent goes into the text, quick-task resolves it.
+    await screen.findByText('Unknown skill "ghost" — prefilled for spec-to-deploy; review and press Start')
+    // Legacy initFromQuery verbatim: the intent goes into the text, the default workflow resolves it.
     expect(textarea().value).toBe('Use the "ghost" skill on: hello')
-    // The unknown-skill prefill path deliberately stays on `quick-task` (the no-ceremony floor),
-    // NOT the new `spec-to-deploy` default — a bookmarklet/prefill run must not silently push or
-    // deploy. `quick-task` now shows its own name (the `default` label moved to `spec-to-deploy`).
-    await pillReady('quick-task')
+    // The unknown-skill prefill path now uses the default workflow `spec-to-deploy` like every other
+    // floor (owner decision 2026-08-20: default everything). It displays as `default` via the
+    // WORKFLOW_DISPLAY_NAMES mapping.
+    await pillReady('default')
     expect(runsPosted()).toHaveLength(0)
   })
 
