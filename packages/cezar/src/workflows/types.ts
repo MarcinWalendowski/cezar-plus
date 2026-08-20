@@ -143,7 +143,14 @@ export function stepKind(step: WorkflowStepDef): 'agent' | 'check' {
  * not a chain and gets no note — that single-step case stays byte-for-byte
  * unchanged. Returns undefined for check steps.
  */
-export function chainStepNote(steps: WorkflowStepDef[], index: number): string | undefined {
+export function chainStepNote(
+  steps: WorkflowStepDef[],
+  index: number,
+  /** A step being RESUMED after a cezar restart (spec 2026-08-20, P3). The engine and the
+   *  prompt have to agree about what `CEZ:DONE` means, or a resumed step reads the handoff
+   *  file its own earlier turn wrote and concludes the whole run is achieved. */
+  opts: { resumed?: boolean } = {},
+): string | undefined {
   const step = steps[index];
   if (!step || stepKind(step) !== 'agent') return undefined;
   const total = steps.filter((s) => stepKind(s) === 'agent').length;
@@ -162,6 +169,15 @@ export function chainStepNote(steps: WorkflowStepDef[], index: number): string |
     sentences.push(
       `An earlier step in this same run may already have reported its own work done (in its ` +
         `report, or in this run's handoff file); that does not mean step ${position}'s work is done.`,
+    );
+  }
+  if (opts.resumed) {
+    sentences.push(
+      `This step was interrupted by a cezar restart and is being resumed — pick it back up rather ` +
+        `than starting it over.` +
+        (position < total
+          ? ` The remaining ${total - position} step(s) of the chain still run after it.`
+          : ''),
     );
   }
   sentences.push(

@@ -2327,3 +2327,104 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
     expect(echoed?.text).toContain('/compact please');
   }, 40_000);
 });
+
+/**
+ * P2 of spec 2026-08-20-chain-integrity-restart-and-continuation, driven end-to-end through the
+ * mock backend: a continuation's `CEZ:DONE` is a statement about ITS OWN step, not about the run.
+ *
+ * `runContinuation`'s turn-end handler read the marker with no chain guard at all, while its twin
+ * in `runAgentStep` has had one since #410. That asymmetry is what let run `be31d9e9` — a
+ * six-step `spec-to-deploy` chain whose recovery had turned it into a `continue-1` chat — emit
+ * `CEZ:DONE` after step 1 and take the whole run to `done` with five steps still pending.
+ */
+describe('a continuation cannot finish an unfinished chain (P2)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeAll(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-chain-p2-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterAll(() => {
+    manager?.dispose();
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const settled = async (id: string, timeoutMs = 30_000) => {
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + timeoutMs;
+    while (!terminal.has(store.getRun(id)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error(`run stuck at ${store.getRun(id)?.status}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+
+  it('hands the run back to the chain instead of settling it', async () => {
+    const workflow: WorkflowDef = {
+      name: 'two-step',
+      source: 'built-in',
+      steps: [
+        { id: 'one', name: 'One', prompt: '{{task}}' },
+        { id: 'two', name: 'Two', prompt: '{{task}}' },
+      ],
+    };
+    // `mock:done` makes every mock turn end with CEZ:DONE.
+    const record = manager.startRun(workflow, { task: 'mock:done do the thing', worktree: false });
+    await settled(record.id);
+    expect(store.getRun(record.id)?.status).toBe('done');
+
+    // Put the chain back into the shape recovery used to leave behind: step two never ran, and
+    // the ball is with a synthetic continuation. This is the be31d9e9 record, in miniature.
+    store.updateStep(record.id, 'two', { status: 'pending', finishedAt: undefined });
+    // `mock:done` again: this continuation ends its turn claiming ITS goal is achieved — the
+    // exact signal that used to finish the whole run.
+    expect(manager.continueRun(record.id, { text: 'mock:done carry on' })).toEqual({ ok: true });
+
+    // `worktree: false` serializes on the repo-root lease, so the continuation's session opens a
+    // beat after the call returns — wait for it to actually START before waiting for the end.
+    const started = Date.now() + 30_000;
+    while (!store.readEvents(record.id).some((e) => e.type === 'step-start' && e.stepId === 'continue-1')) {
+      if (Date.now() > started) throw new Error('continuation never started');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await settled(record.id);
+
+    const events = store.readEvents(record.id);
+    const continueEnd = events.findIndex((e) => e.type === 'step-end' && e.stepId === 'continue-1');
+    expect(continueEnd).toBeGreaterThan(-1);
+    // The chain continued: step two actually started, AFTER the continuation closed…
+    const twoStart = events.findIndex(
+      (e, i) => i > continueEnd && e.type === 'step-start' && e.stepId === 'two',
+    );
+    expect(twoStart).toBeGreaterThan(continueEnd);
+    // …and the run's own "finished" lifecycle line came only after that.
+    // The ORIGINAL run also logged one; the chain's own finish is the last.
+    const finishes = events
+      .map((e, i) => (e.type === 'lifecycle' && e.message === 'run finished' ? i : -1))
+      .filter((i) => i >= 0);
+    const finished = finishes[finishes.length - 1] ?? -1;
+    expect(finished).toBeGreaterThan(twoStart);
+    // …and no `run finished` slipped in between the continuation's close and step two starting.
+    expect(
+      events.slice(continueEnd, twoStart).some((e) => e.type === 'lifecycle' && e.message === 'run finished'),
+    ).toBe(false);
+    // No step left pending at the end — the definition of the chain being done.
+    expect(store.getRun(record.id)?.steps.filter((s) => s.status === 'pending')).toEqual([]);
+    expect(store.getRun(record.id)?.status).toBe('done');
+  }, 90_000);
+});

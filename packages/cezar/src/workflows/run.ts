@@ -52,6 +52,7 @@ import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-re
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.ts';
 import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidateTitle } from '../runs/auto-name.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
+import { defDescribesRun, firstUnfinishedStep, pendingChainSteps, stepTerminal } from '../runs/chain.ts';
 import { resolveProfileEnvForRoot } from '../workspace/agent-profiles.ts';
 import { accountUsageKey, countInflight, type InflightStep } from '../workspace/agent-account-usage.ts';
 import { resolvePoolForDispatch } from '../workspace/agent-route-select.ts';
@@ -238,6 +239,14 @@ interface ActiveRun {
    * work must be the LAST work this run does — land `review` + `stopReason: 'budget'`, not `done`.
    */
   budgetExceeded?: boolean;
+  /**
+   * A continuation ended its turn with `CEZ:DONE` while its run's CHAIN still had pending steps
+   * (spec 2026-08-20, P2). The marker is a statement about the agent's OWN step, so the session
+   * closes — but the run must be handed back to the chain, not settled. Carried on `state` for
+   * the same reason `budgetExceeded` is: the turn-end handler cannot see the post-`session.result`
+   * wrap-up that has to act on it.
+   */
+  chainHandBack?: boolean;
   /** Registry snapshot used to expand `/skill` follow-ups before a backend can
    *  mistake them for its own slash commands (#676). */
   skills?: Skill[];
@@ -557,6 +566,33 @@ const VARIANT_HINTS: Record<string, string | undefined> = {
 const RESTART_CONTINUATION_PROMPT =
   'The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.';
 
+/**
+ * The restart prompt, told where in the chain it landed (spec 2026-08-20, P3). The engine and
+ * the prompt have to say the same thing about what `CEZ:DONE` means: without the chain position
+ * a resumed step reads its own handoff notes, concludes the task is achieved and ends the run.
+ */
+export function restartContinuationPrompt(chain?: { position: number; total: number }): string {
+  if (!chain || chain.total <= 1) return RESTART_CONTINUATION_PROMPT;
+  return (
+    `${RESTART_CONTINUATION_PROMPT} This run is a chain of ${chain.total} agent steps and you are ` +
+    `resuming step ${chain.position} of ${chain.total} — finish THIS step's own work; the chain ` +
+    `continues after it.`
+  );
+}
+
+/**
+ * Where a chain picks back up (spec 2026-08-20, P1/P2) — the first definition step that has
+ * not reached a terminal state, plus the interrupted session to reattach to when there is one
+ * and it is safe. In-memory only: it rides in `pendingJobs` alongside the revived workflow and
+ * is recomputed from the record on every re-entry, so nothing about it needs persisting.
+ */
+interface ChainResumePoint {
+  /** Index into the revived `WorkflowDef.steps`. */
+  index: number;
+  /** Present only when that step already had a session this process may reattach to. */
+  resume?: { sessionId: string; profileId?: string; prompt: string };
+}
+
 interface PendingContinuation {
   stepId: string;
   sessionId: string | undefined;
@@ -599,7 +635,14 @@ export class RunManager {
   private readonly waiting = new Set<string>();
   /** Durable monitoring subset. Only the configured number receives the waiting-slot exemption. */
   private readonly monitoring = new Set<string>();
-  private readonly pendingJobs = new Map<string, { workflow: WorkflowDef; input: StartRunInput }>();
+  private readonly pendingJobs = new Map<
+    string,
+    { workflow: WorkflowDef; input: StartRunInput; resumeAt?: ChainResumePoint }
+  >();
+  /** Steps left in the chain at this run's last hand-back (spec 2026-08-20, R4). A re-entry that
+   *  does not strictly reduce it is a loop, not progress, and fails the run loudly instead of
+   *  spinning. Process-local: a restart re-arms it from the record on the first hand-back. */
+  private readonly chainReentries = new Map<string, number>();
   /** Interrupted agent turns recovered after a process restart. Unlike an
    *  explicit user Continue, these are bulk scheduler work and must re-enter
    *  through `pump()` so both workspace and per-project caps are honored. */
@@ -1143,7 +1186,7 @@ export class RunManager {
           // in the same synchronous tick as the `pendingJobs.delete` above, so no
           // handler can observe a half-dequeued run.
           const input = this.hydrateQueuedInput(runId, job.input);
-          void this.execute(runId, job.workflow, input).catch((err: unknown) => {
+          void this.execute(runId, job.workflow, input, job.resumeAt).catch((err: unknown) => {
             const message = err instanceof Error ? err.message : String(err);
             this.store.updateRun(runId, {
               status: 'failed',
@@ -1273,11 +1316,17 @@ export class RunManager {
         continue;
       }
       if (run.status === 'waiting') {
+        // The turn was over and the ball was in the user's court, so the open step really is
+        // finished — but the CHAIN may not be (spec 2026-08-20, P2). Settle the step first, then
+        // ask: if later steps are still pending, re-enter at the next one instead of calling
+        // `settleSuccess`, which would mark a six-step run `done` after one.
         for (const step of run.steps) {
           if (step.status === 'waiting' || step.status === 'running') {
             this.store.updateStep(run.id, step.id, { status: 'done', finishedAt: new Date().toISOString() });
           }
         }
+        const settled = this.store.getRun(run.id) ?? run;
+        if (await this.reenterChain(settled, 'cezar restarted')) continue;
         this.store.appendEvent(run.id, {
           type: 'lifecycle',
           message: 'cezar restarted — the open session was settled',
@@ -1285,12 +1334,26 @@ export class RunManager {
         await this.settleSuccess(run.id);
         continue;
       }
-      // `running`: the process died mid-turn. Mark it interrupted (the state
+      // `running`: the process died mid-turn. Re-enter the CHAIN first (spec 2026-08-20, P1) —
+      // resuming the interrupted step's own session at its own index, the same shape
+      // `reviveQueuedRun` already uses for a `queued` record. Before this, a restart during any
+      // non-final step silently converted the pipeline into an open-ended `continue-N` chat and
+      // the remaining steps were never going to happen.
+      if (await this.reenterChain(run, 'cezar restarted', { onlyIfMoreStepsFollow: true })) {
+        continue;
+      }
+      // Nothing revivable: fall back to the continuation path. Mark it interrupted (the state
       // continueRun expects), then pick the work back up from the last session.
       const finishedAt = new Date().toISOString();
       for (const step of run.steps) {
         if (step.status === 'running' || step.status === 'waiting') {
-          this.store.updateStep(run.id, step.id, { status: 'failed', finishedAt });
+          // A non-empty `error`: this step did NOT fail, it was interrupted, and an empty error
+          // string is what the cockpit rendered as a bare "failed" with no cause.
+          this.store.updateStep(run.id, step.id, {
+            status: 'failed',
+            error: 'interrupted — cezar process exited during the run',
+            finishedAt,
+          });
         }
       }
       this.store.updateRun(run.id, {
@@ -1330,6 +1393,141 @@ export class RunManager {
     if (def) return def;
     const { workflows } = await loadWorkflows(this.repoRoot);
     return workflows.find((w) => w.name === run.workflow) ?? null;
+  }
+
+  /**
+   * Where this run's chain picks back up, and whether the interrupted step's session may be
+   * reattached (spec 2026-08-20, P1). `undefined` when every definition step is terminal —
+   * there is nothing to re-enter and the caller settles as it always did.
+   */
+  private chainResumeAt(run: RunRecord, workflow: WorkflowDef): ChainResumePoint | undefined {
+    // A catalog-revived def may not be this run's def at all (see `defDescribesRun`). Re-entering
+    // against a foreign one would re-run finished work, so bail to the caller's old path instead.
+    if (!defDescribesRun(workflow.steps, run.steps)) return undefined;
+    const index = firstUnfinishedStep(workflow.steps, run.steps);
+    const def = index < 0 ? undefined : workflow.steps[index];
+    if (index < 0 || !def) return undefined;
+    if (stepKind(def) !== 'agent') return { index }; // a check step is a shell command; nothing to resume
+    const record = run.steps.find((s) => s.id === def.id);
+    // Session ids are provider-owned opaque values (#562): reattaching one to the wrong backend
+    // corrupts the run, so a mismatch simply starts the step fresh. Same affinity rule
+    // `continueRun` applies — new records carry explicit affinity, legacy ones fall back to the
+    // run's current runner as the conservative owner.
+    const stepBackend = def.runner ?? run.runner ?? 'claude';
+    const sessionBackend = record?.backend ?? run.runner ?? 'claude';
+    // `pending` means the step never opened a session in the first place — any `sessionId` on it
+    // was minted for an attempt that did not start, so there is nothing on the other end.
+    if (!record?.sessionId || record.status === 'pending' || sessionBackend !== stepBackend) {
+      return { index };
+    }
+    const total = workflow.steps.filter((step) => stepKind(step) === 'agent').length;
+    const position = workflow.steps.slice(0, index).filter((step) => stepKind(step) === 'agent').length + 1;
+    return {
+      index,
+      resume: {
+        sessionId: record.sessionId,
+        // `sessionId` and `profileId` are a PAIR — a resume that reads the wrong account's
+        // config dir finds no session and silently starts a fresh one instead.
+        ...(record.profileId ? { profileId: record.profileId } : {}),
+        prompt: restartContinuationPrompt({ position, total }),
+      },
+    };
+  }
+
+  /**
+   * Hand a run back to its CHAIN instead of finishing it (spec 2026-08-20, P1/P2) — the fix for
+   * the two paths that used to end a six-step run from a one-step signal: restart recovery, which
+   * replaced the remaining steps with a synthetic `continue-N` chat, and a continuation's
+   * `CEZ:DONE`, which had no chain guard at all.
+   *
+   * Re-entry goes through the QUEUE (`pendingJobs` + `queue.push`), never a direct `execute()`:
+   * that is the only path that respects the workspace semaphore, the repo-root lease and the
+   * `maxParallel` cap. A turn-end handler calling `execute()` inline would run a second engine
+   * loop for a run that still holds a slot.
+   *
+   * Returns `true` when the run has been HANDLED — re-queued, or failed for making no progress.
+   * The caller must not settle it either way. `false` means nothing could be revived and the
+   * caller's old path (a continuation, or `settleSuccess`) still applies.
+   */
+  private async reenterChain(
+    run: RunRecord,
+    reason: string,
+    opts: {
+      /** R4: a hand-back that does not shorten the chain is a loop. Recovery may legitimately
+       *  re-enter the SAME step (a second restart), so only the turn-end hand-back asks for it. */
+      requireProgress?: boolean;
+      /**
+       * The caller's fallback already covers the step being resumed, so re-entry is only worth
+       * taking over for when the chain OUTLIVES that step. `recover()`'s `running` branch is the
+       * one caller in that position: its `continueRun` fallback resumes the interrupted step's own
+       * session, which is the whole job for a single-step `quick-task` (and for a chain
+       * interrupted on its last step) — and that path carries its own hard-won behaviour, from
+       * per-project cap queueing to the #562 session-failure containment. Narrowing here keeps
+       * this fix to what it is about: a chain whose REMAINING steps would otherwise be dropped.
+       */
+      onlyIfMoreStepsFollow?: boolean;
+    } = {},
+  ): Promise<boolean> {
+    const workflow = await this.reviveWorkflow(run);
+    if (!workflow) return false;
+    const resumeAt = this.chainResumeAt(run, workflow);
+    if (!resumeAt) return false;
+    const remaining = workflow.steps.length - resumeAt.index;
+    if (opts.onlyIfMoreStepsFollow && remaining < 2) return false;
+    const nextId = workflow.steps[resumeAt.index]?.id ?? '?';
+    if (opts.requireProgress) {
+      const previous = this.chainReentries.get(run.id);
+      if (previous !== undefined && remaining >= previous) {
+        const error = `chain re-entry made no progress — still ${remaining} step(s) pending at "${nextId}"`;
+        this.store.updateRun(run.id, {
+          status: 'failed',
+          error,
+          finishedAt: new Date().toISOString(),
+          currentStepId: undefined,
+          activity: undefined,
+        });
+        this.store.appendEvent(run.id, { type: 'lifecycle', message: `run failed — ${error}` });
+        this.chainReentries.delete(run.id);
+        return true;
+      }
+    }
+    this.chainReentries.set(run.id, remaining);
+    // Re-apply the inbox ceiling exactly as `reviveQueuedRun` does — same reason (#471).
+    const generateFollowups = followupsEnabled() ? run.generateFollowups : false;
+    this.pendingJobs.set(run.id, {
+      workflow,
+      input: this.hydrateQueuedInput(run.id, {
+        task: run.task,
+        model: run.model,
+        runner: run.runner,
+        generateFollowups,
+        autonomous: run.autonomous,
+        worktree: run.worktree,
+      }),
+      resumeAt,
+    });
+    // Steps about to re-run go back to `pending` so the GUI rail reads top-to-bottom truthfully
+    // while the run sits in the queue — the same normalization `execute()`'s retry loop does.
+    for (const step of workflow.steps.slice(resumeAt.index)) {
+      const record = run.steps.find((s) => s.id === step.id);
+      if (record && !stepTerminal(record.status)) {
+        this.store.updateStep(run.id, step.id, { status: 'pending', finishedAt: undefined });
+      }
+    }
+    this.store.updateRun(run.id, {
+      status: 'queued',
+      error: undefined,
+      finishedAt: undefined,
+      currentStepId: undefined,
+      activity: undefined,
+      generateFollowups,
+    });
+    this.queue.push(run.id);
+    this.store.appendEvent(run.id, {
+      type: 'lifecycle',
+      message: `${reason} — chain re-queued at step "${nextId}" (${remaining} of ${workflow.steps.length} step(s) remaining)`,
+    });
+    return true;
   }
 
   /** Remove a run from the live registries — keeps `waiting ⊆ active`. */
@@ -2508,8 +2706,21 @@ export class RunManager {
         this.spendBudgetUnit(runId);
         if (askRejection) this.store.appendEvent(runId, { type: 'note', message: askRejection, stepId });
         if (done) {
-          // Goal achieved (agent contract, #347) — same as in runAgentStep.
-          this.store.appendEvent(runId, { type: 'lifecycle', message: 'goal achieved — session closed' });
+          // Goal achieved (agent contract, #347) — but of WHAT (spec 2026-08-20, P2). `CEZ:DONE`
+          // is a statement about the agent's own step; `runAgentStep`'s twin of this handler has
+          // said so since #410 (its `interactive` gate ignores the marker on a non-final step) and
+          // this one had no guard at all. That asymmetry was defensible while a continuation only
+          // ever existed AFTER a chain finished; restart recovery creates them mid-chain, and then
+          // it is what marks a six-step run `done` after step one.
+          const settling = this.store.getRun(runId);
+          const chainPending = settling ? pendingChainSteps(settling) : [];
+          state.chainHandBack = chainPending.length > 0;
+          this.store.appendEvent(runId, {
+            type: 'lifecycle',
+            message: state.chainHandBack
+              ? `step goal achieved — session closed; ${chainPending.length} chain step(s) still to run`
+              : 'goal achieved — session closed',
+          });
           appendHandoffHeartbeat(this.dataDir, runId, 'turn complete — goal achieved, session closed');
           state.session?.end();
           return;
@@ -2709,6 +2920,9 @@ export class RunManager {
     if (session.pid !== undefined) registerRunProcess(runId, session.pid);
 
     const finishedAt = () => new Date().toISOString();
+    /** Set by the success branch below when the chain must take the run back — acted on in
+     *  `finally`, once this run has left the live registries. */
+    let handBack: RunRecord | null = null;
     try {
       await session.result;
       if (sessionError) throw new Error(sessionError);
@@ -2742,8 +2956,20 @@ export class RunManager {
       } else {
         this.store.updateStep(runId, stepId, { status: 'done', finishedAt: finishedAt() });
         this.store.appendEvent(runId, { type: 'step-end', stepId, status: 'done' });
-        await this.settleSuccess(runId);
-        appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=done`);
+        // The continuation step is done either way; whether the RUN is depends on the chain
+        // (spec 2026-08-20, P2). With steps still pending, hand back to the chain instead of
+        // settling — `settleSuccess`'s own guard would only park it at `waiting`, which is a
+        // stall, not the continuation of the pipeline the user asked for. The hand-back itself
+        // happens in `finally`, AFTER `dropActive`: re-queuing a run that is still in `active`
+        // lets a concurrent `pump()` enter `execute()` for it, and the `dropActive` below would
+        // then delete the NEW `ActiveRun` out from under the running engine loop.
+        handBack = state.chainHandBack === true ? (this.store.getRun(runId) ?? null) : null;
+        if (!handBack) await this.settleSuccess(runId);
+        appendHandoffHeartbeat(
+          this.dataDir,
+          runId,
+          `step "${stepId}" complete — status=${handBack ? 'chain continues' : 'done'}`,
+        );
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2763,12 +2989,29 @@ export class RunManager {
       this.clearAutosaveTimer(state);
       if (state.cwd !== this.repoRoot) await autosaveCommit(state.cwd, 'turn end');
       this.dropActive(runId);
+      if (handBack) {
+        // Now that the run holds no slot and no `ActiveRun`, put it back in the queue at its next
+        // pending step. `dropActive`'s own `releaseSlot()` pumped a queue this run was not in
+        // yet, so pump once more — otherwise the re-queued run waits for an unrelated wakeup.
+        if (await this.reenterChain(handBack, 'step goal achieved', { requireProgress: true })) {
+          void this.pump();
+        } else {
+          await this.settleSuccess(runId);
+        }
+      }
     }
   }
 
   // ---- execution -----------------------------------------------------------
 
-  private async execute(runId: string, workflow: WorkflowDef, input: StartRunInput): Promise<void> {
+  private async execute(
+    runId: string,
+    workflow: WorkflowDef,
+    input: StartRunInput,
+    /** Chain re-entry (spec 2026-08-20, P1): start the loop at this step instead of the top, and
+     *  reattach its interrupted session when one survived. Absent on every ordinary start. */
+    resumeAt?: ChainResumePoint,
+  ): Promise<void> {
     const state: ActiveRun = {
       cancelled: false,
       interrupt: () => undefined,
@@ -3000,7 +3243,15 @@ export class RunManager {
 
     const lastAgentIdx = findLastAgentStepIndex(workflow);
 
-    let i = 0;
+    // A re-entry (P1) resumes mid-chain. Clamp defensively: the index came from a revived
+    // definition that may not be the one the record was written against.
+    const resumeIdx =
+      resumeAt && resumeAt.index > 0 && resumeAt.index < workflow.steps.length ? resumeAt.index : 0;
+    // Consumed by the FIRST step this loop runs and never again — a later step is new work,
+    // not a resumed turn.
+    let resumeFrom = resumeIdx === (resumeAt?.index ?? -1) ? resumeAt?.resume : undefined;
+
+    let i = resumeIdx;
     while (i < workflow.steps.length) {
       if (state.cancelled) break;
       if (this.budgetSpent(runId, config)) {
@@ -3025,6 +3276,8 @@ export class RunManager {
         // The last agent step of the workflow is interactive: after its turn
         // the session stays open for follow-ups until finish/idle/cancel.
         const interactive = i === lastAgentIdx && i === workflow.steps.length - 1;
+        const stepResume = i === resumeIdx ? resumeFrom : undefined;
+        resumeFrom = undefined;
         const failure = await this.runAgentStep(
           runId,
           state,
@@ -3037,8 +3290,9 @@ export class RunManager {
           startImages,
           taskBackend,
           extraSystemPrompt,
-          chainStepNote(workflow.steps, i),
+          chainStepNote(workflow.steps, i, { resumed: stepResume !== undefined }),
           startAttachments,
+          stepResume,
         );
         startImages = undefined;
         startAttachments = [];
@@ -3152,6 +3406,10 @@ export class RunManager {
      *  paths are appended to `userPrompt` so the agent can operate on the
      *  real files, not just view the inline image blocks. */
     attachments: PersistedAttachment[] = [],
+    /** Chain re-entry (spec 2026-08-20, P1): reattach the session this step was already running
+     *  when the process died, and open it with the restart prompt instead of the step's own
+     *  template — the session already holds everything the template would have said. */
+    resumeFrom?: { sessionId: string; profileId?: string; prompt: string },
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -3185,7 +3443,7 @@ export class RunManager {
       }
     }
 
-    let userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task);
+    let userPrompt = resumeFrom?.prompt ?? applyTemplate(step.prompt ?? '{{task}}', input.task);
     if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
     if (checkFailure) {
       userPrompt += `\n\nA verification command failed after the previous attempt. Fix the cause. Failing output:\n\n${checkFailure}`;
@@ -3202,7 +3460,8 @@ export class RunManager {
       if (attachments.length) userPrompt += `\n\n${pastedAttachmentsText(attachments)}`;
     }
 
-    const sessionId = randomUUID();
+    // A resumed step keeps the session id it already owns — that id IS the work done so far.
+    const sessionId = resumeFrom?.sessionId ?? randomUUID();
     const backend = step.runner ?? taskBackend;
     this.store.updateStep(runId, step.id, { sessionId, backend });
 
@@ -3366,6 +3625,10 @@ export class RunManager {
     try {
       stepProfile = await this.agentEnvForStep(runId, stepBackend, {
         generateFollowups: followupsEnabled() && input.generateFollowups !== false,
+        // A resume reattaches to a session that lives inside ONE account's config dir, so it must
+        // run under the account that created it — not whatever the project has been switched to
+        // since. Same rule `runContinuation` applies to a resumed continuation.
+        ...(resumeFrom?.profileId ? { recordedProfileId: resumeFrom.profileId } : {}),
       });
     } catch (err) {
       if (err instanceof AgentTempDirError) return err.message;
@@ -3419,6 +3682,7 @@ export class RunManager {
           env: stepProfile.env,
           model: backendModel,
           sessionId,
+          resume: resumeFrom !== undefined,
           // Interactive sessions have no wall clock — the idle timer rules.
           timeoutMs: interactive ? 0 : undefined,
         },
@@ -3818,6 +4082,25 @@ export class RunManager {
   }
 
   private async settleSuccess(runId: string): Promise<void> {
+    // Invariant I1 (spec 2026-08-20-chain-integrity-restart-and-continuation): only the CHAIN
+    // finishes the run. `settleSuccess` has three callers and only `execute()`'s success path can
+    // prove the chain ran off the end — the other two arrive from a session-level signal (a
+    // restart settle, a continuation's `CEZ:DONE`) that says nothing about the remaining steps.
+    // Fail closed BEFORE `applyWorkspaceRun`: applying twelve worktrees back and stamping
+    // `finishedAt` is what made this unrecoverable rather than merely wrong. A stalled chain parks
+    // at `waiting`, which is recoverable (P1/P2 re-entry, the next `recover()`, the queue
+    // watchdog, or a user "Continue") — failing it would throw away a worktree full of real work.
+    const settling = this.store.getRun(runId);
+    const pending = settling ? pendingChainSteps(settling) : [];
+    if (pending.length > 0) {
+      this.store.updateRun(runId, { status: 'waiting', currentStepId: undefined });
+      this.store.appendEvent(runId, {
+        type: 'lifecycle',
+        message: `chain incomplete — ${pending.length} step(s) still pending; the run was not finished`,
+      });
+      return;
+    }
+    this.chainReentries.delete(runId);
     await this.applyWorkspaceRun(runId);
     const run = this.store.getRun(runId);
     let review = false;

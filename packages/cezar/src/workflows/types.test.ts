@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AUTONOMOUS_IMPLEMENTATION_WORKFLOW, SPEC_TO_DEPLOY_WORKFLOW } from './types.ts';
+import { AUTONOMOUS_IMPLEMENTATION_WORKFLOW, SPEC_TO_DEPLOY_WORKFLOW, chainStepNote } from './types.ts';
 
 /**
  * `AUTONOMOUS_IMPLEMENTATION_WORKFLOW` (PLAN D27 Phase 2, `.ai/specs/2026-08-15-autonomous-
@@ -135,5 +135,45 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     // takes. `buildAllowedTools()` turns `Bash` + no allowlist into plain, unrestricted `Bash`.
     expect(deploy?.allowedTools).toContain('Bash');
     expect(deploy?.bashAllowlist).toBeUndefined();
+  });
+});
+
+/**
+ * P3 of spec 2026-08-20-chain-integrity-restart-and-continuation: the prompt and the engine have
+ * to say the same thing about what `CEZ:DONE` means. The engine now refuses to finish a run whose
+ * chain has pending steps; the note is what stops a RESUMED step from restarting its work — or,
+ * worse, from reading the handoff file its own earlier turn wrote and declaring the run achieved.
+ */
+describe('chainStepNote for a resumed step', () => {
+  const STEPS = [
+    { id: 'spec', name: 'Write the spec' },
+    { id: 'implement', name: 'Implement the spec' },
+    { id: 'deploy', name: 'Deploy' },
+  ];
+
+  it('is byte-for-byte unchanged when the step is not being resumed', () => {
+    expect(chainStepNote(STEPS, 1)).toBe(chainStepNote(STEPS, 1, {}));
+    expect(chainStepNote(STEPS, 1, { resumed: false })).toBe(chainStepNote(STEPS, 1));
+    expect(chainStepNote(STEPS, 1)).not.toMatch(/resumed/);
+  });
+
+  it('says the step is being resumed and how much chain is left after it', () => {
+    const note = chainStepNote(STEPS, 1, { resumed: true });
+    expect(note).toContain('step 2 of 3');
+    expect(note).toContain('interrupted by a cezar restart and is being resumed');
+    expect(note).toContain('The remaining 1 step(s) of the chain still run after it.');
+    // The rule the whole spec enforces, still the closing sentence.
+    expect(note).toContain("Only end this turn with CEZ:DONE once step 2's own goal is achieved");
+  });
+
+  it('does not promise remaining steps when the resumed step is the chain\'s last', () => {
+    const note = chainStepNote(STEPS, 2, { resumed: true });
+    expect(note).toContain('is being resumed');
+    expect(note).not.toContain('still run after it');
+  });
+
+  it('stays undefined for a single-agent-step workflow, resumed or not', () => {
+    const single = [{ id: 'work', name: 'Work' }];
+    expect(chainStepNote(single, 0, { resumed: true })).toBeUndefined();
   });
 });
