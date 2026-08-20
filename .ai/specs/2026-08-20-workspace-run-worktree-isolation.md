@@ -1,8 +1,15 @@
 # Yes, a workspace run worktrees every project — and two of the twelve share one tree
 
-> **Status:** implemented (code + automated coverage) — **QA needed**: the runtime E2E in
-> § Verification has not been run. Answers a question, then fixes the four defects the answer
-> exposed.
+> **Status: IMPLEMENTED and SHIPPED — QA NEEDED, not done.** Commit `a23aa9bf`, merged with
+> `origin/main` as `e9293b12` and pushed to `origin/main` on 2026-08-20 (no PR: this repo ships
+> direct linear commits to `main`, AGENTS.md § "Shipping cezar itself"). Code and automated
+> coverage are complete and the full gate suite was re-run green **on the merged tree**, with the
+> one `test:package` red proven identical at clean `origin/main` by a control run (todo
+> `46dbb850`). What is **not** done is the runtime E2E in § Verification — it has never been run,
+> and this fix's own defect was invisible to every unit test, so "gates green" is necessary and
+> not sufficient here. Tracked as todo `afa0935d`. **Not deployed:** the change is on
+> `origin/main`; `/opt/cezar` has not been swapped, so the running cockpit is still the old
+> behaviour. Answers a question, then fixes the four defects the answer exposed.
 > · **Date:** 2026-08-20
 > **Extends:** `2026-08-19-parallel-workspace-runs-worktrees.md` (implemented; the model it
 > describes is live and correct). This spec does **not** replace it — it closes the gaps between
@@ -343,3 +350,30 @@ evidence must come from a real run:
   failure was cosmetic. I found no case of a *lost* diff, and I did not prove one cannot happen —
   the race has no defined winner, and if the loser is the entry that would have applied a real
   change, the branch (kept) is the only copy.
+
+
+## Where the record went (step 5, 2026-08-20)
+
+Written in the same session as the code, in the four places the next reader looks:
+
+| Where | What |
+|---|---|
+| `CHANGELOG.md`, Unreleased → Added | The question, the measured answer, the four defects and their fixes, the shared knowledge-mount exception, the merged-tree gate results with the pre-existing red named, and the honest QA-needed status. |
+| `BACKWARD_COMPATIBILITY.md` §2 | The workspace-run route bullet said the run starts **in place**. Marked `CORRECTED 2026-08-20` in place — the strikethrough is on the two words that were false, the rest of the bullet is untouched, and the correction names what replaced them (per-repo worktrees, no boot-root lease, N concurrent runs). |
+| `BACKWARD_COMPATIBILITY.md` §3 | `workspaceWorktrees[].reclaimedAt` documented as additive, with the rule that makes it worth having: absence on a path that no longer exists is what a *leaked* tree looks like, so stamping it on a removal you did not perform destroys the signal. |
+| `BACKWARD_COMPATIBILITY.md` §9 | `worktreeRetentionDefault`'s default 10 → 1000 named as a real behaviour change for any install that never set the key. |
+| `AGENTS.md`, Git / worktree row | Amended in place: *one worktree per task* is still true for an ordinary run and **wrong for a workspace run**, which is one per granted git REPO — with the "registry entry count ≠ worktree count" trap stated outright, because that assumption is exactly what produced the race this spec fixes. |
+| `.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md` | Extended in place by commit `a23aa9bf` (it is not superseded — its model is live and correct). |
+| Knowledge base | Two proposals appended to this run's `CEZ_KB_WRITE_FILE` (project scope), pending review via `cez kb proposals`. |
+| Todos | `afa0935d` (the runtime E2E, high), `94230424` (the corpus correction the mechanism cannot reach, high), `86812792` (the phantom `running` run 23221162, medium), `46dbb850` (main's own `test:package` red). |
+
+**One correction could not be made in place, and that is itself a finding.** The corpus domain
+index — `notion-export/domains/cezar.md`, the first document a session reads about cezar — still
+says a workspace run uses *"no worktree (exclusive tree lease ⇒ one workspace run at a time)"*.
+That is the exact falsehood this spec answers, and the documented correction path cannot touch it:
+`applySupersede` (`packages/cezar/src/knowledge/proposals.ts`) refuses any target whose
+`entry.root` is neither `project` nor `workspace` — *"target is on a read-only mount"* — and all
+2111 corpus documents, every domain index among them, are on the read-only `notion` mount. So the
+one document most likely to be read first is the one the correction mechanism is least able to
+reach. Escalated as todo `94230424` rather than fixed by writing to the mount behind the
+mechanism's back, and recorded as a KB proposal in its own right.

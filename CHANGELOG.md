@@ -5,6 +5,64 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- ✨ **A workspace run gives every project its own worktree — and no longer leaks them.** Spec
+  `.ai/specs/2026-08-20-workspace-run-worktree-isolation.md`, commit `a23aa9bf`.
+
+  It began as a question — *"if we run a task in the workspace, do we create a worktree, or do
+  multiple sessions work on the same files?"* — and the answer was measured on the live box rather
+  than read off the code: **we create worktrees.** One per registered git project, per run, on
+  `cez/<id8>`; the agent is granted those trees instead of the real checkouts, and each diff is
+  applied back when the run settles successfully. Three workspace runs were live simultaneously
+  while this was written, each holding its own tree in each project — so they are genuinely
+  parallel and do **not** edit each other's files. Answering it exposed four defects around the
+  edges of that model, and this ships their fixes.
+
+  - **Twelve registry entries were resolving to ten worktrees, and the apply-back raced itself.**
+    `loki-labs`, `brand` and `lokie-chatbox` are three registered projects inside **one** git repo,
+    so all three were handed their own apply-back entry for the **same** directory — three
+    concurrent `git apply`s of three overlapping diffs into one tree, serialized on a key
+    (`wt.root`) that differs for all three. `materializeWorkspaceWorktrees` now returns at most one
+    entry per distinct path, rooted at the repo root so `git apply`'s cwd is correct by
+    construction, and the collapsed siblings are **named in a note** rather than silently dropped —
+    a transcript that accounts for ten of twelve projects reads as a bug. Each collapsed sibling is
+    granted its own **subdirectory inside** the shared tree; letting it fall back to its real
+    checkout would have been a silent isolation leak, worse than the race being fixed.
+  - **Only a successful run cleaned up.** Failed, cancelled and stopped runs leaked up to twelve
+    checkouts each, permanently. `discardWorkspaceWorktrees` now runs on those endings and removes
+    the **directories** while keeping the **branches**: the branch is the recovery artifact and
+    costs bytes, the checkout is what costs gigabytes, so nothing becomes unrecoverable.
+  - **Retention had never heard of them.** `reclaimWorktrees` walked `run.worktreePath` only, so
+    the leaks already on disk had no drain at all. It now walks `run.workspaceWorktrees` under the
+    same keep-last-N rule, branch kept, stamping the new optional `reclaimedAt` so a reclaimed tree
+    is distinguishable from a leaked one. `DEFAULT_WORKTREE_RETENTION` and
+    `resources.worktreeRetentionDefault` go **10 → 1000**: a workspace run reaches twelve
+    directories rather than one, and retention exists to stop a disk saturating, not to
+    garbage-collect recent work.
+  - **`(diff failed: )`** — the blank diagnostic that cost a previous session an investigation
+    ending in "the error message is empty". Every `applyOne` failure path now carries a non-empty
+    reason, whatever git wrote to its streams.
+
+  **The one place the answer really is "yes, shared":** the knowledge mount. Worktreeing a
+  2110-document corpus per run is not worth it, so every concurrent run is granted `notion-export`
+  at its **real path** — and `workspaceGrantSystemPrompt` now says exactly that, declares the
+  granted knowledge roots read-only, and names the per-run `CEZ_KB_WRITE_FILE` append as the only
+  write an agent makes there. Leaving that undocumented is what made it dangerous.
+
+  Also backfilled: `workflows/workspace-parallel.test.ts` covers the two seams the 2026-08-19 spec
+  shipped untested — `pump()`'s non-git exemption and the repo-lease skip — which together are the
+  entire guarantee that N workspace runs can run at once.
+
+  Gates re-run on the **merged** tree, not just on the branch: `typecheck` exit 0, `test:unit`
+  44/44, `npm test` 9184 pass / 1 fail (`knowledge/catalog.test.ts` C18, this host's 40 ms/MiB
+  budget against 63.1 measured — unchanged code), `build` exit 0. `test:package` is 14/15, and that
+  red is **not this change**: a control run in a detached worktree at clean `origin/main`, with
+  none of this present, fails identically — filed as todo `46dbb850`.
+
+  Status is **QA needed, not done.** The defect this fixes was invisible to every unit test and
+  visible in one line of a production transcript, so green gates are necessary and not sufficient:
+  until a real workspace task settles carrying an empty `workspaceWorktrees` and a transcript free
+  of `(diff failed: )`, and two such tasks run at once, this is qa needed — todo `afa0935d`. It is also **not deployed**: this is on `origin/main`, and `/opt/cezar` has not been swapped.
+
 - ✨ **A workflow step is green only when its goal was verified — not when its agent stopped.**
   Spec `.ai/specs/2026-08-20-steps-green-only-when-verified.md`, commit `57fc8807`.
 
