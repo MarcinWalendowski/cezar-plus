@@ -38,6 +38,49 @@
   its previous behaviour.
 
 ## 🐛 Fixed
+- 🐛 **A run could be marked `done` while five of its six workflow steps had never run.** Spec
+  `.ai/specs/2026-08-20-chain-integrity-restart-and-continuation.md`, commits `ee74a158` /
+  `5774bf95`.
+
+  A `spec-to-deploy` run finished after step 1 of 6. `implement`, `run-tests`, `commit-push`,
+  `document` and `deploy` never executed, twelve project worktrees were applied back to their real
+  checkouts, and the task closed as successful. Three independent completion paths each settled the
+  run from a **session-level** signal — a `CEZ:DONE` marker, an idle close, a restart settle —
+  without ever asking whether the **chain** was finished: restart recovery replaced the remaining
+  steps with a synthetic `continue-N` chat session, `runContinuation`'s turn-end honoured
+  `CEZ:DONE` with no chain guard, and `settleSuccess` never read `run.steps` at all.
+
+  A session marker now speaks only for its own step. `pendingChainSteps()`
+  (`packages/cezar/src/runs/chain.ts`) is consulted in `settleSuccess` **before** the workspace
+  worktrees are applied back; a run whose persisted `workflowDef` still holds non-terminal steps
+  parks at `waiting` (recoverable, worktree intact) instead of landing `done`. Restart recovery
+  re-enters the real chain through `pendingJobs` + `queue.push` + `pump()`, never inline, so the
+  workspace semaphore and repo-root lease still apply.
+
+  The bug was old and unreachable: almost every run used to be a single-step `quick-task`, where
+  "session done = run done" is true. `097d1b15` made the six-step chain the default for **every**
+  run path and turned a latent assumption into a data-losing default. The predicate deliberately
+  fails open on a record with no `workflowDef`, so pre-#367 records settle as they always did.
+  Verified on production: the deploy's own restart re-queued this run's chain at `run-tests`
+  rather than at a `continue-1`.
+
+- 🐛 **Every chain step but the last was hard-killed at 30 minutes for taking its time, and
+  recorded as `failed`.** Spec `.ai/specs/2026-08-20-agent-step-inactivity-timeout.md`, commit
+  `e3f542df`.
+
+  `DEFAULT_RUN_TIMEOUT_MS` armed a plain `setTimeout` once at spawn and nothing ever reset it, so
+  the bound measured **duration**, not health. Only the chain's last step escaped it (it passes
+  `timeoutMs: 0`). Two steps of the run that fixed the bug above died this way mid-work — the
+  record said `failed`, the truth was a clock.
+
+  The bound is now **inactivity**: `DEFAULT_RUN_IDLE_TIMEOUT_MS`, re-armed on every line the agent
+  emits, in all three runners (`claude-cli-runner`, `codex-app-server-runner`,
+  `opencode-server-runner`). A streaming step runs as long as it needs; a step that has produced
+  nothing for the limit is wedged and is killed exactly as before, now saying `produced no output
+  for 30m`. `timeoutMs: 0` still disables the bound entirely. Same latent-assumption-made-default
+  shape as the chain bug, in a different mechanism: harmless while every run was one step, a
+  routine killer once six-step runs became the default.
+
 - 🐛 **The usage bars were invisible, and had been since they shipped.** The fill was `bg-accent`
   against a `bg-muted` track, and `--accent` is a shadcn alias for `--muted` in the token sheet — a
   surface token, not the brand accent. Fill and track were literally the same colour, so 0%, 4% and

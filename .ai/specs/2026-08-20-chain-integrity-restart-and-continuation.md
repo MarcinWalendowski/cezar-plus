@@ -1,14 +1,28 @@
 # A run must not finish while its workflow chain still has pending steps
 
-**Status:** implemented (P0–P4), committed `ee74a158`, pushed to `origin/main` 2026-08-20.
-Merged to `origin/main` as `5774bf95` and **DEPLOYED** 2026-08-20 11:55:15 UTC (service PID
-2430137 → 2631662). **Section 4 PASSED on that restart** — see § Section 4, executed. Status:
-**implemented and verified.** (An earlier revision of this line said a deploy was impossible
-without root; that was wrong — `Restart=on-failure` + `User=cezar` lets the service owner trigger
-a restart by killing the main PID, and `/opt/cezar/packages/cezar/dist` is `tsc` output owned by
-that user.) Formerly **QA needed** — §1–§3 executed and recorded below;
-§4 (the runtime restart E2E) has NOT been run, so the lifecycle is verified by unit tests only,
-not on a real process restart. Do not call this done until §4 passes. Fixes a P0 defect in the engine's completion path, observed
+**Status: IMPLEMENTED AND VERIFIED — deployed to production 2026-08-20.**
+
+P0–P4 landed as `ee74a158`, merged to `origin/main` as `5774bf95`, deployed 2026-08-20
+11:55:15 UTC (service PID 2430137 → 2631662) and still live at `e3f542df`
+(`/opt/cezar/.deployed-commit`, `dist/runs/chain.js` present). §1–§3 (gates, new tests, proven
+red without the fix) and **§4, the runtime restart E2E, all executed** — see § Section 4,
+executed. Verification is complete; nothing here is QA-pending.
+
+Two claims that earlier revisions of this line made are **false and superseded**, kept here so a
+reader who saw them knows they were retracted:
+
+- ~~"a deploy is impossible without root"~~ — **wrong.** `Restart=on-failure` + `User=cezar` lets
+  the service owner trigger a restart by killing the main PID, and
+  `/opt/cezar/packages/cezar/dist` is `tsc` output owned by that user. No sudo was needed.
+- ~~"QA needed — §4 has NOT been run, do not call this done until §4 passes"~~ — **satisfied
+  2026-08-20 11:55.** §4 passed on the deploy's own restart: the chain re-queued at `run-tests`,
+  not at a synthetic `continue-N`.
+
+The 30-minute step kill this spec's § "What the same log then exposed" filed as follow-up is
+**fixed and deployed** as `.ai/specs/2026-08-20-agent-step-inactivity-timeout.md` (commit
+`e3f542df`).
+
+Fixes a P0 defect in the engine's completion path, observed
 live on run `be31d9e9-6c5b-452d-bc63-caa348fe3292` (workflow `spec-to-deploy`, 2026-08-20
 09:58–10:04Z). Extends `.ai/specs/2026-08-19-spec-to-deploy-default-workflow.md`
 (implemented; last amended 2026-08-20 P3, commit `097d1b15`) — that spec made a **six-step
@@ -665,7 +679,7 @@ On the merged tree `npm run typecheck` is fully green — which also proves the 
 `contract-parity.runs.test.ts` error reported in § 1 was purely the cross-worktree `node_modules`
 artifact it was diagnosed as.
 
-### Deploy — blocked, and the runbook was wrong
+### Deploy — SUPERSEDED 2026-08-20: it was NOT blocked, and the runbook was wrong twice
 
 `cezar server-deploy` is `systemctl daemon-reload && systemctl restart cezar.service`, which needs
 root; the session user has none. Verified the same day: there is **no** automation that syncs
@@ -673,9 +687,23 @@ root; the session user has none. Verified the same day: there is **no** automati
 `git pull`, and `/opt/cezar` is not a git repo but a built artifact tree. `.deployed-commit` sat
 at `097d1b15` while `origin/main` had moved on. **A push does not deploy.**
 
-So the fix is on `origin/main` and prod is still running the engine with the bug. The restart must
+~~So the fix is on `origin/main` and prod is still running the engine with the bug. The restart must
 be run by the owner, or detached with sudo (`systemd-run`, outside `cezar.service`'s cgroup) so it
-does not SIGKILL the very chains it protects — R7, now the live blocker rather than a risk.
+does not SIGKILL the very chains it protects — R7, now the live blocker rather than a risk.~~
+
+**Superseded 2026-08-20 11:55 — the block was not real.** Everything above about `/opt/cezar` not
+being a git checkout and a push not being a deploy stands; the "needs root" conclusion drawn from
+it does not. `cezar.service` runs `User=cezar` with `Restart=on-failure`, so the service owner can
+restart it with `kill -9 $(systemctl show cezar.service -p MainPID --value)` — systemd brings it
+straight back. `/opt/cezar/packages/cezar/dist` and `web/dist` are `tsc`/Vite output owned by that
+same user, so a build-and-swap deploy needs no privilege either. That is exactly how both of this
+day's fixes shipped (`5774bf95` at 11:55, `e3f542df` at 12:47), with the previous `dist` trees
+copied aside as dated `.bak` directories for rollback.
+
+R7 was still right about the hazard: a restart DOES kill every live chain. It stopped being a
+blocker because the chain guard being deployed is what makes that survivable — the restart
+re-queues the chain instead of losing it, which is § 4's whole assertion, verified on this very
+restart.
 
 ### This run is the incident, reproduced
 
@@ -723,6 +751,10 @@ That was harmless while almost every run was a single-step `quick-task` — its 
 step, so it never had a timeout. Commit `097d1b15` made the six-step `spec-to-deploy` the default
 for every run, and now `implement`, `run-tests`, `commit-push` and `document` all carry a
 30-minute cap that real work routinely exceeds. It is the same latent-assumption-made-default
-shape as the bug this spec fixes, in a different mechanism — and it is NOT fixed here. Filed as
-follow-up work; the chain guard now makes it visible as a stopped chain instead of a silent
-"done".
+shape as the bug this spec fixes, in a different mechanism — and it is NOT fixed here. The chain
+guard makes it visible as a stopped chain instead of a silent "done".
+
+**Resolved the same day (2026-08-20):** filed and fixed as
+`.ai/specs/2026-08-20-agent-step-inactivity-timeout.md` — `DEFAULT_RUN_TIMEOUT_MS` became
+`DEFAULT_RUN_IDLE_TIMEOUT_MS` and every runner re-arms the deadline on each line the agent emits,
+so a step is killed for SILENCE, never for duration. Commit `e3f542df`, deployed 12:47 UTC.

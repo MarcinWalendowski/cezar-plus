@@ -73,6 +73,30 @@ where it lived; the defect was that it lived in one of two places. When you find
 of a pair of twins, the question is not "is this one right?" — it is "what changed since, that
 now reaches the other one?"
 
+**When a default changes the SHAPE of the workload, audit every bound written against the
+old shape.** The same day and the same run produced two P0s that are one lesson. Both were
+old code, correct for years, made false by commit `097d1b15` making the six-step
+`spec-to-deploy` the default for every run path: (a) "session done = run done" — true when a
+run had one step, data-losing across six
+(`.ai/specs/2026-08-20-chain-integrity-restart-and-continuation.md`); (b) "only the chain's
+LAST step gets `timeoutMs: 0`, so nothing important is capped" — true when the single step WAS
+the last step, and a routine killer once four earlier steps carried a 30-minute wall clock that
+real `implement` and `run-tests` work exceeds
+(`.ai/specs/2026-08-20-agent-step-inactivity-timeout.md`). Neither was a new bug; both were
+latent branches becoming reachable. A one-line default flip is not a small diff — it is a
+change of workload shape, and the review it needs is a sweep of every timeout, cap, lock and
+"the last one" assumption written when the old shape was true.
+
+**A bound on a working process must measure health, not elapsed time.** The 30-minute step cap
+was a `setTimeout` armed at spawn that nothing ever reset, so it killed a busy agent and a
+wedged one identically, and wrote `failed` on both. It now re-arms on every line the agent
+emits — `DEFAULT_RUN_IDLE_TIMEOUT_MS`, all three runners — and says `produced no output for
+30m`, a diagnosis rather than an accusation. The reaping guarantee is unchanged, because a
+wedged CLI holding a `maxParallel` slot is exactly the silent case. Note what was NOT done:
+`timeoutMs: 0` for every step would have removed the only thing that reaps a non-interactive
+step, which `IDLE_TIMEOUT_MS` never covers because such a step is never parked at `waiting`.
+Bound the failure mode you actually mean; do not delete the bound because it misfires.
+
 **Find every construction site of a shared in-memory object — grep the TYPE, not the
 field.** `ActiveRun` is built in `execute` AND in `runContinuation`; #811 populated
 `state.skills` in the first only, so registry `/skill` expansion worked on new tasks and

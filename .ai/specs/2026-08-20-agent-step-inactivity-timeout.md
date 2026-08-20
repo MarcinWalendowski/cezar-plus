@@ -1,6 +1,18 @@
 # A long step is not a hung step: bound agent runs by SILENCE, not total duration
 
-**Status:** implemented + deployed 2026-08-20. Fixes a defect exposed by run
+**Status: IMPLEMENTED and DEPLOYED 2026-08-20 — one verification step still open (§ 4).**
+
+Commit `e3f542df`, pushed to `origin/main`, built and swapped into `/opt/cezar` at 12:47:07 UTC
+(`/opt/cezar/.deployed-commit` = `e3f542df9bf586bcd76ac830d0870a661bd095be`;
+`DEFAULT_RUN_IDLE_TIMEOUT_MS` and the new "produced no output for" message are present in all three
+deployed runners). §§ 1–3 of Verification executed and recorded below, including the red-without-
+the-fix proof. **§ 4 — the in-the-wild confirmation that a chain step actually survives past 30
+minutes — has NOT been observed yet**, because no step has run that long since the swap. Until it
+has, the fix is verified by unit test and by inspection of the deployed artifact, not by a live
+long step. What to look for: `produced no output for 30m` must appear only for a genuinely silent
+agent, never for one that is streaming. Do not upgrade this line without that observation.
+
+Fixes a defect exposed by run
 `9d09795a-bd71-40a5-9ff7-badd97023b59`, whose `implement` and `run-tests` steps were both killed
 at exactly 30 minutes and recorded as `failed` while doing real work. Sibling of
 `.ai/specs/2026-08-20-chain-integrity-restart-and-continuation.md` (implemented, deployed): that
@@ -111,7 +123,9 @@ No config, no persisted field, no contract change.
    - `timeoutMs: 0` disables the bound entirely (unchanged).
 3. Prove red without the fix (the "stays alive while streaming" case must fail against the
    fixed-deadline implementation).
-4. Runtime: this run's own next chain step must survive past 30 minutes.
+4. Runtime: this run's own next chain step must survive past 30 minutes. **NOT YET EXECUTED** —
+   see the Status line. The two steps that have run since the deploy (`commit-push` 12:47–13:02,
+   `document` from 13:02) both finished under 30 minutes, so neither exercises the bound.
 
 
 ## Verification, executed
@@ -134,3 +148,24 @@ One note on the tests as built: the "goes quiet" case asserts SIGTERM and `child
 SIGTERM→SIGKILL escalation. Consuming stdout means the destroyed stream ends the read loop, whose
 `finally` clears the kill timer before fake time reaches it. Escalation is pinned by the
 pre-existing `timeoutMs: 20` case, which writes no output.
+
+## Deployment, executed
+
+- `e3f542df` pushed to `origin/main`; `packages/cezar` server + web built from that tree.
+- Old `dist` / `web/dist` copied aside as `dist.bak.20260820-124616` before the swap (one rollback
+  generation, same convention the box already used).
+- Restart triggered without root by `kill -9 $(systemctl show cezar.service -p MainPID --value)`;
+  `Restart=on-failure` + `User=cezar` brings it back. Service up since 12:47:07 UTC, PID 2746138,
+  running `/opt/cezar/packages/cezar/dist/index.js`.
+- Rollback, no sudo required:
+
+```bash
+S=20260820-124616
+cd /opt/cezar/packages/cezar
+rm -rf dist && mv dist.bak.$S dist
+rm -rf web/dist && mv web/dist.bak.$S web/dist
+echo "5774bf95b0439de5eedd2993cde8ad68847eb8a6 (rolled back)" > /opt/cezar/.deployed-commit
+kill -9 $(systemctl show cezar.service -p MainPID --value)
+```
+
+  The earlier `20260820-115346` generation rolls all the way back to `097d1b15`.
