@@ -599,13 +599,19 @@ export type CreatePrResponse = z.infer<typeof createPrResponseSchema>;
  * onto the prompt and the stored entry rides along), `deferred` (mid-spawn, so it was buffered
  * and arrives as an ordinary follow-up turn once the session opens). Anything else is a 409.
  *
- * A union, not one object of optional flags: exactly one of the three keys is ever present, and
+ * A union, not one object of optional flags: exactly one of the four keys is ever present, and
  * the flattened DTO shape admitted `{}`. Pre-#472 clients only ever saw `delivered`.
+ *
+ * `continued` (spec 2026-08-20-inactive-sessions-stay-in-progress): the run was an idle-PARKED
+ * `waiting` session — its backend process was closed to free memory but its status stayed
+ * `waiting`, not `done` — so posting a message reopened the session via `--resume` and handed the
+ * message in as the continuation prompt, exactly like `POST /runs/:id/continue`.
  */
 export const messageResponseSchema = z.union([
   z.object({ delivered: z.literal(true) }),
   z.object({ queued: z.literal(true), message: queuedMessageSchema }),
   z.object({ deferred: z.literal(true) }),
+  z.object({ continued: z.literal(true) }),
 ]);
 export type MessageResponse = z.infer<typeof messageResponseSchema>;
 

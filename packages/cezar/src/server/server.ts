@@ -4751,6 +4751,24 @@ export function createApp(deps: ServerDeps) {
       if (manager.sendMessage(id, content)) return c.json({ delivered: true });
 
       const currentRun = store.getRun(id);
+      // Parked-wait resume (spec 2026-08-20-inactive-sessions-stay-in-progress). An interactive
+      // session that idled out had its backend process closed to free memory but its run kept
+      // `status: 'waiting'` (in-progress / needs-you), NOT `done`. There is no live session to
+      // deliver into, and it is not queued/starting, so reopen the backend via `--resume` and hand
+      // this message in as the continuation prompt instead of answering `409 session closed`. A
+      // live/queued/starting run never reaches this rung — those are handled above.
+      if (currentRun?.status === 'waiting' && !manager.isActive(id)) {
+        const blocked = await providerActionError([providerForExistingRun(currentRun, undefined)]);
+        if (blocked) return c.json({ error: blocked }, 409);
+        const text = content
+          .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
+          .map((b) => b.text)
+          .join('\n');
+        const images = content.filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image');
+        const resumed = manager.continueRun(id, { text, images });
+        if (resumed.ok) return c.json({ continued: true });
+        return c.json({ error: resumed.error ?? 'session closed' }, 409);
+      }
       const stack = currentRun?.queuedMessages ?? [];
       // Bounds apply only to a message that is actually about to be stacked. Without this
       // gate an over-long message posted to a *finished* run would answer `400 prompt too

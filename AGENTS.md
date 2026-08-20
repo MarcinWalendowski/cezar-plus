@@ -32,7 +32,10 @@ them as `done`). It was also the only liveness bound on `CEZ:MONITORING` and the
 reason a parked monitor eventually stopped holding a `maxParallel` slot. Neither
 dependency was named in the spec, so neither was replaced, and `monitoring` became a state
 with no exit. Before deleting a timer, lock, cap or timeout, grep for everything that
-reaches a terminal state *because* of it.
+reaches a terminal state *because* of it. (`2026-08-20-inactive-sessions-stay-in-progress.md`
+is the counter-example done right: it stopped the ordinary-wait idle close from recording
+`done`, but KEPT the timer's load-bearing role — the process close that bounds memory — and
+only changed what the close settles to, `waiting` instead of `done`.)
 
 **A replacement that ships OFF is not a replacement.** Diff the default path, not the
 feature. The question is always: *with every new knob at its shipped default, what does
@@ -48,6 +51,18 @@ a user message (`deliverMessage`), the autonomous nudge (turn-end only), and the
 wake timer. Cezar has no process-exit callback, no CI webhook and no sub-agent-completion
 event, so a state whose only on-by-default exit is "a human types something" is a dead end,
 however well it renders.
+
+**Two handlers, one guard, is the same bug at rest.** `runAgentStep`'s turn-end has honoured
+`CEZ:DONE` only on the chain's LAST step since #410; `runContinuation`'s near-identical
+turn-end honoured it unconditionally. That asymmetry was defensible while a continuation only
+ever existed *after* a chain had finished. Then #367's restart recovery started creating
+continuations mid-chain, and the guard nobody had copied became the reason run `be31d9e9` was
+marked `done` after step 1 of 6 — twelve project worktrees applied back, five steps including
+the commit and the deploy silently dropped
+(`.ai/specs/2026-08-20-chain-integrity-restart-and-continuation.md`). The guard was correct
+where it lived; the defect was that it lived in one of two places. When you find a guard on one
+of a pair of twins, the question is not "is this one right?" — it is "what changed since, that
+now reaches the other one?"
 
 **Find every construction site of a shared in-memory object — grep the TYPE, not the
 field.** `ActiveRun` is built in `execute` AND in `runContinuation`; #811 populated

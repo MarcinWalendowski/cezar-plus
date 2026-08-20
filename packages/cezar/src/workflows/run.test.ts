@@ -546,6 +546,49 @@ describe('RunManager.continueRun override', () => {
     expect(calls[0]?.[3]).toBe('claude');
   });
 
+  /** An idle-PARKED interactive wait (spec 2026-08-20-inactive-sessions-stay-in-progress): the
+   *  session idled out, its backend process was closed to free memory, but the run kept
+   *  `status: 'waiting'` (in-progress / needs-you) instead of settling `done`, and its session is
+   *  still resumable. NOT in the active map — that is what makes it a park, not a live wait. */
+  function parkedWaitingRun(): string {
+    const record = store.createRun({
+      title: 't',
+      workflow: 'quick-task',
+      task: 't',
+      runner: 'claude',
+      model: 'sonnet',
+      steps: [{ id: 's1', name: 'Work', kind: 'agent' }],
+    });
+    store.updateRun(record.id, { status: 'waiting' });
+    store.updateStep(record.id, 's1', { sessionId: 'sess-1', backend: 'claude' });
+    return record.id;
+  }
+
+  it('Continue resumes an idle-parked waiting run (spec 2026-08-20)', () => {
+    const id = parkedWaitingRun();
+    // Before this change continueRun rejected every `waiting` run; a PARKED wait (not active) is
+    // now resumable via --resume, which is the whole point of parking instead of finishing.
+    expect(manager.continueRun(id, { text: 'carry on' })).toEqual({ ok: true });
+  });
+
+  it('Cancel settles an idle-parked waiting run instead of 409', () => {
+    const id = parkedWaitingRun();
+    expect(manager.cancel(id)).toBe(true);
+    expect(store.getRun(id)?.status).toBe('cancelled');
+  });
+
+  it('Finish settles an idle-parked waiting run (no live session) instead of 409', async () => {
+    const id = parkedWaitingRun();
+    expect(manager.finish(id)).toBe(true);
+    // finish() fires settleSuccess (fire-and-forget) — the record leaves `waiting` and, with no
+    // worktree diff, lands `done`. It must never sit at `waiting` claiming to be finished.
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline && store.getRun(id)?.status === 'waiting') {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(store.getRun(id)?.status).toBe('done');
+  });
+
   it('an omitted override preserves the run current backend/model (backward compat)', () => {
     const id = resumableRun();
     expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
@@ -1289,6 +1332,35 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
     expect(parked?.activity).toBe('monitoring');
     const state = (manager as unknown as { active: Map<string, { idleTimer?: NodeJS.Timeout }> }).active.get(record.id);
     expect(state?.idleTimer).toBeUndefined(); // durable monitors do not inherit the 15-minute user-wait timer
+  }, 30_000);
+
+  /**
+   * spec 2026-08-20-inactive-sessions-stay-in-progress (owner instruction: "don't mark inactive
+   * sessions as done autonomously"). An ordinary markerless wait DOES keep the 15-minute idle
+   * timer — its process-closing memory bound is load-bearing (AGENTS.md) — but firing it now PARKS
+   * the run at `waiting`, not `done`: an unanswered handoff is never recorded as finished.
+   */
+  it('an idle-parked ordinary wait stays `waiting`, never settles `done`', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:hello', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    const state = (
+      manager as unknown as {
+        active: Map<string, { idleTimer?: NodeJS.Timeout; idleParked?: boolean; session?: { end(): void } }>;
+      }
+    ).active.get(record.id)!;
+    expect(state.idleTimer).toBeDefined(); // ordinary waits keep the memory-bounding idle timer
+
+    // Fire the inactivity close exactly as `armIdleTimer`'s callback does: flag the park, then end
+    // the backend session to free its process. The post-`session.result` wrap-up must KEEP the run
+    // `waiting`, not settle it `done`/`review`.
+    state.idleParked = true;
+    state.session?.end();
+    await waitFor(record.id, () => !manager.isActive(record.id)); // close + wrap-up settled
+    currentId = undefined; // no longer active — afterEach cancel would be a no-op/404
+    const parked = store.getRun(record.id);
+    expect(parked?.status).toBe('waiting'); // in-progress / needs-you — NOT `done`
+    expect(parked?.finishedAt).toBeUndefined(); // an unfinished task is never stamped finished
   }, 30_000);
 
   /**
@@ -2374,4 +2446,105 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
     );
     expect(echoed?.text).toContain('/compact please');
   }, 40_000);
+});
+
+/**
+ * P2 of spec 2026-08-20-chain-integrity-restart-and-continuation, driven end-to-end through the
+ * mock backend: a continuation's `CEZ:DONE` is a statement about ITS OWN step, not about the run.
+ *
+ * `runContinuation`'s turn-end handler read the marker with no chain guard at all, while its twin
+ * in `runAgentStep` has had one since #410. That asymmetry is what let run `be31d9e9` — a
+ * six-step `spec-to-deploy` chain whose recovery had turned it into a `continue-1` chat — emit
+ * `CEZ:DONE` after step 1 and take the whole run to `done` with five steps still pending.
+ */
+describe('a continuation cannot finish an unfinished chain (P2)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeAll(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-chain-p2-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterAll(() => {
+    manager?.dispose();
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const settled = async (id: string, timeoutMs = 30_000) => {
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + timeoutMs;
+    while (!terminal.has(store.getRun(id)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error(`run stuck at ${store.getRun(id)?.status}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+
+  it('hands the run back to the chain instead of settling it', async () => {
+    const workflow: WorkflowDef = {
+      name: 'two-step',
+      source: 'built-in',
+      steps: [
+        { id: 'one', name: 'One', prompt: '{{task}}' },
+        { id: 'two', name: 'Two', prompt: '{{task}}' },
+      ],
+    };
+    // `mock:done` makes every mock turn end with CEZ:DONE.
+    const record = manager.startRun(workflow, { task: 'mock:done do the thing', worktree: false });
+    await settled(record.id);
+    expect(store.getRun(record.id)?.status).toBe('done');
+
+    // Put the chain back into the shape recovery used to leave behind: step two never ran, and
+    // the ball is with a synthetic continuation. This is the be31d9e9 record, in miniature.
+    store.updateStep(record.id, 'two', { status: 'pending', finishedAt: undefined });
+    // `mock:done` again: this continuation ends its turn claiming ITS goal is achieved — the
+    // exact signal that used to finish the whole run.
+    expect(manager.continueRun(record.id, { text: 'mock:done carry on' })).toEqual({ ok: true });
+
+    // `worktree: false` serializes on the repo-root lease, so the continuation's session opens a
+    // beat after the call returns — wait for it to actually START before waiting for the end.
+    const started = Date.now() + 30_000;
+    while (!store.readEvents(record.id).some((e) => e.type === 'step-start' && e.stepId === 'continue-1')) {
+      if (Date.now() > started) throw new Error('continuation never started');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await settled(record.id);
+
+    const events = store.readEvents(record.id);
+    const continueEnd = events.findIndex((e) => e.type === 'step-end' && e.stepId === 'continue-1');
+    expect(continueEnd).toBeGreaterThan(-1);
+    // The chain continued: step two actually started, AFTER the continuation closed…
+    const twoStart = events.findIndex(
+      (e, i) => i > continueEnd && e.type === 'step-start' && e.stepId === 'two',
+    );
+    expect(twoStart).toBeGreaterThan(continueEnd);
+    // …and the run's own "finished" lifecycle line came only after that.
+    // The ORIGINAL run also logged one; the chain's own finish is the last.
+    const finishes = events
+      .map((e, i) => (e.type === 'lifecycle' && e.message === 'run finished' ? i : -1))
+      .filter((i) => i >= 0);
+    const finished = finishes[finishes.length - 1] ?? -1;
+    expect(finished).toBeGreaterThan(twoStart);
+    // …and no `run finished` slipped in between the continuation's close and step two starting.
+    expect(
+      events.slice(continueEnd, twoStart).some((e) => e.type === 'lifecycle' && e.message === 'run finished'),
+    ).toBe(false);
+    // No step left pending at the end — the definition of the chain being done.
+    expect(store.getRun(record.id)?.steps.filter((s) => s.status === 'pending')).toEqual([]);
+    expect(store.getRun(record.id)?.status).toBe('done');
+  }, 90_000);
 });
