@@ -2,7 +2,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DEFAULT_SKILLS_REPOS, gatedSkillsRepos, loadConfig, resolveWorktreeRetention } from './config.ts';
+import {
+  DEFAULT_SKILLS_REPOS,
+  DEFAULT_WORKTREE_RETENTION,
+  gatedSkillsRepos,
+  loadConfig,
+  resolveWorktreeRetention,
+} from './config.ts';
 
 /**
  * `config.json` schema roundtrips (R2 2.3: `systemPrompt?`). The invariants
@@ -116,13 +122,13 @@ describe('loadConfig systemPrompt', () => {
     });
   });
 
-  /** `worktreeRetention` (#483): count-based, always materialized (default 10),
+  /** `worktreeRetention` (#483): count-based, always materialized (default `DEFAULT_WORKTREE_RETENTION`),
    *  `.catch(10)` so a bad value degrades to the default. `0` = unlimited. */
   describe('worktreeRetention', () => {
     it('defaults to 10 when absent (old config files load unchanged)', async () => {
       write({ maxParallel: 5 });
       const config = await loadConfig(repoRoot);
-      expect(config.worktreeRetention).toBe(10);
+      expect(config.worktreeRetention).toBe(DEFAULT_WORKTREE_RETENTION);
       expect(config.maxParallel).toBe(5);
     });
 
@@ -139,13 +145,13 @@ describe('loadConfig systemPrompt', () => {
     it('degrades a bad value to the default (10) via .catch', async () => {
       write({ worktreeRetention: -4, maxParallel: 6 });
       const config = await loadConfig(repoRoot);
-      expect(config.worktreeRetention).toBe(10);
+      expect(config.worktreeRetention).toBe(DEFAULT_WORKTREE_RETENTION);
       expect(config.maxParallel).toBe(6);
     });
 
     it('degrades a wrong-typed value to the default (10)', async () => {
       write({ worktreeRetention: 'lots' });
-      expect((await loadConfig(repoRoot)).worktreeRetention).toBe(10);
+      expect((await loadConfig(repoRoot)).worktreeRetention).toBe(DEFAULT_WORKTREE_RETENTION);
     });
   });
 });
@@ -216,19 +222,19 @@ describe('resolveWorktreeRetention', () => {
     expect(await resolveWorktreeRetention(repoRoot)).toBe(0);
   });
 
-  it('falls back to 10 when the workspace config is absent', async () => {
+  it('falls back to the built-in default when the workspace config is absent', async () => {
     writeRepo({ maxParallel: 5 });
-    expect(await resolveWorktreeRetention(repoRoot)).toBe(10);
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(DEFAULT_WORKTREE_RETENTION);
   });
 
-  it('falls back to 10 when the workspace config is corrupt (unreadable)', async () => {
+  it('falls back to the built-in default when the workspace config is corrupt (unreadable)', async () => {
     writeFileSync(join(cezHome, 'config.json'), '{ not json', 'utf8');
-    expect(await resolveWorktreeRetention(repoRoot)).toBe(10);
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(DEFAULT_WORKTREE_RETENTION);
   });
 
-  it('falls back to 10 when the workspace default itself is out of bounds', async () => {
+  it('falls back to the built-in default when the workspace default itself is out of bounds', async () => {
     writeWorkspace({ resources: { worktreeRetentionDefault: -1 } });
-    expect(await resolveWorktreeRetention(repoRoot)).toBe(10);
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(DEFAULT_WORKTREE_RETENTION);
   });
 
   it('treats a repo value the schema would refuse as unset, so the workspace seeds it', async () => {

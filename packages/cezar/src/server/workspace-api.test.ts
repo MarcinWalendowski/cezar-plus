@@ -99,7 +99,7 @@ describe('the workspace settings API (step 2.7)', () => {
         monitoringWakeIntervalMinutes: 5,
         autoResumeOnUsageLimit: true,
         memoryLimitMb: null,
-        worktreeRetentionDefault: 10,
+        worktreeRetentionDefault: 1000,
       },
       // Machine-wide agent defaults (spec 2026-07-29-agent-profiles). EMPTY, not populated: absent
       // keys mean "this machine has no opinion", which is what makes them defaults a repo can be
@@ -146,7 +146,7 @@ describe('the workspace settings API (step 2.7)', () => {
         monitoringWakeIntervalMinutes: 5,
         autoResumeOnUsageLimit: false,
         memoryLimitMb: 2048,
-        worktreeRetentionDefault: 10,
+        worktreeRetentionDefault: 1000,
       },
       // Untouched by a resources write, and still empty — the two live in the same file but answer
       // unrelated questions, so one must never materialize the other.

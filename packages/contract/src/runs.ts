@@ -165,6 +165,10 @@ export const workspaceWorktreeSchema = z.object({
   branch: z.string(),
   /** Fork ref / starting commit, the apply-back diff base. */
   baseBranch: z.string(),
+  /** Set when count-based retention removed this worktree's DIRECTORY; the `cez/<id8>` branch
+   *  survives, so the work stays recoverable (spec 2026-08-20-workspace-run-worktree-isolation,
+   *  X4). Its absence on a path that no longer exists is what a LEAKED worktree looks like. */
+  reclaimedAt: z.string().optional(),
 });
 export type WorkspaceWorktree = z.infer<typeof workspaceWorktreeSchema>;
 

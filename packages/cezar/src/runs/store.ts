@@ -359,6 +359,8 @@ export const runRecordSchema = z.object({
         worktreePath: z.string(),
         branch: z.string(),
         baseBranch: z.string(),
+        /** Retention removed the directory; the `cez/<id8>` branch is kept (spec 2026-08-20). */
+        reclaimedAt: z.string().optional(),
       }),
     )
     .optional(),

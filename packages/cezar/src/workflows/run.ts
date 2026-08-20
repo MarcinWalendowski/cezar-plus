@@ -65,6 +65,7 @@ import {
 } from '../workspace/granted-roots.ts';
 import {
   applyWorkspaceWorktrees,
+  discardWorkspaceWorktrees,
   materializeWorkspaceWorktrees,
 } from '../workspace/workspace-worktrees.ts';
 import type { WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
@@ -3110,6 +3111,9 @@ export class RunManager {
       this.clearIdleTimer(state);
       this.clearAutosaveTimer(state);
       if (state.cwd !== this.repoRoot) await autosaveCommit(state.cwd, 'turn end');
+      // Same rule as `execute()`'s terminal block: a continuation that ended cancelled/stopped/
+      // failed drops its worktree directories and keeps the branches (spec 2026-08-20, X3).
+      await this.discardWorkspaceRun(runId);
       this.dropActive(runId);
       if (handBack) {
         // Now that the run holds no slot and no `ActiveRun`, put it back in the queue at its next
@@ -3586,6 +3590,8 @@ export class RunManager {
     } else {
       await this.settleSuccess(runId);
     }
+    // Cancelled / stopped / failed: no apply-back (W7), but no leak either (spec 2026-08-20, X3).
+    await this.discardWorkspaceRun(runId);
     this.clearIdleTimer(state);
     this.dropActive(runId);
   }
@@ -4306,6 +4312,49 @@ export class RunManager {
     }
     // Keep only the worktrees that could not be applied (conflicts), so a re-run does not try to
     // re-apply what already landed; clear the field entirely once everything is in.
+    this.store.updateRun(runId, { workspaceWorktrees: kept.length > 0 ? kept : undefined });
+  }
+
+  /**
+   * The other half of `applyWorkspaceRun` (spec 2026-08-20-workspace-run-worktree-isolation, X3).
+   *
+   * Apply-back is success-only on purpose (spec 2026-08-19, W7) — landing a half-finished run in
+   * twelve real checkouts is worse than not landing it. But CLEANUP was success-only too, purely
+   * because `applyWorkspaceRun` was the single call site, so every `failed`/`cancelled`/stopped
+   * workspace run left twelve full checkouts on disk forever. This discards the DIRECTORIES and
+   * keeps the `cez/<id8>` BRANCHES: nothing becomes unrecoverable (a Continue re-materializes the
+   * trees from those branches), and the gigabytes go.
+   *
+   * A no-op for every other run and for every other ending — including the review GATE, which is a
+   * successful park whose diff the user is about to read. `review` WITH a `stopReason` is the
+   * opposite: an agent we stopped, which is one of the endings this exists for.
+   */
+  private async discardWorkspaceRun(runId: string): Promise<void> {
+    const run = this.store.getRun(runId);
+    if (!run) return;
+    const stopped = run.status === 'review' && run.stopReason !== undefined;
+    if (run.status !== 'failed' && run.status !== 'cancelled' && !stopped) return;
+    const worktrees = run.workspaceWorktrees;
+    if (!worktrees || worktrees.length === 0) return;
+    const reports = await discardWorkspaceWorktrees(worktrees);
+    const keptRoots = new Set(reports.filter((r) => r.outcome === 'kept').map((r) => r.root));
+    const kept = worktrees.filter((wt) => keptRoots.has(wt.root));
+    for (const report of reports) {
+      if (report.outcome !== 'kept') continue;
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: `${report.root}: worktree kept — ${report.detail ?? 'not discarded'}`,
+      });
+    }
+    const discarded = reports.length - kept.length;
+    if (discarded > 0) {
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: `run did not succeed — discarded ${discarded} project worktree(s); the ${
+          worktrees[0]?.branch ?? 'cez/*'
+        } branches keep the work`,
+      });
+    }
     this.store.updateRun(runId, { workspaceWorktrees: kept.length > 0 ? kept : undefined });
   }
 

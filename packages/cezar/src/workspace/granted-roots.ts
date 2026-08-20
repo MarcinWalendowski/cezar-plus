@@ -1,4 +1,4 @@
-import { sep } from 'node:path';
+import { join, sep } from 'node:path';
 import type { WorkspaceGrantProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { listProjects } from './projects.ts';
 
@@ -78,6 +78,35 @@ function stripTrailingSep(root: string): string {
 }
 
 /**
+ * Where a project's work lives inside the run's worktrees, or `undefined` when it has none.
+ *
+ * Not a plain `root → worktreePath` lookup any more (spec 2026-08-20, X1/X2): a worktree entry is
+ * now keyed on the REPO root, and several registry entries can sit inside one repo — `brand` and
+ * `chatbox` are subdirectories of the `monorepo` checkout, registered as projects of their
+ * own. Those map to the MATCHING SUBDIRECTORY of the shared tree, so each project still has a path
+ * of its own, the repo root itself is still granted (the agent can work at the top of the repo),
+ * and `dedupeContainedRoots` collapses the three to one `--add-dir`.
+ *
+ * The deepest containing repo root wins, so a nested repo registered inside another one maps to
+ * its OWN worktree rather than to its parent's.
+ */
+function worktreePathOf(
+  projectRoot: string,
+  worktrees: readonly WorkspaceWorktree[],
+): string | undefined {
+  const project = stripTrailingSep(projectRoot);
+  let best: { root: string; path: string } | undefined;
+  for (const wt of worktrees) {
+    const root = stripTrailingSep(wt.root);
+    if (project === root) return wt.worktreePath;
+    if (!project.startsWith(root + sep)) continue;
+    if (best && best.root.length >= root.length) continue;
+    best = { root, path: join(wt.worktreePath, project.slice(root.length + 1)) };
+  }
+  return best?.path;
+}
+
+/**
  * A project that is not on disk contributes NO root: `--add-dir` on a path that does not exist is
  * a spawn-time failure on the Claude CLI, and a workspace run must not die because one registered
  * checkout was moved. It stays in `projects` so the prompt can say so.
@@ -86,14 +115,13 @@ export function buildWorkspaceGrant(
   projects: readonly GrantedProject[],
   worktrees: readonly WorkspaceWorktree[] = [],
 ): WorkspaceGrant {
-  const worktreeByRoot = new Map(worktrees.map((wt) => [wt.root, wt.worktreePath]));
   const isolated = worktrees.length > 0;
   // The path the agent works in per project: its worktree when it has one, else the real root
   // (a non-git or worktree-failed project, granted in place — see materializeWorkspaceWorktrees).
   const paths = new Map<string, string>();
   for (const project of projects) {
     if (project.status === 'missing') continue;
-    paths.set(project.root, worktreeByRoot.get(project.root) ?? project.root);
+    paths.set(project.root, worktreePathOf(project.root, worktrees) ?? project.root);
   }
   return {
     projects: [...projects],
@@ -147,6 +175,16 @@ export function workspaceGrantSystemPrompt(grant: WorkspaceGrant | undefined): s
       'your work there. When this task finishes, cezar applies your changes back into each real',
       'checkout automatically and removes the worktree — so do NOT commit, stash, reset, or push,',
       'and never edit a project outside its worktree path. Report what you changed, per project.',
+      '',
+      // X5 (spec 2026-08-20-workspace-run-worktree-isolation). The knowledge mount is the ONE
+      // grant that is NOT worktreed: worktreeing a 2000-document corpus per run is not worth it,
+      // and the append-only write protocol already makes concurrent runs safe. But that safety is
+      // a convention agents follow, not an isolation boundary — so it has to be said out loud, or
+      // the paragraph above reads as "everything you can reach is yours alone", which is false.
+      'One exception: the knowledge-base directories are NOT worktreed. They are mounted at their',
+      'real paths and SHARED with every other run in flight, so editing a file there edits it for',
+      'everyone at once. Treat them as read-only: the local cezar knowledge base is the only thing',
+      'you write to, and you write it by appending to CEZ_KB_WRITE_FILE, which is yours alone.',
     );
   } else {
     lines.push(

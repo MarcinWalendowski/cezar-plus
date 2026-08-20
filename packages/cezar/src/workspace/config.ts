@@ -115,8 +115,9 @@ const resourcesSchema = z
     /** Per-task memory ceiling in MiB; null = no limit (matches the file's
      *  literal `"memoryLimitMb": null` in the spec's Data Model). */
     memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().default(null).catch(null),
-    /** Default worktree retention for projects that don't override it. */
-    worktreeRetentionDefault: z.number().int().min(0).max(1000).default(10).catch(10),
+    /** Default worktree retention for projects that don't override it. 1000 since 2026-08-20 —
+     *  see `DEFAULT_WORKTREE_RETENTION` (`../config.ts`) for why the ceiling is this high. */
+    worktreeRetentionDefault: z.number().int().min(0).max(1000).default(1000).catch(1000),
   })
   .passthrough();
 

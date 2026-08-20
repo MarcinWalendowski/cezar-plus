@@ -8,6 +8,23 @@
 > its own `cez/<id8>` worktree, runs **up to `maxParallel`**, and **auto-applies** each worktree
 > back into the real checkout when it finishes, removing the worktree after the merge. D1/D3/D5/D6
 > (record home, containment, persisted grant, prompt names the grant) are kept.
+>
+> **Extended in place 2026-08-20 by `2026-08-20-workspace-run-worktree-isolation.md`.** The model
+> here is live and correct — a workspace run does create one worktree per granted git project, and
+> several such runs genuinely run at once. Four gaps it left, all fixed there, all of which change
+> what a reader should expect from this document:
+>
+> - **"one worktree per PROJECT" is really one per git REPO.** Several registry entries inside one
+>   checkout (`loki-labs` + `brand` + `lokie-chatbox`) resolve to a single tree; they are collapsed
+>   to one entry rooted at the repo root, and each project is granted its own subdirectory of that
+>   tree. Before the collapse, apply-back raced itself and reported `(diff failed: )` on every run.
+> - **W7's "apply on success only" left cleanup unowned.** Non-success endings now DISCARD the
+>   directories and keep the `cez/<id8>` branches.
+> - **The per-project prune this spec's Risks section relied on never reclaimed these.** Retention
+>   now walks `workspaceWorktrees` too.
+> - **The knowledge-base mount is NOT worktreed.** It is granted to every concurrent run at its
+>   real path — the one place where "do multiple sessions work on the same files?" is *yes*. The
+>   system prompt now says so.
 
 ## TLDR
 

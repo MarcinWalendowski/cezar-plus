@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DEFAULT_WORKTREE_RETENTION } from '../config.ts';
 import { createWorktree } from '../git-worktree.ts';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
@@ -84,7 +85,7 @@ describe('the worktrees API', () => {
     const runningId = await seed('33333333-3333-4333-8333-333333333333', 'running');
 
     const body = await getWorktrees();
-    expect(body.keep).toBe(10); // schema default
+    expect(body.keep).toBe(DEFAULT_WORKTREE_RETENTION); // schema default
     expect(body.worktrees).toHaveLength(3);
 
     const byRun = Object.fromEntries(body.worktrees.map((w) => [w.runId, w]));

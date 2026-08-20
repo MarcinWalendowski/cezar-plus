@@ -26,6 +26,24 @@ export function isReclaimable(run: RunRecord): boolean {
   return FINISHED.has(run.status) && !!run.worktreePath && !run.worktreeReclaimedAt;
 }
 
+/** One entry of a workspace run's per-project worktree map, as the STORE holds it. Taken from
+ *  `RunRecord` rather than re-imported from the contract so the two can never drift apart here. */
+export type StoredWorkspaceWorktree = NonNullable<RunRecord['workspaceWorktrees']>[number];
+
+/**
+ * The same rule as `isReclaimable`, for a WORKSPACE run's per-project worktrees (spec
+ * 2026-08-20-workspace-run-worktree-isolation, X4).
+ *
+ * `run.worktreePath` is the single-repo field, and it is the only one this module used to read —
+ * so twelve directories per workspace run accumulated with nothing to bound them (measured
+ * 2026-08-20: 6 in `chat`, 5 in `cezar`, 3 in seven other repos, with `worktreeRetentionDefault`
+ * in force the whole time). A workspace run is reclaimable when it is finished and still holds at
+ * least one un-reclaimed worktree.
+ */
+export function isWorkspaceReclaimable(run: RunRecord): boolean {
+  return FINISHED.has(run.status) && (run.workspaceWorktrees ?? []).some((wt) => !wt.reclaimedAt);
+}
+
 /**
  * Given every run and the keep-count `keep`, return the ids of the finished
  * worktrees whose *directory* should be reclaimed: keep the `keep`
@@ -42,11 +60,28 @@ export function selectReclaimableWorktrees(runs: readonly RunRecord[], keep: num
   return reclaimable.slice(keep).map((r) => r.id);
 }
 
+/**
+ * Workspace-run counterpart of `selectReclaimableWorktrees`, with the SAME keep-last-N rule and
+ * the same recency ordering (X4) — deliberately a second selector over the same primitives rather
+ * than a second rule: a running workspace run must never lose its trees mid-flight, and `FINISHED`
+ * is what guarantees it. `keep === 0` means unlimited.
+ */
+export function selectReclaimableWorkspaceRuns(runs: readonly RunRecord[], keep: number): string[] {
+  if (!Number.isFinite(keep) || keep <= 0) return [];
+  const reclaimable = runs
+    .filter(isWorkspaceReclaimable)
+    .sort((a, b) => (recencyKey(a) < recencyKey(b) ? 1 : recencyKey(a) > recencyKey(b) ? -1 : 0));
+  return reclaimable.slice(keep).map((r) => r.id);
+}
+
 /** The slice of the runs store the enforcer needs. Kept structural so the
  *  enforcer stays easy to test and never imports the concrete store. */
 export interface RetentionStore {
   listRuns(): RunRecord[];
-  updateRun(id: string, patch: { worktreeReclaimedAt?: string }): unknown;
+  updateRun(
+    id: string,
+    patch: { worktreeReclaimedAt?: string; workspaceWorktrees?: StoredWorkspaceWorktree[] },
+  ): unknown;
 }
 
 /** The slice of the store the re-materializer needs. */
@@ -123,6 +158,48 @@ export async function reclaimWorktrees(
       reclaimed.push(id);
     } catch {
       // best-effort: never let retention crash a terminal transition or startup.
+    }
+  }
+  // A WORKSPACE run's worktrees live in the OTHER projects' repos, not in `repoRoot` — the reclaim
+  // is keyed on each entry's own root (X4). Same keep-N budget, same "branch kept" contract, and
+  // the same "stamp only once the directory is confirmed gone" discipline as above.
+  for (const id of selectReclaimableWorkspaceRuns(runs, keep)) {
+    const worktrees = byId.get(id)?.workspaceWorktrees;
+    if (!worktrees || worktrees.length === 0) continue;
+    const next: StoredWorkspaceWorktree[] = [];
+    let changed = false;
+    let removedAny = false;
+    for (const wt of worktrees) {
+      if (wt.reclaimedAt) {
+        next.push(wt);
+        continue;
+      }
+      // Already gone — applied back and removed on a successful settle, or discarded on a failed
+      // one. Stamping it is what stops this run being re-selected on every pass forever.
+      if (!existsSync(wt.worktreePath)) {
+        next.push({ ...wt, reclaimedAt: now() });
+        changed = true;
+        continue;
+      }
+      try {
+        await remove(wt.root, wt.worktreePath);
+        if (existsSync(wt.worktreePath)) {
+          next.push(wt); // reclaim failed; retry next pass
+          continue;
+        }
+        next.push({ ...wt, reclaimedAt: now() });
+        changed = true;
+        removedAny = true;
+      } catch {
+        next.push(wt);
+      }
+    }
+    if (!changed) continue;
+    try {
+      store.updateRun(id, { workspaceWorktrees: next });
+      if (removedAny && !reclaimed.includes(id)) reclaimed.push(id);
+    } catch {
+      // best-effort, as above.
     }
   }
   return reclaimed;

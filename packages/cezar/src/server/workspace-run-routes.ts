@@ -23,9 +23,17 @@ import { loadWorkspaceGrant, type WorkspaceGrant } from '../workspace/granted-ro
  *
  *  1. `worktree: false`, unconditionally. There is no single repository to branch, and an
  *     isolated worktree of the boot repo would isolate nothing that matters while making the run
- *     look sandboxed. A consequence worth stating: an in-place run takes the boot repo's exclusive
- *     working-tree lease (`workflows/run.ts`), so **one workspace run at a time** — correct, since
- *     two agents editing the same real checkouts concurrently is a hazard, not throughput.
+ *     look sandboxed.
+ *
+ *     **Corrected 2026-08-20** (spec `2026-08-19-parallel-workspace-runs-worktrees.md`, extended by
+ *     `2026-08-20-workspace-run-worktree-isolation.md`). This used to say the consequence was "one
+ *     workspace run at a time", because an in-place run takes the boot repo's exclusive
+ *     working-tree lease. That has been false since 2026-08-19: a workspace run isolates each
+ *     granted git REPO in its own `cez/<id8>` worktree (`workspace/workspace-worktrees.ts`), takes
+ *     NO boot-root lease, and is exempt from the non-git single-slot cap in `pump()` — so N
+ *     workspace runs run at once, up to `maxParallel`, and their diffs are applied back to the real
+ *     checkouts when they settle successfully. `worktree: false` still holds; only its consequence
+ *     changed.
  *  2. The grant, read once from the registry here and PERSISTED on the record. Every later step
  *     and every restart re-applies that stored list — see `runRecordSchema.workspaceProjects`.
  *  3. The boot project as the run's home, because a `RunManager` is bound to a repository and

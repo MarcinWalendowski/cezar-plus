@@ -116,6 +116,59 @@ describe('buildWorkspaceGrant — isolated (per-project worktrees, spec 2026-08-
     );
   });
 
+  it('maps a sibling registry entry to its SUBDIRECTORY of the shared repo worktree', () => {
+    // `brand` and `chatbox` live inside the `monorepo` checkout and are registered as
+    // projects of their own, so the run has ONE worktree for all three (spec 2026-08-20, X1).
+    // Each still needs a path of its own, or the prompt would send two of them at the REAL
+    // checkout — a silent isolation leak, which is exactly what the collapse was meant to close.
+    const grant = buildWorkspaceGrant(
+      [
+        project('monorepo', '/w/mono'),
+        project('brand', '/w/mono/brand'),
+        project('chatbox', '/w/mono/chatbox'),
+        project('cezar', '/w/mono/cezar'),
+      ],
+      [wt('/w/mono', '/w/mono/.ai/cezar/worktrees/r1'), wt('/w/mono/cezar', '/w/mono/cezar/.ai/cezar/worktrees/r1')],
+    );
+    expect(grant.paths.get('/w/mono')).toBe('/w/mono/.ai/cezar/worktrees/r1');
+    expect(grant.paths.get('/w/mono/brand')).toBe('/w/mono/.ai/cezar/worktrees/r1/brand');
+    expect(grant.paths.get('/w/mono/chatbox')).toBe(
+      '/w/mono/.ai/cezar/worktrees/r1/chatbox',
+    );
+    // A nested repo with a worktree of its OWN wins over its container's — deepest root, not first.
+    expect(grant.paths.get('/w/mono/cezar')).toBe('/w/mono/cezar/.ai/cezar/worktrees/r1');
+    // The repo root is granted, so an agent can still work at the top of the repo; the three
+    // sibling paths inside it collapse to that one `--add-dir`.
+    expect(new Set(grant.roots)).toEqual(
+      new Set(['/w/mono/.ai/cezar/worktrees/r1', '/w/mono/cezar/.ai/cezar/worktrees/r1']),
+    );
+  });
+
+  it('does not mistake a shared prefix for containment', () => {
+    // `/w/monorepo` is NOT inside `/w/mono`. A bare `startsWith` says it is and would grant a
+    // path inside the wrong repo's worktree.
+    const grant = buildWorkspaceGrant(
+      [project('other', '/w/monorepo')],
+      [wt('/w/mono', '/w/mono/.ai/cezar/worktrees/r1')],
+    );
+    expect(grant.paths.get('/w/monorepo')).toBe('/w/monorepo');
+  });
+
+  it('states that the knowledge mount is shared and real-pathed, and is not written directly', () => {
+    // X5: the KB roots are the ONE grant that is not worktreed — they are handed to every
+    // concurrent run at their real path. That is safe only because writes go to a per-run
+    // `CEZ_KB_WRITE_FILE`, which is a convention an agent follows, not a boundary. Saying the
+    // paths above are isolated without saying this one is not is what makes it dangerous.
+    const grant = buildWorkspaceGrant(
+      [project('cezar', '/w/cezar')],
+      [wt('/w/cezar', '/w/cezar/.ai/cezar/worktrees/r1')],
+    );
+    const prompt = workspaceGrantSystemPrompt(grant) ?? '';
+    expect(prompt).toMatch(/knowledge-base directories are NOT worktreed/i);
+    expect(prompt).toMatch(/SHARED with every other run/i);
+    expect(prompt).toContain('CEZ_KB_WRITE_FILE');
+  });
+
   it('the prompt names the worktree paths and tells the agent cezar applies them back', () => {
     const grant = buildWorkspaceGrant(
       [project('cezar', '/w/cezar')],

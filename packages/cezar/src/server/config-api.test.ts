@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DEFAULT_WORKTREE_RETENTION } from '../config.ts';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { createApp } from './server.ts';
@@ -82,7 +83,7 @@ describe('the config API', () => {
       modelsLocked: false,
       maxParallel: 2,
       memoryLimitMb: null,
-      worktreeRetention: 10,
+      worktreeRetention: DEFAULT_WORKTREE_RETENTION,
       liveTitleUpdates: null,
       reviewGate: null,
     });
@@ -199,7 +200,7 @@ describe('the config API', () => {
       modelsLocked: false,
       maxParallel: 5,
       memoryLimitMb: null,
-      worktreeRetention: 10,
+      worktreeRetention: DEFAULT_WORKTREE_RETENTION,
       liveTitleUpdates: null,
       reviewGate: null,
     });
@@ -217,7 +218,7 @@ describe('the config API', () => {
     // null drops the key so it degrades to the schema default (10).
     await put({ worktreeRetention: null });
     expect(rawFile().worktreeRetention).toBeUndefined();
-    expect((await getBody()).worktreeRetention).toBe(10);
+    expect((await getBody()).worktreeRetention).toBe(DEFAULT_WORKTREE_RETENTION);
   });
 
   it('rejects a negative or over-limit worktreeRetention with 400', async () => {

@@ -31,8 +31,16 @@ export type SkillsRepoSource = z.infer<typeof skillsRepoSchema>;
  */
 export const DEFAULT_SKILLS_REPOS: SkillsRepoSource[] = [];
 
-/** Last-resort retention when neither the repo nor the workspace says anything. */
-export const DEFAULT_WORKTREE_RETENTION = 10;
+/**
+ * Last-resort retention when neither the repo nor the workspace says anything.
+ *
+ * Raised 10 → 1000 on 2026-08-20 (owner call, spec
+ * 2026-08-20-workspace-run-worktree-isolation): with the enforcer now also walking a workspace
+ * run's twelve per-project worktrees, a keep-10 budget would reclaim a directory the user might
+ * still want to look at after a handful of runs. Retention exists to stop disk saturating, not to
+ * garbage-collect recent work — and the reclaim only ever removes the DIRECTORY, never the branch.
+ */
+export const DEFAULT_WORKTREE_RETENTION = 1000;
 
 /** Unlimited — see `stepBudget`'s doc comment for why the default has no teeth. */
 export const DEFAULT_STEP_BUDGET = 0;
@@ -50,8 +58,9 @@ const configSchema = z.object({
    * Count-based worktree retention (#483): keep the last N *finished*
    * worktrees materialized on disk; reclaim older ones (directory only — the
    * `cez/<id8>` branch is kept, so the work stays recoverable). 0 = unlimited
-   * (never auto-reclaim). Default 10. `.catch(10)` keeps it additive-safe: a
-   * bad value degrades to the default instead of discarding the rest.
+   * (never auto-reclaim). Default `DEFAULT_WORKTREE_RETENTION`. The `.catch`
+   * keeps it additive-safe: a bad value degrades to the default instead of
+   * discarding the rest.
    */
   worktreeRetention: worktreeRetentionSchema.default(DEFAULT_WORKTREE_RETENTION).catch(DEFAULT_WORKTREE_RETENTION),
   /**

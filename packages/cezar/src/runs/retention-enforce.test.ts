@@ -60,6 +60,26 @@ function finishedRun(id: string, path: string, finishedAt: string): RunRecord {
   } as unknown as RunRecord;
 }
 
+/** A finished WORKSPACE run: no `worktreePath`, one `workspaceWorktrees` entry per repo. */
+function finishedWorkspaceRun(
+  id: string,
+  worktrees: { root: string; worktreePath: string }[],
+  finishedAt: string,
+): RunRecord {
+  return {
+    id,
+    status: 'done',
+    createdAt: finishedAt,
+    finishedAt,
+    workspaceWorktrees: worktrees.map((wt) => ({
+      ...wt,
+      branch: branchFor(id),
+      baseBranch: 'main',
+    })),
+    steps: [],
+  } as unknown as RunRecord;
+}
+
 describe('reclaimWorktrees (real git, #483)', () => {
   it('reclaims the oldest over-limit worktree: dir removed, branch kept, field stamped', async () => {
     const repo = await fixtureRepo();
@@ -118,5 +138,68 @@ describe('reclaimWorktrees (real git, #483)', () => {
     const store = fakeStore([finishedRun(id, wt.path, '2026-07-01T00:00:00.000Z')]);
     expect(await reclaimWorktrees(repo, store, 0)).toEqual([]);
     expect(existsSync(wt.path)).toBe(true);
+  });
+
+  /**
+   * Workspace runs (spec 2026-08-20-workspace-run-worktree-isolation, X4). Their worktrees live in
+   * OTHER repos than the `repoRoot` this enforcer was called for, and are keyed on each entry's own
+   * root — which is exactly why the `run.worktreePath` reclaimer never saw them.
+   */
+  it('reclaims a finished workspace run in every repo it touched: dirs gone, branches kept, entries stamped', async () => {
+    const repoA = await fixtureRepo();
+    const repoB = await fixtureRepo();
+    const oldId = '77777777-7777-4777-8777-777777777777';
+    const newId = '88888888-8888-4888-8888-888888888888';
+    const oldA = await createWorktree(repoA, oldId, 'main');
+    const oldB = await createWorktree(repoB, oldId, 'main');
+    const newA = await createWorktree(repoA, newId, 'main');
+
+    const store = fakeStore([
+      finishedWorkspaceRun(
+        oldId,
+        [
+          { root: repoA, worktreePath: oldA.path },
+          { root: repoB, worktreePath: oldB.path },
+        ],
+        '2026-08-01T00:00:00.000Z',
+      ),
+      finishedWorkspaceRun(newId, [{ root: repoA, worktreePath: newA.path }], '2026-08-09T00:00:00.000Z'),
+    ]);
+
+    const reclaimed = await reclaimWorktrees(repoA, store, 1, {
+      now: () => '2026-08-20T00:00:00.000Z',
+    });
+
+    expect(reclaimed).toEqual([oldId]);
+    // Both repos reclaimed, though only `repoA` was the enforcer's own root.
+    expect(existsSync(oldA.path)).toBe(false);
+    expect(existsSync(oldB.path)).toBe(false);
+    // Branches survive in both — the same "directory only" contract as the single-repo reclaimer.
+    expect(await branchExists(repoA, oldId)).toBe(true);
+    expect(await branchExists(repoB, oldId)).toBe(true);
+    for (const wt of store.runs.find((r) => r.id === oldId)?.workspaceWorktrees ?? []) {
+      expect(wt.reclaimedAt).toBe('2026-08-20T00:00:00.000Z');
+    }
+    // The newest workspace run is inside the budget and untouched.
+    expect(existsSync(newA.path)).toBe(true);
+    expect(store.runs.find((r) => r.id === newId)?.workspaceWorktrees?.[0]?.reclaimedAt).toBeUndefined();
+  });
+
+  it('never reclaims a workspace run that is still running, even when it is the over-limit one', async () => {
+    // The mutation this catches: reclaiming over the raw run list instead of through the
+    // finished-only selector. `live` is the OLDER of the two, so a bypassed filter puts it
+    // outside a keep-1 budget and deletes the tree an agent is working in right now.
+    const repo = await fixtureRepo();
+    const liveId = '99999999-9999-4999-8999-999999999999';
+    const doneId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const live = await createWorktree(repo, liveId, 'main');
+    const done = await createWorktree(repo, doneId, 'main');
+    const running = finishedWorkspaceRun(liveId, [{ root: repo, worktreePath: live.path }], '2026-08-01T00:00:00.000Z');
+    (running as { status: string }).status = 'running';
+    const finished = finishedWorkspaceRun(doneId, [{ root: repo, worktreePath: done.path }], '2026-08-09T00:00:00.000Z');
+
+    expect(await reclaimWorktrees(repo, fakeStore([running, finished]), 1)).toEqual([]);
+    expect(existsSync(live.path)).toBe(true);
+    expect(existsSync(done.path)).toBe(true);
   });
 });
