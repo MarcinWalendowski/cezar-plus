@@ -418,3 +418,33 @@ changed in this range were synced into `/opt/cezar` with dated `.bak` copies.
 **This is deployed, not done.** Verification §4 — the real-browser runtime pass — has still never
 been executed (todo `98bbd957`). It must be watched on a genuinely RUNNING task: a replayed thread
 does not exercise the streaming path, because `item.delta` frames are never re-emitted (risk R4).
+
+### Runtime confirmation 2026-08-20 14:2x UTC — the timer renders
+
+The owner reported not seeing the timer, correctly noting that "deployed" had been evidenced only
+as *bytes served*, never as *pixels rendered* — a real gap in the check. Cause was neither a failed
+deploy nor a data gap: the entry chunk hash changed (`index-GwGxH3dU` -> `index-CYPil8c_`) and every
+asset ships `cache-control: immutable, max-age=31536000`, so an already-open cockpit tab keeps
+running the OLD graph until `index.html` is re-fetched. After a reload the owner confirmed: **"I can
+see UI now."** That closes the render half of Verification section 4 for the timer.
+
+Two facts worth pinning, because both were guessed at during the incident:
+
+- **It is not "new tasks only".** The gate is `run.status === 'running'` (plus a present
+  `startedAt`), verified in the SERVED bundle:
+  `e.status===\`running\`?jsx(et,{since:e.startedAt,label:\`Running for\`}):null`. `startedAt` is a
+  pre-existing server field, present on **11/11** runs in the store including the ten already
+  `done` — so no run is missing it. Non-running runs show no timer *by design*, and at that moment
+  exactly one run was `running`, which is why the UI looked empty.
+- **`index.html` is served with NO `Cache-Control` at all** (assets are immutable, the HTML has no
+  header). It works, but it leaves "did my deploy land?" resting on browser heuristics. Any future
+  web deploy should expect a reload to be required, and telling a user "it is deployed" without
+  saying "reload" is an incomplete instruction.
+
+**Generalisable:** a bundle-grep plus an HTTP 200 proves *delivery*, not *behaviour*. For a UI
+change the two can diverge for an entire session on nothing but an open tab. Until something has
+rendered for a human or a headless browser, the honest status is "deployed, unrendered" — and this
+box has no Playwright/Puppeteer, so that last step is a human's until one is installed.
+
+Still open from section 4: the **streaming last-line** behaviour (risk R4) — it needs watching on a
+live run, since replay never re-emits `item.delta`. Todo `98bbd957` stays open for it.
