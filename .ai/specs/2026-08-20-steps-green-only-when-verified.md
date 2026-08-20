@@ -1,6 +1,10 @@
 # A step is green only when its goal was verified
 
-**Status: IMPLEMENTED (this session) — gates and a live run still to come.**
+**Status: IMPLEMENTED and PUSHED 2026-08-20 — commit `57fc8807` on `origin/main`
+(github.com/MarcinWalendowski/cezar), 10 files, +1301/-5. Typecheck exit 0; the three touched
+test files 148/148. NOT YET DEPLOYED — deploy is step 6 of this same run — and NOT YET OBSERVED
+on a live run: the mechanism is proven by test only, so this is QA NEEDED, not done. Do not
+upgrade this line without that observation (todo `aad60921`).**
 
 Written in the `implement` step of run `3bc55a31`, not the `spec` step. The `spec` step of that
 same run was killed mid-research (`claude CLI did not exit on its own after close; terminated by
@@ -209,7 +213,37 @@ Gates: `npm run typecheck` (root, not `typecheck:web` alone) and `npm test`.
 
 **Not verified until it happens:** a real `spec-to-deploy` run reaching a red `commit-push` or a
 red `deploy` in production. Until then the mechanism is proven by test only. Do not upgrade this
-line without that observation.
+line without that observation. Tracked as todo `aad60921` (high), with its three acceptance
+criteria — a dirty tree naming its files, a half-deployed pair naming WHICH target failed, and a
+failed post-condition re-entering the same step rather than continuing past it.
+
+### What shipped, and where the record went (the `document` step, run `3bc55a31`)
+
+Committed as `57fc8807` "feat: a step is green only when its post-condition holds" and pushed
+straight to `origin/main` — this fork ships linear commits to `main`, not PRs, under AGENTS.md
+§"Shipping cezar itself". `origin/main` had moved to `93e450c7` meanwhile and conflicted in two
+files; **both were keep-BOTH unions, resolved and re-verified, nothing dropped**:
+
+- `workflows/types.ts` — upstream had added `Task` to the `document` step's `allowedTools`; kept
+  that AND this change's `verify: { builtin: 'everything-committed', max: 1 }`.
+- `workflows/types.test.ts` — import union of upstream's `DEFAULT_ALLOWED_TOOLS` /
+  `RECORD_READ_RECIPE` with this change's `skillStackOf` / `workflowStepSchema`.
+
+The decision was written back to, in the same session as the code:
+
+| Where | What |
+|---|---|
+| `CHANGELOG.md`, Unreleased → ✨ Added | the entry for this change |
+| `AGENTS.md` § "Shipping cezar itself" | the "gate on a real readiness probe" rule was PROSE this now enforces — marked in place as implemented, naming the built-in and `.ai/deploy-targets.json` |
+| `.ai/specs/2026-08-19-spec-to-deploy-default-workflow.md` | amended (P4) — its steps are no longer green on agent exit alone |
+| knowledge base | proposal appended to `CEZ_KB_WRITE_FILE` (workspace scope), pending review via `cez kb proposals` |
+| tracker | todo `aad60921` — the in-the-wild observation tests cannot supply; todo `4b455418` — the owner's call on R2 and R3 |
+| memory `commit-step-must-commit-everything` | the owner instruction it records is now MECHANICALLY enforced, not advice — marked in place |
+
+**Open after this step, deliberately:** the deploy (step 6), and the live-run observation. Both
+built-ins report not-applicable-green on a workspace run *by design* (R3), and this WAS a
+workspace run — so this run cannot be its own evidence. The first real proof is a repo-scoped
+`spec-to-deploy` run after the deploy lands.
 
 ## Provenance
 

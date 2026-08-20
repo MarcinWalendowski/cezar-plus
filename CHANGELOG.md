@@ -5,6 +5,47 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- ✨ **A workflow step is green only when its goal was verified — not when its agent stopped.**
+  Spec `.ai/specs/2026-08-20-steps-green-only-when-verified.md`, commit `57fc8807`.
+
+  A step's status was a claim about the AGENT, never about the world: the loop settled `done`
+  whenever the runner reported no error, so a session that ran, said nothing useful and exited 0
+  was indistinguishable from one that did the job. Three false greens inside two days —
+  run `23221162`'s `commit-push` reported done leaving **7 modified and 5 untracked files and no
+  commit at all**; run `3bc55a31`'s `spec` step reported done having written **no spec file**,
+  after cezar terminated it at code 143; and `deploy` ended green having shipped **one of cezar's
+  two services**, the half-live case the owner's own words already named — *delivery is not
+  activation*.
+
+  A step may now declare a **post-condition** — `verify: { builtin: … | command: … , max: N }` —
+  evaluated after its work, deciding its status. Four choices worth knowing:
+
+  - **A verdict is a sentence, not an exit code.** The two built-ins run in-process, so
+    `everything-committed` names the files still uncommitted and `all-services-deployed` names
+    *which* target failed. `verify.command` remains available for a one-off shell check.
+  - **A failed post-condition re-runs the SAME step**, with the verdict appended to the prompt
+    through the existing `checkFailure` channel — the agent is told what it did not achieve and
+    gets `max` attempts to finish it. Past `max` the step is `failed` and the run stops. It never
+    silently continues to the next step.
+  - **`.ai/deploy-targets.json` is what "deployed" means, as probes.** The `deploy` step is green
+    only when **every** declared probe exits 0 (each bounded at 60s). cezar's own file declares
+    both halves, and the service probe deliberately checks that the *running process answers*, not
+    merely that a new tree was copied into place. A repo that has never declared its targets gets
+    a **red** deploy step: nobody saying what a repo deploys is not evidence of a deploy.
+  - **No `verify` → unchanged behaviour**, so every existing workflow keeps its exact meaning, and
+    a workspace run passes both built-ins on purpose — its worktrees are applied back unstaged
+    after the run ends, so it is *meant* to commit nothing.
+
+  Verified against real git repos in `mkdtemp`, no mocks: 18 post-condition tests (including run
+  `23221162`'s exact 7-modified/5-untracked shape, and the one-probe-of-two "UI shipped, service
+  did not" case), plus runner tests proving a step whose work succeeds and whose post-condition
+  fails ends **`failed`, not `done`**. Typecheck exit 0.
+
+  Status is **QA needed, not done**: never observed on a live run. The run that built it was a
+  workspace run, which both built-ins pass by design, so it cannot be its own evidence — the first
+  real proof is a repo-scoped `spec-to-deploy` run after this deploys (todo `aad60921`). Two
+  judgement calls are awaiting the owner's eye as todo `4b455418` (spec R2 and R3).
+
 - ✨ **Every workflow step and every tool call now says how long it took.** Spec
   `.ai/specs/2026-08-20-step-and-tool-call-durations.md`, commit `69b4a3de`. **Web-only** — no
   contract field, no migration, no runner change.
