@@ -10,6 +10,16 @@ EVERYTHING** — the earlier carve-out that kept the unattended paths (automatio
 tasks, bookmarklet, unknown-skill prefill) on `quick-task` is REMOVED; they now default to
 `spec-to-deploy` too, per owner instruction "default everything to this workflow".
 
+**Amended 2026-08-20 (P4), commit `57fc8807` — a step of this workflow is NO LONGER green just
+because its agent exited 0.** As specified here, every step settled `done` whenever the runner
+reported no error, which let `commit-push` report done having committed nothing (run `23221162`)
+and let `deploy` report done having shipped one of cezar's two services. `commit-push`, `document`
+and `deploy` now each carry a `verify` post-condition that must hold after the step's work, and a
+failed post-condition re-runs the SAME step with the verdict appended to its prompt before the run
+fails. Read `.ai/specs/2026-08-20-steps-green-only-when-verified.md` before reasoning about any
+step status described below — the "Solution" and "Architecture" sections here still describe the
+pre-P4 unconditional `done`.
+
 ## TLDR
 
 Add a new built-in workflow that codifies the owner's standard operating pipeline as a

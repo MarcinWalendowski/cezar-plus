@@ -477,11 +477,42 @@ steps:
     onFail:
       retry: implement           # loop back to an earlier step…
       max: 2                     # …at most twice
+  - id: ship
+    name: Commit & push
+    prompt: "Commit and push the change for: {{task}}"
+    verify:                      # a POST-CONDITION: what must be TRUE to be green
+      builtin: everything-committed
+      max: 1                     # re-run this step once if it isn't
 ```
 
 `{{task}}` is replaced with the task text you typed. When a check fails and loops
 back, its failing output is appended to the retried agent's prompt so the next
 attempt can see what broke.
+
+**`verify` — a step is green only if its goal was met.** Without one, a step
+passes whenever its agent exits without erroring, which is not the same thing: a
+commit step can end "done" having committed nothing. A `verify` block says what
+has to be true about the world afterwards. `command:` is any shell command (exit
+0 is the only green); `builtin:` names a check cezar evaluates itself —
+
+| builtin | green when |
+|---|---|
+| `everything-committed` | the tree is clean and, where a remote is reachable, nothing is unpushed |
+| `all-services-deployed` | **every** service in `.ai/deploy-targets.json` probes live |
+
+When a post-condition fails, the step is re-run up to `max` times with the
+verdict appended to its prompt — the agent is told exactly what it did not
+achieve — and only then marked failed. The run stops there rather than carrying a
+false "shipped" into the next step. The built-in `spec-to-deploy` workflow uses
+both. Declare what a repo deploys in `.ai/deploy-targets.json`:
+
+```json
+{ "targets": [ { "name": "api", "probe": "curl -fsS http://127.0.0.1:8080/health" } ] }
+```
+
+A repo that genuinely does not deploy says so explicitly with `{"targets": []}`;
+a missing file fails the deploy step, because "nobody said what this deploys" is
+not evidence that it deployed.
 
 Prefer skills over steps? A workflow can also be written in the portable
 shorthand — an ordered list of skill names, each becoming one agent step:

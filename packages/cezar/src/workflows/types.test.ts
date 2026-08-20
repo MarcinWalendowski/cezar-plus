@@ -5,6 +5,8 @@ import {
   RECORD_READ_RECIPE,
   SPEC_TO_DEPLOY_WORKFLOW,
   chainStepNote,
+  skillStackOf,
+  workflowStepSchema,
 } from './types.ts';
 
 /**
@@ -264,5 +266,87 @@ describe('chainStepNote for a resumed step', () => {
   it('stays undefined for a single-agent-step workflow, resumed or not', () => {
     const single = [{ id: 'work', name: 'Work' }];
     expect(chainStepNote(single, 0, { resumed: true })).toBeUndefined();
+  });
+});
+
+/**
+ * STEP POST-CONDITIONS (`.ai/specs/2026-08-20-steps-green-only-when-verified.md`). Every step of
+ * this workflow used to be green whenever its agent exited without erroring — which is how
+ * `commit-push` reported `status=done` on run `23221162` leaving 7 modified and 5 untracked files
+ * and no commit, and how deploying one of cezar's two services ended the deploy step green.
+ *
+ * | Guard | Mutation that must turn it red |
+ * |---|---|
+ * | `commit-push` verifies everything is committed | delete its `verify` |
+ * | `document` does too (it commits the record) | delete its `verify` |
+ * | `deploy` verifies ALL services are live | delete its `verify`, or point it at the commit built-in |
+ * | The schema rejects an ambiguous `verify` | drop the builtin-XOR-command refinement |
+ */
+describe('SPEC_TO_DEPLOY_WORKFLOW steps are green only when verified', () => {
+  const step = (id: string) => SPEC_TO_DEPLOY_WORKFLOW.steps.find((s) => s.id === id);
+
+  it('gates commit-push on everything actually being committed', () => {
+    expect(step('commit-push')?.verify).toEqual({ builtin: 'everything-committed', max: 1 });
+  });
+
+  it('gates document on the same thing — an uncommitted record is not a record', () => {
+    expect(step('document')?.verify).toEqual({ builtin: 'everything-committed', max: 1 });
+  });
+
+  it('gates deploy on ALL services being deployed, not merely on the step ending', () => {
+    expect(step('deploy')?.verify).toEqual({ builtin: 'all-services-deployed', max: 1 });
+  });
+
+  it('leaves the steps that have no machine-checkable post-condition alone', () => {
+    // Deliberate, not an oversight: a spec's quality is not shell-checkable, and re-running the
+    // whole gate suite to verify `run-tests` would double its cost. `commit-push` is what catches
+    // the downstream damage — that is the incident's own causal chain.
+    for (const id of ['spec', 'implement', 'run-tests']) {
+      expect(step(id)?.verify).toBeUndefined();
+    }
+  });
+
+  it('every declared post-condition names a builtin the runner can actually evaluate', () => {
+    // A `verify` naming an unknown builtin is RED at runtime, which would fail the default
+    // workflow for everyone. Catch a typo here instead.
+    const known = new Set(['everything-committed', 'all-services-deployed']);
+    for (const s of SPEC_TO_DEPLOY_WORKFLOW.steps) {
+      if (s.verify?.builtin) expect(known.has(s.verify.builtin)).toBe(true);
+    }
+  });
+});
+
+describe('workflowStepSchema — verify', () => {
+  const base = { id: 'ship', prompt: 'do it' };
+
+  it('defaults max to 1, so a failed post-condition always gets one re-run', () => {
+    const parsed = workflowStepSchema.parse({ ...base, verify: { builtin: 'everything-committed' } });
+    expect(parsed.verify?.max).toBe(1);
+  });
+
+  it('accepts a plain shell post-condition', () => {
+    expect(() => workflowStepSchema.parse({ ...base, verify: { command: 'test -f dist/index.js' } })).not.toThrow();
+  });
+
+  it('rejects a verify that names both a builtin and a command', () => {
+    expect(() =>
+      workflowStepSchema.parse({ ...base, verify: { builtin: 'everything-committed', command: 'true' } }),
+    ).toThrow();
+  });
+
+  it('rejects a verify that names neither', () => {
+    expect(() => workflowStepSchema.parse({ ...base, verify: { max: 2 } })).toThrow();
+  });
+
+  it('rejects an unknown builtin at load time rather than at run time', () => {
+    expect(() => workflowStepSchema.parse({ ...base, verify: { builtin: 'everything-deployed' } })).toThrow();
+  });
+
+  it('keeps a post-conditioned step out of the compact `skills:` form', () => {
+    // `skillStackOf` is the inverse of `skillsToSteps`; compacting a step that carries a
+    // post-condition would silently drop the post-condition on the next save.
+    const plain = { id: 'a', skill: 'a', name: 'a', prompt: '{{task}}' };
+    expect(skillStackOf([plain])).toEqual(['a']);
+    expect(skillStackOf([{ ...plain, verify: { builtin: 'everything-committed' as const, max: 1 } }])).toBeNull();
   });
 });
