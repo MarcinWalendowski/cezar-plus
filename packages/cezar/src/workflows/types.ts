@@ -404,6 +404,37 @@ export const AUTONOMOUS_IMPLEMENTATION_WORKFLOW: WorkflowDef = {
 };
 
 /**
+ * The "read the record" opening, as ONE tool call (spec
+ * `.ai/specs/2026-08-20-agent-round-trip-batching-and-fanout.md`, Phase 3).
+ *
+ * In run `ec6e8e06` this exact opening — read the handoff, list the spec dir, `git log`, search
+ * the KB, check the tracker — cost about **fifteen separate round trips** before the agent had
+ * read a single line of the code it was there to change. None of those facts depends on any
+ * other, so none of them needed its own turn.
+ *
+ * Every rule the batch obeys is a named risk from that spec: `set +e` (R1 — a `set -e` batch
+ * hides every section after the first missing file and the model reads the rest as success), a
+ * delimiter per section (R1 — an undelimited blob cannot be read section by section), and a bound
+ * per section (R2 — 231 small results flooded into one unbounded `cat` is strictly *worse* than
+ * the 231 calls it replaced).
+ *
+ * Shipped as a literal the agent can paste rather than prose it has to translate: the round trip
+ * it saves is the one spent getting the batch syntax wrong.
+ */
+export const RECORD_READ_RECIPE = [
+  '```bash',
+  'set +e',
+  "say(){ printf '\\n===== %s =====\\n' \"$1\"; }",
+  'say HANDOFF; sed -n 1,80p "$CEZ_HANDOFF_FILE"',
+  'say SPECS;   ls -1t .ai/specs 2>/dev/null | head -30',
+  'say GITLOG;  git log --oneline -15',
+  'say KB;      cez kb search "<your query>" 2>&1 | head -40',
+  'say TODOS;   cezar todo list 2>&1 | head -20',
+  'say CONV;    sed -n 1,60p AGENTS.md 2>/dev/null || sed -n 1,60p CLAUDE.md 2>/dev/null',
+  '```',
+].join('\n');
+
+/**
  * The owner's standard operating pipeline as ONE selectable chain (spec
  * `.ai/specs/2026-08-19-spec-to-deploy-default-workflow.md`): **read the record → write the
  * spec → implement → run tests → commit & push/merge → document → deploy.** Where
@@ -440,8 +471,28 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'spec',
       name: 'Read the record and write the spec',
-      allowedTools: ['Read', 'Grep', 'Glob', 'Write', 'Bash'],
-      bashAllowlist: ['git log', 'git show', 'git status', 'cez kb'],
+      // `Task` (spec 2026-08-20-agent-round-trip-batching-and-fanout, Phase 4): this step is the
+      // most exploration-bound in the chain — on `ec6e8e06` it spent 467 s of MODEL time against
+      // 15 s of tool execution, a 32× ratio, and its reading jobs (knowledge base, spec dir + git
+      // history, the code itself, the tracker) are genuinely independent of one another. Fan-out
+      // does not reduce model seconds; it OVERLAPS them, which is exactly what a step bounded by
+      // thinking-about-reads needs and what a mutating step (`implement`) must never do.
+      //
+      // Honest note on what this line does TODAY: `--allowedTools` only GRANTS additively on a
+      // Claude run (`core/claude-cli-runner.ts` :399-404, measured against claude 2.1.224), so
+      // `Task` was already reachable in `ec6e8e06` — its `session.started` event lists it — and
+      // the model simply never reached for it. Naming it here is what stops this step silently
+      // LOSING fan-out the day the filed `--disallowedTools` follow-up lands.
+      allowedTools: ['Read', 'Grep', 'Glob', 'Write', 'Bash', 'Task'],
+      // Known contradiction, stated rather than left for the next reader to trip over: the
+      // batched record-read this step's prompt now asks for (`RECORD_READ_RECIPE`) is a
+      // multi-command script, and `buildAllowedTools` turns each entry below into a STARTS-WITH
+      // `Bash(<prefix>:*)` — which no `set +e …` script can ever match. That costs nothing today
+      // (the allowlist is decorative on Claude, see above) but it is a real conflict the
+      // `--disallowedTools` follow-up has to resolve: either the batch runs, or the allowlist
+      // does. Widening this step to a general shell is NOT the answer — see this workflow's doc
+      // comment on why `spec` is deliberately shell-poor.
+      bashAllowlist: ['git log', 'git show', 'git status', 'cez kb', 'sed -n', 'ls', 'cezar todo list'],
       prompt: [
         'You are writing a SPEC for the task below. You are NOT implementing it in this step.',
         '',
@@ -455,6 +506,20 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         '3. The spec directory, for a precedent of this shape or a spec this extends, and',
         '   `git log`/`git show` for recent commits touching the area, so the spec describes the',
         '   code that is there now rather than the code you assumed.',
+        '',
+        'Gather all of that in ONE call, not five — none of those facts depends on another:',
+        '',
+        RECORD_READ_RECIPE,
+        '',
+        'Then go WIDE before you go deep. Reading the record, mapping the code, and checking for',
+        'in-flight duplicate work are independent jobs, so run up to THREE sub-agents (`Task`) on',
+        'them in parallel in a single turn and read their findings together. Rules that make this',
+        'safe rather than merely fast:',
+        '- Sub-agents are READ-ONLY here. They report findings; they write nothing.',
+        '- YOU write every word of the spec. A spec assembled out of sub-agent summaries loses the',
+        '  citations that make it worth having — that is the whole product of this step.',
+        '- Give each one a job whose answer is worth a minute of work. Do not fan out to read one',
+        '  file; that costs more than it saves.',
         '',
         'Then write ONE spec file, following this repository’s own naming and section conventions',
         '(match the files already in its spec directory — do not impose a different format). It',
@@ -507,6 +572,19 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         'Run the repo\'s own gates — typecheck, lint, and tests, whatever it defines (check its',
         'package.json / Makefile / CI config for the real commands). If any fail, FIX the code and',
         're-run until they pass. Do NOT commit and do NOT `git push` in this step.',
+        '',
+        'This step is bound by EXECUTION, not by thinking — on a measured run, 617 of its 826',
+        'seconds were `npm`. So overlap it instead of watching it:',
+        '- Start the dependency install in the BACKGROUND as your first action, before you read',
+        '  anything. Then read the repo\'s gate config while it runs.',
+        '- Run each long gate with `run_in_background` and keep working; `wait` for every one of',
+        '  them and read its full output BEFORE you report. Never report a gate you did not read.',
+        '- Never background anything that mutates the git index.',
+        '- Read this repo\'s own docs for environment traps that make its gates LIE before you',
+        '  conclude a suite is unrunnable here (in this repo: AGENTS.md § Validation — `NODE_ENV=',
+        '  production` makes `npm ci` install zero devDependencies, and a cockpit session exports',
+        '  knobs the server suites assert on). The measured run rediscovered both the hard way and',
+        '  paid three full `npm test` runs for it.',
         '',
         'End your report with the exact gate commands you ran and their results. If a gate cannot be',
         'made to pass, say so plainly and stop — do not let the chain ship a red build.',
@@ -561,7 +639,12 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'document',
       name: 'Document the decision',
-      allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash'],
+      // `Task` for the same measured reason `spec` has it (Phase 4): 361 s of model time against
+      // 109 s of tool time, and its three reads — what the KB already says, what the spec claims,
+      // what the tracker thinks — are independent. It WRITES (Edit/Write are granted), so the
+      // read-only bound on the sub-agents is load-bearing, not decorative: concurrent writers in
+      // one worktree corrupt each other, which is why `implement` gets no fan-out at all.
+      allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash', 'Task'],
       // Runs AFTER `commit-push`, so its own doc/spec/KB commit has to reach the remote too — the
       // same scoped git+gh grant, plus `cez kb` for the knowledge write. Still no arbitrary shell.
       bashAllowlist: [
@@ -581,6 +664,12 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         '',
         'Original task, for context:',
         '{{task}}',
+        '',
+        'Open with ONE batched read, not one call per source — and fan the deeper reads out to at',
+        'most three READ-ONLY sub-agents (`Task`) in a single turn (what the KB already says, what',
+        'the spec claims, what the tracker thinks). You do all the writing yourself:',
+        '',
+        RECORD_READ_RECIPE,
         '',
         'Do all of:',
         '1. Knowledge base — record the durable decision/what shipped where the next session will',

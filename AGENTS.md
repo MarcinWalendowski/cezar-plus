@@ -333,6 +333,53 @@ network), reuses an already-healthy instance instead of double-booting, and writ
 
 `CEZ_DRY_RUN=1 npm run dev` still exercises the whole cockpit offline for manual verification.
 
+## How an agent step should spend its tool calls
+
+Measured on run `ec6e8e06` (spec `.ai/specs/2026-08-20-agent-round-trip-batching-and-fanout.md`):
+61.5 minutes, 271 tool calls, **1.00 calls per model round trip** — it never once batched. 231 of
+those calls (85%) finished in under a second and did 29 seconds of real work between them, while
+costing ~23.5 minutes of round trips. The bottleneck is *asking*, not *doing*.
+
+Read the meter before and after any change to this, rather than asserting an improvement:
+
+```bash
+cez run stats <runId>          # per-step table: calls, round trips, batch factor, model vs exec
+cez run stats <runId> --json   # the same as a RunStats object
+```
+
+**Batch factor is the primary metric, deliberately over wall clock** — wall clock on a loaded box
+is not trustworthy (`src/knowledge/catalog.test.ts` C18 flakes under load 5–7 on 8 cores, and
+`ec6e8e06` hit exactly that), while round-trip *count* is load-independent.
+
+The doctrine itself rides on every agent step's system prompt (`TOOL_BUDGET_DOCTRINE`,
+`src/workflows/run.ts`). The "read the record" opening it asks for is shipped as a literal
+(`RECORD_READ_RECIPE`, `src/workflows/types.ts`) and is worth reaching for by hand too — it turns
+about fifteen opening round trips into one:
+
+```bash
+set +e
+say(){ printf '\n===== %s =====\n' "$1"; }
+say HANDOFF; sed -n 1,80p "$CEZ_HANDOFF_FILE"
+say SPECS;   ls -1t .ai/specs 2>/dev/null | head -30
+say GITLOG;  git log --oneline -15
+say KB;      cez kb search "<your query>" 2>&1 | head -40
+say TODOS;   cezar todo list 2>&1 | head -20
+```
+
+Three rules make a batch safe rather than merely fast, and all three are failure modes that were
+reasoned through before they were hit: `set +e` (under `set -e` one missing file hides every
+section after it, and the model reads the rest as success), a delimiter per section (an
+undelimited blob cannot be read section by section), and a bound per section (`head -n`, `-15`,
+`sed -n 1,80p` — an unbounded batch floods the context it was meant to save, which is strictly
+worse than the calls it replaced).
+
+**Sub-agent fan-out is granted asymmetrically and on purpose.** `spec` and `document` carry `Task`
+because they are exploration-bound (32× and 3.3× model-time to tool-time) with independent reads;
+their sub-agents stay READ-ONLY and the orchestrating step writes every word. `implement`,
+`run-tests`, `commit-push` and `deploy` deliberately do NOT — concurrent writers in one worktree
+corrupt each other, `run-tests` is `npm`-bound (617 of its 826 s), and git's index is one lock.
+`workflows/types.test.ts` asserts that absence as hard as it asserts the presence.
+
 ## Related documents
 
 - `AGENT_PROTOCOL.md` — the agent protocol: the runner seam, the v1 `AgentEvent` + v2 `UiEvent` streams, per-backend mapping, the golden-fixture testing contract, and the checklist for adding a new runner.

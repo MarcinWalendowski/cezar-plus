@@ -11,6 +11,7 @@ import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import type { WorkflowDef } from './types.ts';
 import {
   RunManager,
+  TOOL_BUDGET_DOCTRINE,
   composeSystemPrompt,
   makeRunTitle,
   resolveExtraSystemPrompt,
@@ -46,6 +47,51 @@ describe('composeSystemPrompt', () => {
     ['blank parts drop out', ['', '   ', H], H],
   ] as const)('%s', (_name, parts, expected) => {
     expect(composeSystemPrompt(...parts)).toBe(expected);
+  });
+});
+
+/**
+ * The tool-budget doctrine (spec `.ai/specs/2026-08-20-agent-round-trip-batching-and-fanout.md`,
+ * Phase 2 / Verification §2).
+ *
+ * These are unit assertions on the TEXT and its composition. They cannot show that the doctrine
+ * makes a run faster — only a runtime A/B measured with `cez run stats` can (Verification §4),
+ * and the spec says so plainly. What they DO guarantee is that the text reaches every agent step
+ * exactly once, survives a skill + handoff composition, and stays short enough not to dilute the
+ * step instruction it precedes (R7).
+ */
+describe('TOOL_BUDGET_DOCTRINE', () => {
+  it('states the three levers: batch cheap reads, parallel independent calls, background the slow', () => {
+    expect(TOOL_BUDGET_DOCTRINE).toContain('Batch cheap reads into ONE script');
+    expect(TOOL_BUDGET_DOCTRINE).toContain('Emit independent tool calls in ONE turn');
+    expect(TOOL_BUDGET_DOCTRINE).toContain('Background what is genuinely slow');
+  });
+
+  it('carries the safety conditions, not just the speed advice (R1, R2, R5, R6)', () => {
+    // R1 — a `set -e` batch hides every section after the first failure.
+    expect(TOOL_BUDGET_DOCTRINE).toContain('set +e');
+    // R2 — an unbounded batch is worse than the calls it replaced.
+    expect(TOOL_BUDGET_DOCTRINE).toContain('bound every section');
+    expect(TOOL_BUDGET_DOCTRINE).toMatch(/`head`|head -/);
+    // R5 — parallel blocks are only safe for calls with no dependency between them.
+    expect(TOOL_BUDGET_DOCTRINE).toContain('no dependency between them');
+    // R6 — never background anything that mutates the index.
+    expect(TOOL_BUDGET_DOCTRINE).toContain('mutates the git index');
+  });
+
+  it('stays under ~200 words so it cannot dilute the step prompt it precedes (R7)', () => {
+    // R7's own number, with a small allowance for the markdown markers and the shell fragments
+    // that are inseparable from the instruction. A doctrine that grows past this is one that
+    // starts competing with the step prompt underneath it for the model's attention.
+    expect(TOOL_BUDGET_DOCTRINE.split(/\s+/).filter(Boolean).length).toBeLessThan(210);
+  });
+
+  it('appears exactly once in a full skill + extra + contract composition', () => {
+    const composed = composeSystemPrompt('SKILL BODY', 'EXTRA', TOOL_BUDGET_DOCTRINE, HANDOFF_INSTRUCTIONS);
+    expect(composed.split('## Tool budget (cezar)')).toHaveLength(2);
+    // Order: after the skill and the user's own prompt (neither is buried), before the contract.
+    expect(composed.indexOf('EXTRA')).toBeLessThan(composed.indexOf('## Tool budget (cezar)'));
+    expect(composed.indexOf('## Tool budget (cezar)')).toBeLessThan(composed.indexOf('## Handoff (cezar)'));
   });
 });
 
@@ -251,7 +297,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
     expect(record?.systemPrompt).toBe(CONFIG_PROMPT);
     const prompt = capturedSystemPrompt();
     // Composition: extra prompt first (no skill on this step), contract last.
-    expect(prompt).toBe(composeSystemPrompt(CONFIG_PROMPT, HANDOFF_INSTRUCTIONS));
+    expect(prompt).toBe(composeSystemPrompt(CONFIG_PROMPT, TOOL_BUDGET_DOCTRINE, HANDOFF_INSTRUCTIONS));
   }, 30_000);
 
 
@@ -385,7 +431,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const record = store.getRun(id);
     expect(record?.systemPrompt).toBe(OVERRIDE_PROMPT);
     const prompt = capturedSystemPrompt();
-    expect(prompt).toBe(composeSystemPrompt(OVERRIDE_PROMPT, HANDOFF_INSTRUCTIONS));
+    expect(prompt).toBe(composeSystemPrompt(OVERRIDE_PROMPT, TOOL_BUDGET_DOCTRINE, HANDOFF_INSTRUCTIONS));
     expect(prompt).not.toContain(CONFIG_PROMPT);
   }, 30_000);
 
@@ -418,7 +464,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
       source: 'ai',
     });
     expect(capturedSystemPrompt()).toBe(
-      composeSystemPrompt(skillPrompt, CONFIG_PROMPT, HANDOFF_INSTRUCTIONS),
+      composeSystemPrompt(skillPrompt, CONFIG_PROMPT, TOOL_BUDGET_DOCTRINE, HANDOFF_INSTRUCTIONS),
     );
 
     // The mock writes the actual first user message it received into the run
@@ -449,7 +495,9 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const id = await runToEnd({ task: 'do the thing quietly', generateFollowups: false });
     const record = store.getRun(id);
     expect(record?.generateFollowups).toBe(false);
-    expect(capturedSystemPrompt()).toBe(composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS));
+    expect(capturedSystemPrompt()).toBe(
+      composeSystemPrompt(CONFIG_PROMPT, TOOL_BUDGET_DOCTRINE, HANDOFF_ONLY_INSTRUCTIONS),
+    );
     expect(capturedSystemPrompt()).not.toContain('CEZ_TODOS_FILE');
     expect(existsSync(todosFile)).toBe(false);
     // The opt-out must survive an inherited CEZ_TODOS_FILE (nested cezar):
@@ -468,7 +516,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     expect(capturedSystemPrompt(1)).toBe(
-      composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS),
+      composeSystemPrompt(CONFIG_PROMPT, TOOL_BUDGET_DOCTRINE, HANDOFF_ONLY_INSTRUCTIONS),
     );
     expect(capturedSystemPrompt(1)).not.toContain('CEZ_TODOS_FILE');
     expect(existsSync(todosFile)).toBe(false);
@@ -564,7 +612,9 @@ describe('the global follow-up gate (dry run)', () => {
 
     const id = await runToEnd({ task: 'do the thing mock:done' });
 
-    expect(capturedSystemPrompt()).toBe(composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS));
+    expect(capturedSystemPrompt()).toBe(
+      composeSystemPrompt(CONFIG_PROMPT, TOOL_BUDGET_DOCTRINE, HANDOFF_ONLY_INSTRUCTIONS),
+    );
     expect(capturedSystemPrompt()).not.toContain('CEZ_TODOS_FILE');
     expect(existsSync(todosFile)).toBe(false);
     // …and nothing leaked into the parent cezar's inbox either.

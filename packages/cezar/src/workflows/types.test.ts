@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { AUTONOMOUS_IMPLEMENTATION_WORKFLOW, SPEC_TO_DEPLOY_WORKFLOW, chainStepNote } from './types.ts';
+import {
+  AUTONOMOUS_IMPLEMENTATION_WORKFLOW,
+  DEFAULT_ALLOWED_TOOLS,
+  RECORD_READ_RECIPE,
+  SPEC_TO_DEPLOY_WORKFLOW,
+  chainStepNote,
+} from './types.ts';
 
 /**
  * `AUTONOMOUS_IMPLEMENTATION_WORKFLOW` (PLAN D27 Phase 2, `.ai/specs/2026-08-15-autonomous-
@@ -91,7 +97,90 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
   it('spec step reads the record but cannot reach a shell beyond kb + read-only git', () => {
     const spec = stepById('spec');
     // No install/build/push verbs — a spec-writing pass has no business running them.
-    expect(spec?.bashAllowlist).toEqual(['git log', 'git show', 'git status', 'cez kb']);
+    // `sed -n`, `ls` and `cezar todo list` joined the list with the batched record-read recipe
+    // (spec 2026-08-20-agent-round-trip-batching-and-fanout, Phase 3). Every entry is still a
+    // READ, which is the property that actually matters here — asserted below as a rule rather
+    // than trusted to the literal.
+    expect(spec?.bashAllowlist).toEqual([
+      'git log',
+      'git show',
+      'git status',
+      'cez kb',
+      'sed -n',
+      'ls',
+      'cezar todo list',
+    ]);
+    expect(canPush(spec?.bashAllowlist)).toBe(false);
+    for (const entry of spec?.bashAllowlist ?? []) {
+      // No mutation, no network, no build. `git status`/`git log`/`git show` are queries;
+      // `sed -n` is print-only (no `-i`); `ls` and `cezar todo list` read.
+      expect(/^(git (log|show|status)|cez kb|sed -n|ls|cezar todo list)$/.test(entry.trim())).toBe(true);
+    }
+  });
+
+  /**
+   * Sub-agent fan-out is granted ASYMMETRICALLY, and the asymmetry is the whole design
+   * (spec `.ai/specs/2026-08-20-agent-round-trip-batching-and-fanout.md`, Phase 4 / §5).
+   *
+   * `spec` and `document` are exploration-bound — measured at 32× and 3.3× model-time to
+   * tool-time on run `ec6e8e06` — and their reads are independent, so overlapping them is free
+   * wall clock. `implement` is serial and FILE-MUTATING: concurrent writers in one worktree
+   * corrupt each other, and there is no per-agent isolation *inside* a step the way
+   * `2026-08-19-parallel-workspace-runs-worktrees.md` gave runs one. `run-tests` is
+   * execution-bound (617 of its 826 s were `npm`) and parallel agents would contend for the same
+   * `node_modules`. `commit-push` shares one git index lock. Granting `Task` to any of those
+   * three would be a measured pessimisation, not a missing feature — so this test asserts their
+   * ABSENCE as hard as it asserts the other two's presence.
+   */
+  it('grants Task fan-out to the read-heavy steps ONLY (spec, document)', () => {
+    expect(stepById('spec')?.allowedTools).toContain('Task');
+    expect(stepById('document')?.allowedTools).toContain('Task');
+    for (const id of ['implement', 'run-tests', 'commit-push', 'deploy']) {
+      expect(stepById(id)?.allowedTools ?? []).not.toContain('Task');
+    }
+    // The default set stays fan-out-free: `implement`, `run-tests` and `deploy` read it, and a
+    // `Task` added there would silently hand a mutating step concurrent writers.
+    expect(DEFAULT_ALLOWED_TOOLS).not.toContain('Task');
+  });
+
+  it('tells the two fanned-out steps to keep their sub-agents read-only and write nothing', () => {
+    for (const id of ['spec', 'document']) {
+      const prompt = stepById(id)?.prompt ?? '';
+      expect(prompt).toContain('READ-ONLY');
+      expect(prompt).toMatch(/THREE sub-agents|three READ-ONLY sub-agents/);
+    }
+    // The spec step's own product is its citations; a spec assembled from summaries loses them.
+    expect(stepById('spec')?.prompt).toContain('YOU write every word of the spec');
+  });
+
+  it('opens the record-reading steps with ONE batched, bounded, non-aborting script', () => {
+    for (const id of ['spec', 'document']) {
+      const prompt = stepById(id)?.prompt ?? '';
+      expect(prompt).toContain(RECORD_READ_RECIPE);
+    }
+    // R1: never `set -e` in a probe batch — it hides every section after the first miss.
+    expect(RECORD_READ_RECIPE).toContain('set +e');
+    expect(RECORD_READ_RECIPE).not.toMatch(/set -e/);
+    // R1: a delimiter per section, or the result is an unreadable blob.
+    expect(RECORD_READ_RECIPE).toContain('=====');
+    // R2: every section is bounded, or the batch floods the context it was meant to save.
+    // A bound can be a pipe (`| head -30`) or the command's own count flag (`git log -15`) —
+    // both cap the output, which is the property; the shape is not.
+    for (const line of RECORD_READ_RECIPE.split('\n')) {
+      if (!line.startsWith('say ')) continue;
+      expect(line, `unbounded section: ${line}`).toMatch(/head -\d+|tail -\d+|sed -n \d+,\d+p|\s-\d+\b/);
+    }
+  });
+
+  it('tells run-tests to overlap its npm time and to read the env traps first', () => {
+    const prompt = stepById('run-tests')?.prompt ?? '';
+    expect(prompt).toContain('BACKGROUND');
+    expect(prompt).toContain('run_in_background');
+    // R6: a backgrounded gate that is never waited on reports against a tree that moved.
+    expect(prompt).toContain('`wait` for every one of');
+    expect(prompt).toContain('Never background anything that mutates the git index');
+    // The measured run paid three full `npm test` runs to rediscover documented traps.
+    expect(prompt).toContain('AGENTS.md');
   });
 
   it('implement and run-tests reuse the autonomous allowlist verbatim, so neither can push', () => {

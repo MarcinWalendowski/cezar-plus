@@ -466,11 +466,50 @@ export function resolveExtraSystemPrompt(
 }
 
 /**
+ * How an agent step should SPEND its tool calls (spec
+ * `.ai/specs/2026-08-20-agent-round-trip-batching-and-fanout.md`, Phase 2 — "code mode").
+ *
+ * **Why this exists at all.** Run `ec6e8e06` took 61.5 minutes and made 271 tool calls at a
+ * measured **1.00 calls per model round trip** — it never once put two independent calls in one
+ * turn. 231 of those calls (85%) finished in under a second and did 29 seconds of real work
+ * between them, while costing ~23.5 minutes of round trips at a median 6.1 s gap. Nothing in the
+ * composed prompt had ever said how to spend a tool call, so the model spent them one fact at a
+ * time. `cez run stats <runId>` is the meter that proves or disproves the fix.
+ *
+ * Rides on EVERY agent step and every Continue turn, before the handoff contract, because the
+ * economics are the same whichever step is running. Kept short on purpose (R7: prompt bloat) —
+ * and it is cache-read, not re-input, on every turn after the first (`ec6e8e06` billed 599 k
+ * cacheRead against 10 input tokens), so its marginal per-turn cost is near zero.
+ *
+ * The `set +e` / delimiter / bound rules are not style: they are R1 and R2 from that spec. A
+ * batch under `set -e` hides every section after the first failure, and an unbounded batch is
+ * strictly worse than the calls it replaced.
+ */
+export const TOOL_BUDGET_DOCTRINE = `## Tool budget (cezar)
+
+Round trips make a step slow, not tool execution: a measured cezar run spent 23 of its 61
+minutes on 231 sub-second shell calls issued one per turn. Spend a tool call as if it costs six
+seconds, because it does.
+
+- **Batch cheap reads into ONE script.** Several independent facts, each a cheap shell command,
+  are one call. Use \`set +e\` so a missing file does not abort the rest, delimit each section
+  (\`printf '\\n===== %s =====\\n'\`), and bound every section (\`head\`, \`sed -n\`) so the batch
+  cannot flood your context. Echo \`$?\` where success matters; read every section.
+- **Emit independent tool calls in ONE turn.** Different tools, or one slow call beside several
+  fast ones, cost a single round trip together — but only with **no dependency between them**. A
+  write and a read of the same path stay serial, and a probe whose answer decides the next
+  command is not independent of it.
+- **Background what is genuinely slow.** A 150-second install or test run should not block you
+  from reading the next file: start it with \`run_in_background\`, keep working, and wait for it
+  before you report. Never background anything that mutates the git index.`;
+
+/**
  * Joins the parts of one agent step's system prompt in fixed order — skill
  * body (most task-specific), then the run's extra prompt (user guidance, can
- * amend the skill), then the handoff contract (always last, never optional in
- * practice). Blank parts drop out; survivors join with the same `\n\n---\n\n`
- * divider the skill+handoff composition has always used.
+ * amend the skill), then the tool-budget doctrine, then the handoff contract
+ * (always last, never optional in practice). Blank parts drop out; survivors
+ * join with the same `\n\n---\n\n` divider the skill+handoff composition has
+ * always used.
  */
 export function composeSystemPrompt(...parts: Array<string | undefined>): string {
   return parts
@@ -2957,6 +2996,10 @@ export class RunManager {
         // echoed on the record) rides along with the handoff contract.
         systemPrompt: composeSystemPrompt(
           record?.systemPrompt,
+          // A Continue turn is a FRESH agent session, so it re-earns the round-trip tax from
+          // scratch — `ec6e8e06`'s `continue-1` step spent 145 s of model time against 3 s of
+          // tool time, the worst model:exec ratio in the whole run (48×).
+          TOOL_BUDGET_DOCTRINE,
           generateFollowups ? HANDOFF_INSTRUCTIONS : HANDOFF_ONLY_INSTRUCTIONS,
           // Before the knowledge block on purpose: this says where the work IS. A Continue turn
           // is a FRESH agent session, so without it the second turn of a workspace run would
@@ -3818,6 +3861,10 @@ export class RunManager {
           systemPrompt: composeSystemPrompt(
             systemPrompt,
             extraSystemPrompt,
+            // After the skill and the user's own prompt, so neither is buried, and before the
+            // handoff contract. Both can override it: a skill that needs a call-by-call trace
+            // says so and wins, because it is the more specific instruction.
+            TOOL_BUDGET_DOCTRINE,
             followupsEnabled() && input.generateFollowups !== false
               ? HANDOFF_INSTRUCTIONS
               : HANDOFF_ONLY_INSTRUCTIONS,

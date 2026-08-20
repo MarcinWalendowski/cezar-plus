@@ -16,6 +16,7 @@ import { getRepoInfo } from './server/git.ts';
 import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveWorktreeRetention } from './config.ts';
 import { reclaimWorktrees } from './runs/retention.ts';
 import { RunStore } from './runs/store.ts';
+import { runRunStatsCommand } from './runs/stats-cli.ts';
 import { RunManager } from './workflows/run.ts';
 import { loadWorkflows } from './workflows/load.ts';
 import { DEFAULT_WORKFLOW_NAME } from './workflows/types.ts';
@@ -55,6 +56,9 @@ const HELP = `cezar — local cockpit for AI agent tasks in your repo
 Usage:
   cezar                     start the cockpit (server + GUI) for the current repo
   cezar run "<task>"        run a task headless in the terminal
+  cezar run stats <runId>   tool economy for a finished run: calls, model round
+                            trips, batch factor (calls/round-trip), model vs
+                            tool time, sub-agent calls — per step [--json]
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
   cezar projects            list the projects this cockpit serves
                             (also: projects add [<dir>] · projects remove <id>)
@@ -167,6 +171,19 @@ async function main(): Promise<void> {
     const todoCwd = resolve(process.cwd());
     const todoRepoRoot = (await getRepoInfo(todoCwd))?.root ?? todoCwd;
     process.exitCode = await runTodoCommand(rawArgs.slice(1), { repoRoot: todoRepoRoot });
+    return;
+  }
+
+  // `run stats` is routed here for BOTH reasons `kb` and `todo` above are, plus one of its own:
+  // `case 'run'` joins every positional into the task text, so `cez run stats <id>` would happily
+  // START A RUN titled "stats <id>" rather than metering one — a wrong-and-expensive default, not
+  // a missing feature. It also owns `--json`, which the strict `parseArgs` below rejects.
+  // Read-only and filesystem-only (spec `.ai/specs/2026-08-20-agent-round-trip-batching-and-
+  // fanout.md`, Phase 1: the meter ships before the optimisations it exists to judge).
+  if (rawArgs[0] === 'run' && rawArgs[1] === 'stats') {
+    const statsCwd = resolve(process.cwd());
+    const statsRepoRoot = (await getRepoInfo(statsCwd))?.root ?? statsCwd;
+    process.exitCode = await runRunStatsCommand(rawArgs.slice(2), { repoRoot: statsRepoRoot });
     return;
   }
 
