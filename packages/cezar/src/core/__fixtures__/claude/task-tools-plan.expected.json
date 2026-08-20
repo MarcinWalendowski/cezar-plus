@@ -24,6 +24,10 @@
     "turnId": "turn_1"
   },
   {
+    "type": "context.updated",
+    "contextTokens": 812
+  },
+  {
     "type": "item.started",
     "item": {
       "kind": "message",
@@ -85,6 +89,10 @@
     ]
   },
   {
+    "type": "context.updated",
+    "contextTokens": 868
+  },
+  {
     "type": "item.started",
     "item": {
       "kind": "tool",
@@ -128,6 +136,10 @@
         "status": "pending"
       }
     ]
+  },
+  {
+    "type": "context.updated",
+    "contextTokens": 902
   },
   {
     "type": "item.started",
@@ -175,6 +187,10 @@
     }
   },
   {
+    "type": "context.updated",
+    "contextTokens": 930
+  },
+  {
     "type": "item.started",
     "item": {
       "kind": "tool",
@@ -214,6 +230,10 @@
       },
       "output": "Updated task #2 deleted"
     }
+  },
+  {
+    "type": "context.updated",
+    "contextTokens": 958
   },
   {
     "type": "item.started",
@@ -261,6 +281,10 @@
     ]
   },
   {
+    "type": "context.updated",
+    "contextTokens": 986
+  },
+  {
     "type": "item.started",
     "item": {
       "kind": "tool",
@@ -284,6 +308,10 @@
       "input": {},
       "output": "#1 [in_progress] Wire the dock\n#3 [pending] Ship it"
     }
+  },
+  {
+    "type": "context.updated",
+    "contextTokens": 1014
   },
   {
     "type": "item.started",

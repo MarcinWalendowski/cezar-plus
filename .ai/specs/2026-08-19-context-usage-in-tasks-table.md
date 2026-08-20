@@ -65,12 +65,26 @@ cacheWrite` only when a mapper did not stamp it. The denominator (`contextWindow
 unchanged and correct: cezar launches Claude with the standard 200k window (no
 `context-1m` beta), so `45k / 200k` is right until that beta is enabled.
 
+## Live refresh (2026-08-20 follow-up)
+
+`turn.completed` only fires once per INVOCATION, and a Claude "turn" is a whole invocation
+(user prompt → many model round-trips → one `result`). So on a long task the Context column
+sat on an em dash for the entire first turn — minutes — then jumped. Fix: a new
+`UiContextUpdatedEvent` (`{ type: 'context.updated', contextTokens }`), emitted by the claude
+mapper on EACH main-agent assistant frame (subagent frames excluded, as everywhere else).
+`recordUsageUiEvent` handles it by overwriting the step's `contextTokens` (never the token
+totals — `turn.completed` still owns those), which rolls up to `run.contextTokens` and
+broadcasts over SSE via the existing `persistUsageCheckpoint` → `updateStep` → `flush` path,
+so the column climbs live per round-trip exactly like CPU/mem. codex/opencode still land
+their figure at `turn.completed` (their per-call/per-message signals are a cheap follow-up).
+
 ## Architecture
 
 - **Capture** (`workflows/run.ts::recordUsageUiEvent`): on `turn.completed`, persist
   `contextTokens` on the step (OVERWRITE — latest turn wins), preferring the mapper's
   point-in-time `event.contextTokens` and falling back to `input + cacheRead + cacheWrite`
   of the turn `usage`. The existing `inputTokens`/`outputTokens` accumulation is untouched.
+  Live per-round-trip updates arrive via `context.updated` (see "Live refresh").
 - **Roll up** (`runs/store.ts::updateStep`): run-level `contextTokens` = the latest
   started agent step's value (the current session); `contextWindow` =
   `contextWindowForModel(run.model, run.modelIdentity)`. Both recomputed on every step

@@ -23,6 +23,10 @@
     "turnId": "turn_1"
   },
   {
+    "type": "context.updated",
+    "contextTokens": 18004
+  },
+  {
     "type": "item.started",
     "item": {
       "kind": "reasoning",
@@ -114,6 +118,10 @@
     }
   },
   {
+    "type": "context.updated",
+    "contextTokens": 60
+  },
+  {
     "type": "item.started",
     "item": {
       "kind": "tool",
@@ -167,6 +175,10 @@
       ],
       "output": "File created successfully at: /repo/src/middleware.test.ts"
     }
+  },
+  {
+    "type": "context.updated",
+    "contextTokens": 45
   },
   {
     "type": "item.started",

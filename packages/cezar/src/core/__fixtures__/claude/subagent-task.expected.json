@@ -23,6 +23,10 @@
     "turnId": "turn_1"
   },
   {
+    "type": "context.updated",
+    "contextTokens": 900
+  },
+  {
     "type": "item.started",
     "item": {
       "kind": "tool",
@@ -107,6 +111,10 @@
       },
       "output": "The session cookie is dropped in src/middleware.ts:12 (clearSession on every redirect)."
     }
+  },
+  {
+    "type": "context.updated",
+    "contextTokens": 150
   },
   {
     "type": "item.started",

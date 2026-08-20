@@ -170,7 +170,12 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
   // Track this call's own prompt size for the point-in-time Context occupancy. Undefined
   // for a subagent frame (its window is separate) or a frame with no usage — then the
   // turn keeps whatever the last main-agent call reported (spec 2026-08-19, correction).
-  const lastMainAgentPromptTokens = mainAgentPromptTokens(msg) ?? state.lastMainAgentPromptTokens;
+  const framePrompt = mainAgentPromptTokens(msg);
+  const lastMainAgentPromptTokens = framePrompt ?? state.lastMainAgentPromptTokens;
+  // Emit occupancy LIVE, once per main-agent round-trip, so the Context column climbs during a
+  // long turn instead of waiting for `turn.completed` (which for claude is the whole invocation
+  // — minutes out on a big task). Only when this frame carried fresh main-agent usage.
+  if (framePrompt !== undefined) events.push({ type: 'context.updated', contextTokens: framePrompt });
 
   for (const raw of content) {
     if (!isRecord(raw)) continue;

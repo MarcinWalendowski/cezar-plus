@@ -381,6 +381,20 @@ export interface UiUsageUpdatedEvent {
 }
 
 /**
+ * Point-in-time context-window occupancy after ONE model round-trip inside the current turn —
+ * emitted per assistant frame, not only at turn end, so the tasks-table Context column climbs
+ * LIVE during a long turn instead of sitting on an em dash until `turn.completed` fires (a
+ * Claude "turn" is a whole invocation, so its first completion can be minutes out). Carries
+ * only the occupancy (`input + cacheRead + cacheWrite` of that single call); it never touches
+ * the turn's cumulative token/cost totals. `usage.updated`/`turn.completed` stay authoritative
+ * for those (spec 2026-08-19-context-usage-in-tasks-table, live-refresh follow-up).
+ */
+export interface UiContextUpdatedEvent {
+  type: 'context.updated';
+  contextTokens: number;
+}
+
+/**
  * An image emitted mid-stream (kept from v1) — raw base64 on the wire here;
  * the run manager persists it and re-emits a URL. claude: image blocks in
  * `tool_result` (with `itemId` linking back to the tool item).
@@ -407,6 +421,7 @@ export type UiEvent =
   | UiPermissionResolvedEvent
   | UiAskRequestedEvent
   | UiUsageUpdatedEvent
+  | UiContextUpdatedEvent
   | UiImageEvent;
 
 /** Every v2 event discriminator — `satisfies Record<UiEventType, …>` maps

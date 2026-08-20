@@ -23,6 +23,10 @@
     "turnId": "turn_1"
   },
   {
+    "type": "context.updated",
+    "contextTokens": 850
+  },
+  {
     "type": "item.started",
     "item": {
       "kind": "message",
@@ -39,6 +43,10 @@
       "role": "assistant",
       "text": "Okay — looking into: fix the login redirect"
     }
+  },
+  {
+    "type": "context.updated",
+    "contextTokens": 120
   },
   {
     "type": "item.started",
@@ -68,6 +76,10 @@
       },
       "output": " M src/example.ts"
     }
+  },
+  {
+    "type": "context.updated",
+    "contextTokens": 80
   },
   {
     "type": "item.started",
@@ -103,6 +115,10 @@
     "itemId": "toolu_mock_shot_1",
     "mediaType": "image/png",
     "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+  },
+  {
+    "type": "context.updated",
+    "contextTokens": 300
   },
   {
     "type": "item.started",

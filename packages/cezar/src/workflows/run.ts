@@ -3546,6 +3546,17 @@ export class RunManager {
       return;
     }
 
+    // Live occupancy (per round-trip): overwrite the step's `contextTokens` as each model call
+    // reports its prompt size, so the Context column climbs DURING a long turn rather than
+    // jumping only at `turn.completed`. Overwrite-only — never touches the turn's token totals,
+    // which `turn.completed` still owns (spec 2026-08-19, live-refresh follow-up).
+    if (event.type === 'context.updated') {
+      if (Number.isFinite(event.contextTokens) && event.contextTokens >= 0) {
+        this.persistUsageCheckpoint(runId, invocation.stepId, { contextTokens: event.contextTokens });
+      }
+      return;
+    }
+
     if (event.type !== 'turn.completed') return;
     if (!invocation.startedTurns.has(event.turnId) || invocation.recordedTurns.has(event.turnId)) return;
     const input = event.usage?.input;

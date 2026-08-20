@@ -148,6 +148,22 @@ describe('RunManager directional usage accounting', () => {
     expect(store.getRun(run.id)?.contextTokens).toBe(150_000);
   });
 
+  it('refreshes contextTokens LIVE from context.updated, before any turn.completed', () => {
+    const { run, state, sink } = fixture();
+    internal.beginUsageInvocation(run.id, state, 'work');
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'turn.started', turnId: 'turn_1' });
+    // A long turn: each model round-trip reports its growing prompt via context.updated, well
+    // before the turn completes. The Context column must climb now, not sit empty for minutes
+    // (spec 2026-08-19-context-usage-in-tasks-table, live-refresh follow-up).
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'context.updated', contextTokens: 18_000 });
+    expect(store.getRun(run.id)?.contextTokens).toBe(18_000);
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'context.updated', contextTokens: 54_000 });
+    expect(store.getRun(run.id)?.steps[0]?.contextTokens).toBe(54_000);
+    expect(store.getRun(run.id)?.contextTokens).toBe(54_000);
+    // No turn.completed has fired — token totals stay unrecorded; only occupancy moved.
+    expect(store.getRun(run.id)?.steps[0]?.inputTokens).toBeUndefined();
+  });
+
   it('falls back to the usage prompt sum for contextTokens when the event omits it', () => {
     const { run, state, sink } = fixture();
     internal.beginUsageInvocation(run.id, state, 'work');

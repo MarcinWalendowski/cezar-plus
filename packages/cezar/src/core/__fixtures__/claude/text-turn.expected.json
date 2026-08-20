@@ -23,6 +23,10 @@
     "turnId": "turn_1"
   },
   {
+    "type": "context.updated",
+    "contextTokens": 18004
+  },
+  {
     "type": "item.started",
     "item": {
       "kind": "message",
