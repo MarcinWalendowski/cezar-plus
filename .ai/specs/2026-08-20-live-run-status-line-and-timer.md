@@ -35,8 +35,8 @@ producing right now, and — after a silence threshold — says how long it has 
 instead of pretending everything is fine.
 
 Everything it needs is already on the wire. **No server, contract or protocol change:
-this is a web-only change**, which per `AGENTS.md` §"Do NOT self-deploy…" is the class
-that swaps into `/opt/cezar` without a restart.
+this is a web-only change**, which per `AGENTS.md` §"Always self-deploy" is the class
+that swaps into `/opt/cezar` without a restart at all.
 
 ## Problem
 
@@ -338,9 +338,9 @@ Concrete and executable. Run from the repo root.
    Capture a screenshot of (b) and (c) into `.ai/specs/assets/` and reference it here.
 5. **Deploy class check** — `git diff --name-only` must touch `packages/web/**` and
    `.ai/specs/**` only. If anything under `packages/cezar/**` or `packages/contract/**`
-   appears, this stopped being a web-only change and the non-disruptive-deploy caveat in
-   `AGENTS.md` (and `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`) applies —
-   deploy detached or after the session ends.
+   appears, this stopped being a web-only change: it needs the service restart described in
+   `AGENTS.md` §"Always self-deploy" instead of a bare asset swap. Still deploy it in-session —
+   the restart is survivable and continuation resumes the run.
 
 Until step 4 has actually been executed and recorded, the status of this work is **QA
 needed**, not done.

@@ -5,6 +5,30 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- 📜 **cezar always self-deploys now — the "do not self-deploy from a running session" rule is
+  removed, not merely marked stale.** Owner instruction 2026-08-20.
+
+  `AGENTS.md:12` used to withhold self-deploy for backend changes until the non-disruptive path
+  landed, telling agents to run the deploy detached or hand the restart to a human. Two things had
+  since made that rule wrong. The `systemd-run` escape hatch it pointed at **does not exist on the
+  prod box** (no sudo, no user systemd bus, uid 999 is not lingering — so a session cannot leave
+  `cezar.service`'s cgroup and "detached" collapsed to "after the session ends"). And the SIGKILL it
+  was protecting against is **survivable**: restart-continuation
+  (`.ai/specs/2026-08-20-chain-integrity-restart-and-continuation.md`) resumes the deploying run —
+  and any foreign run in flight — so the real cost of a backend restart is a ~5s interruption, not a
+  destruction. The rule was therefore blocking every backend deploy in exchange for nothing.
+
+  The replacement rule is *always self-deploy, including from inside a running cockpit session*,
+  with the working path written down: build → readiness-probe the **deployed** tree before touching
+  the service → back up and swap `dist`/`web/dist` → write `.deployed-commit` → `kill -9` MainPID.
+  One genuine gate survives, because it is correctness rather than caution: **a dependency change in
+  the delta means a `dist`-only swap is not sufficient.**
+
+  Scrubbed from `AGENTS.md`, the memory files, and the four specs that cited the rule as a caveat or
+  a risk mitigation (`live-run-status-line-and-timer`, `step-and-tool-call-durations`,
+  `chain-integrity-restart-and-continuation`, and `non-disruptive-cezar-self-deploy` — the last
+  amended to say plainly that it gates nothing and must not be cited to postpone a deploy).
+
 - ✨ **A workspace run gives every project its own worktree — and no longer leaks them.** Spec
   `.ai/specs/2026-08-20-workspace-run-worktree-isolation.md`, commit `a23aa9bf`.
 

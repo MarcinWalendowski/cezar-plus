@@ -29,8 +29,7 @@ every step end (`run.ts:4555-4562`, `:3002-3056`) — confirmed live in this ver
 record (below). Tool times are derivable from the `ts` that `appendEvent` stamps on every
 persisted frame (`packages/cezar/src/runs/store.ts:919-930`). So this is a **web-only
 change**: no contract field, no migration, no runner change — which per `AGENTS.md`
-§"Do NOT self-deploy…" and `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` is
-the class that swaps into `/opt/cezar` without a restart.
+§"Always self-deploy" is the class that swaps into `/opt/cezar` without a restart at all.
 
 ## Problem
 
@@ -340,7 +339,7 @@ from, and what Verification §5 replays.
 | R8 | Parallel tool calls overlap, so the chips sum to more than wall-clock. | The chip is elapsed, not exclusive, and the `title` says so. Measured on this run: two parallel `Bash` calls reported 10.61s and 9.98s over a ~10.6s window — correct, and correctly *not* additive. |
 | R9 | A `check` step's `check-output` card gets no chip while an agent's tool cards do — an inconsistency a reader could mistake for a bug. | Named, not hidden: a `check-output` frame is a single event with no interval. The check **step's** rail clock is the honest answer, and it is right above. |
 | R10 | The reducer's clone-on-update drops `timing` (see Architecture). | Explicit carry-forward + a reducer test that sends `started → updated → updated → completed` and asserts the chip survives all four frames. |
-| R11 | Scope creep into `packages/cezar`, which changes the deploy class from "swap into `/opt/cezar`" to "restart the service" — and per the standing memory, a backend self-deploy from inside a running session SIGKILLs the session. | Verification §6 is a hard gate: `git diff --name-only` must be `packages/web/**` + `.ai/specs/**` only. |
+| R11 | Scope creep into `packages/cezar`, which changes the deploy class from "swap into `/opt/cezar`" to "restart the service". | Verification §6 is a hard gate: `git diff --name-only` must be `packages/web/**` + `.ai/specs/**` only. Note this is a scope risk, not a deploy risk: a backend change still self-deploys in-session per `AGENTS.md` §"Always self-deploy". |
 
 
 ## Deployment
@@ -350,9 +349,9 @@ using this repo's own documented web-only deploy path (`AGENTS.md:12`) rather th
 `cezar server-deploy`.
 
 **Why not `cezar server-deploy`.** That command is a hard `systemctl daemon-reload && systemctl
-restart cezar.service`, and the unit is `KillMode=control-group` — it SIGKILLs every in-flight run
-*and the deploying session itself*. `AGENTS.md:12` carves out the exception this change qualifies
-for: **a web-only change swaps into `/opt/cezar` without a restart and is safe to ship live.**
+restart cezar.service`, which needs sudo the service user does not have. `AGENTS.md:12` describes the
+class this change qualifies for: **a web-only change swaps into `/opt/cezar` without a restart at
+all**, so it needs neither sudo nor a cutover.
 `git diff a6c0ba3e..69b4a3de --name-only` is 18 files under `packages/web` plus this spec, and
 nothing under `packages/cezar`, so the carve-out applies as written.
 

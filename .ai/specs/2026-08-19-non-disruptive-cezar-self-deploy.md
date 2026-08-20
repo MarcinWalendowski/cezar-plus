@@ -1,8 +1,17 @@
 # Non-disruptive cezar self-deploy / update
 
-**Status:** draft (not implemented)
+**Status:** draft (not implemented) — **and NOT a prerequisite for anything**
 **Date:** 2026-08-19
 **Owner ask:** "ensure that we can deploy/update cezar itself without any disruption."
+
+> **Amended 2026-08-20 — this spec no longer gates self-deploy.** It was once cited as the thing
+> cezar had to wait for before deploying itself from a running session. That rule is withdrawn
+> (owner instruction 2026-08-20): **cezar always self-deploys**, see `AGENTS.md` §"Always
+> self-deploy". The interruption this spec describes is real but survivable — restart-continuation
+> (`.ai/specs/2026-08-20-chain-integrity-restart-and-continuation.md`) resumes the deploying run and
+> any foreign run in flight, and a full unattended self-deploy was verified on 2026-08-20
+> (`8a34f20d`, ~5s outage). What remains below is a genuine *quality* improvement — shrink the gap
+> to zero — not a blocker. Do not cite it as a reason to defer a deploy.
 
 ## TLDR
 

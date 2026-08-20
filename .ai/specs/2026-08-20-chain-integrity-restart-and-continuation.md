@@ -158,10 +158,10 @@ it structurally (the loop ran off the end), not by asking.
   spec-to-deploy") made every user-initiated *and* unattended run a 6-step chain. Before it,
   almost every run was `quick-task` (1 step), where "session done = run done" was true. The
   bug existed but was unreachable.
-- **It reproduces on a plain restart**, which happens on every cezar self-deploy — and
-  AGENTS.md already records that `cezar server-deploy` SIGKILLs in-flight runs
-  (`.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, draft). Shipping cezar
-  currently *causes* this bug in every live chain.
+- **It reproduces on a plain restart**, which happens on every cezar self-deploy — and a
+  restart SIGKILLs in-flight runs. Since cezar always self-deploys (`AGENTS.md` §"Always
+  self-deploy"), shipping cezar *causes* this bug in every live chain until this spec lands —
+  which is exactly why this fix is what makes always-self-deploy safe.
 
 ### What this spec does NOT cover
 
@@ -431,7 +431,7 @@ Same reasoning as #661's `monitoring` slot bug, one layer down.
 | R4 | A re-entry loop that never advances (step ends → re-enter → step ends). | Existing step budget bounds turns; plus a hard check that `pendingChainSteps().length` strictly decreases, else the run fails with a named error. |
 | R5 | Worktrees apply back at the wrong moment — too early loses isolation, never at all loses the work. | The guard sits **before** `applyWorkspaceRun`; a stalled run keeps `workspaceWorktrees` intact. Test asserts the field is untouched on a stalled settle. |
 | R6 | Collision with the in-flight idle-timeout fix (run `ef9901e3`), which edits the same `settleSuccess`. | Named in § "What this spec does NOT cover". Whichever lands second rebases; I1 is a precondition both must satisfy. |
-| R7 | Shipping the fix requires a cezar restart, which triggers the very bug in every live chain. | Deploy **detached** (`systemd-run`, outside `cezar.service`'s cgroup) per AGENTS.md, or after live runs settle. P0 first means a restart during the rollout stalls rather than loses. |
+| R7 | Shipping the fix requires a cezar restart, which triggers the very bug in every live chain. | P0 first: a restart during the rollout stalls a chain rather than losing it. This is a one-time bootstrap cost — once this spec is live, continuation resumes chains across every later self-deploy. |
 | R8 | The regression test passes against the buggy code. | AGENTS.md § "Prove the regression test fails without the fix" — `git stash` the source, run the new tests, confirm red, record the output. |
 
 ## Verification
@@ -688,8 +688,8 @@ root; the session user has none. Verified the same day: there is **no** automati
 at `097d1b15` while `origin/main` had moved on. **A push does not deploy.**
 
 ~~So the fix is on `origin/main` and prod is still running the engine with the bug. The restart must
-be run by the owner, or detached with sudo (`systemd-run`, outside `cezar.service`'s cgroup) so it
-does not SIGKILL the very chains it protects — R7, now the live blocker rather than a risk.~~
+be run by the owner so it does not SIGKILL the very chains it protects — R7, now the live blocker
+rather than a risk.~~
 
 **Superseded 2026-08-20 11:55 — the block was not real.** Everything above about `/opt/cezar` not
 being a git checkout and a push not being a deploy stands; the "needs root" conclusion drawn from
