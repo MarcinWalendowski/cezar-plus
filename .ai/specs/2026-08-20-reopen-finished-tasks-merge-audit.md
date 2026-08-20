@@ -10,10 +10,10 @@
 >
 > **Phases 4-5 — the production sweep and the record it produces — are NOT done. NOTHING HAS BEEN
 > REOPENED, and the owner's ask is therefore NOT yet answered.** This is *QA needed*, not done.
-> Two things stand between here and there, in this order: **(1) deploy the backend** — the watcher
-> only exists in a process started from this code, and `/opt/cezar/.deployed-commit` still read
-> `f9bcda42` when this line was written, i.e. production runs the code from before the change;
-> **(2) then run the sweep** — `cezar runs reopen --all-done --dry-run` (expect 19: workspace 15 /
+> ~~Two things stand between here and there~~ — **one thing now. (1) deploy the backend is DONE,
+> 2026-08-20 19:04 UTC:** `/opt/cezar/.deployed-commit` = `f53f5a58`, the service restarted onto
+> the new tree (MainPID 3548803 → 3683619) and the reopen watcher is live in the resident process.
+> See § Deployment. What remains is **(2) run the sweep** — `cezar runs reopen --all-done --dry-run` (expect 19: workspace 15 /
 > chat 3 / cezar 1), a `--limit 1` canary, then the remaining 18, always with
 > `--exclude a29f2b11-f83a-4c37-92bb-ff538551146a` so the sweep cannot reopen itself. Both are
 > filed as cezar todos so they survive this run ending. See *Status log — 2026-08-20* at the foot.
@@ -407,10 +407,12 @@ write a request file, assert the run reaches `queued` and a `continue-1` step is
 enforced, not merely intended, by the `verify` post-conditions on `commit-push`/`document`/`deploy`
 (`packages/cezar/src/workflows/postconditions.ts`, spec `2026-08-20-steps-green-only-when-verified.md`).
 
-**Deploy:** build → readiness-probe the deployed tree → swap `dist` + `web/dist` into `/opt/cezar`
-→ `git rev-parse HEAD > /opt/cezar/.deployed-commit` → `kill -9` the MainPID. Backend change, so
-the restart is required and will SIGKILL this session. `.ai/deploy-targets.json` probes must all
-exit 0 (currently deployed: `f9bcda42`).
+**Deploy — EXECUTED 2026-08-20 19:03-19:04 UTC exactly as planned; see § Deployment.** build →
+readiness-probe the deployed tree → swap `dist` + `web/dist` into `/opt/cezar` →
+`git rev-parse HEAD > /opt/cezar/.deployed-commit` → `kill -9` the MainPID. Backend change, so
+the restart was required and did SIGKILL this session — restart-continuation resumed the run and
+the resumed session verified its own deploy. Both `.ai/deploy-targets.json` probes exit 0
+(~~currently deployed: `f9bcda42`~~ → now `f53f5a58`).
 
 **E2E — the acceptance test, in this order, and the gate is real:**
 
@@ -468,6 +470,97 @@ Stating it rather than promising events that have nowhere to go.
 - **Whether `cez/6af4b894`'s missing run record was deleted or never written.** No trace in
   `runs.json` or its `.bak` files.
 
+## Deployment
+
+Deployed to production (`prod-host`) on **2026-08-20 19:03-19:04 UTC** by step 6 of run
+`a29f2b11`, using this repo's own documented deploy path (`AGENTS.md:12`) — **not**
+`cezar server-deploy`, whose `systemctl restart` needs sudo the `cezar` service user does not
+have.
+
+**Deploy class: backend + web, so a tree swap AND a restart.** The delta `f9bcda42..f53f5a58`
+touches `packages/cezar/src` (`server/server.ts`, `index.ts`, `reopen-requests.ts`,
+`reopen-watch.ts`, `runs/reopen-cli.ts`, `workflows/postconditions.ts`), so the web-only
+carve-out did not apply and the artifact in place was not a correct build of this commit.
+`package.json` / `package-lock.json` are **unchanged** across the delta
+(`git diff --name-only f9bcda42..f53f5a58 -- package.json package-lock.json '*/package.json'` is
+empty), so no `npm install` into `/opt/cezar` was needed — the `dist` swap is sufficient, per the
+one correctness caveat in `AGENTS.md:12`.
+
+**What was run.**
+
+```
+npm run build                                  # in the worktree, exit 0 (server + web + check:pack)
+cp -a <worktree>/packages/cezar/dist      /opt/cezar/packages/cezar/dist.new
+cp -a <worktree>/packages/cezar/web/dist  /opt/cezar/packages/cezar/web/dist.new
+diff -rq <worktree>/... /opt/cezar/...         # both exit 0, staged == built
+# readiness probe, BEFORE touching the service:
+node -e "await import('/opt/cezar/packages/cezar/dist.new/server/server.js'); ..."   # exit 0
+mv .../dist     .../dist.bak.20260820-190308  &&  mv .../dist.new     .../dist
+mv .../web/dist .../web/dist.bak.20260820-190308 && mv .../web/dist.new .../web/dist
+printf '%s\n' f53f5a58c5d24f950841293dcb847f20c19a304b > /opt/cezar/.deployed-commit
+kill -9 3548803                                # the unit's MainPID; Restart=on-failure brings it back
+```
+
+Rollback is reversing the two `mv` pairs for stamp `20260820-190308` and restoring
+`.deployed-commit.bak.20260820-190308`.
+
+**Readiness gate, executed BEFORE the swap** (`AGENTS.md:12` — "readiness-probe the DEPLOYED tree
+before touching the service, so a broken build is still one `mv` from rollback"). The staged tree
+was imported, not merely inspected:
+
+| # | Probe | Result |
+| --- | --- | --- |
+| 1 | `await import()` the staged server module graph (`server/server.js`, `reopen-watch.js`, `reopen-requests.js`, `runs/reopen-cli.js`, `workflows/postconditions.js`) | exit 0, 490 ms |
+| 2 | `node dist.new/index.js runs reopen --help` | prints the new usage block |
+| 3 | **Negative control:** the OLD deployed tree | no `dist/runs/reopen-cli.js`; `runs reopen` was an unknown route there |
+
+Probe 3 is what makes probes 1-2 evidence of *new code* rather than a re-copy.
+
+**Restart.** `kill -9` on MainPID `3548803` at 19:03:57 UTC; the unit was back `active (running)`
+as MainPID `3683619` at **19:04:02 UTC — a ~5 s outage**, `NRestarts=11`. As `AGENTS.md:12`
+predicts, that SIGKILL took the deploying session's own process group with it; restart-continuation
+(`.ai/specs/2026-08-20-chain-integrity-restart-and-continuation.md`) resumed this run, and the
+resumed session is what verified the deploy below. Expected and survivable, exactly as documented.
+
+**Post-restart verification — both `.ai/deploy-targets.json` targets exit 0.**
+
+| target | probe | result |
+| --- | --- | --- |
+| cezar service (backend) | `dist/index.js` present ∧ `.deployed-commit` == HEAD ∧ `GET /api/v1/health` | **exit 0** |
+| cezar UI (web) | `web/dist/index.html` present ∧ served HTML references the built entry chunk | **exit 0** (`assets/index-CfWS9u4Q.js`) |
+
+**Delivery is not activation — so activation was proved separately**, which is the whole point of
+that `$comment` in `.ai/deploy-targets.json`. A health 200 only shows *some* process answers:
+
+- the resident process's own `cmdline` is `/usr/bin/node /opt/cezar/packages/cezar/dist/index.js
+  serve …`, started **19:04:01**, i.e. after the 19:03:08 swap — it loaded the new tree, not the old one;
+- `dist/server/server.js` imports `../reopen-watch.js` (line 61) and calls `watchReopenRequests`
+  at three seams (boot context, context-built, per-project);
+- **runtime, not static:** PID `3683619` holds an inotify watch on inode `0x5f5aa`, which is
+  `/var/lib/cezar/workspace/.ai/cezar` — the reopen store's `dataDir`. The watcher is subscribed
+  in the live process, not merely present on disk.
+
+**Verification § E2E step 1 is DISCHARGED by this deploy step.** Run against the *deployed*
+binary from `/var/lib/cezar/workspace`:
+
+```
+node /opt/cezar/packages/cezar/dist/index.js runs reopen --all-done --dry-run \
+  --exclude a29f2b11-f83a-4c37-92bb-ff538551146a
+→ dry run — 19 run(s) would be reopened, nothing written        (exit 0)
+→ skipped (no runs.json): anymail-mcp, aside, bubble-trade, career, career-kit,
+  homebrew-tap, mw-site, brand, lokie-chatbox
+```
+
+**Exactly 19**, split `workspace` 15 / `chat` 3 / `cezar` 1 — the count this spec predicted, so
+the selector and the board agree. `reopen-requests.json` was absent before and after: the dry-run
+path returns at `reopen-cli.js:197`, before any `appendReopenRequests`. The selector, the project
+walk, the exclude flag and the CLI wiring are therefore all confirmed working *in production*.
+
+**What this deploy does NOT discharge.** Nothing has been reopened. E2E steps 2 onward — the
+`--limit 1` canary, the remaining 18, and the per-run merge verdicts — are Phases 4-5 and remain
+**QA needed**, carried by cezar todo `3cd4adc4`. Deploying is what makes that sweep possible at
+all; it is not the sweep.
+
 ## Status log — 2026-08-20 (run `a29f2b11`, workflow `spec-to-deploy`)
 
 | step | outcome |
@@ -477,9 +570,11 @@ Stating it rather than promising events that have nowhere to go.
 | 3 `run-tests` | full suite. Found and fixed a **pre-existing** red from `57fc8807` — post-conditions evaluated under `CEZ_DRY_RUN=1` — reproduced at clean `HEAD` as a control. +3 tests. |
 | 4 `commit-push` | `2e421370` (the dry-run repair) and `0cbb65a4` (the feature), pushed `f9bcda42..0cbb65a4`. Split deliberately: burying a cross-cutting engine repair inside a `feat:` hides it from the `git log -S` archaeology AGENTS.md relies on. |
 | 5 `document` | this status block, the `CHANGELOG.md` Added + Fixed entries, `AGENTS.md`'s post-condition rule given its dry-run carve-out, and three specs marked in place (`steps-green-only-when-verified`, `spec-to-deploy-default-workflow`, `003-handoff-cli`). Todos filed for Phases 4-5. |
-| 6 `deploy` | **pending at the time of writing.** Required before Phase 4 can do anything. No dependency change in the delta, so a `dist` + `web/dist` swap is sufficient — no `npm install` into `/opt/cezar`. |
+| 6 `deploy` | **DONE 2026-08-20 19:04 UTC — see § Deployment.** `f9bcda42` → `f53f5a58` in `/opt/cezar`; `dist` + `web/dist` swapped (no `npm install`, the delta touches no manifest), readiness-probed before the swap with a negative control, service restarted (MainPID 3548803 → 3683619, ~5 s outage) and the restart SIGKILLed this session as predicted — continuation resumed the run and the resumed session verified it. Both `.ai/deploy-targets.json` probes exit 0, and the watcher is proved live in the resident process (inotify watch on the store `dataDir`). E2E step 1 discharged against the deployed binary: **exactly 19**, nothing written. |
 
 **What a later session must not conclude from this file.** That the sweep ran. It did not. The
 19 `done` runs on the production Active tab have not been asked whether their work reached `main`,
 and the two runs this spec's audit already caught with commits on no `main` anywhere are still
-unmerged. Phases 1-3 built the door; nobody has walked through it.
+unmerged. Phases 1-3 built the door and step 6 opened it in production — but nobody has walked
+through it. The only thing the deploy proved about the sweep is that its *selector* returns the
+predicted 19 and writes nothing; firing it is Phase 4, todo `3cd4adc4`.

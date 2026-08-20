@@ -48,10 +48,13 @@
   64 new tests across five files, green; `npm run typecheck` exit 0.
 
   **Not done, and not to be rounded up.** This is Phases 1-3: the capability exists and is
-  **unused**. *Nothing has been reopened yet.* The watcher only exists in a process started from
-  this code, so the sweep needs the backend deployed first; Phase 4 (the 19-run sweep) and Phase 5
-  (a merge verdict recorded per run) are the actual owner ask and are filed as cezar todos so they
-  cannot be lost.
+  **unused**. *Nothing has been reopened yet.* ~~The sweep needs the backend deployed first~~ —
+  **deployed 2026-08-20 19:04 UTC** as `f53f5a58` (`/opt/cezar/.deployed-commit`; service restarted
+  onto the new tree, both `.ai/deploy-targets.json` probes exit 0, and the watcher proved live in
+  the resident process). Against the deployed binary, `--all-done --dry-run` returns **exactly the
+  predicted 19** and writes nothing. So the door is open in production and the selector is
+  confirmed — but Phase 4 (the 19-run sweep) and Phase 5 (a merge verdict recorded per run) are the
+  actual owner ask, are **still not run**, and are filed as cezar todos so they cannot be lost.
 - 📜 **cezar always self-deploys now — the "do not self-deploy from a running session" rule is
   removed, not merely marked stale.** Owner instruction 2026-08-20.
 
