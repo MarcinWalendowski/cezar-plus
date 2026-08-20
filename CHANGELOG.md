@@ -54,7 +54,29 @@
   the resident process). Against the deployed binary, `--all-done --dry-run` returns **exactly the
   predicted 19** and writes nothing. So the door is open in production and the selector is
   confirmed — but Phase 4 (the 19-run sweep) and Phase 5 (a merge verdict recorded per run) are the
-  actual owner ask, are **still not run**, and are filed as cezar todos so they cannot be lost.
+  actual owner ask, are ~~**still not run**~~ **1/19 run** (see below), and are filed as cezar
+  todos so they cannot be lost.
+
+  **UPDATE 2026-08-20 19:51 UTC (run `7aecd6a2`, spec
+  `.ai/specs/2026-08-20-reopen-sweep-execution.md`, commit `58961e5e`).** The sweep was fired and
+  got one run in. Chat run `b1684fe9` was reopened at 19:27:26 UTC and was still answering when
+  that run's `document` step ran; **the other 18 have not been touched and no `MERGE-VERDICT` line
+  exists anywhere on the box yet.** Two things are now known that were not:
+
+  - **A reopen filed against a project whose context is not resident is silently lost.** Project
+    contexts are lazy (`ProjectContexts.context()` builds on first API touch), and
+    `watchReopenRequests` only subscribes for the boot context, contexts already built, and
+    `onContextBuilt` — so nothing watches a cold project's inbox. Verified by inotify on the live
+    PID: `workspace` and `cezar` were watched, `chat` was not, and `--project chat` wrote a
+    well-formed request that nothing would ever read, with exit 0 and no stamp. Worked around with
+    one authenticated loopback read to force the context build; not fixed, because the fix is
+    TypeScript and shipping it means a restart, and a restart mid-sweep `kill -9`s in-flight
+    continuations. Filed as cezar todo `503195a8`.
+  - **Reopening a *workspace* run materializes ten worktrees, not one** — twelve registry projects
+    collapsing to ten distinct repos. Fifteen workspace runs is 150 worktree creations and 150
+    apply-backs, and that path has still never been executed.
+
+  Remaining waves are carried by cezar todo `9159228c`.
 - 📜 **cezar always self-deploys now — the "do not self-deploy from a running session" rule is
   removed, not merely marked stale.** Owner instruction 2026-08-20.
 

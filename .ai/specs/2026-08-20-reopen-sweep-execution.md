@@ -1,6 +1,16 @@
 # Firing the reopen sweep: two canaries, nineteen verdicts, and one line each agent must print
 
-> **Status: SPEC — not executed.** This is the execution plan for **Phases 4-5** of
+> **Status: PARTIAL — executed through Wave A, and Wave A has not finished. Waves B, C and D have
+> NOT run.** Measured 2026-08-20 19:51 UTC, at the end of this run's `document` step. Phase 0
+> (deploy) and Phase 1 (the dry runs) are **DONE** and their acceptance criteria are met. Wave A's
+> canary — chat run `b1684fe9`, request `acd801d9` — was reopened at **19:27:26 UTC** and its
+> `continue-1` step was still `running` when this line was written, so **not one `MERGE-VERDICT`
+> line exists yet**: `grep -rn MERGE-VERDICT` across every run directory on this box matches only
+> the prompt text this spec injects. **One of nineteen runs has been reopened; eighteen have not.
+> The owner's ask is still unanswered.** What remains is carried by a cezar todo — see § Status log
+> at the foot for the per-step record and the exact resume commands.
+>
+> ~~**Status: SPEC — not executed.**~~ This is the execution plan for **Phases 4-5** of
 > `.ai/specs/2026-08-20-reopen-finished-tasks-merge-audit.md`, which shipped Phases 1-3 as
 > `0cbb65a4` and is still marked **PARTIAL** because nothing has been reopened. That spec built
 > the door and deployed it; this one walks through it. It does not re-litigate the design — the
@@ -552,3 +562,69 @@ Wave D table is the analytics deliverable, and it is the input any future bulk-r
 | step | outcome |
 |---|---|
 | 1 `spec` | this file. Read the parent spec end to end, the shipped `reopen-cli.ts` / `reopen-watch.ts` / `continueRun` / `workspace-worktrees.ts` at `origin/main`, `AGENTS.md` § "Shipping cezar itself", `.ai/deploy-targets.json`, `/opt/cezar/.deployed-notes.md`, and re-measured the live board: 20 done+unarchived rows, 10-worktrees-per-workspace-run, the four-run merge audit, per-run cost and duration, and the transcript/handoff shapes the verdict collector depends on. Three corrections to the parent spec's arithmetic recorded above. |
+
+| 2 `implement` | **Phase 0 DONE** — fast-forwarded `origin/main` `f02156d5` into `cez/7aecd6a2`; both `.ai/deploy-targets.json` probes exit 0, so **AC1 is met** (`/opt/cezar/.deployed-commit` = `f02156d5`, ≥ `0cbb65a4`, service live as MainPID `3683619`). No tree swap and no restart: this run's delta is docs-only and takes the no-restart carve-out — deliberately, because a restart mid-sweep `kill -9`s in-flight continuations. **Phase 1 DONE** — dry runs: bare = **20**, `--exclude a29f2b11` = **19** (workspace 15 / chat 3 / cezar 1), and `reopen-requests.json` was absent before and after in every project, so **AC2 is met**. Before-picture in `.ai/cezar/tmp/7aecd6a2…/reopen-before.txt`. **Wave A FIRED** — `b1684fe9` (chat), request `acd801d9`, 19:23:27 UTC written / 19:27:26 UTC started. **Waves B, C and D were not reached.** |
+| 3 `run-tests` | Nothing to run — the delta is a spec file. No code changed, so the gates from run `a29f2b11` (typecheck exit 0, 64 new tests green) still describe `HEAD`. |
+| 4 `commit-push` | `58961e5e` ("docs: spec the reopen sweep — two canaries, nineteen verdicts, one grep-able line"), pushed `f02156d5..58961e5e` to `origin/main`, clean fast-forward. |
+| 5 `document` | this block, the Status correction at the head of this file, and **four corrections written in place** into the parent spec (`2026-08-20-reopen-finished-tasks-merge-audit.md`): its "NOTHING HAS BEEN REOPENED" head claim, and the three places it calls `cez/6af4b894` an orphan with no run record. KB proposals written for the lazy-context defect and for the sweep's execution state. Todo filed for Waves B-D. |
+
+### The blocking defect this run found, and did not fix
+
+**A reopen request filed against a project whose context is not resident is silently lost.**
+`server.ts` wires `watchReopenRequests` for the boot context, for contexts already built, and on
+`onContextBuilt` — but project contexts are **lazy** (`ProjectContexts.context()` builds on first
+API touch), so a project nobody has opened since the last restart has no watch on its
+`<dataDir>/reopen-requests.json`. Verified on production by inotify against PID `3683619`: the
+`workspace` (boot) and `cezar` dataDirs were watched, `chat`'s was not. `cezar runs reopen
+--project chat` therefore wrote a well-formed request that nothing would ever read — no error, no
+stamp — which is the precise silent-loss failure `reopen-watch.ts`'s continue-then-stamp ordering
+was designed to prevent.
+
+**Worked around, not fixed:** one authenticated loopback read (`GET /api/v1/p/chat/launch-key`,
+using a live session id from the local identity store) built chat's context, which fired
+`onContextBuilt` → `watch` → reconcile, and Wave A started four minutes after it was filed. It
+affects `chat` (3 runs) only in this sweep; `workspace` (15) and `cezar` (1) were already resident.
+Not fixed here on purpose: the fix is TypeScript, and shipping TypeScript means a restart, and a
+restart mid-sweep drops in-flight continuations. Filed as cezar todo `503195a8`.
+
+### Verdicts collected so far
+
+**None.** The table below is the shape the sweep must fill; it is empty because Wave A had not
+settled when this run's `document` step ran, and Waves B-D never fired.
+
+| run | project | verdict | repo | ref | note |
+|---|---|---|---|---|---|
+| `b1684fe9` | chat | *pending* — `continue-1` still `running` at 19:51 UTC | — | — | KNOWN-UNMERGED going in: `2675cd16`'s content is not on `origin/main`. A bare `merged` verdict from this run means the prompt failed, not that the work landed. |
+| the other 18 | — | *not reopened* | — | — | — |
+
+**Scoring caveat for whoever grades Wave A.** At ~19:35 UTC the reopened agent fetched
+(`origin/main` `3e4f26a5` → `e54cc50a`) and then `git reset --hard origin/main` on `cez/b1684fe9`,
+dropping tip `2675cd16` from the branch and re-applying its SPEC-529 work as a focused delta on top
+of SPEC-528, which had landed meanwhile. So `git cherry origin/main cez/b1684fe9` is now
+**vacuously empty** (branch == `origin/main`) and cannot score items 3-4 of the Wave A gate. Score
+on whether `2675cd16`'s **content** reaches `origin/main`; the commit survives in the branch reflog
+(`cez/b1684fe9@{1}`).
+
+### How to resume
+
+Nothing here is stateful — the waves are independent CLI invocations. In order:
+
+```bash
+# Wave A gate — b1684fe9 must settle first
+grep -n '^MERGE-VERDICT' /var/lib/cezar/loki-labs/chat/.ai/cezar/runs/b1684fe9-*.handoff.md
+
+# Wave B canary — the ten-worktree path, still unproven
+cezar runs reopen be31d9e9-6c5b-452d-bc63-caa348fe3292 --project workspace   # expect 10 worktrees, all gone after settle
+
+# Wave C — the remaining 17
+cezar runs reopen --all-done   --exclude a29f2b11-f83a-4c37-92bb-ff538551146a   --exclude b1684fe9-0201-48ba-ad3d-782b144350f5   --exclude be31d9e9-6c5b-452d-bc63-caa348fe3292   --exclude 7aecd6a2-e87b-485f-b1b1-c242ddaa92fa
+
+# Wave D — collect
+grep -rn '^MERGE-VERDICT' /var/lib/cezar/*/.ai/cezar/runs/*.handoff.md                           /var/lib/cezar/loki-labs/*/.ai/cezar/runs/*.handoff.md
+```
+
+**Cautions that outlive this run.** Do NOT deploy to `/opt/cezar` between Wave A and Wave D — the
+restart is a `kill -9` and drops in-flight continuations. `maxParallel` is 3 with a FIFO queue, so
+17 queued reopens block the owner's next task for hours; that is a scheduling decision for the
+owner, not a technical one. And `--project chat` still needs a resident context (see the defect
+above) until `503195a8` is fixed.
