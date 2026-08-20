@@ -34,6 +34,7 @@ import {
 } from '@/api/queries'
 import { DEFAULT_AGENT_ACCOUNT_ID, type ApiRun, type OpenTarget } from '@loki-labs/better-cezar-api-client'
 import { DiffStatLabel } from '@/components/diff-stat'
+import { LiveDuration } from '@/components/live-duration'
 import { TitleEditInput, useTitleEditor } from '@/components/editable-title'
 import { Pill } from '@/components/pill'
 import { ReferenceChip } from '@/components/reference-chip'
@@ -146,6 +147,16 @@ export function RunHeader({
             <Pill dot={attention.tone} pulse={attention.pulse}>
               {attention.label}
               {queuePosition !== undefined ? ` #${queuePosition}` : ''}
+              {/* "how long has this been going", inside the pill it qualifies (spec
+                  2026-08-20-live-run-status-line-and-timer). A LEAF, so its 1s tick re-renders one
+                  <time> rather than this header and the transcript beneath it. */}
+              {run.status === 'running' ? (
+                <LiveDuration
+                  since={run.startedAt}
+                  label="Running for"
+                  className="text-muted-foreground"
+                />
+              ) : null}
             </Pill>
             <ActionsKebab run={run} actions={actions} onToggleNotes={() => setNotesOpen((open) => !open)} />
           </span>

@@ -27,7 +27,7 @@ import { displayWorkflowName, taskIssueUrl, taskPrUrl } from '@/lib/tasks-table'
 import { cn, isHttpUrl } from '@/lib/utils'
 
 import { AutoResumeHint } from './auto-resume-hint'
-import { WorkingIndicator } from './thread-items'
+import { RunStatusLine } from './thread-items'
 import { useContinueAction } from './follow-up-engine'
 import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
@@ -336,10 +336,21 @@ export function ThreadView({
           )
         ) : null}
 
-        {/* Live session heartbeat: while the engine owns the turn (`running`), a spinner tails
-            the thread so quiet gaps between bursts don't read as "finished". `waiting` hands
-            off to the dock's reply hint, `queued` to the placeholder above — so `running` only. */}
-        {run.status === 'running' ? <WorkingIndicator /> : null}
+        {/* Live session heartbeat: while the engine owns the turn (`running`), the status line
+            tails the thread — what the agent is doing, the last line it streamed, how long this
+            item has taken, and how quiet it has gone — so a gap between bursts reads as a
+            measured pause rather than "finished". `waiting` hands off to the dock's reply hint,
+            `queued` to the placeholder above — so `running` only.
+
+            Fed from `currentThread`/`currentEvents` (the compact current-state feed) rather than
+            the visible page: loading older pages must not change what "right now" says. */}
+        {run.status === 'running' ? (
+          <RunStatusLine
+            state={currentThread}
+            events={history?.currentEvents ?? []}
+            activity={run.activity}
+          />
+        ) : null}
 
         {/* Closed states read as the body's last line; the WAITING state lives in the dock
             (mockup `.paused-hint`), right above the composer it is asking the user to use. */}

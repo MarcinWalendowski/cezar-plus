@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { compactTokens, shortAge } from '@/lib/format'
+import { compactTokens, formatDuration, shortAge } from '@/lib/format'
 
 describe('shortAge', () => {
   const now = Date.parse('2026-07-14T12:00:00.000Z')
@@ -51,5 +51,32 @@ describe('compactTokens', () => {
 
   it.each([-5, Number.NaN, Number.POSITIVE_INFINITY])('renders %s as 0', (tokens) => {
     expect(compactTokens(tokens)).toBe('0')
+  })
+})
+
+describe('formatDuration', () => {
+  it.each([
+    [0, '0:00'],
+    [999, '0:00'],
+    [1_000, '0:01'],
+    [59_000, '0:59'],
+    [60_000, '1:00'],
+    [64_000, '1:04'],
+    [3_599_000, '59:59'],
+    // The hour field appears only once there is one — a stopwatch, not a fixed-width clock.
+    [3_600_000, '1:00:00'],
+    [7_384_000, '2:03:04'],
+    [90_000_000, '25:00:00'],
+  ])('%d ms elapsed reads %s', (ms, expected) => {
+    expect(formatDuration(ms)).toBe(expected)
+  })
+
+  it('clamps a negative elapsed to 0:00 rather than printing a negative clock', () => {
+    // `startedAt` is stamped by the server; the browser's clock may sit behind it.
+    expect(formatDuration(-5_000)).toBe('0:00')
+  })
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY])('renders %s as 0:00', (ms) => {
+    expect(formatDuration(ms)).toBe('0:00')
   })
 })

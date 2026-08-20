@@ -104,6 +104,14 @@ const RULES: Rule[] = [
     applies: (f) => f.isE2e,
   },
   {
+    name: 'no-tick-in-thread-containers',
+    why: 'a 1s useNow re-renders its OWNER every second — in the task-thread route or the run-header body that is a 300-row transcript re-rendered 60x/minute for a clock. The ticking clocks are LEAVES (components/live-duration.tsx, and the status line in thread-items.tsx), which is the whole reason they are separate components (spec 2026-08-20-live-run-status-line-and-timer, risk R2)',
+    pattern: /\buseNow\b/g,
+    applies: (f) =>
+      f.rel === 'src/routes/task-thread/task-thread.tsx' ||
+      f.rel === 'src/routes/task-thread/run-header.tsx',
+  },
+  {
     name: 'no-100vh',
     why: 'viewport height is 100dvh/h-dvh — 100vh ignores mobile browser chrome (iOS rule)',
     pattern: /\b(?:(?:h|min-h|max-h)-screen|100vh)\b/g,
