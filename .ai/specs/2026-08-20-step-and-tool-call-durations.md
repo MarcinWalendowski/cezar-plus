@@ -1,10 +1,16 @@
 # Every step and every tool call says how long it took
 
-**Status:** IMPLEMENTED (Phases 1-3) — **QA needed**, not done. Written 2026-08-20 by step 1 of
-run `6af4b894` (`spec-to-deploy`); implemented by step 2 of the same run. Phase 4 stays
-deferred by design. Verification 1-6 executed and green (see §Verification); **§7, the real
-runtime pass on a live multi-step task, has NOT been executed** — a headless step cannot open
-`/tasks/:id`. Until it has, this is QA needed.
+**Status:** IMPLEMENTED (Phases 1-3), SHIPPED and **DEPLOYED TO PRODUCTION** — **QA needed**, not done. Written 2026-08-20 by
+step 1 of run `6af4b894` (`spec-to-deploy`); implemented by step 2, gated by step 3, shipped by
+step 4 as commit `69b4a3de` ("feat: every step and every tool call says how long it took", 19
+files, +1452/-124, this spec and the replay fixture included), **pushed to `origin/main`**
+(`a6c0ba3e..69b4a3de`, fast-forward, no PR — cezar self-dev ships direct to main under `AGENTS.md`
+§"Shipping cezar itself"). Documented by step 5 (this record, plus the `AGENTS.md` scrub
+correction §Verification called for). **Deployed by step 6** — see §Deployment. Phase 4 stays
+deferred by design. Verification 1-6 executed
+and green (see §Verification); **§7, the real runtime pass on a live multi-step task, has NOT been
+executed** — a headless step cannot open `/tasks/:id`. Until it has, this is QA needed, and it is
+tracked as an open todo rather than left in this paragraph to rot.
 **Date:** 2026-08-20
 
 ## TLDR
@@ -336,6 +342,63 @@ from, and what Verification §5 replays.
 | R10 | The reducer's clone-on-update drops `timing` (see Architecture). | Explicit carry-forward + a reducer test that sends `started → updated → updated → completed` and asserts the chip survives all four frames. |
 | R11 | Scope creep into `packages/cezar`, which changes the deploy class from "swap into `/opt/cezar`" to "restart the service" — and per the standing memory, a backend self-deploy from inside a running session SIGKILLs the session. | Verification §6 is a hard gate: `git diff --name-only` must be `packages/web/**` + `.ai/specs/**` only. |
 
+
+## Deployment
+
+Deployed to production (`prod-host`) on 2026-08-20 at 15:35 UTC by step 6 of run `6af4b894`,
+using this repo's own documented web-only deploy path (`AGENTS.md:12`) rather than
+`cezar server-deploy`.
+
+**Why not `cezar server-deploy`.** That command is a hard `systemctl daemon-reload && systemctl
+restart cezar.service`, and the unit is `KillMode=control-group` — it SIGKILLs every in-flight run
+*and the deploying session itself*. `AGENTS.md:12` carves out the exception this change qualifies
+for: **a web-only change swaps into `/opt/cezar` without a restart and is safe to ship live.**
+`git diff a6c0ba3e..69b4a3de --name-only` is 18 files under `packages/web` plus this spec, and
+nothing under `packages/cezar`, so the carve-out applies as written.
+
+**What was run.**
+
+```
+NODE_ENV=development npm run build:web        # -> packages/cezar/web/dist, exit 0, built in 1.25s
+cp -a <worktree>/packages/cezar/web/dist  /opt/cezar/packages/cezar/web/dist.new
+diff -rq <worktree>/packages/cezar/web/dist  /opt/cezar/packages/cezar/web/dist.new   # identical
+mv /opt/cezar/packages/cezar/web/dist      /opt/cezar/packages/cezar/web/dist.bak.20260820-153518
+mv /opt/cezar/packages/cezar/web/dist.new  /opt/cezar/packages/cezar/web/dist
+```
+
+No `sudo`, no restart, no `kill`. Rollback is reversing the last two moves.
+
+**Proof no restart happened:** `MainPID=3249167` and `ActiveEnterTimestamp=2026-08-20 15:21:17 UTC`
+were identical before and after the swap. The deploying session and every other in-flight run
+survived untouched.
+
+**Readiness gate, executed after the swap over real HTTP against the live server** (AGENTS.md:11 —
+"the deploy step must gate on a real readiness probe and never ship a broken build"):
+
+| # | Probe | Result |
+| --- | --- | --- |
+| 1 | `GET /` | 200, 6492 B, references new entry chunk `index-Dw4mZmPj.js` |
+| 2 | `GET /assets/task-thread-BvvI_Fzc.js` | 200, 102918 B, contains `tool-duration` |
+| 3 | `GET /assets/run-header-BmtNFwZt.js` | 200, 33653 B, contains `took ` |
+| 4 | Negative control: pre-swap tree | chunk was `task-thread-BhRcCytV.js`, **no** `tool-duration` |
+
+The two markers sit in *different* chunks because Vite splits by route, so the paths are recorded
+rather than a count — a bare count cannot distinguish "not deployed" from "looked in the wrong
+chunk". Probe 4 is what makes the hash change evidence of new code rather than a re-copy.
+
+**Deployed is not rendered.** Assets are served `cache-control: immutable` while `index.html`
+carries no `Cache-Control` at all, so a cockpit tab that is already open keeps running the OLD
+chunk graph until someone reloads it. The honest status for a human is "deployed — reload the tab".
+An HTTP 200 plus a bundle grep proves DELIVERY, not BEHAVIOUR, which is exactly why §7 below is
+still owed.
+
+**Still owed: Verification §7** — the real runtime pass on a live `/tasks/:id`, watching a step's
+clock tick and freeze at its final value. A headless step cannot do it and this one did not.
+Tracked as todo `1f74df2b` on project `cezar`. This deploy does not discharge it.
+
+The deploy is recorded on the box at `/opt/cezar/.deployed-commit` (prior record preserved as
+`.deployed-commit.bak.20260820-153558`).
+
 ## Verification
 
 Concrete and executable, from the repo root. **Scrub the environment first** — per
@@ -461,7 +524,9 @@ environment and also leak into the server suites (`accountUsage: true` where `he
 expects `false`, and 10 further failures across `health-forge`, `projects-api`,
 `agent-profile-wiring` and `add-project-dialog`). Unsetting **every** `CEZ_*` except
 `CEZ_HANDOFF_FILE` and `CEZ_TASK_ID` clears all of them. That is worth folding back into
-`AGENTS.md`.
+`AGENTS.md`. **Done by step 5** — `AGENTS.md` §"Three environment traps that make the gates LIE"
+now carries a prefix-wide scrub (verified to leave exactly those two variables standing) in place
+of the hand-written list, with the old list marked as the incomplete thing it was.
 
 | # | Check | Result |
 | --- | --- | --- |
@@ -478,6 +543,34 @@ The 2 failures in §4 are **not this change** and are named rather than rounded 
 a box at load average 15.7, and `server/project-context.test.ts` fails only inside the full
 parallel run and passes twice in isolation. Both are server files this change never touches (§6),
 and both are wall-clock budgets on a loaded machine.
+
+**Corrected 2026-08-20 by step 3 (the gate step), which re-ran everything under the COMPLETE
+`CEZ_*` scrub.** The paragraph above stands as written except for its second failure: under the
+full scrub `server/project-context.test.ts` **passes**, so "fails only inside the full parallel
+run" was the env leak of §Verification's own finding, not a load-sensitive test. Read the numbers
+below, not the ones above, as this change's gate result.
+
+| # | Gate, re-run under the complete scrub | Result |
+| --- | --- | --- |
+| a | `npm run typecheck` | GREEN |
+| b | `npm run test:unit` | 44/44 GREEN |
+| c | `npm run build` + `check:pack` | GREEN |
+| d | `npm run test:package` | 15/15 GREEN |
+| e | `npm test` (whole repo) | 9094 passed, **1 failed** |
+| f | `packages/web` suite | 175 files / 3859 tests GREEN |
+
+The single remaining red, `knowledge/catalog.test.ts` C18, is **proven pre-existing, not
+load-sensitive, and not ours**: reproduced at clean `HEAD` `a6c0ba3e` in the real checkout at
+63.7 ms/MiB with none of this change present, on an idle host (`steal=0`). It is an absolute
+40 ms/MiB budget calibrated on a faster machine than this EPYC-Rome box — see `AGENTS.md`
+§"Three environment traps that make the gates LIE", trap 3, where it is now written down so no
+future session re-derives it. Deliberately NOT widened: fitting the budget to the slowest host
+that ever runs it would destroy the regression signal the case exists for. `packages/cezar` is
+byte-identical to `HEAD` in this change's worktree, so the diff cannot be implicated.
+
+Step 3 also caught, and step 5 recorded in `AGENTS.md`, a **pre-existing flake** unrelated to
+this change: `add-project-dialog.test.tsx` > "registers exactly the checked rows" races on
+navigate, ~1 full-suite run in 4, 3/3 green in isolation, in a file this change never touches.
 
 ### Replay fixture
 

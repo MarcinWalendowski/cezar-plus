@@ -246,16 +246,27 @@ npm test -- --testTimeout=30000 path/to/one.test.ts
 npm test -- -t "the name of one test"
 ```
 
-### Two environment traps that make the gates LIE
+### Three environment traps that make the gates LIE
 
-Both were hit on 2026-08-20 (spec `.ai/specs/2026-08-20-live-run-status-line-and-timer.md`), and
-both produce a *plausible* failure that reads as "this suite cannot run here". Neither is a
-sandbox limitation. **Scrub the environment before you conclude anything about a test.**
+The first two were hit on 2026-08-20 (spec `.ai/specs/2026-08-20-live-run-status-line-and-timer.md`),
+the third the same day (spec `.ai/specs/2026-08-20-step-and-tool-call-durations.md`). Each produces
+a *plausible* failure that reads as "this suite cannot run here". None is a sandbox limitation.
+**Scrub the environment before you conclude anything about a test.**
+
+**Corrected 2026-08-20 (spec `2026-08-20-step-and-tool-call-durations.md`): the hand-written `-u`
+list this block used to carry was INCOMPLETE, and an incomplete scrub is worse than none — it
+looks authoritative and still leaves 11 failures behind.** It named nine variables; a run's
+environment also carries `CEZ_ACCOUNT_USAGE`, `CEZ_ACCOUNT_USAGE_HOSTED`, `CEZ_BROWSE_ROOT`,
+`CEZ_PUBLIC_URL`, `CEZ_PORT_STRICT` and `CEZ_ENV_PASSTHROUGH`, which leak into `health-forge`
+(`accountUsage: true` where it expects `false`), `projects-api`, `agent-profile-wiring` and
+`add-project-dialog`. Do not enumerate — that list will be stale again the next time a knob is
+added. **Unset every `CEZ_*` except the two a run needs to report itself**, and `NODE_ENV` with
+them:
 
 ```bash
-env -u NODE_ENV -u CEZ_REMOTE -u CEZ_OIDC_ISSUER -u CEZ_OIDC_CLIENT_ID \
-    -u CEZ_PROJECTS_DIR -u CEZ_KB -u CEZ_KB_ROOTS -u CEZ_KB_WRITE_FILE -u CEZ_TODOS_FILE \
-    npm ci && npm test
+scrub=$(env | sed -n 's/^\(CEZ_[A-Z0-9_]*\)=.*/\1/p' \
+        | grep -vxE 'CEZ_(HANDOFF_FILE|TASK_ID)' | sed 's/^/-u /')
+env -u NODE_ENV $scrub npm ci && env -u NODE_ENV $scrub npm test
 ```
 
 1. **`NODE_ENV=production` makes `npm ci` install ZERO devDependencies.** cezar's own agent
@@ -272,8 +283,24 @@ env -u NODE_ENV -u CEZ_REMOTE -u CEZ_OIDC_ISSUER -u CEZ_OIDC_CLIENT_ID \
    `CEZ_OIDC_ISSUER`, `CEZ_OIDC_CLIENT_ID`, `CEZ_PROJECTS_DIR`, `CEZ_KB`, `CEZ_KB_ROOTS`,
    `CEZ_KB_WRITE_FILE`, `CEZ_TODOS_FILE` are all live in a run's environment, and the server
    suites assert on exactly those knobs — 26 unrelated failures, none of them about your change.
+   Those names are **examples, not the set**: see the corrected scrub above, which unsets the
+   whole `CEZ_*` prefix precisely so this list never has to be right.
 
-**The method, which generalises past these two.** "It fails on an untouched file at clean HEAD
+3. **An absolute time budget calibrated on a different machine.** `knowledge/catalog.test.ts`
+   C18 asserts `bestMs / totalMiB < 40` — a hard 40 ms/MiB, taken on the box the test was
+   written on. Its comment already defends against ambient *load* (CPU time, not wall; minimum
+   of three repeats), and that defence works. It cannot defend against a slower **core**. On the
+   EPYC-Rome prod host this repo now runs its gates on, the same code measures **54-65 ms/MiB
+   with the machine idle** (`steal=0`), so the case fails every time, on every branch. Confirmed
+   the honest way on 2026-08-20: reproduced at clean `HEAD` `a6c0ba3e` in the real checkout, at
+   63.7 ms/MiB, with none of the change under test present. **A red C18 on this host is a
+   statement about the host, not about your diff** — and it is a red that will greet every
+   future session, so do not spend an hour re-deriving it. It was deliberately left failing
+   rather than widened: raising a budget to fit the slowest machine that ever runs it destroys
+   the ~20% regression signal the case exists to catch. The real fix is to make the budget
+   relative to a measured per-host baseline, which is a separate change and nobody's scope yet.
+
+**The method, which generalises past all three.** "It fails on an untouched file at clean HEAD
 too" feels like proof that the code is innocent and the environment is broken. It is proof of the
 first half only. The same install, the same env and the same runner feed both checkouts, so a
 control that fails identically **localises the fault to what they share** — it does not license
@@ -302,6 +329,13 @@ mechanism that exists.** Drop that class and look at the two that do:
    Assert the **effect** (did the value change), never a proxy for it.
 2. **Genuine concurrency timing.** Failures clustered at `--maxWorkers=16` on a 16-core box, and
    this repo is often run with several agents competing for the same cores.
+
+**Known live flake, as of 2026-08-20** — so the next session recognises it instead of bisecting
+toward it: `add-project-dialog.test.tsx` > *"registers exactly the checked rows, one POST each,
+and navigates to the first"* fails roughly **1 full-suite run in 4** and passes 3/3 in isolation.
+It is mechanism 1 above (a navigate race in the file's own helper), not anything a caller did:
+the file was untouched by the runs that surfaced it and imports nothing they changed. Unfixed —
+noted here so a red on that one name is recognised, never so it is ignored.
 
 Two method notes, both learned the hard way here:
 

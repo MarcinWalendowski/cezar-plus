@@ -4,6 +4,44 @@
 
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
+## ✨ Added
+- ✨ **Every workflow step and every tool call now says how long it took.** Spec
+  `.ai/specs/2026-08-20-step-and-tool-call-durations.md`, commit `69b4a3de`. **Web-only** — no
+  contract field, no migration, no runner change.
+
+  The cockpit could say *that* a step was running and *that* a tool call happened, never for how
+  long. On a six-step `spec-to-deploy` run, "which step ate the hour" was the only question worth
+  asking and `/tasks/:id` could not answer it. Both numbers already existed on shapes the browser
+  held — `StepState.startedAt`/`finishedAt` are persisted contract fields, and tool times are
+  derivable from the `ts` the store stamps on every frame — so this reads what was already there
+  rather than recording anything new.
+
+  Each clock **ticks while the thing is in flight and freezes at its final value once it ends**:
+  a running step shows elapsed time on the rail and in the collapsed summary, a finished run shows
+  `took h:mm:ss`, and a tool card carries a `tool-duration` chip. Three choices worth knowing:
+
+  - **Sub-second precision is not cosmetic.** Measured against this run's own transcript — 106 tool
+    entries, median 76 ms, 98 of 105 under one second — a formatter that floors to `0s` would have
+    shown `0s` on 93% of the cards it exists to inform.
+  - **One ticking component, enforced.** The live tick lives in `LiveDuration`, and the design
+    guardian's `no-tick-in-thread-containers` rule now covers `step-rail.tsx` and
+    `thread-items.tsx`, so a future `useNow` in a `ToolCard` fails the suite rather than re-rendering
+    the whole thread once a second. `RunStatusLine` moved to its own file so that rule could cover
+    `thread-items.tsx` honestly instead of being widened around existing correct code.
+  - **A finished item's duration never moves.** `endedAt` freezes on the first terminal frame, so a
+    later repaint of a completed item cannot push the number forward.
+
+  **Deployed to production 2026-08-20 15:35 UTC** via the web-only swap into `/opt/cezar` — no
+  `systemctl restart`, no sudo, `MainPID`/`ActiveEnterTimestamp` unchanged across the cutover, so
+  no in-flight run was lost. Verified over live HTTP (`GET /` 200 on the new entry chunk;
+  `tool-duration` present in `task-thread-BvvI_Fzc.js`, `took ` in `run-header-BmtNFwZt.js`;
+  neither present in the pre-swap tree). **Reload the cockpit tab** — `index.html` sends no
+  `Cache-Control`, so an already-open tab keeps the old chunk graph.
+
+  Status is **QA needed, not done**: verification 1-6 are green, but §7, the real runtime pass on a
+  live `/tasks/:id`, cannot be executed from a headless step and has not been. Delivery is not
+  behaviour — an HTTP 200 and a bundle grep do not discharge §7 (todo `1f74df2b`).
+
 ## 🔧 Changed
 - 🔧 **Balancing a pool now looks at how used each login actually is, not just whether it is
   nearly dead.** Specs `.ai/specs/2026-08-16-agent-account-usage-routing.md` (Solution C) and
