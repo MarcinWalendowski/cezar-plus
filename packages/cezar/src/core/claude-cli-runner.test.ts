@@ -207,7 +207,7 @@ describe('SIGTERM→SIGKILL escalation for a CLI that survives SIGTERM', () => {
     });
   });
 
-  it('escalates on the wall-clock timeout path as well', () => {
+  it('escalates on the inactivity timeout path as well', () => {
     withFakeChild((fake) => {
       const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 20 }).startSession({
         userPrompt: 'do it',
@@ -221,6 +221,90 @@ describe('SIGTERM→SIGKILL escalation for a CLI that survives SIGTERM', () => {
       vi.advanceTimersByTime(KILL_GRACE_MS);
       expect(fake.signals).toEqual(['SIGTERM', 'SIGKILL']);
     });
+  });
+
+  /**
+   * Spec 2026-08-20-agent-step-inactivity-timeout. The deadline used to be a wall clock armed
+   * once at spawn, so ANY step that ran longer than the limit was killed and recorded as
+   * `failed` however hard it was working — run `9d09795a` lost both `implement` and `run-tests`
+   * that way, at exactly 30 minutes each. It now bounds SILENCE: every line the agent emits
+   * re-arms it.
+   *
+   * This is the regression test. Against the old fixed deadline it goes red at the second
+   * iteration, when the wall clock fires despite a steady stream of output.
+   */
+  it('never fires while the agent keeps producing output, however long the step runs', async () => {
+    const fake = signallableChild();
+    spawnHook.override = () => fake.child;
+    vi.useFakeTimers();
+    try {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 100 }).startSession({
+        userPrompt: 'a long but very much alive step',
+        cwd: process.cwd(),
+      });
+      void session.result.catch(() => undefined);
+
+      // Six half-limit ticks: 3x the limit in total elapsed time, never one full limit of silence.
+      for (let i = 0; i < 6; i++) {
+        (fake.child.stdout as unknown as PassThrough).write('{}\n');
+        await vi.advanceTimersByTimeAsync(50);
+      }
+
+      expect(fake.signals).toEqual([]);
+      expect(fake.child.killed).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      spawnHook.override = null;
+    }
+  });
+
+  it('still fires once the agent goes quiet for a full limit, even after a busy spell', async () => {
+    const fake = signallableChild();
+    spawnHook.override = () => fake.child;
+    vi.useFakeTimers();
+    try {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 100 }).startSession({
+        userPrompt: 'a step that wedges after doing some work',
+        cwd: process.cwd(),
+      });
+      void session.result.catch(() => undefined);
+
+      for (let i = 0; i < 3; i++) {
+        (fake.child.stdout as unknown as PassThrough).write('{}\n');
+        await vi.advanceTimersByTimeAsync(50);
+      }
+      expect(fake.signals).toEqual([]); // alive so far
+
+      // Then silence — the bound a non-interactive step has no other source of. Being busy
+      // earlier buys no immunity; it only moves the deadline.
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fake.signals).toEqual(['SIGTERM']);
+      // SIGTERM→SIGKILL escalation itself is pinned by the `timeoutMs: 20` case above. It is not
+      // re-asserted here: consuming stdout means the destroyed stream ends the read loop, whose
+      // `finally` clears the kill timer before fake time can reach it.
+      expect(fake.child.killed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      spawnHook.override = null;
+    }
+  });
+
+  it('timeoutMs: 0 disables the bound entirely, silence or not (interactive sessions)', async () => {
+    const fake = signallableChild();
+    spawnHook.override = () => fake.child;
+    vi.useFakeTimers();
+    try {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 0 }).startSession({
+        userPrompt: 'interactive',
+        cwd: process.cwd(),
+      });
+      void session.result.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(fake.signals).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      spawnHook.override = null;
+    }
   });
 
   it('stops escalating once the CLI really exits after SIGTERM', () => {

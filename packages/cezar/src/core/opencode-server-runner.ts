@@ -10,7 +10,7 @@ import type {
 import type { AgentSession, SessionOptions } from './agent-runner.ts';
 import { prependSystemPrompt, trackChildExit } from './agent-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
-import { AUTO_END_DELAY_MS, DEFAULT_RUN_TIMEOUT_MS } from './claude-cli-runner.ts';
+import { AUTO_END_DELAY_MS, DEFAULT_RUN_IDLE_TIMEOUT_MS } from './claude-cli-runner.ts';
 import { parseModelIdentity } from './model-identity.ts';
 import { V1TextCoalescer } from './v1-text-coalescer.ts';
 import {
@@ -55,7 +55,7 @@ export class OpencodeServerRunner implements AgentRunner {
 
   constructor(opts: OpencodeRunnerOptions = {}) {
     this.bin = opts.bin ?? process.env.CEZ_OPENCODE_BIN ?? 'opencode';
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_IDLE_TIMEOUT_MS;
   }
 
   run(spec: AgentRunSpec, onEvent?: (event: AgentEvent) => void): Promise<AgentRunResult> {
@@ -119,6 +119,10 @@ class OpencodeSession implements AgentSession {
   private autoEndTimer: NodeJS.Timeout | undefined;
   private spawnFailed: Error | null = null;
   private timedOut = false;
+  /** Re-arms the inactivity deadline (spec 2026-08-20). Lives on the instance because the SSE
+   *  reader that proves liveness is a METHOD, while the timer is local to `startSession`.
+   *  No-op until a session arms one. */
+  private bumpIdle: () => void = () => undefined;
   /** One teardown per session — see `terminate()`. */
   private signalled = false;
 
@@ -158,15 +162,19 @@ class OpencodeSession implements AgentSession {
     // The server prints its URL on stdout once listening.
     const urlReady = this.waitForServerUrl(port);
 
+    // INACTIVITY bound, not a wall clock: re-armed by every SSE frame (spec 2026-08-20).
     const limitMs = spec.timeoutMs ?? timeoutMs;
     let deadline: NodeJS.Timeout | undefined;
-    if (limitMs > 0) {
+    this.bumpIdle = () => {
+      if (limitMs <= 0 || this.timedOut) return;
+      if (deadline) clearTimeout(deadline);
       deadline = setTimeout(() => {
         this.timedOut = true;
         this.interrupt();
       }, limitMs);
       deadline.unref?.();
-    }
+    };
+    this.bumpIdle();
 
     this.ready = (async () => {
       this.baseUrl = await urlReady;
@@ -207,7 +215,7 @@ class OpencodeSession implements AgentSession {
       };
       if (this.timedOut) {
         const mins = Math.round((limitMs / 60_000) * 10) / 10;
-        this.emit({ type: 'error', message: `opencode timed out after ${mins}m and was killed` });
+        this.emit({ type: 'error', message: `opencode produced no output for ${mins}m and was killed` });
       }
       this.emit({ type: 'done' });
       return base;
@@ -395,6 +403,7 @@ class OpencodeSession implements AgentSession {
         while ((sep = buffer.indexOf('\n\n')) >= 0) {
           const frame = buffer.slice(0, sep);
           buffer = buffer.slice(sep + 2);
+          this.bumpIdle(); // proof of life — restart the silence clock
           this.handleFrame(frame);
         }
       }

@@ -12,7 +12,7 @@ import type {
 import { isSignalTerminationExit, prependSystemPrompt, trackChildExit } from './agent-runner.ts';
 import {
   AUTO_END_DELAY_MS,
-  DEFAULT_RUN_TIMEOUT_MS,
+  DEFAULT_RUN_IDLE_TIMEOUT_MS,
   KILL_GRACE_MS,
 } from './claude-cli-runner.ts';
 import { parseAskRequest, type AskQuestion } from './ask.ts';
@@ -66,7 +66,7 @@ export class CodexAppServerRunner implements AgentRunner {
 
   constructor(opts: CodexRunnerOptions = {}) {
     this.bin = resolveCodexExecutable(opts.bin);
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_IDLE_TIMEOUT_MS;
   }
 
   run(spec: AgentRunSpec, onEvent?: (event: AgentEvent) => void): Promise<AgentRunResult> {
@@ -155,11 +155,14 @@ class CodexSession implements AgentSession {
     this.child.stderr.setEncoding('utf8');
     this.child.stderr.on('data', (chunk: string) => stderrChunks.push(chunk));
 
-    // Optional wall-clock kill switch (disabled for interactive sessions).
+    // Optional INACTIVITY kill switch (disabled for interactive sessions), re-armed on every
+    // line the agent emits — it bounds silence, not duration (spec 2026-08-20).
     const limitMs = spec.timeoutMs ?? timeoutMs;
     let killTimer: NodeJS.Timeout | undefined;
     let deadline: NodeJS.Timeout | undefined;
-    if (limitMs > 0) {
+    const bump = (): void => {
+      if (limitMs <= 0 || this.timedOut) return;
+      if (deadline) clearTimeout(deadline);
       deadline = setTimeout(() => {
         this.timedOut = true;
         this.interrupt();
@@ -173,7 +176,8 @@ class CodexSession implements AgentSession {
         killTimer.unref?.();
       }, limitMs);
       deadline.unref?.();
-    }
+    };
+    bump();
 
     // Handshake → thread → first turn. Kicked off concurrently with the read
     // loop below (which resolves the request() promises this awaits).
@@ -185,6 +189,7 @@ class CodexSession implements AgentSession {
         const readLoop = async () => {
           for await (const line of readNdjson(this.child.stdout)) {
             if (this.timedOut) break;
+            bump(); // proof of life — restart the silence clock
             let msg: CodexAppServerMessage;
             try {
               msg = JSON.parse(line) as CodexAppServerMessage;
@@ -240,7 +245,7 @@ class CodexSession implements AgentSession {
 
       if (this.timedOut) {
         const mins = Math.round((limitMs / 60_000) * 10) / 10;
-        this.emit({ type: 'error', message: `codex app-server timed out after ${mins}m and was killed` });
+        this.emit({ type: 'error', message: `codex app-server produced no output for ${mins}m and was killed` });
         this.emit({ type: 'done' });
         return base;
       }

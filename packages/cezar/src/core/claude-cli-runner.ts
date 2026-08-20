@@ -27,9 +27,23 @@ import {
   type ClaudeUiMapping,
 } from './claude-ui-mapper.ts';
 
-/** Default wall-clock cap for a single run before SIGTERM → SIGKILL.
- *  Interactive sessions pass `timeoutMs: 0` to disable it entirely. */
-export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000;
+/**
+ * Default INACTIVITY cap for a single run before SIGTERM → SIGKILL: how long the agent may
+ * produce nothing at all, not how long it may work
+ * (spec 2026-08-20-agent-step-inactivity-timeout). Interactive sessions pass `timeoutMs: 0` to
+ * disable it entirely.
+ *
+ * This was a wall clock armed once at spawn until 2026-08-20, which killed any step that took
+ * longer than the limit however hard it was working. Harmless while `quick-task` was the default
+ * (its single step IS the chain's last step, so it always got `timeoutMs: 0`); a real defect once
+ * the six-step `spec-to-deploy` became the default and four of its steps became timed. Run
+ * `9d09795a` lost `implement` and `run-tests` to it, both mid-work, both labelled `failed`.
+ *
+ * It stays a real bound: a non-interactive step is never parked at `waiting`, so `IDLE_TIMEOUT_MS`
+ * does not cover it and this is the ONLY thing that reaps a wedged CLI holding a `maxParallel`
+ * slot. Bounding silence keeps that guarantee and drops only the false positive.
+ */
+export const DEFAULT_RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
 /** Grace period between SIGTERM and SIGKILL when a timeout fires. */
 export const KILL_GRACE_MS = 10_000;
 /** After `end()` closes stdin: claude in stream-json mode can ignore EOF and
@@ -42,7 +56,8 @@ export const AUTO_END_DELAY_MS = 250;
 export interface ClaudeCliRunnerOptions {
   /** Override the binary name/path; defaults to `claude` on PATH. */
   bin?: string;
-  /** Wall-clock timeout for a run (ms); per-spec `timeoutMs` still wins. */
+  /** Inactivity timeout for a run (ms) — time with NO agent output, not total duration
+   *  (spec 2026-08-20). Per-spec `timeoutMs` still wins; `0` disables the bound. */
   timeoutMs?: number;
 }
 
@@ -82,7 +97,7 @@ export class ClaudeCliRunner implements AgentRunner {
       process.env.CEZ_CLAUDE_BIN ??
       (process.env.CEZ_DRY_RUN === '1' ? mockClaudePath() : 'claude');
     this.bin = opts.bin ?? defaultBin;
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_IDLE_TIMEOUT_MS;
   }
 
   /** One-shot run: start a session and auto-end it after the first turn. */
@@ -213,12 +228,16 @@ export class ClaudeCliRunner implements AgentRunner {
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => stderrChunks.push(chunk));
 
-    // Optional wall-clock kill switch (disabled for interactive sessions).
+    // Optional INACTIVITY kill switch (disabled for interactive sessions). Re-armed by `bump()`
+    // on every line the agent emits, so it bounds silence rather than duration — see
+    // `DEFAULT_RUN_IDLE_TIMEOUT_MS`.
     const limitMs = spec.timeoutMs ?? this.timeoutMs;
     let timedOut = false;
     let killTimer: NodeJS.Timeout | undefined;
     let deadline: NodeJS.Timeout | undefined;
-    if (limitMs > 0) {
+    const bump = (): void => {
+      if (limitMs <= 0 || timedOut) return; // nothing to arm, or already firing
+      if (deadline) clearTimeout(deadline);
       deadline = setTimeout(() => {
         timedOut = true;
         interrupt();
@@ -229,12 +248,14 @@ export class ClaudeCliRunner implements AgentRunner {
         killTimer.unref?.();
       }, limitMs);
       deadline.unref?.();
-    }
+    };
+    bump();
 
     const result = (async (): Promise<AgentRunResult> => {
       try {
         for await (const line of readNdjson(child.stdout)) {
           if (timedOut) break;
+          bump(); // proof of life: the agent is working, so the silence clock starts over
           let msg: ClaudeStreamMessage;
           try {
             msg = JSON.parse(line) as ClaudeStreamMessage;
@@ -297,7 +318,10 @@ export class ClaudeCliRunner implements AgentRunner {
 
       if (timedOut) {
         const mins = Math.round((limitMs / 60_000) * 10) / 10;
-        onEvent?.({ type: 'error', message: `claude CLI timed out after ${mins}m and was killed` });
+        onEvent?.({
+          type: 'error',
+          message: `claude CLI produced no output for ${mins}m and was killed`,
+        });
         onEvent?.({ type: 'done' });
         return { text, toolCalls, tokensUsed, sessionId: spec.sessionId };
       }
