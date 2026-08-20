@@ -186,6 +186,49 @@ describe('mapClaudeMessage edge cases', () => {
     expect(mapped.events.map((e) => e.type)).toEqual(['turn.completed']);
   });
 
+  // Regression (correction 2026-08-20): context occupancy is the LAST main-agent call's
+  // prompt, NOT the `result` frame's usage — that frame SUMS every round-trip's prompt, so a
+  // many-call turn read many-fold the real window (the `10M / 200k` bug). Two main-agent calls
+  // (18k then 40k, context growing) plus a subagent call (whose window is separate): the turn's
+  // `contextTokens` must be the last main call's 40k — not the subagent's, not the result sum.
+  it('turn.completed context occupancy is the last main-agent call, not the result-frame sum', () => {
+    let s = state;
+    s = mapClaudeMessage(
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'a' }], usage: { input_tokens: 4, cache_read_input_tokens: 18_000 } } },
+      s,
+    ).state;
+    // A subagent frame (parent_tool_use_id present) — its small window must NOT be adopted.
+    s = mapClaudeMessage(
+      { type: 'assistant', parent_tool_use_id: 'toolu_sub', message: { role: 'assistant', content: [{ type: 'text', text: 'sub' }], usage: { input_tokens: 10, cache_read_input_tokens: 500 } } },
+      s,
+    ).state;
+    s = mapClaudeMessage(
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'b' }], usage: { input_tokens: 40, cache_read_input_tokens: 40_000 } } },
+      s,
+    ).state;
+    const done = mapClaudeMessage(
+      { type: 'result', subtype: 'success', usage: { input_tokens: 54, cache_read_input_tokens: 58_500 } },
+      s,
+    );
+    const turn = done.events.find((e) => e.type === 'turn.completed');
+    // 40 + 40_000 — the last MAIN call's prompt. Not 500+ (subagent), not 58_554 (result sum).
+    expect(turn).toMatchObject({ type: 'turn.completed', contextTokens: 40_040 });
+  });
+
+  it('a new turn does not inherit the previous turn s context occupancy', () => {
+    let s = mapClaudeMessage(
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'a' }], usage: { input_tokens: 4, cache_read_input_tokens: 18_000 } } },
+      state,
+    ).state;
+    s = mapClaudeMessage({ type: 'result', subtype: 'success', usage: { input_tokens: 4, cache_read_input_tokens: 18_000 } }, s).state;
+    s = claudeTurnStarted(s).state;
+    // A second turn that is a plain text reply — no assistant usage frame — reports no occupancy
+    // rather than carrying the first turn's 18k forward.
+    const done = mapClaudeMessage({ type: 'result', subtype: 'success', result: 'ok' }, s);
+    const turn = done.events.find((e) => e.type === 'turn.completed');
+    expect(turn).not.toHaveProperty('contextTokens');
+  });
+
   // The runner emits a v1 `text` from `msg.result` when a session streamed no assistant text
   // block (claude-cli-runner.ts, `textChunks.length === 0`). Without the v2 twin, that prose
   // reached the cockpit only in v1 — where the thread reducer's per-turn "v2 wins" rule deleted

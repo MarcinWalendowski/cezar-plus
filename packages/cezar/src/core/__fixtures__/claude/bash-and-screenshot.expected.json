@@ -131,7 +131,8 @@
       "output": 185,
       "total": 1455
     },
-    "costUsd": 0.0342
+    "costUsd": 0.0342,
+    "contextTokens": 300
   },
   {
     "type": "usage.updated",

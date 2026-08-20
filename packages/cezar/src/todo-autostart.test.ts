@@ -90,7 +90,7 @@ describe('reconcileAutostartTodos', () => {
       { id: 'bad', summary: 'Boom', autostart: true, suggestedSkill: 'x'.repeat(5000) },
       { id: 'ok', summary: 'Fine', autostart: true },
     ]);
-    // `resolveTodoWorkflow` never throws on an unknown skill (falls back to quick-task), so force a
+    // `resolveTodoWorkflow` never throws on an unknown skill (falls back to the default), so force a
     // failure a different way: make the manager itself throw for the first todo only.
     const manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) => {

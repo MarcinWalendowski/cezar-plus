@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AUTONOMOUS_IMPLEMENTATION_WORKFLOW } from './types.ts';
+import { AUTONOMOUS_IMPLEMENTATION_WORKFLOW, SPEC_TO_DEPLOY_WORKFLOW } from './types.ts';
 
 /**
  * `AUTONOMOUS_IMPLEMENTATION_WORKFLOW` (PLAN D27 Phase 2, `.ai/specs/2026-08-15-autonomous-
@@ -57,5 +57,83 @@ describe('AUTONOMOUS_IMPLEMENTATION_WORKFLOW cannot push', () => {
     for (const entry of bashAllowlist()) {
       expect(bareRunnerPrefixes).not.toContain(entry.trim());
     }
+  });
+});
+
+/**
+ * `SPEC_TO_DEPLOY_WORKFLOW` (spec `.ai/specs/2026-08-19-spec-to-deploy-default-workflow.md`): the
+ * owner's full pipeline as one chain — read+spec → implement → run-tests → commit-push → document
+ * → deploy. Its guards are asymmetric BY DESIGN, so the tests assert exactly that asymmetry rather
+ * than one blanket rule:
+ *  - `implement`/`run-tests` keep the autonomous workflow's push-free allowlist (shared by
+ *    reference) — they can build/test but never reach the remote;
+ *  - `commit-push` gets a SCOPED remote grant (git + gh only, incl. `git push`) — owner decision;
+ *  - `deploy` is UNRESTRICTED on purpose (owner decision 2026-08-19, "fixed grant").
+ */
+describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
+  const stepById = (id: string) => SPEC_TO_DEPLOY_WORKFLOW.steps.find((s) => s.id === id);
+  const canPush = (allowlist: string[] | undefined) =>
+    (allowlist ?? []).some((entry) => 'git push'.startsWith(entry.trim()));
+
+  it('is the six-step read+spec → implement → run-tests → commit-push → document → deploy chain', () => {
+    expect(SPEC_TO_DEPLOY_WORKFLOW.name).toBe('spec-to-deploy');
+    expect(SPEC_TO_DEPLOY_WORKFLOW.source).toBe('built-in');
+    expect(SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => s.id)).toEqual([
+      'spec',
+      'implement',
+      'run-tests',
+      'commit-push',
+      'document',
+      'deploy',
+    ]);
+  });
+
+  it('spec step reads the record but cannot reach a shell beyond kb + read-only git', () => {
+    const spec = stepById('spec');
+    // No install/build/push verbs — a spec-writing pass has no business running them.
+    expect(spec?.bashAllowlist).toEqual(['git log', 'git show', 'git status', 'cez kb']);
+  });
+
+  it('implement and run-tests reuse the autonomous allowlist verbatim, so neither can push', () => {
+    // Shared BY REFERENCE, not copied: the sets drift into disagreement the moment one is edited and
+    // the other is not, which is exactly the failure this asserts against.
+    const auto = AUTONOMOUS_IMPLEMENTATION_WORKFLOW.steps[0]?.bashAllowlist;
+    expect(stepById('implement')?.bashAllowlist).toBe(auto);
+    expect(stepById('run-tests')?.bashAllowlist).toBe(auto);
+    expect(canPush(auto)).toBe(false);
+  });
+
+  it('commit-push CAN push (scoped git+gh grant) but is never unrestricted bash', () => {
+    const step = stepById('commit-push');
+    // The one remote-reaching step — owner decision. It must actually be able to push...
+    expect(step?.bashAllowlist).toContain('git push');
+    expect(canPush(step?.bashAllowlist)).toBe(true);
+    // ...and open/merge a PR...
+    expect(step?.bashAllowlist).toContain('gh pr');
+    // ...but every entry is a git or gh verb, so it is still an allowlist, not a general shell.
+    for (const entry of step?.bashAllowlist ?? []) {
+      expect(/^(git|gh) /.test(entry.trim())).toBe(true);
+    }
+    // And Bash is granted THROUGH that non-empty allowlist, never plain/unrestricted.
+    expect(step?.allowedTools).toContain('Bash');
+    expect((step?.bashAllowlist ?? []).length).toBeGreaterThan(0);
+  });
+
+  it('document step ships its record via the same scoped git+gh grant plus cez kb', () => {
+    const doc = stepById('document');
+    // Runs after commit-push, so it pushes its own doc/spec/KB commit — but only git/gh + cez kb.
+    expect(doc?.bashAllowlist).toContain('git push');
+    expect(doc?.bashAllowlist).toContain('cez kb');
+    for (const entry of doc?.bashAllowlist ?? []) {
+      expect(/^(git|gh|cez) /.test(entry.trim())).toBe(true);
+    }
+  });
+
+  it('deploy step is deliberately UNRESTRICTED — Bash with no allowlist (fixed-grant decision)', () => {
+    const deploy = stepById('deploy');
+    // The whole point of this step: run the target repo's own deploy script, whatever shape it
+    // takes. `buildAllowedTools()` turns `Bash` + no allowlist into plain, unrestricted `Bash`.
+    expect(deploy?.allowedTools).toContain('Bash');
+    expect(deploy?.bashAllowlist).toBeUndefined();
   });
 });

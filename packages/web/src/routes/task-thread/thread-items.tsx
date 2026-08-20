@@ -166,7 +166,9 @@ export function UserBubble({
       {onEdit || onRemove ? (
         <span
           data-slot="bubble-actions"
-          className="mb-1 flex justify-end gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+          // `pointer-coarse:opacity-100`: with no hover on touch, editing or removing a queued
+          // message would be impossible on a phone — reveal the actions outright there.
+          className="mb-1 flex justify-end gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 pointer-coarse:opacity-100 focus-within:opacity-100"
         >
           {onEdit ? (
             <button

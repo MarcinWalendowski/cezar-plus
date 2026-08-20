@@ -863,7 +863,7 @@ function GithubMergeBox({ number }: { number: number }) {
               Refresh
             </Button>
           </div>
-          <p className="mt-1 font-mono text-[11px] text-soft-foreground">
+          <p className="mt-1 font-mono text-[11px] break-all text-soft-foreground">
             {state.headRef} ({state.headSha.slice(0, 7)}) → {state.baseRef}
           </p>
           <ul className="mt-3 space-y-2 text-xs">

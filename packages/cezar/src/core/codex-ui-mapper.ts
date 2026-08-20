@@ -243,6 +243,10 @@ function mapTurnEnd(
   };
   if (turnId === state.currentTurnId && state.pendingTurnUsage !== null) {
     completed.usage = state.pendingTurnUsage;
+    // Point-in-time window occupancy = the LAST request's prompt. codex `last.input`
+    // (`inputTokens`) already INCLUDES the cached prefix, so it IS the full prompt — adding
+    // `cacheRead` (the cached subset) would double-count (spec 2026-08-19, correction).
+    if (state.pendingTurnUsage.input > 0) completed.contextTokens = state.pendingTurnUsage.input;
   }
   events.push(completed);
   return {

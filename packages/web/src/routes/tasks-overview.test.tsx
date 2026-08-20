@@ -376,7 +376,7 @@ describe('TasksOverview — the table', () => {
 
     expect(screen.getByRole('button', { name: 'Expand Workflow column', pressed: false })).not.toBeNull()
     expect(tableRow('archived-folded')?.querySelector('td[data-column-id="workflow"]')?.textContent).toBe('')
-    fireEvent.change(screen.getByRole('textbox', { name: 'Search tasks' }), { target: { value: 'needle' } })
+    fireEvent.change(screen.getAllByRole('textbox', { name: 'Search tasks' })[0]!, { target: { value: 'needle' } })
     expect(tableRow('archived-folded')).not.toBeNull()
     expect(screen.getByRole('button', { name: 'Expand Workflow column', pressed: false })).not.toBeNull()
   })
@@ -487,7 +487,7 @@ describe('TasksOverview — the table', () => {
         run({ id: 'q2', title: 'Beta', status: 'queued', createdAt: ago(60_000) }),
       ],
     })
-    fireEvent.change(screen.getByRole('textbox', { name: 'Search tasks' }), { target: { value: 'beta' } })
+    fireEvent.change(screen.getAllByRole('textbox', { name: 'Search tasks' })[0]!, { target: { value: 'beta' } })
     expect(tableRow('q1')).toBeNull()
     expect(tableRow('q2')?.querySelector('[data-slot="queue-note"]')?.textContent).toBe('#2 in queue')
   })
@@ -748,7 +748,7 @@ describe('TasksOverview — header', () => {
         run({ id: 'b', title: 'README tagline', workflow: 'plan-then-do' }),
       ],
     })
-    const search = screen.getByRole('textbox', { name: 'Search tasks' })
+    const search = screen.getAllByRole('textbox', { name: 'Search tasks' })[0]!
 
     fireEvent.change(search, { target: { value: 'zod' } })
     expect(tableRow('a')).not.toBeNull()
@@ -802,7 +802,7 @@ describe('TasksOverview — empty and loading states', () => {
 
   it('says what the search missed, quoting it, with no backdrop', () => {
     renderOverview({ runs: [run({ title: 'Something' })] })
-    fireEvent.change(screen.getByRole('textbox', { name: 'Search tasks' }), { target: { value: 'quaternion' } })
+    fireEvent.change(screen.getAllByRole('textbox', { name: 'Search tasks' })[0]!, { target: { value: 'quaternion' } })
     const empty = document.querySelector<HTMLElement>('[data-slot="tasks-empty"]')
     if (!empty) throw new Error('no empty state rendered')
 

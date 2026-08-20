@@ -321,7 +321,9 @@ describe('mapCodexNotification edge cases', () => {
     ).state;
     const completed = mapCodexNotification({ method: 'turn/completed', params: { turn: { id: 't2' } } }, s);
     expect(completed.events).toEqual([
-      { type: 'turn.completed', turnId: 't2', stopReason: 'end_turn', usage: { input: 7, output: 3, total: 10 } },
+      // `contextTokens` = the last request's prompt (`last.input`, cache-inclusive) — the
+      // point-in-time window occupancy, distinct from the cumulative `usage` (spec 2026-08-19).
+      { type: 'turn.completed', turnId: 't2', stopReason: 'end_turn', usage: { input: 7, output: 3, total: 10 }, contextTokens: 7 },
     ]);
     expect(mapCodexNotification({ method: 'turn/completed', params: { turn: { id: 't2' } } }, completed.state).events).toEqual([
       { type: 'turn.completed', turnId: 't2', stopReason: 'end_turn' },
@@ -364,6 +366,7 @@ describe('mapCodexNotification edge cases', () => {
         turnId: 't2',
         stopReason: 'end_turn',
         usage: { input: 8, output: 2, total: 10 },
+        contextTokens: 8,
       },
     ]);
   });
@@ -812,6 +815,7 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
       turnId: 'turn_mock_1',
       stopReason: 'end_turn',
       usage: { input: 1200, output: 300, total: 1500 },
+      contextTokens: 1200,
     });
   }, 30_000);
 

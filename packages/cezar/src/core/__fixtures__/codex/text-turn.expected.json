@@ -109,6 +109,7 @@
       "total": 2210,
       "cacheRead": 900,
       "reasoning": 120
-    }
+    },
+    "contextTokens": 1800
   }
 ]

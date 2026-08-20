@@ -107,6 +107,7 @@ import { canBeUnread, isReadDoneItem, isUnread } from '@/lib/read-state'
 import { runTitle, type ListView } from '@/lib/task-groups'
 import { Markdown } from '@/routes/task-thread/markdown'
 import { usageMetricVisibility } from '@/lib/token-metrics'
+import { useIsDesktop } from '@/lib/use-desktop'
 import { useNow } from '@/lib/use-now'
 import { cn } from '@/lib/utils'
 
@@ -707,6 +708,7 @@ function FiledTasks({
   const start = useStartFiledTask()
   const update = useUpdateFiledTodo()
   const now = useNow(30_000)
+  const isDesktop = useIsDesktop()
   const [detail, setDetail] = React.useState<WorkspaceTodoEntry | null>(null)
   const [shown, setShown] = React.useState(FILED_ROW_PAGE_SIZE)
 
@@ -768,6 +770,33 @@ function FiledTasks({
         <p data-slot="filed-tasks-empty" className="mt-2 text-[12.5px] text-soft-foreground">
           No filed tasks match these filters.
         </p>
+      ) : !isDesktop ? (
+        // Below `md` the six-column filed table sideways-scrolls, so its rows render as cards.
+        // `useIsDesktop` (not a CSS pair) keeps exactly one copy in the DOM — see `TaskTable`.
+        <div data-slot="filed-tasks-cards" className="mt-2 flex flex-col gap-2.5">
+          {rows.map((entry) => (
+            <FiledCard
+              key={`${entry.project}:${entry.todo.id}`}
+              entry={entry}
+              now={now}
+              onOpenDetail={() => setDetail(entry)}
+              onStart={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
+              onArchive={(archived) => update.mutate({ entry, patch: { archived } })}
+              startBusy={start.isPending}
+              archiveBusy={update.isPending}
+            />
+          ))}
+          {hasMore ? (
+            <button
+              type="button"
+              data-action="filed-tasks-show-more"
+              onClick={() => setShown((current) => current + FILED_ROW_PAGE_SIZE)}
+              className="self-center rounded-md px-3 py-2.5 text-[12.5px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              Show {Math.min(FILED_ROW_PAGE_SIZE, sorted.length - rows.length)} more
+            </button>
+          ) : null}
+        </div>
       ) : (
         <div
           data-slot="filed-tasks-table"
@@ -1027,6 +1056,100 @@ function FiledRow({
         </span>
       </td>
     </tr>
+  )
+}
+
+/**
+ * One filed task as a card — the `<md` framing of `FiledRow`.
+ *
+ * Same detail-dialog title button and the same Start / Archive handlers, only reshaped for a
+ * phone: a stacked card with ≥44px labelled actions where the row offers 28px icons.
+ */
+function FiledCard({
+  entry,
+  now,
+  onOpenDetail,
+  onStart,
+  onArchive,
+  startBusy,
+  archiveBusy,
+}: {
+  entry: WorkspaceTodoEntry
+  now: number
+  onOpenDetail: () => void
+  onStart: () => void
+  onArchive: (archived: boolean) => void
+  startBusy: boolean
+  archiveBusy: boolean
+}) {
+  const status = filedStatus(entry)
+  const archived = entry.todo.archivedAt !== undefined
+  return (
+    <div
+      data-slot="filed-task-card"
+      data-project={entry.project}
+      data-todo-id={entry.todo.id}
+      className="rounded-lg border border-border bg-card px-3.5 py-3 shadow-xs"
+    >
+      <div className="flex items-start gap-2.5">
+        <span className="mt-px shrink-0">
+          <FiledStatusPill status={status} />
+        </span>
+        <button
+          type="button"
+          data-slot="filed-task-title"
+          onClick={onOpenDetail}
+          title={entry.todo.summary}
+          className="min-w-0 flex-1 text-left text-[13.5px] font-medium leading-[1.35] hover:underline"
+        >
+          {entry.todo.summary}
+        </button>
+        <span className="mt-0.5 shrink-0 text-[11.5px] text-soft-foreground tabular-nums">
+          {entry.todo.ts ? shortAge(entry.todo.ts, now) : '—'}
+        </span>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11.5px] text-muted-foreground">
+        <Link to={scopeTo(entry.project, '/')} className="truncate font-mono hover:text-foreground">
+          {entry.project}
+        </Link>
+        {entry.todo.priority ? (
+          <>
+            <Sep />
+            <FiledPriorityChip priority={entry.todo.priority} />
+          </>
+        ) : null}
+      </div>
+      <div className="mt-2.5 flex flex-wrap gap-2">
+        <button
+          type="button"
+          data-action="start-filed-task"
+          aria-label={`Start ${entry.todo.summary}`}
+          disabled={startBusy}
+          onClick={onStart}
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border px-3 text-[12.5px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-wait disabled:opacity-50"
+        >
+          <PlayIcon className="size-3.5" aria-hidden="true" />
+          Start
+        </button>
+        <button
+          type="button"
+          data-action={archived ? 'restore-filed-task' : 'archive-filed-task'}
+          aria-label={
+            archived ? `Restore ${entry.todo.summary} to the active list` : `Archive ${entry.todo.summary}`
+          }
+          disabled={archiveBusy}
+          onClick={() => onArchive(!archived)}
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border px-3 text-[12.5px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-wait disabled:opacity-50"
+        >
+          {archived ? (
+            <ArchiveRestoreIcon className="size-3.5" aria-hidden="true" />
+          ) : (
+            <ArchiveIcon className="size-3.5" aria-hidden="true" />
+          )}
+          {archived ? 'Restore' : 'Archive'}
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -1449,6 +1572,33 @@ function TaskTable({
   busy: boolean
   showCost: boolean
 }) {
+  // Below `md` the table's ~700px minimum row is a sideways-scroll on a phone, so the same rows
+  // render as stacked cards instead (mobile-ux spec 2026-08-19). Gated on `useIsDesktop` rather
+  // than a CSS `md:hidden`/`hidden md:block` pair so exactly one of the two is in the DOM — the
+  // page's unit tests query rows by role/text without scoping, and a second copy would make every
+  // such query ambiguous. jsdom has no `matchMedia`, so it counts as desktop and tests see only
+  // the table (`use-desktop.ts`).
+  const isDesktop = useIsDesktop()
+
+  if (!isDesktop) {
+    return (
+      <div data-slot="global-tasks-cards" className="flex flex-col gap-2.5">
+        {tasks.map((task) => (
+          <GlobalTaskCard
+            key={`${task.run.projectId}/${task.run.id}`}
+            task={task}
+            now={now}
+            showProject={showProject}
+            onArchive={onArchive}
+            onSetRead={onSetRead}
+            busy={busy}
+            showCost={showCost}
+          />
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div
       data-slot="global-tasks-table"
@@ -1660,6 +1810,171 @@ function TaskRow({
         </span>
       </td>
     </tr>
+  )
+}
+
+/**
+ * One cross-project run as a card — the `<md` framing of `TaskRow`.
+ *
+ * Same data, same links, same status/reference grammar; only the box and the touch targets
+ * change. The desktop table stays the source of truth for row shape (mobile-ux spec 2026-08-19),
+ * so this deliberately mirrors it rather than inventing a second layout — status pill + title +
+ * unread dot + age on top, a wrapping mono meta line (project · workflow · cost · context ·
+ * refs) below, and full-width ≥44px Read/Archive actions where the row offers its 28px icons.
+ */
+function GlobalTaskCard({
+  task,
+  now,
+  showProject,
+  onArchive,
+  onSetRead,
+  busy,
+  showCost,
+}: {
+  task: GlobalTask
+  now: number
+  showProject: boolean
+  onArchive: (task: GlobalTask, archived: boolean) => void
+  onSetRead: (task: GlobalTask, read: boolean) => void
+  busy: boolean
+  showCost: boolean
+}) {
+  const { run } = task
+  const attention = deriveAttention(run)
+  const to = scopeTo(run.projectId, `/tasks/${run.id}`)
+  const unread = isUnread(run)
+  const readDone = isReadDoneItem(run)
+  const references = taskReferences(run, task.project?.repoUrl)
+  const context = contextCell(run)
+  const cost = formatCost(run.costUsd)
+  const title = runTitle(run)
+  const canRead = canBeUnread(run)
+  const archived = run.archived
+  const canArchive = archived || ARCHIVABLE_STATUSES.has(run.status)
+
+  // Project (when shown) · workflow · cost · context — the same order the table reads left to
+  // right, interleaved with the middot separators. Built as a list so an absent piece leaves no
+  // stray separator behind it.
+  const parts: React.ReactNode[] = []
+  if (showProject) {
+    parts.push(
+      run.workspace ? (
+        <span
+          key="project"
+          data-slot="workspace-chip"
+          title="Workspace run — granted every registered project"
+          className="inline-flex max-w-full items-center gap-1 truncate rounded-full bg-muted px-1.5 py-px text-[10.5px] font-medium text-muted-foreground"
+        >
+          <LayersIcon className="size-3 shrink-0" aria-hidden="true" />
+          {task.projectName}
+        </span>
+      ) : (
+        <Link key="project" to={scopeTo(run.projectId, '/')} className="truncate hover:text-foreground">
+          {task.projectName}
+        </Link>
+      ),
+    )
+  }
+  const workflow = displayWorkflowName(run.workflow)
+  if (workflow) parts.push(<span key="workflow">{workflow}</span>)
+  if (showCost && cost) parts.push(<span key="cost">{cost}</span>)
+  if (context.text) {
+    parts.push(
+      <span key="context" data-slot="card-context" title="Context window used / max">
+        {context.text}
+      </span>,
+    )
+  }
+
+  return (
+    <div
+      data-slot="global-task-card"
+      data-run-id={run.id}
+      data-project={run.projectId}
+      className="rounded-lg border border-border bg-card px-3.5 py-3 shadow-xs"
+    >
+      <div className="flex items-start gap-2.5">
+        <Pill dot={attention.tone} pulse={attention.pulse} className="mt-px shrink-0">
+          {attention.label}
+        </Pill>
+        <Link
+          to={to}
+          title={title}
+          className={cn(
+            'min-w-0 flex-1 text-[13.5px] leading-[1.35]',
+            unread ? 'font-semibold text-foreground' : readDone ? 'font-medium text-muted-foreground' : 'font-medium',
+          )}
+        >
+          {title}
+        </Link>
+        {unread ? (
+          <StatusDot
+            tone="violet"
+            role="img"
+            aria-label="unread"
+            title="Unread — not opened since it finished"
+            className="mt-1.5 shrink-0"
+          />
+        ) : null}
+        <span className="mt-0.5 shrink-0 text-[11.5px] text-soft-foreground tabular-nums">
+          {shortAge(run.startedAt ?? run.createdAt, now)}
+        </span>
+      </div>
+
+      {parts.length > 0 || references.length > 0 ? (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 font-mono text-[11.5px] font-medium text-muted-foreground tabular-nums">
+          {parts.map((node, index) => (
+            <React.Fragment key={index}>
+              {index > 0 ? <Sep /> : null}
+              {node}
+            </React.Fragment>
+          ))}
+          {references.length > 0 ? <ReferenceChips references={references} run={run} /> : null}
+        </div>
+      ) : null}
+
+      {canRead || canArchive ? (
+        <div className="mt-2.5 flex flex-wrap gap-2">
+          {canRead ? (
+            <button
+              type="button"
+              data-action={unread ? 'mark-read' : 'mark-unread'}
+              aria-label={unread ? `Mark ${title} read` : `Mark ${title} unread`}
+              disabled={busy}
+              onClick={() => onSetRead(task, unread)}
+              className={cn(
+                'inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border px-3 text-[12.5px] font-medium hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-wait disabled:opacity-50',
+                unread ? 'text-violet' : 'text-muted-foreground',
+              )}
+            >
+              {unread ? (
+                <EyeIcon className="size-3.5" aria-hidden="true" />
+              ) : (
+                <EyeOffIcon className="size-3.5" aria-hidden="true" />
+              )}
+              {unread ? 'Mark read' : 'Mark unread'}
+            </button>
+          ) : null}
+          {canArchive ? (
+            <button
+              type="button"
+              data-action={archived ? 'unarchive-run' : 'archive-run'}
+              aria-label={archived ? `Restore ${title} to the active list` : `Archive ${title}`}
+              disabled={busy}
+              onClick={() => onArchive(task, !archived)}
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border px-3 text-[12.5px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-wait disabled:opacity-50"
+            >
+              {archived ? (
+                <ArchiveRestoreIcon className="size-3.5" aria-hidden="true" />
+              ) : (
+                <ArchiveIcon className="size-3.5" aria-hidden="true" />
+              )}
+              {archived ? 'Restore' : 'Archive'}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -1980,6 +2295,15 @@ function ContextTd({ cell }: { cell: ContextCell }) {
 
 function Dash() {
   return <span className="text-xs text-soft-foreground">—</span>
+}
+
+/** The middot between a card's meta pieces — decorative, so hidden from the a11y tree. */
+function Sep() {
+  return (
+    <span className="text-soft-foreground" aria-hidden="true">
+      ·
+    </span>
+  )
 }
 
 /** What an empty global list honestly means, given how it got empty. */

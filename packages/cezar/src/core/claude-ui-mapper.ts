@@ -70,6 +70,14 @@ export interface ClaudeUiMapperState {
   /** `TaskCreate` calls whose result has not arrived yet, keyed by tool_use id.
    *  The entry parks here until the result reveals its real id. */
   readonly pendingTaskCreates: ReadonlyMap<string, PlanEntry>;
+  /** The prompt size of the most recent MAIN-agent API call in the current turn
+   *  (`input + cache_read + cache_creation` of that one `assistant` frame). This
+   *  is the turn's point-in-time context occupancy, stamped onto `turn.completed`
+   *  — NOT the `result` frame's usage, which SUMS every call's prompt and so
+   *  overcounts a many-round-trip turn many-fold (spec
+   *  2026-08-19-context-usage-in-tasks-table, point-in-time correction). Reset at
+   *  each `turn.started`. */
+  readonly lastMainAgentPromptTokens?: number;
 }
 
 export interface ClaudeUiMapping {
@@ -100,7 +108,9 @@ export function createClaudeUiState(opts: { fallbackSessionId?: string } = {}): 
  */
 export function claudeTurnStarted(state: ClaudeUiMapperState): ClaudeUiMapping {
   const turnId = `turn_${state.turnSeq + 1}`;
-  const next = { ...state, turnSeq: state.turnSeq + 1, currentTurnId: turnId };
+  // A new turn starts with an empty window reading: last turn's occupancy must not
+  // survive into a turn that (e.g. a plain text reply) reports no assistant usage.
+  const next = { ...state, turnSeq: state.turnSeq + 1, currentTurnId: turnId, lastMainAgentPromptTokens: undefined };
   if (!state.sessionStarted) {
     return { events: [], state: { ...next, pendingTurnIds: [...state.pendingTurnIds, turnId] } };
   }
@@ -157,6 +167,10 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
   let tasks = state.tasks;
   let pendingTaskCreates = state.pendingTaskCreates;
   let sawAssistantText = state.sawAssistantText;
+  // Track this call's own prompt size for the point-in-time Context occupancy. Undefined
+  // for a subagent frame (its window is separate) or a frame with no usage — then the
+  // turn keeps whatever the last main-agent call reported (spec 2026-08-19, correction).
+  const lastMainAgentPromptTokens = mainAgentPromptTokens(msg) ?? state.lastMainAgentPromptTokens;
 
   for (const raw of content) {
     if (!isRecord(raw)) continue;
@@ -225,11 +239,33 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
     // Unknown block types (redacted_thinking, server_tool_use, …): ignored.
   }
 
-  if (events.length === 0) return { events, state };
+  if (events.length === 0) {
+    return lastMainAgentPromptTokens === state.lastMainAgentPromptTokens
+      ? { events, state }
+      : { events, state: { ...state, lastMainAgentPromptTokens } };
+  }
   return {
     events,
-    state: { ...state, itemSeq, openTools: openTools ?? state.openTools, tasks, pendingTaskCreates, sawAssistantText },
+    state: { ...state, itemSeq, openTools: openTools ?? state.openTools, tasks, pendingTaskCreates, sawAssistantText, lastMainAgentPromptTokens },
   };
+}
+
+/** The prompt size of THIS single main-agent API call — `input_tokens +
+ *  cache_read_input_tokens + cache_creation_input_tokens` of the `assistant`
+ *  frame's own usage. Undefined for a subagent frame (`parent_tool_use_id`
+ *  present — its window is not the main session's) or a frame carrying no usage.
+ *  This one call's prompt IS the current window occupancy; the `result` frame's
+ *  usage is the SUM of every call's prompt and must never feed it. */
+function mainAgentPromptTokens(msg: Record<string, unknown>): number | undefined {
+  if (str(msg.parent_tool_use_id) !== undefined) return undefined;
+  const message = isRecord(msg.message) ? msg.message : undefined;
+  const usage = message && isRecord(message.usage) ? message.usage : undefined;
+  if (!usage) return undefined;
+  const prompt =
+    (num(usage.input_tokens) ?? 0) +
+    (num(usage.cache_read_input_tokens) ?? 0) +
+    (num(usage.cache_creation_input_tokens) ?? 0);
+  return prompt > 0 ? prompt : undefined;
 }
 
 /** claude `Edit`/`Write` inputs carry the diff inline (§7.1). */
@@ -540,6 +576,9 @@ function mapResult(msg: Record<string, unknown>, state: ClaudeUiMapperState): Cl
   const turnEvent: UiTurnCompletedEvent = { type: 'turn.completed', turnId, stopReason: resultStopReason(msg) };
   if (usage) turnEvent.usage = usage;
   if (costUsd !== undefined) turnEvent.costUsd = costUsd;
+  // Point-in-time occupancy = the last main-agent call's prompt (tracked above), NOT
+  // `usage`, which is the turn's cross-call SUM (spec 2026-08-19, correction).
+  if (state.lastMainAgentPromptTokens !== undefined) turnEvent.contextTokens = state.lastMainAgentPromptTokens;
   events.push(turnEvent);
   if (usage) {
     const usageEvent: UiUsageUpdatedEvent = { type: 'usage.updated', usage };
@@ -556,6 +595,8 @@ function mapResult(msg: Record<string, unknown>, state: ClaudeUiMapperState): Cl
       currentTurnId: null,
       openTools: openTools ?? state.openTools,
       sawAssistantText,
+      // Turn closed — drop the occupancy so a stray frame can't reattribute it to the next turn.
+      lastMainAgentPromptTokens: undefined,
     },
   };
 }

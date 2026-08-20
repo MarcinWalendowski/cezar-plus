@@ -21,9 +21,17 @@ the occupancy of the window right now, so it cannot be reused for this.
 
 Two new numbers per run:
 
-- **`contextTokens`** — current context occupancy = the MOST RECENT turn's prompt size
-  (`input + cacheRead + cacheWrite`, excluding `output` which is generated, not part of
-  that turn's input). Overwritten each turn (not accumulated), so it tracks "now".
+- **`contextTokens`** — current context occupancy. **Corrected 2026-08-20 by
+  "point-in-time context occupancy": the original mechanism below took this from the
+  turn's `usage`, which for Claude/opencode is a per-turn CUMULATIVE total that SUMS every
+  internal API round-trip's prompt — a 50-round-trip session read `~50 ×` the window and
+  the cell showed `10M / 200k`, `28M`. It is now the prompt size of the MOST RECENT single
+  model call in the turn (`input + cacheRead + cacheWrite` of that one call), reported by
+  each mapper on `UiTurnCompletedEvent.contextTokens`. See "Point-in-time correction"
+  below; the original wording is kept for history.** ~~Current context occupancy = the
+  MOST RECENT turn's prompt size (`input + cacheRead + cacheWrite`, excluding `output`
+  which is generated, not part of that turn's input). Overwritten each turn (not
+  accumulated), so it tracks "now".~~
 - **`contextWindow`** — the model's maximum context, derived from the model string:
   `[1m]` → 1,000,000; any Claude model (opus/sonnet/haiku) → 200,000; otherwise unknown
   (omitted — the cell then shows only the current figure rather than inventing a max).
@@ -31,11 +39,38 @@ Two new numbers per run:
 Rendered as one combined `Context` column, `used / max` with a compact `k`/`M` format
 (`45k / 200k`), tinted amber past 75% and danger past 90% of the window.
 
+## Point-in-time correction (2026-08-20)
+
+The turn-level `usage` on `turn.completed` is a **cumulative** total for the whole turn,
+so `input + cacheRead + cacheWrite` of it is a SUM across every model call the agent made
+inside that turn — not the window's current fill. Within a turn the prompt only grows (each
+tool result is appended), so the correct occupancy is the **last (largest) single call's**
+prompt. New optional field `UiTurnCompletedEvent.contextTokens` carries that per-call figure,
+computed by whichever mapper knows the backend's token semantics:
+
+- **claude** (`claude-ui-mapper.ts`): the last MAIN-agent (`parent_tool_use_id` absent)
+  `assistant` frame's `message.usage` = `input_tokens + cache_read_input_tokens +
+  cache_creation_input_tokens`. Subagent frames are skipped — a subagent's small window is
+  not the main session's. Reset at `turn.started`. (The `result` frame that used to feed
+  this is the SUM of every call's usage — the exact source of the inflation.)
+- **opencode** (`opencode-ui-mapper.ts`): the MAX per-message prompt among the turn's
+  messages, not `usageForMessages`' sum (which stays the turn's cumulative `usage`).
+- **codex** (`codex-ui-mapper.ts`): `last.input` — codex's `inputTokens` already INCLUDES
+  the cached prefix, so adding `cacheRead` would double-count.
+- **pi**: not stamped; its `turnUsage` is already the last message's usage (point-in-time),
+  so `recordUsageUiEvent` falls back to the old formula for it with no change in behavior.
+
+`recordUsageUiEvent` prefers `event.contextTokens` and falls back to `input + cacheRead +
+cacheWrite` only when a mapper did not stamp it. The denominator (`contextWindow`) is
+unchanged and correct: cezar launches Claude with the standard 200k window (no
+`context-1m` beta), so `45k / 200k` is right until that beta is enabled.
+
 ## Architecture
 
 - **Capture** (`workflows/run.ts::recordUsageUiEvent`): on `turn.completed`, persist
-  `contextTokens = input + cacheRead + cacheWrite` on the step (OVERWRITE — latest turn
-  wins). The existing `inputTokens`/`outputTokens` accumulation is untouched.
+  `contextTokens` on the step (OVERWRITE — latest turn wins), preferring the mapper's
+  point-in-time `event.contextTokens` and falling back to `input + cacheRead + cacheWrite`
+  of the turn `usage`. The existing `inputTokens`/`outputTokens` accumulation is untouched.
 - **Roll up** (`runs/store.ts::updateStep`): run-level `contextTokens` = the latest
   started agent step's value (the current session); `contextWindow` =
   `contextWindowForModel(run.model, run.modelIdentity)`. Both recomputed on every step

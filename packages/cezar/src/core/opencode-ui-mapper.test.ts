@@ -455,7 +455,9 @@ describe('mapOpencodeEvent edge cases', () => {
     ).state;
     const first = mapOpencodeEvent({ type: 'session.idle', properties: { sessionID: SESSION_ID } }, state);
     expect(first.events).toEqual([
-      { type: 'turn.completed', turnId: 'turn_1', stopReason: 'end_turn', usage: { input: 7, output: 3, total: 10 }, costUsd: 0.02 },
+      // `contextTokens` = the largest single message's prompt (here the one in-turn message,
+      // input 7) — point-in-time occupancy, not the summed `usage` (spec 2026-08-19).
+      { type: 'turn.completed', turnId: 'turn_1', stopReason: 'end_turn', usage: { input: 7, output: 3, total: 10 }, costUsd: 0.02, contextTokens: 7 },
     ]);
     state = opencodeTurnStarted(first.state).state;
     expect(mapOpencodeEvent({ type: 'session.idle', properties: { sessionID: SESSION_ID } }, state).events).toEqual([
@@ -639,6 +641,7 @@ describe('OpencodeServerRunner v2 wiring (against the bundled mock server)', () 
       stopReason: 'end_turn',
       usage: { input: 1200, output: 300, total: 1500, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
       costUsd: 0.0021,
+      contextTokens: 1200,
     });
     expect(v2.filter((e) => e.type === 'turn.completed')).toHaveLength(1);
   }, 30_000);

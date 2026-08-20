@@ -73,7 +73,8 @@ import type { UiEvent } from '../core/ui-events.ts';
 import {
   chainStepNote,
   DEFAULT_ALLOWED_TOOLS,
-  QUICK_TASK_WORKFLOW,
+  DEFAULT_WORKFLOW,
+  DEFAULT_WORKFLOW_NAME,
   stepKind,
   type WorkflowDef,
   type WorkflowStepDef,
@@ -83,10 +84,13 @@ const CHECK_OUTPUT_CAP = 20_000;
 
 /**
  * The workflow "▶ Run" turns a filed todo into (`server.ts`'s `POST /todos/:id/start`): a
- * one-step workflow around the suggested skill when it still exists on disk, plain quick-task
- * otherwise. Lifted out here — rather than left inline in the route — so `todo-autostart.ts`
- * (Phase 2, `.ai/specs/2026-08-19-file-tasks-from-a-running-task.md`) resolves a todo the SAME
- * way whether a person clicks ▶ Run or the cockpit starts a `--start`-filed todo for them.
+ * one-step workflow around the suggested skill when it still exists on disk, the default workflow
+ * ({@link DEFAULT_WORKFLOW_NAME}) otherwise. Lifted out here — rather than left inline in the route
+ * — so `todo-autostart.ts` (Phase 2, `.ai/specs/2026-08-19-file-tasks-from-a-running-task.md`)
+ * resolves a todo the SAME way whether a person clicks ▶ Run or the cockpit starts a
+ * `--start`-filed todo for them. A todo is user-initiated (a person filed it), so it floors to the
+ * full default; the unattended integration paths keep their own explicit fallback (see
+ * {@link DEFAULT_WORKFLOW_NAME}).
  */
 export async function resolveTodoWorkflow(
   repoRoot: string,
@@ -104,7 +108,7 @@ export async function resolveTodoWorkflow(
     }
   }
   const { workflows } = await loadWorkflows(repoRoot);
-  return workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW;
+  return workflows.find((w) => w.name === DEFAULT_WORKFLOW_NAME) ?? DEFAULT_WORKFLOW;
 }
 
 async function configuredModelProvider(
@@ -1269,6 +1273,11 @@ export class RunManager {
         continue;
       }
       if (run.status === 'waiting') {
+        // A `waiting` run parked on an unanswered `CEZ:ASK` is waiting on the USER — settling it
+        // to plain `done` here silently drops the "needs you" signal, so a restart made a task
+        // with an open question look finished. Detect that before the steps are settled and keep
+        // it in the attention-bearing `review` gate instead (the ask card still resumes it).
+        const pendingAsk = this.runHasPendingAsk(run.id);
         for (const step of run.steps) {
           if (step.status === 'waiting' || step.status === 'running') {
             this.store.updateStep(run.id, step.id, { status: 'done', finishedAt: new Date().toISOString() });
@@ -1276,9 +1285,11 @@ export class RunManager {
         }
         this.store.appendEvent(run.id, {
           type: 'lifecycle',
-          message: 'cezar restarted — the open session was settled',
+          message: pendingAsk
+            ? 'cezar restarted — the open session was settled; your answer is still needed'
+            : 'cezar restarted — the open session was settled',
         });
-        await this.settleSuccess(run.id);
+        await this.settleSuccess(run.id, { pendingAsk });
         continue;
       }
       // `running`: the process died mid-turn. Mark it interrupted (the state
@@ -3550,12 +3561,16 @@ export class RunManager {
       return;
     }
     invocation.recordedTurns.add(event.turnId);
-    // Context occupancy is the LATEST turn's prompt size (`input + cacheRead + cacheWrite`,
-    // excluding generated `output`) — overwritten, not accumulated like the token totals
-    // above, so it tracks how full the window is right now (spec
-    // 2026-08-19-context-usage-in-tasks-table). Cache fields absent on a backend that omits
-    // them → they count as 0, and a plain-input turn still reports a truthful occupancy.
-    const contextTokens = input + (event.usage?.cacheRead ?? 0) + (event.usage?.cacheWrite ?? 0);
+    // Context occupancy is the LATEST turn's window fill — overwritten, not accumulated like
+    // the token totals above, so it tracks how full the window is right now (spec
+    // 2026-08-19-context-usage-in-tasks-table). Prefer the mapper's point-in-time
+    // `event.contextTokens`: the LAST single call's prompt. `event.usage` here is the turn's
+    // CROSS-CALL SUM (the claude `result` frame adds every round-trip's prompt), so falling
+    // back to `input + cacheRead + cacheWrite` of it overcounts a many-round-trip turn
+    // manyfold — the `10M / 200k` bug (correction 2026-08-20). The fallback stays only for
+    // backends (pi) whose turn `usage` is already the last call's, not a sum.
+    const contextTokens =
+      event.contextTokens ?? input + (event.usage?.cacheRead ?? 0) + (event.usage?.cacheWrite ?? 0);
     this.persistUsageCheckpoint(runId, invocation.stepId, {
       inputTokens: (step.inputTokens ?? 0) + input,
       outputTokens: (step.outputTokens ?? 0) + output,
@@ -3813,7 +3828,7 @@ export class RunManager {
     this.store.updateRun(runId, { workspaceWorktrees: kept.length > 0 ? kept : undefined });
   }
 
-  private async settleSuccess(runId: string): Promise<void> {
+  private async settleSuccess(runId: string, opts: { pendingAsk?: boolean } = {}): Promise<void> {
     await this.applyWorkspaceRun(runId);
     const run = this.store.getRun(runId);
     let review = false;
@@ -3823,8 +3838,14 @@ export class RunManager {
       const config = await loadConfig(this.repoRoot);
       review = hasDiff && reviewGateEnabled(config) && run.autonomous !== true;
     }
+    // A run parked on an UNANSWERED question is waiting on the user, not finished. Settle it to
+    // the attention-bearing `review` gate — the same non-active, continuable state the ask card
+    // resumes through — never plain `done`, or a restart would silently mark a task that still
+    // needs you as complete and drop the "needs you" signal (the `CEZ:ASK`-stuck-on-done bug).
+    const pendingAsk = opts.pendingAsk === true;
+    const settledReview = review || pendingAsk;
     this.store.updateRun(runId, {
-      status: review ? 'review' : 'done',
+      status: settledReview ? 'review' : 'done',
       finishedAt: new Date().toISOString(),
       currentStepId: undefined,
       // A run that got all the way to a settled turn is not in a limit loop, so the resume
@@ -3834,10 +3855,28 @@ export class RunManager {
     });
     this.store.appendEvent(runId, {
       type: 'lifecycle',
-      message: review
-        ? 'changes ready for review — send feedback, open a draft PR, or finish'
-        : 'run finished',
+      message: pendingAsk
+        ? 'your answer is still needed — reopen the session to continue'
+        : review
+          ? 'changes ready for review — send feedback, open a draft PR, or finish'
+          : 'run finished',
     });
+  }
+
+  /**
+   * Does this run's transcript end on an UNANSWERED `CEZ:ASK`? True when its latest
+   * `ask.requested` event has no later `user-message` (the event a resume/answer appends to
+   * resolve the card). Used by restart recovery to keep a task that asked the user a question
+   * in an attention state rather than settling it to plain `done`.
+   */
+  private runHasPendingAsk(runId: string): boolean {
+    let lastAsk = -1;
+    let lastAnswer = -1;
+    for (const event of this.store.readEvents(runId)) {
+      if (event.type === 'ask.requested') lastAsk = Math.max(lastAsk, event.seq);
+      else if (event.type === 'user-message') lastAnswer = Math.max(lastAnswer, event.seq);
+    }
+    return lastAsk >= 0 && lastAsk > lastAnswer;
   }
 
   /**

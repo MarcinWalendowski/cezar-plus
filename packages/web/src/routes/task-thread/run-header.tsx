@@ -462,7 +462,10 @@ function EditableTitle({ run }: { run: ApiRun }) {
         type="button"
         aria-label="Rename task"
         onClick={editor.begin}
-        className="shrink-0 rounded-sm p-1 text-soft-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted hover:text-foreground focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+        // `pointer-coarse:opacity-100`: touch has no hover, so without this the rename pencil
+        // is unreachable on a phone — reveal it outright there, keep the quiet hover on fine
+        // pointers.
+        className="shrink-0 rounded-sm p-1 text-soft-foreground opacity-0 transition-opacity group-hover:opacity-100 pointer-coarse:opacity-100 hover:bg-muted hover:text-foreground focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
       >
         <PencilIcon className="size-3.5" aria-hidden="true" />
       </button>

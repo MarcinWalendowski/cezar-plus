@@ -501,7 +501,8 @@ export function Composer({
                     disabled={disabled}
                     aria-label="Start dictation"
                     title="Dictation"
-                    className="h-8 gap-1.5 px-2.5 text-xs font-medium text-muted-foreground"
+                    // ≥44px on touch (max-md), the compact 32px control on desktop.
+                    className="h-8 gap-1.5 px-2.5 text-xs font-medium text-muted-foreground max-md:h-11"
                     onClick={dictation.start}
                   >
                     <MicIcon aria-hidden="true" className="size-3.5" />
@@ -520,7 +521,8 @@ export function Composer({
                   disabled={
                     disabled || busy || (text.trim() === '' && images.length === 0 && !allowEmptySubmit)
                   }
-                  className="size-8"
+                  // The most-tapped mobile control: ≥44px on touch (max-md), 32px on desktop.
+                  className="size-8 max-md:size-11"
                   onClick={submitDraft}
                 >
                   <ArrowUpIcon aria-hidden="true" />
@@ -611,7 +613,7 @@ function AttachButton({
         aria-label="Attach images"
         title="Attach an image (or paste a screenshot)"
         disabled={disabled}
-        className="size-8 text-muted-foreground"
+        className="size-8 text-muted-foreground max-md:size-11"
         onClick={() => inputRef.current?.click()}
       >
         <PaperclipIcon aria-hidden="true" className="size-[15px]" />

@@ -51,7 +51,8 @@
       "cacheRead": 18000,
       "cacheWrite": 9000
     },
-    "costUsd": 0.0021
+    "costUsd": 0.0021,
+    "contextTokens": 18004
   },
   {
     "type": "usage.updated",

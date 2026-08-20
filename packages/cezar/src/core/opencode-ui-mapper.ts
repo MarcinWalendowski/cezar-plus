@@ -597,6 +597,11 @@ function mapIdle(props: Record<string, unknown>, state: OpencodeUiMapperState): 
   const turnUsage = usageForMessages(state.currentTurnMessageIds, state.usageByMessage);
   if (turnUsage.usage !== null) completed.usage = turnUsage.usage;
   if (turnUsage.cost !== null) completed.costUsd = turnUsage.cost;
+  // Point-in-time window occupancy = the LARGEST single message's prompt, NOT the summed
+  // `turnUsage.usage` (that adds every round-trip's prompt and overcounts the window many-
+  // fold). Within a turn the prompt only grows, so the max is the current fill (spec
+  // 2026-08-19-context-usage-in-tasks-table, point-in-time correction).
+  if (turnUsage.maxPromptTokens > 0) completed.contextTokens = turnUsage.maxPromptTokens;
   return {
     events: [
       ...openSubtasks.map((subtask): UiEvent => ({ type: 'item.completed', item: completedSubtask(subtask) })),
@@ -725,9 +730,12 @@ function emitUsage(state: OpencodeUiMapperState): OpencodeUiMapping {
 function usageForMessages(
   messageIds: ReadonlySet<string>,
   usageByMessage: ReadonlyMap<string, MessageUsage>,
-): { usage: TokenUsage | null; cost: number | null } {
+): { usage: TokenUsage | null; cost: number | null; maxPromptTokens: number } {
   let usage: TokenUsage | null = null;
   let cost: number | null = null;
+  // The single fullest message's prompt (`input + cacheRead + cacheWrite`) — the turn's
+  // point-in-time window occupancy, as opposed to the summed `usage` (see the caller).
+  let maxPromptTokens = 0;
   for (const id of messageIds) {
     const message = usageByMessage.get(id);
     if (message === undefined) continue;
@@ -735,11 +743,15 @@ function usageForMessages(
       message.info !== null && (message.steps === null || message.info.total >= message.steps.total)
         ? message.info
         : message.steps;
-    if (effective !== null && (effective.input > 0 || effective.output > 0)) usage = addUsage(usage, effective);
+    if (effective !== null && (effective.input > 0 || effective.output > 0)) {
+      usage = addUsage(usage, effective);
+      const prompt = effective.input + (effective.cacheRead ?? 0) + (effective.cacheWrite ?? 0);
+      if (prompt > maxPromptTokens) maxPromptTokens = prompt;
+    }
     const effectiveCost = maxCost(message.infoCost, message.stepsCost ?? undefined);
     if (effectiveCost !== null && effectiveCost > 0) cost = (cost ?? 0) + effectiveCost;
   }
-  return { usage, cost };
+  return { usage, cost, maxPromptTokens };
 }
 
 // ---- tiny guards ---------------------------------------------------------------

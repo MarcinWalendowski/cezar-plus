@@ -260,7 +260,8 @@
       "cacheRead": 54000,
       "cacheWrite": 2400
     },
-    "costUsd": 0.0128
+    "costUsd": 0.0128,
+    "contextTokens": 45
   },
   {
     "type": "usage.updated",

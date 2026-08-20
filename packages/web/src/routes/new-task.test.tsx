@@ -344,8 +344,8 @@ const sourcePill = () => screen.getByRole('button', { name: 'Choose a skill or w
 const location = () => screen.getByTestId('location').textContent
 
 /** The pickers resolve once workflows+skills+ui-state answered — wait for the real label.
- *  'None' is the cold default (2026-08-15: the composer no longer guesses quick-task
- *  client-side; the server resolves an omitted source to quick-task itself). */
+ *  'None' is the cold default (2026-08-15: the composer no longer guesses a workflow
+ *  client-side; the server resolves an omitted source to the default, `spec-to-deploy`). */
 async function pillReady(label = 'None') {
   await waitFor(() => {
     expect(sourcePill().textContent).toContain(label)
@@ -855,10 +855,10 @@ describe('submit', () => {
     pickSource({ source: 'workflow', ref: 'quick-task' })
     serve()
     renderNewTask()
-    // The pill shows the DISPLAY name while the draft and the request carry the identity — the
-    // whole point of `displayWorkflowName` being display-only. Both halves are asserted here, so
-    // mapping the posted body by mistake fails this too.
-    await pillReady('default')
+    // The draft and the request carry the identity verbatim. `quick-task` is no longer display-
+    // mapped (the `default` label moved to `spec-to-deploy`, the new floor), so the pill shows its
+    // own name here; the display-only mapping itself is covered in `lib/tasks-table.test.ts`.
+    await pillReady('quick-task')
     fireEvent.change(textarea(), { target: { value: 'Ship it' } })
     await startTask()
 
@@ -912,7 +912,7 @@ describe('submit', () => {
         label: 'cold default',
         pillLabel: 'None',
         overrides: {},
-        // Neither `workflow` nor `steps` — the server resolves the None pick to quick-task.
+        // Neither `workflow` nor `steps` — the server resolves the None pick to the default.
         expected: {},
       },
       {
@@ -1516,9 +1516,10 @@ describe('bookmarklet auto-start', () => {
     await screen.findByText('Unknown skill "ghost" — prefilled for quick-task; review and press Start')
     // Legacy initFromQuery verbatim: the intent goes into the text, quick-task resolves it.
     expect(textarea().value).toBe('Use the "ghost" skill on: hello')
-    // The pill displays it as `default`; the toast above still names `quick-task`, which is the
-    // honest spelling for a message about what the SERVER will resolve the prefill to.
-    await pillReady('default')
+    // The unknown-skill prefill path deliberately stays on `quick-task` (the no-ceremony floor),
+    // NOT the new `spec-to-deploy` default — a bookmarklet/prefill run must not silently push or
+    // deploy. `quick-task` now shows its own name (the `default` label moved to `spec-to-deploy`).
+    await pillReady('quick-task')
     expect(runsPosted()).toHaveLength(0)
   })
 
@@ -1957,9 +1958,10 @@ describe('prompt templates on the new-task composer', () => {
     await pillReady()
 
     // Picked by `data-source-ref` (the identity), read back as the display name — the picker and
-    // the pill sit two clicks apart and must agree.
+    // the pill sit two clicks apart and must agree. `quick-task` now displays verbatim (the
+    // `default` label moved to the new `spec-to-deploy` floor).
     await pickSource('quick-task')
-    await waitFor(() => expect(sourcePill().textContent).toContain('default'))
+    await waitFor(() => expect(sourcePill().textContent).toContain('quick-task'))
     expect(textarea().value).toBe('')
   })
 

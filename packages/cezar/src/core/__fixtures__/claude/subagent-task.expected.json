@@ -136,7 +136,8 @@
       "total": 37595,
       "cacheRead": 36000
     },
-    "costUsd": 0.0455
+    "costUsd": 0.0455,
+    "contextTokens": 150
   },
   {
     "type": "usage.updated",

@@ -4,6 +4,7 @@ import { parse as parseYaml } from 'yaml';
 import {
   NOTE_TO_SPEC_WORKFLOW,
   QUICK_TASK_WORKFLOW,
+  SPEC_TO_DEPLOY_WORKFLOW,
   normalizeWorkflowDoc,
   stepsIssue,
   workflowFileSchema,
@@ -18,9 +19,10 @@ export interface WorkflowLoadIssue {
 }
 
 /**
- * Load the workflow catalog: the built-in `quick-task` plus every
- * `.ai/cezar/workflows/*.{yaml,yml}` in the repo. File workflows win name
- * collisions with built-ins. Invalid files are reported, never fatal.
+ * Load the workflow catalog: the built-ins (`quick-task`, `note-to-spec`,
+ * `spec-to-deploy`) plus every `.ai/cezar/workflows/*.{yaml,yml}` in the repo.
+ * File workflows win name collisions with built-ins. Invalid files are
+ * reported, never fatal.
  */
 export async function loadWorkflows(
   repoRoot: string,
@@ -64,9 +66,11 @@ export async function loadWorkflows(
   const fileNames = new Set(fromFiles.map((w) => w.name));
   const workflows = [
     ...fromFiles,
-    // A repo may override either built-in by shipping a file of the same name — same rule for
-    // both, so `note-to-spec` is customisable per project without any new mechanism.
-    ...[QUICK_TASK_WORKFLOW, NOTE_TO_SPEC_WORKFLOW].filter((w) => !fileNames.has(w.name)),
+    // A repo may override any built-in by shipping a file of the same name — same rule for all,
+    // so `note-to-spec`/`spec-to-deploy` are customisable per project without any new mechanism.
+    ...[QUICK_TASK_WORKFLOW, NOTE_TO_SPEC_WORKFLOW, SPEC_TO_DEPLOY_WORKFLOW].filter(
+      (w) => !fileNames.has(w.name),
+    ),
   ];
   workflows.sort((a, b) => a.name.localeCompare(b.name));
   return { workflows, issues };

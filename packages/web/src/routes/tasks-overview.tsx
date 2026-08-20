@@ -147,6 +147,26 @@ export function TasksOverview({
   const columns = taskColumnsForCapabilities({ tokens: showTokens, cost: showCost })
   const unread = unreadDoneCount(all)
 
+  // One search control, rendered in the desktop header and — below `md`, where that header is
+  // hidden — above the card list, sharing this one `query` state (the pattern global-tasks
+  // already uses). Without the mobile copy the phone had no way to search the home list at all.
+  const search = (
+    <div className="relative w-full md:w-60">
+      <SearchIcon
+        className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-soft-foreground"
+        aria-hidden="true"
+      />
+      <input
+        type="text"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder="Search tasks…"
+        aria-label="Search tasks"
+        className="h-9 w-full rounded-md border border-input bg-card pr-3 pl-8 text-[13px] text-foreground outline-none placeholder:text-soft-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      />
+    </div>
+  )
+
   return (
     <div data-route="tasks" className="flex min-h-full flex-col">
       {/* Desktop header. Below `md` the shell's top bar already says "Tasks", and the drawer
@@ -212,23 +232,12 @@ export function TasksOverview({
           </Button>
         ) : null}
         {hostUsage}
-        <div className="relative w-60">
-          <SearchIcon
-            className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-soft-foreground"
-            aria-hidden="true"
-          />
-          <input
-            type="text"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search tasks…"
-            aria-label="Search tasks"
-            className="h-9 w-full rounded-md border border-input bg-card pr-3 pl-8 text-[13px] text-foreground outline-none placeholder:text-soft-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-          />
-        </div>
+        {search}
       </header>
 
       <div className="flex flex-1 flex-col p-3 pb-[calc(90px+env(safe-area-inset-bottom))] md:p-5 md:pb-5">
+        {/* Below `md` the desktop header is hidden, so the search box rides here instead. */}
+        <div className="mb-3 md:hidden">{search}</div>
         {runs === undefined ? null : visible.length === 0 ? (
           <TasksEmptyState view={view} query={query} />
         ) : (
@@ -803,7 +812,10 @@ function TitleCell({
         data-slot="row-rename"
         aria-label="Rename task"
         onClick={editor.begin}
-        className="shrink-0 rounded-sm p-0.5 text-soft-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+        // `pointer-coarse:opacity-100`: a touch device has no hover, so the reveal-on-hover
+        // would leave rename unreachable — show it outright there while fine pointers keep it
+        // quiet until the row is hovered.
+        className="shrink-0 rounded-sm p-0.5 text-soft-foreground opacity-0 transition-opacity group-hover/row:opacity-100 pointer-coarse:opacity-100 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
       >
         <PencilIcon className="size-3" aria-hidden="true" />
       </button>

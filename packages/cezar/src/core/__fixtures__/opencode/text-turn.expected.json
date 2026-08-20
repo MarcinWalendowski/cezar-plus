@@ -90,6 +90,7 @@
       "cacheWrite": 0,
       "reasoning": 64
     },
-    "costUsd": 0.0042
+    "costUsd": 0.0042,
+    "contextTokens": 3000
   }
 ]

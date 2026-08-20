@@ -120,6 +120,7 @@
       "output": 300,
       "total": 1900,
       "cacheRead": 800
-    }
+    },
+    "contextTokens": 1600
   }
 ]

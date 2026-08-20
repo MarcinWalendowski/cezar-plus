@@ -255,6 +255,17 @@ export interface UiTurnCompletedEvent {
   stopReason: StopReason;
   usage?: TokenUsage;
   costUsd?: number;
+  /**
+   * Point-in-time context-window occupancy at turn end: the prompt size
+   * (`input + cacheRead + cacheWrite`) of the MOST RECENT single model call in
+   * this turn — NOT a sum across the turn's calls. `usage` above is the turn's
+   * CUMULATIVE token/cost total (it sums every internal round-trip); this is
+   * "how full is the window right now", which the tasks-table Context column
+   * shows over the model's max (spec 2026-08-19-context-usage-in-tasks-table).
+   * Absent when a backend cannot report a per-call figure — the consumer then
+   * falls back to `usage`, whose per-call meaning holds for those backends.
+   */
+  contextTokens?: number;
 }
 
 /** An item entered the stream (tools usually with status pending/running). */

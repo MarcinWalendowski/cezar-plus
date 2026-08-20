@@ -386,3 +386,245 @@ export const AUTONOMOUS_IMPLEMENTATION_WORKFLOW: WorkflowDef = {
     },
   ],
 };
+
+/**
+ * The owner's standard operating pipeline as ONE selectable chain (spec
+ * `.ai/specs/2026-08-19-spec-to-deploy-default-workflow.md`): **read the record → write the
+ * spec → implement → run tests → commit & push/merge → document → deploy.** Where
+ * `note-to-spec` stops at the spec and `autonomous-implementation` stops at a local commit,
+ * this runs the whole loop end to end, remote included.
+ *
+ * The early steps reuse the safety patterns already proven above:
+ *  - **`spec`** mirrors `note-to-spec` — read-only tools plus `cez kb` and read-only git; it
+ *    produces a spec and stops there;
+ *  - **`implement`** and **`run-tests`** reuse `AUTONOMOUS_IMPLEMENTATION_WORKFLOW`'s exact
+ *    `bashAllowlist` BY REFERENCE, so they never drift: installs + gate-shaped runner verbs +
+ *    git add/commit, but still **no `git push`** and no bare runner prefix. `implement` writes the
+ *    code; `run-tests` runs the full gate suite and fixes what it finds.
+ *
+ * **Two steps are deliberate, knowing privilege escalations over every other built-in — owner
+ * decisions, named honestly so the next reader is not surprised:**
+ *  - **`commit-push` (owner decision 2026-08-19, "commit & push/merge")** gets a SCOPED grant that
+ *    reaches the remote: git add/commit **plus `git push`**, branch/merge plumbing, and `gh pr`
+ *    (open/merge a PR). This is the one step that ships to the remote; it is still an allowlist,
+ *    not unrestricted bash — only git and gh, never an arbitrary shell.
+ *  - **`deploy` (owner decision 2026-08-19, "fixed grant")** gets UNRESTRICTED `Bash` (default
+ *    tools, no `bashAllowlist`) because deploy mechanics differ per project and cannot be predicted
+ *    from here; it is told to discover and run the target repo's OWN documented deploy scripts.
+ *
+ * Both reverse the "no unattended deploy/push" stance that `autonomous-implementation` enforces
+ * structurally — that guard is left intact THERE; this workflow makes a different, opt-in-per-task
+ * trade. A task only reaches these steps by being started on `spec-to-deploy` on purpose.
+ */
+export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
+  name: 'spec-to-deploy',
+  description: 'Read the record, write a spec, implement, run tests, commit & push/merge, document, then deploy.',
+  source: 'built-in',
+  steps: [
+    {
+      id: 'spec',
+      name: 'Read the record and write the spec',
+      allowedTools: ['Read', 'Grep', 'Glob', 'Write', 'Bash'],
+      bashAllowlist: ['git log', 'git show', 'git status', 'cez kb'],
+      prompt: [
+        'You are writing a SPEC for the task below. You are NOT implementing it in this step.',
+        '',
+        'Task:',
+        '{{task}}',
+        '',
+        'Before you write anything, read what already exists — most work extends a prior decision:',
+        '1. The knowledge base / decision records — search it first (`cez kb search "<query>"`,',
+        '   `cez kb show <id>`). It is the source of truth for decisions.',
+        '2. The task tracker / open todos for related or duplicate work already in flight.',
+        '3. The spec directory, for a precedent of this shape or a spec this extends, and',
+        '   `git log`/`git show` for recent commits touching the area, so the spec describes the',
+        '   code that is there now rather than the code you assumed.',
+        '',
+        'Then write ONE spec file, following this repository’s own naming and section conventions',
+        '(match the files already in its spec directory — do not impose a different format). It',
+        'must contain: a TLDR, the problem, the solution, the architecture, PHASES broken into',
+        'independently shippable steps, data models and API contracts where they apply, risks, and',
+        'a verification section naming concrete, executable test steps.',
+        '',
+        'Cite what you actually read — KB entry ids, spec numbers, file paths, commit hashes. If you',
+        'could not find something, say so in the spec rather than inventing it.',
+        '',
+        'Change NO other file in this step. When the spec file exists, declare its path on its own',
+        'line: `CEZ:SPEC_PATH=<repo-relative path>`. The next step implements it.',
+      ].join('\n'),
+    },
+    {
+      id: 'implement',
+      name: 'Implement the spec',
+      allowedTools: DEFAULT_ALLOWED_TOOLS,
+      // Reuse the autonomous workflow's guarded allowlist verbatim so the two never drift:
+      // installs + gate-shaped runner subcommands only, git add/commit but never `git push`.
+      bashAllowlist: AUTONOMOUS_IMPLEMENTATION_WORKFLOW.steps[0]?.bashAllowlist,
+      prompt: [
+        'You are IMPLEMENTING the spec the previous step wrote (its path was declared as',
+        'CEZ:SPEC_PATH in this run\'s handoff). Nobody is watching — make reasonable assumptions,',
+        'note them in your report, and proceed.',
+        '',
+        'Original task, for context:',
+        '{{task}}',
+        '',
+        'Read the spec fully, then implement it: write the code and the tests its own Verification',
+        'section names. You MAY run gates as you go to check yourself, but the authoritative test',
+        'run and the commit/push are SEPARATE later steps — do NOT `git push` here, and you need not',
+        'do the final commit. End your report with what you implemented and any assumptions you made.',
+      ].join('\n'),
+    },
+    {
+      id: 'run-tests',
+      name: 'Run the tests',
+      allowedTools: DEFAULT_ALLOWED_TOOLS,
+      // Same guarded allowlist as `implement`, by reference: it can install, run every gate, and
+      // edit code to fix a failure — but it cannot reach the remote. `commit-push` does that next.
+      bashAllowlist: AUTONOMOUS_IMPLEMENTATION_WORKFLOW.steps[0]?.bashAllowlist,
+      prompt: [
+        'The previous step implemented the spec. RUN THIS REPOSITORY\'S FULL GATE SUITE now and make',
+        'it green before anything is committed or shipped.',
+        '',
+        'Original task, for context:',
+        '{{task}}',
+        '',
+        'Run the repo\'s own gates — typecheck, lint, and tests, whatever it defines (check its',
+        'package.json / Makefile / CI config for the real commands). If any fail, FIX the code and',
+        're-run until they pass. Do NOT commit and do NOT `git push` in this step.',
+        '',
+        'End your report with the exact gate commands you ran and their results. If a gate cannot be',
+        'made to pass, say so plainly and stop — do not let the chain ship a red build.',
+      ].join('\n'),
+    },
+    {
+      id: 'commit-push',
+      name: 'Commit & push / merge',
+      // Owner decision 2026-08-19 ("commit & push/merge"): a SCOPED remote-reaching grant — git
+      // (incl. `git push`, branch/merge plumbing) and `gh pr` only. This is the one step that ships
+      // to the remote. It is still an allowlist, NOT unrestricted bash: no arbitrary shell, only the
+      // version-control verbs shipping needs. `cez kb` is not here — documenting is the next step.
+      allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+      bashAllowlist: [
+        'git status',
+        'git diff',
+        'git log',
+        'git show',
+        'git branch',
+        'git rev-parse',
+        'git add',
+        'git commit',
+        'git fetch',
+        'git pull',
+        'git push',
+        'git merge',
+        'git checkout',
+        'git switch',
+        'gh pr',
+        'gh repo',
+      ],
+      prompt: [
+        'The change is implemented and its tests pass. SHIP it, following THIS repository\'s own',
+        'conventions — do not impose a workflow the repo does not use.',
+        '',
+        'Original task, for context:',
+        '{{task}}',
+        '',
+        '1. Commit whatever is staged/uncommitted with a clear message (imperative, lowercase prefix',
+        '   — `feat:`/`fix:`/`chore:`… — referencing the spec, e.g. "feat: implement <spec>").',
+        '2. Ship it the way this repo ships: check recent `git log` / a CONTRIBUTING doc / the KB for',
+        '   whether it pushes a branch directly, or opens a PR (`gh pr create`) and merges it',
+        '   (`gh pr merge`). Follow that. If `main` is protected, open a PR rather than forcing a push.',
+        '3. If self-merging is the repo\'s convention, merge; if review is expected, leave the PR open',
+        '   and say so.',
+        '',
+        'If pushing or merging is not possible or not authorized here (no remote, protected branch,',
+        'no credentials), commit locally and REPORT that plainly — do not force it. End your report',
+        'with the commit(s), the branch, and the push/PR/merge result.',
+      ].join('\n'),
+    },
+    {
+      id: 'document',
+      name: 'Document the decision',
+      allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash'],
+      // Runs AFTER `commit-push`, so its own doc/spec/KB commit has to reach the remote too — the
+      // same scoped git+gh grant, plus `cez kb` for the knowledge write. Still no arbitrary shell.
+      bashAllowlist: [
+        'git status',
+        'git diff',
+        'git log',
+        'git show',
+        'git add',
+        'git commit',
+        'git push',
+        'gh pr',
+        'cez kb',
+      ],
+      prompt: [
+        'The change for this task is implemented, tested, and shipped. Now WRITE THE RECORD STRAIGHT',
+        'so the next session reads the truth — in the SAME breath as the code, never later.',
+        '',
+        'Original task, for context:',
+        '{{task}}',
+        '',
+        'Do all of:',
+        '1. Knowledge base — record the durable decision/what shipped where the next session will',
+        '   read it (`cez kb` / this repo\'s documented knowledge mechanism). If this change',
+        '   corrects or supersedes an earlier decision, MARK the stale entry in place — do not just',
+        '   append the new truth beside it.',
+        '2. Spec status — set the spec\'s Status to implemented / partial / superseded to match what',
+        '   actually landed.',
+        '3. Tracker — sync the task/todo state (done, or what remains) so the record and the code do',
+        '   not drift.',
+        '',
+        'Commit the doc/spec edits and push them the same way the change was shipped (branch push or',
+        'PR). If pushing is not authorized here, commit locally and say so. End your report listing',
+        'what you recorded and where.',
+      ].join('\n'),
+    },
+    {
+      id: 'deploy',
+      name: 'Deploy',
+      // Fixed grant (owner decision 2026-08-19): UNRESTRICTED Bash on purpose. Deploy mechanics
+      // differ per project and cannot be enumerated here, so this step runs the target repo's OWN
+      // documented deploy scripts. See this workflow's doc comment for why this reverses the
+      // no-unattended-deploy stance the autonomous workflow enforces — a deliberate, opt-in trade.
+      allowedTools: DEFAULT_ALLOWED_TOOLS,
+      prompt: [
+        'The change for this task is implemented, tested, shipped, and documented. Now DEPLOY it',
+        'using THIS repository\'s own existing deploy mechanism — do not invent a deploy process.',
+        '',
+        'Original task, for context:',
+        '{{task}}',
+        '',
+        'First DISCOVER how this repo deploys, then run it:',
+        '- Look for a deploy script (package.json `deploy`/`release`/`publish`, a `scripts/deploy*`,',
+        '  a Makefile target, `wrangler deploy`, a CI/deploy doc in the repo or its knowledge base).',
+        '- Read its documented deploy instructions and follow them exactly.',
+        '',
+        'If you find a clear deploy path, run it and verify it succeeded (check the command output /',
+        'health of the deployed service). If this repo has NO documented deploy mechanism, do NOT',
+        'improvise or push blindly — stop and report that no deploy path was found, so a person can',
+        'decide. End your report with what you deployed, the command you ran, and the result.',
+      ].join('\n'),
+    },
+  ],
+};
+
+/**
+ * The workflow a run FLOORS to when it names none — the "default workflow" (owner decision
+ * 2026-08-19: `spec-to-deploy` replaces `quick-task` here). This is the single source of truth for
+ * that name: the user-initiated floors (`POST /runs` / composer, the inbox ▶ Run, the CLI) all
+ * read it, so the default moves in one edit instead of drifting across hardcoded literals.
+ *
+ * **Deliberately NOT wired to the unattended integration paths** — automations, GitHub-triggered
+ * tasks and the bookmarklet keep their explicit `quick-task` fallback. `spec-to-deploy` can
+ * `git push` and runs an unrestricted-Bash deploy step; a run that a person did not consciously
+ * start (a CI event, a note typed on a phone) must not inherit that by default. Those paths name a
+ * workflow explicitly or floor to the no-ceremony `quick-task`, on purpose.
+ */
+export const DEFAULT_WORKFLOW_NAME = SPEC_TO_DEPLOY_WORKFLOW.name;
+
+/** The default workflow definition itself — the last-resort fallback when a name lookup misses
+ *  (e.g. a repo shipped no catalog and the built-in registry was somehow empty). Pairs with
+ *  {@link DEFAULT_WORKFLOW_NAME}. */
+export const DEFAULT_WORKFLOW: WorkflowDef = SPEC_TO_DEPLOY_WORKFLOW;

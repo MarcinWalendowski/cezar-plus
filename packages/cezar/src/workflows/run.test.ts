@@ -130,6 +130,38 @@ describe('RunManager directional usage accounting', () => {
     expect(store.getRun(run.id)).toMatchObject({ inputTokens: 15, outputTokens: 3 });
   });
 
+  it('records the point-in-time contextTokens from the event, not the cumulative usage', () => {
+    const { run, state, sink } = fixture();
+    internal.beginUsageInvocation(run.id, state, 'work');
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'turn.started', turnId: 'turn_1' });
+    // usage is the turn's cross-call SUM (10M); contextTokens is the last call's real
+    // window fill (150k). The step must persist 150k, not derive a bogus figure from usage
+    // (spec 2026-08-19-context-usage-in-tasks-table, point-in-time correction).
+    internal.handleRunnerUiEvent(run.id, state, sink, {
+      type: 'turn.completed',
+      turnId: 'turn_1',
+      stopReason: 'end_turn',
+      usage: { input: 10_000_000, output: 5000, total: 10_005_000 },
+      contextTokens: 150_000,
+    });
+    expect(store.getRun(run.id)?.steps[0]?.contextTokens).toBe(150_000);
+    expect(store.getRun(run.id)?.contextTokens).toBe(150_000);
+  });
+
+  it('falls back to the usage prompt sum for contextTokens when the event omits it', () => {
+    const { run, state, sink } = fixture();
+    internal.beginUsageInvocation(run.id, state, 'work');
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'turn.started', turnId: 'turn_1' });
+    internal.handleRunnerUiEvent(run.id, state, sink, {
+      type: 'turn.completed',
+      turnId: 'turn_1',
+      stopReason: 'end_turn',
+      usage: { input: 40, output: 2, total: 92, cacheRead: 30, cacheWrite: 20 },
+    });
+    // No event.contextTokens (a pi-style backend): input + cacheRead + cacheWrite = 90.
+    expect(store.getRun(run.id)?.steps[0]?.contextTokens).toBe(90);
+  });
+
   it('keeps the run aggregate absent after a pre-turn failure even when a later invocation is metered', () => {
     const { run, state, sink } = fixture();
     internal.beginUsageInvocation(run.id, state, 'work');

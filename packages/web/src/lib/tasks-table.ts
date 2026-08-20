@@ -106,17 +106,17 @@ export function scheduledResume(
 /**
  * How a workflow NAME is displayed. Identity in, display text out — nothing else.
  *
- * `quick-task` is the zero-config workflow (one agent step whose prompt is `{{task}}`) and, more
- * to the point, the value the server resolves to when a run names no workflow at all
- * (`server.ts`'s `resolveRunWorkflow`). So it is what almost every row carries, and "quick-task"
- * reads as a choice somebody made when it is the absence of one. It prints as **default**.
+ * `spec-to-deploy` is the value the server resolves to when a run names no workflow at all
+ * (`server.ts`'s `resolveRunWorkflow`, since the 2026-08-19 default change). So it is what almost
+ * every row created without an explicit pick carries, and its raw name reads as a choice somebody
+ * made when it is the absence of one. It prints as **default**. (`quick-task`, the old floor, is
+ * now an ordinary named pick and shows itself verbatim.)
  *
  * **Display only, and that boundary is the whole design.** The stored `RunRecord.workflow`, the
- * `POST /runs` body, the `--workflow` CLI flag, the catalog entry and the `.ai/cezar/workflows/
- * quick-task.yaml` override a repo may ship are all untouched — `quick-task` remains the name
- * every one of those speaks, and BACKWARD_COMPATIBILITY.md protects it in three places (users
- * commit workflow files and share them across repos). Renaming the identity would break those;
- * renaming the label costs nothing and can be undone by deleting one map entry.
+ * `POST /runs` body, the `--workflow` CLI flag, the catalog entry and any `.ai/cezar/workflows/
+ * spec-to-deploy.yaml` override a repo may ship are all untouched — `spec-to-deploy` remains the
+ * name every one of those speaks. Renaming the identity would break committed/shared workflow
+ * files; renaming the label costs nothing and can be undone by deleting one map entry.
  *
  * **The line is REFERENCING a workflow versus AUTHORING one**, and it is deliberate, not an
  * oversight to tidy up later. Everything that says "this run used that workflow" goes through
@@ -124,11 +124,11 @@ export function scheduledResume(
  * workflow facet, the group-by headings, and the composer's picker *and* its pill (those two sit
  * two clicks apart and must agree). The Workflows builder page (`routes/workflows/`) does NOT —
  * its chips load a workflow into an editable draft whose name field becomes
- * `.ai/cezar/workflows/<name>.yaml`, so a chip reading "default" that populates `quick-task` and
- * saves `quick-task.yaml` would be a lie about the thing you are editing. There the name IS the
- * subject; here it is a reference to one.
+ * `.ai/cezar/workflows/<name>.yaml`, so a chip reading "default" that populates `spec-to-deploy`
+ * and saves `spec-to-deploy.yaml` would be a lie about the thing you are editing. There the name
+ * IS the subject; here it is a reference to one.
  */
-const WORKFLOW_DISPLAY_NAMES: Readonly<Record<string, string>> = { 'quick-task': 'default' }
+const WORKFLOW_DISPLAY_NAMES: Readonly<Record<string, string>> = { 'spec-to-deploy': 'default' }
 
 /** The display text for a workflow name. Unmapped names pass through verbatim, so a real pick
  *  (`plan-first`, a repo's own file) always shows itself. */
