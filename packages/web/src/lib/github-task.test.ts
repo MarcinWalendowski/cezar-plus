@@ -92,8 +92,8 @@ describe('githubRunBody', () => {
     expect(body.task).not.toContain('Use these skills')
   })
 
-  it('nothing selected → quick-task', () => {
-    expect(githubRunBody(item(), null, []).workflow).toBe('quick-task')
+  it('nothing selected → spec-to-deploy (the default workflow)', () => {
+    expect(githubRunBody(item(), null, []).workflow).toBe('spec-to-deploy')
   })
 
   it('a custom prompt EXTENDS the task context rather than replacing it (#524)', () => {
@@ -285,9 +285,9 @@ describe('githubRunBody backend (#401)', () => {
     expect(body).toMatchObject({ runner: 'opencode', model: 'anthropic/claude-sonnet-5' })
   })
 
-  it('rides the quick-task route, and an all-undefined pair leaves the body clean', () => {
+  it('rides the default-workflow route, and an all-undefined pair leaves the body clean', () => {
     expect(githubRunBody(item(), null, [], undefined, { runner: 'codex' })).toMatchObject({
-      workflow: 'quick-task',
+      workflow: 'spec-to-deploy',
       runner: 'codex',
     })
     // engineBody returns explicit undefineds for "send nothing" — they must not become keys

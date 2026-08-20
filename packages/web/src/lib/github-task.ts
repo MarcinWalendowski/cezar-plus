@@ -158,5 +158,5 @@ export function githubRunBody(
       task: composeGithubTask(item, [], customPrompt),
     }
   }
-  return { ...backend, workflow: 'quick-task', task: composeGithubTask(item, [], customPrompt) }
+  return { ...backend, workflow: 'spec-to-deploy', task: composeGithubTask(item, [], customPrompt) }
 }

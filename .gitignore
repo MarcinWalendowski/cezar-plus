@@ -30,3 +30,6 @@ skills-lock.json
 
 # mock-agent output from dry-run e2e (scripts/mock-claude.mjs appends here)
 /notes.md
+
+# node_modules symlink used for on-box builds (worktree has no hoisted modules)
+/node_modules
