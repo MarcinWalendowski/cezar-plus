@@ -1,8 +1,11 @@
 # Non-disruptive cezar self-deploy / update
 
-**Status:** draft (not implemented) — **and NOT a prerequisite for anything**
-**Date:** 2026-08-19
+**Status:** ready to implement (rewritten 2026-08-20 from the 2026-08-19 draft, `4797a60d`) — **and NOT a prerequisite for anything**
+**Date:** 2026-08-19, rewritten 2026-08-20
 **Owner ask:** "ensure that we can deploy/update cezar itself without any disruption."
+**Todo:** `d0386413-8bac-4e2a-88c4-62c37ab87ea1`
+**KB:** `specs-594acc539b36` (this file), `docs-1e87e5c94420` / `docs-bc62ccfc8fdf` (remote-access
+docs), `notion-2fea4573209f` (the `cockpit.example.com` deployment record)
 
 > **Amended 2026-08-20 — this spec no longer gates self-deploy.** It was once cited as the thing
 > cezar had to wait for before deploying itself from a running session. That rule is withdrawn
@@ -13,124 +16,586 @@
 > (`8a34f20d`, ~5s outage). What remains below is a genuine *quality* improvement — shrink the gap
 > to zero — not a blocker. Do not cite it as a reason to defer a deploy.
 
+---
+
+## Two corrections to the 2026-08-19 draft, marked in place
+
+The draft (commit `4797a60d`) was written from a reading of the installer source, not from the
+running box. Two of its load-bearing premises are false, and both change the design, so they are
+corrected here rather than appended — the draft's Phase 2 was built entirely on the first one.
+
+### CORRECTED 2026-08-20 — **nginx is not the perimeter on this box. `cloudflared` is, and its ingress config is remote.**
+
+> ~~"nginx is already the perimeter, so use it. … `nginx -s reload` (graceful: nginx drains
+> existing upstream connections onto the old instance and routes new ones to the new)"~~
+> ~~"**Perimeter:** nginx vhost → `proxy_pass http://127.0.0.1:4321` (WebSocket upgrade wired),
+> Cloudflare Access in front."~~
+
+Measured on `prod-host`, 2026-08-20:
+
+```
+$ systemctl is-active nginx          → inactive
+$ ls /etc/nginx/sites-enabled/       → No such file or directory
+$ systemctl is-active cloudflared    → active
+$ systemctl cat cloudflared          → ExecStart=/usr/bin/cloudflared --no-autoupdate \
+                                         tunnel run --token-file /etc/cloudflared/token
+$ ls /etc/cloudflared/               → token          (no config.yml, no ingress file)
+$ ss -lntp                           → 127.0.0.1:4321  users:(("node",pid=2374338,fd=29))
+```
+
+nginx is the perimeter on the **`ubuntu-vps`** platform (`docs-1e87e5c94420`), which is what the
+draft's author read. This box is the **hetzner + Cloudflare Tunnel/Access** deployment
+(`notion-2fea4573209f`), and it runs a **token-mode** tunnel: the ingress map
+(`cockpit.example.com → http://127.0.0.1:4321`) lives in the Cloudflare Zero Trust dashboard, not
+in a file on the box.
+
+Why this kills the draft's Phase 2: "start the new release on the idle port, then flip the
+upstream" requires an edit to the *remote* tunnel config over the Cloudflare API — seconds of
+latency, eventual propagation to the edge, no atomicity, and no local rollback. It is the worst
+possible cutover primitive. **`127.0.0.1:4321` is therefore a fixed contract**, and the handover
+has to happen *behind* that port, not by moving it. See "Solution → P3".
+
+### CORRECTED 2026-08-20 — **there is no single-writer lock, and `running` runs do not simply die: they are force-resumed in a fresh session.**
+
+> ~~"cezar uses a single-writer lock; blue-green must ensure runs stay owned by the instance that
+> spawned them"~~
+
+No such lock exists. `RunStore` (`packages/cezar/src/runs/store.ts:589`) is an `EventEmitter` over
+a plain in-memory `Map` (`:590`), read once from `runs.json` at construction (`:605`) and written
+back wholesale by `flush()` (`:1131`, tmp+rename at `:1214`). `WorkspaceSemaphore`
+(`packages/cezar/src/workspace/semaphore.ts:164`) is a `Set` of in-process participants. Nothing
+on disk arbitrates between two processes. **Two live `cezar serve` instances on one `.ai/cezar/`
+do not race at the margins — the second one to flush silently overwrites everything the first
+wrote.** So "two instances, one state dir" is not a risk to be managed with ownership rules; it is
+a state-destroying bug, and the design must guarantee it never happens even for a millisecond.
+
+> ~~"A deploy mid-run loses that run's live process (its persisted state survives, but the running
+> work does not)."~~
+
+True but incomplete, and the incompleteness matters for the acceptance criterion. `RunManager.recover()`
+(`packages/cezar/src/workflows/run.ts:1257`) already handles a restart: a `running` run has its
+open steps marked `failed`, the run marked `failed` with `error: 'interrupted — cezar process
+exited during the run'`, and then `continueRun(run.id, { text: RESTART_CONTINUATION_PROMPT }, true)`
+(`:1301`, prompt at `:553`) starts a **new** agent session resuming from the last `sessionId`.
+
+So the task is not lost. What is lost is: the live process tree, the in-flight turn's uncommitted
+work, the agent's live context (a fresh session re-reads everything), the run's `running` status
+for as long as the queue takes to pick it back up, and — visibly — the transcript gains an
+`interrupted` error and a restart-continuation prompt on **every deploy**. The acceptance
+criterion "a deploy mid-run leaves the run alive and streaming" is **not** met by `recover()` and
+is not meant to be: `recover()` is crash recovery, and a deploy is not a crash.
+
+Everything else in the draft's Problem section was verified correct and is kept below.
+
+---
+
 ## TLDR
 
-Deploying a new cezar version to the production host today is a **hard
-`systemctl restart cezar.service`**. Because the unit runs `KillMode=control-group` and every
-agent run is a child process in that cgroup, a deploy **kills every in-flight run** — and the
-deployer itself when it runs on-box (observed live 2026-08-19: the session performing the deploy
-was pid 1441357 inside `cezar.service`'s own cgroup). The cockpit's SSE/WS also drop and the
-single `--port-strict` port means there is an unavoidable bind gap. This spec makes a
-version update safe to run at any time, with no killed runs and no visible cockpit outage.
+Deploying a new cezar version to `prod-host` is a hard `systemctl restart cezar.service`.
+The unit runs the default `KillMode=control-group` and every agent run is a child process in that
+cgroup, so a deploy **SIGKILLs every in-flight run** — and the deployer itself when it runs
+on-box. `--port-strict` on a single port means the new process cannot bind until the old one has
+released, so every open SSE/WS stream drops and in-flight requests abort. Code reaches
+`/opt/cezar` by hand-run `rsync` with no atomic swap and no rollback, and the only health check
+runs *after* the restart.
+
+This spec makes a version update safe to run at any time, in five independently shippable phases:
+an atomic release symlink with a rollback ledger; a deployer that re-executes itself out of the
+service's cgroup; systemd **socket activation** so the listening socket outlives the process and
+no connection is ever refused; a **detached per-run broker** so agent processes survive a restart
+and the new server re-attaches to their output byte-for-byte; and a health-gated deploy that
+smoke-boots the candidate before the flip and auto-rolls-back after it.
+
+---
 
 ## Problem — what "disruption" concretely is today
 
-Measured on `prod-host` (Hetzner CX43), 2026-08-19:
+Measured on `prod-host` (Hetzner CX43), 2026-08-19 and re-measured 2026-08-20:
 
-- **Unit:** `cezar.service`, `ExecStart=/usr/bin/node /opt/cezar/packages/cezar/dist/index.js
-  serve --no-open --bind-host 127.0.0.1 --port 4321 --port-strict`,
-  `WorkingDirectory=/var/lib/cezar/workspace`, `KillMode=control-group`, `Restart=on-failure`.
-- **Perimeter:** nginx vhost → `proxy_pass http://127.0.0.1:4321` (WebSocket upgrade wired),
-  Cloudflare Access in front.
-- **Deploy command:** `cezar server-deploy` → `hetzner.redeploy()` = `systemctl daemon-reload &&
-  systemctl restart <unit>` then `confirmListening` + a `verifyStep` probe
-  (`packages/cezar/src/server-install/platforms/hetzner.ts:1184`). It **restarts**; it does not
-  itself deliver code to `/opt/cezar`.
-- **State:** plain JSON / NDJSON / Markdown under `.ai/cezar/` — survives a restart.
+**Unit** (`/etc/systemd/system/cezar.service`, hand-written on this box — *not* generated by
+`server-install`; its `Description` is `cezar cockpit (hosted, Cloudflare Access is the
+perimeter)`, which no generator in this repo emits):
 
-Five disruption vectors follow from that:
+```ini
+[Service]
+Type=simple
+User=cezar
+Group=cezar
+WorkingDirectory=/var/lib/cezar/workspace
+EnvironmentFile=/etc/cezar/cezar.env
+ExecStart=/usr/bin/node /opt/cezar/packages/cezar/dist/index.js serve \
+          --no-open --bind-host 127.0.0.1 --port 4321 --port-strict
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=60
+```
 
-1. **Runs die on restart.** Each agent run is a `claude`/`codex` child in the service cgroup;
-   `KillMode=control-group` SIGKILLs the whole tree. A deploy mid-run loses that run's live
-   process (its persisted state survives, but the running work does not).
-2. **The on-box deployer dies too.** Anything triggering the deploy from inside the cockpit
-   (an agent task, this session) is in the same cgroup and is killed mid-cutover — so the
-   deploy cannot even report its own success.
-3. **HTTP/SSE/WS cutover gap.** `--port-strict` + one port means the new instance cannot bind
-   `4321` until the old process has released it; every open `/api/v1/events` and `/api/v1/ws`
-   stream drops and in-flight HTTP requests abort.
-4. **Code delivery is unmanaged.** `/opt/cezar` is a plain built tree (not a git checkout), with
-   no atomic release swap and no rollback path — a half-copied `dist` can be started.
-5. **No readiness gate / rollback.** `verifyStep` runs *after* the restart, so a broken build is
-   already serving (or crash-looping under `Restart=on-failure`) before it is caught.
+plus three drop-ins (`10-cloudflare.conf`, `20-onepassword.conf`, `30-agent-passthrough.conf`).
+`systemctl show` confirms `KillMode=control-group`, `Delegate=no`.
+
+**Perimeter:** `cloudflared` token tunnel → `http://127.0.0.1:4321`, Cloudflare Access in front.
+Ingress config is remote (see the correction above).
+
+**Code delivery:** a hand-run `rsync` of a built tree into `/opt/cezar`, with `/opt/cezar.prev`
+kept as the previous copy and a `.deployed-commit` marker **that no code in this repo writes** —
+recorded as a known gap in `.ai/specs/2026-08-19-tasks-page-and-start-grounding.md:288,297`. The
+live marker's contents are free text: `37a9a978… (on-box worktree build, spec-to-deploy default
++ standing ship auth)`. `/opt/cezar` is 490 MB including `node_modules`.
+
+**`cezar server-deploy`** → `hetzner.redeploy()` (`packages/cezar/src/server-install/platforms/hetzner.ts:1184`)
+= `systemctl daemon-reload && systemctl restart <unit>`, then `confirmListening` (`:280`) and
+`verifyStep`. It restarts; it does not deliver code. (`ubuntu-vps.ts:1109` is the same shape.)
+
+**State:** plain JSON / NDJSON / Markdown under `.ai/cezar/` — survives a restart. Per-run
+transcripts are durable append-only NDJSON at `<dataDir>/runs/<runId>.ndjson`, and
+`runs/event-history.ts` already serves them with resumable page and live cursors
+(`{offset, boundarySeq}`). **That durability is the foundation the whole design rests on.**
+
+Five disruption vectors follow:
+
+1. **Runs are SIGKILLed on restart.** Each agent run is a `claude`/`codex` child in the service
+   cgroup; `KillMode=control-group` kills the whole tree. `recover()` then force-resumes the task
+   in a fresh session (see the correction above) — the task survives, the *run* does not.
+2. **The on-box deployer dies too.** Anything triggering the deploy from inside the cockpit (an
+   agent task, an interactive session) is in the same cgroup and is killed mid-cutover — so the
+   deploy cannot report its own success. Observed live 2026-08-19: the deploying session was
+   pid 1441357, inside `cezar.service`'s cgroup.
+3. **HTTP/SSE/WS cutover gap.** `--port-strict` + one port: the new process cannot bind 4321
+   until the old has released it (`packages/cezar/src/index.ts:365` refuses to boot rather than
+   drift), and the old process's `shutdown` is `store.flush(); process.exit(0)`
+   (`index.ts:616`, wired to SIGINT and SIGTERM at `:620–621`) — no drain, no in-flight
+   completion, sockets cut mid-response.
+4. **Code delivery is unmanaged.** No atomic swap: a half-copied `dist` can be started, and
+   "rollback" is a human remembering `/opt/cezar.prev` exists.
+5. **No readiness gate.** `verifyStep` runs *after* the restart, so a broken build is already
+   serving — or crash-looping under `Restart=on-failure` — before anything notices.
+
+---
 
 ## Solution
 
-Four independent, individually-shippable changes. Phase 1 removes the worst harm (killed runs)
-and is worth doing even alone; Phases 2–4 make the HTTP layer and the release truly seamless.
+Five changes, each shippable and useful alone. P1–P2 are prerequisites for P5; P3 and P4 are
+independent of everything and of each other. **P4 is the one that satisfies "a deploy mid-run
+leaves the run alive and streaming"**; P3 satisfies "cutover gap = 0"; P2 satisfies "deployer
+survives"; P5 satisfies "bad build auto-rolls-back".
 
-### Phase 1 — Detach run processes from the server cgroup (biggest win)
+### P1 — Atomic release + rollback ledger
 
-Launch each agent run in its **own** transient scope / dedicated slice
-(`systemd-run --scope --slice=cezar-runs.slice …`, or `Delegate=yes` with a per-run child
-cgroup), not as a bare child of `cezar.service`. Then restarting the HTTP server no longer
-touches running agents. On boot the server **re-attaches** to still-live runs from the persisted
-`.ai/cezar/` state + a per-run pidfile, resuming the SSE stream. Deliverable: a restart during an
-active run leaves the run running and its output intact.
+`/opt/cezar` **becomes a symlink** to `/opt/cezar-releases/<releaseId>/`. Deliberately the symlink
+and not a `current` subdirectory: every existing absolute path on the box already points *through*
+`/opt/cezar` — the unit's `ExecStart`, and all three CLI wrappers in `/usr/local/bin`
+(`cez`, `cezar`, `cezar-cli`, each `exec /usr/bin/node /opt/cezar/packages/cezar/dist/index.js "$@"`).
+Keeping `/opt/cezar` as the stable name means **no other file on the box has to change**, and the
+wrapper's own comment ("depends only on the path, which is stable across deploys") stays true.
 
-### Phase 2 — Zero-downtime HTTP cutover (blue-green behind nginx)
+`releaseId` = `<utc-timestamp>-<short-sha>`. A deploy stages into a fresh release dir, `fsync`s,
+then flips the symlink with `rename(2)` on a temp symlink — atomic, no window where `/opt/cezar`
+does not resolve. `deploy.json` is the ledger: `{current, previous, releases: [...]}`. Rollback =
+flip back + restart; seconds, no rebuild. Keep N=5 releases (490 MB each ≈ 2.5 GB; the box has
+room, and the count is configurable).
 
-nginx is already the perimeter, so use it. Run two instances on two ports (e.g. 4321 / 4322).
-Deploy: start the new release on the idle port → health + readiness gate → **`nginx -s reload`**
-(graceful: nginx drains existing upstream connections onto the old instance and routes new ones
-to the new) → stop the old instance once its connections have drained. Cutover gap at the client
-= 0. (Alternative considered: systemd socket activation with a shared listening socket that
-survives restarts so connections queue during the swap — rejected as second choice because nginx
-already fronts the service and gives us health-gated flips and instant rollback for free.)
+**Two things must not be per-release** and are moved out before the first flip: `/opt/cezar/.ai/`
+(a build-time leftover — `WORKLIST.md`, `runs/`, `analysis/`, `browsers/`, `qa/`, `scripts/`;
+nothing reads it at runtime, because the unit's `WorkingDirectory` is `/var/lib/cezar/workspace`),
+and `.deployed-commit`, which becomes a *derived* field of the ledger rather than a hand-written
+file. The migration step verifies this by listing everything under `/opt/cezar` that is not
+tracked by git and refusing to flip if anything unexpected is there.
 
-### Phase 3 — Atomic release + instant rollback
+### P2 — Self-safe deployer
 
-`/opt/cezar` becomes a symlink → `/opt/cezar/releases/<version-or-sha>`. Deploy builds/stages a
-new release dir off the live path, then flips the symlink atomically. Keep the last N releases;
-rollback = flip the symlink back + reload — seconds, no rebuild.
+The deploy re-executes itself into a transient unit **outside** `cezar.service`'s cgroup before it
+touches anything:
 
-### Phase 4 — Self-safe, health-gated deployer
+```
+systemd-run --unit=cezar-deploy-<releaseId> --collect --same-dir \
+            --property=KillMode=process --property=Type=oneshot \
+            -- <the real deploy command>
+```
 
-Run the deploy as a **transient unit outside** `cezar.service`'s cgroup (`systemd-run`), so
-cutting over or restarting the service never kills the deployer (fixes vector 2 — the bug this
-spec was written from). Gate the traffic flip on a real readiness probe (deeper than `/health`);
-**fail closed** — if readiness fails, never flip, and auto-rollback the symlink. `server-deploy`
-grows a `--strategy=blue-green` path that runs this sequence; the current restart stays as
-`--strategy=restart` for the single-user local case where a blip is fine.
+The parent then *tails the transient unit's log file and exits or reports*; it never holds the
+deploy. Cutting over or restarting `cezar.service` cannot kill the deployer, because it is no
+longer in that cgroup. This alone fixes vector 2 — the bug this spec was written from.
 
-## Data models / interfaces
+The deploy log streams to `/var/log/cezar/deploy-<releaseId>.log` so a cockpit that was itself
+restarted mid-deploy can still read what happened. `server-deploy` learns `--follow` to tail it.
 
-- `cezar-runs.slice` (new) — cgroup slice owning all run scopes, never restarted by a deploy.
-- `/opt/cezar/releases/<id>/` + `/opt/cezar → current` symlink; a `releases.json` ledger
-  `{current, previous, releases: [{id, builtAt, version, sha}]}`.
-- Per-run pidfile + the existing `.ai/cezar/` run record, enough to re-attach after a server
-  restart.
-- `server-deploy --strategy=blue-green|restart` (default stays `restart` until Phase 2 lands).
+### P3 — Socket activation: a listening socket that outlives the process
+
+The fixed-port constraint (correction 1) rules out moving the upstream. So **stop killing the
+socket**: a `cezar.socket` unit owns `127.0.0.1:4321` and passes the listening fd to
+`cezar.service` via `LISTEN_FDS`.
+
+```ini
+# /etc/systemd/system/cezar.socket
+[Socket]
+ListenStream=127.0.0.1:4321
+Backlog=1024
+[Install]
+WantedBy=sockets.target
+```
+
+`cezar.service` gains `Sockets=cezar.socket`, and `serveCommand` learns to listen on the inherited
+fd (`server.listen({ fd: 3 })`) when `LISTEN_FDS=1` and `LISTEN_PID === process.pid`, falling back
+to `listen(port)` otherwise so every non-systemd path (local dev, macOS, `ubuntu-vps`) is
+untouched. `--port-strict`'s refusal is skipped in inherited-fd mode — the whole point is that the
+port is legitimately held, by systemd.
+
+Effect: across a restart the socket never closes. Client connections arriving during the swap sit
+in the kernel accept backlog and are served by the new process — **zero connection refusals, zero
+`ECONNRESET` on connect**. Requests that were mid-flight on the old process still need a graceful
+close, which is the second half of P3: `shutdown` stops accepting, waits up to `CEZ_DRAIN_MS`
+(default 5 s) for in-flight HTTP requests to finish, sends a final `event: reload` SSE frame
+carrying each stream's resume cursor, closes WS with code 1012 (`Service Restart`), then flushes
+and exits. The web client already reconnects; it learns to reconnect *immediately* on 1012/`reload`
+rather than after its backoff, and to resume from the cursor.
+
+**"Gap = 0" is defined and measured as:** across the cutover, (a) zero failed HTTP requests from a
+continuous client, (b) zero refused connections, (c) zero lost or duplicated run events, proven by
+`seq` continuity across the reconnect. It is *not* defined as "no TCP connection was ever closed" —
+an SSE stream is unbounded, so any process replacement must eventually close one; what must not
+happen is a lost byte or a failed request.
+
+### P4 — Runs survive the restart: the detached run broker
+
+This is the architectural change, and the reason the draft's one-line "launch each run in its own
+scope" is not sufficient. Today the server process **is** the consumer of the agent CLI's stdout:
+`ClaudeCliRunner` spawns the child (`packages/cezar/src/core/claude-cli-runner.ts`, `nodeSpawn`)
+and then iterates `readNdjson(child.stdout)` in-process. Moving the child to another cgroup keeps
+it *alive* but severs its output the moment the parent dies — the pipe's read end goes with the
+parent, the child gets `EPIPE` on its next write, and nothing has recorded the stream. Detaching
+the process without relocating the pipe makes things worse, not better.
+
+So the thin pipe-owning layer moves out of the server, and nothing else does:
+
+**`cezar run-broker --spool <dir> -- <argv…>`** (a new hidden subcommand in the same package, so
+there is one artifact to deploy):
+
+- spawns the backend CLI with the given argv / cwd / env (the env built by the existing
+  `buildChildEnv` and passed through, so `CEZ_ENV_PASSTHROUGH` semantics are unchanged);
+- appends every raw stdout line verbatim to `<spool>/out.ndjson`, stderr to `<spool>/err.log`;
+- serves a unix control socket `<spool>/ctl.sock` (mode 0600) speaking one NDJSON request per
+  line: `{op:'send', content}` → child stdin, `{op:'end'}`, `{op:'interrupt'}`, `{op:'status'}`;
+- writes `<spool>/meta.json` at start (`pid`, `backend`, `argv`, `startedAt`, `brokerVersion`) and
+  `<spool>/exit.json` at exit (`code`, `signal`, `exitedAt`);
+- puts itself outside the server's cgroup (mechanism below), and `setsid`s so no terminal or
+  process-group signal reaches it.
+
+**Server side**, a `BrokeredSession` implements the *existing* `AgentSession` interface unchanged
+(`packages/cezar/src/core/agent-runner.ts:183–198`: `result`, `pid`, `sendMessage`, `end`,
+`interrupt`, `open`) by tailing `out.ndjson` from a byte offset and feeding each line into the same
+per-runner handler that `readNdjson(child.stdout)` feeds today. `sendMessage`/`end`/`interrupt`
+become control-socket writes. **Every layer above the runner — the UI mapper, step lifecycle,
+autosave, leases, semaphore, store writes — is untouched**, which is what makes this tractable
+against a 4 168-line `run.ts`.
+
+**Re-attach on boot.** `recover()` gains a branch *before* its existing interrupted-run handling:
+for each `running` run with a spool whose `meta.json` pid is alive and whose `exit.json` is
+absent, re-open the control socket, re-attach a `BrokeredSession` at the run record's persisted
+`consumedOffset`, and leave the run `running`. Nothing is marked failed; no
+`RESTART_CONTINUATION_PROMPT`; the transcript gains one `lifecycle` line ("cezar restarted — this
+run kept going"). The offset is persisted on the run record on every flush, so re-attach replays
+exactly the bytes the old process had not yet consumed: **no gap, no duplicate**. If the pid is
+dead or the spool is unreadable, control falls through to today's behaviour unchanged — the
+existing path stays the safety net rather than being replaced.
+
+**Getting out of the cgroup**, in preference order, probed once at boot and reported on
+`/api/v1/health` so the operator can see which mode is live:
+
+1. `systemd-run --user --scope --slice=cezar-runs.slice` — requires a user manager for `cezar`
+   (`loginctl enable-linger cezar`, done by the install step). Clean, per-run cgroup, survives
+   any `cezar.service` action.
+2. `cezar.service` gains `Delegate=yes` + `KillMode=process`, and the broker is `setsid`-detached
+   into a child cgroup the server creates under its own delegated cgroup. `KillMode=process`
+   means systemd signals only the main process on stop.
+3. No relocation (macOS, non-systemd, container without cgroup delegation): the broker still runs,
+   still spools durably, and still survives an *ordinary* exit of the server — it just does not
+   survive a `KillMode=control-group` teardown. Health reports `runBrokerIsolation: 'none'` so
+   this is visible rather than assumed.
+
+**Backend scope, stated as a decision, not an omission:** P4 covers the **`claude`** backend only
+in this spec. `codex` (app-server transport) and `opencode` (HTTP server) do not own a stdout pipe
+in the same shape and need their own transports brokered; `pi` is a third shape. They keep
+today's interrupt-and-continue behaviour, and `/api/v1/health` reports which backends are
+brokered. This box runs `claude`, so the acceptance criterion is met; the rest is follow-up work
+with a filed todo.
+
+### P5 — Health-gated deploy with auto-rollback
+
+`server-deploy --strategy=blue-green` (the name is kept from the draft for continuity, though
+correction 1 means it is a *release* flip behind a fixed socket, not two live upstreams) runs:
+
+1. `deploy.started` — stage the build into a new release dir (P1). Nothing live has changed.
+2. **Smoke boot.** Start the candidate `dist/index.js` on a scratch port with a throwaway
+   `CEZ_HOME` and a throwaway empty project dir, probe `/api/v1/health` and a deeper readiness
+   route, then kill it. **A throwaway home is mandatory, not hygiene** — correction 2 means a
+   second process pointed at the real `.ai/cezar/` would overwrite `runs.json`. `deploy.release_built`.
+3. Flip the symlink (P1) and `systemctl restart cezar.service`. With P3 the socket is held by
+   `cezar.socket` throughout; with P4 the run brokers are in their own slice and are not signalled.
+   `deploy.cutover` with `gap_ms` and `inflight_runs`.
+4. Probe readiness on the real port. `deploy.instance_ready` / `deploy.drained`.
+5. **Fail closed.** Any failure at 2 or 4 → never flip, or flip back to `previous` and restart →
+   `deploy.rollback`. Rollback is a symlink `rename` plus a restart, so it is subject to exactly
+   the same gapless machinery as the deploy.
+
+The current restart-only path stays as `--strategy=restart` for the single-user local case where a
+blip is fine, and remains the default until P3 and P4 are both live on the box.
+
+---
+
+## Architecture
+
+```
+                       Cloudflare Access ─► cloudflared (token tunnel; ingress config is REMOTE)
+                                                     │
+                                                     ▼   fixed contract, never moves
+                                        ┌────────────────────────────┐
+                                        │ cezar.socket  127.0.0.1:4321│  ← systemd owns the fd
+                                        └─────────────┬──────────────┘     (survives restarts;
+                                                      │ LISTEN_FDS=1        backlog absorbs the swap)
+                                        ┌─────────────▼──────────────┐
+                                        │ cezar.service              │
+                                        │  ExecStart=/opt/cezar/…    │──► symlink ──► /opt/cezar-releases/<id>/
+                                        │  KillMode=process          │                 (atomic rename, ledger)
+                                        └─────────────┬──────────────┘
+                     tail out.ndjson @offset          │  ctl.sock (send/end/interrupt)
+             ┌────────────────────────────────────────┼───────────────────────────┐
+             ▼                                        ▼                           ▼
+   ┌──────────────────┐                     ┌──────────────────┐        cezar-runs.slice
+   │ run-broker <r1>  │                     │ run-broker <r2>  │        (own cgroup — a
+   │  claude ──stdout─┼──► spool/out.ndjson │  claude …        │         cezar.service
+   └──────────────────┘     (durable)       └──────────────────┘         restart never
+                                                                          signals these)
+
+   deploy:  systemd-run --unit=cezar-deploy-<id> --property=KillMode=process   ← outside the
+            └─ stage → smoke-boot (throwaway CEZ_HOME) → flip → restart → probe → rollback  service cgroup
+```
+
+The invariant that makes it work: **the run's output is a file, not a pipe.** Once that is true,
+the server becomes a *replaceable reader* of durable state, and every other property (re-attach
+without loss, deploy at any moment, rollback) follows from replaying a byte offset.
+
+---
+
+## Data models
+
+**`/opt/cezar-releases/deploy.json`** — the release ledger. Additive-safe like every other cezar
+state file (every field optional with `.catch`, `.passthrough()` at each object level, atomic
+tmp+rename write), so an older cezar reading it never loses a newer one's fields:
+
+```jsonc
+{
+  "schema": 1,
+  "current": "20260820T093000Z-67e93cca",
+  "previous": "20260819T180000Z-37a9a978",
+  "keep": 5,
+  "releases": [
+    {
+      "id": "20260820T093000Z-67e93cca",
+      "sha": "67e93cca…",           // full commit sha
+      "version": "0.10.0",          // packages/cezar/package.json
+      "builtAt": "2026-08-20T09:30:00.000Z",
+      "activatedAt": "2026-08-20T09:31:12.000Z",
+      "note": "spec-to-deploy",     // replaces the free-text .deployed-commit
+      "healthy": true               // set by the post-flip readiness probe
+    }
+  ]
+}
+```
+
+**`<dataDir>/runs/<runId>.spool/`** — one broker spool per agent session:
+
+| file | writer | contents |
+| --- | --- | --- |
+| `meta.json` | broker, at start | `{ schema: 1, runId, stepId, backend, pid, argv, cwd, startedAt, brokerVersion }` |
+| `out.ndjson` | broker, append-only | the backend's stdout, verbatim, one line per record |
+| `err.log` | broker, append-only | the backend's stderr |
+| `ctl.sock` | broker | unix stream socket, mode 0600, owner-only |
+| `exit.json` | broker, at exit | `{ code, signal, exitedAt }` |
+
+**`RunRecord`** gains two optional fields (both `.optional().catch(undefined)`, so an older cezar
+parses a newer record and a newer cezar parses an older one):
+
+- `spoolDir?: string` — relative to `dataDir`; absent ⇒ this run was never brokered, take the
+  legacy path.
+- `consumedOffset?: number` — byte offset into `out.ndjson` the server has fully processed. This
+  is the entire re-attach contract.
+
+No migration, no format change to `runs.json` or the event NDJSON. The draft's "changing the state
+format is out of scope" holds.
+
+---
+
+## API / interface contracts
+
+**Control socket** (`<spool>/ctl.sock`), NDJSON request → NDJSON response, one per line:
+
+| request | response | notes |
+| --- | --- | --- |
+| `{"op":"send","content":[…ContentBlock]}` | `{"ok":true}` \| `{"ok":false,"error":"closed"}` | maps to `AgentSession.sendMessage` |
+| `{"op":"end"}` | `{"ok":true}` | stdin EOF, then the runner's existing SIGTERM→SIGKILL watchdog |
+| `{"op":"interrupt"}` | `{"ok":true}` | hard stop, for cancel |
+| `{"op":"status"}` | `{"ok":true,"pid":N,"open":bool,"bytes":N}` | `bytes` = `out.ndjson` size, for re-attach |
+
+**CLI:**
+
+- `cezar run-broker --spool <dir> [--backend <id>] -- <argv…>` — hidden; not in `--help`, because
+  it is an internal artifact, not a user-facing command. Covered by the entry-module reachability
+  test pattern that `.ai/specs/2026-08-19-tasks-page-and-start-grounding.md` established for `kb`.
+- `cezar server-deploy [--strategy=restart|blue-green] [--follow] [--rollback [<releaseId>]]`.
+  Default stays `restart` until P3 and P4 are live on the box.
+
+**HTTP:**
+
+- `GET /api/v1/health` gains `deploy: { releaseId, version, sha, activatedAt }` and
+  `runtime: { socketActivated: bool, runBrokerIsolation: 'scope'|'delegated'|'none', brokeredBackends: string[] }`.
+  Additive only — `packages/contract` schema plus the contract-parity test that already guards
+  every route.
+- `GET /api/v1/ready` (new) — the deeper readiness probe P5 gates on: store loaded, project stores
+  booted, workspace config readable, backends detected. Distinct from `/health`, which is the
+  CORS-open discovery endpoint and must stay cheap and public-shaped.
+- SSE streams gain a terminal `event: reload` frame carrying `{cursor}`; WS closes with 1012.
+
+**systemd units** — `cezar.socket` (new), `cezar.service` gains `Sockets=`, `KillMode=process`,
+`Delegate=yes`; `cezar-runs.slice` (new). Written by a `server-install` step so a fresh box gets
+them, *and* by a one-shot migration for this hand-provisioned box, whose unit no generator in this
+repo currently owns (see Problem). The three existing drop-ins are preserved untouched.
+
+---
+
+## Phases
+
+Each phase is independently shippable and independently valuable. The chain's remaining steps map
+one-to-one onto P1…P5.
+
+| # | Phase | Ships | Verified by |
+| --- | --- | --- | --- |
+| **P1** | Atomic release + ledger | `/opt/cezar` → symlink, `/opt/cezar-releases/`, `deploy.json`, `--rollback` | unit tests on the ledger + flip/rollback; a real flip + rollback on the box |
+| **P2** | Self-safe deployer | `systemd-run` re-exec, deploy log, `--follow` | deploy triggered from inside the cockpit survives a restart of `cezar.service` |
+| **P3** | Socket activation + graceful drain | `cezar.socket`, `LISTEN_FDS` support, drain, `reload` frame, client fast-reconnect | continuous-client harness across a restart: 0 failed requests, 0 refused connections |
+| **P4** | Run broker + re-attach | `cezar run-broker`, `BrokeredSession`, spool, `recover()` re-attach branch, slice/lingering | a `running` run stays `running` across `systemctl restart`, transcript continuous by `seq` |
+| **P5** | Health-gated deploy + rollback | smoke boot, `/api/v1/ready`, `--strategy=blue-green`, analytics | a deliberately broken build never flips; a build that boots-then-fails auto-rolls-back |
+
+**Ordering constraints:** P5 needs P1 (something to flip) and P2 (a deployer that outlives the
+restart it triggers). P3 and P4 are independent of P1/P2 and of each other. P1 alone already
+removes the "half-copied `dist`" failure mode and gives a one-command rollback, so it is worth
+shipping first even if nothing else follows.
+
+---
 
 ## Risks
 
-- **Run re-attach correctness.** The server must reliably re-adopt a detached run and its stream;
-  a missed re-attach orphans a running agent. Mitigate with a pidfile + liveness check + a
-  reconcile pass on boot.
-- **Two instances, one state dir.** During cutover both instances share `.ai/cezar/`. cezar uses
-  a single-writer lock; blue-green must ensure runs stay owned by the instance that spawned them
-  and that append-only NDJSON stays safe for a concurrent reader. Define ownership explicitly.
-- **nginx reload race.** The upstream flip and drain must be ordered so no request lands on a
-  stopped instance; stop the old instance only after `reload` + a drain delay.
-- **Cloudflare Access / auth continuity.** The perimeter must treat both ports identically.
+- **Re-attach correctness is the whole feature.** A missed re-attach orphans a live agent —
+  worse than today, because today's `recover()` at least resumes the task. Mitigation: the
+  re-attach branch is *additive and fails open* — pid dead, spool unreadable, offset past EOF,
+  `meta.json` unparseable, broker version mismatch all fall through to the existing
+  interrupted-run path, which stays exactly as it is. The dangerous direction (a run silently
+  left for dead) is the one the fallback covers.
+- **Two live instances would destroy state** (correction 2). Every phase is designed so it never
+  happens: P3 replaces the process behind one socket rather than running two; P5's smoke boot uses
+  a throwaway `CEZ_HOME` *and* a throwaway project dir. A guard is added at boot — if `runs.json`'s
+  mtime advances while this process holds it and did not write it, log loudly. It is a canary, not
+  a lock; a real cross-process lock is a bigger change and is named as follow-up, not smuggled in.
+- **Cutover latency in place of cutover failure.** Socket activation converts "connection refused"
+  into "queued in the backlog for as long as the new process takes to boot." A cezar boot that
+  takes 8 s makes that an 8 s stall for a request that lands at the wrong moment. Bounded by
+  `Backlog=1024` and measured in verification; if boot time is the binding constraint, that is a
+  separate optimization with a real number attached to it, not a design flaw to hand-wave.
+- **`Delegate=yes` + `KillMode=process` leaks processes on a genuine failure.** A crashed server
+  leaves brokers running with nothing consuming them. Mitigation: brokers get their own idle
+  watchdog (no control connection and no stdout for `CEZ_BROKER_ORPHAN_MS`, default 30 min → they
+  exit), and `recover()` sweeps spools whose runs are terminal, reusing the existing
+  `sweepAgentTmpDirs` pattern (`run.ts:1263`).
+- **Disk.** Five 490 MB releases plus per-run spools. Bounded by `keep` and by the existing
+  retention machinery; the deploy refuses to stage when free space is under a threshold.
+- **The box's unit is not generated by this repo.** P3/P4's unit changes must be applied both by a
+  `server-install` step (for fresh boxes) and by an idempotent one-shot migration (for this box),
+  or the box drifts further from the installer. Related open todo: `7583ce12` (the installer does
+  not create the `cez` wrapper) — same root cause, tracked separately.
+- **Cloudflare Access / tunnel continuity.** `cloudflared` holds a long-lived connection to
+  `127.0.0.1:4321`. Socket activation keeps the listener up, but `cloudflared`'s existing upstream
+  connections still break when the process dies; verification must confirm it re-establishes
+  without an edge-visible 502.
 
-## Verification (plan the test up front)
+---
 
-- **E2E, the acceptance test:** start a long-running agent task, trigger `server-deploy` mid-run,
-  assert (a) the run process survives and completes with its steps intact, (b) the cockpit's SSE
-  reconnects within its backoff with **zero lost events** (seq dedup proves it), (c) HTTP cutover
-  gap measured at the client = 0, (d) the deployer process survives to report success,
-  (e) a forced-bad build never flips traffic and auto-rolls-back. Record video/artifacts.
-- **Unit:** release symlink flip + rollback ledger; run-scope launch + boot re-attach reconcile.
-- **Gates:** typecheck / lint / test green.
+## Verification
 
-## Analytics (name the events now)
+**The acceptance E2E, run on `prod-host`** (this is the test the two acceptance criteria
+name; artifacts and video kept per run):
 
-`deploy.started`, `deploy.release_built`, `deploy.instance_ready`, `deploy.cutover`
-(`gap_ms`, `inflight_runs`), `deploy.drained`, `deploy.rollback` — each with `version`, `sha`,
-`strategy`. The `inflight_runs` at cutover and `gap_ms` are the numbers that prove "non-disruptive."
+1. Start a long-running agent task on the `claude` backend and let it reach a `running` step with
+   live output.
+2. Start a continuous client harness against the public host: an SSE subscriber recording every
+   event `seq`, plus a 10 rps HTTP poller against `/api/v1/ready` recording every status and every
+   connect error, both timestamped.
+3. Trigger `cezar server-deploy --strategy=blue-green` **from inside the cockpit** (an agent task —
+   the exact configuration that broke on 2026-08-19).
+4. Assert:
+   - **(a)** the run's status never leaves `running`; its process tree pid (from `meta.json`) is
+     unchanged before and after; its transcript `seq` sequence has no gap and no duplicate across
+     the restart; no `interrupted — cezar process exited during the run` event exists.
+   - **(b)** the HTTP poller records **zero** non-2xx responses and **zero** connect errors;
+     max observed latency is recorded as `gap_ms`.
+   - **(c)** the SSE subscriber's `seq` stream is continuous across its reconnect.
+   - **(d)** the deploying task itself is alive after the cutover and reports success.
+   - **(e)** repeat with a deliberately broken build (`dist/index.js` truncated): the smoke boot
+     fails, the symlink never flips, `/opt/cezar` still resolves to the old release, and no
+     restart happened at all.
+   - **(f)** repeat with a build that boots and then fails readiness: it flips, readiness fails,
+     the ledger's `previous` is restored, and the client harness still records zero failures
+     across *both* the flip and the rollback.
 
-## Out of scope
+**Automated (must be green before any deploy):**
 
-- Multi-host / horizontal scale-out (this is one box).
-- Changing the state format; all of the above works on the existing JSON/NDJSON/Markdown.
+- Ledger: flip is atomic (no observable moment where `/opt/cezar` is dangling), rollback restores
+  `previous`, `keep` prunes oldest-first, a corrupt `deploy.json` degrades to "no ledger" and
+  refuses to flip rather than flipping blind.
+- Broker: spawn → spool → control socket round-trip; `BrokeredSession` satisfies the `AgentSession`
+  contract against the same golden fixtures `claude-cli-runner.test.ts` uses, so the v1 `AgentEvent`
+  and v2 `UiEvent` streams are **byte-identical** to the in-process path (this is the parity
+  requirement `AGENT_PROTOCOL.md` already imposes on every backend);
+  re-attach at offset N replays exactly the untail'd bytes; re-attach with a dead pid / missing
+  spool / bad `meta.json` falls through to the legacy path.
+- `recover()`: a `running` run with a live spool stays `running` and is not force-continued; every
+  existing `recover()` case (queued, waiting, running-without-spool) is unchanged — asserted
+  against the current tests, which must pass untouched.
+- Socket activation: `LISTEN_FDS`/`LISTEN_PID` parsing (correct pid, wrong pid, absent, `>1` fds),
+  and that `--port-strict`'s refusal is skipped only in inherited-fd mode.
+- Drain: in-flight requests complete; SSE receives the `reload` frame with a usable cursor; WS
+  closes 1012.
+- Contract parity for the new `/api/v1/ready` route and the `/api/v1/health` additions — the
+  existing `contract-parity.*.test.ts` suite covers this by construction.
+- Unit generation: `cezar.socket` + the amended `cezar.service` are asserted as text, and the
+  migration is idempotent (running it twice is a no-op) and preserves the three existing drop-ins.
+
+**Gates:** `npm run typecheck`, `npm run lint`, `npm run test` green before deploy — necessary,
+not sufficient. Until the E2E above has actually run on the box, this ships as **QA Needed**, not
+Done.
+
+---
+
+## Analytics
+
+Named now, per the workspace rule, and emitted by the deployer:
+
+`deploy.started`, `deploy.release_built`, `deploy.instance_ready`, `deploy.cutover`, `deploy.drained`,
+`deploy.rollback` — each with `version`, `sha`, `releaseId`, `strategy`. `deploy.cutover` carries
+the two numbers that *are* the definition of "non-disruptive": **`gap_ms`** (max client-observed
+latency across the swap, 0 failed requests being the pass condition) and **`inflight_runs`**
+(how many runs were live and survived). `deploy.rollback` carries `reason` and `failedAt`
+(`smoke_boot` | `readiness`).
+
+---
+
+## Out of scope (decisions, not omissions)
+
+- **Multi-host / horizontal scale-out.** One box.
+- **A real cross-process lock on `.ai/cezar/`.** Correction 2 makes the case that one is missing,
+  and the canary above makes its absence visible, but every phase here is designed to never need
+  it. Filed as follow-up.
+- **Brokering `codex` / `opencode` / `pi`.** P4 covers `claude` only; see "Backend scope" above.
+  `/api/v1/health` reports which backends are brokered so this is visible, not assumed.
+- **Changing the state format.** Two optional `RunRecord` fields and one new ledger file; nothing
+  existing is migrated.
+- **Moving the tunnel ingress or introducing nginx on this box.** Correction 1 rules the first out
+  as a cutover primitive; the second is a new perimeter component this design does not need.
