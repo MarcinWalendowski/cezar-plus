@@ -1,7 +1,23 @@
 # Reopen every finished task and make it prove its work reached `main`
 
-> **Status: PARTIAL — Phases 1-3 implemented 2026-08-20 (run `a29f2b11`, `implement` step);
-> Phases 4-5 (the production sweep and its record) NOT done, nothing has been reopened yet.**
+> **Status: PARTIAL — Phases 1-3 IMPLEMENTED, SHIPPED and PUSHED 2026-08-20** as commit
+> `0cbb65a4` on `origin/main`, a clean fast-forward `f9bcda42..0cbb65a4`, no PR (this repo ships
+> direct linear commits to `main`, AGENTS.md § "Shipping cezar itself"). Alongside it, `2e421370`
+> — a pre-existing cross-cutting repair this run's gate step uncovered and reproduced at clean
+> `HEAD`: post-conditions were evaluated under `CEZ_DRY_RUN=1`, where the agent is a mock that
+> never commits, so every dry run died at `commit-push`. `npm run typecheck` exit 0; 64 new tests
+> across five files green.
+>
+> **Phases 4-5 — the production sweep and the record it produces — are NOT done. NOTHING HAS BEEN
+> REOPENED, and the owner's ask is therefore NOT yet answered.** This is *QA needed*, not done.
+> Two things stand between here and there, in this order: **(1) deploy the backend** — the watcher
+> only exists in a process started from this code, and `/opt/cezar/.deployed-commit` still read
+> `f9bcda42` when this line was written, i.e. production runs the code from before the change;
+> **(2) then run the sweep** — `cezar runs reopen --all-done --dry-run` (expect 19: workspace 15 /
+> chat 3 / cezar 1), a `--limit 1` canary, then the remaining 18, always with
+> `--exclude a29f2b11-f83a-4c37-92bb-ff538551146a` so the sweep cannot reopen itself. Both are
+> filed as cezar todos so they survive this run ending. See *Status log — 2026-08-20* at the foot.
+>
 > Written in the `spec` step of the same run. The capability now exists end to end —
 > `packages/cezar/src/reopen-requests.ts` (store + `selectDoneUnarchived`),
 > `reopen-watch.ts` (cockpit watcher, wired in `server/server.ts` beside `watchTodoAutostart`),
@@ -451,3 +467,19 @@ Stating it rather than promising events that have nowhere to go.
   evidence on disk either way.
 - **Whether `cez/6af4b894`'s missing run record was deleted or never written.** No trace in
   `runs.json` or its `.bak` files.
+
+## Status log — 2026-08-20 (run `a29f2b11`, workflow `spec-to-deploy`)
+
+| step | outcome |
+|---|---|
+| 1 `spec` | this file, written after reading the KB, the spec dir and a four-run production merge audit. |
+| 2 `implement` | Phases 1-3: `reopen-requests.ts` (store + `selectDoneUnarchived`), `reopen-watch.ts` (cockpit watcher, wired in `server/server.ts`), `runs/reopen-cli.ts` (`cezar runs reopen`, routed in `index.ts`). 5 new test files, 64 tests. |
+| 3 `run-tests` | full suite. Found and fixed a **pre-existing** red from `57fc8807` — post-conditions evaluated under `CEZ_DRY_RUN=1` — reproduced at clean `HEAD` as a control. +3 tests. |
+| 4 `commit-push` | `2e421370` (the dry-run repair) and `0cbb65a4` (the feature), pushed `f9bcda42..0cbb65a4`. Split deliberately: burying a cross-cutting engine repair inside a `feat:` hides it from the `git log -S` archaeology AGENTS.md relies on. |
+| 5 `document` | this status block, the `CHANGELOG.md` Added + Fixed entries, `AGENTS.md`'s post-condition rule given its dry-run carve-out, and three specs marked in place (`steps-green-only-when-verified`, `spec-to-deploy-default-workflow`, `003-handoff-cli`). Todos filed for Phases 4-5. |
+| 6 `deploy` | **pending at the time of writing.** Required before Phase 4 can do anything. No dependency change in the delta, so a `dist` + `web/dist` swap is sufficient — no `npm install` into `/opt/cezar`. |
+
+**What a later session must not conclude from this file.** That the sweep ran. It did not. The
+19 `done` runs on the production Active tab have not been asked whether their work reached `main`,
+and the two runs this spec's audit already caught with commits on no `main` anywhere are still
+unmerged. Phases 1-3 built the door; nobody has walked through it.

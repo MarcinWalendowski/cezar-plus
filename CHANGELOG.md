@@ -5,6 +5,53 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- ✨ **Every finished task can now be reopened and made to prove its work reached `main` — from
+  the box, without a browser.** Spec `.ai/specs/2026-08-20-reopen-finished-tasks-merge-audit.md`,
+  commit `0cbb65a4`.
+
+  The owner asked for one sweep — *"reopen all 'done' tasks from active tab in cezar production
+  (here) with such a promot: \"analyze if changes/fixes/updates from this task were merged into
+  main\" if not, do it now"* — and answering it first required admitting what the board actually
+  says. **The Active/Archived split consults `archived` and never `status`**
+  (`packages/web/src/lib/task-groups.ts:221-223`, server twin `workspace/run-index.ts:328`,
+  cross-project twin `global-tasks.ts:284`), so a `done` run sits on Active until a human archives
+  it — there is no age window and no lifecycle filter. The cockpit also ends every run at a review
+  gate and never auto-merges (AGENTS.md, intro). **"done" has therefore never meant "merged", and
+  nothing on the board said which.** On this box that is 19 runs. A four-run sample audited for the
+  spec found **two whose commits exist on no `main` anywhere** — a 561-line spec expansion in
+  `cezar` and an 8-file, +1000/−54 implementation in `chat` — plus a third whose work is on
+  `origin/main` while the local checkout is three commits behind.
+
+  The engine already had the primitive: `RunManager.continueRun` (`workflows/run.ts:2532`) reopens
+  a `done` run against its original agent session, re-materializing both a reclaimed project
+  worktree and a removed workspace worktree set. What it lacked was **reach**. Its only door is
+  `POST /api/v1/p/:projectId/runs/:id/continue`, production runs `CEZ_AUTH=oidc` behind Cloudflare
+  Access, and an agent on the box has no browser and no session — so the one actor who could do
+  this 19 times could not do it once.
+
+  - **The CLI writes an intent, the running cockpit executes it.** Not a new mechanism: this is
+    exactly the pattern this repo already used to close the identical gap for
+    `cezar todo add --start`, reused wholesale. `cezar runs reopen` (`runs/reopen-cli.ts`, routed
+    in `index.ts`) appends a request to a JSON store (`reopen-requests.ts`); `reopen-watch.ts`,
+    wired in `server/server.ts` beside `watchTodoAutostart`, picks it up and goes through
+    `RunManager` — so a reopened run obeys `maxParallel` and the queue instead of 19 sessions
+    stampeding the box.
+  - **`--all-done` is the Active-tab predicate spelled out:** `status === 'done' && archived !== true`.
+    `selectDoneUnarchived` is table-tested with one row per `RunStatus` member, so a status added
+    to the enum fails a test rather than slipping silently into a production sweep.
+  - **`--dry-run` prints the selection and writes nothing**, `--limit` canaries it, and
+    `--exclude <id>` exists for one specific reason: a sweep launched from inside a run must not
+    reopen itself.
+  - **No new `CEZ_*` var, no config file, no daemon.** The watcher is the cockpit process that is
+    already running — per § Zero config, the capability is discovered, not configured.
+
+  64 new tests across five files, green; `npm run typecheck` exit 0.
+
+  **Not done, and not to be rounded up.** This is Phases 1-3: the capability exists and is
+  **unused**. *Nothing has been reopened yet.* The watcher only exists in a process started from
+  this code, so the sweep needs the backend deployed first; Phase 4 (the 19-run sweep) and Phase 5
+  (a merge verdict recorded per run) are the actual owner ask and are filed as cezar todos so they
+  cannot be lost.
 - 📜 **cezar always self-deploys now — the "do not self-deploy from a running session" rule is
   removed, not merely marked stale.** Owner instruction 2026-08-20.
 
@@ -199,6 +246,26 @@
   its previous behaviour.
 
 ## 🐛 Fixed
+- 🐛 **A dry run could not satisfy a post-condition its own mock never performed, so every
+  dry run died at `commit-push`.** Commit `2e421370`, amending
+  `.ai/specs/2026-08-20-steps-green-only-when-verified.md`.
+
+  A pre-existing red from `57fc8807`, found by this run's gate step and reproduced at clean `HEAD`
+  as a control before being fixed. Under `CEZ_DRY_RUN=1` the agent is a mock: it narrates a step
+  and returns, committing nothing and deploying nothing. The post-conditions `57fc8807` added were
+  evaluated anyway — so `everything-committed` truthfully reported a dirty tree, killed the step,
+  and broke `npm run test:package` **and** `npm run test:e2e` on every branch, not just the one
+  that noticed.
+
+  `evaluatePostcondition` now short-circuits green in a dry run with a `simulated, not verified`
+  verdict — deliberately **after** the unknown-builtin-id check, so a workflow that names a
+  post-condition which does not exist is still caught in a dry run rather than waved through. +3
+  tests in `postconditions.test.ts`.
+
+  The cost is a real narrowing of a claim, so it is written into the rule it qualifies rather than
+  left in a commit message: a step's `done` is a claim about the WORLD **except under
+  `CEZ_DRY_RUN=1`**, where it is a claim about the simulation. `AGENTS.md`, the post-condition spec
+  and the `spec-to-deploy` spec are each marked in place.
 - 🐛 **A step cezar stopped was recorded as a step that failed — and took the rest of the
   workflow down with it.** Spec `.ai/specs/2026-08-20-agent-step-stopped-is-not-failed.md`, commit
   `62a41d30`.
