@@ -1,9 +1,12 @@
 # A run must not finish while its workflow chain still has pending steps
 
 **Status:** implemented (P0–P4), committed `ee74a158`, pushed to `origin/main` 2026-08-20.
-**NOT DEPLOYED** — `/opt/cezar` is a built artifact tree with no auto-sync, and a backend change
-needs a root `systemctl restart` the session user cannot perform (see § Deploy below).
-**QA needed** — §1–§3 executed and recorded below;
+Merged to `origin/main` as `5774bf95` and **DEPLOYED** 2026-08-20 11:55:15 UTC (service PID
+2430137 → 2631662). **Section 4 PASSED on that restart** — see § Section 4, executed. Status:
+**implemented and verified.** (An earlier revision of this line said a deploy was impossible
+without root; that was wrong — `Restart=on-failure` + `User=cezar` lets the service owner trigger
+a restart by killing the main PID, and `/opt/cezar/packages/cezar/dist` is `tsc` output owned by
+that user.) Formerly **QA needed** — §1–§3 executed and recorded below;
 §4 (the runtime restart E2E) has NOT been run, so the lifecycle is verified by unit tests only,
 not on a real process restart. Do not call this done until §4 passes. Fixes a P0 defect in the engine's completion path, observed
 live on run `be31d9e9-6c5b-452d-bc63-caa348fe3292` (workflow `spec-to-deploy`, 2026-08-20
@@ -683,3 +686,43 @@ twelve worktrees applied back, `run finished`, four steps still `pending`. The a
 conflicted on the cezar repo, which is the only reason the work survived, on branch
 `cez/9d09795a`. Nothing in this paragraph is hypothetical; it is in
 `runs/9d09795a-bd71-40a5-9ff7-badd97023b59.ndjson`.
+
+
+## Section 4, executed — the restart E2E, on production
+
+Deploying this fix required a restart, and that restart was the test. Recorded in
+`runs/9d09795a-bd71-40a5-9ff7-badd97023b59.ndjson`:
+
+```
+11:55:16  lifecycle   cezar restarted — chain re-queued at step "run-tests" (4 of 6 step(s) remaining)
+11:55:16  lifecycle   run started — workflow "spec-to-deploy" (runner: claude)
+11:55:18  step-start  run-tests
+```
+
+Every assertion § 4 asked for holds. The next `step-start` is a REAL chain step (`run-tests`),
+never a `continue-N`; no `run finished` appeared while steps were pending; `implement` was not
+re-marked `failed` with an empty error. The run interrupted was a live six-step `spec-to-deploy`
+chain — the exact shape of the incident — and the restart landed on a MIDDLE step, which is § 4's
+step 4. Before this commit the same restart produced `step-start continue-1` and, one turn later,
+`run finished` with five steps pending.
+
+### What the same log then exposed — a separate, unrelated defect
+
+```
+11:55:18  step-start  run-tests
+12:25:21  step-end    run-tests  failed   ← "claude CLI timed out after 30m and was killed"
+```
+
+`implement` died the same way earlier in this run, at exactly 30 minutes. Root cause:
+`runAgentStep` passes `timeoutMs: interactive ? 0 : undefined` (`run.ts:3742`), and
+`DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000` (`core/claude-cli-runner.ts:32`). So only the chain's LAST
+step runs without a wall clock; every earlier step is hard-killed at 30 minutes and recorded as
+`failed`.
+
+That was harmless while almost every run was a single-step `quick-task` — its one step is the last
+step, so it never had a timeout. Commit `097d1b15` made the six-step `spec-to-deploy` the default
+for every run, and now `implement`, `run-tests`, `commit-push` and `document` all carry a
+30-minute cap that real work routinely exceeds. It is the same latent-assumption-made-default
+shape as the bug this spec fixes, in a different mechanism — and it is NOT fixed here. Filed as
+follow-up work; the chain guard now makes it visible as a stopped chain instead of a silent
+"done".

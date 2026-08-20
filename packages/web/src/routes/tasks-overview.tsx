@@ -69,6 +69,7 @@ import {
   type UsageCell,
 } from '@/lib/tasks-table'
 import { usageMetricVisibility } from '@/lib/token-metrics'
+import { useIsDesktop } from '@/lib/use-desktop'
 import { useTaskTableColumns } from '@/lib/use-task-table-columns'
 import { useNow } from '@/lib/use-now'
 import { cn } from '@/lib/utils'
@@ -148,8 +149,15 @@ export function TasksOverview({
   const unread = unreadDoneCount(all)
 
   // One search control, rendered in the desktop header and — below `md`, where that header is
-  // hidden — above the card list, sharing this one `query` state (the pattern global-tasks
-  // already uses). Without the mobile copy the phone had no way to search the home list at all.
+  // hidden — above the card list, sharing this one `query` state. Without the mobile copy the
+  // phone had no way to search the home list at all.
+  //
+  // Gated on `useIsDesktop` rather than a CSS `md:hidden` pair so exactly ONE copy is in the DOM,
+  // the same rule `global-tasks.tsx` states for its cards: two controls carrying the identical
+  // `aria-label="Search tasks"` make every unscoped `getByLabelText` ambiguous (it broke
+  // `routes.test.tsx`), and a screen reader at any width would meet the name twice. jsdom has no
+  // `matchMedia`, so it counts as desktop and tests see only the header copy (`use-desktop.ts`).
+  const isDesktop = useIsDesktop()
   const search = (
     <div className="relative w-full md:w-60">
       <SearchIcon
@@ -232,12 +240,12 @@ export function TasksOverview({
           </Button>
         ) : null}
         {hostUsage}
-        {search}
+        {isDesktop ? search : null}
       </header>
 
       <div className="flex flex-1 flex-col p-3 pb-[calc(90px+env(safe-area-inset-bottom))] md:p-5 md:pb-5">
         {/* Below `md` the desktop header is hidden, so the search box rides here instead. */}
-        <div className="mb-3 md:hidden">{search}</div>
+        {isDesktop ? null : <div className="mb-3">{search}</div>}
         {runs === undefined ? null : visible.length === 0 ? (
           <TasksEmptyState view={view} query={query} />
         ) : (

@@ -331,7 +331,14 @@ describe('ProjectContexts, central-hub activation (W3.1)', () => {
     return contexts;
   }
 
-  async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  /**
+   * Liveness, not latency: these cases assert that a fire-and-forget scan EVENTUALLY settles
+   * without `context()` having awaited it. How fast the index builds is a separate question, owned
+   * by the stated budget in `knowledge/catalog.test.ts` (C18) — so the deadline here only has to
+   * outlast a slow machine, and 2s did not: the scan measured ~2.15s on a loaded shared box and
+   * this timed out at 108% of its own budget while asserting nothing about speed.
+   */
+  async function waitFor(predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (!predicate()) {
       if (Date.now() > deadline) throw new Error('waitFor: timed out');

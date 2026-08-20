@@ -138,6 +138,10 @@ const WORKFLOWS: WorkflowsResponse = {
   workflows: [
     { name: 'quick-task', description: 'Single step, no gates', source: 'built-in', steps: [] },
     { name: 'fix-and-verify', source: 'built-in', steps: [] },
+    // The built-in default since the 2026-08-19 change. Real catalogs always carry it, and
+    // `new-task.tsx` only selects it when the list actually offers it, so omitting it here left the
+    // unknown-skill prefill path with no source at all.
+    { name: 'spec-to-deploy', description: 'Spec, build, gates, ship', source: 'built-in', steps: [] },
   ],
   issues: [],
 }
@@ -614,7 +618,7 @@ describe('picker data flows', () => {
       ...document.querySelectorAll('[data-slot="source-option"]:not([data-source-kind="none"])'),
     ]
     expect(options.map((o) => o.getAttribute('data-source-ref'))).toEqual([
-      'om-fix', 'quick-task', 'fix-and-verify', 'deploy',
+      'om-fix', 'quick-task', 'fix-and-verify', 'spec-to-deploy', 'deploy',
     ])
     const headings = [...document.querySelectorAll('[cmdk-group-heading]')].map((h) => h.textContent)
     expect(headings).toEqual(['Project skills', 'Workflows', 'Global'])

@@ -29,7 +29,7 @@ const run = (status: RunStatus, extra: Partial<ApiRun> = {}): ApiRun => ({
   id: 'r1',
   title: 'do the thing plz',
   titleSummary: 'Do the thing',
-  workflow: 'quick-task',
+  workflow: 'spec-to-deploy',
   task: 'Summarize what this project does.',
   status,
   createdAt: '2026-07-14T12:00:00.000Z',
@@ -683,11 +683,11 @@ describe('meta line, tabs, pill and resume hint', () => {
       }),
     )
     const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
-    // `default`, not `quick-task`: the record still stores `quick-task` (the fixture sets it), but
-    // it is the server's fallback for "no workflow named" and reads as a choice nobody made.
-    // Display only — `displayWorkflowName` in `lib/tasks-table.ts`.
+    // `default`, not `spec-to-deploy`: the record still stores `spec-to-deploy` (the fixture sets
+    // it), but it is the server's fallback for "no workflow named" and reads as a choice nobody
+    // made. Display only — `displayWorkflowName` in `lib/tasks-table.ts`.
     expect(meta.textContent).toContain('default')
-    expect(meta.textContent).not.toContain('quick-task')
+    expect(meta.textContent).not.toContain('spec-to-deploy')
     // #416 pulled runner/model out of the loose dot-list to cut noise, and that still holds — they
     // are not separate chips beside the workflow. But an icon ALONE made "which agent, account and
     // model produced this?" unanswerable without knowing to click it, which is the one question the

@@ -75,7 +75,7 @@ const run = (status: RunStatus, extra: Partial<ApiRun> = {}): ApiRun =>
     id: 'r1',
     title: 'do the thing plz',
     titleSummary: 'Do the thing',
-    workflow: 'quick-task',
+    workflow: 'spec-to-deploy',
     task: 'Summarize what this project does.',
     status,
     createdAt: '2026-07-14T12:00:00.000Z',
@@ -774,7 +774,7 @@ describe('ThreadView', () => {
     renderView(<ThreadView run={run('queued')} thread={reduceThread([])} />)
     const placeholder = document.querySelector('[data-slot="queued-state"]')
     expect(placeholder?.textContent).toContain('Waiting for a free agent slot')
-    // The stored name is `quick-task` (the fixture's), displayed as `default` — see
+    // The stored name is `spec-to-deploy` (the fixture's), displayed as `default` — see
     // `displayWorkflowName`. The queued note is a reference to the workflow, so it maps too.
     expect(placeholder?.textContent).toContain('default · starts automatically')
     expect(document.querySelector('[data-slot="thread-empty"]')).toBeNull()

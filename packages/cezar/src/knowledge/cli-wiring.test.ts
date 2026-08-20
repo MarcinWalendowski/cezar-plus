@@ -114,7 +114,12 @@ describe('the kb command is wired into the CLI entry point', () => {
 
     const { stdout: help } = await cli(['--help']);
     const block = help.slice(help.indexOf('cezar kb'));
-    const advertised = [...block.slice(0, block.indexOf('cezar backup')).matchAll(/·\s*([a-z]+)/g)]
+    // Bounded at the NEXT top-level entry, `cezar todo`. It used to slice to `cezar backup`, which
+    // was the next entry when this was written — `cezar todo` landed between the two afterwards and
+    // its own `· list` fell inside the span, so this asserted that a TODO subcommand existed in the
+    // KB dispatch. The boundary has to be the very next command, or any entry added after `kb`
+    // silently joins the comparison.
+    const advertised = [...block.slice(0, block.indexOf('cezar todo')).matchAll(/·\s*([a-z]+)/g)]
       .map((m) => m[1])
       .filter((word) => word !== 'json');
     expect(advertised.length).toBeGreaterThan(2); // floor: an empty list agrees with anything

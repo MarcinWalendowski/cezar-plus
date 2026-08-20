@@ -150,12 +150,14 @@ describe('workspace runs', () => {
 })
 
 /**
- * `quick-task` is the workflow the server resolves to when a run names none, so it is what nearly
- * every row carries — and printed raw it reads as a choice somebody made. It displays as
- * `default`. **Display only**: the stored name, the API body, the CLI flag and the facet VALUE are
- * all still `quick-task`, which is what `BACKWARD_COMPATIBILITY.md` protects.
+ * `spec-to-deploy` is the workflow the server resolves to when a run names none (the 2026-08-19
+ * default change), so it is what nearly every row carries — and printed raw it reads as a choice
+ * somebody made. It displays as `default`. **Display only**: the stored name, the API body, the CLI
+ * flag and the facet VALUE are all still `spec-to-deploy`, which is what
+ * `BACKWARD_COMPATIBILITY.md` protects. (`quick-task`, the old floor, is now an ordinary named pick
+ * and shows itself verbatim — covered by `tasks-table.test.ts`.)
  */
-describe('the quick-task display name', () => {
+describe('the spec-to-deploy display name', () => {
   const wf = (id: string, workflow: string) => run({ id, projectId: 'api', workflow })
 
   it('groups under the identity but heads the group with the display name', () => {
@@ -163,12 +165,12 @@ describe('the quick-task display name', () => {
     // name — it is the group's identity, and a label in a key is how display text leaks into
     // state — while the heading a reader sees is the display text.
     const groups = groupGlobalTasks(
-      toGlobalTasks([wf('a', 'quick-task'), wf('b', 'plan-first')], PROJECTS),
+      toGlobalTasks([wf('a', 'spec-to-deploy'), wf('b', 'plan-first')], PROJECTS),
       'workflow',
     )
     expect(groups.map((group) => [group.key, group.label]).sort()).toEqual(
       [
-        ['quick-task', 'default'],
+        ['spec-to-deploy', 'default'],
         ['plan-first', 'plan-first'],
       ].sort(),
     )
@@ -178,22 +180,22 @@ describe('the quick-task display name', () => {
     // The mutation: drop either `task.run.workflow` or `displayWorkflowName(...)` from `haystack`.
     // Typing what the column shows must find the row; so must typing the name the API, the CLI
     // and every existing bookmark still use.
-    const tasks = toGlobalTasks([wf('a', 'quick-task'), wf('b', 'plan-first')], PROJECTS)
+    const tasks = toGlobalTasks([wf('a', 'spec-to-deploy'), wf('b', 'plan-first')], PROJECTS)
     const matched = (query: string) =>
       filterGlobalTasks(tasks, filters({ query }), 'active').map((task) => task.run.id)
     expect(matched('default')).toEqual(['a'])
-    expect(matched('quick-task')).toEqual(['a'])
+    expect(matched('spec-to-deploy')).toEqual(['a'])
     // The control: the mapping must not make every row match either word.
     expect(matched('plan-first')).toEqual(['b'])
   })
 
-  it('filters on the stored name, so a shared `?workflow=quick-task` link still works', () => {
+  it('filters on the stored name, so a shared `?workflow=spec-to-deploy` link still works', () => {
     // The display-only contract, made testable. The facet VALUE is the identity; renaming it
     // would silently break every URL anyone has already shared or bookmarked.
-    const tasks = toGlobalTasks([wf('a', 'quick-task'), wf('b', 'plan-first')], PROJECTS)
-    expect(allWorkflows(tasks)).toEqual(['plan-first', 'quick-task'])
+    const tasks = toGlobalTasks([wf('a', 'spec-to-deploy'), wf('b', 'plan-first')], PROJECTS)
+    expect(allWorkflows(tasks)).toEqual(['plan-first', 'spec-to-deploy'])
     expect(
-      filterGlobalTasks(tasks, filters({ workflows: ['quick-task'] }), 'active').map((t) => t.run.id),
+      filterGlobalTasks(tasks, filters({ workflows: ['spec-to-deploy'] }), 'active').map((t) => t.run.id),
     ).toEqual(['a'])
     // And not on the label — `default` is not a workflow anybody can filter by.
     expect(filterGlobalTasks(tasks, filters({ workflows: ['default'] }), 'active')).toEqual([])
