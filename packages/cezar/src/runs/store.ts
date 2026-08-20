@@ -94,6 +94,12 @@ const stepStateSchema = z.object({
   profileId: z.string().optional(),
   /** Dollar cost reported by the claude CLI for this step's turns. */
   costUsd: z.number().optional(),
+  /** Why CEZAR stopped this step, when it did. `status` stays `failed` — `StepStatus` is a
+   *  published union and widening it would break every exhaustive consumer — so this optional
+   *  field carries the one fact `status` cannot: nothing errored, a bound fired. Absent on every
+   *  pre-existing record and on every genuine failure, which keeps `runs.json` parseable both
+   *  ways. Cleared implicitly when the step is re-entered and succeeds. */
+  stopReason: z.enum(['inactivity']).optional(),
 });
 
 /** One prompt message stacked onto a run while it waits for a free agent slot
@@ -204,8 +210,16 @@ export const runRecordSchema = z.object({
    * `failed` is deliberately never used for this: an agent that errored and an agent that was
    * stopped are different facts, and collapsing them would make "bigger budget or bug fix?"
    * unanswerable from the record.
+   *
+   * WIDENED 2026-08-20 with `'inactivity'` — the run's agent produced no output for the runner's
+   * inactivity bound and cezar stopped it. Same category as `'budget'` by exactly the reasoning
+   * above (cezar stopped it; it did not fail), so it lands the same way: `review`, with the
+   * workflow's later steps left `pending` instead of abandoned. Before this, such a stop was
+   * recorded as a plain step failure and ended the whole run — see run `9d09795a`, where the
+   * stopped step had its code written, its gates green and its commit made. Additive at the wire
+   * level: an older cockpit ignores the value and renders an unremarkable `review`.
    */
-  stopReason: z.enum(['budget']).optional(),
+  stopReason: z.enum(['budget', 'inactivity']).optional(),
   /**
    * Cumulative units of budgeted work this run has spent (PLAN D27 Phase 1), checked against
    * `config.stepBudget` — see that field's own doc comment (`config.ts`) for the default and why

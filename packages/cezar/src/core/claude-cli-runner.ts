@@ -14,7 +14,7 @@ import type {
 
 // Re-exported for backends and the run manager that still import them from here.
 export type { AgentSession, SessionOptions } from './agent-runner.ts';
-import { isSignalTerminationExit, trackChildExit } from './agent-runner.ts';
+import { isSignalTerminationExit, stopMessage, trackChildExit } from './agent-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
 import { costWeightedTokens, type RawUsage } from './usage.ts';
 import { readNdjson } from './ndjson.ts';
@@ -44,6 +44,23 @@ import {
  * slot. Bounding silence keeps that guarantee and drops only the false positive.
  */
 export const DEFAULT_RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
+
+/**
+ * The inactivity bound a runner uses when its caller does not pass one: `CEZ_RUN_IDLE_TIMEOUT_MS`
+ * (milliseconds, `0` disables), else `DEFAULT_RUN_IDLE_TIMEOUT_MS`.
+ *
+ * An operator seam, and the only one this bound had: until now 30 minutes was a hard-coded
+ * constant, so a machine whose agents legitimately go quiet for longer — or a workspace that
+ * wants a hung CLI reaped sooner — had to patch the source. Read at CONSTRUCTION, so it applies
+ * per session rather than being frozen at import. An unparseable or negative value is treated as
+ * unset rather than as `0`: a typo in a shell profile must not silently disable a safety bound.
+ */
+export function defaultIdleTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CEZ_RUN_IDLE_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_RUN_IDLE_TIMEOUT_MS;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : DEFAULT_RUN_IDLE_TIMEOUT_MS;
+}
 /** Grace period between SIGTERM and SIGKILL when a timeout fires. */
 export const KILL_GRACE_MS = 10_000;
 /** After `end()` closes stdin: claude in stream-json mode can ignore EOF and
@@ -97,7 +114,7 @@ export class ClaudeCliRunner implements AgentRunner {
       process.env.CEZ_CLAUDE_BIN ??
       (process.env.CEZ_DRY_RUN === '1' ? mockClaudePath() : 'claude');
     this.bin = opts.bin ?? defaultBin;
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_IDLE_TIMEOUT_MS;
+    this.timeoutMs = opts.timeoutMs ?? defaultIdleTimeoutMs();
   }
 
   /** One-shot run: start a session and auto-end it after the first turn. */
@@ -241,7 +258,11 @@ export class ClaudeCliRunner implements AgentRunner {
       deadline = setTimeout(() => {
         timedOut = true;
         interrupt();
-        child.stdout.destroy();
+        // stdout is deliberately NOT destroyed here. It used to be, which made the SIGTERM →
+        // SIGKILL grace window below useless: everything the CLI emitted while winding down —
+        // its final message, a handoff write, a `CEZ:SPEC_PATH` declaration — went on the floor.
+        // The read loop keeps draining until the stream ends on its own, which the SIGKILL
+        // guarantees it eventually does.
         killTimer = setTimeout(() => {
           if (!hasExited()) signalChild('SIGKILL');
         }, KILL_GRACE_MS);
@@ -254,7 +275,8 @@ export class ClaudeCliRunner implements AgentRunner {
     const result = (async (): Promise<AgentRunResult> => {
       try {
         for await (const line of readNdjson(child.stdout)) {
-          if (timedOut) break;
+          // No `if (timedOut) break` here: frames that arrive during the grace window are the
+          // agent's parting words and must still land (see the deadline handler above).
           bump(); // proof of life: the agent is working, so the silence clock starts over
           let msg: ClaudeStreamMessage;
           try {
@@ -298,8 +320,8 @@ export class ClaudeCliRunner implements AgentRunner {
           }
         }
       } catch (err) {
-        // A timeout destroys stdout, which surfaces here as a premature-close
-        // error — expected; rethrow anything else.
+        // A SIGKILLed child tears stdout down mid-frame, which surfaces here as a
+        // premature-close error — expected once we stopped it; rethrow anything else.
         if (!timedOut) throw err;
       } finally {
         if (deadline) clearTimeout(deadline);
@@ -317,11 +339,9 @@ export class ClaudeCliRunner implements AgentRunner {
       const text = textChunks.join('\n').trim();
 
       if (timedOut) {
-        const mins = Math.round((limitMs / 60_000) * 10) / 10;
-        onEvent?.({
-          type: 'error',
-          message: `claude CLI produced no output for ${mins}m and was killed`,
-        });
+        // Not an agent failure: `reason` is what lets the run manager park the run at `review`
+        // and keep the chain's later steps alive, instead of recording this as a failed step.
+        onEvent?.({ type: 'error', message: stopMessage('inactivity', limitMs), reason: 'inactivity' });
         onEvent?.({ type: 'done' });
         return { text, toolCalls, tokensUsed, sessionId: spec.sessionId };
       }

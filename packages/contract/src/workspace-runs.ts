@@ -40,7 +40,7 @@ export const workspaceRunSummarySchema = z.object({
    *  PLAN D27, Phase 1/3. Mirrors `RunRecord.stopReason`; carried here for the same reason
    *  `runIndexEntrySchema` (`runs.ts`) carries it — `deriveAttention` reads it, and without it a
    *  budget-parked run on this board reads as a plain, unremarkable `review`. */
-  stopReason: z.enum(['budget']).optional(),
+  stopReason: z.enum(['budget', 'inactivity']).optional(),
   createdAt: z.string(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),

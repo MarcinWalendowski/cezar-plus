@@ -71,6 +71,18 @@ export interface AgentRunSpec {
 }
 
 /**
+ * The message a cezar-initiated stop reports. Shared by every runner so the run log, the step
+ * record and the cockpit banner all say the same sentence — and so it stays a DIAGNOSIS ("no
+ * output for 30m") rather than the accusation the old wall-clock wording made ("timed out").
+ */
+export function stopMessage(reason: AgentStopReason, limitMs: number): string {
+  const mins = Math.round((limitMs / 60_000) * 10) / 10;
+  return reason === 'inactivity'
+    ? `agent produced no output for ${mins}m and was stopped`
+    : `agent was stopped after ${mins}m`;
+}
+
+/**
  * Backends without a dedicated system-prompt channel (codex app-server,
  * opencode serve) deliver `spec.systemPrompt` as a leading block of the
  * opening user message — the documented per-backend mapping (spec §protocol
@@ -130,6 +142,17 @@ export type ContentBlock =
   | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
 
 /** Normalized event stream — the GUI renders these, the store persists them. */
+/**
+ * Why CEZAR itself stopped a session, as opposed to the agent failing or finishing.
+ *
+ * One member today — the inactivity bound of
+ * `.ai/specs/2026-08-20-agent-step-inactivity-timeout.md` is the only thing that stops a live
+ * session on cezar's initiative. It is a UNION rather than a boolean because the record it lands
+ * on (`stopReason`, `runs/store.ts`) already carries `'budget'` for the same category of fact,
+ * and a second bound would otherwise be indistinguishable from this one after the event.
+ */
+export type AgentStopReason = 'inactivity';
+
 export type AgentEvent =
   | { type: 'text'; text: string }
   | { type: 'tool-call'; id: string; tool: string; input: unknown }
@@ -146,7 +169,13 @@ export type AgentEvent =
   | { type: 'turn-end' }
   | { type: 'note'; message: string }
   | { type: 'done' }
-  | { type: 'error'; message: string };
+  /** `reason` marks a stop CEZAR initiated rather than an agent failure: the run manager parks
+   *  those at `review` with a `stopReason` and keeps the workflow's remaining steps alive,
+   *  instead of recording a failure and ending the chain
+   *  (`.ai/specs/2026-08-20-agent-step-stopped-is-not-failed.md`). Absent on every genuine
+   *  agent/CLI error, which is every pre-existing emitter of this event — so the old shape, and
+   *  every consumer of it, is unchanged. */
+  | { type: 'error'; message: string; reason?: AgentStopReason };
 
 export interface AgentToolCallRecord {
   id: string;

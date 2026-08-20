@@ -11,18 +11,28 @@ import type {
   ContentBlock,
   SessionOptions,
 } from './agent-runner.js';
+import { stopMessage } from './agent-runner.js';
+import { defaultIdleTimeoutMs } from './claude-cli-runner.js';
 import { buildChildEnv } from './agent-env.js';
 import { readNdjson } from './ndjson.js';
 import { createPiUiState, mapPiRpcMessage, piTurnStarted } from './pi-ui-mapper.js';
 
-const DEFAULT_TIMEOUT_MS = 30 * 60_000;
+/*
+ * The inactivity cap comes from the shared `defaultIdleTimeoutMs()` seam, not a local constant.
+ *
+ * This runner was left behind by `.ai/specs/2026-08-20-agent-step-inactivity-timeout.md`, which
+ * converted the claude, codex and opencode runners and not this one — so until now a pi step was
+ * still killed for DURATION, the exact defect that spec exists to remove, just on the one backend
+ * nobody measured.
+ */
 const KILL_GRACE_MS = 10_000;
 const AUTO_END_DELAY_MS = 250;
 
 export interface PiRunnerOptions {
   /** Override the binary name/path; defaults to `pi` on PATH (`CEZ_PI_BIN`). */
   bin?: string;
-  /** Wall-clock timeout for a run (ms); per-spec `timeoutMs` still wins. */
+  /** Inactivity timeout for a run (ms) — time with NO agent output, not total duration.
+   *  Per-spec `timeoutMs` still wins; `0` disables the bound. */
   timeoutMs?: number;
 }
 
@@ -40,7 +50,7 @@ export class PiRunner implements AgentRunner {
 
   constructor(opts: PiRunnerOptions = {}) {
     this.bin = opts.bin ?? process.env.CEZ_PI_BIN ?? (process.env.CEZ_DRY_RUN === '1' ? mockPiPath() : 'pi');
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.timeoutMs = opts.timeoutMs ?? defaultIdleTimeoutMs();
   }
 
   run(spec: AgentRunSpec, onEvent?: (event: AgentEvent) => void): Promise<AgentRunResult> {
@@ -138,19 +148,25 @@ export class PiRunner implements AgentRunner {
       },
     ]);
 
+    // Optional INACTIVITY kill switch, re-armed by `bump()` on every RPC line pi emits, so it
+    // bounds silence rather than duration — the same shape the other three runners use.
     const limitMs = spec.timeoutMs ?? this.timeoutMs;
-    const deadline =
-      limitMs > 0
-        ? setTimeout(() => {
-            timedOut = true;
-            interrupt();
-          }, limitMs)
-        : undefined;
-    deadline?.unref?.();
+    let deadline: NodeJS.Timeout | undefined;
+    const bump = (): void => {
+      if (limitMs <= 0 || timedOut) return; // nothing to arm, or already firing
+      if (deadline) clearTimeout(deadline);
+      deadline = setTimeout(() => {
+        timedOut = true;
+        interrupt();
+      }, limitMs);
+      deadline.unref?.();
+    };
+    bump();
 
     const result = (async (): Promise<AgentRunResult> => {
       try {
         for await (const line of readNdjson(child.stdout)) {
+          bump(); // proof of life: the agent is working, so the silence clock starts over
           let value: unknown;
           try {
             value = JSON.parse(line);
@@ -221,8 +237,9 @@ export class PiRunner implements AgentRunner {
       const exitCode = await waitForExit(child);
       if (spawnError) throw spawnError;
       if (timedOut) {
-        const message = `pi CLI timed out after ${Math.round((limitMs / 60_000) * 10) / 10}m and was killed`;
-        onEvent?.({ type: 'error', message });
+        // Not an agent failure — `reason` routes it to `review` + `stopReason` in the run manager.
+        const message = stopMessage('inactivity', limitMs);
+        onEvent?.({ type: 'error', message, reason: 'inactivity' });
         onEvent?.({ type: 'done' });
         return { text: textChunks.join('').trim(), toolCalls, tokensUsed, sessionId };
       }

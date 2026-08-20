@@ -9,10 +9,10 @@ import type {
   ContentBlock,
   SessionOptions,
 } from './agent-runner.ts';
-import { isSignalTerminationExit, prependSystemPrompt, trackChildExit } from './agent-runner.ts';
+import { isSignalTerminationExit, prependSystemPrompt, stopMessage, trackChildExit } from './agent-runner.ts';
 import {
   AUTO_END_DELAY_MS,
-  DEFAULT_RUN_IDLE_TIMEOUT_MS,
+  defaultIdleTimeoutMs,
   KILL_GRACE_MS,
 } from './claude-cli-runner.ts';
 import { parseAskRequest, type AskQuestion } from './ask.ts';
@@ -66,7 +66,7 @@ export class CodexAppServerRunner implements AgentRunner {
 
   constructor(opts: CodexRunnerOptions = {}) {
     this.bin = resolveCodexExecutable(opts.bin);
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_IDLE_TIMEOUT_MS;
+    this.timeoutMs = opts.timeoutMs ?? defaultIdleTimeoutMs();
   }
 
   run(spec: AgentRunSpec, onEvent?: (event: AgentEvent) => void): Promise<AgentRunResult> {
@@ -166,7 +166,7 @@ class CodexSession implements AgentSession {
       deadline = setTimeout(() => {
         this.timedOut = true;
         this.interrupt();
-        this.child.stdout.destroy();
+        // stdout is NOT destroyed: the grace window exists so the backend's last frames land.
         killTimer = setTimeout(() => {
           if (!this.hasExited()) {
             this.terminatedByCezar = true;
@@ -188,7 +188,7 @@ class CodexSession implements AgentSession {
       try {
         const readLoop = async () => {
           for await (const line of readNdjson(this.child.stdout)) {
-            if (this.timedOut) break;
+            // No early break: frames arriving during the grace window are the agent's last words.
             bump(); // proof of life — restart the silence clock
             let msg: CodexAppServerMessage;
             try {
@@ -244,8 +244,8 @@ class CodexSession implements AgentSession {
       };
 
       if (this.timedOut) {
-        const mins = Math.round((limitMs / 60_000) * 10) / 10;
-        this.emit({ type: 'error', message: `codex app-server produced no output for ${mins}m and was killed` });
+        // Not an agent failure — `reason` routes it to `review` + `stopReason` in the run manager.
+        this.emit({ type: 'error', message: stopMessage('inactivity', limitMs), reason: 'inactivity' });
         this.emit({ type: 'done' });
         return base;
       }

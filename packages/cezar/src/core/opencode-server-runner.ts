@@ -8,9 +8,9 @@ import type {
   ContentBlock,
 } from './agent-runner.ts';
 import type { AgentSession, SessionOptions } from './agent-runner.ts';
-import { prependSystemPrompt, trackChildExit } from './agent-runner.ts';
+import { prependSystemPrompt, stopMessage, trackChildExit } from './agent-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
-import { AUTO_END_DELAY_MS, DEFAULT_RUN_IDLE_TIMEOUT_MS } from './claude-cli-runner.ts';
+import { AUTO_END_DELAY_MS, defaultIdleTimeoutMs } from './claude-cli-runner.ts';
 import { parseModelIdentity } from './model-identity.ts';
 import { V1TextCoalescer } from './v1-text-coalescer.ts';
 import {
@@ -55,7 +55,7 @@ export class OpencodeServerRunner implements AgentRunner {
 
   constructor(opts: OpencodeRunnerOptions = {}) {
     this.bin = opts.bin ?? process.env.CEZ_OPENCODE_BIN ?? 'opencode';
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_IDLE_TIMEOUT_MS;
+    this.timeoutMs = opts.timeoutMs ?? defaultIdleTimeoutMs();
   }
 
   run(spec: AgentRunSpec, onEvent?: (event: AgentEvent) => void): Promise<AgentRunResult> {
@@ -214,8 +214,8 @@ class OpencodeSession implements AgentSession {
         sessionId: this.sessionId ?? spec.sessionId,
       };
       if (this.timedOut) {
-        const mins = Math.round((limitMs / 60_000) * 10) / 10;
-        this.emit({ type: 'error', message: `opencode produced no output for ${mins}m and was killed` });
+        // Not an agent failure — `reason` routes it to `review` + `stopReason` in the run manager.
+        this.emit({ type: 'error', message: stopMessage('inactivity', limitMs), reason: 'inactivity' });
       }
       this.emit({ type: 'done' });
       return base;

@@ -397,3 +397,128 @@ describe('CEZ_APPROVAL_GATE removal (spec Verification row 3, whole packages/cez
     expect(APPROVAL_GATE_RE.test('--permission-mode bypassPermissions')).toBe(false);
   });
 });
+
+/**
+ * The grace window between SIGTERM and SIGKILL has to be REAL.
+ *
+ * The inactivity handler used to call `child.stdout.destroy()` the instant the bound fired, and
+ * the read loop bailed on `if (timedOut) break`. Between them, the 10s grace window bought
+ * nothing: everything the CLI emitted while winding down — its final message, a handoff write, a
+ * `CEZ:SPEC_PATH` declaration — was thrown away, and the step's last words were lost precisely
+ * when they mattered most, on the run that got stopped mid-work.
+ */
+describe('a stopped session keeps draining until the stream really ends', () => {
+  function drainableChild(): {
+    child: ChildProcessWithoutNullStreams;
+    signals: NodeJS.Signals[];
+    frame: (text: string) => void;
+    endStdout: () => void;
+    exit: (code: number) => void;
+  } {
+    const signals: NodeJS.Signals[] = [];
+    const emitter = new EventEmitter();
+    const stdout = new PassThrough();
+    const child = Object.assign(emitter, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      killed: false,
+      pid: 5150,
+      kill: (signal: NodeJS.Signals) => {
+        signals.push(signal);
+        Object.assign(child, { killed: true });
+        return true;
+      },
+    }) as unknown as ChildProcessWithoutNullStreams;
+    const frame = (text: string) =>
+      stdout.write(
+        `${JSON.stringify({
+          type: 'assistant',
+          message: { role: 'assistant', content: [{ type: 'text', text }] },
+        })}\n`,
+      );
+    const exit = (code: number) => {
+      Object.assign(child, { exitCode: code });
+      emitter.emit('exit', code, null);
+    };
+    return { child, signals, frame, endStdout: () => stdout.end(), exit };
+  }
+
+  async function withChild(run: (fake: ReturnType<typeof drainableChild>) => Promise<void>): Promise<void> {
+    const fake = drainableChild();
+    spawnHook.override = () => fake.child;
+    vi.useFakeTimers();
+    try {
+      await run(fake);
+    } finally {
+      vi.useRealTimers();
+      spawnHook.override = null;
+    }
+  }
+
+  it('frames emitted after the SIGTERM still reach the result', async () => {
+    // Guard: restore `child.stdout.destroy()` in the deadline handler, or the `if (timedOut)
+    // break` in the read loop, and this goes red — the parting message never lands.
+    await withChild(async (fake) => {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 60_000 }).startSession({
+        userPrompt: 'do it',
+        cwd: process.cwd(),
+      });
+
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(fake.signals).toEqual(['SIGTERM']);
+
+      fake.frame('here is my handoff before I go');
+      await vi.advanceTimersByTimeAsync(0);
+      fake.endStdout();
+      fake.exit(143);
+
+      const result = await session.result;
+      expect(result.text).toContain('here is my handoff before I go');
+    });
+  });
+
+  it('the stop is reported as a cezar stop, not an agent failure', async () => {
+    await withChild(async (fake) => {
+      const events: AgentEvent[] = [];
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 60_000 }).startSession(
+        { userPrompt: 'do it', cwd: process.cwd() },
+        (event) => events.push(event),
+      );
+
+      await vi.advanceTimersByTimeAsync(60_001);
+      fake.endStdout();
+      fake.exit(143);
+      await session.result;
+
+      const error = events.find((e) => e.type === 'error');
+      // `reason` is what the run manager keys `review`-not-`failed` off.
+      expect(error).toMatchObject({ reason: 'inactivity' });
+      expect((error as { message: string }).message).toContain('no output for 1m');
+    });
+  });
+
+  it('a session that keeps talking is never stopped — the bound measures silence', async () => {
+    await withChild(async (fake) => {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 60_000 }).startSession({
+        userPrompt: 'do it',
+        cwd: process.cwd(),
+      });
+
+      // 90 minutes of steady work in 50s gaps: far past any wall clock, never 60s of silence.
+      for (let i = 0; i < 108; i++) {
+        await vi.advanceTimersByTimeAsync(50_000);
+        fake.frame(`working ${i}`);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      expect(fake.signals).toEqual([]);
+
+      fake.endStdout();
+      fake.exit(0);
+      const result = await session.result;
+      expect(result.text).toContain('working 107');
+    });
+  });
+});

@@ -31,7 +31,7 @@ import {
 import { todosPath } from '../todos.ts';
 import { knowledgeSystemPrompt, loadKnowledgeSummary, type KnowledgePromptSummary } from '../knowledge/prompt.ts';
 import { knowledgeWriteFilePath } from '../knowledge/proposals.ts';
-import type { AgentEvent, ContentBlock } from '../core/agent-runner.ts';
+import type { AgentEvent, AgentStopReason, ContentBlock } from '../core/agent-runner.ts';
 import { discoverSkills, type Skill } from '../skills.ts';
 import { materializeSkillDir } from '../skills-remote.ts';
 import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
@@ -254,6 +254,17 @@ interface ActiveRun {
    * wrap-up that has to act on it.
    */
   chainHandBack?: boolean;
+  /**
+   * Cezar itself stopped the running agent session — the inactivity bound fired
+   * (`.ai/specs/2026-08-20-agent-step-stopped-is-not-failed.md`), the agent did not fail.
+   *
+   * Carried on `state` for the same reason `budgetExceeded` is: the runner reports it through an
+   * `error` event inside `onEvent`, and `execute()`'s step loop — which is what has to decide
+   * `review`-not-`failed`, and whether to re-enter the step — cannot see that event while its
+   * `await this.runAgentStep(...)` for that very step is still in flight. Set per step attempt,
+   * consumed by the step loop.
+   */
+  stepStopped?: AgentStopReason;
   /** Registry snapshot used to expand `/skill` follow-ups before a backend can
    *  mistake them for its own slash commands (#676). */
   skills?: Skill[];
@@ -572,6 +583,25 @@ const VARIANT_HINTS: Record<string, string | undefined> = {
 
 const RESTART_CONTINUATION_PROMPT =
   'The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.';
+
+/**
+ * The prompt a step gets when it is re-entered after CEZAR stopped it for inactivity.
+ *
+ * It resumes the SAME session, so the work so far is already in context. What the agent does not
+ * know is why its turn ended — and an agent that assumes it crashed re-does finished work.
+ * Deliberately different from `RESTART_CONTINUATION_PROMPT`: a restart lost the process, this did
+ * not. The instruction that matters is "land what you have", because the same bound is armed
+ * again for the retry and a second stop ends the run.
+ */
+export function stoppedContinuationPrompt(_reason: AgentStopReason): string {
+  return (
+    'Your previous turn did not end on its own — cezar stopped the session because it had ' +
+    'produced no output for too long. Nothing you already did was undone: this is the same ' +
+    'session, so check the work on disk before redoing any of it. Prioritise landing what you ' +
+    'have — finish the current change, update the handoff file (CEZ_HANDOFF_FILE), and end the ' +
+    'turn. This is the one automatic retry; the same limit is armed again.'
+  );
+}
 
 /**
  * The restart prompt, told where in the chain it landed (spec 2026-08-20, P3). The engine and
@@ -3300,6 +3330,17 @@ export class RunManager {
     // not a resumed turn.
     let resumeFrom = resumeIdx === (resumeAt?.index ?? -1) ? resumeAt?.resume : undefined;
 
+    /** Steps already re-entered once after a cezar-initiated stop. One retry per step: a second
+     *  stop is terminal for the run rather than a loop. */
+    const resumedAfterStop = new Set<string>();
+    /** The resume handle a re-entry hands to the step it is re-running. Distinct from
+     *  `resumeFrom`, which belongs to a RESTART re-entry and is spent on `resumeIdx` only. */
+    let stopResume: { sessionId: string; profileId?: string; prompt: string } | undefined;
+    /** Set when a stop is terminal for this run: it parks at `review` with this reason, and the
+     *  steps after it stay `pending`. Deliberately NOT `runError` — a run cezar stopped is not a
+     *  run that failed, and collapsing them makes the record unable to answer which it was. */
+    let stopReason: AgentStopReason | undefined;
+
     let i = resumeIdx;
     while (i < workflow.steps.length) {
       if (state.cancelled) break;
@@ -3325,8 +3366,12 @@ export class RunManager {
         // The last agent step of the workflow is interactive: after its turn
         // the session stays open for follow-ups until finish/idle/cancel.
         const interactive = i === lastAgentIdx && i === workflow.steps.length - 1;
-        const stepResume = i === resumeIdx ? resumeFrom : undefined;
+        // A stop re-entry's handle wins: it is for THIS iteration of THIS step, whereas
+        // `resumeFrom` belongs to the restart that opened the loop and is spent on `resumeIdx`.
+        const stepResume = stopResume ?? (i === resumeIdx ? resumeFrom : undefined);
+        stopResume = undefined;
         resumeFrom = undefined;
+        state.stepStopped = undefined;
         const failure = await this.runAgentStep(
           runId,
           state,
@@ -3347,6 +3392,49 @@ export class RunManager {
         startAttachments = [];
         checkFailure = null;
         if (state.cancelled) break;
+        const stopped = state.stepStopped;
+        state.stepStopped = undefined;
+        if (failure && stopped) {
+          // A stop cezar initiated. Three things must NOT happen here, all of which did on run
+          // 9d09795a: the step must not read as an agent failure, the RUN must not be marked
+          // `failed`, and the steps after it must not be abandoned into ad-hoc `continue-N` chat.
+          const record = this.store.getRun(runId)?.steps.find((st) => st.id === step.id);
+          // Name the numbers now, so "how often does this fire, and how far in?" has an answer
+          // next time instead of a grep. The run's own NDJSON is the analytics surface.
+          emit({
+            type: 'metric',
+            stepId: step.id,
+            name: 'run.step.stopped',
+            runId,
+            workflow: workflow.name,
+            reason: stopped,
+            elapsedMs: record?.startedAt ? Date.now() - Date.parse(record.startedAt) : undefined,
+            tokensUsed: record?.tokensUsed,
+            attempt: resumedAfterStop.has(step.id) ? 2 : 1,
+          });
+          if (!resumedAfterStop.has(step.id) && record?.sessionId) {
+            // Re-enter the SAME session once. The work is on disk and in the session; starting
+            // over would discard it, and a cold continuation costs more than the bound saved.
+            resumedAfterStop.add(step.id);
+            emit({
+              type: 'note',
+              stepId: step.id,
+              message: `${failure} — resuming the same session once`,
+            });
+            emit({ type: 'metric', stepId: step.id, name: 'run.step.resumed_after_stop', runId, reason: stopped });
+            this.store.updateStep(runId, step.id, { status: 'pending', error: undefined });
+            stopResume = {
+              sessionId: record.sessionId,
+              // `sessionId` and `profileId` are a PAIR — see `chainResumeAt`.
+              ...(record.profileId ? { profileId: record.profileId } : {}),
+              prompt: stoppedContinuationPrompt(stopped),
+            };
+            continue; // same `i`
+          }
+          this.finishStep(runId, step.id, 'failed', failure, emit, stopped);
+          stopReason = stopped;
+          break;
+        }
         if (failure) {
           this.finishStep(runId, step.id, 'failed', failure, emit);
           runError = `step "${step.id}" failed: ${failure}`;
@@ -3406,6 +3494,24 @@ export class RunManager {
       }
       this.store.updateRun(runId, { status: 'cancelled', finishedAt, currentStepId: undefined });
       emit({ type: 'lifecycle', message: 'run cancelled' });
+    } else if (stopReason) {
+      // `review`, never `failed` — the precedent `stopReason: 'budget'` set: an agent cezar
+      // stopped is not an agent that errored, and `review` is already resumable from the
+      // cockpit's Continue action. The steps after this one were never touched, so they stay
+      // `pending` and the chain is still there to finish.
+      this.store.updateRun(runId, {
+        status: 'review',
+        stopReason,
+        finishedAt,
+        currentStepId: undefined,
+        // May have been parked `monitoring` when the stop landed — stale the moment the run is
+        // no longer `running` at all.
+        activity: undefined,
+      });
+      emit({
+        type: 'lifecycle',
+        message: `run stopped — the agent produced no output for too long; review before continuing`,
+      });
     } else if (runError) {
       this.store.updateRun(runId, { status: 'failed', error: runError, finishedAt, currentStepId: undefined });
       emit({ type: 'lifecycle', message: `run failed — ${runError}` });
@@ -3544,6 +3650,11 @@ export class RunManager {
       emit({ ...event, stepId: step.id });
       if (event.type === 'error') {
         sessionError ??= event.message;
+        // A stop CEZAR initiated carries `reason`; a genuine agent/CLI error does not. Keeping
+        // the two apart is the whole point: the record used to say `failed` for both, so on run
+        // 9d09795a the owner had to hand-annotate the handoff to explain that a step whose code
+        // was written, gates green and commit made had not actually failed.
+        if (event.reason) state.stepStopped ??= event.reason;
         state.session?.interrupt();
         return;
       }
@@ -4436,14 +4547,29 @@ export class RunManager {
     status: 'done' | 'failed',
     error: string | undefined,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+    /** Set only when CEZAR stopped the step. `status` stays `failed` — `StepStatus` is a
+     *  published union and widening it would break every exhaustive consumer — so this field is
+     *  the one thing that tells a reader, and the cockpit, that nothing actually errored. */
+    stopReason?: AgentStopReason,
   ): void {
     this.store.updateStep(runId, stepId, {
       status,
       error,
+      ...(stopReason ? { stopReason } : {}),
       finishedAt: new Date().toISOString(),
     });
-    emit({ type: 'step-end', stepId, status, ...(error ? { error } : {}) });
-    appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=${status}`);
+    emit({
+      type: 'step-end',
+      stepId,
+      status,
+      ...(error ? { error } : {}),
+      ...(stopReason ? { stopReason } : {}),
+    });
+    appendHandoffHeartbeat(
+      this.dataDir,
+      runId,
+      `step "${stepId}" complete — status=${status}${stopReason ? ' (stopped, not failed)' : ''}`,
+    );
   }
 }
 

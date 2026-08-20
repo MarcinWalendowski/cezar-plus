@@ -1,4 +1,11 @@
-import { ChevronDownIcon, CircleCheckIcon, CircleIcon, CircleXIcon, LoaderCircleIcon } from 'lucide-react'
+import {
+  ChevronDownIcon,
+  CircleCheckIcon,
+  CircleIcon,
+  CirclePauseIcon,
+  CircleXIcon,
+  LoaderCircleIcon,
+} from 'lucide-react'
 import { useState } from 'react'
 
 import type { StepState, StepStatus } from '@loki-labs/better-cezar-api-client'
@@ -13,10 +20,25 @@ import { cn } from '@/lib/utils'
  * command cards (`thread-state.ts` `check-output`); this rail is only the state summary.
  */
 
-/** The four rail glyphs. Pure so the status → glyph table is testable without rendering. */
-export type RailVisual = 'done' | 'active' | 'pending' | 'failed'
+/** The rail glyphs. Pure so the status → glyph table is testable without rendering. */
+export type RailVisual = 'done' | 'active' | 'pending' | 'failed' | 'stopped'
 
-export function railVisual(status: StepStatus): RailVisual {
+/** What the glyph table reads. A STEP, not a bare status: a step cezar stopped is persisted
+ *  `status: 'failed'` — `StepStatus` is a published union and widening it would break every
+ *  exhaustive consumer — and `stopReason` is the only thing that says nothing errored. A bare
+ *  status is still accepted, for the callers that genuinely only have one. */
+export type RailStep = Pick<StepState, 'status'> & { stopReason?: StepState['stopReason'] }
+
+/**
+ * A step CEZAR stopped is not a step that failed. The run that motivated this had two steps whose
+ * code was written, gates green and commit made, and whose rail showed a red X — the owner had to
+ * hand-annotate the handoff to say the kills were not failures. An amber pause glyph is what makes
+ * the rail say it instead.
+ */
+export function railVisual(step: RailStep | StepStatus): RailVisual {
+  const status = typeof step === 'string' ? step : step.status
+  const stopReason = typeof step === 'string' ? undefined : step.stopReason
+  if (status === 'failed') return stopReason ? 'stopped' : 'failed'
   switch (status) {
     case 'done':
       return 'done'
@@ -24,7 +46,8 @@ export function railVisual(status: StepStatus): RailVisual {
     case 'waiting': // the agent paused mid-step — the step is still the live one
     case 'review': // parked at the review gate — same: in flight until accepted
       return 'active'
-    case 'failed':
+    // `failed` is handled above, where `stopReason` splits a stop from a real failure — so the
+    // narrowed union here no longer contains it.
     case 'cancelled':
       return 'failed'
     case 'pending':
@@ -57,11 +80,16 @@ export function StepRail({ steps }: { steps: StepState[] }) {
         <div
           key={step.id}
           data-slot="step-row"
-          data-visual={railVisual(step.status)}
+          data-visual={railVisual(step)}
           className="flex min-h-[22px] min-w-0 items-center gap-2 text-[13px] text-muted-foreground"
         >
-          <RailIcon visual={railVisual(step.status)} />
+          <RailIcon visual={railVisual(step)} />
           <span className="min-w-0 truncate font-medium text-foreground">{step.name}</span>
+          {step.stopReason ? (
+            <span data-slot="step-stop-reason" className="shrink-0 text-xs text-pending-strong">
+              stopped — no output
+            </span>
+          ) : null}
           {step.iterations > 1 ? (
             <span data-slot="step-iterations" className="shrink-0 text-xs text-soft-foreground tabular-nums">
               ×{step.iterations}
@@ -95,6 +123,9 @@ function RailIcon({ visual }: { visual: RailVisual }) {
       )
     case 'failed':
       return <CircleXIcon aria-hidden className={cn(base, 'text-danger')} />
+    case 'stopped':
+      // A pause glyph, not an X: cezar stopped this step at a bound, nothing errored.
+      return <CirclePauseIcon aria-hidden className={cn(base, 'text-pending-strong')} />
     case 'pending':
       return <CircleIcon aria-hidden className={cn(base, 'text-soft-foreground')} />
   }
@@ -103,10 +134,10 @@ function RailIcon({ visual }: { visual: RailVisual }) {
 /** The step the summary line speaks for: the first ACTIVE step (running/waiting/review); else the
  *  next step still to run (first pending), so a not-yet-started or between-steps run reads honestly;
  *  else the last step, so a finished workflow reads "step N of N". */
-export function activeStepIndex(steps: ReadonlyArray<Pick<StepState, 'status'>>): number {
-  const active = steps.findIndex((step) => railVisual(step.status) === 'active')
+export function activeStepIndex(steps: ReadonlyArray<RailStep>): number {
+  const active = steps.findIndex((step) => railVisual(step) === 'active')
   if (active >= 0) return active
-  const pending = steps.findIndex((step) => railVisual(step.status) === 'pending')
+  const pending = steps.findIndex((step) => railVisual(step) === 'pending')
   if (pending >= 0) return pending
   // `steps.length - 1` would hand an empty list back a -1 that indexes nothing; 0 keeps every
   // caller's `steps[index]` honest (undefined for an empty list, never a silent wrong element).
@@ -121,7 +152,8 @@ function StepDot({ visual }: { visual: RailVisual }) {
       ? 'bg-success'
       : visual === 'failed'
         ? 'bg-danger'
-        : visual === 'active'
+        : // amber, like `active` — a stopped step is a decision waiting, not an outcome
+        visual === 'active' || visual === 'stopped'
           ? 'bg-pending'
           : 'bg-soft-foreground'
   return (
@@ -165,7 +197,7 @@ export function WorkflowSteps({ runId, steps }: { runId: string; steps: StepStat
       >
         <span data-slot="step-dots" className="flex shrink-0 items-center gap-1">
           {steps.map((step) => (
-            <StepDot key={step.id} visual={railVisual(step.status)} />
+            <StepDot key={step.id} visual={railVisual(step)} />
           ))}
         </span>
         <span className="min-w-0 max-w-[45%] shrink truncate font-semibold text-foreground">{current.name}</span>

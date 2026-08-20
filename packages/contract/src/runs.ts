@@ -92,6 +92,11 @@ export const stepStateSchema = z.object({
    *  selection. Absent on records written before accounts existed. */
   profileId: z.string().optional(),
   costUsd: z.number().optional(),
+  /** Why CEZAR stopped this step, when it did: today only `'inactivity'` — the agent produced no
+   *  output for the runner's bound. `status` stays `failed` (`StepStatus` is a published union),
+   *  so this is the only thing that says nothing actually errored, and it is what the step rail
+   *  renders "stopped" rather than a red X from. Absent on every genuine failure. */
+  stopReason: z.enum(['inactivity']).optional(),
 });
 export type StepState = z.infer<typeof stepStateSchema>;
 
@@ -227,7 +232,7 @@ export const runRecordSchema = z.object({
    * package, so adding a member would break a consumer switching over it exhaustively. This field
    * is new and optional, so an older build round-trips it untouched.
    */
-  stopReason: z.enum(['budget']).optional(),
+  stopReason: z.enum(['budget', 'inactivity']).optional(),
   /** Cumulative units of budgeted work this run has spent (PLAN D27 Phase 1) — one check-step
    *  attempt, or one agent turn (opening turn, follow-up, self-continuation nudge, or monitoring
    *  wake-up all count equally). See `stopReason` above and `stepsUsed`'s doc comment in
@@ -422,7 +427,7 @@ export const runIndexEntrySchema = z.object({
    *  here because `deriveAttention` reads it to tell a budget stop apart from an ordinary review
    *  on the two cross-project boards (`global-tasks.tsx`, `workspace-tasks.tsx`) — without it a
    *  budget-parked run across every OTHER project reads as a plain, unremarkable `review`. */
-  stopReason: z.enum(['budget']).optional(),
+  stopReason: z.enum(['budget', 'inactivity']).optional(),
   createdAt: z.string(),
   finishedAt: z.string().optional(),
   /** With `status`/`finishedAt`/`archived`, the four inputs `isUnread` reads — what lets the

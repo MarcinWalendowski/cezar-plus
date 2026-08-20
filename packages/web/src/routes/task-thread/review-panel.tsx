@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   CheckIcon,
+  ClockIcon,
   CopyIcon,
   CornerUpLeftIcon,
   ExternalLinkIcon,
@@ -27,6 +28,43 @@ import { useContinuationProvider } from './continuation-provider'
 import { useFinishRun } from './use-finish-run'
 
 /**
+ * The banner a `review` run gets when CEZAR stopped it rather than it finishing. One table for
+ * every reason, so a newly added stop reason cannot silently inherit "here is finished work to
+ * look at" — the exact defect D27 Phase 4a fixed for `'budget'`, and that
+ * `'inactivity'` would otherwise have reintroduced.
+ *
+ * `undefined` for a plain review (and for any reason an older server sends that this build does
+ * not know), which falls through to the untouched violet banner — the historical rendering.
+ */
+function stopBanner(
+  reason: ApiRun['stopReason'],
+): { reason: string; Icon: typeof GaugeIcon; headline: string; detail: string } | undefined {
+  switch (reason) {
+    case 'budget':
+      return {
+        reason: 'budget',
+        Icon: GaugeIcon,
+        headline: 'Stopped — step budget reached, work is incomplete.',
+        detail:
+          'The agent hit its step ceiling mid-task, not finished work. Read what it got through, ' +
+          'send it back with a bigger budget, or accept what is here.',
+      }
+    case 'inactivity':
+      return {
+        reason: 'inactivity',
+        Icon: ClockIcon,
+        headline: 'Stopped — the agent went silent, work is incomplete.',
+        detail:
+          'The backend produced no output for long enough that cezar stopped it rather than let ' +
+          'it hold a slot, and it had already been resumed once. The work on disk is intact — ' +
+          'read what it got through, then send it back or accept what is here.',
+      }
+    default:
+      return undefined
+  }
+}
+
+/**
  * The review gate (spec 009, §"Task thread" review bullet) on the new surface — cezar's core
  * promise that nothing auto-merges. The flow is UNCHANGED from web/app.js `renderReviewPanel`;
  * only the surface is redesigned: a violet review banner, the diff as collapsible per-file
@@ -43,22 +81,19 @@ import { useFinishRun } from './use-finish-run'
  * sense for an incomplete run, so `RunDiff`/`ReviewActions` are unchanged underneath.
  */
 export function ReviewPanel({ run }: { run: ApiRun }) {
-  const budgetStopped = run.stopReason === 'budget'
+  const stopped = stopBanner(run.stopReason)
   return (
     <section data-slot="review-panel" aria-label="Review the changes" className="flex flex-col gap-3">
-      {budgetStopped ? (
+      {stopped ? (
         <div
           data-slot="review-banner"
-          data-stop-reason="budget"
+          data-stop-reason={stopped.reason}
           className="flex items-center gap-2.5 rounded-md border border-pending/40 bg-pending/10 px-3.5 py-2.5"
         >
-          <GaugeIcon className="size-4 shrink-0 text-pending-strong" aria-hidden="true" />
+          <stopped.Icon className="size-4 shrink-0 text-pending-strong" aria-hidden="true" />
           <p className="min-w-0 text-[13px]">
-            <span className="font-semibold">Stopped — step budget reached, work is incomplete.</span>{' '}
-            <span className="text-muted-foreground">
-              The agent hit its step ceiling mid-task, not finished work. Read what it got through,
-              send it back with a bigger budget, or accept what is here.
-            </span>
+            <span className="font-semibold">{stopped.headline}</span>{' '}
+            <span className="text-muted-foreground">{stopped.detail}</span>
           </p>
         </div>
       ) : (

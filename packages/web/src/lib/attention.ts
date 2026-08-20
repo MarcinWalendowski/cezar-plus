@@ -92,6 +92,9 @@ export type AttentionInput = Pick<RunRecord, 'status' | 'activity' | 'autoResume
  *    `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`, "a budget stop looks
  *    exactly like finishing" — the defect this branch exists to prevent). Ahead of the plain
  *    `review` rung below because the chain is first-match-wins.
+ *  - `review` with `stopReason: 'inactivity'` → amber too, for exactly the reason above: cezar
+ *    stopped the agent because it went silent, so this is unfinished work waiting on a decision,
+ *    not finished work waiting on a read.
  *  - `review` → violet, matching the violet PR chip beside it: there is work to look at.
  *    (The legacy UI painted both amber; the redesign splits them, per the mockup.)
  *  - `running` → violet, pulsing.
@@ -119,6 +122,9 @@ export function deriveAttention(run: AttentionInput): Attention {
   }
   if (run.status === 'review' && run.stopReason === 'budget') {
     return { bucket: 'waiting', tone: 'pending', pulse: true, label: 'budget stopped' }
+  }
+  if (run.status === 'review' && run.stopReason === 'inactivity') {
+    return { bucket: 'waiting', tone: 'pending', pulse: true, label: 'stopped — no output' }
   }
   if (run.status === 'review') {
     return { bucket: 'waiting', tone: 'violet', pulse: true, label: 'needs review' }

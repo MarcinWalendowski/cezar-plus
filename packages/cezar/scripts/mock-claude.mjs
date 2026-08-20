@@ -133,6 +133,16 @@ async function respond(userText, imageCount) {
     ? '\nCEZ:PR=4242\nCEZ:ISSUE=17\nCEZ:TITLE=implementing marker refs'
     : '';
 
+  // `mock:hang` in the message, or CEZ_MOCK_HANG=1 in the env → never answer this turn: the
+  // process stays alive and emits nothing. This is the shape the INACTIVITY bound exists for — a
+  // CLI that is alive but wedged. The PROMPT form hangs only the opening turn (a resumed retry
+  // carries a different prompt and answers normally, which is how the resume-once path is
+  // testable); the ENV form hangs every turn, which is how "a second stop ends the run" is.
+  if (process.env.CEZ_MOCK_HANG === '1' || userText.includes('mock:hang')) {
+    await new Promise(() => {});
+    return;
+  }
+
   // `mock:slow` → hold the turn for ~25 s so queue states are observable.
   if (userText.includes('mock:slow')) await sleep(25_000);
 
