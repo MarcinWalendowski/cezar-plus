@@ -119,6 +119,7 @@ import {
   type TodoItem,
 } from '../todos.ts';
 import { watchTodoAutostart, type TodoAutostartProject } from '../todo-autostart.ts';
+import { watchReopenRequests, type ReopenWatchProject } from '../reopen-watch.ts';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.ts';
 import {
   HistoryCursorError,
@@ -1549,6 +1550,22 @@ export function createApp(deps: ServerDeps) {
     if (ctx) watchTodoAutostart(todoAutostartProject(ctx));
   }
   contexts.onContextBuilt((ctx) => watchTodoAutostart(todoAutostartProject(ctx)));
+
+  // Phase 2 reopen inbox (`.ai/specs/2026-08-20-reopen-finished-tasks-merge-audit.md`,
+  // `reopen-watch.ts`) — the same wiring, one line lower, for the same reason: `cezar runs reopen`
+  // writes an inert request file and THIS process, the one that owns the project's `RunManager`,
+  // is what turns it into a continuation. Self-healing on a rebuilt context exactly like
+  // `watchTodoAutostart` above; see `watchReopenRequests`' own doc comment.
+  const reopenWatchProject = (ctx: { dataDir: string; manager: RunManager }): ReopenWatchProject => ({
+    dataDir: ctx.dataDir,
+    manager: ctx.manager,
+  });
+  watchReopenRequests(reopenWatchProject(bootContext));
+  for (const id of contexts.ids()) {
+    const ctx = contexts.peek(id);
+    if (ctx) watchReopenRequests(reopenWatchProject(ctx));
+  }
+  contexts.onContextBuilt((ctx) => watchReopenRequests(reopenWatchProject(ctx)));
 
   const app = new Hono();
 

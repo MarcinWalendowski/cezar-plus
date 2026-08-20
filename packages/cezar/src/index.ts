@@ -17,6 +17,7 @@ import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveWorktreeRetention } from
 import { reclaimWorktrees } from './runs/retention.ts';
 import { RunStore } from './runs/store.ts';
 import { runRunStatsCommand } from './runs/stats-cli.ts';
+import { runRunsCommand } from './runs/reopen-cli.ts';
 import { RunManager } from './workflows/run.ts';
 import { loadWorkflows } from './workflows/load.ts';
 import { DEFAULT_WORKFLOW_NAME } from './workflows/types.ts';
@@ -59,6 +60,11 @@ Usage:
   cezar run stats <runId>   tool economy for a finished run: calls, model round
                             trips, batch factor (calls/round-trip), model vs
                             tool time, sub-agent calls — per step [--json]
+  cezar runs reopen         reopen finished tasks and ask them something:
+                            --all-done [--project <id|path|all>] [--prompt "..."]
+                            [--dry-run] [--limit <n>] [--exclude <runId>] — the
+                            running cockpit continues each one (run "cezar runs"
+                            for the full usage)
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
   cezar projects            list the projects this cockpit serves
                             (also: projects add [<dir>] · projects remove <id>)
@@ -184,6 +190,27 @@ async function main(): Promise<void> {
     const statsCwd = resolve(process.cwd());
     const statsRepoRoot = (await getRepoInfo(statsCwd))?.root ?? statsCwd;
     process.exitCode = await runRunStatsCommand(rawArgs.slice(2), { repoRoot: statsRepoRoot });
+    return;
+  }
+
+  // `runs` is routed here for every reason `kb`/`todo`/`run stats` above are, and for one more of
+  // its own. It owns `--all-done`, `--dry-run`, `--limit`, `--prompt` and a repeatable
+  // `--exclude`, all of which the strict `parseArgs` below rejects as unknown options
+  // long before the command switch — and `runs` is not a `case` there at all, so dispatching it
+  // from inside the switch would answer `unknown command: runs`. Filesystem-only (no HTTP, no
+  // auth wall — see `runs/reopen-cli.ts`'s own doc comment), root resolved from cwd exactly like
+  // `kb` and `todo`.
+  //
+  // `cez run reopen …` is accepted as an alias for `cez runs reopen …`: the singular is the
+  // spelling `run stats` already teaches, and without this it would START A RUN titled
+  // "reopen …" — the same wrong-and-expensive default `run stats` is routed early to avoid.
+  if (rawArgs[0] === 'runs' || (rawArgs[0] === 'run' && rawArgs[1] === 'reopen')) {
+    // Both spellings drop exactly one leading token: `runs reopen …` → `reopen …`, and
+    // `run reopen …` → `reopen …`.
+    const runsArgs = rawArgs.slice(1);
+    const runsCwd = resolve(process.cwd());
+    const runsRepoRoot = (await getRepoInfo(runsCwd))?.root ?? runsCwd;
+    process.exitCode = await runRunsCommand(runsArgs, { repoRoot: runsRepoRoot });
     return;
   }
 
