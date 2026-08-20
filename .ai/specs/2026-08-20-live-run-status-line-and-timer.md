@@ -385,3 +385,36 @@ Two implementation notes that differ from the sketch above, both deliberate:
 - **`lastLine()` treats `\r` as a break and strips ANSI CSI.** Not in the sketch, but tool
   output is raw terminal bytes: without it a progress bar's accumulated blob, or a bare `[2K`
   erase sequence, becomes the "current activity" line. Covered by its own cases.
+
+### Deployed 2026-08-20 14:16 UTC — evidence, not assertion
+
+Deployed to the prod host `prod-host` via this repo's documented **web-only swap**
+(`AGENTS.md` §"Shipping cezar itself"): build → `cp -a` into `/opt/cezar/.../web/dist.new` →
+`mv dist dist.prev.$TS && mv dist.new dist`. **No `systemctl restart`, and none was needed** —
+the server reads web assets with `readFileSync` per request (`shell-routes.ts`), so the new tree
+takes effect on the next request. A full `cezar server-deploy` was deliberately NOT run: it is a
+hard restart with `KillMode=control-group` that would have SIGKILLed this very session mid-deploy.
+
+| Claim | How it was checked | Result |
+| --- | --- | --- |
+| Gate green before shipping | `npm run typecheck` (root, so the server AppType is rebuilt first) | clean, all 3 projects |
+| The build carries the feature | `grep` the built bundle for `live-duration`, `Running for`, `tabular-nums` | all 3 in `assets/run-header-exMj32f0.js` |
+| ...and the OLD build did not | same grep against `dist.prev.20260820-141605/assets/run-header-cqPAkWSl.js` | 0 matches — a real discriminator |
+| The LIVE service serves it | `curl http://127.0.0.1:4321/assets/run-header-exMj32f0.js` | HTTP 200, 22617 B, markers present, `md5` == on-disk |
+| Nothing restarted | `MainPID` + `ActiveEnterTimestamp` before vs after | both unchanged (`2875213`, 13:28:10 UTC) |
+| Service still healthy | `systemctl is-active`; `GET /` | `active`; HTTP 200 |
+| Server dist correctly untouched | `git diff --name-only 62a41d30..52a39767 -- packages/cezar/src` | **0 files** — web-only confirmed, not assumed |
+
+A first grep pass looked like a failure — the markers were absent from `task-thread-*.js`. They
+were simply in a different chunk (`run-header-*.js`); the earlier check had counted matching files
+without naming them. Worth recording because the near-miss is the useful part: *a bundle grep that
+reports a count instead of a path can't tell "not deployed" from "looked in the wrong chunk".*
+
+`/opt/cezar/.deployed-commit` was updated to `52a39767` and states plainly that the **server**
+build is still `62a41d30`, that this split is intended rather than drift, and that the service must
+NOT be restarted to "catch up" to the stamp. `AGENTS.md`, `CHANGELOG.md` and the three specs
+changed in this range were synced into `/opt/cezar` with dated `.bak` copies.
+
+**This is deployed, not done.** Verification §4 — the real-browser runtime pass — has still never
+been executed (todo `98bbd957`). It must be watched on a genuinely RUNNING task: a replayed thread
+does not exercise the streaming path, because `item.delta` frames are never re-emitted (risk R4).
