@@ -94,7 +94,8 @@ import { currentUsage, onUsage } from '../core/process-usage.ts';
 import { currentHostMetrics } from '../core/host-metrics.ts';
 import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.ts';
 import {
-  QUICK_TASK_WORKFLOW,
+  DEFAULT_WORKFLOW,
+  DEFAULT_WORKFLOW_NAME,
   normalizeWorkflowDoc,
   skillStackOf,
   skillsToSteps,
@@ -2096,9 +2097,13 @@ export function createApp(deps: ServerDeps) {
    * /workspace/runs` (spec 2026-08-15-cross-project-workspace-run).
    *
    * Extracted from the `/runs` handler rather than copied into the workspace route: the two must
-   * answer identically for the same body, and "an inline chain, a named workflow, or the
-   * `quick-task` floor" is three rules that would drift the first time a fourth arrived. The
-   * bare-neither branch is why this can never 404 without a name being given.
+   * answer identically for the same body, and "an inline chain, a named workflow, or the default
+   * floor" is three rules that would drift the first time a fourth arrived. The bare-neither branch
+   * is why this can never 404 without a name being given.
+   *
+   * The floor is the default workflow ({@link DEFAULT_WORKFLOW_NAME}) — this is the seam the
+   * composer's "None" pill resolves through, so changing that constant is what makes a
+   * workflow-less submit default to `spec-to-deploy` instead of `quick-task`.
    */
   const resolveRunWorkflow = async (
     root: string,
@@ -2116,7 +2121,7 @@ export function createApp(deps: ServerDeps) {
         ? { workflow: named }
         : { error: `unknown workflow: ${body.workflow}`, status: 404 };
     }
-    return { workflow: workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW };
+    return { workflow: workflows.find((w) => w.name === DEFAULT_WORKFLOW_NAME) ?? DEFAULT_WORKFLOW };
   };
 
   /**

@@ -199,7 +199,7 @@ describe('POST /api/v1/todos/:id/start', () => {
   it('the suggested skill still becomes the one-off workflow when the prompt is extended', async () => {
     writeTodos([{ id: 't1', summary: 'Ship it', suggestedSkill: 'nonexistent-skill' }]);
     const res = await start('t1', { prompt: 'Extra note.' });
-    // No such skill on disk in this scratch repo → falls back to quick-task, same as before #413.
+    // No such skill on disk in this scratch repo → falls back to the default workflow, as before #413.
     expect(res.status).toBe(201);
     expect(captured?.task).toBe('Ship it\n\nExtra note.');
   });

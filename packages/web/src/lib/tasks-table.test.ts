@@ -141,26 +141,27 @@ describe('formatCost', () => {
 })
 
 describe('displayWorkflowName', () => {
-  it('prints quick-task as `default` — it is the fallback, not a choice anyone made', () => {
-    // `quick-task` is what the server resolves to when a run names no workflow at all, so it is
-    // what nearly every row carries. The mutation: return the input verbatim.
-    expect(displayWorkflowName('quick-task')).toBe('default')
+  it('prints spec-to-deploy as `default` — it is the fallback, not a choice anyone made', () => {
+    // `spec-to-deploy` is what the server resolves to when a run names no workflow at all (the
+    // 2026-08-19 default), so it is what nearly every no-choice row carries. Mutation: return input.
+    expect(displayWorkflowName('spec-to-deploy')).toBe('default')
   })
 
-  it('passes every other name through verbatim', () => {
+  it('passes every other name through verbatim, including the old floor quick-task', () => {
     // The control against a mapping that swallows real picks. A repo's own workflow, the built-in
-    // `note-to-spec`, and the placeholders must all show themselves.
-    for (const name of ['plan-first', 'note-to-spec', 'om-fix', '(planned)', '(inbox)', 'default']) {
+    // `note-to-spec`, `quick-task` (now an ordinary named pick), and the placeholders must all
+    // show themselves.
+    for (const name of ['plan-first', 'note-to-spec', 'quick-task', 'om-fix', '(planned)', '(inbox)', 'default']) {
       expect(displayWorkflowName(name)).toBe(name)
     }
   })
 })
 
 describe('workflowLabel', () => {
-  it('applies the display mapping — the column reads `default`, never `quick-task`', () => {
+  it('applies the display mapping — the column reads `default`, never `spec-to-deploy`', () => {
     // The mutation: `return run.workflow` instead of routing through `displayWorkflowName`. Every
     // RunRecord surface (per-project table, thread header, workspace board) rides this one line.
-    expect(workflowLabel(run({ workflow: 'quick-task' }))).toBe('default')
+    expect(workflowLabel(run({ workflow: 'spec-to-deploy' }))).toBe('default')
   })
 
   it('shows any other workflow name as-is', () => {

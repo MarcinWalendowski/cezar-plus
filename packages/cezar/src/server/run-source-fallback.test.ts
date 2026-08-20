@@ -14,11 +14,13 @@ import { connectedProviderAuth } from './provider-auth.testkit.ts';
 /**
  * `POST /api/v1/runs` — "at most one of workflow/steps" (spec
  * 2026-08-15-composer-stops-forcing-choices, D3 + D4). Neither key present used to be a 400
- * ("provide either workflow or steps"); it now resolves to quick-task server-side, the same
- * resolution `POST /todos/:id/start` already had — the composer's "None" pill sends this body.
+ * ("provide either workflow or steps"); it now resolves to the DEFAULT workflow server-side, the
+ * same resolution `POST /todos/:id/start` already had — the composer's "None" pill sends this body.
+ * The default floor is `spec-to-deploy` (owner decision 2026-08-19, spec
+ * 2026-08-19-spec-to-deploy-default-workflow), moved off `quick-task` via `DEFAULT_WORKFLOW_NAME`.
  * Both keys present is still rejected: the relaxation is at-most-one, not "either or neither".
  */
-describe('POST /api/v1/runs — neither workflow nor steps resolves to quick-task (D3 + D4)', () => {
+describe('POST /api/v1/runs — neither workflow nor steps resolves to the default (D3 + D4)', () => {
   let repoRoot: string;
   let store: RunStore;
   let app: Hono;
@@ -61,7 +63,7 @@ describe('POST /api/v1/runs — neither workflow nor steps resolves to quick-tas
   it('a body with neither workflow nor steps is a 201, not a 400', async () => {
     const res = await post({ task: 'whatever the server picks' });
     expect(res.status).toBe(201);
-    expect(capturedWorkflow?.name).toBe('quick-task');
+    expect(capturedWorkflow?.name).toBe('spec-to-deploy');
     expect(capturedInput?.task).toBe('whatever the server picks');
   });
 
@@ -87,20 +89,20 @@ describe('POST /api/v1/runs — neither workflow nor steps resolves to quick-tas
     expect(capturedWorkflow).toBeUndefined();
   });
 
-  it("falls back to the BUILT-IN quick-task when the project has not overridden it", async () => {
+  it("falls back to the BUILT-IN spec-to-deploy when the project has not overridden it", async () => {
     const res = await post({ task: 't' });
     expect(res.status).toBe(201);
-    expect(capturedWorkflow?.name).toBe('quick-task');
+    expect(capturedWorkflow?.name).toBe('spec-to-deploy');
     expect(capturedWorkflow?.source).toBe('built-in');
   });
 
-  it("a project's own quick-task.yaml wins over the built-in — same precedence loadWorkflows always applies", async () => {
+  it("a project's own spec-to-deploy.yaml wins over the built-in — same precedence loadWorkflows always applies", async () => {
     const dir = join(repoRoot, WORKFLOWS_DIR);
     mkdirSync(dir, { recursive: true });
     writeFileSync(
-      join(dir, 'quick-task.yaml'),
+      join(dir, 'spec-to-deploy.yaml'),
       [
-        'name: quick-task',
+        'name: spec-to-deploy',
         'description: project override',
         'steps:',
         '  - id: task',
@@ -112,7 +114,7 @@ describe('POST /api/v1/runs — neither workflow nor steps resolves to quick-tas
     );
     const res = await post({ task: 't' });
     expect(res.status).toBe(201);
-    expect(capturedWorkflow?.name).toBe('quick-task');
+    expect(capturedWorkflow?.name).toBe('spec-to-deploy');
     expect(capturedWorkflow?.source).toBe('file');
     expect(capturedWorkflow?.description).toBe('project override');
   });

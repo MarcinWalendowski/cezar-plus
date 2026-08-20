@@ -18,6 +18,7 @@ import { reclaimWorktrees } from './runs/retention.ts';
 import { RunStore } from './runs/store.ts';
 import { RunManager } from './workflows/run.ts';
 import { loadWorkflows } from './workflows/load.ts';
+import { DEFAULT_WORKFLOW_NAME } from './workflows/types.ts';
 import { startServer, WorkspaceEventBus, type SessionResolver } from './server/server.ts';
 import { runAuthBootGate } from './auth-boot-gate.ts';
 import { buildLocalModeRoutes } from './local-mode-boot.ts';
@@ -80,7 +81,7 @@ Options:
   -p, --port <n>              cockpit port (default 4321; server-install: this
                               instance's loopback port — auto-picked per domain)
       --repo <dir>            repo to operate on (default: cwd)
-      --workflow <name>       workflow for \`run\` (default: quick-task)
+      --workflow <name>       workflow for \`run\` (default: spec-to-deploy)
       --model <model>         model override for \`run\`
       --no-open               don't open the browser
       --platform <id>         server-install target (ubuntu-vps | macosx-ngrok | hetzner)
@@ -697,7 +698,7 @@ async function runCommand(
   await initWorkspace(repoRoot);
   const { workflows, issues } = await loadWorkflows(repoRoot);
   for (const issue of issues) console.error(`! skipped ${issue.path}: ${issue.message}`);
-  const name = workflowName ?? 'quick-task';
+  const name = workflowName ?? DEFAULT_WORKFLOW_NAME;
   const workflow = workflows.find((w) => w.name === name);
   if (!workflow) {
     console.error(`unknown workflow: ${name} (available: ${workflows.map((w) => w.name).join(', ')})`);

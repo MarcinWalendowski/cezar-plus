@@ -1182,7 +1182,7 @@ function SourcePill({
   onPick,
 }: {
   /** `null` is None (2026-08-15) — the cold default; sends no `workflow`/`steps`, the server
-   *  resolves quick-task. */
+   *  resolves the default workflow (`spec-to-deploy` since 2026-08-19). */
   source: TaskSource | null
   ready: boolean
   skills: readonly Skill[]
@@ -1283,7 +1283,7 @@ function SourcePill({
             )}
             {/* `source.ref` is a SKILL name or a WORKFLOW name, so the workflow display mapping is
                 applied only to the workflow case — a skill that happened to be called
-                `quick-task` is a different thing and keeps its own name. Picker and pill must
+                `spec-to-deploy` is a different thing and keeps its own name. Picker and pill must
                 agree: they sit two clicks apart. */}
             <span className="max-w-44 truncate">
               {!ready
@@ -1318,9 +1318,10 @@ function SourcePill({
             >
               {nothingMatches ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
               {/* None (2026-08-15): the cold default, listed first — picking it sends neither
-                  `workflow` nor `steps`, and the server resolves quick-task. Participates in the
-                  search box like everything else rather than always showing, so it never sits
-                  next to "Nothing matches." for a query that excludes it too. */}
+                  `workflow` nor `steps`, and the server resolves the default workflow
+                  (`spec-to-deploy` since 2026-08-19). Participates in the search box like
+                  everything else rather than always showing, so it never sits next to "Nothing
+                  matches." for a query that excludes it too. */}
               {noneMatches ? (
                 <CommandItem
                   value="none"
@@ -1330,7 +1331,7 @@ function SourcePill({
                 >
                   <span className="shrink-0 font-mono text-xs">None</span>
                   <span className="min-w-0 flex-1 truncate text-xs text-soft-foreground">
-                    Runs quick-task — no workflow or skill picked
+                    Runs spec-to-deploy — no workflow or skill picked
                   </span>
                   {source === null ? (
                     <CheckIcon aria-hidden="true" className="ml-auto size-3.5 shrink-0 text-primary" />

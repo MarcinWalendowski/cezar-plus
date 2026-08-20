@@ -99,9 +99,9 @@ describe('configurable composer run defaults', () => {
     try {
       browser.goto(`${baseUrl}/p/${bootProject}/new`)
       browser.waitForFunction(
-        `document.querySelector('[data-slot="source-pill"]')?.textContent.includes('quick-task')`,
+        `document.querySelector('[data-slot="source-pill"]')?.textContent.includes('spec-to-deploy')`,
       )
-      expect(browser.text('[data-slot="source-pill"]')).toContain('quick-task')
+      expect(browser.text('[data-slot="source-pill"]')).toContain('spec-to-deploy')
       expect(browser.evaluate(
         `document.querySelector('[data-slot="worktree-toggle"]')?.getAttribute('aria-checked')`,
       )).toBe('true')

@@ -73,7 +73,8 @@ import type { UiEvent } from '../core/ui-events.ts';
 import {
   chainStepNote,
   DEFAULT_ALLOWED_TOOLS,
-  QUICK_TASK_WORKFLOW,
+  DEFAULT_WORKFLOW,
+  DEFAULT_WORKFLOW_NAME,
   stepKind,
   type WorkflowDef,
   type WorkflowStepDef,
@@ -83,10 +84,13 @@ const CHECK_OUTPUT_CAP = 20_000;
 
 /**
  * The workflow "▶ Run" turns a filed todo into (`server.ts`'s `POST /todos/:id/start`): a
- * one-step workflow around the suggested skill when it still exists on disk, plain quick-task
- * otherwise. Lifted out here — rather than left inline in the route — so `todo-autostart.ts`
- * (Phase 2, `.ai/specs/2026-08-19-file-tasks-from-a-running-task.md`) resolves a todo the SAME
- * way whether a person clicks ▶ Run or the cockpit starts a `--start`-filed todo for them.
+ * one-step workflow around the suggested skill when it still exists on disk, the default workflow
+ * ({@link DEFAULT_WORKFLOW_NAME}) otherwise. Lifted out here — rather than left inline in the route
+ * — so `todo-autostart.ts` (Phase 2, `.ai/specs/2026-08-19-file-tasks-from-a-running-task.md`)
+ * resolves a todo the SAME way whether a person clicks ▶ Run or the cockpit starts a
+ * `--start`-filed todo for them. A todo is user-initiated (a person filed it), so it floors to the
+ * full default; the unattended integration paths keep their own explicit fallback (see
+ * {@link DEFAULT_WORKFLOW_NAME}).
  */
 export async function resolveTodoWorkflow(
   repoRoot: string,
@@ -104,7 +108,7 @@ export async function resolveTodoWorkflow(
     }
   }
   const { workflows } = await loadWorkflows(repoRoot);
-  return workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW;
+  return workflows.find((w) => w.name === DEFAULT_WORKFLOW_NAME) ?? DEFAULT_WORKFLOW;
 }
 
 async function configuredModelProvider(

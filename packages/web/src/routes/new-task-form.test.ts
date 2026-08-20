@@ -161,7 +161,7 @@ describe('resolveSource (candidate validation + the None cold default, 2026-08-1
     ).toEqual({ source: 'workflow', ref: 'fix-and-verify' })
   })
 
-  it('defaults cold to None — no client-side guess (2026-08-15: the server resolves quick-task)', () => {
+  it('defaults cold to None — no client-side guess (2026-08-15: the server resolves the default workflow)', () => {
     expect(resolveSource([], skills, workflows)).toBeNull()
     expect(resolveSource([], skills, [workflow('fix-and-verify')])).toBeNull()
     expect(resolveSource([], [], workflows)).toBeNull()
