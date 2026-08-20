@@ -52,6 +52,43 @@ describe('buildClaudeArgs systemPrompt', () => {
 });
 
 /**
+ * `Task` survives the trip from a step definition into the real argv (spec
+ * `.ai/specs/2026-08-20-agent-round-trip-batching-and-fanout.md`, Phase 4 / R4).
+ *
+ * This test exists because the grant it checks is, today, **decorative** — `buildClaudeArgs`'s
+ * own doc comment records that `--allowedTools` only GRANTS additively against claude 2.1.224,
+ * so `Task` was already reachable in the run that motivated the spec (its `session.started`
+ * event lists it) and the model simply never used it. So Phase 4 could "work" for entirely the
+ * wrong reason, and a test asserting behaviour would be green either way.
+ *
+ * What is assertable, and what becomes load-bearing the day the filed `--disallowedTools`
+ * follow-up lands, is the ARGV: a step whose prompt says "fan out" and whose `allowedTools`
+ * omits `Task` would silently lose the ability then. This pins the plumbing, not the outcome.
+ */
+describe('buildClaudeArgs sub-agent grant', () => {
+  const spec = { userPrompt: 'do it', cwd: '/tmp' };
+
+  it('emits Task into --allowedTools alongside a bash allowlist, unexpanded', () => {
+    const args = buildClaudeArgs({
+      ...spec,
+      allowedTools: ['Read', 'Grep', 'Glob', 'Write', 'Bash', 'Task'],
+      bashAllowlist: ['git log', 'cez kb'],
+    });
+    const allowed = args[args.indexOf('--allowedTools') + 1]?.split(',') ?? [];
+    // `Task` is not a Bash prefix, so it passes through whole while `Bash` expands per prefix.
+    expect(allowed).toContain('Task');
+    expect(allowed).toContain('Bash(git log:*)');
+    expect(allowed).toContain('Bash(cez kb:*)');
+    expect(allowed).not.toContain('Bash');
+  });
+
+  it('leaves Task out when the step never asked for it', () => {
+    const args = buildClaudeArgs({ ...spec, allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash'] });
+    expect(args[args.indexOf('--allowedTools') + 1]?.split(',') ?? []).not.toContain('Task');
+  });
+});
+
+/**
  * spec `.ai/specs/2026-08-15-bypass-permissions-claude-sessions.md`, Verification row 2. The
  * second case is the one that matters: a test that only asserts the default value would pass
  * just as happily against `env.CEZ_APPROVAL_GATE === '1' ? 'acceptEdits' : 'bypassPermissions'`
