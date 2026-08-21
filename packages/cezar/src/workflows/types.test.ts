@@ -266,11 +266,52 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     const prompt = stepById('run-tests')?.prompt ?? '';
     expect(prompt).toContain('BACKGROUND');
     expect(prompt).toContain('run_in_background');
-    // R6: a backgrounded gate that is never waited on reports against a tree that moved.
-    expect(prompt).toContain('`wait` for every one of');
     expect(prompt).toContain('Never background anything that mutates the git index');
     // The measured run paid three full `npm test` runs to rediscover documented traps.
     expect(prompt).toContain('AGENTS.md');
+  });
+
+  /**
+   * Spec `.ai/specs/2026-08-21-wait-on-the-process-not-a-guess.md`.
+   *
+   * The old pin here was '`wait` for every one of' — a phrase that read as a mechanism and was
+   * not one, since a PID captured in one Bash call is not a child of the next call's shell. What
+   * agents actually did with it was guess: 7 blind `sleep N` waits across five measured runs.
+   */
+  it('makes run-tests wait on the process and never on a guessed duration', () => {
+    const prompt = stepById('run-tests')?.prompt ?? '';
+    expect(prompt).toContain('never on a guessed duration');
+    expect(prompt).toContain('wait for the completion signal');
+    // R6, restated after the reword: a backgrounded gate nobody waited on reports against a tree
+    // that moved — run `23221162` ended `run-tests` 90 s in, with `npm test` still running.
+    expect(prompt).toContain('Never report a gate you did not read');
+    expect(prompt).toMatch(/never end your turn while one is still/);
+    // L4 — the report must quote an artifact that cannot exist unless the process finished.
+    expect(prompt).toContain('QUOTE the');
+    expect(prompt).toContain('exit-marker line from each saved log');
+    // Every `sleep <n>` the prompt SHOWS sits inside an early-exit loop — the same predicate
+    // `runs/stats.ts` scores transcripts with, applied to the prompt that teaches it. A prompt
+    // that demonstrated a bare `sleep 30` would teach exactly the defect it forbids.
+    for (const line of prompt.split('\n')) {
+      if (!/\bsleep\s+[\d.]+/.test(line)) continue;
+      expect(line, `unguarded sleep in the run-tests prompt: ${line}`).toMatch(/\b(until|while|for)\b/);
+    }
+  });
+
+  it('makes implement and run-tests re-slice a saved log instead of re-running the command', () => {
+    // The carve-out from the batching doctrine's bounding rule: on run `7c2dd8f0`, 18 repeated
+    // expensive calls cost 5.9 min, headed by one test file run 11 times for 11 different filters.
+    const runTests = stepById('run-tests')?.prompt ?? '';
+    expect(runTests).toContain('rather than re-running the gate');
+    expect(runTests).toContain('re-run 11');
+
+    const implement = stepById('implement')?.prompt ?? '';
+    expect(implement).toContain('never guess with `sleep N`');
+    expect(implement).toContain('instead of re-running the command');
+    for (const line of implement.split('\n')) {
+      if (!/\bsleep\s+[\d.]+/.test(line)) continue;
+      expect(line, `unguarded sleep in the implement prompt: ${line}`).toMatch(/\b(until|while|for)\b/);
+    }
   });
 
   it('implement and run-tests reuse the autonomous allowlist verbatim, so neither can push', () => {
