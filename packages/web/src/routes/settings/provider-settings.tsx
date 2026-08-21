@@ -335,3 +335,23 @@ export function ProviderSettings() {
     </section>
   )
 }
+
+/**
+ * The registry section wrapper (`.ai/specs/2026-08-21-one-settings-area.md`, Phase 2).
+ *
+ * `ProviderSettings` used to render INSIDE the project Agents pane, which meant a host-wide switch
+ * — `PUT /api/v1/providers/:provider/enabled` writes `disabledProviders` in the WORKSPACE config —
+ * was reachable only through one arbitrary project's URL, and every in-app banner linking to it had
+ * to hardcode that arbitrary hop (`/settings/agents#providers`, rewritten to the BOOT project by
+ * the legacy redirect). It is its own workspace section now, at `/settings/providers`.
+ *
+ * The `#providers` anchor on the `<section>` stays: old links land on the right page either way,
+ * and an anchor that resolves to the top of the page it names costs nothing.
+ */
+export function ProvidersSection() {
+  return (
+    <div className="mx-auto flex w-full max-w-2xl flex-col gap-7 p-4 pb-[calc(90px+env(safe-area-inset-bottom))] md:p-6 md:pb-6">
+      <ProviderSettings />
+    </div>
+  )
+}

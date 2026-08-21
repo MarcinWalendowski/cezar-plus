@@ -150,7 +150,7 @@ import {
   pushCurrentBranch,
   readWorktreePath,
 } from './git-changes.ts';
-import { gatedSkillsRepos, loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.ts';
+import { gatedSkillsRepos, loadConfig, ownConfigKeys, resolveWorktreeRetention, type CezConfig } from '../config.ts';
 import { findConfigFile } from '../agent-config/catalog.ts';
 import { readConfigFile, statConfigPath, writeConfigFile } from '../agent-config/files.ts';
 import { readAgentModelDefaults } from '../agent-config/models.ts';
@@ -799,6 +799,16 @@ export interface WorkspaceConfigResponse {
   agentDefaults: {
     runner?: ProviderId;
     models?: { claude?: string; codex?: string; opencode?: string };
+  };
+  /** The machine's answer for the four per-repo run knobs that have one
+   *  (`.ai/specs/2026-08-21-one-settings-area.md`). ALWAYS present, `null` = no opinion — the
+   *  `composerDefaults` convention above, not `agentDefaults`' optional-key one, because these
+   *  four are read by a UI that has to distinguish "unset" from "false"/"empty". */
+  projectDefaults: {
+    systemPrompt: string | null;
+    liveTitleUpdates: boolean | null;
+    reviewGate: boolean | null;
+    stepBudget: number | null;
   };
 }
 
@@ -3885,6 +3895,15 @@ export function createApp(deps: ServerDeps) {
       ...(config.agentDefaults.runner !== undefined ? { runner: config.agentDefaults.runner } : {}),
       ...(config.agentDefaults.models !== undefined ? { models: config.agentDefaults.models } : {}),
     },
+    // NOT the spread shape above: these four are `null`-for-absent, so the keys are always on the
+    // wire. A UI that has to tell "the machine says nothing" from "the machine says false" cannot
+    // read that off a missing key, and `composerDefaults` already settled the convention.
+    projectDefaults: {
+      systemPrompt: config.projectDefaults.systemPrompt ?? null,
+      liveTitleUpdates: config.projectDefaults.liveTitleUpdates ?? null,
+      reviewGate: config.projectDefaults.reviewGate ?? null,
+      stepBudget: config.projectDefaults.stepBudget ?? null,
+    },
   });
   // ---- chained family: workspace settings + GUI prefs (workspace-level) ----
   const workspaceConfigRoutes = new Hono<ProjectApiEnv>()
@@ -3892,7 +3911,8 @@ export function createApp(deps: ServerDeps) {
 
     .put('/workspace/config', jsonZodValidator(() => workspaceConfigUpdateSchema), async (c) => {
       const parsed = { data: c.req.valid('json') };
-      const { browseRoot, projectsDir, composerDefaults, resources, agentDefaults } = parsed.data;
+      const { browseRoot, projectsDir, composerDefaults, resources, agentDefaults, projectDefaults } =
+        parsed.data;
       for (const [configuredRoot, create] of [
         [browseRoot, false],
         [projectsDir, true],
@@ -3962,6 +3982,23 @@ export function createApp(deps: ServerDeps) {
             if (Object.keys(models).length === 0) delete config.agentDefaults.models;
             else config.agentDefaults.models = models;
           }
+          // Same delete convention as `PUT /api/v1/config`'s repo-side twin: `null` clears, and
+          // `''` clears `systemPrompt` too, because an emptied textarea means "no extra prompt"
+          // rather than "a prompt that is the empty string" (which the schema would refuse anyway).
+          if (projectDefaults !== undefined) {
+            const tier = config.projectDefaults as Record<string, unknown>;
+            if (projectDefaults.systemPrompt !== undefined) {
+              if (projectDefaults.systemPrompt === null || projectDefaults.systemPrompt === '') {
+                delete tier.systemPrompt;
+              } else tier.systemPrompt = projectDefaults.systemPrompt;
+            }
+            for (const key of ['liveTitleUpdates', 'reviewGate', 'stepBudget'] as const) {
+              const value = projectDefaults[key];
+              if (value === undefined) continue;
+              if (value === null) delete tier[key];
+              else tier[key] = value;
+            }
+          }
         });
       } catch (err) {
         // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
@@ -4024,6 +4061,14 @@ export function createApp(deps: ServerDeps) {
       .optional(),
     // Bounds mirror `src/workspace/config.ts`, so a value this accepts is never degraded away by
     // the next load's `.catch`. `null` clears a key back to "no opinion".
+    projectDefaults: z
+      .object({
+        systemPrompt: z.string().trim().max(20_000, 'must be at most 20000 characters').nullable().optional(),
+        liveTitleUpdates: z.boolean().nullable().optional(),
+        reviewGate: z.boolean().nullable().optional(),
+        stepBudget: z.number().int().min(0).max(1000).nullable().optional(),
+      })
+      .optional(),
     agentDefaults: z
       .object({
         runner: z.enum(PROVIDER_IDS).nullable().optional(),
@@ -6134,6 +6179,12 @@ export function createApp(deps: ServerDeps) {
   const configAnswer = async (repoRoot: string, config: CezConfig) => {
     const nativeModels = await readAgentModelDefaults(repoRoot);
     const modelsLocked = agentModelsLocked(repoRoot);
+    // Two extra reads, both cheap and both deliberately uncached: `~/.cezar/` is shared by every
+    // cezar on the machine (a snapshot is a staleness bug, same reason `loadConfig` re-reads), and
+    // `overridden` has to come from the RAW repo file because the parsed config cannot tell a key
+    // this repo set from one a schema default or the machine tier materialized.
+    const machine = (await loadWorkspaceConfig()).projectDefaults;
+    const overridden = await ownConfigKeys(repoRoot);
     return {
       baseBranch: config.baseBranch ?? null,
       defaultRunner: config.defaultRunner,
@@ -6155,6 +6206,16 @@ export function createApp(deps: ServerDeps) {
       // Optional review gate (#489): tri-state — null means "no config key, the
       // CEZ_REVIEW_GATE env default (OFF) decides".
       reviewGate: config.reviewGate ?? null,
+      // Which TIER answered (`.ai/specs/2026-08-21-one-settings-area.md`). Every field above is
+      // still the EFFECTIVE value; these two only say where it came from, so the one Settings area
+      // can label a field Inherited or Overridden instead of guessing.
+      inherited: {
+        systemPrompt: machine.systemPrompt ?? null,
+        liveTitleUpdates: machine.liveTitleUpdates ?? null,
+        reviewGate: machine.reviewGate ?? null,
+        stepBudget: machine.stepBudget ?? null,
+      },
+      overridden,
     };
   };
   // ---- chained family: per-repo config (project-scoped) ----

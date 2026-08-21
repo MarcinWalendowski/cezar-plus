@@ -11,7 +11,7 @@ import {
   XIcon,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useParams, useSearchParams } from 'react-router'
+import { useParams, useSearchParams, Link as WorkspaceLink } from 'react-router'
 
 import { isAgentPoolId } from '@loki-labs/better-cezar-api-client'
 import { Link, scopeTo, useNavigate } from '@/lib/project-router'
@@ -838,12 +838,12 @@ export function NewTaskRoute() {
           footerEnd={
             <>
               {!providersReady && !providers.isPending ? (
-                <Link
-                  to="/settings/agents#providers"
+                <WorkspaceLink
+                  to="/settings/providers"
                   className="text-xs font-medium text-foreground underline underline-offset-4"
                 >
                   Configure providers
-                </Link>
+                </WorkspaceLink>
               ) : null}
               <ModeSegment
                 planFirst={draft.planFirst}
@@ -877,7 +877,7 @@ export function NewTaskRoute() {
           }
           startUnavailableAction={
             !providers.isPending ? (
-              <Link to="/settings/agents#providers">Configure providers</Link>
+              <WorkspaceLink to="/settings/providers">Configure providers</WorkspaceLink>
             ) : undefined
           }
           onStepsChange={(steps) => setPlan((current) => (current ? { ...current, steps } : current))}

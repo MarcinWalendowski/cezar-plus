@@ -1,5 +1,5 @@
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -176,9 +176,13 @@ describe('sidebar wiring', () => {
     await waitFor(() => expect(versionChip()).not.toBeNull())
     expect(screen.queryByRole('link', { name: /Inbox/ })).toBeNull()
     expect(navBadge()).toBeNull()
-    // Every other view is untouched — the gate owns exactly one item.
-    expect(screen.getByRole('link', { name: /Tasks/ })).toBeTruthy()
-    expect(screen.getByRole('link', { name: /Settings/ })).toBeTruthy()
+    // Every other view is untouched — the gate owns exactly one item. Scoped to the NAV since
+    // `.ai/specs/2026-08-21-one-settings-area.md`: the sidebar footer's icon link is named
+    // "Settings" too now (it used to say "Global settings", because it led to the other area),
+    // so an unscoped name query matches two real links.
+    const nav = screen.getByRole('navigation', { name: 'Main' })
+    expect(within(nav).getByRole('link', { name: /Tasks/ })).toBeTruthy()
+    expect(within(nav).getByRole('link', { name: /Settings/ })).toBeTruthy()
   })
 
   it('never asks for todos on a server with the inbox off', async () => {

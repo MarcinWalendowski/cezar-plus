@@ -197,11 +197,13 @@ describe('ProjectGroups', () => {
     // GitHub and Workflows were hidden from the nav on 2026-08-14 (`nav-items.ts`), and a group's
     // rows come from the same `visibleNavItems`, so they are gone from every group too. Skills was
     // restored 2026-08-17 (opt-out, on by default), so each group carries its scoped `/p/<id>/skills`.
+    // Settings LEFT the groups on 2026-08-21 (`.ai/specs/2026-08-21-one-settings-area.md`): it
+    // carries `workspace: true` now, which this loop filters out, because there is no such thing
+    // as "this project's Settings page" any more — the project is a field inside one page.
     expect(within(shopNav).getAllByRole('link').map((a) => a.getAttribute('href'))).toEqual([
       '/p/shop/',
       '/p/shop/git',
       '/p/shop/skills',
-      '/p/shop/settings',
     ])
     // Only the group that owns the URL lights a nav row — `/p/cezar/` is the Tasks area of
     // exactly one project, not of every project whose nav lists a Tasks row.

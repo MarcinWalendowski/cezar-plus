@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { CheckIcon, InboxIcon, PlayIcon, TriangleAlertIcon } from 'lucide-react'
 import { useRef, useState } from 'react'
+import { Link as WorkspaceLink } from 'react-router'
 import { Link, useNavigate } from '@/lib/project-router'
 
 import { removeTodo, startTodo } from '@/api/client'
@@ -333,12 +334,12 @@ function TodoCard({
               {resolved.providerError
                 ? 'Provider authentication could not be verified.'
                 : 'Connect an agent provider to run this follow-up.'}
-              <Link
-                to="/settings/agents#providers"
+              <WorkspaceLink
+                to="/settings/providers"
                 className="font-medium text-foreground underline underline-offset-4"
               >
                 Configure providers
-              </Link>
+              </WorkspaceLink>
             </span>
           ) : null}
         </div>

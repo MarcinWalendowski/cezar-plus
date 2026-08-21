@@ -94,6 +94,7 @@ function serve(answers: Answers = {}) {
   }
   const config: WorkspaceConfigResponse = {
     agentDefaults: {},
+    projectDefaults: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
     browseRoot: '~/',
     projectsDir: '~/cezar/projects',
     composerDefaults: {
@@ -205,7 +206,7 @@ function renderProjects(projects: ProjectListEntry[] = PROJECTS) {
   const client = gateSeededClient(projects)
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={['/settings/global/projects']}>
+      <MemoryRouter initialEntries={['/settings/projects']}>
         <AppRoutes />
         <Toaster />
       </MemoryRouter>

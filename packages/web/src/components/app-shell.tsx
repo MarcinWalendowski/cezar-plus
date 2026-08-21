@@ -686,14 +686,20 @@ function SidebarContent({
             {items.map((item) => {
               const isActive = item.to === activeTo
               const Icon = item.icon
+              // A `workspace: true` item has no project to scope into — its ONLY destination is
+              // `workspaceTo` — so it renders through react-router's own Link. The scoped one
+              // would mint `/p/<id>/settings` (a redirect, at best) or `/p/<id>/notes` (not a
+              // route at all). The project groups filter these items out for the same reason;
+              // this flat sidebar has no groups to filter, so the choice lands here.
+              const ItemLink = item.workspace ? RouterLink : Link
               // Link, not NavLink, on purpose. NavLink derives `aria-current` from its own prefix
               // match against `to`, and that rule is wrong here: it would *not* light Tasks on
               // /tasks/:id — which the spec requires. `aria-current` cannot be forced past NavLink's
               // own matching, so the area rule lives in `activeNavPath` and this is a plain Link.
               return (
-                <Link
+                <ItemLink
                   key={item.to}
-                  to={item.to}
+                  to={item.workspace ? (item.workspaceTo as string) : item.to}
                   onClick={onNavigate}
                   aria-current={isActive ? 'page' : undefined}
                   className={cn(
@@ -724,7 +730,7 @@ function SidebarContent({
                       {unreadCount}
                     </span>
                   ) : null}
-                </Link>
+                </ItemLink>
               )
             })}
           </nav>
@@ -770,12 +776,13 @@ function SidebarContent({
 }
 
 /**
- * The footer's way into `/settings/global/*` (multi-project spec, "Sidebar → Footer").
+ * The footer's way into `/settings/*` (multi-project spec, "Sidebar → Footer").
  *
- * A PLAIN router Link, deliberately: global settings sit outside every project, and the scoped
- * `Link` this file otherwise uses would prefix the target with the active `/p/<id>` — a path
- * that is not a route. Icon-only to keep the footer's one row intact; the accessible name and
- * the tooltip both carry the label.
+ * A PLAIN router Link, deliberately: Settings sits outside every project
+ * (`.ai/specs/2026-08-21-one-settings-area.md`), and the scoped `Link` this file otherwise uses
+ * would prefix the target with the active `/p/<id>` — a path that only redirects back out. Icon-
+ * only to keep the footer's one row intact; the accessible name and the tooltip both carry the
+ * label.
  */
 function GlobalSettingsLink({
   className,
@@ -787,10 +794,10 @@ function GlobalSettingsLink({
   return (
     <Button asChild variant="ghost" size="icon" className={cn('size-7', className)}>
       <RouterLink
-        to="/settings/global"
+        to="/settings"
         data-slot="global-settings-link"
-        aria-label="Global settings"
-        title="Global settings"
+        aria-label="Settings"
+        title="Settings"
         onClick={onNavigate}
       >
         <SettingsIcon className="size-4" aria-hidden="true" />

@@ -28,7 +28,11 @@ function serve() {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
+      // `/settings/<id>?project=<id>` mounts a scope provider, so project-scoped requests go out
+      // as `/api/v1/p/<id>/…` (`.ai/specs/2026-08-21-one-settings-area.md`). Normalized here so
+      // this file keeps asserting the SECTION's behaviour against one spelling; WHICH scope a
+      // section addresses is pinned in `settings.test.tsx`, where it is the subject.
+      const url = String(input).replace(/^\/api\/v1\/p\/[^/]+/, '/api/v1')
       const method = init?.method ?? 'GET'
       const body = init?.body ? (JSON.parse(String(init.body)) as unknown) : undefined
       requests.push({ method, url, body })
@@ -135,7 +139,7 @@ afterEach(() => {
 
 describe('the General page', () => {
   it('reads out the registry entry for the project you are inside', async () => {
-    renderAt('/p/demo/settings')
+    renderAt('/settings/project?project=demo')
     const facts = await waitFor(() => {
       const el = document.querySelector('[data-slot="project-facts"]')
       expect(el).not.toBeNull()
@@ -152,7 +156,7 @@ describe('the General page', () => {
   })
 
   it('carries the per-project concurrency ceiling, named against the workspace cap', async () => {
-    renderAt('/p/demo/settings')
+    renderAt('/settings/project?project=demo')
     const select = await screen.findByLabelText('Max parallel tasks for demo-project')
     expect(select.textContent).toContain('Inherit workspace (4)')
 
@@ -166,7 +170,7 @@ describe('the General page', () => {
   })
 
   it('removes the project after a confirm, then leaves the URL that just stopped resolving', async () => {
-    renderAt('/p/demo/settings')
+    renderAt('/settings/project?project=demo')
     const remove = await screen.findByRole('button', { name: /^Remove demo-project from the workspace/ })
 
     fireEvent.click(remove)
@@ -184,12 +188,12 @@ describe('the General page', () => {
     // Straight to the boot project — staying would render a settings page for a project the
     // registry no longer has.
     await waitFor(() => {
-      expect(document.querySelector('[data-route="settings"]')).toBeNull()
+      expect(document.querySelector('[data-route="settings-project"]')).toBeNull()
     })
   })
 
   it('refuses to remove the boot project before the click, with the reason', async () => {
-    renderAt('/p/boot/settings')
+    renderAt('/settings/project?project=boot')
     const remove = await screen.findByRole('button', { name: /^Remove cezar from the workspace/ })
     expect(remove.hasAttribute('disabled')).toBe(true)
     expect(document.querySelector('[data-slot="project-general-remove-boot"]')?.textContent).toContain(
@@ -197,16 +201,19 @@ describe('the General page', () => {
     )
   })
 
-  it('is the project area only — global settings has no project to describe', async () => {
-    renderAt('/settings/global')
+  it('describes no project when none is selected — it asks for one instead', async () => {
+    // With *All projects* there is no checkout to describe, so the section says so and offers the
+    // pick rather than borrowing whichever project happens to be around
+    // (`.ai/specs/2026-08-21-one-settings-area.md`).
+    renderAt('/settings/project')
     await waitFor(() => {
-      expect(document.querySelector('[data-slot="settings-index"]')).not.toBeNull()
+      expect(document.querySelector('[data-slot="settings-project-required"]')).not.toBeNull()
     })
     expect(general()).toBeNull()
   })
 
   it('names a folder that is gone, and says what to do about it', async () => {
-    renderAt('/p/demo/settings', {
+    renderAt('/settings/project?project=demo', {
       registry: [project('boot'), { ...project('demo'), status: 'missing' }],
     })
     const status = await waitFor(() => {
@@ -224,7 +231,7 @@ describe('the General page', () => {
     // `CEZ_SINGLE_PROJECT=1` makes PATCH and DELETE `/api/v1/projects/:id` answer 409 (server.ts)
     // and drops the whole global Projects section from the nav registry. Offering the same two
     // controls here would be a knob whose every change is refused; what the project IS stays true.
-    renderAt('/settings', { singleProject: true, registry: [project('boot')] })
+    renderAt('/settings/project?project=boot', { singleProject: true, registry: [project('boot')] })
     await waitFor(() => {
       expect(general()).not.toBeNull()
     })
@@ -237,7 +244,7 @@ describe('the General page', () => {
   it('sends a missing folder to the path when there is no Remove button to point at', async () => {
     // The other half of the gate: single-project mode took the Remove field away, so the hint
     // must not send the reader "below" to a control that is not rendered.
-    renderAt('/settings', {
+    renderAt('/settings/project?project=boot', {
       singleProject: true,
       registry: [{ ...project('boot'), status: 'missing' }],
     })

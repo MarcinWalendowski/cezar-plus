@@ -63,6 +63,21 @@ export const workspaceConfigResponseSchema = z.object({
       pi: z.string().optional(),
     }).optional(),
   }),
+  /**
+   * The machine's answer for the four per-repo run knobs that have one
+   * (`.ai/specs/2026-08-21-one-settings-area.md`, Phase 3).
+   *
+   * `null` — not absent — means "this machine has no opinion", mirroring how `composerDefaults`
+   * reports absence above: the keys are ALWAYS present on the wire because `workspaceConfigBody`
+   * materializes them, and the tri-state lives in the value. A repo's own `.ai/cezar/config.json`
+   * still wins key by key; these are consulted only where it is silent.
+   */
+  projectDefaults: z.object({
+    systemPrompt: z.string().nullable(),
+    liveTitleUpdates: z.boolean().nullable(),
+    reviewGate: z.boolean().nullable(),
+    stepBudget: z.number().nullable(),
+  }),
 });
 export type WorkspaceConfigResponse = z.infer<typeof workspaceConfigResponseSchema>;
 
@@ -95,6 +110,17 @@ export const setWorkspaceConfigInputSchema = z.object({
           pi: z.string().trim().min(1).max(200).nullable().optional(),
         })
         .optional(),
+    })
+    .optional(),
+  /** The machine tier for the per-repo run knobs. `null` (and `''` for `systemPrompt`) CLEARS a
+   *  key back to "no opinion" — the same delete convention `PUT /api/v1/config` uses, and the one
+   *  thing a bare absent key cannot say in a partial patch. */
+  projectDefaults: z
+    .object({
+      systemPrompt: z.string().trim().max(20_000).nullable().optional(),
+      liveTitleUpdates: z.boolean().nullable().optional(),
+      reviewGate: z.boolean().nullable().optional(),
+      stepBudget: z.number().int().min(0).max(1000).nullable().optional(),
     })
     .optional(),
   resources: z
@@ -325,6 +351,23 @@ export const configResponseSchema = z.object({
   /** Optional review gate (#489): null = no config key, the `CEZ_REVIEW_GATE` env default (OFF)
    *  decides. */
   reviewGate: z.boolean().nullable(),
+  /**
+   * Where an effective value came from, so the one Settings area can label a field **Inherited**
+   * or **Overridden** (`.ai/specs/2026-08-21-one-settings-area.md`, Phase 3).
+   *
+   * `inherited` is what `~/.cezar/config.json`'s `projectDefaults` says, independent of this repo;
+   * `null` means the machine has no opinion either. Every field above keeps its current meaning —
+   * the EFFECTIVE value, machine tier already folded in.
+   */
+  inherited: z.object({
+    systemPrompt: z.string().nullable(),
+    liveTitleUpdates: z.boolean().nullable(),
+    reviewGate: z.boolean().nullable(),
+    stepBudget: z.number().nullable(),
+  }),
+  /** The keys this repo's RAW `.ai/cezar/config.json` sets — never a defaulted or inherited one.
+   *  Read from the file, not from the parsed config, which cannot tell the two apart. */
+  overridden: z.array(z.string()),
 });
 export type ConfigResponse = z.infer<typeof configResponseSchema>;
 

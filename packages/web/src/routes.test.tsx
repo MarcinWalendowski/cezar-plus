@@ -11,6 +11,7 @@ import { ListViewProvider } from './components/list-view'
 import { ThemeProvider } from './components/theme-provider'
 import { LAST_LOCATION_STORAGE_KEY } from './lib/last-location'
 import { AppRoutes, pageTitleContext } from './routes'
+import { visibleSettingsSections } from './routes/settings/registry'
 import { ONBOARDING_ENTRY_PROBE_KEY } from './routes/onboarding/onboarding-gate'
 import { resetDraft } from './routes/new-task-draft'
 
@@ -196,7 +197,8 @@ describe('pageTitleContext', () => {
     ['/p/cezar/inbox', 'Inbox'],
     ['/p/cezar/workflows/quick-task', 'Workflows'],
     ['/p/cezar/settings/agents', 'Settings'],
-    ['/settings/global/projects', 'Settings'],
+    ['/settings/projects', 'Settings'],
+    ['/settings', 'Settings'],
   ])('labels %s as %s', (pathname, pageLabel) => {
     expect(pageTitleContext(pathname)).toEqual({ pageLabel, taskId: null })
   })
@@ -247,14 +249,9 @@ const ROUTE_CASES: Array<[url: string, route: string, title: string]> = [
   ['/workflows', 'workflows', 'Loading workflows…'],
   ['/workflows/ship-it', 'workflows', 'Loading workflows…'],
   ['/skills', 'skills', 'Skills'],
-  // Project settings only (step 3.5) — appearance/notifications/resources/projects moved to
-  // the unscoped `/settings/global/*` area, covered in its own describe below.
-  ['/settings', 'settings', 'Settings'],
-  ['/settings/agents', 'settings-agents', 'Agents'],
-  ['/settings/agent-config', 'settings-agent-config', 'Agent config'],
-  ['/settings/worktrees', 'settings-worktrees', 'Worktrees'],
-  ['/settings/bookmarklets', 'settings-bookmarklets', 'Bookmarklets'],
-  ['/settings/prompt-templates', 'settings-prompt-templates', 'Prompt templates'],
+  // Settings is NOT here any more: it is one workspace-level area at `/settings`
+  // (`.ai/specs/2026-08-21-one-settings-area.md`), and every `/p/<id>/settings/*` URL redirects
+  // into it. Both halves get their own describe below.
 ]
 
 describe('scoped route map (/p/:projectId)', () => {
@@ -284,6 +281,10 @@ describe('scoped route map (/p/:projectId)', () => {
   })
 
   // MCP lives inside Agent config; keyboard remains hidden and unrouted.
+  // `/settings/*` under a project is a redirect family now, registered per KNOWN section id — an
+  // unknown or hidden one falls straight through to the 404 rather than bouncing between the
+  // project prefix and the flat area forever. `keyboard` is the hidden case; `mcp` lives inside
+  // Agent config and was never a section.
   const unknown = [
     '/nope-404',
     '/tasks',
@@ -310,12 +311,12 @@ describe('scoped route map (/p/:projectId)', () => {
     expect(screen.getByRole('link', { name: 'Back to tasks' }).getAttribute('href')).toBe(`/p/${BOOT}/`)
   })
 
-  // The area rule (nav links, tab links…) — spot-checked through the Settings shell, whose
-  // section links are plain flat `to`s routed through the scope-aware Link.
+  // The area rule (nav links, tab links…) — spot-checked through the 404 page's way home, which
+  // is a plain flat `to` routed through the scope-aware Link. It used to be spot-checked through
+  // the Settings index, until Settings stopped being project-scoped at all.
   it('navigation links generated inside a project carry its prefix', () => {
-    renderAt(`/p/${BOOT}/settings`)
-    const link = document.querySelector('[data-slot="settings-index"] a[data-section="agents"]')
-    expect(link?.getAttribute('href')).toBe(`/p/${BOOT}/settings/agents`)
+    renderAt(`/p/${BOOT}/definitely-not-a-route`)
+    expect(screen.getByRole('link', { name: 'Back to tasks' }).getAttribute('href')).toBe(`/p/${BOOT}/`)
   })
 
   it('remounts the same page and loads its new scope when the project param changes', async () => {
@@ -360,19 +361,31 @@ describe('scoped route map (/p/:projectId)', () => {
 })
 
 /**
- * Global settings (step 3.5) — the one area OUTSIDE `/p/:projectId`. Two things must hold: the
- * URLs render without any project scope, and the sections that MOVED there keep their old
- * project-scoped URLs alive as redirects, so pre-split bookmarks still land.
+ * The ONE Settings area (`.ai/specs/2026-08-21-one-settings-area.md`) — outside `/p/:projectId`,
+ * holding every section. Three things must hold: every non-hidden section has exactly one URL
+ * that renders unscoped; both families of old URLs (`/settings/global/*` and `/p/<id>/settings/*`)
+ * redirect into it with query and hash intact; and the project one carries the project it named.
  */
-describe('the global settings area (/settings/global)', () => {
-  const GLOBAL_CASES: Array<[string, string, string]> = [
-    ['/settings/global', 'settings-global', 'Global settings'],
-    ['/settings/global/appearance', 'settings-global-appearance', 'Appearance'],
-    ['/settings/global/notifications', 'settings-global-notifications', 'Notifications'],
-    ['/settings/global/resources', 'settings-global-resources', 'Resources'],
-    ['/settings/global/projects', 'settings-global-projects', 'Projects'],
+describe('the settings area (/settings)', () => {
+  const SETTINGS_CASES: Array<[string, string, string]> = [
+    ['/settings', 'settings', 'Settings'],
+    ['/settings/project', 'settings-project', 'Project'],
+    ['/settings/agents', 'settings-agents', 'Agents'],
+    ['/settings/providers', 'settings-providers', 'Providers'],
+    ['/settings/agent-config', 'settings-agent-config', 'Agent config'],
+    ['/settings/worktrees', 'settings-worktrees', 'Worktrees'],
+    ['/settings/bookmarklets', 'settings-bookmarklets', 'Bookmarklets'],
+    ['/settings/prompt-templates', 'settings-prompt-templates', 'Prompt templates'],
+    ['/settings/appearance', 'settings-appearance', 'Appearance'],
+    ['/settings/notifications', 'settings-notifications', 'Notifications'],
+    ['/settings/resources', 'settings-resources', 'Resources'],
+    ['/settings/accounts', 'settings-accounts', 'Agent accounts'],
+    ['/settings/projects', 'settings-projects', 'Projects'],
+    ['/settings/teams', 'settings-teams', 'Workspaces'],
+    ['/settings/account', 'settings-account', 'Account'],
+    ['/settings/backup', 'settings-backup', 'Backup'],
   ]
-  for (const [url, route, title] of GLOBAL_CASES) {
+  for (const [url, route, title] of SETTINGS_CASES) {
     it(`${url} → ${route}, unscoped`, () => {
       renderAt(url)
       expect(routeName()).toBe(route)
@@ -381,6 +394,19 @@ describe('the global settings area (/settings/global)', () => {
       expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(title)
     })
   }
+
+  // The report this spec answers, as a test: every visible section is reachable from ONE address.
+  // A section that exists in the registry and has no route is precisely the bug — six of them did.
+  it('every non-hidden section has exactly one route, and the hidden one has none', () => {
+    const routed = new Set(
+      SETTINGS_CASES.map(([url]) => url.replace('/settings/', '')).filter((id) => id !== '/settings'),
+    )
+    for (const section of visibleSettingsSections(HEALTH.capabilities as never)) {
+      expect(routed.has(section.id)).toBe(true)
+    }
+    renderAt('/settings/keyboard')
+    expect(routeName()).toBe('not-found')
+  })
 
   // #801: a bookmarked deep link into any of the four `/automations*` routes still resolves — the
   // route map is unchanged — but the view says the feature is off instead of rendering an editor
@@ -407,43 +433,76 @@ describe('the global settings area (/settings/global)', () => {
   })
 
   it('omits the Projects route when single-project mode is active', () => {
-    renderAt('/settings/global/projects', {
+    renderAt('/settings/projects', {
       health: { ...HEALTH, capabilities: { ...HEALTH.capabilities, singleProject: true } },
     })
-    expect(routeName()).not.toBe('settings-global-projects')
+    expect(routeName()).not.toBe('settings-projects')
     expect(screen.queryByRole('heading', { level: 1, name: 'Projects' })).toBeNull()
   })
 
-  // A moved section's old URL, in both spellings a bookmark can have it.
-  for (const id of ['appearance', 'notifications', 'resources']) {
-    it(`/p/${BOOT}/settings/${id} redirects to the global twin`, () => {
-      renderAt(`/p/${BOOT}/settings/${id}`)
-      expect(currentPathname()).toBe(`/settings/global/${id}`)
-      expect(routeName()).toBe(`settings-global-${id}`)
+  // The OLD global area's URLs. Nine of them are in bookmarks and in BACKWARD_COMPATIBILITY.md;
+  // a 404 here would be worse than the split this change removes.
+  it('/settings/global → /settings', () => {
+    renderAt('/settings/global')
+    expect(currentPathname()).toBe('/settings')
+    expect(routeName()).toBe('settings')
+  })
+
+  for (const id of ['appearance', 'notifications', 'resources', 'projects', 'accounts', 'backup']) {
+    it(`/settings/global/${id} → /settings/${id}`, () => {
+      renderAt(`/settings/global/${id}`)
+      expect(currentPathname()).toBe(`/settings/${id}`)
+      expect(routeName()).toBe(`settings-${id}`)
     })
 
-    it(`the legacy flat /settings/${id} lands on the global twin too`, () => {
-      renderAt(`/settings/${id}`)
-      expect(currentPathname()).toBe(`/settings/global/${id}`)
-    })
-
-    it(`/settings/${id} carries query AND hash through BOTH redirect hops`, () => {
-      // The legacy flat URL takes two hops — `LegacyPathRedirect` into the boot project, then
-      // the moved-section redirect out to the global twin. `settingsSectionPath` returns a bare
-      // pathname, so the second hop is exactly where a bookmark's `?…#…` used to disappear.
-      renderAt(`/settings/${id}?tab=x&y=a%2Fb#anchor`)
-      expect(currentPathname()).toBe(`/settings/global/${id}`)
+    it(`/settings/global/${id} carries query AND hash across the hop`, () => {
+      renderAt(`/settings/global/${id}?tab=x&y=a%2Fb#anchor`)
+      expect(currentPathname()).toBe(`/settings/${id}`)
       expect(currentSearch()).toBe('?tab=x&y=a%2Fb')
       expect(currentHash()).toBe('#anchor')
     })
+  }
 
-    it(`/p/${BOOT}/settings/${id} carries query AND hash on the single hop`, () => {
-      renderAt(`/p/${BOOT}/settings/${id}?tab=x#anchor`)
-      expect(currentPathname()).toBe(`/settings/global/${id}`)
-      expect(currentSearch()).toBe('?tab=x')
-      expect(currentHash()).toBe('#anchor')
+  // The PROJECT area's URLs. The id that was a path prefix becomes `?project=`, so the section
+  // keeps working on exactly the repo the old link named — the promise this redirect exists for.
+  it(`/p/${BOOT}/settings → /settings?project=${BOOT}`, () => {
+    renderAt(`/p/${BOOT}/settings`)
+    expect(currentPathname()).toBe('/settings')
+    expect(currentSearch()).toBe(`?project=${BOOT}`)
+    expect(routeName()).toBe('settings')
+  })
+
+  for (const id of ['agents', 'worktrees', 'bookmarklets', 'prompt-templates', 'agent-config']) {
+    it(`/p/${BOOT}/settings/${id} → /settings/${id}?project=${BOOT}`, () => {
+      renderAt(`/p/${BOOT}/settings/${id}`)
+      expect(currentPathname()).toBe(`/settings/${id}`)
+      expect(currentSearch()).toBe(`?project=${BOOT}`)
+      expect(routeName()).toBe(`settings-${id}`)
     })
   }
+
+  it('the project hop keeps the caller’s own query and hash, with `project` leading', () => {
+    // The exact case the spec names: `/p/cezar/settings/agents?x=1#providers` must land on
+    // `/settings/agents?project=cezar&x=1#providers`. A bookmark's params are as load-bearing as
+    // the project id, and dropping either would silently undo what the hop exists to preserve.
+    renderAt(`/p/${BOOT}/settings/agents?x=1&y=a%2Fb#providers`)
+    expect(currentPathname()).toBe('/settings/agents')
+    expect(currentSearch()).toBe(`?project=${BOOT}&x=1&y=a%2Fb`)
+    expect(currentHash()).toBe('#providers')
+  })
+
+  it('the path wins over an incoming project= param — the path is what was addressed', () => {
+    renderAt(`/p/${BOOT}/settings/agents?project=someone-else`)
+    expect(currentSearch()).toBe(`?project=${BOOT}`)
+  })
+
+  // A flat `/settings/<id>` is a REAL address now rather than a two-hop legacy redirect: it is
+  // the one area's own URL, and it means "all projects".
+  it('a flat /settings/appearance renders directly, with no project hop', () => {
+    renderAt('/settings/appearance')
+    expect(currentPathname()).toBe('/settings/appearance')
+    expect(routeName()).toBe('settings-appearance')
+  })
 })
 
 /** Legacy flat URLs (BACKWARD_COMPATIBILITY.md): every pre-multi-project path redirects to the

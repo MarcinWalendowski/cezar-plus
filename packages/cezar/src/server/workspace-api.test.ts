@@ -105,6 +105,11 @@ describe('the workspace settings API (step 2.7)', () => {
       // keys mean "this machine has no opinion", which is what makes them defaults a repo can be
       // silent about rather than settings every checkout inherits a value from.
       agentDefaults: {},
+      // The machine tier for the four per-repo run knobs
+      // (`.ai/specs/2026-08-21-one-settings-area.md`). ALWAYS present with `null` for absent —
+      // the `composerDefaults` convention, not `agentDefaults`' optional-key one — because a UI
+      // has to tell "the machine says nothing" from "the machine says false".
+      projectDefaults: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
     });
     // Absolute project roots belong on /api/v1/projects; schemaVersion is a
     // migration cursor, not a setting.
@@ -151,6 +156,7 @@ describe('the workspace settings API (step 2.7)', () => {
       // Untouched by a resources write, and still empty — the two live in the same file but answer
       // unrelated questions, so one must never materialize the other.
       agentDefaults: {},
+      projectDefaults: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
     });
     // Round-trip through GET and the raw file.
     expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).resources.maxParallel).toBe(5);
@@ -179,6 +185,78 @@ describe('the workspace settings API (step 2.7)', () => {
     ).toBeNull();
     expect((rawConfig().resources as Record<string, unknown>).monitoringWakeIntervalMinutes).toBeNull();
     expect(semaphore.monitoringWakeIntervalMinutes()).toBeNull();
+  });
+
+  /**
+   * The machine tier (`.ai/specs/2026-08-21-one-settings-area.md`, Phase 3): `projectDefaults`.
+   *
+   * What is pinned is the delete convention and the round trip, because those are what the one
+   * Settings area depends on — *All projects* has to be able to say "no opinion" again after
+   * saying something, and an absent key is the only spelling of that in the file.
+   */
+  it('PUT projectDefaults round-trips through GET and the raw file', async () => {
+    const res = await putConfig({
+      projectDefaults: { systemPrompt: 'be brief', reviewGate: true, stepBudget: 12 },
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as WorkspaceConfigResponse).projectDefaults).toEqual({
+      systemPrompt: 'be brief',
+      liveTitleUpdates: null,
+      reviewGate: true,
+      stepBudget: 12,
+    });
+    expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).projectDefaults).toEqual({
+      systemPrompt: 'be brief',
+      liveTitleUpdates: null,
+      reviewGate: true,
+      stepBudget: 12,
+    });
+    // Absent in the FILE, not written as null: `~/.cezar/config.json` stays a file you can cat and
+    // fix by hand (BACKWARD_COMPATIBILITY.md §3), and a key that says nothing should not be there.
+    expect(rawConfig().projectDefaults).toEqual({
+      systemPrompt: 'be brief',
+      reviewGate: true,
+      stepBudget: 12,
+    });
+  });
+
+  it('null CLEARS a projectDefaults key back to "no opinion"; "" clears the prompt', async () => {
+    await putConfig({ projectDefaults: { systemPrompt: 'be brief', reviewGate: false } });
+    // `false` first, so the clear below is proved to remove the KEY rather than to write `false`.
+    expect((rawConfig().projectDefaults as Record<string, unknown>).reviewGate).toBe(false);
+
+    await putConfig({ projectDefaults: { reviewGate: null, systemPrompt: '' } });
+    expect(rawConfig().projectDefaults).toEqual({});
+    expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).projectDefaults).toEqual({
+      systemPrompt: null,
+      liveTitleUpdates: null,
+      reviewGate: null,
+      stepBudget: null,
+    });
+  });
+
+  it('an unknown sibling key inside projectDefaults survives the write (.passthrough)', async () => {
+    writeFileSync(
+      workspaceConfigPath(),
+      JSON.stringify({ projectDefaults: { fromANewerCezar: 'keep me' } }),
+      'utf8',
+    );
+    await putConfig({ projectDefaults: { reviewGate: true } });
+    expect(rawConfig().projectDefaults).toEqual({ fromANewerCezar: 'keep me', reviewGate: true });
+  });
+
+  it('a rejected browseRoot persists NOTHING, projectDefaults included', async () => {
+    // The all-or-nothing contract this route has always had, extended to the new key rather than
+    // quietly exempting it.
+    const res = await putConfig({
+      browseRoot: '/definitely/not/here',
+      projectDefaults: { reviewGate: true },
+    });
+    expect(res.status).toBe(400);
+    // Nothing persisted at all — the file is not even created, which is the strongest form of
+    // "NOTHING". A later successful write is what brings it into existence.
+    expect(existsSync(workspaceConfigPath())).toBe(false);
+    expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).projectDefaults.reviewGate).toBeNull();
   });
 
   it('partial updates leave the other keys untouched', async () => {

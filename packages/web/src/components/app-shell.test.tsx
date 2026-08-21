@@ -428,10 +428,12 @@ describe('AppShell', () => {
     it('links out of every project scope', () => {
       renderShell('/p/shop/git', { projectGroups: <p>groups</p> })
       // PLAIN targets: the scope-aware Link would prefix them with `/p/shop`, which is no route.
-      // Settings is the one that cannot be derived from the per-project `to` — a project's
-      // `/settings` and the workspace's `/settings/global` are different routes.
+      // Tasks is the one that cannot be derived from the per-project `to` — it answers `/` inside
+      // a project and `/tasks` across them. Settings used to be the sharpest such case (`/settings`
+      // vs `/settings/global`) until `.ai/specs/2026-08-21-one-settings-area.md` made it ONE area:
+      // both strings agree now, and the row carries `workspace: true` so it renders only here.
       expect(row('Tasks')!.getAttribute('href')).toBe('/tasks')
-      expect(row('Settings')!.getAttribute('href')).toBe('/settings/global')
+      expect(row('Settings')!.getAttribute('href')).toBe('/settings')
     })
 
     it('stays put while the project groups scroll', () => {

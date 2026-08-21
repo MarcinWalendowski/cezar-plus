@@ -25,7 +25,11 @@ function serve(targets: Array<{ id: string; label: string; icon?: string }> = OP
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
+      // `/settings/<id>?project=<id>` mounts a scope provider, so project-scoped requests go out
+      // as `/api/v1/p/<id>/…` (`.ai/specs/2026-08-21-one-settings-area.md`). Normalized here so
+      // this file keeps asserting the SECTION's behaviour against one spelling; WHICH scope a
+      // section addresses is pinned in `settings.test.tsx`, where it is the subject.
+      const url = String(input).replace(/^\/api\/v1\/p\/[^/]+/, '/api/v1')
       const method = init?.method ?? 'GET'
       const body = init?.body ? (JSON.parse(String(init.body)) as unknown) : undefined
       requests.push({ method, url, body })
@@ -102,8 +106,10 @@ afterEach(() => {
 })
 
 describe('the project folder in settings', () => {
-  it('the General page names the absolute root, in full', async () => {
-    renderAt('/settings')
+  it('the Project section names the absolute root, in full', async () => {
+    // Was the project settings INDEX ("General"); it is a real registry section now, at
+    // `/settings/project?project=<id>` (`.ai/specs/2026-08-21-one-settings-area.md`).
+    renderAt('/settings/project?project=boot')
     const field = await waitFor(() => {
       const el = document.querySelector('[data-slot="project-location"][data-variant="field"]')
       expect(el).not.toBeNull()
@@ -114,7 +120,7 @@ describe('the project folder in settings', () => {
   })
 
   it('every project section keeps the root in the nav footer', async () => {
-    renderAt('/settings/worktrees')
+    renderAt('/settings/worktrees?project=boot')
     const nav = await waitFor(() => {
       const el = document.querySelector('[data-slot="settings-nav"] [data-slot="project-location"]')
       expect(el).not.toBeNull()
@@ -126,7 +132,7 @@ describe('the project folder in settings', () => {
   it('copies the path to the clipboard', async () => {
     const writeText = vi.fn(async () => {})
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
-    renderAt('/settings')
+    renderAt('/settings/project?project=boot')
     const copy = await screen.findByTitle('Copy the project folder path')
 
     fireEvent.click(copy)
@@ -135,14 +141,14 @@ describe('the project folder in settings', () => {
   })
 
   it('"Open with" lists the machine\'s apps, minus the agent CLIs', async () => {
-    renderAt('/settings')
+    renderAt('/settings/project?project=boot')
     // `cli:claude` is detected and offered for a task worktree, but opening the CHECKOUT in an
     // agent CLI is exactly what worktrees exist to avoid — the server 400s it too.
     expect(await openWithMenu()).toEqual(['finder', 'vscode'])
   })
 
   it('a pick opens the project folder through the server — the path never travels', async () => {
-    renderAt('/settings')
+    renderAt('/settings/project?project=boot')
     await openWithMenu()
 
     fireEvent.click(document.querySelector('[data-target="vscode"]')!)
@@ -156,7 +162,7 @@ describe('the project folder in settings', () => {
 
   it('hosted mode has no apps to offer, so no menu is rendered', async () => {
     serve([])
-    renderAt('/settings')
+    renderAt('/settings/project?project=boot')
     await waitFor(() => {
       expect(document.querySelector('[data-slot="project-location"]')).not.toBeNull()
     })
@@ -166,11 +172,18 @@ describe('the project folder in settings', () => {
     expect(document.querySelector('[data-slot="project-location-open"]')).toBeNull()
   })
 
-  it('global settings shows no project folder — it describes no project', async () => {
-    renderAt('/settings/global')
-    await waitFor(() => {
-      expect(document.querySelector('[data-slot="settings-index"]')).not.toBeNull()
+  it('no selected project means no project folder — there is none to describe', async () => {
+    // With *All projects* the nav footer names the MACHINE's file instead
+    // (`.ai/specs/2026-08-21-one-settings-area.md`). It used to be the whole global settings AREA
+    // that had no folder to show; now it is the absence of a `?project=`, which is the same fact
+    // said as a field rather than as a place.
+    renderAt('/settings/resources')
+    const nav = await waitFor(() => {
+      const el = document.querySelector('[data-slot="settings-nav"]')
+      expect(el).not.toBeNull()
+      return el!
     })
     expect(document.querySelector('[data-slot="project-location"]')).toBeNull()
+    expect(nav.textContent).toContain('Stored in ~/.cezar')
   })
 })

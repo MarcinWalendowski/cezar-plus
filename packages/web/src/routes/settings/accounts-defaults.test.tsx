@@ -92,6 +92,7 @@ function serve({
       worktreeRetentionDefault: 10,
     },
     agentDefaults,
+    projectDefaults: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
   }
   let accountState = accounts
   const json = (payload: unknown, status = 200) =>
@@ -142,7 +143,7 @@ function renderAccounts() {
   })
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={['/settings/global/accounts']}>
+      <MemoryRouter initialEntries={['/settings/accounts']}>
         <AppRoutes />
         <Toaster />
       </MemoryRouter>

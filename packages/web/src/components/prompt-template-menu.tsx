@@ -1,6 +1,9 @@
 import { ChevronDownIcon, NotebookPenIcon, SparklesIcon } from 'lucide-react'
 import { useRef, useState } from 'react'
-import { useNavigate } from '@/lib/project-router'
+import { useNavigate } from 'react-router'
+
+import { useActiveProjectId } from '@/lib/project-router'
+import { settingsSectionPath } from '@/routes/settings/settings-shell'
 
 import {
   Command,
@@ -51,6 +54,7 @@ export function PromptTemplateMenu({
   // Navigated imperatively rather than rendered as a <Link>: a link inside a CommandItem gets
   // its navigation swallowed by cmdk's own onSelect handling of the row.
   const navigate = useNavigate()
+  const activeProjectId = useActiveProjectId()
 
   if (templates.length === 0) return null
 
@@ -146,7 +150,10 @@ export function PromptTemplateMenu({
                 className="text-[12px] text-muted-foreground"
                 onSelect={() => {
                   setOpen(false)
-                  void navigate('/settings/prompt-templates')
+                  // Plain navigate + `?project=`: Settings is one workspace-level area
+                  // (`.ai/specs/2026-08-21-one-settings-area.md`), and templates are per repo, so
+                  // the project comes along as the section's subject rather than as a path prefix.
+                  void navigate(settingsSectionPath('prompt-templates', activeProjectId))
                 }}
               >
                 Edit templates…

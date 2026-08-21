@@ -799,12 +799,37 @@ export async function getRepo(opts?: ReadOptions): Promise<RepoResponse> {
   )
 }
 
-/** The Settings → Agents knobs in one read (`GET /api/config`, additive R6 route). */
+/**
+ * The Settings → Agents knobs in one read (`GET /api/config`, additive R6 route).
+ *
+ * `inherited`/`overridden` are materialized HERE rather than guarded at each read site, the same
+ * boundary treatment `getWorkspaceConfig` gives `agentDefaults` and for the same reason: during
+ * development the cockpit and the server can be different versions, and a server that predates
+ * `.ai/specs/2026-08-21-one-settings-area.md` answers without them. An empty override list and an
+ * all-null inherited block are exactly what "no machine tier" means, so the fallback is the truth
+ * rather than a placeholder.
+ */
 export async function getConfig(opts?: ReadOptions): Promise<ConfigResponse> {
-  return unwrap(
+  const answer = await unwrap(
     await cez.api.v1.p[':projectId'].config.$get({ param: { projectId: queryScope() } }, init(opts)),
     '/config',
   )
+  return withConfigTiers(answer)
+}
+
+/** Shared by `getConfig` and `putConfig` — both answer the same shape (`configAnswer` builds
+ *  both), so both need the same version-skew floor. */
+function withConfigTiers(answer: ConfigResponse): ConfigResponse {
+  return {
+    ...answer,
+    inherited: answer.inherited ?? {
+      systemPrompt: null,
+      liveTitleUpdates: null,
+      reviewGate: null,
+      stepBudget: null,
+    },
+    overridden: answer.overridden ?? [],
+  }
 }
 
 /** The selected project's agent-owned config catalog and current file state. */
@@ -1934,7 +1959,18 @@ export async function getWorkspaceConfig(opts?: ReadOptions): Promise<WorkspaceC
     await cez.api.v1.workspace.config.$get({}, init(opts)),
     '/workspace/config',
   )
-  return { ...answer, agentDefaults: answer.agentDefaults ?? {} }
+  return {
+    ...answer,
+    agentDefaults: answer.agentDefaults ?? {},
+    // Same version-skew floor, one spec later: a server without `projectDefaults` has no machine
+    // tier, and all-null is what that means (`.ai/specs/2026-08-21-one-settings-area.md`).
+    projectDefaults: answer.projectDefaults ?? {
+      systemPrompt: null,
+      liveTitleUpdates: null,
+      reviewGate: null,
+      stepBudget: null,
+    },
+  }
 }
 
 /**
@@ -2098,19 +2134,34 @@ export async function removeAgentProfile(id: string): Promise<RemoveAgentProfile
 export async function putWorkspaceConfig(
   patch: SetWorkspaceConfigInput,
 ): Promise<WorkspaceConfigResponse> {
-  return unwrap(await cez.api.v1.workspace.config.$put({ json: patch }), '/workspace/config')
+  const answer = await unwrap(
+    await cez.api.v1.workspace.config.$put({ json: patch }),
+    '/workspace/config',
+  )
+  return {
+    ...answer,
+    agentDefaults: answer.agentDefaults ?? {},
+    projectDefaults: answer.projectDefaults ?? {
+      systemPrompt: null,
+      liveTitleUpdates: null,
+      reviewGate: null,
+      stepBudget: null,
+    },
+  }
 }
 
 /** Set/clear the agents' config knobs — base branch, default runner, system prompt, per-runner
  *  model presets (Settings → Agents, R6 1.5). Merged into the raw config.json server-side so
  *  unrelated user keys survive; `null` clears a knob back to its default. */
 export async function putConfig(patch: SetConfigInput): Promise<SetConfigResponse> {
-  return unwrap(
-    await cez.api.v1.p[':projectId'].config.$put({
-      param: { projectId: queryScope() },
-      json: patch,
-    }),
-    '/config',
+  return withConfigTiers(
+    await unwrap(
+      await cez.api.v1.p[':projectId'].config.$put({
+        param: { projectId: queryScope() },
+        json: patch,
+      }),
+      '/config',
+    ),
   )
 }
 

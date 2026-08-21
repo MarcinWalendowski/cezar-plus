@@ -19,6 +19,7 @@ import { RunDiff } from '@/components/run-diff'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
+import { Link as WorkspaceLink } from 'react-router'
 import { Link } from '@/lib/project-router'
 import { isSubmitShortcut } from '@/lib/use-submit-shortcut'
 import { isHttpUrl } from '@/lib/utils'
@@ -207,12 +208,12 @@ function ReviewActions({ run }: { run: ApiRun }) {
         >
           <span>{continuation.reason}</span>
           {!continuation.providerPending ? (
-            <Link
-              to="/settings/agents#providers"
+            <WorkspaceLink
+              to="/settings/providers"
               className="font-medium text-foreground underline underline-offset-4"
             >
               Configure providers
-            </Link>
+            </WorkspaceLink>
           ) : null}
         </p>
       ) : null}

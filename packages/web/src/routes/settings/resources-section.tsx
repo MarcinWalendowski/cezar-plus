@@ -154,7 +154,7 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
         <p className="text-[11px] text-soft-foreground">
           Need a different limit for one project?{' '}
           <Link
-            to="/settings/global/projects"
+            to="/settings/projects"
             data-slot="resources-project-limits-link"
             className="font-medium text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground"
           >

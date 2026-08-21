@@ -171,7 +171,7 @@ export function CloneProjectDialog({
             ) : (
               <Button asChild variant="ghost" size="icon-sm" className="size-7">
                 <RouterLink
-                  to="/settings/global/projects"
+                  to="/settings/projects"
                   data-slot="clone-root-settings"
                   aria-label="Edit checkout root"
                   title="Edit checkout root"

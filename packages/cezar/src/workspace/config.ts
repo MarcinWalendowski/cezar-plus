@@ -155,6 +155,35 @@ const agentDefaultsSchema = z
   })
   .passthrough();
 
+/**
+ * The machine's answer for settings a REPO may also set
+ * (`.ai/specs/2026-08-21-one-settings-area.md`, Phase 3).
+ *
+ * Every key optional with NO default, for the reason `agentDefaultsSchema` gives above it: an
+ * absent value has to stay distinguishable from a chosen one, or "fall back to the machine
+ * default" collapses into "always the default". A repo's own `.ai/cezar/config.json` still wins
+ * key by key — these are consulted only where that file is SILENT (`withMachineDefaults`,
+ * `../config.ts`), which puts the final order at repo → machine → env → hardcoded. An empty
+ * `projectDefaults` therefore reproduces the pre-change behaviour byte for byte, `reviewGate`'s
+ * env-default-OFF and `liveTitleUpdates`' env-default-ON included.
+ *
+ * Four keys, and only four. `baseBranch` is deliberately absent (a branch is a property of a
+ * repository, not of a person), as are `skillsRepos` (its raw PRESENCE is a tri-state probe —
+ * seeding it would silently ungate every default skill in every repo) and `modelsLocked` (its
+ * resolver ORs env, workspace and repo already, bypassing both loaders).
+ *
+ * Bounds mirror `configSchema` in `../config.ts` exactly, so a value this accepts can never be
+ * degraded away by the repo-side parse it seeds.
+ */
+const projectDefaultsSchema = z
+  .object({
+    systemPrompt: z.string().trim().min(1).max(20_000).optional().catch(undefined),
+    liveTitleUpdates: z.boolean().optional().catch(undefined),
+    reviewGate: z.boolean().optional().catch(undefined),
+    stepBudget: z.number().int().min(0).max(1000).optional().catch(undefined),
+  })
+  .passthrough();
+
 const workspacePathSchema = (envName: 'CEZ_BROWSE_ROOT' | 'CEZ_PROJECTS_DIR', fallback: string) => {
   const defaultValue = () => process.env[envName]?.trim() || fallback;
   return z.string().min(1).max(4096).default(defaultValue).catch(defaultValue);
@@ -199,6 +228,8 @@ const workspaceConfigSchema = z
     disabledProviders: disabledProvidersSchema,
     /** Machine-wide agent/model defaults for repos that set none of their own. */
     agentDefaults: agentDefaultsSchema.default(() => ({})).catch(() => ({})),
+    /** Machine-wide answers for the per-repo run knobs — see `projectDefaultsSchema`. */
+    projectDefaults: projectDefaultsSchema.default(() => ({})).catch(() => ({})),
     /** Per-entry salvage: a corrupt entry is dropped, the rest of the registry
      *  survives (a whole-array `.catch([])` would evict every project over one
      *  bad row). */

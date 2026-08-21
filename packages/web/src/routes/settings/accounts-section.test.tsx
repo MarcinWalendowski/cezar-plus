@@ -190,7 +190,7 @@ function renderAccounts() {
   })
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={['/settings/global/accounts']}>
+      <MemoryRouter initialEntries={['/settings/accounts']}>
         <AppRoutes />
         <Toaster />
       </MemoryRouter>

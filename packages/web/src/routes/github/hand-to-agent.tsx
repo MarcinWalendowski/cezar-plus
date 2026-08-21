@@ -10,6 +10,7 @@ import {
   ZapIcon,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { Link as WorkspaceLink } from 'react-router'
 import { Link } from '@/lib/project-router'
 
 import { createRun, putUiState } from '@/api/client'
@@ -275,12 +276,12 @@ export function HandToAgent({
             {resolved.providerError
               ? 'Provider authentication could not be verified.'
               : 'Connect an agent provider to run this item.'}
-            <Link
-              to="/settings/agents#providers"
+            <WorkspaceLink
+              to="/settings/providers"
               className="font-medium text-foreground underline underline-offset-4"
             >
               Configure providers
-            </Link>
+            </WorkspaceLink>
           </span>
         ) : null}
         <PromptTemplateMenu templates={templates} onInsert={insertPromptTemplate} />

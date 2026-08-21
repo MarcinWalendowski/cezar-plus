@@ -1,5 +1,8 @@
 import { ChevronDownIcon, SettingsIcon } from 'lucide-react'
-import { Link } from '@/lib/project-router'
+import { Link } from 'react-router'
+
+import { useActiveProjectId } from '@/lib/project-router'
+import { settingsSectionPath } from '@/routes/settings/settings-shell'
 
 import type { BackendCheck, HealthResponse, Runner } from '@loki-labs/better-cezar-api-client'
 import { StatusDot } from '@/components/status-dot'
@@ -76,7 +79,18 @@ export function forgeNote(health: HealthResponse): string | null {
   return `GitHub is unreachable — ${health.forge.reason ?? 'unknown reason'}. The GitHub tab is hidden until it comes back.`
 }
 
+/**
+ * Where "Tool settings" and a broken tool's row point. Settings is one workspace-level area now
+ * (`.ai/specs/2026-08-21-one-settings-area.md`), so the link is plain and the project rides along
+ * as `?project=` — the menu is opened from inside a project, and Agents is a `per-project` section
+ * whose subject should be the one the user is standing in rather than the machine tier.
+ */
+function useAgentSettingsPath(): string {
+  return settingsSectionPath('agents', useActiveProjectId())
+}
+
 export function ToolsMenu({ health }: { health: HealthResponse | undefined }) {
+  const agentSettings = useAgentSettingsPath()
   if (!health) return null
 
   // Green when cez can actually work: at least one agent CLI is present and the default runner
@@ -122,7 +136,7 @@ export function ToolsMenu({ health }: { health: HealthResponse | undefined }) {
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild>
           <Link
-            to="/settings/agents"
+            to={agentSettings}
             data-slot="tools-settings"
             className="gap-2 text-[12.5px] text-muted-foreground"
           >
@@ -163,10 +177,11 @@ function AvailableToolRow({ check }: { check: BackendCheck }) {
  * Agents. The whole row is the link, so the DropdownMenuItem closes the menu on navigation.
  */
 function UnavailableToolRow({ check }: { check: BackendCheck }) {
+  const agentSettings = useAgentSettingsPath()
   return (
     <DropdownMenuItem asChild>
       <Link
-        to="/settings/agents"
+        to={agentSettings}
         data-slot="tool-row"
         data-tool={check.name}
         data-available="false"

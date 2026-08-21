@@ -160,31 +160,62 @@ const configSchema = z.object({
 
 export type CezConfig = z.infer<typeof configSchema>;
 
+/** The tier of `~/.cezar/config.json` a repo's own config is folded on top of. */
+export interface MachineTier {
+  agentDefaults: WorkspaceConfig['agentDefaults'];
+  projectDefaults: WorkspaceConfig['projectDefaults'];
+}
+
 /**
- * Fold the machine-wide agent defaults under a repo's own config (spec 2026-07-29-agent-profiles).
+ * The keys `projectDefaults` can seed — named once, so the seeding loop, the `inherited` block on
+ * `GET /api/v1/config` and any future key stay one list rather than three.
+ */
+export const PROJECT_DEFAULT_KEYS = [
+  'systemPrompt',
+  'liveTitleUpdates',
+  'reviewGate',
+  'stepBudget',
+] as const;
+export type ProjectDefaultKey = (typeof PROJECT_DEFAULT_KEYS)[number];
+
+/**
+ * Fold the machine-wide defaults under a repo's own config (spec 2026-07-29-agent-profiles for
+ * `agentDefaults`; `.ai/specs/2026-08-21-one-settings-area.md` Phase 3 for `projectDefaults`).
  *
  * Applied to the RAW object, before parsing, for the reason `ownWorktreeRetention` documents just
  * below: `defaultRunner`'s `.default('claude')` materializes the key, so after a parse there is no
  * telling "the user chose claude" from "the user said nothing". Merging first keeps the wire shape
  * exactly as it has always been — `defaultRunner` and the model presets stay always-present — while
- * making an absent key mean "ask the machine".
+ * making an absent key mean "ask the machine". `stepBudget` carries a `.default(0)` and is seeded
+ * here for exactly the same reason.
  *
  * A repo key always wins, and `models` merges per RUNNER rather than wholesale: pinning claude's
  * model in one repo must not silently discard the machine's codex preset.
+ *
+ * The four `projectDefaults` keys sit ABOVE the env fallbacks that `liveTitleUpdatesEnabled`
+ * (`runs/auto-name.ts`, default ON) and `reviewGateEnabled` (`runs/review-gate.ts`, default OFF)
+ * apply, so the order is repo → machine → env → hardcoded and an unset machine tier is
+ * indistinguishable from before the tier existed.
  */
-function withMachineDefaults(raw: unknown, machine: WorkspaceConfig['agentDefaults']): unknown {
+function withMachineDefaults(raw: unknown, machine: MachineTier): unknown {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) raw = {};
   const own = raw as Record<string, unknown>;
   const ownModels = own.defaultModels && typeof own.defaultModels === 'object'
     ? own.defaultModels as Record<string, unknown>
     : undefined;
-  const models = { ...machine.models, ...ownModels };
+  const models = { ...machine.agentDefaults.models, ...ownModels };
+  const seeded: Record<string, unknown> = {};
+  for (const key of PROJECT_DEFAULT_KEYS) {
+    const fromMachine = (machine.projectDefaults as Record<string, unknown>)[key];
+    if (own[key] === undefined && fromMachine !== undefined) seeded[key] = fromMachine;
+  }
   return {
     ...own,
-    ...(own.defaultRunner === undefined && machine.runner !== undefined
-      ? { defaultRunner: machine.runner }
+    ...(own.defaultRunner === undefined && machine.agentDefaults.runner !== undefined
+      ? { defaultRunner: machine.agentDefaults.runner }
       : {}),
     ...(Object.keys(models).length > 0 ? { defaultModels: models } : {}),
+    ...seeded,
   };
 }
 
@@ -196,7 +227,11 @@ function withMachineDefaults(raw: unknown, machine: WorkspaceConfig['agentDefaul
  * machine, so a snapshot is a staleness bug.
  */
 export async function loadConfig(repoRoot: string): Promise<CezConfig> {
-  const machine = (await loadWorkspaceConfig()).agentDefaults;
+  const workspace = await loadWorkspaceConfig();
+  const machine: MachineTier = {
+    agentDefaults: workspace.agentDefaults,
+    projectDefaults: workspace.projectDefaults,
+  };
   let raw: string;
   try {
     raw = await readFile(join(repoRoot, '.ai/cezar', 'config.json'), 'utf8');
@@ -291,4 +326,35 @@ export async function resolveWorktreeRetention(repoRoot: string): Promise<number
   if (own !== undefined) return own;
   const workspace = await loadWorkspaceConfig().catch(() => null);
   return workspace?.resources.worktreeRetentionDefault ?? DEFAULT_WORKTREE_RETENTION;
+}
+
+
+/**
+ * The keys this repo's RAW `.ai/cezar/config.json` actually sets
+ * (`.ai/specs/2026-08-21-one-settings-area.md`, Phase 3).
+ *
+ * `loadConfig` cannot answer this, for the reason `ownWorktreeRetention` above spells out and
+ * `withMachineDefaults` compounds: schema defaults and the machine tier both materialize keys, so
+ * a parsed config cannot tell "this repo chose" from "this repo said nothing and something else
+ * answered". The one Settings area needs that distinction to label a field **Overridden** rather
+ * than **Inherited**, so it comes from a raw read — never from the parsed object.
+ *
+ * Reports every own key present in the file, not just the ones cezar knows: a user key
+ * (`skillsRepos`, anything hand-added) IS set by this repo, and pretending otherwise would make
+ * the answer depend on cezar's version rather than on the file.
+ */
+export async function ownConfigKeys(repoRoot: string): Promise<string[]> {
+  let raw: string;
+  try {
+    raw = await readFile(join(repoRoot, '.ai/cezar', 'config.json'), 'utf8');
+  } catch {
+    return []; // no file — nothing set
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    return Object.keys(parsed as Record<string, unknown>).sort();
+  } catch {
+    return []; // malformed JSON — same as unset, which is what loadConfig does too
+  }
 }

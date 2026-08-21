@@ -127,6 +127,8 @@ function serve({
     worktreeRetention: 10,
     liveTitleUpdates: null,
     reviewGate: null,
+    inherited: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
+    overridden: [],
     ...config,
   }
   const json = (payload: unknown, status = 200) =>
@@ -134,7 +136,11 @@ function serve({
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
+      // `/settings/<id>?project=<id>` mounts a scope provider, so project-scoped requests go out
+      // as `/api/v1/p/<id>/…` (`.ai/specs/2026-08-21-one-settings-area.md`). Normalized here so
+      // this file keeps asserting the SECTION's behaviour against one spelling; WHICH scope a
+      // section addresses is pinned in `settings.test.tsx`, where it is the subject.
+      const url = String(input).replace(/^\/api\/v1\/p\/[^/]+/, '/api/v1')
       const method = init?.method ?? 'GET'
       const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined
       requests.push({ method, url, body })
@@ -223,6 +229,9 @@ function gateSeededClient() {
   return client
 }
 
+/** Entries carry `?project=boot` since `.ai/specs/2026-08-21-one-settings-area.md`: Agents is a
+ *  `per-project` section, and without a project it renders the MACHINE tier instead — a different
+ *  form against a different store, covered in `settings.test.tsx`. */
 function renderAt(entry: string) {
   const client = gateSeededClient()
   render(
@@ -246,16 +255,17 @@ afterEach(() => {
 })
 
 describe('the agents form', () => {
-  it('puts the anchored Providers section first', async () => {
+  it('does NOT render the Providers pane — it is its own workspace section', async () => {
+    // Inverted on 2026-08-21 (`.ai/specs/2026-08-21-one-settings-area.md`, Phase 2). This test
+    // used to pin Providers as the FIRST child of this form, which is precisely the bug: the
+    // switch writes `disabledProviders` in the WORKSPACE config, so a host-wide toggle was
+    // reachable only through one arbitrary project's URL. It lives at `/settings/providers` now
+    // (`provider-settings.test.tsx`).
     serve()
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
 
     await waitFor(() => expect(form()).not.toBeNull())
-    const providers = document.querySelector<HTMLElement>('[data-slot="provider-settings"]')!
-    expect(providers.id).toBe('providers')
-    expect(providers.className).toContain('scroll-mt-20')
-    expect(providers.className).not.toContain('scroll-mt-6')
-    expect(form()?.firstElementChild).toBe(providers)
+    expect(document.querySelector('[data-slot="provider-settings"]')).toBeNull()
   })
 
   it('keeps a saved disconnected runner selected while disabling its runner and model controls', async () => {
@@ -269,7 +279,7 @@ describe('the agents form', () => {
         ],
       },
     })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
 
     const codex = await screen.findByRole('radio', { name: 'codex' })
     expect(codex.getAttribute('aria-checked')).toBe('true')
@@ -293,7 +303,7 @@ describe('the agents form', () => {
         ],
       },
     })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
 
     const codex = await screen.findByRole('radio', { name: 'codex' })
     expect(codex.getAttribute('aria-checked')).toBe('true')
@@ -306,7 +316,7 @@ describe('the agents form', () => {
 
   it('disables only provider-specific controls while provider status is pending', async () => {
     serve({ providerStatusPending: true })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
 
     const claude = await screen.findByRole('radio', { name: 'claude' })
     expect((claude as HTMLButtonElement).disabled).toBe(true)
@@ -317,10 +327,13 @@ describe('the agents form', () => {
 
   it('keeps unrelated settings usable when provider status errors', async () => {
     serve({ providerStatus: { error: 'probe failed' }, providerStatusCode: 500 })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
 
-    expect(await screen.findByText('Provider status could not be loaded')).toBeTruthy()
-    expect((screen.getByRole('radio', { name: 'claude' }) as HTMLButtonElement).disabled).toBe(true)
+    // The "Provider status could not be loaded" banner moved out with the Providers section
+    // (spec Phase 2); what this test is actually about is that a failed probe disables the
+    // PROVIDER-dependent controls and nothing else.
+    const claude = await screen.findByRole('radio', { name: 'claude' })
+    expect((claude as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByLabelText<HTMLSelectElement>('Default model for claude').disabled).toBe(true)
     expect(screen.getByLabelText<HTMLTextAreaElement>('System prompt').disabled).toBe(false)
     expect(screen.getByLabelText<HTMLButtonElement>('Review changes before finishing').disabled).toBe(false)
@@ -331,25 +344,25 @@ describe('the agents form', () => {
     serve({
       providerStatus: { providers: [null, { provider: 'future', status: secret }] },
     })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
 
-    expect(await screen.findByText('Provider status could not be loaded')).toBeTruthy()
-    expect((screen.getByRole('radio', { name: 'claude' }) as HTMLButtonElement).disabled).toBe(true)
+    const claude = await screen.findByRole('radio', { name: 'claude' })
+    expect((claude as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByLabelText<HTMLSelectElement>('Default model for claude').disabled).toBe(true)
     expect(screen.getByLabelText<HTMLTextAreaElement>('System prompt').disabled).toBe(false)
+    // A malformed payload must never be echoed into the page, wherever it is rendered.
     expect(screen.queryByText(secret)).toBeNull()
   })
 
   it('disables provider controls when a failed refresh leaves connected data cached', async () => {
     serve({ providerStatusAfterFirstError: 'refresh probe failed' })
-    const client = renderAt('/settings/agents')
+    const client = renderAt('/settings/agents?project=boot')
 
     const claude = await screen.findByRole('radio', { name: 'claude' })
     expect((claude as HTMLButtonElement).disabled).toBe(false)
     await act(() => client.refetchQueries({ queryKey: workspaceQueryKeys.providerStatus }))
 
-    expect(await screen.findByText('Provider status could not be loaded')).toBeTruthy()
-    expect((claude as HTMLButtonElement).disabled).toBe(true)
+    await waitFor(() => expect((claude as HTMLButtonElement).disabled).toBe(true))
     expect(screen.getByLabelText<HTMLTextAreaElement>('System prompt').disabled).toBe(false)
   })
 
@@ -362,7 +375,7 @@ describe('the agents form', () => {
         defaultModels: { claude: 'opus' },
       },
     })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
 
     await waitFor(() => expect(form()).not.toBeNull())
     expect(screen.getByRole('radio', { name: 'codex' }).getAttribute('aria-checked')).toBe('true')
@@ -378,7 +391,7 @@ describe('the agents form', () => {
 
   it('live title updates: the switch defaults ON and PUTs the toggle', async () => {
     serve()
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
     await waitFor(() => expect(form()).not.toBeNull())
 
     const toggle = screen.getByLabelText('Live title updates')
@@ -391,7 +404,7 @@ describe('the agents form', () => {
 
   it('review gate: the switch defaults OFF and PUTs the toggle (#489)', async () => {
     serve()
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
     await waitFor(() => expect(form()).not.toBeNull())
 
     const toggle = screen.getByLabelText('Review changes before finishing')
@@ -404,7 +417,7 @@ describe('the agents form', () => {
 
   it('default runner round-trips: click PUTs the patch and the control follows the answer', async () => {
     serve()
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
     await waitFor(() => expect(form()).not.toBeNull())
 
     fireEvent.click(screen.getByRole('radio', { name: 'codex' }))
@@ -417,7 +430,7 @@ describe('the agents form', () => {
 
   it('model presets round-trip per runner — auto sends null to clear the key', async () => {
     serve({ config: { defaultModels: { codex: 'gpt-5-codex' } } })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
     await waitFor(() => expect(form()).not.toBeNull())
 
     const claude = screen.getByLabelText<HTMLSelectElement>('Default model for claude')
@@ -444,7 +457,7 @@ describe('the agents form', () => {
         ],
       },
     })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
     await waitFor(() => expect(form()).not.toBeNull())
 
     const opencode = screen.getByLabelText<HTMLSelectElement>('Default model for opencode')
@@ -472,7 +485,7 @@ describe('the agents form', () => {
         modelsLocked: true,
       },
     })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
     await waitFor(() => expect(form()).not.toBeNull())
 
     const claudeModel = screen.getByLabelText<HTMLOutputElement>('Default model for claude')
@@ -488,7 +501,7 @@ describe('the agents form', () => {
 
   it('system prompt saves trimmed on the explicit button, and an emptied box clears with null', async () => {
     serve({ config: { systemPrompt: 'Be brief.' } })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
     await waitFor(() => expect(form()).not.toBeNull())
 
     const box = screen.getByLabelText<HTMLTextAreaElement>('System prompt')
@@ -512,7 +525,7 @@ describe('the agents form', () => {
 
   it('an over-limit prompt disables Save with the reason — no request leaves', async () => {
     serve()
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
     await waitFor(() => expect(form()).not.toBeNull())
 
     fireEvent.change(screen.getByLabelText('System prompt'), { target: { value: 'x'.repeat(20_001) } })
@@ -525,7 +538,7 @@ describe('the agents form', () => {
 
   it('base branch round-trips through the same PUT — "" means follow the checked-out branch', async () => {
     serve({ config: { baseBranch: 'develop' } })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
     await waitFor(() => expect(form()).not.toBeNull())
     const picker = await waitFor(() => screen.getByLabelText<HTMLSelectElement>('Base branch'))
     expect(picker.value).toBe('develop')
@@ -537,7 +550,7 @@ describe('the agents form', () => {
 
   it('a PUT refusal surfaces the server\'s own words (409 → danger toast)', async () => {
     serve({ putStatus: 409, putError: 'config.json is locked by another cockpit' })
-    renderAt('/settings/agents')
+    renderAt('/settings/agents?project=boot')
     await waitFor(() => expect(form()).not.toBeNull())
 
     fireEvent.click(screen.getByRole('radio', { name: 'opencode' }))
@@ -575,7 +588,7 @@ describe('the agents form', () => {
           profiles: WITH_WORK_ACCOUNT.profiles.filter((profile) => profile.isDefault),
         },
       })
-      renderAt('/settings/agents')
+      renderAt('/settings/agents?project=boot')
       await waitFor(() => expect(form()).not.toBeNull())
       // Settled: the default-models field below it has rendered, so the pane is not mid-load.
       await screen.findByLabelText('Default model for claude')
@@ -586,7 +599,7 @@ describe('the agents form', () => {
 
     it('splits ONLY the agent that has a second login, and names each folder', async () => {
       serve({ agentProfiles: WITH_WORK_ACCOUNT })
-      renderAt('/settings/agents')
+      renderAt('/settings/agents?project=boot')
 
       await waitFor(() => expect(rows()).toHaveLength(5))
       expect(rows().map((r) => r.textContent)).toEqual([
@@ -605,7 +618,7 @@ describe('the agents form', () => {
       serve({
         agentProfiles: { ...WITH_WORK_ACCOUNT, selections: { '/repo': { claude: 'klaudiusz' } } },
       })
-      renderAt('/settings/agents')
+      renderAt('/settings/agents?project=boot')
 
       await waitFor(() => expect(rowFor('claude', 'klaudiusz')?.getAttribute('aria-checked')).toBe('true'))
       expect(rowFor('claude', '')?.getAttribute('aria-checked')).toBe('false')
@@ -615,14 +628,17 @@ describe('the agents form', () => {
       // One click, two stores, and that split is the point: the runner is a team decision that
       // belongs in the committable repo config, the account is personal and must never reach it.
       serve({ agentProfiles: WITH_WORK_ACCOUNT })
-      renderAt('/settings/agents')
+      renderAt('/settings/agents?project=boot')
 
       await waitFor(() => expect(rows()).toHaveLength(5))
       fireEvent.click(rowFor('claude', 'klaudiusz')!)
 
       await waitFor(() => expect(selections()).toHaveLength(1))
+      // `boot`, not the reserved `default` alias: the section is addressed by `?project=boot` and
+      // mounts that scope, so it names the project it was pointed at. Both resolve to the same
+      // repo root server-side, which is the key the account store actually uses.
       expect(selections()[0]?.body).toEqual({
-        projectId: 'default',
+        projectId: 'boot',
         provider: 'claude',
         profileId: 'klaudiusz',
       })
@@ -636,7 +652,7 @@ describe('the agents form', () => {
       serve({
         agentProfiles: { ...WITH_WORK_ACCOUNT, selections: { '/repo': { claude: 'klaudiusz' } } },
       })
-      renderAt('/settings/agents')
+      renderAt('/settings/agents?project=boot')
 
       // Wait for the SPLIT state: until the accounts land, claude is one plain row, and clicking
       // that one writes no selection — which is correct, and would make this pass for no reason.
@@ -645,7 +661,7 @@ describe('the agents form', () => {
 
       await waitFor(() => expect(selections()).toHaveLength(1))
       expect(selections()[0]?.body).toEqual({
-        projectId: 'default',
+        projectId: 'boot',
         provider: 'claude',
         profileId: null,
       })
@@ -653,7 +669,7 @@ describe('the agents form', () => {
 
     it('switches agent and account together when the picked row is another agent', async () => {
       serve({ agentProfiles: WITH_WORK_ACCOUNT })
-      renderAt('/settings/agents')
+      renderAt('/settings/agents?project=boot')
 
       await waitFor(() => expect(rows()).toHaveLength(5))
       fireEvent.click(rowFor('codex')!)
@@ -675,7 +691,7 @@ describe('the agents form', () => {
             profile.id === 'klaudiusz' ? { ...profile, exists: false, looksValid: false } : profile),
         },
       })
-      renderAt('/settings/agents')
+      renderAt('/settings/agents?project=boot')
 
       await waitFor(() =>
         expect(
@@ -685,7 +701,7 @@ describe('the agents form', () => {
 
     it('says the account is personal, because everything else in this pane is shared', async () => {
       serve({ agentProfiles: WITH_WORK_ACCOUNT })
-      renderAt('/settings/agents')
+      renderAt('/settings/agents?project=boot')
 
       await waitFor(() => expect(rows()).toHaveLength(5))
       const pane = document.querySelector('[data-slot="agents-runner"]')?.closest('section')

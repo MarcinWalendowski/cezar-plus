@@ -7,7 +7,8 @@ import { createQueryClient } from '@/api/query-client'
 import type { ProviderStatusResponse } from '@loki-labs/better-cezar-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { applyProviderStatusRow } from '@/lib/provider-status'
-import { workspaceQueryKeys } from '@/api/queries'
+import { queryKeys, workspaceQueryKeys } from '@/api/queries'
+import { AppRoutes } from '@/routes'
 import { ProviderSettings } from './provider-settings'
 
 const ALL_STATUSES: ProviderStatusResponse = {
@@ -552,5 +553,73 @@ describe('ProviderSettings', () => {
     expect(await within(card('codex')).findByText('Not connected')).toBeTruthy()
     expect(within(card('codex')).getByRole('button', { name: 'Try again' })).toBeTruthy()
     expect(await screen.findByText('That incident is no longer current.')).toBeTruthy()
+  })
+})
+
+/**
+ * Providers as its OWN workspace section (`.ai/specs/2026-08-21-one-settings-area.md`, Phase 2).
+ *
+ * The pane used to render inside the project Agents form, which meant this switch — whose PUT
+ * writes `disabledProviders` in the WORKSPACE config — was reachable only through one arbitrary
+ * project's URL, and every in-app banner that linked to it hardcoded that hop
+ * (`/settings/agents#providers`, rewritten to the BOOT project). What is pinned here is that the
+ * URL has no project segment in it, in EITHER direction: the page is addressed without one, and
+ * the request goes out without one.
+ */
+describe('/settings/providers', () => {
+  function renderRoute(entry = '/settings/providers') {
+    const client = createQueryClient()
+    client.setDefaultOptions({ queries: { ...client.getDefaultOptions().queries, retry: false } })
+    client.setQueryData(queryKeys.health, {
+      bootProject: 'boot',
+      capabilities: { localHandoff: true, singleProject: false },
+    })
+    client.setQueryData(workspaceQueryKeys.projects, {
+      projects: [],
+      bootProject: 'boot',
+      projectsDir: '~/cezar/projects',
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={[entry]}>
+          <AppRoutes />
+          <Toaster />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+  }
+
+  it('renders as its own section, with no project in the URL', async () => {
+    serve()
+    renderRoute()
+    expect(document.querySelector('[data-route="settings-providers"]')).not.toBeNull()
+    expect(await screen.findByRole('switch', { name: 'Use Claude Code' })).toBeTruthy()
+    // A workspace section: the header offers no project selector, because there is nothing to pick.
+    expect(document.querySelector('[data-slot="settings-project-selector"]')).toBeNull()
+  })
+
+  it('the switch PUTs the unscoped /api/v1/providers/:provider/enabled', async () => {
+    serve()
+    renderRoute()
+    fireEvent.click(await screen.findByRole('switch', { name: 'Use Claude Code' }))
+
+    await waitFor(() => {
+      expect(requests.some((r) => r.method === 'PUT' && r.url === '/api/v1/providers/claude/enabled')).toBe(
+        true,
+      )
+    })
+    // Not `/api/v1/p/<anything>/providers/…`: host state, addressed as host state.
+    expect(requests.some((r) => r.url.includes('/p/') && r.url.includes('/providers/'))).toBe(false)
+  })
+
+  it('is no longer rendered inside the Agents pane', async () => {
+    // Phase 2's actual deliverable. Agents mounts a project scope, so leaving Providers in it
+    // would put workspace data back behind a project subject.
+    serve()
+    renderRoute('/settings/agents?project=boot')
+    await waitFor(() => {
+      expect(document.querySelector('[data-route="settings-agents"]')).not.toBeNull()
+    })
+    expect(document.querySelector('[data-slot="provider-settings"]')).toBeNull()
   })
 })

@@ -72,11 +72,12 @@ export function AutoResumeHint({ run }: { run: ApiRun }) {
       >
         Don’t resume
       </button>
-      {/* Global settings live OUTSIDE every project scope, so this is react-router's own Link:
-          the scope-aware one would prefix it into `/p/<id>/settings/global/…`, which is not a
-          route. Same reason `clone-project-dialog.tsx` reaches for `RouterLink`. */}
+      {/* Settings lives OUTSIDE every project scope, so this is react-router's own Link: the
+          scope-aware one would prefix it into `/p/<id>/settings/resources`, which only redirects
+          straight back out (`.ai/specs/2026-08-21-one-settings-area.md`). Same reason
+          `clone-project-dialog.tsx` reaches for `RouterLink`. */}
       <GlobalLink
-        to="/settings/global/resources"
+        to="/settings/resources"
         data-slot="auto-resume-settings-link"
         className="font-medium text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground"
       >

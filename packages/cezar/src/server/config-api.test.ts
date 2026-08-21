@@ -86,6 +86,11 @@ describe('the config API', () => {
       worktreeRetention: DEFAULT_WORKTREE_RETENTION,
       liveTitleUpdates: null,
       reviewGate: null,
+      // Which TIER answered (`.ai/specs/2026-08-21-one-settings-area.md`). With no repo file and
+      // no machine file, nothing is inherited and nothing is overridden — and BOTH keys are
+      // present, because "no machine opinion" has to be sayable.
+      inherited: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
+      overridden: [],
     });
   });
 
@@ -203,6 +208,12 @@ describe('the config API', () => {
       worktreeRetention: DEFAULT_WORKTREE_RETENTION,
       liveTitleUpdates: null,
       reviewGate: null,
+      inherited: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
+      // Exactly the keys the RAW file holds after the merge — the two the user had plus the three
+      // the PUT wrote. `defaultRunner`, `plannerModel` and `worktreeRetention` are effective values
+      // that no one set, and they are correctly absent: this list is what the UI labels
+      // "Overridden", and a defaulted key labelled that way would be a lie.
+      overridden: ['baseBranch', 'defaultModels', 'maxParallel', 'skillsRepos', 'systemPrompt'],
     });
   });
 

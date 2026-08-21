@@ -70,7 +70,11 @@ function serve({
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
+      // Bookmarklets is a `per-project` settings section, so `/settings/bookmarklets?project=boot`
+      // mounts a scope provider and its reads go out as `/api/v1/p/boot/…`
+      // (`.ai/specs/2026-08-21-one-settings-area.md`). Normalized so this file keeps matching one
+      // spelling; WHICH scope a section addresses is pinned in `settings/settings.test.tsx`.
+      const url = String(input).replace(/^\/api\/v1\/p\/[^/]+/, '/api/v1')
       const method = init?.method ?? 'GET'
       const body = init?.body ? JSON.parse(String(init.body)) : undefined
       requests.push({ method, url, body })
@@ -98,7 +102,9 @@ function gateSeededClient() {
   const client = createQueryClient()
   client.setQueryData(queryKeys.health, { bootProject: 'boot' })
   client.setQueryData(workspaceQueryKeys.projects, {
-    projects: [],
+    projects: [
+      { id: 'boot', name: 'cezar', root: '/home/u/cezar', status: 'ok', addedAt: '2026-01-01T00:00:00Z', lastOpenedAt: '2026-01-01T00:00:00Z', source: 'local' },
+    ],
     bootProject: 'boot',
     projectsDir: '~/cezar/projects',
   })
@@ -444,7 +450,7 @@ describe('the bookmarklet panel (spec 011)', () => {
         return new Promise<never>(() => {}) // /api/v1/skills never settles
       }),
     )
-    renderAt('/settings/bookmarklets')
+    renderAt('/settings/bookmarklets?project=boot')
 
     await waitFor(() =>
       expect(document.querySelector('[data-slot="bookmarklets-loading"]')).not.toBeNull(),
@@ -455,7 +461,7 @@ describe('the bookmarklet panel (spec 011)', () => {
 
   it('is a first-class Settings page that generates protected links and auto-arms per-skill links only', async () => {
     serve()
-    renderAt('/settings/bookmarklets')
+    renderAt('/settings/bookmarklets?project=boot')
 
     await waitFor(() => expect(document.querySelector('[data-slot="bookmarklet-panel"]')).not.toBeNull())
     // The key landed in the links (the panel is its one legitimate DOM use).

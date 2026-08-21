@@ -11,23 +11,29 @@ import { AppRoutes } from '@/routes'
 import { SETTINGS_SECTIONS, visibleSettingsSections } from './registry'
 
 /**
- * The Settings shell + Appearance section (R6 Step 1.3): registry rendering, hidden gating,
- * the project/global scope split (step 3.5), the appearance round-trip against a stubbed
- * ui-state API, and boot application of persisted values. The URL map itself (including
- * hidden sections 404ing) lives in routes.test.tsx.
+ * The Settings shell + Appearance section (R6 Step 1.3): registry rendering, hidden gating, the
+ * appearance round-trip against a stubbed ui-state API, and boot application of persisted values.
+ * The URL map itself (including hidden sections 404ing, and both legacy redirect families) lives
+ * in routes.test.tsx.
  *
- * The scope split is what most of this file now pins, and it is pinned where it is observable:
- * WHICH STORE a section writes. Appearance and Notifications must reach
- * `/api/v1/workspace/ui-state` (global), Agents must reach `/api/v1/config` (project) — the stub
- * below answers both and records every request, so a section writing the wrong one shows up as
- * a wrong URL rather than as a passing test.
+ * **Rewritten for `.ai/specs/2026-08-21-one-settings-area.md`.** The previous version of this file
+ * said, in its own header, "the scope split is what most of this file now pins" — and it pinned it
+ * the RIGHT way, by asserting which STORE a section writes rather than which component rendered.
+ * That property is kept; only the split is gone. There is one nav listing every section now, and
+ * what a `per-project` section writes is decided by `?project=`, not by which of two areas the URL
+ * was in.
+ *
+ * So the central assertion is still WHICH STORE: Appearance and Notifications must reach
+ * `/api/v1/workspace/ui-state`, Agents with *All projects* must reach `/api/v1/workspace/config`,
+ * and Agents with `?project=chat` must reach `/api/v1/p/chat/config`. The stub below answers all
+ * of them and records every request, so a section writing the wrong one shows up as a wrong URL
+ * rather than as a passing test.
  */
 
 let requests: Array<{ method: string; url: string; body?: unknown }> = []
 
-/** Both ui-state stores plus the project config answer; everything else the routes fetch stays
- *  honestly pending. Both stores are served on purpose — a section writing to the wrong one
- *  would otherwise hang instead of failing loudly. */
+/** Every store a settings section can reach, so a section writing to the WRONG one fails loudly
+ *  on the recorded URL instead of hanging on an unstubbed fetch. */
 function serve(uiState: Record<string, unknown> = {}) {
   requests = []
   const json = (payload: unknown) =>
@@ -46,7 +52,19 @@ function serve(uiState: Record<string, unknown> = {}) {
       if (url === '/api/v1/ui-state' && method === 'GET') return json(projectUiState)
       if (url === '/api/v1/ui-state' && method === 'PUT')
         return json({ ...projectUiState, ...(body as Record<string, unknown>) })
-      if (url === '/api/v1/config') return json(AGENTS_CONFIG)
+      if (url === '/api/v1/workspace/config' && method === 'GET') return json(WORKSPACE_CONFIG)
+      if (url === '/api/v1/workspace/config' && method === 'PUT')
+        return json({
+          ...WORKSPACE_CONFIG,
+          projectDefaults: {
+            ...WORKSPACE_CONFIG.projectDefaults,
+            ...((body as { projectDefaults?: Record<string, unknown> })?.projectDefaults ?? {}),
+          },
+        })
+      // Both spellings of the per-repo config: unscoped (the boot project) and explicitly scoped
+      // (what `?project=chat` addresses). Serving both is the point — a section reaching for the
+      // wrong one must produce a wrong URL, not a pending promise.
+      if (url === '/api/v1/config' || /^\/api\/v1\/p\/[^/]+\/config$/.test(url)) return json(AGENTS_CONFIG)
       if (url === '/api/v1/providers/status')
         return json({
           providers: [
@@ -61,7 +79,7 @@ function serve(uiState: Record<string, unknown> = {}) {
   )
 }
 
-/** Enough of `GET /api/v1/config` for the Agents section to render its form. */
+/** Enough of `GET /api/v1/config` for the Agents section to render its project form. */
 const AGENTS_CONFIG = {
   baseBranch: null,
   defaultRunner: 'claude',
@@ -72,11 +90,39 @@ const AGENTS_CONFIG = {
   worktreeRetention: 10,
   liveTitleUpdates: null,
   reviewGate: null,
+  inherited: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
+  overridden: [],
 }
 
+/** Enough of `GET /api/v1/workspace/config` for the Agents section's MACHINE-tier form. */
+const WORKSPACE_CONFIG = {
+  browseRoot: '~/',
+  projectsDir: '~/cezar/projects',
+  composerDefaults: {
+    autonomous: null,
+    worktree: null,
+    inheritedAutonomous: 'source-dependent',
+    inheritedWorktree: true,
+  },
+  resources: {
+    maxParallel: 2,
+    maxMonitoringSessions: 2,
+    monitoringWakeIntervalMinutes: null,
+    autoResumeOnUsageLimit: true,
+    memoryLimitMb: null,
+    worktreeRetentionDefault: 10,
+  },
+  agentDefaults: {},
+  projectDefaults: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
+}
+
+const PROJECTS = [
+  { id: 'boot', name: 'cezar', root: '/home/u/cezar', status: 'ok', addedAt: '2026-01-01T00:00:00Z', lastOpenedAt: '2026-01-01T00:00:00Z', source: 'local' },
+  { id: 'chat', name: 'chat', root: '/home/u/chat', status: 'ok', addedAt: '2026-01-01T00:00:00Z', lastOpenedAt: '2026-01-01T00:00:00Z', source: 'local' },
+]
+
 /** Seeds the step-3.2 route gates — boot id (legacy redirect) + registry (known-check) — so a
- *  flat entry URL lands scoped immediately. The boot project mounts UNSCOPED, so the exact
- *  `/api/v1/*` paths this file's fetch stub matches stay byte-identical. */
+ *  flat entry URL resolves immediately. */
 function gateSeededClient(singleProject = false) {
   const client = createQueryClient()
   client.setQueryData(queryKeys.health, {
@@ -84,7 +130,7 @@ function gateSeededClient(singleProject = false) {
     capabilities: { localHandoff: true, followups: true, singleProject },
   })
   client.setQueryData(workspaceQueryKeys.projects, {
-    projects: [],
+    projects: PROJECTS,
     bootProject: 'boot',
     projectsDir: '~/cezar/projects',
   })
@@ -117,8 +163,19 @@ afterEach(() => {
   document.documentElement.classList.remove('light')
 })
 
-const PROJECT_SECTIONS = ['agents', 'agent-config', 'worktrees', 'bookmarklets', 'prompt-templates']
-const GLOBAL_SECTIONS = [
+/**
+ * One list, one order, one nav. The old file kept two — PROJECT_SECTIONS and GLOBAL_SECTIONS —
+ * and asserted that no id appeared in both. That invariant is meaningless now and its replacement
+ * is stronger: every visible section is in the ONE list, which is the report this change answers.
+ */
+const ALL_SECTIONS = [
+  'project',
+  'agents',
+  'providers',
+  'agent-config',
+  'worktrees',
+  'bookmarklets',
+  'prompt-templates',
   'appearance',
   'notifications',
   'resources',
@@ -130,22 +187,24 @@ const GLOBAL_SECTIONS = [
   // and Projects, and NOT gated by `singleProject`: a single-project deployment can still belong
   // to an org with more than one team.
   'teams',
-  // Account (D14, same spec) — logout. Declared unconditionally like `teams`, above: visibility is
-  // an async probe inside the panel (`account-section.tsx`'s own doc comment), not a registry-level
-  // gate, so it is never absent from THIS list (which only reflects the synchronous `hidden`/
-  // `scope`/`capability` gates `visibleSettingsSections` actually has).
+  // Account (D14, same spec) — logout. Declared unconditionally: visibility is an async probe
+  // inside the panel (`account-section.tsx`), not a registry-level gate, so it is never absent
+  // from THIS list (which reflects only the synchronous `hidden`/`capability` gates).
   'account',
   // Backup (spec 2026-08-16-provider-agnostic-platform-backup) — declared unconditionally like
-  // `account`/`teams`, for the same reason: `CEZ_BACKUP` is deliberately not a health capability
-  // (byte-identical health), so visibility is an async probe inside `backup-section.tsx` (it reads
-  // `GET /api/v1/backup`), never a synchronous registry gate — so it is always present in THIS list.
+  // `account`/`teams`: `CEZ_BACKUP` is deliberately not a health capability, so visibility is an
+  // async probe inside `backup-section.tsx`.
   'backup',
 ]
 
+/** The half that answers per repo. Every one of these was unreachable from the address the
+ *  sidebar pointed at — which is the whole report. */
+const PER_PROJECT = ['project', 'agents', 'agent-config', 'worktrees', 'bookmarklets', 'prompt-templates']
+
 describe('the section registry', () => {
-  it('declares the spec §Settings sections, later ones hidden', () => {
+  it('declares every spec §Settings section, later ones hidden', () => {
     const byId = new Map(SETTINGS_SECTIONS.map((s) => [s.id, s]))
-    for (const id of [...PROJECT_SECTIONS, ...GLOBAL_SECTIONS]) {
+    for (const id of ALL_SECTIONS) {
       expect(byId.get(id as never)?.hidden).toBeUndefined()
     }
     // Listed in the registry but hidden until implemented (later phase).
@@ -154,123 +213,133 @@ describe('the section registry', () => {
     }
   })
 
-  it('splits the sections by scope (step 3.5) — each id belongs to exactly one area', () => {
-    expect(visibleSettingsSections('project').map((s) => s.id)).toEqual(PROJECT_SECTIONS)
-    expect(visibleSettingsSections('global').map((s) => s.id)).toEqual(GLOBAL_SECTIONS)
-    // No id may appear in both areas — the two navs would then link to two different pages
-    // under the same name, and the `settings/<id>` legacy redirect would be ambiguous.
-    expect(PROJECT_SECTIONS.filter((id) => GLOBAL_SECTIONS.includes(id))).toEqual([])
+  it('is ONE list — no scope argument, nothing filtered out by area', () => {
+    expect(visibleSettingsSections().map((s) => s.id)).toEqual(ALL_SECTIONS)
+    // `sources` is capability-gated, not area-gated: it appears exactly when `CEZ_SOURCES=1` does.
+    expect(visibleSettingsSections({ singleProject: false, sources: true }).map((s) => s.id)).toContain(
+      'sources',
+    )
+    expect(visibleSettingsSections({ singleProject: false, sources: false }).map((s) => s.id)).toEqual(
+      ALL_SECTIONS,
+    )
+  })
+
+  it('marks scope as a FIELD: appliesTo, not a routing area', () => {
+    for (const section of visibleSettingsSections()) {
+      expect(section.appliesTo).toBe(PER_PROJECT.includes(section.id) ? 'per-project' : 'workspace')
+    }
+    // Providers is the sharpest case (spec Phase 2): its switch writes workspace state, so it is
+    // a workspace section rather than something reached through one arbitrary project's URL.
+    expect(SETTINGS_SECTIONS.find((s) => s.id === 'providers')?.appliesTo).toBe('workspace')
+    // Only Agents can answer for *All projects*: the other five edit a folder, a branch, a
+    // checkout's worktrees or that repo's own files, and have no machine tier to fall back on.
+    expect(visibleSettingsSections().filter((s) => s.machineTier === true).map((s) => s.id)).toEqual([
+      'agents',
+    ])
   })
 
   it('hides Projects only when the single-project capability is active', () => {
     // Accounts, Teams and Account all survive: a single-project cockpit still runs on ONE of
     // possibly several logins in an org with more than one team, and can still have a session to
     // sign out of — none of that is "how many projects".
-    expect(visibleSettingsSections('global', { singleProject: true, sources: false }).map((s) => s.id)).toEqual([
-      'appearance', 'notifications', 'resources', 'accounts', 'teams', 'account', 'backup',
-    ])
-    expect(
-      visibleSettingsSections('global', { singleProject: false, sources: false }).map((s) => s.id),
-    ).toEqual(GLOBAL_SECTIONS)
-    expect(visibleSettingsSections('global').map((s) => s.id)).toEqual(GLOBAL_SECTIONS)
+    expect(visibleSettingsSections({ singleProject: true, sources: false }).map((s) => s.id)).toEqual(
+      ALL_SECTIONS.filter((id) => id !== 'projects'),
+    )
   })
 })
 
 describe('the settings shell', () => {
-  it('renders the PROJECT nav from the registry — project sections only', () => {
+  it('renders ONE nav from the registry — every section, in one list', () => {
     renderAt('/settings/agents')
     const nav = document.querySelector('[data-slot="settings-nav"]')!
     const ids = [...nav.querySelectorAll('[data-section]')].map((el) => el.getAttribute('data-section'))
-    expect(ids).toEqual(PROJECT_SECTIONS)
+    expect(ids).toEqual(ALL_SECTIONS)
+    // The area split is gone from the DOM too, not just from the list: no nav carries a scope.
+    expect(nav.getAttribute('data-scope')).toBeNull()
     // The active section is marked for assistive tech, not just by color.
     expect(nav.querySelector('[aria-current="page"]')?.getAttribute('data-section')).toBe('agents')
     // The mobile pill row renders through the same registry — the two can never disagree.
     const pills = document.querySelector('[data-slot="settings-nav-mobile"]')!
-    expect([...pills.querySelectorAll('[data-section]')].length).toBe(PROJECT_SECTIONS.length)
+    expect([...pills.querySelectorAll('[data-section]')].length).toBe(ALL_SECTIONS.length)
   })
 
-  it('every section keeps a way BACK to the index: the "General" nav entry', () => {
+  it('every nav link is flat and unprefixed — there is no project in a settings URL', () => {
     renderAt('/settings/worktrees')
-    // Project scope: scoped like every other project link, and pointing at the area index.
+    const nav = document.querySelector('[data-slot="settings-nav"]')!
+    expect(nav.querySelector('[data-section="resources"]')?.getAttribute('href')).toBe('/settings/resources')
+    expect(nav.querySelector('[data-section="agents"]')?.getAttribute('href')).toBe('/settings/agents')
+    expect(nav.querySelector('[data-section="projects"]')?.getAttribute('href')).toBe('/settings/projects')
+  })
+
+  it('carries the selected project across a nav click', () => {
+    // Switching sections while standing on one project must not silently re-target the machine
+    // tier — the user picked a subject, and a nav click is not a change of subject.
+    renderAt('/settings/worktrees?project=chat')
+    const nav = document.querySelector('[data-slot="settings-nav"]')!
+    expect(nav.querySelector('[data-section="agents"]')?.getAttribute('href')).toBe(
+      '/settings/agents?project=chat',
+    )
+  })
+
+  it('every section keeps a way BACK to the index: the "All settings" nav entry', () => {
+    renderAt('/settings/worktrees')
     expect(
       document.querySelector('[data-slot="settings-nav"] [data-slot="settings-nav-index"]')?.getAttribute('href'),
-    ).toBe('/p/boot/settings')
+    ).toBe('/settings')
     // The mobile pill row carries it too — the index is the ONLY place small screens see it.
     expect(
       document.querySelector('[data-slot="settings-nav-mobile"] [data-slot="settings-nav-index"]')?.getAttribute('href'),
-    ).toBe('/p/boot/settings')
-    // A section is open, so "General" is not the current page.
+    ).toBe('/settings')
+    // A section is open, so the index is not the current page.
     expect(document.querySelector('[data-slot="settings-nav-index"][aria-current="page"]')).toBeNull()
   })
 
-  it('"General" is the current page on the index itself, and unprefixed in the global area', () => {
+  it('/settings is the registry as an index — one card per visible section', () => {
     renderAt('/settings')
     expect(
       document.querySelector('[data-slot="settings-nav"] [data-slot="settings-nav-index"]')?.getAttribute('aria-current'),
     ).toBe('page')
-    cleanup()
-
-    renderAt('/settings/global/resources')
-    expect(
-      document.querySelector('[data-slot="settings-nav"] [data-slot="settings-nav-index"]')?.getAttribute('href'),
-    ).toBe('/settings/global')
-  })
-
-  it('renders the GLOBAL nav at /settings/global — global sections, unprefixed links', () => {
-    renderAt('/settings/global/appearance')
-    const nav = document.querySelector('[data-slot="settings-nav"]')!
-    expect(nav.getAttribute('data-scope')).toBe('global')
-    const ids = [...nav.querySelectorAll('[data-section]')].map((el) => el.getAttribute('data-section'))
-    expect(ids).toEqual(GLOBAL_SECTIONS)
-    // The whole point of the plain (non-scoped) links: no `/p/<id>` prefix may appear, or the
-    // target would not be a route at all.
-    expect(nav.querySelector('[data-section="resources"]')?.getAttribute('href')).toBe(
-      '/settings/global/resources',
-    )
-    expect(nav.querySelector('[data-section="projects"]')?.getAttribute('href')).toBe(
-      '/settings/global/projects',
-    )
-  })
-
-  it('/settings is the project registry as an index — one card per visible section', () => {
-    renderAt('/settings')
     const index = document.querySelector('[data-slot="settings-index"]')!
     const ids = [...index.querySelectorAll('[data-section]')].map((el) => el.getAttribute('data-section'))
-    expect(ids).toEqual(PROJECT_SECTIONS)
-    // Scope-aware links (step 3.2): the flat `to` picks up the active project's prefix.
+    expect(ids).toEqual(ALL_SECTIONS)
     expect(index.querySelector('[data-section="bookmarklets"]')?.getAttribute('href')).toBe(
-      '/p/boot/settings/bookmarklets',
+      '/settings/bookmarklets',
     )
-    // …and the cross-link out of the project area is NOT prefixed.
-    expect(document.querySelector('[data-slot="settings-global-link"]')?.getAttribute('href')).toBe(
-      '/settings/global',
-    )
+    // No cross-link to a second area, because there is no second area. The old file asserted the
+    // opposite (`settings-global-link`), which is exactly the invariant this change removes.
+    expect(document.querySelector('[data-slot="settings-global-link"]')).toBeNull()
   })
 
-  it('/settings/global is the global registry as an index', () => {
-    renderAt('/settings/global')
-    const index = document.querySelector('[data-slot="settings-index"]')!
-    const ids = [...index.querySelectorAll('[data-section]')].map((el) => el.getAttribute('data-section'))
-    expect(ids).toEqual(GLOBAL_SECTIONS)
-    expect(index.querySelector('[data-section="projects"]')?.getAttribute('href')).toBe(
-      '/settings/global/projects',
-    )
-  })
-
-  it('single-project mode removes Projects from the global index and navigation', () => {
-    renderAt('/settings/global', { singleProject: true })
+  it('single-project mode removes Projects from the index and the navigation', () => {
+    renderAt('/settings', { singleProject: true })
     expect(document.querySelector('[data-slot="settings-index"] [data-section="projects"]')).toBeNull()
     expect(document.querySelector('[data-slot="settings-nav"] [data-section="projects"]')).toBeNull()
     expect(document.querySelector('[data-section="resources"]')).not.toBeNull()
   })
 
-  it('a moved section keeps its old URL working: /settings/appearance → the global twin', async () => {
+  it('a per-project section shows the project selector; a workspace one does not', () => {
+    renderAt('/settings/worktrees')
+    expect(document.querySelector('[data-slot="settings-project-selector"]')).not.toBeNull()
+    cleanup()
+
     renderAt('/settings/appearance')
-    // Legacy flat URL → boot project → the section's new global home. Two redirects, one hop
-    // each, and the address bar ends up naming the real place.
-    await waitFor(() => {
-      expect(document.querySelector('[data-route="settings-global-appearance"]')).not.toBeNull()
+    expect(document.querySelector('[data-slot="settings-project-selector"]')).toBeNull()
+    expect(document.querySelector('[data-slot="settings-applies-to"]')?.textContent).toBe('All projects')
+  })
+
+  it('a per-project section with no machine tier asks for a project instead of faking one', async () => {
+    // The honest half of the design: a checkout's worktrees have no all-projects answer, so the
+    // pane says so and offers the pick rather than rendering a control that would write somewhere
+    // arbitrary — which is what the old area did by borrowing the project from the URL.
+    renderAt('/settings/worktrees')
+    const required = await waitFor(() => {
+      const el = document.querySelector('[data-slot="settings-project-required"]')
+      expect(el).not.toBeNull()
+      return el!
     })
+    expect([...required.querySelectorAll('[data-slot="settings-project-pick"]')].map((el) =>
+      el.getAttribute('data-project'),
+    )).toEqual(['boot', 'chat'])
   })
 
   it('unfinished sections say so through the shared CenteredState template', () => {
@@ -283,10 +352,10 @@ describe('the settings shell', () => {
   })
 })
 
-describe('the appearance section (global scope)', () => {
+describe('the appearance section', () => {
   it('persisted values apply at boot: server ui-state stamps the root and the controls', async () => {
     serve({ appearance: { accent: 'violet', density: 'compact' } })
-    renderAt('/settings/global/appearance')
+    renderAt('/settings/appearance')
 
     await waitFor(() => {
       expect(document.documentElement.dataset.accent).toBe('violet')
@@ -301,7 +370,7 @@ describe('the appearance section (global scope)', () => {
 
   it('accent round-trip: apply immediately, PUT the FULL appearance object', async () => {
     serve({ appearance: { density: 'compact' } })
-    renderAt('/settings/global/appearance')
+    renderAt('/settings/appearance')
     await waitFor(() => {
       expect(screen.getByRole('radio', { name: 'Compact' }).getAttribute('aria-checked')).toBe('true')
     })
@@ -321,7 +390,7 @@ describe('the appearance section (global scope)', () => {
 
   it('density flips back to the default and the attribute comes OFF the root', async () => {
     serve({ appearance: { density: 'compact' } })
-    renderAt('/settings/global/appearance')
+    renderAt('/settings/appearance')
     await waitFor(() => {
       expect(document.documentElement.dataset.density).toBe('compact')
     })
@@ -337,7 +406,7 @@ describe('the appearance section (global scope)', () => {
 
   it('reading width round-trip: Wide stamps the root and PUTs the full object; back to Narrow clears it', async () => {
     serve({ appearance: { accent: 'violet' } })
-    renderAt('/settings/global/appearance')
+    renderAt('/settings/appearance')
     // Wait for the server value to settle (Violet is server-provided; Narrow is the default and
     // would report "checked" from the mirror before the GET even lands), so the pending load
     // can't clobber the width write we're about to make.
@@ -362,7 +431,7 @@ describe('the appearance section (global scope)', () => {
   })
 
   it('theme rides the existing theme system: class + localStorage, no ui-state write', async () => {
-    renderAt('/settings/global/appearance')
+    renderAt('/settings/appearance')
 
     fireEvent.click(screen.getByRole('radio', { name: 'Light' }))
     expect(document.documentElement.classList.contains('light')).toBe(true)
@@ -382,16 +451,16 @@ describe('the appearance section (global scope)', () => {
 })
 
 /**
- * The step-3.5 acceptance test, stated as bluntly as the spec states it: appearance and
- * notifications write the GLOBAL store, agents writes the PROJECT store. Each assertion checks
- * BOTH halves — the right URL was written AND the other store was left alone — because a
- * section wired to both would satisfy a one-sided check.
+ * The acceptance test, stated as bluntly as the spec states it. It used to read "the settings
+ * SPLIT writes the right store"; the split is gone and the property it protected is not. Each
+ * assertion checks BOTH halves — the right URL was written AND the other stores were left alone —
+ * because a section wired to both would satisfy a one-sided check.
  */
-describe('the settings split writes the right store', () => {
+describe('one settings area, still writing the right store', () => {
   const putsTo = (url: string) => requests.filter((r) => r.method === 'PUT' && r.url === url)
 
   it('appearance → /api/v1/workspace/ui-state, never the per-repo one', async () => {
-    renderAt('/settings/global/appearance')
+    renderAt('/settings/appearance')
     await waitFor(() => expect(screen.getByRole('radio', { name: 'Violet' })).toBeTruthy())
 
     fireEvent.click(screen.getByRole('radio', { name: 'Violet' }))
@@ -410,7 +479,7 @@ describe('the settings split writes the right store', () => {
     ;(FakeNotification as unknown as { permission: string }).permission = 'granted'
     vi.stubGlobal('Notification', FakeNotification)
 
-    renderAt('/settings/global/notifications')
+    renderAt('/settings/notifications')
     const toggle = await screen.findByRole('switch', { name: 'Notify when an agent needs you' })
     fireEvent.click(toggle)
 
@@ -419,8 +488,10 @@ describe('the settings split writes the right store', () => {
     expect(putsTo('/api/v1/ui-state')).toHaveLength(0)
   })
 
-  it('agents → the project-scoped /api/v1/config, never the workspace routes', async () => {
-    renderAt('/settings/agents')
+  it('agents with a project → THAT project’s /api/v1/p/<id>/config, never a workspace route', async () => {
+    // `?project=chat` is the whole mechanism: the section sits outside `/p/:projectId` and still
+    // addresses chat's own config, because the shell mounts a scope provider around its body.
+    renderAt('/settings/agents?project=chat')
     const runner = await waitFor(() => {
       const el = document.querySelector<HTMLButtonElement>('[data-slot="agents-runner"] [data-value="codex"]')
       expect(el).not.toBeNull()
@@ -429,8 +500,27 @@ describe('the settings split writes the right store', () => {
 
     fireEvent.click(runner)
 
-    await waitFor(() => expect(putsTo('/api/v1/config')).toHaveLength(1))
-    expect(putsTo('/api/v1/config')[0]?.body).toEqual({ defaultRunner: 'codex' })
+    await waitFor(() => expect(putsTo('/api/v1/p/chat/config')).toHaveLength(1))
+    expect(putsTo('/api/v1/p/chat/config')[0]?.body).toEqual({ defaultRunner: 'codex' })
     expect(requests.some((r) => r.method === 'PUT' && r.url.startsWith('/api/v1/workspace/'))).toBe(false)
+    // …and never some OTHER project's copy, which is the failure a bare `/api/v1/config` would be.
+    expect(putsTo('/api/v1/config')).toHaveLength(0)
+  })
+
+  it('agents with All projects → /api/v1/workspace/config, never any repo’s config', async () => {
+    renderAt('/settings/agents')
+    const prompt = await screen.findByLabelText('System prompt')
+    fireEvent.change(prompt, { target: { value: 'be brief' } })
+    fireEvent.click(screen.getByRole('button', { name: /Save for all projects/ }))
+
+    await waitFor(() => expect(putsTo('/api/v1/workspace/config')).toHaveLength(1))
+    expect(putsTo('/api/v1/workspace/config')[0]?.body).toEqual({
+      projectDefaults: { systemPrompt: 'be brief' },
+    })
+    // The machine tier must never touch a committable repo file — that is the reason the two
+    // files stay separate, and the one thing this page could plausibly get wrong.
+    expect(requests.some((r) => r.method === 'PUT' && /^\/api\/v1(\/p\/[^/]+)?\/config$/.test(r.url))).toBe(
+      false,
+    )
   })
 })

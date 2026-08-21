@@ -30,6 +30,7 @@ import { visibleSettingsSections, type SettingsSectionId } from './routes/settin
 import {
   SettingsIndexRoute,
   SettingsSectionRoute,
+  settingsIndexPath,
   settingsSectionPath,
 } from './routes/settings/settings-shell'
 import { TasksOverviewRoute } from './routes/tasks-overview'
@@ -143,18 +144,56 @@ function KnowledgeDocRedirect() {
   return <ScopedNavigate to={`/knowledge?doc=${encodeURIComponent(id ?? '')}`} replace />
 }
 
-/** A settings section that MOVED from the project area to the global one. Its own hop, not an
- *  inline `<Navigate>`, because `settingsSectionPath` returns a bare pathname: only a component
- *  can read `useLocation` and carry the query and hash across. Legacy flat URLs reach here on a
- *  SECOND hop (`LegacyPathRedirect` first), and dropping either half there would silently undo
- *  what that hop just preserved. Plain Navigate — the target is outside every project. */
-function MovedSettingsSectionRedirect({ sectionId }: { sectionId: SettingsSectionId }) {
+/**
+ * `/settings/global` and `/settings/global/<id>` → the one Settings area
+ * (`.ai/specs/2026-08-21-one-settings-area.md`).
+ *
+ * Its own component rather than an inline `<Navigate>`, because only a component can read
+ * `useLocation` and carry the query and hash across — `BACKWARD_COMPATIBILITY.md`'s "Settings
+ * split, old URLs kept" promise applies in this direction too, and nine global URLs are in
+ * bookmarks and in that document. Plain Navigate: the target is outside every project.
+ */
+function GlobalSettingsRedirect({ sectionId }: { sectionId?: SettingsSectionId }) {
   const location = useLocation()
   return (
     <Navigate
       to={{
-        pathname: settingsSectionPath('global', sectionId),
+        pathname: sectionId === undefined ? settingsIndexPath() : settingsSectionPath(sectionId),
         search: location.search,
+        hash: location.hash,
+      }}
+      replace
+    />
+  )
+}
+
+/**
+ * `/p/<id>/settings` and `/p/<id>/settings/<section>` → `/settings[/<section>]?project=<id>`.
+ *
+ * The project half of the same move: scope stopped being a PLACE and became a field, so the id
+ * that used to be a path prefix becomes a query param and the section keeps working on exactly
+ * the repo the old URL named. `project` leads the query string so a pasted link reads as what it
+ * is; the caller's own params follow, and an incoming `project=` loses to the path (the path is
+ * the thing that was addressed).
+ *
+ * Registered ONE ROUTE PER KNOWN SECTION rather than as `settings/:section`, deliberately: a
+ * catch-all would swallow `/p/<id>/settings/nope`, redirect it to `/settings/nope?project=<id>`,
+ * which matches no route, which the flat-path fallback sends back to `/p/<id>/settings/nope` — a
+ * redirect loop where a 404 belongs. Unknown and hidden sections fall through to `NotFoundRoute`.
+ */
+function ProjectSettingsRedirect({ sectionId }: { sectionId?: SettingsSectionId }) {
+  const location = useLocation()
+  const { projectId = '' } = useParams()
+  const params = new URLSearchParams()
+  params.set('project', projectId)
+  for (const [key, value] of new URLSearchParams(location.search)) {
+    if (key !== 'project') params.append(key, value)
+  }
+  return (
+    <Navigate
+      to={{
+        pathname: sectionId === undefined ? settingsIndexPath() : settingsSectionPath(sectionId),
+        search: `?${params.toString()}`,
         hash: location.hash,
       }}
       replace
@@ -639,50 +678,52 @@ export function AppRoutes() {
             }
           />
 
-          {/* Settings (R6 Step 1.3): registry-driven — the section list, nav and routes all come
-              from routes/settings/registry.tsx. Hidden sections are NOT routed, so their URLs are
-              honest 404s until the section ships (notifications unhides in Step 1.7).
-
-              Only the PROJECT-scoped sections live here (multi-project spec, step 3.5); the
-              global ones are the top-level `/settings/global/*` block below. */}
-          <Route path="settings" element={<SettingsIndexRoute scope="project" capabilities={capabilities} />} />
+          {/* Settings is ONE area now, mounted at the top level below
+              (`.ai/specs/2026-08-21-one-settings-area.md`). Everything under `/p/<id>/settings/*`
+              redirects to it with the project carried as `?project=<id>`, so every pre-existing
+              bookmark keeps working and keeps naming the same repo. `settings/skills` outranks
+              nothing here — it is a static sibling and keeps its own older hop to `/skills`. */}
+          <Route path="settings" element={<ProjectSettingsRedirect />} />
           <Route path="settings/skills" element={<SettingsSkillsRedirect />} />
-          {visibleSettingsSections('project', capabilities).map((section) => (
+          {visibleSettingsSections(capabilities).map((section) => (
             <Route
               key={section.id}
               path={`settings/${section.id}`}
-              element={<SettingsSectionRoute section={section} scope="project" capabilities={capabilities} />}
-            />
-          ))}
-          {/* A section that MOVED out of the project area keeps its old URL working: every
-              pre-3.5 bookmark and every legacy flat `/settings/appearance` (which the redirect
-              below turns into `/p/<boot>/settings/appearance`) lands on the global twin instead
-              of a 404 — query and hash intact across both hops. */}
-          {visibleSettingsSections('global', capabilities).map((section) => (
-            <Route
-              key={section.id}
-              path={`settings/${section.id}`}
-              element={<MovedSettingsSectionRedirect sectionId={section.id} />}
+              element={<ProjectSettingsRedirect sectionId={section.id} />}
             />
           ))}
 
           <Route path="*" element={<NotFoundRoute />} />
         </Route>
 
-        {/* Global settings (multi-project spec, step 3.5) — the one cockpit area that is NOT
-            under `/p/:projectId`, because nothing here belongs to a project: appearance and
-            notifications are the user's, resources are the machine's, and the Projects pane IS
-            the registry. No `ProjectScopeProvider` above it, so its sections must read/write the
-            workspace routes (`/api/workspace/*`), which are never scope-prefixed.
+        {/* Settings — ONE area, outside `/p/:projectId`
+            (`.ai/specs/2026-08-21-one-settings-area.md`). It used to be two, kept apart by a
+            `scope` field on the registry, and the sidebar pointed at the half that did not hold
+            Agents, Worktrees, Bookmarklets, Prompt templates or the agent config editor. Every
+            non-hidden section is routed here exactly once; a `per-project` one takes its subject
+            from `?project=` and mounts its own scope provider (settings-shell.tsx).
+
+            No `ProjectScopeProvider` above this block, so a workspace section reads/writes the
+            workspace routes (`/api/v1/workspace/*`), which are never scope-prefixed.
 
             Static segments outrank the `*` legacy redirect below in React Router's ranking, so
             these win regardless of order — listed here for readability. */}
-        <Route path="/settings/global" element={<SettingsIndexRoute scope="global" capabilities={capabilities} />} />
-        {visibleSettingsSections('global', capabilities).map((section) => (
+        <Route path="/settings" element={<SettingsIndexRoute capabilities={capabilities} />} />
+        {visibleSettingsSections(capabilities).map((section) => (
           <Route
             key={section.id}
-            path={settingsSectionPath('global', section.id)}
-            element={<SettingsSectionRoute section={section} scope="global" capabilities={capabilities} />}
+            path={`/settings/${section.id}`}
+            element={<SettingsSectionRoute section={section} capabilities={capabilities} />}
+          />
+        ))}
+        {/* The old global area's URLs, kept alive. `global` is not a section id, so these static
+            segments can never collide with the block above. */}
+        <Route path="/settings/global" element={<GlobalSettingsRedirect />} />
+        {visibleSettingsSections(capabilities).map((section) => (
+          <Route
+            key={`global-${section.id}`}
+            path={`/settings/global/${section.id}`}
+            element={<GlobalSettingsRedirect sectionId={section.id} />}
           />
         ))}
 

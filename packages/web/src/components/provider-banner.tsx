@@ -1,6 +1,7 @@
 import { XIcon } from 'lucide-react'
 
 import type { ProviderStatusResponse } from '@loki-labs/better-cezar-api-client'
+import { Link as WorkspaceLink } from 'react-router'
 import { Link } from '@/lib/project-router'
 import {
   type ProviderAuthDismissals,
@@ -47,12 +48,12 @@ export function ProviderBanner({
           Provider authentication failed during a task:{' '}
           {incidents.map(({ label }) => label).join(', ')}.
         </span>
-        <Link
-          to="/settings/agents#providers"
+        <WorkspaceLink
+          to="/settings/providers"
           className="ml-auto shrink-0 font-medium underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           Open agent settings
-        </Link>
+        </WorkspaceLink>
         <button
           type="button"
           aria-label="Dismiss provider authentication alert"
@@ -88,12 +89,12 @@ export function ProviderBanner({
     >
       <StatusDot tone={uncertain ? 'danger' : 'pending'} />
       <span>{message}</span>
-      <Link
-        to="/settings/agents#providers"
+      <WorkspaceLink
+        to="/settings/providers"
         className="ml-auto shrink-0 font-medium text-foreground underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         Configure providers
-      </Link>
+      </WorkspaceLink>
     </div>
   )
 }

@@ -107,7 +107,7 @@ describe('CloneProjectDialog', () => {
     // The name defaults to the repo half — the same rule the server applies.
     await waitFor(() => expect(slot('clone-target')?.textContent).toBe('~/cezar/projects/cezar'))
     expect(rootSettingsControl().tagName).toBe('A')
-    expect(rootSettingsControl().getAttribute('href')).toBe('/settings/global/projects')
+    expect(rootSettingsControl().getAttribute('href')).toBe('/settings/projects')
     expect(rootSettingsControl().getAttribute('aria-label')).toBe('Edit checkout root')
     expect(rootSettingsControl().getAttribute('title')).toBe('Edit checkout root')
 

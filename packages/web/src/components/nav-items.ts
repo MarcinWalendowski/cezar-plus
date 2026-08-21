@@ -67,9 +67,10 @@ export type NavItem = {
    *  (Phase 3) — `/workspace/knowledge`, still gated behind `knowledge` below (an item with no
    *  cross-project page at all would carry only `to`, the way this one used to).
    *
-   *  Never derived from `to` — `/settings` scoped is a project's settings, and the workspace
-   *  answer is `/settings/global`, a different route with a different scope provider. The two
-   *  destinations are related by meaning, not by string. */
+   *  Never derived from `to`: `Tasks` answers `/tasks` at workspace level and `/` inside a project.
+   *  (Settings used to be the sharpest example of the two differing — `/settings` scoped vs
+   *  `/settings/global` — until `.ai/specs/2026-08-21-one-settings-area.md` made it one area with
+   *  one destination; it now carries `workspace: true` and the two strings agree.) */
   workspaceTo?: string
   /** Automations-gated (#801): the item exists only while `/api/health` reports
    *  `capabilities.automations` — GitHub automations are opt-in via `CEZ_AUTOMATIONS=1`.
@@ -128,7 +129,12 @@ export const NAV_ITEMS: NavItem[] = [
   // project-scoped, so it ALSO renders inside each project group via `to` (no `workspace: true`).
   { to: '/skills', label: 'Skills', icon: SparklesIcon, match: ['/skills'], skills: true, workspaceTo: '/skills' },
   { to: '/notes', label: 'Notes', icon: NotebookPenIcon, match: ['/notes'], notes: true, workspace: true, workspaceTo: '/notes' },
-  { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'], workspaceTo: '/settings/global' },
+  // ONE Settings area (`.ai/specs/2026-08-21-one-settings-area.md`). `workspace: true` is what
+  // takes it out of the per-project groups: there is no such thing as "this project's Settings
+  // page" any more — the project is a field inside the page (`?project=`), not a URL prefix. It
+  // used to carry `workspaceTo: '/settings/global'` and a project-scoped `to`, which is exactly
+  // how the sidebar came to point at the half of Settings that held neither Agents nor Worktrees.
+  { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'], workspace: true, workspaceTo: '/settings' },
 ]
 
 /**
@@ -242,7 +248,7 @@ export function activeNavPath(pathname: string): string | null {
  *
  * **Pass the RAW pathname, never `stripProjectPrefix`'d.** That single choice is what makes this
  * scope-aware, and it is the whole mechanism: every workspace route (`/tasks`, `/notes`,
- * `/settings/global`) sits outside `/p/:id` by construction, so a path inside a project scope
+ * `/settings`) sits outside `/p/:id` by construction, so a path inside a project scope
  * matches none of them and falls out as null on its own. Hand it the stripped path and
  * `/p/shop/notes` becomes `/notes`, which lights the workspace Notes row while the user is
  * standing inside one project — the exact confusion the two bands exist to avoid.
@@ -251,8 +257,8 @@ export function activeNavPath(pathname: string): string | null {
  * path it can never fire, so it read as the safety net while the argument was doing the work.
  * The test that pins this renders at `/p/shop/notes`.
  *
- * Longest matching prefix wins, as in `activeNavPath`, so `/settings/global/appearance` lights
- * Settings rather than falling through.
+ * Longest matching prefix wins, as in `activeNavPath`, so `/settings/appearance` lights Settings
+ * rather than falling through.
  */
 export function activeWorkspaceNavPath(pathname: string): string | null {
   let best: { to: string; length: number } | null = null

@@ -26,6 +26,7 @@ function serve(resources: Partial<WorkspaceConfigResponse['resources']> = {}) {
   requests = []
   const state: WorkspaceConfigResponse = {
     agentDefaults: {},
+    projectDefaults: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
     browseRoot: '~/',
     projectsDir: '~/cezar/projects',
     composerDefaults: {
@@ -79,7 +80,7 @@ function gateSeededClient() {
 function renderResources() {
   render(
     <QueryClientProvider client={gateSeededClient()}>
-      <MemoryRouter initialEntries={['/settings/global/resources']}>
+      <MemoryRouter initialEntries={['/settings/resources']}>
         <AppRoutes />
         <Toaster />
       </MemoryRouter>
@@ -134,7 +135,7 @@ describe('Global settings → Resources', () => {
     renderResources()
 
     const link = await screen.findByRole('link', { name: 'Configure per-project limits' })
-    expect(link.getAttribute('href')).toBe('/settings/global/projects')
+    expect(link.getAttribute('href')).toBe('/settings/projects')
     expect(screen.getByText(/Need a different limit for one project/)).not.toBeNull()
   })
 

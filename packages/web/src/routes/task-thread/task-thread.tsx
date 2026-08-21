@@ -1,6 +1,6 @@
 import { MessageSquareTextIcon, SearchXIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useParams } from 'react-router'
+import { useLocation, useParams, Link as WorkspaceLink } from 'react-router'
 
 import { Link } from '@/lib/project-router'
 
@@ -474,12 +474,12 @@ export function ThreadView({
             // typed prompt reach `POST /continue` in one request.
             footerEnd={
               providerBlocked && !continueAction.providerPending ? (
-                <Link
-                  to="/settings/agents#providers"
+                <WorkspaceLink
+                  to="/settings/providers"
                   className="text-xs font-medium text-foreground underline underline-offset-4"
                 >
                   Configure providers
-                </Link>
+                </WorkspaceLink>
               ) : continuable ? continueAction.pills : undefined
             }
             // Continuing with nothing typed is the legacy one-click Continue.

@@ -163,8 +163,11 @@ describe('ProviderBanner', () => {
       },
     })
 
+    // UNSCOPED since `.ai/specs/2026-08-21-one-settings-area.md` Phase 2: the providers switch
+    // writes host-wide state, so the banner no longer routes through whichever project happens to
+    // be active — it points at the workspace section that owns the setting.
     expect(screen.getByRole('link', { name: 'Open agent settings' }).getAttribute('href')).toBe(
-      '/p/cezar/settings/agents#providers',
+      '/settings/providers',
     )
   })
 
@@ -223,11 +226,11 @@ describe('ProviderBanner', () => {
     )
   })
 
-  it('links to the active project Settings → Agents providers anchor', () => {
+  it('links to the workspace Providers section, with no project in the URL', () => {
     renderBanner()
 
     expect(screen.getByRole('link', { name: 'Configure providers' }).getAttribute('href')).toBe(
-      '/p/cezar/settings/agents#providers',
+      '/settings/providers',
     )
   })
 

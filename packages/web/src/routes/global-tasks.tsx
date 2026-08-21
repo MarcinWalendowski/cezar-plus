@@ -1543,7 +1543,7 @@ function FilterBar({
         // since the pane that fixes it is two clicks away and outside this page.
         <p data-slot="no-tags-hint" className="text-[11px] text-soft-foreground">
           Tag connected repositories in{' '}
-          <Link to="/settings/global/projects" className="font-medium text-violet hover:underline">
+          <Link to="/settings/projects" className="font-medium text-violet hover:underline">
             Settings → Projects
           </Link>{' '}
           to group their tasks together here.

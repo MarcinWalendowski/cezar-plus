@@ -19,6 +19,7 @@ import { LiveDuration } from '@/components/live-duration'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ZoomableImage } from '@/components/zoomable-image'
 import { formatToolDuration } from '@/lib/format'
+import { Link as WorkspaceLink } from 'react-router'
 import { Link } from '@/lib/project-router'
 import type { FileDiff, ToolKind, UiToolItem } from '@loki-labs/better-cezar-api-client'
 import { cn } from '@/lib/utils'
@@ -276,12 +277,12 @@ export function ProviderAuthRequiredCard({
       <p className="mt-1 text-xs text-muted-foreground">
         Review {label} settings before retrying.
       </p>
-      <Link
-        to="/settings/agents#providers"
+      <WorkspaceLink
+        to="/settings/providers"
         className="mt-2 inline-flex text-xs font-medium text-foreground underline-offset-2 hover:underline"
       >
         Open provider settings
-      </Link>
+      </WorkspaceLink>
     </div>
   )
 }

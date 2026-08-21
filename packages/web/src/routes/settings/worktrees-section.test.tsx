@@ -35,6 +35,8 @@ function serve(config: Partial<ConfigResponse> = {}) {
     worktreeRetention: 10,
     liveTitleUpdates: null,
     reviewGate: null,
+    inherited: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
+    overridden: [],
     ...config,
   }
   const json = (payload: unknown, status = 200) =>
@@ -42,7 +44,11 @@ function serve(config: Partial<ConfigResponse> = {}) {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
+      // `/settings/<id>?project=<id>` mounts a scope provider, so project-scoped requests go out
+      // as `/api/v1/p/<id>/…` (`.ai/specs/2026-08-21-one-settings-area.md`). Normalized here so
+      // this file keeps asserting the SECTION's behaviour against one spelling; WHICH scope a
+      // section addresses is pinned in `settings.test.tsx`, where it is the subject.
+      const url = String(input).replace(/^\/api\/v1\/p\/[^/]+/, '/api/v1')
       const method = init?.method ?? 'GET'
       const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined
       requests.push({ method, url, body })
@@ -65,7 +71,9 @@ function gateSeededClient() {
   const client = createQueryClient()
   client.setQueryData(queryKeys.health, { bootProject: 'boot' })
   client.setQueryData(workspaceQueryKeys.projects, {
-    projects: [],
+    projects: [
+      { id: 'boot', name: 'cezar', root: '/home/u/cezar', status: 'ok', addedAt: '2026-01-01T00:00:00Z', lastOpenedAt: '2026-01-01T00:00:00Z', source: 'local' },
+    ],
     bootProject: 'boot',
     projectsDir: '~/cezar/projects',
   })
@@ -101,7 +109,7 @@ afterEach(() => {
 describe('Project settings → Worktrees: keep-last-N-worktrees (#483)', () => {
   it('renders the configured value and disables Save until it changes', async () => {
     serve({ worktreeRetention: 7 })
-    renderAt('/settings/worktrees')
+    renderAt('/settings/worktrees?project=boot')
     await waitFor(() => expect(retentionInput()).not.toBeNull())
     expect(retentionInput()!.value).toBe('7')
     expect(saveButton()!.disabled).toBe(true)
@@ -109,7 +117,7 @@ describe('Project settings → Worktrees: keep-last-N-worktrees (#483)', () => {
 
   it('saves the entered count through PUT /api/v1/config', async () => {
     serve({ worktreeRetention: 10 })
-    renderAt('/settings/worktrees')
+    renderAt('/settings/worktrees?project=boot')
     await waitFor(() => expect(retentionInput()).not.toBeNull())
 
     fireEvent.change(retentionInput()!, { target: { value: '3' } })
@@ -122,7 +130,7 @@ describe('Project settings → Worktrees: keep-last-N-worktrees (#483)', () => {
 
   it('saves 0 as a real value (unlimited), not as a clear', async () => {
     serve({ worktreeRetention: 5 })
-    renderAt('/settings/worktrees')
+    renderAt('/settings/worktrees?project=boot')
     await waitFor(() => expect(retentionInput()).not.toBeNull())
 
     fireEvent.change(retentionInput()!, { target: { value: '0' } })
@@ -134,7 +142,7 @@ describe('Project settings → Worktrees: keep-last-N-worktrees (#483)', () => {
 
   it('rejects a negative, over-limit, or non-integer count (Save stays disabled, no PUT)', async () => {
     serve({ worktreeRetention: 10 })
-    renderAt('/settings/worktrees')
+    renderAt('/settings/worktrees?project=boot')
     await waitFor(() => expect(retentionInput()).not.toBeNull())
 
     for (const bad of ['-1', '1001', '2.5', '']) {

@@ -120,10 +120,12 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
     registry?.bootProject === projectId,
   ).data
 
-  // Global settings intentionally has no selected project. Everywhere else the URL id selects
+  // Settings intentionally has no selected project in the document title: it is ONE workspace-
+  // level area since `.ai/specs/2026-08-21-one-settings-area.md`, and a `per-project` section
+  // names its subject in its own header rather than in the tab title. Everywhere else the URL id selects
   // the authoritative registry entry; health may name only the CONFIRMED boot project while
   // the registry is unavailable, never a non-boot project whose root health does not describe.
-  const globalSettings = pathname === '/settings/global' || pathname.startsWith('/settings/global/')
+  const globalSettings = pathname === '/settings' || pathname.startsWith('/settings/')
   const projectName = globalSettings
     ? null
     : (activeProject?.name ??

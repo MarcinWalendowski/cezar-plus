@@ -8,6 +8,7 @@ import { useActiveProjectId } from '@/lib/project-router'
 import { ProjectFolderField } from './project-location'
 import { MaxParallelSelect, STATUS_LABEL } from './projects-section'
 import { RemoveProjectDialog, useProjectRemoval } from './remove-project'
+import type { SettingsSectionProps } from './registry'
 import { SettingsField } from './settings-field'
 
 /**
@@ -45,6 +46,25 @@ function fullDate(iso: string): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return '—'
   return at.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+/**
+ * The registry section wrapper (`.ai/specs/2026-08-21-one-settings-area.md`).
+ *
+ * This pane used to be mounted directly by `SettingsIndexRoute` — a shell special case, and the
+ * reason the project folder, the registry facts, `Max parallel tasks` and Remove were reachable
+ * only by landing on the project settings INDEX, which is the one settings page the sidebar's
+ * Settings row never went to. It is a registry entry now (`project`), so it is in the nav like
+ * everything else. Capabilities arrive from the SHELL rather than from a `useHealth()` here: this
+ * body renders under a project scope provider, and `queryKeys.health` is scope-led, so reading
+ * health from inside would look up the machine's capabilities under a project's cache key.
+ */
+export function ProjectGeneralSection({ capabilities }: SettingsSectionProps) {
+  return (
+    <div className="p-4 pb-[calc(90px+env(safe-area-inset-bottom))] md:p-6 md:pb-6">
+      <ProjectGeneral capabilities={capabilities} />
+    </div>
+  )
 }
 
 export function ProjectGeneral({ capabilities }: { capabilities?: Pick<Capabilities, 'singleProject'> }) {

@@ -27,10 +27,17 @@ import { SettingsField } from './settings-field'
  * placeholder path is worse than no path, and the registry answer arrives within a tick anyway.
  */
 
-/** The active project's absolute root, or `null` while the registry cannot name it. */
-export function useActiveProjectRoot(): string | null {
-  const projectId = useActiveProjectId()
+/**
+ * The active project's absolute root, or `null` while the registry cannot name it.
+ *
+ * `override` names a project explicitly instead of taking the active one. The one Settings area
+ * (`.ai/specs/2026-08-21-one-settings-area.md`) needs that: its nav footer says which checkout the
+ * `?project=` selection points at, and it renders OUTSIDE the section's scope provider.
+ */
+export function useActiveProjectRoot(override?: string | null): string | null {
+  const active = useActiveProjectId()
   const registry = useProjects().data
+  const projectId = override === undefined ? active : override
   if (projectId === null) return null
   return registry?.projects.find((project) => project.id === projectId)?.root ?? null
 }
@@ -82,8 +89,8 @@ export function ProjectFolderField() {
   )
 }
 
-export function ProjectLocationNav() {
-  const root = useActiveProjectRoot()
+export function ProjectLocationNav({ projectId }: { projectId?: string | null } = {}) {
+  const root = useActiveProjectRoot(projectId)
   if (root === null) return null
   return (
     <div data-slot="project-location" data-variant="nav" className="mt-auto px-2.5 pt-3">

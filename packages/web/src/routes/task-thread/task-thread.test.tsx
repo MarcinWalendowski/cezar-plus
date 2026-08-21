@@ -116,7 +116,7 @@ describe('ThreadView', () => {
 
     expect(screen.getByRole('alert').textContent).toContain('This run needed Codex authorization')
     expect(screen.getByRole('link', { name: 'Open provider settings' }).getAttribute('href')).toBe(
-      '/settings/agents#providers',
+      '/settings/providers',
     )
   })
 
@@ -254,7 +254,7 @@ describe('ThreadView', () => {
     expect(hint?.querySelector('time')?.getAttribute('datetime')).toBe('2026-08-03T17:00:30.000Z')
     // The other half of an automation nobody opted into: one click to switch it off.
     expect(screen.getByRole('link', { name: 'Auto-resume settings' }).getAttribute('href')).toBe(
-      '/settings/global/resources',
+      '/settings/resources',
     )
   })
 
