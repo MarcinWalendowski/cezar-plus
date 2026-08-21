@@ -515,6 +515,27 @@ export function resolveExtraSystemPrompt(
  * The `set +e` / delimiter / bound rules are not style: they are R1 and R2 from that spec. A
  * batch under `set -e` hides every section after the first failure, and an unbounded batch is
  * strictly worse than the calls it replaced.
+ *
+ * **Bullet 3 names the waiting mechanism because the first version did not** (spec
+ * `.ai/specs/2026-08-21-wait-on-the-process-not-a-guess.md`). It used to say "wait for it before
+ * you report" and stop there, so agents supplied the mechanism themselves and guessed a duration:
+ * measured across the five run transcripts on the prod box, 7 blind `sleep N` waits (1.8 min) —
+ * the archetype being `sleep 120; tail -12 /tmp/full-suite-mine.log` — against 32 bounded poll
+ * loops, which are the CORRECT pattern and exit when the job does. Hence three tiers in
+ * preference order (foreground + redirect · background + completion signal · block on the marker)
+ * and an explicit ban on a bare `sleep N`. The `never end your turn while it runs` clause closes
+ * run `23221162`'s hole, where `run-tests` backgrounded `npm test` and reported done while it ran.
+ *
+ * The re-read clause carves the expensive case out of bullet 1's bounding rule, which is correct
+ * for cheap reads and had no exception: on run `7c2dd8f0`, 18 repeated expensive calls cost 5.9
+ * minutes, headed by one test file re-run **11 times** only to see a different output filter.
+ * `blindSleepCalls` and `repeatedExpensiveCalls` in `cez run stats` are the meter for both.
+ *
+ * It names **no backend-specific tool or parameter** — not even `run_in_background`, which is a
+ * Claude Code Bash parameter — because this text is also prepended to codex, opencode and pi
+ * prompts (`core/agent-runner.ts`). Tiers 1 and 3 are pure POSIX shell and are the two preferred
+ * ones, so a backend that models no background work at all loses nothing. `system-prompt.test.ts`
+ * asserts that absence rather than trusting it.
  */
 export const TOOL_BUDGET_DOCTRINE = `## Tool budget (cezar)
 
@@ -530,9 +551,12 @@ seconds, because it does.
   fast ones, cost a single round trip together — but only with **no dependency between them**. A
   write and a read of the same path stay serial, and a probe whose answer decides the next
   command is not independent of it.
-- **Background what is genuinely slow.** A 150-second install or test run should not block you
-  from reading the next file: start it with \`run_in_background\`, keep working, and wait for it
-  before you report. Never background anything that mutates the git index.`;
+- **Background what is genuinely slow; wait on the process, never on a guess.** Send its output to
+  a file (\`cmd >"$f" 2>&1; echo EXIT=$?\`). Foreground it unless you have work to overlap; if you
+  do, background it and wait for the completion signal, or block on the marker
+  (\`until grep -q EXIT= "$f"; do sleep 5; done\`) — never a bare \`sleep N\`, and never end your turn
+  while it runs. Re-read \`$f\` for a different slice; never re-run an expensive command. Never
+  background anything that mutates the git index.`;
 
 /**
  * Joins the parts of one agent step's system prompt in fixed order — skill

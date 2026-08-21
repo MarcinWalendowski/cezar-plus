@@ -79,11 +79,63 @@ describe('TOOL_BUDGET_DOCTRINE', () => {
     expect(TOOL_BUDGET_DOCTRINE).toContain('mutates the git index');
   });
 
-  it('stays under ~200 words so it cannot dilute the step prompt it precedes (R7)', () => {
-    // R7's own number, with a small allowance for the markdown markers and the shell fragments
-    // that are inseparable from the instruction. A doctrine that grows past this is one that
-    // starts competing with the step prompt underneath it for the model's attention.
-    expect(TOOL_BUDGET_DOCTRINE.split(/\s+/).filter(Boolean).length).toBeLessThan(210);
+  it('names the mechanism instead of leaving the agent to guess a duration', () => {
+    // The defect this replaced: bullet 3 said "wait for it before you report" and named no
+    // mechanism, so the model invented one — 7 blind `sleep N` waits across five measured runs,
+    // the archetype being `sleep 120; tail -12 /tmp/full-suite-mine.log`.
+    expect(TOOL_BUDGET_DOCTRINE).toContain('never on a guess');
+    expect(TOOL_BUDGET_DOCTRINE).toMatch(/completion signal/);
+    expect(TOOL_BUDGET_DOCTRINE).toMatch(/never a bare `sleep N`/);
+    // The bounded poll loop stays legal and is shown, because it is 32 of the 39 measured sleeps
+    // and a rule that only banned `sleep` would ban the correct pattern too.
+    expect(TOOL_BUDGET_DOCTRINE).toContain('until grep -q EXIT=');
+    // R2 of the 2026-08-21 spec — the hole a guessed sleep accidentally covered: run `23221162`
+    // backgrounded `npm test`, ended while it ran, and reported done. Matched across the line
+    // break the doctrine wraps at; the clause is one sentence, not one line.
+    expect(TOOL_BUDGET_DOCTRINE).toMatch(/never end your turn\s+while it runs/);
+  });
+
+  it('carves the expensive case out of the bounding rule without repealing it', () => {
+    // One test file was re-run 11 times on run `7c2dd8f0` (230 s of pure repetition) purely to
+    // see a different filter of the same output — because bullet 1's bounding rule is right for
+    // cheap reads and had no exception for expensive ones.
+    expect(TOOL_BUDGET_DOCTRINE).toContain('never re-run an expensive command');
+    // …and bullet 1 is NOT repealed: R2 of the 2026-08-20 spec still stands.
+    expect(TOOL_BUDGET_DOCTRINE).toContain('bound every section');
+  });
+
+  it('names no backend-specific tool or parameter, because it also rides on codex and opencode', () => {
+    // `composeSystemPrompt` output reaches claude via `--append-system-prompt` AND every other
+    // backend via `prependSystemPrompt` (`core/agent-runner.ts`). cezar models no background work
+    // of its own — there is no Monitor/BashOutput/TaskOutput/KillShell anywhere in `src/` — and
+    // `run_in_background` is a Claude Code Bash parameter, so naming any of them here would ship
+    // an instruction that three of the four backends cannot follow. Tiers 1 and 3 are pure POSIX
+    // shell, which is why dropping them costs nothing.
+    for (const tool of ['Monitor', 'BashOutput', 'TaskOutput', 'KillShell', 'run_in_background']) {
+      expect(TOOL_BUDGET_DOCTRINE, `backend-specific: ${tool}`).not.toContain(tool);
+    }
+  });
+
+  it('stays under the word cap so it cannot dilute the step prompt it precedes (R7)', () => {
+    // RAISED 210 -> 260 on 2026-08-21 (spec `.ai/specs/2026-08-21-wait-on-the-process-not-a-guess.md`,
+    // R1), deliberately, and the argument is recorded here rather than left as a bare number for
+    // the next session to guess at.
+    //
+    // The old cap was R7 of the 2026-08-20 spec: "a doctrine that grows past this is one that
+    // starts competing with the step prompt underneath it for the model's attention." That
+    // reasoning is sound, but the number was never measured — it was a considered guess, and no
+    // measurement of dilution exists on either side of it.
+    //
+    // What IS measured: at 203 words the doctrine was read and followed (100% of production Bash
+    // calls became multi-statement batches after it shipped), and its marginal per-turn cost is
+    // ~zero because it is cache-read, not re-input. The +49 words buy rules attacking 1.8 min of
+    // blind sleeping and 5.9 min of re-running measured on real runs. The counter-argument stands
+    // recorded: "it was already read" is evidence about 203 words, not about 252, and dilution
+    // would show up as OTHER bullets being followed less, which no metric here would catch.
+    //
+    // This is a raise, not a removal. Growing the doctrine again needs the same argument made
+    // again, with numbers.
+    expect(TOOL_BUDGET_DOCTRINE.split(/\s+/).filter(Boolean).length).toBeLessThan(260);
   });
 
   it('appears exactly once in a full skill + extra + contract composition', () => {

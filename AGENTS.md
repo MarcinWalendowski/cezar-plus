@@ -285,6 +285,19 @@ env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm ci \
    off the registry, which is exactly the silently-different run the rule above forbids. A
    missing local vitest is a signal to fix the install, never to route around it.
 
+   **Amended 2026-08-21 — inside a `.ai/cezar/worktrees/` tree the symptom is WORSE than a missing
+   module, because the suite runs.** Node resolves upward out of the worktree and finds the parent
+   checkout's complete `node_modules` at `~/loki-labs/cezar/node_modules`, so `npm test` starts,
+   prints a normal vitest banner and returns a real-looking result. Measured this session: `npm ci`
+   under `NODE_ENV=production` left **13 binaries in `node_modules/.bin`, no `vitest` and no
+   `jsdom`** — and the run still produced **1 979 failures across 109 files, 1 976 of them
+   `|web|`**. Not one of those 1 976 names the cause; the only honest line in the whole log is a
+   `spawnSync …/node_modules/.bin/vitest ENOENT` inside `workspace/home-safety.test.ts`, which is
+   the one test that spawns vitest by path instead of inheriting the resolution. After `env -u
+   NODE_ENV npm ci` the identical tree goes to **3 failures** (trap 3's C18, plus two suites that
+   pass on their own and only flake under the full run's load). So before believing a mass failure
+   in a worktree, run `ls node_modules/.bin | wc -l` — 13 means the install, not the change.
+
 2. **A cockpit session exports its own knobs into the test run.** `CEZ_REMOTE=1`,
    `CEZ_OIDC_ISSUER`, `CEZ_OIDC_CLIENT_ID`, `CEZ_PROJECTS_DIR`, `CEZ_KB`, `CEZ_KB_ROOTS`,
    `CEZ_KB_WRITE_FILE`, `CEZ_TODOS_FILE` are all live in a run's environment, and the server
@@ -438,6 +451,43 @@ section after it, and the model reads the rest as success), a delimiter per sect
 undelimited blob cannot be read section by section), and a bound per section (`head -n`, `-15`,
 `sed -n 1,80p` — an unbounded batch floods the context it was meant to save, which is strictly
 worse than the calls it replaced).
+
+**Waiting on something slow: wait on the process, never on a guess** (spec
+`.ai/specs/2026-08-21-wait-on-the-process-not-a-guess.md`). Measured across six production
+sessions: sleep/poll waiting cost **16.9 minutes** against **10.0 minutes** of real gate time — a
+2.4:1 loss against the thing backgrounding was meant to speed up, because "wait for it before you
+report" named no mechanism and a duration is the easiest thing to invent. Three tiers, in
+preference order:
+
+| tier | when | shape |
+| --- | --- | --- |
+| 1. foreground + redirect | nothing independent to overlap — the common case | `cmd >"$f" 2>&1; echo EXIT=$?`, then read `$f` in the same call |
+| 2. background + completion signal | you genuinely have other work | start it in the background, do that work, wait for the signal, read the output file it hands you |
+| 3. block on the marker | a fresh shell must wait on something it did not start | `until grep -q EXIT= "$f"; do sleep 5; done`, then slice |
+
+A bounded poll loop **is** tier 3 and is correct — it exits when the job does, so its wall clock is
+mostly the job. What is banned is that loop with its exit condition deleted: a bare `sleep N` to
+pass time before reading a log. Note that `wait $PID` is only meaningful when the start and the
+wait are in the *same* Bash call — shell state does not persist between calls — which is why tiers
+2 and 3 exist at all. And never end a turn while a backgrounded job is still running: on run
+`23221162`, `run-tests` backgrounded `npm test`, ended 90 seconds later, and reported `status=done`.
+
+**The carve-out from the bounding rule above: re-read the file, never re-run the command.** `head`
+/ `sed -n` is right for cheap reads and had no exception for expensive ones, so agents re-ran gates
+to see a different filter — on run `7c2dd8f0` that was 18 repeated expensive calls costing 5.9
+minutes, headed by one test file run **11 times** (37 s of work, 230 s of repetition). Redirect
+once, then `grep` / `sed -n` / `tail` the saved file. Re-run a gate only after you changed code.
+
+Both halves are metered, so neither is an assertion:
+
+```bash
+cez run stats <runId> --json | grep -E 'blindSleepCalls|sleepCalls|repeatedExpensiveCalls'
+```
+
+`blindSleepCalls` is the hard target (**0** — it counts sleeps with no early-exit guard).
+`sleepCalls` may stay non-zero, because tier 3 is legal. `repeatedExpensiveCalls` cannot tell a
+wasteful re-slice from a legitimate re-run after an edit, so it is a signal to go read the command
+list rather than a gate.
 
 **Sub-agent fan-out is granted asymmetrically and on purpose.** `spec` and `document` carry `Task`
 because they are exploration-bound (32× and 3.3× model-time to tool-time) with independent reads;

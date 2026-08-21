@@ -190,6 +190,154 @@ describe('computeRunStats — round-trip counting', () => {
   });
 });
 
+/**
+ * The waiting + repetition meters (spec `.ai/specs/2026-08-21-wait-on-the-process-not-a-guess.md`,
+ * Verification §3).
+ *
+ * **These are asserted over INLINE events, not over the fixture, and that is deliberate.**
+ * `ec6e8e06-trimmed.ndjson` was built by stripping `input` payloads — it is the right fixture for
+ * every counter that reads only timestamps and ids, and it is a trap for these two, which read
+ * `input.command`. A predicate tested only against it reports 0 for every run regardless of truth
+ * and passes while measuring nothing (R7). The fixture's own zeroes are pinned below, WITH the
+ * reason, so the next reader does not mistake them for a measurement.
+ *
+ * Every command below is a real one, copied from the transcripts on the production box.
+ */
+describe('computeRunStats — waiting on a guess, and re-running what was already run', () => {
+  /** Events at an explicit second offset, so exec times are exact rather than incidental. */
+  const ev = (seq: number, sec: number, type: string, extra: Record<string, unknown> = {}): RunEvent =>
+    ({
+      seq,
+      type,
+      ts: new Date(1_700_000_000_000 + sec * 1_000).toISOString(),
+      stepId: 'run-tests',
+      ...extra,
+    }) as RunEvent;
+  const bash = (seq: number, sec: number, id: string, command: string): RunEvent =>
+    ev(seq, sec, 'tool-call', { id, tool: 'Bash', input: { command } });
+  const done = (seq: number, sec: number, id: string): RunEvent => ev(seq, sec, 'tool-result', { toolCallId: id });
+
+  it('counts a bounded poll loop as a sleep but NOT as a defect — it exits when the job does', () => {
+    // 32 of the 39 sleeps measured across five runs look like this. Banning them (which a bare
+    // `grep sleep` acceptance criterion would) bans the correct pattern, and would be satisfied
+    // by a run that never ran a gate at all.
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', 'for i in $(seq 1 60); do grep -q "^EXIT=" /tmp/gate-typecheck.log && break; sleep 2; done'),
+      done(2, 30, 'a'),
+    ]);
+    expect(s.totals.sleepCalls).toBe(1);
+    expect(s.totals.blindSleepCalls).toBe(0);
+    // Exec time on a poll loop is mostly the JOB, which is why it is reported apart from the count.
+    expect(s.totals.sleepExecMs).toBe(30_000);
+  });
+
+  it('counts a bare `sleep 120` before grepping a log as blind — the archetype of the defect', () => {
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', 'set +e\nsleep 120; tail -12 /tmp/full-suite-mine.log'),
+      done(2, 120, 'a'),
+    ]);
+    expect(s.totals.sleepCalls).toBe(1);
+    expect(s.totals.blindSleepCalls).toBe(1);
+    expect(s.totals.sleepExecMs).toBe(120_000);
+  });
+
+  it('never drops a blind sleep that has no recorded result — the one you most need to see', () => {
+    // Why the predicate runs on `tool-call` and not on matched pairs: the join dropped 2 of 18
+    // sleeps on run `7c2dd8f0`, and BOTH were blind. A defect counter whose target is zero must
+    // not under-report, and a wait that never returned is the worst one to hide.
+    const s = computeRunStats('r', [bash(1, 0, 'a', 'sleep 240; grep -c FAIL /tmp/out.log')]);
+    expect(s.totals.blindSleepCalls).toBe(1);
+    // …and it contributes no exec time, because there is none to measure.
+    expect(s.totals.sleepExecMs).toBe(0);
+  });
+
+  it('ignores a `sleep` being WRITTEN INTO a heredoc — that call waits for nothing', () => {
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', "cat > /tmp/cutover-experiment.sh <<'SCRIPT'\nsleep 25\nsleep 40\nSCRIPT\nchmod +x /tmp/cutover-experiment.sh"),
+      done(2, 1, 'a'),
+    ]);
+    expect(s.totals.sleepCalls).toBe(0);
+    expect(s.totals.blindSleepCalls).toBe(0);
+  });
+
+  it('ignores `sleep 0`, and is not fooled by the English word "for" inside a heredoc', () => {
+    // Measured: stripping heredocs ALONE is net-zero. It removes one false blind (above) and
+    // creates another — here, prose inside the python body was acting as the `for` guard, so
+    // stripping correctly exposes a `sleep 0`, which is not a wait either. Hence the duration test.
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', "python3 - <<'EOF'\n# poll the sweep for the Wave A gate\nprint(1)\nEOF\nsleep 0; cat /tmp/sweep.json"),
+      done(2, 1, 'a'),
+    ]);
+    expect(s.totals.sleepCalls).toBe(0);
+  });
+
+  it('still catches a blind sleep AFTER the heredoc terminator', () => {
+    // The negative control for the case above: only the BODY is dropped, never the rest of the
+    // command. This exact shape is one of `c10864d1`'s two blind sleeps.
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', "python3 - <<'PYEOF'\nprint('start')\nPYEOF\nsleep 60 2>/dev/null; python3 sweep-status.py"),
+      done(2, 60, 'a'),
+    ]);
+    expect(s.totals.blindSleepCalls).toBe(1);
+  });
+
+  it('counts re-running one expensive command for a DIFFERENT FILTER as repetition', () => {
+    // `7c2dd8f0` ran one test file 11 times — 37 s the first time, 230 s of pure repetition after
+    // — changing only the filter each time. An exact-command key finds none of this (measured: 0
+    // across all five runs), which is why the key drops everything past the first `|` or `>`.
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', 'npm test -- packages/cezar/src/core/brokered-session.test.ts | grep -E "FAIL|✓"'),
+      done(2, 37, 'a'),
+      bash(3, 40, 'b', 'npm test -- packages/cezar/src/core/brokered-session.test.ts | grep "Test Files"'),
+      done(4, 77, 'b'),
+      bash(5, 80, 'c', 'npm test -- packages/cezar/src/core/brokered-session.test.ts > /tmp/one.log'),
+      done(6, 117, 'c'),
+    ]);
+    expect(s.totals.repeatedExpensiveCalls).toBe(2);
+  });
+
+  it('does not count a repeat whose FIRST call was cheap — that is not the defect', () => {
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', 'npm run typecheck'),
+      done(2, 2, 'a'),
+      bash(3, 4, 'b', 'npm run typecheck | tail -5'),
+      done(4, 6, 'b'),
+    ]);
+    expect(s.totals.repeatedExpensiveCalls).toBe(0);
+  });
+
+  it('does not group two genuinely different gates together', () => {
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', 'npm run typecheck'),
+      done(2, 20, 'a'),
+      bash(3, 22, 'b', 'npm test'),
+      done(4, 60, 'b'),
+    ]);
+    expect(s.totals.repeatedExpensiveCalls).toBe(0);
+  });
+
+  it('reads no command out of a non-Bash call, and survives a missing `input` entirely', () => {
+    const s = computeRunStats('r', [
+      ev(1, 0, 'tool-call', { id: 'a', tool: 'Read', input: { file_path: '/tmp/sleep 30' } }),
+      ev(2, 1, 'tool-call', { id: 'b', tool: 'Bash' }),
+      done(3, 2, 'b'),
+    ]);
+    expect(s.totals.sleepCalls).toBe(0);
+    expect(s.totals.repeatedExpensiveCalls).toBe(0);
+  });
+
+  it('reports ZERO on the ec6e8e06 fixture because its `input` was STRIPPED, not because it never waited', () => {
+    // R7, pinned so it cannot be misread. This is the trap the spec names: a sleep counter tested
+    // only against this fixture passes while measuring nothing at all.
+    expect(stats.totals.sleepCalls).toBe(0);
+    expect(stats.totals.blindSleepCalls).toBe(0);
+    expect(stats.totals.repeatedExpensiveCalls).toBe(0);
+    // The proof that the zero is the fixture's and not the meter's: 271 real Bash-and-friends
+    // calls are in there, and every one of them arrives with no command to read.
+    expect(stats.totals.toolCalls).toBe(271);
+  });
+});
+
 describe('formatRunStats', () => {
   it('names every step, the totals row, and the two headline numbers', () => {
     const text = formatRunStats(stats);
@@ -201,6 +349,12 @@ describe('formatRunStats', () => {
     expect(text).toContain('batch factor 1.00');
     expect(text).toContain('(1.00 = never batched)');
     expect(text).toContain('231 cheap calls');
+    // The waiting + repetition columns and their summary clause. The fixture's `input` is
+    // stripped, so these are structurally present and numerically zero — see the R7 pin above.
+    expect(text).toContain('sleep');
+    expect(text).toContain('re-run');
+    expect(text).toContain('sleep 0 blind of 0');
+    expect(text).toContain('0 expensive call(s) re-run');
     // A restarted step is marked as such rather than silently averaged away.
     expect(text).toMatch(/spec \(×2\)/);
   });
