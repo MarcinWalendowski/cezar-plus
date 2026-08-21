@@ -135,7 +135,7 @@ export function probeIsolationCapabilities(
   };
 }
 
-function probeUserScope(
+export function probeUserScope(
   env: NodeJS.ProcessEnv,
   fs: { existsSync(p: string): boolean },
   uid = process.getuid?.() ?? 0,
