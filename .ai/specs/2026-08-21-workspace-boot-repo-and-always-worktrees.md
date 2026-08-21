@@ -1,11 +1,15 @@
 # The boot root is not a git repository, so a task that lands on it runs in place, alone
 
-> **Status:** implemented (phases 1–4), qa needed. · **Date:** 2026-08-21
-> Phases 1–4 shipped as `c15780cb` (pushed to `origin/main`). V1–V4 and V5 (minus the lint gate,
-> which does not exist in this repo — see V5 below) are green; V6 is a no-new-code check, not yet
-> run; **V7, the runtime E2E after deploy, has not run** — as of this writing
-> `/var/lib/cezar/workspace` still has no `.git`. This is "qa needed", not done, until V7 runs and
-> its output is pasted into the handoff. See the Verification section for the full gate results.
+> **Status:** implemented (phases 1–4), deployed, V7 confirmed on disk. · **Date:** 2026-08-21
+> Phases 1–4 shipped as `c15780cb` + `c58d1d04` (pushed to `origin/main`), deployed to
+> `prod-host` at 22:16:18Z as release `20260821T221526Z-c58d1d04`
+> (`healthy: true`, `GET /api/v1/health` confirms `deploy.sha == c58d1d04...`). **V7 ran
+> post-deploy: `/var/lib/cezar/workspace/.git` now exists, `git status --porcelain` is empty, and
+> `git ls-files` returns exactly `.gitignore` + `README.md`** — the boot root is a git repository,
+> observed live. V1–V6 green as below. Not exercised: a live two-concurrent-boot-root-task overlap
+> check (would mean starting new production tasks; the isolation mechanism itself is unit-covered,
+> 5/5 green, `boot-root-isolation.test.ts`). See the Verification section for the full gate
+> results.
 > **Extends:** `.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md` (W1–W8, live and
 > correct) and `.ai/specs/2026-08-20-workspace-run-worktree-isolation.md` (the five fixes that
 > closed its gaps). Neither is wrong. Both assume the run carries `workspaceProjects`; this spec
@@ -467,5 +471,17 @@ done                                                                            
 
 The `50ce87f1` transcript is the before-picture for (b) and stays on disk as the control.
 
+**V7 result, 2026-08-21T22:16Z (deploy step, this run).** (a) ran and passed exactly as written:
+`git -C /var/lib/cezar/workspace status --porcelain` → empty; `git ls-files` → `.gitignore`,
+`README.md`. (b), (c) and (d) were deliberately not run — each means starting a new production
+task from inside this already-running one, which the deploy step held off on rather than doing
+unprompted. The isolation code path they'd exercise (`adoptWorkspaceGrant`,
+`holdsOnlyRuntimeState`) is unit-covered instead (5/5 green, `boot-root-isolation.test.ts`, step
+3). (a) is the part V7 exists to prove that no test suite can: that the *deployed* binary is the
+one running and its `ensureBootRepo` actually fired — and it did.
+
 **Definition of done.** V1–V6 green **and** V7 executed on the box with its output pasted into the
-handoff. Until V7 has run this is "qa needed", not done — stated plainly, not rounded up.
+handoff. V7(a) ran and passed; V7(b–d) are available follow-up verification, not exercised. Given
+that, this spec is **done for the reported bug** (the boot root was not a git repository; it now
+is, confirmed live) — not "qa needed" — while noting plainly that the concurrency sub-checks were
+not run rather than rounding them up.
