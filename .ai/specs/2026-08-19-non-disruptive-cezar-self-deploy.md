@@ -841,9 +841,17 @@ class of defect the one-consumer rule exists to prevent, and it was invisible to
 > corpus note `cezar-prod-rootless-deploy-provisioning` for the provisioning decisions and their
 > blast radius.
 >
-> **One clause below survives and is still load-bearing:** a deploy driven from *inside* an agent
-> task still fails, because `buildSystemdRunArgv` needs a *system* `systemd-run` transient unit,
-> which `cezar` is correctly denied. Drive the cutover as an operator or from a detached unit.
+> **CORRECTED 2026-08-21 (same day) — the "one surviving clause" did not survive either.** It is
+> struck through below because it was the last sentence in this banner still telling a reader to go
+> find an operator, and `07f5c274` had already made that false. An agent task deploys itself here:
+> `decideReExec` reads the unit's `KillMode`, finds `process` on this box, and takes **no** transient
+> unit at all — see "The agent-driven deploy gap, closed and measured (2026-08-21, second pass)"
+> below for the fix and the five cutovers that measured it. Re-verified 2026-08-21 ~20:5x UTC on
+> `prod-host`: `systemctl show cezar.service -p KillMode` → `KillMode=process`.
+>
+> > ~~**One clause below survives and is still load-bearing:** a deploy driven from *inside* an agent
+> > task still fails, because `buildSystemdRunArgv` needs a *system* `systemd-run` transient unit,
+> > which `cezar` is correctly denied. Drive the cutover as an operator or from a detached unit.~~
 >
 > The original text is kept unchanged below because those measurements are the reason the grants
 > are shaped the way they are — do not re-derive them, and do not read them as the state of the box.
