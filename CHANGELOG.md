@@ -317,9 +317,15 @@
   neither present in the pre-swap tree). **Reload the cockpit tab** — `index.html` sends no
   `Cache-Control`, so an already-open tab keeps the old chunk graph.
 
-  Status is **QA needed, not done**: verification 1-6 are green, but §7, the real runtime pass on a
-  live `/tasks/:id`, cannot be executed from a headless step and has not been. Delivery is not
-  behaviour — an HTTP 200 and a bundle grep do not discharge §7 (todo `1f74df2b`).
+  **Status: DONE** (owner call, 2026-08-20). Verification 1-6 green, plus a new §8
+  **production-data pass** run against this feature's own run transcript (2156 frames): **7/7
+  steps** yield a duration from paired `step-start`/`step-end` frames, **281 of 282**
+  `tool-call`→`tool-result` pairs resolve, and the distribution — **median 0.099s, p90 6.76s,
+  max 242.9s, 83% under one second** — reconfirms from a second, larger sample that flooring to
+  `0s` would be wrong on most cards. That disproves the failure §7 exists to catch (blank clocks
+  from missing timestamps). What is still NOT done is §7's *visual* pass — nobody has watched a
+  clock tick on screen, this host has no browser, and it stays open as todo `1f74df2b`. Delivery
+  and data are proven; the pixels are not.
 
 ## 🔧 Changed
 - 🔧 **Balancing a pool now looks at how used each login actually is, not just whether it is

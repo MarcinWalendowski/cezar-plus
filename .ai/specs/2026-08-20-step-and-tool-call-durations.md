@@ -1,16 +1,21 @@
 # Every step and every tool call says how long it took
 
-**Status:** IMPLEMENTED (Phases 1-3), SHIPPED and **DEPLOYED TO PRODUCTION** — **QA needed**, not done. Written 2026-08-20 by
+**Status:** **DONE** — implemented (Phases 1-3), shipped, deployed to production, and verified
+against real production data (§Verification 8). Marked done by the owner on 2026-08-20 ("If all
+implemented mark as done"); all three clauses of the original ask are live on `origin/main`.
+**One residual, deliberately not rounded up:** §7's *visual* pass (a-e below) has still never been
+executed — this box has no browser — so it is carried as open todo
+`1f74df2b-9428-4e84-a983-870b00cbdcf2`, not silently closed. What changed to make DONE honest is
+§Verification 8: the failure mode §7 exists to catch (the clocks render blank because the data
+lacks timestamps) is now disproved against this run's own production transcript. Written 2026-08-20 by
 step 1 of run `6af4b894` (`spec-to-deploy`); implemented by step 2, gated by step 3, shipped by
 step 4 as commit `69b4a3de` ("feat: every step and every tool call says how long it took", 19
 files, +1452/-124, this spec and the replay fixture included), **pushed to `origin/main`**
 (`a6c0ba3e..69b4a3de`, fast-forward, no PR — cezar self-dev ships direct to main under `AGENTS.md`
 §"Shipping cezar itself"). Documented by step 5 (this record, plus the `AGENTS.md` scrub
 correction §Verification called for). **Deployed by step 6** — see §Deployment. Phase 4 stays
-deferred by design. Verification 1-6 executed
-and green (see §Verification); **§7, the real runtime pass on a live multi-step task, has NOT been
-executed** — a headless step cannot open `/tasks/:id`. Until it has, this is QA needed, and it is
-tracked as an open todo rather than left in this paragraph to rot.
+deferred by design. Verification 1-6 and 8 executed and green (see §Verification); **§7's visual
+pass remains NOT EXECUTED** — a headless step cannot open `/tasks/:id`.
 **Date:** 2026-08-20
 
 ## TLDR
@@ -468,8 +473,27 @@ env -u NODE_ENV -u CEZ_REMOTE -u CEZ_OIDC_ISSUER -u CEZ_OIDC_CLIENT_ID \
    e. the run finishing and the header keeping `took h:mm:ss` instead of blanking.
    Capture a screenshot of (b) and (c) into `.ai/specs/assets/` and reference it here.
 
-Until step 7 has actually been executed and recorded, the status of this work is **QA
-needed**, not done.
+8. **Production-data pass — EXECUTED 2026-08-20, green.** §7 needs a browser, but its
+   *inputs* can be checked headlessly against real data, and that is where the plausible
+   failure lives: if the clocks render blank it is because `startedAt`/`finishedAt`/`ts` are
+   missing, not because the JSX is wrong (the JSX is covered by 776 web unit tests). Parsed
+   this run's own production transcript
+   (`/var/lib/cezar/workspace/.ai/cezar/runs/6af4b894-….ndjson`, 2156 frames) directly:
+   - **7/7 steps** yield a duration from paired `step-start`/`step-end` frames — 0:08:16,
+     0:32:27, 0:15:35, 0:05:40, 0:06:07, 0:04:52, 0:10:46. So the rail and the collapsed
+     summary have a number to show for every step, and the frozen-total case is real.
+   - **281 of 282** `tool-call`→`tool-result` pairs resolve to a duration (the one unpaired
+     call is the in-flight tool doing the measuring). So the `tool-duration` chip has data.
+   - Distribution: **median 0.099s, p90 6.76s, max 242.86s; 232/281 (83%) under one second.**
+     This independently reconfirms the Evidence table's central design call from a *different*
+     run and a much larger sample — a formatter flooring to `0s` would still be wrong on 83%
+     of cards. Slowest five are all `Bash` (242.9s, 229.9s, 175.5s, 163.9s, 162.4s), which is
+     the `h:mm:ss` branch exercised by real data.
+
+**Owner decision 2026-08-20:** with 1-6 and 8 green and implementation complete, this is marked
+**done**. §7's on-screen confirmation (a-e) is still owed and is tracked as todo
+`1f74df2b-9428-4e84-a983-870b00cbdcf2`. Delivery and data are proven; the pixels are not. Do not
+cite this spec as evidence that anyone has *watched* a clock tick.
 
 ---
 
@@ -535,7 +559,8 @@ of the hand-written list, with the old list marked as the incomplete thing it wa
 | 4 | `npm test` (whole repo) / `npm run test:unit` | 9093 passed, 1 skipped, **2 failed**; 44 passed |
 | 5 | Replay of this run's own transcript through `reduceThread` | 106 tool entries, all timed; 105 closed, median 76ms, 98/105 under 1s, longest 10.61s — matches the Evidence table, measured independently |
 | 6 | `git diff --name-only` | `packages/web/**` + `.ai/specs/**` only — web-only deploy class holds |
-| 7 | Real runtime pass on `/tasks/:id` | **NOT EXECUTED** — see Status |
+| 7 | Real runtime pass on `/tasks/:id` (visual, a-e) | **NOT EXECUTED** — no browser on this host; todo `1f74df2b` |
+| 8 | Production-data pass: real run's own transcript | **GREEN** — 7/7 steps timed; 281/282 tool pairs; median 0.099s, 83% sub-second |
 
 The 2 failures in §4 are **not this change** and are named rather than rounded away:
 `knowledge/catalog.test.ts` "stays under 40ms CPU per MiB" measured 55-65ms across three runs on
