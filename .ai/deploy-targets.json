@@ -1,21 +1,28 @@
 {
   "$comment": [
     "What a DEPLOYED cezar means, as probes a machine can run. The `deploy` step of the",
-    "spec-to-deploy workflow is green only when EVERY target below exits 0 — see",
+    "spec-to-deploy workflow is green only when EVERY target below exits 0 \u2014 see",
     ".ai/specs/2026-08-20-steps-green-only-when-verified.md and workflows/postconditions.ts.",
     "cezar is TWO services and shipping one alone used to end that step green.",
     "Each probe runs with bash -lc in the step's cwd, bounded at 60s.",
     "DELIVERY IS NOT ACTIVATION: the service probe deliberately checks that the running",
-    "process answers, not merely that a new dist tree was copied into place — a half-live",
-    "deploy (new CLI tree, old resident server) is exactly what reads like a whole one."
+    "process answers, not merely that a new dist tree was copied into place \u2014 a half-live",
+    "deploy (new CLI tree, old resident server) is exactly what reads like a whole one.",
+    "CORRECTED 2026-08-21: the backend probe used to compare `/opt/cezar/.deployed-commit`",
+    "against HEAD. On a rootless blue-green box that file is never written (`/opt/cezar` is a",
+    "symlink into /opt/cezar-releases/, and `deploy.json` + GET /api/v1/health's `deploy`",
+    "field are the ledger), so the probe failed after a WORKING deploy \u2014 a red that says",
+    "nothing about the deploy. It now asks the RUNNING process which sha it is serving,",
+    "which is strictly stronger: a stale marker cannot forge it. `.deployed-commit` stays as",
+    "a fallback for boxes still on the --strategy=restart path, which do write it."
   ],
   "targets": [
     {
-      "name": "cezar service (backend) — deployed tree matches HEAD and the running process answers",
-      "probe": "set -e; test -f /opt/cezar/packages/cezar/dist/index.js; test \"$(cat /opt/cezar/.deployed-commit 2>/dev/null)\" = \"$(git rev-parse HEAD)\"; curl -fsS --max-time 10 http://127.0.0.1:4321/api/v1/health > /dev/null"
+      "name": "cezar service (backend) \u2014 the RUNNING process is serving HEAD",
+      "probe": "set -e; test -f /opt/cezar/packages/cezar/dist/index.js; head=$(git rev-parse HEAD); live=$(curl -fsS --max-time 10 http://127.0.0.1:4321/api/v1/health | grep -o '\"deploy\":{[^}]*}' | grep -o '\"sha\":\"[0-9a-f]*\"' | grep -o '[0-9a-f]\\{7,40\\}' | head -1); if [ -z \"$live\" ]; then live=$(grep -oE '^[0-9a-f]{7,40}' /opt/cezar/.deployed-commit 2>/dev/null | head -1); fi; test -n \"$live\"; case \"$head\" in \"$live\"*) exit 0;; esac; echo \"live=$live head=$head\"; exit 1"
     },
     {
-      "name": "cezar UI (web) — the built bundle is the one being served",
+      "name": "cezar UI (web) \u2014 the built bundle is the one being served",
       "probe": "set -e; test -f /opt/cezar/packages/cezar/web/dist/index.html; curl -fsS --max-time 10 http://127.0.0.1:4321/ | grep -qF \"$(grep -o 'assets/index-[A-Za-z0-9_-]*\\.js' /opt/cezar/packages/cezar/web/dist/index.html | head -1)\""
     }
   ]
