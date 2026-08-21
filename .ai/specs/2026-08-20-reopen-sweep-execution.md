@@ -16,7 +16,8 @@
 > Per-wave gates, the four defects this run measured, and the full 20-row table are in
 > § Status log — 2026-08-21. Two things are deliberately **not** claimed done: eleven runs finished
 > in `waiting` rather than settling, so their worktrees and branches are still on disk (board
-> hygiene, not audit — cezar todo `4fc816ca`); and the queue-pump defect that nearly stalled the
+> hygiene, not audit — cezar todo `4929b86c`, which superseded `4fc816ca`); and the queue-pump
+defect that nearly stalled the
 > sweep is diagnosed, not fixed (cezar todo `b6fbd608`).
 >
 > ~~**Status: EXECUTED — all four waves have fired; every one of the 19 runs has now been asked, and
@@ -343,10 +344,15 @@ oversight.
         │              --exclude 7aecd6a2 --prompt "$P"          → 17 requests
         │        └─► queued behind maxParallel=3; hours of wall clock
         ▼
-  Wave D   grep '^MERGE-VERDICT:' over 19 × (ndjson, handoff.md) → the Phase 5 table
+  Wave D   grep 'MERGE-VERDICT:' over 19 × (handoff.md, ndjson) → the Phase 5 table   [*]
         │
   Phase 6  parent spec Status: PARTIAL → resolved; marker re-stamped; commit + push
 ```
+
+`[*]` **Corrected 2026-08-21 (run `c10864d1`).** This box originally read
+`grep '^MERGE-VERDICT:'` and the anchor matches nothing — the line is written as a Progress-log
+**bullet**. Handoff first, transcript only as a fallback. See § The collector for the working
+command and the two further traps it hides.
 
 Nothing here writes to `runs.json` directly — it is `RunStore`-owned with debounced atomic saves,
 which is the whole reason the intent lives in its own file (parent spec § Architecture).
@@ -505,7 +511,10 @@ already enumerated in § Problem 4. Save it to a file; Waves A and B diff agains
 
 1. `b1684fe9` leaves `done`, appears in Working, streams, and settles to `done` (not `failed`, not
    `review`).
-2. `grep '^MERGE-VERDICT:' chat/.ai/cezar/runs/b1684fe9-….{ndjson,handoff.md}` returns a line.
+2. ~~`grep '^MERGE-VERDICT:' chat/.ai/cezar/runs/b1684fe9-….{ndjson,handoff.md}` returns a line.~~
+   **Corrected 2026-08-21:** the anchored form returns nothing for any run, because the line is a
+   Progress-log bullet — use the collector in § The collector. Graded with the corrected command,
+   this item **PASSED**.
 3. Its verdict is `merged-now` or `land-blocked` — **not** `merged`. `cez/b1684fe9` @ `2675cd16`
    is provably unmerged today (`git cherry origin/main cez/b1684fe9` → `+ 2675cd16`), so a
    `merged` verdict here means the agent got it wrong and the prompt's grounding failed.
@@ -761,8 +770,10 @@ missing since it was written:
   should.
 
 So re-applying a workspace run that already applied once is **benign, measured rather than
-reasoned**. Todo **`4fc816ca`** stays open only for the narrower question it also asks — a run that
-*does* change something on a second apply-back, which this sweep has not produced yet.
+reasoned**. Todo **`4fc816ca`** is therefore **closed 2026-08-21**: all three of its acceptance
+criteria were executed and measured here. The narrower question it also asked — a run that *does*
+change something on a second apply-back — this sweep never produced, so it is **unmeasured, not
+passed**, and it carries forward in `4929b86c` rather than keeping a satisfied todo open.
 
 **And the canary's own ten did clear, by the other route.** `be31d9e9` never settled — it later
 died on a transport error (§ Two continuations died of transport errors) — but the `failed` path
@@ -990,7 +1001,8 @@ checkout was modified by the sweep, at any point, and every audit that had somet
 it through `origin/main` rather than through apply-back.
 
 Cleaning it up means settling or cancelling the eleven `waiting` runs, which is board hygiene and
-deliberately out of this spec's scope — cezar todo `4fc816ca`. Do not `git worktree remove` them by
+deliberately out of this spec's scope — cezar todo `4929b86c` (opened 2026-08-21 to carry exactly
+this, superseding `4fc816ca`). Do not `git worktree remove` them by
 hand while their runs are parked but resumable.
 
 ### How to finish (Wave D) — done, and how to re-derive it
@@ -1010,9 +1022,47 @@ every run. The one legitimate re-file is by **explicit run id**, for a continuat
 before printing a verdict — which is exactly how `81345cea` was recovered after
 `API Error: The response stopped arriving` (re-filed 07:44, answered 07:46, $1.24).
 
-Carried to completion under cezar todo `033ccf08`.
+Carried to completion under cezar todo `033ccf08`, **closed 2026-08-21**: the table above holds
+20 distinct runs, every one with a final status and a verdict, none left blank.
+
+### Where the record went (step `document`, 2026-08-21)
+
+Written the same session as the code, per the workspace rule that the repo and the record must not
+drift. Four knowledge proposals on this run's `CEZ_KB_WRITE_FILE`, pending review
+(`cez kb proposals`, run from the **real repo root** — see the caveat below):
+
+| seq | scope | path | what it carries |
+|---|---|---|---|
+| 0 | project | `cezar/reopen-sweep-executed-2026-08-21.md` | the result, the $114.05 / mean-$6.00 cost datum, and the four defects the sweep measured |
+| 1 | project | `cezar/reopen-verdict-collector-grep.md` | the anchored-grep trap and the working collector |
+| 2 | workspace | `environment/agent-run-tmpdir-is-inside-the-git-checkout.md` | a run's `TMPDIR` sits inside the project checkout — 17 of 19 test failures |
+| 3 | project | `cezar/reopen-sweep-execution-state.md` | **supersedes run `7aecd6a2`'s still-pending proposal at the same path**, whose heading claims only 1 of 19 runs was reopened |
+
+Seq 3 is the one that needs care. Both proposals are *pending*, `applyKnowledgeProposals` is
+per-run, and the reviewer chooses the order — so applying `7aecd6a2`'s **after** this one
+reinstates the false heading. Carried as todo `648bbed4`; rejecting `7aecd6a2` seq 2 loses nothing,
+because seq 3 preserves its full original text below the correction.
+
+**Todos closed:** `9159228c` (this run's own brief), `3cd4adc4` (the sweep, whose summary still read
+"the owner's ask is still unanswered"), `033ccf08` (Wave D collection), `4fc816ca` (Wave B gate
+item 2, executed on `b63f15e4`). **Todos opened:** `4929b86c` (the worktree/branch litter),
+`a8585eed` (`cez kb proposals` reads the worktree's non-existent `dataDir`, so it prints
+"no pending proposals" from inside *any* task — indistinguishable from an empty queue, and it
+briefly convinced this run its own proposals had been rejected), `648bbed4` (above). **Left open
+deliberately:** `b6fbd608` (queue does not pump on a transition into `waiting` — diagnosed, not
+fixed, because the fix is TypeScript and shipping it restarts the service) and `503195a8`
+(lazy-context reopen loss).
+
+**Not written:** the workspace corpus at `notion-export/` has no changelog entry and no
+`domains/cezar.md` mention for any of this. That is not an oversight — the whole notion corpus is a
+**read-only mount**, `applySupersede` refuses any target whose root is neither `project` nor
+`workspace`, and no proposal can reach it. Todo `94230424` already carries that gap.
 
 ### How run `7aecd6a2` said to resume — kept for the record
+
+> **Historical — the sweep is finished; do not run these.** Both `grep '^MERGE-VERDICT'`
+> commands below are the anchored form corrected in § The collector: they match nothing, and in
+> the last hours of run `7aecd6a2` that was indistinguishable from "no verdicts yet".
 
 ### How to resume
 

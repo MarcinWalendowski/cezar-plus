@@ -31,7 +31,8 @@
 > **What is deliberately not claimed.** Eleven of the nineteen runs finished in **`waiting`** rather
 > than `done` — they answered and parked awaiting a user — so their worktrees and branches are still
 > on disk and their apply-backs have not run. That is board hygiene, not audit (cezar todo
-> `4fc816ca`). And the scheduler defect that nearly stalled the sweep — a transition into `waiting`
+> `4929b86c`, which superseded `4fc816ca` when that one's premise — "apply-back has never run" —
+> stopped being true). And the scheduler defect that nearly stalled the sweep — a transition into `waiting`
 > frees a slot **without pumping the queue** — is diagnosed by experiment but **not fixed**, because
 > the fix is TypeScript and shipping it restarts the service (cezar todo `b6fbd608`).
 >

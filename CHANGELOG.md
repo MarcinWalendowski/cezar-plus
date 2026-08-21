@@ -126,7 +126,7 @@
 
   **Two things are deliberately not claimed done.** Eleven of the nineteen finished in `waiting`
   rather than `done` — they answered and parked awaiting a user — so their worktrees and branches
-  are still on disk and their apply-backs have not run (board hygiene, todo `4fc816ca`). And two
+  are still on disk and their apply-backs have not run (board hygiene, todo `4929b86c`). And two
   continuations died on transport errors mid-sweep; one had already printed its verdict, the other
   had not and was recovered by re-filing that **single run by id** (`81345cea`, answered in two
   minutes for $1.24). `--all-done` would never have re-asked it: it selects `status === 'done'`
