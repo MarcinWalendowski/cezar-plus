@@ -1,0 +1,102 @@
+/**
+ * Where a run broker's process tree lives (P4 of
+ * `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`).
+ *
+ * The problem in one line: `cezar.service` runs with the default `KillMode=control-group`, so
+ * `systemctl restart` SIGKILLs every process in its cgroup — and every agent run cezar has spawned
+ * is in that cgroup. Making a run survive a deploy means getting the broker OUT of it.
+ *
+ * Three modes, tried in order, because the right answer depends on privileges this process may not
+ * have and must not demand:
+ *
+ *  1. `scope` — `systemd-run --user --scope --slice=cezar-runs.slice`. A real per-run cgroup under
+ *     a named slice, so brokers are visible to `systemd-cgtop` and survive any action on
+ *     `cezar.service`. Needs a user manager for the service account (`loginctl enable-linger`),
+ *     which the install step arranges.
+ *  2. `delegated` — `Delegate=yes` + `KillMode=process` on the service, with the broker
+ *     `setsid`-detached. systemd signals only the main process on stop, so the tree is left alone.
+ *  3. `none` — macOS, a container without cgroup delegation, a plain `cezar serve` in a terminal.
+ *     The broker still spools durably and still survives an ordinary server exit; it just does not
+ *     survive a `KillMode=control-group` teardown.
+ *
+ * Mode 3 is a real degradation, so it is REPORTED (`/api/v1/health` → `runtime.runBrokerIsolation`)
+ * rather than assumed away. "It works on the box we tested" is exactly the claim this field exists
+ * to stop anyone making.
+ */
+
+export const BROKER_ISOLATIONS = ['scope', 'delegated', 'none'] as const;
+export type BrokerIsolation = (typeof BROKER_ISOLATIONS)[number];
+
+/** Slice that owns every run broker. Never `cezar.service`'s own cgroup — that is the point. */
+export const RUNS_SLICE = 'cezar-runs.slice';
+
+export interface IsolationCapabilities {
+  /** `systemd-run` exists AND a user manager is running for this uid (linger enabled). */
+  userScopeAvailable: boolean;
+  /** The service unit was started with `Delegate=yes` (systemd exports this in the environment of
+   *  a delegated unit as part of the cgroup being writable; the caller probes it). */
+  delegated: boolean;
+}
+
+export function chooseIsolation(caps: IsolationCapabilities): BrokerIsolation {
+  if (caps.userScopeAvailable) return 'scope';
+  if (caps.delegated) return 'delegated';
+  return 'none';
+}
+
+/** Human-readable justification, surfaced on health so an operator can see WHY they are degraded
+ *  rather than only that they are. */
+export function describeIsolation(isolation: BrokerIsolation): string {
+  switch (isolation) {
+    case 'scope':
+      return `each run gets its own transient scope under ${RUNS_SLICE} — a deploy cannot signal it`;
+    case 'delegated':
+      return 'runs are setsid-detached in a delegated cgroup with KillMode=process — a deploy signals only the server';
+    case 'none':
+      return 'runs share the server cgroup — a KillMode=control-group restart WILL kill them (degraded)';
+  }
+}
+
+/** True when a restart of the service is expected to leave in-flight runs alive. */
+export function survivesRestart(isolation: BrokerIsolation): boolean {
+  return isolation !== 'none';
+}
+
+export interface BrokerLaunchOptions {
+  isolation: BrokerIsolation;
+  runId: string;
+  /** The broker command, already split into argv. */
+  command: string[];
+  slice?: string;
+}
+
+export function brokerScopeUnitName(runId: string): string {
+  return `cezar-run-${runId.replace(/[^A-Za-z0-9:_.-]/g, '-')}`;
+}
+
+/**
+ * Build the argv that launches a broker in the chosen isolation mode.
+ *
+ * `--scope` (rather than a transient service) is deliberate: a scope adopts an EXISTING process
+ * into a new cgroup and keeps it attached to our stdio, which is what we want — the broker is our
+ * child, we just need it accounted somewhere systemd will not sweep. A transient `--unit` service
+ * would be started by systemd itself, inheriting systemd's environment rather than the carefully
+ * built agent environment (`buildChildEnv`), which is a different and much larger change.
+ *
+ * `delegated` and `none` return the command unchanged — the escape there is `setsid` + `detached`
+ * at spawn time, which is the caller's job, not an argv prefix.
+ */
+export function buildBrokerLaunchArgv(opts: BrokerLaunchOptions): string[] {
+  if (opts.isolation !== 'scope') return [...opts.command];
+  return [
+    'systemd-run',
+    '--user',
+    '--scope',
+    `--slice=${opts.slice ?? RUNS_SLICE}`,
+    `--unit=${brokerScopeUnitName(opts.runId)}`,
+    '--quiet',
+    '--collect',
+    '--',
+    ...opts.command,
+  ];
+}

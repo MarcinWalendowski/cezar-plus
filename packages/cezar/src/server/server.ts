@@ -19,7 +19,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
 import type { Next } from 'hono';
-import { serve, type ServerType } from '@hono/node-server';
+import { createAdaptorServer, serve, type ServerType } from '@hono/node-server';
 import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
@@ -296,6 +296,15 @@ export interface ServerDeps {
   /** Host the HTTP server binds (default 127.0.0.1). A non-loopback host
    *  implies hosted mode — `capabilities.localHandoff:false`. */
   bindHost?: string;
+  /**
+   * A listening descriptor inherited from systemd socket activation
+   * (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P3).
+   *
+   * When set, the server binds this fd instead of `port`/`bindHost`, so the listening socket
+   * belongs to `cezar.socket` and survives a restart of `cezar.service`. Absent on every ordinary
+   * path — local `cezar serve`, tests, macOS — which keeps the port bind exactly as it was.
+   */
+  listenFd?: number;
   /** Workspace-registry id of the boot project (multi-project spec) — plumbed
    *  from `initWorkspace` in src/index.ts. Optional: legacy callers/tests get
    *  a lazy registry lookup by `repoRoot`, falling back to the repo's slug. */
@@ -6896,11 +6905,22 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   // expose an agent-executing box to the network. `bindHost` exists only for a deliberate
   // hosted/VPS deployment (which also flips CEZ_REMOTE to gate the local-handoff endpoints) —
   // src/index.ts never passes it, so the loopback guarantee holds for the normal CLI.
-  const server = serve({
-    fetch: app.fetch,
-    port,
-    hostname: deps.bindHost ?? '127.0.0.1',
-  });
+  // Socket activation (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P3):
+  // when systemd handed us the listening descriptor, bind THAT rather than the port. The socket
+  // then outlives this process, so a deploy's restart never closes it and arriving connections
+  // queue in the kernel backlog instead of being refused. `serve()` only knows how to
+  // `listen(port, hostname)`, so the fd path builds the same server and listens itself.
+  const server = deps.listenFd === undefined
+    ? serve({
+        fetch: app.fetch,
+        port,
+        hostname: deps.bindHost ?? '127.0.0.1',
+      })
+    : (() => {
+        const inherited = createAdaptorServer({ fetch: app.fetch });
+        inherited.listen({ fd: deps.listenFd });
+        return inherited;
+      })();
   const automationProjects = new Map<string, { root: string; owner: string; repo: string }>();
   const automationScheduler = new WorkspaceAutomationScheduler({
     coordinator: automationCoordinator,

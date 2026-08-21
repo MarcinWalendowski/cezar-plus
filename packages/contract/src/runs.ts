@@ -411,6 +411,24 @@ export const runRecordSchema = z.object({
    * like every other key.
    */
   workflowDef: workflowDefSchema.optional(),
+  /**
+   * Run-broker spool for this run's live agent session, relative to the project's data dir
+   * (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P4).
+   *
+   * Absent means this run was never brokered — an older record, a backend that is not brokered
+   * yet, or a host where brokering is unavailable. On boot, absent routes recovery to the legacy
+   * "mark interrupted and force-continue" path, which stays exactly as it was.
+   */
+  spoolDir: z.string().optional(),
+  /**
+   * Bytes of `<spoolDir>/out.ndjson` already consumed and turned into events.
+   *
+   * This single number IS the re-attach contract: a replacement server resumes the tail here, so
+   * it replays precisely the records the previous process had not yet handled — no gap, no
+   * duplicate. It advances only past COMPLETE lines (see `readSpoolFrom`), which is why a read
+   * landing mid-record cannot corrupt or lose one.
+   */
+  consumedOffset: z.number().optional(),
 });
 export type RunRecord = z.infer<typeof runRecordSchema>;
 
