@@ -16,6 +16,7 @@ import {
 } from '@/api/queries'
 import { useProjectScope } from '@/api/project-scope-context'
 import type { ConfigResponse, Runner, SetConfigInput } from '@loki-labs/better-cezar-api-client'
+import { Input } from '@/components/ui/input'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
@@ -290,6 +291,41 @@ function AgentsForm({
           <span className="text-[13px] text-muted-foreground">
             {(config.reviewGate ?? false) ? 'On' : 'Off'}
             {config.reviewGate === null && ' (default)'}
+          </span>
+        </label>
+      </Field>
+
+      <Field
+        title="Approvals before implementing a spec"
+        hint="How many people must approve the spec before a task implements, pushes or deploys it. Default: 0 — approved automatically, nothing pauses. Above 1 needs real sign-in accounts, because it counts people, not clicks."
+      >
+        <label className="flex w-fit items-center gap-3">
+          <Input
+            type="number"
+            min={0}
+            max={10}
+            aria-label="Approvals before implementing a spec"
+            data-slot="agents-min-approvers"
+            className="w-24"
+            value={config.minApprovers ?? 0}
+            disabled={save.isPending}
+            onChange={(e) => {
+              const next = Number(e.target.value);
+              if (!Number.isInteger(next) || next < 0 || next > 10) return;
+              save.mutate(
+                // 0 from this control means "back to the default" — clear the key rather than
+                // pinning a 0 that would then override a deliberate env setting.
+                { minApprovers: next === 0 ? null : next },
+                {
+                  onSuccess: () =>
+                    toast(next === 0 ? 'Specs are approved automatically' : `${next} approval(s) required`),
+                },
+              );
+            }}
+          />
+          <span className="text-[13px] text-muted-foreground">
+            {(config.minApprovers ?? 0) === 0 ? 'Auto-approved' : 'Pauses for approval'}
+            {config.minApprovers === null && ' (default)'}
           </span>
         </label>
       </Field>

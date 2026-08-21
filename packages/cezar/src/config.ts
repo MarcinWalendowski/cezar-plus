@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { loadWorkspaceConfig, type WorkspaceConfig } from './workspace/config.ts';
 import { RUNNER_IDS } from './core/agent-runner.ts';
+import { MAX_APPROVERS } from './runs/approvals.ts';
 
 /**
  * Optional advanced config at `.ai/cezar/config.json`. Zero-config rule:
@@ -110,6 +111,24 @@ const configSchema = z.object({
    *  turn end. Absent = the `CEZ_TITLE_UPDATES` env decides (default ON — owner
    *  decision on PR #479). */
   liveTitleUpdates: z.boolean().optional(),
+  /**
+   * How many DISTINCT humans must approve a step marked `requiresApproval` before the chain
+   * continues (`.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`, P3 — owner
+   * ask 2026-08-20). **`minApprovers: 0` is the default and means auto-approved**, so the
+   * zero-config chain never parks; see `runs/approvals.ts` for the precedence rules and for why
+   * a malformed `CEZ_MIN_APPROVERS` fails OPEN.
+   *
+   * `.catch(undefined)` keeps the key additive-safe like its neighbours: a bad value degrades to
+   * "unset" (env, then 0) instead of discarding the rest of the config.
+   */
+  approvals: z
+    .object({
+      minApprovers: z.number().int().min(0).max(MAX_APPROVERS).optional(),
+      /** Auto-approve after this many hours. 0 / unset = wait indefinitely. */
+      timeoutHours: z.number().int().min(0).max(24 * 30).optional(),
+    })
+    .optional()
+    .catch(undefined),
   /** Optional diff-first review gate (#489): when a successful run with changes
    *  should park at `review` for a human. Absent = the `CEZ_REVIEW_GATE` env
    *  decides (default OFF — the deliberate inverse of `liveTitleUpdates`).

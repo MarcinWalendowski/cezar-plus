@@ -35,6 +35,7 @@ function serve(config: Partial<ConfigResponse> = {}) {
     worktreeRetention: 10,
     liveTitleUpdates: null,
     reviewGate: null,
+    minApprovers: null,
     ...config,
   }
   const json = (payload: unknown, status = 200) =>

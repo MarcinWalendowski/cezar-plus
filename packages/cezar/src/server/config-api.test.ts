@@ -86,6 +86,7 @@ describe('the config API', () => {
       worktreeRetention: DEFAULT_WORKTREE_RETENTION,
       liveTitleUpdates: null,
       reviewGate: null,
+      minApprovers: null,
     });
   });
 
@@ -203,6 +204,7 @@ describe('the config API', () => {
       worktreeRetention: DEFAULT_WORKTREE_RETENTION,
       liveTitleUpdates: null,
       reviewGate: null,
+      minApprovers: null,
     });
   });
 
