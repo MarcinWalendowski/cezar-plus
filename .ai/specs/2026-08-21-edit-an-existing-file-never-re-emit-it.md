@@ -1,13 +1,24 @@
 # Edit an existing file; never re-emit it
 
-> **Status: SPEC ONLY — nothing implemented.** Written in the `spec` step of run
-> `f272fda8-3cbe-4c4a-924c-6fcd6d1243b4`, from the brief left by that run's `context` step
-> (`.ai/specs/briefs/2026-08-21-edit-over-heredoc-file-writes.md`). No code, prompt, test or
-> tracker row has been changed by this step. · **Date:** 2026-08-21
+> **Status: IMPLEMENTED and SHIPPED — commit `76c8de0c` on `cez/f272fda8`, 2026-08-21.**
+> `FILE_WRITE_RECIPE` (`packages/cezar/src/workflows/types.ts:500`) ships in the `spec`,
+> `implement` and `document` steps of `spec-to-deploy`; `spec` also gained `'Edit'` in its
+> `allowedTools`. The five new `StepStats` fields (`toolInputChars`, `heredocChars`,
+> `heredocFileWrites`, `heredocRewrites`, `heredocRewriteWasteChars`) ship in `runs/stats.ts` and
+> are tested (`stats.test.ts`). `AGENTS.md` § "Changing part of a file that already exists" carries
+> the doctrine for future sessions. Todo `8ef45202-f29f-4dde-995b-1df150936940` is closed done.
+> **What is NOT yet verified: acceptance criterion 3** ("tool-call input characters in `implement`
+> drop by >= 40%") is empirical and this run implemented the change without itself running
+> end-to-end under the new prompt — see § "What I could not verify" → *"Whether the override
+> actually wins"*. Tracked as follow-up todo `e91ba865-eb2a-4935-aebc-c7c0e6eb491d`, filed because
+> the closest precedent (the round-trip-batching prompt, `.ai/specs/2026-08-20-agent-round-trip-batching-and-fanout.md`)
+> shipped, read correct in review, and then moved its measured number by nothing (batch factor
+> 1.00 → 1.02) — a prompt instruction looking right is not evidence it changes behaviour under
+> bypass-permissions mode, which actively steers the opposite way. · **Date:** 2026-08-21
 >
-> **Origin:** todo `8ef45202-f29f-4dde-995b-1df150936940` (high, started) — *"Every file write in a
-> run is a Bash heredoc, so whole files are re-emitted as output tokens"* — measured on run
-> `70f19253-cf6b-407c-92e0-96a8020a8ebb`.
+> **Origin:** todo `8ef45202-f29f-4dde-995b-1df150936940` (high, started → done) — *"Every file
+> write in a run is a Bash heredoc, so whole files are re-emitted as output tokens"* — measured on
+> run `70f19253-cf6b-407c-92e0-96a8020a8ebb`.
 >
 > This spec changes **agent-facing prompt text, one `allowedTools` entry, and four derived
 > metrics**. It changes no route, no stored schema and no run protocol.
