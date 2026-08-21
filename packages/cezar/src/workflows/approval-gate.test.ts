@@ -102,6 +102,95 @@ describe('the approval gate survives a restart', () => {
     return id;
   }
 
+  /**
+   * THE REGRESSION GUARD, and the reason this whole feature is safe to put on the DEFAULT
+   * workflow: at the shipped `minApprovers: 0` a `requiresApproval` step must behave as though
+   * the flag did not exist — no park, no `pendingApproval` written, no status change, no event.
+   *
+   * `spec-to-deploy` is the floor for every run on the box (including unattended GitHub- and
+   * bookmarklet-triggered ones), so if this ever regressed, every task in the workspace would
+   * stall behind an approval nobody knew to give. It is checked through the same private entry
+   * point the step loop uses, so it cannot pass by testing a different code path than production.
+   */
+  it('AUTO-APPROVES without parking when no approvals are configured (the shipped default)', async () => {
+    const id = parkedRun();
+    // Clear the fixture's pending state: this is the "step just finished, gate about to be
+    // consulted" moment, not a re-park.
+    store.updateRun(id, { pendingApproval: undefined, status: 'running' });
+    const before = store.getRun(id);
+
+    const gate = manager as unknown as {
+      awaitApproval: (
+        runId: string,
+        state: { cancelled: boolean; interrupt: () => void },
+        step: { id: string; requiresApproval?: boolean },
+        emit: (e: unknown) => void,
+        config: unknown,
+      ) => Promise<{ kind: string }>;
+    };
+    const emitted: unknown[] = [];
+    const outcome = await gate.awaitApproval(
+      id,
+      { cancelled: false, interrupt: () => undefined },
+      { id: 'review-spec', requiresApproval: true },
+      (e) => emitted.push(e),
+      // No `approvals` key and no env — exactly a zero-config install.
+      {},
+    );
+
+    expect(outcome.kind).toBe('approved');
+    // Nothing was written, nothing was announced, nothing waited.
+    expect(store.getRun(id)?.pendingApproval).toBeUndefined();
+    expect(store.getRun(id)?.status).toBe(before?.status);
+    expect(emitted).toEqual([]);
+  });
+
+  it('parks only because a NUMBER was configured — same call, same step, different config', async () => {
+    const id = parkedRun();
+    store.updateRun(id, { pendingApproval: undefined, status: 'running' });
+
+    const gate = manager as unknown as {
+      awaitApproval: (
+        runId: string,
+        state: { cancelled: boolean; interrupt: () => void },
+        step: { id: string; requiresApproval?: boolean },
+        emit: (e: unknown) => void,
+        config: unknown,
+      ) => Promise<{ kind: string }>;
+    };
+    // The park hands its resolver to the run's ActiveRun so `approveRun` can find it. In
+    // production `execute()` owns that record; here it is registered by hand, because calling
+    // `awaitApproval` directly is the only way to test the gate without spawning an agent.
+    const state = { cancelled: false, interrupt: () => undefined };
+    (manager as unknown as { active: Map<string, unknown> }).active.set(id, state);
+
+    // Do NOT await: at minApprovers 1 this call is supposed to block until somebody decides.
+    // Awaiting it here would hang the test, which is itself the assertion.
+    let settled = false;
+    void gate
+      .awaitApproval(
+        id,
+        state,
+        { id: 'review-spec', requiresApproval: true },
+        () => undefined,
+        { approvals: { minApprovers: 1 } },
+      )
+      .then(() => {
+        settled = true;
+      });
+    // Let the park persist itself.
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(settled).toBe(false);
+    expect(store.getRun(id)?.status).toBe('waiting');
+    expect(store.getRun(id)?.pendingApproval?.minApprovers).toBe(1);
+
+    // Release it so the test does not leave a pending promise behind.
+    await manager.approveRun(id, 'ada');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(true);
+  });
+
   it('a restart leaves the run parked instead of settling the gated step to done', async () => {
     const id = parkedRun();
 
