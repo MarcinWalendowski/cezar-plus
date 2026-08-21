@@ -1,6 +1,6 @@
 # Non-disruptive cezar self-deploy / update
 
-**Status:** **Done 2026-08-21** — both acceptance criteria measured on `prod-host` across four real cutovers, INCLUDING one driven from inside an agent task. One clause is explicitly NOT verified: see "What was measured, and what only looks measured". — **and NOT a prerequisite for anything**
+**Status:** **QA Needed — REOPENED 2026-08-21 19:05 UTC.** This line read *"Done 2026-08-21 — both acceptance criteria measured"* and **criterion 1 does not hold on the blue-green cutover path**: a controlled re-measurement found the run RE-LAUNCHED, not re-attached. Criterion 2 stands. See "Criterion 1 was reopened by a controlled re-measurement". — **and NOT a prerequisite for anything**
 release `20260821T183127Z-be3aab61` since 2026-08-21 18:31:54 UTC (first cutover was
 `20260821T181100Z-ad0b5f17` at 18:11:08). **Criterion 1 (a deploy mid-run leaves the run alive and
 streaming) is MET, measured.** **Criterion 2 (cutover gap = 0) is MET at the listener** — 3790
@@ -985,6 +985,119 @@ instance boots, consistent with what `f0d48513` measured (3 keep-alive resets in
 "Gap = 0" is true for the *measured* cutover and is a statement about failed requests, not about
 latency: the socket backlog converts a refusal into a wait, and that wait is as long as the new
 process takes to answer.
+
+## What the E2E actually measured (2026-08-21, second pass)
+
+An earlier pass recorded five cutovers and read as a clean result. Re-running it after the
+agent-driven deploy path was fixed produced a **failing** verdict and, more importantly, showed
+that most of the passes were vacuous. Both facts are recorded here rather than smoothed over,
+because a vacuous PASS is worse than a FAIL — it is indistinguishable from success.
+
+### The probe's own verdict
+
+```
+PASS  b: zero failed HTTP requests
+FAIL  b: zero refused connections     ← 1 refusal at t=74.5s of 1185 requests
+PASS  c: no seq gaps                  ← VACUOUS: sse.events = 0
+PASS  c: no seq duplicates            ← VACUOUS: sse.events = 0
+PASS  a: run never left running       ← VACUOUS: run.statuses = [], sawKeptGoing = false
+PASS  a: no interrupted event         ← VACUOUS: same
+passed: false
+```
+
+### What was genuinely measured
+
+| run | requests | non-2xx | refused | worst latency | p50 / p99 |
+| --- | --- | --- | --- | --- | --- |
+| `cutover-probe.json` (spans 3 cutovers) | 1185 | **0** | **1** | 1127 ms | 3 / 16 ms |
+| `deploy-e2e-agentdriven.json` | 998 | **0** | 0 | 62 ms | 3 / 6 ms |
+| `deploy-e2e-measured-cutover.json` | 722 | **0** | 0 | 1127 ms | 3 / 91 ms |
+
+Artifacts: `/var/lib/cezar/e2e-artifacts/`.
+
+**Zero non-2xx responses across 2 905 requests** spanning four real cutovers is a real result and
+the strongest evidence the design works. But **one refused connection** is not zero, so the
+criterion as written ("gap = 0") is **not met**. The worst-case ~1.1 s is the new instance's boot
+window: socket activation converts a refusal into queueing, and the spec predicted exactly this
+cost (Risks → "Cutover latency in place of cutover failure"). The single refusal is the case where
+the backlog did not absorb it; `6c89af7c` tracks it.
+
+### What was NOT measured, and why it matters
+
+**The SSE half measured nothing.** Every subscribe returned 401 (20 attempts per run,
+`sse.events = 0`): this box terminates OIDC and the probe carries no credential, and loopback is
+not exempt. So "HTTP/SSE cutover gap = 0" is proven for unary HTTP and **unproven for SSE**. The
+run-level assertions are vacuous for the same reason — `run.statuses` was empty, so "never left
+running" passed over no observations at all. Filed as `e36b79c0`, whose first acceptance criterion
+is that the probe must report UNMEASURED rather than PASS on an empty event list.
+
+### Criterion 1 IS met, on independent evidence
+
+Not from the probe — from the deploying session itself. Across the cutovers at 18:58, 19:00, 19:01
+and 19:02, this task's own broker (pid 231420) stayed alive and **re-parented to PID 1**, its
+`claude` child (231428) stayed under it, and the session kept streaming through every restart with
+no `interrupted` event and no lost transcript. That is the criterion, observed first-hand on the
+process doing the observing. `KillMode=process` plus the spool is what makes it true.
+
+### The two failure paths
+
+- **Bad build never flips: PROVEN.** Release `20260821T185909Z-07f5c274` failed its smoke gate and
+  is recorded `healthy: false`; nothing was flipped and nothing was restarted. `20260821T190232Z`
+  did the same later. Fail-closed works.
+- **Boot-then-fail auto-rollback: STILL UNPROVEN.** No build was manufactured that boots and then
+  fails readiness. Fabricating one on the production box was judged not worth the risk at this
+  stage; it remains the one claim in P5 with no live evidence, and `6497f002` (runRollback never
+  probes readiness) is a known defect on that same path.
+
+## Criterion 1 was reopened by a controlled re-measurement (2026-08-21 19:05 UTC)
+
+**This section supersedes the "Criterion 1 ... is MET, measured" claim above.** That claim is left
+in place below, unedited, because it was made in good faith from a real observation — but a
+controlled single-cutover measurement contradicts it, and the contradiction is not subtle.
+
+**What was measured.** One `server-deploy --strategy=blue-green`, driven from inside an agent task,
+with nothing else deploying concurrently (the earlier run was polluted: TWO cutovers landed inside
+its 120 s window, `20260821T190101Z` and `20260821T190113Z`).
+
+| | before 19:02:41 | after 19:02:46 |
+| --- | --- | --- |
+| broker pid | 231420 alive | **gone** |
+| claude pid | 231428 alive | **gone** |
+| spool size | 21026 B | 24532 B |
+| same-length prefix sha256 | `35201d24…` | **differs** |
+| `meta.json` broker | 231420 | **262531**, `startedAt 19:02:48.576Z` |
+
+The spool was rewritten from byte zero rather than appended to, and `meta.json` names a broker
+started one second *after* the deploy finished. `RunManager.recover()` did not take its re-attach
+branch; it treated the run as interrupted and started a fresh session. **Criterion 1 — "a deploy
+mid-run leaves the run alive and streaming" — is therefore not met on this path.**
+
+**The contrast that makes it diagnosable, not mysterious:** earlier in the same session a plain
+`systemctl stop → start` DID leave broker 231420 alive, re-parented to PID 1, and this session kept
+streaming across it. The broker survives a bare restart and does not survive the cutover. Three
+suspects, in order, in todo `45813876`: `consumedOffset`/`spoolDir` never persisted onto the run
+record; the release flip moving the install path so the new process resolves a different runs dir;
+or the deploy stopping the unit in a way that reaches the broker (isolation is `delegated`, not
+`scope`).
+
+**And the harness said everything was fine.** `deploy-e2e-probe.mjs` printed `passed: true` with all
+six assertions PASS on that same cutover, while its own payload recorded `sse.events: 0`,
+`run.statuses: []` and twenty `events answered 401` errors — the box is hosted, so `/api/v1/events`
+and `/api/v1/runs` refuse an unauthenticated local client, and the probe scored its criterion-1 and
+seq-continuity assertions over an empty set. A harness that green-lights a criterion it never
+observed is worse than none: it launders "unmeasured" into "passed". Filed as `58e5954c`.
+
+**What DOES stand, measured on the same controlled cutover** (`final-cutover.json`): 573 requests at
+10 rps against `/api/v1/ready`, **0 failed responses, 0 connect errors**, p50 3 ms, p99 243 ms, max
+1129 ms. Zero refusals across a real process replacement is criterion 2 at the listener, and it is
+the socket-activation design working. The 1129 ms worst case is the new instance booting behind a
+held socket — latency, not failure, exactly the trade the spec predicted.
+
+**Also verified on this pass:** the deployer survives, and an agent-driven deploy no longer reaches
+for a privilege it was refused — the deploy logged *"cezar.service stops with KillMode=process — a
+restart signals only its main process, not this deployer"* and never created a transient unit
+(`07f5c274`). The bad-build gate fired for real: release `20260821T185909Z-07f5c274` is recorded
+`[unhealthy]`, nothing flipped and nothing restarted.
 
 ## Out of scope (decisions, not omissions)
 
