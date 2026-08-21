@@ -8,8 +8,15 @@
 > never commits, so every dry run died at `commit-push`. `npm run typecheck` exit 0; 64 new tests
 > across five files green.
 >
-> **Phases 4-5 — the production sweep and the record it produces — are NOT done. NOTHING HAS BEEN
-> REOPENED, and the owner's ask is therefore NOT yet answered.** This is *QA needed*, not done.
+> **CORRECTED 2026-08-20 19:51 UTC by run `7aecd6a2`: ~~NOTHING HAS BEEN REOPENED~~ — one run
+> has.** Chat run `b1684fe9` was reopened at 19:27:26 UTC as the Wave A canary of
+> `.ai/specs/2026-08-20-reopen-sweep-execution.md`, and was still answering when that run's
+> `document` step ran. The other **18 have not been touched, and no `MERGE-VERDICT` line exists
+> anywhere on this box yet**, so the sentence's conclusion still holds even though its premise no
+> longer does. Read the execution spec, not this paragraph, for where the sweep actually stands.
+>
+> **Phases 4-5 — the production sweep and the record it produces — are NOT done. ~~NOTHING HAS BEEN
+> REOPENED~~, and the owner's ask is therefore NOT yet answered.** This is *QA needed*, not done.
 > ~~Two things stand between here and there~~ — **one thing now. (1) deploy the backend is DONE,
 > 2026-08-20 19:04 UTC:** `/opt/cezar/.deployed-commit` = `f53f5a58`, the service restarted onto
 > the new tree (MainPID 3548803 → 3683619) and the reopen watcher is live in the resident process.
@@ -119,6 +126,19 @@ their own `commit-push` step actually committed and pushed. That is precisely th
 `commit-push` green with 7 modified and 5 untracked files and no commit. `57fc8807` made that
 post-condition machine-checked, but **only for runs started after it shipped** — every run in the
 table above predates it.
+
+**CORRECTED 2026-08-20 by run `7aecd6a2`: `cez/6af4b894` is NOT an orphan, and it IS in the
+sweep.** It has a run record — `6af4b894-9d55-4685-8b04-3f72e56a1c99`, a **workspace** run, `done`
+and unarchived, finished 2026-08-20T15:50:39Z, titled *"each step of workflow should show time of
+processing…"* — in **`/var/lib/cezar/workspace/.ai/cezar/runs.json`**. The audit below looked for it
+in the *cezar project's* `runs.json` and read its absence there as absence everywhere; every
+workspace run's row lives in the boot project's index instead
+(`2026-08-15-cross-project-workspace-run.md`). So it is one of the 19, reachable by the sweep like
+any other row, and the paragraph below plus the § Out of scope bullet and the § What I could not
+establish bullet that repeat this claim are all wrong about it. `rescue/staged-index-20260820` is
+unaffected — it really has no run row.
+
+Original text, unchanged:
 
 Two orphans surfaced by the same audit, with no run record in any `runs.json` and therefore no row
 on any tab (out of scope here, recorded so they are not lost): `cezar` branch
@@ -447,10 +467,15 @@ Stating it rather than promising events that have nowhere to go.
 - `POST /runs/reopen-finished` and a "Reopen finished" UI broom beside "Archive finished"
   (`tasks-overview.tsx:230`). Natural, wanted, and useless to the actor this task serves.
 - Archiving anything. This sweep does not clean the board; it audits it.
-- The two orphan refs with no run record — `cezar` `rescue/staged-index-20260820` (1 commit ahead
+- ~~The two orphan refs with no run record~~ — **CORRECTED 2026-08-20 by run `7aecd6a2`: there is
+  one, not two.** `cez/6af4b894` has a workspace run row and is therefore IN the sweep, not out of
+  scope (see § 3). What genuinely has no run row is `cezar` `rescue/staged-index-20260820` (1 commit
+  ahead of main); that one, plus `chat`'s local `main` being 3 behind `origin/main`, is real, found
+  by this spec's audit, not reachable by a run-driven sweep, and worth a filed todo. Original text:
+  *"The two orphan refs with no run record — `cezar` `rescue/staged-index-20260820` (1 commit ahead
   of main) and `cezar` `cez/6af4b894` (landed) — plus `chat`'s local `main` being 3 behind
   `origin/main`. Real, found by this spec's audit, and not reachable by a run-driven sweep because
-  no run row points at them. Worth a filed todo.
+  no run row points at them. Worth a filed todo."*
 - `2f1ae4aa`'s three ad-hoc artifacts in `chat/.ai/cezar/runs/` (`…-reporters.json`,
   `…-reporters-user2.json`, `…-cancel-daily-tasks.sh`) — run leftovers in a directory that is
   supposed to hold only `<id>.ndjson` / `<id>.handoff.md` / `<id>.knowledge.ndjson`.
@@ -467,8 +492,10 @@ Stating it rather than promising events that have nowhere to go.
   be answered by a script from outside.
 - **Why 9 of 12 registered projects have no `runs.json`** (never ran vs. ledger removed). No
   evidence on disk either way.
-- **Whether `cez/6af4b894`'s missing run record was deleted or never written.** No trace in
-  `runs.json` or its `.bak` files.
+- ~~**Whether `cez/6af4b894`'s missing run record was deleted or never written.**~~ **RESOLVED
+  2026-08-20 by run `7aecd6a2`: the record was never missing.** It is a workspace run, so its row is
+  in `/var/lib/cezar/workspace/.ai/cezar/runs.json`, not in the cezar project's — which is the only
+  file this audit checked. Original text: *"No trace in `runs.json` or its `.bak` files."*
 
 ## Deployment
 
@@ -572,7 +599,10 @@ all; it is not the sweep.
 | 5 `document` | this status block, the `CHANGELOG.md` Added + Fixed entries, `AGENTS.md`'s post-condition rule given its dry-run carve-out, and three specs marked in place (`steps-green-only-when-verified`, `spec-to-deploy-default-workflow`, `003-handoff-cli`). Todos filed for Phases 4-5. |
 | 6 `deploy` | **DONE 2026-08-20 19:04 UTC — see § Deployment.** `f9bcda42` → `f53f5a58` in `/opt/cezar`; `dist` + `web/dist` swapped (no `npm install`, the delta touches no manifest), readiness-probed before the swap with a negative control, service restarted (MainPID 3548803 → 3683619, ~5 s outage) and the restart SIGKILLed this session as predicted — continuation resumed the run and the resumed session verified it. Both `.ai/deploy-targets.json` probes exit 0, and the watcher is proved live in the resident process (inotify watch on the store `dataDir`). E2E step 1 discharged against the deployed binary: **exactly 19**, nothing written. |
 
-**What a later session must not conclude from this file.** That the sweep ran. It did not. The
+**What a later session must not conclude from this file.** That the sweep ran. **AMENDED
+2026-08-20 19:51 UTC by run `7aecd6a2`: 1 of the 19 has now been asked** — chat `b1684fe9`, the Wave
+A canary, reopened 19:27:26 UTC and still answering — **and 18 have not.** No verdict has been
+recorded for any of them. The paragraph's warning stands for those 18. The
 19 `done` runs on the production Active tab have not been asked whether their work reached `main`,
 and the two runs this spec's audit already caught with commits on no `main` anywhere are still
 unmerged. Phases 1-3 built the door and step 6 opened it in production — but nobody has walked
