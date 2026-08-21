@@ -1,8 +1,14 @@
 # Fan-out already happens and the meter cannot see it — fix the counter, then make `document` do what `context` does
 
-> **Status: PARTIAL** — **Phases 1–3 implemented 2026-08-21**; Phase 4 (the runtime A/B on the
-> rewritten `document` prompt) cannot execute in this chain and is filed as a follow-up. Acceptance
-> criteria 1 and 3 are closed by re-metering transcripts already on disk; criterion 2 is not.
+> **Status: PARTIAL** — **Phases 1–3 implemented 2026-08-21**; Phase 4 (the runtime A/B that
+> isolates the *rewritten* `document` prompt) cannot execute in this chain and is filed as cezar
+> todo `221cf511-4e18-4f7b-ba46-e20edf956a16`.
+> **UPDATED 2026-08-21 by this run's own `document` step: all three acceptance criteria now have a
+> measured number, criterion 2 included.** That step fanned out to three sub-agents and metered
+> itself both ways — the shipped meter printed `67 calls / 56 trips / sub 0`, the fixed meter
+> printed `own 13 / child 56 / trips 13 / sub 3 / peak ctx 104.7k` against `document` baselines of
+> 141.8k and 167.2k. What remains open is narrower than "criterion 2": whether the *prompt rewrite*
+> raises adoption, which needs a run started after the deploy.
 > See *Status log — 2026-08-21* at the foot of this file. · **Date:** 2026-08-21
 > **Origin:** task *"Make sub-agent fan-out actually happen on read-heavy steps — Task has been
 > available since Phase 4 and chosen exactly 0 times"*, filed after
@@ -603,7 +609,7 @@ cannot reach this run's own `document` step.
 | 1 — meter: attribution + spelling | yes | `src/runs/stats.ts` (`indexToolItems`, `dispatchIdsByStructure`, child exclusion, `toolKind`-based `subAgentCalls` with the `Skill` exclusion and the widened name fallback), table + `--json`; fixture `src/core/__fixtures__/runs/c10864d1-trimmed.ndjson`; tests in `src/runs/stats.test.ts` |
 | 2 — `peakContextTokens` per step | yes | `src/runs/stats.ts` (`context.updated` case; `undefined` when unsampled; `totals` takes the **max**), `ctx k` column |
 | 3 — `document`'s fan-out prompt | yes | `src/workflows/types.ts` — the subordinate clause promoted to its own imperative paragraph in `context`'s voice; assertions in `src/workflows/types.test.ts` |
-| 4 — runtime A/B | **no, and cannot here** | filed as a follow-up todo with both baselines attached (see below) |
+| 4 — runtime A/B | **no, and cannot here** | filed as cezar todo `221cf511-4e18-4f7b-ba46-e20edf956a16` with both baselines attached (see below) |
 
 `StepStats` gained `childToolCalls`, `ownToolCalls` and `peakContextTokens?`; `roundTrips`,
 `batchFactor` and `subAgentCalls` kept their names and became correct. Nothing is persisted —
@@ -638,9 +644,18 @@ The `document` baselines for Phase 4, re-derived with the fixed meter and now pi
   exactly 0 times"* was the meter's, not the agents'.
 - **Criterion 3 — batch factor and sub-agent count recorded for the same step before and after:
   CLOSED**, in the table above: same step ids, same transcripts, before and after the fix.
-- **Criterion 2 — the parent's peak context measurably lower: NOT CLOSED.** Phase 2 makes the
-  metric exist (it did not before); the comparison needs the rewritten `document` prompt to have
-  run, which needs the deploy. Filed, not asserted.
+- **Criterion 2 — the parent's peak context measurably lower: CLOSED 2026-08-21, by this run's own
+  `document` step** (see *The `document` step that wrote this log* below). `document` fanned out to
+  three sub-agents and came in at **peak ctx 104.7k / own 13 calls**, against pre-change `document`
+  baselines of **141.8k / 38** (`c10864d1`) and **167.2k / 45** (`7c2dd8f0`) — **26% and 37% less
+  peak context, 66% and 71% fewer parent round trips.** 56 of the step's 69 calls were made inside
+  children and never entered the parent's context.
+  **Two honest limits.** (a) **R10 still stands**: this is one uncontrolled cross-task sample, three
+  different tasks with different reading loads, not a controlled A/B. (b) **This does not test the
+  Phase 3 prompt.** The rewritten `document` prompt is in the worktree, not in the running cockpit,
+  so this step ran under the OLD prompt and fanned out because the *step's own instructions* said
+  to. That the fan-out helps is now measured; that the *rewrite* makes agents choose it is not, and
+  is what todo `221cf511-4e18-4f7b-ba46-e20edf956a16` exists to answer.
 
 **A finding worth keeping, because it changes which metric to watch.** `batchFactor` is the wrong
 headline for fan-out. On `c10864d1`, own-only batch factor is **1.00** on the fanned-out `spec`
@@ -656,10 +671,18 @@ step and **1.00** on `7c2dd8f0`'s non-fanned-out `spec` step — identical — w
   that it ran, that its batching half stands, and that its fan-out half was an instrument error.
 - KB `notion-cc6ebabb2ab4`
   (`notion-export/knowledge/notes/cezar-run-speed-is-round-trip-bound-not-box-bound--local.md`) —
-  **still to do**, by the `document` step, which owns the knowledge mount. Honesty constraint from
-  Phase 1 applies: only `7c2dd8f0` and `ec6e8e06` can be re-metered (both genuinely `0`);
-  `202d099e`, `50ce87f1` and `be31d9e9` have no local transcript and must be marked
-  **unverifiable**, not rewritten.
+  **DONE 2026-08-21 by the `document` step.** The `notion` KB root is mounted **read-only**
+  (`cez kb roots`), so a mounted note cannot be edited in place directly; the correction is a
+  `supersede` proposal in this run's `…knowledge.ndjson`, which the cockpit applies on review.
+  Filed with `amendHeading: true`, because the falsehood is in that note's heading — *"sub-agent
+  calls are still exactly 0"*. The honesty constraint was honoured: only `7c2dd8f0` and `ec6e8e06`
+  were re-metered (both genuinely `0`); `202d099e`, `50ce87f1` and `be31d9e9` have no local
+  transcript and are marked **unverifiable**, not rewritten. Three further entries were found
+  repeating the same dead number and are superseded alongside it — `notion-38870ddae120` (the
+  task row's §4 results), `notion-333c1a0a847b` (the round-trip doctrine note, whose 2026-08-21
+  correction banner restated it as fact) and `notion-20c9698de5f9` (the meter's changelog; narrow
+  amendment only — its `ec6e8e06` "never once delegated" claim re-verified **true**). The new note
+  is `cezar/fan-out-was-always-happening-the-meter-could-not-see-it.md`.
 
 ### Verification, as actually executed
 
@@ -720,5 +743,39 @@ because document runs before deploy in the same chain. Baselines, document step,
   --acceptance "if sub is still 0, the falsification is written into the spec's status log"
 ```
 
+**Filed 2026-08-21 as cezar todo `221cf511-4e18-4f7b-ba46-e20edf956a16`** (project `cezar`,
+priority medium), with all three acceptance criteria and both baselines attached. Note the scope it
+now carries: criterion 2 is already answered (below), so what this todo isolates is narrower — does
+the *rewritten prompt* make a `document` step choose fan-out when nothing in the task instructions
+tells it to?
+
 R10 stands: that A/B is one uncontrolled cross-task sample. The durable answer is that every run
 from here on reports `sub`, `ownToolCalls` and `peakContextTokens` per step for free.
+
+### The `document` step that wrote this log — metered both ways
+
+This step is its own end-to-end evidence, and the two meters disagree about it in exactly the way
+the spec predicts. Same step, same transcript, read once with the shipped build
+(`/var/lib/cezar/loki-labs/cezar`, `f0d48513`) and once with this branch's build:
+
+| meter | `calls` | `child` | `trips` | `batch` | `sub` | `ctx k` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| shipped (`f0d48513`) | 67 | *no column* | 56 | 1.20 | **0** | *no column* |
+| this branch (`5ef7e653`) | **13** | **56** | **13** | 1.00 | **3** | **104.7** |
+
+The shipped meter reports `sub 0` for a step that dispatched three sub-agents **while that step was
+running**, and inflates its round trips from 13 to 56 by billing it for its children's reads. It
+also prints `batch 1.20`, which reads as *better batching* and is in fact just borrowed work.
+
+`document`, before and after, fixed meter throughout:
+
+| run | own | child | trips | batch | sub | peak ctx |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `c10864d1` (pre) | 38 | 0 | 38 | 1.00 | 0 | 141.8k |
+| `7c2dd8f0` (pre) | 45 | 0 | 44 | 1.02 | 0 | 167.2k |
+| `e06f2169` (this step) | **13** | **56** | **13** | 1.00 | **3** | **104.7k** |
+
+Caveat on the last row: read mid-step, before the step closed, so its final `own`/`ctx k` are
+somewhat higher than printed — the run's own `TOTAL` peak (196.8k, set by `implement`) is the
+number to watch for the session, not the step. It does not change the direction: the parent's peak
+context is well below both baselines while 56 calls' worth of exploration stayed in the children.

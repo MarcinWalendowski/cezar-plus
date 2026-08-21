@@ -434,8 +434,11 @@ new isolation story first (per-agent worktrees inside a step), which is out of s
 
 ## Status log — 2026-08-20
 
-**Status: PARTIAL.** Code for all five phases landed and is committed. The measurement that
-decides whether any of it worked — Verification §4 — has **not** run. Nothing is deployed.
+**Status: PARTIAL.** **CORRECTED 2026-08-21 — the paragraph below survived the correction pass and still told a reader, in this log's own opening sentence, that §4 had not run. It did run.** The 2026-08-21 pass amended this file's status header, §4's `subAgentCalls > 0` acceptance criterion and the *§4 (the runtime A/B)* bullet 28 lines further down, but not this lead paragraph, so the file contradicted itself. What is true: **§4 ran**, and the code **is deployed** — the measurement was taken against production runs on `prod-host`. §4's *batching* result stands (batch factor 1.00–1.02, unmoved by the doctrine); §4's *fan-out* result was an instrument error, because `subAgentCalls` matched `tool === 'Task'`, a string this backend never emits. See the corrected `§4` bullet below and
+`.ai/specs/2026-08-21-sub-agent-fanout-adoption-and-attribution.md`. Original text, left unchanged beneath this correction:
+
+> Code for all five phases landed and is committed. The measurement that
+> decides whether any of it worked — Verification §4 — has **not** run. Nothing is deployed.
 
 ### What landed
 
