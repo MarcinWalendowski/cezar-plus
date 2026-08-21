@@ -37,6 +37,7 @@ function serve(config: Partial<ConfigResponse> = {}) {
     reviewGate: null,
     inherited: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
     overridden: [],
+    minApprovers: null,
     ...config,
   }
   const json = (payload: unknown, status = 200) =>

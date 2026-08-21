@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { collectSecretValues, redactDeep, redactSecrets } from '../core/secret-redaction.ts';
 // Type-only module (zod + nothing else), so this cannot cycle back into the store.
 import { workflowDefSchema } from '../workflows/types.ts';
+import { pendingApprovalSchema } from '@loki-labs/better-cezar-contract';
 
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 import { contextWindowForModel } from '../core/context-window.ts';
@@ -262,6 +263,9 @@ export const runRecordSchema = z.object({
    * invented path.
    */
   declaredSpecPath: z.string().max(500).optional(),
+  /** Set while the run is parked on a human approval gate (spec 2026-08-20, P3); cleared the
+   *  moment the gate releases or the chain moves on. Absent on every ungated run. */
+  pendingApproval: pendingApprovalSchema.optional(),
   /** Sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
    *  `monitoring` while the agent is still working on its own downstream work.
    *  Optional/absent on old runs; cleared when the run resumes or ends. */

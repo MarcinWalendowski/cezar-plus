@@ -179,6 +179,43 @@ export type WorkspaceWorktree = z.infer<typeof workspaceWorktreeSchema>;
  * key is always present in what the server hands out. Everything else optional here is optional
  * there — these are additive fields, and an absent one means "this run predates it".
  */
+/**
+ * A run parked on a HUMAN APPROVAL GATE
+ * (`.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`, P3).
+ *
+ * Persisted on the record, not held in `ActiveRun` memory, for a reason this project learned the
+ * hard way: run `be31d9e9` was interrupted by two cezar restarts mid-step, and an approval held
+ * only in process memory would have evaporated with them — silently un-gating the very step the
+ * gate exists to hold. `recover()` reads this back and re-parks.
+ *
+ * Additive and optional: no published enum gains a member (see `stopReason`'s doc comment on why
+ * `RunStatus` is never widened), so an older build round-trips this untouched. A parked run's
+ * `status` is the existing `waiting` — "the ball is in your court" already means exactly that.
+ */
+export const pendingApprovalSchema = z.object({
+  /** The gated step. The run is parked BEFORE the chain advances past it. */
+  stepId: z.string(),
+  requestedAt: z.string(),
+  /**
+   * Snapshot of `approvals.minApprovers` AT PARK TIME. Deliberately not re-read on each approval:
+   * lowering the setting later must not retroactively release a run that is already waiting, and
+   * raising it must not move the goalposts under the people who already approved.
+   */
+  minApprovers: z.number().int().min(1),
+  approvals: z.array(
+    z.object({
+      by: z.string(),
+      at: z.string(),
+      note: z.string().max(2000).optional(),
+    }),
+  ),
+  /** Echo of `declaredSpecPath`, so the approval card can link the artifact under review. */
+  specPath: z.string().max(500).optional(),
+  /** Deadline when `approvals.timeoutHours > 0`; absent = wait indefinitely. */
+  expiresAt: z.string().optional(),
+});
+export type PendingApproval = z.infer<typeof pendingApprovalSchema>;
+
 export const runRecordSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -252,6 +289,9 @@ export const runRecordSchema = z.object({
    *  `markerRefs`). Absent until the run declares one, and absent forever on a run that never does
    *  — a fact worth seeing, not one to paper over with a guessed path. */
   declaredSpecPath: z.string().max(500).optional(),
+  /** Set while the run is parked on a human approval gate (spec 2026-08-20, P3); cleared the
+   *  moment the gate releases or the chain moves on. Absent on every ungated run. */
+  pendingApproval: pendingApprovalSchema.optional(),
   /** `monitoring` while `status === 'running'` and the agent is working on downstream work.
    *  Absent on old runs; cleared on resume/end. */
   activity: runActivitySchema.optional(),
@@ -371,6 +411,24 @@ export const runRecordSchema = z.object({
    * like every other key.
    */
   workflowDef: workflowDefSchema.optional(),
+  /**
+   * Run-broker spool for this run's live agent session, relative to the project's data dir
+   * (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P4).
+   *
+   * Absent means this run was never brokered — an older record, a backend that is not brokered
+   * yet, or a host where brokering is unavailable. On boot, absent routes recovery to the legacy
+   * "mark interrupted and force-continue" path, which stays exactly as it was.
+   */
+  spoolDir: z.string().optional(),
+  /**
+   * Bytes of `<spoolDir>/out.ndjson` already consumed and turned into events.
+   *
+   * This single number IS the re-attach contract: a replacement server resumes the tail here, so
+   * it replays precisely the records the previous process had not yet handled — no gap, no
+   * duplicate. It advances only past COMPLETE lines (see `readSpoolFrom`), which is why a read
+   * landing mid-record cannot corrupt or lose one.
+   */
+  consumedOffset: z.number().optional(),
 });
 export type RunRecord = z.infer<typeof runRecordSchema>;
 

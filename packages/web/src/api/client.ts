@@ -1460,6 +1460,35 @@ export interface ContinueOptions {
 /** Reopen a finished run's session. 409 (with the reason) when it cannot be resumed. An optional
  *  runner/model override lets the follow-up choose the engine; omitted keeps the run's current
  *  backend (backward compat). */
+/**
+ * Decide a run parked on a step's human approval gate (spec
+ * `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`).
+ *
+ * Both routes answer 409 when the run exists but is not parked — the caller renders that as
+ * "somebody already decided this" rather than as a failure, because it usually means a second
+ * reviewer got there first.
+ */
+export async function approveRun(id: string, note?: string): Promise<unknown> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].approve.$post({
+      param: { projectId: queryScope(), id: encodeURIComponent(id) },
+      json: note ? { note } : {},
+    }),
+    runPath(id, '/approve'),
+  )
+}
+
+/** `notes` is required: it is handed to the spec step as its rework instructions. */
+export async function requestRunChanges(id: string, notes: string): Promise<unknown> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id']['request-changes'].$post({
+      param: { projectId: queryScope(), id: encodeURIComponent(id) },
+      json: { notes },
+    }),
+    runPath(id, '/request-changes'),
+  )
+}
+
 export async function continueRun(id: string, opts: ContinueOptions = {}): Promise<ContinueResponse> {
   const body = {
     ...(opts.text !== undefined ? { text: opts.text } : {}),

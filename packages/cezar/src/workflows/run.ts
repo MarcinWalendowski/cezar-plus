@@ -53,6 +53,7 @@ import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-re
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.ts';
 import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidateTitle } from '../runs/auto-name.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
+import { approvalsSatisfied, minApprovers } from '../runs/approvals.ts';
 import { defDescribesRun, firstUnfinishedStep, pendingChainSteps, stepTerminal } from '../runs/chain.ts';
 import { resolveProfileEnvForRoot } from '../workspace/agent-profiles.ts';
 import { accountUsageKey, countInflight, type InflightStep } from '../workspace/agent-account-usage.ts';
@@ -69,7 +70,7 @@ import {
   discardWorkspaceWorktrees,
   materializeWorkspaceWorktrees,
 } from '../workspace/workspace-worktrees.ts';
-import type { WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
+import type { PendingApproval, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
 import { UiEventSink } from '../runs/ui-event-sink.ts';
 import type { UiEvent } from '../core/ui-events.ts';
@@ -78,7 +79,9 @@ import {
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_WORKFLOW,
   DEFAULT_WORKFLOW_NAME,
+  parseReviewVerdict,
   stepKind,
+  type ReviewVerdict,
   type WorkflowDef,
   type WorkflowStepDef,
 } from './types.ts';
@@ -206,6 +209,9 @@ export function repositoryRootLockDisabled(env: NodeJS.ProcessEnv = process.env)
 const REPOSITORY_ROOT_LOCK_DISABLED_NOTE =
   'repository-root lock disabled by CEZ_DISABLE_REPO_LOCK=1 (shared checkout is unsafe)';
 
+/** How a parked approval gate released (spec 2026-08-20, P3). */
+type ApprovalOutcome = { kind: 'approved' } | { kind: 'changes'; notes: string } | { kind: 'cancelled' };
+
 interface ActiveRun {
   cancelled: boolean;
   interrupt: () => void;
@@ -248,6 +254,19 @@ interface ActiveRun {
    * work must be the LAST work this run does — land `review` + `stopReason: 'budget'`, not `done`.
    */
   budgetExceeded?: boolean;
+  /**
+   * The `CEZ:REVIEW=pass|revise` verdict the CURRENT agent step declared (spec
+   * `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`, P2). Set from the
+   * turn-end handler, read and cleared by `execute()`'s step loop once the step returns — the
+   * same shape `stepStopped` already uses, and for the same reason: the loop does not own the
+   * session's turns, so the signal has to travel on the state both sides share.
+   */
+  reviewVerdict?: ReviewVerdict;
+  /** The reviewing turn's full report — what a `revise` verdict hands to the retried step. */
+  reviewReport?: string;
+  /** Resolver for a run parked on a human approval gate (spec 2026-08-20, P3). Present ONLY
+   *  while parked; `approve`/`requestChanges` call it, `cancel` aborts it. */
+  approvalWaiter?: (outcome: ApprovalOutcome) => void;
   /**
    * A continuation ended its turn with `CEZ:DONE` while its run's CHAIN still had pending steps
    * (spec 2026-08-20, P2). The marker is a statement about the agent's OWN step, so the session
@@ -669,6 +688,16 @@ interface ChainResumePoint {
   index: number;
   /** Present only when that step already had a session this process may reattach to. */
   resume?: { sessionId: string; profileId?: string; prompt: string };
+  /**
+   * Why the chain is re-entering here, in the words the resumed step should act on. Seeded into
+   * `checkFailure`, the channel that appends explanatory text to a retried agent's prompt.
+   *
+   * One caller today: a "request changes" that arrives while the run is NOT active — a restart
+   * killed the `execute()` that was parked on the approval gate (spec 2026-08-20, P3). Without
+   * it the spec step would be re-run with no idea what the reviewer objected to, which is the
+   * same defect as re-running a failed check without showing the failure.
+   */
+  feedback?: string;
 }
 
 interface PendingContinuation {
@@ -1394,6 +1423,22 @@ export class RunManager {
         continue;
       }
       if (run.status === 'waiting') {
+        // A run parked on an APPROVAL GATE stays parked (spec 2026-08-20, P3). Everything below
+        // this line settles the open step to `done` — which, for a gated step, would silently
+        // grant the approval that a human was asked for and never gave. That is the exact failure
+        // mode `pendingApproval` is persisted to prevent, so it is checked FIRST.
+        //
+        // Nothing needs to be re-run to hold the park: the record already carries the gate and the
+        // approvals collected so far, and `releaseApproval`'s no-live-waiter branch re-enters the
+        // chain when the decision finally arrives. Re-entering HERE would re-run the reviewer for
+        // no benefit and lose nothing but time.
+        if (run.pendingApproval) {
+          this.store.appendEvent(run.id, {
+            type: 'lifecycle',
+            message: `cezar restarted — still waiting for approval (${run.pendingApproval.approvals.length}/${run.pendingApproval.minApprovers})`,
+          });
+          continue;
+        }
         // A `waiting` run parked on an unanswered `CEZ:ASK` is waiting on the USER — settling it
         // to plain `done` here silently drops the "needs you" signal, so a restart made a task
         // with an open question look finished. Detect that before the steps are settled and keep
@@ -1537,6 +1582,8 @@ export class RunManager {
    * caller's old path (a continuation, or `settleSuccess`) still applies.
    */
   private async reenterChain(
+    // Reassigned when `opts.resetTo` rewinds the record — the resume point must be computed
+    // against the steps as they are AFTER the rewind, not before it.
     run: RunRecord,
     reason: string,
     opts: {
@@ -1553,12 +1600,36 @@ export class RunManager {
        * this fix to what it is about: a chain whose REMAINING steps would otherwise be dropped.
        */
       onlyIfMoreStepsFollow?: boolean;
+      /**
+       * Rewind before resuming: reset this step, and every step back to its `onFail.retry`
+       * target, to `pending` so the re-entry lands on the TARGET rather than on the step that
+       * was just released. Used by a "request changes" that arrives with no live `execute()` to
+       * loop back in-process (spec 2026-08-20, P3).
+       */
+      resetTo?: string;
+      /** Carried into the resumed step's prompt — see `ChainResumePoint.feedback`. */
+      feedback?: string;
     } = {},
   ): Promise<boolean> {
     const workflow = await this.reviveWorkflow(run);
     if (!workflow) return false;
+    if (opts.resetTo) {
+      const fromIdx = workflow.steps.findIndex((s) => s.id === opts.resetTo);
+      const target = workflow.steps[fromIdx]?.onFail?.retry;
+      const retryIdx = target ? workflow.steps.findIndex((s) => s.id === target) : -1;
+      // Only ever backwards, and only when both ends resolve — `stepsIssue` guarantees the
+      // ordering at load time, but a REVIVED definition may not be the one this record was
+      // written against, so the bounds are re-checked rather than assumed.
+      if (fromIdx >= 0 && retryIdx >= 0 && retryIdx <= fromIdx) {
+        for (const between of workflow.steps.slice(retryIdx, fromIdx + 1)) {
+          this.store.updateStep(run.id, between.id, { status: 'pending', error: undefined });
+        }
+        run = this.store.getRun(run.id) ?? run;
+      }
+    }
     const resumeAt = this.chainResumeAt(run, workflow);
     if (!resumeAt) return false;
+    if (opts.feedback) resumeAt.feedback = opts.feedback;
     const remaining = workflow.steps.length - resumeAt.index;
     if (opts.onlyIfMoreStepsFollow && remaining < 2) return false;
     const nextId = workflow.steps[resumeAt.index]?.id ?? '?';
@@ -3346,6 +3417,33 @@ export class RunManager {
     const verifyRetries = new Map<string, number>();
     let checkFailure: string | null = null;
     let runError: string | null = null;
+
+    /** Is a backwards loop from this step still within its `onFail.max` budget? */
+    const canLoopBack = (from: WorkflowStepDef): boolean =>
+      Boolean(from.onFail) && (retriesUsed.get(from.id) ?? 0) < (from.onFail?.max ?? 0);
+
+    /**
+     * Send the chain BACK to `step.onFail.retry`, carrying `feedback` into that step's prompt.
+     *
+     * ONE loop-back in this engine, not two. It was extracted when the spec reviewer's `revise`
+     * verdict (spec 2026-08-20-split-steps-spec-review-and-approval-gate, P2) became a second
+     * caller: a check step failing and a reviewer asking for changes are the same motion — reset
+     * the steps between here and the target so the GUI rail reads top-to-bottom truthfully, hand
+     * the target the text explaining WHY, and re-enter. `stepsIssue` has already guaranteed the
+     * target is an EARLIER step, so this can only ever go backwards.
+     *
+     * Returns the index to continue from. Callers check `canLoopBack` first.
+     */
+    const loopBackTo = (from: number, step: WorkflowStepDef, feedback: string, message: string): number => {
+      retriesUsed.set(step.id, (retriesUsed.get(step.id) ?? 0) + 1);
+      checkFailure = feedback;
+      const retryIdx = workflow.steps.findIndex((candidate) => candidate.id === step.onFail?.retry);
+      emit({ type: 'note', stepId: step.id, message });
+      for (const between of workflow.steps.slice(retryIdx, from + 1)) {
+        this.store.updateStep(runId, between.id, { status: 'pending' });
+      }
+      return retryIdx;
+    };
     // The step budget (PLAN D27, Phase 1 of
     // `.ai/specs/2026-08-15-autonomous-implementation-continuation.md`): `config.stepBudget`
     // (0 = unlimited) caps the persisted `stepsUsed` counter — see its doc comment
@@ -3381,6 +3479,10 @@ export class RunManager {
     // Consumed by the FIRST step this loop runs and never again — a later step is new work,
     // not a resumed turn.
     let resumeFrom = resumeIdx === (resumeAt?.index ?? -1) ? resumeAt?.resume : undefined;
+    // A re-entry may carry the reason it is re-entering — today: the notes from a "request
+    // changes" that landed after a restart, when there was no parked `execute()` left to resolve
+    // (spec 2026-08-20, P3). Delivered through the same channel a failing check uses.
+    if (resumeAt?.feedback) checkFailure = resumeAt.feedback;
 
     /** Steps already re-entered once after a cezar-initiated stop. One retry per step: a second
      *  stop is terminal for the run rather than a loop. */
@@ -3507,6 +3609,68 @@ export class RunManager {
           break;
         }
 
+        // ---- the spec reviewer's verdict (spec 2026-08-20, P2) -------------------------------
+        // Read and CLEAR: the verdict belongs to the step that just ran, and leaving it set would
+        // let one reviewer's `revise` re-trigger on a later step that never declared anything.
+        const reviewVerdict = state.reviewVerdict;
+        const report = state.reviewReport;
+        state.reviewVerdict = undefined;
+        state.reviewReport = undefined;
+        if (reviewVerdict === 'revise' && step.onFail) {
+          const used = retriesUsed.get(step.id) ?? 0;
+          if (canLoopBack(step)) {
+            // The reviewer did its job correctly — `done`, not `failed`. `loopBackTo` resets it to
+            // `pending` a line later anyway (the slice is inclusive of `from`), but the step-end
+            // event the rail reads must not call a working reviewer a failure.
+            this.finishStep(runId, step.id, 'done', undefined, emit);
+            i = loopBackTo(
+              i,
+              step,
+              report ?? 'The reviewer asked for changes but left no report.',
+              `spec review asked for changes — reworking from "${step.onFail.retry}" (revision ${used + 1}/${step.onFail.max})`,
+            );
+            continue;
+          }
+          // Revisions spent. PROCEED rather than fail the run — deliberately, and loudly.
+          //
+          // Failing here would let one stubborn reviewer kill a run at the SHIPPED DEFAULT, where
+          // no human is in the loop to overrule it (`minApprovers: 0`); that trades a
+          // false-green risk for a hard-stop certainty, which is the worse of the two. The note
+          // is the mitigation and it is not decorative: it is what a person reads when asking why
+          // an implemented change still carries an unresolved objection.
+          emit({
+            type: 'note',
+            stepId: step.id,
+            message: `spec review still asks for changes after ${step.onFail.max} revision(s) — continuing anyway; read this step's report before trusting the result`,
+          });
+        }
+
+        // ---- the human approval gate (spec 2026-08-20, P3) -----------------------------------
+        if (step.requiresApproval) {
+          const outcome = await this.awaitApproval(runId, state, step, emit, config);
+          if (outcome.kind === 'cancelled') break;
+          if (outcome.kind === 'changes') {
+            const used = retriesUsed.get(step.id) ?? 0;
+            if (canLoopBack(step)) {
+              this.finishStep(runId, step.id, 'done', undefined, emit);
+              i = loopBackTo(
+                i,
+                step,
+                `A reviewer requested changes to the spec:\n\n${outcome.notes}`,
+                `changes requested — reworking from "${step.onFail?.retry}" (revision ${used + 1}/${step.onFail?.max})`,
+              );
+              continue;
+            }
+            // A HUMAN asked for changes and the chain has no revisions left. Unlike the agent
+            // verdict above, this one stops the run: a person is in the loop by definition here
+            // (the gate only parks when they opted in), so "proceed anyway" would override the
+            // very decision the gate exists to collect.
+            this.finishStep(runId, step.id, 'failed', 'changes requested, no revisions left', emit);
+            runError = `step "${step.id}": changes were requested after ${step.onFail?.max ?? 0} revision(s) — rework the spec and start again`;
+            break;
+          }
+        }
+
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
@@ -3535,22 +3699,14 @@ export class RunManager {
       }
 
       const used = retriesUsed.get(step.id) ?? 0;
-      if (step.onFail && used < step.onFail.max) {
-        retriesUsed.set(step.id, used + 1);
-        checkFailure = output;
+      if (canLoopBack(step)) {
         this.finishStep(runId, step.id, 'failed', 'check failed — looping back', emit);
-        const retryIdx = workflow.steps.findIndex((s) => s.id === step.onFail?.retry);
-        emit({
-          type: 'note',
-          stepId: step.id,
-          message: `check failed — retrying from "${step.onFail.retry}" (attempt ${used + 1}/${step.onFail.max})`,
-        });
-        // Steps we're about to re-run go back to pending so the GUI rail
-        // reads top-to-bottom truthfully.
-        for (const s of workflow.steps.slice(retryIdx, i + 1)) {
-          this.store.updateStep(runId, s.id, { status: 'pending' });
-        }
-        i = retryIdx;
+        i = loopBackTo(
+          i,
+          step,
+          output,
+          `check failed — retrying from "${step.onFail?.retry}" (attempt ${used + 1}/${step.onFail?.max})`,
+        );
         continue;
       }
 
@@ -3626,6 +3782,215 @@ export class RunManager {
     await this.discardWorkspaceRun(runId);
     this.clearIdleTimer(state);
     this.dropActive(runId);
+  }
+
+
+  // ---- the human approval gate (spec 2026-08-20-split-steps-spec-review-and-approval-gate, P3) --
+
+  /**
+   * Park the run until `approvals.minApprovers` DISTINCT humans approve the step that just ran,
+   * or one of them asks for changes.
+   *
+   * **At the shipped default (`minApprovers: 0`) this returns `approved` without parking, without
+   * persisting anything and without emitting an event** — the zero-config chain takes exactly the
+   * path it took before the gate existed. That is the whole reason the flag is safe to put on a
+   * step of the DEFAULT workflow.
+   *
+   * The park itself is modelled on `acquireRepoRoot`: join `waiting`, give the `maxParallel` slot
+   * back (the #347 rule — an idle run must not hold a slot), await, and restore on the way out.
+   * Two differences, both deliberate:
+   *  - the state is PERSISTED (`pendingApproval`) as well as held in memory, because a cezar
+   *    restart must not silently un-gate the step — see `pendingApprovalSchema`'s doc comment for
+   *    the run that taught us this;
+   *  - `status` becomes `waiting`, the existing "ball is in your court" state, rather than a new
+   *    `RunStatus` member. `RunStatus` is a published union and is never widened.
+   *
+   * Every exit is enumerated (AGENTS.md § "Enumerate the transitions out of every state you add"):
+   * approve, request-changes, cancel, the optional `timeoutHours` auto-approval, and a process
+   * restart — which does NOT resolve this promise at all (the process is gone); recovery re-parks
+   * from the persisted record instead.
+   */
+  private async awaitApproval(
+    runId: string,
+    state: ActiveRun,
+    step: WorkflowStepDef,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+    config: CezConfig,
+  ): Promise<ApprovalOutcome> {
+    const required = minApprovers(config);
+    if (required <= 0) return { kind: 'approved' };
+    if (state.cancelled) return { kind: 'cancelled' };
+
+    const run = this.store.getRun(runId);
+    // Re-parking after a restart keeps the approvals already collected — they were given against
+    // this same step and this same snapshot, and discarding them would ask the same people again.
+    const existing = run?.pendingApproval?.stepId === step.id ? run.pendingApproval : undefined;
+    const timeoutHours = config.approvals?.timeoutHours ?? 0;
+    const pending: PendingApproval = existing ?? {
+      stepId: step.id,
+      requestedAt: new Date().toISOString(),
+      minApprovers: required,
+      approvals: [],
+      ...(run?.declaredSpecPath ? { specPath: run.declaredSpecPath } : {}),
+      ...(timeoutHours > 0
+        ? { expiresAt: new Date(Date.now() + timeoutHours * 3_600_000).toISOString() }
+        : {}),
+    };
+
+    // Already satisfied before we even park — an approval that arrived while the step was still
+    // running, or a re-park after a restart where the gate was met in between.
+    if (approvalsSatisfied(pending.approvals, pending.minApprovers)) {
+      this.store.updateRun(runId, { pendingApproval: undefined });
+      return { kind: 'approved' };
+    }
+
+    this.store.updateRun(runId, { pendingApproval: pending, status: 'waiting', activity: undefined });
+    this.store.updateStep(runId, step.id, { status: 'waiting' });
+    emit({
+      type: 'lifecycle',
+      stepId: step.id,
+      message: `waiting for approval — ${pending.approvals.length}/${pending.minApprovers} approver(s) so far`,
+    });
+
+    /** Restores the pre-park `interrupt`; assigned inside the promise, called on the way out. */
+    let restore: () => void = () => undefined;
+    const outcome = await new Promise<ApprovalOutcome>((resolve) => {
+      let settled = false;
+      const once = (value: ApprovalOutcome) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      state.approvalWaiter = once;
+      // `cancel()` calls `state.interrupt()`; chain onto it so a cancelled run does not sit here
+      // forever. Restored in the `finally` below, exactly as `acquireRepoRoot` does.
+      const parkedInterrupt = state.interrupt;
+      state.interrupt = () => {
+        parkedInterrupt();
+        once({ kind: 'cancelled' });
+      };
+      const timer = pending.expiresAt
+        ? setTimeout(
+            () => {
+              emit({
+                type: 'note',
+                stepId: step.id,
+                message: `approval timed out after ${timeoutHours}h — auto-approving, as this repo's \`approvals.timeoutHours\` asks`,
+              });
+              once({ kind: 'approved' });
+            },
+            Math.max(0, Date.parse(pending.expiresAt) - Date.now()),
+          )
+        : undefined;
+      timer?.unref?.();
+      restore = () => {
+        state.interrupt = parkedInterrupt;
+      };
+      this.waiting.add(runId);
+      this.releaseSlot();
+    });
+
+    restore();
+    state.approvalWaiter = undefined;
+    this.waiting.delete(runId);
+    this.store.updateRun(runId, { pendingApproval: undefined });
+    if (outcome.kind !== 'cancelled') {
+      this.store.updateRun(runId, { status: 'running' });
+      this.store.updateStep(runId, step.id, { status: 'running' });
+    }
+    return outcome;
+  }
+
+  /**
+   * Record one approval for a run parked on its gate. Returns the updated pending state so the
+   * caller can report "2 of 3" without a second read.
+   *
+   * Idempotent per approver: a second click from the same identity does not count twice — see
+   * `approvalsSatisfied` on why this counts DISTINCT approvers rather than clicks. It does
+   * refresh that approver's note and timestamp, which is a correction, not a new vote.
+   */
+  async approveRun(
+    runId: string,
+    by: string,
+    note?: string,
+  ): Promise<{ ok: boolean; error?: string; pending?: PendingApproval }> {
+    const run = this.store.getRun(runId);
+    if (!run) return { ok: false, error: 'not found' };
+    const pending = run.pendingApproval;
+    if (!pending) return { ok: false, error: 'this run is not waiting for an approval' };
+
+    const at = new Date().toISOString();
+    const approvals = [
+      ...pending.approvals.filter((a) => a.by !== by),
+      { by, at, ...(note ? { note } : {}) },
+    ];
+    const updated: PendingApproval = { ...pending, approvals };
+    this.store.updateRun(runId, { pendingApproval: updated });
+    this.store.appendEvent(runId, {
+      type: 'note',
+      stepId: pending.stepId,
+      message: `approved by ${by} (${approvals.length}/${pending.minApprovers})`,
+    });
+
+    if (!approvalsSatisfied(approvals, pending.minApprovers)) return { ok: true, pending: updated };
+
+    this.store.appendEvent(runId, {
+      type: 'lifecycle',
+      stepId: pending.stepId,
+      message: `approval gate released — ${pending.minApprovers} approver(s) satisfied`,
+    });
+    const released = await this.releaseApproval(runId, { kind: 'approved' }, pending);
+    return { ...released, pending: updated };
+  }
+
+  /** A reviewer wants the spec changed. Sends the chain back to the step's `onFail.retry`. */
+  async requestChanges(runId: string, by: string, notes: string): Promise<{ ok: boolean; error?: string }> {
+    const run = this.store.getRun(runId);
+    if (!run) return { ok: false, error: 'not found' };
+    const pending = run.pendingApproval;
+    if (!pending) return { ok: false, error: 'this run is not waiting for an approval' };
+    this.store.appendEvent(runId, {
+      type: 'note',
+      stepId: pending.stepId,
+      message: `changes requested by ${by}`,
+    });
+    return this.releaseApproval(runId, { kind: 'changes', notes: `${notes}\n\n— requested by ${by}` }, pending);
+  }
+
+  /**
+   * Hand the outcome to whoever is waiting on it — and when NOBODY is (a restart killed the
+   * `execute()` that was parked), re-enter the chain from the persisted record instead.
+   *
+   * That second branch is the one that makes this gate survive a restart rather than merely
+   * record one. `execute()`'s promise cannot be resolved across a process boundary, so the
+   * durable state has to be enough on its own: for an approval the gated step is marked `done`
+   * and re-entry lands on the NEXT step; for a change request the gated step and everything back
+   * to its retry target go `pending`, and the notes ride along as `feedback`.
+   */
+  private async releaseApproval(
+    runId: string,
+    outcome: ApprovalOutcome,
+    pending: PendingApproval,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const state = this.active.get(runId);
+    if (state?.approvalWaiter) {
+      state.approvalWaiter(outcome);
+      return { ok: true };
+    }
+    // No live waiter: settle the record so a chain re-entry resumes in the right place.
+    this.store.updateRun(runId, { pendingApproval: undefined });
+    const run = this.store.getRun(runId);
+    if (!run) return { ok: false, error: 'not found' };
+    if (outcome.kind === 'approved') {
+      this.store.updateStep(runId, pending.stepId, { status: 'done', finishedAt: new Date().toISOString() });
+    }
+    await this.reenterChain(
+      this.store.getRun(runId) ?? run,
+      outcome.kind === 'approved' ? 'approved' : 'changes requested',
+      outcome.kind === 'changes' ? { feedback: outcome.notes, resetTo: pending.stepId } : {},
+    );
+    return { ok: true };
   }
 
   /** Returns an error message, or null on success. */
@@ -3757,6 +4122,19 @@ export class RunManager {
         sink.flushAll();
         void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
+        // The spec reviewer's verdict (spec 2026-08-20-split-steps-spec-review-and-approval-gate,
+        // P2). Read on EVERY turn of the step and overwritten, so the LAST turn's verdict is the
+        // one the step loop acts on — a reviewer that thinks again in a follow-up turn is not held
+        // to what it said first. Unlike `done`, this is NOT gated on `interactive`: `review-spec`
+        // is a mid-chain step, which is exactly the position where `interactive` is false, and
+        // gating it there would make the verdict unreadable in the only step that emits one.
+        const declaredVerdict = parseReviewVerdict(turnText);
+        if (declaredVerdict) {
+          state.reviewVerdict = declaredVerdict;
+          // The report IS the instruction set handed to the retried step, so it is kept whole
+          // (capped like any other fed-back output) rather than reduced to the verdict word.
+          state.reviewReport = turnText.trimEnd().slice(-CHECK_OUTPUT_CAP);
+        }
         const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
         // `CEZ:ASK` → the user is blocked; wins over `CEZ:MONITORING`, loses to
         // `CEZ:DONE` (#473).

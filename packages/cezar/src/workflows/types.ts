@@ -53,6 +53,19 @@ export const workflowStepSchema = z
      * `max` carries a `.default(1)`, so the OUTPUT shape has it present whenever `verify` is —
      * the same reason `onFail.max` does.
      */
+    /**
+     * HUMAN APPROVAL GATE (`.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`,
+     * P3). Agent steps only: after this step's turn the run PARKS at `waiting` until
+     * `config.approvals.minApprovers` approvals arrive through `POST /runs/:id/approve`.
+     *
+     * **`approvals.minApprovers` defaults to 0, which means auto-approved** — owner decision
+     * 2026-08-20 ("min 1, but by default it should be 'auto approved'"). At 0 the engine takes
+     * the exact code path it took before this flag existed, so the zero-config chain is
+     * unchanged; the flag only becomes teeth when somebody opts in. That is why the safety value
+     * of the review step does NOT rest here — it rests on the agent's own `CEZ:REVIEW` verdict
+     * (see `parseReviewVerdict`), which works at the shipped default.
+     */
+    requiresApproval: z.boolean().optional(),
     verify: z
       .object({
         builtin: z.enum(POSTCONDITION_IDS).optional(),
@@ -66,6 +79,9 @@ export const workflowStepSchema = z
   })
   .refine((s) => Boolean(s.command) !== Boolean(s.prompt ?? s.skill), {
     message: 'a step is either an agent step (prompt/skill) or a check step (command), not both',
+  })
+  .refine((s) => !(s.requiresApproval && s.command), {
+    message: 'requiresApproval belongs to an agent step — a check step has no turn to approve',
   });
 
 /**
@@ -460,15 +476,55 @@ export const RECORD_READ_RECIPE = [
 ].join('\n');
 
 /**
+ * The spec reviewer's verdict marker (`.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`,
+ * P2) — `CEZ:REVIEW=pass` or `CEZ:REVIEW=revise`, a sibling of `CEZ:DONE` / `CEZ:SPEC_PATH`.
+ *
+ * This is the half of the review that works at the SHIPPED DEFAULT. The human gate
+ * (`requiresApproval`) defaults to auto-approved, so a review step that only asked a person
+ * would be, in AGENTS.md's words, "a mechanism removed and a setting added". The agent's own
+ * verdict is what still bites when nobody has configured anything: `revise` loops the chain
+ * back to the step named in `onFail.retry`, bounded by `onFail.max`.
+ *
+ * Read from the END of the turn (like `CEZ:DONE`) so a marker MENTIONED mid-report — this very
+ * doc comment, a spec quoting the syntax, a reviewer explaining what it is about to emit — is
+ * not mistaken for the verdict. Absent marker = `undefined` = "said nothing", which the caller
+ * treats as `pass`: a reviewer that forgets its marker must not wedge the chain.
+ */
+const REVIEW_VERDICT_RE = /CEZ:REVIEW\s*=\s*(pass|revise)\s*$/i;
+
+export type ReviewVerdict = 'pass' | 'revise';
+
+/** The trailing `CEZ:REVIEW=` verdict of a turn, or undefined when it declared none. */
+export function parseReviewVerdict(turnText: string): ReviewVerdict | undefined {
+  const match = REVIEW_VERDICT_RE.exec(turnText.trimEnd());
+  if (!match) return undefined;
+  return match[1]?.toLowerCase() === 'revise' ? 'revise' : 'pass';
+}
+
+/** Where the `context` step leaves its brief. An existing convention, not a new one:
+ *  `.ai/specs/briefs/2026-08-07-issue-linked-pr-chip.md` predates this spec. */
+export const BRIEFS_DIR = '.ai/specs/briefs';
+
+/**
  * The owner's standard operating pipeline as ONE selectable chain (spec
- * `.ai/specs/2026-08-19-spec-to-deploy-default-workflow.md`): **read the record → write the
- * spec → implement → run tests → commit & push/merge → document → deploy.** Where
- * `note-to-spec` stops at the spec and `autonomous-implementation` stops at a local commit,
+ * `.ai/specs/2026-08-19-spec-to-deploy-default-workflow.md`): **gather the record → write the
+ * spec → review the spec → implement → run tests → commit & push/merge → document → deploy.**
+ * Where `note-to-spec` stops at the spec and `autonomous-implementation` stops at a local commit,
  * this runs the whole loop end to end, remote included.
  *
+ * **Amended 2026-08-20** (`.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`,
+ * owner ask): the front half is now THREE steps, not one. `context` gathers the record and writes
+ * a brief; `spec` writes the spec from that brief; `review-spec` reads both back and returns a
+ * `CEZ:REVIEW=pass|revise` verdict, where `revise` loops the chain back to `spec` (bounded at 2)
+ * with the review as its instructions. `review-spec` also carries `requiresApproval`, the human
+ * gate — dormant at its default (`approvals.minApprovers: 0` = auto-approved) and teeth only when
+ * somebody opts in.
+ *
  * The early steps reuse the safety patterns already proven above:
- *  - **`spec`** mirrors `note-to-spec` — read-only tools plus `cez kb` and read-only git; it
- *    produces a spec and stops there;
+ *  - **`context`** and **`spec`** mirror `note-to-spec` — read-only tools plus `cez kb` and
+ *    read-only git, and they stop at their artifact;
+ *  - **`review-spec`** is read-only WITHOUT `Write`/`Edit`: a reviewer that can edit what it
+ *    reviews is not a reviewer;
  *  - **`implement`** and **`run-tests`** reuse `AUTONOMOUS_IMPLEMENTATION_WORKFLOW`'s exact
  *    `bashAllowlist` BY REFERENCE, so they never drift: installs + gate-shaped runner verbs +
  *    git add/commit, but still **no `git push`** and no bare runner prefix. `implement` writes the
@@ -490,61 +546,96 @@ export const RECORD_READ_RECIPE = [
  */
 export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
   name: 'spec-to-deploy',
-  description: 'Read the record, write a spec, implement, run tests, commit & push/merge, document, then deploy.',
+  description: 'Gather the record, write a spec, review it, implement, run tests, commit & push/merge, document, then deploy.',
   source: 'built-in',
   steps: [
     {
-      id: 'spec',
-      name: 'Read the record and write the spec',
-      // `Task` (spec 2026-08-20-agent-round-trip-batching-and-fanout, Phase 4): this step is the
-      // most exploration-bound in the chain — on `ec6e8e06` it spent 467 s of MODEL time against
-      // 15 s of tool execution, a 32× ratio, and its reading jobs (knowledge base, spec dir + git
-      // history, the code itself, the tracker) are genuinely independent of one another. Fan-out
-      // does not reduce model seconds; it OVERLAPS them, which is exactly what a step bounded by
-      // thinking-about-reads needs and what a mutating step (`implement`) must never do.
+      id: 'context',
+      name: 'Gather the record',
+      // SPLIT OUT of the old combined `spec` step (owner ask 2026-08-20: "seperate gathering
+      // knoweldge/context from writing a spec"; spec
+      // `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`, P1).
       //
-      // Honest note on what this line does TODAY: `--allowedTools` only GRANTS additively on a
-      // Claude run (`core/claude-cli-runner.ts` :399-404, measured against claude 2.1.224), so
-      // `Task` was already reachable in `ec6e8e06` — its `session.started` event lists it — and
-      // the model simply never reached for it. Naming it here is what stops this step silently
-      // LOSING fan-out the day the filed `--disallowedTools` follow-up lands.
+      // Why a separate STEP rather than only sub-agents inside the writing step: every workflow
+      // step is its own agent session with its own context window (`runAgentStep` mints a fresh
+      // `randomUUID()` per step), so the split gives the WRITING step a clean window holding the
+      // brief instead of the raw sweep. The `Task` fan-out added to the combined step is kept —
+      // it belongs HERE, in the reading step, which is the exploration-bound one.
+      //
+      // The combined step's `Task` note still applies: `--allowedTools` only GRANTS additively on
+      // a Claude run, so naming it is what stops this step silently losing fan-out the day the
+      // filed `--disallowedTools` follow-up lands.
       allowedTools: ['Read', 'Grep', 'Glob', 'Write', 'Bash', 'Task'],
-      // Known contradiction, stated rather than left for the next reader to trip over: the
-      // batched record-read this step's prompt now asks for (`RECORD_READ_RECIPE`) is a
-      // multi-command script, and `buildAllowedTools` turns each entry below into a STARTS-WITH
-      // `Bash(<prefix>:*)` — which no `set +e …` script can ever match. That costs nothing today
-      // (the allowlist is decorative on Claude, see above) but it is a real conflict the
-      // `--disallowedTools` follow-up has to resolve: either the batch runs, or the allowlist
-      // does. Widening this step to a general shell is NOT the answer — see this workflow's doc
-      // comment on why `spec` is deliberately shell-poor.
-      bashAllowlist: ['git log', 'git show', 'git status', 'cez kb', 'sed -n', 'ls', 'cezar todo list'],
+      // Read-only except the ONE brief it writes. Same known contradiction the combined step
+      // carried: `buildAllowedTools` turns each entry into a STARTS-WITH `Bash(<prefix>:*)`, which
+      // the batched `set +e` recipe below can never match. Decorative on Claude today; a real
+      // conflict for the `--disallowedTools` follow-up to resolve.
+      bashAllowlist: ['git log', 'git show', 'git status', 'git diff', 'cez kb', 'sed -n', 'ls', 'cezar todo list'],
+      prompt: [
+        'You are GATHERING THE RECORD for the task below. You are NOT writing the spec in this',
+        'step, and you are NOT implementing anything. Your single deliverable is a BRIEF.',
+        '',
+        'Task:',
+        '{{task}}',
+        '',
+        'Read what already exists — most work extends a prior decision:',
+        '1. The knowledge base / decision records — search it first (`cez kb search "<query>"`,',
+        '   `cez kb show <id>`). It is the source of truth for decisions.',
+        '2. The task tracker / open todos, for related or duplicate work already in flight.',
+        '3. The spec directory, for a precedent of this shape or a spec this extends, and',
+        '   `git log`/`git show` for recent commits touching the area, so the brief describes the',
+        '   code that is there NOW rather than the code you assumed.',
+        '',
+        'Gather all of that in ONE call, not five — none of those facts depends on another:',
+        '',
+        RECORD_READ_RECIPE,
+        '',
+        'Then go WIDE. Reading the record, mapping the code, and checking for in-flight duplicate',
+        'work are independent jobs, so run up to THREE sub-agents (`Task`) on them in parallel in a',
+        'single turn and read their findings together. Rules that make this safe rather than merely',
+        'fast:',
+        '- Sub-agents are READ-ONLY here. They report findings; they write nothing.',
+        '- YOU write the brief. A brief assembled out of sub-agent summaries loses the citations',
+        '  that make it worth having — those citations are the entire product of this step.',
+        '- Give each one a job whose answer is worth a minute of work. Do not fan out to read one',
+        '  file; that costs more than it saves.',
+        '',
+        'Write ONE brief to `' + BRIEFS_DIR + '/<YYYY-MM-DD>-<short-slug>.md` (match the files',
+        'already there). It must contain: the problem in this repository\'s own terms; what the',
+        'record already decided, with CITATIONS (KB entry ids, spec paths, commit hashes,',
+        'file:line); which code is actually involved; any prior decision this would contradict;',
+        'and the open questions a spec will have to settle. State what you could NOT find rather',
+        'than inventing it.',
+        '',
+        'Write NOTHING else — no spec, no code, no test. End your report with the brief\'s path and',
+        'the three or four facts that most constrain the design, so the next step reads them even',
+        'before it opens the file.',
+      ].join('\n'),
+    },
+    {
+      id: 'spec',
+      name: 'Write the spec',
+      // Narrowed by the P1 split: the record sweep moved to `context`, so this step's window holds
+      // the brief and the code it names rather than the raw search output. `Task` is deliberately
+      // NOT granted here — the writing is the one job that must not be delegated, for the reason
+      // the prompt gives.
+      allowedTools: ['Read', 'Grep', 'Glob', 'Write', 'Bash'],
+      bashAllowlist: ['git log', 'git show', 'git status', 'cez kb', 'sed -n', 'ls'],
       prompt: [
         'You are writing a SPEC for the task below. You are NOT implementing it in this step.',
         '',
         'Task:',
         '{{task}}',
         '',
-        'Before you write anything, read what already exists — most work extends a prior decision:',
-        '1. The knowledge base / decision records — search it first (`cez kb search "<query>"`,',
-        '   `cez kb show <id>`). It is the source of truth for decisions.',
-        '2. The task tracker / open todos for related or duplicate work already in flight.',
-        '3. The spec directory, for a precedent of this shape or a spec this extends, and',
-        '   `git log`/`git show` for recent commits touching the area, so the spec describes the',
-        '   code that is there now rather than the code you assumed.',
+        'The previous step read the record and left a BRIEF under `' + BRIEFS_DIR + '/` (its path',
+        'is in that step\'s report and in this run\'s handoff file). READ IT FIRST — it holds the',
+        'citations, the prior decisions and the open questions you are writing against. If the',
+        'brief is missing, say so plainly in the spec and do the reading yourself rather than',
+        'writing an uncited spec.',
         '',
-        'Gather all of that in ONE call, not five — none of those facts depends on another:',
-        '',
-        RECORD_READ_RECIPE,
-        '',
-        'Then go WIDE before you go deep. Reading the record, mapping the code, and checking for',
-        'in-flight duplicate work are independent jobs, so run up to THREE sub-agents (`Task`) on',
-        'them in parallel in a single turn and read their findings together. Rules that make this',
-        'safe rather than merely fast:',
-        '- Sub-agents are READ-ONLY here. They report findings; they write nothing.',
-        '- YOU write every word of the spec. A spec assembled out of sub-agent summaries loses the',
-        '  citations that make it worth having — that is the whole product of this step.',
-        '- Give each one a job whose answer is worth a minute of work. Do not fan out to read one',
-        '  file; that costs more than it saves.',
+        'Open the specific files, specs and commits the brief cites. The brief is a map, not a',
+        'substitute for the territory: a spec that describes code nobody re-read is how a spec ends',
+        'up describing code that is no longer there.',
         '',
         'Then write ONE spec file, following this repository’s own naming and section conventions',
         '(match the files already in its spec directory — do not impose a different format). It',
@@ -556,7 +647,54 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         'could not find something, say so in the spec rather than inventing it.',
         '',
         'Change NO other file in this step. When the spec file exists, declare its path on its own',
-        'line: `CEZ:SPEC_PATH=<repo-relative path>`. The next step implements it.',
+        'line: `CEZ:SPEC_PATH=<repo-relative path>`. The next step reviews it.',
+      ].join('\n'),
+    },
+    {
+      id: 'review-spec',
+      name: 'Review the spec',
+      // P2 of `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`.
+      //
+      // READ-ONLY BY CONSTRUCTION — no `Write`, no `Edit`. A reviewer that can edit what it
+      // reviews does not review it, it rewrites it, and the loop-back below stops meaning
+      // anything. When it wants changes it says so, and `spec` makes them in a fresh session with
+      // the criticism in its prompt.
+      allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+      bashAllowlist: ['git log', 'git show', 'git status', 'git diff', 'cez kb', 'sed -n', 'ls'],
+      // A `revise` verdict re-runs `spec` with this step's report appended to its prompt — the
+      // same channel a failing check step uses. `max: 2` bounds it: a stubborn reviewer and a
+      // stubborn writer would otherwise argue until the step budget ran out.
+      onFail: { retry: 'spec', max: 2 },
+      // Owner ask 2026-08-20 ("and then approvals from users"). Dormant unless
+      // `approvals.minApprovers` >= 1 — see `requiresApproval`'s doc comment.
+      requiresApproval: true,
+      prompt: [
+        'You are REVIEWING the spec the previous step wrote (its path was declared as CEZ:SPEC_PATH,',
+        'and is in this run\'s handoff file). You are NOT implementing it, and you must NOT edit it',
+        '— you have no write tools, on purpose.',
+        '',
+        'Original task, for context:',
+        '{{task}}',
+        '',
+        'Everything after this step acts on the spec: it gets implemented, committed, PUSHED to a',
+        'remote and DEPLOYED. You are the last checkpoint before that. Read the spec in full, open',
+        'the code and prior specs it cites, and answer:',
+        '1. Does it solve the task that was actually asked — the whole ask, not a convenient part?',
+        '2. Are its claims about the CURRENT code true? Check the citations; a spec built on a file,',
+        '   function or flag that no longer exists is worse than no spec.',
+        '3. Does it contradict a decision the record already made, without saying so?',
+        '4. Are the phases independently shippable, and does the verification section name steps',
+        '   somebody could actually execute?',
+        '5. What does it leave out that would bite during implementation?',
+        '',
+        'Then end your report with your verdict on its OWN LAST LINE, exactly one of:',
+        '  CEZ:REVIEW=pass     — good enough to build; list any nits above, they will not block.',
+        '  CEZ:REVIEW=revise   — a real defect. State each one plainly and say what would fix it;',
+        '                        your report is handed to the spec step as its instructions.',
+        '',
+        'Judge the spec, not its prose. `revise` is for a spec that is wrong, incomplete against the',
+        'ask, or built on facts that do not hold — not for one you would have worded differently.',
+        'You get at most two revisions, so spend them on defects that matter.',
       ].join('\n'),
     },
     {
@@ -567,7 +705,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       // installs + gate-shaped runner subcommands only, git add/commit but never `git push`.
       bashAllowlist: AUTONOMOUS_IMPLEMENTATION_WORKFLOW.steps[0]?.bashAllowlist,
       prompt: [
-        'You are IMPLEMENTING the spec the previous step wrote (its path was declared as',
+        'You are IMPLEMENTING the spec this run wrote and reviewed (its path was declared as',
         'CEZ:SPEC_PATH in this run\'s handoff). Nobody is watching — make reasonable assumptions,',
         'note them in your report, and proceed.',
         '',

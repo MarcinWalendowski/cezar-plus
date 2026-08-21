@@ -91,6 +91,7 @@ describe('the config API', () => {
       // present, because "no machine opinion" has to be sayable.
       inherited: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
       overridden: [],
+      minApprovers: null,
     });
   });
 
@@ -214,6 +215,7 @@ describe('the config API', () => {
       // that no one set, and they are correctly absent: this list is what the UI labels
       // "Overridden", and a defaulted key labelled that way would be a lie.
       overridden: ['baseBranch', 'defaultModels', 'maxParallel', 'skillsRepos', 'systemPrompt'],
+      minApprovers: null,
     });
   });
 

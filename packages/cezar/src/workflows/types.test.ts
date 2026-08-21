@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   AUTONOMOUS_IMPLEMENTATION_WORKFLOW,
+  BRIEFS_DIR,
   DEFAULT_ALLOWED_TOOLS,
   RECORD_READ_RECIPE,
+  parseReviewVerdict,
   SPEC_TO_DEPLOY_WORKFLOW,
   chainStepNote,
   skillStackOf,
@@ -83,11 +85,16 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
   const canPush = (allowlist: string[] | undefined) =>
     (allowlist ?? []).some((entry) => 'git push'.startsWith(entry.trim()));
 
-  it('is the six-step read+spec → implement → run-tests → commit-push → document → deploy chain', () => {
+  it('is the eight-step context → spec → review → implement → tests → push → document → deploy chain', () => {
     expect(SPEC_TO_DEPLOY_WORKFLOW.name).toBe('spec-to-deploy');
     expect(SPEC_TO_DEPLOY_WORKFLOW.source).toBe('built-in');
+    // Grew from six to eight on 2026-08-20 (spec
+    // `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`): `context` split out of
+    // the combined read+write step, and `review-spec` added before anything acts on the spec.
     expect(SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => s.id)).toEqual([
+      'context',
       'spec',
+      'review-spec',
       'implement',
       'run-tests',
       'commit-push',
@@ -96,8 +103,49 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     ]);
   });
 
-  it('spec step reads the record but cannot reach a shell beyond kb + read-only git', () => {
+  it('gathers the record in its OWN step, which writes a brief and no spec', () => {
+    const context = stepById('context');
+    // The point of the split: the reading step is where fan-out belongs (it is the
+    // exploration-bound one), and the writing step gets a clean window.
+    expect(context?.allowedTools).toContain('Task');
+    expect(context?.prompt).toContain(RECORD_READ_RECIPE);
+    expect(context?.prompt).toContain(BRIEFS_DIR);
+    expect(context?.prompt).not.toContain('CEZ:SPEC_PATH');
+    expect(canPush(context?.bashAllowlist)).toBe(false);
+  });
+
+  it('the spec step now writes FROM the brief and no longer runs the record sweep', () => {
     const spec = stepById('spec');
+    expect(spec?.prompt).toContain(BRIEFS_DIR);
+    expect(spec?.prompt).toContain('CEZ:SPEC_PATH');
+    // The sweep moved to `context`. If this ever comes back, the split has been undone.
+    expect(spec?.prompt).not.toContain(RECORD_READ_RECIPE);
+  });
+
+  it('review-spec cannot edit what it reviews, and loops back to the spec step', () => {
+    const review = stepById('review-spec');
+    // The load-bearing guarantee of the whole review: no write tools, at all. A reviewer that
+    // can edit the spec does not review it, and the loop-back stops meaning anything.
+    expect(review?.allowedTools).not.toContain('Write');
+    expect(review?.allowedTools).not.toContain('Edit');
+    expect(canPush(review?.bashAllowlist)).toBe(false);
+    // Bounded, and backwards — `stepsIssue` enforces the direction, this pins the target.
+    expect(review?.onFail).toEqual({ retry: 'spec', max: 2 });
+    expect(review?.requiresApproval).toBe(true);
+    // Both verdicts have to be spelled out, or the reviewer cannot know what to emit.
+    expect(review?.prompt).toContain('CEZ:REVIEW=pass');
+    expect(review?.prompt).toContain('CEZ:REVIEW=revise');
+  });
+
+  it('only the review step is gated — the gate is not quietly on the whole chain', () => {
+    const gated = SPEC_TO_DEPLOY_WORKFLOW.steps.filter((s) => s.requiresApproval).map((s) => s.id);
+    expect(gated).toEqual(['review-spec']);
+  });
+
+  it('the record-reading step cannot reach a shell beyond kb + read-only git', () => {
+    // Was the combined `spec` step until the 2026-08-20 split; the allowlist travelled with the
+    // reading job, which is what it was always describing.
+    const spec = stepById('context');
     // No install/build/push verbs — a spec-writing pass has no business running them.
     // `sed -n`, `ls` and `cezar todo list` joined the list with the batched record-read recipe
     // (spec 2026-08-20-agent-round-trip-batching-and-fanout, Phase 3). Every entry is still a
@@ -107,6 +155,7 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
       'git log',
       'git show',
       'git status',
+      'git diff',
       'cez kb',
       'sed -n',
       'ls',
@@ -116,7 +165,7 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     for (const entry of spec?.bashAllowlist ?? []) {
       // No mutation, no network, no build. `git status`/`git log`/`git show` are queries;
       // `sed -n` is print-only (no `-i`); `ls` and `cezar todo list` read.
-      expect(/^(git (log|show|status)|cez kb|sed -n|ls|cezar todo list)$/.test(entry.trim())).toBe(true);
+      expect(/^(git (log|show|status|diff)|cez kb|sed -n|ls|cezar todo list)$/.test(entry.trim())).toBe(true);
     }
   });
 
@@ -134,10 +183,13 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
    * three would be a measured pessimisation, not a missing feature — so this test asserts their
    * ABSENCE as hard as it asserts the other two's presence.
    */
-  it('grants Task fan-out to the read-heavy steps ONLY (spec, document)', () => {
-    expect(stepById('spec')?.allowedTools).toContain('Task');
+  it('grants Task fan-out to the read-heavy steps ONLY (context, document)', () => {
+    // `context` inherited this from the combined step in the 2026-08-20 split — and it is the
+    // more honest home for it: fan-out belongs to the step that READS, and `spec`, which now only
+    // writes, deliberately lost it.
+    expect(stepById('context')?.allowedTools).toContain('Task');
     expect(stepById('document')?.allowedTools).toContain('Task');
-    for (const id of ['implement', 'run-tests', 'commit-push', 'deploy']) {
+    for (const id of ['spec', 'review-spec', 'implement', 'run-tests', 'commit-push', 'deploy']) {
       expect(stepById(id)?.allowedTools ?? []).not.toContain('Task');
     }
     // The default set stays fan-out-free: `implement`, `run-tests` and `deploy` read it, and a
@@ -146,17 +198,17 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
   });
 
   it('tells the two fanned-out steps to keep their sub-agents read-only and write nothing', () => {
-    for (const id of ['spec', 'document']) {
+    for (const id of ['context', 'document']) {
       const prompt = stepById(id)?.prompt ?? '';
       expect(prompt).toContain('READ-ONLY');
       expect(prompt).toMatch(/THREE sub-agents|three READ-ONLY sub-agents/);
     }
-    // The spec step's own product is its citations; a spec assembled from summaries loses them.
-    expect(stepById('spec')?.prompt).toContain('YOU write every word of the spec');
+    // The reading step's own product is its citations; a brief assembled from summaries loses them.
+    expect(stepById('context')?.prompt).toContain('YOU write the brief');
   });
 
   it('opens the record-reading steps with ONE batched, bounded, non-aborting script', () => {
-    for (const id of ['spec', 'document']) {
+    for (const id of ['context', 'document']) {
       const prompt = stepById(id)?.prompt ?? '';
       expect(prompt).toContain(RECORD_READ_RECIPE);
     }

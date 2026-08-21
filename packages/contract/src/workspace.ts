@@ -368,6 +368,9 @@ export const configResponseSchema = z.object({
   /** The keys this repo's RAW `.ai/cezar/config.json` sets — never a defaulted or inherited one.
    *  Read from the file, not from the parsed config, which cannot tell the two apart. */
   overridden: z.array(z.string()),
+  /** How many distinct humans must approve a gated step (spec 2026-08-20, P3). `null` = no config
+   *  key, so the `CEZ_MIN_APPROVERS` env decides and the effective default is 0 (auto-approved). */
+  minApprovers: z.number().int().min(0).nullable(),
 });
 export type ConfigResponse = z.infer<typeof configResponseSchema>;
 
@@ -403,6 +406,7 @@ export const setConfigInputSchema = z.object({
   liveTitleUpdates: z.boolean().nullable().optional(),
   /** null clears the key back to the env-default behavior (OFF). */
   reviewGate: z.boolean().nullable().optional(),
+  minApprovers: z.number().int().min(0).max(10).nullable().optional(),
 });
 export type SetConfigInput = z.infer<typeof setConfigInputSchema>;
 

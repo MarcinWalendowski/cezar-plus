@@ -19,7 +19,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
 import type { Next } from 'hono';
-import { serve, type ServerType } from '@hono/node-server';
+import { createAdaptorServer, serve, type ServerType } from '@hono/node-server';
 import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
@@ -213,6 +213,7 @@ import {
   type ProjectContext,
 } from './project-context.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
+import { MAX_APPROVERS } from '../runs/approvals.ts';
 import { readUiState, uiStatePath } from '../ui-state.ts';
 import { agentHomePaths, expandTilde } from '../paths.ts';
 import { backupEnabled, isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCapabilities } from './capabilities.ts';
@@ -295,6 +296,15 @@ export interface ServerDeps {
   /** Host the HTTP server binds (default 127.0.0.1). A non-loopback host
    *  implies hosted mode — `capabilities.localHandoff:false`. */
   bindHost?: string;
+  /**
+   * A listening descriptor inherited from systemd socket activation
+   * (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P3).
+   *
+   * When set, the server binds this fd instead of `port`/`bindHost`, so the listening socket
+   * belongs to `cezar.socket` and survives a restart of `cezar.service`. Absent on every ordinary
+   * path — local `cezar serve`, tests, macOS — which keeps the port bind exactly as it was.
+   */
+  listenFd?: number;
   /** Workspace-registry id of the boot project (multi-project spec) — plumbed
    *  from `initWorkspace` in src/index.ts. Optional: legacy callers/tests get
    *  a lazy registry lookup by `repoRoot`, falling back to the repo's slug. */
@@ -1075,6 +1085,37 @@ const patchRunSchema = z.object({
 });
 
 // Session commit (redesign R5 — §"Git/session API additions").
+/**
+ * The human approval gate's two decisions (spec
+ * `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`, P3).
+ *
+ * `note` is optional on an approval — "yes" is a complete answer — but `notes` is REQUIRED on a
+ * change request: the text is not a courtesy, it is the instruction set handed to the spec step
+ * when the chain loops back, and an empty one would re-run that step with no idea what to change.
+ */
+/**
+ * Who to credit for an approval.
+ *
+ * Mirrors `triagedBy` (`server/workspace-reports-routes.ts`) — same cast, same reason — but with
+ * one deliberate difference: it falls back to `'local'` instead of `undefined`. Report triage may
+ * leave `by` absent because its contract says so; an approval may not, because approvals are
+ * COUNTED, and `approvalsSatisfied` counts distinct identities. An anonymous approval would either
+ * have to be dropped (losing the decision) or treated as its own approver every time (turning
+ * `minApprovers: 3` into three clicks by one person).
+ *
+ * `'local'` is therefore an honest single identity for an unauthenticated deployment: one machine,
+ * one approver, and a `minApprovers` above 1 that genuinely cannot be satisfied — which is what
+ * `awaitApproval` warns about at park time rather than discovering silently.
+ */
+function approverOf(c: Context<ProjectApiEnv>): string {
+  const withPrincipal = c as unknown as Context<{ Variables: { principal: Principal } }>;
+  const principal = withPrincipal.get('principal') as Principal | undefined;
+  return principal?.kind === 'session' ? principal.userId : 'local';
+}
+
+const approveRunSchema = z.object({ note: z.string().max(2000).optional() });
+const requestChangesSchema = z.object({ notes: z.string().trim().min(1).max(4000) });
+
 const gitCommitSchema = z.object({
   message: z.string().trim().min(1, 'must not be empty').max(5_000),
 });
@@ -4781,6 +4822,28 @@ export function createApp(deps: ServerDeps) {
       return c.json({ cancelled });
     })
 
+    // ---- the human approval gate (spec 2026-08-20-split-steps-spec-review-and-approval-gate) --
+    // Both routes 409 rather than 404 when the run exists but is not parked: "you cannot approve
+    // this right now" and "there is no such run" are different answers, and a client that cannot
+    // tell them apart cannot render either honestly.
+    .post('/runs/:id/approve', jsonZodValidator(approveRunSchema, { absent: {} }), async (c) => {
+      const { store, manager } = c.get('project');
+      const id = c.req.param('id');
+      if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
+      const result = await manager.approveRun(id, approverOf(c), c.req.valid('json').note);
+      if (!result.ok) return c.json({ error: result.error ?? 'cannot approve' }, 409);
+      return c.json({ run: store.getRun(id), pending: result.pending });
+    })
+
+    .post('/runs/:id/request-changes', jsonZodValidator(requestChangesSchema), async (c) => {
+      const { store, manager } = c.get('project');
+      const id = c.req.param('id');
+      if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
+      const result = await manager.requestChanges(id, approverOf(c), c.req.valid('json').notes);
+      if (!result.ok) return c.json({ error: result.error ?? 'cannot request changes' }, 409);
+      return c.json({ run: store.getRun(id) });
+    })
+
     // Live-session participation (spec 002): deliver a user message (text +
     // pasted screenshots) into the run's open claude session.
     .post('/runs/:id/messages', jsonZodValidator(messageSchema), async (c) => {
@@ -6216,6 +6279,7 @@ export function createApp(deps: ServerDeps) {
         stepBudget: machine.stepBudget ?? null,
       },
       overridden,
+      minApprovers: config.approvals?.minApprovers ?? null,
     };
   };
   // ---- chained family: per-repo config (project-scoped) ----
@@ -6266,6 +6330,16 @@ export function createApp(deps: ServerDeps) {
       if (parsed.data.reviewGate !== undefined) {
         if (parsed.data.reviewGate === null) delete raw.reviewGate;
         else raw.reviewGate = parsed.data.reviewGate;
+      }
+      if (parsed.data.minApprovers !== undefined) {
+        // `null` clears the key so the env (then 0) decides again. An explicit 0 is DIFFERENT and
+        // is kept: it is a decision to auto-approve here regardless of what the env says, which is
+        // exactly the distinction `minApprovers()` reads.
+        const approvals = (raw.approvals ?? {}) as Record<string, unknown>;
+        if (parsed.data.minApprovers === null) delete approvals.minApprovers;
+        else approvals.minApprovers = parsed.data.minApprovers;
+        if (Object.keys(approvals).length === 0) delete raw.approvals;
+        else raw.approvals = approvals;
       }
       if (parsed.data.memoryLimitMb !== undefined) {
         // null or 0 both mean "no ceiling" — drop the key back to the default.
@@ -6331,6 +6405,10 @@ export function createApp(deps: ServerDeps) {
     // Optional review gate toggle (Settings → Agents, #489): null clears the key
     // back to the env-default behavior (OFF).
     reviewGate: z.boolean().nullable().optional(),
+    // Human approval gate (Settings → Agents, spec 2026-08-20-split-steps-spec-review-and-
+    // approval-gate). null clears the key back to the env default (0 = auto-approved); an
+    // explicit 0 is stored, because "auto-approve here whatever the env says" is a real decision.
+    minApprovers: z.number().int().min(0).max(MAX_APPROVERS).nullable().optional(),
   });
   const setAgentConfigSchema = z.object({
     content: z.string().max(2_000_000),
@@ -6888,11 +6966,22 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   // expose an agent-executing box to the network. `bindHost` exists only for a deliberate
   // hosted/VPS deployment (which also flips CEZ_REMOTE to gate the local-handoff endpoints) —
   // src/index.ts never passes it, so the loopback guarantee holds for the normal CLI.
-  const server = serve({
-    fetch: app.fetch,
-    port,
-    hostname: deps.bindHost ?? '127.0.0.1',
-  });
+  // Socket activation (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P3):
+  // when systemd handed us the listening descriptor, bind THAT rather than the port. The socket
+  // then outlives this process, so a deploy's restart never closes it and arriving connections
+  // queue in the kernel backlog instead of being refused. `serve()` only knows how to
+  // `listen(port, hostname)`, so the fd path builds the same server and listens itself.
+  const server = deps.listenFd === undefined
+    ? serve({
+        fetch: app.fetch,
+        port,
+        hostname: deps.bindHost ?? '127.0.0.1',
+      })
+    : (() => {
+        const inherited = createAdaptorServer({ fetch: app.fetch });
+        inherited.listen({ fd: deps.listenFd });
+        return inherited;
+      })();
   const automationProjects = new Map<string, { root: string; owner: string; repo: string }>();
   const automationScheduler = new WorkspaceAutomationScheduler({
     coordinator: automationCoordinator,

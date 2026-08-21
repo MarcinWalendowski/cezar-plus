@@ -169,6 +169,7 @@ const CONFIG: ConfigResponse = {
   reviewGate: null,
   inherited: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
   overridden: [],
+  minApprovers: null,
 }
 
 const WORKSPACE_CONFIG: WorkspaceConfigResponse = {

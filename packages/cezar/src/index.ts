@@ -6,6 +6,9 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectEnvironment } from './core/backend-detect.ts';
+import { runBrokerCommand } from './core/run-broker-cli.ts';
+import { consumeSocketActivation } from './server/socket-activation.ts';
+import { DrainController, resolveDrainMs } from './server/drain.ts';
 import {
   ProviderAuthService,
   providerAuthChecksDisabled,
@@ -314,6 +317,14 @@ async function main(): Promise<void> {
     case 'supervisor':
       await supervisorCommand(Number(values.port), values['bind-host']);
       return;
+    case 'run-broker':
+      // Internal (deliberately absent from HELP): the per-run process that owns an agent CLI's
+      // stdio so the cockpit can be replaced without killing the agent. Spec
+      // `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P4. Never invoked by a user —
+      // the run manager spawns it — but it MUST be a real subcommand of the same binary so a
+      // release flip ships one artifact rather than a second executable to keep in sync.
+      process.exitCode = await runBrokerCommand(process.argv.slice(3));
+      return;
     default:
       console.error(`unknown command: ${command}\n`);
       console.log(HELP);
@@ -407,7 +418,16 @@ async function serveCommand(
   // auth gate above, and for the identical reason: checked and returned BEFORE initWorkspace,
   // reclaimWorktrees or manager.recover() run, so a busy strict port never leaves half-migrated
   // workspace state behind it.
-  if (portStrict && !(await canListen(preferredPort))) {
+  // Socket activation (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P3).
+  // Consumed HERE, before the port-strict refusal, because the two interact: under activation the
+  // port IS already bound — by systemd, on our behalf — so probing it would find it busy and
+  // refuse to boot, turning the feature that removes the bind gap into a permanent outage.
+  // `consume` also scrubs LISTEN_* from the environment so the agent CLIs cezar spawns never
+  // inherit them and mistake their own fd 3 for a listening socket.
+  const activation = consumeSocketActivation(process.env, process.pid);
+  const listenFd = activation.activated ? activation.socket.fd : undefined;
+
+  if (portStrict && listenFd === undefined && !(await canListen(preferredPort))) {
     console.error(
       `\n  ✗ port ${preferredPort} is already in use, and --port-strict / CEZ_PORT_STRICT=1 is set — ` +
         `refusing to silently pick a different one.\n` +
@@ -616,6 +636,7 @@ async function serveCommand(
     console.log(`\n  ⬆ cezar ${latest} is available (running ${version}) — restart with: npx ${pkgName}@latest\n`);
   });
 
+  const drain = new DrainController({ drainMs: resolveDrainMs(process.env) });
   const port = portStrict ? preferredPort : await pickPort(preferredPort);
   // SECURITY: cezar executes agents. A non-loopback bind exposes that box to
   // whatever can reach the interface, and cezar itself has NO auth — it is only
@@ -631,6 +652,7 @@ async function serveCommand(
 
   startServer({
     repoRoot,
+    listenFd,
     store,
     manager,
     version,
@@ -658,9 +680,32 @@ async function serveCommand(
   }
   if (port !== preferredPort) console.log(`  (port ${preferredPort} was busy — using ${port})`);
   console.log(`\n  cockpit → ${url}\n`);
+  // Graceful drain (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P3).
+  //
+  // This used to be `store.flush(); process.exit(0)` — immediate and unconditional, cutting
+  // in-flight responses mid-body and killing every SSE/WS stream without a word. Socket activation
+  // removes the *bind* gap; it does nothing for requests already in flight on the outgoing
+  // process, and this is that second half: stop accepting, tell live streams to reconnect, let
+  // unary requests finish, then flush and go.
+  //
+  // Re-entrancy matters: systemd sends SIGTERM and, if we outlast TimeoutStopSec, SIGKILL. A
+  // second signal while draining must not restart the drain or exit early — it is ignored.
+  let shuttingDown = false;
   const shutdown = () => {
-    store.flush();
-    process.exit(0);
+    if (shuttingDown) return;
+    shuttingDown = true;
+    void (async () => {
+      try {
+        const report = await drain.drain();
+        if (!report.clean) {
+          console.log(`  drained with ${report.outstanding} request(s) still in flight after ${report.waitedMs}ms`);
+        }
+      } catch {
+        // A drain that throws must never stop us flushing state below.
+      }
+      store.flush();
+      process.exit(0);
+    })();
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
