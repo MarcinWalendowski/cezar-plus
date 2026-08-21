@@ -201,6 +201,24 @@ export async function smokeBootRelease(dir: string, log: (line: string) => void)
       LISTEN_FDS: '',
       LISTEN_PID: '',
       CEZ_SINGLE_PROJECT: '1',
+      // Neutralize the auth boot gate for the candidate.
+      //
+      // MEASURED 2026-08-21: without this, a smoke boot on a HOSTED box inherits `CEZ_REMOTE=1`
+      // from the service environment but not the auth provider that makes hosted mode legal, so
+      // `runAuthBootGate` refuses to boot — "hosted mode with no authentication exposes shell
+      // execution to anyone who can reach this port". The candidate never answers, the smoke gate
+      // reports failure, and `--strategy=blue-green` becomes permanently unusable on exactly the
+      // kind of deployment it was written for. The build was fine every time.
+      //
+      // Turning the gate off here is safe, and narrowly so: the candidate binds a RANDOM high port
+      // on 127.0.0.1 only, serves nothing but its own readiness probe, shares no state (throwaway
+      // CEZ_HOME and project dir), and is SIGKILLed a few seconds later in the `finally` below. It
+      // is never routed to and never outlives the check. What the smoke boot asks is "does this
+      // build come up?" — auth configuration is not what it is testing, and inheriting half of it
+      // only makes the answer wrong.
+      CEZ_REMOTE: '',
+      CEZ_AUTH: '',
+      CEZ_ALLOW_UNAUTHENTICATED: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
