@@ -1,7 +1,9 @@
 # Wait on the process, not on a guess — and slice the file you already saved
 
-> **Status — superseded 2026-08-21 by revision 3 (below): PHASES 1-3 IMPLEMENTED, Phase 4
-> outstanding.** ~~SPEC ONLY — nothing implemented.~~ That line was true when the `spec` step wrote
+> **Status — superseded 2026-08-21 by revision 4 (below): PHASES 1-3 IMPLEMENTED AND SHIPPED
+> (`ada8f376`, on `origin/main`); Phase 4 — the after-run that decides whether any of it worked —
+> STILL OUTSTANDING, tracked as todo `ea54dd16-5913-4b8a-bbc8-d3b1db9da66c`.** ~~superseded 2026-08-21 by revision 3 (below):
+> PHASES 1-3 IMPLEMENTED, Phase 4 outstanding.~~ ~~SPEC ONLY — nothing implemented.~~ That line was true when the `spec` step wrote
 > it and is false now; the `implement` step of the same run shipped L1-L3. Written in the `spec`
 > step of run `70f19253-cf6b-407c-92e0-96a8020a8ebb`, from the brief left by that run's `context` step
 > (`.ai/specs/briefs/2026-08-21-stop-guessed-sleep-waits.md`). ~~No code, prompt or test has been
@@ -72,6 +74,37 @@
 >    agent session), `agent-profile-wiring` and `workspace-parallel` (trap 2 — a cockpit session
 >    exports `CEZ_*` knobs the server suites assert on). All three suites pass under `AGENTS.md`'s
 >    documented scrub. This is the trap that block warns about, hit exactly as described.
+
+> ### Revision 4 — 2026-08-21, shipped and recorded (the `document` step)
+>
+> **Shipped:** commit `ada8f376` — *"the wait had no mechanism, so agents guessed a sleep — wait on
+> the process instead"* — is on `origin/main` (verified here with `git branch -r --contains`, not
+> taken from the handoff: the premise "implemented, tested and shipped" is exactly the one kb
+> `local:2026-08-20-backgrounded-gate-outlives-its-step` lesson 3 says a downstream step must check
+> for itself). Working tree clean.
+>
+> **Gates, as run by the `run-tests` step and reported without rounding up:** `npm run typecheck`,
+> `npm run test:unit` and `npm run build` green. Two reds, and **both reproduce at clean `HEAD`**,
+> so neither is attributable to this change: `npm test` → 2 files of 516 (`knowledge/catalog` C18,
+> the host-dependent 40 ms/MiB budget in `AGENTS.md` trap 3, and one recorded flake that passes
+> alone), and `npm run test:package` → the release-tarball CLI E2E, localised by A/B to the run
+> **broker** (`CEZ_RUN_BROKER=0` makes the identical run finish) and filed as todo
+> `3c6a5aa7-9492-40ff-902b-c2db042dd9e5`. Neither red is in a file this change touches.
+>
+> **§4's snapshot of this run is superseded by its final count.** §4 says `70f19253` "made 3 sleep
+> calls totalling 0.0 min"; that was mid-flight. Final, through the shipped meter:
+> `sleep 0 blind of 9 (362.3s waited) · 0 expensive call(s) re-run`, batch factor 1.02 over 290
+> calls. **This is not evidence that the change works**, and must not be quoted as such: the
+> deployed bundle `/opt/cezar/packages/cezar/dist/index.js` was built at 19:00, ninety minutes
+> *before* this commit, so every step of this run was composed by the OLD doctrine. What the zero
+> does show is that the defect is not universal — an agent can already reach for a guarded poll
+> loop unprompted, which is why the after-run must be compared against `7c2dd8f0` (4 blind / 18
+> sleeps / 802.1 s / 18 re-runs) and not against a hoped-for population average.
+>
+> **Recorded:** kb proposal in this run's `*.knowledge.ndjson` (one new note + one changelog entry
+> + three `supersede` ops against `notion-cc6ebabb2ab4`, `notion-38870ddae120` and
+> `notion-b3c7402826d6`), pending review via `cez kb proposals`. Todo `eb6e528b` closed; the
+> after-run filed as a new todo.
 
 ## TLDR
 
@@ -732,8 +765,11 @@ function stripHeredocs(cmd) {
 
 ### §4 — The acceptance criteria, on a post-change run (the one that decides it)
 
-**This run (`70f19253`) cannot serve as the after-measurement** — its steps are read-only, it made
-3 sleep calls totalling 0.0 min and 0 repeated expensive calls. The named after-run must be a
+**This run (`70f19253`) cannot serve as the after-measurement** — and the reason is stronger than
+this paragraph first gave: **corrected 2026-08-21 (revision 4)**, its final count is 9 sleep calls
+(0 blind, 362.3 s waited) and 0 repeated expensive calls, ~~3 sleep calls totalling 0.0 min and 0
+repeated expensive calls~~ — but every step of it was composed by the doctrine **as deployed at
+19:00, before this commit existed**, so its zero attributes to nothing here. The named after-run must be a
 `spec-to-deploy` run **that actually executes a `run-tests` step**, started after this change is
 deployed to `/opt/cezar/packages/cezar/dist/`. Deployment matters: the doctrine ships as compiled
 `dist`, and the KB note had to correct an earlier claim that it was not deployed.
