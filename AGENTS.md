@@ -246,7 +246,10 @@ npm test -- --testTimeout=30000 path/to/one.test.ts
 npm test -- -t "the name of one test"
 ```
 
-### Three environment traps that make the gates LIE
+### Four environment traps that make the gates LIE
+
+*(Heading amended 2026-08-21: a fourth trap — `TMPDIR` inside a git repo — was measured and is
+documented below. It was worth 17 of 19 failures on a docs-only branch.)*
 
 The first two were hit on 2026-08-20 (spec `.ai/specs/2026-08-20-live-run-status-line-and-timer.md`),
 the third the same day (spec `.ai/specs/2026-08-20-step-and-tool-call-durations.md`). Each produces
@@ -266,7 +269,9 @@ them:
 ```bash
 scrub=$(env | sed -n 's/^\(CEZ_[A-Z0-9_]*\)=.*/\1/p' \
         | grep -vxE 'CEZ_(HANDOFF_FILE|TASK_ID)' | sed 's/^/-u /')
-env -u NODE_ENV $scrub npm ci && env -u NODE_ENV $scrub npm test
+tmp=/tmp/cez-gate-$$ && mkdir -p $tmp   # trap 4: TMPDIR must be OUTSIDE any git repo
+env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm ci \
+  && env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm test
 ```
 
 1. **`NODE_ENV=production` makes `npm ci` install ZERO devDependencies.** cezar's own agent
@@ -300,7 +305,22 @@ env -u NODE_ENV $scrub npm ci && env -u NODE_ENV $scrub npm test
    the ~20% regression signal the case exists to catch. The real fix is to make the budget
    relative to a measured per-host baseline, which is a separate change and nobody's scope yet.
 
-**The method, which generalises past all three.** "It fails on an untouched file at clean HEAD
+4. **`TMPDIR` pointing INSIDE a git repo.** Measured 2026-08-21 on a cezar agent worktree, where
+   the run's `TMPDIR`/`TMP`/`TEMP` are all set to
+   `/var/lib/cezar/loki-labs/cezar/.ai/cezar/tmp/<task-id>` — a path *inside the cezar checkout*,
+   so `git -C "$(node -p 'os.tmpdir()')" rev-parse --show-toplevel` answers
+   `/var/lib/cezar/loki-labs/cezar`. Every test that `mkdtemp`s a directory and expects it **not**
+   to be a git repo therefore gets one whose `git rev-parse` walks up and succeeds. That is
+   **17 failures across 12 files** on a docs-only branch: `workspace-worktrees` (a "plain"
+   granted dir materialises the whole cezar repo as an extra worktree root), `postconditions`
+   (`everything-committed` "is GREEN in a directory that is not a git repo" → `ok: false`),
+   `workspace-parallel` W3 (the non-git single-slot exemption never applies), `projects-scan-api`
+   (`hasCommits` true where a bare fixture expects false), and more. None of them mention
+   `TMPDIR`, and all of them read as "this suite cannot run in a worktree". Fix is the scrub
+   above: point `TMPDIR`/`TMP`/`TEMP` at `/tmp`, which is a tmpfs outside every repo here. Note
+   CI never sees this — `ubuntu-latest` has a plain `/tmp` — so it is purely a local-agent trap.
+
+**The method, which generalises past all four.** "It fails on an untouched file at clean HEAD
 too" feels like proof that the code is innocent and the environment is broken. It is proof of the
 first half only. The same install, the same env and the same runner feed both checkouts, so a
 control that fails identically **localises the fault to what they share** — it does not license
@@ -332,10 +352,21 @@ mechanism that exists.** Drop that class and look at the two that do:
 
 **Known live flake, as of 2026-08-20** — so the next session recognises it instead of bisecting
 toward it: `add-project-dialog.test.tsx` > *"registers exactly the checked rows, one POST each,
-and navigates to the first"* fails roughly **1 full-suite run in 4** and passes 3/3 in isolation.
-It is mechanism 1 above (a navigate race in the file's own helper), not anything a caller did:
-the file was untouched by the runs that surfaced it and imports nothing they changed. Unfixed —
-noted here so a red on that one name is recognised, never so it is ignored.
+and navigates to the first"* fails roughly **1 full-suite run in 4** and ~~passes 3/3 in
+isolation~~. It is mechanism 1 above (a navigate race in the file's own helper), not anything a
+caller did: the file was untouched by the runs that surfaced it and imports nothing they changed.
+Unfixed — noted here so a red on that one name is recognised, never so it is ignored.
+
+**Corrected 2026-08-21: it does NOT pass 3/3 in isolation — it flakes alone too.** Re-measured
+with the file as vitest's only target (`npm test -- packages/web/src/components/add-project-dialog.test.tsx`),
+three consecutive runs: **pass, FAIL, pass**. The failure signature alone is the same one the full
+suite produces — `expected '/p/cezar/' to be '/p/added/'`, i.e. the navigation never moved off the
+previously-selected project. This *strengthens* the mechanism-1 diagnosis rather than weakening it:
+the race lives entirely inside the file's own helper and needs no competition for cores to fire, so
+**do not reach for `--maxWorkers` or suite-level concurrency when explaining it**, and do not treat
+"but it passed alone" as evidence that a full-suite red was caused by something a caller changed.
+One isolated pass proves nothing here; the original 3/3 was a small-n artifact of exactly the kind
+the sample-size note below warns about.
 
 Two method notes, both learned the hard way here:
 

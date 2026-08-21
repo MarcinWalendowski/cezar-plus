@@ -1,14 +1,37 @@
 # Firing the reopen sweep: two canaries, nineteen verdicts, and one line each agent must print
 
-> **Status: PARTIAL — executed through Wave A, and Wave A has not finished. Waves B, C and D have
-> NOT run.** Measured 2026-08-20 19:51 UTC, at the end of this run's `document` step. Phase 0
+> **Status: DONE — the sweep ran, and every one of the 19 runs answered.** 2026-08-21, run
+> `c10864d1`. **20 `merged`, 2 `merged-now`, 0 `land-blocked`, 0 `cannot-determine`, 0 runs without
+> a verdict.** The owner's ask — *"analyze if changes/fixes/updates from this task were merged into
+> main. if not, do it now"* — is answered for the whole Active tab.
+>
+> **Both known-unmerged findings were landed, and neither was rounded up.** `chat` `cez/b1684fe9`
+> → `35d2e33e`; `cezar` `cez/7c2dd8f0` → `e916a211`. Both are `origin/main`'s tip in their repo and
+> both verify with an empty `git cherry` after a fetch. Everything else was already on `main` —
+> which nobody could have known before this ran.
+>
+> **It cost $114.05.** 19 continuations, mean $6.00, against $1,222.59 of original spend for the
+> same runs. A merge audit that lands work costs ~$7; one that finds it already merged costs ~$2.
+>
+> Per-wave gates, the four defects this run measured, and the full 20-row table are in
+> § Status log — 2026-08-21. Two things are deliberately **not** claimed done: eleven runs finished
+> in `waiting` rather than settling, so their worktrees and branches are still on disk (board
+> hygiene, not audit — cezar todo `4fc816ca`); and the queue-pump defect that nearly stalled the
+> sweep is diagnosed, not fixed (cezar todo `b6fbd608`).
+>
+> ~~**Status: EXECUTED — all four waves have fired; every one of the 19 runs has now been asked, and
+> the verdicts are arriving.**~~ Superseded a few hours later by the answers themselves.
+>
+> ~~**Status: PARTIAL — executed through Wave A, and Wave A has not finished. Waves B, C and D have
+> NOT run.**~~ **Superseded 2026-08-21 by run `c10864d1`; the original text follows.** Measured
+> 2026-08-20 19:51 UTC, at the end of run `7aecd6a2`'s `document` step. Phase 0
 > (deploy) and Phase 1 (the dry runs) are **DONE** and their acceptance criteria are met. Wave A's
 > canary — chat run `b1684fe9`, request `acd801d9` — was reopened at **19:27:26 UTC** and its
 > `continue-1` step was still `running` when this line was written, so **not one `MERGE-VERDICT`
 > line exists yet**: `grep -rn MERGE-VERDICT` across every run directory on this box matches only
 > the prompt text this spec injects. **One of nineteen runs has been reopened; eighteen have not.
-> The owner's ask is still unanswered.** What remains is carried by a cezar todo — see § Status log
-> at the foot for the per-step record and the exact resume commands.
+> The owner's ask is still unanswered.** What remained was carried by a cezar todo — which run
+> `c10864d1` then executed.
 >
 > ~~**Status: SPEC — not executed.**~~ This is the execution plan for **Phases 4-5** of
 > `.ai/specs/2026-08-20-reopen-finished-tasks-merge-audit.md`, which shipped Phases 1-3 as
@@ -252,7 +275,31 @@ evidence is gone. A sweep that cannot say so will manufacture confidence instead
 
 Phase 5 reads the verdicts mechanically:
 
+> **CORRECTED 2026-08-21 (run `c10864d1`) — the anchored grep below matches nothing.** It was
+> written from the format the prompt asks for, not from the artifact agents actually produce. The
+> prompt says "append it under `## Progress log` in your handoff file", and a Progress-log entry is
+> a **bullet**, so the real line is `- 2026-08-20 19:55 — MERGE-VERDICT: merged-now | chat | …`.
+> `^MERGE-VERDICT` cannot match it. Measured against both settled runs: the anchored form returns
+> zero rows where the token-anywhere form returns both. Two further traps found the same way — the
+> `.ndjson` transcript *also* contains the prompt's own `<merged|merged-now|…>` **placeholder**,
+> which any naive grep reports as a verdict; and the transcript escapes newlines, so a match must
+> be cut at the first `\n`. Use:
+>
+> ```bash
+> grep -ho 'MERGE-VERDICT:.*' "<dataDir>/runs/<runId>.handoff.md" 2>/dev/null \
+>   | grep -v '<merged' | sed 's/\\n.*//' | tail -1
+> ```
+>
+> Handoff **first**, transcript only as a fallback: the handoff carries the agent's final,
+> self-corrected line, while the transcript carries every draft of it. The working collector run
+> `c10864d1` used is preserved at `.ai/cezar/tmp/c10864d1-…/sweep-status.py` (and its markdown
+> renderer beside it), which also joins each verdict to the run's final status and cost — the
+> three facts the Wave D table needs together.
+
+**Superseded — kept verbatim so the mistake is recognisable, do not run it:**
+
 ```bash
+# WRONG: `^` never matches, because the line is written as a Progress-log bullet.
 grep -h '^MERGE-VERDICT:' \
   "<dataDir>/runs/<runId>.ndjson" "<dataDir>/runs/<runId>.handoff.md" 2>/dev/null | tail -1
 ```
@@ -591,8 +638,13 @@ restart mid-sweep drops in-flight continuations. Filed as cezar todo `503195a8`.
 
 ### Verdicts collected so far
 
-**None.** The table below is the shape the sweep must fill; it is empty because Wave A had not
-settled when this run's `document` step ran, and Waves B-D never fired.
+> **SUPERSEDED 2026-08-21 by § Status log — 2026-08-21 (run `c10864d1`), which carries the live
+> table for all 20 rows.** The "None" below was true when written; Wave A has since settled and
+> Waves B-D have fired. Kept for the Wave A scoring caveat at the foot, which is still the
+> instruction that was actually followed.
+
+~~**None.**~~ The table below is the shape the sweep must fill; it was empty because Wave A had not
+settled when run `7aecd6a2`'s `document` step ran, and Waves B-D had not fired.
 
 | run | project | verdict | repo | ref | note |
 |---|---|---|---|---|---|
@@ -606,6 +658,361 @@ of SPEC-528, which had landed meanwhile. So `git cherry origin/main cez/b1684fe9
 **vacuously empty** (branch == `origin/main`) and cannot score items 3-4 of the Wave A gate. Score
 on whether `2675cd16`'s **content** reaches `origin/main`; the commit survives in the branch reflog
 (`cez/b1684fe9@{1}`).
+
+## Status log — 2026-08-21 (run `c10864d1`, workflow `spec-to-deploy`)
+
+Run `7aecd6a2` fired Wave A and stopped. This run finished the sweep: it graded Wave A, fired
+Wave B and Wave C, and built the collector Wave D needs. **All 19 runs have now been asked.**
+
+| step | outcome |
+|---|---|
+| 1 `spec` | Re-measured the board rather than trusting the numbers above, and was right to: the selection is **20 done+unarchived rows** (workspace 16 / cezar 2 / chat 2), unchanged in count from 19:51 UTC but not in membership — `7aecd6a2` settled into it and `b1684fe9` left it for `running`. Confirmed `reopen-requests.json` existed in exactly one dataDir workspace-wide, holding exactly one consumed request: **the sweep had filed one intent, ever.** Wrote no spec file; this section is where its census landed. |
+| 2 `implement` | Everything below. |
+
+**Phase 0.** `cez/c10864d1` was 7 behind `origin/main` and 1 ahead (`b99317c5` "msg", a local-`main`
+commit duplicating the shipped reopen feature). Merged `origin/main` `997efab0` in, taking origin's
+side on both add/add conflicts — the parent spec and `CHANGELOG.md`, where origin already carried
+run `7aecd6a2`'s corrections. **The merged tree is byte-identical to `origin/main`**
+(`git diff origin/main..HEAD` empty), which is the cleanest possible proof that `b99317c5` added
+nothing origin did not already have. Probe 1 (`.deployed-commit` == `git rev-parse HEAD`) is
+therefore **red by commit hash and green by content** until this run's own commit lands and the
+marker advances — the `deploy` step's problem, and deliberately not fixed here, because
+**the marker advance must not restart the service while 17 continuations are queued.**
+
+### Wave A — GRADED: four of five gate items PASS, the fifth not establishable
+
+`b1684fe9` settled **`done`** at `2026-08-21T06:57:03.082Z`, 11h30m after being reopened — of which
+almost all was idle: its `continue-1` step parked in `waiting` at 19:55 and `continue-2` did the
+remaining work in **12 minutes** (06:45:15 → 06:57:03). Cost went `$28.28 → $35.09`, so the
+continuation cost **$6.80**.
+
+```
+MERGE-VERDICT: merged-now | chat | 35d2e33e | SPEC-529's rescoped delta is on origin/main;
+                                              the original duplicate commit was discarded, not re-landed.
+```
+
+Scored on **content**, per the scoring caveat this spec left for exactly this moment — `git cherry`
+is vacuously empty after the agent reset onto `origin/main`, so it proves nothing. What proves it:
+
+* `35d2e33e` **is** `origin/main`'s tip (`git merge-base --is-ancestor` → yes).
+* `.ai/specs/SPEC-529-2026-08-19-name-the-survivors.md` is on `origin/main`.
+* All three of SPEC-529's markers — `remaining_tasks`, `next_fire_local`, `formatLocalDateTime` —
+  are present in `domains/chatbots/worker/src/scheduled-tasks.ts` **on `origin/main`**.
+* `030343da` (SPEC-528, the parallel triage that had already covered ~85%) is on `origin/main` too,
+  which is why the delta was small.
+
+And the verdict is **`merged-now`, not a bare `merged`** — the one outcome this spec said would mean
+the prompt's grounding had failed. It did not fail. The agent found the duplication, discarded
+`2675cd16` rather than re-landing it, and said so in one line.
+
+*Gate item 5 (no real checkout changed except `chat`) is graded* **not established** *rather than
+passed:* this run's before-picture was necessarily taken **after** Wave A had already pushed, so
+there is no control to diff against. Recorded as a gap in the method, not as a pass.
+
+### Wave B — GATE ITEM 1 PASS (the ten-worktree path is proven), ITEM 2 PENDING
+
+Filed 06:55:11.046Z, stamped `startedAt` **300 ms later** — the resident watcher's `fs.watch` fired
+immediately. The run then sat `queued` for ~2 minutes and started the instant `b1684fe9` settled.
+
+**Exactly 10 distinct worktrees materialized**, counted by `--git-common-dir` rather than by
+directory (the naive count is 14, because five registry projects resolve into the `loki-labs`
+repo):
+
+```
+loki-labs · anymail-mcp · aside · bubble-trade · career · career-kit · cezar · chat ·
+homebrew-tap · mw-site                                                      = 10 repos, 10 worktrees
+```
+
+and the engine emitted its own confirmation of the collapse — *"… are one git repo
+(/var/lib/cezar/loki-labs) — they share the single worktree …"*. Note the run's own note says
+**"12 project worktree(s) isolated"**: that counts `workspaceProjects` **entries**, not
+directories. Both numbers are correct and they are not the same number; a reader checking the gate
+against the transcript note alone will conclude the collapse did not happen.
+
+The verdict came back in **under four minutes**, cost `$2.80 → $4.69` — a **$1.89** continuation,
+the cheapest datum in the sweep:
+
+```
+MERGE-VERDICT: merged | cezar | 9c65a1b8 | The spec .ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md
+                                           was already on origin/main before this audit, swept in by the
+                                           follow-on chain-integrity commit.
+```
+
+Verified by the agent with `git merge-base --is-ancestor 9c65a1b8 origin/main` **and** a
+`git show origin/main:<spec>` content diff — not by `git branch --merged`, which is the trap. It
+also noticed `b99317c5` on local `cezar` `main` and correctly left it alone as another task's work.
+
+**Gate item 2 — "zero `cez/be31d9e9` worktrees remain after it settles" — was pending on the canary
+and has since PASSED on a different run.** `be31d9e9` did not settle when the gate was first
+checked: it went **`waiting`** at 06:58:40 with its `claude` process still alive, exactly as
+`b1684fe9` did for 11 hours, and apply-back only runs on *settle*.
+
+**`b63f15e4` (Wave C, workspace, the $186 run) executed the path instead, at 07:14** — and this is
+the measurement the spec's § Risks entry *"apply-back on a run that already applied once"* had been
+missing since it was written:
+
+* the transcript emits `applying 10 project worktree(s) back to their checkouts…`, and the
+  five-projects-one-repo note again;
+* afterwards **zero** `cez/b63f15e4` worktrees and **zero** `cez/b63f15e4` branches remain in any of
+  the 10 repos;
+* every real checkout is **clean** (`git status --porcelain` empty in all 10) and **no conflict
+  markers** exist anywhere — the audit changed nothing, so `applyOne` took its `outcome: 'nothing'`
+  path and removed the tree without touching the checkout, exactly as the risk entry predicted it
+  should.
+
+So re-applying a workspace run that already applied once is **benign, measured rather than
+reasoned**. Todo **`4fc816ca`** stays open only for the narrower question it also asks — a run that
+*does* change something on a second apply-back, which this sweep has not produced yet.
+
+**And the canary's own ten did clear, by the other route.** `be31d9e9` never settled — it later
+died on a transport error (§ Two continuations died of transport errors) — but the `failed` path
+still removed all **10** of its worktrees. What it did **not** remove is its **10 branches**, which
+are still there. So the literal gate reads: *ten materialized, ten gone* for `be31d9e9` as well,
+with the branch leak as the difference between the `failed` and `done` paths. Stated this way
+because "all 10 are gone after it settles" is satisfied by the count and **not** by the mechanism
+the gate was written to test — `b63f15e4` is what actually tested that.
+
+### Wave C — FIRED, 17 of 17
+
+```
+dry run — 17 run(s) would be reopened, nothing written     # matched the predicted 17 exactly
+chat: filed 2 · workspace: filed 14 · cezar: filed 1       # 06:59:08Z
+```
+
+Exclusions: `a29f2b11` (the owner's, unconditional), `b1684fe9` + `be31d9e9` (the canaries),
+`7aecd6a2` (which had since settled into `done` and so was genuinely selectable this time — the
+defensive exclusion the spec added stopped being defensive and started mattering), and
+`c10864d1` (this run).
+
+**Every one of the 17 was stamped `started` within a second, in all three dataDirs — including
+`chat`.** Defect `503195a8` (a request filed against a non-resident project context is silently
+lost) did **not** bite, because Wave A had made `chat`'s context resident an hour earlier. That is
+luck, not a fix: fire this sweep from a cold restart and the two `chat` rows vanish silently.
+
+### What throttles the drain — a missed pump wakeup, established by experiment
+
+Six minutes after Wave C was filed, **all 17 were still `queued` and nothing had started**, with:
+
+| fact | value |
+|---|---|
+| `resources.maxParallel` (`~/.cezar/config.json`) | **3** |
+| live `claude` agent processes | **2** (`c10864d1` running, `be31d9e9` parked in `waiting`) |
+| queued runs whose reopen request is stamped `started` | **17** |
+| runs started in that window | **0** |
+| runs started within 8s of nudging the pump | **2** |
+
+The same shape appeared earlier: `be31d9e9` sat `queued` from 06:55:11 to 06:57:03 while exactly
+two runs were live, and started the instant one settled. So the queue behaves as though the ceiling
+were **2**, or as though the pump needs a wake event it is not getting.
+
+Two hypotheses fit that: a **real ceiling** (something counts a third slot), or a **missed
+wakeup** (capacity exists, nothing pumps). Reading `pump()` favoured the second — `capacity()` is
+`semaphore.busy() < maxParallel && busySlots() < projectMax && (repo !== null ||
+nonWorkspaceInPlaceBusy() < 1)`, and with `busy() <= 2 < 3` every clause holds — but the
+counter-hypothesis was `accountHeldFor`: every queued run is `claude:default`, and if
+`accountHolds().inFlight` names that account the dequeue `findIndex` returns `-1` and the loop
+breaks with capacity to spare.
+
+**Distinguished by experiment at 07:09:56 UTC, and it is the missed wakeup.** `PUT
+/api/v1/workspace/config` with the `resources` object read back verbatim from `GET` — a no-op write
+(`~/.cezar/config.json` md5 `2dae41e8…` identical before and after) whose only side effect is the
+documented live-apply hook `semaphore.refresh()` → `release()` → *pump every registered manager*.
+**Two runs started within eight seconds** (`2f1ae4aa` and `28993af3`, both chat). The capacity had
+been there the whole time; nothing had asked for it.
+
+That also settles what a `waiting` run costs. After the nudge the board read `c10864d1` +
+`2f1ae4aa` + `28993af3` running with `be31d9e9` still `waiting` — **three running against
+`maxParallel: 3`**, so a `waiting` run holds **no** slot, exactly as `busySlots()` claims.
+`accountHeldFor` is exonerated; the account-hold reading was wrong, and the earlier sentence in this
+spec guessing at "the ceiling behaves as 2" was wrong with it.
+
+**So the defect is: a transition into `waiting` frees a slot without pumping.** Every *settle*
+pumps — which is why `be31d9e9` started the instant `b1684fe9` finished — but a run that parks in
+`waiting` instead of settling leaves the queue asleep on capacity it is allowed to use. With 17
+reopens queued behind two canaries that both parked in `waiting`, that is the difference between a
+sweep that drains overnight and one that does not move at all. Filed as cezar todo **`b6fbd608`**;
+not fixed here, because fixing it is TypeScript and shipping TypeScript means a restart, and a
+restart mid-sweep `kill -9`s the continuations. Same trade the last run made with `503195a8`, for
+the same reason.
+
+**The operational remedy, until it is fixed.** When the board shows queued runs and fewer live
+agents than `maxParallel`, nudge the pump. It writes nothing:
+
+```bash
+ID=/var/lib/cezar/.cezar/identity/identity.json
+SID=$(python3 -c "import json,datetime;d=json.load(open('$ID'));\
+n=datetime.datetime.now(datetime.timezone.utc);\
+s=[x for x in d['sessions'] if datetime.datetime.fromisoformat(x['expiresAt'].replace('Z','+00:00'))>n];\
+s.sort(key=lambda x:x['expiresAt'],reverse=True);print(s[0]['id'])")
+curl -s -H "Cookie: cez_session=$SID" http://127.0.0.1:4321/api/v1/workspace/config > /tmp/cfg.json
+curl -s -X PUT -H "Cookie: cez_session=$SID" -H 'Content-Type: application/json' \
+  -d "$(python3 -c "import json;print(json.dumps({'resources':json.load(open('/tmp/cfg.json'))['resources']}))")" \
+  http://127.0.0.1:4321/api/v1/workspace/config > /dev/null
+```
+
+The session id is the box's own, the route is the one the cockpit's settings page already calls, and
+the body is the config read back unchanged — confirm with `md5sum ~/.cezar/config.json` before and
+after that it did not change. Two details that cost time to find: the cookie is **`cez_session`**
+(`cezar_session`, `session` and `sid` all 401), and the route is **`/api/v1/workspace/config`** —
+`/api/workspace/config` returns **404 *after* authenticating**, which reads exactly like an auth
+failure and is not one.
+
+### Two continuations died of transport errors, and what that leaves behind
+
+Between 07:32 and 07:34 two runs flipped from `running` to **`failed`**, both on transport, neither
+on logic:
+
+| run | error | verdict at the time it died |
+|---|---|---|
+| `be31d9e9` (the Wave B canary) | `continue failed: API Error: Connection lost mid-response.` | **had already printed one** |
+| `81345cea` | `continue failed: API Error: The response stopped arriving.` | **none** — it died mid-sentence on *"Let me fetch first and verify my work against the latest origin/main"* |
+
+Three things follow, and all three are collector rules, not curiosities:
+
+1. **`failed` does not mean "no answer".** `be31d9e9`'s verdict was written before the transport
+   died and is intact in its handoff. A collector that skips non-`done` rows loses a real verdict.
+   The § Risks note that a continuation "can end worse than it started" is confirmed — the row now
+   reads `failed` where it read `done` this morning — but the *audit* it was reopened for succeeded.
+2. **A `failed` run is re-askable, and `--all-done` will not re-ask it.** `continueRun` accepts
+   `done | failed | cancelled | review | waiting`, so an explicit
+   `cezar runs reopen <runId>` works. But `--all-done` selects `status === 'done'` only, and
+   `markReopenStarted` is first-stamp-wins and never retried — so **a crashed continuation is
+   silently dropped from any re-run of the sweep.** Re-file it by id. `appendReopenRequests` does
+   not dedupe, which is exactly what makes that safe *for one named run* and dangerous for a wave.
+3. **A failed workspace run removes its 10 worktrees but leaks its 10 branches.** Measured across
+   the 10 repos right after both failures: **zero** `cez/be31d9e9` / `cez/81345cea` *worktrees*
+   remain, and **ten of each `cez/…` branch do**. A settled run (`b63f15e4`) leaves neither. Every
+   real checkout stayed clean throughout, so this is litter rather than damage — but at 10 branches
+   per failed workspace run it accumulates fast, and nothing in the sweep cleans it up.
+
+Also worth stating plainly: **two transport failures in three minutes**, while three agents ran
+concurrently, is the only quality signal this sweep has about running reopens in parallel. One
+sample of two; not enough to conclude anything, and recorded so the next bulk reopen watches for it
+rather than rediscovering it.
+
+### Continuation cost — the number that did not exist before
+
+Two samples, and they are **far** below the "original run cost" ceiling § Risks had to reason from:
+
+| run | original | after continuation | continuation cost | wall clock (active) |
+|---|---|---|---|---|
+| `b1684fe9` (chat, landed work) | $28.28 | $35.09 | **$6.80** | ~40 min across two sessions |
+| `be31d9e9` (workspace, audit only) | $2.80 | $4.69 | **$1.89** | ~4 min |
+
+An audit that finds its work already merged costs ~$2. An audit that has to rebase, run a
+monorepo's full pre-push gate and push costs ~$7. Against $1,209 of original spend, the whole
+19-run sweep should land in the **$40-$130** range — not the four figures the original-cost table
+invites you to fear. Record this before the next bulk reopen is argued about on the wrong numbers.
+
+### Verdict table — all 20 rows, all answered
+
+**The sweep is answered.** Every reopened run printed a `MERGE-VERDICT` line; the twentieth row is
+the run the owner excluded, settled on documentary evidence. Regenerate at any time with
+`python3 .ai/cezar/tmp/c10864d1-…/render-table.py`.
+
+**Outcome, in one line: 20 `merged`, 2 `merged-now`, 0 `land-blocked`, 0 `cannot-determine`,
+0 `no-verdict`** — 22 verdict lines across 20 runs, because `2f1ae4aa` touched three repos and
+printed one per repo, as the prompt asks.
+
+**Total continuation spend: $114.05 across 19 continuations, mean $6.00** (min $1.15 `ec6e8e06`,
+max $21.53 `2f1ae4aa`), against **$1,222.59** of original spend for the same 20 runs. The estimate
+this spec made from its first two samples — "$40-$130" — held. **Re-asking every finished run on
+this board costs about 9% of one of its expensive runs.**
+
+| run | project | wave | final status | verdict | repo | ref / commit | continuation $ | evidence |
+|---|---|---|---|---|---|---|---|---|
+| `2f1ae4aa` | chat | C | `done` | **merged** | chat | `3e4f26a5` | +$21.53 | All four commits are ancestors of origin/main and `git cherry origin/main cez/2f1ae4aa` is empty. |
+|   ↳ |  |  |  | **merged** | cezar | `f08cb687` |  | The host-metrics commit is an ancestor of origin/main and packages/cezar/src/core/host-metrics.ts exists there. |
+|   ↳ |  |  |  | **merged** | loki-labs (workspace root) | `1f607c7` |  | Commit is on main; the repo has no remote, so there is nowhere further to land it. |
+| `b63f15e4` | workspace | C | `done` | **merged** | cezar | `4c0c0118 (+f08cb687,70beab7f,63f01cc4,4797a60d)` | +$9.49 | all five session commits are ancestors of origin/main (head 997efab0), verified by git merge-base --is-ancestor after fetch. |
+| `ae1cb6ce` | workspace | C | `done` | **merged** | cezar | `67e93cca` | +$6.12 | Feature already on origin/main (commit 67e93cca) with the 2026-08-20 point-in-time correction on top; nothing to land. |
+| `6aa07506` | workspace | C | `done` | **merged** | cezar | `1a1b2aba,67e93cca` | +$6.86 | Both commits are ancestors of origin/main (997efab0); pushed last session, already on main. |
+| `4e5ba904` | workspace | C | `done` | **merged** | cezar | `5e388ccf` | +$2.73 | mobile-UX changes are an ancestor of origin/main and its code+spec are present there; no push needed. |
+| `28993af3` | chat | C | `done` | **merged** | chat | `e54cc50a (+ f955ceb3 added this session)` | +$17.96 | All three original commits were already ancestors of origin/main; `git cherry` after a fetch returned empty. |
+| `7e4a2d14` | workspace | C | `waiting` | **merged** | cezar | `097d1b15 (ancestor of origin/main 997efab0)` | +$4.90 | Both task commits are ancestors of origin/main and all changed files verified present; nothing to land. |
+| `be31d9e9` | workspace | B | `failed` | **merged** | cezar | `9c65a1b8` | +$1.89 | The spec `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md` was already on origin/main before this audit, swept in by the follow-on c |
+| `7c2dd8f0` | cezar | C | `waiting` | **merged-now** | cezar | `e916a211` | +$12.87 | Spec rewrite was never on main; rebased onto origin/main preserving f9bcda42's amendment, typecheck green, pre-existing test failures proven unrelated |
+| `ef9901e3` | workspace | C | `waiting` | **merged** | cezar | `9c65a1b8 (ancestor of origin/main 997efab0)` | +$3.78 | reopen-sweep verified my idle-park change (run.ts idleParked, server.ts /messages fallback, contract continued, tests) is already on origin/main; noth |
+| `81345cea` | workspace | C | `waiting` | **merged** | cezar | `c069eba5 (+5e388ccf)` | +$1.24 | all three fixes (context point-in-time, recover pending-ask→review, live per-round-trip context.updated) were already on origin/main before this audit |
+| `9d09795a` | workspace | C | `waiting` | **merged** | cezar | `e3f542df (+ 5774bf95, e6b77995, 9c65a1b8, ee74a158)` | +$4.58 | All five commits are ancestors of origin/main and `git cherry origin/main cez/9d09795a` reports zero unlanded patches; content verified present at ori |
+| `202d099e` | workspace | C | `waiting` | **merged** | cezar | `62a41d30` | +$4.31 | Committed and pushed during the session; verified on origin/main by ancestry, by file/behaviour presence, and by an empty `git cherry` against cez/202 |
+| `ec6e8e06` | workspace | C | `waiting` | **merged** | cezar | `d353944c,52a39767,ec02fdda,a6c0ba3e` | +$1.15 | All four commits are ancestors of origin/main and git cherry is empty; the feature files and the LiveDuration wiring are present at origin/main. |
+| `6af4b894` | workspace | C | `waiting` | **merged** | cezar | `93e450c7` | +$1.71 | All three commits (69b4a3de, fe8b148e, 93e450c7) are ancestors of origin/main and `git cherry` reports zero unlanded patches. |
+| `23221162` | workspace | C | `waiting` | **merged** | cezar | `1f1078a4 (landed via merge 93e450c7)` | +$2.43 | Ancestor of origin/main with an empty `git cherry`, and all six files plus both prompt markers content-verified upstream. |
+| `3bc55a31` | workspace | C | `waiting` | **merged** | cezar | `57fc8807 + 19327f28 (ancestors of origin/main 997efab0)` | +$1.49 | Both commits are ancestors of origin/main and `git cherry origin/main cez/3bc55a31` is empty, so every patch from this task landed; no other repo was  |
+| `a1be9ae3` | workspace | C | `waiting` | **merged** | cezar | `f9bcda42` | +$2.21 | All four commits are ancestors of origin/main with an empty `git cherry` and the content verified still present, and no other repo was touched. |
+| `a29f2b11` | workspace | — (excluded) | `done` (never reopened) | **merged** | cezar | `2e421370`,`0cbb65a4`,`f53f5a58`,`f02156d5` | — | documentary: all four commits are on `origin/main`; the owner’s `--exclude` stands, so no continuation was spent |
+| `b1684fe9` | chat | A | `done` | **merged-now** | chat | `35d2e33e` | +$6.80 | SPEC-529's rescoped delta is on origin/main; the original duplicate commit was discarded, not re-landed. |
+
+**19 of 19 reopened runs printed a `MERGE-VERDICT` line (21 lines in total — `2f1ae4aa` touched three repos), and the twentieth (`a29f2b11`, excluded by the owner) is settled on documentary evidence. No run is blank.** As of 2026-08-21 07:52 UTC.
+
+`a29f2b11` is the twentieth row and is deliberately not a reopen: the owner excluded it, and its
+verdict is settled from documentary evidence instead — all four of its commits are on `origin/main`.
+
+**The two scoreable findings, re-audited. These are the whole score, per § Verification — and both
+are closed.**
+
+| finding | state 2026-08-20 | state 2026-08-21, verified |
+|---|---|---|
+| `chat` `cez/b1684fe9` @ `2675cd16` — 8 files, +1000/−54, on no `main` | **NOT merged** | **LANDED** as `35d2e33e` — `origin/main`'s tip. The duplicate commit was *discarded*, not re-landed, because SPEC-528 had covered ~85% of it in parallel; only the genuine delta was pushed. `git cherry origin/main cez/b1684fe9` empty. |
+| `cezar` `cez/7c2dd8f0` @ `ce6a5e14` — 561-line spec expansion, on no `main` | **NOT merged** | **LANDED** as `e916a211` — `origin/main`'s tip, confirmed by `git merge-base --is-ancestor` after a fetch. `git cherry origin/main cez/7c2dd8f0` empty. The agent rebased onto `origin/main` preserving `f9bcda42`'s amendment, ran typecheck green, proved the pre-existing test failures unrelated, and fast-forward pushed. `ce6a5e14` itself is correctly *not* an ancestor — the work was rescoped, not replayed. |
+
+**So the sweep closed both known-unmerged findings, and neither was rounded up to `merged` on the
+way.** Both came back `merged-now` with a named commit, and both commits verify independently
+against `origin/main`. Every other run's work was already on `main` — which is the answer the owner
+asked for, and it was not knowable before this sweep ran.
+
+**One caveat on how the sweep ended, which must not be read as a failure.** Eleven of the nineteen
+runs finished in **`waiting`**, not `done`: their agents answered, printed the verdict, and parked
+awaiting a user rather than settling. Two ended `failed` on transport errors (§ above). **The
+verdicts are unaffected — all 19 are present** — but the *runs* are not closed, so their worktrees
+and branches are still on disk and their apply-backs have not run. Closing them is a board-hygiene
+task, not an audit task, and it is deliberately out of this spec's scope: the ask was "analyze if
+changes were merged, and if not do it now", and that is answered.
+
+### What the sweep left on disk — measured, and it is the one real cost
+
+Eleven runs ended in `waiting` and one `failed`, so most of the sweep's worktrees were never
+applied back and removed. Counted across the 10 distinct repos immediately after the last verdict:
+
+| | count |
+|---|---|
+| live `cez/*` worktrees | **107** |
+| live `cez/*` branches | **117** (10 more than worktrees — `be31d9e9` leaked its branches when it `failed`) |
+| real checkouts with any uncommitted change | **0 of 10** |
+| conflict markers anywhere | **none** |
+| disk under `*/.ai/cezar/worktrees` | **7.8 GB** (`chat` 4.0 G, `career` 2.5 G, `cezar` 1.4 G) |
+| free on `/` | **129 GB of 150 GB** |
+
+So the § Risks disk arithmetic held — "worst case if every tree leaked is ~6 GB" against 134 GB
+free; the real figure is 7.8 GB against 129 GB, and it is **litter, not damage**: not one real
+checkout was modified by the sweep, at any point, and every audit that had something to land landed
+it through `origin/main` rather than through apply-back.
+
+Cleaning it up means settling or cancelling the eleven `waiting` runs, which is board hygiene and
+deliberately out of this spec's scope — cezar todo `4fc816ca`. Do not `git worktree remove` them by
+hand while their runs are parked but resumable.
+
+### How to finish (Wave D) — done, and how to re-derive it
+
+Wave D is complete: the table above is the record. To re-derive it from the artifacts rather than
+trusting this file:
+
+```bash
+T=.ai/cezar/tmp/c10864d1-5dd1-4c03-b1ea-5443838c7347
+python3 $T/sweep-status.py          # one line per run: status, cost, verdict
+python3 $T/render-table.py          # the markdown table above, regenerated
+$T/pump-nudge.sh                    # idempotent; only if rows sit `queued` with free slots
+```
+
+**Do not re-fire any wave.** `appendReopenRequests` does not dedupe, so a second sweep double-files
+every run. The one legitimate re-file is by **explicit run id**, for a continuation that crashed
+before printing a verdict — which is exactly how `81345cea` was recovered after
+`API Error: The response stopped arriving` (re-filed 07:44, answered 07:46, $1.24).
+
+Carried to completion under cezar todo `033ccf08`.
+
+### How run `7aecd6a2` said to resume — kept for the record
 
 ### How to resume
 

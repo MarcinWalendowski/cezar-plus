@@ -1,6 +1,41 @@
 # Reopen every finished task and make it prove its work reached `main`
 
-> **Status: PARTIAL — Phases 1-3 IMPLEMENTED, SHIPPED and PUSHED 2026-08-20** as commit
+> **Status: DONE — Phases 1-3 SHIPPED 2026-08-20 (`0cbb65a4`); Phases 4-5 RUN AND ANSWERED
+> 2026-08-21 by run `c10864d1`. The owner's ask is answered for every run on the Active tab.**
+>
+> Off PARTIAL because the thing PARTIAL meant — *nothing has been reopened* — is now false of every
+> run in the selection, and the answers are in. **20 `merged`, 2 `merged-now`, 0 `land-blocked`,
+> 0 `cannot-determine`, 0 runs without a verdict** (22 lines across 20 runs; `2f1ae4aa` touched
+> three repos and printed one per repo). Cost **$114.05** for 19 continuations, mean $6.00 — against
+> $1,222.59 of original spend for the same runs. The per-run table, per-wave gates and the four
+> defects the sweep measured live in `.ai/specs/2026-08-20-reopen-sweep-execution.md`
+> § Status log — 2026-08-21; do not re-derive them here.
+>
+> **This spec's acceptance criterion names the runs whose verdict was not plain `merged`. There are
+> two, and both are the known-unmerged findings this spec was written around — both now landed:**
+>
+> * **`b1684fe9` (chat) — `merged-now` → `35d2e33e`.** The 8-file, +1000/−54 SPEC-529
+>   implementation that was on no `main` at all is now `origin/main`'s tip. The reopened agent found
+>   that SPEC-528 (`030343da`) had landed ~85% of the same fix from a parallel triage, **discarded**
+>   the duplicate commit `2675cd16` rather than re-landing it, and pushed only the genuine delta.
+>   `git cherry origin/main cez/b1684fe9` empty. $6.80.
+> * **`7c2dd8f0` (cezar) — `merged-now` → `e916a211`.** The 561-line spec expansion at `ce6a5e14`
+>   was never on `main`; the agent rebased onto `origin/main` preserving `f9bcda42`'s amendment, ran
+>   typecheck green, proved the pre-existing test failures unrelated, and fast-forward pushed. It is
+>   now `origin/main`'s tip, `git cherry` empty. $12.87.
+>
+> **No run reported `land-blocked` or `cannot-determine`, and none settled without a verdict.** One
+> continuation (`81345cea`) crashed on a transport error before answering and was recovered by
+> re-filing that single run by id — it then answered `merged` in two minutes for $1.24.
+>
+> **What is deliberately not claimed.** Eleven of the nineteen runs finished in **`waiting`** rather
+> than `done` — they answered and parked awaiting a user — so their worktrees and branches are still
+> on disk and their apply-backs have not run. That is board hygiene, not audit (cezar todo
+> `4fc816ca`). And the scheduler defect that nearly stalled the sweep — a transition into `waiting`
+> frees a slot **without pumping the queue** — is diagnosed by experiment but **not fixed**, because
+> the fix is TypeScript and shipping it restarts the service (cezar todo `b6fbd608`).
+>
+> ~~**Status: PARTIAL — Phases 1-3 IMPLEMENTED, SHIPPED and PUSHED 2026-08-20**~~ as commit
 > `0cbb65a4` on `origin/main`, a clean fast-forward `f9bcda42..0cbb65a4`, no PR (this repo ships
 > direct linear commits to `main`, AGENTS.md § "Shipping cezar itself"). Alongside it, `2e421370`
 > — a pre-existing cross-cutting repair this run's gate step uncovered and reproduced at clean
@@ -8,15 +43,25 @@
 > never commits, so every dry run died at `commit-push`. `npm run typecheck` exit 0; 64 new tests
 > across five files green.
 >
-> **CORRECTED 2026-08-20 19:51 UTC by run `7aecd6a2`: ~~NOTHING HAS BEEN REOPENED~~ — one run
-> has.** Chat run `b1684fe9` was reopened at 19:27:26 UTC as the Wave A canary of
-> `.ai/specs/2026-08-20-reopen-sweep-execution.md`, and was still answering when that run's
-> `document` step ran. The other **18 have not been touched, and no `MERGE-VERDICT` line exists
-> anywhere on this box yet**, so the sentence's conclusion still holds even though its premise no
-> longer does. Read the execution spec, not this paragraph, for where the sweep actually stands.
+> **CORRECTED AGAIN 2026-08-21 by run `c10864d1`: ~~the other 18 have not been touched~~ — all 18
+> have.** Waves B and C fired at 06:55 and 06:59 UTC; every run in the selection now has a reopen
+> request stamped `started`, and `MERGE-VERDICT` lines exist on this box (two so far). The
+> paragraph below is kept unchanged underneath, because its *method* — read the execution spec,
+> not this one, for where the sweep stands — is still exactly right.
 >
-> **Phases 4-5 — the production sweep and the record it produces — are NOT done. ~~NOTHING HAS BEEN
-> REOPENED~~, and the owner's ask is therefore NOT yet answered.** This is *QA needed*, not done.
+> ~~**CORRECTED 2026-08-20 19:51 UTC by run `7aecd6a2`: NOTHING HAS BEEN REOPENED — one run
+> has.**~~ Chat run `b1684fe9` was reopened at 19:27:26 UTC as the Wave A canary of
+> `.ai/specs/2026-08-20-reopen-sweep-execution.md`, and was still answering when that run's
+> `document` step ran. ~~The other **18 have not been touched, and no `MERGE-VERDICT` line exists
+> anywhere on this box yet**, so the sentence's conclusion still holds even though its premise no
+> longer does.~~ Read the execution spec, not this paragraph, for where the sweep actually stands.
+>
+> **SUPERSEDED 2026-08-21: Phases 4-5 have been RUN.** The sweep is fired; the ask has been put to
+> all 19. It is still *QA needed* rather than *done* — for the new reason that 17 answers are
+> outstanding, not the old one that nothing had been asked. Original text below.
+>
+> ~~**Phases 4-5 — the production sweep and the record it produces — are NOT done. NOTHING HAS BEEN
+> REOPENED, and the owner's ask is therefore NOT yet answered.** This is *QA needed*, not done.~~
 > ~~Two things stand between here and there~~ — **one thing now. (1) deploy the backend is DONE,
 > 2026-08-20 19:04 UTC:** `/opt/cezar/.deployed-commit` = `f53f5a58`, the service restarted onto
 > the new tree (MainPID 3548803 → 3683619) and the reopen watcher is live in the resident process.

@@ -78,6 +78,76 @@
 
   Remaining waves are carried by cezar todo `9159228c`.
 
+  **ANSWERED 2026-08-21 (run `c10864d1`): the sweep ran and every one of the 19 runs replied —
+  20 `merged`, 2 `merged-now`, 0 `land-blocked`, 0 `cannot-determine`, 0 without a verdict, for
+  $114.05 total.** ~~All four waves fired — every one of the 19 runs has now been asked.~~ ~~The other 18 have not been touched~~ — they have. Wave B (`be31d9e9`,
+  the workspace canary) went out at 06:55:11 UTC and Wave C (17 runs: workspace 14 / chat 2 /
+  cezar 1) at 06:59:08 UTC; **all 18 requests were stamped `started` by the resident watcher within
+  a second**, `chat` included, because Wave A had already made that context resident — luck, not a
+  fix for `503195a8`. Four things are now known that were not:
+
+  - **A continuation costs $2-$7, not $60.** The first two measurements that have ever existed on
+    this box: `b1684fe9` $28.28 → $35.09 (**$6.80** — it rebased, ran a monorepo's full pre-push
+    gate and pushed) and `be31d9e9` $2.80 → $4.69 (**$1.89** — audit only, already merged). Every
+    prior estimate had to reason from *original* run cost ($1,209 across the 19), which made a bulk
+    reopen read as a four-figure decision. It is not; the whole sweep should land in the $40-$130
+    range.
+  - **Wave A passed on content, and the prompt's grounding worked.** `b1684fe9` settled `done` at
+    06:57:03 with `MERGE-VERDICT: merged-now | chat | 35d2e33e`. Its agent found that SPEC-528 had
+    already landed ~85% of the same fix from a parallel triage, **discarded** the duplicate commit
+    `2675cd16` rather than re-landing it, and pushed only the delta — so the fix is on `origin/main`
+    (its tip) even though `git cherry` is vacuously empty. A bare `merged` here would have meant the
+    prompt failed; it did not.
+  - **The ten-worktree path is proven — and has three different correct-looking counts.**
+    `be31d9e9` materialized **exactly 10** distinct worktrees. Count by `--git-common-dir`: the
+    naive per-directory count is 14, and the engine's own note says "12 project worktree(s)
+    isolated" because it counts `workspaceProjects` entries.
+  - **Apply-back on a re-materialized worktree set is now measured, not reasoned.** The canary
+    parked in `waiting` before it could prove it, but `b63f15e4` (Wave C, workspace) settled at
+    07:14, emitted `applying 10 project worktree(s) back to their checkouts…`, and left **zero**
+    `cez/b63f15e4` worktrees and **zero** branches across the 10 repos with every real checkout
+    clean and no conflict markers — the `outcome: 'nothing'` path, exactly as the spec's risk entry
+    predicted. That entry had been reasoned-through-and-never-run since it was written.
+  - **The Wave D collector in the shipped spec matches nothing.** It was written as
+    `grep '^MERGE-VERDICT:'`, but the same spec's prompt tells each agent to append the line under
+    `## Progress log` — where it is a **bullet**, so `^` never matches. The `.ndjson` also contains
+    the prompt's own `<merged|…>` placeholder, which a naive grep reports as a verdict. Corrected in
+    place in the spec. A verification command written from the format you asked for rather than the
+    artifact you got passes review and fails in production — and this one could not be caught when
+    written, because there were no verdicts yet and "0 results" was indistinguishable from "correct
+    but empty".
+
+  **Both known-unmerged findings were landed, and neither was rounded up.** `chat` `cez/b1684fe9`
+  → **`35d2e33e`** and `cezar` `cez/7c2dd8f0` → **`e916a211`**; each is now its repo's
+  `origin/main` tip with an empty `git cherry` after a fetch. Everything else on the board was
+  already on `main` — which nobody could have known before this ran. **Cost: $114.05 for 19
+  continuations, mean $6.00** (min $1.15, max $21.53) against **$1,222.59** of original spend for
+  the same runs: re-asking the whole Active tab costs about 9% of one expensive run.
+
+  **Two things are deliberately not claimed done.** Eleven of the nineteen finished in `waiting`
+  rather than `done` — they answered and parked awaiting a user — so their worktrees and branches
+  are still on disk and their apply-backs have not run (board hygiene, todo `4fc816ca`). And two
+  continuations died on transport errors mid-sweep; one had already printed its verdict, the other
+  had not and was recovered by re-filing that **single run by id** (`81345cea`, answered in two
+  minutes for $1.24). `--all-done` would never have re-asked it: it selects `status === 'done'`
+  only, and `markReopenStarted` is first-stamp-wins and never retried. A failed workspace run also
+  removes its 10 worktrees but **leaks its 10 branches**. Measured afterwards across the 10 repos:
+  **107 live worktrees, 117 live branches, 7.8 GB** — and **0 of 10 real checkouts had a single
+  uncommitted change**, with no conflict markers anywhere. Litter, not damage.
+
+  ~~**Not finished, and not to be rounded up.** 17 verdicts are outstanding and the queue drains
+  until nudged. Measured 07:00-07:07 UTC with `maxParallel: 3`, exactly two live agents and 17 runs
+  `queued`: **zero started in seven minutes**. The cause was then established by experiment rather
+  than left as a guess — an idempotent `PUT /api/v1/workspace/config` (the `resources` object read
+  back verbatim; `~/.cezar/config.json` md5 unchanged) fires the documented `semaphore.refresh()` →
+  pump-every-manager hook, and **two runs started within eight seconds**. So capacity was never the
+  problem: **a transition into `waiting` frees a slot without pumping the queue**, and every
+  *settle* does. A `waiting` run holds no slot — three ran against `maxParallel: 3` immediately
+  after — which also exonerates the `accountHeldFor` hypothesis. Todo `b6fbd608` carries the fix
+  and the spec carries the nudge as an operational remedy. Collection is carried by todo
+  `033ccf08`. The second known-unmerged finding, `cezar` `cez/7c2dd8f0` @ `ce6a5e14`, is **still
+  unmerged** with its reopen queued.~~ *(Both resolved within the hour — see above.)*
+
   **REDEPLOYED 2026-08-20 19:58 UTC (same run, `deploy` step): `/opt/cezar/.deployed-commit` is now
   `34a80bb9` and both `.ai/deploy-targets.json` probes exit 0.** Worth recording because it is a
   trap this repo will hit again: the `document` step's own commits moved `HEAD` past the marker, and
