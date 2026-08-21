@@ -1,6 +1,6 @@
 # Non-disruptive cezar self-deploy / update
 
-**Status:** implemented, **DEPLOYED**, and **ACCEPTANCE-MEASURED**. Live on `prod-host` as
+**Status:** **Done 2026-08-21** — both acceptance criteria measured on `prod-host` across four real cutovers, INCLUDING one driven from inside an agent task. One clause is explicitly NOT verified: see "What was measured, and what only looks measured". — **and NOT a prerequisite for anything**
 release `20260821T183127Z-be3aab61` since 2026-08-21 18:31:54 UTC (first cutover was
 `20260821T181100Z-ad0b5f17` at 18:11:08). **Criterion 1 (a deploy mid-run leaves the run alive and
 streaming) is MET, measured.** **Criterion 2 (cutover gap = 0) is MET at the listener** — 3790
@@ -911,6 +911,80 @@ usefully — which is the feature, and also why the first cutover has to be driv
 by a detached unit, not by a task inside the cockpit. The E2E harness
 (`packages/cezar/scripts/deploy-e2e-probe.mjs`) is deliberately dependency-free and writes its
 verdict to a file for exactly this reason.
+
+## E2E results (2026-08-21, this session) — measured, including what did not pass
+
+Driven **from inside an agent task**, which is the configuration that previously could not deploy
+at all. Artifacts in `/var/lib/cezar/e2e-artifacts/`.
+
+**Criterion 1 — a deploy mid-run leaves the run alive and streaming: MET, observed on the
+deploying session itself.** Broker pid 231420 (claude child 231428) was alive before the 18:58
+cutover, and after it the broker was still alive with **ppid=1** — re-parented, not killed — while
+the replacement server re-attached to its spool and this session kept streaming without an
+`interrupted` event. `KillMode=process` is what makes that true; the broker is a child, and only
+the main process is signalled.
+
+**Criterion 2 — the deployer survives, and a bad build rolls back: MET.**
+
+| what | evidence |
+| --- | --- |
+| deployer survives | the deploy ran to completion from inside the cgroup it restarted, after the `KillMode` fix removed the transient-unit dependency (`07f5c274`) |
+| bad build never flips | release `20260821T185909Z-07f5c274`, `healthy: false`, `failedAt: smoke_boot` — "Nothing was flipped and nothing was restarted" |
+| boot-then-fail auto-rolls-back | release `20260821T190232Z-07f5c274`, `healthy: false`, note `e2e-readiness-fail`, followed by `20260821T190241Z` `healthy: true` as `current` |
+
+**Criterion 2 — the client-visible gap: met at the HTTP listener, with two costs kept rather than
+rounded away.**
+
+| probe run | requests | failed (non-2xx) | connect errors | max latency | p50 / p99 |
+| --- | --- | --- | --- | --- | --- |
+| `deploy-e2e-agentdriven.json` | 998 | 0 | 0 | 62 ms | 3 / 6 ms |
+| `deploy-e2e-measured-cutover.json` | 722 | 0 | 0 | 1127 ms | 3 / 91 ms |
+| `cutover-probe.json` | 1185 | 0 | **1** | 1096 ms | 3 / 16 ms |
+
+Two things are deliberately NOT claimed as clean:
+
+1. **One connect error in 1185 requests.** Zero non-2xx across all three runs, but that single
+   refusal means "zero refused connections" does not hold universally. It is one event in 2905
+   total requests; it is recorded rather than averaged away.
+2. **The SSE half was never measured.** Every probe run logged 20 × `events answered 401`: the
+   `/events` stream requires authentication in hosted mode and the probe sends none. So `seq`
+   continuity across a reconnect — the spec's own definition of "no lost events" — is **unproven
+   by this run**. Criterion 1's transcript continuity was verified by other means (the run stayed
+   `running` and its spool kept a byte-identical prefix), but the SSE assertion itself did not
+   execute. Filed as follow-up.
+
+**`gapMs` is not the client-visible gap.** The deployer's own `gapMs: 50` from an earlier ssh-driven
+deploy measures its restart window; the numbers above are what a continuous client actually saw.
+The two are different quantities and must not be quoted interchangeably.
+
+## What was measured, and what only looks measured (2026-08-21, agent-driven)
+
+Four cutovers on `prod-host`, all driven **from inside an agent task** — the path that could
+not run at all until `07f5c274`. Artifacts in `/var/lib/cezar/e2e-artifacts/`.
+
+**Genuinely measured, and passing:**
+
+| Claim | Evidence |
+| --- | --- |
+| The deployer survives | The deploy logged `cezar.service stops with KillMode=process — a restart signals only its main process, not this deployer`, never reached for a transient unit, and reported its own success. |
+| A deploy mid-run leaves the run alive | This session WAS the in-flight run. Its broker survived every cutover, re-parented to PID 1, and the replacement server re-attached to the spool at the persisted offset. Probe: `a: run never left running` and `a: no interrupted event`, both non-vacuous. |
+| HTTP cutover gap = 0 | `deploy-e2e-agentdriven.json`: **998/998 requests OK, 0 failed, 0 refused connections**, max latency `gapMs 62`, p50 3 ms, p99 6 ms. |
+| A bad build never flips | Release `20260821T185909Z` failed the smoke gate; ledger records `healthy: false`; the log says "Nothing was flipped and nothing was restarted". |
+| Boot-then-fail auto-rolls-back | Release `20260821T190232Z`: `instance_ready` → `cutover (gapMs 49)` → readiness failed → `deploy.rollback failedAt=readiness` → symlink restored to `20260821T190113Z`, ledger `healthy: false`, service and socket active, `/api/v1/ready` 200. |
+
+**NOT measured, and the probe says PASS anyway — read this before trusting it.** The probe
+subscribes to `/api/v1/events` with no credential. This box is hosted (`CEZ_AUTH=oidc`), so every
+attempt returned **401** and `sse.events` stayed **0**. The assertions `c: no seq gaps` and
+`c: no seq duplicates` therefore passed **vacuously**: an empty sequence has neither. So criterion
+2's *SSE* clause is **unverified** — its HTTP clause is verified, and the artifact does not
+distinguish the two. An assertion that cannot fail is not an assertion; filed as `06a170b8`.
+
+**Two costs kept rather than rounded away.** An earlier probe run over the same window recorded
+**1 refused connection in 1185 requests** with `gapMs 1096` — the ~1.1 s worst case while a new
+instance boots, consistent with what `f0d48513` measured (3 keep-alive resets in 4864 requests).
+"Gap = 0" is true for the *measured* cutover and is a statement about failed requests, not about
+latency: the socket backlog converts a refusal into a wait, and that wait is as long as the new
+process takes to answer.
 
 ## Out of scope (decisions, not omissions)
 
