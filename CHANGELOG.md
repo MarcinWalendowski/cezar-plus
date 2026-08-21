@@ -5,6 +5,37 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- ✨ **A deploy no longer kills what it is deploying: `server-deploy --strategy=blue-green`.**
+  Spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`; commits `3f4e9c33` (foundation,
+  154 tests), `954c6a55` (integration, 41 tests), `ad0b5f17` (migration allowlist fix). **Live on
+  `prod-host` since 2026-08-21 18:11:08 UTC** as release `20260821T181100Z-ad0b5f17`.
+
+  The old path was a `systemctl restart` under `KillMode=control-group`: it killed every agent run
+  in flight, every open SSE/WebSocket stream, and — when the deploy was driven from the box — the
+  deploying session itself. Five pieces replace it. **P1** makes `/opt/cezar` an atomic release
+  symlink over `/opt/cezar-releases/<id>` with a `deploy.json` ledger, so activation is one
+  `rename()` and rollback is the same operation backwards (`--rollback[=<id>]`). **P2** re-execs the
+  deployer out of the service cgroup so it survives replacing its own parent. **P3** moves the
+  listening socket to `cezar.socket` (systemd socket activation), so `127.0.0.1:4321` is held by
+  pid 1 across the handover and no client is ever refused — the port is a fixed contract on this
+  box, because the perimeter is a *token-mode* `cloudflared` tunnel whose ingress map lives in
+  Cloudflare's dashboard, not in a file anyone can flip. **P4** gives each claude run a detached
+  **broker** with a byte-addressed spool, so the run outlives the cockpit that spawned it and is
+  re-attached at `consumedOffset` afterwards, with one shared stream consumer feeding both
+  transports (a parity test caught the brokered path dropping `turn.started` on follow-up turns on
+  its first run). **P5** gates the flip on a smoke-boot plus `GET /api/v1/ready`, and rolls back
+  automatically when a release fails it.
+
+  `--strategy=restart` is still the default, so no existing invocation changed meaning.
+  `server-migrate-releases` adopts the layout on a box installed before this existed.
+  `GET /api/v1/health` now reports `runtime.{socketActivated,runBrokerIsolation,brokeredBackends,
+  brokerAvailable}` and `deploy.{releaseId,version,sha,activatedAt}`, so the degraded case is
+  visible rather than assumed.
+
+  **QA Needed:** the acceptance E2E probe (`packages/cezar/scripts/deploy-e2e-probe.mjs`) has not
+  been run, so "gap = 0" and "a run survives a mid-run deploy" are designed-for, not measured. The
+  `gapMs: 50` in the deploy log is the deployer's own restart window and is **not** the
+  client-visible gap.
 - ✨ **Every finished task can now be reopened and made to prove its work reached `main` — from
   the box, without a browser.** Spec `.ai/specs/2026-08-20-reopen-finished-tasks-merge-audit.md`,
   commit `0cbb65a4`.

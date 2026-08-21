@@ -314,6 +314,47 @@ npx cezar-cli server-deploy --platform hetzner --domain acme.login.example.com
 It restarts the unit and re-runs the full end-to-end verify, so "deployed" means
 the thing actually answers correctly through nginx.
 
+### Deploying without dropping in-flight runs (`--strategy=blue-green`)
+
+A plain redeploy restarts the unit, and a restart kills every agent run in
+flight plus any open SSE/WebSocket stream — including, when the deploy is driven
+from the box itself, the deployer's own session. `--strategy=blue-green` avoids
+that: the new version is staged as a **release** under `/opt/cezar-releases/`,
+smoke-booted, and only then made current by flipping the `/opt/cezar` symlink
+atomically; the listening socket is held by `cezar.socket` (systemd socket
+activation) so clients are never refused during the handover; runs live in
+detached per-run **brokers** and are re-attached by byte offset afterwards; and a
+release that fails its health gate is rolled back automatically.
+
+```bash
+# one-shot, on a box installed before this existed: adopt the release layout and
+# install cezar.socket + the KillMode=process drop-in + cezar-runs.slice
+node <checkout>/packages/cezar/dist/index.js server-migrate-releases        # plan
+node <checkout>/packages/cezar/dist/index.js server-migrate-releases --yes  # apply
+
+# from then on
+npx cezar-cli server-deploy --strategy=blue-green --follow
+npx cezar-cli server-deploy --rollback[=<releaseId>]
+```
+
+`--strategy=restart` stays the default, so an existing invocation does not change
+meaning. `GET /api/v1/health` reports what the machinery is actually doing —
+`runtime.socketActivated`, `runtime.runBrokerIsolation`, `runtime.brokeredBackends`
+and the current `deploy.releaseId`/`sha` — and `GET /api/v1/ready` is the
+readiness gate the deploy probes (503 while draining or unready).
+
+**Two things to know before you drive one.** The service user needs to be able to
+manage its own units: grant it narrowly (a polkit rule for `manage-units` on
+`cezar.service`/`cezar.socket` only — never a unit-name prefix, and never the
+right to create *system* transient units, which run as root), plus
+`loginctl enable-linger` for cgroup delegation. And a deploy started from inside
+an agent task still fails even so, because it re-execs itself out of the service
+cgroup via a system `systemd-run` unit — drive the cutover as an operator, or from
+a detached unit.
+
+Design, phases and current status:
+[`.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`](../../.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md).
+
 ---
 
 ## Uninstall

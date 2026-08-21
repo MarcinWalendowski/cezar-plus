@@ -801,6 +801,24 @@ npx cezar-cli server-uninstall --platform ubuntu-vps   # reverse it
 npx cezar-cli server-install   --platform ubuntu-vps --domain shop.example.com
 ```
 
+**A deploy that doesn't kill what it is deploying.** The default `server-deploy`
+restarts the unit, which drops in-flight agent runs and any open SSE/WebSocket
+stream. `--strategy=blue-green` instead stages the new version as a *release*,
+smoke-boots it, flips an atomic symlink, hands the listening socket over via
+systemd socket activation, and rolls itself back if the new instance fails its
+health gate — while runs keep going in detached per-run brokers:
+
+```bash
+npx cezar-cli server-migrate-releases            # one-shot: turn an existing install
+                                                 # into the release layout (--yes to apply)
+npx cezar-cli server-deploy --strategy=blue-green --follow
+npx cezar-cli server-deploy --rollback           # flip back to the previous release
+```
+
+`--strategy=restart` remains the default, so nothing you already run changes
+meaning. Design and current status:
+[`.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`](.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md).
+
 On `ubuntu-vps` a single host can run several independent cockpits — add
 `--domain <host>` and each gets its own port, nginx site, login and service; a
 new domain never resumes or clobbers the first install.

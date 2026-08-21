@@ -1,6 +1,10 @@
 # Non-disruptive cezar self-deploy / update
 
-**Status:** implemented 2026-08-21 (`3f4e9c33` + `954c6a55`), **QA Needed — and the on-box E2E is BLOCKED on root, see "Deploying this needs privileges the service user does not have"** — **and NOT a prerequisite for anything**
+**Status:** implemented **and DEPLOYED — live on `prod-host` since 2026-08-21 18:11:08 UTC**
+as release `20260821T181100Z-ad0b5f17` (`3f4e9c33` foundation + `954c6a55` integration + `ad0b5f17`
+migration fix). **Still QA Needed:** the acceptance E2E probe has never been run, so neither
+acceptance criterion has been *measured* — see "Status log — 2026-08-21" immediately below.
+**NOT a prerequisite for anything.**
 **Date:** 2026-08-19, rewritten 2026-08-20
 **Owner ask:** "ensure that we can deploy/update cezar itself without any disruption."
 **Todo:** `d0386413-8bac-4e2a-88c4-62c37ab87ea1`
@@ -15,6 +19,58 @@ docs), `notion-2fea4573209f` (the `cockpit.example.com` deployment record)
 > any foreign run in flight, and a full unattended self-deploy was verified on 2026-08-20
 > (`8a34f20d`, ~5s outage). What remains below is a genuine *quality* improvement — shrink the gap
 > to zero — not a blocker. Do not cite it as a reason to defer a deploy.
+
+---
+
+## Status log — 2026-08-21: deployed, rootless, and brokering real runs
+
+The box was provisioned at **18:08–18:11 UTC** and the first blue-green cutover ran at **18:11:08
+UTC**. The provisioning decisions (why `/opt` became `root:cezar 2775` rather than the symlink
+moving a level deeper, the scoped polkit rule, and what is deliberately still root-bound) are
+recorded in the corpus as **`cezar-prod-rootless-deploy-provisioning`** — read that before changing
+anything about the host side. This section records only what is *true of the box now*, each row
+re-measured on 2026-08-21 ~18:20 UTC rather than copied forward.
+
+**Live and verified:**
+
+| What the spec asked for | Measured |
+| --- | --- |
+| P1 atomic release + ledger | `/opt/cezar` → `/opt/cezar-releases/20260821T181100Z-ad0b5f17` (a symlink, no longer a directory); `/opt/cezar-releases/deploy.json` holds `current`, `previous`, and `healthy: true` |
+| P3 socket activation | `cezar.socket` active; `runtime.socketActivated: true` |
+| P3 drain-capable unit config | `systemctl show cezar.service` → `KillMode=process`, `Delegate=yes`, `TimeoutStopUSec=30s` (drop-in `40-non-disruptive.conf`, plus `cezar-runs.slice`) |
+| P4 run broker | `runtime.brokerAvailable: true`, `brokeredBackends: ["claude"]`, `runBrokerIsolation: "delegated"` — **not** `"none"` |
+| P5 readiness gate | `GET /api/v1/ready` → 200 |
+| Deploy identity in-band | `health.deploy` = `{releaseId, version 0.10.0, sha ad0b5f17…, activatedAt}` |
+
+**The broker is not a lab result — it is carrying production traffic.** The session that wrote this
+section is itself brokered: `run-broker --spool …/7c2dd8f0-….spool --run 7c2dd8f0… --step document`,
+executed out of `/opt/cezar-releases/20260821T181100Z-ad0b5f17`, with the run record carrying
+`spoolDir` and a live `consumedOffset`. P4 is exercised by every claude run on this box now.
+
+**Deploys no longer need root, and the grant is narrow — established by negative control, not by
+reading the rule.** As the `cezar` service user: `systemctl start cezar.socket` → exit 0;
+`systemctl start cloudflared.service` → *"Access denied … requires interactive authentication"*.
+The polkit rule grants `manage-units` on `cezar.service`/`cezar.socket` and nothing else.
+
+**What is still NOT measured, and is therefore what keeps this QA Needed:**
+
+1. **Neither acceptance criterion has been probed.** `packages/cezar/scripts/deploy-e2e-probe.mjs`
+   has never been run — there is no verdict artifact anywhere on the box. "A deploy mid-run leaves
+   the run alive and streaming" and "HTTP/SSE cutover gap = 0" are *designed for* and *plausible*,
+   not *demonstrated*.
+2. **`gapMs: 50` in the deploy log is not the client-visible gap.** It is the deployer's own number
+   for its own restart window. Socket activation is what actually closes the client-visible gap,
+   and only the probe measures that. Do not quote the first as the second.
+3. **Auto-rollback has not been exercised on this box.** No deliberately broken build has been put
+   through the health gate here.
+4. **A deploy driven from inside an agent task still fails** (recorded in
+   `cezar-prod-rootless-deploy-provisioning`): `buildSystemdRunArgv` shells out to *system*
+   `systemd-run`, which is denied to `cezar` — and must stay denied, since a system transient unit
+   runs as root. An operator/ssh-driven deploy works unprivileged because that shell is not in the
+   unit's cgroup. `decideReExec`'s reason string still hardcodes `KillMode=control-group`, which is
+   stale on this box.
+
+Tracked as todo `a025f99a`, whose ROOT-NEEDED half is now done; the probe is what remains.
 
 ---
 
@@ -665,7 +721,25 @@ brokered path emitted `turn.started` only for the *opening* message, so every br
 turn was missing it and the v2 stream diverged the moment a run had two turns. That is exactly the
 class of defect the one-consumer rule exists to prevent, and it was invisible to every other test.
 
-## Deploying this needs privileges the service user does not have (measured 2026-08-21)
+## SUPERSEDED 2026-08-21 (same day) — the box was provisioned; a deploy needs NO root now. The privilege wall below is history, not current state.
+
+> **SUPERSEDED 2026-08-21 18:11 UTC.** Everything in this section was true when measured at
+> ~14:50 UTC and is false as a description of the box today. The four root commands were run, in an
+> adapted form, at 18:08–18:11 UTC: `/opt` was made `root:cezar 2775` so the release symlink can be
+> replaced without root, linger was enabled for `cezar`, `cezar.socket` + the
+> `40-non-disruptive.conf` drop-in + `cezar-runs.slice` were installed, and a **scoped polkit rule**
+> (`manage-units` on `cezar.service`/`cezar.socket` only) was added. **`cezar server-deploy
+> --strategy=blue-green` now runs as the `cezar` service user with no root and no sudo**, and the
+> first such deploy is live. See "Status log — 2026-08-21" above for the re-measured state, and the
+> corpus note `cezar-prod-rootless-deploy-provisioning` for the provisioning decisions and their
+> blast radius.
+>
+> **One clause below survives and is still load-bearing:** a deploy driven from *inside* an agent
+> task still fails, because `buildSystemdRunArgv` needs a *system* `systemd-run` transient unit,
+> which `cezar` is correctly denied. Drive the cutover as an operator or from a detached unit.
+>
+> The original text is kept unchanged below because those measurements are the reason the grants
+> are shaped the way they are — do not re-derive them, and do not read them as the state of the box.
 
 **The code is on `main`; it has never been deployed, and this session could not deploy it.** That
 is not a scheduling gap, it is a permissions wall, and it is worth stating precisely because the
