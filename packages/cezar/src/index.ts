@@ -38,6 +38,7 @@ import {
   unavailableProviderMessage,
 } from './server/provider-action-gate.ts';
 import { checkForUpdate } from './update-check.ts';
+import { ensureBootRepo, holdsOnlyRuntimeState } from './workspace/boot-repo.ts';
 import { loadWorkspaceConfig } from './workspace/config.ts';
 import { runMigrations } from './workspace/migrations.ts';
 import { shouldRegisterProject } from './workspace/projects.ts';
@@ -458,6 +459,37 @@ async function initWorkspace(repoRoot: string, bindHost?: string): Promise<strin
   return undefined;
 }
 
+/**
+ * Change A of `.ai/specs/2026-08-21-workspace-boot-repo-and-always-worktrees.md`: if the launch
+ * directory is cezar's own scratch root, make it a git repository so tasks homed there can be
+ * isolated, and tell the `RunManager` that is what it is bound to.
+ *
+ * The `holdsOnlyRuntimeState` gate is the whole safety of this: `cezar serve` is routinely
+ * launched from inside a real project, and boot never registers the launch directory
+ * (`suppressBootRegistration` is unconditional), so nothing else distinguishes the two. A repo
+ * that holds work keeps every behaviour it has today.
+ *
+ * Idempotent and never fatal. A failure here degrades to exactly the pre-spec behaviour — the
+ * root stays non-git, tasks run in place one at a time — so it is a warning, not a boot failure
+ * (`AGENTS.md`: degrade, never fail the boot). The flag is still returned in that case: grant
+ * adoption (change C) needs no repository at the boot root, and it is the half that answers the
+ * owner's report.
+ */
+async function prepareBootScratchRoot(repoRoot: string): Promise<boolean> {
+  if (!(await holdsOnlyRuntimeState(repoRoot))) return false;
+  const outcome = await ensureBootRepo(repoRoot);
+  if ('error' in outcome) {
+    console.warn(
+      `[cez] could not make the boot root a git repository (${outcome.error}) — tasks homed in ${repoRoot} will run in place, one at a time`,
+    );
+    return true;
+  }
+  if (outcome.state === 'created') {
+    console.log(`  initialized the boot root as a git repository (branch ${outcome.branch}) so tasks homed here isolate`);
+  }
+  return true;
+}
+
 // ---- serve -----------------------------------------------------------------
 
 async function serveCommand(
@@ -658,10 +690,13 @@ async function serveCommand(
   // cache hook's first call; PUT /api/workspace/config (step 2.7) re-fires it.
   const semaphore = new WorkspaceSemaphore();
   await semaphore.refresh();
+  // Before the store opens and before anything pumps: `getRepoInfo(repoRoot)` below, the startup
+  // worktree reconcile, and `manager.recover()` must all see the repository if there is to be one.
+  const bootScratchRoot = await prepareBootScratchRoot(repoRoot);
   // keepLive + recover() (#367): runs that were queued/running/waiting when
   // the previous process exited are re-queued or resumed instead of failed.
   const store = openStore(repoRoot, { keepLive: true });
-  const manager = new RunManager(store, repoRoot, { semaphore });
+  const manager = new RunManager(store, repoRoot, { semaphore, bootScratchRoot });
   const providerAuth = new ProviderAuthService();
   const workspaceEvents = new WorkspaceEventBus();
   const providerRuntimeAuth = new ProviderRuntimeAuthObserver(providerAuth, (status) => {
@@ -894,6 +929,7 @@ async function runCommand(
     }
   }
 
+  const bootScratchRoot = await prepareBootScratchRoot(repoRoot);
   const store = openStore(repoRoot);
   // Headless tasks still appear in the cockpit later, so persist the same
   // task-local recovery event when a credential expires after the preflight.
@@ -903,7 +939,7 @@ async function runCommand(
   // 2.5) — one refreshed semaphore, even with just one manager in play.
   const semaphore = new WorkspaceSemaphore();
   await semaphore.refresh();
-  const manager = new RunManager(store, repoRoot, { semaphore });
+  const manager = new RunManager(store, repoRoot, { semaphore, bootScratchRoot });
 
   store.on('event', ({ event }) => {
     switch (event.type) {

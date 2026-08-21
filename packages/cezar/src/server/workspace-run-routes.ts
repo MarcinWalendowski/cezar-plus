@@ -39,6 +39,18 @@ import { loadWorkspaceGrant, type WorkspaceGrant } from '../workspace/granted-ro
  *  3. The boot project as the run's home, because a `RunManager` is bound to a repository and
  *     this is the one every workspace-level pass already uses.
  *
+ *     **Amended 2026-08-21** (spec `2026-08-21-workspace-boot-repo-and-always-worktrees.md`).
+ *     The boot root IS a git repository now — `workspace/boot-repo.ts#ensureBootRepo` init-plus-
+ *     commits it at boot, tracking two files with `.ai/` and `.claude/` ignored. Nothing on this
+ *     route changes: a workspace run still takes the earlier `isWorkspaceRun` branch and never
+ *     touches the boot repo. What changed is what happens to a run that reaches the boot root
+ *     WITHOUT the grant this route is the only writer of. Nine other `startRun` call sites omit
+ *     it, and such a run used to fall into the ordinary non-git branch — running in the scratch
+ *     root itself, holding its exclusive lease, capped at one at a time (measured: run
+ *     `50ce87f1`, 85 minutes). `run.ts#adoptWorkspaceGrant` now loads the same grant this route
+ *     loads and puts the run back on this path. So a run fixed there is indistinguishable on the
+ *     wire from one submitted here, which is the point.
+ *
  * Everything else — model policy, provider availability, agent account, workflow resolution — is
  * INJECTED, not re-implemented. Those guards belong to `POST /runs` and must answer identically
  * here; a second copy would drift the first time one of them changed. `server.ts` passes its own.
