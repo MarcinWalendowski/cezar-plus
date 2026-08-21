@@ -504,7 +504,7 @@ describe('agent profiles API', () => {
       });
       const spawns: string[] = [];
       const app = makeApp({
-        socketHub: { registerTopic: () => undefined, attach: () => undefined, close: () => undefined },
+        socketHub: { registerTopic: () => undefined, attach: () => undefined, close: () => undefined, drainClients: () => undefined },
         providerAuth: new ProviderAuthService({
           runCommand: async (executable) => {
             spawns.push(executable);

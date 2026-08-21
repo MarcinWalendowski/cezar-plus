@@ -22,6 +22,8 @@ import type { Next } from 'hono';
 import { createAdaptorServer, serve, type ServerType } from '@hono/node-server';
 import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
+import { SSE_RELOAD_EVENT, type DrainController } from './drain.ts';
+import { currentRelease, runtimeInfo, type RuntimeInfo } from './runtime-info.ts';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
@@ -305,6 +307,14 @@ export interface ServerDeps {
    * path — local `cezar serve`, tests, macOS — which keeps the port bind exactly as it was.
    */
   listenFd?: number;
+  /**
+   * Wind-down coordinator (P3 of `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`).
+   *
+   * Absent on every test app and on any embedder that does not care, in which case nothing is
+   * tracked and shutdown behaves exactly as it did. `serve` passes the one the signal handlers
+   * drain, which is what turns "process.exit mid-response" into "finish, then go".
+   */
+  drain?: DrainController;
   /** Workspace-registry id of the boot project (multi-project spec) — plumbed
    *  from `initWorkspace` in src/index.ts. Optional: legacy callers/tests get
    *  a lazy registry lookup by `repoRoot`, falling back to the repo's slug. */
@@ -1620,6 +1630,70 @@ export function createApp(deps: ServerDeps) {
 
   const app = new Hono();
 
+  // ---- graceful drain (P3) ---------------------------------------------------------------
+  //
+  // Two jobs, both outermost so nothing can slip past them:
+  //
+  //  1. count in-flight requests, so shutdown can WAIT for them instead of cutting responses
+  //     mid-body. `await next()` resolves when the handler has produced its Response — for a
+  //     streaming route that is the moment the stream is handed over, not the moment it ends, so
+  //     an SSE subscriber is correctly not counted as something to wait for. Streams are handled
+  //     by the second job instead, because they are something to END, not to wait on.
+  //
+  //  2. refuse new work once draining, with `503` + `Connection: close` and a `Retry-After`. With
+  //     socket activation the replacement process is already coming up behind the same socket, so
+  //     a client that retries immediately lands on it.
+  const drain = deps.drain;
+  if (drain) {
+    app.use('*', async (c, next) => {
+      if (drain.isDraining()) {
+        c.header('Connection', 'close');
+        c.header('Retry-After', '1');
+        return c.json({ error: 'cezar is restarting — retry' }, 503);
+      }
+      const done = drain.begin();
+      try {
+        await next();
+      } finally {
+        done();
+      }
+    });
+  }
+
+  /**
+   * Register an SSE stream with the drain, so a restart ends it with a resume cursor rather than
+   * a severed socket.
+   *
+   * `cursor()` is read at drain time, not at registration: the client needs the seq it actually
+   * reached, and for a live stream that is only knowable at the end. A stream whose route has no
+   * cursor concept sends the frame with none — the frame itself is still the useful half, because
+   * it is what makes the browser reconnect NOW instead of after its backoff.
+   */
+  const registerSseDrain = (
+    stream: {
+      writeSSE(m: { event: string; data: string }): Promise<void>;
+      close(): Promise<void>;
+      onAbort(listener: () => void): void;
+    },
+    cursor: () => unknown = () => undefined,
+  ): void => {
+    if (!drain) return;
+    const off = drain.registerStream(() => {
+      void (async () => {
+        try {
+          await stream.writeSSE({ event: SSE_RELOAD_EVENT, data: JSON.stringify({ cursor: cursor() }) });
+        } catch {
+          // The peer may already be gone; closing below is still correct.
+        }
+        await stream.close().catch(() => undefined);
+      })();
+    });
+    // Unregister when the client goes away on its own, or the closer set would grow by one entry
+    // per connection for the life of the process — a slow leak on the one route users keep open
+    // all day.
+    stream.onAbort(off);
+  };
+
   // Reject oversized request bodies before they reach any handler (#429). GETs
   // and SSE carry no body, so this only ever gates the mutating routes.
   app.use('*', bodyLimit({ maxSize: GLOBAL_BODY_LIMIT }));
@@ -1766,6 +1840,17 @@ export function createApp(deps: ServerDeps) {
   // 2026-08-07 at the repair stage, since four handlers below now do.)
   app.use('/api/*', async (c, next) => {
     if (c.req.path === `${V1_PREFIX}/health`) return next();
+    // `/ready` joins the exemption for a concrete operational reason (P5 of
+    // `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`): it is probed from the BOX, over
+    // loopback, by a deploy that has no session and cannot obtain one. Behind the perimeter it
+    // would answer 401, the deploy would read that as a broken release, and every good deploy
+    // would roll itself back.
+    //
+    // Unlike `/health` it is NOT made CORS-open — no `Access-Control-Allow-Origin`, so the
+    // same-origin guard above still applies to a browser. What it discloses is a version, a
+    // release id and a list of booleans, which is the shape `/health` already publishes to the
+    // whole internet.
+    if (c.req.path === `${V1_PREFIX}/ready`) return next();
     const principalContext = c as unknown as Context<{ Variables: { principal: Principal } }>;
     // `resolveAuthProvider`, not `resolveCapabilities(...).auth`: which provider a deployment
     // requires is a server-side policy, not a capability the cockpit is told about, and it is
@@ -1908,6 +1993,31 @@ export function createApp(deps: ServerDeps) {
   // hand, the handler was checked against it, and `AppType` then reported the hand-written type
   // back as if the server had proven it. Inferring here means the route says what it actually
   // sends, which is what lets the DTO be derived instead of maintained.
+  /**
+   * The release identity, resolved ONCE per app.
+   *
+   * It cannot change while this process lives — a deploy replaces the process, it does not move
+   * the running one between release trees — so re-reading the ledger per request would be a
+   * filesystem hit per health poll to learn something already known.
+   */
+  const release = currentRelease();
+  /** Types the always-present `runtime` as optional — see its use in `healthSnapshot`. */
+  const optionalRuntime = (info: RuntimeInfo): { runtime?: RuntimeInfo } => ({ runtime: info });
+  const describeRuntime = () =>
+    runtimeInfo({
+      socketActivated: deps.listenFd !== undefined,
+      // Probed defensively, because health is not allowed to be the thing that breaks. `deps` is
+      // a hand-built object at every call site that is not `src/index.ts` — the test suite's
+      // manager stubs, and any embedder assembling `ServerDeps` itself — so a manager without
+      // this method is a shape that reaches here in practice, and `healthSnapshot` is pre-warmed
+      // at BOOT: a throw there is an unhandled rejection during startup, not a failed request.
+      // `none` is the honest fallback rather than a lie: it is exactly what a process that never
+      // probed its isolation has, and it is the value that makes the degraded mode VISIBLE (see
+      // runtime-info.ts) instead of claiming an isolation nobody verified.
+      isolation:
+        typeof deps.manager.brokerIsolation === 'function' ? deps.manager.brokerIsolation() : 'none',
+    });
+
   const healthSnapshot = async () => {
     const [checks, repo, config, workspace] = await Promise.all([
       detectEnvironment(),
@@ -1951,6 +2061,15 @@ export function createApp(deps: ServerDeps) {
       // unreadable workspace degrades to `projects: []`.
       projects: workspace.projects,
       bootProject: workspace.bootProject,
+      // Non-disruptive deploy (P3/P4/P5). Additive, and cheap by construction: the isolation probe
+      // is cached on the manager and the ledger read is one small JSON file.
+      //
+      // Spread through an explicitly-optional holder, the same trick `latestVersion` above uses
+      // and for the same reason: this server always sends the key, but the CONTRACT declares it
+      // optional (an older cezar has no such field), and the contract-parity test demands the
+      // route's inferred type and the schema match exactly in both directions.
+      ...optionalRuntime(describeRuntime()),
+      ...(release ? { deploy: release } : {}),
     };
   };
   // ---- server-side health cache (stale-while-revalidate) -------------------
@@ -2050,6 +2169,45 @@ export function createApp(deps: ServerDeps) {
   };
 
   const healthRoutes = new Hono().get('/health', async (c) => c.json(await healthForRequest(c)));
+
+  /**
+   * `GET /api/v1/ready` — the deep readiness probe a health-gated deploy gates on (P5).
+   *
+   * Why not reuse `/health`: that route is cached (stale-while-revalidate, up to a minute) and
+   * CORS-open, which is right for discovery and disqualifying for a deploy gate — a cached 200
+   * can describe a server that has since stopped being able to serve, which is precisely the
+   * failure the gate exists to catch. This one is uncached and asks whether the things a request
+   * needs are actually there.
+   *
+   * It answers **503 when not ready**, not 200-with-`ready:false`: the probe is consumed by
+   * `curl`, by a deploy script and by systemd-adjacent tooling, all of which read the status line.
+   * A body-only failure would be reported as healthy by every one of them.
+   *
+   * `draining` is a `ready:false` too. During the wind-down this process is deliberately refusing
+   * work, and telling a load balancer otherwise would be a lie with consequences.
+   */
+  const readyRoutes = new Hono().get('/ready', (c) => {
+    const checks: Array<{ name: string; ok: boolean; detail?: string }> = [];
+    const record = (name: string, probe: () => string | undefined): void => {
+      try {
+        const detail = probe();
+        checks.push(detail === undefined ? { name, ok: true } : { name, ok: false, detail });
+      } catch (err) {
+        checks.push({ name, ok: false, detail: err instanceof Error ? err.message : String(err) });
+      }
+    };
+    // The run store is the one piece of state whose absence makes every route wrong rather than
+    // merely empty, so it is probed by USE (does it answer?) rather than by existence.
+    record('store', () => (Array.isArray(deps.store.listRuns()) ? undefined : 'run store did not answer'));
+    record('workspace', () => (typeof deps.repoRoot === 'string' && deps.repoRoot ? undefined : 'no repo root'));
+    record('backends', () => (resolveCapabilities(process.env, deps.bindHost) ? undefined : 'capabilities unresolved'));
+    record('draining', () => (deps.drain?.isDraining() ? 'server is draining' : undefined));
+    const ready = checks.every((check) => check.ok);
+    return c.json(
+      { ready, version, checks, runtime: describeRuntime(), ...(release ? { deploy: release } : {}) },
+      ready ? 200 : 503,
+    );
+  });
 
   // Whole-HOST CPU%/memory% for the dashboard header (spec
   // `.ai/specs/2026-08-19-host-machine-usage-in-dashboard.md`). Workspace-level — one host serves
@@ -5758,6 +5916,9 @@ export function createApp(deps: ServerDeps) {
       return streamSSENoBuffer(c, async (stream) => {
         let replaying = true;
         let maxSeq = requestedAfter;
+        // A restart ends this stream with the seq it reached, so the client reconnects with
+        // `Last-Event-ID` and the transcript continues rather than restarting or skipping.
+        registerSseDrain(stream, () => maxSeq);
         const buffered: RunEvent[] = [];
         // One endpoint, two SSE event names: v1 lines stay `run-event` (the name
         // the legacy UI listened to — its default branch JSON-dumped unknown
@@ -5820,6 +5981,7 @@ export function createApp(deps: ServerDeps) {
     .get('/events', (c) => {
       const { dataDir, store } = c.get('project');
       return streamSSENoBuffer(c, async (stream) => {
+        registerSseDrain(stream);
         const onRun = (run: RunRecord) => void stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
         const onDeleted = (id: string) =>
           void stream.writeSSE({
@@ -5870,6 +6032,7 @@ export function createApp(deps: ServerDeps) {
   const workspaceEventsRoutes = new Hono<ProjectApiEnv>()
     .get('/workspace/events', (c) => {
       return streamSSENoBuffer(c, async (stream) => {
+        registerSseDrain(stream);
         // One detach bundle per attached project — the id guard makes a double
         // attach (connect-time snapshot vs. the built hook) impossible.
         const attached = new Map<string, { store: RunStore; detach: () => void }>();
@@ -6857,6 +7020,7 @@ export function createApp(deps: ServerDeps) {
   // project-scoped spelling, which would be a second surface to protect with no consumer.
   const workspaceV1 = new Hono()
     .route('/', healthRoutes)
+    .route('/', readyRoutes)
     .route('/', hostMetricsRoutes)
     .route('/', modelsRoutes)
     .route('/', providersRoutes)
@@ -6939,6 +7103,9 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   // The subscription hub rides the same HTTP server (one port, zero config):
   // createApp registers the topics, the `upgrade` hook below owns the socket.
   const socketHub = deps.socketHub ?? createSocketHub();
+  // One closer for the whole hub rather than one per client: `drainClients` already iterates, and
+  // the drain only needs to be told "there are live sockets, here is how to end them".
+  deps.drain?.registerStream(() => socketHub.drainClients());
   const automationCoordinator = new AutomationCoordinator({ listProjects });
   const bootProjectId = deps.bootProjectId ?? 'default';
   const bootAutomationStore = automationCoordinator.store(bootProjectId, deps.repoRoot)!;

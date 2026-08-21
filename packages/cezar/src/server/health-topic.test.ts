@@ -29,6 +29,7 @@ function stubHub() {
     },
     attach: () => undefined,
     close: () => undefined,
+    drainClients: () => undefined,
   };
   return { hub, topics };
 }

@@ -148,6 +148,56 @@ export type Capabilities = z.infer<typeof capabilitiesSchema>;
  *
  * Additive fields only: this is the most externally-depended-on JSON in the app.
  */
+/**
+ * Non-disruptive-deploy runtime facts (`.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`).
+ *
+ * Every field here answers a question an operator would otherwise have to ANSWER BY ASSUMPTION,
+ * which is the failure this block exists to prevent: "it survived the deploy on the box we tested"
+ * is not something anyone should have to take on trust. `runBrokerIsolation: 'none'` in particular
+ * is a real degradation — runs share the server's cgroup and a restart WILL kill them — and it is
+ * reported rather than hidden.
+ */
+export const runtimeInfoSchema = z.object({
+  /** The listening socket was inherited from systemd, so a restart never closes it. */
+  socketActivated: z.boolean(),
+  /** Where run brokers live: their own transient scope, a delegated cgroup, or (degraded) ours. */
+  runBrokerIsolation: z.enum(['scope', 'delegated', 'none']),
+  /** Backends whose runs are brokered and therefore survive a restart. */
+  brokeredBackends: z.array(z.string()),
+  /** False when this build has no broker entry point to re-exec (a source checkout). */
+  brokerAvailable: z.boolean(),
+});
+export type RuntimeInfo = z.infer<typeof runtimeInfoSchema>;
+
+/** Which release is serving, derived from the deploy ledger rather than a hand-written marker. */
+export const deployInfoSchema = z.object({
+  releaseId: z.string().optional(),
+  version: z.string().optional(),
+  sha: z.string().optional(),
+  activatedAt: z.string().optional(),
+});
+export type DeployInfo = z.infer<typeof deployInfoSchema>;
+
+/**
+ * `GET /api/v1/ready` — the DEEP readiness probe a health-gated deploy flips on (P5).
+ *
+ * Deliberately not a second spelling of `/health`. `/health` is the CORS-open discovery endpoint
+ * (BACKWARD_COMPATIBILITY.md §2): it must stay cheap, public-shaped and cached, which is exactly
+ * what makes it useless as a deploy gate — a cached payload can report a server that has since
+ * stopped being able to serve. This one asks whether the things a request actually needs are
+ * loaded, and answers 503 when they are not, so a bad release fails the probe instead of being
+ * discovered by a user.
+ */
+export const readyResponseSchema = z.object({
+  ready: z.boolean(),
+  version: z.string(),
+  /** Per-subsystem verdicts, so a failure names itself instead of being a bare `false`. */
+  checks: z.array(z.object({ name: z.string(), ok: z.boolean(), detail: z.string().optional() })),
+  runtime: runtimeInfoSchema,
+  deploy: deployInfoSchema.optional(),
+});
+export type ReadyResponse = z.infer<typeof readyResponseSchema>;
+
 export const healthResponseSchema = z.object({
   version: z.string(),
   latestVersion: z.string().optional(),
@@ -162,5 +212,18 @@ export const healthResponseSchema = z.object({
   // optional, which was wider than the server has ever been.
   projects: z.array(z.object({ id: z.string(), name: z.string() })),
   bootProject: z.string(),
+  /**
+   * Non-disruptive-deploy runtime facts (see `runtimeInfoSchema`) — additive, and OPTIONAL.
+   *
+   * Optional is the honest shape rather than a concession: a cezar from before 2026-08-21 does not
+   * send this key at all, and health is the one payload written to be read by clients of every
+   * vintage (BACKWARD_COMPATIBILITY.md §2). A client that requires it would break against exactly
+   * the servers this field exists to distinguish itself from. Current servers always send it —
+   * `/api/v1/ready` is where a deploy should read it, because that route is uncached.
+   */
+  runtime: runtimeInfoSchema.optional(),
+  /** The release this process is serving, when it was started from a release tree. Absent on a
+   *  plain `npx cezar` and on any install that has never used the ledger. */
+  deploy: deployInfoSchema.optional(),
 });
 export type HealthResponse = z.infer<typeof healthResponseSchema>;

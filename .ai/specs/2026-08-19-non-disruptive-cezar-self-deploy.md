@@ -1,6 +1,6 @@
 # Non-disruptive cezar self-deploy / update
 
-**Status:** ready to implement (rewritten 2026-08-20 from the 2026-08-19 draft, `4797a60d`) — **and NOT a prerequisite for anything**
+**Status:** implemented 2026-08-21, **QA Needed** (the on-box acceptance E2E has not been run) — **and NOT a prerequisite for anything**
 **Date:** 2026-08-19, rewritten 2026-08-20
 **Owner ask:** "ensure that we can deploy/update cezar itself without any disruption."
 **Todo:** `d0386413-8bac-4e2a-88c4-62c37ab87ea1`
@@ -568,6 +568,31 @@ name; artifacts and video kept per run):
 - Unit generation: `cezar.socket` + the amended `cezar.service` are asserted as text, and the
   migration is idempotent (running it twice is a no-op) and preserves the three existing drop-ins.
 
+**How to run the acceptance E2E** (added 2026-08-21, with the implementation):
+
+The measurement half is `packages/cezar/scripts/deploy-e2e-probe.mjs` — a standalone, dependency-free
+script that runs the continuous client of step 2 and evaluates assertions (a), (b) and (c). It is
+deliberately **not** part of cezar and imports nothing from it: it has to keep measuring while the
+cezar it is measuring is replaced, so being inside that process would make it the first casualty.
+
+```bash
+# 1. start a long-running agent task and note its run id
+# 2. start the probe (runs for --seconds, exits non-zero if any assertion fails)
+node packages/cezar/scripts/deploy-e2e-probe.mjs \
+     --base https://cockpit.example.com --run <runId> --seconds 180 \
+     --out .ai/cezar/artifacts/deploy-e2e-$(date -u +%Y%m%dT%H%M%SZ).json
+# 3. from INSIDE the cockpit, in another task:
+cezar server-deploy --strategy=blue-green --follow
+```
+
+It reports `gapMs` (max client-observed latency across the swap — the number the spec names), the
+poller's failure and refusal counts, the SSE `seq` gaps and duplicates, whether a `reload` frame
+arrived, and every status the run passed through. Assertions (e) and (f) — the deliberately broken
+build and the boots-then-fails build — are driven by staging a truncated `dist/index.js` and by a
+release whose `/api/v1/ready` returns 503; both are covered as unit branches in
+`server-install/release-deploy.test.ts`, and the on-box repeat is what promotes them from covered
+to verified.
+
 **Gates:** `npm run typecheck`, `npm run lint`, `npm run test` green before deploy — necessary,
 not sufficient. Until the E2E above has actually run on the box, this ships as **QA Needed**, not
 Done.
@@ -586,6 +611,59 @@ latency across the swap, 0 failed requests being the pass condition) and **`infl
 (`smoke_boot` | `readiness`).
 
 ---
+
+---
+
+## Implementation notes (2026-08-21) — what the build changed about the design
+
+Three things the spec did not anticipate, recorded here because each of them is a decision the
+next reader would otherwise have to re-derive.
+
+### Brokering is gated on being a BUILT tree, not on a flag
+
+The spec assumed a broker could always be launched. It cannot: the broker must be the *same
+artifact* as the server (so a release flip can never leave a broker from one version tailing a
+spool a server from another version wrote), and the cheapest way to guarantee that is to re-exec
+this package's own `dist/index.js`. Running from TypeScript sources — `tsx`, vitest, `npm run dev`
+— there is no such file, and `node src/index.ts` would simply fail.
+
+So `brokerAvailable()` (`core/broker-launch.ts`) answers "is there a built entry point to
+re-exec?", and source mode reports **unavailable**. Two consequences worth stating plainly:
+production gets brokering by default with no flag to set, and **the entire existing test suite and
+every local dev run are untouched by this feature** — they take the in-process path exactly as
+before. `CEZ_RUN_BROKER=0` is the production escape hatch; `=1` states intent but cannot conjure
+an entry point that is not there.
+
+### A measured defect: `sun_path` truncation silently relocates the control socket
+
+`bind(2)` copies the socket path into a fixed 108-byte field and **libuv does not refuse an
+over-long path — it truncates it**. Measured while building this: a 110-character socket path
+binds with no error and the socket file appears at the truncated path, not the one requested. Both
+`listen` and `connect` truncate identically, so control ops keep working and nothing looks wrong —
+until code reasons about the path as a *file*. `rmSync(paths.ctl)` then deletes nothing, the stale
+socket outlives its broker, and the next broker for that spool hits `EADDRINUSE` on a directory it
+can see is empty (a 117-character path did exactly that).
+
+This is not hypothetical for cezar: `<project>/.ai/cezar/runs/<uuid>.spool/ctl.sock` is ~98
+characters from a short project root, and a task worktree clears 107 without anything unusual
+happening. `controlSocketPath()` (`core/run-spool.ts`) therefore keeps the socket beside the spool
+while it fits and falls back to a short, deterministic `/tmp/cez-ctl-<hash>.sock` when it does not.
+`/tmp` is preferred over `os.tmpdir()` on purpose — `TMPDIR` is routinely long (cezar gives every
+run a per-task temp dir, 81 characters on this box), so a "short" fallback built on it can blow the
+same budget it exists to escape.
+
+It also killed the obvious readiness test. `BrokeredSession` does **not** ask whether `ctl.sock`
+exists before sending; it tries the send and believes the result, which is the only question that
+matters and also covers the case a file test never could — the socket exists but the broker has not
+called `accept` yet.
+
+### The parity test earned its keep immediately
+
+`core/brokered-parity.test.ts` runs the same golden fixtures through both transports and compares
+the v1 `AgentEvent` and v2 `UiEvent` streams whole. On its first run it caught a real bug: the
+brokered path emitted `turn.started` only for the *opening* message, so every brokered follow-up
+turn was missing it and the v2 stream diverged the moment a run had two turns. That is exactly the
+class of defect the one-consumer rule exists to prevent, and it was invisible to every other test.
 
 ## Out of scope (decisions, not omissions)
 

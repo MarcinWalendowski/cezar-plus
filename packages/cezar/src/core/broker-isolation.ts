@@ -24,6 +24,11 @@
  * to stop anyone making.
  */
 
+import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
+
+const { W_OK } = constants;
+const nodeFs = { existsSync, accessSync };
+
 export const BROKER_ISOLATIONS = ['scope', 'delegated', 'none'] as const;
 export type BrokerIsolation = (typeof BROKER_ISOLATIONS)[number];
 
@@ -99,4 +104,71 @@ export function buildBrokerLaunchArgv(opts: BrokerLaunchOptions): string[] {
     '--',
     ...opts.command,
   ];
+}
+
+// ---- runtime probe ---------------------------------------------------------------------------
+
+/**
+ * Ask the host which isolation modes are actually available, without spawning anything.
+ *
+ * Deliberately all filesystem checks. The obvious implementation — shell out to `systemd-run
+ * --version` and `systemctl --user is-system-running` — costs two process spawns on a path that
+ * runs at boot and again per run, and answers a question two `existsSync` calls already settle.
+ * It would also be the third place in this repo to learn that `systemctl` prints a healthy banner
+ * for a state that does not work (the `wrangler whoami` lesson in the workspace CLAUDE.md).
+ *
+ * `userScopeAvailable` needs BOTH halves: the binary, and a user manager actually running for this
+ * uid. `XDG_RUNTIME_DIR` alone is not proof — it is set in plenty of sessions with no user
+ * manager behind them — so the private socket the manager creates is what is tested.
+ *
+ * `delegated` is "can I write to my own cgroup?", which is precisely what `Delegate=yes` grants
+ * and what a non-delegated unit denies. Reading the flag out of the unit file would be reading our
+ * configuration; this reads our actual privilege.
+ */
+export function probeIsolationCapabilities(
+  env: NodeJS.ProcessEnv = process.env,
+  fs: { existsSync(p: string): boolean; accessSync(p: string, mode: number): void } = nodeFs,
+): IsolationCapabilities {
+  return {
+    userScopeAvailable: probeUserScope(env, fs),
+    delegated: probeDelegated(fs),
+  };
+}
+
+function probeUserScope(
+  env: NodeJS.ProcessEnv,
+  fs: { existsSync(p: string): boolean },
+): boolean {
+  const hasBinary = (env.PATH ?? '')
+    .split(':')
+    .filter(Boolean)
+    .some((dir) => fs.existsSync(`${dir}/systemd-run`));
+  if (!hasBinary) return false;
+  const runtimeDir = env.XDG_RUNTIME_DIR;
+  if (!runtimeDir) return false;
+  return fs.existsSync(`${runtimeDir}/systemd/private`);
+}
+
+function probeDelegated(fs: {
+  existsSync(p: string): boolean;
+  accessSync(p: string, mode: number): void;
+}): boolean {
+  let ownCgroup: string;
+  try {
+    // cgroup v2: a single `0::<path>` line. v1's numbered controller lines have no delegated
+    // sub-tree to write into anyway, so failing to find the v2 line is correctly a `false`.
+    const line = readFileSync('/proc/self/cgroup', 'utf8')
+      .split('\n')
+      .find((l) => l.startsWith('0::'));
+    if (!line) return false;
+    ownCgroup = `/sys/fs/cgroup${line.slice(3)}`;
+  } catch {
+    return false;
+  }
+  try {
+    fs.accessSync(`${ownCgroup}/cgroup.subtree_control`, W_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }

@@ -164,6 +164,32 @@ export const runRecordSchema = z.object({
   /** Agent backend this run used — drives "open in CLI" resume command. `storedRunnerSchema`
    *  so a legacy `claude-cli` record folds to `claude` instead of failing the whole index (#547). */
   runner: storedRunnerSchema.optional(),
+  /**
+   * This run's broker spool, RELATIVE to `dataDir` (P4 of
+   * `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`).
+   *
+   * Relative and not absolute on purpose: `runs.json` is copied between machines by the backup
+   * surface, and an absolute path from another host would send a re-attach probe at a directory
+   * that either does not exist or — far worse — belongs to a different install.
+   *
+   * Absent means this run was never brokered, which routes a restart straight to the legacy
+   * interrupted-run path. That is the safe direction, and every failure mode in re-attach is
+   * designed to land on it.
+   */
+  spoolDir: z.string().optional().catch(undefined),
+  /**
+   * Bytes of the spool's `out.ndjson` this cezar has fully consumed — the entire re-attach
+   * contract.
+   *
+   * A new process resumes the tail here and replays exactly the records the old one had not yet
+   * handled: no gap (which would lose the agent's work) and no duplicate (which would double every
+   * event in the transcript). It advances only past COMPLETE lines, so a flush that lands mid-record
+   * can neither corrupt nor skip one.
+   *
+   * `.catch(undefined)` alongside `.optional()`: a corrupt value must degrade to "start from the
+   * beginning I know about" rather than failing the parse of the whole run index.
+   */
+  consumedOffset: z.number().int().nonnegative().optional().catch(undefined),
   /** Per-task agent-account override from the composer (spec 2026-07-29-agent-profiles), applying
    *  to steps that run on `runner`. Steps on a DIFFERENT backend still resolve from the project's
    *  own selection — an override for Claude says nothing about which Codex account a mixed

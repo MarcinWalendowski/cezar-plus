@@ -101,6 +101,17 @@ export interface SocketHub {
   /** Stop publishers, terminate clients, clear timers. Idempotent; also runs
    *  on the attached server's own `close`. */
   close(): void;
+  /**
+   * Close every client with `1012 Service Restart` (P3 of
+   * `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`).
+   *
+   * Distinct from `close()`, and the distinction is the whole feature: `close()` calls
+   * `terminate()`, which drops the TCP connection with no close frame, so the browser sees an
+   * abnormal closure and waits out its reconnect backoff. 1012 is the code whose entire meaning is
+   * "come back, I am being replaced" — a client that reads it reconnects at once, into a socket
+   * systemd never closed, so the swap costs a round trip rather than a backoff.
+   */
+  drainClients(): void;
 }
 
 interface TopicState {
@@ -126,6 +137,9 @@ export interface SocketHubOptions {
    *  small so reaping and the liveness beat are observable without a 30 s wait. */
   heartbeatMs?: number;
 }
+
+/** RFC 6455 §7.4.2 — re-exported through the drain module so both halves name one constant. */
+const WS_CLOSE_SERVICE_RESTART = 1012;
 
 export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
   const heartbeatMs = options.heartbeatMs ?? HEARTBEAT_MS;
@@ -282,6 +296,19 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
       }, heartbeatMs);
       // Never the reason the process stays up — the HTTP server owns lifetime.
       heartbeat.unref?.();
+    },
+
+    drainClients() {
+      if (closed) return;
+      for (const ws of [...clients.keys()]) {
+        try {
+          // A close FRAME, then let the peer answer — `terminate()` here would be the abrupt
+          // teardown this method exists to replace.
+          ws.close(WS_CLOSE_SERVICE_RESTART, 'cezar is restarting');
+        } catch {
+          // Already gone; the drain must not care.
+        }
+      }
     },
 
     close() {

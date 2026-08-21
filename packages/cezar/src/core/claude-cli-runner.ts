@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { readFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve as resolvePath } from 'node:path';
 import type {
@@ -18,6 +19,11 @@ import { isSignalTerminationExit, stopMessage, trackChildExit } from './agent-ru
 import { buildChildEnv } from './agent-env.ts';
 import { costWeightedTokens, type RawUsage } from './usage.ts';
 import { readNdjson } from './ndjson.ts';
+import type { UiEvent } from './ui-events.ts';
+import { BrokeredSession } from './brokered-session.ts';
+import { brokerArgs, resolveBrokerCommand, type BrokerSessionRequest } from './broker-launch.ts';
+import { buildBrokerLaunchArgv } from './broker-isolation.ts';
+import { spoolPaths, type SpoolExit } from './run-spool.ts';
 import {
   claudeTurnStarted,
   createClaudeUiState,
@@ -131,6 +137,14 @@ export class ClaudeCliRunner implements AgentRunner {
     onEvent?: (event: AgentEvent) => void,
     opts: SessionOptions = {},
   ): AgentSession {
+    // P4: when the run manager asks for a broker, the backend is spawned by a detached second
+    // process that owns its stdio and spools it to a file. Everything above this line — and
+    // everything the returned `AgentSession` is used for — is unchanged.
+    if (opts.broker) {
+      const session = this.spawnBroker(spec, onEvent, opts, opts.broker);
+      this.lastSession = session;
+      return session;
+    }
     const args = buildClaudeArgs(spec);
 
     let child: ChildProcessWithoutNullStreams;
@@ -148,23 +162,6 @@ export class ClaudeCliRunner implements AgentRunner {
     let eofTermTimer: NodeJS.Timeout | undefined;
     let eofKillTimer: NodeJS.Timeout | undefined;
 
-    // Protocol v2 emission — additive alongside v1 (`onEvent` keeps flowing
-    // byte-identical); the channel is `opts.onUiEvent` (RunManager wiring
-    // lands in R2 step 2.1). The mapper never throws, but a defect in it
-    // must still never disturb the v1 stream — hence the belt-and-braces try.
-    let uiState = createClaudeUiState({ fallbackSessionId: spec.sessionId });
-    const emitUi = (map: (state: typeof uiState) => ClaudeUiMapping): void => {
-      try {
-        const mapped = map(uiState);
-        uiState = mapped.state;
-        if (opts.onUiEvent) {
-          for (const event of mapped.events) opts.onUiEvent(event);
-        }
-      } catch {
-        // v2 mapping is best-effort; v1 consumers stay unaffected.
-      }
-    };
-
     const sendMessage = (content: ContentBlock[]): boolean => {
       if (!stdinOpen) return false;
       // A follow-up inside the reopen window cancels the scheduled close.
@@ -172,15 +169,11 @@ export class ClaudeCliRunner implements AgentRunner {
         clearTimeout(autoEndTimer);
         autoEndTimer = undefined;
       }
-      const line = JSON.stringify({
-        type: 'user',
-        message: { role: 'user', content },
-        session_id: spec.sessionId,
-      });
+      const line = encodeClaudeUserMessage(content, spec.sessionId);
       try {
         child.stdin.write(`${line}\n`);
         // Each user message written to stdin begins a turn (§7.1).
-        emitUi(claudeTurnStarted);
+        consumer.turnStarted();
         return true;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -227,14 +220,24 @@ export class ClaudeCliRunner implements AgentRunner {
       if (!hasExited()) signalChild('SIGTERM');
     };
 
+    const consumer = createClaudeConsumer({
+      spec,
+      onEvent,
+      onUiEvent: opts.onUiEvent,
+      terminatedByCezar: () => terminatedByCezar,
+      onActivity: () => bump(),
+      onTurnEnd: () => {
+        if (opts.autoEndAfterFirstTurn && stdinOpen && !autoEndTimer) {
+          autoEndTimer = setTimeout(end, AUTO_END_DELAY_MS);
+          autoEndTimer.unref?.();
+        }
+      },
+    });
+
     // Seed the first user message — the same path every follow-up takes.
     // Pasted task screenshots (spec.images) ride along as leading blocks.
     sendMessage([...(spec.images ?? []), { type: 'text', text: spec.userPrompt }]);
 
-    const toolCalls: AgentToolCallRecord[] = [];
-    const textChunks: string[] = [];
-    let tokensUsed = 0;
-    let sawUsage = false;
     let spawnFailed: Error | null = null;
 
     child.on('error', (err: NodeJS.ErrnoException) => {
@@ -277,47 +280,7 @@ export class ClaudeCliRunner implements AgentRunner {
         for await (const line of readNdjson(child.stdout)) {
           // No `if (timedOut) break` here: frames that arrive during the grace window are the
           // agent's parting words and must still land (see the deadline handler above).
-          bump(); // proof of life: the agent is working, so the silence clock starts over
-          let msg: ClaudeStreamMessage;
-          try {
-            msg = JSON.parse(line) as ClaudeStreamMessage;
-          } catch {
-            onEvent?.({ type: 'note', message: `claude: skipped unparseable stream line: ${truncate(line)}` });
-            continue;
-          }
-
-          // Claude reports `error_during_execution` while reacting to our
-          // teardown signal. Once cezar has signalled the child, that frame
-          // describes the intentional stop rather than an agent failure.
-          // Normalize only this precise wire shape so genuine result errors
-          // (authentication, limits, malformed sessions) stay authoritative.
-          const mappedMessage = normalizeIntentionalTeardownResult(msg, terminatedByCezar);
-          emitUi((state) => mapClaudeMessage(mappedMessage, state));
-
-          let delta = 0;
-          try {
-            delta = handleClaudeMessage(mappedMessage, { toolCalls, textChunks, onEvent });
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            onEvent?.({ type: 'note', message: `claude: skipped malformed event (${msg.type ?? 'unknown'}): ${message}` });
-            continue;
-          }
-          if (delta > 0) {
-            sawUsage = true;
-            tokensUsed += delta;
-            onEvent?.({ type: 'token-usage', tokensUsed });
-          }
-
-          if (msg.type === 'result') {
-            if (typeof msg.total_cost_usd === 'number' && msg.total_cost_usd > 0) {
-              onEvent?.({ type: 'cost', usd: msg.total_cost_usd });
-            }
-            onEvent?.({ type: 'turn-end' });
-            if (opts.autoEndAfterFirstTurn && stdinOpen && !autoEndTimer) {
-              autoEndTimer = setTimeout(end, AUTO_END_DELAY_MS);
-              autoEndTimer.unref?.();
-            }
-          }
+          consumer.handleLine(line);
         }
       } catch (err) {
         // A SIGKILLed child tears stdout down mid-frame, which surfaces here as a
@@ -336,7 +299,7 @@ export class ClaudeCliRunner implements AgentRunner {
 
       if (spawnFailed) throw spawnFailed;
 
-      const text = textChunks.join('\n').trim();
+      const { text, toolCalls, tokensUsed } = consumer.buildResult();
 
       if (timedOut) {
         // Not an agent failure: `reason` is what lets the run manager park the run at `review`
@@ -366,7 +329,7 @@ export class ClaudeCliRunner implements AgentRunner {
         throw new Error(msg);
       }
 
-      if (!sawUsage) {
+      if (!consumer.sawUsage()) {
         onEvent?.({ type: 'note', message: 'token usage not reported by claude CLI' });
       }
 
@@ -387,6 +350,316 @@ export class ClaudeCliRunner implements AgentRunner {
     this.lastSession = session;
     return session;
   }
+
+  /**
+   * Re-open a session whose agent is still alive behind a broker, resuming its output at
+   * `broker.startOffset` (P4 re-attach).
+   *
+   * The distinction from `startSession` is exactly one thing: nothing is spawned and no opening
+   * message is sent. The agent is mid-turn and has already been told what to do — sending anything
+   * here would inject a second instruction into a conversation that never stopped.
+   */
+  reattachSession(
+    spec: AgentRunSpec,
+    onEvent?: (event: AgentEvent) => void,
+    opts: SessionOptions = {},
+  ): AgentSession {
+    const request = opts.broker;
+    if (!request) throw new Error('reattachSession requires opts.broker');
+    const session = this.attachBroker(spec, onEvent, opts, request, { seed: false });
+    this.lastSession = session;
+    return session;
+  }
+
+  /** Launch a detached broker for this spec, then tail its spool from byte 0. */
+  private spawnBroker(
+    spec: AgentRunSpec,
+    onEvent: ((event: AgentEvent) => void) | undefined,
+    opts: SessionOptions,
+    request: BrokerSessionRequest,
+  ): AgentSession {
+    const brokerCommand = resolveBrokerCommand();
+    if (!brokerCommand) {
+      // Reachable only if a caller asks for a broker in a source tree. Loud rather than silent:
+      // falling back here would make "is this run brokered?" unanswerable from the outside, and
+      // the whole point of `brokerAvailable()` is that the caller decides that BEFORE spawning.
+      throw new Error('run broker requested but this cezar has no built entry point to re-exec');
+    }
+    // A previous session's spool must never be mistaken for this one's. Removing it before the
+    // broker writes `meta.json` also means `isSpoolLive` can never observe a half-replaced spool:
+    // it either sees the old complete one, or nothing, or the new complete one.
+    rmSync(request.spoolDir, { recursive: true, force: true });
+
+    const argv = buildBrokerLaunchArgv({
+      isolation: request.isolation ?? 'none',
+      runId: request.runId,
+      command: [
+        ...brokerCommand,
+        ...brokerArgs({
+          spoolDir: request.spoolDir,
+          runId: request.runId,
+          stepId: request.stepId,
+          backend: this.backend,
+          cwd: spec.cwd,
+          command: [this.bin, ...buildClaudeArgs(spec)],
+        }),
+      ],
+    });
+
+    let spawnFailed: Error | null = null;
+    const [bin, ...rest] = argv;
+    try {
+      const proc = nodeSpawn(bin as string, rest, {
+        cwd: spec.cwd,
+        // The agent's environment, not ours: the broker execs the backend with its OWN
+        // `process.env`, so `buildChildEnv`'s allowlist has to be applied here or the agent would
+        // inherit the server's environment wholesale — the exact least-privilege regression #427
+        // closed.
+        env: buildChildEnv({ backend: this.backend, extraEnv: spec.env }),
+        // Detached + no stdio: the broker must not hold a pipe whose read end dies with us. That
+        // pipe is the thing this entire phase exists to remove.
+        detached: true,
+        stdio: 'ignore',
+      });
+      proc.on('error', (err: NodeJS.ErrnoException) => {
+        spawnFailed = wrapSpawnError(err, bin as string);
+      });
+      proc.unref();
+    } catch (err) {
+      throw wrapSpawnError(err, bin as string);
+    }
+
+    return this.attachBroker(spec, onEvent, opts, { ...request, startOffset: 0 }, {
+      seed: true,
+      spawnFailed: () => spawnFailed,
+    });
+  }
+
+  /**
+   * The half both brokered paths share: a `BrokeredSession` tailing the spool, wired to the same
+   * consumer, the same inactivity bound and the same terminal-event vocabulary as the pipe path.
+   */
+  private attachBroker(
+    spec: AgentRunSpec,
+    onEvent: ((event: AgentEvent) => void) | undefined,
+    opts: SessionOptions,
+    request: BrokerSessionRequest,
+    mode: { seed: boolean; spawnFailed?: () => Error | null },
+  ): AgentSession {
+    let terminatedByCezar = false;
+    let timedOut = false;
+    let deadline: NodeJS.Timeout | undefined;
+
+    const consumer = createClaudeConsumer({
+      spec,
+      onEvent,
+      onUiEvent: opts.onUiEvent,
+      terminatedByCezar: () => terminatedByCezar,
+      onActivity: () => bump(),
+      onTurnEnd: () => {
+        if (opts.autoEndAfterFirstTurn && session.open) {
+          // No reopen window here, and that is deliberate: `AUTO_END_DELAY_MS` exists so a
+          // follow-up typed within a quarter-second cancels the close on a LOCAL pipe. A control
+          // socket round-trip is already slower than that, and a timer armed here would have to
+          // survive a restart to mean anything. Ending promptly is the honest behaviour.
+          session.end();
+        }
+      },
+    });
+
+    // Same INACTIVITY contract as the in-process path — a brokered run that goes silent must still
+    // be reaped, or a wedged CLI would hold a `maxParallel` slot forever with nothing to stop it.
+    const limitMs = spec.timeoutMs ?? this.timeoutMs;
+    const bump = (): void => {
+      if (limitMs <= 0 || timedOut) return;
+      if (deadline) clearTimeout(deadline);
+      deadline = setTimeout(() => {
+        timedOut = true;
+        terminatedByCezar = true;
+        session.interrupt();
+      }, limitMs);
+      deadline.unref?.();
+    };
+
+    const session: BrokeredSession = new BrokeredSession({
+      spoolDir: request.spoolDir,
+      startOffset: request.startOffset ?? 0,
+      onLine: (line) => consumer.handleLine(line),
+      onOffset: request.onOffset,
+      encodeSend: (content) => encodeClaudeUserMessage(content, spec.sessionId),
+      onExit: (exit) => {
+        if (deadline) clearTimeout(deadline);
+        emitBrokeredTerminalEvents({
+          exit,
+          onEvent,
+          timedOut,
+          limitMs,
+          terminatedByCezar,
+          sawUsage: consumer.sawUsage(),
+        });
+      },
+      buildResult: () => {
+        const failed = mode.spawnFailed?.();
+        if (failed) throw failed;
+        const totals = consumer.buildResult();
+        const failure = brokeredExitFailure(request.spoolDir, timedOut, terminatedByCezar);
+        if (failure) throw failure;
+        return totals;
+      },
+    });
+
+    // `interrupt`/`end` on a BrokeredSession are control-socket writes, so the flag has to be set
+    // here rather than inside a `signalChild` the pipe path owns.
+    const markTermination = <T extends 'end' | 'interrupt'>(op: T) => {
+      const original = session[op].bind(session);
+      return () => {
+        terminatedByCezar = true;
+        original();
+      };
+    };
+    session.end = markTermination('end');
+    session.interrupt = markTermination('interrupt');
+
+    // Every user message written to stdin begins a turn (§7.1) — and that is true of the SECOND
+    // one as much as the first. Emitting it only for the opening message (which is what an earlier
+    // cut of this did) left every brokered follow-up without a `turn.started`, so the v2 stream
+    // diverged from the in-process one the moment a run had two turns. `brokered-parity.test.ts`
+    // is what caught it.
+    const brokeredSend = session.sendMessage.bind(session);
+    session.sendMessage = (content) => {
+      const accepted = brokeredSend(content);
+      if (accepted) consumer.turnStarted();
+      return accepted;
+    };
+
+    bump();
+    if (mode.seed) {
+      session.sendMessage([...(spec.images ?? []), { type: 'text', text: spec.userPrompt }]);
+    }
+    return session;
+  }
+}
+
+// ---- the stream consumer ---------------------------------------------------
+//
+// The single place a claude stream-json line becomes cezar events, extracted from the read loop
+// so that BOTH transports can share it verbatim.
+//
+// This extraction is the whole reason the brokered path is safe to add. `AGENT_PROTOCOL.md`
+// requires every backend's v1 `AgentEvent` and v2 `UiEvent` streams to be byte-identical
+// regardless of how the bytes arrived; a second parser written for the spool would be a second
+// thing to keep in sync, and the first divergence would show up as a run whose transcript looks
+// subtly wrong rather than as a failing test. One consumer, two feeds: a pipe iterated in-process,
+// or a file tailed from a byte offset.
+
+export interface ClaudeConsumerOptions {
+  spec: AgentRunSpec;
+  onEvent?: (event: AgentEvent) => void;
+  onUiEvent?: (event: UiEvent) => void;
+  /** True once cezar itself signalled the backend — normalizes the teardown result frame. */
+  terminatedByCezar?: () => boolean;
+  /** A complete line arrived: proof of life for the inactivity clock. */
+  onActivity?: () => void;
+  /** A `result` frame closed a turn — where the auto-end timer is armed. */
+  onTurnEnd?: () => void;
+}
+
+export interface ClaudeConsumer {
+  /** Feed one raw NDJSON line. Never throws: a malformed frame becomes a note, as it always did. */
+  handleLine(line: string): void;
+  /** The run totals accumulated so far. Safe to call more than once. */
+  buildResult(): AgentRunResult;
+  /** Whether the backend ever reported usage — drives the "no token usage" note. */
+  sawUsage(): boolean;
+  /** A user message was written to stdin, which begins a turn (§7.1). */
+  turnStarted(): void;
+}
+
+export function createClaudeConsumer(opts: ClaudeConsumerOptions): ClaudeConsumer {
+  const { spec, onEvent } = opts;
+  const toolCalls: AgentToolCallRecord[] = [];
+  const textChunks: string[] = [];
+  let tokensUsed = 0;
+  let sawUsage = false;
+
+  // Protocol v2 emission — additive alongside v1 (`onEvent` keeps flowing byte-identical). The
+  // mapper never throws, but a defect in it must still never disturb the v1 stream — hence the
+  // belt-and-braces try.
+  let uiState = createClaudeUiState({ fallbackSessionId: spec.sessionId });
+  const emitUi = (map: (state: typeof uiState) => ClaudeUiMapping): void => {
+    try {
+      const mapped = map(uiState);
+      uiState = mapped.state;
+      if (opts.onUiEvent) {
+        for (const event of mapped.events) opts.onUiEvent(event);
+      }
+    } catch {
+      // v2 mapping is best-effort; v1 consumers stay unaffected.
+    }
+  };
+
+  return {
+    turnStarted() {
+      emitUi(claudeTurnStarted);
+    },
+    sawUsage: () => sawUsage,
+    buildResult: () => ({
+      text: textChunks.join('\n').trim(),
+      toolCalls,
+      tokensUsed,
+      sessionId: spec.sessionId,
+    }),
+    handleLine(line: string) {
+      opts.onActivity?.();
+      let msg: ClaudeStreamMessage;
+      try {
+        msg = JSON.parse(line) as ClaudeStreamMessage;
+      } catch {
+        onEvent?.({ type: 'note', message: `claude: skipped unparseable stream line: ${truncate(line)}` });
+        return;
+      }
+
+      // Claude reports `error_during_execution` while reacting to our teardown signal. Once cezar
+      // has signalled the child, that frame describes the intentional stop rather than an agent
+      // failure. Normalize only this precise wire shape so genuine result errors (authentication,
+      // limits, malformed sessions) stay authoritative.
+      const mappedMessage = normalizeIntentionalTeardownResult(msg, opts.terminatedByCezar?.() ?? false);
+      emitUi((state) => mapClaudeMessage(mappedMessage, state));
+
+      let delta = 0;
+      try {
+        delta = handleClaudeMessage(mappedMessage, { toolCalls, textChunks, onEvent });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        onEvent?.({ type: 'note', message: `claude: skipped malformed event (${msg.type ?? 'unknown'}): ${message}` });
+        return;
+      }
+      if (delta > 0) {
+        sawUsage = true;
+        tokensUsed += delta;
+        onEvent?.({ type: 'token-usage', tokensUsed });
+      }
+
+      if (msg.type === 'result') {
+        if (typeof msg.total_cost_usd === 'number' && msg.total_cost_usd > 0) {
+          onEvent?.({ type: 'cost', usd: msg.total_cost_usd });
+        }
+        onEvent?.({ type: 'turn-end' });
+        opts.onTurnEnd?.();
+      }
+    },
+  };
+}
+
+/**
+ * The exact stdin line a claude user message becomes.
+ *
+ * Shared by the pipe path and the brokered path deliberately — `session_id` is not decoration, it
+ * is which conversation the frame belongs to, and a brokered send that omitted it would silently
+ * start a second one.
+ */
+export function encodeClaudeUserMessage(content: ContentBlock[], sessionId?: string): string {
+  return JSON.stringify({ type: 'user', message: { role: 'user', content }, session_id: sessionId });
 }
 
 /**
@@ -580,6 +853,82 @@ function handleClaudeMessage(
 }
 
 // stringify/image helpers moved to claude-ui-mapper.ts (shared by v1 and v2).
+
+// ---- brokered terminal events ----------------------------------------------
+//
+// The pipe path's tail (exit code → note/error/done) expressed once, so a brokered run's last
+// three events are the same three a piped run emits. They are what the cockpit renders as "the
+// run ended", so a divergence here would be visible to a user rather than only to a test.
+
+function emitBrokeredTerminalEvents(ctx: {
+  exit: SpoolExit | null;
+  onEvent?: (event: AgentEvent) => void;
+  timedOut: boolean;
+  limitMs: number;
+  terminatedByCezar: boolean;
+  sawUsage: boolean;
+}): void {
+  const { onEvent } = ctx;
+  if (ctx.timedOut) {
+    // Not an agent failure: `reason` is what lets the run manager park the run at `review` and
+    // keep the chain's later steps alive.
+    onEvent?.({ type: 'error', message: stopMessage('inactivity', ctx.limitMs), reason: 'inactivity' });
+    onEvent?.({ type: 'done' });
+    return;
+  }
+  const code = ctx.exit?.code ?? null;
+  if (ctx.terminatedByCezar && isSignalTerminationExit(code)) {
+    onEvent?.({
+      type: 'note',
+      message: `claude CLI did not exit on its own after close; terminated by cezar (code ${code})`,
+    });
+    onEvent?.({ type: 'done' });
+    return;
+  }
+  if (code !== 0 && code !== null) {
+    onEvent?.({ type: 'error', message: brokeredExitMessage(code, ctx.exit) });
+    return;
+  }
+  if (!ctx.sawUsage) {
+    onEvent?.({ type: 'note', message: 'token usage not reported by claude CLI' });
+  }
+  onEvent?.({ type: 'done' });
+}
+
+/** The `Error` a brokered run rejects with, or null when it ended acceptably. */
+function brokeredExitFailure(spoolDir: string, timedOut: boolean, terminatedByCezar: boolean): Error | null {
+  if (timedOut) return null;
+  const exit = readSpoolExitSafe(spoolDir);
+  const code = exit?.code ?? null;
+  if (code === 0 || code === null) return null;
+  if (terminatedByCezar && isSignalTerminationExit(code)) return null;
+  return new Error(brokeredExitMessage(code, exit, spoolDir));
+}
+
+function brokeredExitMessage(code: number, exit: SpoolExit | null, spoolDir?: string): string {
+  const stderr = spoolDir ? spooledStderrTail(spoolDir) : '';
+  const detail = stderr ? ` — ${stderr}` : '';
+  const signal = exit?.signal ? ` (signal ${exit.signal})` : '';
+  return `claude CLI exited with code ${code}${signal}${detail}`;
+}
+
+function readSpoolExitSafe(spoolDir: string): SpoolExit | null {
+  try {
+    return JSON.parse(readFileSync(spoolPaths(spoolDir).exit, 'utf8')) as SpoolExit;
+  } catch {
+    return null;
+  }
+}
+
+/** The last three lines of the broker's `err.log` — the brokered twin of the pipe path's
+ *  `stderrChunks.slice(-3)`, which is what makes a failed run's cause visible in the transcript. */
+function spooledStderrTail(spoolDir: string): string {
+  try {
+    return readFileSync(spoolPaths(spoolDir).err, 'utf8').trim().split('\n').slice(-3).join(' | ');
+  } catch {
+    return '';
+  }
+}
 
 // ---- subprocess plumbing --------------------------------------------------
 

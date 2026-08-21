@@ -1,4 +1,5 @@
 import { brokerRequest } from './broker-client.ts';
+import type { BrokerRequest } from './run-broker.ts';
 import type { AgentRunResult, AgentSession, ContentBlock } from './agent-runner.ts';
 import { readSpoolExit, readSpoolFrom, readSpoolMeta, spoolPaths, type SpoolExit } from './run-spool.ts';
 
@@ -27,6 +28,15 @@ import { readSpoolExit, readSpoolFrom, readSpoolMeta, spoolPaths, type SpoolExit
  *  whether a user sees their agent's output. */
 export const SPOOL_POLL_MS = 50;
 
+/**
+ * How many consecutive failed control round-trips before a queued send is abandoned.
+ *
+ * At `SPOOL_POLL_MS` this is a ~5 s window, which is generous for "the broker has been spawned but
+ * has not bound its socket yet" and short enough that a broker that never came up does not leave
+ * the cockpit believing a message is still on its way.
+ */
+export const PENDING_MAX_ATTEMPTS = 100;
+
 export interface BrokeredSessionOptions {
   spoolDir: string;
   /** Byte offset to resume from — 0 for a fresh run, the persisted value when re-attaching. */
@@ -48,6 +58,18 @@ export interface BrokeredSessionOptions {
    */
   buildResult?: () => AgentRunResult;
   pollMs?: number;
+  /**
+   * Turn a user message into the exact line the backend expects on stdin.
+   *
+   * The generic `{op:'send'}` control op wraps content in the
+   * `{type:'user', message:{role:'user', content}}` envelope, which is right for a backend that
+   * needs nothing more. Claude needs `session_id` on every user frame, and a frame missing it is
+   * not a slightly-different frame — it starts a different conversation. So the runner supplies the
+   * encoder and the send goes out as `sendRaw`, byte-identical to what the in-process path writes
+   * to the pipe. That byte-identity is the parity requirement `AGENT_PROTOCOL.md` imposes, and
+   * this is the one place the brokered path could quietly have broken it.
+   */
+  encodeSend?: (content: ContentBlock[]) => string;
 }
 
 export class BrokeredSession implements AgentSession {
@@ -60,13 +82,18 @@ export class BrokeredSession implements AgentSession {
   private timer?: NodeJS.Timeout;
   private readonly opts: BrokeredSessionOptions;
   private settle!: (result: AgentRunResult) => void;
+  private failWith!: (err: unknown) => void;
+  private readonly pending: BrokerRequest[] = [];
+  private sending = false;
+  private attempts = 0;
 
   constructor(opts: BrokeredSessionOptions) {
     this.opts = opts;
     this.spoolDir = opts.spoolDir;
     this.offset = opts.startOffset ?? 0;
-    this.result = new Promise<AgentRunResult>((resolve) => {
+    this.result = new Promise<AgentRunResult>((resolve, reject) => {
       this.settle = resolve;
+      this.failWith = reject;
     });
     this.tick();
     this.timer = setInterval(() => this.tick(), opts.pollMs ?? SPOOL_POLL_MS);
@@ -106,6 +133,8 @@ export class BrokeredSession implements AgentSession {
 
   private tick(): void {
     if (this.closed) return;
+    // Before reading: a queued opening message is the reason there is anything to read at all.
+    void this.pumpPending();
     this.drain();
     const exit = readSpoolExit(this.spoolDir);
     if (!exit) return;
@@ -120,27 +149,82 @@ export class BrokeredSession implements AgentSession {
     this.closed = true;
     this.stdinOpen = false;
     if (this.timer) clearInterval(this.timer);
-    this.opts.onExit?.(exit);
-    this.settle(this.opts.buildResult?.() ?? { text: '', toolCalls: [], tokensUsed: 0 });
+    try {
+      this.opts.onExit?.(exit);
+    } catch {
+      // A consumer defect in the terminal callback must not strand `result` unsettled.
+    }
+    try {
+      this.settle(this.opts.buildResult?.() ?? { text: '', toolCalls: [], tokensUsed: 0 });
+    } catch (err) {
+      this.failWith(err);
+    }
+  }
+
+  /**
+   * Queue a control request and start (or join) the drain.
+   *
+   * Everything goes through the queue, including sends issued long after the broker is up. A
+   * "send now if ready, else queue" split would have needed a readiness TEST, and the obvious one
+   * — does `ctl.sock` exist? — is wrong for a reason worth recording: libuv truncates an over-long
+   * `sun_path`, so for a deep spool the socket works perfectly while the file is not at the path
+   * anyone would stat (see `controlSocketPath`). Trying the send and believing the RESULT asks the
+   * only question that matters, and it also covers the case the file test never could — the socket
+   * exists but the broker has not called `accept` yet.
+   */
+  private dispatch(request: BrokerRequest): void {
+    this.pending.push(request);
+    void this.pumpPending();
+  }
+
+  /**
+   * Send queued requests in order, stopping at the first failure so the next tick retries.
+   *
+   * Strictly one in flight: the broker writes each `send` straight to the backend's stdin, so two
+   * concurrent sends could interleave turns. `attempts` bounds the retry so a broker that died
+   * between spawn and bind cannot spin this forever — after the budget the queue is dropped and
+   * the session reports itself closed, which is the truthful state.
+   */
+  private async pumpPending(): Promise<void> {
+    if (this.sending || this.pending.length === 0 || this.closed) return;
+    this.sending = true;
+    try {
+      while (this.pending.length) {
+        const next = this.pending[0] as BrokerRequest;
+        try {
+          await brokerRequest(this.spoolDir, next);
+        } catch {
+          this.attempts += 1;
+          if (this.attempts >= PENDING_MAX_ATTEMPTS) {
+            this.pending.length = 0;
+            this.stdinOpen = false;
+          }
+          return;
+        }
+        this.attempts = 0;
+        this.pending.shift();
+      }
+    } finally {
+      this.sending = false;
+    }
   }
 
   sendMessage(content: ContentBlock[]): boolean {
     if (!this.open) return false;
-    // Fire-and-forget by the interface's own shape (it returns boolean, not a promise). A failed
-    // send surfaces as the backend simply not answering, exactly as a failed pipe write does today.
-    void brokerRequest(this.spoolDir, { op: 'send', content }).catch(() => undefined);
+    const encoded = this.opts.encodeSend?.(content);
+    this.dispatch(encoded === undefined ? { op: 'send', content } : { op: 'sendRaw', line: encoded });
     return true;
   }
 
   end(): void {
     if (!this.stdinOpen) return;
     this.stdinOpen = false;
-    void brokerRequest(this.spoolDir, { op: 'end' }).catch(() => undefined);
+    this.dispatch({ op: 'end' });
   }
 
   interrupt(): void {
     this.stdinOpen = false;
-    void brokerRequest(this.spoolDir, { op: 'interrupt' }).catch(() => undefined);
+    this.dispatch({ op: 'interrupt' });
   }
 
   /** Stop tailing without touching the backend — what a graceful server shutdown does. The broker

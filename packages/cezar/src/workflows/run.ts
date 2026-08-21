@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import {
   parseAskMarkerResult,
   stripAskMarker,
@@ -12,6 +12,13 @@ import { type AgentSession } from '../core/claude-cli-runner.ts';
 import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.ts';
 import { parseUsageLimit } from '../core/usage-limit.ts';
 import { createRunner } from '../core/runner-factory.ts';
+import {
+  BROKERED_BACKENDS,
+  brokerAvailable,
+  type BrokerSessionRequest,
+} from '../core/broker-launch.ts';
+import { chooseIsolation, probeIsolationCapabilities, type BrokerIsolation } from '../core/broker-isolation.ts';
+import { isSpoolLive, readSpoolMeta, spoolDirFor } from '../core/run-spool.ts';
 import type { RunnerId } from '../core/agent-runner.ts';
 import { modelConflictsWithRunner } from '../core/model-presets.ts';
 import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
@@ -344,6 +351,9 @@ export const AUTO_RESUME_MISSED_WINDOW_MS = 24 * 60 * 60_000;
  */
 export const QUEUE_WATCHDOG_MS = 60_000;
 /** Shared empty holds for the common "nothing is held" pump — avoids allocating per sweep. */
+/** How often a brokered run's consumed byte offset is written to `runs.json`. */
+const OFFSET_PERSIST_MS = 1_000;
+
 const NO_HOLDS: AccountHolds = { deadline: new Set(), inFlight: new Set() };
 
 /**
@@ -750,6 +760,23 @@ export class RunManager {
    *  does not strictly reduce it is a loop, not progress, and fails the run loudly instead of
    *  spinning. Process-local: a restart re-arms it from the record on the first hand-back. */
   private readonly chainReentries = new Map<string, number>();
+  /**
+   * Runs whose next agent step must RE-ATTACH to a live broker rather than spawn one (P4 of
+   * `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`).
+   *
+   * A side channel rather than another parameter threaded through `execute()` → `runAgentStep()`,
+   * and that is a deliberate trade: the alternative is widening two long signatures and every
+   * call site of both for a value that is set in exactly one place (`recover`) and read in exactly
+   * one place (the spawn seam). Entries are consumed on first read and dropped whenever the run's
+   * step turns out not to match, so a stale entry cannot re-attach a later step to an older spool.
+   */
+  private readonly pendingReattach = new Map<string, { stepId: string; spoolDir: string; startOffset: number }>();
+  /** Last `consumedOffset` written per run, so the tail's 50 ms cadence does not become a 50 ms
+   *  write cadence on `runs.json`. */
+  private readonly offsetWrites = new Map<string, { offset: number; written: number; at: number }>();
+  /** Cached once: probing the host's cgroup privileges per run would be pure waste, and the answer
+   *  cannot change without the process being restarted anyway. */
+  private brokerIsolationCache?: BrokerIsolation;
   /** Interrupted agent turns recovered after a process restart. Unlike an
    *  explicit user Continue, these are bulk scheduler work and must re-enter
    *  through `pump()` so both workspace and per-project caps are honored. */
@@ -1417,6 +1444,9 @@ export class RunManager {
     // Startup is the one moment we know which runs are still live, so sweep every other
     // per-run directory here — bounded to `<dataDir>/tmp`, never a sibling.
     sweepAgentTmpDirs(this.dataDir, live.map((r) => r.id));
+    // Same reasoning, same moment, for the broker spools (P4): a spool whose run is over is dead
+    // weight, and startup is the one point at which "which runs are still live" is knowable.
+    this.sweepSpools(live.map((r) => r.id));
     for (const run of live) {
       if (run.status === 'queued') {
         await this.reviveQueuedRun(run, 'cezar restarted');
@@ -1466,7 +1496,15 @@ export class RunManager {
         await this.settleSuccess(run.id, { pendingAsk });
         continue;
       }
-      // `running`: the process died mid-turn. Re-enter the CHAIN first (spec 2026-08-20, P1) —
+      // `running`: FIRST ask whether the agent is even dead (P4 of
+      // `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`). A brokered run's backend
+      // lives outside this process's cgroup and outlives it, so a restart is not a crash for it —
+      // its output has been accumulating in a file the whole time. Re-attaching keeps the run
+      // `running`, replays exactly the bytes this process had not consumed, and adds no
+      // `interrupted` event and no restart-continuation prompt. Everything below is unchanged and
+      // remains the safety net: every way this can be wrong returns false.
+      if (await this.reattachBrokeredRun(run)) continue;
+      // The process died mid-turn. Re-enter the CHAIN first (spec 2026-08-20, P1) —
       // resuming the interrupted step's own session at its own index, the same shape
       // `reviveQueuedRun` already uses for a `queued` record. Before this, a restart during any
       // non-final step silently converted the pipeline into an open-ended `continue-N` chat and
@@ -1514,6 +1552,187 @@ export class RunManager {
     // one — see `reconcileAutoResumes`.
     this.reconcileAutoResumes();
     void this.pump();
+  }
+
+  // ---- run brokering (P4) ---------------------------------------------------------------
+  //
+  // `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`. The seam is deliberately tiny:
+  // everything below decides WHETHER a session is brokered and WHERE its spool lives. Nothing
+  // above the runner learns that a run moved out of process, which is what makes this tractable
+  // against a file this size.
+
+  /** Which cgroup escape this host actually supports, probed once. */
+  brokerIsolation(): BrokerIsolation {
+    this.brokerIsolationCache ??= chooseIsolation(probeIsolationCapabilities());
+    return this.brokerIsolationCache;
+  }
+
+  /**
+   * Claim this run's pending re-attach, but only if it names THIS step.
+   *
+   * Consuming unconditionally is the point: an entry that does not match is stale — the chain
+   * moved on, or the record and the spool disagreed — and leaving it behind would let a later step
+   * re-attach to an older step's spool. One read, then gone, either way.
+   */
+  private takeReattach(runId: string, stepId: string): { spoolDir: string; startOffset: number } | undefined {
+    const pending = this.pendingReattach.get(runId);
+    if (!pending) return undefined;
+    this.pendingReattach.delete(runId);
+    return pending.stepId === stepId ? { spoolDir: pending.spoolDir, startOffset: pending.startOffset } : undefined;
+  }
+
+  /** The furthest offset this process has recorded for a run. */
+  private lastOffset(runId: string): number {
+    return this.offsetWrites.get(runId)?.offset ?? 0;
+  }
+
+  /** Absolute spool dir for a run, from the record's relative path or the default layout. */
+  private spoolDirOf(run: RunRecord): string {
+    return run.spoolDir ? join(this.dataDir, run.spoolDir) : spoolDirFor(join(this.dataDir, 'runs'), run.id);
+  }
+
+  /**
+   * The broker request for one step, or `undefined` to keep the in-process path.
+   *
+   * Three gates, all of which must pass, and each of which is a real limit rather than caution:
+   * the backend must be one whose stdout a spool can stand in for (`claude` today), this cezar
+   * must have a built entry point to re-exec as the broker, and the run must not already be
+   * re-attaching to a live spool for this very step.
+   */
+  private brokerFor(runId: string, stepId: string, backend: RunnerId): BrokerSessionRequest | undefined {
+    if (!(BROKERED_BACKENDS as readonly string[]).includes(backend)) return undefined;
+    if (!brokerAvailable()) return undefined;
+    const spoolDir = spoolDirFor(join(this.dataDir, 'runs'), runId);
+    // Recorded BEFORE the spawn: a crash in the same millisecond must still leave the next process
+    // a path to probe. Written relative to `dataDir` — see the field's own note in `store.ts`.
+    this.store.updateRun(runId, { spoolDir: relative(this.dataDir, spoolDir), consumedOffset: 0 });
+    this.offsetWrites.set(runId, { offset: 0, written: 0, at: Date.now() });
+    return {
+      spoolDir,
+      runId,
+      stepId,
+      isolation: this.brokerIsolation(),
+      onOffset: (offset) => this.persistConsumedOffset(runId, offset),
+    };
+  }
+
+  /**
+   * Persist how far this process has consumed the spool, at most once a second.
+   *
+   * The throttle is not premature optimization: the tail wakes every 50 ms and `updateRun` writes
+   * the whole run index, so an unthrottled offset would turn a chatty agent into twenty full
+   * `runs.json` rewrites a second. The cost of the throttle is bounded and cheap — a crash inside
+   * the window re-attaches up to a second early and REPLAYS those records, which is exactly the
+   * direction the design tolerates: a duplicate event is visible and harmless, a lost one is not.
+   *
+   * `force` is used when the session ends, so the final offset is always durable.
+   */
+  private persistConsumedOffset(runId: string, offset: number, force = false): void {
+    const last = this.offsetWrites.get(runId) ?? { offset: 0, written: -1, at: 0 };
+    // Always remember the newest report, even when the write is throttled away — otherwise the
+    // final flush below would have nothing newer than the last throttled write to persist, and
+    // the whole point of forcing it is the progress the throttle is currently holding.
+    const latest = Math.max(last.offset, offset);
+    if (latest <= last.written) {
+      this.offsetWrites.set(runId, { ...last, offset: latest });
+      return;
+    }
+    if (!force && Date.now() - last.at < OFFSET_PERSIST_MS) {
+      this.offsetWrites.set(runId, { ...last, offset: latest });
+      return;
+    }
+    this.offsetWrites.set(runId, { offset: latest, written: latest, at: Date.now() });
+    this.store.updateRun(runId, { consumedOffset: latest });
+  }
+
+  /**
+   * Take a run whose agent is STILL ALIVE behind a broker and keep it running (P4 re-attach).
+   *
+   * Returns false — leaving the caller's existing interrupted-run handling to deal with it — for
+   * every reason a re-attach could be wrong, and there are many: the backend is not brokered, the
+   * spool is gone or belongs to another run, the broker died, the protocol moved, no step is
+   * actually running, or the chain's resume point is not the step the spool holds. **Failing open
+   * is the whole safety argument.** The dangerous outcome here is not "we re-attached when we
+   * could have restarted"; it is a live agent left with nobody reading it, which is strictly worse
+   * than today's behaviour. Every uncertain branch therefore falls back to today's behaviour.
+   *
+   * Unlike a chain re-entry this does NOT re-queue the run. `reenterChain` sets the record to
+   * `queued` and waits for a slot, which would make the run's status leave `running` — the exact
+   * thing the acceptance criterion says must not happen — while its agent kept working unwatched.
+   * So the job is handed straight to `execute()`, which re-adopts the run, re-takes its slot and
+   * re-enters the chain at the surviving step.
+   */
+  private async reattachBrokeredRun(run: RunRecord): Promise<boolean> {
+    const backend = run.runner ?? 'claude';
+    if (!(BROKERED_BACKENDS as readonly string[]).includes(backend)) return false;
+    const spoolDir = this.spoolDirOf(run);
+    if (!isSpoolLive(spoolDir)) return false;
+    const meta = readSpoolMeta(spoolDir);
+    if (!meta || meta.runId !== run.id || !meta.stepId) return false;
+    const openStep = run.steps.find((s) => s.id === meta.stepId);
+    if (!openStep || stepTerminal(openStep.status)) return false;
+
+    const workflow = await this.reviveWorkflow(run);
+    if (!workflow) return false;
+    const resumeAt = this.chainResumeAt(run, workflow);
+    // The spool must hold the step the chain is about to run. A mismatch means the record and the
+    // spool disagree about where this run is, and guessing between them is precisely how a run
+    // ends up with two live agents.
+    if (!resumeAt || workflow.steps[resumeAt.index]?.id !== meta.stepId) return false;
+
+    this.pendingReattach.set(run.id, {
+      stepId: meta.stepId,
+      spoolDir,
+      startOffset: run.consumedOffset ?? 0,
+    });
+    this.store.appendEvent(run.id, {
+      type: 'lifecycle',
+      message: 'cezar restarted — this run kept going',
+    });
+    this.starting.add(run.id);
+    const input = this.hydrateQueuedInput(run.id, {
+      task: run.task,
+      model: run.model,
+      runner: run.runner,
+      generateFollowups: followupsEnabled() ? run.generateFollowups : false,
+      autonomous: run.autonomous,
+      worktree: run.worktree,
+    });
+    void this.execute(run.id, workflow, input, resumeAt).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      this.pendingReattach.delete(run.id);
+      this.store.updateRun(run.id, {
+        status: 'failed',
+        error: `re-attach crashed: ${message}`,
+        finishedAt: new Date().toISOString(),
+      });
+      this.starting.delete(run.id);
+      this.dropActive(run.id);
+    });
+    return true;
+  }
+
+  /**
+   * Delete spool directories whose runs are over.
+   *
+   * The mirror of `sweepAgentTmpDirs`, and needed for the same reason: a crash never reaches the
+   * tidy-up path, so yesterday's spools accumulate. Bounded to `<dataDir>/runs/*.spool` and skips
+   * anything still live, so a sweep can never remove a spool a re-attach is about to use.
+   */
+  private sweepSpools(liveRunIds: string[]): void {
+    const runsDir = join(this.dataDir, 'runs');
+    const live = new Set(liveRunIds);
+    let entries: string[];
+    try {
+      entries = readdirSync(runsDir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.spool')) continue;
+      if (live.has(entry.slice(0, -'.spool'.length))) continue;
+      rmSync(join(runsDir, entry), { recursive: true, force: true });
+    }
   }
 
   /** The persisted definition when it looks sane, else the catalog by name. */
@@ -3062,6 +3281,7 @@ export class RunManager {
     // live path applies (#811). Delivery-only: the `user-message` event above already
     // persisted the user's original text, and the transcript must keep showing that.
     const openingPrompt = expandRegistrySlashSkillText(prompt, state.skills ?? []);
+    const continueBroker = this.brokerFor(runId, stepId, continueBackend);
     const session = runner.startSession(
       {
         // The Continue step is a fresh agent session on the same run — the
@@ -3098,7 +3318,10 @@ export class RunManager {
         timeoutMs: 0,
       },
       onEvent,
-      { onUiEvent: (event) => this.handleRunnerUiEvent(runId, state, sink, event) },
+      {
+        onUiEvent: (event) => this.handleRunnerUiEvent(runId, state, sink, event),
+        ...(continueBroker ? { broker: continueBroker } : {}),
+      },
     );
     state.session = session;
     state.sessionEverOpened = true;
@@ -4269,8 +4492,24 @@ export class RunManager {
     let session: AgentSession;
     state.currentStepId = step.id;
     this.beginUsageInvocation(runId, state, step.id);
+    // P4: this step either re-attaches to a broker that never stopped, or starts one, or takes the
+    // in-process path — decided here and nowhere else, so every layer above sees one `AgentSession`.
+    const reattach = this.takeReattach(runId, step.id);
+    const brokerRequest = reattach
+      ? {
+          spoolDir: reattach.spoolDir,
+          runId,
+          stepId: step.id,
+          startOffset: reattach.startOffset,
+          isolation: this.brokerIsolation(),
+          onOffset: (offset: number) => this.persistConsumedOffset(runId, offset),
+        }
+      : this.brokerFor(runId, step.id, stepBackend);
     try {
-      session = runner.startSession(
+      const openSession = reattach && runner.reattachSession
+        ? runner.reattachSession.bind(runner)
+        : runner.startSession.bind(runner);
+      session = openSession(
         {
           // Skill body, then the run's extra prompt (POST override or config
           // default), then the handoff/todos contract — every agent step.
@@ -4319,6 +4558,7 @@ export class RunManager {
         {
           autoEndAfterFirstTurn: !interactive,
           onUiEvent: (event) => this.handleRunnerUiEvent(runId, state, sink, event),
+          ...(brokerRequest ? { broker: brokerRequest } : {}),
         },
       );
     } catch (err) {
@@ -4353,6 +4593,11 @@ export class RunManager {
       this.monitoring.delete(runId);
       this.waiting.delete(runId);
       this.clearMonitoringWakeTimer(state, runId);
+      // The throttle above may be holding the last few hundred milliseconds of progress. A run
+      // that ended has no next tick to write it, and an offset short of the truth would make a
+      // re-attach replay records the run already handled.
+      if (brokerRequest) this.persistConsumedOffset(runId, this.lastOffset(runId), true);
+      this.offsetWrites.delete(runId);
       state.session = undefined;
       state.currentStepId = undefined;
       state.interrupt = () => undefined;

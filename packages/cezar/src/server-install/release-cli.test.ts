@@ -1,0 +1,136 @@
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { migrateReleasesCommand, socketUnitName, unexpectedEntries } from './release-cli.ts';
+import { loadLedger } from './releases.ts';
+
+/**
+ * `cezar server-migrate-releases` — the one-shot that turns a hand-provisioned box into the
+ * release layout P1 needs, and installs the socket/slice units P3/P4 need.
+ *
+ * It is a separate command rather than a `server-install` step because the live `cezar.service` on
+ * `prod-host` is hand-written (its Description is one no generator in this repo emits) and
+ * carries three operator drop-ins holding the Cloudflare token, the 1Password service-account
+ * token and the agent env passthrough. So the migration may only ADD, must be idempotent, and must
+ * refuse rather than guess when it finds something it does not recognise — because everything it
+ * moves ends up in a release directory, and release directories get pruned.
+ */
+describe('server-migrate-releases', () => {
+  let root: string;
+  let linkPath: string;
+  let releasesDir: string;
+  let etc: string;
+  const logs: string[] = [];
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cez-migrate-'));
+    linkPath = join(root, 'opt-cezar');
+    releasesDir = join(root, 'opt-cezar-releases');
+    etc = join(root, 'etc');
+    mkdirSync(join(linkPath, 'packages'), { recursive: true });
+    writeFileSync(join(linkPath, 'package.json'), '{"name":"cezar"}');
+    writeFileSync(join(linkPath, '.deployed-commit'), '37a9a978 (on-box worktree build)\n');
+    logs.length = 0;
+    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(' '));
+    });
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(' '));
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  // `systemdDir` is a test seam — production never passes it. The unit TEXT is asserted in
+  // `socket-unit.test.ts`; these assert the layout move and idempotence.
+  const migrate = (apply: boolean) =>
+    migrateReleasesCommand({ linkPath, releasesDir, systemdDir: etc, apply });
+
+  it('plans without changing anything until --yes', async () => {
+    const code = await migrateReleasesCommand({ linkPath, releasesDir, apply: false });
+    expect(code).toBe(0);
+    // A directory is still a directory: the plan is a plan.
+    expect(lstatSync(linkPath).isSymbolicLink()).toBe(false);
+    expect(logs.join('\n')).toContain('Nothing was changed');
+  });
+
+  it('refuses when the install path holds something a build would not have put there', async () => {
+    // Anything unaccounted for might be state someone relies on, and it would be moved into a
+    // release directory — which is pruned. Refusing is the only safe answer.
+    writeFileSync(join(linkPath, 'operator-notes.txt'), 'do not delete');
+    const code = await migrateReleasesCommand({ linkPath, releasesDir, apply: true });
+    expect(code).toBe(1);
+    expect(logs.join('\n')).toContain('operator-notes.txt');
+    expect(lstatSync(linkPath).isSymbolicLink()).toBe(false);
+  });
+
+  it('tolerates the build leftovers the spec names, and nothing else', () => {
+    // `.ai/` is a build-time leftover nothing reads at runtime (the unit's WorkingDirectory is
+    // elsewhere) and `.deployed-commit` becomes a derived ledger field.
+    const entries = unexpectedEntries(linkPath, () => ['.ai', '.deployed-commit', 'packages', 'node_modules', 'weird']);
+    expect(entries).toEqual(['weird']);
+  });
+
+  it('makes the install path a SYMLINK and records the release in the ledger', async () => {
+    const code = await migrate(true);
+    expect(code).toBe(0);
+
+    // The spec's P1 decision, load-bearing: `/opt/cezar` itself becomes the symlink, because the
+    // unit's ExecStart and all three /usr/local/bin wrappers already point THROUGH it. Nothing
+    // else on the box has to change.
+    expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+    const target = readlinkSync(linkPath);
+    expect(target.startsWith(releasesDir)).toBe(true);
+    // The moved tree is intact at the far end of the link.
+    expect(readFileSync(join(linkPath, 'package.json'), 'utf8')).toBe('{"name":"cezar"}');
+
+    const ledger = loadLedger(releasesDir);
+    expect(ledger.current).toBe(target.slice(releasesDir.length + 1));
+    // The free-text `.deployed-commit` becomes a real field: the sha is parsed out of it.
+    expect(ledger.releases[0]?.id).toContain('37a9a97');
+  });
+
+  it('writes the socket unit, the numbered drop-in and the slice — adding only', async () => {
+    await migrate(true);
+    expect(readFileSync(join(etc, 'cezar.socket'), 'utf8')).toContain('ListenStream=127.0.0.1:4321');
+    // 40-, so it sorts AFTER the three operator drop-ins on this box and never replaces one.
+    const dropIn = readFileSync(join(etc, 'cezar.service.d', '40-non-disruptive.conf'), 'utf8');
+    expect(dropIn).toContain('Sockets=cezar.socket');
+    // The directive that actually saves in-flight runs: with the default `control-group`,
+    // `systemctl restart` SIGKILLs every agent cezar has spawned.
+    expect(dropIn).toContain('KillMode=process');
+    expect(readFileSync(join(etc, 'cezar-runs.slice'), 'utf8')).toContain('[Slice]');
+  });
+
+  it('is idempotent — running it twice changes nothing the second time', async () => {
+    await migrate(true);
+    const target = readlinkSync(linkPath);
+    const ledgerBefore = readFileSync(join(releasesDir, 'deploy.json'), 'utf8');
+
+    logs.length = 0;
+    const code = await migrate(true);
+
+    expect(code).toBe(0);
+    expect(readlinkSync(linkPath)).toBe(target);
+    expect(readFileSync(join(releasesDir, 'deploy.json'), 'utf8')).toBe(ledgerBefore);
+    expect(logs.join('\n')).toContain('already a symlink');
+    expect(logs.join('\n')).toContain('is already current');
+  });
+
+  it('fails loudly when there is nothing installed to migrate', async () => {
+    const code = await migrateReleasesCommand({ linkPath: join(root, 'nope'), releasesDir, apply: true });
+    expect(code).toBe(1);
+  });
+});
+
+describe('socketUnitName', () => {
+  it('derives the socket unit from the service unit', () => {
+    expect(socketUnitName('cezar.service')).toBe('cezar.socket');
+    expect(socketUnitName('cezar-org.service')).toBe('cezar-org.socket');
+  });
+});

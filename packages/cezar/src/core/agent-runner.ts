@@ -13,6 +13,7 @@
  *                 model with `provider/model`.
  */
 
+import type { BrokerSessionRequest } from './broker-launch.ts';
 import type { UiEvent } from './ui-events.ts';
 
 /**
@@ -201,6 +202,15 @@ export interface SessionOptions {
    *  ALONGSIDE the v1 `AgentEvent`s (additive — v1 keeps flowing unchanged).
    *  RunManager consumption lands in R2 step 2.1. */
   onUiEvent?: (event: UiEvent) => void;
+  /**
+   * Run this session through a detached broker rather than an in-process pipe (P4 of
+   * `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`).
+   *
+   * Set only by `RunManager`, and only for backends that implement it — a runner that does not
+   * simply ignores the field and spawns in-process exactly as before, which is what keeps the
+   * claude-only scope of P4 an ignorable option rather than a fork in every call site.
+   */
+  broker?: BrokerSessionRequest;
 }
 
 /**
@@ -230,6 +240,17 @@ export interface AgentRunner {
   readonly backend: AgentBackend;
   run(spec: AgentRunSpec, onEvent?: (event: AgentEvent) => void): Promise<AgentRunResult>;
   startSession(
+    spec: AgentRunSpec,
+    onEvent?: (event: AgentEvent) => void,
+    opts?: SessionOptions,
+  ): AgentSession;
+  /**
+   * Re-open a session whose backend is STILL RUNNING behind a broker, resuming its output at a
+   * byte offset (P4). Implemented by `claude` only; absent on every other runner, which is how a
+   * caller discovers that a restart cannot rescue that backend's runs and must fall back to the
+   * existing interrupted-run path.
+   */
+  reattachSession?(
     spec: AgentRunSpec,
     onEvent?: (event: AgentEvent) => void,
     opts?: SessionOptions,

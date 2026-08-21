@@ -1566,6 +1566,15 @@ describe('workspace projects API', () => {
       // The exact key set: every pre-existing field (BACKWARD_COMPATIBILITY.md
       // §2 — the bookmarklet contract) plus the two new additive fields, and
       // nothing else. `latestVersion` is absent while no update is known.
+      //
+      // `runtime` joined the list on 2026-08-21 (spec
+      // `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, lines 449-450: "`GET
+      // /api/v1/health` gains `deploy` … and `runtime`"). Adding it here rather than loosening
+      // the assertion to a subset check is the point of this test — it is the tripwire that makes
+      // every new health field a DELIBERATE edit to the documented contract, so a field that
+      // arrives by accident still fails. Its sibling `deploy` is correctly absent: it ships only
+      // when this process is running from a release tree with a ledger entry, which a tmp-dir
+      // test never is.
       expect(Object.keys(body).sort()).toEqual(
         [
           'bootProject',
@@ -1576,6 +1585,7 @@ describe('workspace projects API', () => {
           'projects',
           'repo',
           'repoRoot',
+          'runtime',
           'version',
         ].sort(),
       );

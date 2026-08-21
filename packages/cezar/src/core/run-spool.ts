@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { z } from 'zod';
 
 /**
@@ -71,9 +73,55 @@ export function spoolPaths(spoolDir: string): SpoolPaths {
     meta: join(spoolDir, 'meta.json'),
     out: join(spoolDir, 'out.ndjson'),
     err: join(spoolDir, 'err.log'),
-    ctl: join(spoolDir, 'ctl.sock'),
+    ctl: controlSocketPath(spoolDir),
     exit: join(spoolDir, 'exit.json'),
   };
+}
+
+/**
+ * The longest `sun_path` a unix domain socket may have, minus the NUL: 108 bytes on Linux, and
+ * the smallest of the platform values cezar runs on.
+ */
+export const UNIX_SOCKET_PATH_MAX = 107;
+
+/**
+ * Where the broker's control socket actually lives.
+ *
+ * **This is not defensive programming; it is a measured defect.** `bind(2)` copies `sun_path` into
+ * a fixed 108-byte field, and libuv does not refuse an over-long path — it TRUNCATES it. Measured
+ * on this box: a 110-character socket path binds successfully and reports no error, and the socket
+ * file appears at the truncated path, not the one asked for. Both `listen` and `connect` truncate
+ * identically, so control ops keep working and nothing looks wrong — until something reasons about
+ * the path as a FILE. `rmSync(paths.ctl)` then deletes nothing, the stale socket outlives its
+ * broker, and the next broker for that spool hits `EADDRINUSE` on a path it can see is empty. (A
+ * 117-character path did exactly that in testing, colliding with a 110-character path's leftover.)
+ *
+ * A spool path gets long easily: `<project>/.ai/cezar/runs/<uuid>.spool/ctl.sock` is already ~98
+ * characters from a short project root, and a task worktree or a nested checkout clears 107 without
+ * anything unusual happening.
+ *
+ * So: keep the socket beside the spool while it fits — that is the discoverable, greppable layout
+ * an operator expects — and fall back to a short, DETERMINISTIC path under the temp dir when it
+ * does not. Deterministic matters more than pretty here: the broker and every future server derive
+ * it from the same spool dir with no shared state, so a re-attach after a restart finds the same
+ * socket without having to read anything.
+ */
+export function controlSocketPath(spoolDir: string, tmp: string = tmpdir()): string {
+  const inSpool = join(spoolDir, 'ctl.sock');
+  if (Buffer.byteLength(inSpool) <= UNIX_SOCKET_PATH_MAX) return inSpool;
+  // Keyed on the RESOLVED directory so `./x` and `/abs/x` cannot produce two sockets for one spool.
+  const name = `cez-ctl-${createHash('sha1').update(resolve(spoolDir)).digest('hex').slice(0, 16)}.sock`;
+  // `/tmp` FIRST, and `os.tmpdir()` only as a fallback — which is the opposite of the usual
+  // preference, for a measured reason. `TMPDIR` is routinely set to something long (cezar itself
+  // gives every run a per-task temp dir, 81 characters on this box), and a "short" fallback built
+  // on it can blow the same 107-byte budget the fallback exists to escape. `/tmp` is 4 characters
+  // and exists on every platform cezar runs on. If it somehow does not, the tmpdir attempt is
+  // still better than the spool path that already failed.
+  for (const base of ['/tmp', tmp]) {
+    const candidate = join(base, name);
+    if (Buffer.byteLength(candidate) <= UNIX_SOCKET_PATH_MAX && existsSync(base)) return candidate;
+  }
+  return join(tmp, name);
 }
 
 /** `<dataDir>/runs/<runId>.spool` — one per agent session. */

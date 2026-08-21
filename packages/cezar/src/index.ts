@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectEnvironment } from './core/backend-detect.ts';
 import { runBrokerCommand } from './core/run-broker-cli.ts';
+import { migrateReleasesCommand, releaseDeployCommand } from './server-install/release-cli.ts';
 import { consumeSocketActivation } from './server/socket-activation.ts';
 import { DrainController, resolveDrainMs } from './server/drain.ts';
 import {
@@ -85,6 +86,12 @@ Usage:
                             <id>] [--force]
   cezar server-install      interactive wizard to host cezar on a server
   cezar server-deploy       redeploy a new version (reload the service) + verify
+                              --strategy=blue-green   stage a release, smoke-boot it, flip, probe,
+                                                      auto-roll-back (spec 2026-08-19)
+                              --rollback[=<id>]       flip back to the previous release + restart
+                              --follow                tail the deploy running in its own unit
+  cezar server-migrate-releases
+                            one-shot: /opt/cezar → release symlink + socket/slice units (--yes to apply)
   cezar server-uninstall    reverse a server-install
   cezar supervisor          run the auth-terminating supervisor process (D4/D10 —
                             per-org process isolation; see the org-team-auth spec).
@@ -217,6 +224,27 @@ async function main(): Promise<void> {
     return;
   }
 
+  // `run-broker` is routed here for exactly the reason `kb`/`todo`/`runs` above are, and it is the
+  // one command where getting this wrong is INVISIBLE. It owns `--spool`, `--run`, `--step`,
+  // `--backend` and `--cwd`, every one of which the strict `parseArgs` below rejects as an unknown
+  // option — so the `case 'run-broker'` in the switch was unreachable, and the binary answered
+  // `Unknown option '--spool'` and exited 0.
+  //
+  // Why that was silent rather than loud: the run manager spawns this `detached` with
+  // `stdio: 'ignore'` (it must — the whole point of P4 is that no pipe ties the agent to the
+  // server), so the broker's stderr went nowhere, no spool was ever created, and the parent sat
+  // waiting for a spool that would never appear. `brokerAvailable()` is true in any BUILT tree, so
+  // this was every run on a production install hanging at its first agent step, while the source
+  // tree the tests run in took the in-process path and stayed green. Caught by the packaged-CLI
+  // E2E (`test/e2e/package-cli.test.ts`), which is the only gate that exercises `dist`.
+  //
+  // `rawArgs.slice(1)` rather than `process.argv.slice(3)`: same tokens, but expressed against the
+  // same array every neighbour above uses instead of re-deriving the offset.
+  if (rawArgs[0] === 'run-broker') {
+    process.exitCode = await runBrokerCommand(rawArgs.slice(1));
+    return;
+  }
+
   const { values, positionals } = parseArgs({
     options: {
       port: { type: 'string', short: 'p', default: '4321' },
@@ -233,6 +261,19 @@ async function main(): Promise<void> {
       reconfigure: { type: 'string' },
       reinstall: { type: 'boolean', default: false },
       'port-strict': { type: 'boolean', default: false },
+      // Non-disruptive deploy (`.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`).
+      // `--strategy` defaults to `restart` — today's behaviour — so an existing `server-deploy`
+      // invocation on any platform does exactly what it did before this shipped.
+      strategy: { type: 'string' },
+      rollback: { type: 'string' },
+      follow: { type: 'boolean', default: false },
+      source: { type: 'string' },
+      'link-path': { type: 'string' },
+      'releases-dir': { type: 'string' },
+      'release-id': { type: 'string' },
+      unit: { type: 'string' },
+      sha: { type: 'string' },
+      note: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -302,10 +343,47 @@ async function main(): Promise<void> {
         bindHost: values['bind-host'],
       });
       return;
-    case 'server-deploy':
+    case 'server-deploy': {
+      // Two deploys behind one command, and the split is deliberate. `restart` is what every
+      // platform has always done — reload the unit, re-verify — and stays the default so no
+      // existing invocation changes meaning. `blue-green` is P1/P2/P5: stage a release, prove it
+      // boots before it is live, flip a symlink, restart, probe, and roll back on its own if the
+      // probe fails. `--rollback` is the same machinery pointed backwards.
+      const strategy = values.strategy ?? (values.rollback !== undefined ? 'blue-green' : 'restart');
+      if (strategy !== 'restart') {
+        process.exitCode = await releaseDeployCommand({
+          strategy,
+          rollback: values.rollback,
+          follow: Boolean(values.follow),
+          source: values.source ?? repoRoot,
+          linkPath: values['link-path'],
+          releasesDir: values['releases-dir'],
+          releaseId: values['release-id'],
+          unit: values.unit,
+          port: portExplicit ? Number(values.port) : undefined,
+          sha: values.sha,
+          note: values.note,
+        });
+        return;
+      }
       await serverCommand('deploy', repoRoot, values.platform, {
         yes: Boolean(values.yes),
         domain: values.domain,
+      });
+      return;
+    }
+    case 'server-migrate-releases':
+      // One-shot, idempotent: turn a hand-provisioned box into the release layout this spec needs
+      // (P1) and install the socket/slice units (P3/P4). Separate from `server-install` because
+      // the live unit on `prod-host` is hand-written — no generator in this repo authored
+      // it — so a fresh install and an existing box need different, equally supported paths.
+      process.exitCode = await migrateReleasesCommand({
+        linkPath: values['link-path'],
+        releasesDir: values['releases-dir'],
+        unit: values.unit,
+        port: portExplicit ? Number(values.port) : undefined,
+        bindHost: values['bind-host'],
+        apply: Boolean(values.yes),
       });
       return;
     case 'server-uninstall':
@@ -317,14 +395,9 @@ async function main(): Promise<void> {
     case 'supervisor':
       await supervisorCommand(Number(values.port), values['bind-host']);
       return;
-    case 'run-broker':
-      // Internal (deliberately absent from HELP): the per-run process that owns an agent CLI's
-      // stdio so the cockpit can be replaced without killing the agent. Spec
-      // `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P4. Never invoked by a user —
-      // the run manager spawns it — but it MUST be a real subcommand of the same binary so a
-      // release flip ships one artifact rather than a second executable to keep in sync.
-      process.exitCode = await runBrokerCommand(process.argv.slice(3));
-      return;
+    // NB no `case 'run-broker'` here. It is dispatched from raw argv above the strict `parseArgs`,
+    // because its own flags never survive that parser — and a `case` here that LOOKS live while
+    // being unreachable is precisely how the broker shipped broken. See the block above.
     default:
       console.error(`unknown command: ${command}\n`);
       console.log(HELP);
@@ -653,6 +726,10 @@ async function serveCommand(
   startServer({
     repoRoot,
     listenFd,
+    // P3: the same controller the signal handlers below drain. Without it the server counts
+    // nothing and registers nothing, and the drain has no work to do — which is exactly the state
+    // this wiring was missing.
+    drain,
     store,
     manager,
     version,
