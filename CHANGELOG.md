@@ -5,6 +5,19 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- ✅ **The non-disruptive deploy is now MEASURED, not just shipped** (spec
+  `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` § "Status log — 2026-08-21
+  (18:31–18:41 UTC)"). Release `20260821T183127Z-be3aab61` is live on `prod-host`, deployed
+  with `server-deploy --strategy=blue-green` **from inside an agent task** — via a `systemd-run
+  --user` transient unit, which is the piece that was missing (system transient units are denied to
+  `cezar`, and must stay denied). Across five real cutovers: the deploying run stayed alive with a
+  **byte-identical spool/transcript prefix** (criterion 1 met), and a fresh-connection prober did
+  **3790 requests with zero refusals** (criterion 2 met at the listener). Recorded rather than
+  rounded away: 3 keep-alive resets in 4864 requests and ~1.1 s worst-case cutover latency
+  (`6c89af7c`). The bad-build gate was exercised for real — a broken candidate failed `smoke_boot`,
+  was marked `healthy: false`, and **nothing flipped and nothing restarted**. Two defects the run
+  exposed: bare `--rollback` dies in argv parsing (`f97ddd39`) and `runRollback` never probes
+  readiness (`6497f002`).
 - ✨ **A deploy no longer kills what it is deploying: `server-deploy --strategy=blue-green`.**
   Spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`; commits `3f4e9c33` (foundation,
   154 tests), `954c6a55` (integration, 41 tests), `ad0b5f17` (migration allowlist fix). **Live on

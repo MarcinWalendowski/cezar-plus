@@ -1,10 +1,20 @@
 # Non-disruptive cezar self-deploy / update
 
-**Status:** implemented **and DEPLOYED — live on `prod-host` since 2026-08-21 18:11:08 UTC**
-as release `20260821T181100Z-ad0b5f17` (`3f4e9c33` foundation + `954c6a55` integration + `ad0b5f17`
-migration fix). **Still QA Needed:** the acceptance E2E probe has never been run, so neither
-acceptance criterion has been *measured* — see "Status log — 2026-08-21" immediately below.
-**NOT a prerequisite for anything.**
+**Status:** implemented, **DEPLOYED**, and **ACCEPTANCE-MEASURED**. Live on `prod-host` as
+release `20260821T183127Z-be3aab61` since 2026-08-21 18:31:54 UTC (first cutover was
+`20260821T181100Z-ad0b5f17` at 18:11:08). **Criterion 1 (a deploy mid-run leaves the run alive and
+streaming) is MET, measured.** **Criterion 2 (cutover gap = 0) is MET at the listener** — 3790
+fresh connections across a restart, zero refused — **with two residual costs that are recorded, not
+rounded up**: an intermittent keep-alive reset (3 in 4864 requests over 5 restarts) and ~1.1 s
+worst-case latency. **SSE continuity remains unmeasured** (the API is behind OIDC; no static token
+on the box). See "Status log — 2026-08-21 (18:31–18:41 UTC)" below. **NOT a prerequisite for
+anything.**
+
+> **CORRECTED 2026-08-21** — this header previously read *"Still QA Needed: the acceptance E2E
+> probe has never been run, so neither acceptance criterion has been measured."* That was true when
+> written at ~18:20 UTC and false about ninety minutes later; the probe has now been run four times
+> across five real cutovers. The falsehood was in the status line itself, which is what every
+> reader scans first, so it is amended here rather than appended to.
 **Date:** 2026-08-19, rewritten 2026-08-20
 **Owner ask:** "ensure that we can deploy/update cezar itself without any disruption."
 **Todo:** `d0386413-8bac-4e2a-88c4-62c37ab87ea1`
@@ -54,15 +64,27 @@ The polkit rule grants `manage-units` on `cezar.service`/`cezar.socket` and noth
 
 **What is still NOT measured, and is therefore what keeps this QA Needed:**
 
-1. **Neither acceptance criterion has been probed.** `packages/cezar/scripts/deploy-e2e-probe.mjs`
-   has never been run — there is no verdict artifact anywhere on the box. "A deploy mid-run leaves
-   the run alive and streaming" and "HTTP/SSE cutover gap = 0" are *designed for* and *plausible*,
-   not *demonstrated*.
+1. **SUPERSEDED 2026-08-21 by the status log below — the probe has now been run.** Original text,
+   kept unchanged: ~~"Neither acceptance criterion has been probed. `deploy-e2e-probe.mjs` has never
+   been run — there is no verdict artifact anywhere on the box … *designed for* and *plausible*, not
+   *demonstrated*."~~ Verdict artifacts now exist at
+   `.ai/cezar/tmp/7c2dd8f0-e53e-4e88-b4b3-b382c592bb12/deploy-e2e{,-2,-3}.json`. What genuinely
+   remains unmeasured is narrower: **SSE stream continuity across a cutover**, blocked because the
+   API sits behind `CEZ_AUTH`+OIDC and the box holds no static token, so the probe's `(c)`
+   assertions passed *vacuously* on zero events.
 2. **`gapMs: 50` in the deploy log is not the client-visible gap.** It is the deployer's own number
    for its own restart window. Socket activation is what actually closes the client-visible gap,
    and only the probe measures that. Do not quote the first as the second.
-3. **Auto-rollback has not been exercised on this box.** No deliberately broken build has been put
-   through the health gate here.
+3. **CORRECTED 2026-08-21 — the bad-build gate HAS now been exercised; the post-flip branch has
+   not.** Original text, kept unchanged: ~~"Auto-rollback has not been exercised on this box. No
+   deliberately broken build has been put through the health gate here."~~ A deliberately broken
+   `dist/index.js` was put through it: `smoke_boot` failed, the ledger marked
+   `20260821T183255Z-deadbeef` `healthy: false`, and **nothing was flipped and nothing was
+   restarted** — live release and MainPID unchanged, `/api/v1/ready` still 200. That is the
+   fail-closed branch. The *other* branch — a candidate that passes smoke boot but fails readiness
+   after the flip, so `runGatedDeploy` flips back on its own — is still unexercised, because the
+   smoke gate correctly fires first. The explicit `--rollback` machinery it shares was exercised
+   separately (three flips, all healthy).
 4. **A deploy driven from inside an agent task still fails** (recorded in
    `cezar-prod-rootless-deploy-provisioning`): `buildSystemdRunArgv` shells out to *system*
    `systemd-run`, which is denied to `cezar` — and must stay denied, since a system transient unit
@@ -70,7 +92,92 @@ The polkit rule grants `manage-units` on `cezar.service`/`cezar.socket` and noth
    unit's cgroup. `decideReExec`'s reason string still hardcodes `KillMode=control-group`, which is
    stale on this box.
 
-Tracked as todo `a025f99a`, whose ROOT-NEEDED half is now done; the probe is what remains.
+   **CORRECTED 2026-08-21 — an agent CAN drive a deploy here; it just must not use a *system*
+   transient unit.** The claim above ("a deploy driven from inside an agent task still fails") is
+   withdrawn: this box has `Linger=yes` and a live `user@999.service`, so a **user** transient unit
+   works unprivileged and sits at `/user.slice/…`, where `decideReExec` correctly reports "not
+   inside cezar.service's cgroup" and runs the deploy inline. The `be3aab61` cutover was driven
+   exactly this way, from inside an agent task:
+
+   ```bash
+   export XDG_RUNTIME_DIR=/run/user/999 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/999/bus
+   systemd-run --user --unit=cez-deploy-<sha> --collect --property=Type=oneshot \
+     --property=TimeoutStartSec=900 --working-directory=/var/lib/cezar/loki-labs/cezar \
+     --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+     /usr/bin/node packages/cezar/dist/index.js server-deploy --strategy=blue-green \
+     --source=/var/lib/cezar/loki-labs/cezar --sha=<sha>
+   ```
+
+   System `systemd-run` stays denied, and must — that unit would run as root.
+
+Tracked as todo `a025f99a`, whose ROOT-NEEDED half and whose probe half are both now done.
+Three defects the acceptance run exposed are filed separately: `f97ddd39` (bare `--rollback` dies in
+argv parsing), `6497f002` (`runRollback` never probes readiness), `6c89af7c` (keep-alive reset race
++ ~1.1 s cutover latency).
+
+---
+
+## Status log — 2026-08-21 (18:31–18:41 UTC): the acceptance E2E, measured
+
+Run with `packages/cezar/scripts/deploy-e2e-probe.mjs` across **five real cutovers** on
+`prod-host`: one blue-green deploy (`be3aab61`), three explicit `--rollback` flips, one plain
+`systemctl restart`. Raw verdicts: `.ai/cezar/tmp/7c2dd8f0-…/deploy-e2e{,-2,-3}.json`.
+
+### Criterion 1 — "a deploy mid-run leaves the run alive and streaming": **MET**
+
+Measured on the deploying session itself, which was brokered (`run-broker … --step deploy`, pid
+206399, with `claude` pid 206440 as its child):
+
+| | Before cutover | After cutover |
+| --- | --- | --- |
+| server `MainPID` | 188115 | **212609** (replaced) |
+| broker pid | 206399 | **206399** (unchanged, re-parented to PID 1) |
+| spool `out.ndjson` | 338 281 B | 365 641 B, **prefix sha256 identical** |
+| run transcript `.ndjson` | 6 315 788 B | 6 337 618 B, **prefix sha256 identical** |
+
+Byte-identical prefixes are the assertion that matters: the stream was neither truncated nor
+rewritten, so the re-attach resumed at the recorded offset with no gap and no duplicate. The run
+stayed alive across all five cutovers and is what wrote this section.
+
+### Criterion 2 — "HTTP cutover gap = 0": **MET at the listener**, with two residual costs
+
+The decisive test separates a *listener* gap from a *client* artifact, because the keep-alive probe
+alone cannot tell them apart:
+
+| Prober | Requests | Failed (non-2xx) | Connect errors |
+| --- | --- | --- | --- |
+| **fresh TCP connection per request** (tests the listener) | **3790** | 0 | **0** |
+| keep-alive `fetch`, 10 rps, 5 restarts | 4864 | **0** | 3 |
+
+Socket activation holds the listening fd exactly as designed — **a client connecting during a
+cutover is accepted, never refused.** Two costs remain and are deliberately not rounded away:
+
+1. **Keep-alive resets: 3 in 4864 requests** across five restarts (zero in the final run). `fetch`
+   dispatching onto a pooled connection to the old process at the instant it closes. The drain's
+   `Connection: close` is meant to prevent this; a residual race survives. Filed `6c89af7c`.
+2. **~1.1 s worst-case latency** — 1097 / 1106 / 1164 ms across three independent runs (p50 3 ms,
+   p99 26–38 ms). Connections queue in the socket backlog while the new instance boots. "Gapless"
+   here means *nothing is refused or lost*, not *nothing waits*.
+
+**A false lead, recorded so it is not re-derived.** The first run's two refusals lined up with the
+two rollback restarts, which looked like "the rollback path skips the drain". A controlled re-run
+refuted it: one rollback restart refused nothing, and the plain restart refused nothing across 3790
+fresh connections. It is an intermittent client-side race, not a property of the rollback path.
+
+### What the acceptance run exposed
+
+Three defects, all filed, none fixed in the deploy step: **`f97ddd39`** — bare `--rollback` dies in
+`parseArgs` though the help advertises `--rollback[=<id>]` (use `--rollback=`); **`6497f002`** —
+`runRollback` flips and restarts but never probes readiness, so a rollback onto a dead release
+prints "Deploy complete"; **`6c89af7c`** — the keep-alive race and cutover latency above.
+
+Two traps worth carrying: `gapMs` in the deploy log (55 ms here) is the **deployer's own** restart
+window, not the client-visible gap; and `deploy.drained` is only a terminal event name at the end of
+a successful deploy, **not** an actual drain step.
+
+Release `20260821T183255Z-deadbeef` is left in the ledger marked `healthy: false` — it is the
+deliberately-broken candidate from the bad-build test, kept as evidence. It is unreachable by
+`--rollback` (`previous` is `ad0b5f17`) and `keep: 5` will not prune it yet.
 
 ---
 
