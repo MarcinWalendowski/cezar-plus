@@ -1,6 +1,11 @@
 # The boot root is not a git repository, so a task that lands on it runs in place, alone
 
-> **Status:** draft — not implemented. · **Date:** 2026-08-21
+> **Status:** implemented (phases 1–4), qa needed. · **Date:** 2026-08-21
+> Phases 1–4 shipped as `c15780cb` (pushed to `origin/main`). V1–V4 and V5 (minus the lint gate,
+> which does not exist in this repo — see V5 below) are green; V6 is a no-new-code check, not yet
+> run; **V7, the runtime E2E after deploy, has not run** — as of this writing
+> `/var/lib/cezar/workspace` still has no `.git`. This is "qa needed", not done, until V7 runs and
+> its output is pasted into the handoff. See the Verification section for the full gate results.
 > **Extends:** `.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md` (W1–W8, live and
 > correct) and `.ai/specs/2026-08-20-workspace-run-worktree-isolation.md` (the five fixes that
 > closed its gaps). Neither is wrong. Both assume the run carries `workspaceProjects`; this spec
@@ -417,9 +422,20 @@ its own rather than a citation.
 derives the path from the manager/boot root, not from `state.cwd`. Record the result in the spec. If
 any derives from `state.cwd`, that is a blocking sub-task, not a footnote.
 
-**V5 — Full gates.** From the repo root: `true && npm run lint && true`, plus
-`npm run test:package`. Any red is quoted verbatim in the handoff, and a pre-existing red is proven
-pre-existing by a control run at clean `origin/main` before it is dismissed.
+**V5 — Full gates.** From the repo root: `npm run typecheck`, `npm test`, `npm run build`, plus
+`npm run test:package`. (There is no `lint` script in this repo — the `npm run lint` this bullet
+originally named does not exist; corrected here rather than in the code.) Any red is quoted
+verbatim in the handoff, and a pre-existing red is proven pre-existing by a control run at clean
+`origin/main` before it is dismissed.
+
+**V5 result (2026-08-21, full `CEZ_*` scrub per AGENTS.md):** `typecheck` green (0),
+`test:unit` green (44/44), `build` green (0). `npm test` 1 failed / 9552 passed / 518 files — the
+one red is `catalog.test.ts` C18, AGENTS.md trap 3, the documented permanent host red on this
+EPYC box (measured 69.5/67.3 ms/MiB against a 40 budget, in the documented 54–65 range), not in
+any file this change touches. `test:package` 14/15 red on case 5 ("the release tarball installs
+and runs the dry-run CLI workflow") — proven pre-existing by control runs with no diff applied at
+clean `a5f04b0f` and clean `387ba439`, both red identically; tracked as cezar todo
+`1e8e5266-b3e8-45f1-9489-25391408cdc3`, not a blocker for this spec.
 
 **V6 — Retention actually reclaims the new trees.** After a boot-root run finishes, assert
 `run.worktreePath` is set on its record and that `runs/retention.ts:112`'s keep-last-N reclaims it
