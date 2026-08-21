@@ -1099,6 +1099,83 @@ restart signals only its main process, not this deployer"* and never created a t
 (`07f5c274`). The bad-build gate fired for real: release `20260821T185909Z-07f5c274` is recorded
 `[unhealthy]`, nothing flipped and nothing restarted.
 
+## The agent-driven deploy gap, closed and measured (2026-08-21, second pass)
+
+`f0d48513` recorded five operator-driven cutovers and reported both criteria met. This pass closed
+the one path it could not use — a deploy driven from **inside an agent task** — and, in measuring
+it, found that part of what the probe reported was never actually observed.
+
+### What was fixed
+
+`buildSystemdRunArgv` shelled out to a **system** `systemd-run`. An operator over ssh never hit it
+(`decideReExec` returns false there — not inside the unit's cgroup); an agent task IS inside
+`cezar.service`'s cgroup, took the re-exec branch, and died on *"Access denied … requires
+interactive authentication"*. The tempting fix — a polkit grant on `cezar-deploy-*` — is
+root-equivalent under a narrow name, because a system transient unit runs as root by default. Both
+legitimate fixes shipped in `07f5c274`:
+
+- **Read the unit's `KillMode` and skip the escape when it is already `process`** (the one that
+  carries this box). Checked *before* `systemdRunAvailable`, so a migrated host logs "no escape
+  needed" rather than "no escape possible" — those read very differently at 3am. An unreadable
+  `KillMode` is treated as dangerous, never optimistically skipped.
+- **Ask the USER manager** when not root, for a host that has not been migrated. This needed one
+  thing no plan mentioned and only running it revealed: inside `cezar.service`, `XDG_RUNTIME_DIR`
+  and `DBUS_SESSION_BUS_ADDRESS` are **unset**, so `systemd-run --user` fails with "Failed to
+  connect to user scope bus" *even with `Linger=yes`*. Over ssh a login session sets them, which is
+  exactly why the gap stayed invisible. `userBusEnv()` supplies them.
+
+Live proof, from inside this task: `deploy: cezar.service stops with KillMode=process — a restart
+signals only its main process, not this deployer`, followed by a completed cutover. No transient
+unit was requested at all.
+
+### What the cutovers measured
+
+Four agent-driven cutovers plus one deliberate failure, artifacts in `/var/lib/cezar/e2e-artifacts/`:
+
+| run | poll ok/total | non-2xx | connect errors | `deploy.cutover gapMs` |
+| --- | --- | --- | --- | --- |
+| `deploy-e2e-measured-cutover` | 722/722 | 0 | 0 | 55 |
+| `final-cutover` | 573/573 | 0 | 0 | — |
+| `cutover-probe` | 1443/1444 | 0 | 1 | — |
+| `rollback-probe` | 670/671 | 0 | 1 | — |
+
+**`gapMs: 55` is the DEPLOYER's own restart window, not the client-visible gap.** They are different
+numbers and conflating them would overstate the result; the client-visible figure is the poll
+column, and on the two clean runs it is *zero failed requests out of 722 and 573*.
+
+**Both failure paths fired for real.** A stale `dist` produced a genuine bad build: `smoke_boot`
+failed, and — exactly as designed — *nothing was flipped and nothing was restarted*. Separately the
+ledger records `20260821T190232Z-07f5c274` with `note: e2e-readiness-fail, healthy: false`,
+followed immediately by a healthy release: the readiness gate rolled back on its own.
+
+### What was NOT measured, and must not be read as passing
+
+**`/api/v1/events` answered 401 in all five runs**, because this box is hosted-mode with OIDC and
+the probe sends no credential. The SSE subscriber therefore observed **zero** events — and the
+probe still reported `c: no seq gaps` and `c: no seq duplicates` as PASS, because
+`gaps.length === 0` is trivially true on an empty sample (`deploy-e2e-probe.mjs:204`). The run
+assertions are vacuous the same way: `run.statuses` is `[]` and `sawInterrupted` never flips, yet
+both report PASS. `maxLatencyMs` came back `null` in every artifact.
+
+So of the six assertions, **two carry real data** (the HTTP poll pair) and four had nothing behind
+them. Two runs reported `passed: true` on that basis. Filed as `8dc8bf3a`.
+
+**Criterion 1 — do NOT read this pass as supporting it.** Mid-session this run observed its own
+broker (pid 231420) alive and re-parented to PID 1 with its `claude` child (231428) under it, and
+recorded that as survival. That observation was real but it was taken across the plain
+stop/start used to re-arm `cezar.socket`, not across a blue-green cutover — and it does not
+generalise. By the end of the pass pid 231420 was **gone** and the spool's `meta.json` named a new
+broker (262531, started 19:02:48), i.e. the run had been **re-launched, not re-attached**. That is
+the same conclusion the controlled re-measurement reached independently, and it is why the header
+reopened criterion 1 at 19:05 UTC. Incidental survival of one restart is not evidence of
+re-attachment; the controlled measurement is authoritative and this paragraph defers to it.
+
+**Status therefore stays QA Needed**, on two independent counts: criterion 1 is reopened (the
+cutover path re-launches rather than re-attaches), and the SSE half of criterion 2 has never been
+observed even once. The HTTP half of criterion 2 is measured and clean. Calling any of that Done
+would round two unmeasured things up to a green tick — the specific failure `8dc8bf3a` exists to
+stop.
+
 ## Out of scope (decisions, not omissions)
 
 - **Multi-host / horizontal scale-out.** One box.
