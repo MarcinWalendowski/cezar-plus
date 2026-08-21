@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 /**
@@ -85,20 +86,59 @@ export function decideReExec(opts: {
   env: NodeJS.ProcessEnv;
   cgroupContent: string;
   systemdRunAvailable: boolean;
+  /**
+   * The unit's EFFECTIVE `KillMode`, read with `systemctl show <unit> -p KillMode` — never
+   * assumed. Absent means "could not read it", which is treated as the dangerous value.
+   */
+  killMode?: string;
 }): ReExecDecision {
   if (opts.env[DETACHED_ENV] === '1') {
     return { reExec: false, reason: 'already running detached in a transient unit' };
   }
-  if (!opts.systemdRunAvailable) {
-    return { reExec: false, reason: 'systemd-run is not available on this host' };
-  }
   if (!isInsideUnitCgroup(opts.unitName, opts.cgroupContent)) {
     return { reExec: false, reason: `not inside ${opts.unitName}'s cgroup — the restart cannot reach this process` };
   }
+  // The cheapest correct answer, and the one that needs no privilege at all: if the unit already
+  // stops with `KillMode=process`, a restart signals ONLY the main process. This deployer is a
+  // child, so it is not signalled, so there is nothing to escape from. Checked before
+  // `systemdRunAvailable` deliberately — on a box that has been migrated this returns false and
+  // the transient unit is never attempted, which is why an agent-driven deploy stops needing a
+  // privilege it was refused.
+  if (opts.killMode === 'process') {
+    return {
+      reExec: false,
+      reason: `${opts.unitName} stops with KillMode=process — a restart signals only its main process, not this deployer`,
+    };
+  }
+  if (!opts.systemdRunAvailable) {
+    return { reExec: false, reason: 'systemd-run is not available on this host' };
+  }
   return {
     reExec: true,
-    reason: `inside ${opts.unitName}'s cgroup — a restart would SIGKILL this deployer (KillMode=control-group)`,
+    // CORRECTED 2026-08-21: this used to assert `KillMode=control-group` unconditionally, which
+    // became a lie the moment the box was migrated. Report what was actually read.
+    reason:
+      `inside ${opts.unitName}'s cgroup with KillMode=${opts.killMode ?? 'unknown'} — ` +
+      `a restart would kill this deployer along with the cgroup`,
   };
+}
+
+/**
+ * Read a unit's effective `KillMode`. Read-only, so it needs no privilege even for a system unit.
+ * Returns undefined when it cannot be determined — callers must treat that as the dangerous value
+ * rather than optimistically skipping the escape.
+ */
+export function readKillMode(
+  unitName: string,
+  run: (cmd: string, args: string[]) => string = (cmd, args) =>
+    execFileSync(cmd, args, { encoding: 'utf8' }),
+): string | undefined {
+  try {
+    const out = run('systemctl', ['show', unitName, '-p', 'KillMode', '--value']).trim();
+    return out.length > 0 ? out : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export interface SystemdRunOptions {
@@ -110,6 +150,16 @@ export interface SystemdRunOptions {
   /** Extra environment the transient unit needs (credentials are NOT passed here — the unit
    *  inherits the host env that `systemd-run` gives it). */
   setEnv?: Record<string, string>;
+  /**
+   * Ask the USER manager for the transient unit instead of the system one.
+   *
+   * This is not a stylistic choice. A SYSTEM transient unit runs as root by default, so granting
+   * an unprivileged service account the right to create one is a root-equivalent grant wearing a
+   * narrow name — it was deliberately refused on this deployment. A `--user` scope runs as the
+   * caller, needs no polkit grant at all, and still lives outside `<unit>.service`'s cgroup, which
+   * is the only property the escape actually needs.
+   */
+  user?: boolean;
 }
 
 /**
@@ -124,6 +174,8 @@ export interface SystemdRunOptions {
 export function buildSystemdRunArgv(opts: SystemdRunOptions): string[] {
   const argv = [
     'systemd-run',
+    // Must come before --unit: systemd-run selects the bus from this flag.
+    ...(opts.user ? ['--user'] : []),
     `--unit=${transientUnitName(opts.releaseId)}`,
     '--collect',
     '--property=Type=oneshot',
@@ -137,4 +189,22 @@ export function buildSystemdRunArgv(opts: SystemdRunOptions): string[] {
   for (const [key, value] of Object.entries(opts.setEnv ?? {})) argv.push(`--setenv=${key}=${value}`);
   argv.push('--', ...opts.command);
   return argv;
+}
+
+/**
+ * The environment a `--user` `systemd-run` needs to find its bus.
+ *
+ * Measured 2026-08-21 and the reason option 1 alone was not enough: inside `cezar.service`,
+ * `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` are unset, so `systemd-run --user` fails with
+ * "Failed to connect to user scope bus via local transport" even though lingering is enabled and
+ * `/run/user/<uid>` exists. Over ssh the same command works, because a login session sets them —
+ * which is exactly how this gap stayed invisible until a deploy was driven from inside a task.
+ *
+ * Returns the additions only; the caller merges them over its own env.
+ */
+export function userBusEnv(uid = process.getuid?.() ?? 0): Record<string, string> {
+  return {
+    XDG_RUNTIME_DIR: `/run/user/${uid}`,
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${uid}/bus`,
+  };
 }

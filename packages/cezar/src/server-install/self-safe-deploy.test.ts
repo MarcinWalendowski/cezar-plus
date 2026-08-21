@@ -6,8 +6,10 @@ import {
   decideReExec,
   deployLogPath,
   isInsideUnitCgroup,
+  readKillMode,
   readSelfCgroup,
   transientUnitName,
+  userBusEnv,
 } from './self-safe-deploy.ts';
 
 /**
@@ -61,9 +63,13 @@ describe('decideReExec', () => {
   const base = { unitName: 'cezar.service', systemdRunAvailable: true, cgroupContent: INSIDE_SERVICE };
 
   it('re-execs when inside the doomed cgroup', () => {
+    // The reason no longer hardcodes "SIGKILL ... KillMode=control-group": that string became a
+    // lie once the box was migrated to KillMode=process. It now reports the mode actually read,
+    // which with no killMode supplied is `unknown` -- and unknown is still treated as dangerous.
     const d = decideReExec({ ...base, env: {} });
     expect(d.reExec).toBe(true);
-    expect(d.reason).toMatch(/SIGKILL/);
+    expect(d.reason).toMatch(/would kill this deployer/);
+    expect(d.reason).toMatch(/KillMode=unknown/);
   });
 
   it('does not re-exec twice — the recursion guard', () => {
@@ -128,5 +134,89 @@ describe('transientUnitName', () => {
   it('sanitizes characters systemd would reject', () => {
     expect(transientUnitName('20260820T093000Z-67e93cca')).toBe('cezar-deploy-20260820T093000Z-67e93cca');
     expect(transientUnitName('weird/id with spaces')).toBe('cezar-deploy-weird-id-with-spaces');
+  });
+});
+
+/**
+ * The agent-task deploy gap, measured on prod-host 2026-08-21.
+ *
+ * An operator over ssh was always fine (`decideReExec` returns false — not inside the cgroup). A
+ * deploy driven from INSIDE an agent task took the re-exec branch and died on
+ * "Access denied ... requires interactive authentication", because it asked for a SYSTEM transient
+ * unit. Granting that would have been root-equivalent, so the fix is on our side.
+ */
+describe('KillMode short-circuit (fix 2) — the box no longer needs an escape at all', () => {
+  const INSIDE = '0::/system.slice/cezar.service\n';
+  const base = { unitName: 'cezar.service', env: {}, cgroupContent: INSIDE, systemdRunAvailable: true };
+
+  it('skips the re-exec entirely when the unit already stops with KillMode=process', () => {
+    const d = decideReExec({ ...base, killMode: 'process' });
+    expect(d.reExec).toBe(false);
+    expect(d.reason).toMatch(/KillMode=process/);
+    expect(d.reason).toMatch(/only its main process/);
+  });
+
+  it('still escapes under control-group, and reports the mode it actually READ', () => {
+    const d = decideReExec({ ...base, killMode: 'control-group' });
+    expect(d.reExec).toBe(true);
+    expect(d.reason).toMatch(/KillMode=control-group/);
+  });
+
+  it('treats an unreadable KillMode as dangerous rather than optimistically skipping', () => {
+    const d = decideReExec({ ...base, killMode: undefined });
+    expect(d.reExec).toBe(true);
+    expect(d.reason).toMatch(/KillMode=unknown/);
+  });
+
+  it('the KillMode skip is checked BEFORE systemd-run availability', () => {
+    // On a migrated box with no usable systemd-run, the honest answer is "no escape needed",
+    // not "no escape possible" -- they differ to anyone reading the log.
+    const d = decideReExec({ ...base, killMode: 'process', systemdRunAvailable: false });
+    expect(d.reExec).toBe(false);
+    expect(d.reason).toMatch(/KillMode=process/);
+  });
+
+  it('the stale hardcoded reason is gone', () => {
+    // It asserted KillMode=control-group unconditionally, which became a lie after migration.
+    const d = decideReExec({ ...base, killMode: 'mixed' });
+    expect(d.reason).toContain('KillMode=mixed');
+  });
+});
+
+describe('readKillMode', () => {
+  it('returns the value systemctl prints', () => {
+    expect(readKillMode('cezar.service', () => 'process\n')).toBe('process');
+  });
+
+  it('is undefined on empty output or a throwing systemctl — never a guess', () => {
+    expect(readKillMode('cezar.service', () => '   ')).toBeUndefined();
+    expect(
+      readKillMode('cezar.service', () => {
+        throw new Error('no such unit');
+      }),
+    ).toBeUndefined();
+  });
+});
+
+describe('--user transient unit (fix 1)', () => {
+  it('emits --user BEFORE --unit, because systemd-run picks its bus from that flag', () => {
+    const argv = buildSystemdRunArgv({ releaseId: 'r1', command: ['/bin/true'], user: true });
+    expect(argv[0]).toBe('systemd-run');
+    expect(argv[1]).toBe('--user');
+    expect(argv.indexOf('--user')).toBeLessThan(argv.indexOf('--unit=cezar-deploy-r1'));
+  });
+
+  it('omits --user by default, so the operator/root path is unchanged', () => {
+    expect(buildSystemdRunArgv({ releaseId: 'r1', command: ['/bin/true'] })).not.toContain('--user');
+  });
+
+  it('userBusEnv supplies what a service context lacks', () => {
+    // Measured: inside cezar.service both are unset, so `systemd-run --user` fails with
+    // "Failed to connect to user scope bus" even though Linger=yes and /run/user/<uid> exists.
+    // Over ssh they are set by the login session, which is why the gap stayed invisible.
+    expect(userBusEnv(999)).toEqual({
+      XDG_RUNTIME_DIR: '/run/user/999',
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/999/bus',
+    });
   });
 });

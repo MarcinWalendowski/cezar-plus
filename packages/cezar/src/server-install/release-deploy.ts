@@ -8,7 +8,9 @@ import {
   buildSystemdRunArgv,
   decideReExec,
   deployLogPath,
+  readKillMode,
   readSelfCgroup,
+  userBusEnv,
 } from './self-safe-deploy.ts';
 import {
   currentTarget,
@@ -121,6 +123,8 @@ export interface ReleaseDeployHost {
   spawnDetached(argv: string[], env: NodeJS.ProcessEnv): void;
   systemdRunAvailable(): boolean;
   cgroup(): string;
+  /** The unit's effective KillMode, read not assumed. */
+  killMode(unit: string): string | undefined;
 }
 
 export function defaultHost(log: (line: string) => void): ReleaseDeployHost {
@@ -164,6 +168,7 @@ export function defaultHost(log: (line: string) => void): ReleaseDeployHost {
     },
     systemdRunAvailable: () => commandExists('systemd-run'),
     cgroup: () => readSelfCgroup(),
+    killMode: (unit: string) => readKillMode(unit),
   };
 }
 
@@ -278,14 +283,23 @@ export async function runReleaseDeploy(
     env,
     cgroupContent: fx.cgroup(),
     systemdRunAvailable: fx.systemdRunAvailable(),
+    // READ the unit's kill mode rather than assume it. On a migrated box this is `process`, and
+    // the escape is then unnecessary — which is what lets a deploy driven from inside an agent
+    // task work without any privilege it was refused.
+    killMode: fx.killMode(unitName),
   });
   log(`deploy: ${decision.reason}`);
   if (decision.reExec) {
     if (options.dryRun) return { ok: true, detachedUnit: `dry-run:${releaseId}` };
+    // A SYSTEM transient unit runs as root by default, so an unprivileged service account is
+    // refused it — and granting that right would be a root-equivalent grant under a narrow name.
+    // As a non-root uid, ask the USER manager instead: same cgroup escape, no grant needed.
+    const asUser = (process.getuid?.() ?? 0) !== 0;
     const argv = buildSystemdRunArgv({
       releaseId,
       command: reExecCommand(options, releaseId),
       cwd: options.source,
+      user: asUser,
     });
     try {
       mkdirSync('/var/log/cezar', { recursive: true });
@@ -294,7 +308,10 @@ export async function runReleaseDeploy(
       // deploy; systemd will say so about the append: target, and refusing here would fail the
       // whole cutover over a log file.
     }
-    fx.spawnDetached(argv, { ...env, [DETACHED_ENV]: '1' });
+    // A `--user` systemd-run needs the bus coordinates a service context does not have
+    // (XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS are unset inside the unit, though set over ssh —
+    // which is exactly why this gap was invisible until a deploy ran from inside a task).
+    fx.spawnDetached(argv, { ...env, ...(asUser ? userBusEnv() : {}), [DETACHED_ENV]: '1' });
     log(`deploy: handed off to a transient unit — follow it at ${deployLogPath(releaseId)}`);
     return { ok: true, detachedUnit: releaseId };
   }
