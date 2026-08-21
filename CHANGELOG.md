@@ -328,6 +328,53 @@
   and data are proven; the pixels are not.
 
 ## 🔧 Changed
+- 🔧 **One Settings area — scope became a field instead of a place.** Spec
+  `.ai/specs/2026-08-21-one-settings-area.md`, commit `00f3669f`.
+
+  Reported as *"There should be only one global Settings — we don't need to have setting per
+  project. Right now I can't access some settings or I don't see all settings in
+  `/settings/global` — e.g. I don't see some options that are available in project settings or
+  workspace settings."* The report was accurate and the cause was structural: `registry.tsx` split
+  the sections by `scope`, so the sidebar's Settings row pointed at `/settings/global`, which
+  rendered **only** the global half. Agents, Agent config, Worktrees, Bookmarklets and Prompt
+  templates were reachable exclusively from `/p/<id>/settings/…` — a URL nothing in the workspace
+  band linked to. Providers was the sharpest case: machine-wide provider state, editable only from
+  inside a project's Agents page.
+
+  There is one nav now, listing every visible section once, at `/settings/<section>`. The registry
+  key is `appliesTo: 'per-project' | 'workspace'`, and a `per-project` section takes its repo from
+  `?project=<id>` through the same `ProjectScopeProvider` that `/p/:projectId` already mounts — so
+  every existing hook addresses and caches exactly as before, and no scoped-URL helper was needed.
+  Providers is its own `workspace` section at `/settings/providers`; `provider-banner.tsx` and
+  `new-task.tsx` point there, and workspace data no longer hides behind a project URL.
+
+  **Nothing that was addressable stopped being addressable.** `/settings/global` → `/settings`,
+  `/settings/global/<id>` → `/settings/<id>`, `/p/<id>/settings[/<section>]` →
+  `/settings[/<section>]?project=<id>`, all preserving query and hash byte-for-byte, all pinned in
+  `routes.test.tsx`, and all registered one-route-per-known-section so an unknown id 404s instead of
+  entering a redirect loop with the legacy flat fallback.
+
+  With *All projects* selected, four settings now edit a real machine tier —
+  `projectDefaults.{systemPrompt, liveTitleUpdates, reviewGate, stepBudget}` in
+  `~/.cezar/config.json` — and with a project selected each field is labelled **Inherited** or
+  **Overridden**, with a clear-override affordance. `GET /api/v1/config` answers `inherited` (the
+  machine's value) and `overridden` (the keys the RAW repo file sets, read from the file because a
+  parsed config cannot tell a chosen key from a defaulted one). Precedence is repo → machine → env
+  → hardcoded, folded onto the raw object before parsing, so **an install that sets no
+  `projectDefaults` behaves byte-identically to before** — `liveTitleUpdates` ON, `reviewGate` OFF.
+  Only four keys are seedable, deliberately: `baseBranch` belongs to a repository not a person,
+  `skillsRepos`' mere presence is a tri-state probe, and `modelsLocked` already ORs all three tiers.
+  `stepBudget` gets the tier but keeps its parity with the repo side — still no UI control, still a
+  hand-edited key.
+
+  One latent bug fell out in passing: the flat single-project sidebar routed `workspace: true` nav
+  items through the project-scoping `Link`, so Settings would have minted `/p/<id>/settings`. Those
+  rows use react-router's own `Link` now, which also fixes Notes, whose `/p/<id>/notes` was never a
+  route at all.
+
+  `BACKWARD_COMPATIBILITY.md` §2's *Settings split, old URLs kept* bullet is marked superseded in
+  place rather than replaced — the redirect promise it made is still binding, only the split it
+  described is gone.
 - 🔧 **Balancing a pool now looks at how used each login actually is, not just whether it is
   nearly dead.** Specs `.ai/specs/2026-08-16-agent-account-usage-routing.md` (Solution C) and
   `.ai/specs/2026-08-16-claude-usage-windows.md`.

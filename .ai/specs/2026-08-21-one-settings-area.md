@@ -1,8 +1,11 @@
 # One Settings area — the scope split becomes a field, not a place
 
-**Status: IMPLEMENTED 2026-08-21 — Phases 1–3. Phase 4 (the record) belongs to the `document`
-step.** Written in the `spec` step of the `spec-to-deploy` run for task
-`50ce87f1-3cc6-4934-a66c-d9cb5630248f` and built in the `implement` step of the same run.
+**Status: IMPLEMENTED 2026-08-21 — all four phases. Shipped as `00f3669f` on `origin/main`
+(merged forward as `479f54b5`). QA NEEDED — the live runtime e2e in §Verification has NOT been
+run, so the UI is not verified; see §Status log.** Written in the `spec` step of the
+`spec-to-deploy` run for task `50ce87f1-3cc6-4934-a66c-d9cb5630248f`, built in the `implement`
+step, gated in `run-tests`, shipped in `commit-push`, and recorded in `document` — all of the same
+run.
 
 **Divergences from the design below, all deliberate:**
 
@@ -488,3 +491,40 @@ On `https://cockpit.example.com`, with a screenshot per step:
 (`packages/cezar/dist/index.js` present, `/opt/cezar/.deployed-commit` equal to `git rev-parse
 HEAD`, `/api/v1/health` answering, and the served `index.html` naming the built asset). Phases 1–2
 are web-only and go live on the next request; Phase 3 touches the backend and needs the restart.
+
+## Status log
+
+**2026-08-21 — Phases 1–4 implemented; deploy and live e2e outstanding.**
+
+| Phase | State | Evidence |
+| --- | --- | --- |
+| 1 — one area, one nav, one set of URLs | implemented | `registry.tsx` (`scope` → `appliesTo`), `settings-shell.tsx`, `settings-project.tsx`, `routes.tsx` (`GlobalSettingsRedirect`, `ProjectSettingsRedirect`), `routes.test.tsx` |
+| 2 — Providers becomes a workspace section | implemented | `provider-settings.tsx` (`appliesTo: 'workspace'`), `provider-banner.tsx`, `new-task.tsx`, `provider-settings.test.tsx` |
+| 3 — machine tier for the four project settings | implemented | `workspace/config.ts` (`projectDefaultsSchema`), `config.ts` (`PROJECT_DEFAULT_KEYS`, `withMachineDefaults`), `contract/src/workspace.ts`, `server.ts` (`configAnswer` → `inherited` / `overridden`), `config.test.ts`, `workspace-api.test.ts` |
+| 4 — the record | implemented | this status block, `BACKWARD_COMPATIBILITY.md` §2 (*Settings split* corrected in place, the workspace-config bullet extended, a new `inherited`/`overridden` bullet) and §9 (`projectDefaults`), `CHANGELOG.md` (Unreleased → Changed), KB proposal `cezar/one-settings-area-2026-08-21.md` |
+
+**Divergences from the design are listed at the head of this document** — five, all deliberate,
+none re-opened by the record step.
+
+**Gates, run with the `AGENTS.md` env scrub** (`/tmp/cez-gate-run/gate.sh`, which strips every
+`CEZ_*` except `CEZ_HANDOFF_FILE`/`CEZ_TASK_ID`, unsets `NODE_ENV`, and points `TMPDIR` at
+`/tmp/cez-gate-tmp`): `typecheck` 0 · `test:unit` 44/44 · `build` 0 · `test:package` 15/15 ·
+`vitest` 9430 passed / 2 failed. Both reds are pre-existing and were reproduced on the pre-change
+commit `6c7bca5e`: `knowledge/catalog.test.ts` C18, the documented absolute-time-budget trap
+(`AGENTS.md` trap 3, 57.6 ms/MiB here, 59.1 ms/MiB before this change), and the
+`add-project-dialog.test.tsx` flake, untouched by this diff and 24/24 in isolation three times.
+**Neither is to be "fixed" by widening a budget.**
+
+**NOT done, stated rather than rounded up:**
+
+1. **The live runtime e2e has not run.** §Verification's five browser steps against
+   `https://cockpit.example.com/settings` — the one-nav check that closes the reported gap, the
+   `projectDefaults` round-trip, the Inherited/Overridden labels, both redirect families, and the
+   provider toggle — are all unexecuted. `.ai/scripts/e2e.sh` exits 0 with
+   `TEST_E2E_STATUS=skipped` when no browser can be provisioned, and **that is not a pass**. Until
+   `TEST_E2E_STATUS=passed`, this spec is *implemented, UI not verified*. Tracked as a `cezar todo`
+   filed 2026-08-21.
+2. **Deploy is the `deploy` step's, and it needs the restart.** This delta touches `server.ts`,
+   `packages/contract` and `config.ts`, so it is not a `web/dist`-only swap: per `AGENTS.md:12` the
+   backend half needs the `kill -9` restart, which SIGKILLs the deploying session. Expected and
+   survivable. The post-condition is both probes in `.ai/deploy-targets.json` exiting 0.
