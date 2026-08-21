@@ -1,6 +1,6 @@
 # Non-disruptive cezar self-deploy / update
 
-**Status:** implemented 2026-08-21, **QA Needed** (the on-box acceptance E2E has not been run) — **and NOT a prerequisite for anything**
+**Status:** implemented 2026-08-21 (`3f4e9c33` + `954c6a55`), **QA Needed — and the on-box E2E is BLOCKED on root, see "Deploying this needs privileges the service user does not have"** — **and NOT a prerequisite for anything**
 **Date:** 2026-08-19, rewritten 2026-08-20
 **Owner ask:** "ensure that we can deploy/update cezar itself without any disruption."
 **Todo:** `d0386413-8bac-4e2a-88c4-62c37ab87ea1`
@@ -664,6 +664,72 @@ the v1 `AgentEvent` and v2 `UiEvent` streams whole. On its first run it caught a
 brokered path emitted `turn.started` only for the *opening* message, so every brokered follow-up
 turn was missing it and the v2 stream diverged the moment a run had two turns. That is exactly the
 class of defect the one-consumer rule exists to prevent, and it was invisible to every other test.
+
+## Deploying this needs privileges the service user does not have (measured 2026-08-21)
+
+**The code is on `main`; it has never been deployed, and this session could not deploy it.** That
+is not a scheduling gap, it is a permissions wall, and it is worth stating precisely because the
+whole design assumes an actor who can install units.
+
+Measured on `prod-host` as the `cezar` service user, which is the uid every agent task runs
+as:
+
+```
+$ sudo -ln                 → sudo: Sorry, user cezar may not run sudo on prod-host
+$ ls -ld /opt              → drwxr-xr-x root root        (not writable by cezar)
+$ [ -w /etc/systemd/system ] → false
+$ systemctl daemon-reload  → Access denied ... requires interactive authentication
+$ ls /etc/polkit-1/rules.d → (no rule mentioning cezar)
+$ systemd-run --user --scope → Failed to connect to user scope bus
+                               ($DBUS_SESSION_BUS_ADDRESS / $XDG_RUNTIME_DIR unset)
+```
+
+Four consequences, each of which blocks a different phase:
+
+1. **P1 cannot migrate.** `/opt/cezar` is owned by `cezar`, so its *contents* are writable, but
+   `/opt` itself is root-owned — so `cezar-releases/` cannot be created beside it and `/opt/cezar`
+   cannot be renamed aside. The release layout needs one `mkdir` and one `mv` in a root-owned
+   directory.
+2. **P3 cannot install socket activation.** `cezar.socket`, the `40-non-disruptive.conf` drop-in
+   and `cezar-runs.slice` all live in `/etc/systemd/system`, and none of it takes effect without
+   `systemctl daemon-reload`.
+3. **P4 falls back to its weakest isolation.** There is no user manager for `cezar` (no linger), so
+   `systemd-run --user --scope --slice=cezar-runs.slice` — `chooseIsolation`'s preferred mode — is
+   unavailable. Without the `Delegate=yes` drop-in from (2) either, `chooseIsolation` resolves to
+   **`none`**, which `describeIsolation` correctly reports as degraded: runs share the server
+   cgroup and a `KillMode=control-group` restart still kills them. The machinery is right; the host
+   simply is not configured for it yet.
+4. **Nothing can restart the service.** So even a plain in-place code update cannot be activated.
+
+**The unblock is four root commands**, and they are deliberately ordered so the box keeps working
+if you stop after any of them. Run as root on the box, from a checkout at `954c6a55` or later:
+
+```bash
+# 1. release layout + units, still inert (dry-run first — omit --yes to see the plan)
+/usr/bin/node <checkout>/packages/cezar/dist/index.js server-migrate-releases --yes
+
+# 2. let the service user own its runs' cgroups, and give it a user manager for P4 mode 1
+loginctl enable-linger cezar
+
+# 3. load the socket + drop-in + slice
+systemctl daemon-reload && systemctl enable --now cezar.socket
+
+# 4. the first real cutover, health-gated and self-rolling-back
+/usr/bin/node <checkout>/packages/cezar/dist/index.js server-deploy --strategy=blue-green --follow
+```
+
+**Do not substitute `systemctl restart cezar.service` for step 4.** That is the exact failure this
+spec exists to remove, and until step 3 has loaded `KillMode=process` it still kills every
+in-flight run and the deploying session with them.
+
+**A second, independent reason an agent session cannot drive step 4 itself.** Even with root, the
+agent performing the deploy is a child of `cezar.service` and its stdout is a pipe to the cockpit
+process being replaced. `KillMode=process` saves the *process*, but the reader of its pipe dies, so
+the session cannot report what happened. Only a run started *after* brokering is live survives
+usefully — which is the feature, and also why the first cutover has to be driven by an operator or
+by a detached unit, not by a task inside the cockpit. The E2E harness
+(`packages/cezar/scripts/deploy-e2e-probe.mjs`) is deliberately dependency-free and writes its
+verdict to a file for exactly this reason.
 
 ## Out of scope (decisions, not omissions)
 
