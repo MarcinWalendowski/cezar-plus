@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,21 +31,32 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-/** Run the CLI outside this repo, so the command resolves without inheriting cezar's own
- *  `.ai/cezar` as an accidental fixture. */
-async function cli(args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+/**
+ * Run the CLI outside this repo, so the command resolves without inheriting cezar's own
+ * `.ai/cezar` as an accidental fixture.
+ *
+ * A temp cwd is NOT enough on its own, and `todo add` writes, so the gap files real rows. The
+ * entry module resolves the target repo as `getRepoInfo(cwd)?.root ?? cwd` — a walk UP for a git
+ * toplevel — while `os.tmpdir()` honours `$TMPDIR`, which a cezar run points INSIDE the repo
+ * under test (`.ai/cezar/tmp/<runId>`). The walk then leaves the temp dir, finds cezar's own
+ * root, and every `npm test` files another "Ship it" onto the live board: 10 of them reached
+ * production between 2026-08-19 and 2026-08-21. `git init` stops the walk here whatever
+ * `$TMPDIR` says — the todo lands in `cwd`, which `afterEach` removes.
+ */
+async function cli(args: string[]): Promise<{ stdout: string; stderr: string; code: number; cwd: string }> {
   const cwd = await mkdtemp(join(tmpdir(), 'cez-todo-wiring-'));
   dirs.push(cwd);
+  await execFile('git', ['init', '-q'], { cwd });
   try {
     const { stdout, stderr } = await execFile(
       process.execPath,
       ['--import', tsxLoader, entry, ...args],
       { cwd, maxBuffer: 10 * 1024 * 1024, env: { ...process.env } },
     );
-    return { stdout, stderr, code: 0 };
+    return { stdout, stderr, code: 0, cwd };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };
-    return { stdout: e.stdout ?? '', stderr: e.stderr ?? '', code: e.code ?? 1 };
+    return { stdout: e.stdout ?? '', stderr: e.stderr ?? '', code: e.code ?? 1, cwd };
   }
 }
 
@@ -64,11 +75,53 @@ describe('the todo command is wired into the CLI entry point', () => {
     // AFTER a strict `parseArgs` that throws on the flag first, so the command is registered and
     // still unusable. This is the guard for that specific wrong fix; `todo` is routed before the
     // parser, as `kb`/`backup` are.
-    const { stdout, stderr } = await cli(['todo', 'add', 'Ship it', '--acceptance', 'a', '--json']);
+    const { stdout, stderr, cwd } = await cli(['todo', 'add', 'Ship it', '--acceptance', 'a', '--json']);
     const output = `${stdout}${stderr}`;
     expect(output).not.toMatch(/unknown option/i);
     expect(output).not.toContain('unknown command: todo');
     expect(JSON.parse(stdout).todo).toMatchObject({ summary: 'Ship it', acceptanceCriteria: ['a'] });
+
+    // The isolation is the other half of this case, not a side effect of it: `todo add` WRITES,
+    // and the assertions above pass just as happily when the row landed on the real board. Pin
+    // the write to the temp root, so a regression in where `cwd` resolves fails here instead of
+    // showing up as junk rows in production.
+    const filed = JSON.parse(await readFile(join(cwd, '.ai/cezar/todos.json'), 'utf8'));
+    expect(filed).toHaveLength(1);
+    expect(filed[0]).toMatchObject({ summary: 'Ship it' });
+  });
+
+  it('does not file into THIS repo when $TMPDIR points inside it — the production leak', { timeout: 60_000 }, async () => {
+    // The bug this pins, in the environment that had it: every cezar agent run sets
+    // `TMPDIR=<repo>/.ai/cezar/tmp/<runId>`, so `os.tmpdir()` hands the "isolated" cwd back
+    // INSIDE the repo under test, the entry module's walk up for a git toplevel leaves it, and
+    // `todo add` files a real row onto the live board — 10 "Ship it" rows reached production
+    // between 2026-08-19 and 2026-08-21. CI never reproduced it because `$TMPDIR` is `/tmp`
+    // there, which is why a fully-covered, CI-green test leaked for two days. Set the same
+    // TMPDIR here so CI fails on a regression instead of production absorbing it.
+    const repoRoot = resolve(packageRoot, '../..');
+    const board = join(repoRoot, '.ai/cezar/todos.json');
+    const before = await readFile(board, 'utf8').catch(() => null);
+
+    const base = join(repoRoot, '.ai/cezar/tmp');
+    await mkdir(base, { recursive: true });
+    const insideRepo = await mkdtemp(join(base, 'cez-todo-wiring-tmpdir-'));
+    dirs.push(insideRepo);
+    const originalTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = insideRepo;
+    try {
+      const { stdout, cwd } = await cli(['todo', 'add', 'Ship it', '--acceptance', 'a', '--json']);
+      expect(JSON.parse(stdout).todo).toMatchObject({ summary: 'Ship it' });
+      expect(cwd.startsWith(insideRepo)).toBe(true); // the condition really was reproduced
+      const filed = JSON.parse(await readFile(join(cwd, '.ai/cezar/todos.json'), 'utf8'));
+      expect(filed).toHaveLength(1);
+    } finally {
+      if (originalTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = originalTmpdir;
+    }
+
+    // The whole point: this repo's own board is exactly as it was — still absent on a fresh
+    // checkout (CI), still byte-identical on a dev machine that has one.
+    expect(await readFile(board, 'utf8').catch(() => null)).toBe(before);
   });
 
   it('still rejects a bogus todo subcommand — reachable, not permissive', { timeout: 60_000 }, async () => {
