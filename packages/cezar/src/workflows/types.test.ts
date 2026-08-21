@@ -3,6 +3,7 @@ import {
   AUTONOMOUS_IMPLEMENTATION_WORKFLOW,
   BRIEFS_DIR,
   DEFAULT_ALLOWED_TOOLS,
+  FILE_WRITE_RECIPE,
   RECORD_READ_RECIPE,
   parseReviewVerdict,
   SPEC_TO_DEPLOY_WORKFLOW,
@@ -355,6 +356,47 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     // takes. `buildAllowedTools()` turns `Bash` + no allowlist into plain, unrestricted `Bash`.
     expect(deploy?.allowedTools).toContain('Bash');
     expect(deploy?.bashAllowlist).toBeUndefined();
+  });
+});
+
+/**
+ * The file-write recipe (spec `.ai/specs/2026-08-21-edit-an-existing-file-never-re-emit-it.md`,
+ * L1/L3): overrides bypass mode's Bash-first preference FOR FILE MUTATION ONLY, in the three
+ * write-heavy steps of this workflow.
+ */
+describe('FILE_WRITE_RECIPE', () => {
+  const stepById = (id: string) => SPEC_TO_DEPLOY_WORKFLOW.steps.find((s) => s.id === id);
+
+  it('overrides the bypass-mode Bash preference for FILE EDITS in all three write-heavy steps', () => {
+    for (const id of ['spec', 'implement', 'document']) {
+      expect(stepById(id)?.prompt, id).toContain(FILE_WRITE_RECIPE);
+    }
+    const t = FILE_WRITE_RECIPE.replace(/\s+/g, ' ');
+    // It overrides, explicitly and by name — a rule that does not mention what it overrides loses.
+    expect(t).toContain('OVERRIDES');
+    expect(t).toContain('for file mutation only');
+    // Criterion 2: the WHY travels with the rule, with numbers, so it cannot be deleted as
+    // boilerplate. Both figures are DIRECT COUNTS that survive any change to how heredoc bodies are
+    // parsed — revision 1 pinned a share (274,926/465,531) that the meter's own implementation then
+    // failed to reproduce. Do not put a parse-dependent number in prompt text.
+    expect(t).toContain('an edit costs the CHANGE, a heredoc costs the FILE');
+    expect(t).toMatch(/360 tool calls, ZERO `Edit`, ZERO `Write`/);
+    expect(t).toMatch(/34,845 characters, then 48,618, of which 20,550/);
+    // R10: without this the conversion can cost more round trips than it saves characters.
+    expect(t).toMatch(/PARALLEL edit calls in ONE turn/);
+    // R11: the rule is conditional on how much of the file changes, not on whether it existed.
+    expect(t).toContain('when you are genuinely rewriting MOST of a file');
+    expect(t).toContain('Judge by how much of the file changes');
+    // The carve-outs, or it collides with the doctrine's (correct) shell-first reading rules.
+    expect(t).toContain('a file that does not exist yet');
+    expect(t).toContain('scripted multi-file transform');
+    expect(t).toContain('that rule is about reading, this one is about writing');
+    // R2: the recovery path, or a failed match becomes the exact defect this forbids.
+    expect(t).toContain('Do NOT fall back to rewriting the whole file');
+  });
+
+  it('grants the spec step the editor tool it is now told to use', () => {
+    expect(stepById('spec')?.allowedTools).toContain('Edit');
   });
 });
 
