@@ -378,6 +378,7 @@ async function main(): Promise<void> {
       // the live unit on `prod-host` is hand-written — no generator in this repo authored
       // it — so a fresh install and an existing box need different, equally supported paths.
       process.exitCode = await migrateReleasesCommand({
+        source: values.source ?? repoRoot,
         linkPath: values['link-path'],
         releasesDir: values['releases-dir'],
         unit: values.unit,

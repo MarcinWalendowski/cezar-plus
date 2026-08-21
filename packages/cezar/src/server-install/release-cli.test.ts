@@ -134,3 +134,77 @@ describe('socketUnitName', () => {
     expect(socketUnitName('cezar-org.service')).toBe('cezar-org.socket');
   });
 });
+
+describe('unexpectedEntries — derived from the source checkout (corrected 2026-08-21)', () => {
+  /**
+   * The regression this locks: a hardcoded allowlist refused a HEALTHY build tree on the real box,
+   * because it had never heard of AGENT_PROTOCOL.md / CODE_REVIEW.md / SDLC.md / .env.example /
+   * .github / alias-cezar. The operator's very first command failed on a correct install.
+   */
+  const REAL_BOX = [
+    '.ai',
+    '.deployed-commit',
+    '.env.example',
+    '.github',
+    '.gitignore',
+    'AGENTS.md',
+    'AGENT_PROTOCOL.md',
+    'BACKWARD_COMPATIBILITY.md',
+    'CHANGELOG.md',
+    'CODE_REVIEW.md',
+    'LICENSE',
+    'README.md',
+    'SDLC.md',
+    'alias-cezar',
+    'docs',
+    'node_modules',
+    'package-lock.json',
+    'package.json',
+    'packages',
+    'scripts',
+    'vitest.config.ts',
+  ];
+  const SOURCE = REAL_BOX.filter((e) => !['.ai', '.deployed-commit', 'node_modules'].includes(e));
+
+  const read = (p: string) => (p === '/src' ? SOURCE : REAL_BOX);
+
+  it('accepts a healthy build tree once the source defines what belongs', () => {
+    expect(unexpectedEntries('/opt/cezar', read, '/src')).toEqual([]);
+  });
+
+  it('still flags the cruft a hand-run deploy leaves behind', () => {
+    const withCruft = (p: string) =>
+      p === '/src'
+        ? SOURCE
+        : [
+            ...REAL_BOX,
+            '.deployed-commit.bak.20260821-134917',
+            'AGENTS.md.bak.20260820-131525',
+            '.deploy-verify-f53f5a58.log',
+            '.deployed-notes.md',
+          ];
+    expect(unexpectedEntries('/opt/cezar', withCruft, '/src')).toEqual([
+      '.deployed-commit.bak.20260821-134917',
+      'AGENTS.md.bak.20260820-131525',
+      '.deploy-verify-f53f5a58.log',
+      '.deployed-notes.md',
+    ]);
+  });
+
+  it('without a source it falls back to the static core — refusing too much, never too little', () => {
+    // Deleting an operator's file is unrecoverable; refusing by hand is not. So the no-source
+    // path must NOT pass everything through.
+    const stray = unexpectedEntries('/opt/cezar', read);
+    expect(stray).toContain('AGENT_PROTOCOL.md');
+    expect(stray).not.toContain('packages');
+  });
+
+  it('an unreadable source degrades to the static core rather than throwing', () => {
+    const boom = (p: string) => {
+      if (p === '/src') throw new Error('ENOENT');
+      return REAL_BOX;
+    };
+    expect(() => unexpectedEntries('/opt/cezar', boom, '/src')).not.toThrow();
+    expect(unexpectedEntries('/opt/cezar', boom, '/src')).toContain('AGENT_PROTOCOL.md');
+  });
+});

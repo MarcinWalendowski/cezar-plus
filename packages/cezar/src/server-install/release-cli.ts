@@ -119,6 +119,11 @@ export interface MigrateReleasesOptions {
   apply?: boolean;
   /** Where unit files go. A seam for tests — production never passes it. */
   systemdDir?: string;
+  /**
+   * The source checkout being deployed. Its top-level entries define what legitimately belongs in
+   * the install path, so the stray-entry guard stops drifting as the repo gains files.
+   */
+  source?: string;
 }
 
 /**
@@ -150,7 +155,7 @@ export async function migrateReleasesCommand(opts: MigrateReleasesOptions): Prom
   if (isMigrated(linkPath)) {
     plan.push(`${linkPath} is already a symlink — leaving the release layout alone.`);
   } else {
-    const stray = unexpectedEntries(linkPath);
+    const stray = unexpectedEntries(linkPath, (p) => readdirSync(p), opts.source);
     if (stray.length > 0) {
       // The spec's own requirement: `/opt/cezar/.ai/` is a build-time leftover and `.deployed-commit`
       // becomes a derived ledger field. Anything ELSE unaccounted for might be state someone is
@@ -220,16 +225,46 @@ export function socketUnitName(serviceUnit: string): string {
 }
 
 /** Everything under the install path that a BUILD would not have put there. */
+/**
+ * Entries in the install path that are NOT part of a build.
+ *
+ * The guard matters because a release directory is PRUNED: anything sitting in the install path
+ * when it is moved into `<releases>/<id>` is deleted with that release later. Operator data left
+ * there — a hand-written note, a deploy log — would vanish weeks after the fact, which is the
+ * worst shape a data-loss bug can take.
+ *
+ * **CORRECTED 2026-08-21, caught by a dry run against the real box.** This was a hardcoded
+ * allowlist and it was WRONG in the expensive direction: it omitted `AGENT_PROTOCOL.md`,
+ * `CODE_REVIEW.md`, `SDLC.md`, `.env.example`, `.github` and `alias-cezar` — all tracked files a
+ * normal build tree contains — so the migration refused a perfectly healthy install and the
+ * operator's very first command failed. A static list is also wrong by construction: it silently
+ * drifts every time the repo gains a top-level file, and the failure only shows up on the box.
+ *
+ * So the expected set is DERIVED: whatever the source checkout has at its top level is by
+ * definition part of a build, plus the few things a build or a deploy creates that the source does
+ * not have (`node_modules`, `.ai`, `.deployed-commit`). Genuine cruft — `*.bak.*`,
+ * `.deploy-verify-*.log`, hand-written notes — is still flagged, because it is in neither set.
+ *
+ * `sourceRoot` is optional so the guard degrades to the static core rather than passing everything
+ * when the source is unavailable: refusing too much is recoverable by hand, deleting an operator's
+ * file is not.
+ */
 export function unexpectedEntries(
   linkPath: string,
   read: (p: string) => string[] = (p) => readdirSync(p),
+  sourceRoot?: string,
 ): string[] {
-  // `.ai` is a build-time leftover (WORKLIST.md, runs/, analysis/ …) and nothing reads it at
-  // runtime — the unit's WorkingDirectory is elsewhere. `.deployed-commit` becomes a ledger field.
-  const expected = new Set([
-    '.ai',
-    '.deployed-commit',
-    '.git',
+  // Created by a build or a deploy, so never present in the source checkout.
+  const expected = new Set(['.ai', '.deployed-commit', '.git', 'node_modules']);
+  if (sourceRoot) {
+    try {
+      for (const entry of read(sourceRoot)) expected.add(entry);
+    } catch {
+      // Unreadable source — fall back to the static core below.
+    }
+  }
+  // The static core stays as the floor for the no-sourceRoot case.
+  for (const entry of [
     '.gitignore',
     '.npmrc',
     'AGENTS.md',
@@ -238,7 +273,6 @@ export function unexpectedEntries(
     'LICENSE',
     'README.md',
     'docs',
-    'node_modules',
     'package-lock.json',
     'package.json',
     'packages',
@@ -247,7 +281,9 @@ export function unexpectedEntries(
     'tsconfig.base.json',
     'vitest.config.ts',
     'vitest.workspace.ts',
-  ]);
+  ]) {
+    expected.add(entry);
+  }
   try {
     return read(linkPath).filter((entry) => !expected.has(entry));
   } catch {
