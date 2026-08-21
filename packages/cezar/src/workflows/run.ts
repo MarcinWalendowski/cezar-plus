@@ -68,6 +68,7 @@ import { resolvePoolForDispatch } from '../workspace/agent-route-select.ts';
 import type { ProviderId } from '../core/provider-auth.ts';
 import {
   buildWorkspaceGrant,
+  loadWorkspaceGrant,
   workspaceGrantSystemPrompt,
   type GrantedProject,
   type WorkspaceGrant,
@@ -860,12 +861,34 @@ export class RunManager {
    *  dispose() so a torn-down project stops counting against the cap. */
   private readonly offSemaphore: () => void;
 
+  /**
+   * This manager is bound to cezar's boot/scratch root — the launch directory, when it holds
+   * nothing but cezar's own runtime state (`workspace/boot-repo.ts#holdsOnlyRuntimeState`).
+   *
+   * Two things follow, and ONLY here: a run homed on such a root never runs in place
+   * (`execute`, change B) and one that arrived without a workspace grant adopts one
+   * (change C). Both would be wrong on a root that holds work, which is why this is injected by
+   * the caller that measured it rather than inferred from `repoRoot`.
+   * Spec `.ai/specs/2026-08-21-workspace-boot-repo-and-always-worktrees.md`.
+   */
+  private readonly bootScratchRoot: boolean;
+
+  /** The registry read behind change C. A seam so the adoption is testable without a workspace
+   *  registry on disk — the production default is the same read the sidebar performs. */
+  private readonly loadGrant: () => Promise<WorkspaceGrant>;
+
   constructor(
     private readonly store: RunStore,
     private readonly repoRoot: string,
-    options: { semaphore?: WorkspaceSemaphore } = {},
+    options: {
+      semaphore?: WorkspaceSemaphore;
+      bootScratchRoot?: boolean;
+      loadGrant?: () => Promise<WorkspaceGrant>;
+    } = {},
   ) {
     this.dataDir = join(repoRoot, '.ai/cezar');
+    this.bootScratchRoot = options.bootScratchRoot === true;
+    this.loadGrant = options.loadGrant ?? (() => loadWorkspaceGrant());
     this.semaphore = options.semaphore ?? new WorkspaceSemaphore();
     this.offSemaphore = this.semaphore.register({
       busySlots: () => this.busySlots(),
@@ -1191,6 +1214,59 @@ export class RunManager {
    *  restart, and `false` for every ordinary project run. */
   private isWorkspaceRun(runId: string): boolean {
     return (this.store.getRun(runId)?.workspaceProjects?.length ?? 0) > 0;
+  }
+
+  /**
+   * Change C — a run homed at the boot scratch root with no grant adopts the workspace grant, and
+   * from that line on IS a workspace run: per-project worktrees, no boot-root lease, apply-back on
+   * success (spec `.ai/specs/2026-08-21-workspace-boot-repo-and-always-worktrees.md`).
+   *
+   * **Why this exists at all.** `workspaceProjects` is written in exactly ONE place —
+   * `server/workspace-run-routes.ts`, reached only by `POST /api/v1/workspace/runs`. Nine other
+   * `startRun` call sites (`cezar run`, `POST /runs`, todo autostart, task templates, note
+   * approval, continuations…) never pass it, and any of them bound to the boot manager produces a
+   * run that used to fall into the ordinary in-place branch: the exclusive working-tree lease and
+   * `pump()`'s one-at-a-time cap. Measured 2026-08-21: run `50ce87f1` held it for 85 minutes,
+   * while a run created 43 seconds later WITH the grant isolated into ten worktrees. The only
+   * difference was the record.
+   *
+   * Fixing every call site would be nine copies of one decision, each free to be forgotten again.
+   * Fixing it here answers the question where the run actually lands.
+   *
+   * **The `groupId` carve-out is deliberate**, not an oversight. `startRun` drops the grant for
+   * group VARIANTS on purpose ("they exist to isolate, and a workspace run has nothing to isolate
+   * into"). A variant submitted at the boot root therefore still gets change B's forced isolation
+   * of the boot repo, not ten per-project worktrees.
+   *
+   * Never throws and never blocks the run: an unreadable registry, or one with no project on
+   * disk, leaves the record exactly as it was and the run takes change B's path instead.
+   */
+  private async adoptWorkspaceGrant(
+    runId: string,
+    emit: (event: { type: string; [k: string]: unknown }) => unknown,
+  ): Promise<void> {
+    if (!this.bootScratchRoot) return;
+    const record = this.store.getRun(runId);
+    if (!record) return;
+    if ((record.workspaceProjects?.length ?? 0) > 0) return;
+    if (record.groupId !== undefined) return;
+
+    const grant = await this.loadGrant().catch((err: unknown) => {
+      emit({
+        type: 'note',
+        message: `workspace registry unreadable (${err instanceof Error ? err.message : String(err)}) — this task runs without a workspace grant`,
+      });
+      return null;
+    });
+    if (!grant || grant.projects.length === 0) return;
+
+    this.store.updateRun(runId, { workspaceProjects: grant.projects });
+    emit({
+      type: 'note',
+      message:
+        `workspace boot root — this task carried no project grant, so it adopted the workspace's ` +
+        `${grant.projects.length} project(s) rather than running in the scratch root one at a time`,
+    });
   }
 
   /** Busy slots held by NON-workspace in-place runs — the only ones the non-git single-slot cap in
@@ -3529,6 +3605,9 @@ export class RunManager {
     // that requests isolation fails closed if the worktree cannot be
     // established; only explicit opt-out and non-Git modes run in place.
     const repo = await getRepoInfo(this.repoRoot);
+    // At the boot scratch root, a run that arrived without a grant adopts one and becomes a
+    // workspace run here (spec 2026-08-21, change C) — see `adoptWorkspaceGrant`.
+    await this.adoptWorkspaceGrant(runId, emit);
     // A parallel WORKSPACE RUN (spec 2026-08-19): isolate each granted git project in its own
     // `cez/<id8>` worktree, run up to maxParallel — no boot repo-root lease (below) and not counted
     // by the non-git cap in `pump()`. cwd stays the boot scratch repo; the grant (--add-dir + the
@@ -3547,7 +3626,7 @@ export class RunManager {
             ? `workspace run — ${worktrees.length} project worktree(s) isolated; changes apply back on finish`
             : 'workspace run — no git projects to isolate; running in place',
       });
-    } else if (repo && input.worktree === false) {
+    } else if (repo && input.worktree === false && !this.bootScratchRoot) {
       // Composer opt-out: run in the repo working tree, no branch/worktree. The
       // repository-root lease serializes these runs by default; the explicit
       // CEZ_DISABLE_REPO_LOCK=1 escape hatch allows unsafe overlap.
@@ -3557,10 +3636,28 @@ export class RunManager {
       if (startingCommit) this.store.updateRun(runId, { baseBranch: startingCommit });
       emit({ type: 'note', message: 'worktree off — running in the repo working tree' });
     } else if (repo) {
-      emit({
-        type: 'note',
-        message: `worktree on — using an isolated task worktree (${input.worktree === true ? 'explicit request' : 'default'})`,
-      });
+      if (input.worktree === false) {
+        // Change B. `worktree: false` means "work in the repo working tree", and at the boot
+        // scratch root there is no work in that tree to be in — only cezar's own runtime state,
+        // which the repo ignores. Honoring it would buy nothing and cost the exclusive
+        // working-tree lease plus `pump()`'s one-at-a-time cap. So it is overridden, out loud:
+        // a note that disagrees with the request is honest, a silent disagreement is not.
+        emit({
+          type: 'note',
+          message:
+            'worktree forced on — this is the workspace boot root, which holds no project work; ' +
+            `isolating in .ai/cezar/worktrees/${runId} instead of running in place`,
+        });
+        // Clear the persisted opt-out, or `workingDirectoryOf` (`server.ts`, the session Git
+        // view) would keep reading the boot root while the agent works in the worktree, and
+        // restart recovery would keep treating a removed worktree as "never had one".
+        this.store.updateRun(runId, { worktree: undefined });
+      } else {
+        emit({
+          type: 'note',
+          message: `worktree on — using an isolated task worktree (${input.worktree === true ? 'explicit request' : 'default'})`,
+        });
+      }
       // Fork from the configured base branch (config.json `baseBranch`, e.g.
       // `develop`) — also the target of the eventual draft PR. Unresolvable
       // (typo, not fetched) → note + the currently checked-out branch.

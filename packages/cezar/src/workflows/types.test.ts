@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { KNOWN_PRESETS_BY_RUNNER } from '../core/model-presets.ts';
 import {
   AUTONOMOUS_IMPLEMENTATION_WORKFLOW,
   BRIEFS_DIR,
@@ -141,6 +142,44 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
   it('only the review step is gated — the gate is not quietly on the whole chain', () => {
     const gated = SPEC_TO_DEPLOY_WORKFLOW.steps.filter((s) => s.requiresApproval).map((s) => s.id);
     expect(gated).toEqual(['review-spec']);
+  });
+
+  /**
+   * The per-step model policy (spec `.ai/specs/2026-08-21-per-step-model-policy.md`): sonnet
+   * everywhere, opus on the one judgement step. Asserted against the step list BY IDENTITY and
+   * against a count, because the interesting failure here is vacuous rather than loud — a
+   * `for (const s of steps)` over a renamed, dropped or emptied step list passes while asserting
+   * nothing at all. `runAgentStep` reads `step.model ?? input.model`, so a step that silently
+   * lost its `model` does not fail: it quietly falls back to whatever the composer picked.
+   */
+  it('pins every step to sonnet except the spec review, which is opus', () => {
+    const models = SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => [s.id, s.model] as const);
+    expect(models).toEqual([
+      ['context', 'sonnet'],
+      ['spec', 'sonnet'],
+      ['review-spec', 'opus'],
+      ['implement', 'sonnet'],
+      ['run-tests', 'sonnet'],
+      ['commit-push', 'sonnet'],
+      ['document', 'sonnet'],
+      ['deploy', 'sonnet'],
+    ]);
+    // The asymmetry itself, stated from the other side: opus is on exactly one step, and no step
+    // is left unpinned to fall through to the composer's pick.
+    expect(models.filter(([, m]) => m === 'opus').map(([id]) => id)).toEqual(['review-spec']);
+    expect(models.filter(([, m]) => !m)).toEqual([]);
+  });
+
+  it('names models this runner actually offers, so a typo cannot fall through', () => {
+    // `modelConflictsWithRunner` fails open on an unknown id and `normalizeModelForBackend` would
+    // refuse it only at run time — on the box, mid-chain. Catch it here instead.
+    const presets = KNOWN_PRESETS_BY_RUNNER.claude;
+    expect(presets.length).toBeGreaterThan(0);
+    for (const step of SPEC_TO_DEPLOY_WORKFLOW.steps) {
+      // No step names a per-step `runner`, so every one of them resolves against claude.
+      expect(step.runner).toBeUndefined();
+      expect(presets).toContain(step.model);
+    }
   });
 
   it('the record-reading step cannot reach a shell beyond kb + read-only git', () => {

@@ -560,6 +560,29 @@ export function parseReviewVerdict(turnText: string): ReviewVerdict | undefined 
 export const BRIEFS_DIR = '.ai/specs/briefs';
 
 /**
+ * The per-step model policy for `spec-to-deploy` (owner instruction 2026-08-21: "writing spec
+ * should be sonnet, review spec should be opus, then all the rest should be sonnet again").
+ *
+ * Naming the model ON THE STEP is what makes this a policy rather than a preference.
+ * `runAgentStep` resolves `step.model ?? input.model`, so these WIN over the model picked in the
+ * composer — a deliberate trade, and the one real cost of this change: the picker no longer
+ * changes what a `spec-to-deploy` run costs. The alternative, `defaultModels`, could not express
+ * this at all: it is resolved CLIENT-side in the composer and cannot vary by step.
+ *
+ * The split is judgement work vs. construction work. `review-spec` is the last checkpoint before
+ * a spec is implemented, committed, PUSHED and DEPLOYED, and it is one read-only pass over one
+ * file — cheap to run on the better model. The other seven act on an artefact that already
+ * exists. Both ids are `KNOWN_PRESETS_BY_RUNNER.claude` members (asserted in `types.test.ts`) and
+ * deliberately ALIASES, not pinned version ids, so the chain follows the account's current tier.
+ *
+ * Spec: `.ai/specs/2026-08-21-per-step-model-policy.md`.
+ */
+const SPEC_TO_DEPLOY_STEP_MODEL = 'sonnet';
+
+/** The one exception above — see {@link SPEC_TO_DEPLOY_STEP_MODEL}. */
+const SPEC_REVIEW_MODEL = 'opus';
+
+/**
  * The owner's standard operating pipeline as ONE selectable chain (spec
  * `.ai/specs/2026-08-19-spec-to-deploy-default-workflow.md`): **gather the record → write the
  * spec → review the spec → implement → run tests → commit & push/merge → document → deploy.**
@@ -606,6 +629,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'context',
       name: 'Gather the record',
+      model: SPEC_TO_DEPLOY_STEP_MODEL,
       // SPLIT OUT of the old combined `spec` step (owner ask 2026-08-20: "seperate gathering
       // knoweldge/context from writing a spec"; spec
       // `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`, P1).
@@ -669,6 +693,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'spec',
       name: 'Write the spec',
+      model: SPEC_TO_DEPLOY_STEP_MODEL,
       // Narrowed by the P1 split: the record sweep moved to `context`, so this step's window holds
       // the brief and the code it names rather than the raw search output. `Task` is deliberately
       // NOT granted here — the writing is the one job that must not be delegated, for the reason
@@ -712,6 +737,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'review-spec',
       name: 'Review the spec',
+      model: SPEC_REVIEW_MODEL,
       // P2 of `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`.
       //
       // READ-ONLY BY CONSTRUCTION — no `Write`, no `Edit`. A reviewer that can edit what it
@@ -759,6 +785,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'implement',
       name: 'Implement the spec',
+      model: SPEC_TO_DEPLOY_STEP_MODEL,
       allowedTools: DEFAULT_ALLOWED_TOOLS,
       // Reuse the autonomous workflow's guarded allowlist verbatim so the two never drift:
       // installs + gate-shaped runner subcommands only, git add/commit but never `git push`.
@@ -788,6 +815,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'run-tests',
       name: 'Run the tests',
+      model: SPEC_TO_DEPLOY_STEP_MODEL,
       allowedTools: DEFAULT_ALLOWED_TOOLS,
       // Same guarded allowlist as `implement`, by reference: it can install, run every gate, and
       // edit code to fix a failure — but it cannot reach the remote. `commit-push` does that next.
@@ -839,6 +867,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'commit-push',
       name: 'Commit & push / merge',
+      model: SPEC_TO_DEPLOY_STEP_MODEL,
       // The step is green only if the tree is CLEAN and (where a remote is reachable) nothing is
       // unpushed — owner instruction 2026-08-20 on run `23221162`, which reported `status=done`
       // leaving 7 modified and 5 untracked files and no commit: "everything must be committed in
@@ -890,6 +919,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'document',
       name: 'Document the decision',
+      model: SPEC_TO_DEPLOY_STEP_MODEL,
       // This step COMMITS too (spec status, KB, tracker), so it inherits the same post-condition:
       // a record written into an uncommitted file is a record the next session never reads.
       verify: { builtin: 'everything-committed', max: 1 },
@@ -965,6 +995,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'deploy',
       name: 'Deploy',
+      model: SPEC_TO_DEPLOY_STEP_MODEL,
       // Green only when EVERY service in `.ai/deploy-targets.json` probes live — the whole
       // ask: cezar is the UI tree AND the backend service, and shipping one alone used to end this
       // step green. A repo that declares no targets file is RED, not green: "nobody said what this
