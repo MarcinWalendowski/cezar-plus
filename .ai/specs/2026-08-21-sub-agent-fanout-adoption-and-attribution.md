@@ -3,12 +3,14 @@
 > **Status: PARTIAL** — **Phases 1–3 implemented 2026-08-21**; Phase 4 (the runtime A/B that
 > isolates the *rewritten* `document` prompt) cannot execute in this chain and is filed as cezar
 > todo `221cf511-4e18-4f7b-ba46-e20edf956a16`.
-> **UPDATED 2026-08-21 by this run's own `document` step: all three acceptance criteria now have a
-> measured number, criterion 2 included.** That step fanned out to three sub-agents and metered
-> itself both ways — the shipped meter printed `67 calls / 56 trips / sub 0`, the fixed meter
-> printed `own 13 / child 56 / trips 13 / sub 3 / peak ctx 104.7k` against `document` baselines of
-> 141.8k and 167.2k. What remains open is narrower than "criterion 2": whether the *prompt rewrite*
-> raises adoption, which needs a run started after the deploy.
+> **UPDATED 2026-08-21 by this run's own `document` step, which fanned out to three sub-agents and
+> metered itself both ways.** Read at the same moment: the shipped meter printed
+> `85 calls / 74 trips / batch 1.15 / sub 0`; the fixed meter printed
+> `own 29 / child 56 / trips 29 / batch 1.00 / sub 3 / peak ctx 138.7k`. **Criterion 1 and 3:
+> closed. Criterion 2: measured, and only PARTLY met — weaker than a mid-step read suggested.**
+> Own round trips fall clearly (29 against `document` baselines of 38 and 45, −24% / −36%), but
+> peak context is 138.7k against 141.8k and 167.2k — **−2% against `c10864d1`, which is noise.**
+> Watch `ownToolCalls`; peak context did not separate from the nearer baseline.
 > See *Status log — 2026-08-21* at the foot of this file. · **Date:** 2026-08-21
 > **Origin:** task *"Make sub-agent fan-out actually happen on read-heavy steps — Task has been
 > available since Phase 4 and chosen exactly 0 times"*, filed after
@@ -644,18 +646,27 @@ The `document` baselines for Phase 4, re-derived with the fixed meter and now pi
   exactly 0 times"* was the meter's, not the agents'.
 - **Criterion 3 — batch factor and sub-agent count recorded for the same step before and after:
   CLOSED**, in the table above: same step ids, same transcripts, before and after the fix.
-- **Criterion 2 — the parent's peak context measurably lower: CLOSED 2026-08-21, by this run's own
-  `document` step** (see *The `document` step that wrote this log* below). `document` fanned out to
-  three sub-agents and came in at **peak ctx 104.7k / own 13 calls**, against pre-change `document`
-  baselines of **141.8k / 38** (`c10864d1`) and **167.2k / 45** (`7c2dd8f0`) — **26% and 37% less
-  peak context, 66% and 71% fewer parent round trips.** 56 of the step's 69 calls were made inside
-  children and never entered the parent's context.
-  **Two honest limits.** (a) **R10 still stands**: this is one uncontrolled cross-task sample, three
-  different tasks with different reading loads, not a controlled A/B. (b) **This does not test the
-  Phase 3 prompt.** The rewritten `document` prompt is in the worktree, not in the running cockpit,
-  so this step ran under the OLD prompt and fanned out because the *step's own instructions* said
-  to. That the fan-out helps is now measured; that the *rewrite* makes agents choose it is not, and
-  is what todo `221cf511-4e18-4f7b-ba46-e20edf956a16` exists to answer.
+- **Criterion 2 — the parent's peak context measurably lower: MEASURED, PARTLY MET.** Not the clean
+  close this section claimed for about twenty minutes, and the way it failed is worth recording.
+  Read mid-step, `document` showed `own 13 / peak ctx 104.7k` and criterion 2 was written up as
+  CLOSED at −26% / −37%. **The step kept running, and by the time it finished merging and pushing it
+  read `own 29 / peak ctx 138.7k`.** Against the `document` baselines — **141.8k / own 38**
+  (`c10864d1`) and **167.2k / own 45** (`7c2dd8f0`) — the honest final numbers are:
+  - **Own round trips: clearly lower — 29 vs 38 and 45 (−24% / −36%).** 56 of the step's 85 metered
+    calls were made inside children and never entered the parent's context. This is the robust
+    signal.
+  - **Peak context: −17% against `7c2dd8f0`, but −2% against `c10864d1`.** Two percent is noise. On
+    the nearer baseline, peak context **did not separate**.
+
+  So fan-out demonstrably buys *round trips*; that it also buys *peak context* is supported by one
+  baseline and not by the other. **Do not cite this as a closed criterion.**
+  **Three limits, not two.** (a) **R10 stands**: one uncontrolled cross-task sample, three tasks
+  with different reading loads, not a controlled A/B. (b) **This does not test the Phase 3 prompt** —
+  the rewrite is in the worktree, not in the running cockpit, so this step ran under the OLD prompt
+  and fanned out because its *own instructions* said to. (c) **A peak-context number read while the
+  step is still running is a lower bound, not a result.** It rose 34k after being written down.
+  Meter the step after it closes. Todo `221cf511-4e18-4f7b-ba46-e20edf956a16` should re-read all of
+  these on a step that has finished.
 
 **A finding worth keeping, because it changes which metric to watch.** `batchFactor` is the wrong
 headline for fan-out. On `c10864d1`, own-only batch factor is **1.00** on the fanned-out `spec`
@@ -760,12 +771,12 @@ the spec predicts. Same step, same transcript, read once with the shipped build
 
 | meter | `calls` | `child` | `trips` | `batch` | `sub` | `ctx k` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| shipped (`f0d48513`) | 67 | *no column* | 56 | 1.20 | **0** | *no column* |
-| this branch (`5ef7e653`) | **13** | **56** | **13** | 1.00 | **3** | **104.7** |
+| shipped (`f0d48513`) | 85 | *no column* | 74 | 1.15 | **0** | *no column* |
+| this branch | **29** | **56** | **29** | 1.00 | **3** | **138.7** |
 
 The shipped meter reports `sub 0` for a step that dispatched three sub-agents **while that step was
-running**, and inflates its round trips from 13 to 56 by billing it for its children's reads. It
-also prints `batch 1.20`, which reads as *better batching* and is in fact just borrowed work.
+running**, and inflates its round trips from 29 to 74 by billing it for its children's reads. It
+also prints `batch 1.15`, which reads as *better batching* and is in fact just borrowed work.
 
 `document`, before and after, fixed meter throughout:
 
@@ -773,9 +784,14 @@ also prints `batch 1.20`, which reads as *better batching* and is in fact just b
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `c10864d1` (pre) | 38 | 0 | 38 | 1.00 | 0 | 141.8k |
 | `7c2dd8f0` (pre) | 45 | 0 | 44 | 1.02 | 0 | 167.2k |
-| `e06f2169` (this step) | **13** | **56** | **13** | 1.00 | **3** | **104.7k** |
+| `e06f2169` (this step) | **29** | **56** | **29** | 1.00 | **3** | **138.7k** |
 
-Caveat on the last row: read mid-step, before the step closed, so its final `own`/`ctx k` are
-somewhat higher than printed — the run's own `TOTAL` peak (196.8k, set by `implement`) is the
-number to watch for the session, not the step. It does not change the direction: the parent's peak
-context is well below both baselines while 56 calls' worth of exploration stayed in the children.
+**The last row is still a lower bound** — read while the step was running, and it moved a long way
+during the step: `own 13 / 104.7k` at first read became `own 29 / 138.7k` by the merge and push.
+That is exactly why the peak-context claim is written up as partly met rather than closed: on
+`7c2dd8f0` the gap is real (−17%), on `c10864d1` it is 2% and gone. The run's `TOTAL` peak is
+196.8k, set by `implement`, not by any fanned-out step.
+
+**The lesson, which is the durable part:** an in-flight step cannot measure its own peak context,
+because the act of writing the measurement raises it. Only `ownToolCalls` and `sub` are safe to
+read from inside the step.
