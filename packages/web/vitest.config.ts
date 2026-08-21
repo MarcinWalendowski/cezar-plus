@@ -11,6 +11,7 @@ export default mergeConfig(
       name: 'web',
       environment: 'jsdom',
       include: ['src/**/*.test.{ts,tsx}'],
+      env: { NODE_ENV: '' },
     },
   }),
 )

@@ -35,6 +35,20 @@ const pinSandboxHome = (): void => {
 // one.
 delete process.env.CEZ_AUTH
 
+// AGENTS.md trap 2 scrub (see spec) — live-computed, not enumerated.
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith('CEZ_') && key !== 'CEZ_HANDOFF_FILE' && key !== 'CEZ_TASK_ID') {
+    delete process.env[key]
+  }
+}
+
+// AGENTS.md trap 4 scrub (see spec).
+const scrubbedTmp = mkdtempSync(join(realpathSync('/tmp'), 'cez-vitest-tmp-'))
+process.env.TMPDIR = scrubbedTmp
+process.env.TMP = scrubbedTmp
+process.env.TEMP = scrubbedTmp
+
+
 pinSandboxHome()
 beforeEach(pinSandboxHome)
 // Registered before any suite's own hooks, so vitest runs it last on the way out —
