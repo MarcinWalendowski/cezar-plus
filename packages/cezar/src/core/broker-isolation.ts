@@ -135,16 +135,28 @@ export function probeIsolationCapabilities(
   };
 }
 
-function probeUserScope(
+export function probeUserScope(
   env: NodeJS.ProcessEnv,
   fs: { existsSync(p: string): boolean },
+  uid = process.getuid?.() ?? 0,
 ): boolean {
   const hasBinary = (env.PATH ?? '')
     .split(':')
     .filter(Boolean)
     .some((dir) => fs.existsSync(`${dir}/systemd-run`));
   if (!hasBinary) return false;
-  const runtimeDir = env.XDG_RUNTIME_DIR;
+  // MEASURED 2026-08-21 on prod-host, and the reason this box reported `delegated` rather
+  // than `scope`: inside `cezar.service`, XDG_RUNTIME_DIR is UNSET. A login shell over ssh has it,
+  // so the user-scope path looked available in every manual probe and was silently unavailable to
+  // the server itself. The consequence was not cosmetic -- `delegated` keeps the broker in the
+  // service's OWN cgroup, protected only by KillMode=process, which survives `systemctl restart`
+  // but NOT a full `stop` (deactivation empties the cgroup). A run therefore survived seven
+  // restarts and then died on the first stop/start.
+  //
+  // So derive the default rather than give up: the user manager's private socket is at a
+  // well-known path, and its EXISTENCE is still the actual proof -- this widens where we look, it
+  // does not weaken the test.
+  const runtimeDir = env.XDG_RUNTIME_DIR ?? defaultRuntimeDir(uid);
   if (!runtimeDir) return false;
   return fs.existsSync(`${runtimeDir}/systemd/private`);
 }
@@ -171,4 +183,26 @@ function probeDelegated(fs: {
   } catch {
     return false;
   }
+}
+
+/** Where a lingering user manager keeps its runtime state. Exported so the launcher can put it
+ *  into the child environment: probing for the socket is useless if `systemd-run --user` is then
+ *  spawned without the variable that tells it where to look. */
+export function defaultRuntimeDir(uid = process.getuid?.() ?? 0): string {
+  return `/run/user/${uid}`;
+}
+
+/**
+ * The environment a `--user` `systemd-run` needs, added only when it is missing.
+ *
+ * Never overrides an XDG_RUNTIME_DIR the caller already has — a real login session knows better
+ * than a derived default.
+ */
+export function userScopeEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  uid = process.getuid?.() ?? 0,
+): Record<string, string> {
+  if (env.XDG_RUNTIME_DIR) return {};
+  const dir = defaultRuntimeDir(uid);
+  return { XDG_RUNTIME_DIR: dir, DBUS_SESSION_BUS_ADDRESS: `unix:path=${dir}/bus` };
 }

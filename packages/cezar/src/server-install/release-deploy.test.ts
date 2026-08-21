@@ -43,6 +43,9 @@ describe('runReleaseDeploy', () => {
         mkdirSync(target, { recursive: true });
         rec.staged.push(target);
       },
+      // Default to the PRE-migration mode so every existing case keeps the behaviour it was
+      // written for; the new cases override it to 'process'.
+      killMode: () => 'control-group',
       async smokeBoot(): Promise<ProbeResult> {
         return { ok: true };
       },
@@ -199,5 +202,47 @@ describe('runReleaseDeploy', () => {
     expect(result.ok).toBe(true);
     expect(rec.staged).toEqual([]);
     expect(rec.restarts).toBe(0);
+  });
+
+  describe('agent-task deploy on a migrated box (2026-08-21)', () => {
+    /**
+     * The gap this closes, measured on prod-host: an operator over ssh was always fine
+     * (`decideReExec` returns false — not inside the cgroup), but a deploy driven from INSIDE an
+     * agent task IS inside cezar.service's cgroup, took the re-exec branch, and died on
+     * "Access denied ... requires interactive authentication" because it asked for a SYSTEM
+     * transient unit. Granting that right would have been root-equivalent under a narrow name.
+     */
+    const INSIDE = '0::/system.slice/cezar.service';
+
+    it('does NOT hand off to a transient unit once the unit stops with KillMode=process', async () => {
+      const box = migratedBox();
+      const rec = recorder({ killMode: () => 'process', cgroup: () => INSIDE, systemdRunAvailable: () => true });
+      const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
+
+      expect(result.detachedUnit).toBeUndefined();
+      expect(rec.detached).toEqual([]);
+      // and it actually deployed rather than bailing out
+      expect(rec.restarts).toBeGreaterThan(0);
+    });
+
+    it('still hands off when the restart would take the whole cgroup down', async () => {
+      const box = migratedBox();
+      const rec = recorder({ killMode: () => 'control-group', cgroup: () => INSIDE, systemdRunAvailable: () => true });
+      const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
+
+      expect(result.detachedUnit).toBeTruthy();
+      expect(rec.detached).toHaveLength(1);
+    });
+
+    it('asks the USER manager for the transient unit, never the system one, as a non-root uid', async () => {
+      const box = migratedBox();
+      const rec = recorder({ killMode: () => 'control-group', cgroup: () => INSIDE, systemdRunAvailable: () => true });
+      await runReleaseDeploy({ ...box, env: {} }, rec.host);
+
+      const argv = rec.detached[0] ?? [];
+      expect(argv[0]).toBe('systemd-run');
+      // Vitest does not run as root, so this exercises the real branch.
+      if ((process.getuid?.() ?? 0) !== 0) expect(argv).toContain('--user');
+    });
   });
 });

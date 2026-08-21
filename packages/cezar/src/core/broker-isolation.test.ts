@@ -8,6 +8,9 @@ import {
   chooseIsolation,
   describeIsolation,
   survivesRestart,
+  defaultRuntimeDir,
+  probeUserScope,
+  userScopeEnv,
 } from './broker-isolation.ts';
 
 /** P4 of `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`. */
@@ -76,5 +79,41 @@ describe('brokerScopeUnitName', () => {
   it('sanitizes a run id into a valid unit name', () => {
     expect(brokerScopeUnitName('7c2dd8f0-e53e-4e88')).toBe('cezar-run-7c2dd8f0-e53e-4e88');
     expect(brokerScopeUnitName('has/slash and space')).toBe('cezar-run-has-slash-and-space');
+  });
+});
+
+describe('user-scope availability derives the runtime dir (2026-08-21)', () => {
+  /**
+   * Measured on prod-host: inside `cezar.service` XDG_RUNTIME_DIR is UNSET, so this probe
+   * returned false and isolation degraded to `delegated`. That is not cosmetic — `delegated`
+   * leaves the broker in the service's own cgroup, protected only by KillMode=process, which
+   * survives `systemctl restart` but NOT a full `stop`. A live run survived seven restarts and
+   * then died on the first stop/start.
+   */
+  const fsWith = (paths: string[]) => ({ existsSync: (p: string) => paths.includes(p) });
+
+  it('finds the user manager even with XDG_RUNTIME_DIR unset', () => {
+    const fs = fsWith(['/usr/bin/systemd-run', '/run/user/999/systemd/private']);
+    expect(probeUserScope({ PATH: '/usr/bin' }, fs, 999)).toBe(true);
+  });
+
+  it('still honours an explicit XDG_RUNTIME_DIR over the derived default', () => {
+    const fs = fsWith(['/usr/bin/systemd-run', '/custom/systemd/private']);
+    expect(probeUserScope({ PATH: '/usr/bin', XDG_RUNTIME_DIR: '/custom' }, fs, 999)).toBe(true);
+    // and does NOT silently fall back to the default when the explicit one is wrong
+    expect(probeUserScope({ PATH: '/usr/bin', XDG_RUNTIME_DIR: '/wrong' }, fsWith(['/usr/bin/systemd-run', '/run/user/999/systemd/private']), 999)).toBe(false);
+  });
+
+  it('is still false when there is no user manager — the socket is the proof, not the path', () => {
+    expect(probeUserScope({ PATH: '/usr/bin' }, fsWith(['/usr/bin/systemd-run']), 999)).toBe(false);
+  });
+
+  it('userScopeEnv fills the gap only when the variable is absent', () => {
+    expect(userScopeEnv({}, 999)).toEqual({
+      XDG_RUNTIME_DIR: '/run/user/999',
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/999/bus',
+    });
+    expect(userScopeEnv({ XDG_RUNTIME_DIR: '/already' }, 999)).toEqual({});
+    expect(defaultRuntimeDir(999)).toBe('/run/user/999');
   });
 });

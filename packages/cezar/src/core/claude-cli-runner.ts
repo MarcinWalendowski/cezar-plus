@@ -22,7 +22,7 @@ import { readNdjson } from './ndjson.ts';
 import type { UiEvent } from './ui-events.ts';
 import { BrokeredSession } from './brokered-session.ts';
 import { brokerArgs, resolveBrokerCommand, type BrokerSessionRequest } from './broker-launch.ts';
-import { buildBrokerLaunchArgv } from './broker-isolation.ts';
+import { buildBrokerLaunchArgv, userScopeEnv } from './broker-isolation.ts';
 import { spoolPaths, type SpoolExit } from './run-spool.ts';
 import {
   claudeTurnStarted,
@@ -415,7 +415,14 @@ export class ClaudeCliRunner implements AgentRunner {
         // `process.env`, so `buildChildEnv`'s allowlist has to be applied here or the agent would
         // inherit the server's environment wholesale — the exact least-privilege regression #427
         // closed.
-        env: buildChildEnv({ backend: this.backend, extraEnv: spec.env }),
+        // `buildChildEnv` is an ALLOWLIST, so it drops XDG_RUNTIME_DIR — and without that,
+        // `systemd-run --user` cannot find the user bus, so the scope launch fails even where a
+        // lingering user manager exists. Added only in `scope` mode, and only when the variable is
+        // genuinely absent, so the allowlist stays as narrow as #427 made it.
+        env: {
+          ...buildChildEnv({ backend: this.backend, extraEnv: spec.env }),
+          ...(request.isolation === 'scope' ? userScopeEnv() : {}),
+        },
         // Detached + no stdio: the broker must not hold a pipe whose read end dies with us. That
         // pipe is the thing this entire phase exists to remove.
         detached: true,
