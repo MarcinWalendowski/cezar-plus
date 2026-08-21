@@ -1,28 +1,31 @@
 {
   "$comment": [
     "What a DEPLOYED cezar means, as probes a machine can run. The `deploy` step of the",
-    "spec-to-deploy workflow is green only when EVERY target below exits 0 \u2014 see",
+    "spec-to-deploy workflow is green only when EVERY target below exits 0 — see",
     ".ai/specs/2026-08-20-steps-green-only-when-verified.md and workflows/postconditions.ts.",
     "cezar is TWO services and shipping one alone used to end that step green.",
     "Each probe runs with bash -lc in the step's cwd, bounded at 60s.",
     "DELIVERY IS NOT ACTIVATION: the service probe deliberately checks that the running",
-    "process answers, not merely that a new dist tree was copied into place \u2014 a half-live",
+    "process answers, not merely that a new dist tree was copied into place — a half-live",
     "deploy (new CLI tree, old resident server) is exactly what reads like a whole one.",
     "CORRECTED 2026-08-21: the backend probe used to compare `/opt/cezar/.deployed-commit`",
     "against HEAD. On a rootless blue-green box that file is never written (`/opt/cezar` is a",
     "symlink into /opt/cezar-releases/, and `deploy.json` + GET /api/v1/health's `deploy`",
-    "field are the ledger), so the probe failed after a WORKING deploy \u2014 a red that says",
+    "field are the ledger), so the probe failed after a WORKING deploy — a red that says",
     "nothing about the deploy. It now asks the RUNNING process which sha it is serving,",
     "which is strictly stronger: a stale marker cannot forge it. `.deployed-commit` stays as",
-    "a fallback for boxes still on the --strategy=restart path, which do write it."
+    "a fallback for boxes still on the --strategy=restart path, which do write it.",
+    "CORRECTED AGAIN 2026-08-21 (later the same day). The correction above fixed WHAT the backend probe asks but left HOW it asks broken, and it read red twice more after deploys that had worked. Two defects, both fixed here.",
+    "(1) SILENT RED. It took ONE 10s shot at GET /api/v1/health under `set -e`, so a slow answer killed the probe at `test -n $live` — BEFORE the diagnostic echo — and the step reported \"(no output)\", indistinguishable from a real failure. /health is the wrong endpoint for a deploy gate: it is cached stale-while-revalidate and past HEALTH_MAX_STALE_MS (60s) the read BLOCKS on a fresh snapshot, which server.ts:2076 documents as ~0.8s of agent-CLI --version spawns plus ~0.4s of git — easily over 10s on a loaded box. That is what failed at 20:48:16Z while the UI probe, hitting the same server, passed. It now polls GET /api/v1/ready — uncached by construction, 503 until actually ready, carrying the same deploy field — and WAITS on that condition in a 30s bounded loop (the harness SIGKILLs a probe at PROBE_TIMEOUT_MS=60s, so the budget stays well inside it). The 2s poll interval is the doctrine's sanctioned until-loop, not a guessed sleep N.",
+    "(2) EXACT EQUALITY ON A SHARED BOX. It demanded live sha == this worktree HEAD. cezar is ONE service and concurrent tasks deploy their own HEADs, so a task whose HEAD was not the exact live sha read red even though its code was running — which happened at 20:50:44Z when a concurrent task activated 7e8f2938 over this run's 2438b6d7. HEAD being an ANCESTOR of the live sha is now green, and that is not a weakening: everything at HEAD is in the running process. A server BEHIND this HEAD, or on a divergent line, is still red."
   ],
   "targets": [
     {
-      "name": "cezar service (backend) \u2014 the RUNNING process is serving HEAD",
-      "probe": "set -e; test -f /opt/cezar/packages/cezar/dist/index.js; head=$(git rev-parse HEAD); live=$(curl -fsS --max-time 10 http://127.0.0.1:4321/api/v1/health | grep -o '\"deploy\":{[^}]*}' | grep -o '\"sha\":\"[0-9a-f]*\"' | grep -o '[0-9a-f]\\{7,40\\}' | head -1); if [ -z \"$live\" ]; then live=$(grep -oE '^[0-9a-f]{7,40}' /opt/cezar/.deployed-commit 2>/dev/null | head -1); fi; test -n \"$live\"; case \"$head\" in \"$live\"*) exit 0;; esac; echo \"live=$live head=$head\"; exit 1"
+      "name": "cezar service (backend) — the RUNNING process is ready and serving this HEAD",
+      "probe": "set -u\n# Deliberately NOT `set -e`: the old probe died silently mid-pipeline and reported \"(no output)\",\n# which is indistinguishable from a real red. Every exit below names its reason.\ntest -f /opt/cezar/packages/cezar/dist/index.js || { echo \"no deployed tree: /opt/cezar/packages/cezar/dist/index.js is missing\"; exit 1; }\nhead=$(git rev-parse HEAD) || { echo \"git rev-parse HEAD failed in $PWD\"; exit 1; }\nlive=''\ndeadline=$(( $(date +%s) + 30 ))\nwhile :; do\n  live=$(curl -fsS --max-time 10 http://127.0.0.1:4321/api/v1/ready 2>/dev/null | grep -o '\"deploy\":{[^}]*}' | grep -o '\"sha\":\"[0-9a-f]*\"' | grep -o '[0-9a-f]\\{7,40\\}' | head -1)\n  [ -n \"$live\" ] && break\n  [ \"$(date +%s)\" -ge \"$deadline\" ] && break\n  sleep 2\ndone\n[ -n \"$live\" ] || live=$(grep -oE '^[0-9a-f]{7,40}' /opt/cezar/.deployed-commit 2>/dev/null | head -1)\n[ -n \"$live\" ] || { echo \"no deploy sha after 30s: GET /api/v1/ready never returned one (unreachable, 503 draining/not-ready, or too old to carry a deploy field) and /opt/cezar/.deployed-commit is absent\"; exit 1; }\ncase \"$head\" in \"$live\"*) echo \"live=$live == HEAD\"; exit 0;; esac\ngit merge-base --is-ancestor \"$head\" \"$live\" 2>/dev/null && { echo \"live=$live is a descendant of HEAD=$head — this HEAD is running (a concurrent task deployed a later commit)\"; exit 0; }\necho \"live=$live head=$head — the running server is NOT serving this HEAD\"\nexit 1"
     },
     {
-      "name": "cezar UI (web) \u2014 the built bundle is the one being served",
+      "name": "cezar UI (web) — the built bundle is the one being served",
       "probe": "set -e; test -f /opt/cezar/packages/cezar/web/dist/index.html; curl -fsS --max-time 10 http://127.0.0.1:4321/ | grep -qF \"$(grep -o 'assets/index-[A-Za-z0-9_-]*\\.js' /opt/cezar/packages/cezar/web/dist/index.html | head -1)\""
     }
   ]
