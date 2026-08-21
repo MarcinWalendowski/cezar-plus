@@ -1,6 +1,6 @@
 # A step should spend its time working, not asking — batch the round trips, fan out the reads
 
-> **Status: PARTIAL** — code for Phases 1–5 landed and committed on `cez/23221162`; **Verification §4, the runtime A/B that decides whether any of it worked, has NOT been run**, and nothing is deployed. Do not cite a speed win from this spec until §4 has numbers. See *Status log — 2026-08-20* at the foot of this file. · **Date:** 2026-08-20
+> **Status: PARTIAL** — **CORRECTED 2026-08-21: §4 HAS now been run** (KB `notion-cc6ebabb2ab4`), and its fan-out result was measured with a counter that could not see a dispatch — see `.ai/specs/2026-08-21-sub-agent-fanout-adoption-and-attribution.md`. Code for Phases 1–5 landed and committed on `cez/23221162`. §4's *batching* numbers stand (batch factor 1.00–1.02 across five runs, unmoved by the doctrine); §4's *fan-out* number does not — `subAgentCalls` matched `tool === 'Task'`, a string this backend never emits, so it read `0` unconditionally. Three runs since have each dispatched three sub-agents and each been recorded as zero. Do not cite a fan-out result from this spec; re-meter the transcript. See *Status log — 2026-08-20* at the foot of this file. · **Date:** 2026-08-20
 > **Origin:** owner question on run `ec6e8e06-16e4-448f-a7b9-b00411fcc3d0` — *"there were many
 > tool calls one by one - it was really slow - how we can improve it? can't we run this across
 > many sub agents for each step?"* and, mid-analysis, *"maybe we can do something like codemode?
@@ -398,6 +398,14 @@ skipped or asserted from the diff.**
    - **`batchFactor ≥ 2.0`** after Phase 2 (baseline 1.00). Primary, load-independent.
    - **`roundTrips` for the `spec` step down ≥ 40%** from 44.
    - After Phase 4, **`subAgentCalls > 0` in the `spec` step** and its `wallMs` below 503 000.
+     **CORRECTED 2026-08-21: this criterion was UNTESTABLE as written.** `stats.ts` counted a
+     dispatch by exact equality with `tool === 'Task'`; claude emits `'Agent'`, so `subAgentCalls`
+     was `0` for every run regardless of what any agent did. Evaluating it — as §4's execution on
+     2026-08-21 did — could only ever produce `0`. Fixed by
+     `.ai/specs/2026-08-21-sub-agent-fanout-adoption-and-attribution.md` Phase 1, which re-bases the
+     counter on the v2 item stream's `toolKind`. Re-metered, run `c10864d1`'s `spec` step reads
+     `sub 3`, `own 16` (not 86) and `batch 1.00` — so fan-out DID happen here, and this criterion is
+     met on a transcript that already existed.
    - **No quality regression:** the spec produced by the fanned-out `spec` step still cites real KB
      ids, file paths and commit hashes, at a density comparable to this file.
 5. Report the numbers as measured. If `batchFactor` moves but wall clock does not, **say so** —
@@ -455,9 +463,26 @@ One wiring note worth keeping: the `stats` verb is registered **before** `parseA
   - `server/src/server/project-context.test.ts` W3.1 — **passes in isolation.** Load flake.
   - `server/src/knowledge/catalog.test.ts` C18 — fails in isolation too. This is the documented
     pre-existing CPU-budget failure on this box; `src/knowledge/` is untouched by this diff.
-- **§4 (the runtime A/B): NOT RUN.** It needs a fresh comparable task measured with
-  `cez run stats` before and after. Todo `881c4f7b-9920-4514-8449-daef2f42fa3d`.
-  **No speed claim from this spec is admissible until it has numbers.**
+- **§4 (the runtime A/B): ~~NOT RUN~~ — CORRECTED 2026-08-21, IT RAN, AND HALF OF WHAT IT
+  MEASURED WAS AN INSTRUMENT ERROR.** It was executed on 2026-08-21 over five runs (KB
+  `notion-cc6ebabb2ab4`): batch factor 1.00 / 1.00 / 1.01 / 1.01 / 1.02 against the `ec6e8e06`
+  baseline of 1.00, and `sub 0` in every one.
+  - The **batching** half stands: the tool-budget doctrine was deployed and did not move the
+    number. That is a real, reported null result.
+  - The **fan-out** half does not. `sub` came from `stats.ts:178`, which matched `tool === 'Task'`
+    — a spelling this backend never emits (`"tool":"Task"` occurs **zero** times in every
+    transcript on this box; `"tool":"Agent"` occurs three times in each of three runs). So `sub 0`
+    was what the instrument prints, not what happened, and *"fan-out was available and never
+    chosen"* cannot be concluded from it. Runs `c10864d1`, `70f19253` and `e06f2169` each
+    dispatched **three** sub-agents and each was recorded as having dispatched **none**.
+  - Of the five runs in that table, only `7c2dd8f0` and `ec6e8e06` can be re-metered from anything
+    still on this box, and both are **genuinely** `sub 0`. `202d099e`, `50ce87f1` and `be31d9e9`
+    have no local transcript, so their `sub 0` is **unverifiable** — not rewritten here.
+  - Fixed by `.ai/specs/2026-08-21-sub-agent-fanout-adoption-and-attribution.md` (Phase 1), which
+    also found that a child's tool calls were billed to the parent's step, so fan-out RAISED the
+    round-trip count §4 wanted to see fall. Todo `881c4f7b-9920-4514-8449-daef2f42fa3d`.
+  **No speed claim from this spec is admissible until it has numbers, and no fan-out claim is
+  admissible from numbers this counter produced.**
 
 ### Two corrections this work produced, recorded rather than fixed quietly
 

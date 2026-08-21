@@ -810,11 +810,20 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       // This step COMMITS too (spec status, KB, tracker), so it inherits the same post-condition:
       // a record written into an uncommitted file is a record the next session never reads.
       verify: { builtin: 'everything-committed', max: 1 },
-      // `Task` for the same measured reason `spec` has it (Phase 4): 361 s of model time against
+      // `Task` for the same measured reason the reading step has it: 361 s of model time against
       // 109 s of tool time, and its three reads — what the KB already says, what the spec claims,
       // what the tracker thinks — are independent. It WRITES (Edit/Write are granted), so the
       // read-only bound on the sub-agents is load-bearing, not decorative: concurrent writers in
       // one worktree corrupt each other, which is why `implement` gets no fan-out at all.
+      //
+      // The GRANT alone did not produce fan-out, and the prompt is why (spec
+      // `.ai/specs/2026-08-21-sub-agent-fanout-adoption-and-attribution.md`, Phase 3). Measured:
+      // `context` states the fan-out as its own imperative paragraph with named jobs and rules,
+      // and dispatched sub-agents on 3 of 3 runs; this step held the same grant behind a
+      // subordinate clause and dispatched on 0 of 2 (`c10864d1` 38 own calls, `7c2dd8f0` 45, both
+      // `sub 0`). Same tool, same model, same doctrine — so the clause was promoted to a paragraph
+      // in `context`'s voice. If a later run still reports `sub 0` here, the prompt-form
+      // hypothesis is falsified: record that, do not iterate the wording a third time.
       allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash', 'Task'],
       // Runs AFTER `commit-push`, so its own doc/spec/KB commit has to reach the remote too — the
       // same scoped git+gh grant, plus `cez kb` for the knowledge write. Still no arbitrary shell.
@@ -836,11 +845,22 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         'Original task, for context:',
         '{{task}}',
         '',
-        'Open with ONE batched read, not one call per source — and fan the deeper reads out to at',
-        'most three READ-ONLY sub-agents (`Task`) in a single turn (what the KB already says, what',
-        'the spec claims, what the tracker thinks). You do all the writing yourself:',
+        'Open with ONE batched read, not one call per source — none of these facts depends on',
+        'another:',
         '',
         RECORD_READ_RECIPE,
+        '',
+        'Then go WIDE. What the knowledge base already says, what the spec claims, and what the',
+        'tracker thinks are three independent questions, so run up to THREE sub-agents (`Task`) on',
+        'them in parallel in a single turn and read their findings together. Rules that make this',
+        'safe rather than merely fast:',
+        '- Sub-agents are READ-ONLY here. They report findings; they write nothing. This step holds',
+        '  `Edit`/`Write` and works in ONE worktree — concurrent writers corrupt each other.',
+        '- YOU do all the writing: the knowledge entry, the spec status, the tracker sync and the',
+        '  commit. A record assembled out of sub-agent summaries loses the citations that make it',
+        '  worth having.',
+        '- Give each one a job whose answer is worth a minute of work. Do not fan out to read one',
+        '  file; that costs more than it saves.',
         '',
         'Do all of:',
         '1. Knowledge base — record the durable decision/what shipped where the next session will',

@@ -207,6 +207,42 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     expect(stepById('context')?.prompt).toContain('YOU write the brief');
   });
 
+  /**
+   * The GRANT is not what produces fan-out — the prompt's FORM is (spec
+   * `.ai/specs/2026-08-21-sub-agent-fanout-adoption-and-attribution.md`, Phase 3).
+   *
+   * Measured on this box: `context` states it as its own imperative paragraph — named jobs, then
+   * rules — and dispatched sub-agents on 3 of 3 runs. `document` held the identical `Task` grant
+   * behind a subordinate clause inside the batched-read sentence and dispatched on 0 of 2
+   * (`c10864d1` 38 own calls, `7c2dd8f0` 45; both `sub 0`, once the meter could see a dispatch at
+   * all). Same tool, same model, same doctrine on both sides. So this asserts the FORM, not just
+   * the presence of the word `Task`: the three jobs named as jobs, and the bound that stops a
+   * sub-agent being spawned to read one file.
+   */
+  it('states fan-out as an imperative paragraph in BOTH read-heavy steps, not as an aside', () => {
+    // These prompts are hard-wrapped arrays of lines, so a sentence spans a newline. Assert on
+    // the flowed text — the sentence is the contract, its wrap column is not.
+    const flowed = (id: string) => (stepById(id)?.prompt ?? '').replace(/\s+/g, ' ');
+    for (const id of ['context', 'document']) {
+      const prompt = flowed(id);
+      // Its own paragraph, in the same voice, in both steps.
+      expect(prompt, id).toContain('Then go WIDE.');
+      expect(prompt, id).toContain('in parallel in a single turn');
+      expect(prompt, id).toContain('Rules that make this safe rather than merely fast:');
+      // R4: a sub-agent that reads one file costs more than it saves.
+      expect(prompt, id).toContain('worth a minute of work');
+      expect(prompt, id).toContain('Do not fan out to read one file');
+    }
+    // `document` names its three independent reads AS the three jobs, the way `context` does.
+    const document = flowed('document');
+    expect(document).toContain(
+      'What the knowledge base already says, what the spec claims, and what the tracker thinks are three independent questions',
+    );
+    // It WRITES, so the read-only bound is load-bearing: say why, not just what (R3).
+    expect(document).toContain('concurrent writers corrupt each other');
+    expect(document).toContain('YOU do all the writing');
+  });
+
   it('opens the record-reading steps with ONE batched, bounded, non-aborting script', () => {
     for (const id of ['context', 'document']) {
       const prompt = stepById(id)?.prompt ?? '';
