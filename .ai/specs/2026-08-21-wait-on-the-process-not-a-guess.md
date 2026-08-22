@@ -1,8 +1,12 @@
 # Wait on the process, not on a guess — and slice the file you already saved
 
-> **Status — superseded 2026-08-21 by revision 4 (below): PHASES 1-3 IMPLEMENTED AND SHIPPED
-> (`ada8f376`, on `origin/main`); Phase 4 — the after-run that decides whether any of it worked —
-> STILL OUTSTANDING, tracked as todo `ea54dd16-5913-4b8a-bbc8-d3b1db9da66c`.** ~~superseded 2026-08-21 by revision 3 (below):
+> **Status — superseded 2026-08-22 by revision 5 (below): PHASES 1-3 IMPLEMENTED AND SHIPPED
+> (`ada8f376`) AND NOW CONFIRMED DEPLOYED to `/opt/cezar`; Phase 4's after-run is DESIGNATED AND
+> IN PROGRESS (run `bde0ec40-06da-4628-8410-06a6a42694c7`) — not yet measured, because this is the
+> `spec` step of that same run and `run-tests`/`document` have not executed yet.** ~~superseded
+> 2026-08-21 by revision 4 (below): PHASES 1-3 IMPLEMENTED AND SHIPPED (`ada8f376`, on
+> `origin/main`); Phase 4 — the after-run that decides whether any of it worked — STILL
+> OUTSTANDING, tracked as todo `ea54dd16-5913-4b8a-bbc8-d3b1db9da66c`.~~ ~~superseded 2026-08-21 by revision 3 (below):
 > PHASES 1-3 IMPLEMENTED, Phase 4 outstanding.~~ ~~SPEC ONLY — nothing implemented.~~ That line was true when the `spec` step wrote
 > it and is false now; the `implement` step of the same run shipped L1-L3. Written in the `spec`
 > step of run `70f19253-cf6b-407c-92e0-96a8020a8ebb`, from the brief left by that run's `context` step
@@ -105,6 +109,76 @@
 > + three `supersede` ops against `notion-cc6ebabb2ab4`, `notion-38870ddae120` and
 > `notion-b3c7402826d6`), pending review via `cez kb proposals`. Todo `eb6e528b` closed; the
 > after-run filed as a new todo.
+
+> ### Revision 5 — 2026-08-22, the `spec` step of the designated after-run (`bde0ec40`)
+>
+> **This is the spec-writing contribution to Phase 4, not Phase 4's completion.** Per this step's
+> own instructions ("You are writing a SPEC for the task below. You are NOT implementing it in
+> this step"), nothing below was executed here — `run-tests` and `document` have not run yet in
+> this same run. What this revision does: confirms deployment landed, designates the run that will
+> serve as the measurement, and pins the exact commands the later steps of *this same run* must
+> execute so § Verification §4 stops being abstract.
+>
+> **1. Deployment is now confirmed, not assumed.** Revision 4 flagged that `/opt/cezar` was built
+> *before* `ada8f376` and therefore attributed nothing. Re-checked now, on this box:
+> `/opt/cezar/packages/cezar/dist/index.js` (and its component modules) were rebuilt
+> **2026-08-22T01:43:30Z** — `stat` confirms Modify time, cross-checked against
+> `git merge-base --is-ancestor ada8f376 HEAD` (true) and `ada8f376`'s own commit timestamp
+> (2026-08-21T20:32:12Z, `git show -s --format='%ci'`). The rebuild is nearly 5 hours after the
+> commit, and grepping the deployed bundle directly (not inferring from the timestamp) finds every
+> Phase 1-3 artifact:
+> - `/opt/cezar/packages/cezar/dist/workflows/run.js` contains `never on a guess` and
+>   `never re-run an expensive command` (Phase 1, the doctrine bullet).
+> - `/opt/cezar/packages/cezar/dist/workflows/types.js` contains `QUOTE the` and
+>   `exit-marker line` (Phase 2, the `run-tests` step's L4 marker-quote requirement —
+>   `packages/cezar/src/workflows/types.ts:876-878` in this worktree today).
+> - `/opt/cezar/packages/cezar/dist/runs/stats.js` contains `blindSleepCalls` (Phase 3, the meter).
+>
+> **2. This run is the designated after-run.** `bde0ec40-06da-4628-8410-06a6a42694c7`
+> (branch `cez/bde0ec40`, workflow `spec-to-deploy`) is the run this `spec` step is itself running
+> inside. Its worktree birth time is **2026-08-22T01:43:59Z** — **28.9 seconds after** the dist
+> rebuild above (`stat` on the worktree directory; the gap was computed, not eyeballed, so it isn't
+> a coincidence of clock skew). Every step of this run, including this one, has its system prompt
+> composed from the deployed `TOOL_BUDGET_DOCTRINE` — the new one. `spec-to-deploy`'s eight steps
+> (`packages/cezar/src/workflows/types.ts`, step ids at absolute lines 630 `context`, 694 `spec`,
+> 738 `review-spec`, 802 `implement`, 832 `run-tests`, 884 `commit-push`, 936 `document`, 1012
+> `deploy` — **corrected 2026-08-22, revision 6**: an earlier draft of this line gave these as
+> offsets from a re-read anchored at line 624 and printed them as if absolute) include a real
+> `run-tests` step (`:832-882` in this worktree) that runs the repo's full gate
+> suite — exactly the requirement revision 4 named ("a `spec-to-deploy` run that actually executes
+> a `run-tests` step, started after this change is deployed"). No other run needs to be started.
+>
+> **3. What `implement` (this run's next-but-one step) has to do: nothing code-shaped.** Phases
+> 1-3 are already on `HEAD` (`ada8f376` is an ancestor, confirmed above) and already deployed.
+> There is no further code change this spec calls for. `implement` should find the working tree
+> already matching the spec and report that, rather than inventing a change to make — inventing
+> one would itself be a `repeatedExpensiveCalls`-style violation of the doctrine this spec is
+> about. `run-tests` still runs for real: the gate suite it executes is the only thing that can
+> populate `sleepCalls`/`blindSleepCalls`/`sleepExecMs`/`repeatedExpensiveCalls` with real data.
+>
+> **4. What `document` (this run's step 7) must do, exactly — run the commands pinned in
+> § Verification §4 below (revision 6 corrected them: `--repo` and absolute paths, because
+> `document` runs from this worktree, whose `.ai/cezar/runs/` is empty — the transcript only
+> exists at the workspace root), read the whole-run total those commands print — **corrected
+> 2026-08-22, revision 7: the whole-run total is the gate, not the `run-tests` row alone; an
+> earlier draft of this point said the opposite, and § Verification §4 now explains why that was
+> unsafe** — alongside the per-step `run-tests` numbers as supporting detail, and write the
+> results into this file using the `Edit` tool, not a Bash `sed`/`printf`/inline-arg — § Verification
+> §4 spells out why.** Then, in this same spec file: replace `<AFTER_RUN_ID>` in § Verification §4
+> with `bde0ec40-06da-4628-8410-06a6a42694c7` (already done, revision 5), fill in the four numbers
+> next to the baselines table, paste the per-step `SLEEP |` dump (or "none" if `sleepCalls` is 0),
+> read `repeatedExpensiveCalls` against the run's own commit history (this run made no code change
+> per point 3, so *any* repeat here has no "after an edit" excuse and should be scrutinized harder
+> than the baseline reading in § Verification §4 allows), and only then move the Status line at the
+> top of this file from "IN PROGRESS" to **implemented** — or to **failed, and say so**, per
+> § Verification §4's own "Fail, and say so" clause. Do not mark it implemented from this revision;
+> this revision measured nothing.
+>
+> **What this revision explicitly did NOT do, so the gap is visible rather than silent:** run
+> `cez run stats` against `bde0ec40` (the run is still executing its own `spec` step — the numbers
+> do not exist yet); read any `SLEEP |` lines from this run's own transcript; touch
+> `system-prompt.test.ts`, `types.test.ts`, `stats.ts` or any other Phase 1-3 file (none needed
+> changing, per point 3); or flip the Status line to implemented.
 
 ## TLDR
 
@@ -609,7 +683,12 @@ real run id reproduces the § Problem numbers.
 
 ### Phase 4 — Measure a real post-change run, and record it
 
-Not optional, and not satisfiable by this run. See § Verification §4.
+**Designated after-run: `bde0ec40-06da-4628-8410-06a6a42694c7`** (revision 5, 2026-08-22). Not
+satisfiable by *this step* — the `spec` step only names the run and the commands; `run-tests`
+(step 5 of this same run) has to actually execute the gate suite, and `document` (step 7) has to
+run the commands in § Verification §4 against this run's own id and write the numbers back into
+this file. See § Verification §4 for the exact commands and pass conditions, and revision 5 above
+for why this run — not a new one — is the right one to measure.
 
 ## Analytics
 
@@ -774,36 +853,134 @@ repeated expensive calls~~ — but every step of it was composed by the doctrine
 deployed to `/opt/cezar/packages/cezar/dist/`. Deployment matters: the doctrine ships as compiled
 `dist`, and the KB note had to correct an earlier claim that it was not deployed.
 
+**Named after-run (revision 5, 2026-08-22): `bde0ec40-06da-4628-8410-06a6a42694c7`.** Its worktree
+was born 28.9 s after `/opt/cezar`'s dist was rebuilt with `ada8f376`'s content (verified by
+grepping the deployed `run.js`/`types.js`/`stats.js` directly, not by trusting the timestamp
+alone — see revision 5). Its `run-tests` step (workflow step 5 of 8) has not executed as of this
+`spec` step (step 2 of 8); the commands below must be run by the `document` step (step 7 of 8),
+against this run's own id, once `run-tests` has completed.
+
+**Corrected 2026-08-22 (revision 6, after review flagged both commands below as unrunnable
+verbatim).** Every workflow step, `document` included, runs from **this run's own worktree**
+(`.ai/cezar/worktrees/bde0ec40-…/`), which is its own git toplevel with its own, empty
+`.ai/cezar/runs/` — the transcript only ever exists at the **workspace root**,
+`/var/lib/cezar/loki-labs/cezar`. `stats-cli.ts` resolves `repoRoot` from git toplevel unless
+`--repo` overrides it, so the commands below now pin `--repo` and an absolute `.ndjson` path
+rather than relying on cwd. Verified working (exit 0) on this box before this revision was written.
+
 ```bash
 # Baselines already on this box (before):
-#   7c2dd8f0 → blindSleepCalls 4, sleepCalls 18, repeatedExpensiveCalls 18
+#   7c2dd8f0 → blindSleepCalls 4, sleepCalls 18, repeatedExpensiveCalls 18, sleepExecMs ≈13.4 min
 #   c10864d1 → blindSleepCalls 2, sleepCalls 14, repeatedExpensiveCalls 0
-cez run stats <AFTER_RUN_ID> --json \
+cez run stats bde0ec40-06da-4628-8410-06a6a42694c7 --json \
+  --repo /var/lib/cezar/loki-labs/cezar \
+  | tee /tmp/bde0ec40-stats.json \
   | grep -E 'blindSleepCalls|sleepCalls|repeatedExpensiveCalls|batchFactor'
 
-# And read the commands, because both predicates are crude (R3):
+# Both the run total AND the run-tests row (revision 7: criterion 1 gates on the total — see the
+# corrected note below the commands — with this per-step print kept as supporting detail, since
+# `spec`/`review-spec`/`document` mostly only MENTION sleep/wait vocabulary in prose).
+node -e '
+const s = require("/tmp/bde0ec40-stats.json");
+const step = s.steps.find((x) => x.stepId === "run-tests");
+console.log("run-tests step:", JSON.stringify(step));
+console.log("run total:", JSON.stringify(s.totals));
+'
+
+# And read the commands, because both predicates are crude (R3) — grouped by stepId so a mention
+# in `spec`/`review-spec`/`document` cannot be mistaken for a wait inside `run-tests`:
 node -e '
 const fs=require("fs");
 for (const l of fs.readFileSync(process.argv[1],"utf8").split("\n")) {
   if (!l.trim()) continue; let e; try { e = JSON.parse(l) } catch { continue }
   if (e.type!=="tool-call"||e.tool!=="Bash") continue;
   const c=(e.input&&e.input.command)||"";
-  if(/\bsleep\s+[\d.]+/.test(c)) console.log("SLEEP |",c.replace(/\s+/g," ").slice(0,160));
-}' .ai/cezar/runs/<AFTER_RUN_ID>.ndjson
+  if(/\bsleep\s+[\d.]+/.test(c)) console.log(e.stepId, "| SLEEP |",c.replace(/\s+/g," ").slice(0,160));
+}' /var/lib/cezar/loki-labs/cezar/.ai/cezar/runs/bde0ec40-06da-4628-8410-06a6a42694c7.ndjson
 ```
 
-**Pass, all four:**
-1. `blindSleepCalls == 0` — the hard criterion, and criterion 3 of the task operationalized.
-2. Every surviving `sleep` is visibly inside an early-exit loop, read from the dump above — not
-   inferred from the count (R3's false-guarded direction).
-3. `repeatedExpensiveCalls` is 0, **or** every survivor is explained as a legitimate re-run after
-   an edit (§ Data models says the metric cannot tell these apart; a human read decides).
-4. `batchFactor` has not fallen below the 1.00–1.02 baseline, and the `run-tests` step's report
-   quotes an exit-marker line.
+**Corrected 2026-08-22 (revision 7, after review ran the claim below and found it false):** an
+earlier draft of this paragraph claimed this run's own `review-spec` step "scored `sleepCalls: 1`
+while `sleepExecMs: 0`" and proposed `sleepExecMs` growth as the mention-vs-wait discriminator.
+Running the pinned commands against `review-spec` gives `sleepExecMs: 1216`, not 0 (re-verified
+here: `cez run stats bde0ec40-06da-4628-8410-06a6a42694c7 --json --repo
+/var/lib/cezar/loki-labs/cezar`, `review-spec` row). And per § Data models / `stats.ts:830-836`,
+`sleepExecMs` sums the exec time of the **whole containing Bash call** (`ts - call.startedAt`
+between the `tool-call` and its `tool-result`), not the sleep alone — so it cannot discriminate in
+either direction. A prose mention of `sleep 120` sitting inside a slow `grep` scores high and reads
+as "a genuine wait"; a correct early-exit poll loop that exits on its first probe scores near zero
+and reads as "a mention." The rule is deleted, not repaired.
 
-**Fail, and say so:** any blind sleep survives, or `run-tests` reports a gate whose marker it
-cannot quote. Record the after-run id in this file and in the KB either way — a negative result is
-what the 2026-08-20 spec failed to record on time, and is the reason this spec exists.
+**A counted `sleepCalls` is not necessarily a wait, and this run's own `review-spec` step already
+demonstrated the failure mode** — but the evidence is the command TEXT, not the exec time: its one
+hit is this file's own § Problem section quoting `sleep 120; tail -12 …` as example prose inside a
+Bash call, which the raw-text predicate cannot tell apart from an executed wait. So the per-`stepId`
+`SLEEP |` dump pinned above is the **only** sound adjudicator. When reading it, `document` must
+quote every matched command in this section and classify it as one of:
+- **(a) an executed wait** — the command actually blocked on the sleep as part of waiting for
+  backgrounded work;
+- **(b) a mention** — `sleep <n>` appears as quoted text, example prose, or inside a string/heredoc
+  the predicate didn't strip, inside a command that waited for nothing (`review-spec`'s hit is this
+  case); or
+- **(c) a guarded wait** — a `sleep` inside an early-exit loop (tier 3 of the doctrine, § Solution
+  L1 — legitimate, not a defect).
+
+Only class (b) may be discounted from a count; classes (a) and (c) both count as real `sleepCalls`
+— (c) is the legitimate pattern, (a) is the defect `blindSleepCalls` already flags on its own,
+since an unguarded executed wait is exactly what the predicate calls blind. `sleepExecMs` stays in
+the printed output as reported context, never as a rule to classify by. This is *also* why `document` must paste the
+numbers and the dump into this file with the `Edit` tool (or `Write`), never a Bash
+`sed`/`printf`/inline-arg — a heredoc is technically safe (`stripHeredocs` removes bodies before
+the predicate runs), but naming the safe tool is cheaper than depending on that mechanics detail
+holding for whatever `document` happens to write.
+
+**Corrected 2026-08-22 (revision 7, after review):** an earlier draft gated criterion 1 on the
+`run-tests` step's own row and demoted the whole-run total to "context, not the gate." That is
+narrower than the task's own criterion (`cez run stats <AFTER_RUN_ID> --json` reports
+`blindSleepCalls == 0`, run-level, no step filter) and the narrowing is not safe: `implement` and
+`commit-push` both run before `document` and both plausibly wait on something real (a build, a
+push, an install), so a blind `sleep 60` in either would have been invisible under the old wording
+and the run would still ship as "implemented" with the headline number unread. `deploy` (step 8)
+stays out of reach — the scope note below covers why that is accepted. The gate is restored to the
+whole run below; the `run-tests` row is kept as supporting detail, not dropped.
+
+**Pass, all four, judged on the whole-run total — the `run-tests` row is supporting detail, read
+alongside it:**
+1. `blindSleepCalls == 0` for the **whole run** — the hard criterion, and criterion 3 of the task
+   operationalized verbatim. If the total is nonzero, every counted call must be adjudicated
+   individually from the per-`stepId` dump above, using the (a)/(b)/(c) classification from the
+   mention-vs-wait paragraph — its step named and its command quoted in this section — and only a
+   call classified (b) (a mention, not a wait) may be discounted from the total. The discount and
+   its reasoning are written into this section; nothing is dropped silently. A hit in `implement`
+   or `commit-push` counts exactly as much as one in `run-tests`.
+2. Every surviving `sleep`, across the whole run, is visibly inside an early-exit loop (class (c)) —
+   not inferred from the count (R3's false-guarded direction). The `run-tests` dump is read first,
+   since that step is what the doctrine chiefly targets, but a hit elsewhere is not exempt.
+3. `repeatedExpensiveCalls`, whole run, is 0, **or** every survivor is explained as a legitimate
+   re-run after an edit (§ Data models says the metric cannot tell these apart; a human read
+   decides). This run made no code change (revision 5 point 3), so any repeat has no such excuse.
+   The `run-tests` row is the one most worth reading first, since that step is where the suite
+   actually runs.
+4. `batchFactor` (run total) has not fallen below the 1.00–1.02 baseline, and the `run-tests`
+   step's own report quotes an exit-marker line.
+
+**Fail, and say so:** any blind sleep survives the whole-run total after discounting (per criterion
+1), or `run-tests` reports a gate whose marker it cannot quote. Record the after-run id in this file
+and in the KB either way — a negative result is what the 2026-08-20 spec failed to record on time,
+and is the reason this spec exists.
+
+**Scope note, so a later re-run of these commands is not misread as a regression:** `document` is
+workflow step 7 of 8; `deploy` (step 8) runs after it and is invisible to these numbers. The result
+below is "as of `document`, `deploy` not included" — accepted, because `deploy` runs no gate and so
+cannot move any of these four counters; re-stated here only so nobody re-runs `cez run stats`
+post-`deploy`, gets an identical result, and wonders why it wasn't re-verified.
+
+**Result: PENDING.** To be filled in by the `document` step of run `bde0ec40-06da-4628-8410-06a6a42694c7`
+once `run-tests` (step 5 of 8) has executed — the whole-run `blindSleepCalls __`, `sleepCalls __`,
+`repeatedExpensiveCalls __`, `batchFactor __` (the gate, per revision 7), the `run-tests` step's own
+row as supporting detail, the per-`stepId` `SLEEP |` dump with each hit classified (a)/(b)/(c), and
+PASS/FAIL against the four conditions above. This line is the one the top Status block's flip to
+"implemented" must point at.
 
 ## Open questions — settled here
 
@@ -881,3 +1058,29 @@ node for sleep counts (three predicate variants), exec times, and repeated costl
 raw claude transcripts under `~/.claude/projects/*worktrees*/`; the doctrine's word count via
 `eval` of the template literal; the fixture's missing `input`; `claude --version` → **2.1.233**;
 `cezar todo list`; `git diff f0d48513..origin/main` over the target files (empty).
+
+**Revision 5, read in the `spec` step of run `bde0ec40-06da-4628-8410-06a6a42694c7`, 2026-08-22:**
+`git merge-base --is-ancestor ada8f376 HEAD` (true) and `git show -s --format='%H %ci' ada8f376`
+(2026-08-21T20:32:12Z); `stat /opt/cezar/packages/cezar/dist/index.js` (Modify
+2026-08-22T01:43:30Z) and `stat` on this run's worktree directory (Birth 2026-08-22T01:43:59Z, a
+28.9 s gap computed with `python3`); `grep` of the deployed
+`/opt/cezar/packages/cezar/dist/workflows/run.js` for `never on a guess` and
+`never re-run an expensive command`, `dist/workflows/types.js` for `QUOTE the` and
+`exit-marker line`, and `dist/runs/stats.js` for `blindSleepCalls` (all present); this worktree's
+`packages/cezar/src/workflows/types.ts:832-882` (`run-tests` step, current line numbers — moved
+since revision 1-4 from `:721-755` after `review-spec` was inserted) and `:624-632` (the eight
+`SPEC_TO_DEPLOY_WORKFLOW` step ids, confirmed via `awk`); this run's own handoff file
+(`.ai/cezar/runs/bde0ec40-06da-4628-8410-06a6a42694c7.handoff.md`) for the task text, acceptance
+criteria and baseline figures it was given. **Not read in this revision:** this run's own
+`.ndjson` (it has no `run-tests` data yet — see point 4 above for why that read belongs to the
+`document` step).
+
+**Revision 7, read in the `spec` step of run `bde0ec40-06da-4628-8410-06a6a42694c7`, 2026-08-22, in
+response to review flagging § Verification §4's `sleepExecMs` claim as unmeasured and its criterion
+1 as narrowed unsafely:** `packages/cezar/src/runs/stats.ts:830-836` (the `tool-result` branch —
+confirms `sleepExecMs` accrues `ts - call.startedAt` for the whole Bash call, not a sleep-specific
+duration); `cez run stats bde0ec40-06da-4628-8410-06a6a42694c7 --json --repo
+/var/lib/cezar/loki-labs/cezar`, `review-spec` row (`sleepExecMs: 1216`, confirming the review's
+number and refuting the earlier draft's "0"). No other file changed in this revision; the fix is
+confined to § Verification §4 and the matching sentence in the revision-5 callout, point 4, per the
+review's own scoping.
