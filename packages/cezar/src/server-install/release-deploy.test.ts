@@ -93,6 +93,19 @@ describe('runReleaseDeploy', () => {
     return { linkPath, releasesDir, source };
   }
 
+  /** A second real commit + matching build stamp, so a second deploy produces a genuinely
+   *  distinct release id rather than tripping the `--sha` gate with a fabricated one. */
+  function advanceSource(source: string, marker: string): void {
+    writeFileSync(join(source, 'packages/cezar/src/index.ts'), `export const marker = '${marker}';\n`);
+    execFileSync('git', ['add', '-A'], { cwd: source });
+    execFileSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@local', 'commit', '-q', '-m', marker], { cwd: source });
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8' }).trim();
+    writeFileSync(
+      join(source, 'packages/cezar/dist/.build-stamp.json'),
+      JSON.stringify({ stampVersion: 1, sha, builtAt: '2099-01-01T00:00:00.000Z', dirty: false, version: '0.10.0' }),
+    );
+  }
+
   it('hands the deploy to a transient unit when it is inside the cgroup it is about to restart', async () => {
     const box = migratedBox();
     // The 2026-08-19 production failure, reproduced: the deploying session was pid 1441357 inside
@@ -186,8 +199,9 @@ describe('runReleaseDeploy', () => {
 
   it('reports a failed rollback readiness probe without rebuilding', async () => {
     const box = migratedBox();
-    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
-    await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+    advanceSource(box.source, 'second');
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const rec = recorder({ waitReady: async () => ({ ok: false, detail: 'boom' }) });
 
     const result = await runReleaseDeploy({ ...box, env: {}, rollbackTo: '' }, rec.host);
@@ -200,8 +214,9 @@ describe('runReleaseDeploy', () => {
 
   it('restores and probes the pre-rollback release when the target is dead', async () => {
     const box = migratedBox();
-    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
-    await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+    advanceSource(box.source, 'second');
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const before = loadLedger(box.releasesDir).current;
     let probes = 0;
     const rec = recorder({
