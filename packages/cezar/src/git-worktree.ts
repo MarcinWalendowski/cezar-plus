@@ -584,6 +584,15 @@ export async function isAncestorOf(repoRoot: string, ref: string, ancestorOf: st
 export interface PruneOrphansReport {
   removed: string[];
   declined: { id: string; reason: string }[];
+  kept: { id: string; reason: string }[];
+}
+
+export interface PruneOrphanOutcome {
+  id: string;
+  outcome: 'removed' | 'kept' | 'declined';
+  reason?: string;
+  autosave?: AutosaveResult;
+  branchKept: true;
 }
 
 export interface PruneOrphansOptions {
@@ -601,6 +610,42 @@ export interface PruneOrphansOptions {
    *  whose owner happened to be behind the bad file — so every candidate is declined outright,
    *  without evaluating `findForeignOwner` or the branch-ancestry check at all. */
   ownershipCheckUnavailable?: { reason: string };
+  /** Test seam only. Omitted always means the repo-local lease directory. */
+  leaseDir?: string;
+  leaseStaleMs?: number;
+  now?: () => number;
+  onOutcome?: (outcome: PruneOrphanOutcome) => void;
+}
+
+const DEFAULT_LEASE_STALE_MS = 15 * 60_000;
+
+async function leaseDeclineReason(
+  repoRoot: string,
+  runId: string,
+  opts: PruneOrphansOptions | undefined,
+): Promise<string | undefined> {
+  const leaseDir = opts?.leaseDir ?? join(repoRoot, '.ai/cezar/worktree-leases');
+  if (!existsSync(leaseDir)) return undefined;
+  const path = join(leaseDir, `${runId}.json`);
+  if (!existsSync(path)) return undefined;
+  try {
+    const raw: unknown = JSON.parse(await readFile(path, 'utf8'));
+    if (
+      typeof raw !== 'object' || raw === null ||
+      (raw as { leaseVersion?: unknown }).leaseVersion !== 1 ||
+      (raw as { runId?: unknown }).runId !== runId ||
+      typeof (raw as { heartbeatAt?: unknown }).heartbeatAt !== 'string'
+    ) return 'worktree lease is unreadable';
+    const heartbeat = Date.parse((raw as { heartbeatAt: string }).heartbeatAt);
+    if (!Number.isFinite(heartbeat)) return 'worktree lease is unreadable';
+    const now = opts?.now?.() ?? Date.now();
+    const configuredStaleMs = Number(process.env.CEZ_LEASE_STALE_MS);
+    const staleMs = opts?.leaseStaleMs ?? (Number.isFinite(configuredStaleMs) && configuredStaleMs > 0 ? configuredStaleMs : DEFAULT_LEASE_STALE_MS);
+    if (now - heartbeat <= staleMs) return 'worktree lease heartbeat is fresh';
+    return undefined;
+  } catch {
+    return 'worktree lease is unreadable';
+  }
 }
 
 /**
@@ -629,15 +674,24 @@ export async function pruneOrphans(
   try {
     entries = await readdir(join(repoRoot, WORKTREES_DIR), { withFileTypes: true });
   } catch {
-    return { removed: [], declined: [] }; // no worktrees dir yet
+    return { removed: [], declined: [], kept: [] }; // no worktrees dir yet
   }
   const removed: string[] = [];
   const declined: { id: string; reason: string }[] = [];
+  const kept: { id: string; reason: string }[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || validIds.has(entry.name)) continue;
     const worktreePath = worktreePathFor(repoRoot, entry.name);
+    const leaseReason = await leaseDeclineReason(repoRoot, entry.name, opts);
+    if (leaseReason) {
+      const outcome = { id: entry.name, outcome: 'declined' as const, reason: leaseReason, branchKept: true as const };
+      declined.push({ id: entry.name, reason: leaseReason });
+      opts?.onOutcome?.(outcome);
+      continue;
+    }
     if (opts?.ownershipCheckUnavailable) {
       declined.push({ id: entry.name, reason: `ownership check unavailable: ${opts.ownershipCheckUnavailable.reason}` });
+      opts.onOutcome?.({ id: entry.name, outcome: 'declined', reason: `ownership check unavailable: ${opts.ownershipCheckUnavailable.reason}`, branchKept: true });
       continue;
     }
     const owner = opts?.findForeignOwner?.(worktreePath);
@@ -646,19 +700,23 @@ export async function pruneOrphans(
         id: entry.name,
         reason: `still owned by workspace run ${owner.runId.slice(0, 8)} in project "${owner.projectName}"`,
       });
+      opts?.onOutcome?.({ id: entry.name, outcome: 'declined', reason: `still owned by workspace run ${owner.runId.slice(0, 8)} in project "${owner.projectName}"`, branchKept: true });
       continue;
     }
-    const branch = branchFor(entry.name);
-    // `opts` entirely omitted (no caller updated for this spec yet) reproduces today's
-    // unconditional delete-both, byte for byte. `opts` supplied but `trunkRef` itself absent —
-    // Layer 1 exercised without Layer 2, e.g. a test or a not-yet-fully-wired caller — is the SAFE
-    // direction instead: keep the branch always, never silently reverting to unconditional delete
-    // just because ancestry couldn't be checked.
-    const keepBranch =
-      opts !== undefined &&
-      (opts.trunkRef === undefined || !(await isAncestorOf(repoRoot, branch, opts.trunkRef)));
-    await removeWorktree(repoRoot, worktreePath, keepBranch ? undefined : branch);
+    let autosave: AutosaveResult = 'nothing-to-do';
+    const top = await git(worktreePath, ['rev-parse', '--show-toplevel']);
+    if (top.ok && canonicalPath(top.stdout.trim()) === canonicalPath(worktreePath) && canonicalPath(worktreePath) !== canonicalPath(repoRoot)) {
+      autosave = await autosaveCommit(worktreePath, 'run finalize');
+      if (autosave === 'refused' || autosave === 'failed') {
+        const reason = `autosave ${autosave}; directory kept`;
+        kept.push({ id: entry.name, reason });
+        opts?.onOutcome?.({ id: entry.name, outcome: 'kept', reason, autosave, branchKept: true });
+        continue;
+      }
+    }
+    await removeWorktree(repoRoot, worktreePath);
     removed.push(entry.name);
+    opts?.onOutcome?.({ id: entry.name, outcome: 'removed', autosave, branchKept: true });
   }
-  return { removed, declined };
+  return { removed, declined, kept };
 }

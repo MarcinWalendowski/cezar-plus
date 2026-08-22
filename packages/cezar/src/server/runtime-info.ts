@@ -27,6 +27,8 @@ export interface DeployInfo {
   version?: string;
   sha?: string;
   activatedAt?: string;
+  builtAt?: string;
+  dirty?: boolean;
 }
 
 export function runtimeInfo(opts: {
@@ -73,6 +75,8 @@ export function currentRelease(moduleUrl = import.meta.url): DeployInfo | undefi
       version: entry.version,
       sha: entry.sha,
       activatedAt: entry.activatedAt,
+      builtAt: entry.builtAt,
+      dirty: entry.dirty,
     };
   } catch {
     // No ledger, an unreadable one, or a directory that is not a release: all mean the same thing.
