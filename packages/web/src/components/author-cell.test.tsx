@@ -4,7 +4,6 @@ import { MemoryRouter } from 'react-router'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { AuthorCell, TaskLocationProvider } from '@/components/author-cell'
-import { TooltipProvider } from '@/components/ui/tooltip'
 
 /**
  * The Author column's rendered half (`.ai/specs/2026-08-21-task-author-provenance.md`, Phase 4).
@@ -29,14 +28,17 @@ const agentAuthor: TaskAuthor = {
   agentSessionId: 'cb916c71-974d-4fca-9aaa-f4c89b871b80',
 }
 
+/**
+ * Deliberately mounts NO `TooltipProvider`. It used to mount one, and that is why this suite sat
+ * green through the 2026-08-22 production white-screen: `AuthorCell` renders a Radix `Tooltip`,
+ * which THROWS rather than degrades when no provider is above it, and a harness that supplies one
+ * asserts the harness rather than the component. `AuthorCell` now brings its own, so the bare
+ * render here is the real mounting condition on the run header — the surface that crashed.
+ */
 function renderCell(author: TaskAuthor | undefined, locate?: (id: string) => string | undefined) {
   const cell = <AuthorCell author={author} />
   render(
-    <MemoryRouter>
-      <TooltipProvider>
-        {locate ? <TaskLocationProvider locate={locate}>{cell}</TaskLocationProvider> : cell}
-      </TooltipProvider>
-    </MemoryRouter>,
+    <MemoryRouter>{locate ? <TaskLocationProvider locate={locate}>{cell}</TaskLocationProvider> : cell}</MemoryRouter>,
   )
   return document.querySelector('[data-slot="task-author"]') as HTMLElement
 }

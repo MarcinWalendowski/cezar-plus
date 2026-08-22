@@ -1,7 +1,7 @@
 import type { TaskAuthor } from '@loki-labs/better-cezar-api-client'
 import { createContext, useContext, type ReactNode } from 'react'
 import { Link, type To } from 'react-router'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { UNATTRIBUTED_LABEL, authorLabel, authorTitle } from '@/lib/task-author'
 
@@ -10,8 +10,14 @@ import { UNATTRIBUTED_LABEL, authorLabel, authorTitle } from '@/lib/task-author'
  * Phase 4). Shared by the runs table and the Filed table, which carry the same `author` object on
  * two different records.
  *
- * Must be rendered inside a `TooltipProvider` — both call sites already open one for the whole
- * table, which is why this does not mount its own.
+ * **Corrected 2026-08-22 — this mounts its OWN `TooltipProvider`.** It used to read "must be
+ * rendered inside a `TooltipProvider` — both call sites already open one for the whole table,
+ * which is why this does not mount its own." That was true of the two tables and false the moment
+ * the run header became the third call site: a bare Radix `Tooltip` with no provider above it
+ * *throws* (`\`Tooltip\` must be used within \`TooltipProvider\``), so opening any task that had an
+ * author white-screened the cockpit in production. Nesting providers is legal and free; depending
+ * on an ancestor that not every surface has is not — the same conclusion `ReferenceChip` reached,
+ * for the same reason.
  */
 
 /**
@@ -78,18 +84,20 @@ export function AuthorCell({
     )
 
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span
-          data-slot="task-author"
-          data-author-kind={author.kind}
-          data-author-via={author.via}
-          className={cn('inline-flex max-w-full min-w-0 items-center text-[12.5px] text-muted-foreground', className)}
-        >
-          {body}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent side="left">{title}</TooltipContent>
-    </Tooltip>
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            data-slot="task-author"
+            data-author-kind={author.kind}
+            data-author-via={author.via}
+            className={cn('inline-flex max-w-full min-w-0 items-center text-[12.5px] text-muted-foreground', className)}
+          >
+            {body}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="left">{title}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }

@@ -1,10 +1,33 @@
 # Every task records its author — user, API, or the agent session that spawned it
 
-**Status: IMPLEMENTED + DEPLOYED + VERIFIED 2026-08-22 — Phases 1-4. Phase 5 not started (it was always
-optional). Shipped as `5f8cfced` + `64394362`, fast-forwarded onto `main`, deployed to
+**Status: IMPLEMENTED + DEPLOYED 2026-08-22 — Phases 1-4, then HOTFIXED the same day (see the
+correction directly below; "VERIFIED" was in this heading and was wrong). Phase 5 not started (it
+was always optional). Shipped as `5f8cfced` + `64394362`, fast-forwarded onto `main`, deployed to
 cockpit.example.com as release `20260822T122039Z-64394362` (rootless blue-green; both
 `.ai/deploy-targets.json` probes exit 0 — backend `live=64394362 == HEAD`, UI `serving
 assets/index-3BBCV-iR.js == the built bundle`).**
+
+**CORRECTED 2026-08-22 — Phase 4 shipped a crash, and the shape of the miss is the lesson.**
+`AuthorCell` renders a Radix `Tooltip`, and a bare `Tooltip` with no `TooltipProvider` above it does
+not degrade — it *throws*. The run header, the third call site and one this very change added, has
+no provider, so every task carrying an author white-screened its thread page in production with
+``Uncaught Error: `Tooltip` must be used within `TooltipProvider` ``. Fixed by giving `AuthorCell`
+its own provider — the same conclusion `ReferenceChip` had already reached for the same reason, in
+the same codebase.
+
+**Both browser passes below missed it because both only ever opened the two BOARDS.** The runs
+table and the Filed board each wrap their `<table>` in a `TooltipProvider`, so the cell cannot fail
+there; §Solution also puts the provenance "as a sentence in the run header's meta row", and that is
+the one surface neither pass loaded. The verification was real and careful and confined to the
+surfaces that were structurally incapable of failing — which is why the second pass, whose whole
+point was to close a coverage gap, closed a gap on the same two boards. **A change that adds a
+component to N surfaces has to be opened on N surfaces**; a surface that "already works" is exactly
+where a shared component is cheapest to check and least likely to be checked.
+
+The unit tests could not catch it either, in two independent ways: `run-header.test.tsx` (1073
+lines) never set `author` on a fixture, so `if (run.author)` never rendered; and
+`author-cell.test.tsx` mounted its own `TooltipProvider`, which makes a missing-provider bug
+structurally unreachable no matter how many cases it adds. Both are fixed — §Verification 22-24.
 
 **The DATA path is verified in production, on real records, not fixtures:**
 
@@ -604,6 +627,25 @@ per `AGENTS.md` §Definition of done)**
     break the board.
 21. Filter the Tasks board by Author → only that author's tasks remain, counts consistent with
     the unfiltered board.
+
+**Regression, added 2026-08-22 after the crash above**
+
+22. `run-header.test.tsx` renders a run WITH an author and asserts the cell appears. `renderHeader`
+    mounts no `TooltipProvider`, and that absence IS the assertion — the test is only meaningful
+    while the harness stays bare, so it carries a comment saying not to add one.
+23. `author-cell.test.tsx` renders bare, with no `TooltipProvider` in the harness at all. It used
+    to supply one; that is why 6 green tests sat over a component that threw on the one of its
+    three surfaces that nobody opened.
+24. `components/ui/tooltip-provider.guard.test.ts` — a static scan failing any shipped module that
+    imports `Tooltip` without `TooltipProvider`, which is the exact mistake made here. It carries a
+    floor assertion (at least 5 consumers found, `author-cell.tsx` among them) so a renamed alias
+    or moved directory cannot turn it green by finding nothing. It does not claim to prove each
+    `<Tooltip>` is wrapped — only that no module inherits the provider by coincidence.
+25. Negative controls, both executed rather than assumed: with the shipped `AuthorCell` restored, 7
+    tests fail with the exact production string ``Tooltip` must be used within `TooltipProvider``,
+    while the "no author at all" case still passes (that path renders no tooltip); and with only
+    the `TooltipProvider` import dropped, the guard fails naming `components/author-cell.tsx`. With
+    the fix, 88/88 pass.
 
 ## Analytics
 

@@ -1071,3 +1071,50 @@ describe('run total', () => {
   })
 })
 
+
+describe('author provenance in the meta row', () => {
+  /**
+   * The regression that white-screened production on 2026-08-22. `AuthorCell` renders a Radix
+   * `Tooltip`, and a bare `Tooltip` with no `TooltipProvider` above it does not degrade — it
+   * THROWS ("`Tooltip` must be used within `TooltipProvider`"), taking the whole route down.
+   * Both task tables happened to open a provider around the table; the run header does not, so
+   * every task carrying an author crashed on open.
+   *
+   * These tests are only meaningful because `renderHeader` mounts NO `TooltipProvider` — that
+   * absence is the assertion. Wrapping it in one, the way `author-cell.test.tsx` used to, makes
+   * the bug structurally unreachable. Do not add one here.
+   */
+  it('renders an author without a TooltipProvider ancestor', () => {
+    stubFetch()
+    renderHeader(
+      run('done', { author: { kind: 'user', id: 'u1', via: 'composer', at: '2026-08-22T10:00:00.000Z' } }),
+    )
+    const cell = document.querySelector('[data-slot="task-author"]') as HTMLElement
+    expect(cell).not.toBeNull()
+    expect(cell.dataset.authorKind).toBe('user')
+  })
+
+  it('renders an agent author, the kind that carries a parent link, with no provider either', () => {
+    stubFetch()
+    renderHeader(
+      run('done', {
+        author: {
+          kind: 'agent',
+          id: '232ad6d4-58a5-421e-941f-5c24bd5a8452',
+          via: 'cli-todo-add',
+          at: '2026-08-22T10:00:00.000Z',
+          parentTaskId: '232ad6d4-58a5-421e-941f-5c24bd5a8452',
+          agentSessionId: 'cb916c71-974d-4fca-9aaa-f4c89b871b80',
+        },
+      }),
+    )
+    expect(document.querySelector('[data-slot="task-author"]')?.getAttribute('data-author-kind')).toBe('agent')
+  })
+
+  it('still renders a pre-change run that has no author at all', () => {
+    stubFetch()
+    renderHeader(run('done'))
+    expect(document.querySelector('[data-slot="task-author"]')).toBeNull()
+    expect(screen.getByRole('heading', { level: 1 })).not.toBeNull()
+  })
+})
