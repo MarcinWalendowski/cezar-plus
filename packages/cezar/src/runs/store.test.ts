@@ -152,6 +152,7 @@ describe('RunStore — context window denominator (spec 2026-08-22-context-windo
   it('withdraws the guessed window once observed tokens exceed it, instead of showing 245k / 200k', () => {
     const store = RunStore.open(dataDir);
     const run = store.createRun({
+      author: localCliAuthor(),
       title: 'metered task',
       workflow: 'quick-task',
       task: 'metered task',
@@ -167,6 +168,7 @@ describe('RunStore — context window denominator (spec 2026-08-22-context-windo
   it('pairs the run-level window with the LATEST context step, never a newer step\'s different model', () => {
     const store = RunStore.open(dataDir);
     const run = store.createRun({
+      author: localCliAuthor(),
       title: 'two-step task',
       workflow: 'quick-task',
       task: 'two-step task',
@@ -191,6 +193,7 @@ describe('RunStore — context window denominator (spec 2026-08-22-context-windo
   it('stores and returns an explicit contextWindow patch verbatim, even against the guess', () => {
     const store = RunStore.open(dataDir);
     const run = store.createRun({
+      author: localCliAuthor(),
       title: 'codex task',
       workflow: 'quick-task',
       task: 'codex task',

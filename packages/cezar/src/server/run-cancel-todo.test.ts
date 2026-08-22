@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore, type RunRecord } from '../runs/store.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 import type { RunManager } from '../workflows/run.ts';
 import type { TodoItem } from '../todos.ts';
 import { createApp } from './server.ts';
@@ -35,6 +36,7 @@ describe('POST /api/v1/runs/:id/cancel — clears the linked todo', () => {
 
   const makeRun = (): RunRecord =>
     store.createRun({
+      author: localCliAuthor(),
       title: 'Task',
       workflow: 'quick-task',
       task: 'Do the thing',
