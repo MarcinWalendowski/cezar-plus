@@ -1,6 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -10,6 +10,8 @@ import type { AgentEvent } from './agent-runner.ts';
 import { isSignalTerminationExit, prependSystemPrompt } from './agent-runner.ts';
 import {
   buildClaudeArgs,
+  claudeProjectDirSlug,
+  claudeSessionTranscriptExists,
   ClaudeCliRunner,
   EOF_KILL_GRACE_MS,
   EOF_TERM_GRACE_MS,
@@ -48,6 +50,26 @@ describe('buildClaudeArgs systemPrompt', () => {
 
   it('omits the flag entirely when no systemPrompt is set', () => {
     expect(buildClaudeArgs(spec)).not.toContain('--append-system-prompt');
+  });
+});
+
+/**
+ * `.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`, Phase 1 — the per-step `effort` knob,
+ * mirroring `--model`. No env-side mirror: the CLI does not read `CLAUDE_EFFORT` as input
+ * (spec's Revision note), so the flag is the only signal this function ever emits.
+ */
+describe('buildClaudeArgs effort', () => {
+  const spec = { userPrompt: 'do it', cwd: '/tmp' };
+
+  it('emits --effort with the exact level, alongside --model', () => {
+    const args = buildClaudeArgs({ ...spec, model: 'sonnet', effort: 'medium' });
+    const idx = args.indexOf('--effort');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe('medium');
+  });
+
+  it('omits the flag entirely when no effort is set', () => {
+    expect(buildClaudeArgs(spec)).not.toContain('--effort');
   });
 });
 
@@ -566,5 +588,122 @@ describe('a stopped session keeps draining until the stream really ends', () => 
       const result = await session.result;
       expect(result.text).toContain('working 107');
     });
+  });
+});
+
+/**
+ * spec 2026-08-22-resume-fresh-session-fallback, Phase 1 — the FAST-PATH slug `claudeCode`
+ * itself uses for `<projects>/<slug>`. Pinned against the two shapes measured while root-causing
+ * the spec: a dot-free cwd, and a dotted worktree cwd where a `/.ai/...` segment produces a
+ * doubled dash (the second example is a stand-in for the measured path, which is not reproduced
+ * verbatim here — see the "upstream purity" gate, spec Verification #10 — but keeps its exact
+ * shape: a dotted directory segment sitting between two ordinary ones).
+ * `claudeSessionTranscriptExists` falls back to a directory scan on a slug miss — this test only
+ * pins the fast path, not existence correctness (that rests on the scan).
+ */
+describe('claudeProjectDirSlug', () => {
+  it('turns / and . into - (dot-free cwd)', () => {
+    expect(claudeProjectDirSlug('/var/lib/cezar/workspace')).toBe('-var-lib-cezar-workspace');
+  });
+
+  it('produces a doubled dash where a dotted segment (e.g. /.ai) sits', () => {
+    expect(
+      claudeProjectDirSlug(
+        '/var/lib/example/some-org/project/.ai/cezar/worktrees/3dbf68c1-83d7-4b19-9b16-62a9eaa152c2',
+      ),
+    ).toBe(
+      '-var-lib-example-some-org-project--ai-cezar-worktrees-3dbf68c1-83d7-4b19-9b16-62a9eaa152c2',
+    );
+  });
+});
+
+/**
+ * spec 2026-08-22-resume-fresh-session-fallback, Phase 1/4 — the proactive check itself, and the
+ * runner-level proof that a caller which downgrades on a miss (exactly what `run.ts` now does)
+ * never lets `--resume` reach the CLI for a session id with no transcript. This test cannot reach
+ * `run.ts`'s own wiring (that's `resume-missing-session.test.ts`) — it proves the primitive
+ * (`claudeSessionTranscriptExists`) and the contract a caller must honor with its answer.
+ */
+describe('claudeSessionTranscriptExists / the proactive resume check', () => {
+  it('fails open (answers true) when claudeHome/projects cannot be resolved at all', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cez-claude-transcript-'));
+    try {
+      // `claudeHome` exists but has no `projects/` subdirectory — an unreadable/missing dir must
+      // not read as "confirmed gone", or the check would silently discard a live session.
+      const exists = await claudeSessionTranscriptExists(root, '/some/cwd', 'never-checked');
+      expect(exists).toBe(true);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('answers false for a session id with no transcript anywhere under projects/', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cez-claude-transcript-'));
+    try {
+      mkdirSync(join(root, 'projects', claudeProjectDirSlug('/some/cwd')), { recursive: true });
+      const exists = await claudeSessionTranscriptExists(root, '/some/cwd', 'never-created-id');
+      expect(exists).toBe(false);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('finds the transcript via the directory SCAN even when the slug guess misses', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cez-claude-transcript-'));
+    try {
+      // A project dir that does NOT match `claudeProjectDirSlug(cwd)` — existence must still be
+      // found by the scan, which is what correctness actually rests on (spec Architecture).
+      const wrongSlugDir = join(root, 'projects', 'some-other-project-dir');
+      mkdirSync(wrongSlugDir, { recursive: true });
+      writeFileSync(join(wrongSlugDir, 'a-real-session.jsonl'), '{}\n');
+      const exists = await claudeSessionTranscriptExists(root, '/some/cwd', 'a-real-session');
+      expect(exists).toBe(true);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('a caller that downgrades on a miss never lets --resume reach the CLI for the dead id', async () => {
+    const mockBin = fileURLToPath(new URL('../../scripts/mock-claude.mjs', import.meta.url));
+    const root = mkdtempSync(join(tmpdir(), 'cez-claude-resume-check-'));
+    const cwd = join(root, 'cwd');
+    const claudeHome = join(root, 'claude-home');
+    mkdirSync(cwd, { recursive: true });
+    // An empty `projects/` dir — resolvable, but no transcript anywhere under it — so the check
+    // genuinely answers "does not exist" rather than failing open on an unreadable directory.
+    mkdirSync(join(claudeHome, 'projects'), { recursive: true });
+    const argsFile = join(root, 'args.ndjson');
+    const staleSessionId = 'dead-session-id';
+    const freshSessionId = 'fresh-session-id';
+
+    try {
+      const exists = await claudeSessionTranscriptExists(claudeHome, cwd, staleSessionId);
+      expect(exists).toBe(false);
+
+      // Exactly the substitution `runAgentStep`/`runContinuation` make on a miss: a fresh id,
+      // `resume: false` — never the recorded (dead) session id with `resume: true`.
+      const runner = new ClaudeCliRunner({ bin: mockBin, timeoutMs: 60_000 });
+      const result = await runner.run({
+        userPrompt: 'do it',
+        cwd,
+        env: { CEZ_MOCK_ARGS_FILE: argsFile, CEZ_HANDOFF_FILE: '', CEZ_TODOS_FILE: '' },
+        sessionId: freshSessionId,
+        resume: false,
+      });
+
+      expect(result.sessionId).toBe(freshSessionId);
+      const argv: string[][] = readFileSync(argsFile, 'utf8')
+        .split('\n')
+        .filter((line) => line.trim())
+        .map((line) => JSON.parse(line) as string[]);
+      expect(argv).toHaveLength(1);
+      expect(argv[0]).not.toContain('--resume');
+      expect(argv[0]).not.toContain(staleSessionId);
+      const idIdx = argv[0]?.indexOf('--session-id') ?? -1;
+      expect(idIdx).toBeGreaterThanOrEqual(0);
+      expect(argv[0]?.[idIdx + 1]).toBe(freshSessionId);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 });

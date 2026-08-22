@@ -213,7 +213,7 @@ Rules that follow from that:
 | Real-time events (live UI signals, replacing polls)                                                                                                                                                           | `.ai/specs/2026-07-23-websocket-subscriptions.md`, then `packages/cezar/src/server/ws.ts` + the `health` topic in `packages/cezar/src/server/server.ts`, and `packages/web/src/api/ws.ts`                                                                                        | Two live channels: the SSE run/event stream (`/api/v1/workspace/events`, `packages/web/src/api/global-events.tsx`) and the **WebSocket subscription bus** (`/api/v1/ws`, `ws` lib server-side, native `WebSocket` client). The bus is the pattern for any new live signal instead of a `refetchInterval`. Its whole discipline is **demand-driven subscription**: a topic's server publisher starts on the `0→1` subscriber and stops on `1→0`, and one socket per cockpit ref-counts listeners per topic. **Subscribe at the scope that matches the data's demand lifetime, always return the unsubscribe (`useEffect(() => subscribeTopic(...))`), publish only on change** — a leaked subscription is a server publisher that never stops AND a component that keeps waking for a screen the user left. Per-view signals subscribe in the view; **session-global signals subscribe ONCE at the root**, not per reader — health is the worked example: one `useHealthSubscription()` controller in `GlobalEventsProvider` subscribes after bootstrap only for local mode, while `useHealth()` is a pure cache read the ~15 readers call without touching the socket. Remote mode must open no browser WebSocket because it cannot explicitly carry reverse-proxy credentials; it uses authenticated HTTP plus SSE reconciliation. One socket per local cockpit — never `new WebSocket` for a feature; add a topic. Liveness: server ping/pong reaping + app-level beat, client watchdog + reconnect. Topics are workspace-level (single-mount, never `/api/v1/p/`) and, because the upgrade guard admits any loopback origin (WS has no CORS), must only carry data safe for any local page — read the spec's security caveat before adding one. |
 | Workspace registry / per-user state (`~/.cezar/`)                                                                                                                                                             | `packages/cezar/src/paths.ts`, then `packages/cezar/src/workspace/config.ts`, `packages/cezar/src/workspace/projects.ts`, `packages/cezar/src/workspace/migrations.ts`, `packages/cezar/src/workspace/semaphore.ts`                                                                                                      | `~/.cezar/config.json` is the per-user workspace config **and** the project registry — every repo cezar has been booted in (spec `2026-07-20-multi-project-workspace`). Every path goes through `cezarHomeDir()` so `CEZ_HOME` keeps tests and containers off a real home; never re-derive `homedir()` elsewhere. Schema rules are load-bearing: every field optional with `.catch`, `.passthrough()` at every object level, per-entry salvage for `projects` (one bad row never evicts the registry), and writes only through `mergeWriteWorkspaceConfig` (read-modify-write + atomic tmp/rename, `0600`) so two processes converge. A corrupt or read-only home degrades to in-memory defaults with ONE warning — never a boot failure. Migrations are config-files-only, idempotent, additive and non-blocking; run state never migrates. `maxParallel`/`memoryLimitMb` are workspace-wide (`resources`): the per-repo keys are imported once by migration 001 and ignored by enforcement afterwards. Registration is suppressed for task worktrees and `$HOME` itself (`shouldRegisterProject`). A merge-write resolves its path ONCE and uses it for both halves — resolving it twice let a `CEZ_HOME` that changed mid-flight read one home and write another, wiping the user's registry. Two guards back that up: `assertCezarHomeWriteIsSandboxed` refuses any write into the real `~/.cezar` from a vitest process, and `packages/cezar/vitest.setup.ts` pins `CEZ_HOME` to a per-worker sandbox so no case ever runs unpinned. Every write that leaves projects behind also snapshots `config.json.bak`, which `loadWorkspaceConfig` restores from when the config is missing, empty or corrupt (a config that parses and is simply empty is the user's own state and is never overridden). | **Agent accounts** (spec `2026-07-29-agent-profiles`) live in this directory too, but in their OWN file — `~/.cezar/agent-accounts.json`, never a key in `config.json`, so a cezar that has never heard of accounts cannot drop them; `src/workspace/agent-accounts.ts` owns the store, `src/core/agent-profiles.ts` the vendor knowledge and `src/workspace/agent-profiles.ts` the resolution. |
 | Project-scoped routes & contexts (`/api/v1/p/:projectId`, `/p/:projectId`)                                                                                                                                       | `packages/cezar/src/server/project-context.ts`, then `packages/cezar/src/server/server.ts`, `packages/web/src/routes.tsx`                                                                                                                                                        | One lazily built `{store, manager, dataDir, launchKey}` context per registered project, disposed on removal; a `missing` root is never instantiated (unknown id → 404, gone root → 409). Every project route is registered **once** in a chained family builder and mounted under both `/api/v1/<path>` (bound to the boot project) and `/api/v1/p/:projectId/<path>` — `route-parity.test.ts` walks the exported route manifest and asserts `/api/v1/x`, `/api/v1/p/<boot>/x` and `/api/v1/p/default/x` answer byte-identically, so a new scoped route without its alias fails the suite. `default` is the reserved boot alias and is never an allocated slug. Workspace-level routes (`/projects`, `/workspace/*`, `/fs/browse`) are single-mount and never scope-prefixed. The cockpit mirrors the split: every view lives under `/p/:projectId/`, flat legacy PAGE paths redirect to the boot project, and global settings sit outside the scope at `/settings/global`. **One versioned API surface**: the unversioned `/api/*` spelling was removed — everything answers under `/api/v1`. A chained builder is the only shape Hono can infer route types from, which is what makes `AppType` (`packages/cezar/src/server/app-type.ts`) and the typed client cover the API. **Add a route by adding a link to its family's chain, never a loose `api.get(…)` statement** — a statement reaches neither the typed client nor `AppType`; `versioned-surface.test.ts` fails on any route outside `/api/v1`, and `bc-route-inventory.test.ts` (which reads a built app's route table, not the source) requires it to be inventoried in BACKWARD_COMPATIBILITY.md §2.                                                                                                                 |
-| Git / worktree logic                                                                                                                                                                                          | `packages/cezar/src/git-worktree.ts`, `packages/cezar/src/git-diff-base.ts`, `packages/cezar/src/server/git.ts`                                                                                                                                                                                                    | One worktree per task at `.ai/cezar/worktrees/<runId>`, branch `cez/<id8>` off the configured base branch. **A WORKSPACE run is one worktree per granted git REPO, not one per task** (specs `.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md` and `.ai/specs/2026-08-20-workspace-run-worktree-isolation.md`, code in `src/workspace/workspace-worktrees.ts`): several registry entries inside one checkout collapse to a single tree keyed by the resolved repo root — **never assume the registry entry count equals the worktree count**, twelve entries resolve to ten trees on this workspace — and each project is granted its own subdirectory of the shared tree rather than its real checkout. Diffs are applied back into the real checkouts on a successful settle; every other ending discards the DIRECTORIES and keeps the `cez/<id8>` BRANCHES. `src/runs/retention.ts` reclaims those directories under the same keep-last-N rule and stamps `reclaimedAt`, which is what distinguishes a reclaimed tree from a leaked one. The knowledge mount is the documented exception: it is granted at its REAL path, shared by every concurrent run, read-only. Helpers never throw (except `createWorktree`) — degradation is the caller's policy. Diffs are capped (`DIFF_CAP`). Orphaned worktrees are pruned at startup. **"Which ref anchors *this task's* diff" lives in exactly one place** — `resolveTaskDiffBase` (`git-diff-base.ts`): the merge-base against the **freshest** base ref (`origin/<base>` when the local branch is behind it — agents fetch, they never pull, and a stale local `main` is what turned an eight-line fix into `+59514 −12160`), and, when the agent checked another branch out into the worktree, that branch **as the run found it** (`<branch>@{<run start>}`), whichever of the two attributes fewer changed lines. Attributing a checked-out branch's history to this task is what produced five-figure numbers on review and QA runs (#591 fixed the Changes tab, #751 the stored `diffStat`); anchoring those runs at `HEAD` instead then reported `+0 −0` for work they really did commit. A new task-diff surface resolves through that helper and passes the run's `branch` **and** `startedAt`; `worktreeDiff`/`worktreeDiffStat` deliberately keep the whole-branch anchor and each carry a comment saying why.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Git / worktree logic                                                                                                                                                                                          | `packages/cezar/src/git-worktree.ts`, `packages/cezar/src/git-diff-base.ts`, `packages/cezar/src/server/git.ts`                                                                                                                                                                                                    | One worktree per task at `.ai/cezar/worktrees/<runId>`, branch `cez/<id8>` off the configured base branch. **A WORKSPACE run is one worktree per granted git REPO, not one per task** (specs `.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md` and `.ai/specs/2026-08-20-workspace-run-worktree-isolation.md`, code in `src/workspace/workspace-worktrees.ts`): several registry entries inside one checkout collapse to a single tree keyed by the resolved repo root — **never assume the registry entry count equals the worktree count**, twelve entries resolve to ten trees on this workspace — and each project is granted its own subdirectory of the shared tree rather than its real checkout. Diffs are applied back into the real checkouts on a successful settle; every other ending discards the DIRECTORIES and keeps the `cez/<id8>` BRANCHES. `src/runs/retention.ts` reclaims those directories under the same keep-last-N rule and stamps `reclaimedAt`, which is what distinguishes a reclaimed tree from a leaked one. The knowledge mount is the documented exception: it is granted at its REAL path, shared by every concurrent run, read-only. Helpers never throw (except `createWorktree`) — degradation is the caller's policy. Diffs are capped (`DIFF_CAP`). Orphaned worktrees are pruned at startup. **The BOOT/SCRATCH ROOT is a git repository too** (spec `.ai/specs/2026-08-21-workspace-boot-repo-and-always-worktrees.md`, code in `src/workspace/boot-repo.ts`): `ensureBootRepo` init-plus-commits the launch directory when it holds nothing but cezar's own runtime state (`holdsOnlyRuntimeState`), tracking exactly `.gitignore` + `README.md` with `.ai/` and `.claude/` ignored — so a task homed there isolates instead of emitting `not a git repository — running in place, one task at a time` and taking the exclusive working-tree lease. At that root `worktree: false` is OVERRIDDEN (there is no work in that tree to be in) and a run that arrived with no `workspaceProjects` adopts the workspace grant; group VARIANTS are carved out on purpose. The `holdsOnlyRuntimeState` gate is load-bearing — `cezar serve` is routinely launched inside a real project and boot never registers the launch directory, so nothing else distinguishes the two. The init is **never** just `git init`: `git worktree add` on a commitless repo succeeds and hands back an EMPTY tree. **"Which ref anchors *this task's* diff" lives in exactly one place** — `resolveTaskDiffBase` (`git-diff-base.ts`): the merge-base against the **freshest** base ref (`origin/<base>` when the local branch is behind it — agents fetch, they never pull, and a stale local `main` is what turned an eight-line fix into `+59514 −12160`), and, when the agent checked another branch out into the worktree, that branch **as the run found it** (`<branch>@{<run start>}`), whichever of the two attributes fewer changed lines. Attributing a checked-out branch's history to this task is what produced five-figure numbers on review and QA runs (#591 fixed the Changes tab, #751 the stored `diffStat`); anchoring those runs at `HEAD` instead then reported `+0 −0` for work they really did commit. A new task-diff surface resolves through that helper and passes the run's `branch` **and** `startedAt`; `worktreeDiff`/`worktreeDiffStat` deliberately keep the whole-branch anchor and each carry a comment saying why.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | GitHub integration (issues/PRs tab, draft PRs)                                                                                                                                                                | `packages/cezar/src/server/github.ts`, `packages/cezar/src/server/pr.ts`                                                                                                                                                                                                    | Must degrade gracefully: no `gh`, no remote, offline all return `{ available: false, reason }` — never an error. `gh … --json` output is zod-validated at the boundary. `GITHUB_TOKEN` is the fallback when `gh` isn't authenticated. `createDraftPr` never throws; failures map to one-line human errors. `CEZ_DRY_RUN=1` fakes the PR URL.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Workflows (YAML chains, steps, retries)                                                                                                                                                                       | `packages/cezar/src/workflows/types.ts`, then `packages/cezar/src/workflows/load.ts`, `packages/cezar/src/workflows/run.ts`                                                                                                                                                                | A step is agent (`prompt`/`skill`) XOR check (`command`); a file has `steps` XOR the portable `skills` shorthand — both enforced by zod refinements. `onFail.retry` may only reference an _earlier_ step (`stepsIssue`). `{{task}}` is the substitution token. `quick-task` is the built-in zero-config workflow; built-ins always come back after delete.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | Skills (Markdown playbooks, team repos)                                                                                                                                                                       | `packages/cezar/src/skills.ts`, `packages/cezar/src/skills-remote.ts`                                                                                                                                                                                                       | A skill is a `.md` file with optional YAML frontmatter (`name`, `description`); its body becomes the agent's extra system prompt. Discovery precedence is local-first: `.ai/cezar/skills` → `.ai/skills` → `.agents/skills` + agent mirrors → global → team repo. Missing dirs are fine; team-skill loading never blocks on the network (background cache in `~/.cache/cez/`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -247,10 +247,13 @@ npm test -- --testTimeout=30000 path/to/one.test.ts
 npm test -- -t "the name of one test"
 ```
 
-### Four environment traps that make the gates LIE
+### Five environment traps that make the gates LIE
 
 *(Heading amended 2026-08-21: a fourth trap — `TMPDIR` inside a git repo — was measured and is
-documented below. It was worth 17 of 19 failures on a docs-only branch.)*
+documented below. It was worth 17 of 19 failures on a docs-only branch. Amended again 2026-08-22:
+a fifth — `npm run test:package` stalling under the run broker — was measured and is documented
+below, filed as `.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md` Phase 3. It cost one
+`run-tests` step 43,583 output tokens re-deriving what is now written down.)*
 
 The first two were hit on 2026-08-20 (spec `.ai/specs/2026-08-20-live-run-status-line-and-timer.md`),
 the third the same day (spec `.ai/specs/2026-08-20-step-and-tool-call-durations.md`). Each produces
@@ -274,6 +277,33 @@ tmp=/tmp/cez-gate-$$ && mkdir -p $tmp   # trap 4: TMPDIR must be OUTSIDE any git
 env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm ci \
   && env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm test
 ```
+
+**Corrected 2026-08-22 (`2026-08-21-npm-test-gate-environment-scrub.md`): only root `npm test`
+scrubs itself — not all three commands `.ai/agentic.config.json` lists, and not all five it
+actually has.** `.ai/agentic.config.json`'s `validation.commands` lists **five** entries
+(`typecheck`, `test`, `test:unit`, `build`, `test:package`); of those, `npm test` (`vitest run`)
+is the only one any part of this fix reaches. `packages/web/vitest.config.ts` sets
+`test.env.NODE_ENV = ''` (closes trap 1 for the `web` project, immediately — no redeploy) and
+`packages/cezar/vitest.setup.ts` unsets every ambient `CEZ_*` except
+`CEZ_HANDOFF_FILE`/`CEZ_TASK_ID` and repoints `TMPDIR`/`TMP`/`TEMP` at a fresh directory under
+real `/tmp` before any suite runs — but that `setupFiles` entry is wired into the `server`
+project only (`packages/cezar/vitest.config.ts:13`), so this closes traps 2 and 4 for `server`
+specifically, not for `web`/`api-client` (no live failure observed there today; see the spec's
+Risks section — there is simply no scrub there either). `run.ts`'s `agentEnv()` additionally sets
+`NODE_ENV: ''` in every agent-spawned process's env — a durable fix that reaches trap 1's *other*
+victim, `npm ci` under `NODE_ENV=production` (§1's "worse than a missing module" case above), but
+only once `cezar.service` is redeployed and restarted; until then, `npm ci` itself is still
+exactly as documented in point 1. **`npm run test:unit` and `npm run test:package` are
+unaffected by any of this** — both are `node --test` scripts (`packages/cezar/package.json`),
+neither loads `vitest.setup.ts` or any `vitest.config.ts`, so the recipe above still applies to
+them in full. The recipe also still applies to any invocation none of the above covers — `npm ci`
+before the next redeploy, and any non-vitest tooling. A single-file `vitest run` is now covered
+(it loads the same project config and `setupFiles` as the full run) and no longer needs it. Trap
+3 (the C18 host-speed budget) is unaffected either way; it was never an environment leak.
+`design-guardian.test.ts`/`vite-config.test.ts` (`node:` imports failing to resolve under the
+`web` project's `jsdom` environment) turned out to be a fifth, previously-undocumented failure,
+unrelated to any of the four traps — fixed with a `// @vitest-environment node` docblock in both
+files.
 
 1. **`NODE_ENV=production` makes `npm ci` install ZERO devDependencies.** cezar's own agent
    sessions run with it set, so a worktree installed under it has no vitest, no React and no
@@ -334,7 +364,25 @@ env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm ci \
    above: point `TMPDIR`/`TMP`/`TEMP` at `/tmp`, which is a tmpfs outside every repo here. Note
    CI never sees this — `ubuntu-latest` has a plain `/tmp` — so it is purely a local-agent trap.
 
-**The method, which generalises past all four.** "It fails on an untouched file at clean HEAD
+5. **`npm run test:package` fails 1/15 under the run broker, and it predates your branch.** Case
+   5 (`packages/cezar/test/e2e/package-cli.test.ts:86`, "the release tarball installs and runs the
+   dry-run CLI workflow") stalls at step 1 ("Gather the record") with the run status stuck
+   `running` and the CLI exiting 0. Reproduces IDENTICALLY at clean HEAD — this predates any
+   change you are testing. The decisive control: `CEZ_RUN_BROKER=0` makes the identical run
+   finish; the default brokered path stalls. It is not the env scrub and not a TTY — both A/B
+   identically. See todo `c895a348-4bee-4a81-89ab-a62788a6a118` (canonical — folds in two other
+   independently-filed reports of the same red, `1e8e5266` and `46dbb850`, now archived as
+   superseded) for the live status, acceptance criteria and full repro. **Do not re-diagnose this
+   one** — reproduce it once against a control (clean HEAD is enough) to confirm it is the same
+   red, cite the todo, and stop; re-deriving it from scratch cost one `run-tests` step 43,583
+   output tokens (`.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`).
+   **Corrected 2026-08-22 — the canonical todo (`c895a348`) is now `status: 'done'`, closed by
+   commit `3e6d1b7e` (`.ai/specs/2026-08-22-run-broker-cli-keepalive.md`), which removed the
+   `unref()` on the one-shot broker's poll interval — the same mechanism this todo's own diagnosis
+   pointed at. This red may no longer reproduce; if it does, that is new information, not a
+   re-confirmation of this entry.**
+
+**The method, which generalises past all five.** "It fails on an untouched file at clean HEAD
 too" feels like proof that the code is innocent and the environment is broken. It is proof of the
 first half only. The same install, the same env and the same runner feed both checkouts, so a
 control that fails identically **localises the fault to what they share** — it does not license
@@ -382,6 +430,12 @@ the race lives entirely inside the file's own helper and needs no competition fo
 One isolated pass proves nothing here; the original 3/3 was a small-n artifact of exactly the kind
 the sample-size note below warns about.
 
+**Second known live flake, as of 2026-08-22:** `auto-resume.test.ts` — same class as
+`add-project-dialog.test.tsx` above (genuine concurrency timing, not cross-file pollution): clean
+in isolation (22/22 across 3 re-runs, `2026-08-21-npm-test-gate-environment-scrub.md`) but an
+occasional single failure under the full `npm test` run's load. Not fixed — noted here so a red
+on that name is recognised rather than re-diagnosed from scratch.
+
 Two method notes, both learned the hard way here:
 
 - **Prove pollution by injecting it**, as above. A hypothesis about shared state is cheap to test
@@ -411,6 +465,168 @@ network), reuses an already-healthy instance instead of double-booting, and writ
 | non-zero | `TEST_E2E_STATUS=failed`  | a spec failed, or the env could not boot                                                                          |
 
 `CEZ_DRY_RUN=1 npm run dev` still exercises the whole cockpit offline for manual verification.
+
+## Headless browser on prod-host
+
+`prod-host` has a real, working headless browser: **Playwright 1.62.1** (CLI at
+`/usr/bin/playwright`, package in `/usr/lib/node_modules`) with Chromium, its headless-shell
+variant, ffmpeg, Firefox and WebKit cached in `$HOME/.cache/ms-playwright` (~1.2G). Only Chromium
+has actually been driven against live URLs. Ubuntu 26.04 ships no usable `chromium` in apt — the
+candidate is a snap shim — which is why this is Playwright's own build. OS deps are installed
+(`playwright install-deps`), `xvfb` included, so headed-under-Xvfb is possible too.
+
+**An agent step MAY reach for it directly, without asking first** — checking that a deployed URL
+actually renders, scraping a page a spec cites, reading docs that only exist behind JS. That is a
+deliberate repo-level exception to the global "ask before running anything" default, in the same
+spirit as § Shipping cezar itself.
+
+Two invocations work verbatim, from any cwd:
+
+```bash
+node -e "
+const { chromium } = require('playwright');
+(async () => {
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  await page.goto('https://example.com');
+  console.log(await page.title());
+  await browser.close();
+})();
+"
+
+playwright screenshot https://example.com /tmp/example.png
+```
+
+Always `browser.close()`. A leaked Chrome under concurrent runs is exactly the memory pressure
+that pushes you to the fallback below.
+
+**Resolution is CommonJS-only.** The bare `require('playwright')` above works from any cwd because
+`$HOME/.node_modules/{playwright,playwright-core}` symlink into `/usr/lib/node_modules`, and Node
+consults `$HOME/.node_modules` through its global-folder lookup. That lookup **does not apply to
+ESM**, and this repo is `"type": "module"` — so `import { chromium } from 'playwright'` in a
+`.mjs`, or in a `.js` inside this repo, fails with `ERR_MODULE_NOT_FOUND`. Use `node -e`, a `.cjs`
+file, or `createRequire`:
+
+```js
+import { createRequire } from 'node:module';
+const { chromium } = createRequire(import.meta.url)('playwright');
+```
+
+**The one trap that will silently break this: never set `PLAYWRIGHT_BROWSERS_PATH` on the host
+alone.** `packages/cezar/src/core/agent-env.ts`'s `buildChildEnv()` gives every agent an
+*allowlisted* environment, and `PLAYWRIGHT_` appears in neither `BASE_ALLOW_NAMES` nor
+`BASE_ALLOW_PREFIXES` (`grep -n "PLAYWRIGHT" packages/cezar/src/core/agent-env.ts` returns
+nothing). So if someone "tidies" the browsers into `/opt` and exports `PLAYWRIGHT_BROWSERS_PATH`
+on the host, the variable is dropped before any agent's child process starts: Playwright falls
+back to its own compiled-in default, finds no browsers, and every launch fails with nothing in the
+agent's environment pointing at the cause. The browsers therefore sit at Playwright's **default**
+`$HOME/.cache/ms-playwright`, which needs no env var at all because `HOME` is allowlisted. A moved
+install *can* be made to work — set the variable in the service env **and** name it in
+`CEZ_ENV_PASSTHROUGH` (`/etc/cezar/agent-env.env`), the same two-step the Cloudflare credentials
+went through — but skipping the second step fails exactly as silently as skipping both. Don't take
+that path: leave the browsers at the default, per § Zero config's "never trade a working default
+for a knob."
+
+The `$HOME/.node_modules` symlink is the same philosophy, but note the reason is *not* the
+allowlist: `NODE_PATH` would in fact survive it (`NODE_` **is** an allowed prefix, and `NODE_PATH`
+is not credential-shaped). It is avoided because it is a knob where a working default exists —
+the symlink needs no env var on any path.
+
+Two consequences worth knowing: the cache is `$HOME`-scoped, so a non-interactive
+`ssh root@prod-host '<cmd>'` (whose `$HOME` is `/root`) finds no browsers, while an
+interactive session or an agent run does; and this is a **fact about this box only** — nothing
+guarantees a laptop or CI runner has these browsers cached, unlike `agent-browser` below.
+
+**This is separate from `agent-browser`** (§ Validation, above). `agent-browser` is a portable,
+self-provisioning CLI contract (`snapshot`/`interact`/`assert`/`screenshot`) that works on any
+machine cezar runs on, including one with no Playwright install — reach for it when driving or
+inspecting a UI through its fixed verb set. Reach for raw Playwright when you need Node-API-level
+control (`page.evaluate()`, scripting inside a larger program) or the zero-code
+`playwright screenshot` one-liner.
+
+### Fallback: Cloudflare Browser Run
+
+If local headless proves unreliable under concurrent agent runs (memory pressure, zombie Chrome,
+bot detection on the target), fall back to **Cloudflare Browser Run** — renamed from **Browser
+Rendering**, which is still the name in the API paths and the docs URL. **Verified working from
+this box on 2026-08-22 with the credentials already here** — no new token, nothing to wire:
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com"}' \
+  "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/browser-rendering/content"
+```
+
+It comes in two shapes, and picking the wrong one wastes an afternoon:
+
+- **Quick Actions** — REST endpoints under `.../browser-rendering/{content,screenshot,pdf,markdown,snapshot,scrape,json,links,crawl}`. One HTTP request, stateless, no code deployment. This is *not* a Playwright API; it is the fastest path for "give me the rendered HTML / a screenshot / a PDF."
+- **Browser Sessions over CDP** — this is the **Puppeteer/Playwright-compatible** route, and it works from an external server like this box: connect a WebSocket to the `/devtools/browser` endpoint and drive it with `chromium.connectOverCDP()`, so existing Playwright code changes minimally.
+
+Do **not** reach for `@cloudflare/playwright` from this box: it is a Workers-only fork requiring a
+`browser` binding in `wrangler.jsonc` and `nodejs_compat`. From here the routes are CDP or REST.
+
+Credentials are `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in `/etc/cezar/cloudflare.env`
+(0640 root:cezar). Like `PLAYWRIGHT_`, the `CLOUDFLARE_` prefix is **not** in the agent-env
+allowlist — these two reach an agent only because both names are listed in `CEZ_ENV_PASSTHROUGH`
+in `/etc/cezar/agent-env.env` (since 2026-08-19), which `allow()` checks before the `looksSecret`
+filter. That is already done, so an agent has them today; a *third* `CLOUDFLARE_*` name would not.
+
+One trap when checking that token: `GET /client/v4/user/tokens/verify` returns
+`401 Invalid API Token` for it, while the Browser Run call above returns `200` — it is
+account-scoped, not user-scoped. Probe the capability you actually need, never the token's
+identity papers (the same rule SPEC-403 wrote down for `wrangler whoami`).
+
+## Verifying a cockpit UI change — boot a throwaway cezar on a spare port
+
+**You cannot drive the production cockpit, and you must not try.** `cockpit.example.com` is behind
+Cloudflare Access, and the loopback origin is not a way around it: a browser sent to
+`http://127.0.0.1:4321/tasks` is redirected to `example.cloudflareaccess.com` (the SPA
+follows its own auth), and `GET /api/v1/workspace/runs-index` on loopback answers **401**. Only
+`/api/v1/ready` and the static `/` are open, which is exactly why the two `.ai/deploy-targets.json`
+probes use those and nothing else. Do not reach for credentials, a service token, or
+`CEZ_ALLOW_UNAUTHENTICATED=1` on the prod box to get past this.
+
+**Boot your own instance instead.** It is fast, it needs no secrets, and it renders the SAME built
+bundle you just deployed. Four things have to be true or it will not come up:
+
+1. **A scratch `HOME`.** The project registry lives in `~/.cezar/config.json` and is shared by
+   every cezar on the machine — registering a fixture project into the real one would edit what
+   every other run sees. `HOME=/var/tmp/<scratch>/home` isolates it.
+2. **Scrub the hosted-mode env.** An agent inherits the service's `CEZ_*` namespace, and
+   `CEZ_PUBLIC_URL` alone is enough to put a fresh instance into hosted mode, where it refuses to
+   boot without auth (*"cezar refuses to boot: hosted mode with no authentication exposes shell
+   execution…"*). That message is not an invitation to set `CEZ_ALLOW_UNAUTHENTICATED=1` — unset
+   the inherited vars and it boots as an ordinary local cockpit. This is also why
+   `npm run test:e2e` fails on this box rather than skipping.
+3. **Seed the states you need.** Write `<proj>/.ai/cezar/runs.json` and `todos.json` directly. A
+   feature is only verified if the fixture covers the states that can render — for the Author
+   column that meant user / agent / api / absent in one board, and the absent one is the case a
+   happy-path fixture always forgets.
+4. **Walk the first-run wizard.** The gate is `probe.kind === 'ready' && !probe.hasProjects`, and
+   `hasProjects` counts projects *adopted into an org*, not registry entries — so a registered
+   project still lands you on `/onboarding`. Fill `[data-slot="onboarding-org-name"]`, click
+   `[data-slot="onboarding-org-submit"]`, then navigate to the page under test.
+
+```bash
+B=/var/tmp/uiverify; rm -rf $B; mkdir -p $B/home $B/proj/.ai/cezar
+cd $B/proj && git init -q . && git commit -q --allow-empty -m scratch
+# seed $B/proj/.ai/cezar/runs.json here
+env -u CEZ_PUBLIC_URL -u CEZ_REMOTE -u CEZ_OIDC_ISSUER -u CEZ_OIDC_CLIENT_ID -u CEZ_AUTH \
+    -u CEZ_TODOS_FILE -u CEZ_HANDOFF_FILE -u CEZ_KB_WRITE_FILE -u CEZ_PROJECTS_DIR -u NODE_ENV \
+    HOME=$B/home nohup node /opt/cezar/packages/cezar/dist/index.js \
+    --port 4399 --no-open --repo $B/proj > $B/server.log 2>&1 &
+until [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4399/api/v1/ready)" = 200 ]; do sleep 2; done
+env HOME=$B/home node /opt/cezar/packages/cezar/dist/index.js projects add $B/proj
+```
+
+Then drive it with Playwright (§ Headless browser above), asserting on `data-slot` /
+`data-*` attributes rather than on text or CSS classes — those are the stable contract, and
+several components already carry them for exactly this reason. **Kill the instance and delete the
+directory when done**; a stray cockpit on a spare port holds memory and keeps a worktree lease.
+
+Running against `/opt/cezar/...` verifies the DEPLOYED bytes. Point it at a local `dist/` instead
+when you want to check a build you have not shipped yet.
 
 ## How an agent step should spend its tool calls
 
@@ -495,6 +711,35 @@ their sub-agents stay READ-ONLY and the orchestrating step writes every word. `i
 `run-tests`, `commit-push` and `deploy` deliberately do NOT — concurrent writers in one worktree
 corrupt each other, `run-tests` is `npm`-bound (617 of its 826 s), and git's index is one lock.
 `workflows/types.test.ts` asserts that absence as hard as it asserts the presence.
+
+**Changing part of a file that already exists: edit it, never re-emit it** (spec
+`.ai/specs/2026-08-21-edit-an-existing-file-never-re-emit-it.md`). Bypass permissions mode injects
+its own reminder to prefer `sed`/heredocs/short scripts over `Read`/`Edit`/`Write` — cezar does not
+own that instruction and cannot switch it off, so the only lever is a later, more specific
+paragraph in the step prompt (`FILE_WRITE_RECIPE`, `workflows/types.ts`, shipped in `spec`,
+`implement` and `document`). Measured on run `70f19253`: 360 tool calls, zero `Edit`, zero `Write`;
+its `spec` step wrote one 807-line document twice — 34,845 characters, then 48,618, of which
+20,550 were unchanged lines carried for nothing — and its `deploy` step wrote a 1,383-character
+`/tmp` script twice, byte-identical. An `Edit` costs the CHANGE; a heredoc costs the whole FILE, so
+the waste scales with the size of the file touched, not the size of the edit, without limit.
+
+The rule is deliberately conditional, not "never re-emit": when a rewrite genuinely touches most of
+a file, re-emitting it is correct and cheaper than dozens of anchored edits — the same `spec` step's
+81-hunk revision would have cost ~65,045 characters as edits against the 48,618 it spent rewriting,
+in 81 round trips instead of 1. Judge by how much of the file changes, not by whether it existed.
+
+Metered the same way as the rest of this section — no new event, just five more fields on
+`cez run stats`' `StepStats`:
+
+```bash
+cez run stats <runId> --json | grep -E 'toolInputChars|heredocChars|heredocFileWrites|heredocRewrites'
+```
+
+`heredocRewriteWasteChars` is the hard gate (**target near 0** — the unchanged payload a
+re-emission carried for nothing). `heredocRewrites` is a diagnostic only: it cannot tell a wasteful
+re-emission from a legitimate near-total rewrite, which is exactly why the gate is the waste in
+characters and not this count. `heredocFileWrites` is not a defect on its own — a new file is not
+the problem this measures.
 
 ## Related documents
 

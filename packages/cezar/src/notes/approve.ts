@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ApproveNoteInput, ApproveNoteResponse } from '@loki-labs/better-cezar-contract';
 import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
 import type { RunRecord } from '../runs/store.ts';
+import type { TaskAuthor } from '../runs/task-author.ts';
 import { NOTE_TO_SPEC_WORKFLOW, type WorkflowDef } from '../workflows/types.ts';
 import { loadWorkflows } from '../workflows/load.ts';
 import type { NotePipelineFailure } from './pipeline.ts';
@@ -60,6 +61,9 @@ export interface StartOptions {
   runner?: RunRecord['runner'];
   model?: string;
   agentProfile?: string;
+  /** Who approved — see `NotePipeline.approve`'s own doc comment on why this rides in from the
+   *  route rather than being derived here. */
+  author: TaskAuthor;
 }
 
 export class NoteApprover {
@@ -68,6 +72,7 @@ export class NoteApprover {
   async approve(
     noteId: string,
     input: ApproveNoteInput,
+    author: TaskAuthor,
   ): Promise<{ ok: true; body: ApproveNoteResponse } | NotePipelineFailure> {
     const note = this.deps.store.get(noteId);
     if (!note) return { ok: false, status: 404, error: 'not found' };
@@ -127,6 +132,9 @@ export class NoteApprover {
       try {
         const workflow = await this.resolveWorkflow(project.root, requested.workflow ?? proposal.workflow);
         const run = await this.deps.startRun(projectId, workflow, task, {
+          // The person who approved authors every run this approval creates, in every target
+          // project — one click, N runs, one author (spec 2026-08-21-task-author-provenance).
+          author,
           ...(requested.runner ?? proposal.runner ? { runner: requested.runner ?? proposal.runner } : {}),
           ...(model ? { model } : {}),
           ...(requested.agentProfile ?? proposal.agentProfile

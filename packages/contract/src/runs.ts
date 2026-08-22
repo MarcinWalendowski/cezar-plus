@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { runnerSchema } from './health.ts';
 import { referenceStatusSchema } from './github.ts';
+import { taskAuthorSchema } from './task-author.ts';
 // The chain shapes belong to the workflows family; the run record embeds one, so this file
 // consumes them rather than redeclaring. One-way on purpose — see the header of `./workflows.ts`.
 import { workflowDefSchema, workflowStepDefSchema } from './workflows.ts';
@@ -74,6 +75,11 @@ export const stepStateSchema = z.object({
    *  `inputTokens` — it tracks "how full is the window now", not the running total (spec
    *  2026-08-19-context-usage-in-tasks-table). Absent until the first turn ends. */
   contextTokens: usageCounterSchema.optional(),
+  /** This step's own context-window max (spec 2026-08-22-context-window-denominator-per-step):
+   *  a real backend-reported figure when one exists (codex today), else the model-string
+   *  guess, else absent the moment this step's own `contextTokens` disproves that guess.
+   *  Paired 1:1 with `contextTokens` above — never recomputed from a different step's model. */
+  contextWindow: usageCounterSchema.optional(),
   usageInvocationsStarted: usageCounterSchema.optional(),
   usageInvocationsObserved: usageCounterSchema.optional(),
   usageTurnsStarted: usageCounterSchema.optional(),
@@ -263,6 +269,19 @@ export const runRecordSchema = z.object({
       githubUrl: z.string(),
     })
     .optional(),
+  /**
+   * Who created this task, stamped at creation and never rewritten (spec
+   * `.ai/specs/2026-08-21-task-author-provenance.md`).
+   *
+   * OPTIONAL on the schema because every record written before 2026-08-21 has none — REQUIRED by
+   * `createRun`/`startRun`'s input types, which is what makes it present on everything written
+   * since. Absent renders as "unknown (created before 2026-08-21)", never as a guess: cezar has no
+   * evidence about who started a run last week and inventing one would be worse than `—`.
+   *
+   * Never client-supplied. `createRunInputSchema` does NOT carry this key, so a body naming an
+   * `author` never reaches a handler — an author you can set yourself is not provenance.
+   */
+  author: taskAuthorSchema.optional(),
   status: runStatusSchema,
   /**
    * Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —
@@ -316,8 +335,11 @@ export const runRecordSchema = z.object({
    *  (spec 2026-08-19-context-usage-in-tasks-table). Absent until the first turn ends. */
   contextTokens: usageCounterSchema.optional(),
   /** The model's maximum context window, the denominator in the cockpit's `45k / 200k`.
-   *  Derived from the model string (`contextWindowForModel`); absent for a runner/model
-   *  whose window we do not model, so the cell shows only the current figure. */
+   *  Superseded 2026-08-22 by 2026-08-22-context-window-denominator-per-step: sourced from
+   *  the same step's own `StepState.contextWindow` (a real report, else the model-string
+   *  guess, else withdrawn when that step's own tokens disprove it) rather than a fresh
+   *  independent guess — absent for a runner/model whose window we do not model, so the
+   *  cell shows only the current figure. */
   contextWindow: usageCounterSchema.optional(),
   costUsd: z.number().optional(),
   pullRequestUrl: z.string().optional(),
@@ -512,19 +534,31 @@ export const runIndexEntrySchema = z.object({
   /** The task's branch, when it has one — a column on the global page, and the one field that
    *  makes a cross-project row identifiable at a glance without opening it. */
   branch: z.string().optional(),
+  /** Who created the task (`.ai/specs/2026-08-21-task-author-provenance.md`, Phase 4) — the
+   *  global page's Author column, and the only field that answers "what made this?" for a row on
+   *  a board spanning forty projects. One small object, carried whole rather than pre-rendered to
+   *  a label, because the cross-project board is also the one surface that can resolve an agent
+   *  author's PARENT to a link: it already holds every project's rows. Absent on runs created
+   *  before the field existed. */
+  author: taskAuthorSchema.optional(),
   /** When the agent actually started, as opposed to when the task was created. The global page's
    *  age column prefers it and falls back to `createdAt`, exactly as the per-project table does. */
   startedAt: z.string().optional(),
   /**
-   * The six fields `taskReference()` (`web/src/lib/tasks-table.ts`) reads to decide a task's PR
+   * The eight fields `taskReference()` (`web/src/lib/tasks-table.ts`) reads to decide a task's PR
    * or issue chip. Carried verbatim rather than pre-resolved into a `{kind, number, url}` on the
    * server, because the rule that picks between them is subtle (#407, #526: a run that REVIEWED
    * a PR must not claim it as its own, an issue-subject run must not adopt an incidental
    * transcript PR) and it already exists, tested, on the client. Resolving it a second time
    * server-side would be a second rule, and the two would drift.
    *
-   * Six scalars is still the slim row this schema exists to keep: `steps[]` and `workflowDef`,
-   * the expensive half, stay off it.
+   * `referencedIssueCandidates`/`referencedPrCandidates` are the two newest additions
+   * (foreign-number guard, design ported read-only from `open-mercato/cezar` #840/#864): they are
+   * EVIDENCE the client's `namesNumberElsewhere()` uses to refuse building a chip for a number
+   * that belongs to a different repository, not a link themselves.
+   *
+   * Eight scalars/arrays is still the slim row this schema exists to keep: `steps[]` and
+   * `workflowDef`, the expensive half, stay off it.
    */
   pullRequestUrl: z.string().optional(),
   referencedPullRequestUrl: z.string().optional(),
@@ -532,6 +566,13 @@ export const runIndexEntrySchema = z.object({
   issueNumber: z.number().optional(),
   referencedIssueUrl: z.string().optional(),
   markerRefs: z.object({ pr: z.number().optional(), issue: z.number().optional() }).optional(),
+  /** Evidence-only: raw PR URLs scraped from the run's transcript, some of which may name a
+   *  different repository than the project's own. See `namesNumberElsewhere()`
+   *  (`web/src/lib/tasks-table.ts`). Mirrors `RunRecord.referencedPrCandidates` verbatim. */
+  referencedPrCandidates: z.array(z.string()).optional(),
+  /** Evidence-only twin of `referencedPrCandidates` for issue numbers. Mirrors
+   *  `RunRecord.referencedIssueCandidates` verbatim. */
+  referencedIssueCandidates: z.array(z.string()).optional(),
   /** What the run has cost so far. Absent means nothing was recorded, which is NOT `$0` — the
    *  cockpit prints an em dash rather than claiming a measurement that never happened. */
   costUsd: z.number().optional(),

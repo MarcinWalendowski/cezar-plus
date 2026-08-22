@@ -164,6 +164,162 @@ function commandOf(event: RunEvent): string {
   return typeof command === 'string' ? command : '';
 }
 
+/**
+ * The file-authoring heredoc predicate (spec
+ * `.ai/specs/2026-08-21-edit-an-existing-file-never-re-emit-it.md` § Data models, "exactly").
+ *
+ * `OPENS_HEREDOC` is deliberately looser than `stripHeredocs()`'s own end-of-line opener regex: it
+ * has to match `cat <<'EOF' > P`, where the tag is not at end of line because a redirect trails it.
+ * `stripHeredocs()` itself is NOT touched — see `heredocChars` below for why.
+ */
+const OPENS_HEREDOC = /<<-?\s*['"]?[A-Za-z_]\w*['"]?/;
+/** `cat … > P` / `cat … >> P` — either ordering, `cat > P <<T` and `cat <<T > P`. */
+const CAT_TARGET = /(?:^|[;&|]\s*)cat\b[^|\n]*?>{1,2}\s*['"]?([^\s'";|&<>]+)/;
+/** `tee P` / `tee -a P` — POSITIONAL, no redirect. A `>`-only regex can never match this. */
+const TEE_TARGET = /(?:^|[;&|]\s*)tee\b\s+(?:-a\s+)?['"]?([^\s'";|&<>][^\s'";|&<>]*)/;
+/** Captures the heredoc TERMINATOR, wherever `<<TAG` sits on the line — needed to find where the
+ *  body ends, which `OPENS_HEREDOC` alone (a presence test) does not give us. */
+const HEREDOC_TAG = /<<-?\s*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|([A-Za-z_]\w*))/;
+
+interface HeredocEntry {
+  /** The line that opened this heredoc — tested against `CAT_TARGET` / `TEE_TARGET`. */
+  openerLine: string;
+  body: string[];
+}
+
+/**
+ * Every heredoc in a command, paired with the line that opened it.
+ *
+ * Its own walk, not reused from `stripHeredocs()` — see `OPENS_HEREDOC`'s comment. A line is only
+ * ever tested for a NEW opener while no body is currently open, so a heredoc BODY that itself
+ * contains `<<` (a script writing a heredoc-parsing script, a JS template literal) can never be
+ * mistaken for a second opener — it is already inside `body` by the time this walk would see it.
+ */
+function heredocEntriesOf(command: string): HeredocEntry[] {
+  const lines = command.split('\n');
+  const entries: HeredocEntry[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i] ?? '';
+    if (!OPENS_HEREDOC.test(line)) {
+      i += 1;
+      continue;
+    }
+    const tagMatch = HEREDOC_TAG.exec(line);
+    const tag = tagMatch ? (tagMatch[1] ?? tagMatch[2] ?? tagMatch[3] ?? undefined) : undefined;
+    if (tag === undefined) {
+      i += 1;
+      continue;
+    }
+    const body: string[] = [];
+    let j = i + 1;
+    while (j < lines.length && (lines[j] ?? '').trim() !== tag) {
+      body.push(lines[j] ?? '');
+      j += 1;
+    }
+    entries.push({ openerLine: line, body });
+    i = j + 1;
+  }
+  return entries;
+}
+
+/** The path a file-authoring heredoc's opener line targets, or `undefined` if this heredoc's body
+ *  is a SCRIPT rather than a file's content (e.g. `python3 - <<'PY' > out.txt` — `out.txt` is the
+ *  script's stdout, not the heredoc's body). */
+function authoredPathOf(openerLine: string): string | undefined {
+  const cat = CAT_TARGET.exec(openerLine);
+  if (cat?.[1]) return cat[1];
+  const tee = TEE_TARGET.exec(openerLine);
+  if (tee?.[1]) return tee[1];
+  return undefined;
+}
+
+/**
+ * Paths this command READ, as far as this predicate can tell — `cat`/`head`/`tail` (whole command,
+ * heredoc bodies stripped first so a script's own `cat` calls inside a heredoc body do not count)
+ * or `sed -n … …p`. Feeds `seenPaths` only, never a gate on its own — see `heredocRewrites`' doc
+ * comment for the failure directions this inherits.
+ */
+function readTargetsOf(command: string): string[] {
+  const text = stripHeredocs(command);
+  const targets: string[] = [];
+  const CAT_READ = /(?:^|[;&|]\s*)(?:cat|head|tail)\b\s+(?:-\S+\s+)*['"]?([^\s'";|&<>-][^\s'";|&<>]*)/g;
+  for (const m of text.matchAll(CAT_READ)) if (m[1]) targets.push(m[1]);
+  const SED_READ = /(?:^|[;&|]\s*)sed\s+-n\s+(?:'[^']*'|"[^"]*"|\S+)\s+['"]?([^\s'";|&<>][^\s'";|&<>]*)/g;
+  for (const m of text.matchAll(SED_READ)) if (m[1]) targets.push(m[1]);
+  return targets;
+}
+
+/** Bounds the LCS DP below — past this many cells it falls back to "no further match" for the
+ *  unbounded middle chunk rather than growing without limit (an under-report, same direction as
+ *  every other unknown in this module). ~2000×2000, far past any real spec-sized document. */
+const LCS_CELL_CAP = 4_000_000;
+
+/** Plain LCS over lines, summing the matched lines' characters (+1 per line for the newline each
+ *  carried) — only ever called on the bounded middle chunk `unchangedLineCharsOf` leaves after
+ *  trimming the common prefix/suffix. */
+function lcsCharsOf(a: readonly string[], b: readonly string[]): number {
+  const n = a.length;
+  const m = b.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) {
+      dp[i]![j] = a[i] === b[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
+    }
+  }
+  let chars = 0;
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      chars += (b[j]?.length ?? 0) + 1;
+      i += 1;
+      j += 1;
+    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
+      i += 1;
+    } else {
+      j += 1;
+    }
+  }
+  return chars;
+}
+
+/**
+ * Characters of `newLines` that are UNCHANGED from `oldLines` — an LCS over lines, mirroring
+ * `difflib.SequenceMatcher`'s "equal" opcodes (spec § Data models, `heredocRewriteWasteChars`).
+ * Trims the common prefix/suffix first — O(n), and enough on its own for the two extremes this
+ * metric has to tell apart (a byte-identical re-emission, an all-new body) — then runs the O(n·m)
+ * LCS only on what is left, bounded by `LCS_CELL_CAP`.
+ */
+function unchangedLineCharsOf(oldLines: readonly string[], newLines: readonly string[]): number {
+  let start = 0;
+  const maxStart = Math.min(oldLines.length, newLines.length);
+  while (start < maxStart && oldLines[start] === newLines[start]) start += 1;
+
+  let oldEnd = oldLines.length;
+  let newEnd = newLines.length;
+  while (oldEnd > start && newEnd > start && oldLines[oldEnd - 1] === newLines[newEnd - 1]) {
+    oldEnd -= 1;
+    newEnd -= 1;
+  }
+
+  const lineChars = (line: string | undefined): number => (line?.length ?? 0) + 1;
+  let unchanged = 0;
+  for (let i = 0; i < start; i += 1) unchanged += lineChars(newLines[i]);
+  for (let i = newEnd; i < newLines.length; i += 1) unchanged += lineChars(newLines[i]);
+
+  const midOld = oldLines.slice(start, oldEnd);
+  const midNew = newLines.slice(start, newEnd);
+  if (midOld.length > 0 && midNew.length > 0 && midOld.length * midNew.length <= LCS_CELL_CAP) {
+    unchanged += lcsCharsOf(midOld, midNew);
+  }
+  return unchanged;
+}
+
+/** Retain at most the last body written to a path, capped — so a pathological run cannot make this
+ *  meter's own memory the problem (spec § Data models, `heredocRewriteWasteChars`). */
+const MAX_RETAINED_BODY_BYTES = 256 * 1024;
+
 /** Per-step tool-economy metrics, derived from a run's NDJSON. */
 export interface StepStats {
   stepId: string;
@@ -277,6 +433,61 @@ export interface StepStats {
    * opt-in, see {@link Tokenize}'s doc comment).
    */
   tokenBreakdown?: TokenBreakdown;
+  /**
+   * Σ `JSON.stringify(input).length` over EVERY tool call attributed to this step, sub-agent calls
+   * INCLUDED — the size of what was emitted to drive tools, as opposed to how many times
+   * (`toolCalls`) or how long the tools took (`toolExecMs`).
+   *
+   * SCOPE: the same scope as `toolCalls`, which also counts children (accumulated before the
+   * `childIds` break below) — a sub-agent's characters are still the run's characters. `ownToolCalls`
+   * already exists for the other reading; no `ownToolInputChars` is added.
+   *
+   * SERIALIZATION IS LOAD-BEARING (spec R9): `JSON.stringify`, not Python `json.dumps` — the two
+   * disagree on separators and on `\uXXXX`-escaping non-ASCII. A test pins the exact encoding.
+   */
+  toolInputChars: number;
+  /**
+   * …of which lives inside a heredoc BODY, measured as the `stripHeredocs()` delta.
+   *
+   * This is a FLOOR, deliberately. `stripHeredocs()` only recognises an opener whose tag ends the
+   * line, so `python3 - <<'PY' > /tmp/out.txt` is invisible to it. **DO NOT WIDEN `stripHeredocs()`
+   * to close that gap** — it also feeds `signalsOf()`, i.e. the `sleepCalls` / `blindSleepCalls` /
+   * `repeatedExpensiveCalls` metrics, whose own doc comment records exactly what widening it would
+   * re-score. Reuse it unchanged; the under-count is accepted (spec § Data models).
+   */
+  heredocChars: number;
+  /**
+   * Heredocs whose BODY IS A FILE'S CONTENT — `cat > P <<T`, `cat >> P <<T`, `cat <<T > P`,
+   * `tee P <<T`, `tee -a P <<T`. Counted per heredoc, not per call: one call may author two files.
+   *
+   * Deliberately narrower than "contains a heredoc": in `python3 - <<'PY' > out.txt` the body is a
+   * SCRIPT and `out.txt` is its stdout, not the heredoc's content — a script that transforms twelve
+   * files is the correct tool and must not score here. `/tmp` scratch scripts DO count: a throwaway
+   * script re-emitted is still re-emitted.
+   */
+  heredocFileWrites: number;
+  /**
+   * …of which target a path this run has ALREADY written or read, EARLIER IN THE SAME RUN — either
+   * (a) the target of another file-authoring heredoc, or (b) read (a `Read` tool call's
+   * `file_path`, or a `cat`/`head`/`tail`/`sed -n …p` argument in a Bash command).
+   *
+   * **This is a DIAGNOSTIC, not the gate** — see `heredocRewriteWasteChars`. A count cannot tell a
+   * wasteful re-emission from a legitimate near-total rewrite; both failure directions of the
+   * predicate are accepted rather than hidden (spec § Data models): it UNDER-reports a file that
+   * existed before the run and was never read first, and it OVER-reports a legitimate full
+   * regeneration that was also read.
+   */
+  heredocRewrites: number;
+  /**
+   * **THE DEFECT, IN CHARACTERS, AND THE ONLY HARD GATE.** For each re-emission, the number of
+   * characters of the new body that are UNCHANGED from the body this run last wrote to that path —
+   * i.e. what was paid for twice and bought nothing. Σ over the step.
+   *
+   * Why this and not `heredocRewrites`: a count punishes the legitimate case — a near-total rewrite
+   * carries almost no unchanged lines and scores ≈ 0 here by construction, where a count would flag
+   * it identically to a byte-identical re-emission.
+   */
+  heredocRewriteWasteChars: number;
 }
 
 /** Which data a step's {@link TokenBreakdown} was computed from. */
@@ -710,6 +921,11 @@ interface Bucket {
   sleepCalls: number;
   blindSleepCalls: number;
   sleepExecMs: number;
+  toolInputChars: number;
+  heredocChars: number;
+  heredocFileWrites: number;
+  heredocRewrites: number;
+  heredocRewriteWasteChars: number;
   /** Every expensive invocation this step made, in order — grouped into repeats after the replay,
    *  because whether a group counts depends on how long its FIRST call took. */
   expensive: Array<{ key: string; callId: string | undefined }>;
@@ -750,6 +966,11 @@ function emptyBucket(): Bucket {
     sleepCalls: 0,
     blindSleepCalls: 0,
     sleepExecMs: 0,
+    toolInputChars: 0,
+    heredocChars: 0,
+    heredocFileWrites: 0,
+    heredocRewrites: 0,
+    heredocRewriteWasteChars: 0,
     expensive: [],
     narrationTexts: [],
     reasoningTexts: [],
@@ -858,6 +1079,14 @@ export function computeRunStats(
   /** Was the previous OWN tool event in THIS step a call? If so, the next call joins its round trip. */
   let openBatchStep: string | undefined;
 
+  /** Run-wide (not per-step): every path a file-authoring heredoc has targeted, or that a `Read`
+   *  call / a `cat`/`head`/`tail`/`sed -n …p` Bash command has read, EARLIER in this same replay. */
+  const seenPaths = new Set<string>();
+  /** Run-wide: the last body written to a path via a file-authoring heredoc — what
+   *  `heredocRewriteWasteChars` diffs the next write to that path against. Capped per
+   *  `MAX_RETAINED_BODY_BYTES`; an oversized body is dropped rather than retained. */
+  const lastBodyByPath = new Map<string, string[]>();
+
   let firstTs: number | undefined;
   let lastTs: number | undefined;
 
@@ -883,6 +1112,40 @@ export function computeRunStats(
         const bucket = bucketFor(key);
         bucket.toolCalls += 1;
         const id = stringOf((event as { id?: unknown }).id);
+
+        // Character economy — SAME SCOPE as `toolCalls` (children included), so this runs before
+        // the childIds break below. See `toolInputChars`' doc comment for why.
+        const input = (event as { input?: unknown }).input;
+        const inputChars = input === undefined ? 0 : JSON.stringify(input).length;
+        bucket.toolInputChars += inputChars;
+
+        const toolName = stringOf((event as { tool?: unknown }).tool);
+        if (toolName === 'Bash' && typeof input === 'object' && input !== null) {
+          const command = commandOf(event);
+          const strippedChars = JSON.stringify({ ...input, command: stripHeredocs(command) }).length;
+          bucket.heredocChars += Math.max(0, inputChars - strippedChars);
+
+          for (const entry of heredocEntriesOf(command)) {
+            const path = authoredPathOf(entry.openerLine);
+            if (path === undefined) continue;
+            bucket.heredocFileWrites += 1;
+            if (seenPaths.has(path)) {
+              bucket.heredocRewrites += 1;
+              const priorBody = lastBodyByPath.get(path);
+              if (priorBody !== undefined) {
+                bucket.heredocRewriteWasteChars += unchangedLineCharsOf(priorBody, entry.body);
+              }
+            }
+            seenPaths.add(path);
+            const bodyBytes = entry.body.reduce((n, l) => n + l.length + 1, 0);
+            if (bodyBytes <= MAX_RETAINED_BODY_BYTES) lastBodyByPath.set(path, entry.body);
+            else lastBodyByPath.delete(path);
+          }
+          for (const readPath of readTargetsOf(command)) seenPaths.add(readPath);
+        } else if (toolName === 'Read') {
+          const filePath = stringOf((input as { file_path?: unknown } | null | undefined)?.file_path);
+          if (filePath !== undefined) seenPaths.add(filePath);
+        }
 
         // A sub-agent's call, spending the CHILD's window. It is counted and then dropped: it
         // must not open a round trip, bill exec time, or claim a dispatch of its own.
@@ -1084,6 +1347,11 @@ export function computeRunStats(
           tokenize,
         )
       : undefined,
+    toolInputChars: b.toolInputChars,
+    heredocChars: b.heredocChars,
+    heredocFileWrites: b.heredocFileWrites,
+    heredocRewrites: b.heredocRewrites,
+    heredocRewriteWasteChars: b.heredocRewriteWasteChars,
   }));
 
   const sum = (pick: (s: StepStats) => number): number => steps.reduce((acc, s) => acc + pick(s), 0);
@@ -1117,6 +1385,11 @@ export function computeRunStats(
       sleepExecMs: sum((s) => s.sleepExecMs),
       repeatedExpensiveCalls: sum((s) => s.repeatedExpensiveCalls),
       tokenBreakdown: withBreakdown.length > 0 ? sumTokenBreakdowns(withBreakdown) : undefined,
+      toolInputChars: sum((s) => s.toolInputChars),
+      heredocChars: sum((s) => s.heredocChars),
+      heredocFileWrites: sum((s) => s.heredocFileWrites),
+      heredocRewrites: sum((s) => s.heredocRewrites),
+      heredocRewriteWasteChars: sum((s) => s.heredocRewriteWasteChars),
     },
   };
 }
@@ -1477,6 +1750,13 @@ function pad(value: string, width: number, right = true): string {
   return right ? value.padStart(width) : value.padEnd(width);
 }
 
+/** Thousands of characters, with the heredoc share beside it — `0.0k` for a step that emitted no
+ *  tool-call input, never blank. */
+function charsK(chars: number, heredocChars: number): string {
+  const pct = chars > 0 ? ` (${Math.round((heredocChars / chars) * 100)}%)` : '';
+  return `${(chars / 1_000).toFixed(1)}k${pct}`;
+}
+
 /**
  * The human table — the same shape as the per-step table in the spec's Problem section, so a
  * before/after pair can be read side by side without arithmetic.
@@ -1503,6 +1783,7 @@ export function formatRunStats(stats: RunStats): string {
     // it, since a bounded poll loop is supposed to show up here.
     pad('sleep', 8),
     pad('re-run', 7),
+    pad('chars k', 14),
   ].join('');
 
   const row = (label: string, s: Omit<StepStats, 'stepId' | 'restarts'>, restarts = 0): string =>
@@ -1521,6 +1802,7 @@ export function formatRunStats(stats: RunStats): string {
       pad(ktok(s.peakContextTokens), 8),
       pad(`${s.blindSleepCalls}/${s.sleepCalls}`, 8),
       pad(String(s.repeatedExpensiveCalls), 7),
+      pad(charsK(s.toolInputChars, s.heredocChars), 14),
     ].join('');
 
   const lines = [
@@ -1551,6 +1833,14 @@ export function formatRunStats(stats: RunStats): string {
       (stats.totals.blindSleepCalls > 0 ? '  (blind = a guessed duration; target 0)' : '') +
       ` · ${stats.totals.repeatedExpensiveCalls} expensive call(s) re-run`,
     ...tokenBreakdownLines(stats),
+    // The waste leads — it is the only one of these that is a defect on its own; a legitimate
+    // near-total rewrite scores ≈ 0 on it (spec `heredocRewriteWasteChars`).
+    `${(stats.totals.heredocRewriteWasteChars / 1_000).toFixed(1)}k chars re-emitted for nothing` +
+      `  (${stats.totals.heredocFileWrites} file-authoring heredocs, ${stats.totals.heredocRewrites} of them re-emissions)`,
+    ` · ${(stats.totals.heredocChars / 1_000).toFixed(1)}k of ${(stats.totals.toolInputChars / 1_000).toFixed(1)}k tool-call input chars were heredoc bodies` +
+      (stats.totals.toolInputChars > 0
+        ? ` (${((stats.totals.heredocChars / stats.totals.toolInputChars) * 100).toFixed(1)}%)`
+        : ''),
   ];
   return lines.join('\n');
 }

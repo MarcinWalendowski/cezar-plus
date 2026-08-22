@@ -4,6 +4,7 @@ import type { RunStore } from '../runs/store.ts';
 import type { RunManager, StartRunInput } from '../workflows/run.ts';
 import type { GithubCandidate } from './github-poller.ts';
 import type { AutomationDefinition } from './types.ts';
+import { automationAuthor } from '../runs/task-author.ts';
 
 const PLACEHOLDERS = new Set([
   'github.kind', 'github.number', 'github.title', 'github.url', 'github.author',
@@ -62,6 +63,11 @@ export async function launchAutomationRun(options: {
     worktree: definition.task.worktree,
     autonomous: definition.task.autonomous,
     generateFollowups: definition.task.generateFollowups,
+    // The one path that already recorded provenance, now recording it at CREATION rather than
+    // only as the post-create `automation` patch below (spec 2026-08-21-task-author-provenance).
+    // The patch is untouched and keeps carrying the receipt/revision/event detail — this is a
+    // pointer to it, and the difference that matters is that a constructor cannot be skipped.
+    author: automationAuthor(definition.id),
   };
   const runs = (definition.task.variants ?? 1) > 1
     ? options.manager.startVariants(workflow, input, definition.task.variants ?? 1)

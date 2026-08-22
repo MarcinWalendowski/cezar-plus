@@ -10,6 +10,7 @@ import { RunManager, type StartRunInput } from '../workflows/run.ts';
 import type { WorkflowDef } from '../workflows/types.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const DISABLED_MESSAGE = 'Codex is disabled. Enable it in Settings → Agents → Providers.';
 
@@ -49,7 +50,7 @@ describe('provider action gating', () => {
   const savedDryRun = process.env.CEZ_DRY_RUN;
   const savedFollowups = process.env.CEZ_FOLLOWUPS;
 
-  const makeRun = (input: StartRunInput): RunRecord => store.createRun({
+  const makeRun = (input: StartRunInput): RunRecord => store.createRun({ author: localCliAuthor(),
     title: 'Task',
     workflow: 'quick-task',
     task: input.task,
@@ -58,7 +59,7 @@ describe('provider action gating', () => {
   });
 
   const createExistingRun = (backend?: ProviderId): RunRecord => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'Existing',
       workflow: 'quick-task',
       task: 'Existing task',
@@ -215,7 +216,7 @@ describe('provider action gating', () => {
   });
 
   it('uses the active step backend, not a later historical step, for a live message', async () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'Retrying',
       workflow: 'mixed',
       task: 'Retrying task',
@@ -274,7 +275,7 @@ describe('the gate verifies before it refuses', () => {
     delete process.env.CEZ_DRY_RUN;
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-gate-verify-'));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
-    startRun = vi.fn((_workflow: WorkflowDef, input: StartRunInput) => store.createRun({
+    startRun = vi.fn((_workflow: WorkflowDef, input: StartRunInput) => store.createRun({ author: localCliAuthor(),
       title: 'Task',
       workflow: 'quick-task',
       task: input.task,
@@ -441,7 +442,7 @@ describe('provider availability preserves existing execution', () => {
 
     const engine = manager as unknown as { pump: () => Promise<void> };
     const pausedPump = vi.spyOn(engine, 'pump').mockResolvedValue();
-    const run = manager.startRun(workflow, {
+    const run = manager.startRun(workflow, { author: localCliAuthor(),
       task: 'mock:native-codex-ask choose a library',
       runner: 'claude',
       worktree: false,

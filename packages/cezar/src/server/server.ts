@@ -49,6 +49,7 @@ import { createBackupRoutes } from './backup-routes.ts';
 import { BackupScheduler } from '../backup/scheduler.ts';
 import { loadBackupConfig } from '../backup/config.ts';
 import { createWorkspaceRunRoutes } from './workspace-run-routes.ts';
+import { authorOf } from './request-author.ts';
 import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -111,6 +112,7 @@ import { discoverSkills } from '../skills.ts';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.ts';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.ts';
 import {
+  clearStartedTaskId,
   createTodo,
   markStarted,
   onTodosChanged,
@@ -4869,6 +4871,10 @@ export function createApp(deps: ServerDeps) {
         // One decision here feeds the run record, the system prompt and
         // CEZ_TODOS_FILE alike (RunManager.agentEnv).
         generateFollowups: capabilities().followups ? parsed.data.generateFollowups : false,
+        // Who asked (spec 2026-08-21-task-author-provenance). Derived from the REQUEST, never
+        // read off the body — `startRunSchema` does not carry an `author` key, so a client
+        // cannot name one, which is what makes this worth reading later.
+        author: authorOf(c, 'composer'),
       };
       const variants = parsed.data.variants ?? 1;
       if (variants > 1) {
@@ -4972,11 +4978,21 @@ export function createApp(deps: ServerDeps) {
       return c.json(store.getRun(id));
     })
 
-    .post('/runs/:id/cancel', (c) => {
-      const { store, manager } = c.get('project');
+    .post('/runs/:id/cancel', async (c) => {
+      const { store, manager, dataDir } = c.get('project');
       const id = c.req.param('id');
       if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
       const cancelled = manager.cancel(id);
+      if (cancelled) {
+        // Best-effort, same shape as `noteTodoStarted` on the start side: un-hiding the
+        // originating todo (2026-08-22-run-cancel-restores-todo.md) must never cost the user the
+        // cancel itself.
+        try {
+          await clearStartedTaskId(dataDir, id);
+        } catch (err) {
+          console.warn(`[cezar] could not clear started-todo link for cancelled run ${id}: ${String(err)}`);
+        }
+      }
       return c.json({ cancelled });
     })
 
@@ -5048,7 +5064,7 @@ export function createApp(deps: ServerDeps) {
           .map((b) => b.text)
           .join('\n');
         const images = content.filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image');
-        const resumed = manager.continueRun(id, { text, images });
+        const resumed = await manager.continueRun(id, { text, images });
         if (resumed.ok) return c.json({ continued: true });
         return c.json({ error: resumed.error ?? 'session closed' }, 409);
       }
@@ -5168,7 +5184,7 @@ export function createApp(deps: ServerDeps) {
       }
       const blocked = await providerActionError([providerForExistingRun(run, parsed.data.runner)]);
       if (blocked) return c.json({ error: blocked }, 409);
-      const result = manager.continueRun(id, {
+      const result = await manager.continueRun(id, {
         text: parsed.data.text,
         images: parsed.data.images?.map((img): ContentBlock => ({
           type: 'image',
@@ -5813,7 +5829,9 @@ export function createApp(deps: ServerDeps) {
     // separate inbox feature happens to be on.
     .post('/todos', jsonZodValidator(() => createTodoInputSchema), async (c) => {
       const { dataDir } = c.get('project');
-      const todo = await createTodo(dataDir, c.req.valid('json'));
+      // `author` is a separate argument, never a body key: `createTodoInputSchema` omits it for
+      // the same reason it omits `archivedAt`. See `runs/task-author.ts`.
+      const todo = await createTodo(dataDir, c.req.valid('json'), authorOf(c, 'todo-create-route'));
       const body: CreateTodoResponse = { todo };
       return c.json(body, 201);
     })
@@ -5882,6 +5900,11 @@ export function createApp(deps: ServerDeps) {
           task,
           runner: parsed.data?.runner,
           model: parsed.data?.model,
+          // A PERSON clicked ▶ Run, so the RUN's author is that person — not the agent that filed
+          // the todo, which keeps its own author on its own record. `todo.startedTaskId` already
+          // joins the two, so both facts stay recoverable and neither overwrites the other. The
+          // autostart path (`todo-autostart.ts`) is the opposite case and inherits instead.
+          author: authorOf(c, 'todo-start'),
         });
         await markStarted(dataDir, id, run.id);
         return c.json({ run }, 201);
@@ -6711,7 +6734,7 @@ export function createApp(deps: ServerDeps) {
     store: noteStore,
     pipeline: {
       process: (noteId) => noteProcessor.process(noteId),
-      approve: (noteId, input) => noteApprover.approve(noteId, input),
+      approve: (noteId, input, author) => noteApprover.approve(noteId, input, author),
     },
   });
   // The autonomous implementation continuation trigger (PLAN D27 Phase 3, `.ai/specs/2026-08-15-
@@ -6893,6 +6916,10 @@ export function createApp(deps: ServerDeps) {
     workflow: run.workflow,
     ...(run.branch !== undefined ? { branch: run.branch } : {}),
     ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
+    // Provenance for the global board's Author column (2026-08-21-task-author-provenance). Sent
+    // whole rather than pre-rendered: the cross-project board is the one surface that can turn an
+    // agent author's parent id into a link, because it alone holds every project's rows.
+    ...(run.author !== undefined ? { author: run.author } : {}),
     // The tracker-reference inputs, verbatim — the cockpit's `taskReference()` owns the rule
     // that picks between them (see the schema's note).
     ...(run.pullRequestUrl !== undefined ? { pullRequestUrl: run.pullRequestUrl } : {}),
@@ -6903,6 +6930,12 @@ export function createApp(deps: ServerDeps) {
     ...(run.issueNumber !== undefined ? { issueNumber: run.issueNumber } : {}),
     ...(run.referencedIssueUrl !== undefined ? { referencedIssueUrl: run.referencedIssueUrl } : {}),
     ...(run.markerRefs !== undefined ? { markerRefs: run.markerRefs } : {}),
+    ...(run.referencedPrCandidates !== undefined
+      ? { referencedPrCandidates: run.referencedPrCandidates }
+      : {}),
+    ...(run.referencedIssueCandidates !== undefined
+      ? { referencedIssueCandidates: run.referencedIssueCandidates }
+      : {}),
     ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
     ...(run.contextTokens !== undefined ? { contextTokens: run.contextTokens } : {}),
     ...(run.contextWindow !== undefined ? { contextWindow: run.contextWindow } : {}),
@@ -7113,6 +7146,15 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     listProjects,
     semaphore: deps.semaphore,
     automationStore: (projectId, root) => automationCoordinator.store(projectId, root)!,
+    // Spec 2026-08-22-cross-project-worktree-orphan-prune-safety, Phase 3 prerequisite: without
+    // this, `deps.bootRoot` never reaches `ProjectContexts` in production (`createApp`'s own
+    // `bootRoot`-carrying `ProjectContexts` construction below is dead code — `deps.contexts` is
+    // already non-undefined by the time it gets there), so the cross-project ownership check's
+    // boot-root candidate is silently empty and the 232ad6d4 incident's exact failure mode — the
+    // boot root's OWN workspace-run records being invisible to a `listProjects()`-only check —
+    // stays open. Also activates the pre-existing `boot-root-conflict` guard (409) for any
+    // registered project whose root equals `deps.repoRoot`; see that spec's Risks.
+    bootRoot: deps.repoRoot,
   });
   // #801: GitHub automations are opt-in. Off, the flag must remove the BEHAVIOR and not merely
   // the UI — no scheduler, no GitHub polling, no launched runs — so every entry point into the

@@ -4,6 +4,7 @@ import {
   AUTONOMOUS_IMPLEMENTATION_WORKFLOW,
   BRIEFS_DIR,
   DEFAULT_ALLOWED_TOOLS,
+  FILE_WRITE_RECIPE,
   RECORD_READ_RECIPE,
   parseReviewVerdict,
   SPEC_TO_DEPLOY_WORKFLOW,
@@ -138,6 +139,27 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     expect(review?.prompt).toContain('CEZ:REVIEW=revise');
   });
 
+  /**
+   * spec `.ai/specs/2026-08-21-structured-review-targeted-spec-edits.md`: a `revise` verdict must
+   * be a change list the `spec` step can apply mechanically, not prose it has to re-derive. This
+   * pins the required shape and the two regression guards the spec calls out: the pre-existing
+   * "judge the spec, not its prose" discipline must survive, and both verdict markers must still
+   * be present so `parseReviewVerdict` keeps working.
+   */
+  it('review-spec is required to write its `revise` verdict as a FILE/SECTION/CHANGE list', () => {
+    const review = stepById('review-spec');
+    expect(review?.prompt).toContain('FILE:');
+    expect(review?.prompt).toContain('SECTION:');
+    expect(review?.prompt).toContain('CHANGE:');
+    // The structural-rewrite escape hatch — the one case re-emitting the whole file is correct.
+    expect(review?.prompt).toContain('structural rewrite');
+    expect(review?.prompt).toContain('CEZ:REVIEW=pass');
+    expect(review?.prompt).toContain('CEZ:REVIEW=revise');
+    expect(review?.prompt).toContain(
+      'Judge the spec, not its prose. `revise` is for a spec that is wrong, incomplete against the',
+    );
+  });
+
   it('only the review step is gated — the gate is not quietly on the whole chain', () => {
     const gated = SPEC_TO_DEPLOY_WORKFLOW.steps.filter((s) => s.requiresApproval).map((s) => s.id);
     expect(gated).toEqual(['review-spec']);
@@ -167,6 +189,26 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     // is left unpinned to fall through to the composer's pick.
     expect(models.filter(([, m]) => m === 'opus').map(([id]) => id)).toEqual(['review-spec']);
     expect(models.filter(([, m]) => !m)).toEqual([]);
+  });
+
+  /**
+   * `.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`, Phase 1: `run-tests` alone gets an
+   * `effort` ceiling. Every other step must stay `undefined` — a step that silently gained one
+   * would be capped on reasoning depth with no reviewer having decided that, the same vacuous-
+   * failure shape the model-policy test above guards against.
+   */
+  it('caps run-tests to medium effort and leaves every other step unset', () => {
+    const efforts = SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => [s.id, s.effort] as const);
+    expect(efforts).toEqual([
+      ['context', undefined],
+      ['spec', undefined],
+      ['review-spec', undefined],
+      ['implement', undefined],
+      ['run-tests', 'medium'],
+      ['commit-push', undefined],
+      ['document', undefined],
+      ['deploy', undefined],
+    ]);
   });
 
   it('names models this runner actually offers, so a typo cannot fall through', () => {
@@ -337,6 +379,22 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     }
   });
 
+  /**
+   * `.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`, Phase 2: the diagnostic-depth ceiling
+   * ("stop once a control proves not-mine") and the output-discipline clause ("quote verbatim,
+   * never re-explain the diff") — the behavioral lever alongside Phase 1's mechanical `effort` cap.
+   */
+  it('tells run-tests to stop diagnosing once a control proves the failure is not mine, and to quote rather than narrate', () => {
+    const prompt = stepById('run-tests')?.prompt ?? '';
+    expect(prompt).toContain('not mine');
+    expect(prompt).toContain('Stop there');
+    expect(prompt).toMatch(/does not contain this run's\s*\nchange/);
+    expect(prompt).toContain('cezar todo add');
+    expect(prompt).toContain('Report pass/fail plainly');
+    expect(prompt).toContain('Quote the');
+    expect(prompt).toContain('never re-explain what the diff changed');
+  });
+
   it('makes implement and run-tests re-slice a saved log instead of re-running the command', () => {
     // The carve-out from the batching doctrine's bounding rule: on run `7c2dd8f0`, 18 repeated
     // expensive calls cost 5.9 min, headed by one test file run 11 times for 11 different filters.
@@ -394,6 +452,47 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     // takes. `buildAllowedTools()` turns `Bash` + no allowlist into plain, unrestricted `Bash`.
     expect(deploy?.allowedTools).toContain('Bash');
     expect(deploy?.bashAllowlist).toBeUndefined();
+  });
+});
+
+/**
+ * The file-write recipe (spec `.ai/specs/2026-08-21-edit-an-existing-file-never-re-emit-it.md`,
+ * L1/L3): overrides bypass mode's Bash-first preference FOR FILE MUTATION ONLY, in the three
+ * write-heavy steps of this workflow.
+ */
+describe('FILE_WRITE_RECIPE', () => {
+  const stepById = (id: string) => SPEC_TO_DEPLOY_WORKFLOW.steps.find((s) => s.id === id);
+
+  it('overrides the bypass-mode Bash preference for FILE EDITS in all three write-heavy steps', () => {
+    for (const id of ['spec', 'implement', 'document']) {
+      expect(stepById(id)?.prompt, id).toContain(FILE_WRITE_RECIPE);
+    }
+    const t = FILE_WRITE_RECIPE.replace(/\s+/g, ' ');
+    // It overrides, explicitly and by name — a rule that does not mention what it overrides loses.
+    expect(t).toContain('OVERRIDES');
+    expect(t).toContain('for file mutation only');
+    // Criterion 2: the WHY travels with the rule, with numbers, so it cannot be deleted as
+    // boilerplate. Both figures are DIRECT COUNTS that survive any change to how heredoc bodies are
+    // parsed — revision 1 pinned a share (274,926/465,531) that the meter's own implementation then
+    // failed to reproduce. Do not put a parse-dependent number in prompt text.
+    expect(t).toContain('an edit costs the CHANGE, a heredoc costs the FILE');
+    expect(t).toMatch(/360 tool calls, ZERO `Edit`, ZERO `Write`/);
+    expect(t).toMatch(/34,845 characters, then 48,618, of which 20,550/);
+    // R10: without this the conversion can cost more round trips than it saves characters.
+    expect(t).toMatch(/PARALLEL edit calls in ONE turn/);
+    // R11: the rule is conditional on how much of the file changes, not on whether it existed.
+    expect(t).toContain('when you are genuinely rewriting MOST of a file');
+    expect(t).toContain('Judge by how much of the file changes');
+    // The carve-outs, or it collides with the doctrine's (correct) shell-first reading rules.
+    expect(t).toContain('a file that does not exist yet');
+    expect(t).toContain('scripted multi-file transform');
+    expect(t).toContain('that rule is about reading, this one is about writing');
+    // R2: the recovery path, or a failed match becomes the exact defect this forbids.
+    expect(t).toContain('Do NOT fall back to rewriting the whole file');
+  });
+
+  it('grants the spec step the editor tool it is now told to use', () => {
+    expect(stepById('spec')?.allowedTools).toContain('Edit');
   });
 });
 

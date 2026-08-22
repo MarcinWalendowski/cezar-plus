@@ -15,11 +15,12 @@ import {
   providerAuthChecksDisabled,
 } from './core/provider-auth.ts';
 import { applyProviderEnablement } from './core/provider-availability.ts';
-import { pruneOrphans } from './git-worktree.ts';
+import { canonicalPath, pruneOrphans } from './git-worktree.ts';
 import { getRepoInfo } from './server/git.ts';
 import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveWorktreeRetention } from './config.ts';
 import { reclaimWorktrees } from './runs/retention.ts';
 import { RunStore } from './runs/store.ts';
+import { findForeignWorkspaceOwner, loadForeignWorkspaceRunSources } from './runs/worktree-ownership.ts';
 import { runRunStatsCommand } from './runs/stats-cli.ts';
 import { runRunsCommand } from './runs/reopen-cli.ts';
 import { RunManager } from './workflows/run.ts';
@@ -38,6 +39,7 @@ import {
   unavailableProviderMessage,
 } from './server/provider-action-gate.ts';
 import { checkForUpdate } from './update-check.ts';
+import { ensureBootRepo, holdsOnlyRuntimeState } from './workspace/boot-repo.ts';
 import { loadWorkspaceConfig } from './workspace/config.ts';
 import { runMigrations } from './workspace/migrations.ts';
 import { shouldRegisterProject } from './workspace/projects.ts';
@@ -45,6 +47,7 @@ import { runProjectsCommand } from './workspace/projects-cli.ts';
 import { runBackupCommand } from './backup/cli.ts';
 import { runKnowledgeCommand } from './knowledge/cli.ts';
 import { runTodoCommand } from './todo-cli.ts';
+import { localCliAuthor } from './runs/task-author.ts';
 import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 // FIX 6 (D13 repair pass 1): the production `listRegisteredProjectRoots` supplier lives in
 // `./registered-project-roots.ts` for the same reason `./auth-boot-gate.ts` was extracted from this
@@ -90,6 +93,8 @@ Usage:
                                                       auto-roll-back (spec 2026-08-19)
                               --rollback[=<id>]       flip back to the previous release + restart
                               --follow                tail the deploy running in its own unit
+                              --dry-run               print the plan, change nothing
+                                                      (also: CEZ_DRY_RUN=1)
   cezar server-migrate-releases
                             one-shot: /opt/cezar → release symlink + socket/slice units (--yes to apply)
   cezar server-uninstall    reverse a server-install
@@ -267,6 +272,7 @@ async function main(): Promise<void> {
       strategy: { type: 'string' },
       rollback: { type: 'string' },
       follow: { type: 'boolean', default: false },
+      'dry-run': { type: 'boolean', default: false },
       source: { type: 'string' },
       'link-path': { type: 'string' },
       'releases-dir': { type: 'string' },
@@ -350,6 +356,9 @@ async function main(): Promise<void> {
       // boots before it is live, flip a symlink, restart, probe, and roll back on its own if the
       // probe fails. `--rollback` is the same machinery pointed backwards.
       const strategy = values.strategy ?? (values.rollback !== undefined ? 'blue-green' : 'restart');
+      // The flag and the env var mean the same thing everywhere `server-deploy` can run, not just
+      // on blue-green — see `.ai/specs/2026-08-22-server-deploy-dry-run-flag.md`.
+      const dryRun = Boolean(values['dry-run']) || process.env.CEZ_DRY_RUN === '1';
       if (strategy !== 'restart') {
         process.exitCode = await releaseDeployCommand({
           strategy,
@@ -363,12 +372,14 @@ async function main(): Promise<void> {
           port: portExplicit ? Number(values.port) : undefined,
           sha: values.sha,
           note: values.note,
+          dryRun,
         });
         return;
       }
       await serverCommand('deploy', repoRoot, values.platform, {
         yes: Boolean(values.yes),
         domain: values.domain,
+        dryRun,
       });
       return;
     }
@@ -456,6 +467,37 @@ async function initWorkspace(repoRoot: string, bindHost?: string): Promise<strin
     console.warn(`[cez] workspace registry unavailable (${message}) — continuing without it`);
   }
   return undefined;
+}
+
+/**
+ * Change A of `.ai/specs/2026-08-21-workspace-boot-repo-and-always-worktrees.md`: if the launch
+ * directory is cezar's own scratch root, make it a git repository so tasks homed there can be
+ * isolated, and tell the `RunManager` that is what it is bound to.
+ *
+ * The `holdsOnlyRuntimeState` gate is the whole safety of this: `cezar serve` is routinely
+ * launched from inside a real project, and boot never registers the launch directory
+ * (`suppressBootRegistration` is unconditional), so nothing else distinguishes the two. A repo
+ * that holds work keeps every behaviour it has today.
+ *
+ * Idempotent and never fatal. A failure here degrades to exactly the pre-spec behaviour — the
+ * root stays non-git, tasks run in place one at a time — so it is a warning, not a boot failure
+ * (`AGENTS.md`: degrade, never fail the boot). The flag is still returned in that case: grant
+ * adoption (change C) needs no repository at the boot root, and it is the half that answers the
+ * owner's report.
+ */
+async function prepareBootScratchRoot(repoRoot: string): Promise<boolean> {
+  if (!(await holdsOnlyRuntimeState(repoRoot))) return false;
+  const outcome = await ensureBootRepo(repoRoot);
+  if ('error' in outcome) {
+    console.warn(
+      `[cez] could not make the boot root a git repository (${outcome.error}) — tasks homed in ${repoRoot} will run in place, one at a time`,
+    );
+    return true;
+  }
+  if (outcome.state === 'created') {
+    console.log(`  initialized the boot root as a git repository (branch ${outcome.branch}) so tasks homed here isolate`);
+  }
+  return true;
 }
 
 // ---- serve -----------------------------------------------------------------
@@ -658,10 +700,13 @@ async function serveCommand(
   // cache hook's first call; PUT /api/workspace/config (step 2.7) re-fires it.
   const semaphore = new WorkspaceSemaphore();
   await semaphore.refresh();
+  // Before the store opens and before anything pumps: `getRepoInfo(repoRoot)` below, the startup
+  // worktree reconcile, and `manager.recover()` must all see the repository if there is to be one.
+  const bootScratchRoot = await prepareBootScratchRoot(repoRoot);
   // keepLive + recover() (#367): runs that were queued/running/waiting when
   // the previous process exited are re-queued or resumed instead of failed.
   const store = openStore(repoRoot, { keepLive: true });
-  const manager = new RunManager(store, repoRoot, { semaphore });
+  const manager = new RunManager(store, repoRoot, { semaphore, bootScratchRoot });
   const providerAuth = new ProviderAuthService();
   const workspaceEvents = new WorkspaceEventBus();
   const providerRuntimeAuth = new ProviderRuntimeAuthObserver(providerAuth, (status) => {
@@ -674,11 +719,28 @@ async function serveCommand(
 
   // Startup reconcile (spec 006): sweep worktrees whose run no longer exists.
   if (repo) {
-    const orphans = await pruneOrphans(repoRoot, new Set(store.listRuns().map((r) => r.id))).catch(
-      () => [] as string[],
+    // Cross-project ownership check (spec 2026-08-22-cross-project-worktree-orphan-prune-safety,
+    // Layer 1): this process IS the boot root, so its own candidate list is every OTHER registered
+    // project (no separate boot-root entry needed — the `!= repoRoot` filter would drop it anyway).
+    // `loadWorkspaceConfig()` is the cheap raw registry read — `listProjects()` additionally shells
+    // out a git status/branch probe per project, unneeded cost on the hot boot path.
+    const registeredProjects = (await loadWorkspaceConfig()).projects.filter(
+      (p) => canonicalPath(p.root) !== canonicalPath(repoRoot),
     );
-    if (orphans.length > 0) {
-      console.log(`  cleaned ${orphans.length} orphaned worktree(s): ${orphans.map((id) => id.slice(0, 8)).join(', ')}`);
+    const foreignSources = loadForeignWorkspaceRunSources(repoRoot, registeredProjects);
+    const unreadableSource = foreignSources.find((s) => s.unreadable);
+    const orphans = await pruneOrphans(repoRoot, new Set(store.listRuns().map((r) => r.id)), {
+      findForeignOwner: (path) => findForeignWorkspaceOwner(repoRoot, path, foreignSources),
+      trunkRef: repo.branch,
+      ownershipCheckUnavailable: unreadableSource
+        ? { reason: `project "${unreadableSource.projectName}"'s runs.json could not be read` }
+        : undefined,
+    }).catch(() => ({ removed: [] as string[], declined: [] as { id: string; reason: string }[] }));
+    if (orphans.removed.length > 0) {
+      console.log(`  cleaned ${orphans.removed.length} orphaned worktree(s): ${orphans.removed.map((id) => id.slice(0, 8)).join(', ')}`);
+    }
+    if (orphans.declined.length > 0) {
+      console.log(`  declined to reclaim ${orphans.declined.length} worktree(s): ${orphans.declined.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
     }
     // Count-based worktree retention (#483): reclaim finished worktrees beyond
     // the keep-limit (directory only — `cez/<id8>` branch kept, so recoverable).
@@ -894,6 +956,7 @@ async function runCommand(
     }
   }
 
+  const bootScratchRoot = await prepareBootScratchRoot(repoRoot);
   const store = openStore(repoRoot);
   // Headless tasks still appear in the cockpit later, so persist the same
   // task-local recovery event when a credential expires after the preflight.
@@ -903,7 +966,7 @@ async function runCommand(
   // 2.5) — one refreshed semaphore, even with just one manager in play.
   const semaphore = new WorkspaceSemaphore();
   await semaphore.refresh();
-  const manager = new RunManager(store, repoRoot, { semaphore });
+  const manager = new RunManager(store, repoRoot, { semaphore, bootScratchRoot });
 
   store.on('event', ({ event }) => {
     switch (event.type) {
@@ -932,7 +995,9 @@ async function runCommand(
     }
   });
 
-  const run = manager.startRun(workflow, { task, model });
+  // A person typing at a terminal is a `user` with id `local` — the `approverOf` rule
+  // (spec 2026-08-21-task-author-provenance). There is no session and no request here.
+  const run = manager.startRun(workflow, { task, model, author: localCliAuthor('cli-run') });
   // `review` is terminal here too (spec 009) — headless runs must not hang on
   // the GUI's review gate; the diff waits on the task branch/cockpit instead.
   const final = await new Promise<string>((resolveStatus) => {
@@ -988,6 +1053,7 @@ async function serverCommand(
     port?: number;
     externalProxy?: boolean;
     bindHost?: string;
+    dryRun?: boolean;
   },
 ): Promise<void> {
   // Detection (claude/gh/codex) and tool installs resolve executables off the
@@ -1061,7 +1127,7 @@ async function serverCommand(
   }
 
   const runOpts = {
-    dryRun: process.env.CEZ_DRY_RUN === '1',
+    dryRun: process.env.CEZ_DRY_RUN === '1' || Boolean(flags.dryRun),
     assumeYes: flags.yes,
     reconfigure: new Set((flags.reconfigure ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
     reinstall: Boolean(flags.reinstall),

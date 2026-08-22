@@ -9,6 +9,7 @@ import type { RunRecord } from '../runs/store.ts';
 import type { WorkflowDef } from '../workflows/types.ts';
 import type { StartRunInput } from '../workflows/run.ts';
 import { loadWorkspaceGrant, type WorkspaceGrant } from '../workspace/granted-roots.ts';
+import { authorOf } from './request-author.ts';
 
 /**
  * `POST /api/v1/workspace/runs` — the composer's Workspace submit path
@@ -38,6 +39,18 @@ import { loadWorkspaceGrant, type WorkspaceGrant } from '../workspace/granted-ro
  *     and every restart re-applies that stored list — see `runRecordSchema.workspaceProjects`.
  *  3. The boot project as the run's home, because a `RunManager` is bound to a repository and
  *     this is the one every workspace-level pass already uses.
+ *
+ *     **Amended 2026-08-21** (spec `2026-08-21-workspace-boot-repo-and-always-worktrees.md`).
+ *     The boot root IS a git repository now — `workspace/boot-repo.ts#ensureBootRepo` init-plus-
+ *     commits it at boot, tracking two files with `.ai/` and `.claude/` ignored. Nothing on this
+ *     route changes: a workspace run still takes the earlier `isWorkspaceRun` branch and never
+ *     touches the boot repo. What changed is what happens to a run that reaches the boot root
+ *     WITHOUT the grant this route is the only writer of. Nine other `startRun` call sites omit
+ *     it, and such a run used to fall into the ordinary non-git branch — running in the scratch
+ *     root itself, holding its exclusive lease, capped at one at a time (measured: run
+ *     `50ce87f1`, 85 minutes). `run.ts#adoptWorkspaceGrant` now loads the same grant this route
+ *     loads and puts the run back on this path. So a run fixed there is indistinguishable on the
+ *     wire from one submitted here, which is the point.
  *
  * Everything else — model policy, provider availability, agent account, workflow resolution — is
  * INJECTED, not re-implemented. Those guards belong to `POST /runs` and must answer identically
@@ -127,6 +140,10 @@ export function createWorkspaceRunRoutes(deps: WorkspaceRunRouteDeps) {
                 source: { type: 'base64' as const, media_type: img.mediaType, data: img.data },
               })),
             }),
+        // Who asked (spec 2026-08-21-task-author-provenance) — the same request-derived answer
+        // `POST /runs` gives, through the same helper, so the two composer submits can never
+        // disagree about who started a task.
+        author: authorOf(c, 'workspace-composer'),
         // The two decisions this route owns.
         worktree: false,
         workspaceProjects: grant.projects,

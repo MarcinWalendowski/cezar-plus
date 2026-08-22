@@ -1,10 +1,10 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { brokerRequest } from './broker-client.ts';
-import { BrokeredSession } from './brokered-session.ts';
+import { BrokeredSession, PENDING_MAX_ATTEMPTS } from './brokered-session.ts';
 import { startRunBroker } from './run-broker.ts';
 
 /**
@@ -220,4 +220,55 @@ describe('BrokeredSession', () => {
     expect(session.open).toBe(false);
     expect(session.sendMessage([{ type: 'text', text: 'z' }])).toBe(false);
   });
+
+  // 2026-08-22-run-broker-cli-keepalive: the poll timer must hold a one-shot `cezar run` process
+  // open while a session is genuinely in flight, and the exhausted-retry give-up path must
+  // actually settle `result` instead of leaving it — and the process — hanging forever.
+  it('the poll timer is ref\'d while the session is open and cleared once it ends', async () => {
+    const spool = join(scratch(), 'run.spool');
+    const broker = startRunBroker({ spoolDir: spool, runId: 'b6', backend: 'claude', command: echoBackend() });
+    const clearSpy = vi.spyOn(global, 'clearInterval');
+    const session = new BrokeredSession({ spoolDir: spool, onLine: () => {}, pollMs: 10 });
+    const timer = (session as unknown as { timer?: NodeJS.Timeout }).timer;
+    // `setInterval` handles are ref'd by default; P1's fix is simply the absence of the
+    // `.unref()` call that used to follow construction — this is the process-keep-alive half of
+    // the mechanism (the actual process-exit proof lives at the e2e level; see the spec's
+    // Verification §1 note on why a same-process unit test cannot observe an event-loop drain).
+    expect(timer?.hasRef()).toBe(true);
+    expect(clearSpy).not.toHaveBeenCalled();
+
+    session.detach();
+    expect(clearSpy).toHaveBeenCalledWith(timer);
+    clearSpy.mockRestore();
+    await brokerRequest(spool, { op: 'end' });
+    await broker.finished;
+  }, TEST_TIMEOUT_MS);
+
+  it(`gives up and rejects result within ${PENDING_MAX_ATTEMPTS} attempts when no broker ever answers`, async () => {
+    const spool = join(scratch(), 'no-broker.spool');
+    // Short `pollMs` (5ms) scales the ~`PENDING_MAX_ATTEMPTS`-attempt give-up budget down in real
+    // time too, since it's attempt-counted rather than wall-clock — keeps this test fast without
+    // changing the production 5s/100-attempt tuning (`SPOOL_POLL_MS`/`PENDING_MAX_ATTEMPTS`).
+    const session = new BrokeredSession({ spoolDir: spool, onLine: () => {}, pollMs: 5 });
+    const start = Date.now();
+    expect(session.sendMessage([{ type: 'text', text: 'hello' }])).toBe(true);
+
+    await expect(session.result).rejects.toThrow(/did not respond/);
+    expect(session.open).toBe(false);
+    expect(Date.now() - start).toBeLessThan(5_000);
+  }, TEST_TIMEOUT_MS);
+
+  it('a spawn failure takes precedence over the generic give-up message', async () => {
+    const spool = join(scratch(), 'no-broker-spawn-failed.spool');
+    const spawnErr = new Error('boom: broker exec failed');
+    const session = new BrokeredSession({
+      spoolDir: spool,
+      onLine: () => {},
+      pollMs: 5,
+      spawnFailed: () => spawnErr,
+    });
+    expect(session.sendMessage([{ type: 'text', text: 'hello' }])).toBe(true);
+
+    await expect(session.result).rejects.toBe(spawnErr);
+  }, TEST_TIMEOUT_MS);
 });

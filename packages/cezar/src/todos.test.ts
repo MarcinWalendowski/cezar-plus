@@ -4,7 +4,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { todoItemSchema } from '@loki-labs/better-cezar-contract';
-import { createTodo, onTodosChanged, readTodos, todoSchema, todosPath, todosWatchActive, updateTodo } from './todos.ts';
+import {
+  clearStartedTaskId,
+  createTodo,
+  onTodosChanged,
+  readTodos,
+  todoSchema,
+  todosPath,
+  todosWatchActive,
+  updateTodo,
+} from './todos.ts';
+import { localCliAuthor } from './runs/task-author.ts';
 
 /**
  * Per-dataDir todos watch (multi-project spec, step 2.3): each project's
@@ -280,6 +290,26 @@ describe('updateTodo', () => {
     expect('archivedAt' in (stored as object)).toBe(false);
   });
 
+  /**
+   * The maintenance path a wrong-diagnosis correction needs (2026-08-22). The workspace rule is
+   * that a falsehood in a HEADING gets fixed in the heading — for a todo that is `summary`, the
+   * only field the board renders — so correcting `context` alone leaves the board still
+   * advertising the disproved theory.
+   */
+  it('sets summary, so a todo founded on a wrong diagnosis can be corrected where readers see it', async () => {
+    await seed({ id: 't1', summary: 'wait on liveness, then retry the step' });
+    const result = await updateTodo(dataDir, 't1', { summary: 'the scope unit name collided — fixed' });
+    expect(result?.summary).toBe('the scope unit name collided — fixed');
+    const [stored] = await readTodos(dataDir);
+    expect(stored?.summary).toBe('the scope unit name collided — fixed');
+  });
+
+  it('leaves summary alone when the patch does not carry it', async () => {
+    await seed({ id: 't1', summary: 'Ship it' });
+    const result = await updateTodo(dataDir, 't1', { status: 'done' });
+    expect(result?.summary).toBe('Ship it');
+  });
+
   it('returns undefined for an unknown id and writes nothing', async () => {
     await seed({ id: 't1', summary: 'Ship it' });
     const result = await updateTodo(dataDir, 'nope', { status: 'done' });
@@ -325,6 +355,75 @@ describe('updateTodo', () => {
 });
 
 /**
+ * `clearStartedTaskId` (2026-08-22-run-cancel-restores-todo.md) — the inverse of `markStarted`,
+ * called from the cancel route. Keyed by `startedTaskId`, not `id`: the cancel route only ever has
+ * the run id, never the todo it was started from. `todos-patch.test.ts`-style route coverage lives
+ * in `server/run-cancel-todo.test.ts`; these exercise the primitive directly.
+ */
+describe('clearStartedTaskId', () => {
+  let root: string;
+  let dataDir: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cez-todos-clear-started-'));
+    dataDir = join(root, '.ai/cezar');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const seed = async (todo: object) => {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(join(dataDir, 'todos.json'), JSON.stringify([todo]), 'utf8');
+  };
+
+  it('finds the todo by startedTaskId — NOT by its own id — and deletes the KEY entirely', async () => {
+    await seed({ id: 't1', summary: 'Ship it', startedTaskId: 'run-abc' });
+    const result = await clearStartedTaskId(dataDir, 'run-abc');
+    expect(result).toBeDefined();
+    expect('startedTaskId' in (result as object)).toBe(false);
+    const [stored] = await readTodos(dataDir);
+    expect('startedTaskId' in (stored as object)).toBe(false);
+  });
+
+  it('returns undefined when no todo references the given run id, and writes nothing', async () => {
+    await seed({ id: 't1', summary: 'Ship it', startedTaskId: 'run-abc' });
+    const result = await clearStartedTaskId(dataDir, 'run-does-not-exist');
+    expect(result).toBeUndefined();
+    const [stored] = await readTodos(dataDir);
+    expect(stored?.startedTaskId).toBe('run-abc');
+  });
+
+  it('a write blocked on a held lease waits, then applies once the lease frees', async () => {
+    await seed({ id: 't1', summary: 'Ship it', startedTaskId: 'run-abc' });
+
+    // Same real held lock file as `updateTodo`'s own lease test above, not an in-process
+    // ordering accident.
+    const lockPath = join(dataDir, 'todos.lock');
+    const fd = openSync(lockPath, 'wx', 0o600);
+    writeFileSync(fd, JSON.stringify({ pid: 999_999, startedAt: new Date().toISOString() }));
+
+    const clearPromise = clearStartedTaskId(dataDir, 'run-abc');
+    let settled = false;
+    void clearPromise.then(() => {
+      settled = true;
+    });
+
+    // Several retry cycles' worth of time (backoff starts at 10ms, caps at 200ms) — long enough
+    // to prove the write is actually WAITING on the lease, not failing fast or skipping silently.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(settled).toBe(false);
+
+    closeSync(fd);
+    unlinkSync(lockPath);
+
+    const result = await clearPromise;
+    expect(result && 'startedTaskId' in result).toBe(false);
+  }, 10_000);
+});
+
+/**
  * `createTodo` (2026-08-15-knowledge-grounded-task-fanout.md, Phase 1) — the primitive behind
  * `POST /todos`, and the concurrency risk the spec calls out by name: until now the only writer
  * besides the server was an agent subprocess appending to the same file, and `todos.ts` does a
@@ -345,7 +444,7 @@ describe('createTodo', () => {
   });
 
   it('assigns id and ts, and appends to an empty inbox', async () => {
-    const todo = await createTodo(dataDir, { summary: 'First task' });
+    const todo = await createTodo(dataDir, { summary: 'First task' }, localCliAuthor('cli-todo-add'));
     expect(todo.id).toBeTruthy();
     expect(todo.ts).toBeTruthy();
     expect(todo.summary).toBe('First task');
@@ -353,16 +452,16 @@ describe('createTodo', () => {
   });
 
   it('appends without disturbing an existing entry', async () => {
-    const first = await createTodo(dataDir, { summary: 'First' });
-    const second = await createTodo(dataDir, { summary: 'Second' });
+    const first = await createTodo(dataDir, { summary: 'First' }, localCliAuthor('cli-todo-add'));
+    const second = await createTodo(dataDir, { summary: 'Second' }, localCliAuthor('cli-todo-add'));
     const items = await readTodos(dataDir);
     expect(items.map((t) => t.id).sort()).toEqual([first.id, second.id].sort());
   });
 
   it('two createTodo calls racing the same dataDir both survive — the write lease actually serializes them', async () => {
     const [a, b] = await Promise.all([
-      createTodo(dataDir, { summary: 'Racer A' }),
-      createTodo(dataDir, { summary: 'Racer B' }),
+      createTodo(dataDir, { summary: 'Racer A' }, localCliAuthor('cli-todo-add')),
+      createTodo(dataDir, { summary: 'Racer B' }, localCliAuthor('cli-todo-add')),
     ]);
     expect(a.id).not.toBe(b.id);
     const items = await readTodos(dataDir);
@@ -373,7 +472,7 @@ describe('createTodo', () => {
 
   it('twenty concurrent createTodo calls all survive', async () => {
     const results = await Promise.all(
-      Array.from({ length: 20 }, (_, i) => createTodo(dataDir, { summary: `Task ${i}` })),
+      Array.from({ length: 20 }, (_, i) => createTodo(dataDir, { summary: `Task ${i}` }, localCliAuthor('cli-todo-add'))),
     );
     const ids = new Set(results.map((t) => t.id));
     expect(ids.size).toBe(20); // every id unique — no two calls collided on the same object

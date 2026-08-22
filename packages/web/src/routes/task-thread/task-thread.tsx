@@ -1,6 +1,6 @@
 import { MessageSquareTextIcon, SearchXIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useParams, Link as WorkspaceLink } from 'react-router'
+import { useLocation, useParams } from 'react-router'
 
 import { Link } from '@/lib/project-router'
 
@@ -13,12 +13,10 @@ import {
   useRun,
   useProjectRepoBase,
   useRuns,
-  useSendMessage,
 } from '@/api/queries'
 import { useRunHistory, type RunHistoryState } from '@/api/run-history'
 import type { ApiRun } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
-import { Composer } from '@/components/composer/composer'
 import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
@@ -28,7 +26,6 @@ import { cn, isHttpUrl } from '@/lib/utils'
 
 import { AutoResumeHint } from './auto-resume-hint'
 import { RunStatusLine } from './run-status-line'
-import { useContinueAction } from './follow-up-engine'
 import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
 import { collectSubagents, findSubagent, subagentChildren } from './subagent-dock'
@@ -39,7 +36,7 @@ import { queuePosition } from './run-actions'
 import { RunHeader } from './run-header'
 import { AskCard } from './ask-card'
 import { useRunRecordReconcile } from './run-reconcile'
-import { useActiveProviderAvailability } from './active-provider'
+import { ThreadComposer } from './thread-composer'
 import { ThreadLoading } from './thread-loading'
 import { threadRenderMode } from './thread-scroll'
 import { JumpToLatestPill, useThreadScroll } from './thread-scroller'
@@ -192,14 +189,9 @@ export function ThreadView({
   // that has not run. Deliberately `queued` only: review/done/failed/cancelled keep the
   // existing copy and their Continue action.
   const queued = run.status === 'queued'
-  // …and the fourth: a closed run whose last session can be reopened. Continue used to be a
-  // bare button beside a DISABLED textarea, so "reopen it and say what to do next" meant
-  // continuing blind and then typing into the thread once the session came back. The composer
-  // stays authorable here instead: the draft is the prompt the reopened session starts on, and
-  // submitting an empty one is still the plain one-click Continue.
-  const continueAction = useContinueAction(run)
-  const hasContinuation = !sessionOpen && !queued && continueAction.available
-  const continuable = hasContinuation && continueAction.canContinue
+  // …and the fourth — a closed run whose last session can be reopened — lives in
+  // `ThreadComposer` now, together with the provider gate and the draft: nothing outside the
+  // composer ever read those flags.
   // A closed session can never settle its in-flight items — nothing in the reducer rewrites a
   // `running` item on `session.ended`, so an interrupted fan-out stays `running` in the
   // persisted stream forever. Without this, reopening it pulses `Agents · 0/1` above a dead
@@ -236,16 +228,6 @@ export function ThreadView({
     () => (openAgentId === undefined ? [] : subagentChildren(currentThread.turns, openAgentId)),
     [currentThread.turns, openAgentId],
   )
-  const sendMessage = useSendMessage(run.id)
-  const activeProvider = useActiveProviderAvailability(run)
-  // A queued send only amends the persisted prompt; it invokes no provider and therefore
-  // remains available even when provider discovery cannot authorize a live session. Once the
-  // session is open, mirror the server's active-backend gate as before.
-  const activeProviderBlocked = sessionOpen && !activeProvider.usable
-  const continuationProviderBlocked = hasContinuation && !continueAction.canContinue
-  const providerBlocked = activeProviderBlocked || continuationProviderBlocked
-  const providerReason = activeProviderBlocked ? activeProvider.reason : continueAction.reason
-
   // The queued-run affordances (#472), passed only while the run is queued — so the bubbles
   // go read-only on the next `run` SSE frame once it starts. The bubbles await these promises
   // so a failed write keeps its editor/draft open and shows the server's error.
@@ -397,8 +379,8 @@ export function ThreadView({
 
         {/* The review gate (spec 009): a finished run with changes parks here — nothing
             auto-merges. The panel exists exactly while the run rests at `review`. */}
-        {run.pendingApproval ? <ApprovalCard run={run} /> : null}
-        {run.status === 'review' ? <ReviewPanel run={run} /> : null}
+        {run.pendingApproval ? <ApprovalCard key={run.id} run={run} /> : null}
+        {run.status === 'review' ? <ReviewPanel key={run.id} run={run} /> : null}
       </div>
 
       <AcceptCelebration status={run.status} />
@@ -461,40 +443,15 @@ export function ThreadView({
             </div>
           ) : null}
 
-          <Composer
-            onSubmit={
-              continuable
-                ? (text, images) => continueAction.continueWith(text, images)
-                : (text, images) => sendMessage.mutateAsync({ text, images })
-            }
-            disabled={providerBlocked || (!sessionOpen && !queued && !continuable)}
-            // Only reachable now by a closed run with NO session to resume — which is exactly
-            // the one case where Continue is not on offer either. Left honest rather than
-            // rewritten: "closed" is all such a run can be told.
-            disabledReason={providerBlocked ? providerReason : 'Session closed — no session to resume.'}
-            // The engine pills ride the enabled footer, so the picked runner/model and the
-            // typed prompt reach `POST /continue` in one request.
-            footerEnd={
-              providerBlocked && !continueAction.providerPending ? (
-                <WorkspaceLink
-                  to="/settings/providers"
-                  className="text-xs font-medium text-foreground underline underline-offset-4"
-                >
-                  Configure providers
-                </WorkspaceLink>
-              ) : continuable ? continueAction.pills : undefined
-            }
-            // Continuing with nothing typed is the legacy one-click Continue.
-            allowEmptySubmit={continuable}
-            sendAriaLabel={continuable ? 'Continue' : 'Send'}
-            placeholder={
-              queued ? 'Add to the prompt — sent when the run starts…'
-              : continuable ? 'Continue — add a prompt, or send to just reopen the session…'
-              : run.status === 'waiting' ? 'Reply — / for skills, @ for files…'
-              : 'Message the agent — / for skills, @ for files…'
-            }
-            autocompleteSkills
-            quickReplies
+          {/* Keyed by run id, like the docks above: a `/tasks/:id` param change re-renders the
+              same route element, so without this the half-typed reply follows you to the next
+              task. The key also makes the draft read a mount-time read (spec
+              `2026-08-21-per-task-prompt-drafts.md`). */}
+          <ThreadComposer
+            key={run.id}
+            run={run}
+            sessionOpen={sessionOpen}
+            queued={queued}
             getMentionCandidates={() => threadFilePaths(thread)}
           />
         </div>

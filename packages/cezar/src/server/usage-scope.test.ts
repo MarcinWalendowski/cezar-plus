@@ -10,6 +10,7 @@ import { clearProjectProbeCache, listProjects, registerProject } from '../worksp
 import { ProjectContexts } from './project-context.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Per-project `usage` SSE scoping (spec 2026-07-20-multi-project-workspace,
@@ -45,7 +46,7 @@ describe('usage SSE fan-out is scoped per project', () => {
     }
     clearProjectProbeCache();
     store = RunStore.open(join(repoRoot, '.ai/cezar'), { keepLive: true });
-    bootRunId = store.createRun({
+    bootRunId = store.createRun({ author: localCliAuthor(),
       title: 'boot',
       workflow: 'quick-task',
       task: 'boot',
@@ -114,7 +115,7 @@ describe('usage SSE fan-out is scoped per project', () => {
     expect((await apiRequest(app, `/api/v1/p/${other.id}/runs`)).status).toBe(200);
     const otherStore = contexts.peek(other.id)?.store;
     expect(otherStore).toBeDefined();
-    const otherRunId = (otherStore as RunStore).createRun({
+    const otherRunId = (otherStore as RunStore).createRun({ author: localCliAuthor(),
       title: 'other',
       workflow: 'quick-task',
       task: 'other',

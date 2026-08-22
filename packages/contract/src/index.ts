@@ -5,6 +5,7 @@
 export * from './events.ts';
 export * from './health.ts';
 export * from './host-metrics.ts';
+export * from './task-author.ts';
 export * from './runs.ts';
 export * from './repo.ts';
 export * from './github.ts';

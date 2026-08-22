@@ -131,8 +131,19 @@ export function defaultHost(log: (line: string) => void): ReleaseDeployHost {
   return {
     async stage(source, target) {
       mkdirSync(target, { recursive: true });
-      // `--delete` so a release directory reused after a failed attempt cannot keep a stale file,
-      // and the git metadata is excluded because a release is an artifact, not a checkout.
+      // `--delete` so a release directory reused after a failed attempt cannot keep a stale file in
+      // the shipped tree — note this does NOT delete *excluded* paths (that needs the separate
+      // `--delete-excluded` flag, not added here), so a reused target can still carry whatever it
+      // already had under the four excludes below. Harmless: nothing in a running release reads any
+      // of them (see Risks), and Phase 4 covers reclaiming space already on disk, which a re-stage
+      // cannot do.
+      // A release is an artifact, not a checkout: git metadata (`.git`) is excluded, and so is every
+      // directory that is cezar's own AGENT RUNTIME STATE rather than the tree being shipped —
+      // `.ai/cezar/runs` (per-run history), `.ai/cezar/worktrees` (live task git worktrees, each with
+      // its own node_modules — measured 2026-08-21/22 at up to several GB) and `.ai/cezar/tmp`
+      // (per-run scratch dirs, recreated on demand at runtime by `agentTmpDir`). All three are also
+      // being concurrently written to by whatever other tasks are running on the box at stage time, so
+      // excluding them removes that race along with the size.
       const rsync = run('rsync', [
         '-a',
         '--delete',
@@ -140,6 +151,10 @@ export function defaultHost(log: (line: string) => void): ReleaseDeployHost {
         '.git',
         '--exclude',
         '.ai/cezar/runs',
+        '--exclude',
+        '.ai/cezar/worktrees',
+        '--exclude',
+        '.ai/cezar/tmp',
         `${source.replace(/\/*$/, '')}/`,
         `${target.replace(/\/*$/, '')}/`,
       ]);
@@ -307,8 +322,26 @@ export async function runReleaseDeploy(
     killMode: fx.killMode(unitName),
   });
   log(`deploy: ${decision.reason}`);
+
+  // One short-circuit for every dry run, placed right here: after `decideReExec` has run and
+  // logged its reason (the most informative line in the preview — it says whether the real deploy
+  // would hand off to a transient unit), but before that decision, the rollback branch, the
+  // symlink guard or the free-space check are ACTED on. This replaces three separate `dryRun`
+  // checks that used to sit deeper in this function — one inside the re-exec branch (which
+  // returned a `detachedUnit` and printed no plan at all), one guarding the rollback branch (which
+  // did not exist, so `--rollback --dry-run` used to perform a real rollback), and one just before
+  // `runGatedDeploy` (which ran after the free-space floor, so a box under the floor exited 1
+  // instead of printing a plan). See `.ai/specs/2026-08-22-server-deploy-dry-run-flag.md`.
+  if (options.dryRun) {
+    log(
+      rollback
+        ? `DRY RUN — would flip ${linkPath} to ${options.rollbackTo || 'the previous release'} and restart ${unitName}.`
+        : `DRY RUN — would stage ${options.source} → ${releaseDir(releasesDir, releaseId)}, smoke-boot it, flip ${linkPath}, restart ${unitName}, probe :${port}/api/v1/ready.`,
+    );
+    return { ok: true };
+  }
+
   if (decision.reExec) {
-    if (options.dryRun) return { ok: true, detachedUnit: `dry-run:${releaseId}` };
     // A SYSTEM transient unit runs as root by default, so an unprivileged service account is
     // refused it — and granting that right would be a root-equivalent grant under a narrow name.
     // As a non-root uid, ask the USER manager instead: same cgroup escape, no grant needed.
@@ -335,7 +368,7 @@ export async function runReleaseDeploy(
   }
 
   // ---- P1: the install path must already be a symlink ------------------------------------------
-  if (!options.dryRun && existsSync(linkPath) && !isMigrated(linkPath)) {
+  if (existsSync(linkPath) && !isMigrated(linkPath)) {
     return {
       ok: false,
       error:
@@ -380,11 +413,6 @@ export async function runReleaseDeploy(
     emit,
     now: fx.now,
   };
-
-  if (options.dryRun) {
-    log(`DRY RUN — would stage ${options.source} → ${releaseDir(releasesDir, releaseId)}, smoke-boot it, flip ${linkPath}, restart ${unitName}, probe :${port}/api/v1/ready.`);
-    return { ok: true };
-  }
 
   const outcome = await runGatedDeploy({ releasesDir, linkPath, entry, strategy }, effects);
   return { ok: outcome.ok, outcome, ...(outcome.ok ? {} : { error: outcome.detail ?? outcome.failedAt }) };

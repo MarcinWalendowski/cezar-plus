@@ -7,6 +7,7 @@ import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from './run.ts';
 import type { WorkflowDef } from './types.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 
@@ -136,8 +137,8 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
     const a = project('cez-wsem-a-', semaphore);
     const b = project('cez-wsem-b-', semaphore);
 
-    const slowA = a.manager.startRun(SLOW, { task: 'hold a slot (A)' });
-    const slowB = b.manager.startRun(SLOW, { task: 'hold a slot (B)' });
+    const slowA = a.manager.startRun(SLOW, { author: localCliAuthor(), task: 'hold a slot (A)' });
+    const slowB = b.manager.startRun(SLOW, { author: localCliAuthor(), task: 'hold a slot (B)' });
     await waitFor(
       () =>
         a.store.getRun(slowA.id)?.status === 'running' &&
@@ -147,7 +148,7 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
 
     // Third run, third project slot — but the WORKSPACE cap is 2, so it must
     // queue even though manager A alone only holds one slot.
-    const third = a.manager.startRun(INSTANT, { task: 'third — must queue' });
+    const third = a.manager.startRun(INSTANT, { author: localCliAuthor(), task: 'third — must queue' });
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(a.store.getRun(third.id)?.status).toBe('queued');
 
@@ -171,8 +172,8 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
     const a = project('cez-wsem-cross-a-', semaphore);
     const b = project('cez-wsem-cross-b-', semaphore);
 
-    const slow1 = a.manager.startRun(SLOW, { task: 'saturate 1' });
-    const slow2 = a.manager.startRun(SLOW, { task: 'saturate 2' });
+    const slow1 = a.manager.startRun(SLOW, { author: localCliAuthor(), task: 'saturate 1' });
+    const slow2 = a.manager.startRun(SLOW, { author: localCliAuthor(), task: 'saturate 2' });
     await waitFor(
       () =>
         a.store.getRun(slow1.id)?.status === 'running' &&
@@ -180,7 +181,7 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
       'A to saturate the workspace cap',
     );
 
-    const queued = b.manager.startRun(INSTANT, { task: 'queued in the OTHER project' });
+    const queued = b.manager.startRun(INSTANT, { author: localCliAuthor(), task: 'queued in the OTHER project' });
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(b.store.getRun(queued.id)?.status).toBe('queued');
 
@@ -198,13 +199,13 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
     const a = project('cez-wsem-fair-a-', semaphore);
     const b = project('cez-wsem-fair-b-', semaphore);
 
-    const holder = a.manager.startRun(SLOW, { task: 'hold the only slot' });
+    const holder = a.manager.startRun(SLOW, { author: localCliAuthor(), task: 'hold the only slot' });
     await waitFor(() => a.store.getRun(holder.id)?.status === 'running', 'the holder to run');
     // B queues first, then A — the freed slot must go to B despite the slot
     // being freed by (and the pump originating in) A.
-    const older = b.manager.startRun(INSTANT, { task: 'queued first, other project' });
+    const older = b.manager.startRun(INSTANT, { author: localCliAuthor(), task: 'queued first, other project' });
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const newer = a.manager.startRun(SLOW, { task: 'queued second, same project' });
+    const newer = a.manager.startRun(SLOW, { author: localCliAuthor(), task: 'queued second, same project' });
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(b.store.getRun(older.id)?.status).toBe('queued');
     expect(a.store.getRun(newer.id)?.status).toBe('queued');
@@ -224,15 +225,15 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
 
     // B's agent run parks at `waiting` (markerless mock turn-end) — and by the
     // #347 rule gives its slot back while parked.
-    const waitingRun = b.manager.startRun(AGENT, { task: 'park and wait', worktree: false });
+    const waitingRun = b.manager.startRun(AGENT, { author: localCliAuthor(), task: 'park and wait', worktree: false });
     await waitFor(
       () => b.store.getRun(waitingRun.id)?.status === 'waiting',
       "B's run to park at waiting",
     );
 
     // Project A saturates the workspace cap: 2 running holders, busy == cap.
-    const slow1 = a.manager.startRun(SLOW, { task: 'saturate 1' });
-    const slow2 = a.manager.startRun(SLOW, { task: 'saturate 2' });
+    const slow1 = a.manager.startRun(SLOW, { author: localCliAuthor(), task: 'saturate 1' });
+    const slow2 = a.manager.startRun(SLOW, { author: localCliAuthor(), task: 'saturate 2' });
     await waitFor(
       () =>
         a.store.getRun(slow1.id)?.status === 'running' &&
@@ -280,15 +281,15 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
 
     // A starts two runs. The workspace has room (cap 4), but A's own ceiling is
     // 1 — so the second A run must queue on the per-project gate.
-    const a1 = a.manager.startRun(SLOW, { task: 'A slot 1' });
-    const a2 = a.manager.startRun(SLOW, { task: 'A slot 2 — must queue on A per-project cap' });
+    const a1 = a.manager.startRun(SLOW, { author: localCliAuthor(), task: 'A slot 1' });
+    const a2 = a.manager.startRun(SLOW, { author: localCliAuthor(), task: 'A slot 2 — must queue on A per-project cap' });
     await waitFor(() => a.store.getRun(a1.id)?.status === 'running', 'A first run to run');
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(a.store.getRun(a2.id)?.status).toBe('queued'); // blocked by A's own cap, not the workspace
 
     // B inherits the workspace cap (no override) — it runs two concurrently.
-    const b1 = b.manager.startRun(SLOW, { task: 'B slot 1' });
-    const b2 = b.manager.startRun(SLOW, { task: 'B slot 2' });
+    const b1 = b.manager.startRun(SLOW, { author: localCliAuthor(), task: 'B slot 1' });
+    const b2 = b.manager.startRun(SLOW, { author: localCliAuthor(), task: 'B slot 2' });
     await waitFor(
       () =>
         b.store.getRun(b1.id)?.status === 'running' && b.store.getRun(b2.id)?.status === 'running',
@@ -323,7 +324,7 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
     stores.push(store);
 
     for (const suffix of ['one', 'two', 'three']) {
-      const record = store.createRun({
+      const record = store.createRun({ author: localCliAuthor(),
         title: suffix,
         workflow: 'quick-task',
         task: `interrupted ${suffix}`,
@@ -415,7 +416,7 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
     stores.push(store);
     managers.push(manager);
 
-    const record = store.createRun({
+    const record = store.createRun({ author: localCliAuthor(),
       title: 'interrupted continuation',
       workflow: 'quick-task',
       task: 'resume after restart',
@@ -456,9 +457,9 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
 
     // Park an agent run at `waiting` (holds no slot per #347), then saturate A's
     // per-project cap of 1 with a running holder.
-    const waitingRun = a.manager.startRun(AGENT, { task: 'park and wait', worktree: false });
+    const waitingRun = a.manager.startRun(AGENT, { author: localCliAuthor(), task: 'park and wait', worktree: false });
     await waitFor(() => a.store.getRun(waitingRun.id)?.status === 'waiting', 'the agent run to park');
-    const holder = a.manager.startRun(SLOW, { task: 'occupy the single per-project slot' });
+    const holder = a.manager.startRun(SLOW, { author: localCliAuthor(), task: 'occupy the single per-project slot' });
     await waitFor(() => a.store.getRun(holder.id)?.status === 'running', "the holder to take A's only slot");
 
     // Even at A's per-project cap, the resume bypasses pump() — straight into the
@@ -480,8 +481,8 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
     });
     const a = project('cez-wsem-refresh-', semaphore);
 
-    const holder = a.manager.startRun(SLOW, { task: 'hold the only slot' });
-    const queued = a.manager.startRun(INSTANT, { task: 'wait for capacity' });
+    const holder = a.manager.startRun(SLOW, { author: localCliAuthor(), task: 'hold the only slot' });
+    const queued = a.manager.startRun(INSTANT, { author: localCliAuthor(), task: 'wait for capacity' });
     await waitFor(() => a.store.getRun(holder.id)?.status === 'running', 'the holder to run');
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(a.store.getRun(queued.id)?.status).toBe('queued');

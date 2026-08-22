@@ -17,6 +17,7 @@ import {
   resolveExtraSystemPrompt,
   skillSystemPrompt,
 } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -135,6 +136,18 @@ describe('TOOL_BUDGET_DOCTRINE', () => {
     //
     // This is a raise, not a removal. Growing the doctrine again needs the same argument made
     // again, with numbers.
+    expect(TOOL_BUDGET_DOCTRINE.split(/\s+/).filter(Boolean).length).toBeLessThan(260);
+  });
+
+  /**
+   * The file-write rule (spec `.ai/specs/2026-08-21-edit-an-existing-file-never-re-emit-it.md`,
+   * Q2) belongs in the STEP prompt, not here — `Edit`/`Write` are Claude Code tool names, the same
+   * class of violation that forced `run_in_background` out of this doctrine, and this text also
+   * rides on codex/opencode/pi via `prependSystemPrompt`. This is the negative pin that keeps it
+   * from migrating in later "for consistency".
+   */
+  it('keeps the file-write rule OUT of the backend-neutral doctrine', () => {
+    for (const t of ['Edit', 'Write', 'heredoc']) expect(TOOL_BUDGET_DOCTRINE).not.toContain(t);
     expect(TOOL_BUDGET_DOCTRINE.split(/\s+/).filter(Boolean).length).toBeLessThan(260);
   });
 
@@ -323,7 +336,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
     selectedWorkflow: WorkflowDef = workflow,
   ): Promise<string> {
     writeFileSync(argsFile, '', 'utf8'); // fresh capture per run
-    const record = manager.startRun(selectedWorkflow, input);
+    const record = manager.startRun(selectedWorkflow, { ...input, author: localCliAuthor() });
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 20_000;
     while (!terminal.has(store.getRun(record.id)?.status ?? '')) {
@@ -355,7 +368,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
 
 
   it('live refresh: the namer applies turn context through the mock (direct drive)', async () => {
-    const record = manager.startRun(skillWorkflow, { task: '437' });
+    const record = manager.startRun(skillWorkflow, { author: localCliAuthor(), task: '437' });
     type NamerSeam = { autoNameRun(id: string, skill: string | undefined, task: string, live?: object): Promise<void> };
     await (manager as unknown as NamerSeam).autoNameRun(record.id, 'om-auto-review-pr', '437', {
       turnText: 'fixed the watchdog race',
@@ -373,7 +386,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
       lastNamerKey: Map<string, string>;
     };
     const seam = manager as unknown as Seam;
-    const record = manager.startRun(skillWorkflow, { task: '437' });
+    const record = manager.startRun(skillWorkflow, { author: localCliAuthor(), task: '437' });
 
     // Dry-run guard (without the CEZ_AUTONAME=1 force): no key is recorded,
     // the namer is never consulted.
@@ -418,7 +431,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
   }, 30_000);
 
   it('marker declarations outrank the namer (spec 2026-07-18-task-ref-markers)', async () => {
-    const record = manager.startRun(skillWorkflow, { task: '437' });
+    const record = manager.startRun(skillWorkflow, { author: localCliAuthor(), task: '437' });
     await manager.recordTurnEnd(record.id, 'Working on it.\nCEZ:PR=500\nCEZ:TITLE=implementing marker refs');
     let after = store.getRun(record.id);
     expect(after?.prNumber).toBe(500);
@@ -461,7 +474,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
 
   it('a user rename made before the namer answers is never overwritten', async () => {
     writeFileSync(argsFile, '', 'utf8');
-    const record = manager.startRun(skillWorkflow, { task: '437' });
+    const record = manager.startRun(skillWorkflow, { author: localCliAuthor(), task: '437' });
     // What PATCH /api/v1/runs/:id does, synchronously after creation:
     store.updateRun(record.id, { title: 'My name', titleSummary: 'My name', titleOrigin: 'user' });
 
@@ -559,7 +572,9 @@ describe('systemPrompt end-to-end (dry run)', () => {
       'mock: implemented the change',
     );
 
-    expect(manager.continueRun(id, { text: 'continue without generating follow-ups' })).toEqual({
+    await expect(
+      manager.continueRun(id, { text: 'continue without generating follow-ups' }),
+    ).resolves.toEqual({
       ok: true,
     });
     const deadline = Date.now() + 20_000;
@@ -641,7 +656,7 @@ describe('the global follow-up gate (dry run)', () => {
 
   async function runToEnd(input: { task: string; generateFollowups?: boolean }): Promise<string> {
     writeFileSync(argsFile, '', 'utf8');
-    const record = manager.startRun(workflow, input);
+    const record = manager.startRun(workflow, { ...input, author: localCliAuthor() });
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 20_000;
     while (!terminal.has(store.getRun(record.id)?.status ?? '')) {

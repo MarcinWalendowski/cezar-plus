@@ -49,10 +49,49 @@ export function getApiBaseUrl(): string {
 
 let activeProjectId: string | null = null
 
-/** Written by ProjectScopeProvider on mount/param change (and cleared on unmount). Everything
- *  else only reads. */
-export function setApiScope(projectId: string | null): void {
+/**
+ * WHO claimed the scope — compared by identity, never inspected.
+ *
+ * One slot with no owner is what made a departing provider able to un-scope the arriving one
+ * (`.ai/specs/2026-08-22-api-scope-ownership-token.md`). React renders the arriving tree before
+ * it commits the departing one's cleanup, so an unconditional reset on unmount lands AFTER the
+ * successor has already written its own project — and every later request goes out unscoped,
+ * reaching the boot project's runs instead of the one the URL names (a 404 the cockpit renders
+ * as "Task not found" over a task that is running). The owner is what lets a release ask "am I
+ * still the writer?" instead of assuming it.
+ */
+let scopeOwner: unknown = null
+
+/** Written by ProjectScopeProvider on mount/param change (and released on unmount). Everything
+ *  else only reads.
+ *
+ *  `owner` is an opaque identity — the provider passes a per-instance token so its own unmount
+ *  can tell "I am still the writer" from "someone has taken over since". Omitting it claims the
+ *  scope for the `null` owner, which is what a test or an embedder setting the scope by hand
+ *  means: nobody's release should be able to undo it except another explicit write. */
+export function setApiScope(projectId: string | null, owner: unknown = null): void {
   activeProjectId = projectId === '' ? null : projectId
+  scopeOwner = owner
+}
+
+/**
+ * Reset to unscoped, but ONLY if `owner` is the claim still standing.
+ *
+ * The unmount half of `setApiScope`. A provider that has been superseded — the departing half of
+ * an instance swap, which is every navigation out of `/p/:projectId/*` and back — calls this and
+ * it does nothing, so the arriving provider's scope survives. A provider that leaves with no
+ * successor still owns the slot, so it resets normally.
+ */
+export function releaseApiScope(owner: unknown): void {
+  if (scopeOwner !== owner) return
+  activeProjectId = null
+  scopeOwner = null
+}
+
+/** Whether `owner` is the claim currently standing — what lets the provider re-claim during a
+ *  render in which the VALUE already matches but the ownership has moved on. */
+export function ownsApiScope(owner: unknown): boolean {
+  return scopeOwner === owner
 }
 
 export function getApiScope(): string | null {

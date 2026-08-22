@@ -224,7 +224,12 @@ function ProjectGroup({
     bucket.rows.flatMap((row) => {
       // A collapsed variant group paints its FIRST member's chip, so that is the one to ask
       // about — the others only become visible once the tile is expanded.
-      const reference = taskReference(row.kind === 'run' ? row.run : row.members[0]!)
+      //
+      // `project.repoUrl` rather than `useProjectRepoBase()`: this group's `ProjectListEntry` is
+      // already in scope (unlike a container reading the on-screen project), and this call sits
+      // inside a `buckets.flatMap` callback anyway, where no hook may run (multi-project spec
+      // Phase 5).
+      const reference = taskReference(row.kind === 'run' ? row.run : row.members[0]!, project.repoUrl)
       return reference ? [{ projectId: project.id, kind: reference.kind, number: reference.number }] : []
     }),
   )
@@ -386,6 +391,7 @@ function ProjectGroup({
               scope={project.id}
               showTokens={showTokens}
               showCost={showCost}
+              repoBase={project.repoUrl}
             />
           </ReferenceStatusProvider>
 

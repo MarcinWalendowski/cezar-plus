@@ -8,6 +8,7 @@ import type { WorkflowDef } from '../workflows/types.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp, type Principal, type SessionResolver } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * D12's OTHER half, pinned (spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`): "role
@@ -42,7 +43,7 @@ describe('POST /api/v1/workflows — a `member` is not gated by role (D12)', () 
     process.env.CEZ_AUTH = 'oidc';
     manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) =>
-        store.createRun({ title: 't', workflow: '(planned)', task: input.task, steps: [] }),
+        store.createRun({ author: localCliAuthor(), title: 't', workflow: '(planned)', task: input.task, steps: [] }),
     } as unknown as RunManager;
   });
 

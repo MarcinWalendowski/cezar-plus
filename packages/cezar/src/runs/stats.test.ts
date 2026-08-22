@@ -387,6 +387,125 @@ describe('computeRunStats — waiting on a guess, and re-running what was alread
   });
 });
 
+/**
+ * The heredoc/file-write economy meter (spec
+ * `.ai/specs/2026-08-21-edit-an-existing-file-never-re-emit-it.md`, Verification §1).
+ *
+ * Inline events, not the fixture — R7 of that spec, same reasoning as the sleep/repetition meters
+ * above: both stats fixtures have `input` stripped, so a character metric tested only against them
+ * measures zero forever and passes.
+ */
+describe('computeRunStats — edit an existing file, never re-emit it', () => {
+  const ev = (seq: number, sec: number, type: string, extra: Record<string, unknown> = {}): RunEvent =>
+    ({
+      seq,
+      type,
+      ts: new Date(1_700_000_000_000 + sec * 1_000).toISOString(),
+      stepId: 'implement',
+      ...extra,
+    }) as RunEvent;
+  const bash = (seq: number, sec: number, id: string, command: string): RunEvent =>
+    ev(seq, sec, 'tool-call', { id, tool: 'Bash', input: { command } });
+  const done = (seq: number, sec: number, id: string): RunEvent => ev(seq, sec, 'tool-result', { toolCallId: id });
+
+  it('counts a heredoc body separately from the command that carries it', () => {
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', "cat > .ai/specs/x.md <<'EOF'\nline one\nline two\nEOF"),
+      done(2, 1, 'a'),
+    ]);
+    expect(s.totals.heredocFileWrites).toBe(1);
+    expect(s.totals.heredocRewrites).toBe(0); // a NEW file is not the defect
+    expect(s.totals.heredocChars).toBeGreaterThan(0);
+    expect(s.totals.heredocChars).toBeLessThan(s.totals.toolInputChars);
+  });
+
+  it('charges a re-emission only for the lines it carried unchanged', () => {
+    const p = '.ai/specs/2026-08-21-wait-on-the-process-not-a-guess.md';
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', `cat > ${p} <<'SPECEOF'\nkept one\nkept two\nSPECEOF`),
+      done(2, 1, 'a'),
+      bash(3, 2, 'b', `cat > ${p} <<'SPECEOF'\nkept one\nkept two\nbrand new\nSPECEOF`),
+      done(4, 3, 'b'),
+    ]);
+    expect(s.totals.heredocFileWrites).toBe(2);
+    expect(s.totals.heredocRewrites).toBe(1);
+    // 'kept one\n' + 'kept two\n' — the two lines paid for twice. NOT 'brand new'.
+    expect(s.totals.heredocRewriteWasteChars).toBe('kept one\n'.length + 'kept two\n'.length);
+  });
+
+  it('charges a TOTAL rewrite almost nothing — R11, the reason the gate is chars not count', () => {
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', "cat > doc.md <<'EOF'\nalpha\nbravo\nEOF"),
+      done(2, 1, 'a'),
+      bash(3, 2, 'b', "cat > doc.md <<'EOF'\ncharlie\ndelta\nEOF"),
+      done(4, 3, 'b'),
+    ]);
+    expect(s.totals.heredocRewrites).toBe(1); // the count still flags it…
+    expect(s.totals.heredocRewriteWasteChars).toBe(0); // …and the gate correctly does not.
+  });
+
+  it('matches `tee` and the trailing-redirect ordering, which the first predicate could not', () => {
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', "tee -a notes.md <<'EOF'\nx\nEOF"),
+      done(2, 1, 'a'),
+      bash(3, 2, 'b', "cat <<'EOF' > other.md\ny\nEOF"),
+      done(4, 3, 'b'),
+    ]);
+    expect(s.totals.heredocFileWrites).toBe(2);
+  });
+
+  it('scores a heredoc write to a path the run already READ as a re-emission', () => {
+    const s = computeRunStats('r', [
+      ev(1, 0, 'tool-call', { id: 'a', tool: 'Read', input: { file_path: 'src/x.ts' } }),
+      done(2, 1, 'a'),
+      bash(3, 2, 'b', "cat > src/x.ts <<'EOF'\nwhole new body\nEOF"),
+      done(4, 3, 'b'),
+    ]);
+    expect(s.totals.heredocRewrites).toBe(1);
+  });
+
+  it('does NOT score a script as a file write, in either redirect position', () => {
+    const s = computeRunStats('r', [
+      bash(1, 0, 'a', "python3 - <<'PYEOF'\nimport io\ns = io.open('a.ts').read()\nPYEOF"),
+      done(2, 1, 'a'),
+      bash(3, 2, 'b', "python3 - <<'PY' > /tmp/out.txt\nprint(1)\nPY"),
+      done(4, 3, 'b'),
+    ]);
+    expect(s.totals.heredocFileWrites).toBe(0); // the body is a SCRIPT; /tmp/out.txt is its stdout
+    expect(s.totals.heredocChars).toBeGreaterThan(0);
+  });
+
+  it('documents the `stripHeredocs` blind spot instead of widening it (R9/§ Data models)', () => {
+    // The tag is not at end of line, so `stripHeredocs` — which `signalsOf` also depends on — does
+    // not see this body. Accepted: under-count against 7 correct rejections of JS sources
+    // containing `<<`. If this ever fails, someone widened the stripper.
+    const s = computeRunStats('r', [bash(1, 0, 'a', "python3 - <<'PY' > /tmp/out.txt\nprint(1)\nPY"), done(2, 1, 'a')]);
+    expect(s.totals.heredocChars).toBe(0);
+  });
+
+  it('pins the serialization — the baseline is JSON.stringify, NOT python json.dumps (R9)', () => {
+    const input = { command: 'héllo <<EOF' };
+    const s = computeRunStats('r', [ev(1, 0, 'tool-call', { id: 'a', tool: 'Bash', input })]);
+    expect(s.totals.toolInputChars).toBe(JSON.stringify(input).length);
+    // Guards the exact failure revision 1 of the spec shipped: `{"command":"héllo <<EOF"}` is 25
+    // characters, where python's `json.dumps` default (`", "`/`": "` separators + \uXXXX escaping)
+    // gives 31.
+    expect(s.totals.toolInputChars).toBe(25);
+  });
+
+  it('reports ZERO chars on both fixtures because their `input` was STRIPPED, not because they never wrote', () => {
+    expect(stats.totals.toolInputChars).toBe(0);
+    expect(stats.totals.heredocChars).toBe(0);
+    expect(stats.totals.heredocFileWrites).toBe(0);
+    expect(stats.totals.heredocRewriteWasteChars).toBe(0);
+    // The proof the zero is the fixture's, not the meter's: 271 real tool calls are in there.
+    expect(stats.totals.toolCalls).toBe(271);
+    expect(fanout.totals.toolInputChars).toBe(0);
+    expect(fanout.totals.heredocFileWrites).toBe(0);
+    expect(fanout.totals.toolCalls).toBe(124);
+  });
+});
+
 describe('formatRunStats', () => {
   it('names every step, the totals row, and the two headline numbers', () => {
     const text = formatRunStats(stats);
