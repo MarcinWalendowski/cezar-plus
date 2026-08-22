@@ -1,45 +1,34 @@
 # `npm test` is a validation gate an agent can never see green
 
-**Status:** draft, round 6 (2026-08-22). Round 5's blocking defect is fixed and confirmed applied:
-`AGENTS.md:278-300` and `packages/cezar/src/workflows/types.ts:793-802` were re-read live this
-round and both now carry the round-5 `new_string` text verbatim (not the round-3 text) — Phase 6
-is done, not just written. Round 6's own review (see this task's `$CEZ_HANDOFF_FILE`) passed the
-round-5 draft's content without requiring a new draft; this round changes the file again, to
-record two new operational facts discovered after that review passed, so the header now reflects
-a real round-6 draft rather than a stale "round 5" label carried past its own review:
+**Status:** implemented — shipped 2026-08-22 as commit `1c225e7e` ("fix: npm test gate scrubs its
+own environment instead of lying red"), merged and pushed to `origin/main` at `c17ae1d5`. This
+supersedes the "draft, round 6" status this line used to carry; the two round-6 open questions
+below it (empty `node_modules` in the worktree, the `home-safety.test.ts` `ENOENT` not matching
+the predicted residual) are **resolved, not open** — both were the empty-install artifact round 6
+suspected, not a sixth cause. After `env -u NODE_ENV npm ci` in a clean worktree at this commit,
+the implement step measured `npm run test:unit` 44/44 green and root `npm test` at
+**9553/9555 tests passed (1 skipped), one failing test**: `knowledge/catalog.test.ts`'s C18
+host-speed budget (§ Four environment traps, trap 3 — a pre-existing, deliberately-accepted
+per-host timing budget, unrelated to this spec and not touched by it). Zero `React.act is not a
+function` failures (was ~1931) and zero "not a git repo" failures (was ~41).
 
-1. **This worktree's `node_modules` is currently empty** (`ls node_modules` → only Vite cache
-   dirs; confirmed again this round) **while ambient `NODE_ENV=production` is still standing**
-   (confirmed again this round: `env | grep NODE_ENV` → `production`). Phase 1a's fix for this
-   (AGENTS.md trap 1 applied to `npm ci` itself) only reaches processes spawned by a *redeployed,
-   restarted* `cezar.service` — it cannot be observed inside this run. A plain `npm ci` run from
-   inside this worktree, right now, would reproduce trap 1 and leave devDependencies uninstalled,
-   which would then make Phase 5 (`npm run test:package`) and any fresh full-`npm test` re-run
-   fail for a reason this spec does not fix, not confirm or refute one that it does. Verification
-   step 8 below is revised to say so explicitly: any command run from a `node_modules`-empty state
-   in this worktree needs `env -u NODE_ENV npm ci` first, per `AGENTS.md`'s own existing manual
-   recipe.
-2. **A full self-check `npm test` already ran in this worktree** (`/tmp/cez-selfcheck/npm-test-full.log`,
-   2 files / 2 tests failed of 9555) **but its second failure does not match this spec's own
-   predicted residual.** One failure was the expected, already-accepted `knowledge/catalog.test.ts`
-   C18 host-speed budget. The other was `home-safety.test.ts` — not `auto-resume.test.ts`, the
-   flake this spec's Verification step 6 and the applied `AGENTS.md` "Known live flake" note both
-   name — and it failed with `spawnSync .../node_modules/.bin/vitest ENOENT`: the test's own
-   nested `vitest run` (it deliberately spawns a second vitest process to prove `npm test` never
-   touches a real user's `~/.cezar`) couldn't find the vitest binary. Given fact 1 above
-   (`node_modules` is empty right now), the most likely explanation is a broken/incomplete install
-   at the time that self-check ran, not a new, third residual this spec needs to account for — but
-   that could not be confirmed from a read-only step, and a missing test binary failing a
-   *different* test than predicted is not the same thing as confirming the predicted result.
-   Verification step 6 is revised below to require re-running the full gate after a clean,
-   NODE_ENV-scrubbed `npm ci`, and to say plainly that the two-residual claim is unconfirmed under
-   a clean install until that happens.
+**Acceptance criteria, final:** (1) web tests run under React 19 without `React.act` errors — MET
+(`packages/web/vitest.config.ts` pins `NODE_ENV=''`). (2) git-dependent tests use a TMPDIR outside
+the repo — MET (`packages/cezar/vitest.setup.ts` scrubs `TMPDIR`/`TMP`/`TEMP` before any suite
+runs). (3) `npm test` is green on the prod box, or `.ai/agentic.config.json` stops listing a gate
+that cannot pass — **NOT literally met, by design**: root `npm test` still exits nonzero on this
+host because of the pre-existing C18 host-speed budget (trap 3), which this spec's Risks section
+scoped out from the start as a separate, unowned follow-up (see below) rather than something to
+fix or hide by delisting the gate. The gate stays listed because it is now a true, near-total
+signal instead of a 2152-failure wall of noise — a real regression is visible again. A follow-up
+to make C18's budget relative to a measured per-host baseline is recommended, not filed as part of
+this spec.
 
-Everything else — the four causes, the five fixes, the `AGENTS.md`/`types.ts` correction text, the
-acceptance-criterion-3 gap — is unchanged from round 5 and was re-verified against the live tree
-this round (see Provenance). **Nothing on this branch is committed** — every fix below exists only
-as unstaged/untracked working-tree state (confirmed this round: `git rev-parse HEAD` = `3444f1c8`,
-the branch's merge-base with `origin/main`, zero commits of its own).
+Everything below this status block — the four causes, the five fixes, the `AGENTS.md`/`types.ts`
+correction text — is the round-6 diagnosis and design, re-verified against the live tree through
+round 7 review (PASS, no revision required) and confirmed applied byte-for-byte on disk before
+shipping. Read it as the record of *why* the fix takes the shape it does; the *Status* paragraph
+above is the authority on what actually landed.
 
 Brief: `.ai/specs/briefs/2026-08-21-npm-test-validation-gate-red.md` (original; not present in
 this worktree — see Provenance note at the end), continuation briefs:
