@@ -1,10 +1,16 @@
 # An explicit `--rollback` never probes readiness, so it reports success onto a dead release
 
-**Status: IMPLEMENTED, QA Needed.** Implemented 2026-08-22; gates and runtime E2E remain for later workflow steps.
+**Status: IMPLEMENTED, QA Needed.** Implemented and gated green 2026-08-22 (commit `2f91de4b`,
+merged to `origin/main` at `c31af208`) — `npm run typecheck`, `npm test` (server-install package,
+389/389), `npm run build`, and `npm run test:unit` (44/44) all pass; the full-repo `npm test`'s 11
+failures and `npm run test:package`'s e2e flake were independently confirmed pre-existing/host-load,
+not caused by this diff. **What remains before this is Done, not QA Needed:** Verification §5, the
+real `systemd --user` rollback-onto-a-dead-release E2E on a scratch install, has not been run yet —
+gates green proves the unit behavior, not that a real rollback on `prod-host` now fails closed.
 Written against `HEAD` of `cez/f28edef5`
 (`2778fd52`). The defect is todo `6497f002`, filed by the 2026-08-21 acceptance run of
 `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` (that spec, lines 110-117 and
-167-176) and never fixed. Step 1 of this run left
+167-176) and now fixed in code (§5's runtime E2E still pending — see above). Step 1 of this run left
 `.ai/specs/briefs/2026-08-22-rollback-readiness-gate.md`; every file and line it cites was
 re-opened for this document, and where the brief and the code disagreed the code won (noted
 inline).
