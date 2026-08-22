@@ -75,12 +75,13 @@ export const BROKERED_BACKENDS = ['claude'] as const;
 export function brokerArgs(opts: {
   spoolDir: string;
   runId: string;
+  instanceId: string;
   stepId?: string;
   backend: string;
   cwd?: string;
   command: string[];
 }): string[] {
-  const args = ['--spool', opts.spoolDir, '--run', opts.runId, '--backend', opts.backend];
+  const args = ['--spool', opts.spoolDir, '--run', opts.runId, '--instance', opts.instanceId, '--backend', opts.backend];
   if (opts.stepId) args.push('--step', opts.stepId);
   if (opts.cwd) args.push('--cwd', opts.cwd);
   return [...args, '--', ...opts.command];
@@ -94,9 +95,11 @@ export function brokerArgs(opts: {
  * finished consuming — replaying the remainder with no gap and no duplicate.
  */
 export interface BrokerSessionRequest {
-  /** `<dataDir>/runs/<runId>.spool`. */
+  /** `<dataDir>/runs/<runId>.spool/<instanceId>`. */
   spoolDir: string;
   runId: string;
+  /** Present for a fresh launch, absent only while adopting a protocol-1 spool. */
+  instanceId?: string;
   stepId?: string;
   /** Byte offset into `out.ndjson` to resume from. Only a re-attach sets this. */
   startOffset?: number;

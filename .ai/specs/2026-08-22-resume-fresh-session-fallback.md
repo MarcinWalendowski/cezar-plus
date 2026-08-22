@@ -1,10 +1,20 @@
 # A resumed session cezar never confirmed existed must not fail its step permanently
 
+**CORRECTED 2026-08-22 by `.ai/specs/2026-08-22-missing-session-resume-verification.md`:
+implemented and shipped in `373b1b10`.** Four non-Vitest repository gates pass, and commit
+`a0ef7959` added and passed an opt-in contract test against the installed Claude and Codex CLIs.
+The root Vitest gate is not green: C18 reproduced at `62.29 > 40` and on a clean parent checkout
+at `64.80 > 40`. No reactive engine E2E or proactive SIGKILL recovery E2E is recorded, so runtime
+QA remains needed.
+
 **Status: implemented 2026-08-22, gates green, QA needed.** Root-caused from run
 `232ad6d4-58a5-421e-941f-5c24bd5a8452` (`spec-to-deploy`, workspace run), which died
 permanently at `commit-push`. Gathered in
 `.ai/specs/briefs/2026-08-22-resume-fresh-session-fallback.md`; this spec settles that
 brief's five open questions and specifies the fix.
+
+**CORRECTED 2026-08-22:** C18 was reproduced both here and on a clean parent checkout; it remains
+a real red gate tracked separately, not a waived flake. The original implementation note follows.
 
 **Implementation note (2026-08-22): Phase 1's gate is `ChainResumePoint.resume.verifyTranscript`,
 not a bare `resumeFrom !== undefined` check.** `runAgentStep`'s `resumeFrom` parameter is shared

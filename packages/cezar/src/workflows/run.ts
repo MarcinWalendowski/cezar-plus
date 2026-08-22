@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import {
   parseAskMarkerResult,
@@ -17,8 +17,9 @@ import {
   brokerAvailable,
   type BrokerSessionRequest,
 } from '../core/broker-launch.ts';
-import { chooseIsolation, probeIsolationCapabilities, type BrokerIsolation } from '../core/broker-isolation.ts';
-import { isSpoolLive, readSpoolMeta, spoolDirFor } from '../core/run-spool.ts';
+import { chooseIsolation, nextBrokerInstanceId, probeIsolationCapabilities, type BrokerIsolation } from '../core/broker-isolation.ts';
+import { isSpoolLive, legacySpoolDirFor, readSpoolMeta, SPOOL_ORPHAN_GRACE_MS, spoolDirFor, type SpoolMeta } from '../core/run-spool.ts';
+import { reapAbandonedBroker } from '../core/reap-abandoned-broker.ts';
 import { isMissingSessionRejection, type RunnerId } from '../core/agent-runner.ts';
 import { agentHomePaths } from '../paths.ts';
 import { modelConflictsWithRunner } from '../core/model-presets.ts';
@@ -1008,6 +1009,7 @@ export class RunManager {
   /** The registry read behind change C. A seam so the adoption is testable without a workspace
    *  registry on disk — the production default is the same read the sidebar performs. */
   private readonly loadGrant: () => Promise<WorkspaceGrant>;
+  private readonly reapBroker: (runId: string, meta: SpoolMeta) => Promise<boolean>;
 
   constructor(
     private readonly store: RunStore,
@@ -1016,11 +1018,13 @@ export class RunManager {
       semaphore?: WorkspaceSemaphore;
       bootScratchRoot?: boolean;
       loadGrant?: () => Promise<WorkspaceGrant>;
+      reapBroker?: (runId: string, meta: SpoolMeta) => Promise<boolean>;
     } = {},
   ) {
     this.dataDir = join(repoRoot, '.ai/cezar');
     this.bootScratchRoot = options.bootScratchRoot === true;
     this.loadGrant = options.loadGrant ?? (() => loadWorkspaceGrant());
+    this.reapBroker = options.reapBroker ?? reapAbandonedBroker;
     this.semaphore = options.semaphore ?? new WorkspaceSemaphore();
     this.offSemaphore = this.semaphore.register({
       busySlots: () => this.busySlots(),
@@ -1909,7 +1913,7 @@ export class RunManager {
 
   /** Absolute spool dir for a run, from the record's relative path or the default layout. */
   private spoolDirOf(run: RunRecord): string {
-    return run.spoolDir ? join(this.dataDir, run.spoolDir) : spoolDirFor(join(this.dataDir, 'runs'), run.id);
+    return run.spoolDir ? join(this.dataDir, run.spoolDir) : legacySpoolDirFor(join(this.dataDir, 'runs'), run.id);
   }
 
   /**
@@ -1923,7 +1927,8 @@ export class RunManager {
   private brokerFor(runId: string, stepId: string, backend: RunnerId): BrokerSessionRequest | undefined {
     if (!(BROKERED_BACKENDS as readonly string[]).includes(backend)) return undefined;
     if (!brokerAvailable()) return undefined;
-    const spoolDir = spoolDirFor(join(this.dataDir, 'runs'), runId);
+    const instanceId = nextBrokerInstanceId();
+    const spoolDir = spoolDirFor(join(this.dataDir, 'runs'), runId, instanceId);
     // Recorded BEFORE the spawn: a crash in the same millisecond must still leave the next process
     // a path to probe. Written relative to `dataDir` — see the field's own note in `store.ts`.
     this.store.updateRun(runId, { spoolDir: relative(this.dataDir, spoolDir), consumedOffset: 0 });
@@ -1931,6 +1936,7 @@ export class RunManager {
     return {
       spoolDir,
       runId,
+      instanceId,
       stepId,
       isolation: this.brokerIsolation(),
       onOffset: (offset) => this.persistConsumedOffset(runId, offset),
@@ -1987,19 +1993,28 @@ export class RunManager {
     const backend = run.runner ?? 'claude';
     if (!(BROKERED_BACKENDS as readonly string[]).includes(backend)) return false;
     const spoolDir = this.spoolDirOf(run);
-    if (!isSpoolLive(spoolDir)) return false;
     const meta = readSpoolMeta(spoolDir);
-    if (!meta || meta.runId !== run.id || !meta.stepId) return false;
+    const refuse = async (): Promise<false> => {
+      if (meta && await this.reapBroker(run.id, meta)) {
+        this.store.appendEvent(run.id, {
+          type: 'lifecycle',
+          message: `adopted-out agent stopped: broker ${meta.pid}`,
+        });
+      }
+      return false;
+    };
+    if (!isSpoolLive(spoolDir)) return refuse();
+    if (!meta || meta.runId !== run.id || !meta.stepId) return refuse();
     const openStep = run.steps.find((s) => s.id === meta.stepId);
-    if (!openStep || stepTerminal(openStep.status)) return false;
+    if (!openStep || stepTerminal(openStep.status)) return refuse();
 
     const workflow = await this.reviveWorkflow(run);
-    if (!workflow) return false;
+    if (!workflow) return refuse();
     const resumeAt = this.chainResumeAt(run, workflow);
     // The spool must hold the step the chain is about to run. A mismatch means the record and the
     // spool disagree about where this run is, and guessing between them is precisely how a run
     // ends up with two live agents.
-    if (!resumeAt || workflow.steps[resumeAt.index]?.id !== meta.stepId) return false;
+    if (!resumeAt || workflow.steps[resumeAt.index]?.id !== meta.stepId) return refuse();
 
     this.pendingReattach.set(run.id, {
       stepId: meta.stepId,
@@ -2051,8 +2066,36 @@ export class RunManager {
     }
     for (const entry of entries) {
       if (!entry.endsWith('.spool')) continue;
-      if (live.has(entry.slice(0, -'.spool'.length))) continue;
-      rmSync(join(runsDir, entry), { recursive: true, force: true });
+      const parent = join(runsDir, entry);
+      const runId = entry.slice(0, -'.spool'.length);
+      let children: string[];
+      try {
+        children = readdirSync(parent);
+      } catch {
+        continue;
+      }
+      // A flat protocol-1 spool has files directly in the parent. Keep it only while its run is live.
+      if (children.some((child) => child === 'meta.json')) {
+        if (!live.has(runId) && !isSpoolLive(parent)) rmSync(parent, { recursive: true, force: true });
+        continue;
+      }
+      for (const child of children) {
+        const instanceDir = join(parent, child);
+        if (isSpoolLive(instanceDir)) continue;
+        if (!readSpoolMeta(instanceDir)) {
+          try {
+            if (Date.now() - statSync(instanceDir).mtimeMs <= SPOOL_ORPHAN_GRACE_MS) continue;
+          } catch {
+            continue;
+          }
+        }
+        rmSync(instanceDir, { recursive: true, force: true });
+      }
+      try {
+        if (readdirSync(parent).length === 0) rmSync(parent, { recursive: true, force: true });
+      } catch {
+        // Concurrent broker launch or cleanup, leave it for the next sweep.
+      }
     }
   }
 

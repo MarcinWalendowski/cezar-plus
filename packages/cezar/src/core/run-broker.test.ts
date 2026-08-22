@@ -66,7 +66,7 @@ describe('run broker', () => {
     'spools the backend output and answers status on the control socket',
     async () => {
       const spool = join(scratch(), 'run.spool');
-      const broker = startRunBroker({ spoolDir: spool, runId: 'r1', backend: 'claude', command: echoBackend() });
+      const broker = startRunBroker({ spoolDir: spool, runId: 'r1', instanceId: 'i1', backend: 'claude', command: echoBackend() });
 
       const meta = readSpoolMeta(spool);
       expect(meta?.runId).toBe('r1');
@@ -90,7 +90,7 @@ describe('run broker', () => {
     'writes a message to the live backend through the control socket',
     async () => {
       const spool = join(scratch(), 'run.spool');
-      const broker = startRunBroker({ spoolDir: spool, runId: 'r2', backend: 'claude', command: echoBackend() });
+      const broker = startRunBroker({ spoolDir: spool, runId: 'r2', instanceId: 'i2', backend: 'claude', command: echoBackend() });
       const out = spoolPaths(spool).out;
 
       await waitFor(() => readSpoolFrom(out, 0).lines.length >= 1);
@@ -114,7 +114,7 @@ describe('run broker', () => {
       // disappears (as it would during `systemctl restart`), and a fresh one picks up from the
       // persisted byte offset while the agent has kept working throughout.
       const spool = join(scratch(), 'run.spool');
-      const broker = startRunBroker({ spoolDir: spool, runId: 'r3', backend: 'claude', command: echoBackend() });
+      const broker = startRunBroker({ spoolDir: spool, runId: 'r3', instanceId: 'i3', backend: 'claude', command: echoBackend() });
       const out = spoolPaths(spool).out;
 
       await waitFor(() => readSpoolFrom(out, 0).lines.length >= 1);
@@ -157,7 +157,7 @@ describe('run broker', () => {
     'records the exit and tears the control socket down',
     async () => {
       const spool = join(scratch(), 'run.spool');
-      const broker = startRunBroker({ spoolDir: spool, runId: 'r4', backend: 'claude', command: echoBackend() });
+      const broker = startRunBroker({ spoolDir: spool, runId: 'r4', instanceId: 'i4', backend: 'claude', command: echoBackend() });
       await waitFor(() => readSpoolFrom(spoolPaths(spool).out, 0).lines.length >= 1);
       await brokerRequest(spool, { op: 'end' });
       const exit = await broker.finished;
@@ -177,7 +177,7 @@ describe('run broker', () => {
       // A server that sees exit.json stops reading. If the tees were still flushing, it would
       // lose the tail -- so exit.json must be written strictly after the streams close.
       const spool = join(scratch(), 'run.spool');
-      const broker = startRunBroker({ spoolDir: spool, runId: 'r5', backend: 'claude', command: echoBackend() });
+      const broker = startRunBroker({ spoolDir: spool, runId: 'r5', instanceId: 'i5', backend: 'claude', command: echoBackend() });
       await waitFor(() => readSpoolFrom(spoolPaths(spool).out, 0).lines.length >= 1);
       for (const text of ['a', 'b', 'c']) {
         await brokerRequest(spool, { op: 'send', content: [{ type: 'text', text }] });
@@ -199,7 +199,7 @@ describe('run broker', () => {
       const spool = join(scratch(), 'run.spool');
       // a backend that ignores stdin EOF and would otherwise run forever
       const forever = [process.execPath, '-e', 'process.stdout.write("{}\\n");setInterval(()=>{},1000);'];
-      const broker = startRunBroker({ spoolDir: spool, runId: 'r6', backend: 'claude', command: forever });
+      const broker = startRunBroker({ spoolDir: spool, runId: 'r6', instanceId: 'i6', backend: 'claude', command: forever });
       await waitFor(() => readSpoolFrom(spoolPaths(spool).out, 0).lines.length >= 1);
 
       await brokerRequest(spool, { op: 'interrupt' });
@@ -214,7 +214,7 @@ describe('run broker', () => {
     'rejects a malformed control request without dying',
     async () => {
       const spool = join(scratch(), 'run.spool');
-      const broker = startRunBroker({ spoolDir: spool, runId: 'r7', backend: 'claude', command: echoBackend() });
+      const broker = startRunBroker({ spoolDir: spool, runId: 'r7', instanceId: 'i7', backend: 'claude', command: echoBackend() });
       await waitFor(() => readSpoolFrom(spoolPaths(spool).out, 0).lines.length >= 1);
 
       await expect(brokerRequest(spool, { op: 'nonsense' })).resolves.toMatchObject({ ok: false });
@@ -236,7 +236,7 @@ describe('run broker', () => {
         '-e',
         'process.stderr.write("a warning\\n");process.stdout.write("{\\"type\\":\\"ready\\"}\\n");process.exit(0);',
       ];
-      const broker = startRunBroker({ spoolDir: spool, runId: 'r8', backend: 'claude', command: noisy });
+      const broker = startRunBroker({ spoolDir: spool, runId: 'r8', instanceId: 'i8', backend: 'claude', command: noisy });
       await broker.finished;
 
       expect(readFileSync(spoolPaths(spool).err, 'utf8')).toContain('a warning');

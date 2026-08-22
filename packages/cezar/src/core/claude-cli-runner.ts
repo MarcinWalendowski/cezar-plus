@@ -32,7 +32,7 @@ import { readNdjson } from './ndjson.ts';
 import type { UiEvent } from './ui-events.ts';
 import { BrokeredSession } from './brokered-session.ts';
 import { brokerArgs, resolveBrokerCommand, type BrokerSessionRequest } from './broker-launch.ts';
-import { buildBrokerLaunchArgv, nextBrokerInstanceId, userScopeEnv } from './broker-isolation.ts';
+import { buildBrokerLaunchArgv, userScopeEnv } from './broker-isolation.ts';
 import { readSpoolMeta, spoolPaths, type SpoolExit } from './run-spool.ts';
 import {
   claudeTurnStarted,
@@ -395,6 +395,7 @@ export class ClaudeCliRunner implements AgentRunner {
       // the whole point of `brokerAvailable()` is that the caller decides that BEFORE spawning.
       throw new Error('run broker requested but this cezar has no built entry point to re-exec');
     }
+    if (!request.instanceId) throw new Error('fresh broker launch requires an instance id');
     // A previous session's spool must never be mistaken for this one's. Removing it before the
     // broker writes `meta.json` also means `isSpoolLive` can never observe a half-replaced spool:
     // it either sees the old complete one, or nothing, or the new complete one.
@@ -406,12 +407,13 @@ export class ClaudeCliRunner implements AgentRunner {
       // Unique per LAUNCH, not per run — a run spawns one broker per step, and a scope unit name
       // reused while the previous scope is still alive makes `systemd-run` exit 1 without starting
       // anything (`brokerScopeUnitName`).
-      instanceId: nextBrokerInstanceId(),
+      instanceId: request.instanceId,
       command: [
         ...brokerCommand,
         ...brokerArgs({
           spoolDir: request.spoolDir,
           runId: request.runId,
+          instanceId: request.instanceId,
           stepId: request.stepId,
           backend: this.backend,
           cwd: spec.cwd,
@@ -527,6 +529,12 @@ export class ClaudeCliRunner implements AgentRunner {
 
     const session: BrokeredSession = new BrokeredSession({
       spoolDir: request.spoolDir,
+      owner: request.instanceId
+        ? { instanceId: request.instanceId }
+        : (() => {
+            const meta = readSpoolMeta(request.spoolDir);
+            return meta ? { instanceId: meta.instanceId, brokerPid: meta.pid } : undefined;
+          })(),
       startOffset: request.startOffset ?? 0,
       onLine: (line) => consumer.handleLine(line),
       onOffset: request.onOffset,
@@ -544,11 +552,11 @@ export class ClaudeCliRunner implements AgentRunner {
           sawUsage: consumer.sawUsage(),
         });
       },
-      buildResult: () => {
+      buildResult: (exit) => {
         const failed = mode.spawnFailed?.();
         if (failed) throw failed;
         const totals = consumer.buildResult();
-        const failure = brokeredExitFailure(request.spoolDir, timedOut, terminatedByCezar);
+        const failure = brokeredExitFailure(exit, request.spoolDir, timedOut, terminatedByCezar);
         if (failure) throw failure;
         return totals;
       },
@@ -1004,9 +1012,8 @@ function emitBrokeredTerminalEvents(ctx: {
 }
 
 /** The `Error` a brokered run rejects with, or null when it ended acceptably. */
-function brokeredExitFailure(spoolDir: string, timedOut: boolean, terminatedByCezar: boolean): Error | null {
+function brokeredExitFailure(exit: SpoolExit | null, spoolDir: string, timedOut: boolean, terminatedByCezar: boolean): Error | null {
   if (timedOut) return null;
-  const exit = readSpoolExitSafe(spoolDir);
   const code = exit?.code ?? null;
   if (code === 0 || code === null) return null;
   if (terminatedByCezar && isSignalTerminationExit(code)) return null;
@@ -1018,14 +1025,6 @@ function brokeredExitMessage(code: number, exit: SpoolExit | null, spoolDir?: st
   const detail = stderr ? ` — ${stderr}` : '';
   const signal = exit?.signal ? ` (signal ${exit.signal})` : '';
   return `claude CLI exited with code ${code}${signal}${detail}`;
-}
-
-function readSpoolExitSafe(spoolDir: string): SpoolExit | null {
-  try {
-    return JSON.parse(readFileSync(spoolPaths(spoolDir).exit, 'utf8')) as SpoolExit;
-  } catch {
-    return null;
-  }
 }
 
 /** The last three lines of the broker's `err.log` — the brokered twin of the pipe path's
@@ -1067,12 +1066,13 @@ function waitForExit(child: ChildProcessWithoutNullStreams): Promise<number | nu
 /**
  * Where a broker LAUNCHER's own output goes.
  *
- * Beside the spool, never inside it: `spawnBroker` deletes `<runId>.spool` before every launch, so
+ * Beside the run's spool tree, never inside an instance directory, so
  * a log written in there would be erased by the next step — exactly the step whose failure we are
  * trying to explain. One file per run, appended across its steps.
  */
 export function brokerLaunchLogPath(spoolDir: string): string {
-  return resolvePath(dirname(spoolDir), `${basename(spoolDir).replace(/\.spool$/, '')}.broker.log`);
+  const runSpoolDir = dirname(spoolDir);
+  return resolvePath(dirname(runSpoolDir), `${basename(runSpoolDir).replace(/\.spool$/, '')}.broker.log`);
 }
 
 /** Open the launch log for append, or `null` if we cannot — diagnostics must never block a run. */
