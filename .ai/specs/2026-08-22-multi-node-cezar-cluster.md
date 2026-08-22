@@ -2,7 +2,8 @@
 
 **Status:** Proposed
 **Date:** 2026-08-22
-**Revised:** 2026-08-22 (same day), after the owner corrected the premise
+**Revised:** 2026-08-22 (same day), twice — after the owner corrected the premise, then after the
+owner set the node economics
 
 > **CORRECTED 2026-08-22 — the first draft led with "a second node is worth having for
 > *capability*, not for compute", and that was wrong.** Owner: *"It's mostly about machine compute:
@@ -59,6 +60,17 @@ median**, n=10, min 56.8 / max 59.0), a small explicit tier of state replicates 
 cluster-scoped leases guard anything that starts work or spends the shared subscription, and each
 node advertises **capacity** so the scheduler can fill it. Capability labels — macOS, iMessage, a
 browser, a device — then decide *which* eligible node, not whether a second one is worth having.
+
+**A node costs about EUR 20/mo, and the shape of the fleet follows from that.** Owner: *"it's
+cheaper to have 3x vps of 8vcpu than 24vcpu machine"* — true, and the measured 12.9 % duty cycle
+says why: we are buying **burst**, which is exactly what shared vCPU is for. The dividing line is
+shared versus dedicated, not small versus big (§2b: 3 × CX43 ≈ EUR 61/mo for 24 vCPU against
+~EUR 339/mo for a 16-vCPU dedicated machine; within the shared line, price is linear). So workers
+are **homogeneous CX43-class, `maxHeavySteps: 2` each, no backups, minted by a script** — cattle,
+because their entire state is worktrees and caches while the record lives on the hub. The Mac is
+the exception: the biggest machine here, and the one that sleeps, so it is a *capability* node that
+may take overflow, never a capacity number you can count on. The next ceiling after compute is not
+compute — it is the **agent subscription**, for which no measured number exists (§4, Q2a).
 
 The single most important thing in this document is a refusal: **replication must not ship before
 the claim lease.** `todo-autostart.ts` turns `autostart: true` into a live agent run from an
@@ -146,8 +158,8 @@ box, so `memory.peak` and `cpu.stat` can be read from the scope directly.
 
 ### 2a. Which node, once there is more than one
 
-Capacity says *add* a node. Capability says *which*. Both matter, and the second is why the two
-hosts are not interchangeable.
+Capacity says *add* a node. Capability says *which*. Both matter — and the point of §2b is that
+capacity nodes **should** be interchangeable, which makes the Mac the one node that is not.
 
 What the Mac has that the box does not:
 
@@ -169,9 +181,93 @@ Two consequences the design has to carry:
 - **The Mac sleeps.** Capacity that disappears when a lid closes is not capacity you can promise, so
   a queued task must degrade to "waiting for `mac`" visibly rather than stalling silently — and the
   hub must still be able to run *something* alone.
-- **Work products land where the run ran.** Eight tasks spread over two hosts means eight worktrees
-  and eight branches on two machines. Each node pushes its own branch to `origin`; the review gate
-  and diff are rendered from the node that ran it, over the relay.
+- **Work products land where the run ran.** Eight tasks spread over N hosts means eight worktrees
+  and eight branches scattered across them. Each node pushes its own branch to `origin`; the review
+  gate and diff are rendered from the node that ran it, over the relay. This is also why a worker
+  can be cattle (§2b): the durable artefact is the pushed branch, not the disk it was built on —
+  but note the corollary, that a node destroyed mid-run destroys unpushed work, so decommission
+  drains first.
+
+  **And the corollary has an exception with teeth: 4 of the 12 registered projects have no
+  `origin` at all** (§6 — `brand`, `mw-site`, `lokie-chatbox`, and `loki-labs` itself). For those,
+  a commit on a worker exists *only* on that worker's disk, so "cattle" would mean losing it on
+  rebuild. Placement must therefore refuse to dispatch a remote-less project to a node that is not
+  the one holding the record for it, rather than running it somewhere the result cannot leave.
+  A machine you plan to destroy must not be the only copy of anything.
+
+### 2b. Scale out on shared vCPU, because that is what the burst is worth paying for
+
+Owner, 2026-08-22: *"it's cheaper to have 3x vps of 8vcpu than 24vcpu machine."* Correct, and the
+measured duty cycle says *why* — but the saving is not where it first looks.
+
+All-in monthly, VAT included at 23 %. The anchor is what we actually pay, from 1Password: the
+existing box is **EUR 24.22/mo** = server 19.67 + backups 3.93 + IPv4 0.82. Public list prices are
+quoted ex-VAT (CX43 EUR 15.99 → 19.67 incl., exactly), so the two reconcile with nothing missing:
+
+| option | vCPU | RAM | EUR/mo incl. VAT |
+|---|---|---|---|
+| **3 × CX43** (shared) | 24 | 48 GB | **~61** (3 × 19.67 + 3 × 0.82 IPv4, no backups — see below) |
+| 2 × CX43 | 16 | 32 GB | ~41 |
+| 1 × CX53 (shared) | 16 | 32 GB | ~36 |
+| **1 × CCX43 (dedicated)** | **16** | 64 GB | **~339** |
+
+**The real dividing line is shared versus dedicated, not small versus big.** Within the shared line
+price is almost exactly linear — 2 × CX43 (~41) against 1 × CX53 (~36) is a wash — so "three small
+boxes" wins nothing over "one bigger shared box" on price alone. Against a *dedicated*-vCPU machine
+it wins enormously: **~5.5× the cost for two-thirds of the vCPU count**, after the June 2026
+increase that roughly doubled CCX pricing while CX rose 30-40 %.
+
+And the 12.9 % duty cycle is precisely the argument for shared vCPU: **we are buying burst.** A
+dedicated core is worth paying for when a machine is steadily saturated; ours is idle ~87 % of the
+time and then wants everything for seven minutes. That is the workload shared vCPU exists for.
+
+So within the shared line the choice is architectural, and it favours more small nodes:
+
+- **Failure domain.** One node down costs a third of capacity, not all of it. Today it costs all.
+- **Rolling restarts.** The hub self-deploys ~10×/day; with N nodes you drain one instead of
+  interrupting everything (D15b).
+- **It matches the memory shape.** A testing run wants ~5 GB, so a 16 GB node seats 2 heavy steps —
+  the same `maxHeavySteps: 2` on every node. Three nodes is 6 concurrent heavy steps, which at
+  12.9 % duty cycle supports far more than the 8 runs being asked for.
+- **Homogeneous nodes make placement trivial** — identical labels, identical caps, pure
+  least-loaded (D12), no special cases.
+
+**What scale-out actually costs, and it is not the VPS bill.** Each node needs a checkout of every
+repo, `node_modules` per worktree, worktree retention (already **7.7 GB** on one box, against
+160 GB of disk), agent CLI logins, credentials, and — the one that has already bitten — **keeping
+its checkout current**, since a push is not delivery. Three nodes is three of all of that. **Node
+provisioning must therefore be a script, not a runbook**, before node 3 exists; the marginal cost of
+a node has to be minutes, or the fleet silently drifts.
+
+**And half of that script already exists — which changes the work from "write a provisioner" to
+"extend one".** `cez server-install --platform hetzner` is a step orchestrator
+(`server-install/platforms/hetzner.ts` over pure generators in `hetzner/{provision-user,
+systemd-unit,nginx,tls}.ts`) that already creates a dedicated unix user and `CEZ_HOME`, writes the
+systemd and socket units, installs the agent CLIs (`claude`, `codex`, `gh`), configures nginx and
+TLS, and finishes with an end-to-end verification step. What it stands up is a **cockpit for an
+org**, not a worker: no repo checkouts, no agent CLI *logins*, no cgroup caps, no
+`CEZ_ENV_PASSTHROUGH`, no cluster enrollment. So the delta is a role, not a new tool — and the
+repo's command convention is `server-*`, not a new `node` namespace.
+
+**The evidence that this matters is the box we already have.** `cez server-migrate-releases` exists
+with the comment *"the live unit on `prod-host` is hand-written — no generator in this repo
+authored it"*. The single node in production was provisioned by hand and then needed a bespoke
+one-shot command to be dragged into the layout the installer assumes. **N=1 already drifted from
+its own installer.** That is the argument for making the script the only path, stated as a measured
+fact rather than a principle.
+
+Which licenses a small saving worth taking: **worker nodes are cattle.** Their state is worktrees,
+caches and `node_modules` — all disposable, since the record lives on the hub (tier 1/2). So a
+worker takes **no backups** (−EUR 3.93/mo each) and is rebuilt by the provisioning script instead of
+restored. Only the hub, which holds the leases and the corpus, is a pet.
+
+**The ceiling money cannot move.** Compute is the cheap constraint; the **agent subscription** is
+not. Every node draws on the same pool — two Claude logins and one Codex — and their limits are
+per-account 5-hour windows that no VPS purchase widens (Problem §4). There is **no measured number**
+for how much concurrency that pool sustains, and this spec does not invent one. Buy nodes to reach
+8, then read the account panel (it reports real Claude usage windows) at 8 concurrent **before**
+buying nodes 4 through 6 — otherwise the outcome is idle vCPUs waiting on a quota, at EUR 20 each
+per month.
 
 ### 3. Every exactly-once guarantee cezar owns is a local file lease
 
@@ -200,7 +296,7 @@ that spans machines, so nothing has one. The moment two nodes hold copies of the
 The same shape applies to every scheduler that *creates* work: the automations poller, the sources
 sweep, the reopen sweep, the backup scheduler.
 
-### 4. Two nodes drain one subscription
+### 4. Every node drains the same one subscription, and that is the ceiling money cannot move
 
 `~/.cezar/agent-accounts.json` on the box sets `defaults: {claude: "pool:*", codex: "pool:*"}` —
 balance across claude:default (kontakt@), claude:secondary (owner@) and codex:default.
@@ -215,6 +311,12 @@ also per node, so node B keeps dispatching into a limit node A already observed.
 Account state is cluster state. Nothing else in this design forces a synchronous cross-node call;
 this does, and it is affordable at 58 ms per *dispatch* (against a measured median 6.1 s gap between
 an agent's tool calls, one grant per run start is noise).
+
+**This scales differently from everything else in the spec, and in the wrong direction.** Compute
+is buyable at ~EUR 20 per node (§2b); the pool is three logins whose 5-hour windows widen for
+nobody. So each node added past the point where the pool saturates buys queueing, not throughput —
+and the spec has **no measured number** for where that point is. Do not guess one: reach 8
+concurrent, read the account panel's real usage windows at that load, then decide about nodes 4-6.
 
 ### 5. Node-local state is most of the bytes, and none of it should move
 
@@ -271,29 +373,38 @@ luck.
 
 ### Shape
 
-One **hub**, N **spokes**. A spoke holds a single outbound WebSocket to the hub and never listens
-for inbound connections.
+One **hub**, N **spokes**, and the spokes are meant to be **interchangeable**. A spoke holds a
+single outbound WebSocket to the hub and never listens for inbound connections.
 
 ```
-   ┌──────────────── prod-host  (hub) ────────────────┐
-   │  cockpit.example.com · always on · owns cluster leases │
-   │  /var/lib/cezar/loki-labs/*   ·  the KB corpus         │
-   └───────▲──────────────────────────────────▲─────────────┘
-           │  outbound WSS (Cloudflare Tunnel)│
-           │  58 ms median RTT, measured      │
-   ┌───────┴────────────┐          ┌──────────┴───────────┐
-   │  mac  (spoke)       │          │  future node (spoke) │
-   │  /Users/mw/loki-labs│          │                      │
-   │  labels: macos,     │          │                      │
-   │  imessage, browser, │          │                      │
-   │  device-e2e         │          │                      │
-   └─────────────────────┘          └──────────────────────┘
+   ┌──────────────── prod-host  (hub) ─────────────────┐
+   │  cockpit.example.com · always on · owns cluster leases  │
+   │  the KB corpus · the record · a PET (backed up)         │
+   │  also a worker: maxParallel 8, maxHeavySteps 2          │
+   └──▲──────────────────▲──────────────────▲────────────────┘
+      │ outbound WSS (Cloudflare Tunnel), 58 ms median RTT, measured
+      │                  │                  │
+ ┌────┴──────────┐ ┌─────┴─────────┐ ┌──────┴────────────────┐
+ │ worker-2      │ │ worker-3      │ │ mac                   │
+ │ CX43, ~EUR 20 │ │ CX43, ~EUR 20 │ │ M4 Max 16c / 128 GB   │
+ │ CATTLE        │ │ CATTLE        │ │ labels: macos,        │
+ │ no backups    │ │ no backups    │ │ imessage, browser,    │
+ │ heavySteps 2  │ │ heavySteps 2  │ │ device-e2e · SLEEPS   │
+ └───────────────┘ └───────────────┘ └───────────────────────┘
+   homogeneous, script-provisioned      special capabilities
 ```
 
-Hub-and-spoke rather than peer-to-peer, for three reasons that are facts about this deployment, not
+Two classes of spoke, and the distinction is the whole scaling story. **Homogeneous workers**
+(CX43-shaped, identical caps and labels, provisioned by script, no backups) are how you buy
+throughput: each adds 8 vCPU / 16 GB / 2 heavy-step slots for ~EUR 20/mo. **The Mac** is a
+capability node that happens to also be the largest machine in the fleet, and it is the one node
+whose availability you cannot promise.
+
+Hub-and-spoke rather than peer-to-peer, for reasons that are facts about this deployment, not
 preferences: the Mac has **no inbound address**; the Mac **sleeps**, so a node that was away needs
-somewhere durable to catch up from; and at N=2..5 a gossip mesh buys nothing and costs a discovery
-protocol and an anti-entropy layer.
+somewhere durable to catch up from; a VPS worker is cattle that should carry no coordination state
+at all; and at N=2..6 a gossip mesh buys nothing and costs a discovery protocol and an anti-entropy
+layer.
 
 **The hub is a role, not a new program.** A cezar server with `CEZ_CLUSTER=1` and no
 `CEZ_CLUSTER_HUB` is a hub; one with `CEZ_CLUSTER_HUB=<url>` is a spoke. No second daemon, no port
@@ -467,6 +578,14 @@ If no eligible node has headroom the run stays `queued` with a `queuedReason` di
 three cases that look identical from the board — **no node has the label**, **every eligible node is
 at capacity**, or **the node it needs is offline** — and it **never silently runs somewhere else**.
 
+**One eligibility rule is not about labels or headroom at all: a project with no `origin` may only
+run on the node that holds it.** 4 of the box's 12 registered projects have none (§6). A run's
+durable output is a pushed branch; where there is nothing to push to, the output lives only on that
+node's disk — which is precisely the thing §2b says we are willing to destroy. So remote-less
+projects are pinned by construction, with a fourth `queuedReason`, and decommissioning
+refuses while any remote-less project's only copy is here. The cattle/pet split is a property of
+the *data*, not of the hardware, and this is where the two disagree.
+
 **D12a — A dispatch carries its workflow by value, and refuses a stale target.**
 Two things the target node does not necessarily have, and neither is obvious until it bites:
 
@@ -501,10 +620,15 @@ runs hit `run-tests` together and the machine thrashes. Today it is set to 5 and
 
 So each node advertises and enforces two:
 
-| knob | bounds | box | Mac |
-|---|---|---|---|
-| `maxParallel` | runs admitted at all | 8 | 8+ |
-| `maxHeavySteps` (new) | runs inside a CPU/memory-heavy step at once | **2** | ~8 |
+| knob | bounds | box (hub, 8 vCPU / 15 GB) | CX43 worker (8 / 16) | Mac (16 / 128) |
+|---|---|---|---|---|
+| `maxParallel` | runs admitted at all | 8 | 8 | 8+ |
+| `maxHeavySteps` (new) | runs inside a CPU/memory-heavy step at once | **2** | **2** | ~8 |
+
+The hub and a CX43 worker are the same shape on purpose (§2b): identical caps, identical labels,
+so placement is pure least-loaded with no special cases and a node can be replaced without
+re-tuning anything. The Mac is the only row that differs, and its number is a ceiling it can
+*offer*, never one the cluster may count on — it sleeps.
 
 `maxHeavySteps` is a second `WorkspaceSemaphore`, taken at step entry and released at step exit,
 and it is the mechanism that turns 12.9 % duty cycle into real oversubscription. A step is heavy
@@ -618,6 +742,10 @@ packages/contract/src/cluster.ts
 packages/web/src/routes/settings/cluster.tsx
 ```
 
+Plus one extension rather than a new module: `server-install/platforms/hetzner.ts` gains a
+**worker role** (checkouts, CLI logins, cgroup caps, enrollment) alongside the org-cockpit role it
+installs today — see Phase 4.
+
 Vertical slice following the `automations` convention — *"not modular; no plugin seam exists"*.
 
 ### What is touched in existing code, and how little
@@ -636,12 +764,30 @@ Vertical slice following the `automations` convention — *"not modular; no plug
   the same `onStoreCreated` / `onContextBuilt` hooks so it covers the boot context, every
   already-built context and every later one.
 
+- `capabilities.ts` — `cluster: boolean`, **always present** and `false` when off, like every other
+  capability key. Do not re-assert the "flag-off health body is byte-identical" claim: it was
+  measured false and corrected in place in that file, and this key makes the body grow by one more
+  pair. What opt-in buys is behavioural — no index, no watcher, no timer, no route, no nav item, no
+  prompt bytes.
+- `workspace-runs-routes.ts` — union the remote projection into the workspace runs list.
+- `server-install/platforms/hetzner.ts` (+ `steps.ts`) — the **worker role** (Phase 4): checkouts,
+  agent CLI logins, cgroup caps, `CEZ_ENV_PASSTHROUGH`, `cez cluster enroll`. An extension of the
+  existing step list, not a second provisioning path.
+- `.env.example` — `CEZ_CLUSTER` and `CEZ_CLUSTER_HUB`, **in the same commit that introduces them**,
+  plus the README env table since both are user-facing. The env contract has one documentation
+  surface and an undocumented `CEZ_*` var is a bug, not an omission.
+
+Nothing else in phases 1-5. In particular `RunStatus`, `StepStatus` and every existing `.ai/cezar/`
+file format are unchanged, and `RunStore`/`RunRecord` are untouched *by the cluster half*.
+
 **Phase 0 is a separate, smaller diff, and it does touch the store** — the sentence above is about
 phases 1-5 only, and saying "nothing else" without this caveat would have been false:
 
 - `runs/store.ts` — four additive optional fields (`peakCpuPct`, `peakMemoryBytes`, `cpuSeconds`,
   `resourceKill`). Additive and optional, so an older cezar reading a newer `runs.json` is
-  unaffected; no published union is widened.
+  unaffected; no published union is widened — in particular `resourceKill` is a **new optional
+  field**, not a new `RunStatus` member, because `RunStatus` is published wire enum (C3 still gets
+  its named reason, from the field).
 - `core/process-usage.ts` — keep a peak for the CPU it already samples, and on Linux prefer the
   run's cgroup (`memory.peak`, `cpu.stat`) over summing `ps` RSS.
 - `core/broker-isolation.ts` — pass `--property=` resource properties onto the scope it already
@@ -653,18 +799,6 @@ phases 1-5 only, and saying "nothing else" without this caveat would have been f
 - `packages/cezar/vitest.config.ts` and the agent search path — worker/thread caps.
 
 None of that needs a second machine, a link, or a lease, which is exactly why it is Phase 0.
-- `capabilities.ts` — `cluster: boolean`, **always present** and `false` when off, like every other
-  capability key. Do not re-assert the "flag-off health body is byte-identical" claim: it was
-  measured false and corrected in place in that file, and this key makes the body grow by one more
-  pair. What opt-in buys is behavioural — no index, no watcher, no timer, no route, no nav item, no
-  prompt bytes.
-- `workspace-runs-routes.ts` — union the remote projection into the workspace runs list.
-- `.env.example` — `CEZ_CLUSTER` and `CEZ_CLUSTER_HUB`, **in the same commit that introduces them**,
-  plus the README env table since both are user-facing. The env contract has one documentation
-  surface and an undocumented `CEZ_*` var is a bug, not an omission.
-
-Nothing else. In particular `RunStore`, `RunRecord`, `RunStatus`, `StepStatus` and every existing
-`.ai/cezar/` file format are unchanged.
 
 Two knobs only, and neither is a credential: the link secret is written by `cez cluster join`, and
 `acceptsDispatch` lives on the node record where the cockpit can show it, not in an env var somebody
@@ -767,10 +901,26 @@ first; `todos.json.bak` written on both sides before the first write.
 Claim lease (re-enables autostart for replicated todos, now exactly-once), account grants + usage
 aggregation + cluster-wide limit holds, run index projection.
 
-**Phase 4 — Placement and remote dispatch.**
+**Phase 4 — Placement, remote dispatch, and a worker you can mint in minutes.**
 `placement` on a todo, label matching, queue-with-reason, spoke-side `acceptsDispatch` opt-in,
 workflow-by-value and the pre-dispatch freshness refusal (D12a), on-demand live event relay for a
 foreign run.
+
+This is the first phase where buying a machine pays, so it is also the phase that must make buying
+one cheap: **a worker is minted by a script, and the script is the existing installer with a new
+role** — `cez server-install --platform hetzner --role worker`, not a new `cez node` namespace
+(§2b: the installer already does the user, units, nginx/TLS and agent-CLI *installs*; a worker adds
+repo checkouts, agent CLI **logins**, cgroup caps + `maxHeavySteps`, `CEZ_ENV_PASSTHROUGH`, and
+`cez cluster enroll` with the hub's token). Extend the step list and the strategy — do not author a
+parallel shell script, which is how the two provisioning paths that already exist
+(`server-install` and the hand-built hub) came to disagree.
+
+The logins are the one genuinely interactive step, so the run must **stop and say so** rather than
+half-provisioning silently. Verified by being the **only** way a worker is ever created: E5b builds
+node 3 from zero, and the marginal cost has to be minutes or the fleet drifts and every later
+measurement is noise. Corollary, and it is the point of cattle: decommissioning must be equally
+boring — `cez cluster revoke` then `cez server-uninstall`, drain first, destroy, no backup to
+restore, and a refusal while this node holds the only copy of a remote-less project (D12).
 
 **Phase 5 — Scheduler ownership.**
 Automations, sources and backup tick under a cluster lease — each of those creates work or writes
@@ -905,6 +1055,9 @@ terminal" for a run on somebody else's host.
 | **Hub is a single point of failure** | it is one for *coordination*, never for local work (D15). A spoke with no hub is an ordinary cockpit. Stated as a bound, not hidden |
 | **Retired Mac corpus resurrected** | D8: corpus is explicitly out of tier 1; spokes read through the hub, cache read-only |
 | **Enrollment grants code execution on the Mac** | outbound-only, `acceptsDispatch` off by default and spoke-enforced, per-node credential, two-sided revoke |
+| **A destroyed worker takes the only copy of something with it** — 4 of 12 projects have no `origin` | those projects are pinned to their holding node by placement, with their own `queuedReason`; decommission (`cez cluster revoke` + `cez server-uninstall`) drains first and refuses while it holds an unpushable-anywhere copy (D12) |
+| **The fleet drifts into N different machines** — each node is its own checkouts, logins, caps and env | provisioning is a script from the first extra node, never a runbook; E5b provisions twice and **diffs the two results**, which is the only assertion that can actually catch drift |
+| **Nodes bought past the point the subscription sustains** — idle vCPU at EUR 20/mo each | no number is invented (§4, Q2a): reach 8, read the account panel's real usage windows at that load, then decide on nodes 4-6. The measurement is a gate on the purchase, not a report after it |
 
 ## Verification
 
@@ -953,6 +1106,12 @@ Unit (pure, in `cluster/merge.ts`, `clock.ts`, `placement.ts`, `ops.ts`):
 4. An op carrying an unknown field round-trips through an older reader unchanged (D13).
 5. Compaction preserves the merge result exactly for a randomised op sequence (property-style).
 6. Placement: unmet `requires` → `queued` with a reason naming the node, and **never** a start.
+   - **6a** — a project whose `origin` is absent is **never** placed off its holding node, even
+     when that node is the most loaded and a remote-less-capable peer is idle. *Negative control:*
+     the same fixture with an `origin` present **does** get placed on the peer — otherwise the test
+     passes because placement did nothing at all, which is the cheapest way for this assertion to
+     be vacuous. And assert the `queuedReason` is the remote-less one, not "at capacity"; a rule
+     that reports the wrong reason is a rule the next person deletes as redundant.
 
 Integration (two servers in one vitest process, two `CEZ_HOME` temp dirs, linked over loopback):
 
@@ -1002,6 +1161,19 @@ Gates green is necessary, not sufficient. Until these have run the work is **QA 
 - **E5a** Dispatch safety: name a workflow that exists **only** on the dispatching node → it still
   runs correctly on the target (carried by value). Then put the target's checkout deliberately
   behind `origin` and mid-conflict → dispatch **refuses** and names which, and the override runs it.
+- **E5b** Provisioning: run `cez server-install --platform hetzner --role worker` against a
+  **freshly created, untouched** VPS and time it. Acceptance: the node enrolls, reports its labels, and completes a dispatched task with
+  no manual step other than the agent CLI logins the script explicitly stops for. Then the part
+  that is easy to skip and is the whole point — **do it a second time and diff the two nodes**
+  (installed versions, unit files, env names, caps, checkout heads). Two nodes that differ mean the
+  script is a runbook wearing a shebang. Finally decommission one of them and assert the
+  cluster keeps working and stops trying to place work there. Include the hub in the diff: if
+  `prod-host` (hand-built, per §2b) cannot be described by the same role, the role is
+  incomplete and the fleet has two provisioning paths again.
+- **E5c** Capacity actually multiplied: repeat **C0/C1's eight tasks across the cluster** and
+  compare wall time to all-8-complete against the single-box C1 number. This is the only evidence
+  that a second machine bought throughput rather than just moved queueing around; a cluster that
+  admits 8 and finishes no faster than one box has paid EUR 20/mo for latency.
 - **E6** Account grants: dispatch from both nodes at once → the hub's account panel shows one
   coherent utilisation, and a limit hold observed on one node parks the other.
 - **E7** Sleep/resume: close the Mac for an hour with pending ops on both sides; on wake, converge
@@ -1024,6 +1196,12 @@ Not HA and not failover — the hub is a coordination SPOF by design (D15 bounds
 multi-tenant. Not a live-run migration. Not a second code-sync mechanism — git remains it. Not a
 cluster-wide `maxParallel` (D14). Not replication of the KB corpus (D8).
 
+**Not autoscaling.** Worker provisioning is a script a person runs, not a controller that reacts
+to load. At this size the reaction time that matters is minutes and the fleet changes monthly — but
+the real reason is §4: the next ceiling after compute is the **agent subscription**, which no
+autoscaler can widen. A controller optimising on CPU pressure would happily buy machines to wait on
+a quota.
+
 **And not doctrine.** `CLAUDE.md` / `AGENTS.md` at the workspace root have their own record (the
 box) and their own one-way transport (`tools/doctrine-sync`, pull-only by design, SPEC-531). Those
 are repo files, which puts them in tier 3. The cluster must not become a second, bidirectional path
@@ -1036,11 +1214,22 @@ for them — that is precisely how the two copies became unrelated histories in 
    step. If C1 confirms that, the cluster becomes a way to go past 8 and to use the Mac's 128 GB,
    not a prerequisite for 8. Worth deciding whether to ship Phase 0 and re-measure before committing
    to phases 1-5.
-2. **A third node instead of, or as well as, the Mac?** The Mac is the biggest machine here but it
-   sleeps and it is the owner's own workstation — eight agents forking 50 processes each is felt.
-   A second VPS is capacity that never sleeps and never competes with the person using it, at a
-   known monthly price. The design treats both identically; the choice is about cost and about
-   whether you want agent load on your desk.
+2. **A third node instead of, or as well as, the Mac? — recommendation, not a question.** Buy VPS
+   workers; treat the Mac as a capability node that may also take overflow when it happens to be
+   awake. The Mac is the biggest machine in the fleet (128 GB, 8.5× the box) but it sleeps and it
+   is the owner's own workstation — eight agents forking 50 processes each is felt — so it can
+   never be *counted on* for a capacity number. A CX43-class worker can: ~EUR 20/mo all-in, never
+   sleeps, competes with nobody, and §2b shows the shared-vCPU line is where the price is sane
+   (against a dedicated-vCPU machine, ~5.5× the cost for two-thirds of the vCPU). Concretely:
+   **homogeneous CX43 workers, `maxHeavySteps: 2` each, no backups (cattle), minted by
+   `cez server-install --role worker` and never by hand.** What is genuinely still open is only *how many*, and
+   that is not a compute question — see Q2a.
+   - **2a — the part that is genuinely open: how many workers before the subscription is the
+     ceiling?** Unmeasured, and this spec refuses to guess it. Every node draws the same two Claude
+     logins and one Codex, on per-account 5-hour windows that no VPS purchase widens. Reach 8
+     concurrent (Phase 0, plus one worker if Phase 0 falls short), read the account panel's real
+     usage windows at that load, and only then decide on nodes 4-6. Buying ahead of that number
+     buys idle vCPUs waiting on a quota, at EUR 20 each per month.
 3. **Which node is the hub?** This spec assumes `hel1` (always on, addressable). Note it is now
    explicitly the *weaker* worker — hub is a reachability role, not a capacity one. Mac-as-hub
    inverts the reachability problem and is not recommended.
