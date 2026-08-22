@@ -107,6 +107,25 @@ export function isSignalTerminationExit(exitCode: number | null): boolean {
   return exitCode === 130 || exitCode === 137 || exitCode === 143;
 }
 
+/**
+ * Recognizes a resume rejected because the backend never actually created the conversation being
+ * resumed — a session id cezar minted and persisted before any confirmation it existed on the
+ * backend's side (spec 2026-08-22-resume-fresh-session-fallback). String-matched because neither
+ * surface exposes a machine-readable code for this distinction (checked against neither CLI/RPC
+ * docs in that pass): `claude`'s rejection is free-text CLI stderr, `codex`'s is a JSON-RPC error
+ * message. A future release could reword either and silently disable the fallback keyed on this —
+ * the failure mode of a wrong guess is the bug resurfacing exactly as measured, not a new one.
+ *
+ * `opencode` never resumes by session id at the transport level (`opencode-server-runner.ts`'s
+ * bootstrap always issues `POST /session` unconditionally), so it cannot hit this failure mode and
+ * always answers `false`.
+ */
+export function isMissingSessionRejection(backend: RunnerId, message: string): boolean {
+  if (backend === 'claude') return /No conversation found with session ID/i.test(message);
+  if (backend === 'codex') return /no rollout found for thread id/i.test(message);
+  return false;
+}
+
 /** The slice of `ChildProcess` a termination tracker needs — keeps the helper
  *  usable from the transport layer and from test fakes alike. */
 export interface TrackableChild {

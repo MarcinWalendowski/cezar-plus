@@ -646,3 +646,37 @@ describe('OpencodeServerRunner v2 wiring (against the bundled mock server)', () 
     expect(v2.filter((e) => e.type === 'turn.completed')).toHaveLength(1);
   }, 30_000);
 });
+
+/**
+ * spec 2026-08-22-resume-fresh-session-fallback, AC #4 / Phase 4 — the executable answer for
+ * OpenCode, not a prose claim. Unlike `claude` and `codex`, OpenCode's bootstrap never resumes by
+ * session id at the transport level: it always issues `POST /session` unconditionally
+ * (`opencode-server-runner.ts` bootstrap), ignoring `spec.resume`/`spec.sessionId` entirely — so
+ * it cannot hit the "resumed a session the backend never created" failure the other two backends
+ * can, and there is no fallback to add for it. This pins that existing behavior down as
+ * intentional rather than an oversight.
+ */
+describe('OpencodeServerRunner never resumes by session id (spec 2026-08-22, AC #4)', () => {
+  const mockBin = join(FIXTURES, 'mock-opencode-serve.mjs');
+
+  it('starts a fresh session and completes normally for a sessionId that was never created anywhere', async () => {
+    const runner = new OpencodeServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      { userPrompt: 'check the working tree', cwd: process.cwd(), sessionId: 'never-created-anywhere', resume: true },
+      (e) => events.push(e),
+      { autoEndAfterFirstTurn: true },
+    );
+    const result = await session.result;
+
+    // The mock always mints its own SESSION_ID from POST /session — never the caller's id, and
+    // never a "session not found" class error, because no resume-by-id request was ever sent.
+    expect(result.sessionId).toBe('ses_mock_1');
+    expect(result.sessionId).not.toBe('never-created-anywhere');
+    expect(events.some((e) => e.type === 'session' && e.sessionId === 'ses_mock_1')).toBe(true);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    expect(events.some((e) => e.type === 'note' && /not found|no rollout|no conversation/i.test(e.message))).toBe(
+      false,
+    );
+  });
+});

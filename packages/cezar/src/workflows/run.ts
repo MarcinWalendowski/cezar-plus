@@ -8,7 +8,7 @@ import {
   type AskMarkerParseResult,
   type AskRequest,
 } from '../core/ask.ts';
-import { type AgentSession } from '../core/claude-cli-runner.ts';
+import { claudeSessionTranscriptExists, type AgentSession } from '../core/claude-cli-runner.ts';
 import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.ts';
 import { parseUsageLimit } from '../core/usage-limit.ts';
 import { createRunner } from '../core/runner-factory.ts';
@@ -19,7 +19,8 @@ import {
 } from '../core/broker-launch.ts';
 import { chooseIsolation, probeIsolationCapabilities, type BrokerIsolation } from '../core/broker-isolation.ts';
 import { isSpoolLive, readSpoolMeta, spoolDirFor } from '../core/run-spool.ts';
-import type { RunnerId } from '../core/agent-runner.ts';
+import { isMissingSessionRejection, type RunnerId } from '../core/agent-runner.ts';
+import { agentHomePaths } from '../paths.ts';
 import { modelConflictsWithRunner } from '../core/model-presets.ts';
 import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
 import {
@@ -762,8 +763,17 @@ export function specRevisionFeedback(report: string, specPath?: string): string 
 interface ChainResumePoint {
   /** Index into the revived `WorkflowDef.steps`. */
   index: number;
-  /** Present only when that step already had a session this process may reattach to. */
-  resume?: { sessionId: string; profileId?: string; prompt: string };
+  /** Present only when that step already had a session this process may reattach to.
+   *  `verifyTranscript` marks it (spec 2026-08-22-resume-fresh-session-fallback, Phase 1): every
+   *  handle built here is a session id recorded by an EARLIER process invocation, of ambiguous
+   *  confirmation status — never a session this same process just observed running, the way a
+   *  cezar-initiated stop's own retry (`stopResume`, `execute()`'s chain loop) is. `runAgentStep`
+   *  reads it to decide whether the Claude-only proactive existence check applies; a `stopResume`
+   *  handle deliberately does not set it, or the check would downgrade a session that was
+   *  confirmed alive moments ago whenever the dev box's real `~/.claude/projects` (or a test's
+   *  unrelated `CLAUDE_CONFIG_DIR`) happens not to carry its transcript — losing the in-progress
+   *  work the stop-retry exists to preserve, and reproducing the stop as a second, terminal one. */
+  resume?: { sessionId: string; profileId?: string; prompt: string; verifyTranscript?: true };
   /**
    * Why the chain is re-entering here, in the words the resumed step should act on. Seeded into
    * `checkFailure`, the channel that appends explanatory text to a retried agent's prompt.
@@ -1922,6 +1932,8 @@ export class RunManager {
         // config dir finds no session and silently starts a fresh one instead.
         ...(record.profileId ? { profileId: record.profileId } : {}),
         prompt: restartContinuationPrompt({ position, total }),
+        // This id was recorded by an earlier process invocation — see `ChainResumePoint.resume`.
+        verifyTranscript: true,
       },
     };
   }
@@ -3088,6 +3100,12 @@ export class RunManager {
      *  opening a recovered continuation does not persist duplicate files. */
     persistedImages: ContentBlock[] = [],
     persistedAttachments: PersistedAttachment[] = [],
+    /** Set only by this method's own reactive fallback (spec 2026-08-22-resume-fresh-session-
+     *  fallback, Phase 3) when it re-invokes itself with a fresh session after a resume was
+     *  rejected as targeting a conversation the backend never created — guards the one retry
+     *  against retrying a SECOND rejection in a row, which is a real failure, not a loop. Every
+     *  ordinary caller omits it. */
+    retriedMissingSession = false,
   ): Promise<void> {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
@@ -3412,6 +3430,32 @@ export class RunManager {
     }
     this.store.updateStep(runId, stepId, { profileId: continueProfile.profileId });
 
+    // Proactive Claude-only check (spec 2026-08-22-resume-fresh-session-fallback, Phase 1) — the
+    // twin of `runAgentStep`'s own check. `sessionId` here is a hint persisted before the backend
+    // ever confirmed the conversation exists (the `updateStep` above at the top of this method);
+    // verify a transcript actually exists before handing it to `--resume`. Unlike `runAgentStep`,
+    // no `userPrompt` rebuild is needed on a miss: `prompt` is the caller's own opening message
+    // either way, not a restart-continuation prompt tied to an assumption the session already
+    // holds context (see spec Phase 1, "Phase 3 is unaffected for a different reason").
+    let resumeDowngraded = false;
+    if (continueBackend === 'claude' && sessionId !== undefined) {
+      const claudeHome = agentHomePaths({ ...process.env, ...continueProfile.env }).claude;
+      const exists = await claudeSessionTranscriptExists(claudeHome, state.cwd, sessionId);
+      if (!exists) {
+        resumeDowngraded = true;
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId,
+          message: 'no transcript for the recorded session — starting fresh',
+        });
+      }
+    }
+    // A downgrade mints a NEW id rather than retrying the dead one — Claude never emits a
+    // `session` event to correct the record later the way Codex/OpenCode do, so the fresh id
+    // must be persisted here or the record keeps pointing at the dead one forever.
+    const spawnSessionId = resumeDowngraded ? randomUUID() : sessionId;
+    if (resumeDowngraded) this.store.updateStep(runId, stepId, { sessionId: spawnSessionId });
+
     // From the RECORD, not the registry — see `workspaceGrantOf`.
     const continueGrant = workspaceGrantOf(record);
     const runner = createRunner(continueBackend);
@@ -3454,8 +3498,8 @@ export class RunManager {
         ],
         env: continueProfile.env,
         model: continueModel,
-        sessionId,
-        resume: sessionId !== undefined,
+        sessionId: spawnSessionId,
+        resume: resumeDowngraded ? false : sessionId !== undefined,
         timeoutMs: 0,
       },
       onEvent,
@@ -3474,6 +3518,11 @@ export class RunManager {
     /** Set by the success branch below when the chain must take the run back — acted on in
      *  `finally`, once this run has left the live registries. */
     let handBack: RunRecord | null = null;
+    /** Set by the catch branch below (spec 2026-08-22-resume-fresh-session-fallback, Phase 3)
+     *  when the failure is a recognized "unknown session" rejection and this is the first time —
+     *  acted on in `finally`, once this run has left the live registries, same reasoning as
+     *  `handBack`: re-invoking while still `active` lets a concurrent `pump()` race this method. */
+    let missingSessionRetry = false;
     try {
       await session.result;
       if (sessionError) throw new Error(sessionError);
@@ -3532,16 +3581,36 @@ export class RunManager {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      sink.sessionEnded('error', message);
-      this.store.updateStep(runId, stepId, { status: 'failed', error: message, finishedAt: finishedAt() });
-      appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=failed`);
-      this.store.updateRun(runId, {
-        status: 'failed',
-        error: `continue failed: ${message}`,
-        finishedAt: finishedAt(),
-        currentStepId: undefined,
-      });
-      this.store.appendEvent(runId, { type: 'lifecycle', message: `continue failed — ${message}` });
+      // Reactive fallback (spec 2026-08-22-resume-fresh-session-fallback, Phase 3) — the
+      // continuation-path twin of the chain loop's Phase 2 branch, and what
+      // `recover-session-failure.test.ts` exercises. `sessionId !== undefined` means this attempt
+      // actually resumed a session; `!retriedMissingSession` bounds it to one retry.
+      if (!retriedMissingSession && sessionId !== undefined && isMissingSessionRejection(backend, message)) {
+        missingSessionRetry = true;
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId,
+          message: `${message} — the session was never confirmed to exist; retrying with a fresh session`,
+        });
+        this.store.appendEvent(runId, {
+          type: 'metric',
+          stepId,
+          name: 'run.step.resumed_after_missing_session',
+          runId,
+          backend,
+        });
+      } else {
+        sink.sessionEnded('error', message);
+        this.store.updateStep(runId, stepId, { status: 'failed', error: message, finishedAt: finishedAt() });
+        appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=failed`);
+        this.store.updateRun(runId, {
+          status: 'failed',
+          error: `continue failed: ${message}`,
+          finishedAt: finishedAt(),
+          currentStepId: undefined,
+        });
+        this.store.appendEvent(runId, { type: 'lifecycle', message: `continue failed — ${message}` });
+      }
     } finally {
       this.recordUsagePeaks(runId);
       this.clearIdleTimer(state);
@@ -3551,7 +3620,33 @@ export class RunManager {
       // failed drops its worktree directories and keeps the branches (spec 2026-08-20, X3).
       await this.discardWorkspaceRun(runId);
       this.dropActive(runId);
-      if (handBack) {
+      if (missingSessionRetry) {
+        // Same shape as `handBack` below: re-invoke only after this run has left the live
+        // registries, so a concurrent `pump()` cannot race the new `ActiveRun` this creates.
+        // Re-entering `runContinuation` itself (rather than the chain loop) re-sets `status:
+        // 'running'`, `iterations: 1` and re-appends `step-start`/`user-message` unconditionally
+        // (above), so the record ends up looking like a step that took two iterations — the same
+        // shape the chain-loop fallback produces.
+        void this.runContinuation(
+          runId,
+          stepId,
+          undefined,
+          backend,
+          prompt,
+          images,
+          persistedImages,
+          persistedAttachments,
+          true,
+        ).catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.store.updateRun(runId, {
+            status: 'failed',
+            error: `continue crashed: ${message}`,
+            finishedAt: new Date().toISOString(),
+          });
+          this.dropActive(runId);
+        });
+      } else if (handBack) {
         // Now that the run holds no slot and no `ActiveRun`, put it back in the queue at its next
         // pending step. `dropActive`'s own `releaseSlot()` pumped a queue this run was not in
         // yet, so pump once more — otherwise the re-queued run waits for an unrelated wakeup.
@@ -3872,6 +3967,11 @@ export class RunManager {
     /** Steps already re-entered once after a cezar-initiated stop. One retry per step: a second
      *  stop is terminal for the run rather than a loop. */
     const resumedAfterStop = new Set<string>();
+    /** Steps already re-entered once after a resume rejected because the backend never actually
+     *  created the conversation being resumed (spec 2026-08-22-resume-fresh-session-fallback,
+     *  Phase 2). One retry per step, same reasoning as `resumedAfterStop`: a second miss in a row
+     *  is a real failure, not a loop to keep retrying. */
+    const resumedAfterMissingSession = new Set<string>();
     /** The resume handle a re-entry hands to the step it is re-running. Distinct from
      *  `resumeFrom`, which belongs to a RESTART re-entry and is spent on `resumeIdx` only. */
     let stopResume: { sessionId: string; profileId?: string; prompt: string } | undefined;
@@ -3973,6 +4073,33 @@ export class RunManager {
           this.finishStep(runId, step.id, 'failed', failure, emit, stopped);
           stopReason = stopped;
           break;
+        }
+        // Reactive fallback (spec 2026-08-22-resume-fresh-session-fallback, Phase 2) — the exact
+        // path run `232ad6d4` hit: `stepResume !== undefined` means this attempt actually resumed
+        // a session, and the predicate recognizes the backend's "never created that conversation"
+        // rejection. One retry per step, mirroring `resumedAfterStop` just above.
+        if (
+          failure &&
+          stepResume !== undefined &&
+          !resumedAfterMissingSession.has(step.id) &&
+          isMissingSessionRejection(step.runner ?? taskBackend, failure)
+        ) {
+          resumedAfterMissingSession.add(step.id);
+          this.store.updateStep(runId, step.id, { sessionId: undefined, status: 'pending', error: undefined });
+          emit({
+            type: 'note',
+            stepId: step.id,
+            message: `${failure} — the session was never confirmed to exist; retrying with a fresh session`,
+          });
+          emit({
+            type: 'metric',
+            stepId: step.id,
+            name: 'run.step.resumed_after_missing_session',
+            runId,
+            workflow: workflow.name,
+            backend: step.runner ?? taskBackend,
+          });
+          continue; // same `i` — resumeFrom/stopResume are already spent, so the next pass mints a fresh id
         }
         if (failure) {
           this.finishStep(runId, step.id, 'failed', failure, emit);
@@ -4414,8 +4541,11 @@ export class RunManager {
     attachments: PersistedAttachment[] = [],
     /** Chain re-entry (spec 2026-08-20, P1): reattach the session this step was already running
      *  when the process died, and open it with the restart prompt instead of the step's own
-     *  template — the session already holds everything the template would have said. */
-    resumeFrom?: { sessionId: string; profileId?: string; prompt: string },
+     *  template — the session already holds everything the template would have said. Also the
+     *  vehicle for a stop-retry's own resume handle (`execute()`'s `stopResume`), which is why
+     *  `verifyTranscript` (spec 2026-08-22-resume-fresh-session-fallback) is a separate flag
+     *  rather than "resumeFrom is set" — see `ChainResumePoint.resume`. */
+    resumeFrom?: { sessionId: string; profileId?: string; prompt: string; verifyTranscript?: true },
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -4681,6 +4811,50 @@ export class RunManager {
           onOffset: (offset: number) => this.persistConsumedOffset(runId, offset),
         }
       : this.brokerFor(runId, step.id, stepBackend);
+
+    // Proactive Claude-only check (spec 2026-08-22-resume-fresh-session-fallback, Phase 1): a
+    // resume target is a HINT cezar minted and persisted before any confirmation the backend
+    // ever created the conversation — verify a transcript actually exists before handing it to
+    // `--resume`, so a session that died before writing one (run 232ad6d4's `commit-push`
+    // iteration 1) never reaches the CLI at all. Skipped for a P4 broker reattach: that path
+    // never spawns a new `claude` process or sends `--resume`, so there is nothing to verify.
+    // Gated on `resumeFrom.verifyTranscript`, NOT merely `resumeFrom !== undefined` — this same
+    // parameter also carries a cezar-initiated stop's own retry handle (`stopResume`, a session
+    // this very process observed running seconds ago), which `verifyTranscript` deliberately
+    // leaves unset. Without the gate this check would downgrade a stop-retry whenever the box's
+    // `~/.claude/projects` (or a test's unrelated `CLAUDE_CONFIG_DIR`) doesn't carry that
+    // session's transcript yet, discarding the in-progress work the stop-retry exists to
+    // preserve and turning one stop into two (the second being terminal).
+    let resumeDowngraded = false;
+    if (stepBackend === 'claude' && resumeFrom?.verifyTranscript === true && !reattach) {
+      const claudeHome = agentHomePaths({ ...process.env, ...stepProfile.env }).claude;
+      const exists = await claudeSessionTranscriptExists(claudeHome, state.cwd, resumeFrom.sessionId);
+      if (!exists) {
+        // The check fires AFTER `userPrompt` was frozen above (resumeFrom.prompt — the restart-
+        // continuation prompt), which assumes the session already holds everything the step's own
+        // template would have said. A downgrade falsifies that assumption by construction, so
+        // `userPrompt` must be rebuilt from the step's own template — not just the session id —
+        // or the fresh session runs contextless. Re-run exactly the three lines that built it the
+        // first time, with `resumeFrom` treated as absent.
+        userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task);
+        if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
+        if (checkFailure) {
+          userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
+        }
+        resumeDowngraded = true;
+        emit({
+          type: 'note',
+          stepId: step.id,
+          message: 'no transcript for the recorded session — starting fresh',
+        });
+      }
+    }
+    // A downgrade mints a NEW id rather than retrying the dead one — nothing to reattach to, and
+    // Claude never emits a `session` event to correct the record later the way Codex/OpenCode do,
+    // so the fresh id must be persisted here or the record keeps pointing at the dead one forever.
+    const spawnSessionId = resumeDowngraded ? randomUUID() : sessionId;
+    if (resumeDowngraded) this.store.updateStep(runId, step.id, { sessionId: spawnSessionId });
+
     try {
       const openSession = reattach && runner.reattachSession
         ? runner.reattachSession.bind(runner)
@@ -4725,8 +4899,8 @@ export class RunManager {
           ],
           env: stepProfile.env,
           model: backendModel,
-          sessionId,
-          resume: resumeFrom !== undefined,
+          sessionId: spawnSessionId,
+          resume: resumeDowngraded ? false : resumeFrom !== undefined,
           // Interactive sessions have no wall clock — the idle timer rules.
           timeoutMs: interactive ? 0 : undefined,
         },

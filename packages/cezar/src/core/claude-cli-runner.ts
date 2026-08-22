@@ -1,7 +1,8 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readFileSync, rmSync } from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve as resolvePath } from 'node:path';
+import { dirname, join, resolve as resolvePath } from 'node:path';
 import type {
   AgentEvent,
   AgentRunResult,
@@ -750,6 +751,65 @@ export function buildAllowedTools(allowedTools: string[], bashAllowlist?: string
 
 function truncate(s: string, max = 200): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/**
+ * The FAST-PATH guess at Claude Code's own `cwd` → project-directory slug: `/` and `.` both become
+ * `-`, everything else is left alone. Pinned against two measured examples (spec
+ * 2026-08-22-resume-fresh-session-fallback): a dot-free cwd (`/var/lib/cezar/workspace` →
+ * `-var-lib-cezar-workspace`) and a dotted worktree cwd, where `/.ai` produces a doubled dash. Not
+ * a guarantee for every possible cwd — `claudeSessionTranscriptExists` falls back to a directory
+ * scan on a miss, which is what existence correctness actually rests on.
+ */
+export function claudeProjectDirSlug(cwd: string): string {
+  return cwd.replace(/[/.]/g, '-');
+}
+
+/**
+ * Whether a Claude resume target's transcript actually exists on disk, so a doomed `--resume`
+ * never reaches the CLI (spec 2026-08-22-resume-fresh-session-fallback — run `232ad6d4`'s
+ * `commit-push` iteration 1 died before writing one at all).
+ *
+ * Existence is answered by a SCAN of `<claudeHome>/projects`, not by trusting the slug:
+ * `claudeProjectDirSlug(cwd)` is tried first as a cheap fast path, and a miss there falls through
+ * to a scan of every project subdirectory for `<sessionId>.jsonl` — because a false "exists" here
+ * reproduces exactly the bug this check exists to catch.
+ *
+ * The two failure directions are NOT symmetric (see that spec's Architecture/Risks). A false
+ * POSITIVE ("no transcript" for a session that exists) only costs one downgrade to a fresh session
+ * that wasn't needed — harmless. A false NEGATIVE ("transcript exists" — including "the check
+ * could not tell") lets a doomed `--resume` through, which is today's bug reproducing itself. So
+ * any resolution failure — `claudeHome/projects` missing or unreadable — FAILS OPEN: this returns
+ * `true` (unverified, proceed with the resume as today) rather than `false`.
+ */
+export async function claudeSessionTranscriptExists(
+  claudeHome: string,
+  cwd: string,
+  sessionId: string,
+): Promise<boolean> {
+  const projectsDir = join(claudeHome, 'projects');
+  try {
+    await stat(join(projectsDir, claudeProjectDirSlug(cwd), `${sessionId}.jsonl`));
+    return true;
+  } catch {
+    // The slug guess missed — not proof the transcript doesn't exist. Fall through to the scan.
+  }
+  let entries: string[];
+  try {
+    entries = await readdir(projectsDir);
+  } catch {
+    // `claudeHome/projects` couldn't be resolved at all (permissions, missing dir, …) — fail open.
+    return true;
+  }
+  for (const entry of entries) {
+    try {
+      await stat(join(projectsDir, entry, `${sessionId}.jsonl`));
+      return true;
+    } catch {
+      // not in this project dir — keep scanning
+    }
+  }
+  return false;
 }
 
 /** Path to the bundled mock (`scripts/mock-claude.mjs`), for CEZ_DRY_RUN=1. */
