@@ -6,6 +6,11 @@ import type { RunRecord } from '../runs/store.ts';
 import { NOTE_TO_SPEC_WORKFLOW, type WorkflowDef } from '../workflows/types.ts';
 import { NoteApprover, type NoteApproverProject } from './approve.ts';
 import { NoteStore } from './store.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
+
+/** The approving person, as the route derives one (`server/request-author.ts`). Approval is the
+ *  one notes path a human drives, so a local-user author is the true statement here. */
+const APPROVER = localCliAuthor('note-approval');
 
 /**
  * Approval — the only path from a note to a run (P2.3, spec
@@ -87,7 +92,7 @@ describe('NoteApprover', () => {
     const result = await approver.approve(noteId, {
       passId: 'pass_1',
       proposals: [{ id: 'p1' }, { id: 'p2' }],
-    });
+    }, APPROVER);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -116,8 +121,8 @@ describe('NoteApprover', () => {
     const { approver, started } = makeApprover();
 
     const [first, second] = await Promise.all([
-      approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] }),
-      approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] }),
+      approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] }, APPROVER),
+      approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] }, APPROVER),
     ]);
 
     expect(started).toHaveLength(1);
@@ -135,9 +140,9 @@ describe('NoteApprover', () => {
   it('refuses a sequential re-approve too, naming the run that exists', async () => {
     const noteId = await seed();
     const { approver } = makeApprover();
-    await approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] });
+    await approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] }, APPROVER);
 
-    const again = await approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] });
+    const again = await approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] }, APPROVER);
 
     expect(again.ok).toBe(true);
     if (!again.ok) return;
@@ -151,7 +156,7 @@ describe('NoteApprover', () => {
     const result = await approver.approve(noteId, {
       passId: 'pass_1',
       proposals: [{ id: 'p3' }, { id: 'p1' }],
-    });
+    }, APPROVER);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -166,14 +171,14 @@ describe('NoteApprover', () => {
     const noteId = await seed();
     const failing = makeApprover({ fail: (projectId) => projectId === 'api' });
 
-    const first = await failing.approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] });
+    const first = await failing.approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] }, APPROVER);
     expect(first.ok && first.body.rejected).toHaveLength(1);
     // The claim must NOT survive a run that never started — otherwise the proposal is stuck
     // holding a placeholder for a run that does not exist, forever.
     expect(store.get(noteId)?.pass?.proposals[0]?.createdRunId).toBeUndefined();
 
     const working = makeApprover();
-    const retry = await working.approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] });
+    const retry = await working.approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'p1' }] }, APPROVER);
 
     expect(retry.ok && retry.body.created).toHaveLength(1);
   });
@@ -182,7 +187,7 @@ describe('NoteApprover', () => {
     const noteId = await seed();
     const { approver } = makeApprover();
 
-    const result = await approver.approve(noteId, { passId: 'pass_stale', proposals: [{ id: 'p1' }] });
+    const result = await approver.approve(noteId, { passId: 'pass_stale', proposals: [{ id: 'p1' }] }, APPROVER);
 
     expect(result).toMatchObject({ ok: false, status: 409 });
   });
@@ -194,7 +199,7 @@ describe('NoteApprover', () => {
     await approver.approve(noteId, {
       passId: 'pass_1',
       proposals: [{ id: 'p1', projectId: 'web', task: 'Spec it over here instead.' }],
-    });
+    }, APPROVER);
 
     expect(started[0]).toMatchObject({ projectId: 'web', task: 'Spec it over here instead.' });
   });
@@ -203,11 +208,11 @@ describe('NoteApprover', () => {
     const noteId = await seed();
     const { approver } = makeApprover();
 
-    expect(await approver.approve('note_nope', { passId: 'pass_1', proposals: [{ id: 'p1' }] })).toMatchObject({
+    expect(await approver.approve('note_nope', { passId: 'pass_1', proposals: [{ id: 'p1' }] }, APPROVER)).toMatchObject({
       ok: false,
       status: 404,
     });
-    const result = await approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'nope' }] });
+    const result = await approver.approve(noteId, { passId: 'pass_1', proposals: [{ id: 'nope' }] }, APPROVER);
     expect(result.ok && result.body.rejected[0]?.status).toBe(404);
   });
 });

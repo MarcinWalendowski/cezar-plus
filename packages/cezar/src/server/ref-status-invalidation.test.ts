@@ -9,6 +9,7 @@ import type { RunManager } from '../workflows/run.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { forgetRefStatus } from './github.ts';
 import { createApp } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * The two places cezar changes a pull request itself — and therefore the two places it must stop
@@ -100,7 +101,7 @@ describe('a reference cezar changes itself is forgotten, not waited out', () => 
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: worktree });
     execFileSync('git', ['config', 'user.name', 'Test'], { cwd: worktree });
     execFileSync('git', ['commit', '--allow-empty', '-m', 'work'], { cwd: worktree });
-    const run = store.createRun({ title: 'Ship it', task: 'ship it', workflow: 'quick-task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 'Ship it', task: 'ship it', workflow: 'quick-task', steps: [] });
     store.updateRun(run.id, { status: 'review', worktreePath: worktree, branch: 'cez/abc' });
 
     const created = await apiRequest(app, `/api/v1/runs/${run.id}/pr`, {

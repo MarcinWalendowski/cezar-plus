@@ -20,6 +20,8 @@ import {
 import { readWorkspaceReportsConfig } from '../reports-config.ts';
 import { readReportTriage, updateReportTriage } from '../reports-triage.ts';
 import { createTodo, readTodos } from '../todos.ts';
+import type { TaskAuthor } from '../runs/task-author.ts';
+import { authorOf } from './request-author.ts';
 import { listProjects } from '../workspace/projects.ts';
 import {
   WorkspaceReportsIndex,
@@ -310,6 +312,9 @@ export function createWorkspaceReportsRoutes(deps: WorkspaceReportsRouteDeps) {
     body: string;
     priority?: 'high' | 'medium' | 'low';
     auto: boolean;
+    /** Who approved the report (spec 2026-08-21-task-author-provenance) — the person who clicked,
+     *  which is the same reasoning `by` already records for the triage row. */
+    author: TaskAuthor;
   }) {
     const marker = `report-key: ${args.key}`;
     const existing = (await readTodos(args.dataDir)).find((t) => t.context?.includes(marker));
@@ -327,7 +332,7 @@ export function createWorkspaceReportsRoutes(deps: WorkspaceReportsRouteDeps) {
         (args.row.entry.domain ? `\ndomain: ${args.row.entry.domain}` : '') +
         (args.row.entry.updatedAt ? `\nfiled: ${args.row.entry.updatedAt}` : ''),
       whatToDo: seedWhatToDo(args.row.entry.title, args.body),
-    });
+    }, args.author);
     return { todo, reused: false as const };
   }
 
@@ -415,6 +420,9 @@ export function createWorkspaceReportsRoutes(deps: WorkspaceReportsRouteDeps) {
             row,
             body: listed.body(row.key),
             auto: true,
+            // The pass did the converting, but a PERSON asked for it — the same reasoning `by`
+            // above already records. `auto` is what keeps the two distinguishable.
+            author: authorOf(c, 'report-triage'),
           });
           await updateReportTriage(row.key, (current) =>
             current ?? {
@@ -478,6 +486,7 @@ export function createWorkspaceReportsRoutes(deps: WorkspaceReportsRouteDeps) {
         body: found.body,
         ...(priority ? { priority } : {}),
         auto: false,
+        author: authorOf(c, 'report-triage'),
       });
 
       const by = triagedBy(c);

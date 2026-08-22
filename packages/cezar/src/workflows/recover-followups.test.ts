@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -61,7 +62,7 @@ describe('recover() and the follow-up ceiling (#471)', () => {
   /** A run left `queued` by a crash. `workflowDef` is persisted by a follow-up updateRun, the
    *  way startRun does it (run.ts:254) — recover() revives the workflow from it. */
   const queuedRun = (generateFollowups: boolean): string => {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'do it',

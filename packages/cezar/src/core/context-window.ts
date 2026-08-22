@@ -39,3 +39,28 @@ export function contextWindowForModel(
   }
   return undefined;
 }
+
+/**
+ * The per-step resolution layer (spec 2026-08-22-context-window-denominator-per-step): decides
+ * which number — if any — a step's `contextWindow` should be, given a real backend report, the
+ * model-string guess, and the actual occupancy that guess would be divided into.
+ *
+ * A `reportedWindow` (today: codex's `usage.updated`) is a fact and wins outright, even over
+ * evidence that looks contradictory — a real number is never second-guessed by a heuristic.
+ * Absent a report, `contextWindowForModel`'s guess is used UNLESS `observedTokens` already
+ * exceeds it, in which case the guess is provably wrong and withdrawn (`undefined`) rather than
+ * asserted anyway — this is what stops `245k / 200k` from rendering.
+ */
+export function resolveContextWindow(params: {
+  model: string | undefined;
+  modelIdentity: string | undefined;
+  reportedWindow: number | undefined;
+  observedTokens: number | undefined;
+}): number | undefined {
+  if (params.reportedWindow !== undefined) return params.reportedWindow;
+  const modeled = contextWindowForModel(params.model, params.modelIdentity);
+  if (modeled !== undefined && params.observedTokens !== undefined && params.observedTokens > modeled) {
+    return undefined;
+  }
+  return modeled;
+}

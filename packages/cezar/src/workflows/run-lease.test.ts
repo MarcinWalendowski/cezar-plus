@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { RunManager } from './run.ts';
 import type { WorkflowDef } from './types.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 
@@ -186,10 +187,10 @@ describe('RunManager repository-root lease scheduling', () => {
       // maxParallel defaults to 2. `holder` takes the lease; `blocked` waits on
       // it while idle and must hand its slot back, or `isolated` — which needs
       // no lease at all — would be starved until the holder finishes (#438).
-      const holder = start(holdsLease, { task: 'holder', worktree: false });
+      const holder = start(holdsLease, { author: localCliAuthor(), task: 'holder', worktree: false });
       await holdsTheLease(fixture, holder.id);
-      const blocked = start(INSTANT, { task: 'blocked', worktree: false });
-      const isolated = start(INSTANT, { task: 'isolated' });
+      const blocked = start(INSTANT, { author: localCliAuthor(), task: 'blocked', worktree: false });
+      const isolated = start(INSTANT, { author: localCliAuthor(), task: 'isolated' });
 
       await waitFor(
         () => SETTLED.includes(store.getRun(isolated.id)?.status ?? ''),
@@ -221,9 +222,9 @@ describe('RunManager repository-root lease scheduling', () => {
       const fixture = fixtureRepo();
       const { store, manager, holdsLease, release, start } = fixture;
 
-      const holder = start(holdsLease, { task: 'holder', worktree: false });
+      const holder = start(holdsLease, { author: localCliAuthor(), task: 'holder', worktree: false });
       await holdsTheLease(fixture, holder.id);
-      const blocked = start(INSTANT, { task: 'blocked', worktree: false });
+      const blocked = start(INSTANT, { author: localCliAuthor(), task: 'blocked', worktree: false });
       // The note is emitted immediately before the lease is awaited, so it — not
       // the `running` status, which lands well before — is what pins the run to
       // the blocked state this test is about.
@@ -245,7 +246,7 @@ describe('RunManager repository-root lease scheduling', () => {
 
       // The lease chain survives the cancel: a later root run still gets the
       // tree once the holder hands it on.
-      const after = start(INSTANT, { task: 'after', worktree: false });
+      const after = start(INSTANT, { author: localCliAuthor(), task: 'after', worktree: false });
       release();
       await waitFor(() => SETTLED.includes(store.getRun(after.id)?.status ?? ''), 'the later run to finish');
       expect(store.getRun(after.id)?.status).toBe('done');

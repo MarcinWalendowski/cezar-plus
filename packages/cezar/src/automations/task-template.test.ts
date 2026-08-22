@@ -3,10 +3,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
-import type { RunManager } from '../workflows/run.ts';
+import type { RunManager, StartRunInput } from '../workflows/run.ts';
 import { launchAutomationRun, reconcileAutomationReceipts, renderAutomationTask, validateAutomationPrompt } from './task-template.ts';
 import { AutomationStore } from './store.ts';
 import type { AutomationDefinition } from './types.ts';
+import { localCliAuthor, taskAuthorSchema } from '../runs/task-author.ts';
 
 const definition: AutomationDefinition = {
   id: 'one', revision: 1, name: 'Review', enabled: true, events: ['issue.opened'], intervalSeconds: 300,
@@ -33,12 +34,20 @@ describe('automation task templates', () => {
     const root = await mkdtemp(join(tmpdir(), 'cezar-template-'));
     try {
       const store = RunStore.open(join(root, '.ai/cezar'));
+      const started: StartRunInput[] = [];
       const manager = {
-        startRun: (workflow: { name: string; steps: Array<{ id: string; name?: string; command?: string }> }, input: { task: string }) =>
-          store.createRun({ title: 'automation', workflow: workflow.name, task: input.task, steps: workflow.steps.map((step) => ({ id: step.id, name: step.name ?? step.id, kind: step.command ? 'check' as const : 'agent' as const })) }),
+        startRun: (workflow: { name: string; steps: Array<{ id: string; name?: string; command?: string }> }, input: StartRunInput) => {
+          started.push(input);
+          return store.createRun({ author: input.author, title: 'automation', workflow: workflow.name, task: input.task, steps: workflow.steps.map((step) => ({ id: step.id, name: step.name ?? step.id, kind: step.command ? 'check' as const : 'agent' as const })) });
+        },
       } as unknown as RunManager;
       const launched = await launchAutomationRun({ root, manager, store, definition: { ...definition, task: { ...definition.task, workflow: 'quick-task' } }, candidate, receiptId: 'receipt' });
       expect(store.getRun(launched.runId)?.automation).toEqual({ automationId: 'one', automationRevision: 1, receiptId: 'receipt', event: 'issue.opened', githubUrl: candidate.url });
+      // The author is stamped at CREATION (spec 2026-08-21-task-author-provenance) and points at
+      // the same automation the post-create `automation` patch above still describes in full.
+      // Asserted TOGETHER, because the whole claim is that the new field regresses neither.
+      expect(started[0]?.author).toMatchObject({ kind: 'automation', id: 'one', via: 'automation' });
+      expect(taskAuthorSchema.safeParse(started[0]?.author).success).toBe(true);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -47,7 +56,7 @@ describe('automation task templates', () => {
     try {
       const dataDir = join(root, '.ai/cezar');
       const runs = RunStore.open(dataDir);
-      const run = runs.createRun({ title: 'x', workflow: 'quick-task', task: 'x', steps: [] });
+      const run = runs.createRun({ author: localCliAuthor(), title: 'x', workflow: 'quick-task', task: 'x', steps: [] });
       runs.updateRun(run.id, { automation: { automationId: 'one', automationRevision: 1, receiptId: 'receipt', event: 'issue.opened', githubUrl: candidate.url } });
       const automations = AutomationStore.open(dataDir);
       automations.appendReceipt({ receiptId: 'receipt', receiptKey: 'one:e', eventId: 'e', automationId: 'one', revision: 1, status: 'reserved', observedAt: '2026-07-26T00:00:00.000Z', updatedAt: '2026-07-26T00:00:00.000Z' });

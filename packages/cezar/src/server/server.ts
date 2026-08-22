@@ -49,6 +49,7 @@ import { createBackupRoutes } from './backup-routes.ts';
 import { BackupScheduler } from '../backup/scheduler.ts';
 import { loadBackupConfig } from '../backup/config.ts';
 import { createWorkspaceRunRoutes } from './workspace-run-routes.ts';
+import { authorOf } from './request-author.ts';
 import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -4870,6 +4871,10 @@ export function createApp(deps: ServerDeps) {
         // One decision here feeds the run record, the system prompt and
         // CEZ_TODOS_FILE alike (RunManager.agentEnv).
         generateFollowups: capabilities().followups ? parsed.data.generateFollowups : false,
+        // Who asked (spec 2026-08-21-task-author-provenance). Derived from the REQUEST, never
+        // read off the body — `startRunSchema` does not carry an `author` key, so a client
+        // cannot name one, which is what makes this worth reading later.
+        author: authorOf(c, 'composer'),
       };
       const variants = parsed.data.variants ?? 1;
       if (variants > 1) {
@@ -5824,7 +5829,9 @@ export function createApp(deps: ServerDeps) {
     // separate inbox feature happens to be on.
     .post('/todos', jsonZodValidator(() => createTodoInputSchema), async (c) => {
       const { dataDir } = c.get('project');
-      const todo = await createTodo(dataDir, c.req.valid('json'));
+      // `author` is a separate argument, never a body key: `createTodoInputSchema` omits it for
+      // the same reason it omits `archivedAt`. See `runs/task-author.ts`.
+      const todo = await createTodo(dataDir, c.req.valid('json'), authorOf(c, 'todo-create-route'));
       const body: CreateTodoResponse = { todo };
       return c.json(body, 201);
     })
@@ -5893,6 +5900,11 @@ export function createApp(deps: ServerDeps) {
           task,
           runner: parsed.data?.runner,
           model: parsed.data?.model,
+          // A PERSON clicked ▶ Run, so the RUN's author is that person — not the agent that filed
+          // the todo, which keeps its own author on its own record. `todo.startedTaskId` already
+          // joins the two, so both facts stay recoverable and neither overwrites the other. The
+          // autostart path (`todo-autostart.ts`) is the opposite case and inherits instead.
+          author: authorOf(c, 'todo-start'),
         });
         await markStarted(dataDir, id, run.id);
         return c.json({ run }, 201);
@@ -6722,7 +6734,7 @@ export function createApp(deps: ServerDeps) {
     store: noteStore,
     pipeline: {
       process: (noteId) => noteProcessor.process(noteId),
-      approve: (noteId, input) => noteApprover.approve(noteId, input),
+      approve: (noteId, input, author) => noteApprover.approve(noteId, input, author),
     },
   });
   // The autonomous implementation continuation trigger (PLAN D27 Phase 3, `.ai/specs/2026-08-15-
@@ -6904,6 +6916,10 @@ export function createApp(deps: ServerDeps) {
     workflow: run.workflow,
     ...(run.branch !== undefined ? { branch: run.branch } : {}),
     ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
+    // Provenance for the global board's Author column (2026-08-21-task-author-provenance). Sent
+    // whole rather than pre-rendered: the cross-project board is the one surface that can turn an
+    // agent author's parent id into a link, because it alone holds every project's rows.
+    ...(run.author !== undefined ? { author: run.author } : {}),
     // The tracker-reference inputs, verbatim — the cockpit's `taskReference()` owns the rule
     // that picks between them (see the schema's note).
     ...(run.pullRequestUrl !== undefined ? { pullRequestUrl: run.pullRequestUrl } : {}),

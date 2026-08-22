@@ -10,6 +10,7 @@ import { Toaster, resetToasts } from '@/components/ui/toaster'
 
 import { AcceptCelebration, ReviewPanel } from './review-panel'
 import { ThreadView } from './task-thread'
+import { readTaskDraft, resetTaskDrafts, writeTaskDraft } from './task-drafts'
 import { reduceThread } from './thread-state'
 
 afterEach(() => {
@@ -425,5 +426,67 @@ describe('the accept celebration', () => {
     const { rerenderWithProviders } = renderWithProviders(<AcceptCelebration status="review" />)
     rerenderWithProviders(<AcceptCelebration status="done" />)
     expect(document.querySelector('[data-slot="accept-celebration"]')).toBeNull()
+  })
+})
+
+/**
+ * The review gate's notes are a prompt too (spec `.ai/specs/2026-08-21-per-task-prompt-drafts.md`,
+ * D9): they go back into the session as `Review feedback: …`, and until this they died on the next
+ * tab switch — in the state where the text someone types is longest.
+ */
+describe('the review notes draft', () => {
+  afterEach(() => {
+    resetTaskDrafts()
+    localStorage.clear()
+  })
+
+  const notes = () => screen.getByLabelText('Notes for the agent') as HTMLTextAreaElement
+
+  it('paints a stored draft on the first render and persists every keystroke', () => {
+    stubFetch()
+    writeTaskDraft('reviewNotes', 'r1', 'the error handling needs work')
+    renderWithProviders(<ReviewPanel run={run('review')} />)
+    expect(notes().value).toBe('the error handling needs work')
+
+    fireEvent.change(notes(), { target: { value: 'and the tests' } })
+    expect(readTaskDraft('reviewNotes', 'r1')).toBe('and the tests')
+  })
+
+  it('keeps each task`s notes apart when the panel re-renders for another run', () => {
+    stubFetch()
+    const { rerenderWithProviders } = renderWithProviders(<ReviewPanel run={run('review')} />)
+    fireEvent.change(notes(), { target: { value: 'notes for r1' } })
+
+    rerenderWithProviders(<ReviewPanel key="r2" run={run('review', { id: 'r2' })} />)
+    expect(notes().value).toBe('')
+    expect(readTaskDraft('reviewNotes', 'r1')).toBe('notes for r1')
+  })
+
+  it('a SUCCESSFUL send back clears the box AND the store', async () => {
+    stubFetch()
+    renderWithProviders(<ReviewPanel run={run('review')} />)
+    fireEvent.change(notes(), { target: { value: 'change the copy' } })
+    const sendBack = screen.getByRole<HTMLButtonElement>('button', { name: /Send back/ })
+    await waitFor(() => expect(sendBack.disabled).toBe(false))
+    fireEvent.click(sendBack)
+
+    await waitFor(() => expect(notes().value).toBe(''))
+    // Clearing only the state would leave the notes to reappear on the next mount.
+    expect(localStorage.getItem('cez-task-review-notes:r1')).toBeNull()
+  })
+
+  it('a FAILED send back keeps the notes in the box AND in the store', async () => {
+    stubFetch({
+      'POST /api/v1/runs/r1/continue': () => jsonResponse({ error: 'the server said no' }, 500),
+    })
+    renderWithProviders(<ReviewPanel run={run('review')} />)
+    fireEvent.change(notes(), { target: { value: 'a careful paragraph' } })
+    const sendBack = screen.getByRole<HTMLButtonElement>('button', { name: /Send back/ })
+    await waitFor(() => expect(sendBack.disabled).toBe(false))
+    fireEvent.click(sendBack)
+
+    await waitFor(() => expect(sendBack.disabled).toBe(false))
+    expect(notes().value).toBe('a careful paragraph')
+    expect(readTaskDraft('reviewNotes', 'r1')).toBe('a careful paragraph')
   })
 })

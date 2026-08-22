@@ -16,6 +16,7 @@ import type {
   NotificationEvent,
   RegisteredTransport,
 } from "./types.ts";
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * `observer.test.ts` is scanned by `decider.test.ts`'s own source-level guard ("the one mapping
@@ -149,7 +150,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   };
 
   it("first sight is silent: attaching to a store that already moved a run notifies nothing on that run's next touch", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "pre-existing",
       workflow: "w",
       task: "t",
@@ -165,7 +166,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("a real transition after first sight notifies (run.finished on -> done)", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "finishing",
       workflow: "w",
       task: "t",
@@ -180,7 +181,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("an unchanged status re-touch (e.g. a title edit) notifies nothing", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "stable",
       workflow: "w",
       task: "t",
@@ -193,7 +194,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("run.failed fires on -> failed with no autoResumeAt", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "oops",
       workflow: "w",
       task: "t",
@@ -207,7 +208,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("run.usage-limit fires (never run.failed) on -> failed WITH autoResumeAt", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "limited",
       workflow: "w",
       task: "t",
@@ -227,7 +228,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("run.review fires on -> review and carries the pull request URL", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "ready",
       workflow: "w",
       task: "t",
@@ -247,7 +248,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("run.needs-you carries the first question of the LAST ask.requested event, within a bounded tail scan", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "blocked",
       workflow: "w",
       task: "t",
@@ -298,7 +299,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("run.needs-you falls back to the decider default body when no ask.requested event exists", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "blocked, no ask",
       workflow: "w",
       task: "t",
@@ -312,7 +313,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("never reads the run event log for a transition that does not need the ASK text", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "no read needed",
       workflow: "w",
       task: "t",
@@ -327,7 +328,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("reads the run event log exactly once for a transition that DOES need the ASK text", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "needs a read",
       workflow: "w",
       task: "t",
@@ -342,7 +343,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("each notification carries its owning project id and name", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "attributed",
       workflow: "w",
       task: "t",
@@ -358,7 +359,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("routes nothing when the sink admits no transports, without throwing", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "nobody listening",
       workflow: "w",
       task: "t",
@@ -371,7 +372,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("subscribes to (event, ...) only for provider-auth-required, ignoring every other event type", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "auth",
       workflow: "w",
       task: "t",
@@ -394,7 +395,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("provider-auth-required carries the project id/name and ignores a malformed event silently", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "auth2",
       workflow: "w",
       task: "t",
@@ -420,7 +421,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   });
 
   it("returns an unsubscribe that stops all future delivery", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "unsub",
       workflow: "w",
       task: "t",
@@ -448,7 +449,7 @@ describe("notifications/observer: watchRunNotifications", () => {
   it("a boot-grace window records transitions without sending, then sends normally once it closes", () => {
     let now = 1_000_000;
     const sink = recordingSink();
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "boot",
       workflow: "w",
       task: "t",
@@ -489,7 +490,7 @@ describe("notifications/observer: a failing sink can never touch a run", () => {
   });
 
   it("a synchronously-throwing sink leaves the run byte-identical to one with no notifier attached", () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "fragile",
       workflow: "w",
       task: "t",
@@ -523,7 +524,7 @@ describe("notifications/observer: a failing sink can never touch a run", () => {
   it("warns at most once per hour, even across repeated failures", () => {
     const clock = makeClock();
     const warn = vi.fn();
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "noisy failure",
       workflow: "w",
       task: "t",
@@ -575,7 +576,7 @@ describe("notifications/observer: RunNotificationObserver (WeakSet dedupe)", () 
     const sink = recordingSink();
     const clock = makeClock();
     const observer = new RunNotificationObserver(sink, { now: clock.now });
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: "deduped",
       workflow: "w",
       task: "t",
@@ -601,13 +602,13 @@ describe("notifications/observer: RunNotificationObserver (WeakSet dedupe)", () 
       const sink = recordingSink();
       const clock = makeClock();
       const observer = new RunNotificationObserver(sink, { now: clock.now });
-      const runA = store.createRun({
+      const runA = store.createRun({ author: localCliAuthor(),
         title: "a",
         workflow: "w",
         task: "t",
         steps: [],
       });
-      const runB = otherStore.createRun({
+      const runB = otherStore.createRun({ author: localCliAuthor(),
         title: "b",
         workflow: "w",
         task: "t",

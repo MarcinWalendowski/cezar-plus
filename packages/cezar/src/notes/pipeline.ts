@@ -1,4 +1,5 @@
 import type { ApproveNoteInput, ApproveNoteResponse } from '@loki-labs/better-cezar-contract';
+import type { TaskAuthor } from '../runs/task-author.ts';
 import type { StoredNote } from './types.ts';
 
 /**
@@ -34,5 +35,12 @@ export interface NotePipeline {
   approve(
     noteId: string,
     input: ApproveNoteInput,
+    /**
+     * Who approved (spec 2026-08-21-task-author-provenance). Threaded from the ROUTE rather than
+     * derived here, for the same reason `startRun` is a callback: this layer has no request, and
+     * the identity of the person who clicked is a fact only the request carries. Every run this
+     * approval creates — one per proposal, across N projects — gets this one author.
+     */
+    author: TaskAuthor,
   ): Promise<{ ok: true; body: ApproveNoteResponse } | NotePipelineFailure>;
 }

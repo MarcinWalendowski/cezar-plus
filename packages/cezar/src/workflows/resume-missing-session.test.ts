@@ -9,6 +9,7 @@ import { claudeProjectDirSlug } from '../core/claude-cli-runner.ts';
 import { RunStore } from '../runs/store.ts';
 import { RunManager } from './run.ts';
 import type { WorkflowDef } from './types.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -68,7 +69,7 @@ describe('a resumed session cezar never confirmed existed does not fail its step
       ],
     };
     const record = store.createRun({
-      title: 't',
+      author: localCliAuthor(), title: 't',
       workflow: 'spec-to-deploy',
       task: 'ship the fix',
       runner: opts.backend,

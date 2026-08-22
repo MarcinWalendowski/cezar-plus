@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { taskAuthorSchema } from './task-author.ts';
 import { diffStatSchema, runStatusSchema } from './runs.ts';
 
 /**
@@ -46,6 +47,11 @@ export const workspaceRunSummarySchema = z.object({
   finishedAt: z.string().optional(),
   diffStat: diffStatSchema.optional(),
   branch: z.string().optional(),
+  /** Who created the task (`.ai/specs/2026-08-21-task-author-provenance.md`, Phase 4).
+   *  Carried on BOTH board shapes deliberately — `run-index.ts` already notes that the two
+   *  boards must not drift, and a provenance column that exists on one of them is exactly
+   *  that drift. Absent on runs created before the field existed. */
+  author: taskAuthorSchema.optional(),
   groupId: z.string().optional(),
   variant: z.string().optional(),
   archived: z.boolean().optional(),

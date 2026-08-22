@@ -35,6 +35,13 @@ Two new numbers per run:
 - **`contextWindow`** — the model's maximum context, derived from the model string:
   `[1m]` → 1,000,000; any Claude model (opus/sonnet/haiku) → 200,000; otherwise unknown
   (omitted — the cell then shows only the current figure rather than inventing a max).
+  **Superseded 2026-08-22 by 2026-08-22-context-window-denominator-per-step:** this guess is
+  now only the fallback inside `resolveContextWindow()` — a real backend-reported figure
+  (codex's `usage.contextWindow`) wins outright when one exists, and the guess itself is
+  withdrawn (`undefined`) the moment a step's own observed `contextTokens` exceeds it,
+  because a flat 200k for every Claude tier had no escape hatch when that guess was wrong
+  (the `245k / 200k` bug). `contextWindow` is now resolved and stored PER STEP, not
+  recomputed independently at the run level — see the amended "Roll up" bullet below.
 
 Rendered as one combined `Context` column, `used / max` with a compact `k`/`M` format
 (`45k / 200k`), tinted amber past 75% and danger past 90% of the window.
@@ -88,7 +95,14 @@ their figure at `turn.completed` (their per-call/per-message signals are a cheap
 - **Roll up** (`runs/store.ts::updateStep`): run-level `contextTokens` = the latest
   started agent step's value (the current session); `contextWindow` =
   `contextWindowForModel(run.model, run.modelIdentity)`. Both recomputed on every step
-  update, like `inputTokens`/`costUsd`.
+  update, like `inputTokens`/`costUsd`. **Superseded 2026-08-22 by
+  2026-08-22-context-window-denominator-per-step:** `run.contextWindow` is no longer an
+  independent fresh guess — it is copied from that same latest step's own
+  `StepState.contextWindow`, itself resolved once per `updateStep` patch by
+  `resolveContextWindow()` (real report → model-string guess → withdrawn if disproved).
+  Recomputing the run-level figure from the run's CURRENT model on every update could pair a
+  newer step's model with an older step's still-latest `contextTokens`; sourcing both from
+  one step's own record fixes that pairing bug too.
 - **New pure helper** (`core/context-window.ts`): `contextWindowForModel()`, unit-tested.
 - **Cross-project index** (`server.ts::runIndexEntry`): copy both fields onto
   `RunIndexEntry` so the global `/tasks` table has them.

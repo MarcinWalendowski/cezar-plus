@@ -9,6 +9,7 @@ import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from './run.ts';
 import { BROKER_PROTOCOL, spoolDirFor, writeSpoolExit, writeSpoolMeta } from '../core/run-spool.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -67,7 +68,7 @@ describe('recover() re-attaches a run whose broker is still alive (P4)', () => {
 
   /** A run interrupted mid-`implement`, exactly as a restart leaves it. */
   function runningRun(): string {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'two-step',
       task: 'do the thing',

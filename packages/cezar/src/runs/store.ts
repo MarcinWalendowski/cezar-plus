@@ -9,7 +9,8 @@ import { workflowDefSchema } from '../workflows/types.ts';
 import { pendingApprovalSchema } from '@loki-labs/better-cezar-contract';
 
 import { RUNNER_IDS } from '../core/agent-runner.ts';
-import { contextWindowForModel } from '../core/context-window.ts';
+import { resolveContextWindow } from '../core/context-window.ts';
+import { taskAuthorSchema, type TaskAuthor } from './task-author.ts';
 
 import type { RunnerId } from '../core/agent-runner.ts';
 // Type-only, so no runtime edge is added from the store to the contract package — one definition
@@ -74,6 +75,11 @@ const stepStateSchema = z.object({
    *  each turn — see the contract's `stepStateSchema` (spec
    *  2026-08-19-context-usage-in-tasks-table). */
   contextTokens: usageCounterSchema.optional(),
+  /** This step's own context-window max (spec 2026-08-22-context-window-denominator-per-step):
+   *  a real backend-reported figure when one exists (codex today), else the model-string
+   *  guess, else absent the moment this step's own `contextTokens` disproves that guess.
+   *  Resolved once per `updateStep` patch by `resolveContextWindow` — see below. */
+  contextWindow: usageCounterSchema.optional(),
   usageInvocationsStarted: usageCounterSchema.optional(),
   usageInvocationsObserved: usageCounterSchema.optional(),
   usageTurnsStarted: usageCounterSchema.optional(),
@@ -220,6 +226,21 @@ export const runRecordSchema = z.object({
       githubUrl: z.string().url(),
     })
     .optional(),
+  /**
+   * Who created this task, stamped at creation and never rewritten (spec
+   * `.ai/specs/2026-08-21-task-author-provenance.md`). The wire twin is
+   * `contract/src/runs.ts`'s field of the same name.
+   *
+   * OPTIONAL here for the same reason `diffStat` is: `runs.json` is `safeParse`d as ONE array, so
+   * a required addition would silently drop every pre-existing run. What makes the field present
+   * on everything written since is `createRun`'s INPUT type below, where it is required — a
+   * creation path that names no author does not compile. No default, no `?? 'unknown'`: a default
+   * is precisely what would let a real path ship unattributed while still looking attributed.
+   *
+   * Written ONCE, in the record literal. `updateRun` never sets it, so an author cannot be edited
+   * after the fact — which is the property that makes it worth reading at all.
+   */
+  author: taskAuthorSchema.optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
   /**
    * Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —
@@ -319,7 +340,10 @@ export const runRecordSchema = z.object({
   outputTokens: usageCounterSchema.optional(),
   /** Current context occupancy (latest agent step's `contextTokens`) and the model's max
    *  window — see the contract's `runRecordSchema` (spec
-   *  2026-08-19-context-usage-in-tasks-table). Recomputed on every step update. */
+   *  2026-08-19-context-usage-in-tasks-table). Superseded 2026-08-22 by
+   *  2026-08-22-context-window-denominator-per-step: `contextWindow` is now copied from that
+   *  same step's own `StepState.contextWindow`, not recomputed independently on every
+   *  update. */
   contextTokens: usageCounterSchema.optional(),
   contextWindow: usageCounterSchema.optional(),
   costUsd: z.number().optional(),
@@ -688,6 +712,15 @@ export class RunStore extends EventEmitter {
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
+    /**
+     * Who created this task (spec 2026-08-21-task-author-provenance). REQUIRED, and required HERE
+     * rather than defaulted, because this is the ONLY place a `RunRecord` comes into being — so a
+     * required argument on this one object is a complete guarantee for runs, and `npm run
+     * typecheck` fails for the ninth creation path exactly as it did for the first eight.
+     *
+     * Build it with one of the constructors in `./task-author.ts`; never with a literal.
+     */
+    author: TaskAuthor;
   }): RunRecord {
     const run: RunRecord = {
       id: randomUUID(),
@@ -710,6 +743,8 @@ export class RunStore extends EventEmitter {
       workspaceProjects: input.workspaceProjects,
       groupId: input.groupId,
       variant: input.variant,
+      // Stamped once, at the only mint point, and never rewritten — see the schema field above.
+      author: input.author,
       status: 'queued',
       createdAt: new Date().toISOString(),
       tokensUsed: 0,
@@ -807,7 +842,22 @@ export class RunStore extends EventEmitter {
     const run = this.runs.get(runId);
     const step = run?.steps.find((s) => s.id === stepId);
     if (!run || !step) return;
+    // Captured BEFORE the merge below: once `Object.assign` runs, `step.contextWindow` holds
+    // either the value this same patch just wrote or a previously-stored guess, and re-reading
+    // it as `reportedWindow` would let a stale guess masquerade as a report and permanently
+    // short-circuit `resolveContextWindow`'s clamp. Only a value present on THIS call's own
+    // patch counts as a report (spec 2026-08-22-context-window-denominator-per-step).
+    const reportedWindow = patch.contextWindow;
+    const touchesContext = 'contextTokens' in patch || 'contextWindow' in patch;
     Object.assign(step, this.redactStepPatch(patch));
+    if (touchesContext) {
+      step.contextWindow = resolveContextWindow({
+        model: run.model,
+        modelIdentity: run.modelIdentity,
+        reportedWindow,
+        observedTokens: step.contextTokens,
+      });
+    }
     run.tokensUsed = run.steps.reduce((sum, s) => sum + s.tokensUsed, 0);
     const startedAgentSteps = run.steps.filter((candidate) => candidate.kind === 'agent' && candidate.iterations > 0);
     const directionalComplete =
@@ -839,10 +889,19 @@ export class RunStore extends EventEmitter {
       .reverse()
       .find((candidate) => candidate.contextTokens !== undefined);
     run.contextTokens = latestContextStep?.contextTokens;
-    // The max window is a property of the model, recomputed here so an `auto` run picks it up
-    // once `modelIdentity` resolves. Absent for a model we do not size — the cell then shows
-    // only the current figure rather than dividing by an invented max.
-    run.contextWindow = contextWindowForModel(run.model, run.modelIdentity);
+    // Sourced from that SAME step's own resolved `contextWindow` — never a fresh, independent
+    // guess — so numerator and denominator are always the one step's own pair (spec
+    // 2026-08-22-context-window-denominator-per-step, Defect B). The `?? resolveContextWindow`
+    // fallback exists only for step records persisted before `StepState.contextWindow`
+    // existed; it goes inert the first time that step is patched again under this code.
+    run.contextWindow =
+      latestContextStep?.contextWindow ??
+      resolveContextWindow({
+        model: run.model,
+        modelIdentity: run.modelIdentity,
+        reportedWindow: undefined,
+        observedTokens: latestContextStep?.contextTokens,
+      });
     const cost = run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
     run.costUsd = cost > 0 ? cost : undefined;
     this.touch(run);

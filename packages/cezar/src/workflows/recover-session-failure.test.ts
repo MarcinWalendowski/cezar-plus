@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { RunManager } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -52,7 +53,7 @@ describe('recover() contains backend session failures (#562)', () => {
   });
 
   it('retries once with a fresh session instead of failing the run outright', async () => {
-    const record = store.createRun({
+    const record = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'continue safely',
@@ -115,7 +116,7 @@ describe('recover() contains backend session failures (#562)', () => {
   // `thread/start`, which this mock never rejects — the fixed behavior no longer produces a
   // single-rejection failure to build the "next boot" scenario from.
   it('does not retry-storm a step that already exhausted its retry and genuinely failed', async () => {
-    const record = store.createRun({
+    const record = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'continue safely',

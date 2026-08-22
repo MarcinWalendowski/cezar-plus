@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import { closeSync, mkdirSync, openSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { taskAuthorSchema, type TaskAuthor } from './runs/task-author.ts';
 
 /**
  * The global follow-up inbox (spec 007): `.ai/cezar/todos.json`, a flat JSON
@@ -78,6 +79,21 @@ export const todoSchema = z.object({
   /** File this todo AS a run the moment the running cockpit notices it, instead of waiting for a
    *  person to click ▶ Run. See `todo-autostart.ts`. */
   autostart: z.boolean().optional(),
+  // ---- author (2026-08-21-task-author-provenance.md, Phase 3) --------------------------------
+  /**
+   * Who filed this task — see the wire twin (`contract/src/skills.ts`'s `todoItemSchema`).
+   *
+   * Optional on the schema, REQUIRED by `createTodo`'s third argument below: that split is the
+   * whole mechanism. It keeps every legacy entry — and every raw agent append, which bypasses
+   * `createTodo` entirely (`handoff.ts`'s `FOLLOWUP_INSTRUCTIONS`) — valid and readable, while
+   * making it impossible for a NEW code path to file a todo without naming who filed it.
+   *
+   * `origin` (above) is not this field and is not superseded by it: it names a writer CLASS with
+   * no identity, no parent and no way to tell a person at the composer from a script posting to
+   * the same route. It stays exactly as it is — removing a shipped field is a breaking change
+   * with no benefit.
+   */
+  author: taskAuthorSchema.optional(),
 });
 
 export type TodoItem = z.infer<typeof todoSchema> & { id: string };
@@ -86,7 +102,10 @@ export type TodoItem = z.infer<typeof todoSchema> & { id: string };
  *  `id`/`ts` are assigned by `createTodo` itself, `taskId`/`startedTaskId` are agent-/server-only,
  *  `archivedAt` is stamped by `updateTodo`'s archive action, never client-supplied on create.
  *  Mirrors the wire twin's `createTodoInputSchema` (`contract/src/skills.ts`) field-for-field. */
-export type CreateTodoInput = Omit<TodoItem, 'id' | 'ts' | 'taskId' | 'startedTaskId' | 'archivedAt'>;
+export type CreateTodoInput = Omit<
+  TodoItem,
+  'id' | 'ts' | 'taskId' | 'startedTaskId' | 'archivedAt' | 'author'
+>;
 
 export function todosPath(dataDir: string): string {
   return join(dataDir, 'todos.json');
@@ -259,11 +278,20 @@ export async function removeTodo(dataDir: string, id: string): Promise<boolean> 
 
 /** `POST /:projectId/todos` (2026-08-15-knowledge-grounded-task-fanout.md, Phase 1): assigns
  *  `id`/`ts` and appends, under the same lease every other writer here takes — so a create
- *  racing a concurrent create, delete, start, or agent append never loses either side. */
-export async function createTodo(dataDir: string, input: CreateTodoInput): Promise<TodoItem> {
+ *  racing a concurrent create, delete, start, or agent append never loses either side.
+ *
+ *  `author` is a SEPARATE, REQUIRED parameter rather than a key of `input`
+ *  (2026-08-21-task-author-provenance) — that is what stops it ever being read off a request
+ *  body. `input` is what a caller may specify; `author` is what the server decides about the
+ *  caller. Build it with one of the constructors in `./runs/task-author.ts`. */
+export async function createTodo(
+  dataDir: string,
+  input: CreateTodoInput,
+  author: TaskAuthor,
+): Promise<TodoItem> {
   return withTodosLease(dataDir, async () => {
     const { items } = await readRaw(dataDir);
-    const todo: TodoItem = { ...input, id: randomUUID(), ts: new Date().toISOString() };
+    const todo: TodoItem = { ...input, id: randomUUID(), ts: new Date().toISOString(), author };
     items.push(todo);
     await writeAtomic(dataDir, items);
     return todo;
