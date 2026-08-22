@@ -37,6 +37,21 @@ author kind. Screenshot at the time of writing: `/tmp/qa-author-column.png`.
   (step implement) via cezar todo add"* — the parent task AND the agent session, on screen.
 - Zero page errors.
 
+**Confirmed a second time, independently, and it covered two things the first pass did not**
+(2026-08-22, port 4399, fixture with all FOUR states). Recorded because the gap is the useful part:
+the run above checked the runs table and three kinds, so the **Filed board's** Author column and
+the **`api`** kind were unverified until now.
+
+- Both boards carry the header: `["Status","Task","Project","Author","Priority","Age","Actions"]`
+  (Filed) and `[…,"Ref","Author","Workflow",…]` (runs) — one page, two tables, one column.
+- `{kind: 'api', via: 'composer'}` renders `API`, and carries no parent link.
+- An agent-authored **todo** on the Filed board links to its parent exactly as an agent-authored
+  run does, which is what divergence 1's shared `AuthorCell` was for.
+
+The method both passes used is now written down in `AGENTS.md` §"Verifying a cockpit UI change —
+boot a throwaway cezar on a spare port", so the next UI change does not have to rediscover the
+Access wall, the inherited `CEZ_PUBLIC_URL` that blocks boot, or the org-adoption gate.
+
 **Why a throwaway cockpit and not production:** cockpit.example.com sits behind Cloudflare Access,
 and the prod API answers `401` to an unauthenticated loopback client, so the SPA redirects to the
 Access sign-in and never renders a board. Driving the real cockpit needs credentials this task does
