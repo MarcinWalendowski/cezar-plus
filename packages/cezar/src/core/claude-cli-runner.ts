@@ -1,8 +1,17 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { readFileSync, rmSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve as resolvePath } from 'node:path';
+import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 import type {
   AgentEvent,
   AgentRunResult,
@@ -23,8 +32,8 @@ import { readNdjson } from './ndjson.ts';
 import type { UiEvent } from './ui-events.ts';
 import { BrokeredSession } from './brokered-session.ts';
 import { brokerArgs, resolveBrokerCommand, type BrokerSessionRequest } from './broker-launch.ts';
-import { buildBrokerLaunchArgv, userScopeEnv } from './broker-isolation.ts';
-import { spoolPaths, type SpoolExit } from './run-spool.ts';
+import { buildBrokerLaunchArgv, nextBrokerInstanceId, userScopeEnv } from './broker-isolation.ts';
+import { readSpoolMeta, spoolPaths, type SpoolExit } from './run-spool.ts';
 import {
   claudeTurnStarted,
   createClaudeUiState,
@@ -394,6 +403,10 @@ export class ClaudeCliRunner implements AgentRunner {
     const argv = buildBrokerLaunchArgv({
       isolation: request.isolation ?? 'none',
       runId: request.runId,
+      // Unique per LAUNCH, not per run — a run spawns one broker per step, and a scope unit name
+      // reused while the previous scope is still alive makes `systemd-run` exit 1 without starting
+      // anything (`brokerScopeUnitName`).
+      instanceId: nextBrokerInstanceId(),
       command: [
         ...brokerCommand,
         ...brokerArgs({
@@ -409,6 +422,8 @@ export class ClaudeCliRunner implements AgentRunner {
 
     let spawnFailed: Error | null = null;
     const [bin, ...rest] = argv;
+    const launchLog = brokerLaunchLogPath(request.spoolDir);
+    const launchLogFd = openLaunchLog(launchLog);
     try {
       const proc = nodeSpawn(bin as string, rest, {
         cwd: spec.cwd,
@@ -424,10 +439,18 @@ export class ClaudeCliRunner implements AgentRunner {
           ...buildChildEnv({ backend: this.backend, extraEnv: spec.env }),
           ...(request.isolation === 'scope' ? userScopeEnv() : {}),
         },
-        // Detached + no stdio: the broker must not hold a pipe whose read end dies with us. That
-        // pipe is the thing this entire phase exists to remove.
+        // Detached, and stdio that is never a PIPE: the broker must not hold a pipe whose read end
+        // dies with us. That pipe is the thing this entire phase exists to remove.
+        //
+        // It used to be `stdio: 'ignore'` outright, which also threw away the LAUNCHER's diagnostics
+        // — and when `systemd-run` refuses to start a scope it says so on stderr and exits 1, which
+        // is not a spawn `error` event, so `spawnFailed` stays null and nothing is recorded
+        // anywhere on the box. A run then failed with "run broker did not respond after 5000ms",
+        // naming a process that was never created. A FILE fd keeps the no-pipe property intact
+        // while making that class of failure legible
+        // (`.ai/specs/2026-08-22-broker-scope-unit-name-collision.md`).
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', launchLogFd ?? 'ignore', launchLogFd ?? 'ignore'],
       });
       proc.on('error', (err: NodeJS.ErrnoException) => {
         spawnFailed = wrapSpawnError(err, bin as string);
@@ -435,11 +458,24 @@ export class ClaudeCliRunner implements AgentRunner {
       proc.unref();
     } catch (err) {
       throw wrapSpawnError(err, bin as string);
+    } finally {
+      // Ours to close either way: the child has its own duplicate of the descriptor, so closing
+      // here neither truncates its output nor leaks an fd per step in a long-running server.
+      if (launchLogFd !== null) {
+        try {
+          closeSync(launchLogFd);
+        } catch {
+          // Already gone (spawn failure paths can close it for us) — nothing to recover.
+        }
+      }
     }
 
     return this.attachBroker(spec, onEvent, opts, { ...request, startOffset: 0 }, {
       seed: true,
       spawnFailed: () => spawnFailed,
+      // Only `giveUp` reads this, and that is the whole point — "no meta.json" is meaningless at
+      // t=0 and conclusive at t=5s. See `BrokeredSessionOptions.launchFailure`.
+      launchFailure: () => brokerNeverStarted(request.spoolDir, launchLog),
     });
   }
 
@@ -452,7 +488,7 @@ export class ClaudeCliRunner implements AgentRunner {
     onEvent: ((event: AgentEvent) => void) | undefined,
     opts: SessionOptions,
     request: BrokerSessionRequest,
-    mode: { seed: boolean; spawnFailed?: () => Error | null },
+    mode: { seed: boolean; spawnFailed?: () => Error | null; launchFailure?: () => Error | null },
   ): AgentSession {
     let terminatedByCezar = false;
     let timedOut = false;
@@ -496,6 +532,7 @@ export class ClaudeCliRunner implements AgentRunner {
       onOffset: request.onOffset,
       encodeSend: (content) => encodeClaudeUserMessage(content, spec.sessionId),
       spawnFailed: mode.spawnFailed,
+      launchFailure: mode.launchFailure,
       onExit: (exit) => {
         if (deadline) clearTimeout(deadline);
         emitBrokeredTerminalEvents({
@@ -1025,6 +1062,67 @@ function waitForExit(child: ChildProcessWithoutNullStreams): Promise<number | nu
     );
     safety.unref?.();
   });
+}
+
+/**
+ * Where a broker LAUNCHER's own output goes.
+ *
+ * Beside the spool, never inside it: `spawnBroker` deletes `<runId>.spool` before every launch, so
+ * a log written in there would be erased by the next step — exactly the step whose failure we are
+ * trying to explain. One file per run, appended across its steps.
+ */
+export function brokerLaunchLogPath(spoolDir: string): string {
+  return resolvePath(dirname(spoolDir), `${basename(spoolDir).replace(/\.spool$/, '')}.broker.log`);
+}
+
+/** Open the launch log for append, or `null` if we cannot — diagnostics must never block a run. */
+function openLaunchLog(path: string): number | null {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    return openSync(path, 'a');
+  } catch {
+    return null;
+  }
+}
+
+/** Bytes to quote back from the launch log. Enough for systemd's refusal plus context, short
+ *  enough that a chatty launcher cannot flood a step's error message. */
+const LAUNCH_LOG_TAIL_BYTES = 2000;
+
+/**
+ * Why the control channel never came up, when the broker itself was never started.
+ *
+ * Consulted only once `BrokeredSession` has exhausted its retry budget. `meta.json` is the proof:
+ * the broker writes it before binding, so its ABSENCE after five seconds means no broker ever ran —
+ * and "did not respond" is then a false description of a process that does not exist. If the
+ * launcher said anything on the way out (a refused `systemd-run` scope says a great deal), that is
+ * the actual cause and it goes in the message.
+ */
+export function brokerNeverStarted(spoolDir: string, launchLog: string): Error | null {
+  if (readSpoolMeta(spoolDir)) return null;
+  const detail = readLaunchLogTail(launchLog);
+  return new Error(
+    `run broker for ${spoolDir} was never started — no meta.json was written` +
+      (detail ? `; launcher said: ${detail}` : ''),
+  );
+}
+
+function readLaunchLogTail(path: string): string {
+  try {
+    if (!existsSync(path)) return '';
+    const size = statSync(path).size;
+    const fd = openSync(path, 'r');
+    try {
+      const start = Math.max(0, size - LAUNCH_LOG_TAIL_BYTES);
+      const buf = Buffer.alloc(Math.min(size, LAUNCH_LOG_TAIL_BYTES));
+      readSync(fd, buf, 0, buf.length, start);
+      return buf.toString('utf8').trim().split('\n').slice(-5).join(' | ');
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
 }
 
 function wrapSpawnError(err: unknown, bin: string): Error {

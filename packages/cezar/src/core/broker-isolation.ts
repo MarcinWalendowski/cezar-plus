@@ -73,10 +73,55 @@ export interface BrokerLaunchOptions {
   /** The broker command, already split into argv. */
   command: string[];
   slice?: string;
+  /**
+   * Discriminator making this launch's unit name unique among the run's other brokers.
+   *
+   * REQUIRED in practice for `scope` — see `brokerScopeUnitName`. Optional in the type only so the
+   * name stays the run's own when a caller genuinely launches once (tests, and the re-attach path,
+   * which spawns nothing).
+   */
+  instanceId?: string;
 }
 
-export function brokerScopeUnitName(runId: string): string {
-  return `cezar-run-${runId.replace(/[^A-Za-z0-9:_.-]/g, '-')}`;
+let brokerInstanceSeq = 0;
+
+/**
+ * A discriminator unique to one broker launch.
+ *
+ * Process start time plus a counter: the counter separates brokers within a process, the start time
+ * separates them across a server restart that resets the counter while an old scope is still alive.
+ * Both parts are needed — a bare counter collides after a deploy, a bare timestamp collides between
+ * two steps starting in the same millisecond.
+ */
+export function nextBrokerInstanceId(): string {
+  brokerInstanceSeq += 1;
+  const startedAt = Math.round(Date.now() - process.uptime() * 1000);
+  return `${startedAt.toString(36)}-${brokerInstanceSeq}`;
+}
+
+/**
+ * The transient scope unit a broker runs in.
+ *
+ * **`instanceId` is not decoration.** This used to be `cezar-run-<runId>` and nothing else, one name
+ * per RUN — while `spawnBroker` is called once per STEP. A systemd scope stays active as long as its
+ * cgroup is non-empty, so any process an agent leaves running (a dev server, `op daemon`, a test
+ * fixture — all three were found holding scopes open on prod-host on 2026-08-22) keeps the
+ * name taken after its broker exits. The run's next step then hit
+ *
+ *   Failed to start transient scope unit: Unit cezar-run-<id>.scope was already loaded
+ *
+ * `systemd-run` exited 1, no broker was ever spawned, and the session reported the generic
+ * "run broker did not respond after 5000ms" — blaming a process that did not exist. Permanent, not
+ * flaky: the lingering process outlives the run, so every later step failed the same way. Five runs
+ * died this way in one morning. `--collect` does not save us; it reaps FAILED units, not active
+ * ones. See `.ai/specs/2026-08-22-broker-scope-unit-name-collision.md`.
+ *
+ * The run id stays the PREFIX so `systemctl --user list-units 'cezar-run-<runId>*'` still groups one
+ * run's scopes for an operator.
+ */
+export function brokerScopeUnitName(runId: string, instanceId?: string): string {
+  const safe = (s: string): string => s.replace(/[^A-Za-z0-9:_.-]/g, '-');
+  return `cezar-run-${safe(runId)}${instanceId ? `-${safe(instanceId)}` : ''}`;
 }
 
 /**
@@ -98,7 +143,7 @@ export function buildBrokerLaunchArgv(opts: BrokerLaunchOptions): string[] {
     '--user',
     '--scope',
     `--slice=${opts.slice ?? RUNS_SLICE}`,
-    `--unit=${brokerScopeUnitName(opts.runId)}`,
+    `--unit=${brokerScopeUnitName(opts.runId, opts.instanceId)}`,
     '--quiet',
     '--collect',
     '--',
