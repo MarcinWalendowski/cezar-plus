@@ -1,5 +1,28 @@
 # `run-tests` output-token ceiling
 
+**Status: partial (2026-08-22).** Phases 1-3 are implemented, committed and shipped —
+commit `16eb7a24` (`feat: cap run-tests reasoning effort at medium, cut its output-token
+burn`), merged to `origin/main` via `966a832b`. **Phase 4 (the live A/B token measurement
+that would prove the fix moved the number) did NOT run.** `implement`'s second pass found
+the on-disk Phase 4 mechanism (trigger a full run per arm, `POST /runs/:id/cancel`
+immediately after `run-tests`'s own step-end) unsafe: the measured step-end-to-commit-push
+gap is 1-4ms across all 11 sampled runs, unwinnable by any external cancel call, so both
+arms — one of them carrying a deliberately-broken test — would reach a real `git push` and
+a real `deploy` before the cancel could land. Running Phase 4 as written risked shipping a
+broken build to production to collect a token count, which this workspace's standing
+authorization for cezar-on-cezar does not cover implicitly (see AGENTS.md, "gates first,
+fail closed"). Correctly not run rather than run unsafely. Follow-up filed as todo
+`ef4f65f7-0621-41d2-ad33-b7bce4ac916d`: redesign Phase 4 around `POST /runs` with an inline
+5-step `steps` array that terminates by construction at `run-tests` (no cancel race
+possible), then run the A/B. Until that todo closes, **acceptance criterion 4 (tokens
+measured below 20,000 on a comparable run) is unverified** — Phases 1-3 are a plausible,
+cheap, reviewed fix, not a proven one. The below is kept as history for how Phases 1-3
+were arrived at and reviewed; it previously read "revised" — corrected to "partial" now
+that the run itself is complete and Phase 4's fate is settled.
+
+<details>
+<summary>Review history (Phases 1-3), kept for context</summary>
+
 **Status:** revised (2026-08-22) — pass 4 `review-spec` (opus) returned **PASS**; pass 5
 (same day, after Phases 1-3 landed) returned **REVISE** on three localized defects (D1-D3 below,
 in revision item 10); pass 6 (same day) returned **REVISE** on one blocking defect confined to
@@ -225,6 +248,8 @@ fixed here rather than deferred (items 1-9 fixed pre-implementation; item 10 fix
     "a few seconds"), not by wall clock; and step 0's parenthetical on `--project` no longer implies
     cezar is unregistered (it is a registered project root — the absolute path is used because it
     needs no id lookup, not because no id resolves).
+
+</details>
 
 ## TLDR
 
@@ -864,3 +889,16 @@ no route change), so `effort` appears on `run-tests` in that response automatica
 4. **In-band.** `GET /api/v1/workflows` on the deployed server reports `effort: "medium"` on
    `run-tests` and no `effort` field (or `undefined`) on every other step of the built-in
    `spec-to-deploy` definition.
+
+**Outcome recorded 2026-08-22 — item 3 above (Phase 4) did NOT run.** `implement`'s second
+pass found the design step 3 itself describes (2b/3b: cancel each arm right after
+`run-tests`'s own step-end) unsafe as written — the step-end-to-commit-push gap measures
+1-4ms across all 11 sampled runs, unwinnable by any external `POST /runs/:id/cancel`, so
+both arms (one carrying a deliberately-broken test) would reach a real `git push` and
+`deploy` before the cancel could land. Items 1, 2 and 4 passed as written (unit tests
+present, scoped gates green, `effort: "medium"` confirmed live on the deployed
+`spec-to-deploy` workflow after commit `16eb7a24`/`966a832b`). Item 3 is deferred to todo
+`ef4f65f7-0621-41d2-ad33-b7bce4ac916d`, which redesigns the mechanism (a `POST /runs` with
+an inline 5-step array terminating at `run-tests`, removing the cancel race entirely) before
+re-attempting the A/B. Acceptance criterion 4 of the originating todo (`33ce6584`) —
+tokens measured below 20,000 on a comparable run — stays unverified until that todo closes.
