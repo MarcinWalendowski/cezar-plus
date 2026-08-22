@@ -271,11 +271,32 @@ export async function createTodo(dataDir: string, input: CreateTodoInput): Promi
 }
 
 /** `PATCH /:projectId/todos/:id`'s body, server-side — mirrors the wire twin's
- *  `updateTodoInputSchema` (`contract/src/skills.ts`) field-for-field. */
+ *  `updateTodoInputSchema` (`contract/src/skills.ts`) field-for-field, EXCEPT `context` and
+ *  `acceptanceCriteria` below, which are maintenance-only additions with no wire-schema
+ *  counterpart (added 2026-08-22 for one-off todo-consolidation scripts; never populated from
+ *  an HTTP body). */
 export type UpdateTodoPatch = {
   status?: TodoItem['status'];
   priority?: TodoItem['priority'];
   archived?: boolean;
+  /** Maintenance-only: not settable via the wire schema / composer UI. */
+  context?: TodoItem['context'];
+  /** Maintenance-only: not settable via the wire schema / composer UI. */
+  acceptanceCriteria?: TodoItem['acceptanceCriteria'];
+  /**
+   * Maintenance-only, and added 2026-08-22 for a specific reason worth keeping.
+   *
+   * A todo's summary is the only part of it the board renders, so it is what every later reader
+   * scans — and when a todo turns out to be founded on a wrong diagnosis, the wrong diagnosis is
+   * usually IN that line. Todo `c4cd4ab6` said "wait on liveness, then retry the step" from a
+   * theory that measurement then disproved; correcting only `context` would have left the board
+   * still advertising the theory. The workspace correction rule is explicit that a falsehood in a
+   * heading must be fixed in the heading, so the maintenance path needs to be able to reach it.
+   *
+   * Still not on the wire schema: a summary is an entry's identity, and letting the composer UI
+   * rewrite it in place would make the board's history unreadable.
+   */
+  summary?: TodoItem['summary'];
 };
 
 /**
@@ -299,6 +320,9 @@ export async function updateTodo(dataDir: string, id: string, patch: UpdateTodoP
     if (patch.priority !== undefined) item.priority = patch.priority;
     if (patch.archived === true) item.archivedAt = new Date().toISOString();
     else if (patch.archived === false) delete item.archivedAt;
+    if (patch.context !== undefined) item.context = patch.context;
+    if (patch.acceptanceCriteria !== undefined) item.acceptanceCriteria = patch.acceptanceCriteria;
+    if (patch.summary !== undefined) item.summary = patch.summary;
     await writeAtomic(dataDir, items);
     return item;
   });

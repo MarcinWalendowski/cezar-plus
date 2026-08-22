@@ -83,6 +83,7 @@ describe('RunManager agent-profile resolution', () => {
       'CEZ_HANDOFF_FILE',
       'CEZ_TASK_ID',
       'CEZ_TODOS_FILE',
+      'NODE_ENV',
       'TEMP',
       'TMP',
       'TMPDIR',

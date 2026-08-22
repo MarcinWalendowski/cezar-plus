@@ -34,6 +34,12 @@ export const SPOOL_POLL_MS = 50;
  * At `SPOOL_POLL_MS` this is a ~5 s window, which is generous for "the broker has been spawned but
  * has not bound its socket yet" and short enough that a broker that never came up does not leave
  * the cockpit believing a message is still on its way.
+ *
+ * MEASURED 2026-08-22 on prod-host at load average 7.68, spawning brokers exactly as
+ * `spawnBroker` does: socket accepts at p50 621 ms, max 716 ms over 10 rounds, 0 over 5 s. The
+ * budget is ~8x the observed worst case on a loaded box. Recorded because a morning of runs died
+ * with this timeout message and "raise the timeout" was the obvious wrong fix — the brokers had
+ * never been STARTED (`brokerScopeUnitName`), and no budget reaches a process that does not exist.
  */
 export const PENDING_MAX_ATTEMPTS = 100;
 
@@ -72,11 +78,32 @@ export interface BrokeredSessionOptions {
   encodeSend?: (content: ContentBlock[]) => string;
   /**
    * The broker child's own OS-level spawn error, if any (`proc.on('error', …)` in `spawnBroker`).
-   * Consulted only when the control channel gives up after `PENDING_MAX_ATTEMPTS` — lets a
-   * broker that failed to spawn at all surface its real cause instead of the generic
-   * "did not respond" message that's all the connect-retry loop can see on its own.
+   * Consulted when the control channel gives up after `PENDING_MAX_ATTEMPTS` — lets a broker that
+   * failed to spawn at all surface its real cause instead of the generic "did not respond" message
+   * that's all the connect-retry loop can see on its own.
+   *
+   * **Kept narrow deliberately.** `attachBroker`'s `buildResult` also consults this, on EVERY
+   * terminal path including a graceful `detach()`, so anything reported here becomes a thrown run
+   * failure. A wider "why is there no broker?" answer belongs in `launchFailure`, which only
+   * `giveUp` reads — an earlier cut of the 2026-08-22 fix widened this one instead and turned every
+   * clean detach-before-first-line into a failed step. The test that caught it is
+   * `broker-scope-collision.test.ts`.
    */
   spawnFailed?: () => Error | null;
+  /**
+   * Why no broker exists, asked ONLY once the control channel has given up.
+   *
+   * Separate from `spawnFailed` because it is allowed to be expensive and, more importantly,
+   * allowed to be WRONG early: "no `meta.json` yet" means nothing at t=0 and means the launcher
+   * never started a broker at t=5s. Reading it only at the give-up point is what makes that
+   * inference sound.
+   *
+   * The case it exists for: `systemd-run` refusing a scope unit name that is still taken. It exits
+   * 1, which is not a spawn `error` event, so `spawnFailed` is null and the session would otherwise
+   * report that a broker "did not respond" when no broker was ever created
+   * (`.ai/specs/2026-08-22-broker-scope-unit-name-collision.md`).
+   */
+  launchFailure?: () => Error | null;
 }
 
 export class BrokeredSession implements AgentSession {
@@ -210,6 +237,7 @@ export class BrokeredSession implements AgentSession {
             const waitedMs = this.attempts * (this.opts.pollMs ?? SPOOL_POLL_MS);
             this.giveUp(
               this.opts.spawnFailed?.() ??
+                this.opts.launchFailure?.() ??
                 new Error(`run broker for ${this.spoolDir} did not respond after ${waitedMs}ms — giving up`),
             );
           }
