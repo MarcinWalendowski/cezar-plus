@@ -58,6 +58,17 @@
   been stood up across two real nodes: `cez cluster reconcile` still has no request/response
   transport, so E2 — the 110-row reconcile that motivated the whole design — has no runnable path
   yet. Open items are tracked in `.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`.
+
+  **Gates, run on `prod-host` and on the MERGED tree.** `typecheck` exit 0, `build`,
+  `test:unit` and `test:package` exit 0, and `npm test` at **562 of 563 files green** (10550 tests,
+  342 s). The single red is `knowledge/catalog.test.ts` C18, a CPU-per-MiB budget calibrated on an
+  M4 Max with no host normalisation: it reads 68.6 against a `< 40` ceiling on this box and fails
+  identically at pristine HEAD unpacked from `git archive`, so it is a standing host red and not
+  this work's. The budget was deliberately **not** raised. The gate was run on the box rather than
+  the Mac because the Mac never finished a run — under a ~20-agent fan-out `fseventsd` saturated a
+  core and individual `fs.watch` files took 50–650 s. Re-running after the `origin/main` merge was
+  not ceremony: the merge left 12 tests failing in files it never touched textually (see the PLAN's
+  "A green branch gate says nothing about the tree you will actually push").
 - ✅ **The non-disruptive deploy is now MEASURED, not just shipped** (spec
   `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` § "Status log — 2026-08-21
   (18:31–18:41 UTC)"). Release `20260821T183127Z-be3aab61` is live on `prod-host`, deployed

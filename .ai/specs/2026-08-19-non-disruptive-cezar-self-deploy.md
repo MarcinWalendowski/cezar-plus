@@ -171,6 +171,12 @@ Three defects, all filed, none fixed in the deploy step: **`f97ddd39`** — bare
 `runRollback` flips and restarts but never probes readiness, so a rollback onto a dead release
 prints "Deploy complete"; **`6c89af7c`** — the keep-alive race and cutover latency above.
 
+**CORRECTED 2026-08-22 — `6497f002` is fixed, `f97ddd39` and `6c89af7c` are not.** `runRollback`
+now probes `/api/v1/ready` after the restart and reports failure distinctly (commit `2f91de4b`,
+merged to `origin/main` at `c31af208`; spec `.ai/specs/2026-08-22-rollback-readiness-gate.md`,
+status IMPLEMENTED QA Needed — its own runtime E2E, §5, has not run yet). The other two defects in
+this paragraph are unaffected and still open.
+
 Two traps worth carrying: `gapMs` in the deploy log (55 ms here) is the **deployer's own** restart
 window, not the client-visible gap; and `deploy.drained` is only a terminal event name at the end of
 a successful deploy, **not** an actual drain step.
@@ -1077,6 +1083,10 @@ process doing the observing. `KillMode=process` plus the spool is what makes it 
   fails readiness. Fabricating one on the production box was judged not worth the risk at this
   stage; it remains the one claim in P5 with no live evidence, and `6497f002` (runRollback never
   probes readiness) is a known defect on that same path.
+  **CORRECTED 2026-08-22 — `6497f002` is fixed** (`runRollback` now probes readiness; see the
+  correction under "What the acceptance run exposed" above). This bullet's own claim, "boot-then-fail
+  auto-rollback unproven", is unaffected — it is about `runGatedDeploy`'s P5 gate, not `runRollback`,
+  and still has no live evidence.
 
 ## Criterion 1 was reopened by a controlled re-measurement (2026-08-21 19:05 UTC)
 

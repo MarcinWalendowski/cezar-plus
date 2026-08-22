@@ -103,14 +103,15 @@ describe('two brokers of the same run never share a scope unit name', () => {
   it('gives each STEP of one run its own --unit, keeping the run id as the prefix', () => {
     const cwd = scratch();
     const runId = 'b3b5719c-ccf6-445c-9b97-39dd7eaf077e';
-    const spoolDir = join(cwd, '.ai', 'cezar', 'runs', `${runId}.spool`);
     const spec: AgentRunSpec = { userPrompt: 'go', cwd, timeoutMs: 0 };
     const runner = new ClaudeCliRunner({ bin: '/bin/true', timeoutMs: 0 });
 
     // Exactly what a run does: `implement`, then `run-tests`, same run, same spool dir.
-    for (const stepId of ['implement', 'run-tests']) {
+    for (const [index, stepId] of ['implement', 'run-tests'].entries()) {
+      const instanceId = `test-${index + 1}`;
+      const spoolDir = join(cwd, '.ai', 'cezar', 'runs', `${runId}.spool`, instanceId);
       const session = runner.startSession(spec, undefined, {
-        broker: { spoolDir, runId, stepId, isolation: 'scope' },
+        broker: { spoolDir, runId, instanceId, stepId, isolation: 'scope' },
       });
       // Stop the poll timer; this test is about the launch, and a ref'd interval would hang vitest.
       stopPolling(session);
@@ -128,11 +129,11 @@ describe('two brokers of the same run never share a scope unit name', () => {
 
   it('wires the never-started diagnosis into the session — as launchFailure, NOT as spawnFailed', () => {
     const cwd = scratch();
-    const spoolDir = join(cwd, '.ai', 'cezar', 'runs', 'r7.spool');
+    const spoolDir = join(cwd, '.ai', 'cezar', 'runs', 'r7.spool', 'i7');
     const runner = new ClaudeCliRunner({ bin: '/bin/true', timeoutMs: 0 });
     stopPolling(
       runner.startSession({ userPrompt: 'go', cwd, timeoutMs: 0 }, undefined, {
-        broker: { spoolDir, runId: 'r7', stepId: 'implement', isolation: 'scope' },
+        broker: { spoolDir, runId: 'r7', instanceId: 'i7', stepId: 'implement', isolation: 'scope' },
       }),
     );
 
@@ -157,11 +158,11 @@ describe('two brokers of the same run never share a scope unit name', () => {
 
   it('sends the launcher’s own output to a file beside the spool, never to a pipe and never to /dev/null', () => {
     const cwd = scratch();
-    const spoolDir = join(cwd, '.ai', 'cezar', 'runs', 'r9.spool');
+    const spoolDir = join(cwd, '.ai', 'cezar', 'runs', 'r9.spool', 'i9');
     const runner = new ClaudeCliRunner({ bin: '/bin/true', timeoutMs: 0 });
     stopPolling(
       runner.startSession({ userPrompt: 'go', cwd, timeoutMs: 0 }, undefined, {
-        broker: { spoolDir, runId: 'r9', stepId: 'implement', isolation: 'scope' },
+        broker: { spoolDir, runId: 'r9', instanceId: 'i9', stepId: 'implement', isolation: 'scope' },
       }),
     );
 
@@ -177,9 +178,9 @@ describe('two brokers of the same run never share a scope unit name', () => {
     // Beside the spool, not inside it — `spawnBroker` deletes the spool dir before every launch, so
     // a log written in there would be erased by the very step whose failure it explains.
     const log = brokerLaunchLogPath(spoolDir);
-    expect(dirname(log)).toBe(dirname(spoolDir));
+    expect(dirname(log)).toBe(dirname(dirname(spoolDir)));
     expect(log.startsWith(spoolDir)).toBe(false);
-    expect(log).toBe(join(dirname(spoolDir), 'r9.broker.log'));
+    expect(log).toBe(join(dirname(dirname(spoolDir)), 'r9.broker.log'));
   });
 });
 

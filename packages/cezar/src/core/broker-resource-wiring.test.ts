@@ -84,8 +84,11 @@ describe('one `resources` object reaches the scope AND the attribution', () => {
     stopPolling(
       runner.startSession(spec, undefined, {
         broker: {
-          spoolDir: join(cwd, 'r1.spool'),
+          // `<runId>.spool/<instanceId>` and an explicit `instanceId`, as `RunManager.brokerFor`
+          // builds it — since the dead-twin fix `spawnBroker` refuses a fresh launch without one.
+          spoolDir: join(cwd, 'r1.spool', 'i-r1'),
           runId: 'r1',
+          instanceId: 'i-r1',
           stepId: 'run-tests',
           isolation: 'scope',
           ...(resources ? { resources } : {}),
@@ -180,7 +183,14 @@ describe('one `resources` object reaches the scope AND the attribution', () => {
     const runner = new ClaudeCliRunner({ bin: '/bin/true', timeoutMs: 0 });
     stopPolling(
       runner.startSession({ userPrompt: 'go', cwd, timeoutMs: 0 }, undefined, {
-        broker: { spoolDir: join(cwd, 'r2.spool'), runId: 'r2', stepId: 'run-tests', isolation: 'none', resources },
+        broker: {
+          spoolDir: join(cwd, 'r2.spool', 'i-r2'),
+          runId: 'r2',
+          instanceId: 'i-r2',
+          stepId: 'run-tests',
+          isolation: 'none',
+          resources,
+        },
       }),
     );
 

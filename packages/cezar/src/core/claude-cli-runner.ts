@@ -37,12 +37,7 @@ import {
   type BrokerSessionRequest,
   type ResourceKillReport,
 } from './broker-launch.ts';
-import {
-  buildBrokerLaunchArgv,
-  detectResourceKill,
-  nextBrokerInstanceId,
-  userScopeEnv,
-} from './broker-isolation.ts';
+import { buildBrokerLaunchArgv, detectResourceKill, userScopeEnv } from './broker-isolation.ts';
 import { readSpoolMeta, spoolPaths, type SpoolExit } from './run-spool.ts';
 import {
   claudeTurnStarted,
@@ -415,6 +410,7 @@ export class ClaudeCliRunner implements AgentRunner {
       // the whole point of `brokerAvailable()` is that the caller decides that BEFORE spawning.
       throw new Error('run broker requested but this cezar has no built entry point to re-exec');
     }
+    if (!request.instanceId) throw new Error('fresh broker launch requires an instance id');
     // A previous session's spool must never be mistaken for this one's. Removing it before the
     // broker writes `meta.json` also means `isSpoolLive` can never observe a half-replaced spool:
     // it either sees the old complete one, or nothing, or the new complete one.
@@ -426,7 +422,10 @@ export class ClaudeCliRunner implements AgentRunner {
       // Unique per LAUNCH, not per run — a run spawns one broker per step, and a scope unit name
       // reused while the previous scope is still alive makes `systemd-run` exit 1 without starting
       // anything (`brokerScopeUnitName`).
-      instanceId: nextBrokerInstanceId(),
+      // Supplied by the caller since the dead-twin fix — the id has to be the one the spool was
+      // opened under, so minting a fresh one here would re-introduce the mismatch that let one
+      // launch read another's exit record.
+      instanceId: request.instanceId,
       // D14a's bounds actually reaching the scope. Without this line `MemoryHigh`/`MemoryMax`/
       // `CPUWeight` and the `cezar-runs.slice` ceiling are config that governs nothing, and
       // `attachBroker`'s kill attribution below would be describing a bound that is not there.
@@ -438,6 +437,7 @@ export class ClaudeCliRunner implements AgentRunner {
         ...brokerArgs({
           spoolDir: request.spoolDir,
           runId: request.runId,
+          instanceId: request.instanceId,
           stepId: request.stepId,
           backend: this.backend,
           cwd: spec.cwd,
@@ -556,7 +556,16 @@ export class ClaudeCliRunner implements AgentRunner {
 
     const session: BrokeredSession = new BrokeredSession({
       spoolDir: request.spoolDir,
+      owner: request.instanceId
+        ? { instanceId: request.instanceId }
+        : (() => {
+            const meta = readSpoolMeta(request.spoolDir);
+            return meta ? { instanceId: meta.instanceId, brokerPid: meta.pid } : undefined;
+          })(),
       startOffset: request.startOffset ?? 0,
+      // A re-attach may follow a complete earlier turn. Never classify its next failed control
+      // request as a cold launch whose agent did no work.
+      previouslyAnswered: !mode.seed,
       onLine: (line) => consumer.handleLine(line),
       onOffset: request.onOffset,
       encodeSend: (content) => encodeClaudeUserMessage(content, spec.sessionId),
@@ -578,18 +587,18 @@ export class ClaudeCliRunner implements AgentRunner {
           sawUsage: consumer.sawUsage(),
         });
       },
-      buildResult: () => {
+      buildResult: (exit) => {
         const failed = mode.spawnFailed?.();
         if (failed) throw failed;
         const totals = consumer.buildResult();
-        const failure = brokeredExitFailure(request.spoolDir, timedOut, terminatedByCezar);
-        // Ahead of `failure`, not folded into it, because the common shape of a cgroup kill —
-        // `{ code: null, signal: 'SIGKILL' }`, which is what Node reports when nothing traps the
-        // signal — makes `brokeredExitFailure` return NULL (`code === null` is its "ended
-        // acceptably" case). Left to that path a killed run resolves successfully and the step
-        // goes GREEN, which is worse than C3's "blamed on the test": it is a run that lost its
-        // agent mid-work and reported done. `resourceKill` is set only when a bound this launch
-        // actually carried can explain the signal, so this cannot swallow an ordinary exit.
+        const failure = brokeredExitFailure(exit, request.spoolDir, timedOut, terminatedByCezar);
+        // Ahead of `failure`, not folded into it. `brokeredExitFailure` now answers correctly for
+        // an untrapped kill, but it can only say "killed by signal SIGKILL" — it does not know
+        // whether a bound this launch actually carried explains that signal. `resourceKill` does,
+        // and a run whose agent was killed by its own memory ceiling must say so, because the
+        // alternative is the run's agent "fixing" a test that was never broken. Set only when a
+        // configured bound was genuinely applied to THIS launch, so it cannot recolour an
+        // ordinary exit.
         if (resourceKill) throw resourceKillFailure(failure, resourceKill);
         if (failure) throw failure;
         return totals;
@@ -1114,9 +1123,8 @@ function resourceKillFailure(failure: Error | null, kill: ResourceKillReport): E
 }
 
 /** The `Error` a brokered run rejects with, or null when it ended acceptably. */
-function brokeredExitFailure(spoolDir: string, timedOut: boolean, terminatedByCezar: boolean): Error | null {
+function brokeredExitFailure(exit: SpoolExit | null, spoolDir: string, timedOut: boolean, terminatedByCezar: boolean): Error | null {
   if (timedOut) return null;
-  const exit = readSpoolExitSafe(spoolDir);
   const code = exit?.code ?? null;
   if (code === 0) return null;
   if (terminatedByCezar) {
@@ -1145,14 +1153,6 @@ function brokeredExitMessage(code: number | null, exit: SpoolExit | null, spoolD
       ? `claude CLI was killed by signal ${signal ?? 'unknown'}`
       : `claude CLI exited with code ${code}${signal ? ` (signal ${signal})` : ''}`;
   return `${summary}${detail}`;
-}
-
-function readSpoolExitSafe(spoolDir: string): SpoolExit | null {
-  try {
-    return JSON.parse(readFileSync(spoolPaths(spoolDir).exit, 'utf8')) as SpoolExit;
-  } catch {
-    return null;
-  }
 }
 
 /** The last three lines of the broker's `err.log` — the brokered twin of the pipe path's
@@ -1215,12 +1215,13 @@ function stderrDetail(stderrChunks: string[]): string {
 /**
  * Where a broker LAUNCHER's own output goes.
  *
- * Beside the spool, never inside it: `spawnBroker` deletes `<runId>.spool` before every launch, so
+ * Beside the run's spool tree, never inside an instance directory, so
  * a log written in there would be erased by the next step — exactly the step whose failure we are
  * trying to explain. One file per run, appended across its steps.
  */
 export function brokerLaunchLogPath(spoolDir: string): string {
-  return resolvePath(dirname(spoolDir), `${basename(spoolDir).replace(/\.spool$/, '')}.broker.log`);
+  const runSpoolDir = dirname(spoolDir);
+  return resolvePath(dirname(runSpoolDir), `${basename(runSpoolDir).replace(/\.spool$/, '')}.broker.log`);
 }
 
 /** Open the launch log for append, or `null` if we cannot — diagnostics must never block a run. */

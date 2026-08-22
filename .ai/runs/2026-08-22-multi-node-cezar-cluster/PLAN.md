@@ -497,6 +497,30 @@ shared checkout, **no agent may run a command whose blast radius is the whole wo
 `stash`, `checkout .`, `reset --hard`, `clean -fd`. That includes restoring a mutation test: copy
 the file to the scratchpad first and restore from the copy.
 
+### A green branch gate says nothing about the tree you will actually push
+
+The branch gate on the box read 559 of 560 files green with only the standing C18 red. The merge
+with `origin/main` — 33 commits the box's own agents had pushed while this fan-out ran — then took
+the same tree to **3 failed files, 12 failed tests**, and none of the twelve were in a file the
+merge touched textually. Git had reported two conflicted files and five hunks; it could not report
+this, because nothing conflicted.
+
+What broke: `origin/main`'s dead-twin fix made `instanceId` a **required** field of a fresh broker
+launch (`spawnBroker` now throws `fresh broker launch requires an instance id`), moved the spool to
+`<runId>.spool/<instanceId>`, and made `BrokeredSession` accept an `exit.json` only when its
+`instanceId` matches the launch's. Two test files written earlier in this same fan-out
+(`broker-external-kill.test.ts`, `broker-resource-wiring.test.ts`) constructed broker requests
+without one, because when they were written the runner minted its own. Both were adapted to supply
+an `instanceId` and to stamp it into every exit they write — which makes them *more* faithful to
+`RunManager.brokerFor`, not less. Post-merge on the box: typecheck 0, **562 of 563 files green**,
+the one red still C18.
+
+The rule this yields: **the gate that authorises a push is the gate on the merged tree**, re-run
+after the merge, never the branch gate carried forward. A long fan-out against a moving `main` makes
+that mandatory rather than tidy — the contract a test was written against can be replaced under it
+by a commit that never touches the test's file, and the only thing that detects it is running the
+suite again.
+
 ### One methodological note, because it invalidates a whole class of claim
 
 `grep` **silently finds nothing** in a file it classifies as binary, and four `.ts` files in this

@@ -43,6 +43,9 @@ export interface ReleaseDeployCliOptions {
   sha?: string;
   note?: string;
   dryRun?: boolean;
+  allowStaleArtifact?: boolean;
+  refuseDirty?: boolean;
+  allowUnrelated?: boolean;
 }
 
 const STRATEGIES = new Set(['restart', 'blue-green']);
@@ -69,7 +72,11 @@ export async function releaseDeployCommand(opts: ReleaseDeployCliOptions, host?:
       ...(opts.port ? { port: opts.port } : {}),
       strategy: opts.strategy as DeployStrategy,
       ...(opts.rollback !== undefined ? { rollbackTo: opts.rollback } : {}),
-      ...(opts.sha ? { sha: opts.sha } : { sha: gitSha(opts.source) }),
+      ...(opts.sha ? { sha: opts.sha } : {}),
+      sourceHead: gitSha(opts.source),
+      allowStaleArtifact: opts.allowStaleArtifact,
+      refuseDirty: opts.refuseDirty,
+      allowUnrelated: opts.allowUnrelated,
       ...(opts.note ? { note: opts.note } : {}),
       ...(opts.dryRun ? { dryRun: true } : {}),
       version: packageVersion(opts.source),
@@ -82,6 +89,27 @@ export async function releaseDeployCommand(opts: ReleaseDeployCliOptions, host?:
     if (opts.follow) return followDeploy(result.detachedUnit);
     console.log(`  Follow it with: cezar server-deploy --follow --release-id ${result.detachedUnit}\n`);
     return 0;
+  }
+  const rollback = result.outcome?.operation === 'rollback' || opts.rollback !== undefined;
+  if (!result.ok && rollback && result.outcome?.failedAt === 'readiness' && result.outcome.serving) {
+    const outcome = result.outcome;
+    const serving = outcome.serving!;
+    console.error(`\n  Rollback FAILED: ${outcome.releaseId} did not become ready: ${outcome.detail ?? 'readiness probe failed'}`);
+    if (serving.releaseId === outcome.releaseId) {
+      const restoring = serving.detail?.match(/; restoring (.+) failed: (.+)$/);
+      if (restoring) {
+        console.error(`  Restored ${restoring[1]}, but the restart itself failed: ${restoring[2]}. NOTHING is serving a proven release.`);
+      } else {
+        console.error(`  ${linkPath} still points at ${outcome.releaseId}, and it is NOT serving.`);
+        console.error('  Pick another release: cezar server-deploy --rollback=<other-id>');
+      }
+    } else if (serving.ready) {
+      console.error(`  Restored ${serving.releaseId}, which probed ready. The box is serving again, on the release you tried to leave.`);
+    } else {
+      console.error(`  Restored ${serving.releaseId}; it is NOT ready either: ${serving.detail ?? 'readiness probe failed'}`);
+      console.error('  NOTHING is serving a proven release. Intervene by hand.');
+    }
+    return 1;
   }
   if (!result.ok) {
     console.error(`\n  Deploy failed: ${result.error ?? 'unknown'}`);
@@ -98,7 +126,11 @@ export async function releaseDeployCommand(opts: ReleaseDeployCliOptions, host?:
     console.log('');
     return 0;
   }
-  console.log('\n  Deploy complete.');
+  if (rollback && result.outcome?.serving?.ready) {
+    console.log(`\n  Rolled back to ${result.outcome.serving.releaseId}: /api/v1/ready passed.`);
+  } else {
+    console.log('\n  Deploy complete.');
+  }
   for (const line of describeReleases(releasesDir, linkPath)) console.log(`  ${line}`);
   console.log('');
   return 0;

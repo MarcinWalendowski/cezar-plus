@@ -331,6 +331,9 @@ async function main(): Promise<void> {
       unit: { type: 'string' },
       sha: { type: 'string' },
       note: { type: 'string' },
+      'allow-stale-artifact': { type: 'boolean', default: false },
+      'refuse-dirty': { type: 'boolean', default: false },
+      'allow-unrelated': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -431,6 +434,9 @@ async function main(): Promise<void> {
           sha: values.sha,
           note: values.note,
           dryRun,
+          allowStaleArtifact: Boolean(values['allow-stale-artifact']),
+          refuseDirty: Boolean(values['refuse-dirty']),
+          allowUnrelated: Boolean(values['allow-unrelated']),
         });
         return;
       }
@@ -785,21 +791,23 @@ async function serveCommand(
     const registeredProjects = (await loadWorkspaceConfig()).projects.filter(
       (p) => canonicalPath(p.root) !== canonicalPath(repoRoot),
     );
-    const foreignSources = loadForeignWorkspaceRunSources(repoRoot, registeredProjects);
-    const unreadableSource = foreignSources.find((s) => s.unreadable);
-    const orphans = await pruneOrphans(repoRoot, new Set(store.listRuns().map((r) => r.id)), {
-      findForeignOwner: (path) => findForeignWorkspaceOwner(repoRoot, path, foreignSources),
-      trunkRef: repo.branch,
-      ownershipCheckUnavailable: unreadableSource
-        ? { reason: `project "${unreadableSource.projectName}"'s runs.json could not be read` }
-        : undefined,
-    }).catch(() => ({ removed: [] as string[], declined: [] as { id: string; reason: string }[] }));
-    if (orphans.removed.length > 0) {
-      console.log(`  cleaned ${orphans.removed.length} orphaned worktree(s): ${orphans.removed.map((id) => id.slice(0, 8)).join(', ')}`);
-    }
-    if (orphans.declined.length > 0) {
-      console.log(`  declined to reclaim ${orphans.declined.length} worktree(s): ${orphans.declined.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
-    }
+    const delay = Number(process.env.CEZ_SWEEP_DELAY_MS ?? 5 * 60_000);
+    const sweepTimer = setTimeout(() => {
+      const foreignSources = loadForeignWorkspaceRunSources(repoRoot, registeredProjects);
+      const unreadableSource = foreignSources.find((s) => s.unreadable);
+      void pruneOrphans(repoRoot, new Set(store.listRuns().map((r) => r.id)), {
+        findForeignOwner: (path) => findForeignWorkspaceOwner(repoRoot, path, foreignSources),
+        trunkRef: repo.branch,
+        ownershipCheckUnavailable: unreadableSource
+          ? { reason: `project "${unreadableSource.projectName}"'s runs.json could not be read` }
+          : undefined,
+      }).then((orphans) => {
+        if (orphans.removed.length > 0) console.log(`  cleaned ${orphans.removed.length} orphaned worktree(s): ${orphans.removed.map((id) => id.slice(0, 8)).join(', ')}`);
+        if (orphans.kept.length > 0) console.log(`  kept ${orphans.kept.length} unsafe-to-reclaim worktree(s): ${orphans.kept.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
+        if (orphans.declined.length > 0) console.log(`  declined to reclaim ${orphans.declined.length} worktree(s): ${orphans.declined.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
+      }).catch(() => undefined);
+    }, Math.max(0, delay));
+    sweepTimer.unref?.();
     // Count-based worktree retention (#483): reclaim finished worktrees beyond
     // the keep-limit (directory only — `cez/<id8>` branch kept, so recoverable).
     // Best-effort; never blocks boot.

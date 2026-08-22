@@ -64,22 +64,29 @@ describe('a brokered run whose backend died by an untrapped external signal', ()
   function brokeredSession(
     exit: SpoolExit | 'omit',
     onEvent?: (event: AgentEvent) => void,
-  ): { session: AgentSession; spoolDir: string } {
+  ): { session: AgentSession; spoolDir: string; instanceId: string } {
     const cwd = mkdtempSync(join(tmpdir(), 'cez-broker-extkill-'));
     dirs.push(cwd);
     const runId = `r${(nextRunId += 1)}`;
-    const spoolDir = join(cwd, `${runId}.spool`);
+    // `instanceId` is load-bearing in this harness, not decoration. Since the dead-twin fix a
+    // fresh broker launch must be given one (`spawnBroker` throws without it), the spool lives at
+    // `<runId>.spool/<instanceId>` rather than at `<runId>.spool`, and — the part that silently
+    // hangs a test rather than failing it — `BrokeredSession` only ACCEPTS an `exit.json` whose
+    // `instanceId` matches the launch's. So every exit this file writes has to be stamped with it,
+    // which is exactly what the real broker does. Mirrors `RunManager.brokerFor`.
+    const instanceId = `i-${runId}`;
+    const spoolDir = join(cwd, `${runId}.spool`, instanceId);
 
     const spec: AgentRunSpec = { userPrompt: 'run the gates', cwd, timeoutMs: 0 };
     const runner = new ClaudeCliRunner({ bin: '/bin/true', timeoutMs: 0 });
     const session = runner.startSession(spec, onEvent, {
-      broker: { spoolDir, runId, stepId: 'run-tests', isolation: 'none' },
+      broker: { spoolDir, runId, instanceId, stepId: 'run-tests', isolation: 'none' },
     });
 
     mkdirSync(spoolDir, { recursive: true });
     writeFileSync(spoolPaths(spoolDir).out, '');
-    if (exit !== 'omit') writeSpoolExit(spoolDir, exit);
-    return { session, spoolDir };
+    if (exit !== 'omit') writeSpoolExit(spoolDir, { ...exit, instanceId });
+    return { session, spoolDir, instanceId };
   }
 
   it('an external SIGKILL with no cgroup bound configured fails the run and names the signal', async () => {
@@ -110,17 +117,17 @@ describe('a brokered run whose backend died by an untrapped external signal', ()
     // SIGKILL always does: `code: null, signal: 'SIGKILL'`. Bit for bit the same record as the
     // positive case above; only `terminatedByCezar` tells them apart, and this must resolve
     // exactly as it always did before this fix: cleanly, no error, no signal named.
-    const { session, spoolDir } = brokeredSession('omit');
+    const { session, spoolDir, instanceId } = brokeredSession('omit');
     session.interrupt();
     // `brokeredSession` already wrote `out.ndjson` and skipped `exit.json` (`'omit'`) — write it
     // now, after `interrupt()`, so the flag is set before the tail ever observes the exit.
-    writeSpoolExit(spoolDir, { code: null, signal: 'SIGKILL', exitedAt: new Date().toISOString() });
+    writeSpoolExit(spoolDir, { code: null, signal: 'SIGKILL', exitedAt: new Date().toISOString(), instanceId });
 
     await expect(session.result).resolves.toMatchObject({ text: '' });
   });
 
   it('a healthy brokered run still reaches a clean result (floor)', async () => {
-    const { session, spoolDir } = brokeredSession('omit');
+    const { session, spoolDir, instanceId } = brokeredSession('omit');
     writeFileSync(
       spoolPaths(spoolDir).out,
       `${JSON.stringify({
@@ -131,7 +138,7 @@ describe('a brokered run whose backend died by an untrapped external signal', ()
         total_cost_usd: 0.001,
       })}\n`,
     );
-    writeSpoolExit(spoolDir, { code: 0, signal: null, exitedAt: new Date().toISOString() });
+    writeSpoolExit(spoolDir, { code: 0, signal: null, exitedAt: new Date().toISOString(), instanceId });
 
     const result = await session.result;
     expect(result.text).toBe('all good');

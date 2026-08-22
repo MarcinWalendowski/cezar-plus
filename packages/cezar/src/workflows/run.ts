@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import {
   parseAskMarkerResult,
@@ -20,11 +20,14 @@ import {
 } from '../core/broker-launch.ts';
 import {
   chooseIsolation,
+  nextBrokerInstanceId,
   probeIsolationCapabilities,
   type BrokerIsolation,
   type BrokerResourceLimits,
 } from '../core/broker-isolation.ts';
-import { isSpoolLive, readSpoolMeta, spoolDirFor } from '../core/run-spool.ts';
+import { isPidAlive, isSpoolLive, legacySpoolDirFor, readSpoolMeta, SPOOL_ORPHAN_GRACE_MS, spoolDirFor, type SpoolMeta } from '../core/run-spool.ts';
+import { isRetryableBrokerLaunch } from '../core/brokered-session.ts';
+import { reapAbandonedBroker } from '../core/reap-abandoned-broker.ts';
 import { isMissingSessionRejection, type RunnerId } from '../core/agent-runner.ts';
 import { agentHomePaths } from '../paths.ts';
 import { modelConflictsWithRunner } from '../core/model-presets.ts';
@@ -52,6 +55,7 @@ import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
 import { readAgentModelProvider } from '../agent-config/models.ts';
 import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.ts';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.ts';
+import { LEASE_HEARTBEAT_MS, removeWorktreeLeases, touchWorktreeLeases, writeWorktreeLease } from '../workspace/worktree-lease.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 import { loadWorkflows } from './load.ts';
 import { evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
@@ -255,6 +259,8 @@ interface ActiveRun {
   monitoringWakeIntervalMinutes?: number;
   monitoringWakeups?: number;
   autosaveTimer?: NodeJS.Timeout;
+  leaseTimer?: NodeJS.Timeout;
+  leaseRoots?: string[];
   /* The screenshot counter lives on `RunManager.queuedImageSeq` (#472), keyed by
    * run id — a queued run persists attachments with no `ActiveRun` at all. */
   /** Has a session EVER opened on this run (#472)? `session` alone cannot answer
@@ -309,6 +315,8 @@ interface ActiveRun {
    * consumed by the step loop.
    */
   stepStopped?: AgentStopReason;
+  /** A newly launched broker exhausted its control-channel budget before any request succeeded. */
+  brokerNeverAnswered?: { spoolDir: string; message: string };
   /** Registry snapshot used to expand `/skill` follow-ups before a backend can
    *  mistake them for its own slash commands (#676). */
   skills?: Skill[];
@@ -339,6 +347,23 @@ const AUTONOMOUS_NUDGE =
   'Continue working autonomously until the task is fully complete. Do not ask me for confirmation or clarification — make reasonable assumptions and proceed. When everything is done, end the session with your done signal.';
 const MONITORING_WAKE_NUDGE =
   'Re-check the downstream work you were monitoring. Continue toward the task goal; emit CEZ:MONITORING again only if it is still pending.';
+
+/** Stop both halves of a broker launch before its spool is replaced by a retry. Best effort.
+ *  Distinct from `reapAbandonedBroker` (`../core/reap-abandoned-broker.ts`), which stops a
+ *  broker the replacement server refused to adopt across a blue-green cutover — different
+ *  trigger, different signature (spool dir here vs. run id + meta there). */
+export function reapAbandonedColdLaunch(spoolDir: string): void {
+  const meta = readSpoolMeta(spoolDir);
+  if (!meta) return;
+  for (const pid of [meta.childPid, meta.pid]) {
+    if (pid === undefined || !isPidAlive(pid)) continue;
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // Already exited or not signalable. Reaping must not turn a retryable step into a failure.
+    }
+  }
+}
 
 /**
  * Auto-resume after a provider usage limit (spec 2026-08-03-auto-resume-after-usage-limit).
@@ -1012,6 +1037,7 @@ export class RunManager {
   /** The registry read behind change C. A seam so the adoption is testable without a workspace
    *  registry on disk — the production default is the same read the sidebar performs. */
   private readonly loadGrant: () => Promise<WorkspaceGrant>;
+  private readonly reapBroker: (runId: string, meta: SpoolMeta) => Promise<boolean>;
 
   constructor(
     private readonly store: RunStore,
@@ -1020,11 +1046,13 @@ export class RunManager {
       semaphore?: WorkspaceSemaphore;
       bootScratchRoot?: boolean;
       loadGrant?: () => Promise<WorkspaceGrant>;
+      reapBroker?: (runId: string, meta: SpoolMeta) => Promise<boolean>;
     } = {},
   ) {
     this.dataDir = join(repoRoot, '.ai/cezar');
     this.bootScratchRoot = options.bootScratchRoot === true;
     this.loadGrant = options.loadGrant ?? (() => loadWorkspaceGrant());
+    this.reapBroker = options.reapBroker ?? reapAbandonedBroker;
     this.semaphore = options.semaphore ?? new WorkspaceSemaphore();
     this.offSemaphore = this.semaphore.register({
       busySlots: () => this.busySlots(),
@@ -1071,6 +1099,7 @@ export class RunManager {
       this.clearIdleTimer(state);
       this.clearMonitoringWakeTimer(state, runId);
       this.clearAutosaveTimer(state);
+      this.clearWorktreeLeases(state, runId);
       state.releaseRepoRoot?.();
       state.releaseRepoRoot = undefined;
     }
@@ -1971,7 +2000,7 @@ export class RunManager {
 
   /** Absolute spool dir for a run, from the record's relative path or the default layout. */
   private spoolDirOf(run: RunRecord): string {
-    return run.spoolDir ? join(this.dataDir, run.spoolDir) : spoolDirFor(join(this.dataDir, 'runs'), run.id);
+    return run.spoolDir ? join(this.dataDir, run.spoolDir) : legacySpoolDirFor(join(this.dataDir, 'runs'), run.id);
   }
 
   /**
@@ -1989,7 +2018,8 @@ export class RunManager {
   ): Promise<BrokerSessionRequest | undefined> {
     if (!(BROKERED_BACKENDS as readonly string[]).includes(backend)) return undefined;
     if (!brokerAvailable()) return undefined;
-    const spoolDir = spoolDirFor(join(this.dataDir, 'runs'), runId);
+    const instanceId = nextBrokerInstanceId();
+    const spoolDir = spoolDirFor(join(this.dataDir, 'runs'), runId, instanceId);
     // Recorded BEFORE the spawn: a crash in the same millisecond must still leave the next process
     // a path to probe. Written relative to `dataDir` — see the field's own note in `store.ts`.
     this.store.updateRun(runId, { spoolDir: relative(this.dataDir, spoolDir), consumedOffset: 0 });
@@ -1997,6 +2027,7 @@ export class RunManager {
     return {
       spoolDir,
       runId,
+      instanceId,
       stepId,
       isolation: this.brokerIsolation(),
       resources: await this.runResourceLimits(),
@@ -2115,19 +2146,28 @@ export class RunManager {
     const backend = run.runner ?? 'claude';
     if (!(BROKERED_BACKENDS as readonly string[]).includes(backend)) return false;
     const spoolDir = this.spoolDirOf(run);
-    if (!isSpoolLive(spoolDir)) return false;
     const meta = readSpoolMeta(spoolDir);
-    if (!meta || meta.runId !== run.id || !meta.stepId) return false;
+    const refuse = async (): Promise<false> => {
+      if (meta && await this.reapBroker(run.id, meta)) {
+        this.store.appendEvent(run.id, {
+          type: 'lifecycle',
+          message: `adopted-out agent stopped: broker ${meta.pid}`,
+        });
+      }
+      return false;
+    };
+    if (!isSpoolLive(spoolDir)) return refuse();
+    if (!meta || meta.runId !== run.id || !meta.stepId) return refuse();
     const openStep = run.steps.find((s) => s.id === meta.stepId);
-    if (!openStep || stepTerminal(openStep.status)) return false;
+    if (!openStep || stepTerminal(openStep.status)) return refuse();
 
     const workflow = await this.reviveWorkflow(run);
-    if (!workflow) return false;
+    if (!workflow) return refuse();
     const resumeAt = this.chainResumeAt(run, workflow);
     // The spool must hold the step the chain is about to run. A mismatch means the record and the
     // spool disagree about where this run is, and guessing between them is precisely how a run
     // ends up with two live agents.
-    if (!resumeAt || workflow.steps[resumeAt.index]?.id !== meta.stepId) return false;
+    if (!resumeAt || workflow.steps[resumeAt.index]?.id !== meta.stepId) return refuse();
 
     this.pendingReattach.set(run.id, {
       stepId: meta.stepId,
@@ -2179,8 +2219,36 @@ export class RunManager {
     }
     for (const entry of entries) {
       if (!entry.endsWith('.spool')) continue;
-      if (live.has(entry.slice(0, -'.spool'.length))) continue;
-      rmSync(join(runsDir, entry), { recursive: true, force: true });
+      const parent = join(runsDir, entry);
+      const runId = entry.slice(0, -'.spool'.length);
+      let children: string[];
+      try {
+        children = readdirSync(parent);
+      } catch {
+        continue;
+      }
+      // A flat protocol-1 spool has files directly in the parent. Keep it only while its run is live.
+      if (children.some((child) => child === 'meta.json')) {
+        if (!live.has(runId) && !isSpoolLive(parent)) rmSync(parent, { recursive: true, force: true });
+        continue;
+      }
+      for (const child of children) {
+        const instanceDir = join(parent, child);
+        if (isSpoolLive(instanceDir)) continue;
+        if (!readSpoolMeta(instanceDir)) {
+          try {
+            if (Date.now() - statSync(instanceDir).mtimeMs <= SPOOL_ORPHAN_GRACE_MS) continue;
+          } catch {
+            continue;
+          }
+        }
+        rmSync(instanceDir, { recursive: true, force: true });
+      }
+      try {
+        if (readdirSync(parent).length === 0) rmSync(parent, { recursive: true, force: true });
+      } catch {
+        // Concurrent broker launch or cleanup, leave it for the next sweep.
+      }
     }
   }
 
@@ -2361,6 +2429,7 @@ export class RunManager {
   /** Remove a run from the live registries — keeps `waiting ⊆ active`. */
   private dropActive(runId: string): void {
     const state = this.active.get(runId);
+    if (state) this.clearWorktreeLeases(state, runId);
     state?.releaseRepoRoot?.();
     if (state) state.releaseRepoRoot = undefined;
     this.waiting.delete(runId);
@@ -3457,6 +3526,8 @@ export class RunManager {
      *  against retrying a SECOND rejection in a row, which is a real failure, not a loop. Every
      *  ordinary caller omits it. */
     retriedMissingSession = false,
+    /** Bounds a fresh-broker retry while preserving this continuation's backend conversation. */
+    retriedColdBroker = false,
   ): Promise<void> {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
@@ -3494,8 +3565,10 @@ export class RunManager {
           (snapshot) => {
             this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
           },
+          this.repoRoot,
         );
         this.store.updateRun(runId, { workspaceWorktrees: worktrees });
+        this.armWorktreeLeases(state, runId, worktrees.map((worktree) => worktree.root));
       }
     }
     if (state.cwd === this.repoRoot && !workspaceRun) {
@@ -3898,6 +3971,8 @@ export class RunManager {
      *  acted on in `finally`, once this run has left the live registries, same reasoning as
      *  `handBack`: re-invoking while still `active` lets a concurrent `pump()` race this method. */
     let missingSessionRetry = false;
+    /** Re-enter after teardown with a new broker but the same backend session id. */
+    let coldBrokerRetry = false;
     try {
       await session.result;
       if (sessionError) throw new Error(sessionError);
@@ -3956,11 +4031,28 @@ export class RunManager {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (!retriedColdBroker && isRetryableBrokerLaunch(err)) {
+        coldBrokerRetry = true;
+        reapAbandonedColdLaunch(err.spoolDir);
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId,
+          message: `${message}; the follow-up did not reach the agent, relaunching the broker once`,
+        });
+        this.store.appendEvent(runId, {
+          type: 'metric',
+          stepId,
+          name: 'run.step.retried_cold_broker',
+          runId,
+          workflow: this.store.getRun(runId)?.workflow,
+          spoolDir: err.spoolDir,
+          attempt: 2,
+        });
       // Reactive fallback (spec 2026-08-22-resume-fresh-session-fallback, Phase 3) — the
       // continuation-path twin of the chain loop's Phase 2 branch, and what
       // `recover-session-failure.test.ts` exercises. `sessionId !== undefined` means this attempt
       // actually resumed a session; `!retriedMissingSession` bounds it to one retry.
-      if (!retriedMissingSession && sessionId !== undefined && isMissingSessionRejection(backend, message)) {
+      } else if (!retriedMissingSession && sessionId !== undefined && isMissingSessionRejection(backend, message)) {
         missingSessionRetry = true;
         this.store.appendEvent(runId, {
           type: 'note',
@@ -3995,7 +4087,29 @@ export class RunManager {
       // failed drops its worktree directories and keeps the branches (spec 2026-08-20, X3).
       await this.discardWorkspaceRun(runId);
       this.dropActive(runId);
-      if (missingSessionRetry) {
+      if (coldBrokerRetry) {
+        void this.runContinuation(
+          runId,
+          stepId,
+          name,
+          sessionId,
+          backend,
+          prompt,
+          images,
+          persistedImages,
+          persistedAttachments,
+          retriedMissingSession,
+          true,
+        ).catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.store.updateRun(runId, {
+            status: 'failed',
+            error: `continue crashed: ${message}`,
+            finishedAt: new Date().toISOString(),
+          });
+          this.dropActive(runId);
+        });
+      } else if (missingSessionRetry) {
         // Same shape as `handBack` below: re-invoke only after this run has left the live
         // registries, so a concurrent `pump()` cannot race the new `ActiveRun` this creates.
         // Re-entering `runContinuation` itself (rather than the chain loop) re-sets `status:
@@ -4138,8 +4252,10 @@ export class RunManager {
         (snapshot) => {
           this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
         },
+        this.repoRoot,
       );
       this.store.updateRun(runId, { workspaceWorktrees: worktrees });
+      this.armWorktreeLeases(state, runId, worktrees.map((worktree) => worktree.root));
       emit({
         type: 'note',
         message:
@@ -4203,6 +4319,7 @@ export class RunManager {
       }
       try {
         const wt = await createWorktree(this.repoRoot, runId, base);
+        await writeWorktreeLease(this.repoRoot, runId, this.repoRoot);
         state.cwd = wt.path;
         this.store.updateRun(runId, {
           worktreePath: wt.path,
@@ -4217,6 +4334,7 @@ export class RunManager {
           emit({ type: 'note', message: `seeded personal agent config: ${seededConfig.join(', ')}` });
         }
         this.armAutosave(state);
+        this.armWorktreeLeases(state, runId, [this.repoRoot]);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const error = `worktree creation failed: ${message}`;
@@ -4357,6 +4475,8 @@ export class RunManager {
      *  Phase 2). One retry per step, same reasoning as `resumedAfterStop`: a second miss in a row
      *  is a real failure, not a loop to keep retrying. */
     const resumedAfterMissingSession = new Set<string>();
+    /** Steps already relaunched once after a new broker never answered its first control request. */
+    const retriedColdBroker = new Set<string>();
     /** The resume handle a re-entry hands to the step it is re-running. Distinct from
      *  `resumeFrom`, which belongs to a RESTART re-entry and is spent on `resumeIdx` only. */
     let stopResume: { sessionId: string; profileId?: string; prompt: string } | undefined;
@@ -4396,12 +4516,17 @@ export class RunManager {
         stopResume = undefined;
         resumeFrom = undefined;
         state.stepStopped = undefined;
-        // Snapshotted before the gate, because `withHeavyStep` may not call `fn` until a slot
-        // frees, and the three `start*`/`checkFailure` variables below are one-shot: they belong
-        // to the step that is entering now, not to whatever the loop is doing when it resumes.
-        const stepFeedback = checkFailure;
-        const stepImages = startImages;
-        const stepAttachments = startAttachments;
+        state.brokerNeverAnswered = undefined;
+        // These three snapshots serve two purposes at once, and both need the value AS SENT.
+        // Theirs: a broker that never answered is retried once, and the retry restores exactly
+        // what this attempt was given (see `coldBroker` below). Ours: `withHeavyStep` may not call
+        // `fn` until a heavy slot frees, and `startImages`/`startAttachments`/`checkFailure` are
+        // one-shot — they belong to the step entering now, not to whatever the loop is doing when
+        // it resumes. Passing the snapshots rather than the live variables makes the call
+        // independent of when it actually runs.
+        const sentImages = startImages;
+        const sentAttachments = startAttachments;
+        const sentCheckFailure = checkFailure;
         const stepChainNote = chainStepNote(workflow.steps, i, { resumed: stepResume !== undefined });
         const failure = await this.withHeavyStep(step, emit, () =>
           this.runAgentStep(
@@ -4410,14 +4535,14 @@ export class RunManager {
             step,
             input,
             skills,
-            stepFeedback,
+            sentCheckFailure,
             interactive,
             emit,
-            stepImages,
+            sentImages,
             taskBackend,
             extraSystemPrompt,
             stepChainNote,
-            stepAttachments,
+            sentAttachments,
             stepResume,
           ),
         );
@@ -4494,6 +4619,37 @@ export class RunManager {
             backend: step.runner ?? taskBackend,
           });
           continue; // same `i` — resumeFrom/stopResume are already spent, so the next pass mints a fresh id
+        }
+        // The session callback can set this while `runSingleAgentStep` is awaiting. TypeScript's
+        // local control-flow analysis cannot observe that asynchronous mutation.
+        const coldBroker = state.brokerNeverAnswered as ActiveRun['brokerNeverAnswered'];
+        state.brokerNeverAnswered = undefined;
+        if (failure && coldBroker && !retriedColdBroker.has(step.id)) {
+          retriedColdBroker.add(step.id);
+          reapAbandonedColdLaunch(coldBroker.spoolDir);
+          this.store.updateStep(runId, step.id, {
+            sessionId: undefined,
+            status: 'pending',
+            error: undefined,
+          });
+          emit({
+            type: 'note',
+            stepId: step.id,
+            message: `${failure}; no control request reached the agent, relaunching the broker once`,
+          });
+          emit({
+            type: 'metric',
+            stepId: step.id,
+            name: 'run.step.retried_cold_broker',
+            runId,
+            workflow: workflow.name,
+            spoolDir: coldBroker.spoolDir,
+            attempt: 2,
+          });
+          startImages = sentImages;
+          startAttachments = sentAttachments;
+          checkFailure = sentCheckFailure;
+          continue;
         }
         if (failure) {
           this.finishStep(runId, step.id, 'failed', failure, emit);
@@ -5372,6 +5528,9 @@ export class RunManager {
       return null;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (isRetryableBrokerLaunch(err)) {
+        state.brokerNeverAnswered = { spoolDir: err.spoolDir, message };
+      }
       sink.sessionEnded('error', message); // alongside v1's fatal `error`
       return message;
     } finally {
@@ -6078,6 +6237,25 @@ export class RunManager {
       clearInterval(state.autosaveTimer);
       state.autosaveTimer = undefined;
     }
+  }
+
+  private armWorktreeLeases(state: ActiveRun, runId: string, roots: string[]): void {
+    const unique = [...new Set(roots)];
+    if (unique.length === 0) return;
+    state.leaseRoots = unique;
+    if (state.leaseTimer) clearInterval(state.leaseTimer);
+    state.leaseTimer = setInterval(() => {
+      void touchWorktreeLeases(unique, runId, this.repoRoot);
+    }, LEASE_HEARTBEAT_MS);
+    state.leaseTimer.unref?.();
+  }
+
+  private clearWorktreeLeases(state: ActiveRun, runId: string): void {
+    if (state.leaseTimer) clearInterval(state.leaseTimer);
+    state.leaseTimer = undefined;
+    const roots = state.leaseRoots ?? [];
+    state.leaseRoots = undefined;
+    if (roots.length > 0) void removeWorktreeLeases(roots, runId);
   }
 
   private runCheckStep(

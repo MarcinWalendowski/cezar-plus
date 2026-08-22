@@ -10,7 +10,10 @@ covered by tests. The gate (`typecheck`, `build`, `test:unit`, `test:package`, `
 under load (`fseventsd` pegged, load ~9) fails dozens of integration tests on their timeouts and
 never finished a full run. The one red on the box is `knowledge/catalog.test.ts` C18, a CPU-per-MiB
 budget with no host normalisation that fails identically at **pristine HEAD** on that machine; it is
-a standing red there, not a result of this work. What is **not** done is the measurement: the C0/C1 decision gate this
+a standing red there, not a result of this work. The gate was re-run **after** merging
+`origin/main` and it is that run — 562 of 563 files green, typecheck 0 — that authorises the push:
+the merge itself broke 12 tests in files it never touched textually, by making `instanceId` a
+required field of a fresh broker launch. What is **not** done is the measurement: the C0/C1 decision gate this
 spec's own Stage 0 puts in front of Phases 1+ has not been captured, so the throughput claim is
 designed-for, not measured; C1–C4 need `maxParallel` / `maxHeavySteps` / a memory bound written
 into `prod-host`'s `~/.cezar/config.json` first, and C3 cannot run on the Mac at all

@@ -2017,6 +2017,7 @@ export function createApp(deps: ServerDeps) {
   const describeRuntime = () =>
     runtimeInfo({
       socketActivated: deps.listenFd !== undefined,
+      dataDir: bootDataDir,
       // Probed defensively, because health is not allowed to be the thing that breaks. `deps` is
       // a hand-built object at every call site that is not `src/index.ts` — the test suite's
       // manager stubs, and any embedder assembling `ServerDeps` itself — so a manager without
