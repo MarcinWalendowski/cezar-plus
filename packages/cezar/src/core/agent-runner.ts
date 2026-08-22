@@ -57,6 +57,12 @@ export interface AgentRunSpec {
    *  e.g. CEZ_HANDOFF_FILE / CEZ_TODOS_FILE / CEZ_TASK_ID (spec 007). */
   env?: Record<string, string>;
   model?: string;
+  /** claude CLI's own `--effort` (low|medium|high|xhigh|max). Claude-only — the codex and
+   *  opencode runners never read this field, same as bashAllowlist is decorative for them.
+   *  No env-side mirror: the CLI does not read `CLAUDE_EFFORT` as input (measured — see
+   *  .ai/specs/2026-08-21-run-tests-reasoning-ceiling.md, Revision note), so the flag is the
+   *  only signal. */
+  effort?: string;
   /** Wall-clock kill switch for the run (ms). */
   timeoutMs?: number;
   /**

@@ -1054,6 +1054,12 @@ export class RunManager {
    *  unset flag must leave the agent's environment untouched, and two extra empty keys are not
    *  untouched.
    *
+   *  **Corrected 2026-08-22:** the zero-config env is no longer "exactly the three keys" —
+   *  `NODE_ENV` below is a fourth, unconditional one. It is not gated by any flag, so it does not
+   *  touch the byte-identity invariant this paragraph cites (that invariant is about flag-gated
+   *  features going untouched when their flag is off); it is simply always present now, the same
+   *  way `TMPDIR`/`TEMP`/`TMP` always are.
+   *
    *  The empty-string spelling above is not the precedent it looks like, because the two cases
    *  differ in where the decision lives. `generateFollowups` is a PER-RUN boolean that flips
    *  inside one process whose `process.env` never changes, so omitting the key really would let
@@ -1082,6 +1088,11 @@ export class RunManager {
       CEZ_HANDOFF_FILE: handoffPath(this.dataDir, runId),
       CEZ_TASK_ID: runId,
       CEZ_TODOS_FILE: generateFollowups ? todosPath(this.dataDir) : '',
+      // `NODE_ENV=production` makes npm's own tooling (ci, test runners) install/resolve the
+      // production build of everything, which is never what an agent-driven `npm ci`/`npm test`
+      // wants (AGENTS.md trap 1). Unconditional, not gated by any CEZ_* flag: every agent-spawned
+      // command gets a sane default, the same way TMPDIR below always does.
+      NODE_ENV: '',
       ...(knowledge.enabled
         ? {
             CEZ_KB_ROOTS: knowledge.summary ? knowledge.summary.roots.map((r) => r.path).join(':') : '',
@@ -4725,6 +4736,7 @@ export class RunManager {
           ],
           env: stepProfile.env,
           model: backendModel,
+          effort: step.effort,
           sessionId,
           resume: resumeFrom !== undefined,
           // Interactive sessions have no wall clock — the idle timer rules.
