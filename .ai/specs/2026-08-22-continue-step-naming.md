@@ -1,5 +1,13 @@
 # A follow-up prompt names what it's retrying, or names itself — never the literal "Continue"
 
+**Status: implemented.** All four phases landed together in `6c3d1c3a`, merged with
+`origin/main` as `988fbac5` and pushed directly to `main` (no branch protection on this repo).
+`tsc --noEmit -p tsconfig.test.json` clean; full vitest run 9757 passed / 1 skipped, only two
+pre-existing unrelated failures left (`catalog.test.ts`, `config-api.test.ts` — filed as todos
+`72eba946`, `72129a4c`). Root `npm run typecheck`'s `pretypecheck` build step cannot complete on
+this host on any branch, reproduced at clean HEAD — pre-existing, filed as `72129a4c`, not a
+regression from this change.
+
 The brief this spec was drafted against, `.ai/specs/briefs/2026-08-22-continue-step-naming.md`,
 is no longer on disk (reaped mid-session — see this run's handoff log); every citation below was
 re-verified directly against the code in this pass, not carried from the brief.
