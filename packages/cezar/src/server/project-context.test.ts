@@ -547,7 +547,7 @@ describe('ProjectContexts — cross-project orphan-prune safety (spec 2026-08-22
     // The run's OWN record: a real RunStore-backed workspace run, so the persisted
     // `workspaceWorktrees` entry is schema-valid for free rather than hand-authored.
     const bootStore = RunStore.open(join(bootRoot, '.ai/cezar'), { keepLive: true });
-    const created = bootStore.createRun({ title: 'workspace run', workflow: 'w', task: 't', steps: [] });
+    const created = bootStore.createRun({ author: localCliAuthor(), title: 'workspace run', workflow: 'w', task: 't', steps: [] });
     const wt = await createWorktree(targetRoot, created.id, 'main');
     // A unique commit, so this worktree's branch is provably NOT merged into trunk — exercising
     // layer 2 (branch-reachability) too, in case layer 1 were ever bypassed.

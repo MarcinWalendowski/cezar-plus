@@ -526,6 +526,13 @@ export const runIndexEntrySchema = z.object({
   /** The task's branch, when it has one — a column on the global page, and the one field that
    *  makes a cross-project row identifiable at a glance without opening it. */
   branch: z.string().optional(),
+  /** Who created the task (`.ai/specs/2026-08-21-task-author-provenance.md`, Phase 4) — the
+   *  global page's Author column, and the only field that answers "what made this?" for a row on
+   *  a board spanning forty projects. One small object, carried whole rather than pre-rendered to
+   *  a label, because the cross-project board is also the one surface that can resolve an agent
+   *  author's PARENT to a link: it already holds every project's rows. Absent on runs created
+   *  before the field existed. */
+  author: taskAuthorSchema.optional(),
   /** When the agent actually started, as opposed to when the task was created. The global page's
    *  age column prefers it and falls back to `createdAt`, exactly as the per-project table does. */
   startedAt: z.string().optional(),

@@ -33,6 +33,7 @@ import {
   useRuns,
 } from '@/api/queries'
 import { DEFAULT_AGENT_ACCOUNT_ID, type ApiRun, type OpenTarget } from '@loki-labs/better-cezar-api-client'
+import { AuthorCell } from '@/components/author-cell'
 import { DiffStatLabel } from '@/components/diff-stat'
 import { LiveDuration } from '@/components/live-duration'
 import { TitleEditInput, useTitleEditor } from '@/components/editable-title'
@@ -589,6 +590,12 @@ function MetaRow({
     )
   }
   if (run.diffStat) parts.push(<DiffStatLabel key="diff" stat={run.diffStat} />)
+  if (run.author) {
+    // Provenance, on the one surface that has room for the whole sentence rather than a cell.
+    // `parentTo` is left to the provider: the thread is project-scoped, but a workspace run's
+    // parent may live in another project, so guessing the scope here would mint a 404.
+    parts.push(<AuthorCell key="author" author={run.author} />)
+  }
   if (run.automation) {
     // Provenance is history and is always shown; only the LINK is gated. Following it with the
     // capability off would land on the disabled `/automations` state, which says nothing about

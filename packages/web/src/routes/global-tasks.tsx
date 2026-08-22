@@ -44,6 +44,7 @@ import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
+import { AuthorCell, TaskLocationProvider } from '@/components/author-cell'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { deriveAttention } from '@/lib/attention'
 import {
@@ -398,6 +399,18 @@ export function GlobalTasksRoute() {
   const toggle = (facet: FacetId, value: string) =>
     setFilters((current) => ({ ...current, [facet]: toggleFacetValue(current[facet], value) }))
   const clearFacet = (facet: FacetId) => setFilters((current) => ({ ...current, [facet]: [] }))
+  // Where each task lives, for the Author column's parent link. Built from the rows this page
+  // already loaded, because a run id alone does not say which project holds it — see
+  // `TaskLocationProvider`'s doc comment. A parent that is not on the board (archived away,
+  // beyond the per-project limit) simply resolves to `undefined` and renders unlinked.
+  const locateTask = React.useMemo(() => {
+    const byId = new Map(tasks.map((t) => [t.run.id, t.run.projectId]))
+    return (taskId: string) => {
+      const projectId = byId.get(taskId)
+      return projectId ? scopeTo(projectId, `/tasks/${taskId}`) : undefined
+    }
+  }, [tasks])
+
   const archive = useArchiveIndexedRun()
   const setRead = useReadIndexedRun()
 
@@ -432,6 +445,7 @@ export function GlobalTasksRoute() {
   )
 
   return (
+    <TaskLocationProvider locate={locateTask}>
     <div data-route="global-tasks" className="flex min-h-full flex-col">
       <header className="sticky top-0 z-10 hidden h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-5 md:flex">
         <h1 className="text-base font-semibold">All tasks</h1>
@@ -577,6 +591,7 @@ export function GlobalTasksRoute() {
         </ReferenceStatusProvider>
       </div>
     </div>
+    </TaskLocationProvider>
   )
 }
 
@@ -809,6 +824,7 @@ function FiledTasks({
                   <Th className="w-[104px]">Status</Th>
                   <Th>Task</Th>
                   <Th className="w-[124px]">Project</Th>
+                  <Th className="hidden w-[104px] lg:table-cell">Author</Th>
                   <Th className="w-[84px]">Priority</Th>
                   <Th className="w-[64px] text-right">Age</Th>
                   <Th className="w-[64px] text-right">
@@ -997,6 +1013,9 @@ function FiledRow({
         <Link to={scopeTo(entry.project, '/')} className="truncate hover:text-foreground">
           {entry.project}
         </Link>
+      </td>
+      <td className={cn(TD_BASE, 'hidden lg:table-cell')}>
+        <AuthorCell author={entry.todo.author} />
       </td>
       <td className={TD_BASE}>
         {entry.todo.priority ? <FiledPriorityChip priority={entry.todo.priority} /> : <Dash />}
@@ -1617,6 +1636,7 @@ function TaskTable({
               {showProject ? <Th className="w-[124px]">Project</Th> : null}
               <Th className="hidden w-[120px] xl:table-cell">Tags</Th>
               <Th className="w-[84px]">Ref</Th>
+              <Th className="hidden w-[104px] xl:table-cell">Author</Th>
               <Th className="hidden w-[108px] xl:table-cell">Workflow</Th>
               {showCost ? <Th className="hidden w-[64px] text-right lg:table-cell">Cost</Th> : null}
               <Th className="hidden w-[56px] text-right xl:table-cell">CPU</Th>
@@ -1783,6 +1803,9 @@ function TaskRow({
         ) : (
           <Dash />
         )}
+      </td>
+      <td className={cn(TD_BASE, 'hidden xl:table-cell')}>
+        <AuthorCell author={run.author} />
       </td>
       <td className={cn(TD_BASE, 'hidden text-[12.5px] text-muted-foreground xl:table-cell')}>
         {displayWorkflowName(run.workflow)}

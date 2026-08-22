@@ -6905,6 +6905,10 @@ export function createApp(deps: ServerDeps) {
     workflow: run.workflow,
     ...(run.branch !== undefined ? { branch: run.branch } : {}),
     ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
+    // Provenance for the global board's Author column (2026-08-21-task-author-provenance). Sent
+    // whole rather than pre-rendered: the cross-project board is the one surface that can turn an
+    // agent author's parent id into a link, because it alone holds every project's rows.
+    ...(run.author !== undefined ? { author: run.author } : {}),
     // The tracker-reference inputs, verbatim — the cockpit's `taskReference()` owns the rule
     // that picks between them (see the schema's note).
     ...(run.pullRequestUrl !== undefined ? { pullRequestUrl: run.pullRequestUrl } : {}),

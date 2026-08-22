@@ -1,8 +1,34 @@
 # Every task records its author — user, API, or the agent session that spawned it
 
-**Status: SPEC ONLY — not implemented.** Written in the `spec` step of the `spec-to-deploy` run
-for task `232ad6d4-58a5-421e-941f-5c24bd5a8452`. No code file was touched in that step; the next
-step implements Phase 1.
+**Status: IMPLEMENTED 2026-08-22 — Phases 1-4. Phase 5 not started (it was always optional).
+QA NEEDED: the runtime e2e in §Verification steps 18-21 has NOT been run, so the cockpit surface
+is unverified in a real browser.** Written in the `spec` step of the `spec-to-deploy` run for task
+`232ad6d4-58a5-421e-941f-5c24bd5a8452`; Phases 1-3 built in the `implement` step of the same run,
+Phase 4 after the owner confirmed the orphan-prune fix (`5ffa383c`) had landed.
+
+**Divergences from the design below, all deliberate:**
+
+1. **The parent link is resolved by the page, not by a scoped URL.** §Solution promised the Author
+   cell would link to `/p/:projectId/tasks/:parentTaskId`. That URL is wrong more often than it is
+   right — a workspace run's parent lives in the workspace's own store, not in the project the
+   child landed in, so the child's `projectId` is not the parent's. What shipped is
+   `TaskLocationProvider` (`web/src/components/author-cell.tsx`): the cross-project board already
+   holds every project's rows, builds an id → path map from them, and supplies it through context
+   (the `ReferenceStatusProvider` precedent in the same file). A parent the page cannot locate
+   renders as plain text. An unlinked id is honest; a 404 that looks like a feature is not.
+2. **Both board shapes were widened, not just the global one.** `author` was added to
+   `runIndexEntrySchema` (`contract/src/runs.ts`) AND `workspaceRunSummarySchema`
+   (`contract/src/workspace-runs.ts`). `run-index.ts`'s own comment says the two boards must not
+   drift, and a provenance column on one of them is exactly that drift.
+3. **The Author filter facet is NOT implemented.** §Solution's fourth bullet listed one. The
+   facet-space plumbing lives in two separate modules with their own URL params and tests
+   (`lib/global-tasks.ts`, `lib/filed-tasks.ts`), and adding it would roughly double this phase's
+   diff for a convenience, so it is deferred rather than half-built. `authorFacet()` and
+   `authorFacetLabel()` (`web/src/lib/task-author.ts`) are implemented and tested, so the facet is
+   a wiring job, not a design one.
+4. **The column is hidden on narrow viewports** (`lg:` on the Filed table, `xl:` on the runs
+   table), following the rule the runs table's own header comment states: every column is pinned
+   as narrow as it can be so Task keeps the pixels it gives up.
 
 **Date:** 2026-08-21
 
