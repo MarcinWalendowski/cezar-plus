@@ -1,9 +1,20 @@
 # Structured review verdicts, and targeted edits on spec revision
 
-**Status: DRAFT (2026-08-21) — spec only, nothing implemented.** Written in the `spec` step of
-the `spec-to-deploy` run for task `0762e872-f6e5-4a51-b1b1-8a7df9cdf4e7`, from the brief left by
-that run's `context` step: `.ai/specs/briefs/2026-08-21-structured-review-targeted-spec-edits.md`.
-Todo `a7ebbe3f-ec42-4ce0-8b9d-90c60dfed6b4` is this task.
+**Status: PHASES 0-3 IMPLEMENTED AND SHIPPED (2026-08-22, `ea0c8374` on `origin/main`) —
+PHASE 4 STILL OUTSTANDING.** Written in the `spec` step of the `spec-to-deploy` run for task
+`0762e872-f6e5-4a51-b1b1-8a7df9cdf4e7`, from the brief left by that run's `context` step:
+`.ai/specs/briefs/2026-08-21-structured-review-targeted-spec-edits.md`. Todo
+`a7ebbe3f-ec42-4ce0-8b9d-90c60dfed6b4` is this task. `review-spec`'s FILE/SECTION/CHANGE prompt
+(§ Solution 1), `specRevisionFeedback()` at all three `run.ts` call sites (§ Solution 2), and the
+reworded shared wrapper (§ Solution 3) are all live — verified directly: `specRevisionFeedback` is
+defined at `run.ts:727` and called at `run.ts:4016`, `4048` and `4384`; the reworded wrapper text
+is at `run.ts:4455`; the FILE/SECTION/CHANGE shape is in the `review-spec` prompt at
+`types.ts:782`. Phase 3's tests (`review-verdict.test.ts`, `types.test.ts`) pass: 51/51. **Phase 4
+(the real, out-of-band revision-run measurement of acceptance criteria 3 and 4) did not run inside
+this chain** — this run's own two `revise` verdicts (see Progress log below) both fired against
+the OLD `review-spec`/`spec` code, before this fix existed, since they critiqued the spec document
+itself rather than exercising the shipped feature. Filed as a follow-up todo per § Phases' own
+instruction; see that todo for the measurement recipe (§ Verification 3).
 
 ## TLDR
 
