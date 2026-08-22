@@ -2,6 +2,11 @@
 
 **For task d92e6b85. Gather-the-record step only — no spec, no code written here.**
 
+**RESOLVED 2026-08-22.** The mechanism this brief traces (root mechanism section, below) was
+confirmed and fixed — see `.ai/specs/2026-08-22-run-broker-cli-keepalive.md` for the spec and
+`3e6d1b7e` (`origin/main`) for the shipped commit. Kept here as the discovery record; the spec is
+now the current source of truth for this defect.
+
 ## The problem, in this repo's own terms
 
 `npm run test:package` (`packages/cezar/test/e2e/package-cli.test.ts:354-432`, "the release

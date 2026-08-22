@@ -1,5 +1,24 @@
 # The one-shot `cezar run` CLI must not exit while its brokered run is still in flight
 
+**Status: IMPLEMENTED, TESTED and SHIPPED 2026-08-22.** Commit `3e6d1b7e` ("fix: keep a
+one-shot brokered run's interval ref'd so the process outlives the session"), pushed to
+`origin/main` (fast-forward from `6fdbe35e`) on `prod-host`. P1+P2 both landed in
+`packages/cezar/src/core/brokered-session.ts` (unref removed from the poll timer; `giveUp()`
+terminal path + `spawnFailed` option wired into `pumpPending`'s attempts-exhausted branch) and
+`claude-cli-runner.ts` (threads `mode.spawnFailed` into the `BrokeredSession` constructor). P3
+(the doc note on `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`) landed in the same
+commit. All three acceptance criteria met and measured, not just gated green — see Verification
+§2/§3 below for what was actually run: `npm run test:package` **15/15** (was 1/15 red, the
+originally-failing test 5 now passes), 4 new unit tests in `brokered-session.test.ts` (9/9 total)
+covering timer ref state and the give-up rejection path, and a direct manual repro of AC2 against
+the built `dist/index.js` (`CEZ_DRY_RUN=1 … run mock:done` → `run done`, `runs.json` row
+`status: "done"`). AC3's give-up path is covered by the unit tests (P2 tests assert the rejection
+message and precedence) but was not additionally forced end-to-end through the CLI in this
+session — left as an optional follow-up repro, not a gap in the mechanism itself. Full gate suite
+green: `typecheck`, `test:unit` (44/44), `build`; `npm test` (vitest) has one pre-existing,
+unrelated failure (`knowledge/catalog.test.ts` C18, a documented host-speed timing trap, 517/518
+files / 9573/9575 tests otherwise green) not touched by this change.
+
 ## TLDR
 
 `npm run test:package` is red 1/15 on `prod-host`: the packaged CLI's `cezar run mock:done
