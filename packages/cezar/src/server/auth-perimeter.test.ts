@@ -13,6 +13,7 @@ import type { WorkflowDef } from '../workflows/types.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp, type Principal, type SessionResolver } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * The HTTP half of the auth perimeter (D1/D3/D6, spec
@@ -49,7 +50,7 @@ describe('requirePrincipal — the /api/* auth perimeter', () => {
     process.env.CEZ_DRY_RUN = '1'; // keeps the /api/v1/health probe off the network
     manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) =>
-        store.createRun({ title: 't', workflow: '(planned)', task: input.task, steps: [] }),
+        store.createRun({ author: localCliAuthor(), title: 't', workflow: '(planned)', task: input.task, steps: [] }),
     } as unknown as RunManager;
   });
 

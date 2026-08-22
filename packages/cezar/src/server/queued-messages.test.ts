@@ -9,6 +9,7 @@ import type { RunManager } from '../workflows/run.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
 import { createApp } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * #472 — the queued prompt stack over HTTP: the three-rung delivery ladder on
@@ -31,7 +32,7 @@ describe('queued prompt stack routes (#472)', () => {
   beforeEach(() => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-472-routes-'));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
-    record = store.createRun({ title: 't', workflow: '(planned)', task: 'the task', steps: [] });
+    record = store.createRun({ author: localCliAuthor(), title: 't', workflow: '(planned)', task: 'the task', steps: [] });
     // The record's own status now gates the early bounds checks (a finished run gets 409
     // rather than a bounds 400), so the fixture must look queued as well as answer on that rung.
     store.updateRun(record.id, { status: 'queued' });

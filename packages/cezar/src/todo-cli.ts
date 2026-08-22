@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { basename, join, resolve } from 'node:path';
 import { createTodoInputSchema, type TodoKnowledgeRef } from '@loki-labs/better-cezar-contract';
 import { createTodo, readTodos, type CreateTodoInput } from './todos.ts';
+import { authorFromAgentEnv } from './runs/task-author.ts';
 import { loadWorkspaceConfig } from './workspace/config.ts';
 import { normalizeRoot } from './workspace/projects.ts';
 
@@ -66,7 +67,9 @@ export async function runTodoCommand(args: string[], opts: TodoCliOptions): Prom
   }
 
   try {
-    return sub === 'add' ? await handleAdd(rest, opts.repoRoot, io) : await handleList(rest, opts.repoRoot, io);
+    return sub === 'add'
+      ? await handleAdd(rest, opts.repoRoot, io, opts.env ?? process.env)
+      : await handleList(rest, opts.repoRoot, io);
   } catch (err) {
     io.error(`todo ${sub}: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
@@ -126,7 +129,12 @@ async function buildSpecKnowledgeRef(specPath: string, filingRepoRoot: string): 
   };
 }
 
-async function handleAdd(rest: string[], defaultRoot: string, io: TodoCliIo): Promise<number> {
+async function handleAdd(
+  rest: string[],
+  defaultRoot: string,
+  io: TodoCliIo,
+  env: NodeJS.ProcessEnv,
+): Promise<number> {
   let values: {
     project?: string;
     context?: string;
@@ -193,10 +201,17 @@ async function handleAdd(rest: string[], defaultRoot: string, io: TodoCliIo): Pr
   }
 
   const dataDir = join(resolved.root, '.ai/cezar');
-  const todo = await createTodo(dataDir, parsed.data);
+  // WHO filed this (spec 2026-08-21-task-author-provenance). Read from the process env, which is
+  // the only thing a child of an agent step has to go on: `CEZ_TASK_ID` names the parent task and
+  // `CEZ_SESSION_ID`/`CEZ_STEP_ID` name the session inside it, all three set by `agentEnvForStep`.
+  // A person running this in their own shell has none of them and is recorded as the local user —
+  // which is the distinction `origin: 'agent'` (hard-coded above, whoever the caller is) cannot
+  // make, and the reason this field exists next to it rather than instead of it.
+  const todo = await createTodo(dataDir, parsed.data, authorFromAgentEnv(env, 'cli-todo-add'));
   // TODO(analytics): emit `todo.filed` (origin, project, hasSpec) here once an event sink exists
   // — no analytics/telemetry mechanism exists anywhere in this codebase today (checked), so this
-  // is left as a TODO rather than inventing one.
+  // is left as a TODO rather than inventing one. `todo.author.kind`/`.via` is the dimension it was
+  // missing; the sink is still what does not exist.
 
   if (values.json) {
     io.log(JSON.stringify({ todo }, null, 2));

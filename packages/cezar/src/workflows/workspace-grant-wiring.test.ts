@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentRunSpec, AgentRunner, AgentSession } from '../core/agent-runner.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const specs: AgentRunSpec[] = [];
 
@@ -96,7 +97,7 @@ describe('RunManager — a workspace run hands its grant to the spawn', () => {
   };
 
   it('grants the deduped project roots as additional directories', async () => {
-    manager.startRun(WORKFLOW, { task: 'touch every project', worktree: false, workspaceProjects: GRANT });
+    manager.startRun(WORKFLOW, { author: localCliAuthor(), task: 'touch every project', worktree: false, workspaceProjects: GRANT });
     const spec = await spawned();
     // Deduped: `/w/monorepo/cezar` is already inside `/w/monorepo`.
     expect(spec.additionalDirectories).toContain('/w/monorepo');
@@ -105,7 +106,7 @@ describe('RunManager — a workspace run hands its grant to the spawn', () => {
   });
 
   it('keeps the run-state directory grant it always had alongside them', async () => {
-    manager.startRun(WORKFLOW, { task: 'touch every project', worktree: false, workspaceProjects: GRANT });
+    manager.startRun(WORKFLOW, { author: localCliAuthor(), task: 'touch every project', worktree: false, workspaceProjects: GRANT });
     const spec = await spawned();
     // The handoff file lives here; a grant that REPLACED this list instead of extending it would
     // break every workspace run's handoff journal, silently.
@@ -113,7 +114,7 @@ describe('RunManager — a workspace run hands its grant to the spawn', () => {
   });
 
   it('states every project and its absolute path in the system prompt', async () => {
-    manager.startRun(WORKFLOW, { task: 'touch every project', worktree: false, workspaceProjects: GRANT });
+    manager.startRun(WORKFLOW, { author: localCliAuthor(), task: 'touch every project', worktree: false, workspaceProjects: GRANT });
     const spec = await spawned();
     // The portable half. `--add-dir` above is Claude-only; on codex/opencode this text is the
     // ENTIRE grant the agent ever learns about, and the cwd contains none of the work.
@@ -123,7 +124,7 @@ describe('RunManager — a workspace run hands its grant to the spawn', () => {
   });
 
   it('changes nothing for an ordinary run', async () => {
-    manager.startRun(WORKFLOW, { task: 'ordinary', worktree: false });
+    manager.startRun(WORKFLOW, { author: localCliAuthor(), task: 'ordinary', worktree: false });
     const spec = await spawned();
     // Every granted directory is still the run's OWN state (the run-state folder plus the #785
     // per-run TMPDIR) — nothing outside this repo. Asserting "no foreign root" rather than an
@@ -134,7 +135,7 @@ describe('RunManager — a workspace run hands its grant to the spawn', () => {
   });
 
   it('re-reads the grant from the RECORD, so a later step cannot drift from the registry', async () => {
-    const run = manager.startRun(WORKFLOW, {
+    const run = manager.startRun(WORKFLOW, { author: localCliAuthor(),
       task: 'touch every project',
       worktree: false,
       workspaceProjects: GRANT,

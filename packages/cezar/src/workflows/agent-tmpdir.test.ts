@@ -7,6 +7,7 @@ import { RunStore } from '../runs/store.ts';
 import { AgentTempDirError, agentTmpDir } from '../runs/agent-tmpdir.ts';
 import { registerProject } from '../workspace/projects.ts';
 import { RunManager, agentDirectories } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * #785 wiring: the per-run temp directory has to reach the SPAWN, be gone when
@@ -53,7 +54,7 @@ describe('RunManager — task-scoped agent TMPDIR (#785)', () => {
   });
 
   const newRun = () =>
-    store.createRun({
+    store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'w',
       task: 't',

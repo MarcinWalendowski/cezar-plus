@@ -13,6 +13,7 @@ import {
   RunManager,
 } from './run.ts';
 import type { WorkflowDef } from './types.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -79,7 +80,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
 
   it('schedules the resume for the provider\'s reset instant plus the grace', async () => {
     manager = new RunManager(store, repoRoot);
-    const record = manager.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     await settle(record.id);
 
     const failed = store.getRun(record.id);
@@ -101,7 +102,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
     manager = new RunManager(store, repoRoot, {
       semaphore: new WorkspaceSemaphore({ initial: { autoResumeOnUsageLimit: false } }),
     });
-    const record = manager.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     await settle(record.id);
 
     expect(store.getRun(record.id)?.status).toBe('failed');
@@ -110,7 +111,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
 
   it('schedules the next window when the resumed turn hits the limit again, and counts up', async () => {
     const first = new RunManager(store, repoRoot);
-    const record = first.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const record = first.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     await settle(record.id);
     first.dispose();
 
@@ -135,7 +136,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
     // rebuilt project context, a manager disposed mid-wait. The record is the durable half, so
     // an elapsed deadline nobody is holding must not sit in the cockpit promising a resume.
     const first = new RunManager(store, repoRoot);
-    const record = first.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const record = first.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     await settle(record.id);
     first.dispose(); // drops the timer, keeps the record
 
@@ -145,7 +146,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
     });
     // A manager that never runs `recover()` — the reconcile rides the ordinary pump.
     manager = new RunManager(store, repoRoot);
-    manager.startRun(workflow, { task: 'mock:done unrelated', worktree: false });
+    manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done unrelated', worktree: false });
 
     await expect
       .poll(
@@ -158,7 +159,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
 
   it('retires the deadline when the resume is refused, instead of promising a past time', async () => {
     const first = new RunManager(store, repoRoot);
-    const record = first.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const record = first.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     await settle(record.id);
     first.dispose();
 
@@ -188,7 +189,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
     // on the repo-root lease (#438) instead of holding a slot, which is a different queue rule
     // altogether and would mask what this test is about.
     const runs = [1, 2, 3, 4, 5].map((n) =>
-      manager!.startRun(workflow, { task: `mock:limit task ${n}` }),
+      manager!.startRun(workflow, { author: localCliAuthor(), task: `mock:limit task ${n}` }),
     );
 
     // Two schedules is the whole story: exactly the two that had slots ever ran.
@@ -228,7 +229,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
       semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 2 } }),
     });
     const runs = [1, 2, 3, 4, 5].map((n) =>
-      manager!.startRun(workflow, { task: `mock:limit inplace ${n}`, worktree: false }),
+      manager!.startRun(workflow, { author: localCliAuthor(), task: `mock:limit inplace ${n}`, worktree: false }),
     );
 
     await expect
@@ -245,7 +246,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
 
   it('keeps the account held while a resume is in flight, until a turn proves the window', async () => {
     manager = new RunManager(store, repoRoot);
-    const record = manager.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     await settle(record.id);
     const account = `claude:default`;
     expect([...manager.accountHolds().deadline]).toContain(account);
@@ -277,7 +278,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
     // other to prove a window neither will ever get to test. Everything in the workspace stops.
     const semaphore = new WorkspaceSemaphore({ initial: { maxParallel: 2 } });
     const first = new RunManager(store, repoRoot, { semaphore });
-    const runs = [1, 2].map((n) => first.startRun(workflow, { task: `mock:limit pair ${n}` }));
+    const runs = [1, 2].map((n) => first.startRun(workflow, { author: localCliAuthor(), task: `mock:limit pair ${n}` }));
     for (const run of runs) await settle(run.id);
     expect(runs.every((r) => store.getRun(r.id)?.autoResumeAt !== undefined)).toBe(true);
     first.dispose();
@@ -308,9 +309,9 @@ describe('a run stopped by a usage limit resumes itself', () => {
     manager = new RunManager(store, repoRoot, {
       semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 1 } }),
     });
-    const limited = manager.startRun(workflow, { task: 'mock:limit holder' });
+    const limited = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit holder' });
     await settle(limited.id);
-    const waiting = manager.startRun(workflow, { task: 'mock:done work' });
+    const waiting = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done work' });
     await expect.poll(() => store.getRun(waiting.id)?.status, { timeout: 10_000 }).toBe('queued');
 
     // While a real appointment is ahead, sitting still is CORRECT and the watchdog must not
@@ -349,7 +350,13 @@ describe('a run stopped by a usage limit resumes itself', () => {
     // Mutation that must turn this red: move the try/catch from around the single
     // `reviveQueuedRun` call to around the whole `for` loop. The sweep still resolves, so (1)
     // stays green on its own — only (2) catches it.
-    const unrecoverable = { title: 't', workflow: 'no-such-workflow', task: 'mock:done', steps: [] };
+    const unrecoverable = {
+      title: 't',
+      workflow: 'no-such-workflow',
+      task: 'mock:done',
+      steps: [],
+      author: localCliAuthor(),
+    };
     store.createRun(unrecoverable);
     store.createRun(unrecoverable);
     // Sabotage whichever the sweep reaches FIRST, in the store's own order, so the test does not
@@ -386,9 +393,9 @@ describe('a run stopped by a usage limit resumes itself', () => {
     manager = new RunManager(store, repoRoot, {
       semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 1 } }),
     });
-    const limited = manager.startRun(workflow, { task: 'mock:limit holder', worktree: false });
+    const limited = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit holder', worktree: false });
     await settle(limited.id);
-    const waiting = manager.startRun(workflow, { task: 'mock:done work', worktree: false });
+    const waiting = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done work', worktree: false });
     await expect.poll(() => store.getRun(waiting.id)?.status, { timeout: 10_000 }).toBe('queued');
 
     // Wedge it: the holder holds with no deadline anyone is waiting for, and nothing is running.
@@ -420,7 +427,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
     // `accountHolds()` reads it as a hold, so nothing new starts on that account, and the cockpit
     // shows a `scheduled` row for a resume that will never come.
     const first = new RunManager(store, repoRoot);
-    const record = first.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const record = first.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     await settle(record.id);
     expect(store.getRun(record.id)?.autoResumeAt).toBeDefined();
     first.dispose(); // the timer is gone; the deadline is not
@@ -447,7 +454,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
     // any of them. `pump()` iterates its own queue, so such a run is invisible to it and would
     // sit there for good: neither running, nor failed, nor ever going to happen.
     const first = new RunManager(store, repoRoot);
-    const record = first.startRun(workflow, { task: 'mock:done orphan', worktree: false });
+    const record = first.startRun(workflow, { author: localCliAuthor(), task: 'mock:done orphan', worktree: false });
     await settle(record.id);
     first.dispose();
     // Back to `queued` with nobody holding the work item — exactly what the engine sees after
@@ -472,10 +479,10 @@ describe('a run stopped by a usage limit resumes itself', () => {
     // sequence, because the hold — correctly — stops the second from ever starting otherwise.
     const semaphore = new WorkspaceSemaphore({ initial: { maxParallel: 1 } });
     const first = new RunManager(store, repoRoot, { semaphore });
-    const a = first.startRun(workflow, { task: 'mock:limit probe a' });
+    const a = first.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit probe a' });
     await settle(a.id);
     first.cancelAutoResume(a.id); // release the hold so b can take its turn
-    const b = first.startRun(workflow, { task: 'mock:limit probe b' });
+    const b = first.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit probe b' });
     await settle(b.id);
     first.dispose();
 
@@ -500,13 +507,13 @@ describe('a run stopped by a usage limit resumes itself', () => {
     manager = new RunManager(store, repoRoot, {
       semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 1 } }),
     });
-    const limited = manager.startRun(workflow, { task: 'mock:limit claude work', worktree: false });
+    const limited = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit claude work', worktree: false });
     await settle(limited.id);
     expect(store.getRun(limited.id)?.autoResumeAt).toBeDefined();
 
     // A second login on the same backend is a second budget (spec 2026-07-29-agent-profiles), so
     // a limit on one must not stall the other. Same shape as a different backend entirely.
-    const other = manager.startRun(workflow, {
+    const other = manager.startRun(workflow, { author: localCliAuthor(),
       task: 'mock:done other account',
       worktree: false,
       agentProfile: 'second',
@@ -518,7 +525,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
 
   it('never resumes a task the user resigned from — archived is archived', async () => {
     manager = new RunManager(store, repoRoot);
-    const resigned = manager.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const resigned = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     await settle(resigned.id);
     expect(store.getRun(resigned.id)?.autoResumeAt).toBeDefined();
 
@@ -540,7 +547,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
 
   it('lets a long-missed deadline expire instead of reviving a task from another era', async () => {
     const first = new RunManager(store, repoRoot);
-    const record = first.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const record = first.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     await settle(record.id);
     first.dispose();
 
@@ -560,11 +567,11 @@ describe('a run stopped by a usage limit resumes itself', () => {
 
   it('cancels one task without touching another that is waiting out the same window', async () => {
     manager = new RunManager(store, repoRoot);
-    const kept = manager.startRun(workflow, { task: 'mock:limit keep this one', worktree: false });
+    const kept = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit keep this one', worktree: false });
     await settle(kept.id);
     // A second ACCOUNT, so the first one's hold does not park this run in the queue — the two
     // mechanisms are independent and this test is about the per-task cancel.
-    const dropped = manager.startRun(workflow, {
+    const dropped = manager.startRun(workflow, { author: localCliAuthor(),
       task: 'mock:limit drop this one',
       worktree: false,
       agentProfile: 'second',
@@ -587,7 +594,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
       load: async () => ({ maxParallel: 2, memoryLimitMb: null, autoResumeOnUsageLimit: enabled }),
     });
     manager = new RunManager(store, repoRoot, { semaphore });
-    const record = manager.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     await settle(record.id);
     expect(store.getRun(record.id)?.autoResumeAt).toBeDefined();
 
@@ -604,7 +611,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
 
   it('stops scheduling once the consecutive-resume cap is spent, and says why', async () => {
     manager = new RunManager(store, repoRoot);
-    const record = manager.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     // Pre-load the counter so THIS failure is the one past the cap.
     store.updateRun(record.id, { autoResumeAttempts: MAX_AUTO_RESUMES });
     await settle(record.id);
@@ -616,7 +623,7 @@ describe('a run stopped by a usage limit resumes itself', () => {
 
   it('re-arms across a restart and resumes the task from its last session', async () => {
     const first = new RunManager(store, repoRoot);
-    const record = first.startRun(workflow, { task: 'mock:limit ship it', worktree: false });
+    const record = first.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
     await settle(record.id);
     expect(store.getRun(record.id)?.autoResumeAt).toBeDefined();
     first.dispose();

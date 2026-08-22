@@ -8,6 +8,7 @@ import type { RunManager, StartRunInput } from './workflows/run.ts';
 import type { WorkflowDef } from './workflows/types.ts';
 import { readTodos, todosPath, type TodoItem } from './todos.ts';
 import { reconcileAutostartTodos, watchTodoAutostart, type TodoAutostartProject } from './todo-autostart.ts';
+import { localCliAuthor } from './runs/task-author.ts';
 
 /**
  * Phase 2 — `cezar todo add --start` (`.ai/specs/2026-08-19-file-tasks-from-a-running-task.md`).
@@ -50,7 +51,7 @@ describe('reconcileAutostartTodos', () => {
     const manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
         started.push(input);
-        return store.createRun({ title: 't', workflow: '(inbox)', task: input.task, steps: [] });
+        return store.createRun({ author: input.author, title: 't', workflow: '(inbox)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
     project = { repoRoot, dataDir, manager };
@@ -96,7 +97,7 @@ describe('reconcileAutostartTodos', () => {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
         if (input.task === 'Boom') throw new Error('spawn failed');
         started.push(input);
-        return store.createRun({ title: 't', workflow: '(inbox)', task: input.task, steps: [] });
+        return store.createRun({ author: input.author, title: 't', workflow: '(inbox)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
     await reconcileAutostartTodos({ ...project, manager });
@@ -110,7 +111,7 @@ describe('reconcileAutostartTodos', () => {
     const manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
         calls += 1;
-        return store.createRun({ title: 't', workflow: '(inbox)', task: input.task, steps: [] });
+        return store.createRun({ author: input.author, title: 't', workflow: '(inbox)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
     const raced = { ...project, manager };
@@ -118,6 +119,32 @@ describe('reconcileAutostartTodos', () => {
     // tail is what has to keep these from both reading the file before either's markStarted lands.
     await Promise.all([reconcileAutostartTodos(raced), reconcileAutostartTodos(raced)]);
     expect(calls).toBe(1);
+  });
+
+  it("the autostarted run INHERITS the todo's author, only changing `via`", async () => {
+    // No human acted, so the agent that filed the todo is the author of the run it caused
+    // (spec 2026-08-21-task-author-provenance). Inheritance, not re-derivation — and `at` stays
+    // the moment that agent acted, not the moment the watcher noticed.
+    const filedByAgent = {
+      kind: 'agent' as const,
+      id: 'run_parent',
+      via: 'cli-todo-add' as const,
+      at: '2026-08-20T09:00:00.000Z',
+      parentTaskId: 'run_parent',
+      agentSessionId: 'sess_1',
+    };
+    writeTodos([{ id: 't1', summary: 'Ship it', autostart: true, author: filedByAgent }]);
+    await reconcileAutostartTodos(project);
+
+    expect(started[0]?.author).toEqual({ ...filedByAgent, via: 'todo-autostart' });
+    expect(store.listRuns()[0]?.author).toEqual({ ...filedByAgent, via: 'todo-autostart' });
+  });
+
+  it('a legacy todo with no author degrades to `system`, never to a guess', async () => {
+    writeTodos([{ id: 't2', summary: 'Filed before this shipped', autostart: true }]);
+    await reconcileAutostartTodos(project);
+
+    expect(started[0]?.author).toMatchObject({ kind: 'system', id: 'cezar', via: 'todo-autostart' });
   });
 });
 
@@ -150,7 +177,7 @@ describe('watchTodoAutostart', () => {
     const manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
         started.push(input);
-        return store.createRun({ title: 't', workflow: '(inbox)', task: input.task, steps: [] });
+        return store.createRun({ author: input.author, title: 't', workflow: '(inbox)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
     return { repoRoot, dataDir, manager };

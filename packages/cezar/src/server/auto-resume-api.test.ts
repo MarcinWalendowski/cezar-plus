@@ -7,6 +7,7 @@ import { RunStore, type RunRecord } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import { createApp } from './server.js';
 import { apiRequest } from './loopback-request.testkit.js';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * The PER-TASK off switch for a usage-limit resume (spec
@@ -50,7 +51,7 @@ describe('per-task auto-resume cancellation', () => {
 
   /** A run parked exactly as a usage limit leaves it: failed, with a resume promised. */
   function limited(): string {
-    const run = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', steps: [] });
     store.updateRun(run.id, {
       status: 'failed',
       error: 'Claude AI usage limit reached|1785782478',

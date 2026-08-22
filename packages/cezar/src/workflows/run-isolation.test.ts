@@ -15,6 +15,7 @@ vi.mock('../git-worktree.js', async (importOriginal) => {
 });
 
 import { RunManager } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 const roots: string[] = [];
@@ -62,7 +63,7 @@ describe('RunManager repository-root isolation', () => {
       steps: [{ id: 'check', command: 'node -e "require(\'node:fs\').writeFileSync(\'root-was-touched\',\'yes\')"' }],
     };
 
-    const record = manager.startRun(workflow, { task: 'isolated task' });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'isolated task' });
     await waitForRuns(store, [record.id]);
 
     expect(store.getRun(record.id)?.status).toBe('failed');
@@ -91,8 +92,8 @@ describe('RunManager repository-root isolation', () => {
       ],
     };
 
-    const first = manager.startRun(workflow, { task: 'first', worktree: false });
-    const second = manager.startRun(workflow, { task: 'second', worktree: false });
+    const first = manager.startRun(workflow, { author: localCliAuthor(), task: 'first', worktree: false });
+    const second = manager.startRun(workflow, { author: localCliAuthor(), task: 'second', worktree: false });
     await waitForRuns(store, [first.id, second.id]);
 
     expect(store.getRun(first.id)?.status).toBe('done');
@@ -117,8 +118,8 @@ describe('RunManager repository-root isolation', () => {
         steps: [{ id: 'hold', command: 'node -e "setTimeout(()=>{},1500)"' }],
       };
 
-      const first = manager.startRun(workflow, { task: 'first', worktree: false });
-      const second = manager.startRun(workflow, { task: 'second', worktree: false });
+      const first = manager.startRun(workflow, { author: localCliAuthor(), task: 'first', worktree: false });
+      const second = manager.startRun(workflow, { author: localCliAuthor(), task: 'second', worktree: false });
 
       await waitFor(
         () =>

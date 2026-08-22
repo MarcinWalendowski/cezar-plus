@@ -9,6 +9,7 @@ import type { RunRecord } from '../runs/store.ts';
 import type { WorkflowDef } from '../workflows/types.ts';
 import type { StartRunInput } from '../workflows/run.ts';
 import { loadWorkspaceGrant, type WorkspaceGrant } from '../workspace/granted-roots.ts';
+import { authorOf } from './request-author.ts';
 
 /**
  * `POST /api/v1/workspace/runs` — the composer's Workspace submit path
@@ -139,6 +140,10 @@ export function createWorkspaceRunRoutes(deps: WorkspaceRunRouteDeps) {
                 source: { type: 'base64' as const, media_type: img.mediaType, data: img.data },
               })),
             }),
+        // Who asked (spec 2026-08-21-task-author-provenance) — the same request-derived answer
+        // `POST /runs` gives, through the same helper, so the two composer submits can never
+        // disagree about who started a task.
+        author: authorOf(c, 'workspace-composer'),
         // The two decisions this route owns.
         worktree: false,
         workspaceProjects: grant.projects,

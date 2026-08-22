@@ -7,6 +7,7 @@ import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { createApp, type ServerDeps } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Deployment modes + forge seam (cockpit-ui redesign spec): `/api/v1/health`
@@ -339,7 +340,7 @@ describe('POST /api/v1/runs/:id/open-in-cli — hosted-mode defense in depth', (
   beforeEach(() => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-handoff-'));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
-    runId = store.createRun({ title: 't', workflow: 'quick-task', task: 'do it', steps: [] }).id;
+    runId = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 'do it', steps: [] }).id;
     delete process.env.CEZ_REMOTE;
   });
 

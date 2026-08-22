@@ -7,6 +7,7 @@ import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * `POST /api/v1/runs/:id/continue` runner/model override (#401) — the follow-up composer lets the
@@ -33,7 +34,7 @@ describe('POST /api/v1/runs/:id/continue override', () => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-continue-'));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     captured = undefined;
-    runId = store.createRun({
+    runId = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 't',

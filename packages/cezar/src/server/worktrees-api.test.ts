@@ -11,6 +11,7 @@ import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { createApp } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -57,7 +58,7 @@ describe('the worktrees API', () => {
     finishedAt?: string,
   ): Promise<string> {
     const wt = await createWorktree(repoRoot, id, 'main');
-    const rec = store.createRun({ title: `run ${id.slice(0, 4)}`, workflow: 'w', task: 't', steps: [] });
+    const rec = store.createRun({ author: localCliAuthor(), title: `run ${id.slice(0, 4)}`, workflow: 'w', task: 't', steps: [] });
     store.updateRun(rec.id, { status, finishedAt, worktreePath: wt.path, branch: wt.branch });
     return rec.id;
   }

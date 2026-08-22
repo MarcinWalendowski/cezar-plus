@@ -10,6 +10,7 @@ import { mergeWriteAgentAccounts } from '../workspace/agent-accounts.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { openInTerminal } from './open-in-terminal.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 // The terminal launcher actually spawns a process (osascript/cmd/x-terminal-emulator) — mocked
 // so this suite exercises only the command construction, never a real terminal window.
@@ -103,7 +104,7 @@ describe('POST /api/v1/runs/:id/open-in — agent CLI resume vs fresh launch', (
   /** A FINISHED run by default — `createRun` parks new records at `queued`, which the engine still
    *  owns, and only a run the engine has let go of resumes at all (see the status cases below). */
   const makeRun = (runner: RunnerId | undefined, sessionId?: string) => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'do it',

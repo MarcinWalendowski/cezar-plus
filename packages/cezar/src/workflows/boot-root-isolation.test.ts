@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { ensureBootRepo } from '../workspace/boot-repo.ts';
 import { buildWorkspaceGrant, type WorkspaceGrant } from '../workspace/granted-roots.ts';
@@ -129,7 +130,7 @@ describe('a run homed at the workspace boot root never runs in place', () => {
     const root = await bootScratchRoot();
     const { store, manager } = boot(root, { bootScratchRoot: true });
 
-    const run = manager.startRun(INSTANT, { task: 'opted out', worktree: false });
+    const run = manager.startRun(INSTANT, { author: localCliAuthor(), task: 'opted out', worktree: false });
     await settle(store, [run.id]);
 
     const record = store.getRun(run.id);
@@ -151,7 +152,7 @@ describe('a run homed at the workspace boot root never runs in place', () => {
     const gate = join(root, 'gate');
 
     // No `workspaceProjects` — the shape nine of the ten `startRun` call sites produce.
-    const run = manager.startRun(gatedHold(gate), { task: 'ungranted' });
+    const run = manager.startRun(gatedHold(gate), { author: localCliAuthor(), task: 'ungranted' });
     try {
       await waitFor(
         () => (store.getRun(run.id)?.workspaceWorktrees?.length ?? 0) > 0,
@@ -179,7 +180,7 @@ describe('a run homed at the workspace boot root never runs in place', () => {
     const grant = buildWorkspaceGrant([{ id: 'p', name: 'p', root: project, status: 'ok' }]);
     const { store, manager } = boot(root, { bootScratchRoot: true, grant });
 
-    const run = manager.startRun(INSTANT, { task: 'variant' }, { groupId: 'g1', variant: 'A' });
+    const run = manager.startRun(INSTANT, { author: localCliAuthor(), task: 'variant' }, { groupId: 'g1', variant: 'A' });
     await settle(store, [run.id]);
 
     const record = store.getRun(run.id);
@@ -195,7 +196,7 @@ describe('a run homed at the workspace boot root never runs in place', () => {
     const root = tempDir('cez-nongit-project-'); // a project, not the boot root
     const { store, manager } = boot(root, { bootScratchRoot: false });
 
-    const run = manager.startRun(INSTANT, { task: 'in place' });
+    const run = manager.startRun(INSTANT, { author: localCliAuthor(), task: 'in place' });
     await settle(store, [run.id]);
 
     expect(store.getRun(run.id)?.status).toBe('done');
@@ -208,7 +209,7 @@ describe('a run homed at the workspace boot root never runs in place', () => {
     const root = gitProject('cez-real-repo-');
     const { store, manager } = boot(root, { bootScratchRoot: false });
 
-    const run = manager.startRun(INSTANT, { task: 'opted out for real', worktree: false });
+    const run = manager.startRun(INSTANT, { author: localCliAuthor(), task: 'opted out for real', worktree: false });
     await settle(store, [run.id]);
 
     expect(store.getRun(run.id)?.worktree).toBe(false);

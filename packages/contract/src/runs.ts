@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { runnerSchema } from './health.ts';
 import { referenceStatusSchema } from './github.ts';
+import { taskAuthorSchema } from './task-author.ts';
 // The chain shapes belong to the workflows family; the run record embeds one, so this file
 // consumes them rather than redeclaring. One-way on purpose — see the header of `./workflows.ts`.
 import { workflowDefSchema, workflowStepDefSchema } from './workflows.ts';
@@ -263,6 +264,19 @@ export const runRecordSchema = z.object({
       githubUrl: z.string(),
     })
     .optional(),
+  /**
+   * Who created this task, stamped at creation and never rewritten (spec
+   * `.ai/specs/2026-08-21-task-author-provenance.md`).
+   *
+   * OPTIONAL on the schema because every record written before 2026-08-21 has none — REQUIRED by
+   * `createRun`/`startRun`'s input types, which is what makes it present on everything written
+   * since. Absent renders as "unknown (created before 2026-08-21)", never as a guess: cezar has no
+   * evidence about who started a run last week and inventing one would be worse than `—`.
+   *
+   * Never client-supplied. `createRunInputSchema` does NOT carry this key, so a body naming an
+   * `author` never reaches a handler — an author you can set yourself is not provenance.
+   */
+  author: taskAuthorSchema.optional(),
   status: runStatusSchema,
   /**
    * Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —

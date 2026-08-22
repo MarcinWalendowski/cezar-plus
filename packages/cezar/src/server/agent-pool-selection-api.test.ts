@@ -9,6 +9,7 @@ import { connectedProviderAuth } from './provider-auth.testkit.ts';
 import { loadAgentAccounts } from '../workspace/agent-accounts.ts';
 import { createApp } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * `PUT …/agent-profiles/selection` with a POOL id
@@ -145,7 +146,7 @@ describe('starting a run with a pool route', () => {
     const manager = {
       startRun: (workflow: WorkflowDef, input: StartRunInput) => {
         started = input;
-        return store.createRun({ title: 't', workflow: workflow.name, task: input.task, steps: [] });
+        return store.createRun({ author: localCliAuthor(), title: 't', workflow: workflow.name, task: input.task, steps: [] });
       },
     } as unknown as RunManager;
     const app = createApp({ repoRoot, store, manager, version: '0.0.0-test', providerAuth: connectedProviderAuth() });
