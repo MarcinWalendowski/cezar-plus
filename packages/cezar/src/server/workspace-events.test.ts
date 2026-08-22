@@ -11,6 +11,7 @@ import { clearProjectProbeCache, listProjects, registerProject } from '../worksp
 import { ProjectContexts } from './project-context.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { WorkspaceEventBus, createApp } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Workspace SSE stream (spec 2026-07-20-multi-project-workspace, step 2.8):
@@ -127,13 +128,13 @@ describe('GET /api/v1/workspace/events', () => {
     const ws = await openStream('/api/v1/workspace/events');
     await ws.readUntil('event: ping');
 
-    const bootRun = store.createRun({
+    const bootRun = store.createRun({ author: localCliAuthor(),
       title: 'boot-run',
       workflow: 'quick-task',
       task: 'b',
       steps: [],
     });
-    const otherRun = other.store.createRun({
+    const otherRun = other.store.createRun({ author: localCliAuthor(),
       title: 'other-run',
       workflow: 'quick-task',
       task: 'o',
@@ -161,13 +162,13 @@ describe('GET /api/v1/workspace/events', () => {
 
     // Other project first: were it going to leak, it would arrive BEFORE the
     // boot event we wait for below.
-    other.store.createRun({
+    other.store.createRun({ author: localCliAuthor(),
       title: 'other-run',
       workflow: 'quick-task',
       task: 'o',
       steps: [],
     });
-    const bootRun = store.createRun({
+    const bootRun = store.createRun({ author: localCliAuthor(),
       title: 'boot-run',
       workflow: 'quick-task',
       task: 'b',
@@ -185,13 +186,13 @@ describe('GET /api/v1/workspace/events', () => {
 
   it('splits usage per project: one stamped event per project with live rows, none for row-less projects', async () => {
     const other = await buildOtherContext();
-    const bootRunId = store.createRun({
+    const bootRunId = store.createRun({ author: localCliAuthor(),
       title: 'boot',
       workflow: 'quick-task',
       task: 'b',
       steps: [],
     }).id;
-    const otherRunId = other.store.createRun({
+    const otherRunId = other.store.createRun({ author: localCliAuthor(),
       title: 'other',
       workflow: 'quick-task',
       task: 'o',
@@ -252,7 +253,7 @@ describe('GET /api/v1/workspace/events', () => {
     expect((await apiRequest(app, `/api/v1/p/${other.id}/runs`)).status).toBe(200);
     const otherStore = contexts.peek(other.id)?.store;
     expect(otherStore).toBeDefined();
-    const run = (otherStore as RunStore).createRun({
+    const run = (otherStore as RunStore).createRun({ author: localCliAuthor(),
       title: 'late',
       workflow: 'quick-task',
       task: 'late',
@@ -272,7 +273,7 @@ describe('GET /api/v1/workspace/events', () => {
 
     try {
       delete process.env.CEZ_DRY_RUN;
-      const run = other.store.createRun({
+      const run = other.store.createRun({ author: localCliAuthor(),
         title: 'auth',
         workflow: 'quick-task',
         task: 'work',
@@ -326,7 +327,7 @@ describe('GET /api/v1/workspace/events', () => {
   it('broadcasts an enabled provider row after an incident-safe retry', async () => {
     const ws = await openStream('/api/v1/workspace/events');
     await ws.readUntil('event: ping');
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'auth retry',
       workflow: 'quick-task',
       task: 'work',
@@ -384,7 +385,7 @@ describe('GET /api/v1/workspace/events', () => {
     const rebuilt = contexts.peek(readded.id)?.store;
     expect(rebuilt).toBeDefined();
     expect(rebuilt).not.toBe(other.store);
-    const run = (rebuilt as RunStore).createRun({
+    const run = (rebuilt as RunStore).createRun({ author: localCliAuthor(),
       title: 're-added',
       workflow: 'quick-task',
       task: 'r',

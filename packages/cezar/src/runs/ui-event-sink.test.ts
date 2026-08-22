@@ -18,6 +18,7 @@ import type { UiEvent, UiItem, UiToolItem } from '../core/ui-events.ts';
 import { createCodexUiState, mapCodexNotification } from '../core/codex-ui-mapper.ts';
 import { RunStore } from './store.ts';
 import { DELTA_FLUSH_MS, UiEventSink, isV2WireEventType } from './ui-event-sink.ts';
+import { localCliAuthor } from './task-author.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -222,7 +223,7 @@ describe('golden-fixture replay through a real RunStore', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cez-sink-'));
     try {
       const store = RunStore.open(dir);
-      const run = store.createRun({
+      const run = store.createRun({ author: localCliAuthor(),
         title: 't',
         workflow: 'w',
         task: 't',

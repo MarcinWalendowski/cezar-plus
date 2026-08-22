@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { RunRecord, RunStatus } from './store.ts';
 import { RunStore } from './store.ts';
 import { findForeignWorkspaceOwner, loadForeignWorkspaceRunSources } from './worktree-ownership.ts';
+import { localCliAuthor } from './task-author.ts';
 
 /**
  * Cross-project ownership check (spec 2026-08-22-cross-project-worktree-orphan-prune-safety,
@@ -118,7 +119,7 @@ describe('loadForeignWorkspaceRunSources (real disk)', () => {
     targetRoot = tempRoot('cez-ownership-target-');
 
     const bootStore = RunStore.open(join(bootRoot, '.ai/cezar'), { keepLive: true });
-    const created = bootStore.createRun({ title: 'workspace run', workflow: 'w', task: 't', steps: [] });
+    const created = bootStore.createRun({ author: localCliAuthor(), title: 'workspace run', workflow: 'w', task: 't', steps: [] });
     bootStore.updateRun(created.id, {
       status: 'running',
       workspaceWorktrees: [

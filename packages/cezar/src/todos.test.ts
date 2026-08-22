@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { todoItemSchema } from '@loki-labs/better-cezar-contract';
 import { createTodo, onTodosChanged, readTodos, todoSchema, todosPath, todosWatchActive, updateTodo } from './todos.ts';
+import { localCliAuthor } from './runs/task-author.ts';
 
 /**
  * Per-dataDir todos watch (multi-project spec, step 2.3): each project's
@@ -365,7 +366,7 @@ describe('createTodo', () => {
   });
 
   it('assigns id and ts, and appends to an empty inbox', async () => {
-    const todo = await createTodo(dataDir, { summary: 'First task' });
+    const todo = await createTodo(dataDir, { summary: 'First task' }, localCliAuthor('cli-todo-add'));
     expect(todo.id).toBeTruthy();
     expect(todo.ts).toBeTruthy();
     expect(todo.summary).toBe('First task');
@@ -373,16 +374,16 @@ describe('createTodo', () => {
   });
 
   it('appends without disturbing an existing entry', async () => {
-    const first = await createTodo(dataDir, { summary: 'First' });
-    const second = await createTodo(dataDir, { summary: 'Second' });
+    const first = await createTodo(dataDir, { summary: 'First' }, localCliAuthor('cli-todo-add'));
+    const second = await createTodo(dataDir, { summary: 'Second' }, localCliAuthor('cli-todo-add'));
     const items = await readTodos(dataDir);
     expect(items.map((t) => t.id).sort()).toEqual([first.id, second.id].sort());
   });
 
   it('two createTodo calls racing the same dataDir both survive — the write lease actually serializes them', async () => {
     const [a, b] = await Promise.all([
-      createTodo(dataDir, { summary: 'Racer A' }),
-      createTodo(dataDir, { summary: 'Racer B' }),
+      createTodo(dataDir, { summary: 'Racer A' }, localCliAuthor('cli-todo-add')),
+      createTodo(dataDir, { summary: 'Racer B' }, localCliAuthor('cli-todo-add')),
     ]);
     expect(a.id).not.toBe(b.id);
     const items = await readTodos(dataDir);
@@ -393,7 +394,7 @@ describe('createTodo', () => {
 
   it('twenty concurrent createTodo calls all survive', async () => {
     const results = await Promise.all(
-      Array.from({ length: 20 }, (_, i) => createTodo(dataDir, { summary: `Task ${i}` })),
+      Array.from({ length: 20 }, (_, i) => createTodo(dataDir, { summary: `Task ${i}` }, localCliAuthor('cli-todo-add'))),
     );
     const ids = new Set(results.map((t) => t.id));
     expect(ids.size).toBe(20); // every id unique — no two calls collided on the same object

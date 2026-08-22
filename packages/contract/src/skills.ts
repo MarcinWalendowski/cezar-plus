@@ -1,6 +1,7 @@
 import { z } from 'zod';
 // `StartTodoResponse` embeds a whole run record, which belongs to the runs slice.
 import { runRecordSchema } from './runs.ts';
+import { taskAuthorSchema } from './task-author.ts';
 
 // ---- skills (`GET /skills`, `POST /skills/refresh`) ---------------------------------------
 
@@ -110,6 +111,17 @@ export const todoItemSchema = z.object({
   /** File this todo AS a run the moment the running cockpit notices it, instead of waiting for a
    *  person to click ▶ Run. */
   autostart: z.boolean().optional(),
+  // ---- author (2026-08-21-task-author-provenance.md, Phase 3) --------------------------------
+  /**
+   * Who filed this task, stamped at creation and never rewritten. Server-stamped: it joins
+   * `archivedAt` in `createTodoInputSchema`'s `.omit()` below, and `updateTodoInputSchema` does
+   * not carry it, so no route can set OR rewrite an author.
+   *
+   * Optional like every field above it, and for the same reason twice over: an agent's plain
+   * append (`FOLLOWUP_INSTRUCTIONS` in `handoff.ts`) carries none of them, and neither does any
+   * entry written before 2026-08-21. Both read as "unknown", which is the honest answer.
+   */
+  author: taskAuthorSchema.optional(),
 });
 export type TodoItem = z.infer<typeof todoItemSchema>;
 
@@ -129,6 +141,10 @@ export const createTodoInputSchema = todoItemSchema.omit({
   taskId: true,
   startedTaskId: true,
   archivedAt: true,
+  // `author` joined the omit list with 2026-08-21-task-author-provenance, for exactly the reason
+  // `archivedAt` gives: it is stamped server-side, never client-supplied. An author a caller can
+  // set is forgeable, and a forgeable author is not provenance — see the field's doc comment.
+  author: true,
 });
 export type CreateTodoInput = z.infer<typeof createTodoInputSchema>;
 

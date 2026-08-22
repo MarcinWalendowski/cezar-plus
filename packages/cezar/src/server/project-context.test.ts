@@ -17,6 +17,7 @@ import {
   type ProjectContextDeps,
   type ProjectContextSource,
 } from './project-context.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const execFileAsync = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -299,8 +300,8 @@ describe('ProjectContexts — boot-root duplication guard', () => {
    */
   it('never lets a duplicate registry row over the boot root truncate runs.json', async () => {
     const boot = RunStore.open(join(rootA, '.ai/cezar'), { keepLive: true });
-    boot.createRun({ title: 'a', workflow: 'w', task: 'a', steps: [] });
-    boot.createRun({ title: 'b', workflow: 'w', task: 'b', steps: [] });
+    boot.createRun({ author: localCliAuthor(), title: 'a', workflow: 'w', task: 'a', steps: [] });
+    boot.createRun({ author: localCliAuthor(), title: 'b', workflow: 'w', task: 'b', steps: [] });
     boot.flush();
     const before = JSON.parse(readFileSync(join(rootA, '.ai/cezar/runs.json'), 'utf8'));
     expect(before).toHaveLength(2);
@@ -546,7 +547,7 @@ describe('ProjectContexts — cross-project orphan-prune safety (spec 2026-08-22
     // The run's OWN record: a real RunStore-backed workspace run, so the persisted
     // `workspaceWorktrees` entry is schema-valid for free rather than hand-authored.
     const bootStore = RunStore.open(join(bootRoot, '.ai/cezar'), { keepLive: true });
-    const created = bootStore.createRun({ title: 'workspace run', workflow: 'w', task: 't', steps: [] });
+    const created = bootStore.createRun({ author: localCliAuthor(), title: 'workspace run', workflow: 'w', task: 't', steps: [] });
     const wt = await createWorktree(targetRoot, created.id, 'main');
     // A unique commit, so this worktree's branch is provably NOT merged into trunk — exercising
     // layer 2 (branch-reachability) too, in case layer 1 were ever bypassed.

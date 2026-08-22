@@ -10,6 +10,7 @@ import { createApp } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
 import { resetAccountUsageRefreshForTests } from './agent-account-usage-routes.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Where the in-flight count comes from
@@ -53,7 +54,7 @@ describe('a manager counts what it is EXECUTING, not what its records say', () =
   /** A crashed process's leftovers, exactly as `keepLive: true` hands them back: the run and its
    *  step both still claim `running`, and nothing is executing them. */
   function leaveCrashedRun(): void {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 't',

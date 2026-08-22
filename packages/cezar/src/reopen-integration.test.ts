@@ -8,6 +8,7 @@ import { RunStore } from './runs/store.ts';
 import { RunManager } from './workflows/run.ts';
 import { appendReopenRequests, readReopenRequests } from './reopen-requests.ts';
 import { reconcileReopenRequests } from './reopen-watch.ts';
+import { localCliAuthor } from './runs/task-author.ts';
 
 const git = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -31,7 +32,7 @@ describe('a reopen request continues a real finished run', () => {
 
   /** A settled run that carries a resumable agent session — `continueRun`'s hard precondition. */
   const seedDoneRun = (opts: { withSession: boolean }): string => {
-    const run = store.createRun({ title: 'ship it', workflow: 'quick-task', task: 'ship it', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 'ship it', workflow: 'quick-task', task: 'ship it', steps: [] });
     store.addStep(run.id, { id: 'work', name: 'Work', kind: 'agent' });
     store.updateStep(run.id, 'work', {
       status: 'done',

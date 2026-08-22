@@ -11,6 +11,7 @@ import { connectedProviderAuth } from './provider-auth.testkit.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { DrainController } from './drain.ts';
 import { createApp } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * `GET /api/v1/ready` and the drain middleware — P3/P5 of
@@ -36,7 +37,7 @@ describe('/api/v1/ready and the graceful drain', () => {
     process.env.CEZ_DRY_RUN = '1'; // keeps the health probe off the network
     manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) =>
-        store.createRun({ title: 't', workflow: '(planned)', task: input.task, steps: [] }),
+        store.createRun({ author: localCliAuthor(), title: 't', workflow: '(planned)', task: input.task, steps: [] }),
       brokerIsolation: () => 'none' as const,
     } as unknown as RunManager;
   });

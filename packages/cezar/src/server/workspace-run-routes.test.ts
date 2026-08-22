@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
+import { taskAuthorSchema } from '../runs/task-author.ts';
 import { createWorkspaceRunRoutes, type WorkspaceRunRouteDeps } from './workspace-run-routes.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import type { ProjectApiEnv } from './server.ts';
@@ -92,6 +93,25 @@ describe('POST /api/v1/workspace/runs', () => {
     expect(started[0]!.input.worktree).toBe(false);
     expect(started[0]!.input.workspaceProjects).toEqual(PROJECTS);
     expect(started[0]!.input.task).toBe('touch every project');
+  });
+
+  it('records who asked, through the SAME helper POST /runs uses', async () => {
+    // The two composer submits must never disagree about who started a task
+    // (spec 2026-08-21-task-author-provenance) — only `via` distinguishes them.
+    const { app, started } = harness();
+    await apiRequest(app, '/api/v1/workspace/runs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+      body: JSON.stringify({ task: 'touch every project' }),
+    });
+    expect(started[0]!.input.author).toMatchObject({ kind: 'user', id: 'local', via: 'workspace-composer' });
+    expect(taskAuthorSchema.safeParse(started[0]!.input.author).success).toBe(true);
+  });
+
+  it('a scripted workspace submit is `api`, not a person', async () => {
+    const { app, started } = harness();
+    await post(app, { task: 'touch every project' });
+    expect(started[0]!.input.author).toMatchObject({ kind: 'api', via: 'workspace-composer' });
   });
 
   it('answers with the boot project and the deduped granted roots', async () => {

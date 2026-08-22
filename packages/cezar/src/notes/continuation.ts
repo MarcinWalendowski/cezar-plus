@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../config.ts';
 import type { RunRecord } from '../runs/store.ts';
+import { agentAuthor, type TaskAuthor } from '../runs/task-author.ts';
 import { AUTONOMOUS_IMPLEMENTATION_WORKFLOW, type WorkflowDef } from '../workflows/types.ts';
 import { loadWorkflows } from '../workflows/load.ts';
 import type { NoteStore } from './store.ts';
@@ -34,6 +35,11 @@ export interface NoteContinuationStartOptions {
    *  was built to bound — the two decisions are connected, not coincidental: an unattended run that
    *  never asks for you is precisely the one that needs `stepBudgetOverride` below to be real. */
   autonomous: true;
+  /** Who caused this run (spec 2026-08-21-task-author-provenance): the SPEC RUN that just
+   *  finished — an `agent` author naming that run as `parentTaskId` and its own session as
+   *  `agentSessionId`. Until now the child's only trace of its parent was the sentence
+   *  "Implement the spec written by run <id>" inside its prompt. */
+  author: TaskAuthor;
   /** PLAN D27 Phase 3's bound: set only when this project's own `config.stepBudget` is 0/unset —
    *  see `startOptions()`'s own doc comment below. */
   stepBudgetOverride?: number;
@@ -103,8 +109,7 @@ export class NoteContinuationTrigger {
 
     try {
       const workflow = await this.resolveWorkflow();
-      const options = await this.startOptions();
-      const implRun = await this.deps.startRun(workflow, this.taskFor(run), options);
+      const implRun = await this.deps.startRun(workflow, this.taskFor(run), await this.startOptions(run));
       await this.deps.store.recordResultingTask(note.id, {
         proposalId,
         projectId: proposal.projectId,
@@ -153,15 +158,35 @@ export class NoteContinuationTrigger {
    * unbounded" must be unreachable — see `AUTONOMOUS_DEFAULT_STEP_BUDGET`'s own doc comment for why
    * a default was chosen over refusing to start.
    */
-  private async startOptions(): Promise<NoteContinuationStartOptions> {
+  private async startOptions(parent: RunRecord): Promise<NoteContinuationStartOptions> {
     const config = await loadConfig(this.deps.projectRoot);
     return {
       autonomous: true,
       stepBudgetOverride: config.stepBudget > 0 ? undefined : AUTONOMOUS_DEFAULT_STEP_BUDGET,
+      // The spec run that just finished IS the author of the run it caused
+      // (spec 2026-08-21-task-author-provenance) — see `authorOfParentRun`.
+      author: authorOfParentRun(parent),
     };
   }
 }
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The finished spec run, as the author of the implementation run it caused.
+ *
+ * The session is the LAST session-bearing step's — the step that actually wrote the spec, since a
+ * chain's later steps are the ones that ran. A spec run that somehow reached `done` without any
+ * step ever carrying a session id yields a `system` author that still names `parentTaskId`
+ * (`agentAuthor`'s own contract), because the schema refuses an `agent` author it cannot fully
+ * name and a half-true one is worse than an honest `system`.
+ */
+function authorOfParentRun(run: RunRecord): TaskAuthor {
+  const bearing = [...run.steps].reverse().find((step) => step.sessionId);
+  return agentAuthor(
+    { taskId: run.id, sessionId: bearing?.sessionId, stepId: bearing?.id },
+    'note-continuation',
+  );
 }

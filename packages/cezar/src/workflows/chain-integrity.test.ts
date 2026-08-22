@@ -8,6 +8,7 @@ import { RunStore } from '../runs/store.ts';
 import type { RunRecord } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -63,7 +64,7 @@ describe('a run cannot finish while its chain still has pending steps (P0)', () 
 
   /** Exactly the record be31d9e9 held at 10:04:21Z, minus the parts settleSuccess never reads. */
   function incidentRecord(): RunRecord {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 'the reported bug',
       workflow: 'spec-to-deploy',
       task: 'there is a critical bug somewhere',
@@ -134,7 +135,7 @@ describe('a run cannot finish while its chain still has pending steps (P0)', () 
   });
 
   it('a single-step quick-task still settles done (the no-regression pin)', async () => {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'do it',
@@ -149,7 +150,7 @@ describe('a run cannot finish while its chain still has pending steps (P0)', () 
   });
 
   it('a record with no workflowDef still settles done (R1, fail open)', async () => {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'spec-to-deploy',
       task: 'do it',
