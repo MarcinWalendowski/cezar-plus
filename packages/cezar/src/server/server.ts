@@ -7113,6 +7113,15 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     listProjects,
     semaphore: deps.semaphore,
     automationStore: (projectId, root) => automationCoordinator.store(projectId, root)!,
+    // Spec 2026-08-22-cross-project-worktree-orphan-prune-safety, Phase 3 prerequisite: without
+    // this, `deps.bootRoot` never reaches `ProjectContexts` in production (`createApp`'s own
+    // `bootRoot`-carrying `ProjectContexts` construction below is dead code — `deps.contexts` is
+    // already non-undefined by the time it gets there), so the cross-project ownership check's
+    // boot-root candidate is silently empty and the 232ad6d4 incident's exact failure mode — the
+    // boot root's OWN workspace-run records being invisible to a `listProjects()`-only check —
+    // stays open. Also activates the pre-existing `boot-root-conflict` guard (409) for any
+    // registered project whose root equals `deps.repoRoot`; see that spec's Risks.
+    bootRoot: deps.repoRoot,
   });
   // #801: GitHub automations are opt-in. Off, the flag must remove the BEHAVIOR and not merely
   // the UI — no scheduler, no GitHub polling, no launched runs — so every entry point into the

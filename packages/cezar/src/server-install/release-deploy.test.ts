@@ -204,6 +204,46 @@ describe('runReleaseDeploy', () => {
     expect(rec.restarts).toBe(0);
   });
 
+  it('a rollback dry run does not flip the symlink or restart — regression for the gap where --rollback --dry-run performed a real rollback', async () => {
+    const box = migratedBox();
+    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
+    const first = loadLedger(box.releasesDir).current;
+    await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, recorder().host);
+    const second = loadLedger(box.releasesDir).current;
+    expect(second).not.toBe(first);
+
+    const rec = recorder();
+    const result = await runReleaseDeploy({ ...box, env: {}, rollbackTo: '', dryRun: true }, rec.host);
+
+    expect(result.ok).toBe(true);
+    expect(rec.restarts).toBe(0);
+    // The ledger's `current` is unchanged — the dry run never reached `runRollback`.
+    expect(loadLedger(box.releasesDir).current).toBe(second);
+  });
+
+  it('a dry run inside the cgroup it would re-exec out of still prints the plan and reports no detached unit', async () => {
+    // The gap found in review: the dry-run short-circuit used to live INSIDE the re-exec branch,
+    // returning `detachedUnit: 'dry-run:<id>'` with no plan ever printed, which `releaseDeployCommand`
+    // then reports as a real detached deploy. Moving the check to run right after `decideReExec`
+    // logs its reason — but before `decision.reExec` is acted on — closes that gap for the
+    // population (an agent-driven deploy on a not-yet-migrated box) this whole flag exists for.
+    const box = migratedBox();
+    const lines: string[] = [];
+    const rec = recorder({
+      systemdRunAvailable: () => true,
+      cgroup: () => '0::/system.slice/cezar.service',
+    });
+    const result = await runReleaseDeploy({ ...box, env: {}, dryRun: true, log: (line) => lines.push(line) }, rec.host);
+
+    expect(result.ok).toBe(true);
+    expect(result.detachedUnit).toBeUndefined();
+    expect(rec.detached).toEqual([]);
+    expect(rec.staged).toEqual([]);
+    expect(rec.restarts).toBe(0);
+    expect(lines.some((l) => l.startsWith('deploy: '))).toBe(true);
+    expect(lines.some((l) => l.startsWith('DRY RUN — would stage'))).toBe(true);
+  });
+
   describe('agent-task deploy on a migrated box (2026-08-21)', () => {
     /**
      * The gap this closes, measured on prod-host: an operator over ssh was always fine

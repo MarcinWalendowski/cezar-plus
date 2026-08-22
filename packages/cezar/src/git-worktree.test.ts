@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -8,9 +8,11 @@ import {
   branchFor,
   createWorktree,
   parseShortstat,
+  pruneOrphans,
   resolveBaseRef,
   worktreeShortstat,
   worktreeSizeBytes,
+  WORKTREES_DIR,
 } from './git-worktree.ts';
 
 const run = promisify(execFile);
@@ -535,5 +537,130 @@ describe('resolveBaseRef (real git)', () => {
   it('refuses an option-like base ref', async () => {
     const repo = await fixtureRepo('cez-resolve-dashguard-');
     expect(await resolveBaseRef(repo, '--upload-pack=evil')).toBeNull();
+  });
+});
+
+/**
+ * Spec 2026-08-22-cross-project-worktree-orphan-prune-safety, Phase 2/4. `pruneOrphans` had zero
+ * test coverage before this spec — every other exported function in this file has a `describe`
+ * block, this one didn't — and shipped the cross-project data-loss bug (232ad6d4) with every gate
+ * green. `validIds` is always empty here: every candidate directory is a deliberate orphan by
+ * construction, so what's under test is what `pruneOrphans` does with each one, not `validIds`
+ * membership itself (that part is a one-line `Set.has` unchanged by this spec).
+ */
+describe('pruneOrphans (real git)', () => {
+  async function branchExists(repo: string, branch: string): Promise<boolean> {
+    const result = await run('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
+      cwd: repo,
+    }).then(
+      () => true,
+      () => false,
+    );
+    return result;
+  }
+
+  it('true orphan, branch fully merged into trunk: both directory and branch are removed', async () => {
+    const repo = await fixtureRepo('cez-prune-merged-');
+    const runId = '44444444-4444-4444-8444-444444444444';
+    const wt = await createWorktree(repo, runId, 'main');
+    const branch = branchFor(runId);
+    expect(await branchExists(repo, branch)).toBe(true);
+
+    const report = await pruneOrphans(repo, new Set(), { trunkRef: 'main' });
+
+    expect(report.removed).toEqual([runId]);
+    expect(report.declined).toEqual([]);
+    expect(existsSync(wt.path)).toBe(false);
+    expect(await branchExists(repo, branch)).toBe(false);
+  });
+
+  it('true orphan, branch carries a unique commit: directory is removed, branch survives (AC3)', async () => {
+    const repo = await fixtureRepo('cez-prune-unmerged-');
+    const runId = '55555555-5555-4555-8555-555555555555';
+    const wt = await createWorktree(repo, runId, 'main');
+    writeFileSync(join(wt.path, 'unique.txt'), 'not on trunk\n');
+    await run('git', ['add', '-A'], { cwd: wt.path });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'unique to this branch'], { cwd: wt.path });
+    const branch = branchFor(runId);
+
+    const report = await pruneOrphans(repo, new Set(), { trunkRef: 'main' });
+
+    expect(report.removed).toEqual([runId]);
+    expect(existsSync(wt.path)).toBe(false);
+    expect(await branchExists(repo, branch)).toBe(true);
+  });
+
+  it('a findForeignOwner match declines to reclaim: directory AND branch both survive, and the reason is reported', async () => {
+    const repo = await fixtureRepo('cez-prune-foreign-owner-');
+    const runId = '66666666-6666-4666-8666-666666666666';
+    const wt = await createWorktree(repo, runId, 'main');
+    const branch = branchFor(runId);
+
+    const report = await pruneOrphans(repo, new Set(), {
+      trunkRef: 'main',
+      findForeignOwner: () => ({ projectName: 'workspace boot', runId: 'foreign-run-id' }),
+    });
+
+    expect(report.removed).toEqual([]);
+    expect(report.declined).toEqual([
+      { id: runId, reason: expect.stringContaining('workspace boot') },
+    ]);
+    expect(existsSync(wt.path)).toBe(true);
+    expect(await branchExists(repo, branch)).toBe(true);
+  });
+
+  it('ownershipCheckUnavailable declines every candidate outright, without evaluating findForeignOwner', async () => {
+    const repo = await fixtureRepo('cez-prune-unreadable-');
+    const runId = '77777777-7777-4777-8777-777777777777';
+    const wt = await createWorktree(repo, runId, 'main');
+    const findForeignOwner = () => undefined;
+
+    const report = await pruneOrphans(repo, new Set(), {
+      trunkRef: 'main',
+      findForeignOwner,
+      ownershipCheckUnavailable: { reason: "project \"boot\"'s runs.json could not be read" },
+    });
+
+    expect(report.removed).toEqual([]);
+    expect(report.declined).toEqual([
+      { id: runId, reason: expect.stringContaining('ownership check unavailable') },
+    ]);
+    expect(existsSync(wt.path)).toBe(true);
+  });
+
+  it('omitting opts entirely reproduces the pre-fix unconditional delete (no caller updated for this spec yet)', async () => {
+    const repo = await fixtureRepo('cez-prune-no-opts-');
+    const runId = '88888888-8888-4888-8888-888888888888';
+    const wt = await createWorktree(repo, runId, 'main');
+    writeFileSync(join(wt.path, 'unique.txt'), 'not on trunk\n');
+    await run('git', ['add', '-A'], { cwd: wt.path });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'unique to this branch'], { cwd: wt.path });
+    const branch = branchFor(runId);
+
+    const report = await pruneOrphans(repo, new Set());
+
+    expect(report.removed).toEqual([runId]);
+    expect(existsSync(wt.path)).toBe(false);
+    expect(await branchExists(repo, branch)).toBe(false);
+  });
+
+  it('opts supplied but trunkRef omitted defaults to the SAFE direction: branch always kept', async () => {
+    const repo = await fixtureRepo('cez-prune-no-trunkref-');
+    const runId = '99999999-9999-4999-8999-999999999999';
+    const wt = await createWorktree(repo, runId, 'main');
+    const branch = branchFor(runId);
+
+    const report = await pruneOrphans(repo, new Set(), { findForeignOwner: () => undefined });
+
+    expect(report.removed).toEqual([runId]);
+    expect(existsSync(wt.path)).toBe(false);
+    expect(await branchExists(repo, branch)).toBe(true);
+  });
+
+  it('an empty worktrees directory returns cleanly with no removed/declined entries', async () => {
+    const repo = await fixtureRepo('cez-prune-empty-');
+    mkdirSync(join(repo, WORKTREES_DIR), { recursive: true });
+    const report = await pruneOrphans(repo, new Set());
+    expect(report).toEqual({ removed: [], declined: [] });
   });
 });

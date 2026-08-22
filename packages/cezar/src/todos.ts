@@ -271,11 +271,18 @@ export async function createTodo(dataDir: string, input: CreateTodoInput): Promi
 }
 
 /** `PATCH /:projectId/todos/:id`'s body, server-side — mirrors the wire twin's
- *  `updateTodoInputSchema` (`contract/src/skills.ts`) field-for-field. */
+ *  `updateTodoInputSchema` (`contract/src/skills.ts`) field-for-field, EXCEPT `context` and
+ *  `acceptanceCriteria` below, which are maintenance-only additions with no wire-schema
+ *  counterpart (added 2026-08-22 for one-off todo-consolidation scripts; never populated from
+ *  an HTTP body). */
 export type UpdateTodoPatch = {
   status?: TodoItem['status'];
   priority?: TodoItem['priority'];
   archived?: boolean;
+  /** Maintenance-only: not settable via the wire schema / composer UI. */
+  context?: TodoItem['context'];
+  /** Maintenance-only: not settable via the wire schema / composer UI. */
+  acceptanceCriteria?: TodoItem['acceptanceCriteria'];
 };
 
 /**
@@ -299,6 +306,8 @@ export async function updateTodo(dataDir: string, id: string, patch: UpdateTodoP
     if (patch.priority !== undefined) item.priority = patch.priority;
     if (patch.archived === true) item.archivedAt = new Date().toISOString();
     else if (patch.archived === false) delete item.archivedAt;
+    if (patch.context !== undefined) item.context = patch.context;
+    if (patch.acceptanceCriteria !== undefined) item.acceptanceCriteria = patch.acceptanceCriteria;
     await writeAtomic(dataDir, items);
     return item;
   });

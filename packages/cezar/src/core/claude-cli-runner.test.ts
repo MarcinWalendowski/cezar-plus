@@ -54,6 +54,26 @@ describe('buildClaudeArgs systemPrompt', () => {
 });
 
 /**
+ * `.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`, Phase 1 — the per-step `effort` knob,
+ * mirroring `--model`. No env-side mirror: the CLI does not read `CLAUDE_EFFORT` as input
+ * (spec's Revision note), so the flag is the only signal this function ever emits.
+ */
+describe('buildClaudeArgs effort', () => {
+  const spec = { userPrompt: 'do it', cwd: '/tmp' };
+
+  it('emits --effort with the exact level, alongside --model', () => {
+    const args = buildClaudeArgs({ ...spec, model: 'sonnet', effort: 'medium' });
+    const idx = args.indexOf('--effort');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe('medium');
+  });
+
+  it('omits the flag entirely when no effort is set', () => {
+    expect(buildClaudeArgs(spec)).not.toContain('--effort');
+  });
+});
+
+/**
  * `Task` survives the trip from a step definition into the real argv (spec
  * `.ai/specs/2026-08-20-agent-round-trip-batching-and-fanout.md`, Phase 4 / R4).
  *

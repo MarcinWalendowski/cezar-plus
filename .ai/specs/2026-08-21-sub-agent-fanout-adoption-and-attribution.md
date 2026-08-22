@@ -3,6 +3,12 @@
 > **Status: PARTIAL** — **Phases 1–3 implemented 2026-08-21**; Phase 4 (the runtime A/B that
 > isolates the *rewritten* `document` prompt) cannot execute in this chain and is filed as cezar
 > todo `221cf511-4e18-4f7b-ba46-e20edf956a16`.
+> **CLOSED 2026-08-22 as a falsification** — todo `221cf511-…` was picked up by task
+> `fb62168a-6972-49f0-afb4-ffe9c4ec9b01`, which measured `document` on five finished, foreign
+> post-deploy runs (`sub == 0` on all five) and found the Phase 3 prompt rewrite does **not** make
+> `document` fan out absent a task instruction telling it to. This is a closed measurement, not an
+> open one — see `.ai/specs/2026-08-22-document-fanout-post-deploy-metering.md` for the full
+> candidate table and the "What landed" row below.
 > **UPDATED 2026-08-21 by this run's own `document` step, which fanned out to three sub-agents and
 > metered itself both ways.** Read at the same moment: the shipped meter printed
 > `85 calls / 74 trips / batch 1.15 / sub 0`; the fixed meter printed
@@ -604,6 +610,11 @@ Still genuinely open, and deliberately not answered:
 omission — `document` runs before `deploy` in this same chain, so the rewritten prompt physically
 cannot reach this run's own `document` step.
 
+**CLOSED 2026-08-22 as a falsification, by task `fb62168a-6972-49f0-afb4-ffe9c4ec9b01`** (todo
+`221cf511-…`). Five finished, foreign post-deploy `document` runs all read `sub == 0` — a closed
+measurement, not a claim that the fan-out adoption succeeded. Full candidate table and status log:
+`.ai/specs/2026-08-22-document-fanout-post-deploy-metering.md`.
+
 ### What landed
 
 | Phase | Landed | Where |
@@ -611,7 +622,7 @@ cannot reach this run's own `document` step.
 | 1 — meter: attribution + spelling | yes | `src/runs/stats.ts` (`indexToolItems`, `dispatchIdsByStructure`, child exclusion, `toolKind`-based `subAgentCalls` with the `Skill` exclusion and the widened name fallback), table + `--json`; fixture `src/core/__fixtures__/runs/c10864d1-trimmed.ndjson`; tests in `src/runs/stats.test.ts` |
 | 2 — `peakContextTokens` per step | yes | `src/runs/stats.ts` (`context.updated` case; `undefined` when unsampled; `totals` takes the **max**), `ctx k` column |
 | 3 — `document`'s fan-out prompt | yes | `src/workflows/types.ts` — the subordinate clause promoted to its own imperative paragraph in `context`'s voice; assertions in `src/workflows/types.test.ts` |
-| 4 — runtime A/B | **no, and cannot here** | filed as cezar todo `221cf511-4e18-4f7b-ba46-e20edf956a16` with both baselines attached (see below) |
+| 4 — runtime A/B | **measured 2026-08-22 — falsified (n=5, `sub == 0`)** | task `fb62168a-…`, see `.ai/specs/2026-08-22-document-fanout-post-deploy-metering.md` § Status log — 2026-08-22 |
 
 `StepStats` gained `childToolCalls`, `ownToolCalls` and `peakContextTokens?`; `roundTrips`,
 `batchFactor` and `subAgentCalls` kept their names and became correct. Nothing is persisted —
