@@ -892,13 +892,15 @@ describe('computeRunStats — token breakdown, calibrated mode (hand-built trans
     return { thinkingBearing: false, visibleChars: 0, thinkingChars: 0, visibleText: '', ...overrides };
   }
 
-  it('classifies free vs bearing responses, pools a run-wide calibrationRatio, and infers withheldThinkingTokens', () => {
+  it('classifies free vs bearing responses, pools a run-wide tokenScaleFactor, and infers withheldThinkingTokens (D6)', () => {
     const transcripts = new Map<string, TranscriptResponse[]>([
       [
         'sess-a',
         [
           tr({ messageId: 'msg1', outputTokens: 100, thinkingBearing: false, visibleChars: 200, visibleText: 'x'.repeat(200) }),
-          tr({ messageId: 'msg2', outputTokens: 300, thinkingBearing: true, visibleChars: 100 }), // blank thinking — withheld
+          // blank thinking — withheld. visibleText is the response's own visible (non-thinking)
+          // text; with charTokenize, tokenize(visibleText) === visibleChars by construction here.
+          tr({ messageId: 'msg2', outputTokens: 300, thinkingBearing: true, visibleChars: 100, visibleText: 'y'.repeat(100) }),
         ],
       ],
     ]);
@@ -914,12 +916,15 @@ describe('computeRunStats — token breakdown, calibrated mode (hand-built trans
     );
     const tb = s.steps[0]?.tokenBreakdown!;
     expect(tb.mode).toBe('calibrated');
-    // calibrationRatio = freeChars/freeTokens = 200/100 = 2 (run-wide, pooled from the one free response)
+    // calibrationRatio (diagnostic only, D6) = freeChars/freeTokens = 200/100 = 2
     expect(tb.calibration?.appliedRatio).toBe(2);
-    // bearingChars = 100 (visible) + 0 (blank thinking); expectedVisible = 100/2 = 50; withheld = 300-50 = 250
+    // tokenScaleFactor = freeTokens/freeTokenized = 100/charTokenize('x'.repeat(200)) = 100/200 = 0.5
+    expect(tb.calibration?.appliedScaleFactor).toBe(0.5);
+    // bearingVisibleTokenized = charTokenize('y'.repeat(100)) = 100; withheld = 300 - 100*0.5 = 250
     expect(tb.withheldThinkingTokens).toBe(250);
+    expect(tb.calibratedNarrationTokens).toBe((tb.narrationTokens ?? 0) * 0.5);
     expect(tb.calibratedResidual).toBe(
-      tb.reportedTokens - ((tb.narrationTokens ?? 0) + (tb.toolArgTokens ?? 0) + (tb.thinkingTokens ?? 0) + 250),
+      tb.reportedTokens - ((tb.calibratedMeasuredTokens ?? 0) + (tb.withheldThinkingTokens ?? 0)),
     );
   });
 
@@ -936,6 +941,9 @@ describe('computeRunStats — token breakdown, calibrated mode (hand-built trans
             thinkingBearing: true,
             visibleChars: 0,
             thinkingChars: visibleThinkingText.length, // NON-blank — real length, not 0
+            // visibleText now (D6) carries the non-blank thinking text itself, since
+            // bearingVisibleTokenized tokenizes it directly instead of a chars/ratio estimate.
+            visibleText: visibleThinkingText,
           }),
         ],
       ],
@@ -951,9 +959,10 @@ describe('computeRunStats — token breakdown, calibrated mode (hand-built trans
       charTokenize,
     );
     const tb = s.steps[0]?.tokenBreakdown!;
-    // ratio = 200/100 = 2; bearingChars = 0 + 34 = 34; expectedVisible = 17; withheld = 100-17 = 83.
-    // Small next to the full 100 — collapsed toward zero because the thinking was ACTUALLY visible
-    // and counted, via thinkingTokens, not treated as a separate withheld cost on top of it.
+    // tokenScaleFactor = 100/200 = 0.5; bearingVisibleTokenized = charTokenize(visibleThinkingText) = 34;
+    // withheld = 100 - 34*0.5 = 83. Small next to the full 100 — collapsed toward zero because the
+    // thinking was ACTUALLY visible and counted, via thinkingTokens, not treated as a separate
+    // withheld cost on top of it.
     expect(tb.thinkingTokens).toBe(visibleThinkingText.length); // measured, real
     expect(tb.withheldThinkingTokens).toBeLessThan(tb.reportedTokens * 0.5);
   });
@@ -981,6 +990,7 @@ describe('computeRunStats — token breakdown, calibrated mode (hand-built trans
     expect(b.calibration?.freeResponseCount).toBe(0);
     expect(b.calibration?.ratio).toBeUndefined();
     expect(b.calibration?.appliedRatio).toBe(2); // pooled from sess-a alone
+    expect(b.calibration?.appliedScaleFactor).toBe(0.5); // 100/charTokenize('x'.repeat(200)) = 100/200
     expect(Number.isNaN(b.withheldThinkingTokens)).toBe(false);
   });
 
@@ -1059,7 +1069,7 @@ describe('computeRunStats — token breakdown, calibrated mode (hand-built trans
         'sess-a',
         [
           tr({ messageId: 'free1', outputTokens: 100, visibleChars: 200, visibleText: 'x'.repeat(200) }),
-          tr({ messageId: 'bearing1', outputTokens: 300, thinkingBearing: true, visibleChars: 100 }),
+          tr({ messageId: 'bearing1', outputTokens: 300, thinkingBearing: true, visibleChars: 100, visibleText: 'y'.repeat(100) }),
         ],
       ],
     ]);
@@ -1076,6 +1086,7 @@ describe('computeRunStats — token breakdown, calibrated mode (hand-built trans
     const text = formatRunStats(s);
     expect(text).toContain('withheld thinking (inferred)');
     expect(text).toContain('calibration ratio');
+    expect(text).toContain('calibrated narrate/think/tool-arg');
   });
 });
 
@@ -1152,8 +1163,13 @@ describe('parseTranscriptResponses — message.id dedup, sidechain exclusion, th
     expect(blank.thinkingBearing).toBe(true);
     expect(blank.thinkingChars).toBe(0); // blank — no visible thinking text
     expect(blank.visibleChars).toBe('visible reply'.length);
+    // A blank thinking block contributes nothing to visibleText — only the real text block does.
+    expect(blank.visibleText).toBe('visible reply');
     expect(visible.thinkingBearing).toBe(true);
     expect(visible.thinkingChars).toBe('Real reasoning text.'.length); // non-blank — real length
+    // D6: non-blank thinking text is folded into visibleText too, since bearingVisibleTokenized
+    // (Solution) tokenizes it directly instead of a chars/ratio estimate.
+    expect(visible.visibleText).toBe('Real reasoning text.');
   });
 
   it('skips malformed lines and non-assistant records rather than throwing', () => {
@@ -1181,8 +1197,22 @@ describe('parseTranscriptResponses — message.id dedup, sidechain exclusion, th
  * Content proportions (tool-arg-heavy, narration-light, near-zero thinking) mirror `70f19253`'s
  * own run-wide split (narrationTokens 13.9k vs toolArgTokens 144.2k across that run).
  *
- * **The one-time TOLERANCE derivation this fixture's numbers were picked from — real archived
- * runs, real transcripts, real `gpt-tokenizer`, run once on this box, never itself the assertion:**
+ * **The pooled free-response set is 8 responses (D8, this revision) — extended from the original
+ * n=2 (`msg_free_1`, `msg_review_free_1`), which gave a parity split of n=1 train / n=1 holdout,
+ * the exact single-response regime the hold-out test below forbids asserting on, and whose two
+ * responses' near-identical implied ratios (1.585/1.575) made the split's error small BY
+ * CONSTRUCTION of the fixture, not by virtue of the code under test.** The 6 new responses
+ * (`msg_free_2..4` on `implement`, `msg_review_free_2..4` on `review-with-opaque`) give a
+ * messageId-sorted parity split of 4 train / 4 holdout, and their `usage.output_tokens` are NOT
+ * all proportional to tokenized visible length — `msg_free_4`/`msg_review_free_4` (very short
+ * replies) carry a noticeably higher implied ratio (~3.3, vs ~1.6–2.1 for the rest), the same
+ * per-response overhead real short Claude responses show. `implement`'s and `review-with-opaque`'s
+ * `turn.completed.usage.output` were updated to match their (extended) transcript's own summed
+ * `output_tokens`, same as before the extension.
+ *
+ * **The one-time TOLERANCE/HOLDOUT_TOLERANCE derivation this fixture's numbers were picked from
+ * — real archived runs, real transcripts, real `gpt-tokenizer`, run once on this box, never itself
+ * the assertion:**
  *
  * ```
  * 26 archived runs read via readRunStats() against their live ~/.claude/projects/ transcripts
@@ -1190,20 +1220,34 @@ describe('parseTranscriptResponses — message.id dedup, sidechain exclusion, th
  * freeGapPct (thinking-free-subset gap) across every calibrated step of every run: 29.3% – 61.4%
  * freeGapPct on 70f19253 alone (the reference run this spec's other numbers are drawn from),
  *   across its 8 steps: 34.7% – 38.9%
+ * tokenScaleFactor hold-out prediction (messageId-sorted odd/even split) on 70f19253 alone (D7):
+ *   tokenScaleFactor(train) = 1.5764, predicted holdout total 18,466 vs actual 18,282 —
+ *   1.01% aggregate error (worst single-response error in the same split: 39%, hence the
+ *   aggregate-only assertion below)
  * ```
  *
- * A 32-point run-wide spread is WIDE, not tight, confirming the spec's own chars/token arithmetic
- * prediction (Solution: "plausibly a 25–35% freeGapPct… not the single-digit-to-low-teens figure
- * a naive reading would suggest") — so Phase 4's WIDE branch applies: a stability/regression band
- * around the FIXTURE's own recorded `freeGapPct`, not an absolute-accuracy claim. `RECORDED_*`
- * below are this fixture's own values, computed once and pinned; `STABILITY_BAND_PP` catches a
- * future change to the tokenizer, the JSON-serialization path, or the transcript-join logic that
- * silently shifts the number, without ever claiming the absolute figure is small.
+ * A 32-point run-wide `freeGapPct` spread is WIDE, not tight, confirming the spec's own chars/token
+ * arithmetic prediction (Solution: "plausibly a 25–35% freeGapPct… not the single-digit-to-low-teens
+ * figure a naive reading would suggest") — so Phase 4's WIDE branch applies: a stability/regression
+ * band around the FIXTURE's own recorded `freeGapPct`, not an absolute-accuracy claim. `RECORDED_*`
+ * below are this (D8-extended) fixture's own values, computed once and pinned; `STABILITY_BAND_PP`
+ * catches a future change to the tokenizer, the JSON-serialization path, or the transcript-join
+ * logic that silently shifts the number, without ever claiming the absolute figure is small.
+ *
+ * **`HOLDOUT_TOLERANCE` (D7) is the real, falsifiable criterion-3 test — NOT a bound on
+ * `calibratedResidual`, which sums to ~0 by algebra at the run level and so cannot fail for a
+ * measurement reason (see `TokenBreakdown.calibratedResidual`'s own doc).** This fixture's own
+ * messageId-sorted even/odd split measures **~4.3% aggregate error** (even half trains, odd half
+ * is predicted) — set alongside `70f19253`'s real-run **1.01%** above, `HOLDOUT_TOLERANCE = 10%`
+ * comfortably bounds both while still failing hard on an actual regression (a broken tokenizer, a
+ * changed JSON-serialization path, or a reversed free/bearing classification would push the error
+ * far past 10%, not marginally past it).
  */
 describe('the reconciliation test (Phase 4) — CI-safe fixture, real gpt-tokenizer, stability band', () => {
-  const RECORDED_IMPLEMENT_FREE_GAP_PCT = 36.9;
-  const RECORDED_REVIEW_FREE_GAP_PCT = 36.5;
+  const RECORDED_IMPLEMENT_FREE_GAP_PCT = 39.0;
+  const RECORDED_REVIEW_FREE_GAP_PCT = 43.4;
   const STABILITY_BAND_PP = 2; // percentage points
+  const HOLDOUT_TOLERANCE = 10; // percent — see the derivation in this describe block's own doc comment
 
   function loadNdjson(path: string): RunEvent[] {
     return readFileSync(path, 'utf8')
@@ -1264,16 +1308,64 @@ describe('the reconciliation test (Phase 4) — CI-safe fixture, real gpt-tokeni
   });
 
   it('the reconciliation identity holds exactly in calibrated mode — printer arithmetic, not a measurement-quality claim', () => {
+    // D6/D7, corrected this revision: the identity's operands are the CALIBRATED fields, not the
+    // raw narrationTokens/toolArgTokens/thinkingTokens — mixing a raw BPE count with a calibrated
+    // inference in the same sum is the pre-D6 defect (see stats.ts's TokenBreakdown docs). The
+    // identity closes exactly per step, by definition (calibratedResidual is declared precisely
+    // to close it) — that is an arithmetic/printer check, not a measurement-quality claim; see
+    // Verification §4/§5 for the real (falsifiable) hold-out test.
     for (const id of ['implement', 'review-with-opaque']) {
       const tb = step(id);
       const sum =
-        (tb.narrationTokens ?? 0) +
-        (tb.toolArgTokens ?? 0) +
-        (tb.thinkingTokens ?? 0) +
+        (tb.calibratedNarrationTokens ?? 0) +
+        (tb.calibratedToolArgTokens ?? 0) +
+        (tb.calibratedThinkingTokens ?? 0) +
         (tb.withheldThinkingTokens ?? 0) +
         (tb.calibratedResidual ?? 0);
       expect(sum).toBeCloseTo(tb.reportedTokens, 6);
     }
+  });
+
+  /**
+   * D7/D8, this revision — the real, falsifiable criterion-3 test: a genuine hold-out prediction
+   * of `tokenScaleFactor`, not a bound on `calibratedResidual` (which closes to ~0 by algebra at
+   * the run level and so cannot fail for a measurement reason — see `TokenBreakdown`'s own doc).
+   * Partition the run's pooled free responses (across BOTH steps — tokenScaleFactor is run-wide,
+   * Solution's "Why run-wide, not per step") into two disjoint halves, deterministically: sort by
+   * `messageId` ascending, then split by parity of that sorted index. Fit `tokenScaleFactor` on
+   * one half, predict the other half's billed total from its tokenized content, and assert the
+   * aggregate — never per-response, since a single response's own error can be large even when the
+   * aggregate is small (39% worst-case on `70f19253`'s own split, this describe block's doc
+   * comment).
+   */
+  it("holds out half the run's pooled free responses and predicts the other half's billed total within HOLDOUT_TOLERANCE (D7/D8)", () => {
+    const pooledFree = [...transcripts.values()]
+      .flat()
+      .filter((r) => !r.thinkingBearing)
+      .sort((a, b) => (a.messageId < b.messageId ? -1 : a.messageId > b.messageId ? 1 : 0));
+    // D8: at least 8 pooled free responses, at least 4 per half — the currently-committed fixture
+    // meets this bar (8 total: msg_free_1..4, msg_review_free_1..4), giving a real train/holdout
+    // aggregate rather than the n=1-vs-1 single-response regime this test forbids asserting on.
+    expect(pooledFree.length).toBeGreaterThanOrEqual(8);
+
+    const train = pooledFree.filter((_, i) => i % 2 === 0);
+    const holdout = pooledFree.filter((_, i) => i % 2 === 1);
+    expect(train.length).toBeGreaterThanOrEqual(4);
+    expect(holdout.length).toBeGreaterThanOrEqual(4);
+
+    const tokenizedOf = (r: TranscriptResponse): number => countTokens(r.visibleText);
+    const trainTokens = train.reduce((acc, r) => acc + r.outputTokens, 0);
+    const trainTokenized = train.reduce((acc, r) => acc + tokenizedOf(r), 0);
+    const trainScaleFactor = trainTokens / trainTokenized;
+
+    const holdoutTokenized = holdout.reduce((acc, r) => acc + tokenizedOf(r), 0);
+    const holdoutActual = holdout.reduce((acc, r) => acc + r.outputTokens, 0);
+    const predictedHoldoutTotal = trainScaleFactor * holdoutTokenized;
+
+    // ~4.3% on this fixture, ~1.01% on 70f19253's real-run split (this describe block's doc
+    // comment) — both comfortably inside HOLDOUT_TOLERANCE.
+    const errorPct = (Math.abs(predictedHoldoutTotal - holdoutActual) / holdoutActual) * 100;
+    expect(errorPct).toBeLessThanOrEqual(HOLDOUT_TOLERANCE);
   });
 });
 

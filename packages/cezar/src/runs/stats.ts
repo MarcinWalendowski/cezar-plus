@@ -328,33 +328,74 @@ export interface TokenBreakdown {
    *  model that emits visible thinking (haiku). Included in `measuredTokens`. `undefined` only
    *  in `'unavailable'` mode. */
   thinkingTokens?: number;
-  /** `narrationTokens + toolArgTokens + thinkingTokens`. Deliberately excludes
-   *  `childToolArgTokens` (unbilled to this step) and `withheldThinkingTokens`/
-   *  `unclassifiedGapTokens` (inferences, not measurements — folding either in here would make
-   *  "components sum to `reportedTokens`" true by construction, the tautology criterion 3 is
-   *  built to rule out). `undefined` only in `'unavailable'` mode. */
+  /** `narrationTokens + toolArgTokens + thinkingTokens` — RAW `gpt-tokenizer` counts, kept as a
+   *  diagnostic (D6, this revision). Deliberately excludes `childToolArgTokens` (unbilled to this
+   *  step) and `withheldThinkingTokens`/`unclassifiedGapTokens` (inferences, not measurements —
+   *  folding either in here would make "components sum to `reportedTokens`" true by construction,
+   *  the tautology criterion 3 is built to rule out). `undefined` only in `'unavailable'` mode.
+   *  In `'calibrated'` mode this is NOT the headline figure — see `calibratedMeasuredTokens`
+   *  below: this run's own regression shows the raw tokenizer count undercounts real billed
+   *  tokens by a wide, consistent margin (see `freeGapPct`), so printing this beside
+   *  `withheldThinkingTokens` (which IS scaled to the billed count) puts two different scales in
+   *  one table — the defect D6 fixes. */
   measuredTokens?: number;
-  /** `'calibrated'` mode only: `bearingTokens − (bearingChars / calibrationRatio)` — the
-   *  thinking-bearing subset's ground-truth usage minus its predicted visible-token cost, where
-   *  `bearingChars` includes any recorded NON-BLANK thinking-text length so a response whose
-   *  thinking was actually visible doesn't get double-counted as both measured (via
-   *  `thinkingTokens`) and withheld here. `calibrationRatio` is RUN-WIDE (pooled across every
-   *  step's thinking-free responses before the per-step computation, never this step's own —
-   *  a thin per-step sample is unstable). SIGNED. An INFERENCE, labeled as such in every
-   *  consumer — never confused with `thinkingTokens`, which is measured. `undefined` outside
-   *  `'calibrated'` mode, and within it, whenever the RUN has zero thinking-free responses
-   *  anywhere (no `calibrationRatio` is computable — that run's steps report `mode: 'basic'`
-   *  instead, never `NaN`). Collapses toward (not `undefined`, just small) `0` on a step where
-   *  thinking was fully visible. */
+  /** `'calibrated'` mode only, NEW this revision (D6): `narrationTokens × tokenScaleFactor` —
+   *  puts narration on the same billed-token scale as `reportedTokens`/`withheldThinkingTokens`,
+   *  unlike the raw `narrationTokens` above. `tokenScaleFactor` (the run-wide `freeTokens /
+   *  freeTokenized` ratio — see `calibration.appliedScaleFactor`) is applied, NOT
+   *  `calibration.appliedRatio` (the chars/token diagnostic, retained but no longer applied to
+   *  anything). `undefined` outside `'calibrated'` mode, or when `tokenScaleFactor` itself is
+   *  `undefined` (the zero-free-response guard, N4). */
+  calibratedNarrationTokens?: number;
+  /** `'calibrated'` mode only, NEW this revision (D6): `toolArgTokens × tokenScaleFactor`. Same
+   *  scaling as `calibratedNarrationTokens`, applied to tool-call-argument tokens — the category
+   *  the as-shipped (pre-D6) design most understated (raw ~36.8% of `reportedTokens` on
+   *  `70f19253`, ~57.8% once consistently calibrated — the single largest category in the run).
+   *  `undefined` outside `'calibrated'` mode, or when `tokenScaleFactor` is `undefined`. */
+  calibratedToolArgTokens?: number;
+  /** `'calibrated'` mode only, NEW this revision (D6): `thinkingTokens × tokenScaleFactor`. Zero
+   *  on a step whose model withholds thinking (`thinkingTokens` itself is 0 there); real and
+   *  nonzero on a step using a model that emits visible thinking (e.g. `claude-haiku-4-5`).
+   *  `undefined` outside `'calibrated'` mode, or when `tokenScaleFactor` is `undefined`. */
+  calibratedThinkingTokens?: number;
+  /** `'calibrated'` mode only, NEW this revision (D6): `calibratedNarrationTokens +
+   *  calibratedToolArgTokens + calibratedThinkingTokens`. This — not the raw `measuredTokens`
+   *  above — is the figure `calibratedResidual` is computed against, and the one `formatRunStats`
+   *  leads with in calibrated mode. `undefined` outside `'calibrated'` mode, or when
+   *  `tokenScaleFactor` is `undefined`. */
+  calibratedMeasuredTokens?: number;
+  /** `'calibrated'` mode only: `bearingTokens − (bearingVisibleTokenized × tokenScaleFactor)` —
+   *  the thinking-bearing subset's ground-truth usage minus its predicted visible-token cost,
+   *  where `bearingVisibleTokenized` is the REAL tokenization (not a chars/ratio estimate,
+   *  corrected this revision, D6) of each bearing response's `visibleText` — narration text,
+   *  tool-arg JSON, and any recorded NON-BLANK thinking text, so a response whose thinking was
+   *  actually visible doesn't get double-counted as both measured (via `thinkingTokens`) and
+   *  withheld here. `tokenScaleFactor` is RUN-WIDE (pooled across every step's thinking-free
+   *  responses before the per-step computation, never this step's own — a thin per-step sample is
+   *  unstable). SIGNED. An INFERENCE, labeled as such in every consumer — never confused with
+   *  `thinkingTokens`, which is measured. `undefined` outside `'calibrated'` mode, and within it,
+   *  whenever the RUN has zero thinking-free responses anywhere (no `tokenScaleFactor` is
+   *  computable — that run's steps report `mode: 'basic'` instead, never `NaN`). Collapses toward
+   *  (not `undefined`, just small) `0` on a step where thinking was fully visible. */
   withheldThinkingTokens?: number;
-  /** `'calibrated'` mode only: `reportedTokens − (narrationTokens + toolArgTokens +
-   *  thinkingTokens + withheldThinkingTokens)`. SIGNED. Declared explicitly because the identity
-   *  does NOT close for a measurement reason, only a definitional one: `measuredTokens` is a real
-   *  BPE tokenization of NDJSON `item.completed` text, while `withheldThinkingTokens` is a
-   *  chars-ratio inference over TRANSCRIPT text — two independent estimators of different,
-   *  only-partially-overlapping evidence, with no algebraic reason for their sum to equal
-   *  `reportedTokens` on the nose. Reported honestly, not asserted small — Phase 4's falsifiable
-   *  test is `freeGapPct`, not this field. `undefined` outside `'calibrated'` mode. */
+  /** `'calibrated'` mode only: `reportedTokens − (calibratedMeasuredTokens +
+   *  withheldThinkingTokens)`. SIGNED.
+   *  **Corrected this revision (D7) — this is an EXACT ALGEBRAIC IDENTITY at the RUN level, not a
+   *  measurement-quality residual.** Substituting the definitions: `calibratedMeasuredTokens +
+   *  withheldThinkingTokens` telescopes to `(tokenScaleFactor × freeTokenized) + bearingTokens`,
+   *  and `tokenScaleFactor` is *defined* as `freeTokens / freeTokenized` — so that first term is
+   *  exactly `freeTokens`, for any tokenizer accuracy whatsoever, and the run-level sum is exactly
+   *  `freeTokens + bearingTokens = reportedTokens`. So this field sums to ~0 across a run's steps
+   *  BY CONSTRUCTION (measured: 3 tokens over 375,001 = 0.0008% on `70f19253`) — it CANNOT fail
+   *  for a measurement reason, so no test asserts a tolerance on it (Phase 4's `HOLDOUT_TOLERANCE`
+   *  hold-out prediction of `tokenScaleFactor` itself is the real falsifiable criterion-3 test —
+   *  see Verification §4). At the PER-STEP level the identity does not close exactly — it reduces
+   *  to that step's own `freeTokens_step − tokenScaleFactor × freeTokenized_step`, a real,
+   *  printable diagnostic of how well the run-wide pooled `tokenScaleFactor` fits THIS step's own
+   *  free-response mix (measured band on `70f19253`: −0.40% to +0.15% of that step's
+   *  `reportedTokens`) — still worth reporting as a per-step calibration-homogeneity check, just
+   *  not a reconciliation test. `undefined` outside `'calibrated'` mode, or when `tokenScaleFactor`
+   *  is `undefined`. */
   calibratedResidual?: number;
   /** `'basic'` mode only: `reportedTokens − measuredTokens`, reported as ONE unattributed line —
    *  no attempt to split it into thinking vs tokenizer noise without the transcript's
@@ -362,10 +403,17 @@ export interface TokenBreakdown {
   unclassifiedGapTokens?: number;
   /** `'calibrated'` mode only: the gap on THIS STEP's own thinking-free response subset alone —
    *  `(freeTokens − Σ tokenize(text/tool-args of those free responses)) / freeTokens × 100`, 1dp.
-   *  This is the falsifiable claim Phase 4's reconciliation test actually bounds — NOT computed
-   *  over thinking-bearing responses, where a gap is expected and reported via
-   *  `withheldThinkingTokens` instead. `undefined` outside `'calibrated'` mode, or when this
-   *  step's own local free-response count is zero (nothing to compute a per-step figure from). */
+   *  **Role corrected this revision (D6) — this is `tokenScaleFactor`'s own fit-quality
+   *  diagnostic, NOT a measure of unattributable spend.** Regressing billed tokens against
+   *  tokenized visible content over a run's own free responses shows the gap this field measures
+   *  is ~91% proportional to the tokenized content — exactly what `tokenScaleFactor` exists to
+   *  absorb, not overhead sitting outside `narrationTokens`/`toolArgTokens`. A large, stable
+   *  `freeGapPct` is expected and fine: it is exactly why a *scale* factor, not a small additive
+   *  correction, is the right shape of fix. The real falsifiable criterion-3 test is Phase 4's
+   *  `HOLDOUT_TOLERANCE` hold-out prediction of `tokenScaleFactor` (Verification §4), not a
+   *  tolerance asserted on this field directly. `undefined` outside `'calibrated'` mode, or when
+   *  this step's own local free-response count is zero (nothing to compute a per-step figure
+   *  from). */
   freeGapPct?: number;
   /** Σ `blockCounts.{redactedThinking,serverToolUse,other}` over the step's turns — content
    *  Anthropic bills as output but never reveals, so it can only be SIZED (via the residual
@@ -378,10 +426,11 @@ export interface TokenBreakdown {
   /** Present only in `'calibrated'` mode — diagnostic, not asserted against in tests.
    *  `freeResponseCount`/`freeChars`/`freeTokens`/`ratio` are THIS STEP's OWN local
    *  free-response numbers (useful for spotting a thin-sample step); NONE of these four is what
-   *  `withheldThinkingTokens` was actually computed from — `appliedRatio` is the RUN-WIDE
-   *  `calibrationRatio` that was. The two are deliberately different fields so a consumer can
-   *  never mistake a step's own noisy local ratio for the one that produced its
-   *  `withheldThinkingTokens`. */
+   *  `withheldThinkingTokens` was actually computed from — that is `appliedScaleFactor` below
+   *  (D6, this revision), not `appliedRatio`. `appliedRatio` is the RUN-WIDE `calibrationRatio`
+   *  (chars/token) — kept for interpretability but no longer applied to anything (D6). All three
+   *  — a step's own `ratio`, the run-wide `appliedRatio`, and the run-wide `appliedScaleFactor` —
+   *  are deliberately separate fields so a consumer can never mistake one for another. */
   calibration?: {
     freeResponseCount: number;
     freeChars: number;
@@ -390,10 +439,19 @@ export interface TokenBreakdown {
      *  run-wide zero-free-response guard on `calibrationRatio` itself; `appliedRatio` can still
      *  be defined here even when `ratio` is not, since the run-wide pool draws from every step. */
     ratio?: number;
-    /** The run-wide `calibrationRatio` actually applied to compute this step's
-     *  `withheldThinkingTokens` — `undefined` only when the whole run had zero thinking-free
-     *  responses. */
+    /** The run-wide `calibrationRatio` (chars/token) — retained from this revision on as an
+     *  interpretability diagnostic ONLY (D6): it is no longer what `withheldThinkingTokens` or
+     *  any `calibrated*Tokens` field is computed from — see `appliedScaleFactor` below.
+     *  `undefined` only when the whole run had zero thinking-free responses. */
     appliedRatio?: number;
+    /** NEW, D6 this revision. The run-wide `tokenScaleFactor` (`freeTokens / freeTokenized`)
+     *  actually applied to compute this step's `withheldThinkingTokens` AND
+     *  `calibratedNarrationTokens`/`calibratedToolArgTokens`/`calibratedThinkingTokens`/
+     *  `calibratedMeasuredTokens` — `undefined` only when the whole run had zero thinking-free
+     *  responses. This is the field that answers "what did the headline numbers actually get
+     *  scaled by" — `appliedRatio` above is a diagnostic sitting beside it, not an alternative
+     *  reading of it. */
+    appliedScaleFactor?: number;
   };
   /** `RunStats.totals.tokenBreakdown` ONLY — always `undefined` on a per-step `TokenBreakdown`.
    *  Count of steps in the run whose own `tokenBreakdown.opaqueBlocks` was `undefined` (no turn
@@ -438,14 +496,18 @@ export interface TranscriptResponse {
    *  thinking-block text entirely (see `thinkingChars`). */
   visibleChars: number;
   /** Non-blank `thinking` block text length, summed — 0 for a blank/withheld block or a response
-   *  with no thinking block at all. Folded into `bearingChars` (Solution, D1) so a response whose
-   *  thinking was actually visible does not get double-counted as both measured and withheld. */
+   *  with no thinking block at all. Folded into `visibleText` (below) so a response whose thinking
+   *  was actually visible does not get double-counted as both measured and withheld. */
   thinkingChars: number;
-  /** The concatenated text this response's `visibleChars` was measured from — narration text and
-   *  tool-arg JSON, newline-joined — kept so `freeGapPct` can tokenize the EXACT text a thinking-
-   *  free response's chars were counted from, not just its length. `undefined` for a
-   *  thinking-bearing response (never read for one). */
-  visibleText?: string;
+  /** The concatenated text this response's chars were measured from — narration text, tool-arg
+   *  JSON, and (D6, this revision) any NON-BLANK thinking text, newline-joined. **Widened this
+   *  revision (D6/D7 nit) — previously `undefined` for a thinking-bearing response, since only
+   *  free responses needed tokenizing under the old chars/ratio formula.** Now ALWAYS defined:
+   *  `freeGapPct` still tokenizes only the free-response subset of this field, but
+   *  `bearingVisibleTokenized` (the `withheldThinkingTokens` formula's own denominator, Solution)
+   *  tokenizes it for the bearing subset too — so a bearing response's visible text (and any
+   *  visible thinking text) must be real, tokenizable content, not `undefined`. */
+  visibleText: string;
 }
 
 /** Whole-run tool economy: the per-step rows plus their totals. */
@@ -466,9 +528,14 @@ export interface RunStats {
    * contribution, which by definition carried no measured information to add — no separate
    * exclusion counter is needed, since `totals.mode` already reports `'unavailable'` when every
    * step was). `opaqueBlocks` sums only across steps where it was itself defined, plus
-   * `stepsWithoutBlockCounts` names how many were excluded. `withheldThinkingTokens` and
-   * `calibratedResidual` sum only across `'calibrated'` steps, plus `stepsNotCalibrated`. `mode`
-   * on a mixed-mode run is `'calibrated'` if ANY step was calibrated, else `'basic'` if any step
+   * `stepsWithoutBlockCounts` names how many were excluded. `withheldThinkingTokens`,
+   * `calibratedResidual`, and (D6, this revision) `calibratedNarrationTokens`/
+   * `calibratedToolArgTokens`/`calibratedThinkingTokens`/`calibratedMeasuredTokens` all sum only
+   * across `'calibrated'` steps, plus `stepsNotCalibrated` — each step's own contribution already
+   * used the correct run-wide `tokenScaleFactor` at compute time, so summing the already-scaled
+   * per-step values is correct; a run-level `tokenScaleFactor` is never re-derived from the
+   * summed totals and reapplied (that would be redundant, not more accurate). `mode` on a
+   * mixed-mode run is `'calibrated'` if ANY step was calibrated, else `'basic'` if any step
    * was basic, else `'unavailable'`. `freeGapPct` and `calibration` are ALWAYS `undefined` on
    * totals — both are per-step diagnostics of different sample sizes, never a fabricated
    * run-level average (spec Risk R9 — the same class of bug the peak-context fix above was about).
@@ -958,22 +1025,32 @@ export function computeRunStats(
     }
   }
 
-  /** RUN-WIDE calibration ratio — pooled across EVERY step's thinking-free transcript responses
-   *  before any per-step computation (spec N4: a per-step pool is unstable on a thin sample).
-   *  `undefined` when the run has zero thinking-free responses anywhere (or no transcripts at
-   *  all) — every step then reports `mode: 'basic'`, never a `NaN` ratio. */
+  /** RUN-WIDE calibration ratio AND scale factor — both pooled across EVERY step's thinking-free
+   *  transcript responses before any per-step computation (spec N4: a per-step pool is unstable
+   *  on a thin sample), computed ONCE here rather than per step (D6, this revision — the same
+   *  pooling argument that already applied to `calibrationRatio` now applies to `tokenScaleFactor`,
+   *  the value calibrated fields are actually scaled by). `calibrationRatio` (chars/token) is kept
+   *  only as an interpretability diagnostic from this revision on — `tokenScaleFactor` (billed
+   *  tokens / this tokenizer's own count, on the SAME visible text) is what `withheldThinkingTokens`
+   *  and every `calibrated*Tokens` field is actually computed from. Both `undefined` when the run
+   *  has zero thinking-free responses anywhere, or no `tokenize` function was supplied — every step
+   *  then reports `mode: 'basic'`, never a `NaN`. */
   let calibrationRatio: number | undefined;
-  if (transcripts) {
+  let tokenScaleFactor: number | undefined;
+  if (transcripts && tokenize) {
     let freeChars = 0;
     let freeTokens = 0;
+    let freeTokenized = 0;
     for (const responses of transcripts.values()) {
       for (const r of responses) {
         if (r.thinkingBearing) continue;
         freeChars += r.visibleChars;
         freeTokens += r.outputTokens;
+        freeTokenized += tokenize(r.visibleText);
       }
     }
     calibrationRatio = freeTokens === 0 ? undefined : freeChars / freeTokens;
+    tokenScaleFactor = freeTokens === 0 ? undefined : freeTokens / freeTokenized;
   }
 
   const steps: StepStats[] = [...buckets.entries()].map(([stepId, b]) => ({
@@ -996,7 +1073,16 @@ export function computeRunStats(
     sleepExecMs: b.sleepExecMs,
     repeatedExpensiveCalls: countRepeatedExpensive(b.expensive, execById),
     tokenBreakdown: b.hasTurnCompleted
-      ? tokenBreakdownOf(stepId, b, toolArgTokensByStep, childToolArgTokensByStep, transcripts, calibrationRatio, tokenize)
+      ? tokenBreakdownOf(
+          stepId,
+          b,
+          toolArgTokensByStep,
+          childToolArgTokensByStep,
+          transcripts,
+          calibrationRatio,
+          tokenScaleFactor,
+          tokenize,
+        )
       : undefined,
   }));
 
@@ -1049,7 +1135,7 @@ function round1(value: number): number {
  * `reportedTokens` can be measured at all) OR the step has no `item.*` events (N9 — tightened
  * from a backend check to an item-presence check: every non-claude mapper emits `item.completed`
  * including `kind: 'reasoning'`, so this is genuinely about data availability, not backend).
- * `'calibrated'` when a run-wide `calibrationRatio` is computable AND this step has at least one
+ * `'calibrated'` when a run-wide `tokenScaleFactor` is computable AND this step has at least one
  * transcript response of its own (joined via its `sessionIds`). `'basic'` otherwise.
  */
 function tokenBreakdownOf(
@@ -1059,6 +1145,7 @@ function tokenBreakdownOf(
   childToolArgTokensByStep: ReadonlyMap<string, number>,
   transcripts: ReadonlyMap<string, readonly TranscriptResponse[]> | undefined,
   calibrationRatio: number | undefined,
+  tokenScaleFactor: number | undefined,
   tokenize: Tokenize | undefined,
 ): TokenBreakdown {
   const reportedTokens = b.reportedTokens;
@@ -1082,7 +1169,7 @@ function tokenBreakdownOf(
     }
   }
 
-  if (calibrationRatio === undefined || stepResponses.length === 0) {
+  if (tokenScaleFactor === undefined || stepResponses.length === 0) {
     return {
       mode: 'basic',
       reportedTokens,
@@ -1098,19 +1185,26 @@ function tokenBreakdownOf(
 
   const bearing = stepResponses.filter((r) => r.thinkingBearing);
   const free = stepResponses.filter((r) => !r.thinkingBearing);
-  const bearingChars = bearing.reduce((acc, r) => acc + r.visibleChars + r.thinkingChars, 0);
   const bearingTokens = bearing.reduce((acc, r) => acc + r.outputTokens, 0);
-  const expectedVisible = bearingChars / calibrationRatio;
-  const withheldThinkingTokens = bearingTokens - expectedVisible;
-  const calibratedResidual =
-    reportedTokens - (narrationTokens + toolArgTokens + thinkingTokens + withheldThinkingTokens);
+  // D6: tokenized directly (real BPE over visibleText, which now includes any non-blank thinking
+  // text — see TranscriptResponse.visibleText) rather than the superseded bearingChars/ratio
+  // estimate — puts the withheld inference on the same scale as calibratedNarrationTokens/
+  // calibratedToolArgTokens/calibratedThinkingTokens below.
+  const bearingVisibleTokenized = bearing.reduce((acc, r) => acc + tokenize(r.visibleText), 0);
+  const withheldThinkingTokens = bearingTokens - bearingVisibleTokenized * tokenScaleFactor;
+
+  const calibratedNarrationTokens = narrationTokens * tokenScaleFactor;
+  const calibratedToolArgTokens = toolArgTokens * tokenScaleFactor;
+  const calibratedThinkingTokens = thinkingTokens * tokenScaleFactor;
+  const calibratedMeasuredTokens = calibratedNarrationTokens + calibratedToolArgTokens + calibratedThinkingTokens;
+  const calibratedResidual = reportedTokens - (calibratedMeasuredTokens + withheldThinkingTokens);
 
   const localFreeChars = free.reduce((acc, r) => acc + r.visibleChars, 0);
   const localFreeTokens = free.reduce((acc, r) => acc + r.outputTokens, 0);
 
   let freeGapPct: number | undefined;
   if (localFreeTokens > 0) {
-    const freeMeasuredTokens = free.reduce((acc, r) => acc + tokenize(r.visibleText ?? ''), 0);
+    const freeMeasuredTokens = free.reduce((acc, r) => acc + tokenize(r.visibleText), 0);
     freeGapPct = round1(((localFreeTokens - freeMeasuredTokens) / localFreeTokens) * 100);
   }
 
@@ -1122,6 +1216,10 @@ function tokenBreakdownOf(
     childToolArgTokens,
     thinkingTokens,
     measuredTokens,
+    calibratedNarrationTokens,
+    calibratedToolArgTokens,
+    calibratedThinkingTokens,
+    calibratedMeasuredTokens,
     withheldThinkingTokens,
     calibratedResidual,
     freeGapPct,
@@ -1132,6 +1230,7 @@ function tokenBreakdownOf(
       freeTokens: localFreeTokens,
       ratio: localFreeTokens === 0 ? undefined : localFreeChars / localFreeTokens,
       appliedRatio: calibrationRatio,
+      appliedScaleFactor: tokenScaleFactor,
     },
   };
 }
@@ -1165,6 +1264,17 @@ function sumTokenBreakdowns(breakdowns: readonly TokenBreakdown[]): TokenBreakdo
     childToolArgTokens: sumDefined((t) => t.childToolArgTokens),
     thinkingTokens: sumDefined((t) => t.thinkingTokens),
     measuredTokens: sumDefined((t) => t.measuredTokens),
+    // D6, this revision: sum only across 'calibrated' steps, same exclusion set as
+    // withheldThinkingTokens/calibratedResidual below — each step's own contribution already
+    // used the correct run-wide tokenScaleFactor at compute time, so summing is correct.
+    calibratedNarrationTokens:
+      withCalibration.length > 0 ? withCalibration.reduce((a, t) => a + (t.calibratedNarrationTokens ?? 0), 0) : undefined,
+    calibratedToolArgTokens:
+      withCalibration.length > 0 ? withCalibration.reduce((a, t) => a + (t.calibratedToolArgTokens ?? 0), 0) : undefined,
+    calibratedThinkingTokens:
+      withCalibration.length > 0 ? withCalibration.reduce((a, t) => a + (t.calibratedThinkingTokens ?? 0), 0) : undefined,
+    calibratedMeasuredTokens:
+      withCalibration.length > 0 ? withCalibration.reduce((a, t) => a + (t.calibratedMeasuredTokens ?? 0), 0) : undefined,
     withheldThinkingTokens:
       withCalibration.length > 0 ? withCalibration.reduce((a, t) => a + (t.withheldThinkingTokens ?? 0), 0) : undefined,
     calibratedResidual:
@@ -1273,7 +1383,13 @@ export function parseTranscriptResponses(lines: readonly string[]): TranscriptRe
         visibleParts.push(json);
       } else if (raw.type === 'thinking') {
         thinkingBearing = true;
-        if (typeof raw.thinking === 'string' && raw.thinking.trim() !== '') thinkingChars += raw.thinking.length;
+        // Non-blank thinking text is real, measurable content (D1) — folded into visibleParts
+        // (D6) so bearingVisibleTokenized (Solution) tokenizes it along with the rest of this
+        // response's visible text, not just its char length.
+        if (typeof raw.thinking === 'string' && raw.thinking.trim() !== '') {
+          thinkingChars += raw.thinking.length;
+          visibleParts.push(raw.thinking);
+        }
       }
     }
     responses.push({
@@ -1282,7 +1398,7 @@ export function parseTranscriptResponses(lines: readonly string[]): TranscriptRe
       thinkingBearing,
       visibleChars,
       thinkingChars,
-      visibleText: thinkingBearing ? undefined : visibleParts.join('\n'),
+      visibleText: visibleParts.join('\n'),
     });
   }
   return responses;
@@ -1460,10 +1576,26 @@ function tokenBreakdownAnnotations(label: string, tb: TokenBreakdown | undefined
     lines.push(`  ${label}: ${tokk(tb.unclassifiedGapTokens)} tokens unattributed`);
   }
   if (tb.mode === 'calibrated') {
+    // D6, this revision: the headline figures are the CALIBRATED categories — on the same
+    // billed-token scale as withheldThinkingTokens/reportedTokens — printed with the raw
+    // (unscaled) table figures and the run-wide factor alongside, never the raw figure alone,
+    // unlabeled, beside a scaled withheldThinkingTokens (the defect this revision fixes).
+    if (tb.calibratedMeasuredTokens !== undefined) {
+      const factor = tb.calibration?.appliedScaleFactor;
+      lines.push(
+        `  ${label}: calibrated narrate/think/tool-arg ` +
+          `${tokk(tb.calibratedNarrationTokens)}/${tokk(tb.calibratedThinkingTokens)}/${tokk(tb.calibratedToolArgTokens)}` +
+          ` (raw ${tokk(tb.narrationTokens)}/${tokk(tb.thinkingTokens)}/${tokk(tb.toolArgTokens)}` +
+          (factor !== undefined ? ` × ${factor.toFixed(3)}` : '') +
+          `)`,
+      );
+    }
     if (tb.withheldThinkingTokens !== undefined) {
       lines.push(
         `  ${label}: ${tokk(tb.withheldThinkingTokens)} tokens withheld thinking (inferred)` +
-          (tb.calibratedResidual !== undefined ? `, ${tokk(tb.calibratedResidual)} residual` : '') +
+          // calibratedResidual is a per-step calibration-fit diagnostic, not a tolerance-tested
+          // reconciliation figure (D7) — it closes to ~0 only in aggregate, across the whole run.
+          (tb.calibratedResidual !== undefined ? `, ${tokk(tb.calibratedResidual)} residual (fit diagnostic)` : '') +
           (tb.freeGapPct !== undefined ? `, freeGapPct ${tb.freeGapPct.toFixed(1)}%` : ''),
       );
     }
