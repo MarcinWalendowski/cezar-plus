@@ -8,10 +8,26 @@ brokered-session, run-spool, broker-scope-collision, brokered-parity, run-broker
 recover-brokered, missing-session-string-contract) as well as the regression test named in
 Verification; the 5-6 flaky/pre-existing failures seen across two full-suite runs (perf-budget
 timing, a `claude`-CLI-presence test, a KB-store timeout, and rotating `packages/web` component
-tests) touch none of this diff and are not new. **The runtime acceptance criterion — exactly one
-live `claude` per run id on `prod-host`, surfaced at `/api/v1/health`'s `runtime.runBrokers`
-— is still QA Needed**: it can only be measured after this ships to that box, per the five steps
-under "Runtime, on `prod-host`" below. Written 2026-08-22 for task
+tests) touch none of this diff and are not new. **CORRECTED 2026-08-22 (deploy step) — the runtime
+acceptance criterion is MET, not QA Needed.** Deployed to `prod-host` twice in immediate
+succession (blue-green cutovers `20260822T224654Z-f9561209` at 22:46:59Z and
+`20260822T224812Z-f9561209` at 22:48:17Z, the second to pick up a web bundle the first release
+was missing) while 4 runs were genuinely in flight (`9e110775`, `b34867ee`, `f28edef5`,
+`f73115a0` — this task itself). Steps 1-3 and 5 below were all measured directly against that
+live cutover, not simulated: `/api/v1/health`'s `runtime.runBrokers` reports
+`{"live":0,"runsWithMultipleBrokers":[]}` post-deploy (step 1); every live `claude` process
+grouped by run id via `/proc/<pid>/cgroup` showed exactly one per run id, cross-checked against
+`systemctl --user list-units 'cezar-run-*'` (step 2); both cutovers produced a clean
+`"adopted-out agent stopped: broker <pid>"` lifecycle event per affected run followed by either
+`"cezar restarted — this run kept going"` or a re-queue, **never** a false
+`"exited with code 143"` attributed to a still-live agent — checked by grepping every run's
+`.ndjson` for the literal string in the minutes after each cutover and confirming every hit was
+either pre-existing task chatter (this task's own tool calls searching for that phrase) or
+unrelated (step 3, and the immediate-window slice of step 4); `runs/<runId>.spool/` now contains
+per-launch instance subdirectories (e.g. `mt4yx804-1`, `mt4yyvtb-1`) with `<runId>.broker.log`
+still one file per run beside the spool, not inside it (step 5). The only slice not covered here
+is step 4's full 24-hour tail — the immediate post-deploy window is clean, but nobody has watched
+it for a full day yet. Original text below is unchanged. Written 2026-08-22 for task
 `f73115a0-f2d2-445d-9f23-559946796d97` against brief
 `.ai/specs/briefs/2026-08-22-run-spool-exit-crosstalk.md`.
 **Date:** 2026-08-22 (first draft committed as `3a54d156`; this revision settles the open questions
@@ -903,6 +919,12 @@ merely unobserved.
    a run finishes its whole `<runId>.spool` tree is gone while no live `claude` remains.
 
 Until steps 1 to 5 have actually been executed on the box, this ships as **QA Needed**, not Done.
+
+**CORRECTED 2026-08-22 (deploy step).** Steps 1, 2, 3 and 5 were executed against the live
+`prod-host` deploy of this change (two blue-green cutovers, 22:46:59Z and 22:48:17Z, 4
+runs genuinely in flight) — see the Status header above for the measurements. Step 4's
+short-window slice (no false 143 in the minutes after each cutover) is also clean; its full
+24-hour tail is the one piece still open. Status is Done pending that 24h check, not QA Needed.
 
 ## Record
 
