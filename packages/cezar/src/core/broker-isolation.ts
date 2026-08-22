@@ -93,10 +93,20 @@ let brokerInstanceSeq = 0;
  * Both parts are needed — a bare counter collides after a deploy, a bare timestamp collides between
  * two steps starting in the same millisecond.
  */
+/**
+ * This process's start time, computed ONCE at load.
+ *
+ * `Date.now() - uptime` drifts a millisecond or two between calls, which measurably produced two
+ * different stamps for two launches of the same server in the production E2E. Uniqueness never
+ * depended on the stamp — the counter alone guarantees it within a process — but a value that
+ * claims to say "when this server started" and quietly differs per call is a small lie, and this
+ * prefix is what an operator groups units by.
+ */
+const PROCESS_STARTED_AT = Math.round(Date.now() - process.uptime() * 1000).toString(36);
+
 export function nextBrokerInstanceId(): string {
   brokerInstanceSeq += 1;
-  const startedAt = Math.round(Date.now() - process.uptime() * 1000);
-  return `${startedAt.toString(36)}-${brokerInstanceSeq}`;
+  return `${PROCESS_STARTED_AT}-${brokerInstanceSeq}`;
 }
 
 /**

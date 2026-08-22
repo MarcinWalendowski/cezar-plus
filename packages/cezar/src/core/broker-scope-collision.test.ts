@@ -240,6 +240,28 @@ describe('nextBrokerInstanceId', () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
+  /**
+   * The process-start half must be STABLE across calls, and this has to be checked by moving the
+   * CLOCK, not by calling fast. `Date.now() - uptime` drifts a millisecond or two — the production
+   * E2E caught it producing two different stamps for two launches of the same server — but twenty
+   * calls in a tight loop all land in the same millisecond, so the obvious version of this test
+   * passed against the buggy code. Driving the clock is what makes it able to fail: with the stamp
+   * captured at module load, no later clock movement can reach it; computed per call, an hour of
+   * simulated drift changes it immediately.
+   */
+  it('keeps one stamp for the life of the process, however far the clock moves', () => {
+    const first = nextBrokerInstanceId().split('-')[0];
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 3_600_000);
+    const up = vi.spyOn(process, 'uptime').mockReturnValue(1);
+    try {
+      expect(nextBrokerInstanceId().split('-')[0]).toBe(first);
+      expect(nextBrokerInstanceId().split('-')[0]).toBe(first);
+    } finally {
+      now.mockRestore();
+      up.mockRestore();
+    }
+  });
+
   it('produces a unit name systemd will accept', () => {
     const unit = brokerScopeUnitName('7c2dd8f0-e53e-4e88', nextBrokerInstanceId());
     expect(unit).toMatch(/^[A-Za-z0-9:_.-]+$/);
