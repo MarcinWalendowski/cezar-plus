@@ -15,11 +15,12 @@ import {
   providerAuthChecksDisabled,
 } from './core/provider-auth.ts';
 import { applyProviderEnablement } from './core/provider-availability.ts';
-import { pruneOrphans } from './git-worktree.ts';
+import { canonicalPath, pruneOrphans } from './git-worktree.ts';
 import { getRepoInfo } from './server/git.ts';
 import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveWorktreeRetention } from './config.ts';
 import { reclaimWorktrees } from './runs/retention.ts';
 import { RunStore } from './runs/store.ts';
+import { findForeignWorkspaceOwner, loadForeignWorkspaceRunSources } from './runs/worktree-ownership.ts';
 import { runRunStatsCommand } from './runs/stats-cli.ts';
 import { runRunsCommand } from './runs/reopen-cli.ts';
 import { RunManager } from './workflows/run.ts';
@@ -709,11 +710,28 @@ async function serveCommand(
 
   // Startup reconcile (spec 006): sweep worktrees whose run no longer exists.
   if (repo) {
-    const orphans = await pruneOrphans(repoRoot, new Set(store.listRuns().map((r) => r.id))).catch(
-      () => [] as string[],
+    // Cross-project ownership check (spec 2026-08-22-cross-project-worktree-orphan-prune-safety,
+    // Layer 1): this process IS the boot root, so its own candidate list is every OTHER registered
+    // project (no separate boot-root entry needed — the `!= repoRoot` filter would drop it anyway).
+    // `loadWorkspaceConfig()` is the cheap raw registry read — `listProjects()` additionally shells
+    // out a git status/branch probe per project, unneeded cost on the hot boot path.
+    const registeredProjects = (await loadWorkspaceConfig()).projects.filter(
+      (p) => canonicalPath(p.root) !== canonicalPath(repoRoot),
     );
-    if (orphans.length > 0) {
-      console.log(`  cleaned ${orphans.length} orphaned worktree(s): ${orphans.map((id) => id.slice(0, 8)).join(', ')}`);
+    const foreignSources = loadForeignWorkspaceRunSources(repoRoot, registeredProjects);
+    const unreadableSource = foreignSources.find((s) => s.unreadable);
+    const orphans = await pruneOrphans(repoRoot, new Set(store.listRuns().map((r) => r.id)), {
+      findForeignOwner: (path) => findForeignWorkspaceOwner(repoRoot, path, foreignSources),
+      trunkRef: repo.branch,
+      ownershipCheckUnavailable: unreadableSource
+        ? { reason: `project "${unreadableSource.projectName}"'s runs.json could not be read` }
+        : undefined,
+    }).catch(() => ({ removed: [] as string[], declined: [] as { id: string; reason: string }[] }));
+    if (orphans.removed.length > 0) {
+      console.log(`  cleaned ${orphans.removed.length} orphaned worktree(s): ${orphans.removed.map((id) => id.slice(0, 8)).join(', ')}`);
+    }
+    if (orphans.declined.length > 0) {
+      console.log(`  declined to reclaim ${orphans.declined.length} worktree(s): ${orphans.declined.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
     }
     // Count-based worktree retention (#483): reclaim finished worktrees beyond
     // the keep-limit (directory only — `cez/<id8>` branch kept, so recoverable).

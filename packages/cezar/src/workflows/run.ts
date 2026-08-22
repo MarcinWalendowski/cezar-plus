@@ -3119,6 +3119,12 @@ export class RunManager {
           runId,
           record?.workspaceProjects ?? [],
           (m) => this.store.appendEvent(runId, { type: 'note', message: m }),
+          // Same write-ordering fix as the initial materialize above — this resume path is the one
+          // that actually mattered for the 232ad6d4 incident's SECOND reclaim, which came after an
+          // interrupt-and-resume, not through the initial materialize.
+          (snapshot) => {
+            this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
+          },
         );
         this.store.updateRun(runId, { workspaceWorktrees: worktrees });
       }
@@ -3656,8 +3662,17 @@ export class RunManager {
     const isWorkspaceRun = (this.store.getRun(runId)?.workspaceProjects?.length ?? 0) > 0;
     if (isWorkspaceRun) {
       const projects = this.store.getRun(runId)?.workspaceProjects ?? [];
-      const worktrees = await materializeWorkspaceWorktrees(runId, projects, (m) =>
-        emit({ type: 'note', message: m }),
+      const worktrees = await materializeWorkspaceWorktrees(
+        runId,
+        projects,
+        (m) => emit({ type: 'note', message: m }),
+        // Persist a snapshot after EVERY worktree, not just at the end (spec
+        // 2026-08-22-cross-project-worktree-orphan-prune-safety) — otherwise the first project's
+        // worktree sits on disk, unrecorded anywhere a target project's own boot-time prune can
+        // see, for as long as the rest of this loop takes.
+        (snapshot) => {
+          this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
+        },
       );
       this.store.updateRun(runId, { workspaceWorktrees: worktrees });
       emit({
