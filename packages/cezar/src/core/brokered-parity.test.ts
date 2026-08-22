@@ -79,12 +79,13 @@ describe('a brokered claude session emits the same events as an in-process one',
 
   async function brokered(fixture: string): Promise<Captured> {
     const cwd = scratch();
-    const spoolDir = spoolDirFor(cwd, 'parity-run');
+    const spoolDir = spoolDirFor(cwd, 'parity-run', 'i1');
     const v1: AgentEvent[] = [];
     const v2: UiEvent[] = [];
     const broker = startRunBroker({
       spoolDir,
       runId: 'parity-run',
+      instanceId: 'i1',
       stepId: 'implement',
       backend: 'claude',
       command: [process.execPath, STUB],
@@ -97,7 +98,7 @@ describe('a brokered claude session emits the same events as an in-process one',
     const session = runner.reattachSession(spec(cwd, fixture), (e) => v1.push(e), {
       autoEndAfterFirstTurn: true,
       onUiEvent: (e) => v2.push(e),
-      broker: { spoolDir, runId: 'parity-run', stepId: 'implement', startOffset: 0 },
+      broker: { spoolDir, runId: 'parity-run', instanceId: 'i1', stepId: 'implement', startOffset: 0 },
     });
     // The opening message the seeded path would have sent. It goes out before the broker has
     // bound its control socket, which is precisely the queueing case that must not lose it.

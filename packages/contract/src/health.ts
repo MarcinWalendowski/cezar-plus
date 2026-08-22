@@ -166,6 +166,10 @@ export const runtimeInfoSchema = z.object({
   brokeredBackends: z.array(z.string()),
   /** False when this build has no broker entry point to re-exec (a source checkout). */
   brokerAvailable: z.boolean(),
+  runBrokers: z.object({
+    live: z.number().int().nonnegative(),
+    runsWithMultipleBrokers: z.array(z.string()),
+  }).optional(),
 });
 export type RuntimeInfo = z.infer<typeof runtimeInfoSchema>;
 
