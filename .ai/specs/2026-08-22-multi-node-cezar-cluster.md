@@ -1,7 +1,22 @@
-# Two cezar nodes, one backlog: the Mac and prod-host as one cluster
+# Eight tasks at once: bound the burst, then spread across nodes
 
 **Status:** Proposed
 **Date:** 2026-08-22
+**Revised:** 2026-08-22 (same day), after the owner corrected the premise
+
+> **CORRECTED 2026-08-22 — the first draft led with "a second node is worth having for
+> *capability*, not for compute", and that was wrong.** Owner: *"It's mostly about machine compute:
+> right now on 8vcpu max 3/4 tasks can run because of cpu usage for search and running tests. I want
+> to run 8 tasks distributed across nodes/workers."* The draft cited the corpus note *"cezar run
+> speed is round-trip bound, not box bound"* as if it settled the question. It does not — **that
+> note measures the latency of ONE run, and this is a question about the throughput of N.** A single
+> run is round-trip bound; eight concurrent runs are bound by whatever the box runs out of first.
+> Both statements are true and they are about different quantities.
+>
+> The goal is **8 concurrent tasks**. The capability argument survives, demoted: it is why *which*
+> node matters, not why a second node exists. Everything downstream of the premise changed with it
+> — the placement default (D12), the capacity model (D14), and a new Phase 0 that raises
+> concurrency on the existing box before any node is added.
 
 ## TLDR
 
@@ -14,12 +29,36 @@ days later, that mirror has failed in the only direction it could: **110 todos e
 on neither Mac file, 10 more disagree about their status, and not one entry exists Mac-only.** The
 Mac cockpit is a stale read-only window onto work it cannot see.
 
-This spec makes the two cockpits **one cluster**: a hub (`hel1`) and spokes (the Mac, and any later
-node) that dial out to it, replicate a small, explicit tier of state in near-real-time (measured
-application-layer round trip Mac → box → Mac through the tunnel: **58 ms median**, n=10, min 56.8 /
-max 59.0), take cluster-scoped leases for anything that starts work or spends a
-shared subscription, and place a task on the node whose *capabilities* the task needs — macOS,
-iMessage, a physical device, a browser — rather than on whichever host happened to be open.
+**The ceiling is a burst, and it is measurable.** Across the 12 largest runs on the box (85.3 h of
+step wall time), `run-tests` is **12.9 %** of it — median 7.6 min, p90 45.1 min. But a run in that
+step is a different animal from a run outside it: peak process-tree footprint is **0.4–0.6 GB and
+1–8 processes** at rest versus **2.2–6.2 GB and 18–50 processes** while testing, on a **15 GB /
+8 vCPU** box. Two runs testing simultaneously is ~10 GB; three is the whole machine. That is the
+3-to-4 ceiling, and `maxParallel` — which counts *runs* — cannot see it, because it cannot tell an
+idle run from one that is about to fork 50 processes.
+
+So the answer is three levers in cost order, and only the third needs a second machine:
+
+1. **Bound the burst.** Each run already executes in its own systemd scope on this box
+   (`cezar-run-*.scope` under `cezar-runs.slice`), so `MemoryMax` / `CPUWeight` / `CPUQuota` are one
+   property each — plus capping vitest workers and ripgrep threads at the source.
+2. **Gate the burst.** Admit many runs but let only *k* be inside a heavy step at once. At 12.9 %
+   duty cycle, 8 concurrent runs expect ~1 simultaneous heavy step; a gate of 2 blocks ~6 % of the
+   time. **This is what gets 8 tasks onto the existing box** — no cluster required.
+3. **Add nodes** for anything beyond one box's ceiling.
+
+**And the Mac is not the small helper this spec first assumed.** It is an **M4 Max, 16 cores,
+128 GB RAM, 742 GB free** against the box's 8 shared vCPU and 15 GB — **8.5× the memory**, which is
+the axis that actually binds. On memory alone it seats ~8 concurrent *testing* runs where the box
+seats 2. The box's value is that it is always on and addressable; the Mac's is that it is the
+bigger machine.
+
+The cluster is therefore hub-and-spoke: `hel1` is the **hub** because it is reachable, spokes dial
+out to it (measured application-layer round trip Mac → box → Mac through the tunnel: **58 ms
+median**, n=10, min 56.8 / max 59.0), a small explicit tier of state replicates in near-real-time,
+cluster-scoped leases guard anything that starts work or spends the shared subscription, and each
+node advertises **capacity** so the scheduler can fill it. Capability labels — macOS, iMessage, a
+browser, a device — then decide *which* eligible node, not whether a second one is worth having.
 
 The single most important thing in this document is a refusal: **replication must not ship before
 the claim lease.** `todo-autostart.ts` turns `autostart: true` into a live agent run from an
@@ -53,26 +92,86 @@ has to become a place where filing work is *safe*, or it will keep not being use
 `archivedAt` — the two fields the Tasks board writes most. A whole-row last-writer-wins merge
 resolves those by throwing one side's edit away. That is why D4 below is per-field, not per-record.
 
-### 2. A second node is worth having for *capability*, not for compute
+### 2. The concurrency ceiling is a burst inside one step, not a per-run cost
 
-It is tempting to frame this as capacity. The corpus already refutes that: *"cezar run speed is
-round-trip bound, not box bound"* (measured 2026-08-21 — 61.5 min of run `ec6e8e06` was 65 % model
-time at 1.00 tool calls per round trip; the box's own CPU was never the constraint). Moving a run
-to a second host buys approximately nothing in wall clock.
+Owner, 2026-08-22: *"on 8vcpu max 3/4 tasks can run because of cpu usage for search and running
+tests. I want to run 8 tasks distributed across nodes/workers."* `maxParallel` on the box is
+currently **5** and is not reachable in practice.
+
+**The workload is bimodal, sharply.** Every run record on the box carrying usage data (n=29,
+`peakRssBytes` = summed process-tree RSS, `peakProcCount`):
+
+| band | peak footprint | processes | which runs |
+|---|---|---|---|
+| at rest | **0.4–0.6 GB** | **1–8** | 17 of 26 `cezar` runs |
+| testing | **2.2–6.2 GB** | **18–50** | 9 of 26 `cezar` runs, and **all 3** `chat` runs |
+
+There is nothing in between. A run is ~0.5 GB and 4 processes until it reaches `run-tests`, at which
+point vitest spawns roughly one worker per file and it becomes a 40-to-50 process, multi-gigabyte
+job. `isolate: false` is not an escape — the corpus records it dying at exit 144 on both machines,
+because the suite spawns real processes and one stray spawn takes a shared worker down.
+
+**Against the hardware, that is the whole ceiling.** The box is **8 vCPU (AMD EPYC-Rome), 15 GB
+RAM** (≈12 GB available), 122 GB free disk. At ~5 GB per testing run, two concurrent test steps is
+~10 GB and three is the entire machine. The observed 3-to-4 limit is what those numbers predict.
+
+**The heavy phase is a small fraction of a run.** Per-step wall time reconstructed from `step-start`
+events across the 12 largest runs (85.3 h total):
+
+| step | n | median | p90 | share of wall time |
+|---|---|---|---|---|
+| `run-tests` | 18 | 7.6 min | 45.1 min | **12.9 %** |
+| `commit-push` | 18 | 3.3 min | 40.4 min | 13.9 % |
+| `spec` | 66 | 5.5 min | 12.7 min | 8.4 % |
+| `implement` | 27 | 7.3 min | 29.3 min | 5.5 % |
+| `review-spec` | 60 | 5.6 min | 7.6 min | 6.1 % |
+
+So eight concurrent runs expect **~1** simultaneous heavy step (8 × 0.129), and under a crude
+independence assumption fewer than three are heavy ~93 % of the time. **A gate of 2 concurrent heavy
+steps supports 8 concurrent runs and blocks about 6 % of the time.** The independence assumption is
+the weak part and is exactly why this must be a gate rather than a hope: eight tasks launched
+together march through the same workflow in near-lockstep, so their heavy phases correlate. A
+semaphore is correct under correlation; a probability is not.
+
+**One number is missing and it is the one the owner named.** cezar samples per-run CPU live
+(`process-usage.ts` → `cpuPct`, summed across the descendant tree) and **never persists it** — zero
+occurrences in the run NDJSON, no field on `RunRecord`. Memory and process counts are recorded; CPU
+is not. So "CPU is the constraint" is a well-founded observation, not a measured one, and this spec
+treats closing that gap as Phase 0 work rather than assuming which resource binds first.
+
+`peakRssBytes` also needs a caveat before anyone sizes hardware from it: it is a **sum of `ps` RSS**
+across 40-plus node workers, so shared pages are counted many times and the true footprint is
+lower. The accurate number is already available and unused — each run runs in its own cgroup on this
+box, so `memory.peak` and `cpu.stat` can be read from the scope directly.
+
+### 2a. Which node, once there is more than one
+
+Capacity says *add* a node. Capability says *which*. Both matter, and the second is why the two
+hosts are not interchangeable.
 
 What the Mac has that the box does not:
 
+- **Eight and a half times the memory, and twice the cores.** M4 Max, **16 cores / 128 GB RAM /
+  742 GB free**, against 8 shared vCPU / 15 GB / 122 GB. Memory is the axis that binds here, so on
+  that axis alone the Mac seats ~8 concurrent *testing* runs where the box seats 2. The second node
+  is the **bigger** node, which is the opposite of how this spec's first draft framed it.
 - **macOS and Apple services** — Messages.db, the `imsg` binaries, FindMy, Contacts, the TCC grants.
   Every device E2E in `AGENTS.md` → "Definition of Done" needs them, and the box cannot run one.
 - **The Chrome bridge** and a real logged-in browser profile.
 - **The owner's working tree**, including uncommitted work, and their keychain and git identity.
-- **Presence** — the person is in front of it.
 
-What the box has that the Mac does not: it is always on, it has a stable inbound address, it holds
-the Cloudflare token and the 1Password service account, and it self-deploys.
+What the box has that the Mac does not: it is **always on**, it has a **stable inbound address**, it
+holds the Cloudflare token and the 1Password service account, and it self-deploys. Note that none of
+those are compute. The box earns the **hub** role by being reachable, and it is the weaker worker.
 
-So the cluster's job is **placement**, not load-spreading: a task that needs a Mac runs on the Mac,
-everything else runs where it always did, and one board shows both.
+Two consequences the design has to carry:
+
+- **The Mac sleeps.** Capacity that disappears when a lid closes is not capacity you can promise, so
+  a queued task must degrade to "waiting for `mac`" visibly rather than stalling silently — and the
+  hub must still be able to run *something* alone.
+- **Work products land where the run ran.** Eight tasks spread over two hosts means eight worktrees
+  and eight branches on two machines. Each node pushes its own branch to `origin`; the review gate
+  and diff are rendered from the node that ran it, over the relay.
 
 ### 3. Every exactly-once guarantee cezar owns is a local file lease
 
@@ -348,19 +447,25 @@ sends. Same reasoning as `supervisor/forwarded-principal.ts`: *"a forged header 
 ORG PROCESS ITSELF regardless of what reached it or how"* — verify at the boundary that actually
 enforces it. Default is **off**: a newly enrolled node replicates state and runs nothing.
 
-**D12 — Placement defaults to the authoring node, and an unmet requirement queues visibly.**
+**D12 — Placement defaults to the eligible node with the most headroom, and an unmet requirement
+queues visibly with a reason that distinguishes *why*.**
 A todo may carry `placement: { node?: string; requires?: string[] }`. Labels are **discovered, not
 configured** (platform, which agent CLIs are logged in, whether the Chrome bridge answers, hosted
 mode) — the zero-config rule.
 
-Resolution order: an explicit `node` pins; else `requires` narrows the eligible set; else **the node
-that authored the todo**. That last clause is the one that matters, and "the hub" would have been
-the wrong default: today a todo filed in the Mac's inbox runs on the Mac and one filed on the box
-runs on the box, and defaulting to the hub would silently relocate half of them the day clustering
-turns on. A default whose job is "nothing changes" must be written to say exactly that.
+Resolution order: an explicit `node` pins; else `requires` narrows the eligible set; else **the
+eligible node with the most headroom** (`maxParallel − active`, then `maxHeavySteps − heavyActive`,
+then a stable tiebreak on nodeId so placement is deterministic in tests).
 
-If no eligible node is online the run stays `queued` with a `queuedReason` naming what it is waiting
-for, and **never silently runs somewhere else**.
+**REVISED from the first draft, which defaulted to the authoring node.** That default was chosen to
+guarantee "nothing changes on day one", and it is the wrong goal: spreading the work *is* the
+change being asked for, and a default that keeps every box-filed task on the box leaves the 16-core
+/ 128 GB machine idle while the 8 vCPU one queues. Least-loaded is the default; the authoring node
+gets no preference beyond the tiebreak.
+
+If no eligible node has headroom the run stays `queued` with a `queuedReason` distinguishing the
+three cases that look identical from the board — **no node has the label**, **every eligible node is
+at capacity**, or **the node it needs is offline** — and it **never silently runs somewhere else**.
 
 **D12a — A dispatch carries its workflow by value, and refuses a stale target.**
 Two things the target node does not necessarily have, and neither is obvious until it bites:
@@ -387,10 +492,60 @@ unknown fields verbatim. Without that, the oldest node in the cluster silently t
 history. A **protocol major** mismatch, by contrast, refuses the link with a stated reason and shows
 it in the cockpit — a partial apply that looks complete is the worse failure.
 
-**D14 — Node-local `maxParallel` stays node-local.** `WorkspaceSemaphore` protects *the host* —
-"`maxParallel` and `memoryLimitMb` protect the host, not a repo". A cluster-wide parallel cap would
-be a different feature with a different justification. The *account* grant (tier 2) is what bounds
-shared spend; the two must not be conflated.
+**D14 — Admission is two numbers per node, not one, and neither is a cluster-wide cap.**
+`WorkspaceSemaphore` protects *the host* — "`maxParallel` and `memoryLimitMb` protect the host, not
+a repo" — and that stays true: a cap that protects a machine must be evaluated on that machine.
+What changes is that **one count cannot express a bimodal workload.** Set `maxParallel` for the
+worst case and the box idles at 2 while every run sits at 0.5 GB; set it for the median and three
+runs hit `run-tests` together and the machine thrashes. Today it is set to 5 and neither works.
+
+So each node advertises and enforces two:
+
+| knob | bounds | box | Mac |
+|---|---|---|---|
+| `maxParallel` | runs admitted at all | 8 | 8+ |
+| `maxHeavySteps` (new) | runs inside a CPU/memory-heavy step at once | **2** | ~8 |
+
+`maxHeavySteps` is a second `WorkspaceSemaphore`, taken at step entry and released at step exit,
+and it is the mechanism that turns 12.9 % duty cycle into real oversubscription. A step is heavy
+when its workflow says so — declared on the step definition, defaulting on for `run-tests`, never
+inferred from the step's name at runtime.
+
+The **cluster-wide** number (the owner's 8) is a *target*, reached by dispatch filling nodes up to
+their own advertised limits — never a cluster-wide semaphore, which would add a 58 ms round trip to
+every admission decision and make an offline hub stop all work everywhere. Nodes report
+`{maxParallel, active, maxHeavySteps, heavyActive}` on `presence`; the scheduler places on the node
+with the most headroom.
+
+The *account* grant (tier 2) is a separate bound on a separate resource — subscription spend, not
+host capacity — and the two must not be conflated. A node can have capacity and no account grant, or
+vice versa; each refusal names which.
+
+**D14a — Bound the burst where it is already bounded-able: the cgroup and the tool.**
+The gate in D14 decides *how many* heavy steps run; this decides *how big* one is allowed to get.
+Both are needed — a gate of 2 over two unbounded 6 GB runs is still 12 GB.
+
+cezar already puts every broker in its own transient scope on Linux (`broker-isolation.ts`:
+`systemd-run --user --scope --slice=cezar-runs.slice`), and **sets no resource properties on it
+today**. So the enforcement point exists and is unused:
+
+- `MemoryHigh` / `MemoryMax` per scope — reclaim before the box swaps, and kill one run instead of
+  the machine. This is the single highest-value line in the whole spec for the 8-task goal.
+- `CPUWeight` per scope, and `CPUQuota` only if a node wants a hard slice. Weight over quota by
+  default: weight lets one run use the whole box when nothing else wants it, which is exactly right
+  for a workload that is idle 87 % of the time.
+- The slice (`cezar-runs.slice`) gets its own ceiling, so runs collectively cannot starve
+  `cezar.service` itself — the cockpit going unresponsive under load is how you lose the ability to
+  *see* the overload.
+
+And at the tool, where the fan-out is actually created: cap vitest's worker pool
+(`poolOptions.threads.maxThreads`) and ripgrep's thread count for agent-spawned searches. Both
+default to "one per core", which is correct for one job on an idle machine and wrong for eight.
+
+**macOS has no cgroups**, so the Mac enforces the count-and-gate half of this and the per-run
+memory ceiling degrades to cezar's existing `memoryLimitMb` process-tree guard. Stated because a
+limit that silently does not exist on one node is worse than one that was never claimed — the node
+reports which enforcement it actually has, and the cockpit shows it.
 
 **D15 — Every local write survives the link being down.** A spoke with no hub is an ordinary cezar
 cockpit that queues ops. Nothing blocks on the link: not a todo write, not a run a person starts by
@@ -475,11 +630,29 @@ Vertical slice following the `automations` convention — *"not modular; no plug
   path exactly as it is when clustering is off.
 - `server.ts` — one wiring line beside the existing `providerRuntimeAuth.watch` /
   `watchTodoAutostart` block; one route family chained into the builder.
-- **Nothing in `runs/store.ts`.** `RunStore extends EventEmitter` and already emits `run`, `event`
-  and `deleted`, so the run projection is an observer that `watch(store)`es it — the shape
-  `provider-auth-runtime.ts` and `notifications/observer.ts` already use, wired through the same
-  `onStoreCreated` / `onContextBuilt` hooks so it covers the boot context, every already-built
-  context and every later one.
+- **Nothing in `runs/store.ts` for the *cluster* half.** `RunStore extends EventEmitter` and already
+  emits `run`, `event` and `deleted`, so the run projection is an observer that `watch(store)`es it
+  — the shape `provider-auth-runtime.ts` and `notifications/observer.ts` already use, wired through
+  the same `onStoreCreated` / `onContextBuilt` hooks so it covers the boot context, every
+  already-built context and every later one.
+
+**Phase 0 is a separate, smaller diff, and it does touch the store** — the sentence above is about
+phases 1-5 only, and saying "nothing else" without this caveat would have been false:
+
+- `runs/store.ts` — four additive optional fields (`peakCpuPct`, `peakMemoryBytes`, `cpuSeconds`,
+  `resourceKill`). Additive and optional, so an older cezar reading a newer `runs.json` is
+  unaffected; no published union is widened.
+- `core/process-usage.ts` — keep a peak for the CPU it already samples, and on Linux prefer the
+  run's cgroup (`memory.peak`, `cpu.stat`) over summing `ps` RSS.
+- `core/broker-isolation.ts` — pass `--property=` resource properties onto the scope it already
+  creates. The scope exists today and carries none.
+- `workspace/semaphore.ts` — the second semaphore (`maxHeavySteps`), taken and released around a
+  step rather than a run.
+- `workflows/types.ts` — a `heavy?: boolean` on the step definition, defaulting on for `run-tests`.
+  Declared, never inferred from the step's name at runtime.
+- `packages/cezar/vitest.config.ts` and the agent search path — worker/thread caps.
+
+None of that needs a second machine, a link, or a lease, which is exactly why it is Phase 0.
 - `capabilities.ts` — `cluster: boolean`, **always present** and `false` when off, like every other
   capability key. Do not re-assert the "flag-off health body is byte-identical" claim: it was
   measured false and corrected in place in that file, and this key makes the body grow by one more
@@ -542,8 +715,24 @@ dirty file while every pull silently failed. A push is not delivery; this makes 
 
 ## Phases
 
-Each phase is independently shippable and independently verifiable. The ordering is chosen so that
-**no phase ever creates shared state without the lease that makes it safe.**
+Each phase is independently shippable and independently verifiable. Two rules set the ordering:
+**no phase creates shared state without the lease that makes it safe**, and **the box gets faster
+before it gets a partner** — otherwise a second node just reproduces the same saturation twice.
+
+**Phase 0 — Raise concurrency on the box that already exists. No cluster.**
+This is the phase that delivers the owner's 8, and it needs no link, no replication and no second
+machine. In order:
+
+1. **Measure what a run actually costs.** Persist peak CPU beside `peakRssBytes`, and on Linux read
+   `memory.peak` / `cpu.stat` from the run's own cgroup instead of summing `ps` RSS. Right now the
+   resource this spec is about is the one resource nothing records.
+2. **Bound the burst** (D14a): `MemoryHigh`/`MemoryMax` and `CPUWeight` on the run scope, a ceiling
+   on `cezar-runs.slice`, capped vitest workers and ripgrep threads.
+3. **Gate the burst** (D14): `maxHeavySteps`, declared per workflow step, default 2 on this box.
+4. **Raise `maxParallel` to 8** and hold it there while (1) reports what happened.
+
+Ship Phase 0 alone and stop, if it is enough. Everything after it is about going *past* one box —
+and Phase 0's measurements are what tell you whether you need to.
 
 **Phase 1 — Identity and link (inert).**
 `nodeId`, discovered labels, enrollment, outbound WS, presence, protocol-version handshake,
@@ -607,6 +796,20 @@ atomic tmp+rename at `0600`, corrupt file degrades to empty with one warning and
   acceptsDispatch: boolean,             // default false
   labels: string[] }                    // DISCOVERED each boot, persisted for display only
 
+// ~/.cezar/config.json  `resources` — extended, both additive and optional
+{ maxParallel: number,                  // existing; box moves 5 -> 8 in Phase 0
+  maxHeavySteps?: number,               // NEW (D14). absent = unbounded, i.e. today's behaviour
+  runMemoryHighMb?: number | null,      // NEW (D14a) -> scope MemoryHigh, Linux only
+  runMemoryMaxMb?: number | null,       // NEW (D14a) -> scope MemoryMax,  Linux only
+  runCpuWeight?: number | null,         // NEW (D14a) -> scope CPUWeight,  Linux only
+  runsSliceMemoryMaxMb?: number | null } // NEW (D14a) -> ceiling on cezar-runs.slice
+
+// RunRecord — additive, optional, closes the gap in Problem §2
+{ peakCpuPct?: number,                  // sampled today, persisted by nobody
+  peakMemoryBytes?: number,             // cgroup memory.peak on Linux; NOT the summed-ps figure
+  cpuSeconds?: number,                  // cgroup cpu.stat usage_usec
+  resourceKill?: { limit: 'memory' | 'cpu'; at: string } }  // C3: never a bare step failure
+
 // ~/.cezar/cluster/peers.json          (roster, replicated)
 { nodes: [{ nodeId, nodeName, labels, lastSeenAt, acceptsDispatch, protocol, version,
             disabledAt? }],
@@ -667,7 +870,9 @@ Frames (`.strict()`, versioned `protocol: { major, minor }`):
             workflow: { builtinId } | { def },                    D12a: by value, never by name
             expect?: { headSha } }                                D12a: refuse a stale target
 → freshness{ projectKey, headSha, ahead, behind, dirty, merging } asked before every dispatch
-→ presence{ activeRuns, hostMetrics, repoDrift[] }
+→ presence{ capacity: { maxParallel, active, maxHeavySteps, heavyActive,      D14: what the
+                        enforcement: 'cgroup' | 'process-tree' | 'none' },    scheduler fills
+            hostMetrics, repoDrift[] }
 → relay   { runId, events[] }                                     Phase 4, on demand only
 ```
 
@@ -684,6 +889,9 @@ terminal" for a run on somebody else's host.
 
 | risk | mitigation |
 |---|---|
+| **Oversubscription thrashes instead of scaling** — 8 admitted, all correlated into `run-tests` together | `maxHeavySteps` is a semaphore, not a probability (D14); C2 tests the correlated launch specifically; C1's acceptance is *lower* wall time, so admitting 8 and finishing slower fails the phase |
+| **A resource kill reads as a broken test** and the agent "fixes" working code | C3 makes it a named resource kill with a reason, never a bare step failure — the same "every mechanism that terminates someone else's work owes the record a reason" rule the stopped-vs-failed work already established |
+| **Capacity that sleeps** — the big node is a laptop | queued tasks say "waiting for `mac`" rather than stalling; the hub must remain able to run work alone, so Phase 0's box-side ceiling is the floor of the design, not a stopgap |
 | **Double-started run** (the headline hazard) | claim lease before autostart is re-enabled for replicated todos; Phase 2 disables it outright; negative control asserts a node without the lease does not start |
 | **Shared subscription burned twice** | cluster account grants + shared limit holds (Phase 3); degraded fallback marks the dispatch `unattributed` rather than blocking |
 | **Wrong pairing writes a foreign backlog into a repo** | confirm-once pairing, never slug-only *and* never origin-only (a worktree shares its parent's origin — Problem §6); unpaired = replicates nothing; `--dry-run` before the first reconcile; `todos.json.bak` written before the first merge |
@@ -701,6 +909,32 @@ terminal" for a run on somebody else's host.
 ## Verification
 
 Planned up front, per the workspace rule that verification is a design input.
+
+### Phase 0 — the capacity claim, which is the one that decides everything else
+
+This is a throughput claim, so it is verified by a load test with a **before** number, not by unit
+tests. Run it on the box, twice, with the same eight tasks.
+
+- **C0 — Baseline, recorded before any change.** Launch 8 real tasks at today's settings. Record:
+  how many reach `run-tests` concurrently, peak `memory.peak` per scope, `/proc/pressure/cpu` and
+  `/proc/pressure/memory` `some avg60` at the worst minute, any OOM kill (`journalctl -k`), and wall
+  time to all-8-complete. Expect it to confirm the 3-to-4 ceiling; **if it does not, stop** — the
+  premise is wrong and the rest of Phase 0 is solving someone else's problem.
+- **C1 — After bounding + gating.** Same 8 tasks. Acceptance: **all 8 admitted and progressing**,
+  never more than `maxHeavySteps` in a heavy step at once, no OOM kill, memory PSI `full` stays 0,
+  and **wall time to all-8-complete is lower than C0**. That last one is the real gate: a machine
+  that admits 8 and finishes slower has been oversubscribed, not scaled.
+- **C2 — The correlated launch, which is the case the maths does not cover.** The 12.9 % duty cycle
+  assumes independence; eight tasks started together do not have it. Launch 8 *identical* workflows
+  simultaneously so their heavy phases align, and assert the gate — not luck — is what holds the
+  line: queueing at the gate is expected and fine, thrashing is not.
+- **C3 — Negative control on the bound.** Set `MemoryMax` deliberately low, run one testing task,
+  and assert it is killed **and reported as a resource kill with a reason**, not as a failed test
+  step. A bound whose failure mode is indistinguishable from a code failure will be blamed on the
+  code, and the run's own agent will "fix" a test that was never broken.
+- **C4 — The cockpit stays responsive at 8.** `cezar-runs.slice` has a ceiling for exactly this;
+  assert `/api/v1/health` latency under full load. Losing the ability to observe an overload is how
+  an overload becomes an outage.
 
 ### Automated
 
@@ -797,14 +1031,26 @@ for them — that is precisely how the two copies became unrelated histories in 
 
 ## Open questions for the owner
 
-1. **Which node is the hub?** This spec assumes `hel1` (always on, addressable). The alternative —
-   Mac as hub — inverts the reachability problem and is not recommended.
-2. **Should the Mac accept dispatched work at all in v1**, or only be a place to *file* work and run
-   device E2E on request? Default in this spec is off, opt-in.
-3. **Cockpit-app Access service token, or ride the SSH tunnel?** A token on the cockpit app's policy
+1. **Is Phase 0 enough?** The measurements say 8 concurrent runs probably fit on the *existing* box
+   once the heavy step is bounded and gated — 12.9 % duty cycle, ~1 expected simultaneous heavy
+   step. If C1 confirms that, the cluster becomes a way to go past 8 and to use the Mac's 128 GB,
+   not a prerequisite for 8. Worth deciding whether to ship Phase 0 and re-measure before committing
+   to phases 1-5.
+2. **A third node instead of, or as well as, the Mac?** The Mac is the biggest machine here but it
+   sleeps and it is the owner's own workstation — eight agents forking 50 processes each is felt.
+   A second VPS is capacity that never sleeps and never competes with the person using it, at a
+   known monthly price. The design treats both identically; the choice is about cost and about
+   whether you want agent load on your desk.
+3. **Which node is the hub?** This spec assumes `hel1` (always on, addressable). Note it is now
+   explicitly the *weaker* worker — hub is a reachability role, not a capacity one. Mac-as-hub
+   inverts the reachability problem and is not recommended.
+4. **Should the Mac accept dispatched work at all in v1**, or only be a place to *file* work and run
+   device E2E on request? Default in this spec is off, opt-in — but with the capacity framing that
+   default is now the thing standing between you and the 128 GB.
+5. **Cockpit-app Access service token, or ride the SSH tunnel?** A token on the cockpit app's policy
    is cleaner and independently revocable; the SSH tunnel needs no Cloudflare change.
-4. **Do run *records* replicate in Phase 3, or is one merged board deferred?** Todos are the value;
+6. **Do run *records* replicate in Phase 3, or is one merged board deferred?** Todos are the value;
    runs are the nice-to-have.
-5. **Does this go upstream?** `open-mercato/cezar` is never pushed to, but this is a general
+7. **Does this go upstream?** `open-mercato/cezar` is never pushed to, but this is a general
    feature. If it should stay fork-private, say so before Phase 1 — it changes nothing technically
    and everything about how the flags are documented.
