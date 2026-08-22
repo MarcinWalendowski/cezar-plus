@@ -72,6 +72,15 @@ the exception: the biggest machine here, and the one that sleeps, so it is a *ca
 may take overflow, never a capacity number you can count on. The next ceiling after compute is not
 compute — it is the **agent subscription**, for which no measured number exists (§4, Q2a).
 
+**The knowledge corpus is the one thing that moves in exactly one direction.** It stays
+single-writer on the hub — that property is what the 2026-08-19 cutover bought — but every node
+that runs an agent needs it **on disk**, because an agent reads knowledge as `--add-dir` paths, not
+as an API, and a node without it produces no knowledge prompt block *at all*, silently. So spokes
+sweep a **pull-only, read-only mirror** through cezar's existing `sources/` connector (one new
+provider file, one registry row: tombstones, watermarks, quarantine and `notifyChanged` all already
+built and tested), scoped per node so 196 files of user reports never land on a machine we plan to
+destroy. 13 MB and ~115 KB of churn a day — the cost is nothing, the correctness is everything.
+
 **A fleet you cannot see is a fleet you will not run.** So the cockpit gets its own stage
 (**Phase 1b**, before any state replicates): one Settings section listing every node with the two
 numbers admission actually uses (`active/maxParallel`, `heavyActive/maxHeavySteps`), which
@@ -328,6 +337,27 @@ nobody. So each node added past the point where the pool saturates buys queueing
 and the spec has **no measured number** for where that point is. Do not guess one: reach 8
 concurrent, read the account panel's real usage windows at that load, then decide about nodes 4-6.
 
+### 4a. The Mac is already reading a five-day-old record, and nothing says so
+
+Not a risk this design introduces — a live condition it uncovered. Measured 2026-08-22: the Mac's
+cockpit runs with **`CEZ_KB=1`** and its knowledge manifest still registers the `notion` root at
+`/Users/mw/loki-labs/notion-export`, the **retired** cold backup. **2082 files, newest mtime
+2026-08-17 22:17**, against **2140** on the box — the record is **58 documents ahead**, and the
+Mac's catalog has not reindexed since 2026-08-17 either.
+
+An agent run from that cockpit is therefore granted `--add-dir` onto a frozen corpus, because an
+agent's knowledge interface is **filesystem paths**, not an API: `workflows/run.ts` feeds
+`knowledgeSummary.roots.map(r => r.path)` into `additionalDirectories` and `claude-cli-runner.ts`
+emits one `--add-dir` per root. Knowledge-first is rule 1 of `AGENTS.md`, so the agent obeys it, on
+a five-day-old copy, and reports success.
+
+**Two separate failures, and they need separate fixes.** A node with *no* corpus produces **no
+knowledge block at all** (`loadKnowledgeSummary` returns `undefined`, the block is simply absent —
+indistinguishable from "this project has no knowledge"). A node with a *stale* corpus produces a
+confident wrong answer. The first is what a fresh VPS worker would do; the second is what the Mac
+does today. D8a addresses both: put the corpus on the node, and **stamp it** so its age is a thing
+you can see.
+
 ### 5. Node-local state is most of the bytes, and none of it should move
 
 Measured on the box:
@@ -431,7 +461,15 @@ The whole design is this table. Anything not in tier 1 does not replicate.
 | todos | `.ai/cezar/todos.json` (merged in place) | project |
 | run **index projection** | `~/.cezar/cluster/runs-remote.json` (new, additive) | project |
 | reports triage decisions | `~/.cezar/reports-triage.json` | workspace |
+| **captured notes** (`~/.cezar/notes.json`) | the capture inbox | workspace |
 | node roster, pairings, placement rules | `~/.cezar/cluster/*` (new) | workspace |
+
+`notes.json` is here because it was **missing from every tier in the first two drafts** — a plain
+omission, not a decision. It is a capture inbox: the whole point is filing a thought from whichever
+machine you are sitting at, which is exactly the Mac, and a capture that reaches only the laptop it
+was typed on is the same failure as the hand-mirrored backlog in §1. Its *processing* (the Loop,
+`notes/pipeline.ts`) is a different matter and stays hub-leased with the other schedulers in Phase
+5 — a note processed twice creates the work twice.
 
 **Tier 2 — hub-authoritative, spokes call through**
 
@@ -440,7 +478,7 @@ The whole design is this table. Anything not in tier 1 does not replicate.
 | todo **claim lease** (who may start it) | mutual exclusion is not eventually consistent |
 | agent-account **grant** + usage aggregate + limit holds | one subscription, N hosts |
 | **scheduler ownership** (automations, sources, backup) | a schedule ticked twice does the work twice |
-| the KB corpus (`notion-export`) | see D8 — the Mac copy is *deliberately* retired |
+| the KB corpus (`notion-export`) — hub is the only writer, spokes get a **pull-only read mirror** | see D8/D8a: the Mac copy is *deliberately* retired, and a second writer is what the cutover killed |
 
 **Tier 3 — never replicated**
 
@@ -523,12 +561,96 @@ every other writer. Two consequences, both free: the existing `fs.watch` fires, 
 and the WS topics update with **no new read path anywhere**; and a replicated write can never
 interleave with a local one.
 
-**D8 — The KB corpus does not replicate. The hub stays its single writer.**
+**D8 — The KB corpus has exactly one writer, the hub. Spokes get a pull-only read mirror.**
 `~/loki-labs/notion-export` on the Mac is a *deliberately retired* cold backup (production cutover
 2026-08-19). A "sync everything" cluster would silently make it live again and re-create exactly the
-drift the cutover killed. Spokes read the corpus **through the hub** (`/api/v1/workspace/knowledge`)
-with a read-only local cache, marked read-only, never written back. This is the one place where the
-obvious behaviour is the wrong one, so it is a decision rather than an omission.
+drift the cutover killed. So the corpus is **never** bidirectional and a spoke never writes into its
+own copy. This is the one place where the obvious behaviour is the wrong one, so it is a decision
+rather than an omission.
+
+**CORRECTED 2026-08-22 (same day) — the single-writer rule stands; the MECHANISM was wrong.** This
+decision read: ~~"Spokes read the corpus **through the hub** (`/api/v1/workspace/knowledge`) with a
+read-only local cache, marked read-only, never written back."~~ That serves the *cockpit* and
+cannot serve an *agent*, which is the consumer that matters once a worker runs work. Measured in
+the code: an agent's knowledge access is **filesystem paths**, not an API — `workflows/run.ts`
+passes `knowledgeSummary.roots.map(r => r.path)` into `additionalDirectories`, which
+`claude-cli-runner.ts` turns into one `--add-dir <path>` per root, and `loadKnowledgeSummary` reads
+the *persisted catalog for that node's own dataDir*. A worker with no corpus on disk therefore has
+no roots to grant, no catalog to summarize, and **no knowledge block in its system prompt at all** —
+and it fails **silently**: `loadKnowledgeSummary` returns `undefined` and the prompt block is simply
+absent, which is indistinguishable from "this project has no knowledge". Knowledge-first is the
+first rule in `AGENTS.md`; a node that cannot read the record would follow it by reading nothing and
+report success. Replaced by a real mirror on disk — **D8a**.
+
+**D8a — The corpus mirror is a source connector, not a new transport.**
+cezar already has a tested one-way document-mirroring machine, built for exactly this shape:
+`sources/` (spec `2026-08-06-external-source-connectors-notion.md`), whose own registry docblock
+says *"a second provider is one new file plus one row in `SOURCE_PROVIDERS` — no contract change,
+no route change, no UI change"*. The hub becomes a provider (`kind: 'cezar-hub'`), and the spoke
+sweeps it. What that buys, none of which has to be designed again:
+
+- **watermark-resumable sweeps** with backoff and full jitter, and `truncated` distinguished from
+  failed — a spoke that was asleep resumes rather than refetching;
+- **explicit tombstones**, never absence-diffing — the sweep's own docblock is emphatic that a
+  document's absence from one delta is not evidence of deletion, which is the bug a hand-rolled
+  rsync-shaped mirror would ship;
+- **`quarantine`**, whose contract is *"the incoming body is quarantined; the local body is left
+  byte-identical"* — precisely the right behaviour when a local file has diverged, i.e. when
+  something on this node wrote into the mirror. Silently overwriting it would destroy evidence;
+  silently keeping it would fork the record;
+- **`notifyChanged`** after every commit, *"required after every sweep, never best effort"* — so
+  the KB index picks the mirror up with no restart;
+- **`adopt`**, a one-way cutover out of the read-only mirror into the writable root, already built.
+
+Two properties this design must add on top, because they are cluster-specific:
+
+1. **The sweep is node-local and therefore takes no scheduler lease.** It writes only this node's
+   own mirror, so the Phase 5 test — *"does a second tick do the work a second time, anywhere but
+   here?"* — answers no. Leasing it would be the wrong instinct.
+2. **The mirror is scoped, and `reports/` is the reason.** 196 files of user reports carrying
+   phones and chat ids. Mirroring them to a rebuild-on-a-whim VPS worker spreads PII to machines
+   whose whole premise is that they are disposable. Default mirror set for a worker:
+   `knowledge/`, `domains/`, `changelog/`, `tasks/`. `reports/` and `raw-input/` are opt-in per
+   node, off by default, and the cockpit says which set a node holds — an agent must never be left
+   guessing whether "not found" means absent or unmirrored.
+
+**Sync cost is not the constraint here; correctness is.** Measured 2026-08-22: the corpus is
+**13 MB / 2140 files** (tasks 636 · changelog 832 · knowledge 433 · reports 196 · raw-input 33 ·
+domains 9) and churns **19 files / 115 KB in 24 h** (31 files / 182 KB in 48 h). A full snapshot is
+one HTTP response; a day of deltas is a rounding error against the 58 ms link. So spend the design
+budget on being auditably correct — divergence detection, tombstones, staleness — and not on being
+clever about bytes. (Careful with the obvious measurement: every file's mtime is ≥ 2026-08-17
+because that is when the import wrote them all, so "files changed in the last 7 days" returns the
+whole corpus and means nothing.)
+
+**This is not a hypothetical, and the evidence is the Mac, today.** Measured 2026-08-22 while
+writing this section: the Mac's cockpit is running (`serve --repo /Users/mw/loki-labs`, pid 38230)
+with **`CEZ_KB=1`**, and its knowledge manifest still registers `notion` →
+`/Users/mw/loki-labs/notion-export`, `readOnly: true`. That tree is the **retired** cold backup —
+**2082 files, newest mtime 2026-08-17 22:17**, against the box's **2140**, so the record is **58
+documents ahead**. The Mac's own catalog was last written 2026-08-17 22:17 and has not reindexed
+since; neither document written to the record today exists there. So a Mac agent asked to do
+knowledge-first work right now is granted `--add-dir` onto a five-day-old corpus and told nothing.
+The retired copy did not need a cluster to become a hazard — it already is one, silently, and the
+staleness stamp below is the part that would have said so.
+
+**A stale mirror must be loud, because a knowledge read has no natural error.** A wrong commit
+throws; a corpus that is four hours behind just returns an older answer, confidently. So the mirror
+carries the hub's corpus version and its own fetch time, the cockpit's node row renders corpus
+freshness **beside** repo drift (they fail the same way and belong side by side), and a dispatch to
+a node whose mirror is stale past a bound is **refused with that reason named** — the same shape as
+D12a's refusal of a checkout that is behind or mid-conflict, for the same reason: "it ran, against
+stale knowledge, on a machine you weren't looking at" is the expensive outcome.
+
+**And a spoke's knowledge WRITES go to the hub, or nowhere.** The `notion` root is already
+`readOnly: true` in the live manifest on the box, so `cez kb write` is refused everywhere by
+machinery that exists (`READ_ONLY_ROOT_REFUSAL`). That is not sufficient on a spoke, because
+`--add-dir` grants the agent write access to the mirror path directly — it can create a file the
+`readOnly` flag never sees. Two halves, and both are needed: the sweep **quarantines** a diverged
+file rather than overwriting it (so the write is preserved and visible rather than destroyed), and
+`cez kb submit` forwards a document to the hub over the link so there is a *correct* path that is
+easier than the wrong one. A rule that only forbids, without offering the affordance it replaces,
+gets routed around.
 
 **D9 — Run events are relayed on demand, never replicated.** ~146 MB of run NDJSON across a single
 day's active files, and a single run can be 25.7 MB. A spoke streams a run's events to the hub only
@@ -764,6 +886,7 @@ packages/cezar/src/cluster/
 packages/cezar/src/server/cluster-routes.ts
 packages/contract/src/cluster.ts
 packages/web/src/routes/settings/cluster-section.tsx    Phase 1b: the fleet panel + Add node
+packages/cezar/src/sources/cezar-hub/provider.ts       Phase 3b: the hub as a source (D8a)
 ```
 
 Plus one extension rather than a new module: `server-install/platforms/hetzner.ts` gains a
@@ -794,6 +917,10 @@ Vertical slice following the `automations` convention — *"not modular; no plug
   pair. What opt-in buys is behavioural — no index, no watcher, no timer, no route, no nav item, no
   prompt bytes.
 - `workspace-runs-routes.ts` — union the remote projection into the workspace runs list.
+- `sources/registry.tsx`'s `SOURCE_PROVIDERS` — **one** row (`cezar-hub`). The seam's own docblock
+  promises a provider costs one file plus one row, with no contract, route or UI change; this is
+  the first outside test of that claim, and if it turns out to cost more, say so rather than
+  widening the seam quietly.
 - `routes/settings/registry.tsx` — **one** entry (`id: 'cluster'`, `appliesTo: 'workspace'`,
   `capability: 'cluster'`) and the `SettingsCapabilities` alias widened to include `cluster`, so
   the shell that forwards capabilities cannot fall behind the filter that reads them. The registry
@@ -1004,6 +1131,24 @@ first; `todos.json.bak` written on both sides before the first write.
 Claim lease (re-enables autostart for replicated todos, now exactly-once), account grants + usage
 aggregation + cluster-wide limit holds, run index projection.
 
+**Phase 3b — Corpus mirror: a worker that cannot read the record cannot do the work.**
+Ordered here, immediately before dispatch, because Phase 4 is the first time a node other than the
+hub runs an agent, and knowledge-first is rule 1 of `AGENTS.md`. Shipping Phase 4 without this
+produces a worker that follows the rule by reading nothing and reports success (D8's correction).
+
+`sources/cezar-hub/provider.ts` plus one row in `SOURCE_PROVIDERS` (D8a): a spoke sweeps the hub's
+corpus into a `readOnly` mirror root, tombstones included, `notifyChanged` after every commit so the
+index follows with no restart. Then the three things that make it honest rather than merely working:
+a **fetch time + hub corpus version** on the mirror, rendered in the node row beside repo drift; a
+**dispatch refusal** when the mirror is stale past its bound, naming that reason; and **quarantine
+plus `cez kb submit`** so a local write is preserved and visible, and has a correct path to the hub
+instead of only a prohibition.
+
+Mirror scope is per node and `reports/` is off by default — 196 files carrying phones and chat ids
+have no business on a machine whose premise is that it gets destroyed. The cockpit shows which set
+a node holds, so "not found" is never ambiguous between *absent from the record* and *not mirrored
+here*.
+
 **Phase 4 — Placement, remote dispatch, and a worker you can mint in minutes.**
 `placement` on a todo, label matching, queue-with-reason, spoke-side `acceptsDispatch` opt-in,
 workflow-by-value and the pre-dispatch freshness refusal (D12a), on-demand live event relay for a
@@ -1117,6 +1262,13 @@ POST   /api/v1/cluster/join                 spoke: redeem a code (CLI-driven). F
                                             code-used | hub-unreachable | protocol-major
 DELETE /api/v1/cluster/nodes/:nodeId        hub: revoke
 PATCH  /api/v1/cluster/nodes/:nodeId        acceptsDispatch, name  (spoke re-enforces)
+GET    /api/v1/cluster/corpus                hub: manifest — { corpusVersion, docs:
+                                            [{path, hash, size, mtime}] }, scoped to the
+                                            asking node's mirror set (D8a)
+GET    /api/v1/cluster/corpus/*path         hub: one document body
+POST   /api/v1/cluster/corpus/submit        spoke -> hub: forward a knowledge write
+                                            (`cez kb submit`). The ONLY write direction
+                                            that exists for the corpus
 GET    /api/v1/cluster/pairings             proposals + confirmed
 POST   /api/v1/cluster/pairings/:projectKey confirm / unpair
 POST   /api/v1/cluster/leases/:kind         acquire/renew  (claim | account | scheduler)
@@ -1140,7 +1292,10 @@ Frames (`.strict()`, versioned `protocol: { major, minor }`):
 → freshness{ projectKey, headSha, ahead, behind, dirty, merging } asked before every dispatch
 → presence{ capacity: { maxParallel, active, maxHeavySteps, heavyActive,      D14: what the
                         enforcement: 'cgroup' | 'process-tree' | 'none' },    scheduler fills
-            hostMetrics, repoDrift[] }
+            hostMetrics, repoDrift[],
+            corpus: { version, fetchedAt, scope[], quarantined } }            D8a: stale
+                                                                             knowledge has
+                                                                             no natural error
 → relay   { runId, events[] }                                     Phase 4, on demand only
 ```
 
@@ -1171,7 +1326,10 @@ terminal" for a run on somebody else's host.
 | **Op log growth** | compaction to the latest `cv` per entity + bounded retention; a partition older than the window falls back to full snapshot reconcile, never a partial merge that reads as complete |
 | **Watcher goes quiet after Mac sleep** | periodic reconcile is the floor, not the watcher (D16); last-successful-reconcile is a rendered health signal |
 | **Hub is a single point of failure** | it is one for *coordination*, never for local work (D15). A spoke with no hub is an ordinary cockpit. Stated as a bound, not hidden |
-| **Retired Mac corpus resurrected** | D8: corpus is explicitly out of tier 1; spokes read through the hub, cache read-only |
+| **Retired Mac corpus resurrected** — a "sync everything" cluster makes the frozen copy live again | D8: one writer, the hub. The mirror is pull-only and the `notion` root is already `readOnly: true` in the live manifest, so no code path writes back; the only write direction is `POST /cluster/corpus/submit` |
+| **A worker runs knowledge-blind and says nothing** — `loadKnowledgeSummary` returns `undefined` and the prompt block is simply absent, which reads as "this project has no knowledge" | D8a puts the corpus on the worker's disk, where the agent's `--add-dir` interface can actually reach it; a node reports its mirror scope and freshness on `presence`, and E9 asserts a dispatched run on a fresh worker can quote a corpus document rather than asserting a file exists |
+| **A stale mirror answers confidently** — an old corpus returns an older answer, never an error | fetch time + hub corpus version on the mirror, rendered beside repo drift; dispatch refuses past a staleness bound with that reason named (D12a's shape) |
+| **PII spread to disposable machines** — `reports/` is 196 files of phones and chat ids | mirror scope is per node, `reports/` and `raw-input/` opt-in and off by default; the cockpit shows which set a node holds so "not found" is never ambiguous |
 | **A copy-paste install command leaks a durable credential** — cockpit commands get screenshotted, pasted into chat, and left in shell history on machines we don't own | nothing long-lived goes in the pasteable string: the code is single-use, short-TTL and stored as a digest; the Access credential comes from the operator's environment, never the rendered line. Test 13a asserts the *absence*, not just the shape |
 | **Enrollment grants code execution on the Mac** | outbound-only, `acceptsDispatch` off by default and spoke-enforced, per-node credential, two-sided revoke |
 | **A destroyed worker takes the only copy of something with it** — 4 of 12 projects have no `origin` | those projects are pinned to their holding node by placement, with their own `queuedReason`; decommission (`cez cluster revoke` + `cez server-uninstall`) drains first and refuses while it holds an unpushable-anywhere copy (D12) |
@@ -1277,6 +1435,21 @@ above stays stable:
     halves asserted — one without the other is the rule silently collapsing to its neighbour.
 15. **Heal-on-read**: a raw agent append (no `id`, no `cv`) is stamped once, and a second read
     changes nothing (idempotent), and the derived op carries the id the file kept.
+16. **Corpus sweep, tombstone half** (D8a): delete a document on the hub → it is tombstoned on the
+    spoke. *Negative control:* a document that merely fails to appear in one watermark-filtered
+    delta is **not** deleted — that is the exact bug the `sources` sweep's own docblock warns about,
+    so the test has to distinguish an explicit tombstone from an absence.
+17. **Divergence is quarantined, never overwritten and never merged.** Write a differing body into
+    a mirrored path on the spoke, sweep, and assert the local body is **byte-identical** afterwards
+    and the path is reported quarantined. Both halves: asserting only "quarantined" passes against
+    code that also clobbered the file.
+18. **Mirror scope is honoured and legible.** With `reports/` off, no report file exists on the
+    spoke **and** the node reports a scope that excludes it. The second assertion is the point —
+    without it, "not found" and "not mirrored" are the same observation.
+19. **A stale mirror refuses a dispatch, with that reason.** Advance the hub's `corpusVersion`, hold
+    the spoke's mirror back past the bound, dispatch → refused, reason names the corpus. *Negative
+    control:* a fresh mirror does not refuse, so the test cannot pass against a node that refuses
+    everything.
 
 ### Runtime E2E — the real pair, and the gate that actually decides
 
@@ -1320,6 +1493,13 @@ Gates green is necessary, not sufficient. Until these have run the work is **QA 
   compare wall time to all-8-complete against the single-box C1 number. This is the only evidence
   that a second machine bought throughput rather than just moved queueing around; a cluster that
   admits 8 and finishes no faster than one box has paid EUR 20/mo for latency.
+- **E5d** Knowledge on a worker, end to end and asserted at the **agent's** level, not the file
+  system's: provision a fresh worker, dispatch a task whose prompt requires a fact that exists only
+  in the corpus, and assert the agent **quotes it**. Asserting "the files are on disk" is the
+  vacuous version — the whole failure this guards against is files present but never granted
+  (`--add-dir`) or never indexed, which leaves the prompt block silently absent. Then the negative
+  control that makes it mean something: run the same task on a node with the mirror **disabled**
+  and confirm it visibly cannot answer, rather than inventing an answer.
 - **E6** Account grants: dispatch from both nodes at once → the hub's account panel shows one
   coherent utilisation, and a limit hold observed on one node parks the other.
 - **E7** Sleep/resume: close the Mac for an hour with pending ops on both sides; on wake, converge
@@ -1336,6 +1516,9 @@ Events named while designing, per the workspace rule: `cluster.node_enrolled`,
 (adds/updates/conflicts, duration), and for Phase 1b `cluster.code_minted` /
 `cluster.code_redeemed` / `cluster.code_expired_unused` (the three together answer "did the
 one-liner actually work for people", which a mint count alone cannot) plus
+`cluster.corpus_swept` (docs changed, tombstoned, bytes, duration, resulting `corpusVersion`),
+`cluster.corpus_quarantined` (path — a non-zero count means something on a node is writing into a
+read-only mirror, which is a finding, not a metric), `cluster.dispatch_refused_stale_corpus`, and
 `cluster.join_failed` **carrying the named reason** — an access rejection and a stale code have
 different fixes and must not aggregate into one number. No analytics sink exists in this repo today — stated, not
 invented; these are the names to use when one lands.
@@ -1344,7 +1527,11 @@ invented; these are the names to use when one lands.
 
 Not HA and not failover — the hub is a coordination SPOF by design (D15 bounds the damage). Not
 multi-tenant. Not a live-run migration. Not a second code-sync mechanism — git remains it. Not a
-cluster-wide `maxParallel` (D14). Not replication of the KB corpus (D8).
+cluster-wide `maxParallel` (D14). **Not *replication* of the KB corpus** — corrected 2026-08-22
+from a flat "not the KB corpus": spokes do get a **pull-only read mirror** (D8a), because an agent
+reads knowledge as files on its own disk. What stays out of scope is the bidirectional half: no
+spoke ever writes into the record, which is the property the 2026-08-19 cutover bought and the one
+this design refuses to spend.
 
 **Not autoscaling.** Worker provisioning is a script a person runs, not a controller that reacts
 to load. At this size the reaction time that matters is minutes and the fleet changes monthly — but
@@ -1390,6 +1577,11 @@ for them — that is precisely how the two copies became unrelated histories in 
    is cleaner and independently revocable; the SSH tunnel needs no Cloudflare change.
 6. **Do run *records* replicate in Phase 3, or is one merged board deferred?** Todos are the value;
    runs are the nice-to-have.
-7. **Does this go upstream?** `open-mercato/cezar` is never pushed to, but this is a general
+7. **What does a worker's mirror include by default?** The spec proposes `knowledge/`, `domains/`,
+   `changelog/`, `tasks/` on, `reports/` and `raw-input/` off — reports carry phones and chat ids.
+   The cost of being wrong is asymmetric: too narrow means an agent occasionally cannot see a
+   report it needed and says so; too wide means PII on a rebuilt-at-will VPS. Confirm the default,
+   or say reports should be mirrored and accept that.
+8. **Does this go upstream?** `open-mercato/cezar` is never pushed to, but this is a general
    feature. If it should stay fork-private, say so before Phase 1 — it changes nothing technically
    and everything about how the flags are documented.
