@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { specRevisionFeedback } from './run.ts';
 import { parseReviewVerdict, SPEC_TO_DEPLOY_WORKFLOW } from './types.ts';
 
 /**
@@ -52,5 +53,46 @@ describe('the review step and the parser agree on the vocabulary', () => {
     for (const word of offered) {
       expect(parseReviewVerdict(`verdict:\nCEZ:REVIEW=${word}`)).toBe(word);
     }
+  });
+
+  // Pinned per review iteration 2's nit (spec .ai/specs/2026-08-21-structured-review-targeted-
+  // spec-edits.md): the FILE/SECTION/CHANGE shape now shows `CEZ:REVIEW=` markers by example
+  // inside its own prompt text, and the drift guard above scans EVERY occurrence in the prompt —
+  // so a future example block that mentions a verdict word the parser cannot read would silently
+  // fail the loop above rather than this being noticed as a false negative. Explicit here so a
+  // reader does not have to re-derive that the loop already covers this case.
+  it('offers exactly the two verdict words, even with the change-list shape shown by example', () => {
+    const prompt = SPEC_TO_DEPLOY_WORKFLOW.steps.find((s) => s.id === 'review-spec')?.prompt ?? '';
+    const offered = [...prompt.matchAll(/CEZ:REVIEW=(\w+)/g)].map((m) => m[1]);
+    expect(new Set(offered)).toEqual(new Set(['pass', 'revise']));
+  });
+});
+
+/**
+ * `specRevisionFeedback()` (spec .ai/specs/2026-08-21-structured-review-targeted-spec-edits.md,
+ * § Solution 2): wraps a reviewer's (or human's) notes with the fixed instruction that makes a
+ * change list something the `spec` step can act on mechanically — apply as targeted edits, don't
+ * re-emit the whole file.
+ */
+describe('specRevisionFeedback', () => {
+  const report = '1. FILE: .ai/specs/foo.md\n   SECTION: ## Risks\n   CHANGE: add a risk about X.';
+
+  it('instructs targeted edits, forbids a full rewrite, and carries the report verbatim', () => {
+    const feedback = specRevisionFeedback(report, '.ai/specs/foo.md');
+    expect(feedback).toContain('TARGETED EDIT');
+    expect(feedback).toContain('Do NOT re-emit');
+    expect(feedback).toContain('byte-identical');
+    expect(feedback).toContain(report);
+  });
+
+  it('points at the known spec path when one is given', () => {
+    const feedback = specRevisionFeedback(report, '.ai/specs/foo.md');
+    expect(feedback).toContain('.ai/specs/foo.md');
+  });
+
+  it('tells the model to locate the file rather than assume it is missing when no path is known', () => {
+    const feedback = specRevisionFeedback(report);
+    expect(feedback).toContain('This run never recorded its path');
+    expect(feedback).toContain('Never write a second copy of the spec under a new path');
   });
 });

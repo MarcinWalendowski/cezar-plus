@@ -139,6 +139,27 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     expect(review?.prompt).toContain('CEZ:REVIEW=revise');
   });
 
+  /**
+   * spec `.ai/specs/2026-08-21-structured-review-targeted-spec-edits.md`: a `revise` verdict must
+   * be a change list the `spec` step can apply mechanically, not prose it has to re-derive. This
+   * pins the required shape and the two regression guards the spec calls out: the pre-existing
+   * "judge the spec, not its prose" discipline must survive, and both verdict markers must still
+   * be present so `parseReviewVerdict` keeps working.
+   */
+  it('review-spec is required to write its `revise` verdict as a FILE/SECTION/CHANGE list', () => {
+    const review = stepById('review-spec');
+    expect(review?.prompt).toContain('FILE:');
+    expect(review?.prompt).toContain('SECTION:');
+    expect(review?.prompt).toContain('CHANGE:');
+    // The structural-rewrite escape hatch — the one case re-emitting the whole file is correct.
+    expect(review?.prompt).toContain('structural rewrite');
+    expect(review?.prompt).toContain('CEZ:REVIEW=pass');
+    expect(review?.prompt).toContain('CEZ:REVIEW=revise');
+    expect(review?.prompt).toContain(
+      'Judge the spec, not its prose. `revise` is for a spec that is wrong, incomplete against the',
+    );
+  });
+
   it('only the review step is gated — the gate is not quietly on the whole chain', () => {
     const gated = SPEC_TO_DEPLOY_WORKFLOW.steps.filter((s) => s.requiresApproval).map((s) => s.id);
     expect(gated).toEqual(['review-spec']);
