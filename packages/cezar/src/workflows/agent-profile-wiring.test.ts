@@ -17,6 +17,7 @@ import { RunManager } from './run.ts';
  */
 describe('RunManager agent-profile resolution', () => {
   const savedHome = process.env.CEZ_HOME;
+  const savedKb = process.env.CEZ_KB;
   let home: string;
   let repoRoot: string;
   let store: RunStore;
@@ -36,6 +37,7 @@ describe('RunManager agent-profile resolution', () => {
     home = mkdtempSync(join(realpathSync(tmpdir()), 'cez-profile-wiring-home-'));
     repoRoot = mkdtempSync(join(realpathSync(tmpdir()), 'cez-profile-wiring-repo-'));
     process.env.CEZ_HOME = home;
+    delete process.env.CEZ_KB;
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     manager = new RunManager(store, repoRoot);
     await registerProject(repoRoot);
@@ -46,6 +48,8 @@ describe('RunManager agent-profile resolution', () => {
     for (const dir of [home, repoRoot]) rmSync(dir, { recursive: true, force: true });
     if (savedHome === undefined) delete process.env.CEZ_HOME;
     else process.env.CEZ_HOME = savedHome;
+    if (savedKb === undefined) delete process.env.CEZ_KB;
+    else process.env.CEZ_KB = savedKb;
   });
 
   const addAccount = async (id: string, provider: 'claude' | 'codex', dir: string) => {
@@ -90,6 +94,23 @@ describe('RunManager agent-profile resolution', () => {
     ]);
     expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
     expect(env.CODEX_HOME).toBeUndefined();
+  });
+
+  it('adds CEZ_KB_ROOTS and CEZ_KB_WRITE_FILE, and only those two, once CEZ_KB=1', async () => {
+    process.env.CEZ_KB = '1';
+    const run = newRun();
+    const { env } = await seam().agentEnvForStep(run.id, 'claude');
+    expect(Object.keys(env).sort()).toEqual([
+      'CEZ_HANDOFF_FILE',
+      'CEZ_KB_ROOTS',
+      'CEZ_KB_WRITE_FILE',
+      'CEZ_TASK_ID',
+      'CEZ_TODOS_FILE',
+      'NODE_ENV',
+      'TEMP',
+      'TMP',
+      'TMPDIR',
+    ]);
   });
 
   it('points the CLI at the project\'s account and reports the id to record', async () => {
