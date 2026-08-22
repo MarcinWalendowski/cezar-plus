@@ -1,10 +1,12 @@
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { migrateReleasesCommand, socketUnitName, unexpectedEntries } from './release-cli.ts';
+import { migrateReleasesCommand, releaseDeployCommand, socketUnitName, unexpectedEntries } from './release-cli.ts';
+import type { ReleaseDeployHost } from './release-deploy.ts';
 import { loadLedger } from './releases.ts';
+import type { ProbeResult } from './deploy-strategy.ts';
 
 /**
  * `cezar server-migrate-releases` — the one-shot that turns a hand-provisioned box into the
@@ -125,6 +127,81 @@ describe('server-migrate-releases', () => {
   it('fails loudly when there is nothing installed to migrate', async () => {
     const code = await migrateReleasesCommand({ linkPath: join(root, 'nope'), releasesDir, apply: true });
     expect(code).toBe(1);
+  });
+});
+
+describe('server-deploy (releaseDeployCommand) --dry-run', () => {
+  /**
+   * `.ai/specs/2026-08-22-server-deploy-dry-run-flag.md` Phase 4: none of the CLI-level wiring for
+   * `--dry-run` had a regression test before this — `release-deploy.test.ts:198-205` only calls
+   * `runReleaseDeploy` directly, never `releaseDeployCommand`. The exit-code-0 assertion alone
+   * would pass against the "Deploy complete." regression this same spec's plumbing would otherwise
+   * introduce (see the spec's Solution), so this asserts on the printed text too.
+   */
+  let root: string;
+  let linkPath: string;
+  let releasesDir: string;
+  let source: string;
+  const logs: string[] = [];
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cez-deploy-cli-'));
+    releasesDir = join(root, 'releases');
+    const seed = join(releasesDir, '20260101T000000Z-old');
+    mkdirSync(seed, { recursive: true });
+    linkPath = join(root, 'cezar');
+    symlinkSync(seed, linkPath);
+    source = join(root, 'src');
+    mkdirSync(source, { recursive: true });
+    logs.length = 0;
+    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(' '));
+    });
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(' '));
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function fakeHost(): ReleaseDeployHost {
+    return {
+      async stage() {
+        throw new Error('a dry run must never stage');
+      },
+      async smokeBoot(): Promise<ProbeResult> {
+        throw new Error('a dry run must never smoke-boot');
+      },
+      async restart() {
+        throw new Error('a dry run must never restart');
+      },
+      async probeReady(): Promise<ProbeResult> {
+        throw new Error('a dry run must never probe');
+      },
+      freeBytes: () => Number.POSITIVE_INFINITY,
+      now: () => '2026-08-22T09:00:00.000Z',
+      spawnDetached: () => {
+        throw new Error('a dry run must never hand off to a transient unit');
+      },
+      systemdRunAvailable: () => false,
+      cgroup: () => '0::/user.slice/session-1.scope',
+      killMode: () => 'process',
+    };
+  }
+
+  it('exits 0 and reports a dry run, not a completed deploy', async () => {
+    const code = await releaseDeployCommand(
+      { strategy: 'blue-green', source, linkPath, releasesDir, dryRun: true },
+      fakeHost(),
+    );
+
+    expect(code).toBe(0);
+    const out = logs.join('\n');
+    expect(out).toContain('Dry run complete');
+    expect(out).not.toContain('Deploy complete.');
   });
 });
 

@@ -92,6 +92,8 @@ Usage:
                                                       auto-roll-back (spec 2026-08-19)
                               --rollback[=<id>]       flip back to the previous release + restart
                               --follow                tail the deploy running in its own unit
+                              --dry-run               print the plan, change nothing
+                                                      (also: CEZ_DRY_RUN=1)
   cezar server-migrate-releases
                             one-shot: /opt/cezar → release symlink + socket/slice units (--yes to apply)
   cezar server-uninstall    reverse a server-install
@@ -269,6 +271,7 @@ async function main(): Promise<void> {
       strategy: { type: 'string' },
       rollback: { type: 'string' },
       follow: { type: 'boolean', default: false },
+      'dry-run': { type: 'boolean', default: false },
       source: { type: 'string' },
       'link-path': { type: 'string' },
       'releases-dir': { type: 'string' },
@@ -352,6 +355,9 @@ async function main(): Promise<void> {
       // boots before it is live, flip a symlink, restart, probe, and roll back on its own if the
       // probe fails. `--rollback` is the same machinery pointed backwards.
       const strategy = values.strategy ?? (values.rollback !== undefined ? 'blue-green' : 'restart');
+      // The flag and the env var mean the same thing everywhere `server-deploy` can run, not just
+      // on blue-green — see `.ai/specs/2026-08-22-server-deploy-dry-run-flag.md`.
+      const dryRun = Boolean(values['dry-run']) || process.env.CEZ_DRY_RUN === '1';
       if (strategy !== 'restart') {
         process.exitCode = await releaseDeployCommand({
           strategy,
@@ -365,12 +371,14 @@ async function main(): Promise<void> {
           port: portExplicit ? Number(values.port) : undefined,
           sha: values.sha,
           note: values.note,
+          dryRun,
         });
         return;
       }
       await serverCommand('deploy', repoRoot, values.platform, {
         yes: Boolean(values.yes),
         domain: values.domain,
+        dryRun,
       });
       return;
     }
@@ -1042,6 +1050,7 @@ async function serverCommand(
     port?: number;
     externalProxy?: boolean;
     bindHost?: string;
+    dryRun?: boolean;
   },
 ): Promise<void> {
   // Detection (claude/gh/codex) and tool installs resolve executables off the
@@ -1115,7 +1124,7 @@ async function serverCommand(
   }
 
   const runOpts = {
-    dryRun: process.env.CEZ_DRY_RUN === '1',
+    dryRun: process.env.CEZ_DRY_RUN === '1' || Boolean(flags.dryRun),
     assumeYes: flags.yes,
     reconfigure: new Set((flags.reconfigure ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
     reinstall: Boolean(flags.reinstall),

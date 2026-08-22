@@ -1,6 +1,12 @@
-import { createContext, useContext, useEffect, useMemo, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from 'react'
 
-import { API_PREFIX, getApiScope, setApiScope } from '@loki-labs/better-cezar-api-client'
+import {
+  API_PREFIX,
+  getApiScope,
+  ownsApiScope,
+  releaseApiScope,
+  setApiScope,
+} from '@loki-labs/better-cezar-api-client'
 
 /**
  * The React face of the project scope (multi-project spec, step 3.1): components read
@@ -43,6 +49,18 @@ export function useProjectScope(): ProjectScope {
  * the scope *between* the render that set it and the children's mount effects, so the arriving
  * project's very first requests would go out unprefixed and cache under the wrong key. A
  * project change must therefore never run a cleanup — only a real unmount does.
+ *
+ * **The reset is also OWNED, since 2026-08-22** (`.ai/specs/2026-08-22-api-scope-ownership-token.md`).
+ * The split above protects one instance whose `projectId` changed; it does nothing for an
+ * instance SWAP — this provider unmounting while a different instance mounts, which is what every
+ * navigation out of `/p/:projectId/*` and back does (the global Tasks page, `/workspace/*`,
+ * `/settings`, the Back button). There the departing cleanup lands after the arriving instance
+ * has already written its project, and the scope goes null under a URL that still names one:
+ * measured on production as three correctly-scoped run requests followed 1ms later by the same
+ * three unscoped, 404, "Task not found" over a running task — and STICKY, because restoring a
+ * module variable re-renders nothing, so the keys stay cached under `'default'` until a reload.
+ * So the token below is the instance's identity: it claims the slot during render (which always
+ * precedes any commit, hence any cleanup) and releases only what it still owns.
  */
 export function ProjectScopeProvider({
   projectId,
@@ -51,16 +69,23 @@ export function ProjectScopeProvider({
   projectId: string | null
   children: ReactNode
 }) {
-  if (getApiScope() !== projectId) setApiScope(projectId)
+  // Identity, not state: never read, only compared. `useRef` because it must be stable across
+  // this instance's renders and distinct from every other instance's.
+  const owner = useRef({}).current
+
+  // `!ownsApiScope(owner)` is not redundant with the value check: across an instance swap the
+  // VALUE already matches (same project, new provider), and without re-claiming, the departing
+  // instance would still hold the slot and its cleanup would null it.
+  if (getApiScope() !== projectId || !ownsApiScope(owner)) setApiScope(projectId, owner)
 
   useEffect(() => {
-    setApiScope(projectId)
-  }, [projectId])
+    setApiScope(projectId, owner)
+  }, [projectId, owner])
 
   // Unmount only — see the note above on why this cannot be the cleanup of the effect above.
   // Ordering still holds for StrictMode's simulated remount: destroys run before creates, so
   // the re-created `[projectId]` effect re-asserts the scope after this one nulled it.
-  useEffect(() => () => setApiScope(null), [])
+  useEffect(() => () => releaseApiScope(owner), [owner])
 
   const value = useMemo<ProjectScope>(
     // Built from the same prefix the request path uses — the version is one fact, not two.
