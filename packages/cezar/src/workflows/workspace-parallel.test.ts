@@ -9,6 +9,7 @@ import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from './run.ts';
 import type { WorkflowDef } from './types.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 const SETTLED = ['done', 'failed', 'cancelled', 'review'];
@@ -141,8 +142,8 @@ describe('workspace runs are exempt from the non-git single-slot cap (W3)', () =
       const gate = join(bootRoot, 'gate');
       const hold = gatedHold('hold', gate);
 
-      const a = manager.startRun(hold, { task: 'ws-a', worktree: false, workspaceProjects: grantOf(project) });
-      const b = manager.startRun(hold, { task: 'ws-b', worktree: false, workspaceProjects: grantOf(project) });
+      const a = manager.startRun(hold, { author: localCliAuthor(), task: 'ws-a', worktree: false, workspaceProjects: grantOf(project) });
+      const b = manager.startRun(hold, { author: localCliAuthor(), task: 'ws-b', worktree: false, workspaceProjects: grantOf(project) });
 
       // Both inside their hold step at the same instant. Under the un-exempted gate
       // (`repo !== null || busySlots() < 1`) the second would still be `queued` here.
@@ -150,8 +151,8 @@ describe('workspace runs are exempt from the non-git single-slot cap (W3)', () =
 
       // The control, on the same non-git root at the same moment: an ORDINARY in-place run still
       // degrades to one at a time, so this third run cannot start while the other two hold.
-      const ordinary = manager.startRun(hold, { task: 'plain-1', worktree: false });
-      const blocked = manager.startRun(INSTANT, { task: 'plain-2', worktree: false });
+      const ordinary = manager.startRun(hold, { author: localCliAuthor(), task: 'plain-1', worktree: false });
+      const blocked = manager.startRun(INSTANT, { author: localCliAuthor(), task: 'plain-2', worktree: false });
       await waitFor(() => holding(store, ordinary.id), 'the ordinary in-place run to run');
       expect(store.getRun(blocked.id)?.status).toBe('queued');
 
@@ -180,10 +181,10 @@ describe('workspace runs do not take the repository-root lease (W3)', () => {
       const { store, manager } = boot(bootRoot, 2);
       const gate = join(bootRoot, 'gate');
 
-      const holder = manager.startRun(gatedHold('hold', gate), { task: 'holder', worktree: false });
+      const holder = manager.startRun(gatedHold('hold', gate), { author: localCliAuthor(), task: 'holder', worktree: false });
       await waitFor(() => holding(store, holder.id), 'the ordinary run to take the lease');
 
-      const workspace = manager.startRun(INSTANT, {
+      const workspace = manager.startRun(INSTANT, { author: localCliAuthor(),
         task: 'workspace',
         worktree: false,
         workspaceProjects: grantOf(project),
@@ -204,7 +205,7 @@ describe('workspace runs do not take the repository-root lease (W3)', () => {
 
       // The exemption is for WORKSPACE runs only — an ordinary in-place run still queues on the
       // lease, which is what makes the assertion above a fact about the exemption.
-      const ordinary = manager.startRun(INSTANT, { task: 'ordinary', worktree: false });
+      const ordinary = manager.startRun(INSTANT, { author: localCliAuthor(), task: 'ordinary', worktree: false });
       await waitFor(
         () =>
           store
@@ -248,7 +249,7 @@ describe('a workspace run that does not succeed discards its worktrees and keeps
       const project = gitRepo('cez-ws-discard-project-');
       const { store, manager } = boot(bootRoot, 2);
 
-      const run = manager.startRun(FAILS, {
+      const run = manager.startRun(FAILS, { author: localCliAuthor(),
         task: 'doomed',
         worktree: false,
         workspaceProjects: grantOf(project),

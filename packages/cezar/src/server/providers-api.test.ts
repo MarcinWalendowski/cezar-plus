@@ -14,6 +14,7 @@ import { RunManager } from '../workflows/run.ts';
 import { ProjectContexts } from './project-context.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { WorkspaceEventBus, createApp } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const CONNECTED_OUTPUT: Record<ProviderId, string> = {
   claude: '{"loggedIn":true}',
@@ -380,7 +381,7 @@ describe('workspace provider API', () => {
       if (event === 'provider-status') seen.push(data);
     });
     const server = app({ providerAuth, workspaceEvents: bus });
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'auth',
       workflow: 'quick-task',
       task: 'work',
@@ -416,7 +417,7 @@ describe('workspace provider API', () => {
   it('observes a lazy-project auth failure emitted during recovery', async () => {
     const lazyRoot = mkdtempSync(join(tmpdir(), 'cez-providers-lazy-'));
     const lazyStore = RunStore.open(join(lazyRoot, '.ai/cezar'), { keepLive: true });
-    const run = lazyStore.createRun({
+    const run = lazyStore.createRun({ author: localCliAuthor(),
       title: 'lazy recovery',
       workflow: 'quick-task',
       task: 'work',

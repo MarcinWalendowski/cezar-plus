@@ -466,6 +466,168 @@ network), reuses an already-healthy instance instead of double-booting, and writ
 
 `CEZ_DRY_RUN=1 npm run dev` still exercises the whole cockpit offline for manual verification.
 
+## Headless browser on prod-host
+
+`prod-host` has a real, working headless browser: **Playwright 1.62.1** (CLI at
+`/usr/bin/playwright`, package in `/usr/lib/node_modules`) with Chromium, its headless-shell
+variant, ffmpeg, Firefox and WebKit cached in `$HOME/.cache/ms-playwright` (~1.2G). Only Chromium
+has actually been driven against live URLs. Ubuntu 26.04 ships no usable `chromium` in apt — the
+candidate is a snap shim — which is why this is Playwright's own build. OS deps are installed
+(`playwright install-deps`), `xvfb` included, so headed-under-Xvfb is possible too.
+
+**An agent step MAY reach for it directly, without asking first** — checking that a deployed URL
+actually renders, scraping a page a spec cites, reading docs that only exist behind JS. That is a
+deliberate repo-level exception to the global "ask before running anything" default, in the same
+spirit as § Shipping cezar itself.
+
+Two invocations work verbatim, from any cwd:
+
+```bash
+node -e "
+const { chromium } = require('playwright');
+(async () => {
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  await page.goto('https://example.com');
+  console.log(await page.title());
+  await browser.close();
+})();
+"
+
+playwright screenshot https://example.com /tmp/example.png
+```
+
+Always `browser.close()`. A leaked Chrome under concurrent runs is exactly the memory pressure
+that pushes you to the fallback below.
+
+**Resolution is CommonJS-only.** The bare `require('playwright')` above works from any cwd because
+`$HOME/.node_modules/{playwright,playwright-core}` symlink into `/usr/lib/node_modules`, and Node
+consults `$HOME/.node_modules` through its global-folder lookup. That lookup **does not apply to
+ESM**, and this repo is `"type": "module"` — so `import { chromium } from 'playwright'` in a
+`.mjs`, or in a `.js` inside this repo, fails with `ERR_MODULE_NOT_FOUND`. Use `node -e`, a `.cjs`
+file, or `createRequire`:
+
+```js
+import { createRequire } from 'node:module';
+const { chromium } = createRequire(import.meta.url)('playwright');
+```
+
+**The one trap that will silently break this: never set `PLAYWRIGHT_BROWSERS_PATH` on the host
+alone.** `packages/cezar/src/core/agent-env.ts`'s `buildChildEnv()` gives every agent an
+*allowlisted* environment, and `PLAYWRIGHT_` appears in neither `BASE_ALLOW_NAMES` nor
+`BASE_ALLOW_PREFIXES` (`grep -n "PLAYWRIGHT" packages/cezar/src/core/agent-env.ts` returns
+nothing). So if someone "tidies" the browsers into `/opt` and exports `PLAYWRIGHT_BROWSERS_PATH`
+on the host, the variable is dropped before any agent's child process starts: Playwright falls
+back to its own compiled-in default, finds no browsers, and every launch fails with nothing in the
+agent's environment pointing at the cause. The browsers therefore sit at Playwright's **default**
+`$HOME/.cache/ms-playwright`, which needs no env var at all because `HOME` is allowlisted. A moved
+install *can* be made to work — set the variable in the service env **and** name it in
+`CEZ_ENV_PASSTHROUGH` (`/etc/cezar/agent-env.env`), the same two-step the Cloudflare credentials
+went through — but skipping the second step fails exactly as silently as skipping both. Don't take
+that path: leave the browsers at the default, per § Zero config's "never trade a working default
+for a knob."
+
+The `$HOME/.node_modules` symlink is the same philosophy, but note the reason is *not* the
+allowlist: `NODE_PATH` would in fact survive it (`NODE_` **is** an allowed prefix, and `NODE_PATH`
+is not credential-shaped). It is avoided because it is a knob where a working default exists —
+the symlink needs no env var on any path.
+
+Two consequences worth knowing: the cache is `$HOME`-scoped, so a non-interactive
+`ssh root@prod-host '<cmd>'` (whose `$HOME` is `/root`) finds no browsers, while an
+interactive session or an agent run does; and this is a **fact about this box only** — nothing
+guarantees a laptop or CI runner has these browsers cached, unlike `agent-browser` below.
+
+**This is separate from `agent-browser`** (§ Validation, above). `agent-browser` is a portable,
+self-provisioning CLI contract (`snapshot`/`interact`/`assert`/`screenshot`) that works on any
+machine cezar runs on, including one with no Playwright install — reach for it when driving or
+inspecting a UI through its fixed verb set. Reach for raw Playwright when you need Node-API-level
+control (`page.evaluate()`, scripting inside a larger program) or the zero-code
+`playwright screenshot` one-liner.
+
+### Fallback: Cloudflare Browser Run
+
+If local headless proves unreliable under concurrent agent runs (memory pressure, zombie Chrome,
+bot detection on the target), fall back to **Cloudflare Browser Run** — renamed from **Browser
+Rendering**, which is still the name in the API paths and the docs URL. **Verified working from
+this box on 2026-08-22 with the credentials already here** — no new token, nothing to wire:
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com"}' \
+  "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/browser-rendering/content"
+```
+
+It comes in two shapes, and picking the wrong one wastes an afternoon:
+
+- **Quick Actions** — REST endpoints under `.../browser-rendering/{content,screenshot,pdf,markdown,snapshot,scrape,json,links,crawl}`. One HTTP request, stateless, no code deployment. This is *not* a Playwright API; it is the fastest path for "give me the rendered HTML / a screenshot / a PDF."
+- **Browser Sessions over CDP** — this is the **Puppeteer/Playwright-compatible** route, and it works from an external server like this box: connect a WebSocket to the `/devtools/browser` endpoint and drive it with `chromium.connectOverCDP()`, so existing Playwright code changes minimally.
+
+Do **not** reach for `@cloudflare/playwright` from this box: it is a Workers-only fork requiring a
+`browser` binding in `wrangler.jsonc` and `nodejs_compat`. From here the routes are CDP or REST.
+
+Credentials are `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in `/etc/cezar/cloudflare.env`
+(0640 root:cezar). Like `PLAYWRIGHT_`, the `CLOUDFLARE_` prefix is **not** in the agent-env
+allowlist — these two reach an agent only because both names are listed in `CEZ_ENV_PASSTHROUGH`
+in `/etc/cezar/agent-env.env` (since 2026-08-19), which `allow()` checks before the `looksSecret`
+filter. That is already done, so an agent has them today; a *third* `CLOUDFLARE_*` name would not.
+
+One trap when checking that token: `GET /client/v4/user/tokens/verify` returns
+`401 Invalid API Token` for it, while the Browser Run call above returns `200` — it is
+account-scoped, not user-scoped. Probe the capability you actually need, never the token's
+identity papers (the same rule SPEC-403 wrote down for `wrangler whoami`).
+
+## Verifying a cockpit UI change — boot a throwaway cezar on a spare port
+
+**You cannot drive the production cockpit, and you must not try.** `cockpit.example.com` is behind
+Cloudflare Access, and the loopback origin is not a way around it: a browser sent to
+`http://127.0.0.1:4321/tasks` is redirected to `example.cloudflareaccess.com` (the SPA
+follows its own auth), and `GET /api/v1/workspace/runs-index` on loopback answers **401**. Only
+`/api/v1/ready` and the static `/` are open, which is exactly why the two `.ai/deploy-targets.json`
+probes use those and nothing else. Do not reach for credentials, a service token, or
+`CEZ_ALLOW_UNAUTHENTICATED=1` on the prod box to get past this.
+
+**Boot your own instance instead.** It is fast, it needs no secrets, and it renders the SAME built
+bundle you just deployed. Four things have to be true or it will not come up:
+
+1. **A scratch `HOME`.** The project registry lives in `~/.cezar/config.json` and is shared by
+   every cezar on the machine — registering a fixture project into the real one would edit what
+   every other run sees. `HOME=/var/tmp/<scratch>/home` isolates it.
+2. **Scrub the hosted-mode env.** An agent inherits the service's `CEZ_*` namespace, and
+   `CEZ_PUBLIC_URL` alone is enough to put a fresh instance into hosted mode, where it refuses to
+   boot without auth (*"cezar refuses to boot: hosted mode with no authentication exposes shell
+   execution…"*). That message is not an invitation to set `CEZ_ALLOW_UNAUTHENTICATED=1` — unset
+   the inherited vars and it boots as an ordinary local cockpit. This is also why
+   `npm run test:e2e` fails on this box rather than skipping.
+3. **Seed the states you need.** Write `<proj>/.ai/cezar/runs.json` and `todos.json` directly. A
+   feature is only verified if the fixture covers the states that can render — for the Author
+   column that meant user / agent / api / absent in one board, and the absent one is the case a
+   happy-path fixture always forgets.
+4. **Walk the first-run wizard.** The gate is `probe.kind === 'ready' && !probe.hasProjects`, and
+   `hasProjects` counts projects *adopted into an org*, not registry entries — so a registered
+   project still lands you on `/onboarding`. Fill `[data-slot="onboarding-org-name"]`, click
+   `[data-slot="onboarding-org-submit"]`, then navigate to the page under test.
+
+```bash
+B=/var/tmp/uiverify; rm -rf $B; mkdir -p $B/home $B/proj/.ai/cezar
+cd $B/proj && git init -q . && git commit -q --allow-empty -m scratch
+# seed $B/proj/.ai/cezar/runs.json here
+env -u CEZ_PUBLIC_URL -u CEZ_REMOTE -u CEZ_OIDC_ISSUER -u CEZ_OIDC_CLIENT_ID -u CEZ_AUTH \
+    -u CEZ_TODOS_FILE -u CEZ_HANDOFF_FILE -u CEZ_KB_WRITE_FILE -u CEZ_PROJECTS_DIR -u NODE_ENV \
+    HOME=$B/home nohup node /opt/cezar/packages/cezar/dist/index.js \
+    --port 4399 --no-open --repo $B/proj > $B/server.log 2>&1 &
+until [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4399/api/v1/ready)" = 200 ]; do sleep 2; done
+env HOME=$B/home node /opt/cezar/packages/cezar/dist/index.js projects add $B/proj
+```
+
+Then drive it with Playwright (§ Headless browser above), asserting on `data-slot` /
+`data-*` attributes rather than on text or CSS classes — those are the stable contract, and
+several components already carry them for exactly this reason. **Kill the instance and delete the
+directory when done**; a stray cockpit on a spare port holds memory and keeps a worktree lease.
+
+Running against `/opt/cezar/...` verifies the DEPLOYED bytes. Point it at a local `dist/` instead
+when you want to check a build you have not shipped yet.
+
 ## How an agent step should spend its tool calls
 
 Measured on run `ec6e8e06` (spec `.ai/specs/2026-08-20-agent-round-trip-batching-and-fanout.md`):

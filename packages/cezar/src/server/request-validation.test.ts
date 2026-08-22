@@ -9,6 +9,7 @@ import type { WorkflowDef } from '../workflows/types.ts';
 import { createApp } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Tightened request validation (#429): the mutating routes now bound their
@@ -33,7 +34,7 @@ describe('request validation bounds (#429)', () => {
     const manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
         captured = input;
-        return store.createRun({ title: 't', workflow: '(planned)', task: input.task, steps: [] });
+        return store.createRun({ author: localCliAuthor(), title: 't', workflow: '(planned)', task: input.task, steps: [] });
       },
       // Options object since #401 (runner/model override rides alongside the resume text);
       // these bounds tests still only care about `text`.
@@ -90,21 +91,21 @@ describe('request validation bounds (#429)', () => {
 
   // ---- continue text -------------------------------------------------------
   it('accepts a 100k-char continue text', async () => {
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
     const res = await postJson(`/api/v1/runs/${run.id}/continue`, { text: 'y'.repeat(100_000) });
     expect(res.status).toBe(200);
     expect(continueText).toHaveLength(100_000);
   });
 
   it('rejects over-cap continue text with a 400', async () => {
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
     const res = await postJson(`/api/v1/runs/${run.id}/continue`, { text: 'y'.repeat(100_001) });
     expect(res.status).toBe(400);
     expect(continueText).toBeUndefined();
   });
 
   it('an empty continue body still resumes (text optional)', async () => {
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
     const res = await apiRequest(app, `/api/v1/runs/${run.id}/continue`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(continueText).toBeUndefined();
@@ -132,21 +133,21 @@ describe('request validation bounds (#429)', () => {
 
   // ---- archive schema ------------------------------------------------------
   it('archives with no body', async () => {
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
     const res = await apiRequest(app, `/api/v1/runs/${run.id}/archive`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(store.getRun(run.id)?.archived).toBe(true);
   });
 
   it('rejects a wrong-typed archived flag with a 400', async () => {
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
     const res = await postJson(`/api/v1/runs/${run.id}/archive`, { archived: 'nope' });
     expect(res.status).toBe(400);
   });
 
   // ---- open-in schema ------------------------------------------------------
   it('rejects an open-in with no target (400)', async () => {
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
     const res = await apiRequest(app, `/api/v1/runs/${run.id}/open-in`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -230,7 +231,7 @@ describe('request validation bounds (#429)', () => {
     });
 
     it('lets a body-less request through where the route tolerated one (archive)', async () => {
-      const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+      const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
       const res = await apiRequest(app, `/api/v1/runs/${run.id}/archive`, { method: 'POST' });
       expect(res.status).toBe(200);
     });

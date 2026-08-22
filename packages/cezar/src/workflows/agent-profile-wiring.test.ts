@@ -7,6 +7,7 @@ import { agentAccountsPath } from '../paths.ts';
 import { mergeWriteAgentAccounts } from '../workspace/agent-accounts.ts';
 import { registerProject } from '../workspace/projects.ts';
 import { RunManager } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Which agent account a STEP spawns under (spec 2026-07-29-agent-profiles).
@@ -63,8 +64,8 @@ describe('RunManager agent-profile resolution', () => {
     });
   };
 
-  const newRun = (over: Parameters<RunManager['startRun']>[1] = { task: 't' }) =>
-    store.createRun({
+  const newRun = (over: Parameters<RunManager['startRun']>[1] = { task: 't', author: localCliAuthor() }) =>
+    store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: over.task,
@@ -81,6 +82,8 @@ describe('RunManager agent-profile resolution', () => {
     // temp directory (#785). No ACCOUNT variable, which is this test's subject.
     expect(Object.keys(env).sort()).toEqual([
       'CEZ_HANDOFF_FILE',
+      'CEZ_SESSION_ID',
+      'CEZ_STEP_ID',
       'CEZ_TASK_ID',
       'CEZ_TODOS_FILE',
       'NODE_ENV',
@@ -125,7 +128,7 @@ describe('RunManager agent-profile resolution', () => {
     await addAccount('cx', 'codex', join(home, 'codex-klaudiusz'));
     await selectAccount('claude', 'work');
     await selectAccount('codex', 'cx');
-    const run = newRun({ task: 't', runner: 'claude', agentProfile: 'client' });
+    const run = newRun({ author: localCliAuthor(), task: 't', runner: 'claude', agentProfile: 'client' });
 
     // The run's runner takes the override…
     expect((await seam().agentEnvForStep(run.id, 'claude')).profileId).toBe('client');

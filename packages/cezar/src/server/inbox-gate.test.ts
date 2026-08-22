@@ -9,6 +9,7 @@ import type { WorkflowDef } from '../workflows/types.ts';
 import { createApp, type ServerDeps } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * **REWRITTEN 2026-08-15 by D7a** (`.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md`).
@@ -62,7 +63,7 @@ describe('inbox gate (#471)', () => {
     manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
         captured = input;
-        return store.createRun({ title: 't', workflow: '(inbox)', task: input.task, steps: [] });
+        return store.createRun({ author: localCliAuthor(), title: 't', workflow: '(inbox)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
     delete process.env.CEZ_FOLLOWUPS;
