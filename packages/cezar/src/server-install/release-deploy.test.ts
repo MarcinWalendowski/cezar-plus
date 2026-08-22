@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { runReleaseDeploy, type ReleaseDeployHost } from './release-deploy.ts';
+import { defaultHost, runReleaseDeploy, type ReleaseDeployHost } from './release-deploy.ts';
 import { DETACHED_ENV } from './self-safe-deploy.ts';
 import { loadLedger } from './releases.ts';
 import type { ProbeResult } from './deploy-strategy.ts';
@@ -243,6 +243,37 @@ describe('runReleaseDeploy', () => {
       expect(argv[0]).toBe('systemd-run');
       // Vitest does not run as root, so this exercises the real branch.
       if ((process.getuid?.() ?? 0) !== 0) expect(argv).toContain('--user');
+    });
+  });
+
+  describe('defaultHost(log).stage — the real rsync, not a mock (2026-08-22)', () => {
+    /**
+     * Every case above supplies a mocked `stage`, so none of them ever run the actual rsync — which
+     * is exactly why the exclude list could ship missing `.ai/cezar/worktrees` and `.ai/cezar/tmp`
+     * uncaught. This exercises `defaultHost`'s real implementation directly against a seeded source
+     * tree, pinning what it does and does not copy.
+     */
+    it('excludes .git, .ai/cezar/runs, .ai/cezar/worktrees and .ai/cezar/tmp, but keeps tracked files', async () => {
+      const source = scratch();
+      const target = scratch();
+      writeFileSync(join(source, 'package.json'), '{}');
+      mkdirSync(join(source, '.git'), { recursive: true });
+      writeFileSync(join(source, '.git', 'HEAD'), 'ref: refs/heads/main');
+      mkdirSync(join(source, '.ai/cezar/runs/some-run'), { recursive: true });
+      writeFileSync(join(source, '.ai/cezar/runs/some-run/marker'), 'x');
+      mkdirSync(join(source, '.ai/cezar/worktrees/some-task/node_modules'), { recursive: true });
+      writeFileSync(join(source, '.ai/cezar/worktrees/some-task/node_modules/marker'), 'x');
+      mkdirSync(join(source, '.ai/cezar/tmp/some-run'), { recursive: true });
+      writeFileSync(join(source, '.ai/cezar/tmp/some-run/marker'), 'x');
+
+      const host = defaultHost(() => {});
+      await host.stage(source, target);
+
+      expect(existsSync(join(target, 'package.json'))).toBe(true);
+      expect(existsSync(join(target, '.git', 'HEAD'))).toBe(false);
+      expect(existsSync(join(target, '.ai/cezar/runs'))).toBe(false);
+      expect(existsSync(join(target, '.ai/cezar/worktrees'))).toBe(false);
+      expect(existsSync(join(target, '.ai/cezar/tmp'))).toBe(false);
     });
   });
 });

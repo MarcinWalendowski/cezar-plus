@@ -131,8 +131,19 @@ export function defaultHost(log: (line: string) => void): ReleaseDeployHost {
   return {
     async stage(source, target) {
       mkdirSync(target, { recursive: true });
-      // `--delete` so a release directory reused after a failed attempt cannot keep a stale file,
-      // and the git metadata is excluded because a release is an artifact, not a checkout.
+      // `--delete` so a release directory reused after a failed attempt cannot keep a stale file in
+      // the shipped tree — note this does NOT delete *excluded* paths (that needs the separate
+      // `--delete-excluded` flag, not added here), so a reused target can still carry whatever it
+      // already had under the four excludes below. Harmless: nothing in a running release reads any
+      // of them (see Risks), and Phase 4 covers reclaiming space already on disk, which a re-stage
+      // cannot do.
+      // A release is an artifact, not a checkout: git metadata (`.git`) is excluded, and so is every
+      // directory that is cezar's own AGENT RUNTIME STATE rather than the tree being shipped —
+      // `.ai/cezar/runs` (per-run history), `.ai/cezar/worktrees` (live task git worktrees, each with
+      // its own node_modules — measured 2026-08-21/22 at up to several GB) and `.ai/cezar/tmp`
+      // (per-run scratch dirs, recreated on demand at runtime by `agentTmpDir`). All three are also
+      // being concurrently written to by whatever other tasks are running on the box at stage time, so
+      // excluding them removes that race along with the size.
       const rsync = run('rsync', [
         '-a',
         '--delete',
@@ -140,6 +151,10 @@ export function defaultHost(log: (line: string) => void): ReleaseDeployHost {
         '.git',
         '--exclude',
         '.ai/cezar/runs',
+        '--exclude',
+        '.ai/cezar/worktrees',
+        '--exclude',
+        '.ai/cezar/tmp',
         `${source.replace(/\/*$/, '')}/`,
         `${target.replace(/\/*$/, '')}/`,
       ]);
