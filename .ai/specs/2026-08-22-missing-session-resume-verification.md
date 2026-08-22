@@ -1,8 +1,19 @@
 # Missing session resume verification
 
-**Status: spec written 2026-08-22. The code fix is already shipped; this spec covers what is
-not done.** Gathered in `.ai/specs/briefs/2026-08-22-missing-session-resume.md`, whose central
-claim was re-verified against the repository rather than taken on trust (see Problem).
+**Status: partial 2026-08-22.** Commit `a0ef7959` shipped the opt-in installed-Claude/Codex
+rejection-string contract and passed it against both installed CLIs. The branch is current and
+the four non-Vitest repository gates passed. Root `npm test` remains red on the independently
+reproduced pre-existing C18 CPU budget failure (`62.29 > 40`; clean parent control `64.80 > 40`).
+The reactive engine E2E and proactive SIGKILL recovery E2E in Verification items 6 and 7 were not
+run, so runtime QA remains needed. Gathered in
+`.ai/specs/briefs/2026-08-22-missing-session-resume.md`, whose central claim was re-verified
+against the repository rather than taken on trust (see Problem).
+
+**Implementation result (2026-08-22).** Phases 1 and 3c are implemented and verified. Phase 2
+is complete as a measurement, not a green gate. Phase 3a's regression tests exist and pass, but
+the red-without-fix mutation proof was not recorded. Phase 3b and the proactive kill E2E remain
+unverified. Phase 4 is partial: the prior implementation todo is closed, the corpus changelog and
+durable decision are recorded, and the current retry todo remains open until deploy completes.
 
 ## TLDR
 
@@ -15,6 +26,11 @@ the code is still present at the current tip `c1ccbe79`. The task's context line
 has `isMissingSessionRejection` and `claudeSessionTranscriptExists` written but UNWIRED and
 unused, Phases 2-4 unimplemented") is **stale**; it described the branch mid-implementation, and
 this worktree is 71 commits behind, so its own files still show the defect.
+
+**CORRECTED 2026-08-22 by `a0ef7959`.** The worktree was brought current and the installed-provider
+string contract was added and passed. The root Vitest gate was rerun but remains red on reproduced
+C18. No recorded evidence shows that the red-without-fix mutation proof or either runtime engine
+E2E ran, so those remain QA-needed. The following gap list is the pre-implementation baseline.
 
 So this spec does not re-specify the fix. It specifies the four things that are genuinely
 outstanding, each of which is a real gate the prior work did not pass:
