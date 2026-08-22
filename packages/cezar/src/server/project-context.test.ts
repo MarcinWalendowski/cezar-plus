@@ -1,9 +1,12 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AutomationStore } from '../automations/store.ts';
 import { emitUsageForTest } from '../core/process-usage.ts';
+import { branchFor, createWorktree } from '../git-worktree.ts';
 import { KnowledgeStore } from '../knowledge/store.ts';
 import { NotificationOutbox } from '../notifications/outbox.ts';
 import { RunStore } from '../runs/store.ts';
@@ -14,6 +17,30 @@ import {
   type ProjectContextDeps,
   type ProjectContextSource,
 } from './project-context.ts';
+
+const execFileAsync = promisify(execFile);
+const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
+
+/** Minimal real git repo (mirrors `git-worktree.test.ts`'s `fixtureRepo`), for the AC4
+ *  cross-project prune test below, which needs an actual `pruneOrphans` run against a real
+ *  `.git` — not the `status: 'not-git'` fixtures every other test in this file uses. */
+async function fixtureRepo(prefix: string): Promise<string> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), prefix));
+  await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+  writeFileSync(join(root, 'base.txt'), 'base\n');
+  await execFileAsync('git', ['add', '-A'], { cwd: root });
+  await execFileAsync('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: root });
+  return root;
+}
+
+async function branchExists(repo: string, branch: string): Promise<boolean> {
+  return execFileAsync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
+    cwd: repo,
+  }).then(
+    () => true,
+    () => false,
+  );
+}
 
 /**
  * Lazy per-project context map (spec 2026-07-20-multi-project-workspace,
@@ -488,5 +515,86 @@ describe('ProjectContexts, central-hub activation (W3.1)', () => {
     expect(contexts!.notifications()).toBeUndefined();
 
     openSpy.mockRestore();
+  });
+});
+
+/**
+ * AC4 (spec 2026-08-22-cross-project-worktree-orphan-prune-safety): the actual incident's shape,
+ * reproduced end to end. A WORKSPACE run's worktree lives inside the TARGET project's repo, but the
+ * run's OWN record — the only place `workspaceWorktrees` is written — lives in the WORKSPACE BOOT
+ * ROOT's `runs.json`, which is deliberately never a `listProjects()` row
+ * (`suppressBootRegistration`). Booting the target project (`contexts.context('target')`) must not
+ * let its own `pruneOrphans` treat that worktree as an orphan just because the target's own
+ * `runs.json` has never heard of the run.
+ *
+ * This test fails against pre-Phase-3 code (no `findForeignOwner` wiring exists at all) and would
+ * ALSO fail against a `listProjects()`-only fix (an earlier draft of this spec) — the negative
+ * variant right below proves that half.
+ */
+describe('ProjectContexts — cross-project orphan-prune safety (spec 2026-08-22, AC4)', () => {
+  const roots: string[] = [];
+
+  afterEach(() => {
+    for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function setUp(): Promise<{ bootRoot: string; targetRoot: string; runId: string; worktreePath: string; branch: string }> {
+    const bootRoot = mkdtempSync(join(realpathSync(tmpdir()), 'cez-ctx-ac4-boot-'));
+    const targetRoot = await fixtureRepo('cez-ctx-ac4-target-');
+    roots.push(bootRoot, targetRoot);
+
+    // The run's OWN record: a real RunStore-backed workspace run, so the persisted
+    // `workspaceWorktrees` entry is schema-valid for free rather than hand-authored.
+    const bootStore = RunStore.open(join(bootRoot, '.ai/cezar'), { keepLive: true });
+    const created = bootStore.createRun({ title: 'workspace run', workflow: 'w', task: 't', steps: [] });
+    const wt = await createWorktree(targetRoot, created.id, 'main');
+    // A unique commit, so this worktree's branch is provably NOT merged into trunk — exercising
+    // layer 2 (branch-reachability) too, in case layer 1 were ever bypassed.
+    writeFileSync(join(wt.path, 'in-progress.txt'), 'agent work\n');
+    await execFileAsync('git', ['add', '-A'], { cwd: wt.path });
+    await execFileAsync('git', [...GIT_ID, 'commit', '-q', '-m', 'agent work'], { cwd: wt.path });
+    bootStore.updateRun(created.id, {
+      status: 'running',
+      workspaceWorktrees: [{ root: targetRoot, worktreePath: wt.path, branch: wt.branch, baseBranch: wt.baseBranch }],
+    });
+    bootStore.flush();
+
+    return { bootRoot, targetRoot, runId: created.id, worktreePath: wt.path, branch: wt.branch };
+  }
+
+  it('a target project boot with bootRoot wired declines to reclaim a live workspace run\'s worktree — directory AND branch both survive', async () => {
+    const { bootRoot, targetRoot, worktreePath, branch } = await setUp();
+
+    const contexts = new ProjectContexts({
+      // Deliberately NOT the boot root — matching `suppressBootRegistration`, and the precise
+      // condition a `listProjects()`-only candidate list must NOT be sufficient to satisfy.
+      listProjects: async () => [{ id: 'target', root: targetRoot, status: 'ok', name: 'target' }],
+      bootRoot,
+    });
+
+    await contexts.context('target');
+    contexts.disposeAll();
+
+    expect(existsSync(worktreePath)).toBe(true);
+    expect(await branchExists(targetRoot, branch)).toBe(true);
+  });
+
+  it('omitting bootRoot from ProjectContexts (the old, listProjects()-only design) still loses the worktree directory', async () => {
+    const { targetRoot, worktreePath } = await setUp();
+
+    const contexts = new ProjectContexts({
+      listProjects: async () => [{ id: 'target', root: targetRoot, status: 'ok', name: 'target' }],
+      // bootRoot omitted: the boot root's own `runs.json` — where this run's record actually
+      // lives — is invisible to this candidate list, reproducing the 232ad6d4 incident's exact gap.
+    });
+
+    await contexts.context('target');
+    contexts.disposeAll();
+
+    // Layer 2 (branch-reachability) still saves the BRANCH — the unique commit above keeps it
+    // unmerged — but the DIRECTORY is still wrongly reclaimed without the boot-root candidate: this
+    // is the failure this spec's Phase 3 exists to close, and proves a `listProjects()`-only
+    // candidate list is not sufficient for the test above to pass for the reason it actually does.
+    expect(existsSync(worktreePath)).toBe(false);
   });
 });

@@ -191,6 +191,26 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     expect(models.filter(([, m]) => !m)).toEqual([]);
   });
 
+  /**
+   * `.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`, Phase 1: `run-tests` alone gets an
+   * `effort` ceiling. Every other step must stay `undefined` — a step that silently gained one
+   * would be capped on reasoning depth with no reviewer having decided that, the same vacuous-
+   * failure shape the model-policy test above guards against.
+   */
+  it('caps run-tests to medium effort and leaves every other step unset', () => {
+    const efforts = SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => [s.id, s.effort] as const);
+    expect(efforts).toEqual([
+      ['context', undefined],
+      ['spec', undefined],
+      ['review-spec', undefined],
+      ['implement', undefined],
+      ['run-tests', 'medium'],
+      ['commit-push', undefined],
+      ['document', undefined],
+      ['deploy', undefined],
+    ]);
+  });
+
   it('names models this runner actually offers, so a typo cannot fall through', () => {
     // `modelConflictsWithRunner` fails open on an unknown id and `normalizeModelForBackend` would
     // refuse it only at run time — on the box, mid-chain. Catch it here instead.
@@ -357,6 +377,22 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
       if (!/\bsleep\s+[\d.]+/.test(line)) continue;
       expect(line, `unguarded sleep in the run-tests prompt: ${line}`).toMatch(/\b(until|while|for)\b/);
     }
+  });
+
+  /**
+   * `.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`, Phase 2: the diagnostic-depth ceiling
+   * ("stop once a control proves not-mine") and the output-discipline clause ("quote verbatim,
+   * never re-explain the diff") — the behavioral lever alongside Phase 1's mechanical `effort` cap.
+   */
+  it('tells run-tests to stop diagnosing once a control proves the failure is not mine, and to quote rather than narrate', () => {
+    const prompt = stepById('run-tests')?.prompt ?? '';
+    expect(prompt).toContain('not mine');
+    expect(prompt).toContain('Stop there');
+    expect(prompt).toMatch(/does not contain this run's\s*\nchange/);
+    expect(prompt).toContain('cezar todo add');
+    expect(prompt).toContain('Report pass/fail plainly');
+    expect(prompt).toContain('Quote the');
+    expect(prompt).toContain('never re-explain what the diff changed');
   });
 
   it('makes implement and run-tests re-slice a saved log instead of re-running the command', () => {

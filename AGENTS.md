@@ -247,10 +247,13 @@ npm test -- --testTimeout=30000 path/to/one.test.ts
 npm test -- -t "the name of one test"
 ```
 
-### Four environment traps that make the gates LIE
+### Five environment traps that make the gates LIE
 
 *(Heading amended 2026-08-21: a fourth trap — `TMPDIR` inside a git repo — was measured and is
-documented below. It was worth 17 of 19 failures on a docs-only branch.)*
+documented below. It was worth 17 of 19 failures on a docs-only branch. Amended again 2026-08-22:
+a fifth — `npm run test:package` stalling under the run broker — was measured and is documented
+below, filed as `.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md` Phase 3. It cost one
+`run-tests` step 43,583 output tokens re-deriving what is now written down.)*
 
 The first two were hit on 2026-08-20 (spec `.ai/specs/2026-08-20-live-run-status-line-and-timer.md`),
 the third the same day (spec `.ai/specs/2026-08-20-step-and-tool-call-durations.md`). Each produces
@@ -274,6 +277,33 @@ tmp=/tmp/cez-gate-$$ && mkdir -p $tmp   # trap 4: TMPDIR must be OUTSIDE any git
 env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm ci \
   && env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm test
 ```
+
+**Corrected 2026-08-22 (`2026-08-21-npm-test-gate-environment-scrub.md`): only root `npm test`
+scrubs itself — not all three commands `.ai/agentic.config.json` lists, and not all five it
+actually has.** `.ai/agentic.config.json`'s `validation.commands` lists **five** entries
+(`typecheck`, `test`, `test:unit`, `build`, `test:package`); of those, `npm test` (`vitest run`)
+is the only one any part of this fix reaches. `packages/web/vitest.config.ts` sets
+`test.env.NODE_ENV = ''` (closes trap 1 for the `web` project, immediately — no redeploy) and
+`packages/cezar/vitest.setup.ts` unsets every ambient `CEZ_*` except
+`CEZ_HANDOFF_FILE`/`CEZ_TASK_ID` and repoints `TMPDIR`/`TMP`/`TEMP` at a fresh directory under
+real `/tmp` before any suite runs — but that `setupFiles` entry is wired into the `server`
+project only (`packages/cezar/vitest.config.ts:13`), so this closes traps 2 and 4 for `server`
+specifically, not for `web`/`api-client` (no live failure observed there today; see the spec's
+Risks section — there is simply no scrub there either). `run.ts`'s `agentEnv()` additionally sets
+`NODE_ENV: ''` in every agent-spawned process's env — a durable fix that reaches trap 1's *other*
+victim, `npm ci` under `NODE_ENV=production` (§1's "worse than a missing module" case above), but
+only once `cezar.service` is redeployed and restarted; until then, `npm ci` itself is still
+exactly as documented in point 1. **`npm run test:unit` and `npm run test:package` are
+unaffected by any of this** — both are `node --test` scripts (`packages/cezar/package.json`),
+neither loads `vitest.setup.ts` or any `vitest.config.ts`, so the recipe above still applies to
+them in full. The recipe also still applies to any invocation none of the above covers — `npm ci`
+before the next redeploy, and any non-vitest tooling. A single-file `vitest run` is now covered
+(it loads the same project config and `setupFiles` as the full run) and no longer needs it. Trap
+3 (the C18 host-speed budget) is unaffected either way; it was never an environment leak.
+`design-guardian.test.ts`/`vite-config.test.ts` (`node:` imports failing to resolve under the
+`web` project's `jsdom` environment) turned out to be a fifth, previously-undocumented failure,
+unrelated to any of the four traps — fixed with a `// @vitest-environment node` docblock in both
+files.
 
 1. **`NODE_ENV=production` makes `npm ci` install ZERO devDependencies.** cezar's own agent
    sessions run with it set, so a worktree installed under it has no vitest, no React and no
@@ -334,7 +364,25 @@ env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm ci \
    above: point `TMPDIR`/`TMP`/`TEMP` at `/tmp`, which is a tmpfs outside every repo here. Note
    CI never sees this — `ubuntu-latest` has a plain `/tmp` — so it is purely a local-agent trap.
 
-**The method, which generalises past all four.** "It fails on an untouched file at clean HEAD
+5. **`npm run test:package` fails 1/15 under the run broker, and it predates your branch.** Case
+   5 (`packages/cezar/test/e2e/package-cli.test.ts:86`, "the release tarball installs and runs the
+   dry-run CLI workflow") stalls at step 1 ("Gather the record") with the run status stuck
+   `running` and the CLI exiting 0. Reproduces IDENTICALLY at clean HEAD — this predates any
+   change you are testing. The decisive control: `CEZ_RUN_BROKER=0` makes the identical run
+   finish; the default brokered path stalls. It is not the env scrub and not a TTY — both A/B
+   identically. See todo `c895a348-4bee-4a81-89ab-a62788a6a118` (canonical — folds in two other
+   independently-filed reports of the same red, `1e8e5266` and `46dbb850`, now archived as
+   superseded) for the live status, acceptance criteria and full repro. **Do not re-diagnose this
+   one** — reproduce it once against a control (clean HEAD is enough) to confirm it is the same
+   red, cite the todo, and stop; re-deriving it from scratch cost one `run-tests` step 43,583
+   output tokens (`.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`).
+   **Corrected 2026-08-22 — the canonical todo (`c895a348`) is now `status: 'done'`, closed by
+   commit `3e6d1b7e` (`.ai/specs/2026-08-22-run-broker-cli-keepalive.md`), which removed the
+   `unref()` on the one-shot broker's poll interval — the same mechanism this todo's own diagnosis
+   pointed at. This red may no longer reproduce; if it does, that is new information, not a
+   re-confirmation of this entry.**
+
+**The method, which generalises past all five.** "It fails on an untouched file at clean HEAD
 too" feels like proof that the code is innocent and the environment is broken. It is proof of the
 first half only. The same install, the same env and the same runner feed both checkouts, so a
 control that fails identically **localises the fault to what they share** — it does not license
@@ -381,6 +429,12 @@ the race lives entirely inside the file's own helper and needs no competition fo
 "but it passed alone" as evidence that a full-suite red was caused by something a caller changed.
 One isolated pass proves nothing here; the original 3/3 was a small-n artifact of exactly the kind
 the sample-size note below warns about.
+
+**Second known live flake, as of 2026-08-22:** `auto-resume.test.ts` — same class as
+`add-project-dialog.test.tsx` above (genuine concurrency timing, not cross-file pollution): clean
+in isolation (22/22 across 3 re-runs, `2026-08-21-npm-test-gate-environment-scrub.md`) but an
+occasional single failure under the full `npm test` run's load. Not fixed — noted here so a red
+on that name is recognised rather than re-diagnosed from scratch.
 
 Two method notes, both learned the hard way here:
 

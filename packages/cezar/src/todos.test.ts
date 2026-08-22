@@ -280,6 +280,26 @@ describe('updateTodo', () => {
     expect('archivedAt' in (stored as object)).toBe(false);
   });
 
+  /**
+   * The maintenance path a wrong-diagnosis correction needs (2026-08-22). The workspace rule is
+   * that a falsehood in a HEADING gets fixed in the heading — for a todo that is `summary`, the
+   * only field the board renders — so correcting `context` alone leaves the board still
+   * advertising the disproved theory.
+   */
+  it('sets summary, so a todo founded on a wrong diagnosis can be corrected where readers see it', async () => {
+    await seed({ id: 't1', summary: 'wait on liveness, then retry the step' });
+    const result = await updateTodo(dataDir, 't1', { summary: 'the scope unit name collided — fixed' });
+    expect(result?.summary).toBe('the scope unit name collided — fixed');
+    const [stored] = await readTodos(dataDir);
+    expect(stored?.summary).toBe('the scope unit name collided — fixed');
+  });
+
+  it('leaves summary alone when the patch does not carry it', async () => {
+    await seed({ id: 't1', summary: 'Ship it' });
+    const result = await updateTodo(dataDir, 't1', { status: 'done' });
+    expect(result?.summary).toBe('Ship it');
+  });
+
   it('returns undefined for an unknown id and writes nothing', async () => {
     await seed({ id: 't1', summary: 'Ship it' });
     const result = await updateTodo(dataDir, 'nope', { status: 'done' });

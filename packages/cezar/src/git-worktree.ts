@@ -116,8 +116,11 @@ function worktreeInfo(path: string, branch: string, baseBranch: string): Worktre
   return { path, branch, baseBranch };
 }
 
-/** Git canonicalizes symlinked path prefixes (macOS `/var` → `/private/var`). */
-function canonicalPath(path: string): string {
+/** Git canonicalizes symlinked path prefixes (macOS `/var` → `/private/var`). Exported (was
+ *  private) for `runs/worktree-ownership.ts`, which canonicalizes a foreign project's root and a
+ *  candidate worktree path the same way before comparing them (spec
+ *  2026-08-22-cross-project-worktree-orphan-prune-safety). */
+export function canonicalPath(path: string): string {
   try {
     return realpathSync(path);
   } catch {
@@ -565,26 +568,97 @@ export async function worktreeShortstat(
 }
 
 /**
- * Startup reconcile: `git worktree prune` + remove every directory under
- * `.ai/cezar/worktrees/` whose run id is no longer in the store (and its
- * branch). Returns the removed run ids for the boot log. Never throws.
+ * Is `ref` fully merged into `ancestorOf` — i.e. does deleting `ref` lose no commit `ancestorOf`
+ * doesn't already have? Wraps `git merge-base --is-ancestor <ref> <ancestorOf>`, which exits 0
+ * only on a clean "yes". Anything else — the ref doesn't resolve, the git call errors — returns
+ * `false`, the fail-SAFE direction for `pruneOrphans`'s branch-delete gate (spec
+ * 2026-08-22-cross-project-worktree-orphan-prune-safety, Layer 2): a branch this cannot prove
+ * merged is a branch that is kept, never one that is deleted on an unproven "probably fine".
+ */
+export async function isAncestorOf(repoRoot: string, ref: string, ancestorOf: string): Promise<boolean> {
+  if (!isSafeGitRef(ref) || !isSafeGitRef(ancestorOf)) return false;
+  const result = await git(repoRoot, ['merge-base', '--is-ancestor', ref, ancestorOf]);
+  return result.ok;
+}
+
+export interface PruneOrphansReport {
+  removed: string[];
+  declined: { id: string; reason: string }[];
+}
+
+export interface PruneOrphansOptions {
+  /** Does some OTHER project's (or the workspace boot root's) `runs.json` still claim this exact
+   *  worktree path? A match means a live workspace run owns it — decline, never delete. See
+   *  `runs/worktree-ownership.ts`. */
+  findForeignOwner?: (worktreePath: string) => { projectName: string; runId: string } | undefined;
+  /** The repo's own current branch (`getRepoInfo(repoRoot).branch`) — the ancestry check a
+   *  candidate's branch must pass before it is force-deleted (Layer 2). Omitted defaults to the
+   *  SAFE direction: the branch is always kept, never the pre-fix unconditional delete. */
+  trunkRef?: string;
+  /** Set by the caller when a foreign source it needed to consult for `findForeignOwner` came back
+   *  `unreadable: true` (`worktree-ownership.ts`'s `ForeignRunSource`). An unreadable foreign index
+   *  means the ownership signal cannot be trusted for ANY candidate this boot, not just the one
+   *  whose owner happened to be behind the bad file — so every candidate is declined outright,
+   *  without evaluating `findForeignOwner` or the branch-ancestry check at all. */
+  ownershipCheckUnavailable?: { reason: string };
+}
+
+/**
+ * Startup reconcile: `git worktree prune` + remove every directory under `.ai/cezar/worktrees/`
+ * whose run id is no longer in THIS project's own store. Returns the removed and declined run ids
+ * for the boot log. Never throws.
+ *
+ * Extended by spec 2026-08-22-cross-project-worktree-orphan-prune-safety to close a cross-project
+ * data-loss bug: a candidate here can belong to a WORKSPACE run whose worktree record lives only
+ * in another project's (or the workspace boot root's) `runs.json` — this project's own
+ * `store.listRuns()` (the source of `validIds`) has no way to know that id exists. Before this
+ * project deletes a candidate, `opts.findForeignOwner` gets first say (decline on a match, and log
+ * why); a candidate that clears that check still only loses its BRANCH when `opts.trunkRef` proves
+ * it fully merged (`isAncestorOf`) — otherwise the directory goes and the branch stays, the same
+ * "directory gone, branch kept" contract `runs/retention.ts` already uses for finished-run
+ * retention. Omitting `opts` entirely reproduces today's unconditional delete-both behavior
+ * byte-for-byte, so every caller not yet updated for Phase 3 stays unaffected by this change.
  */
 export async function pruneOrphans(
   repoRoot: string,
   validIds: ReadonlySet<string>,
-): Promise<string[]> {
+  opts?: PruneOrphansOptions,
+): Promise<PruneOrphansReport> {
   await git(repoRoot, ['worktree', 'prune']);
   let entries: Dirent[];
   try {
     entries = await readdir(join(repoRoot, WORKTREES_DIR), { withFileTypes: true });
   } catch {
-    return []; // no worktrees dir yet
+    return { removed: [], declined: [] }; // no worktrees dir yet
   }
   const removed: string[] = [];
+  const declined: { id: string; reason: string }[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || validIds.has(entry.name)) continue;
-    await removeWorktree(repoRoot, worktreePathFor(repoRoot, entry.name), branchFor(entry.name));
+    const worktreePath = worktreePathFor(repoRoot, entry.name);
+    if (opts?.ownershipCheckUnavailable) {
+      declined.push({ id: entry.name, reason: `ownership check unavailable: ${opts.ownershipCheckUnavailable.reason}` });
+      continue;
+    }
+    const owner = opts?.findForeignOwner?.(worktreePath);
+    if (owner) {
+      declined.push({
+        id: entry.name,
+        reason: `still owned by workspace run ${owner.runId.slice(0, 8)} in project "${owner.projectName}"`,
+      });
+      continue;
+    }
+    const branch = branchFor(entry.name);
+    // `opts` entirely omitted (no caller updated for this spec yet) reproduces today's
+    // unconditional delete-both, byte for byte. `opts` supplied but `trunkRef` itself absent —
+    // Layer 1 exercised without Layer 2, e.g. a test or a not-yet-fully-wired caller — is the SAFE
+    // direction instead: keep the branch always, never silently reverting to unconditional delete
+    // just because ancestry couldn't be checked.
+    const keepBranch =
+      opts !== undefined &&
+      (opts.trunkRef === undefined || !(await isAncestorOf(repoRoot, branch, opts.trunkRef)));
+    await removeWorktree(repoRoot, worktreePath, keepBranch ? undefined : branch);
     removed.push(entry.name);
   }
-  return removed;
+  return { removed, declined };
 }

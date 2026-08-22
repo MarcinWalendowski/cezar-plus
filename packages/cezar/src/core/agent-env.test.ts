@@ -124,6 +124,21 @@ describe('buildChildEnv — least-privilege child env (#427)', () => {
     });
   });
 
+  /**
+   * `agentEnv()`'s `NODE_ENV: ''` (run.ts, AGENTS.md trap 1) relies on the same
+   * "override drops the host copy entirely" mechanism as `#785`'s TMPDIR fix above —
+   * an empty string in `extraEnv` must win over a non-empty host value, not be
+   * treated as "no override" and merged away.
+   */
+  it('an empty-string extraEnv value replaces a non-empty host value, not merely shadows it', () => {
+    const env = buildChildEnv({
+      backend: 'claude',
+      source: { ...HOST, NODE_ENV: 'production' },
+      extraEnv: { NODE_ENV: '' },
+    });
+    expect(env.NODE_ENV).toBe('');
+  });
+
   it('opt-in CEZ_ENV_PASSTHROUGH forwards named extras', () => {
     const src = { ...HOST, MY_TOOLCHAIN_DIR: '/opt/tc', CEZ_ENV_PASSTHROUGH: 'MY_TOOLCHAIN_DIR' };
     const env = buildChildEnv({ backend: 'claude', source: src });
