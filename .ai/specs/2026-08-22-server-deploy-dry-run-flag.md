@@ -1,6 +1,22 @@
 # `--dry-run` for `cezar server-deploy`
 
-**Status:** draft
+**Status:** implemented, tested and shipped 2026-08-22 (commit `18707bf1`, pushed to
+`origin/main`). All four phases landed in one commit, matching this spec exactly:
+`--dry-run` registered in `parseArgs`, threaded into both the blue-green/rollback and
+`restart` dispatch branches, ORed with `CEZ_DRY_RUN` in both places, help text added
+under `cezar server-deploy`, the three scattered `runReleaseDeploy` dry-run checks
+folded into the single post-`decideReExec` short-circuit (closing the rollback and
+re-exec gaps), `releaseDeployCommand`'s success tail branches on `opts.dryRun`, and
+`BACKWARD_COMPATIBILITY.md` documents both the new flag and the widened `CEZ_DRY_RUN`
+reach. Phase 4 coverage shipped as `release-cli.test.ts` additions, `release-deploy.test.ts`
+additions, and a new `server-deploy-cli-wiring.test.ts` (subprocess-level, proves the
+`parseArgs` registration and the `--help` slice). Full gate suite green (typecheck,
+test:unit 44/44, build, test:package 15/15); the two `npm test` failures on the full
+suite (`knowledge/catalog.test.ts` C18 host-calibrated-budget trap, and
+`web/add-project-dialog.test.tsx` under full-suite load) are pre-existing/environmental,
+confirmed unrelated to this diff by a control run at the merge-base. No runtime/device
+E2E applicable — this is a CLI-only flag change, and the CLI-wiring subprocess test
+exercises the real entry point exactly as `cezar server-deploy --dry-run` would be run.
 
 ## TLDR
 
