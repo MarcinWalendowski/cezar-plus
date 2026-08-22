@@ -1,6 +1,17 @@
 # A run's spool is shared by every broker launch, so one dead twin's exit kills the live agent
 
-**Status:** Implemented, verification pending. Written 2026-08-22 for task
+**Status:** Implemented and shipped 2026-08-22. Code for P1-P4 is on `origin/main` at `ab63bcfa`
+(fix commit `30e266e2`, "a dead twin's exit no longer kills the live broker's run", merged with
+`origin/main` `75c7f1c0`). `npm run typecheck` is clean across all four packages and the full
+`npm run test` gate passes for every file the diff touches or exercises (broker-launch,
+brokered-session, run-spool, broker-scope-collision, brokered-parity, run-broker, runtime-info,
+recover-brokered, missing-session-string-contract) as well as the regression test named in
+Verification; the 5-6 flaky/pre-existing failures seen across two full-suite runs (perf-budget
+timing, a `claude`-CLI-presence test, a KB-store timeout, and rotating `packages/web` component
+tests) touch none of this diff and are not new. **The runtime acceptance criterion — exactly one
+live `claude` per run id on `prod-host`, surfaced at `/api/v1/health`'s `runtime.runBrokers`
+— is still QA Needed**: it can only be measured after this ships to that box, per the five steps
+under "Runtime, on `prod-host`" below. Written 2026-08-22 for task
 `f73115a0-f2d2-445d-9f23-559946796d97` against brief
 `.ai/specs/briefs/2026-08-22-run-spool-exit-crosstalk.md`.
 **Date:** 2026-08-22 (first draft committed as `3a54d156`; this revision settles the open questions

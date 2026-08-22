@@ -536,6 +536,9 @@ export class ClaudeCliRunner implements AgentRunner {
             return meta ? { instanceId: meta.instanceId, brokerPid: meta.pid } : undefined;
           })(),
       startOffset: request.startOffset ?? 0,
+      // A re-attach may follow a complete earlier turn. Never classify its next failed control
+      // request as a cold launch whose agent did no work.
+      previouslyAnswered: !mode.seed,
       onLine: (line) => consumer.handleLine(line),
       onOffset: request.onOffset,
       encodeSend: (content) => encodeClaudeUserMessage(content, spec.sessionId),

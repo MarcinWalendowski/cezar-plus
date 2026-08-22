@@ -18,7 +18,8 @@ import {
   type BrokerSessionRequest,
 } from '../core/broker-launch.ts';
 import { chooseIsolation, nextBrokerInstanceId, probeIsolationCapabilities, type BrokerIsolation } from '../core/broker-isolation.ts';
-import { isSpoolLive, legacySpoolDirFor, readSpoolMeta, SPOOL_ORPHAN_GRACE_MS, spoolDirFor, type SpoolMeta } from '../core/run-spool.ts';
+import { isPidAlive, isSpoolLive, legacySpoolDirFor, readSpoolMeta, SPOOL_ORPHAN_GRACE_MS, spoolDirFor, type SpoolMeta } from '../core/run-spool.ts';
+import { isRetryableBrokerLaunch } from '../core/brokered-session.ts';
 import { reapAbandonedBroker } from '../core/reap-abandoned-broker.ts';
 import { isMissingSessionRejection, type RunnerId } from '../core/agent-runner.ts';
 import { agentHomePaths } from '../paths.ts';
@@ -306,6 +307,8 @@ interface ActiveRun {
    * consumed by the step loop.
    */
   stepStopped?: AgentStopReason;
+  /** A newly launched broker exhausted its control-channel budget before any request succeeded. */
+  brokerNeverAnswered?: { spoolDir: string; message: string };
   /** Registry snapshot used to expand `/skill` follow-ups before a backend can
    *  mistake them for its own slash commands (#676). */
   skills?: Skill[];
@@ -336,6 +339,23 @@ const AUTONOMOUS_NUDGE =
   'Continue working autonomously until the task is fully complete. Do not ask me for confirmation or clarification — make reasonable assumptions and proceed. When everything is done, end the session with your done signal.';
 const MONITORING_WAKE_NUDGE =
   'Re-check the downstream work you were monitoring. Continue toward the task goal; emit CEZ:MONITORING again only if it is still pending.';
+
+/** Stop both halves of a broker launch before its spool is replaced by a retry. Best effort.
+ *  Distinct from `reapAbandonedBroker` (`../core/reap-abandoned-broker.ts`), which stops a
+ *  broker the replacement server refused to adopt across a blue-green cutover — different
+ *  trigger, different signature (spool dir here vs. run id + meta there). */
+export function reapAbandonedColdLaunch(spoolDir: string): void {
+  const meta = readSpoolMeta(spoolDir);
+  if (!meta) return;
+  for (const pid of [meta.childPid, meta.pid]) {
+    if (pid === undefined || !isPidAlive(pid)) continue;
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // Already exited or not signalable. Reaping must not turn a retryable step into a failure.
+    }
+  }
+}
 
 /**
  * Auto-resume after a provider usage limit (spec 2026-08-03-auto-resume-after-usage-limit).
@@ -3373,6 +3393,8 @@ export class RunManager {
      *  against retrying a SECOND rejection in a row, which is a real failure, not a loop. Every
      *  ordinary caller omits it. */
     retriedMissingSession = false,
+    /** Bounds a fresh-broker retry while preserving this continuation's backend conversation. */
+    retriedColdBroker = false,
   ): Promise<void> {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
@@ -3816,6 +3838,8 @@ export class RunManager {
      *  acted on in `finally`, once this run has left the live registries, same reasoning as
      *  `handBack`: re-invoking while still `active` lets a concurrent `pump()` race this method. */
     let missingSessionRetry = false;
+    /** Re-enter after teardown with a new broker but the same backend session id. */
+    let coldBrokerRetry = false;
     try {
       await session.result;
       if (sessionError) throw new Error(sessionError);
@@ -3874,11 +3898,28 @@ export class RunManager {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (!retriedColdBroker && isRetryableBrokerLaunch(err)) {
+        coldBrokerRetry = true;
+        reapAbandonedColdLaunch(err.spoolDir);
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId,
+          message: `${message}; the follow-up did not reach the agent, relaunching the broker once`,
+        });
+        this.store.appendEvent(runId, {
+          type: 'metric',
+          stepId,
+          name: 'run.step.retried_cold_broker',
+          runId,
+          workflow: this.store.getRun(runId)?.workflow,
+          spoolDir: err.spoolDir,
+          attempt: 2,
+        });
       // Reactive fallback (spec 2026-08-22-resume-fresh-session-fallback, Phase 3) — the
       // continuation-path twin of the chain loop's Phase 2 branch, and what
       // `recover-session-failure.test.ts` exercises. `sessionId !== undefined` means this attempt
       // actually resumed a session; `!retriedMissingSession` bounds it to one retry.
-      if (!retriedMissingSession && sessionId !== undefined && isMissingSessionRejection(backend, message)) {
+      } else if (!retriedMissingSession && sessionId !== undefined && isMissingSessionRejection(backend, message)) {
         missingSessionRetry = true;
         this.store.appendEvent(runId, {
           type: 'note',
@@ -3913,7 +3954,29 @@ export class RunManager {
       // failed drops its worktree directories and keeps the branches (spec 2026-08-20, X3).
       await this.discardWorkspaceRun(runId);
       this.dropActive(runId);
-      if (missingSessionRetry) {
+      if (coldBrokerRetry) {
+        void this.runContinuation(
+          runId,
+          stepId,
+          name,
+          sessionId,
+          backend,
+          prompt,
+          images,
+          persistedImages,
+          persistedAttachments,
+          retriedMissingSession,
+          true,
+        ).catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.store.updateRun(runId, {
+            status: 'failed',
+            error: `continue crashed: ${message}`,
+            finishedAt: new Date().toISOString(),
+          });
+          this.dropActive(runId);
+        });
+      } else if (missingSessionRetry) {
         // Same shape as `handBack` below: re-invoke only after this run has left the live
         // registries, so a concurrent `pump()` cannot race the new `ActiveRun` this creates.
         // Re-entering `runContinuation` itself (rather than the chain loop) re-sets `status:
@@ -4279,6 +4342,8 @@ export class RunManager {
      *  Phase 2). One retry per step, same reasoning as `resumedAfterStop`: a second miss in a row
      *  is a real failure, not a loop to keep retrying. */
     const resumedAfterMissingSession = new Set<string>();
+    /** Steps already relaunched once after a new broker never answered its first control request. */
+    const retriedColdBroker = new Set<string>();
     /** The resume handle a re-entry hands to the step it is re-running. Distinct from
      *  `resumeFrom`, which belongs to a RESTART re-entry and is spent on `resumeIdx` only. */
     let stopResume: { sessionId: string; profileId?: string; prompt: string } | undefined;
@@ -4318,6 +4383,10 @@ export class RunManager {
         stopResume = undefined;
         resumeFrom = undefined;
         state.stepStopped = undefined;
+        state.brokerNeverAnswered = undefined;
+        const sentImages = startImages;
+        const sentAttachments = startAttachments;
+        const sentCheckFailure = checkFailure;
         const failure = await this.runAgentStep(
           runId,
           state,
@@ -4407,6 +4476,37 @@ export class RunManager {
             backend: step.runner ?? taskBackend,
           });
           continue; // same `i` — resumeFrom/stopResume are already spent, so the next pass mints a fresh id
+        }
+        // The session callback can set this while `runSingleAgentStep` is awaiting. TypeScript's
+        // local control-flow analysis cannot observe that asynchronous mutation.
+        const coldBroker = state.brokerNeverAnswered as ActiveRun['brokerNeverAnswered'];
+        state.brokerNeverAnswered = undefined;
+        if (failure && coldBroker && !retriedColdBroker.has(step.id)) {
+          retriedColdBroker.add(step.id);
+          reapAbandonedColdLaunch(coldBroker.spoolDir);
+          this.store.updateStep(runId, step.id, {
+            sessionId: undefined,
+            status: 'pending',
+            error: undefined,
+          });
+          emit({
+            type: 'note',
+            stepId: step.id,
+            message: `${failure}; no control request reached the agent, relaunching the broker once`,
+          });
+          emit({
+            type: 'metric',
+            stepId: step.id,
+            name: 'run.step.retried_cold_broker',
+            runId,
+            workflow: workflow.name,
+            spoolDir: coldBroker.spoolDir,
+            attempt: 2,
+          });
+          startImages = sentImages;
+          startAttachments = sentAttachments;
+          checkFailure = sentCheckFailure;
+          continue;
         }
         if (failure) {
           this.finishStep(runId, step.id, 'failed', failure, emit);
@@ -5274,6 +5374,9 @@ export class RunManager {
       return null;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (isRetryableBrokerLaunch(err)) {
+        state.brokerNeverAnswered = { spoolDir: err.spoolDir, message };
+      }
       sink.sessionEnded('error', message); // alongside v1's fatal `error`
       return message;
     } finally {
