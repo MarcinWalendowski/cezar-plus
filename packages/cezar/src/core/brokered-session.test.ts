@@ -11,6 +11,8 @@ import {
   isRetryableBrokerLaunch,
 } from './brokered-session.ts';
 import { startRunBroker } from './run-broker.ts';
+import { ensureSpoolDir, writeSpoolExit, writeSpoolMeta } from './run-spool.ts';
+import { spoolDirFor } from './run-spool.ts';
 
 /**
  * P4 of `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`.
@@ -61,6 +63,87 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
 }
 
 describe('BrokeredSession', () => {
+  it('ignores a foreign exit and threads only the accepted exit into the result', async () => {
+    const spool = join(scratch(), 'owned.spool');
+    ensureSpoolDir(spool);
+    let accepted: unknown;
+    const session = new BrokeredSession({
+      spoolDir: spool,
+      owner: { instanceId: 'B' },
+      onLine: () => {},
+      onExit: (exit) => { accepted = exit; },
+      buildResult: (exit) => ({ text: String(exit?.code), toolCalls: [], tokensUsed: 0 }),
+      pollMs: 5,
+    });
+    writeSpoolExit(spool, { code: 143, signal: null, instanceId: 'A', brokerPid: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(session.open).toBe(true);
+    expect(accepted).toBeUndefined();
+
+    writeSpoolExit(spool, { code: 0, signal: null, instanceId: 'B', brokerPid: 11 });
+    await expect(session.result).resolves.toMatchObject({ text: '0' });
+    expect(accepted).toMatchObject({ instanceId: 'B', code: 0 });
+  });
+
+  it('rejects when a known broker dies without recording an exit', async () => {
+    const spool = join(scratch(), 'vanished.spool');
+    ensureSpoolDir(spool);
+    writeSpoolMeta(spool, {
+      schema: 1,
+      protocol: 2,
+      runId: 'vanished',
+      backend: 'claude',
+      pid: 2 ** 30,
+      argv: [],
+      instanceId: 'gone',
+    });
+    const session = new BrokeredSession({
+      spoolDir: spool,
+      owner: { instanceId: 'gone' },
+      onLine: () => {},
+      pollMs: 5,
+    });
+    await expect(session.result).rejects.toThrow(/died without recording an exit.*instance gone/);
+  });
+
+  it('keeps a live sibling running when an older broker exits 143', async () => {
+    const runsDir = scratch();
+    const spoolA = spoolDirFor(runsDir, 'same-run', 'A');
+    const spoolB = spoolDirFor(runsDir, 'same-run', 'B');
+    const sigterm143 = [process.execPath, '-e', 'process.on("SIGTERM",()=>process.exit(143));setInterval(()=>{},1000)'];
+    const brokerA = startRunBroker({
+      spoolDir: spoolA,
+      runId: 'same-run',
+      instanceId: 'A',
+      backend: 'claude',
+      command: sigterm143,
+      orphanTimeoutMs: 50,
+    });
+    const brokerB = startRunBroker({
+      spoolDir: spoolB,
+      runId: 'same-run',
+      instanceId: 'B',
+      backend: 'claude',
+      command: echoBackend(),
+    });
+    const session = new BrokeredSession({
+      spoolDir: spoolB,
+      owner: { instanceId: 'B' },
+      onLine: () => {},
+      buildResult: (exit) => {
+        if (exit?.code && exit.code !== 0) throw new Error(`claude CLI exited with code ${exit.code}`);
+        return { text: '', toolCalls: [], tokensUsed: 0 };
+      },
+      pollMs: 10,
+    });
+
+    await expect(brokerA.finished).resolves.toMatchObject({ code: 143 });
+    expect(session.open).toBe(true);
+    session.end();
+    await expect(session.result).resolves.toMatchObject({ tokensUsed: 0 });
+    await brokerB.finished;
+  }, TEST_TIMEOUT_MS);
+
   it(
     'satisfies the AgentSession shape and streams lines in order',
     async () => {

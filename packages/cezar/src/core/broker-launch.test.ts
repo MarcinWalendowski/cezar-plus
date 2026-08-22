@@ -48,6 +48,7 @@ describe('brokerArgs', () => {
     const args = brokerArgs({
       spoolDir: '/s',
       runId: 'r1',
+      instanceId: 'i1',
       stepId: 'implement',
       backend: 'claude',
       cwd: '/repo',
@@ -59,12 +60,12 @@ describe('brokerArgs', () => {
     // and all, and must never be parsed as ours.
     expect(args.slice(separator + 1)).toEqual(['claude', '--output-format', 'stream-json']);
     expect(args.slice(0, separator)).toEqual([
-      '--spool', '/s', '--run', 'r1', '--backend', 'claude', '--step', 'implement', '--cwd', '/repo',
+      '--spool', '/s', '--run', 'r1', '--instance', 'i1', '--backend', 'claude', '--step', 'implement', '--cwd', '/repo',
     ]);
   });
 
   it('omits optional flags rather than passing empty values', () => {
-    const args = brokerArgs({ spoolDir: '/s', runId: 'r1', backend: 'claude', command: ['claude'] });
+    const args = brokerArgs({ spoolDir: '/s', runId: 'r1', instanceId: 'i1', backend: 'claude', command: ['claude'] });
     expect(args).not.toContain('--step');
     expect(args).not.toContain('--cwd');
   });

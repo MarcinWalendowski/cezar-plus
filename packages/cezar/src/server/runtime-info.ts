@@ -1,8 +1,10 @@
-import { basename, dirname, resolve as resolvePath } from 'node:path';
+import { readdirSync } from 'node:fs';
+import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { BROKERED_BACKENDS, brokerAvailable } from '../core/broker-launch.ts';
 import type { BrokerIsolation } from '../core/broker-isolation.ts';
+import { isPidAlive, readSpoolMeta } from '../core/run-spool.ts';
 import { loadLedger } from '../server-install/releases.ts';
 
 /**
@@ -20,6 +22,43 @@ export interface RuntimeInfo {
   runBrokerIsolation: BrokerIsolation;
   brokeredBackends: string[];
   brokerAvailable: boolean;
+  runBrokers?: { live: number; runsWithMultipleBrokers: string[] };
+}
+
+export const HEALTH_SPOOL_SCAN_MAX = 256;
+
+export function scanRunBrokers(dataDir: string): RuntimeInfo['runBrokers'] {
+  const runsDir = join(dataDir, 'runs');
+  let runSpools: string[];
+  try {
+    runSpools = readdirSync(runsDir).filter((entry) => entry.endsWith('.spool'));
+  } catch {
+    return { live: 0, runsWithMultipleBrokers: [] };
+  }
+  const counts = new Map<string, number>();
+  let scanned = 0;
+  for (const runSpool of runSpools) {
+    const parent = join(runsDir, runSpool);
+    let instances: string[];
+    try {
+      instances = readdirSync(parent, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => join(parent, entry.name));
+    } catch {
+      continue;
+    }
+    scanned += instances.length;
+    if (scanned > HEALTH_SPOOL_SCAN_MAX) return undefined;
+    const live = instances.reduce((count, dir) => {
+      const meta = readSpoolMeta(dir);
+      return count + (meta && isPidAlive(meta.pid) ? 1 : 0);
+    }, 0);
+    if (live > 0) counts.set(runSpool.slice(0, -'.spool'.length), live);
+  }
+  return {
+    live: [...counts.values()].reduce((sum, count) => sum + count, 0),
+    runsWithMultipleBrokers: [...counts].filter(([, count]) => count > 1).map(([runId]) => runId).sort(),
+  };
 }
 
 export interface DeployInfo {
@@ -32,9 +71,11 @@ export interface DeployInfo {
 export function runtimeInfo(opts: {
   socketActivated: boolean;
   isolation: BrokerIsolation;
+  dataDir?: string;
   env?: NodeJS.ProcessEnv;
 }): RuntimeInfo {
   const available = brokerAvailable(opts.env ?? process.env);
+  const runBrokers = opts.dataDir ? scanRunBrokers(opts.dataDir) : undefined;
   return {
     socketActivated: opts.socketActivated,
     runBrokerIsolation: opts.isolation,
@@ -43,6 +84,7 @@ export function runtimeInfo(opts: {
     // than an empty one.
     brokeredBackends: available ? [...BROKERED_BACKENDS] : [],
     brokerAvailable: available,
+    ...(runBrokers ? { runBrokers } : {}),
   };
 }
 

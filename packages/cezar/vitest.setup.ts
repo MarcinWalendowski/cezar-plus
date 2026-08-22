@@ -7,7 +7,8 @@ import { afterAll, afterEach, beforeEach } from 'vitest'
 // CEZ_OIDC_*, CEZ_PORT_STRICT, CEZ_PROJECTS_DIR, CEZ_PUBLIC_URL, CEZ_REMOTE, ...) leak into
 // every agent-spawned `npm test`, and the server suites assert on exactly those knobs being off
 // by default. Unset every CEZ_* except the two identity vars a run legitimately reports through
-// (CEZ_HANDOFF_FILE/CEZ_TASK_ID) — a LIVE-COMPUTED prefix match, not an enumerated list, because
+// (CEZ_HANDOFF_FILE/CEZ_TASK_ID) and the explicit live-vendor contract-test opt-in — a
+// LIVE-COMPUTED prefix match, not an enumerated list, because
 // AGENTS.md already documents an enumerated version of this same scrub going stale once. A
 // suite that means to exercise one of these sets it inside its own test/beforeEach and restores
 // it (the precedent CEZ_AUTOMATIONS/CEZ_SINGLE_PROJECT/etc. already establish in this file's
@@ -16,7 +17,12 @@ import { afterAll, afterEach, beforeEach } from 'vitest'
 // Runs before `sandboxHome`/`pinSandboxHome()` below: it deletes `CEZ_HOME` too (it starts with
 // `CEZ_`), and `pinSandboxHome()` immediately re-sets it to the sandbox value.
 for (const key of Object.keys(process.env)) {
-  if (key.startsWith('CEZ_') && key !== 'CEZ_HANDOFF_FILE' && key !== 'CEZ_TASK_ID') {
+  if (
+    key.startsWith('CEZ_') &&
+    key !== 'CEZ_HANDOFF_FILE' &&
+    key !== 'CEZ_TASK_ID' &&
+    key !== 'CEZ_LIVE_CLI_CONTRACT'
+  ) {
     delete process.env[key]
   }
 }
