@@ -72,6 +72,29 @@ export const workflowStepSchema = z
      * (see `parseReviewVerdict`), which works at the shipped default.
      */
     requiresApproval: z.boolean().optional(),
+    /**
+     * This step is CPU/memory-heavy, so it must hold a slot in the second semaphore
+     * (`resources.maxHeavySteps`) for the duration of its turn — spec
+     * `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D14.
+     *
+     * `maxParallel` alone cannot express a bimodal workload: a run sits near 0.5 GB for most of
+     * its life and spikes into multiple GB inside `run-tests`. Set the one cap for the spike and
+     * the box idles; set it for the median and three runs hit the spike together and thrash. So
+     * admission is two numbers — how many runs are admitted at all, and how many may be inside a
+     * heavy step at once — and this flag is what tells the second one which steps count.
+     *
+     * **DECLARED, never inferred from the step's name at runtime.** A name-match would be a
+     * second, invisible definition of "heavy" that drifts the moment somebody names a step
+     * `tests` or `verify-build`, and it cannot be turned off for a chain that genuinely wants an
+     * unbounded step. The catalog's `run-tests` opts in explicitly; anything else that is heavy
+     * says so in its own YAML.
+     *
+     * Absent = not heavy, which is today's behaviour for every step and every existing workflow
+     * file. Optional and additive so a persisted `workflowDef` written by an older cezar still
+     * parses — see `runs/store.ts`'s `workflowDef` note on why a NARROWING here silently eats
+     * queued runs, and why a widening like this one is safe.
+     */
+    heavy: z.boolean().optional(),
     verify: z
       .object({
         builtin: z.enum(POSTCONDITION_IDS).optional(),
@@ -878,6 +901,13 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       name: 'Run the tests',
       model: SPEC_TO_DEPLOY_STEP_MODEL,
       effort: RUN_TESTS_STEP_EFFORT,
+      // THE step the second admission gate exists for (D14). Declared here, on the definition,
+      // and never inferred from the id at runtime — see `heavy`'s own doc comment on the step
+      // schema above. Measured: a run sits near 0.5 GB for most of its life and spikes into
+      // multiple GB inside this step, at a 12.9 % duty cycle. It is also the ONLY built-in step
+      // that carries the flag; the gate is otherwise inert, and stays inert for every installed
+      // user until they set `resources.maxHeavySteps` themselves.
+      heavy: true,
       allowedTools: DEFAULT_ALLOWED_TOOLS,
       // Same guarded allowlist as `implement`, by reference: it can install, run every gate, and
       // edit code to fix a failure — but it cannot reach the remote. `commit-push` does that next.

@@ -36,6 +36,17 @@ import { DEFAULT_MONITORING_WAKE_MINUTES, loadWorkspaceConfig } from './config.t
 export interface WorkspaceResourceLimits {
   /** Workspace-wide cap on concurrently *running* agent runs. */
   maxParallel: number;
+  /**
+   * Workspace-wide cap on runs inside a CPU/memory-heavy step at once — the SECOND admission
+   * number (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D14). `maxParallel` bounds
+   * how many runs are admitted at all; this bounds how many of them may be spiking together.
+   *
+   * **Absent means UNBOUNDED, never 0/1/2.** Mirrors `resources.maxHeavySteps` in `config.ts`
+   * verbatim — that docblock is the reasoning; read it before touching this key. An older `load`
+   * stub that predates this field, or a config file nobody has opted into the gate on, must behave
+   * exactly like today's cezar: no second gate at all.
+   */
+  maxHeavySteps?: number;
   /** Durable monitoring sessions that do not consume active-task capacity. */
   maxMonitoringSessions?: number;
   /** Automatic monitoring re-check cadence in minutes. Default ON at
@@ -143,6 +154,10 @@ async function loadResourceLimits(): Promise<WorkspaceResourceLimits> {
   }
   return {
     maxParallel: resources.maxParallel,
+    // `resources.maxHeavySteps` is itself `optional().catch(undefined)` (config.ts) — pass it
+    // through verbatim rather than defaulting it here, or this loader would be the second place
+    // (besides the schema) that has to remember absent means unbounded.
+    maxHeavySteps: resources.maxHeavySteps,
     maxMonitoringSessions: resources.maxMonitoringSessions,
     monitoringWakeIntervalMinutes: resources.monitoringWakeIntervalMinutes,
     autoResumeOnUsageLimit: resources.autoResumeOnUsageLimit,
@@ -170,6 +185,16 @@ export class WorkspaceSemaphore {
   /** A slot freed DURING a sweep. The in-flight sweep may already have pumped
    *  the manager that should get it, so re-run rather than drop the wakeup. */
   private pendingRelease = false;
+  /** Heavy steps currently holding a slot — the SECOND gate (D14), counted separately from
+   *  `busy()` because it is taken and released around a STEP, not a run. Deliberately its own
+   *  counter rather than a `SemaphoreParticipant`: participants exist so a freed run slot can
+   *  route to the workspace's longest-waiting queue across projects, and a heavy step has no
+   *  project-scoped queue to route to — every waiter is equally entitled to the next free slot. */
+  private heavyActiveCount = 0;
+  /** FIFO queue of heavy-step waiters, each woken by `releaseHeavyStep()` popping one entry. A
+   *  plain array rather than reusing `participants`' pump-and-poll shape: there is exactly one
+   *  cap to satisfy here, not N managers each deciding independently whether they can start. */
+  private readonly heavyWaiters: Array<() => void> = [];
 
   constructor(options: WorkspaceSemaphoreOptions = {}) {
     this.load = options.load ?? loadResourceLimits;
@@ -194,6 +219,72 @@ export class WorkspaceSemaphore {
   /** Cached workspace-wide parallel cap. */
   maxParallel(): number {
     return this.limits.maxParallel;
+  }
+
+  /**
+   * Cached cap on concurrent CPU/memory-heavy steps across the whole workspace (D14). This is
+   * the ONE place that turns "absent" into "no gate" — every other reader of `limits.maxHeavySteps`
+   * must go through this getter rather than re-deriving the fallback, per `WorkspaceResourceLimits`'
+   * docblock: absent means UNBOUNDED, never 0, 1 or 2. A schema default would silently cap every
+   * installed user's concurrent heavy steps the moment they upgraded `@loki-labs/better-cezar`.
+   */
+  maxHeavySteps(): number {
+    return this.limits.maxHeavySteps ?? Infinity;
+  }
+
+  /** Heavy steps holding a slot right now, across the whole workspace — the `heavyActive` half of
+   *  D14's two presence numbers (`active/maxParallel`, `heavyActive/maxHeavySteps`). */
+  heavyActive(): number {
+    return this.heavyActiveCount;
+  }
+
+  /**
+   * Run `fn` while holding a heavy-step slot (D14), queueing rather than failing when the gate is
+   * full — "queueing at the gate is expected and correct; thrashing is not." A step never opts
+   * into this call because of its NAME; the caller (the workflow runner, wiring the `heavy: true`
+   * flag from `workflows/types.ts`) decides which steps pass through it. A step that never calls
+   * this is never gated, at any occupancy.
+   *
+   * The slot is released in a `finally`, so a step that throws still frees it — a leaked slot here
+   * wedges every future heavy step on the box behind a step that already failed. This is why the
+   * method wraps `fn` rather than exposing bare acquire/release: a caller cannot forget the
+   * `finally` if there is nothing to remember.
+   *
+   * Composes with the run-admission gate (`busy()`/`register()`/`release()`) without deadlock
+   * because the two counters share no lock: a run already holding a run slot and now waiting here
+   * blocks nothing but its own continuation — `release()`'s broadcast sweep, and every other heavy
+   * step's acquire/release, run independently of this queue.
+   */
+  async runHeavyStep<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquireHeavyStep();
+    try {
+      return await fn();
+    } finally {
+      this.releaseHeavyStep();
+    }
+  }
+
+  /** Resolves immediately if a slot is free, else queues and resolves once `releaseHeavyStep()`
+   *  pops this waiter — FIFO, so a step that has been waiting longest goes first. */
+  private acquireHeavyStep(): Promise<void> {
+    if (this.heavyActiveCount < this.maxHeavySteps()) {
+      this.heavyActiveCount += 1;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolveWaiter) => {
+      this.heavyWaiters.push(() => {
+        this.heavyActiveCount += 1;
+        resolveWaiter();
+      });
+    });
+  }
+
+  /** Frees the slot this call held, then hands it straight to the next waiter (if any) — never
+   *  drops back to zero occupancy while someone is still queued. */
+  private releaseHeavyStep(): void {
+    this.heavyActiveCount -= 1;
+    const next = this.heavyWaiters.shift();
+    if (next) next();
   }
 
   maxMonitoringSessions(): number {

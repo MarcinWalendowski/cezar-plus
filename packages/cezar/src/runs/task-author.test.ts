@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { runRecordSchema } from './store.ts';
-import { todoSchema } from '../todos.ts';
+import { todoSchema, type CreateTodoInput } from '../todos.ts';
 import {
   agentAuthor,
   authorFromAgentEnv,
@@ -14,6 +14,7 @@ import {
   taskAuthorSchema,
   type TaskAuthor,
 } from './task-author.ts';
+import { createTodoInputSchema } from '@loki-labs/better-cezar-contract';
 
 /**
  * `author` — spec `.ai/specs/2026-08-21-task-author-provenance.md`.
@@ -361,6 +362,44 @@ describe('the two taskAuthorSchema twins say the same thing', () => {
     // Server-stamped on both sides: the wire schema `.omit()`s it, the persisted `CreateTodoInput`
     // `Omit<>`s it. Neither route can set an author, so neither can rewrite one.
     expect(wireTodos).toContain('author: true,');
-    expect(persistedTodos).toContain("| 'archivedAt' | 'author'");
+  });
+
+  /**
+   * **Rewritten 2026-08-23. This assertion used to be `expect(persistedTodos).toContain("|
+   * 'archivedAt' | 'author'")` and it broke on FORMATTING, not on a regression.** The cluster work
+   * took `CreateTodoInput`'s `Omit<>` from five members to eleven, which wrapped it across lines,
+   * and the single-line literal stopped matching while every property it was guarding still held.
+   *
+   * A string search over source is the weakest form this check can take: it goes red when nobody
+   * broke anything, and — the worse half — it goes green for a match inside a comment or an
+   * unrelated identifier. Both directions are wrong, so the fix is not a better string.
+   *
+   * Each twin gets the strongest check its own nature allows:
+   *  - the **wire** side is a zod object, so its shape is real at runtime and `expect` can read it;
+   *  - the **persisted** side is a TypeScript `Omit<>` that does not exist at runtime, which is why
+   *    the original reached for source text at all. `expectTypeOf` is the right instrument: it is
+   *    inert when the suite runs, and the assertion is checked by `tsc -p tsconfig.test.json` —
+   *    this repo's actual typecheck gate, which these test files are already inside.
+   *
+   * Neither version can be broken by reformatting, and neither can be satisfied by a comment.
+   */
+  it('neither create input admits `author` — checked structurally, not by reading source', () => {
+    // Wire side: a real runtime read of the schema's shape.
+    expect(Object.keys(createTodoInputSchema.shape)).not.toContain('author');
+    // Floor: the key is genuinely absent, not the whole shape empty or the import wrong.
+    expect(Object.keys(createTodoInputSchema.shape)).toContain('summary');
+
+    // Persisted side: a compile-time assertion, enforced by tsc rather than at run time.
+    //
+    // **Its failure signature is cryptic, so recognise it here rather than debugging it there.**
+    // Verified by mutation (dropping `| 'author'` from `CreateTodoInput`'s `Omit<>`): tsc reports
+    // `error TS2554: Expected 2 arguments, but got 1` on THIS line, because vitest's typed API
+    // changes the assertion's arity when the type does not hold. That message says nothing about
+    // `author`. If you see it here, it means `author` leaked back into the create input — go look
+    // at the `Omit<>` in `todos.ts`, not at this call's argument count.
+    expectTypeOf<CreateTodoInput>().not.toHaveProperty('author');
+    // Same floor, so a `CreateTodoInput` that had collapsed to `never`/`unknown` — which would
+    // satisfy every `not.toHaveProperty` above — still fails here.
+    expectTypeOf<CreateTodoInput>().toHaveProperty('summary');
   });
 });

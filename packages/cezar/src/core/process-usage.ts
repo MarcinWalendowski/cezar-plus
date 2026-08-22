@@ -12,9 +12,19 @@
  *    moment the registry empties, so an idle cockpit spawns nothing;
  *  - parsing + tree aggregation are pure functions, testable against canned
  *    `ps` output (scripts/test-process-usage.mjs).
+ *
+ * Phase 0 of `.ai/specs/2026-08-22-multi-node-cezar-cluster.md` adds a second measurement path:
+ * on Linux, a run's own transient scope (`core/broker-isolation.ts`'s `RUNS_SLICE`) has a cgroup,
+ * and `memory.peak` / `cpu.stat` read from it are the figures the host actually enforces against
+ * — unlike the summed `ps` RSS above, which double-counts shared pages across the tree. Same
+ * degrade-silently rule applies: a missing/unreadable cgroup file is normal (macOS has none at
+ * all), never an error, and the fallback is the existing `ps` path, never a thrown run.
  */
 
 import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+
+import { RUNS_SLICE } from './broker-isolation.ts';
 
 /** One aggregated sample for a run's process tree. */
 export interface ProcessUsage {
@@ -94,6 +104,90 @@ export function aggregateTreeUsage(procs: ProcStat[], rootPid: number): ProcessU
   return { cpuPct: Math.round(cpuPct * 10) / 10, rssBytes: rssKb * 1024, procCount };
 }
 
+// ---- cgroup peaks (Linux only; D14a's own scope) ---------------------------
+
+/** Cgroup-sourced peaks for one run — `memory.peak` and `cpu.stat`'s `usage_usec`, converted. */
+export interface CgroupPeaks {
+  peakMemoryBytes: number;
+  cpuSeconds: number;
+}
+
+/**
+ * Attribution for a run's persisted usage figures: which measurement path produced them. A
+ * `ps`-summed number and a cgroup `memory.peak` are not interchangeable — the caller (the node
+ * health panel's `enforcement` field, spec D14a) must never mistake one for the other.
+ *
+ * `'none'` never appears inside a peaks object — `unregisterRunProcess` returns `undefined`
+ * rather than a zero-filled one when no sample of any kind ever landed (the process died before
+ * the first tick, or `ps` itself is unavailable). Absent means NOT MEASURED, never zero, the same
+ * rule `RunRecord`'s own optional usage fields follow. The value exists in this union so a caller
+ * that already has an `undefined` peaks result can name that state with the same vocabulary.
+ */
+export type UsageSource = 'cgroup' | 'process-tree' | 'none';
+
+/** Minimal read surface the cgroup probes need — an inline interface, not `Pick<typeof
+ *  readFileSync, …>`, because `readFileSync`'s overloads (Buffer vs string returns) do not
+ *  structurally match a plain `(path, encoding) => string` test fixture. Mirrors
+ *  `broker-isolation.ts`'s `{ existsSync, accessSync }` injection. */
+interface CgroupFs {
+  readFileSync(path: string, encoding: 'utf8'): string;
+}
+
+const nodeFs: CgroupFs = { readFileSync };
+
+/**
+ * Resolve `pid`'s own cgroup v2 directory under `/sys/fs/cgroup`, restricted to a run's own
+ * transient scope (`RUNS_SLICE`, `core/broker-isolation.ts`) — never a shared or parent cgroup,
+ * which would attribute other work's usage to this run. Null on any failure: non-Linux, `/proc`
+ * unreadable (the process is gone, or this platform has no `/proc`), no unified-hierarchy (`0::`)
+ * line, or a cgroup that is not this run's own scope (`delegated`/`none` isolation leaves a run in
+ * a cgroup it does not own).
+ *
+ * `platform`/`fs` are injectable so the Linux-only path is exercised on every dev machine,
+ * including the macOS box this was written on — mirrors `probeUserScope` in `broker-isolation.ts`.
+ */
+export function resolveRunCgroupDir(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+  fs: CgroupFs = nodeFs,
+): string | null {
+  if (platform !== 'linux') return null;
+  let text: string;
+  try {
+    text = fs.readFileSync(`/proc/${pid}/cgroup`, 'utf8');
+  } catch {
+    return null;
+  }
+  const line = text.split('\n').find((l) => l.startsWith('0::'));
+  if (!line) return null;
+  const cgroupPath = line.slice('0::'.length).trim();
+  if (!cgroupPath.startsWith('/')) return null;
+  if (!cgroupPath.includes(`/${RUNS_SLICE}/`) || !cgroupPath.endsWith('.scope')) return null;
+  return `/sys/fs/cgroup${cgroupPath}`;
+}
+
+/**
+ * Read `memory.peak` + `cpu.stat` from a resolved cgroup directory (`resolveRunCgroupDir`). Null
+ * on any failure — a missing file (older kernel, controller not delegated), a permission error, or
+ * malformed content are all "no data": never thrown, never a failed run.
+ */
+export function readCgroupPeaks(dir: string, fs: CgroupFs = nodeFs): CgroupPeaks | null {
+  try {
+    const peakMemoryBytes = Number(fs.readFileSync(`${dir}/memory.peak`, 'utf8').trim());
+    if (!Number.isFinite(peakMemoryBytes)) return null;
+
+    const statText = fs.readFileSync(`${dir}/cpu.stat`, 'utf8');
+    const usageLine = statText.split('\n').find((l) => l.startsWith('usage_usec '));
+    if (!usageLine) return null;
+    const usageUsec = Number(usageLine.slice('usage_usec '.length).trim());
+    if (!Number.isFinite(usageUsec)) return null;
+
+    return { peakMemoryBytes, cpuSeconds: usageUsec / 1_000_000 };
+  } catch {
+    return null;
+  }
+}
+
 // ---- registry + sampler -----------------------------------------------------
 
 export const SAMPLE_INTERVAL_MS = 2_000;
@@ -103,6 +197,18 @@ interface Entry {
   last?: ProcessUsage;
   peakRssBytes: number;
   peakProcCount: number;
+  /** High-water mark of the `ps`-summed `cpuPct`, the same way `peakRssBytes` tracks
+   *  `rssBytes` — sampled today, persisted by nobody until Phase 0 (`RunRecord.peakCpuPct`). */
+  peakCpuPct: number;
+  /** Resolved once per session and cached — `/proc/<pid>/cgroup` does not move for a scope's
+   *  lifetime, so there is no reason to re-walk it every tick. Left unset (not `null`) on
+   *  failure so a startup race (the scope not yet visible on the very first sample) retries
+   *  rather than permanently falling back to `process-tree`. */
+  cgroupDir?: string;
+  /** Latest successful cgroup read. `memory.peak`/`cpu.stat`'s `usage_usec` are already
+   *  cumulative high-water marks kept by the kernel, so the latest reading IS the peak —
+   *  no max-of-samples needed, unlike the `ps`-derived fields above. */
+  cgroup?: CgroupPeaks;
 }
 
 type UsageListener = (usage: Record<string, ProcessUsage>) => void;
@@ -116,7 +222,7 @@ let sampling = false;
  *  step) replaces the pid but keeps nothing else — peaks are per session and
  *  the engine maxes them into the run record on unregister. */
 export function registerRunProcess(runId: string, pid: number): void {
-  entries.set(runId, { pid, peakRssBytes: 0, peakProcCount: 0 });
+  entries.set(runId, { pid, peakRssBytes: 0, peakProcCount: 0, peakCpuPct: 0 });
   if (!timer) {
     timer = setInterval(() => void sample(), SAMPLE_INTERVAL_MS);
     timer.unref?.();
@@ -124,11 +230,44 @@ export function registerRunProcess(runId: string, pid: number): void {
   }
 }
 
+/** One session's peaks, attributed to the path that produced them (Phase 0,
+ *  `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`). `peakMemoryBytes`/`cpuSeconds` are
+ *  present only when `source` is `'cgroup'` — see `UsageSource`'s docblock for why they are
+ *  never backfilled from the `ps` figures when a cgroup is unavailable. */
+export interface UsagePeaks {
+  peakRssBytes: number;
+  peakProcCount: number;
+  peakCpuPct: number;
+  peakMemoryBytes?: number;
+  cpuSeconds?: number;
+  source: Exclude<UsageSource, 'none'>;
+}
+
+/**
+ * The attribution decision itself, pure: cgroup peaks win whenever a cgroup reading ever landed
+ * for this session; the `ps`-derived figures are the whole answer when one never did. Exported
+ * (alongside `resolveRunCgroupDir`/`readCgroupPeaks`) so this policy is unit-testable without
+ * registering a real process or waiting on the sampler's 2 s timer — `unregisterRunProcess` is
+ * the only caller in this file.
+ */
+export function attributeUsagePeaks(
+  psPeaks: { peakRssBytes: number; peakProcCount: number; peakCpuPct: number },
+  cgroup: CgroupPeaks | undefined,
+): UsagePeaks {
+  if (cgroup) {
+    return {
+      ...psPeaks,
+      peakMemoryBytes: cgroup.peakMemoryBytes,
+      cpuSeconds: cgroup.cpuSeconds,
+      source: 'cgroup',
+    };
+  }
+  return { ...psPeaks, source: 'process-tree' };
+}
+
 /** Stop tracking; returns the session's peaks (undefined when no sample ever
  *  landed — `ps` unavailable, or the process died before the first tick). */
-export function unregisterRunProcess(
-  runId: string,
-): { peakRssBytes: number; peakProcCount: number } | undefined {
+export function unregisterRunProcess(runId: string): UsagePeaks | undefined {
   const entry = entries.get(runId);
   entries.delete(runId);
   if (entries.size === 0 && timer) {
@@ -136,7 +275,10 @@ export function unregisterRunProcess(
     timer = null;
   }
   if (!entry || entry.peakProcCount === 0) return undefined;
-  return { peakRssBytes: entry.peakRssBytes, peakProcCount: entry.peakProcCount };
+  return attributeUsagePeaks(
+    { peakRssBytes: entry.peakRssBytes, peakProcCount: entry.peakProcCount, peakCpuPct: entry.peakCpuPct },
+    entry.cgroup,
+  );
 }
 
 /** Latest sample for one run, if any. */
@@ -185,6 +327,14 @@ async function sample(): Promise<void> {
       if (usage) {
         entry.peakRssBytes = Math.max(entry.peakRssBytes, usage.rssBytes);
         entry.peakProcCount = Math.max(entry.peakProcCount, usage.procCount);
+        entry.peakCpuPct = Math.max(entry.peakCpuPct, usage.cpuPct);
+      }
+      // Cgroup path: no-op on macOS (probe fails once, cheaply) and on any run whose isolation
+      // left it outside its own scope — see resolveRunCgroupDir's degrade rules.
+      entry.cgroupDir ??= resolveRunCgroupDir(entry.pid) ?? undefined;
+      if (entry.cgroupDir) {
+        const cgroupPeaks = readCgroupPeaks(entry.cgroupDir);
+        if (cgroupPeaks) entry.cgroup = cgroupPeaks;
       }
     }
     if (listeners.size > 0) {

@@ -374,3 +374,64 @@ describe('engine — ledger preservation and uninstall safety (PR #423 review fi
     expect(loadServerState().dryRun).toBeUndefined();
   });
 });
+
+// Phase 4 (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D17): `--role worker --join
+// <code>` reaching `RunOptions` and landing on `ServerState`. `platforms/hetzner.ts`'s own worker
+// tests construct `ctx.state` directly and never exercise this wiring — this is the only coverage
+// that argv-shaped options actually arrive on the state the engine builds and persists.
+describe('engine — role/clusterJoinToken (Phase 4 worker CLI wiring)', () => {
+  let home: string;
+  const original = process.env.CEZ_HOME;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'cez-engine-role-'));
+    process.env.CEZ_HOME = home;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.CEZ_HOME;
+    else process.env.CEZ_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('--role worker --join <code> lands both values on the state the engine builds', async () => {
+    const res = await runInstall(strategyOf([fakeStep('a')]), opts({ role: 'worker', clusterJoinToken: 'cezj_abc123' }));
+    expect(res.state.role).toBe('worker');
+    expect(res.state.clusterJoinToken).toBe('cezj_abc123');
+    // and it survives the load+save round-trip the worker steps rely on (hetzner.ts's own docblock).
+    expect(loadServerState().role).toBe('worker');
+    expect(loadServerState().clusterJoinToken).toBe('cezj_abc123');
+  });
+
+  // The one that matters: omitting both flags must not just "also work" — it must leave the state
+  // IDENTICAL to what a supervisor/org install has always produced, with nothing new leaking in.
+  it('negative control: neither flag passed leaves role/clusterJoinToken absent on a supervisor/org install', async () => {
+    const res = await runInstall(
+      strategyOf([fakeStep('a')]),
+      opts({ domain: 'acme.example.com', orgSlug: 'acme', instance: 'acme-example-com', port: 4322 }),
+    );
+    expect(res.status).toBe('complete');
+    expect(res.state.role).toBeUndefined();
+    expect(res.state.clusterJoinToken).toBeUndefined();
+    expect(res.state.domain).toBe('acme.example.com');
+    expect(res.state.orgSlug).toBe('acme');
+    expect(res.state.platform).toBe('ubuntu-vps');
+    expect(loadServerState('acme-example-com').role).toBeUndefined();
+    expect(loadServerState('acme-example-com').clusterJoinToken).toBeUndefined();
+  });
+
+  it('a plain default install (no role, no domain, no orgSlug) is unaffected', async () => {
+    const res = await runInstall(strategyOf([fakeStep('a')]), opts());
+    expect(res.status).toBe('complete');
+    expect(res.state.role).toBeUndefined();
+    expect(res.state.clusterJoinToken).toBeUndefined();
+  });
+
+  it('uninstall clears role/clusterJoinToken from the default record, same as domain/orgSlug', async () => {
+    await runInstall(strategyOf([fakeStep('a')]), opts({ role: 'worker', clusterJoinToken: 'cezj_abc123' }));
+    const res = await runUninstall(strategyOf([fakeStep('a')]), opts());
+    expect(res.status).toBe('complete');
+    expect(res.state.role).toBeUndefined();
+    expect(res.state.clusterJoinToken).toBeUndefined();
+    expect(loadServerState().role).toBeUndefined();
+    expect(loadServerState().clusterJoinToken).toBeUndefined();
+  });
+});

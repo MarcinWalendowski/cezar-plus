@@ -11,7 +11,7 @@ import type {
   ContentBlock,
   SessionOptions,
 } from './agent-runner.js';
-import { stopMessage } from './agent-runner.js';
+import { isSignalTerminationExit, stopMessage, trackChildExit } from './agent-runner.js';
 import { defaultIdleTimeoutMs } from './claude-cli-runner.js';
 import { buildChildEnv } from './agent-env.js';
 import { readNdjson } from './ndjson.js';
@@ -89,6 +89,19 @@ export class PiRunner implements AgentRunner {
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => stderr.push(chunk));
 
+    // Set the moment WE signal the child — `end()`'s grace-period timer or a cancel. pi installs
+    // no signal handler of its own (unlike claude), so without this an untrapped death cezar
+    // itself caused would read as an external kill (see the `exitSignal` check below, mirrors
+    // claude-cli-runner.ts #703).
+    let terminatedByCezar = false;
+    const signalChild = (signal: NodeJS.Signals): void => {
+      terminatedByCezar = true;
+      child.kill(signal);
+    };
+    // Real termination, not `child.exitCode == null` alone — kept consistent with the other three
+    // runners' `hasExited()` (claude-cli-runner.ts #844).
+    const hasExited = trackChildExit(child);
+
     const emitUi = (value: unknown): void => {
       const mapped = mapPiRpcMessage(value, piUi);
       piUi = mapped.state;
@@ -129,14 +142,16 @@ export class PiRunner implements AgentRunner {
       if (!open) return;
       open = false;
       child.stdin.end();
-      killTimer = setTimeout(() => child.exitCode == null && child.kill('SIGTERM'), KILL_GRACE_MS);
+      killTimer = setTimeout(() => {
+        if (!hasExited()) signalChild('SIGTERM');
+      }, KILL_GRACE_MS);
       killTimer.unref?.();
     };
     const interrupt = (): void => {
       if (!open) return;
       write({ type: 'abort' });
       open = false;
-      child.kill('SIGTERM');
+      if (!hasExited()) signalChild('SIGTERM');
     };
 
     write({ id: 'cezar-state', type: 'get_state' });
@@ -234,7 +249,7 @@ export class PiRunner implements AgentRunner {
         open = false;
       }
 
-      const exitCode = await waitForExit(child);
+      const { code: exitCode, signal: exitSignal } = await waitForExit(child);
       if (spawnError) throw spawnError;
       if (timedOut) {
         // Not an agent failure — `reason` routes it to `review` + `stopReason` in the run manager.
@@ -243,6 +258,33 @@ export class PiRunner implements AgentRunner {
         onEvent?.({ type: 'done' });
         return { text: textChunks.join('').trim(), toolCalls, tokensUsed, sessionId };
       }
+
+      // A session cezar itself tore down (`end()`'s grace-period timer, or a cancel) that pi
+      // happened to trap and exit 130/137/143 for — our own teardown, not a pi failure (mirrors
+      // claude-cli-runner.ts #703).
+      if (terminatedByCezar && isSignalTerminationExit(exitCode)) {
+        onEvent?.({
+          type: 'note',
+          message: `pi CLI did not exit on its own after close; terminated by cezar (code ${exitCode})`,
+        });
+        onEvent?.({ type: 'done' });
+        return { text: textChunks.join('').trim(), toolCalls, tokensUsed, sessionId };
+      }
+
+      // An external signal death — an operator's `kill -9`, the kernel OOM killer, anything cezar
+      // did not send. SIGKILL (and most other signals) cannot be trapped, so Node reports these as
+      // `code: null` with `signal` set, which used to fall straight through the check below
+      // (`exitCode !== null` is false) and read exactly like a clean exit. `terminatedByCezar` is
+      // what tells this apart from OUR OWN signal reaching an untrapped death, handled identically
+      // to before this check existed — see the branch above (mirrors claude-cli-runner.ts's
+      // identical check, #703).
+      if (exitSignal && !terminatedByCezar) {
+        const detail = stderr.join('').trim().split('\n').slice(-3).join(' | ');
+        const message = `pi CLI was killed by signal ${exitSignal}${detail ? ` — ${detail}` : ''}`;
+        onEvent?.({ type: 'error', message });
+        throw new Error(message);
+      }
+
       if (exitCode !== 0 && exitCode !== null) {
         const detail = stderr.join('').trim().split('\n').slice(-3).join(' | ');
         const message = `pi CLI exited with code ${exitCode}${detail ? ` — ${detail}` : ''}`;
@@ -349,9 +391,40 @@ function rpcError(value: Record<string, unknown>): string {
   return string(error?.message) ?? string(value.message) ?? `pi RPC command ${string(value.command) ?? 'unknown'} failed`;
 }
 
-function waitForExit(child: ChildProcessWithoutNullStreams): Promise<number | null> {
-  if (child.exitCode !== null) return Promise.resolve(child.exitCode);
-  return new Promise((resolve) => child.once('close', resolve));
+interface PiChildExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+/**
+ * A child killed by an untrapped signal (SIGKILL, or any signal nothing installed a handler for)
+ * reports `code: null` — the signal is the only fact Node records about how it died. The old
+ * shape here returned the bare code and threw the signal away before any caller could see it,
+ * which is how an external `kill -9` (an operator, the kernel OOM killer) came to read exactly
+ * like a clean exit — see the `exitSignal` check in the result handling above (mirrors
+ * claude-cli-runner.ts's identical `waitForExit`, #703).
+ */
+function waitForExit(child: ChildProcessWithoutNullStreams): Promise<PiChildExit> {
+  if (child.exitCode != null || child.signalCode != null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
+  return new Promise((resolve) => {
+    let done = false;
+    const fin = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(safety);
+      resolve({ code, signal });
+    };
+    child.once('close', (code, signal) => fin(code, signal));
+    child.once('exit', (code, signal) => fin(code, signal));
+    // Don't swallow a late error as a clean null exit — fall back to the child's own exit/signal
+    // code (non-null/non-zero on failure).
+    child.once('error', () => fin(child.exitCode ?? null, child.signalCode ?? null));
+    // A SIGKILLed process may never emit 'close' through some edge cases.
+    const safety = setTimeout(() => fin(child.exitCode ?? null, child.signalCode ?? null), KILL_GRACE_MS + 5_000);
+    safety.unref?.();
+  });
 }
 
 function wrapSpawnError(error: NodeJS.ErrnoException, bin: string): Error {

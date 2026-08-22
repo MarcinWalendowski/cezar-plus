@@ -40,5 +40,20 @@ describe('serverStateSchema', () => {
     const s = freshServerState();
     expect(s.installed).toBe(false);
     expect(s.schema).toBe(1);
+    expect(s.role).toBeUndefined();
+    expect(s.clusterJoinToken).toBeUndefined();
+  });
+
+  // Phase 4 (D17, spec `2026-08-22-multi-node-cezar-cluster.md`): `--role worker --join <code>`.
+  it('round-trips role and clusterJoinToken', () => {
+    const parsed = serverStateSchema.parse({ platform: 'hetzner', role: 'worker', clusterJoinToken: 'cezj_abc123' });
+    expect(parsed.role).toBe('worker');
+    expect(parsed.clusterJoinToken).toBe('cezj_abc123');
+  });
+
+  it('a malformed role/clusterJoinToken degrades to absent, not a parse failure', () => {
+    const parsed = serverStateSchema.parse({ platform: 'hetzner', role: '', clusterJoinToken: '' });
+    expect(parsed.role).toBeUndefined();
+    expect(parsed.clusterJoinToken).toBeUndefined();
   });
 });

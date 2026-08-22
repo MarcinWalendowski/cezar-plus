@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { workflowStepDefSchema as contractWorkflowStepDefSchema } from '@loki-labs/better-cezar-contract';
 import { KNOWN_PRESETS_BY_RUNNER, modelConflictsWithRunner } from '../core/model-presets.ts';
 import {
   AUTONOMOUS_IMPLEMENTATION_WORKFLOW,
@@ -10,6 +11,7 @@ import {
   SPEC_TO_DEPLOY_WORKFLOW,
   chainStepNote,
   skillStackOf,
+  workflowDefSchema,
   workflowStepSchema,
 } from './types.ts';
 
@@ -644,6 +646,69 @@ describe('SPEC_TO_DEPLOY_WORKFLOW steps are green only when verified', () => {
     for (const s of SPEC_TO_DEPLOY_WORKFLOW.steps) {
       if (s.verify?.builtin) expect(known.has(s.verify.builtin)).toBe(true);
     }
+  });
+});
+
+/**
+ * D14 of `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`: which steps have to hold a slot in
+ * the `maxHeavySteps` semaphore is DECLARED on the step, never inferred from its name. Types
+ * only at this stage — nothing takes the semaphore yet.
+ */
+describe('workflowStepSchema — heavy', () => {
+  const base = { id: 'run-tests', command: 'npm test' };
+
+  it('is absent by default, so every existing step and workflow file keeps today\'s behaviour', () => {
+    expect(workflowStepSchema.parse(base).heavy).toBeUndefined();
+  });
+
+  it('round-trips an explicit true and an explicit false', () => {
+    // `false` must survive as `false` rather than collapsing to absent: a chain that
+    // deliberately opts a normally-heavy step OUT is saying something a missing key cannot.
+    expect(workflowStepSchema.parse({ ...base, heavy: true }).heavy).toBe(true);
+    expect(workflowStepSchema.parse({ ...base, heavy: false }).heavy).toBe(false);
+  });
+
+  it('rejects a non-boolean rather than coercing it', () => {
+    // Loud at load time. A truthy string silently becoming `true` would make a workflow file
+    // claim a slot in a semaphore its author never asked for.
+    expect(() => workflowStepSchema.parse({ ...base, heavy: 'yes' })).toThrow();
+  });
+
+  it('is not inferred from the step\'s name — a step called run-tests is heavy only if it says so', () => {
+    // The negative control for "declared, never inferred": these two steps differ ONLY in the
+    // declaration, and the schema must not read anything into `id`/`name`. A name-match
+    // implementation would make the first of these heavy and pass a test that only checked the
+    // second.
+    expect(workflowStepSchema.parse({ id: 'run-tests', name: 'run-tests', command: 'npm test' }).heavy).toBeUndefined();
+    expect(workflowStepSchema.parse({ id: 'stroll', name: 'stroll', command: 'true', heavy: true }).heavy).toBe(true);
+  });
+
+  it('the wire (contract) schema keeps it too, so a step survives a save round-trip', () => {
+    // This assertion exists because `contract-parity.workflows.test.ts` CANNOT catch it. That
+    // guard compares the two shapes with a mutual assignability check, and an added optional
+    // property stays assignable in both directions — measured: adding `heavy` to the server
+    // schema alone leaves `npm run typecheck` green (adding a REQUIRED field produces 147
+    // errors, so the guard is live, just blind to this). `GET /workflows` serves the server's
+    // own def verbatim, so the flag is on the wire either way; what a missing mirror would cost
+    // is the way back — a consumer rebuilding a step from the contract type drops `heavy`, and
+    // the workflow silently stops being heavy on its next save.
+    const parsed = contractWorkflowStepDefSchema.parse({ id: 'run-tests', command: 'npm test', heavy: true });
+    expect(parsed.heavy).toBe(true);
+    // Negative control on the mirror itself: it must not have been added as something that
+    // swallows the value (a `.catch(undefined)`, say) — an explicit `false` has to survive as
+    // `false`, exactly as it does on the server side above.
+    expect(contractWorkflowStepDefSchema.parse({ id: 'a', command: 'true', heavy: false }).heavy).toBe(false);
+  });
+
+  it('survives a workflow-def round-trip, which is how a persisted run reads it back', () => {
+    // `RunStore` persists `workflowDef` and re-parses it on load (`runs/store.ts`). A step flag
+    // the def schema dropped would be lost on every restart.
+    const def = workflowDefSchema.parse({
+      name: 'gates',
+      source: 'built-in',
+      steps: [{ id: 'run-tests', command: 'npm test', heavy: true }],
+    });
+    expect(def.steps[0]?.heavy).toBe(true);
   });
 });
 

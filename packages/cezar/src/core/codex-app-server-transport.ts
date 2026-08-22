@@ -139,21 +139,39 @@ export function endCodexAppServer(
   onTimers?.(termTimer, killTimer);
 }
 
-export function waitForCodexAppServerExit(child: ChildProcessWithoutNullStreams): Promise<number | null> {
-  if (child.exitCode != null) return Promise.resolve(child.exitCode);
+export interface CodexAppServerExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+/**
+ * A child killed by an untrapped signal (SIGKILL, or any signal nothing installed a handler for)
+ * reports `code: null` — the signal is the only fact Node records about how it died. The old
+ * shape here returned the bare code and threw the signal away before any caller could see it,
+ * which is how an external `kill -9` (an operator, the kernel OOM killer) came to read exactly
+ * like a clean exit — see the `exitSignal` check in codex-app-server-runner.ts's result handling
+ * (the codex twin of claude-cli-runner.ts's identical `waitForExit`, #703).
+ */
+export function waitForCodexAppServerExit(child: ChildProcessWithoutNullStreams): Promise<CodexAppServerExit> {
+  if (child.exitCode != null || child.signalCode != null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
   return new Promise((resolve) => {
     let done = false;
-    const finish = (code: number | null) => {
+    const finish = (code: number | null, signal: NodeJS.Signals | null) => {
       if (done) return;
       done = true;
       clearTimeout(safety);
-      resolve(code);
+      resolve({ code, signal });
     };
-    child.once('close', (code) => finish(code));
-    child.once('exit', (code) => finish(code));
-    child.once('error', () => finish(child.exitCode ?? null));
+    child.once('close', (code, signal) => finish(code, signal));
+    child.once('exit', (code, signal) => finish(code, signal));
+    // Don't swallow a late error as a clean null exit — fall back to the child's own exit/signal
+    // code (non-null/non-zero on failure).
+    child.once('error', () => finish(child.exitCode ?? null, child.signalCode ?? null));
+    // A SIGKILLed process may never emit 'close' through some edge cases.
     const safety = setTimeout(
-      () => finish(child.exitCode ?? null),
+      () => finish(child.exitCode ?? null, child.signalCode ?? null),
       EOF_TERM_GRACE_MS + EOF_KILL_GRACE_MS + KILL_GRACE_MS + 5_000,
     );
     safety.unref?.();

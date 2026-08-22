@@ -1614,3 +1614,163 @@ describe('RunStatus is not widened for the step budget (PLAN D27 Phase 1)', () =
     expect(contractRunStatusSchema.options).toEqual(runRecordSchema.shape.status.options);
   });
 });
+
+/**
+ * Phase 0 of `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`: what a run actually cost the
+ * host, and whether a cgroup bound killed it. The spec is a capacity claim, and CPU — the
+ * resource it is about — was the one resource nothing persisted: `core/process-usage.ts` samples
+ * it every tick and keeps a high-water mark for RSS only.
+ *
+ * Schema only here. The writers live in `../core/process-usage.ts` (the peaks) and
+ * `../core/broker-isolation.ts` (the kill); their own tests cover the measuring.
+ */
+describe('RunStore — resource accounting (Phase 0: peaks, cpuSeconds, resourceKill)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-resources-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  const newRun = (store: RunStore) =>
+    store.createRun({
+      author: localCliAuthor(),
+      title: 'heavy run',
+      workflow: 'quick-task',
+      task: 'run the gates',
+      steps: [{ id: 'run-tests', name: 'Run tests', kind: 'check' }],
+    });
+
+  it('the three cost fields are absent on a new run and round-trip through runs.json once set', () => {
+    const store = RunStore.open(dataDir);
+    const run = newRun(store);
+    expect([run.peakCpuPct, run.peakMemoryBytes, run.cpuSeconds]).toEqual([undefined, undefined, undefined]);
+
+    store.updateRun(run.id, { peakCpuPct: 412.5, peakMemoryBytes: 5_368_709_120, cpuSeconds: 934.21 });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir).getRun(run.id);
+    expect(reopened?.peakCpuPct).toBe(412.5);
+    expect(reopened?.peakMemoryBytes).toBe(5_368_709_120);
+    expect(reopened?.cpuSeconds).toBe(934.21);
+  });
+
+  it('peakMemoryBytes is a SECOND field, not a rename of peakRssBytes — both survive on one record', () => {
+    // They are different measurements: `peakRssBytes` sums `ps` RSS across the tree (shared
+    // pages double-counted, and not what the kernel used to decide anything), `peakMemoryBytes`
+    // is the run's own cgroup `memory.peak` — the figure `runMemoryMaxMb` is enforced against.
+    // Collapsing them would make the before/after comparison Phase 0 exists to run unreadable.
+    const store = RunStore.open(dataDir);
+    const run = newRun(store);
+    store.updateRun(run.id, { peakRssBytes: 7_000_000_000, peakMemoryBytes: 5_368_709_120 });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir).getRun(run.id);
+    expect(reopened?.peakRssBytes).toBe(7_000_000_000);
+    expect(reopened?.peakMemoryBytes).toBe(5_368_709_120);
+  });
+
+  it('stays absent for a record that predates the fields (additive proof)', () => {
+    writeFileSync(join(dataDir, 'runs.json'), JSON.stringify([LEGACY_RUN]), 'utf8');
+    const legacy = RunStore.open(dataDir).getRun(LEGACY_RUN.id);
+    // The whole array is `safeParse`d as one unit, so a required addition would have dropped
+    // this record entirely rather than leaving the keys undefined.
+    expect(legacy).toBeDefined();
+    expect([legacy?.peakCpuPct, legacy?.peakMemoryBytes, legacy?.cpuSeconds, legacy?.resourceKill]).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it('resourceKill carries a named limit, which is the whole point of the field (C3)', () => {
+    // C3: a cgroup kill must be reported AS a resource kill WITH a reason, never as a bare
+    // failed test step. A bound whose failure mode is indistinguishable from a code failure gets
+    // blamed on the code, and the run's own agent then "fixes" a test that was never broken.
+    const store = RunStore.open(dataDir);
+    const run = newRun(store);
+    expect(run.resourceKill).toBeUndefined();
+
+    store.updateRun(run.id, {
+      status: 'failed',
+      resourceKill: { limit: 'memory', at: '2026-08-22T12:00:00.000Z', detail: 'MemoryMax=2048M' },
+    });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir).getRun(run.id);
+    expect(reopened?.resourceKill).toEqual({
+      limit: 'memory',
+      at: '2026-08-22T12:00:00.000Z',
+      detail: 'MemoryMax=2048M',
+    });
+  });
+
+  it('there is no unnamed spelling of a resource kill — a limit is required, and it is a closed set', () => {
+    // The negative control on C3. If `limit` were optional, or free text, a writer could record
+    // "something killed it" and the reason C3 demands would be exactly what went missing.
+    //
+    // Asserted on the parsed VALUE, not on `.success`: the field carries `.catch(undefined)` for
+    // per-entry salvage, so `safeParse` reports success on every input it is ever given and a
+    // `.success` assertion here could not fail by construction — it passed against a `limit` that
+    // was optional. What discriminates is what comes back: a reason-less kill must degrade to
+    // absent (nothing recorded) rather than parse into a kill with no reason.
+    const parse = (v: unknown) => runRecordSchema.shape.resourceKill.parse(v);
+    expect(parse({ at: '2026-08-22T12:00:00.000Z' })).toBeUndefined();
+    expect(parse({ limit: 'disk', at: '2026-08-22T12:00:00.000Z' })).toBeUndefined();
+    // `detail` is the only optional part: a writer that knows nothing beyond the limit can still
+    // record the fact. This half is what keeps the two above honest — it proves the schema is
+    // capable of accepting a kill at all, so their `undefined` is the missing reason and not a
+    // field that rejects everything.
+    expect(parse({ limit: 'memory', at: '2026-08-22T12:00:00.000Z' })).toEqual({
+      limit: 'memory',
+      at: '2026-08-22T12:00:00.000Z',
+    });
+    // And the narrowing itself: `'cpu'` is NOT a member. `CPUWeight` is a relative scheduling
+    // weight with no ceiling to breach, so no writer in this design can emit a cpu kill — a
+    // member nothing can produce reads to the next person as "cpu kills are handled".
+    expect(parse({ limit: 'cpu', at: '2026-08-22T12:00:00.000Z' })).toBeUndefined();
+  });
+
+  it('a corrupt resourceKill degrades that one key instead of dropping the whole run', () => {
+    // House rule: per-entry salvage. `runs.json` is one `safeParse`d array, so a value that
+    // failed hard here would evict every run in the file, not just this key.
+    writeFileSync(
+      join(dataDir, 'runs.json'),
+      JSON.stringify([{ ...LEGACY_RUN, resourceKill: 'the oom killer got it' }]),
+      'utf8',
+    );
+    const salvaged = RunStore.open(dataDir).getRun(LEGACY_RUN.id);
+    expect(salvaged).toBeDefined();
+    expect(salvaged?.resourceKill).toBeUndefined();
+  });
+
+  it('RunStatus and StepStatus are NOT widened by the resource kill', () => {
+    // P8 of the plan: `resourceKill` is a new optional FIELD precisely so neither published wire
+    // enum grows a member. Value-level, like the step-budget assertions above — a source edit
+    // that widens either union compiles fine, so only a runtime check on the parsed enum catches
+    // it. Mutation: add `'killed'` to either schema — must fail.
+    expect(runRecordSchema.shape.status.options).toEqual([
+      'queued',
+      'running',
+      'waiting',
+      'review',
+      'done',
+      'failed',
+      'cancelled',
+    ]);
+    expect(runRecordSchema.shape.steps.element.shape.status.options).toEqual([
+      'pending',
+      'running',
+      'waiting',
+      'review',
+      'done',
+      'failed',
+      'cancelled',
+      'skipped',
+    ]);
+  });
+});

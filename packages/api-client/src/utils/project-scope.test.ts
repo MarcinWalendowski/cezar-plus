@@ -88,6 +88,16 @@ describe('apiPath — scoped', () => {
     expect(apiPath('/healthcheck')).toBe('/api/v1/p/cezar/healthcheck')
   })
 
+  it('leaves cluster routes unscoped too — a cezar is one node of a cluster, not a project', () => {
+    setApiScope('cezar')
+    expect(apiPath('/cluster')).toBe('/api/v1/cluster')
+    expect(apiPath('/cluster/nodes/abc')).toBe('/api/v1/cluster/nodes/abc')
+    // Negative control: a genuinely project-scoped route must still take the `/p/<id>` prefix
+    // under this same active scope — without this, the test would also pass against a change
+    // that made every route workspace-level, not just `/cluster`.
+    expect(apiPath('/runs')).toBe('/api/v1/p/cezar/runs')
+  })
+
   it('versions whatever route it is given — callers pass routes, never URLs', () => {
     // The contract is one-way on purpose: a URL that came FROM the server goes through
     // `resolveApiUrl`, which is the only function that inspects an existing prefix.

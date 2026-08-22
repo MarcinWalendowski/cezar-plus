@@ -31,6 +31,7 @@ interface HealthBody {
     tokenMetrics: boolean;
     tokenUsageMetrics: boolean;
     costMetrics: boolean;
+    cluster: boolean;
   };
 }
 
@@ -122,6 +123,16 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notify: false,
       accountUsage: false,
       skills: true,
+      // Added 2026-08-23 with `CEZ_CLUSTER`. It is `false` here because the flag is off, and it is
+      // PRESENT because the key is unconditional — `capabilities.cluster` ships in every health
+      // body, on or off, so the cockpit can hide the Cluster nav item without a second request.
+      //
+      // Worth a line, because this file is the SECOND place the capability shape is pinned:
+      // `capabilities.test.ts` is the first, it was updated when the key landed, and these seven
+      // `toEqual`s were not. Seven tests went red at the barrier for a change that was correct.
+      // That is the exact-shape assertion doing its job — a `toMatchObject` here would have
+      // stayed green and let a key appear in the bookmarklet contract with nothing noticing.
+      cluster: false,
     });
   });
 
@@ -178,6 +189,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notify: false,
       accountUsage: false,
       skills: true,
+      cluster: false,
     });
   });
 
@@ -213,6 +225,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notify: false,
       accountUsage: false,
       skills: true,
+      cluster: false,
     });
   });
 
@@ -233,6 +246,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notify: false,
       accountUsage: false,
       skills: true,
+      cluster: false,
     });
   });
 
@@ -265,6 +279,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notify: false,
       accountUsage: false,
       skills: true,
+      cluster: false,
     });
   });
 
@@ -291,6 +306,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notify: false,
       accountUsage: false,
       skills: true,
+      cluster: false,
     });
   });
 
@@ -311,6 +327,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       notify: false,
       accountUsage: false,
       skills: true,
+      cluster: false,
     });
   });
 

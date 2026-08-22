@@ -4,6 +4,9 @@ import { promises as fs } from 'node:fs';
 import { closeSync, mkdirSync, openSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { clusterTodoFieldsSchema, type ClusterAckResult, type ClusterOp } from '@loki-labs/better-cezar-contract';
+import { clusterModeFromEnv } from './cluster/node-identity.ts';
+import { applyReplica, type ReplicaApplyResult } from './cluster/replica.ts';
 import { taskAuthorSchema, type TaskAuthor } from './runs/task-author.ts';
 
 /**
@@ -94,17 +97,79 @@ export const todoSchema = z.object({
    * with no benefit.
    */
   author: taskAuthorSchema.optional(),
+  // ---- cluster (2026-08-22-multi-node-cezar-cluster.md, D4 · D5 · D6 · D13) ------------------
+  /**
+   * `pendingSince` · `pendingFields` · `hubSeq` · `tombstone` · `placement` · `startedOn`, spread
+   * from the contract's `clusterTodoFieldsSchema` rather than restated here — **one definition of
+   * one record.** `cluster/replica.ts` and `cluster/ops.ts` both read these fields off a `TodoItem`;
+   * a second copy of the shape in this file would be free to drift from the one they validate
+   * against, and the drift would only show up as a field silently not replicating.
+   *
+   * Additive and optional, like every group above: an entry carrying none of them still
+   * validates unchanged, which is what keeps every raw agent append (`handoff.ts`'s
+   * `FOLLOWUP_INSTRUCTIONS`) and every pre-cluster row readable. **Nothing writes any of them
+   * unless clustering is on** — see `clusteringOn` below; with `CEZ_CLUSTER` unset this file
+   * produces the same bytes it produced before the cluster existed.
+   *
+   * They are deliberately NOT `.catch`-defaulted, though the spec's data-model rule allows
+   * either ("every field optional **or** `.catch`-defaulted"). A `.catch(undefined)` on
+   * `tombstone` would turn a malformed delete marker into a **resurrected row**, which is worse
+   * than this file's existing per-entry salvage — one entry skipped with a warning, which for a
+   * tombstoned row reads as the deletion it was. Unknown *shapes* are already handled the other
+   * way, by `.passthrough()`: see `storedTodoSchema`.
+   */
+  ...clusterTodoFieldsSchema.shape,
 });
 
+/**
+ * What `readRaw` actually parses with (D13). `todoSchema` is a plain object and therefore STRIPS
+ * keys it does not know — fine while this file was the only writer of the file, and wrong the
+ * moment a newer node in the cluster writes a field this build has never heard of: the older node
+ * would drop it on the next rewrite and silently truncate everyone's history. Passthrough keeps
+ * it, verbatim, so a round-trip through an old reader is lossless.
+ *
+ * Kept separate from `todoSchema` rather than making `todoSchema` itself passthrough, because a
+ * passthrough object infers an index signature (`& { [k: string]: unknown }`) — and `TodoItem`
+ * carrying one would collapse `CreateTodoInput`'s `Omit<>` to a bare index signature, quietly
+ * un-typing every field of the create path. The runtime gains the tolerance; the type does not
+ * lose its shape. Same split as the contract's own `clusterOpSchema` / `storedClusterOpSchema`.
+ */
+export const storedTodoSchema = todoSchema.passthrough();
+
 export type TodoItem = z.infer<typeof todoSchema> & { id: string };
+
+/** A deleted row is a tombstone, never a removal (D6) — a bare removal loses to any concurrent
+ *  patch and the row resurrects. Consumers that render a board (`readTodos` returns tombstoned
+ *  rows, because the outbox derivation must be able to SEE the delete) filter on this. */
+export function isTombstoned(todo: Pick<TodoItem, 'tombstone'>): boolean {
+  return todo.tombstone !== undefined;
+}
 
 /** `POST /:projectId/todos`'s body, server-side: everything `createTodo` accepts from a caller —
  *  `id`/`ts` are assigned by `createTodo` itself, `taskId`/`startedTaskId` are agent-/server-only,
  *  `archivedAt` is stamped by `updateTodo`'s archive action, never client-supplied on create.
- *  Mirrors the wire twin's `createTodoInputSchema` (`contract/src/skills.ts`) field-for-field. */
+ *  Mirrors the wire twin's `createTodoInputSchema` (`contract/src/skills.ts`) field-for-field.
+ *
+ *  The five cluster transport/claim fields join that list for the same reason `author` is a
+ *  separate argument: `pendingSince` and `pendingFields` are written by this file inside the
+ *  lease (see `stampPending`), `hubSeq` by the hub's acknowledgement, `tombstone` is written by
+ *  `removeTodo`, and `startedOn` is hub-confirmed only (D4/D9a) — a caller that could supply one
+ *  could assert a claim the hub never granted, which is precisely the optimistic start the design
+ *  forbids. `placement` is NOT omitted: "run this one on the box" is a legitimate thing for the
+ *  filer to say. */
 export type CreateTodoInput = Omit<
   TodoItem,
-  'id' | 'ts' | 'taskId' | 'startedTaskId' | 'archivedAt' | 'author'
+  | 'id'
+  | 'ts'
+  | 'taskId'
+  | 'startedTaskId'
+  | 'archivedAt'
+  | 'author'
+  | 'pendingSince'
+  | 'pendingFields'
+  | 'hubSeq'
+  | 'tombstone'
+  | 'startedOn'
 >;
 
 export function todosPath(dataDir: string): string {
@@ -195,11 +260,83 @@ async function withTodosLease<T>(dataDir: string, fn: () => Promise<T>): Promise
   }
 }
 
+// ---- the cluster's optimistic-write marker (spec 2026-08-22-multi-node-cezar-cluster, D4/D5) --
+
+/**
+ * Every option any writer in this file takes for the cluster. All optional, and **the default is
+ * off**: with `CEZ_CLUSTER` unset nothing below stamps anything, no new key is written into
+ * `todos.json`, and this file behaves exactly as it did before the cluster existed.
+ *
+ * `clustered` is resolved from `clusterModeFromEnv` — D1's single source of truth — and not from a
+ * `CEZ_CLUSTER === '1'` check re-derived here, because a second signal is how the two drift. It is
+ * deliberately NOT a hook a caller has to register: a stamp that has to be wired up is a stamp that
+ * can be forgotten, and a forgotten one is a **lost write** under D4 (the hub is the only writer, so
+ * an op that is never derived never lands anywhere). The explicit `clustered` override exists for
+ * tests, which must be able to exercise both sides without mutating the process environment.
+ */
+export interface TodoClusterOptions {
+  /** Overrides the env-derived answer. Tests pass it; production does not. */
+  clustered?: boolean;
+  now?: () => Date;
+  /** Injected process environment, for tests. */
+  env?: NodeJS.ProcessEnv;
+}
+
+function clusteringOn(options?: TodoClusterOptions): boolean {
+  return options?.clustered ?? clusterModeFromEnv(options?.env).enabled;
+}
+
+function clusterNow(options?: TodoClusterOptions): string {
+  return (options?.now ?? (() => new Date()))().toISOString();
+}
+
+/**
+ * The optimistic-write marker, stamped **inside the same `O_EXCL` lease as the value it marks**
+ * (D5) — that is the whole property: marker and value can never disagree, so the outbox is
+ * re-derivable from the records themselves and a crash that loses `ops.ndjson`'s tail loses
+ * nothing.
+ *
+ * An **existing** marker is preserved rather than refreshed. `pendingSince` answers "pending since
+ * when", so a record edited five times while the link was down should still report the age of the
+ * FIRST unsent edit — that is what makes a stuck outbox visible. It also keeps `deriveTodoOps`
+ * deterministic: `cluster/ops.ts` carries `todo.pendingSince` through as the op's `ts`, so a
+ * re-derive after a crash reproduces the same op rather than a fresh-looking one.
+ *
+ * `pendingFields` names WHICH keys are owed (2026-08-22 amendment — spec's Data Models section).
+ * `pendingSince` alone can only say THAT a record is owed, never what changed, so a
+ * derive-from-records outbox (D5) had nothing to narrow on and could only send the whole record —
+ * the exact whole-record clobber D4 exists to prevent. `touchedFields` is what THIS write changed:
+ *
+ *  - **A fresh cycle** (`pendingSince` was not already set) starts `pendingFields` from exactly
+ *    `touchedFields`, discarding whatever the array held before. That also self-heals a leftover:
+ *    `applyReplica` (`cluster/replica.ts`) clears `pendingSince` on settle but was written before
+ *    `pendingFields` existed and does not clear this array too, so a stale value can survive a
+ *    settled cycle with nothing outstanding left to describe. Starting the next cycle fresh rather
+ *    than unioning onto that leftover is what keeps it from drifting forever instead of costing
+ *    one stale read.
+ *  - **An outstanding cycle** (`pendingSince` already set) unions `touchedFields` into whatever is
+ *    already owed — never replaces — so an edit to field B before field A's earlier edit has
+ *    synced does not make A's edit un-owed.
+ */
+function stampPending(item: TodoItem, options: TodoClusterOptions | undefined, touchedFields: readonly string[]): void {
+  if (!clusteringOn(options)) return;
+  if (!item.pendingSince) {
+    item.pendingSince = clusterNow(options);
+    item.pendingFields = [...new Set(touchedFields)];
+  } else {
+    item.pendingFields = [...new Set([...(item.pendingFields ?? []), ...touchedFields])];
+  }
+}
+
 // ---- read / write -----------------------------------------------------------
 
 /** Parse + validate the file. Broken JSON / non-array → []; bad entries are
- *  skipped with a warning; entries without an id get one assigned. */
-async function readRaw(dataDir: string): Promise<{ items: TodoItem[]; needsRewrite: boolean }> {
+ *  skipped with a warning; entries without an id get one assigned — and, when clustering is on,
+ *  the same pending marker a `createTodo` would have written (D5a). */
+async function readRaw(
+  dataDir: string,
+  options?: TodoClusterOptions,
+): Promise<{ items: TodoItem[]; needsRewrite: boolean }> {
   let raw: string;
   try {
     raw = await fs.readFile(todosPath(dataDir), 'utf8');
@@ -221,7 +358,9 @@ async function readRaw(dataDir: string): Promise<{ items: TodoItem[]; needsRewri
   const items: TodoItem[] = [];
   let needsRewrite = false;
   for (const entry of parsed) {
-    const result = todoSchema.safeParse(entry);
+    // `storedTodoSchema`, not `todoSchema`: a field a NEWER node in the cluster wrote must survive
+    // this read-and-rewrite untouched (D13). See the schema's own docblock.
+    const result = storedTodoSchema.safeParse(entry);
     if (!result.success) {
       console.warn(`[cez] skipped a malformed todos.json entry: ${result.error.issues.map((i) => i.message).join('; ')}`);
       continue;
@@ -230,9 +369,20 @@ async function readRaw(dataDir: string): Promise<{ items: TodoItem[]; needsRewri
       // Agent entries arrive without ids — assign one so the GUI can address
       // the entry; the file is rewritten (under the lock) on this read.
       needsRewrite = true;
-      items.push({ ...result.data, id: randomUUID() });
+      const healed = { ...result.data, id: randomUUID() } as TodoItem;
+      // D5a: a raw `CEZ_TODOS_FILE` append (`handoff.ts`'s `FOLLOWUP_INSTRUCTIONS`) is a local
+      // write like any other, and it never went through `createTodo`, so this is the only place it
+      // can be marked pending. Keyed on the SAME condition as the id assignment, which is what
+      // makes it idempotent for free: after this rewrite the entry has an id, so a second read
+      // heals nothing and stamps nothing. Stamping every unmarked entry instead would re-file all
+      // 137 existing rows as unsent ops on the first clustered boot — the reconcile (Phase 2.4),
+      // not this reader, is what adopts records that predate the hub.
+      // Every present key is "touched": the hub has never seen this id (it had none until this
+      // line), so the whole entry is new to it, not a narrow patch onto something it already has.
+      stampPending(healed, options, Object.keys(healed));
+      items.push(healed);
     } else {
-      items.push({ ...result.data, id: result.data.id });
+      items.push({ ...result.data, id: result.data.id } as TodoItem);
     }
   }
   return { items, needsRewrite };
@@ -251,24 +401,58 @@ async function writeAtomic(dataDir: string, items: TodoItem[]): Promise<void> {
  *  cross-project workspace board's read of a project that has never run cezar at all —
  *  `mkdirSync`s `.ai/cezar` into existence just by looking. "A read must not materialize state"
  *  (AGENTS.md). The lease is taken below, ONLY on the rare id-backfill write path. */
-export async function readTodos(dataDir: string): Promise<TodoItem[]> {
-  const { items, needsRewrite } = await readRaw(dataDir);
-  if (needsRewrite) {
-    // Re-check under the lease, fresh: another writer may have backfilled (or removed) the same
-    // entries between the read above and the lease landing, and this write must never clobber
-    // that. Best effort — an id backfill that loses this race just retries on the next read.
-    await withTodosLease(dataDir, async () => {
-      const fresh = await readRaw(dataDir);
-      if (fresh.needsRewrite) await writeAtomic(dataDir, fresh.items);
-    }).catch(() => undefined);
-  }
-  return items;
+export async function readTodos(dataDir: string, options?: TodoClusterOptions): Promise<TodoItem[]> {
+  const first = await readRaw(dataDir, options);
+  if (!first.needsRewrite) return first.items;
+
+  // Re-check under the lease, fresh: another writer may have backfilled (or removed) the same
+  // entries between the read above and the lease landing, and this write must never clobber
+  // that. Best effort — an id backfill that loses this race just retries on the next read.
+  // The re-read is what gets written, never the array above: caching items across the lease
+  // boundary is exactly how a snapshot taken before someone else's write gets written back over
+  // it (a todo vanished from production's `todos.json` that way on 2026-08-22).
+  //
+  // **Corrected 2026-08-22 — this used to return the FIRST read's items, which are not what the
+  // file kept.** `readRaw` mints a fresh `randomUUID()` for every id-less entry, so the two reads
+  // assign two DIFFERENT ids to the same raw agent append: the caller was handed one id and the
+  // file kept the other. Harmless while an id was only a GUI handle; not harmless once an id is an
+  // entity id in a cluster, where a derived op carrying the id the caller saw would address a
+  // record no other node has (D5a — "id assignment has to happen before an op is derived"). So the
+  // healed read returns what was written. A failed lease falls back to the first read, which is
+  // still the honest answer: nothing was written either.
+  let healed = first.items;
+  await withTodosLease(dataDir, async () => {
+    const fresh = await readRaw(dataDir, options);
+    if (fresh.needsRewrite) await writeAtomic(dataDir, fresh.items);
+    healed = fresh.items;
+  }).catch(() => undefined);
+  return healed;
 }
 
-/** Check off (delete) an entry. False when the id isn't there. */
-export async function removeTodo(dataDir: string, id: string): Promise<boolean> {
+/**
+ * Check off (delete) an entry. False when the id isn't there.
+ *
+ * **Clustered, this is a tombstone rather than a removal (D6).** A bare removal carries no marker,
+ * so there is nothing for the outbox to derive from and the delete simply never leaves this node;
+ * worse, a removal loses to any concurrent patch and the row resurrects. The row therefore stays in
+ * the file carrying `tombstone: { at }` — which is what `cluster/ops.ts`'s `deriveTodoOps` reads to
+ * emit `op: 'tombstone'` — and is compacted after the retention window, elsewhere. An already
+ * tombstoned row answers false: from the caller's side it is already gone.
+ *
+ * `readTodos` still returns tombstoned rows, deliberately: the outbox derivation reads through it
+ * (D5a) and must be able to see the delete. Board consumers filter with `isTombstoned`.
+ */
+export async function removeTodo(dataDir: string, id: string, options?: TodoClusterOptions): Promise<boolean> {
   return withTodosLease(dataDir, async () => {
-    const { items } = await readRaw(dataDir);
+    const { items } = await readRaw(dataDir, options);
+    if (clusteringOn(options)) {
+      const item = items.find((t) => t.id === id);
+      if (!item || isTombstoned(item)) return false;
+      item.tombstone = { at: clusterNow(options) };
+      stampPending(item, options, ['tombstone']);
+      await writeAtomic(dataDir, items);
+      return true;
+    }
     const next = items.filter((t) => t.id !== id);
     if (next.length === items.length) return false;
     await writeAtomic(dataDir, next);
@@ -288,10 +472,15 @@ export async function createTodo(
   dataDir: string,
   input: CreateTodoInput,
   author: TaskAuthor,
+  options?: TodoClusterOptions,
 ): Promise<TodoItem> {
   return withTodosLease(dataDir, async () => {
-    const { items } = await readRaw(dataDir);
+    const { items } = await readRaw(dataDir, options);
     const todo: TodoItem = { ...input, id: randomUUID(), ts: new Date().toISOString(), author };
+    // Optimistic (D4): the local record is complete the moment it is written and the hub confirms
+    // it afterwards. The marker rides in the SAME write as the value, under this lease. Every
+    // present key is "touched" — the hub has never seen this id before.
+    stampPending(todo, options, Object.keys(todo));
     items.push(todo);
     await writeAtomic(dataDir, items);
     return todo;
@@ -339,18 +528,50 @@ export type UpdateTodoPatch = {
  * the in-memory item (`'archivedAt' in item` stays `true`) even though `JSON.stringify` drops it
  * on disk — an in-memory/on-disk split this avoids entirely.
  */
-export async function updateTodo(dataDir: string, id: string, patch: UpdateTodoPatch): Promise<TodoItem | undefined> {
+export async function updateTodo(
+  dataDir: string,
+  id: string,
+  patch: UpdateTodoPatch,
+  options?: TodoClusterOptions,
+): Promise<TodoItem | undefined> {
   return withTodosLease(dataDir, async () => {
-    const { items } = await readRaw(dataDir);
+    const { items } = await readRaw(dataDir, options);
     const item = items.find((t) => t.id === id);
     if (!item) return undefined;
-    if (patch.status !== undefined) item.status = patch.status;
-    if (patch.priority !== undefined) item.priority = patch.priority;
-    if (patch.archived === true) item.archivedAt = new Date().toISOString();
-    else if (patch.archived === false) delete item.archivedAt;
-    if (patch.context !== undefined) item.context = patch.context;
-    if (patch.acceptanceCriteria !== undefined) item.acceptanceCriteria = patch.acceptanceCriteria;
-    if (patch.summary !== undefined) item.summary = patch.summary;
+    const touched: string[] = [];
+    if (patch.status !== undefined) {
+      item.status = patch.status;
+      touched.push('status');
+    }
+    if (patch.priority !== undefined) {
+      item.priority = patch.priority;
+      touched.push('priority');
+    }
+    if (patch.archived === true) {
+      item.archivedAt = new Date().toISOString();
+      touched.push('archivedAt');
+    } else if (patch.archived === false) {
+      delete item.archivedAt;
+      touched.push('archivedAt');
+    }
+    if (patch.context !== undefined) {
+      item.context = patch.context;
+      touched.push('context');
+    }
+    if (patch.acceptanceCriteria !== undefined) {
+      item.acceptanceCriteria = patch.acceptanceCriteria;
+      touched.push('acceptanceCriteria');
+    }
+    if (patch.summary !== undefined) {
+      item.summary = patch.summary;
+      touched.push('summary');
+    }
+    // Optimistic (D4), in the same write as the change. Note what this cannot express: a patch that
+    // DELETES a key (`archived: false` above) replicates as an op carrying only present fields, so
+    // the removal itself does not travel. That gap lives in `cluster/ops.ts`'s derivation, not here
+    // — `touched` still names `archivedAt` on a delete, honestly recording what changed even though
+    // the derived op cannot carry the deletion.
+    stampPending(item, options, touched);
     await writeAtomic(dataDir, items);
     return item;
   });
@@ -423,21 +644,178 @@ export function todoTaskText(
  *  in the file as an audit trail; the GUI hides started entries. First start wins: an entry
  *  that already carries a `startedTaskId` is left untouched and answers false, so the
  *  best-effort `todoId` bookkeeping on `POST /api/runs` (#374) can never overwrite the audit
- *  trail — the check shares this lease, so two concurrent launches cannot both claim the entry. */
-export async function markStarted(dataDir: string, id: string, taskId: string): Promise<boolean> {
+ *  trail — the check shares this lease, so two concurrent launches cannot both claim the entry.
+ *
+ *  The boolean answer is kept as-is for every existing caller; `markStartedWithClaim` below is the
+ *  same call with the hub's verdict and, on a refusal, the REASON — which a clustered cockpit has
+ *  to render rather than skip silently (D15a). */
+export async function markStarted(dataDir: string, id: string, taskId: string, options?: TodoStartOptions): Promise<boolean> {
+  return (await markStartedWithClaim(dataDir, id, taskId, options)).started;
+}
+
+/** What the hub was asked. Carries no node identity: the hub knows which link the claim arrived on,
+ *  and a node that could name its own `startedOn` could assert a claim it was never granted. */
+export interface TodoStartClaim {
+  dataDir: string;
+  todoId: string;
+  taskId: string;
+}
+
+/**
+ * Ask the hub to apply this claim and wait for its verdict — `undefined` (or a throw) means the
+ * hub did not answer, which is a REFUSAL here, never a fallthrough to starting anyway.
+ *
+ * `ClusterAckResult` is the contract's own acknowledgement shape, so this seam is the frame the
+ * link already returns rather than a second one invented for this call site: `accepted: false`
+ * comes back carrying the winner's `startedOn` in `fields`.
+ */
+export type TodoStartConfirmer = (claim: TodoStartClaim) => Promise<ClusterAckResult | undefined>;
+
+export type TodoStartRefusal = 'not-found' | 'already-started' | 'hub-unconfirmed' | 'hub-refused';
+
+export interface TodoStartClaimResult {
+  started: boolean;
+  /** The stored entry, on a start that happened. */
+  todo?: TodoItem;
+  reason?: TodoStartRefusal;
+  /** Rendered as-is. D15a: "the refusal is a stated, rendered state — never a silent skip." */
+  message?: string;
+}
+
+export interface TodoStartOptions extends TodoClusterOptions {
+  /** Absent means the hub cannot be asked, which refuses exactly like an unreachable hub does —
+   *  a start seam that is not wired up must not degrade into an optimistic start. */
+  confirmStart?: TodoStartConfirmer;
+  /** D15a row 1: a person clicked ▶ Run, or ran `cez run`, ON THIS HOST. That is a human asserting
+   *  intent on the machine in front of them, and it proceeds with the link down — the local write
+   *  is marked pending and the hub reconciles it. Default `false`, so the rule fails CLOSED: an
+   *  autostart, which is the path that can double-start work nobody is watching, has to be granted
+   *  the exemption explicitly rather than inherit it. */
+  humanIntent?: boolean;
+}
+
+const HUB_UNCONFIRMED_MESSAGE = 'waiting for the hub to confirm the claim';
+
+/** Never inside the lease: this is a network round-trip to the hub, and holding a cross-process
+ *  `O_EXCL` lease across it would block every other writer of this file for the hub's timeout. */
+async function askHubToConfirm(
+  dataDir: string,
+  id: string,
+  taskId: string,
+  options: TodoStartOptions | undefined,
+): Promise<ClusterAckResult | undefined> {
+  const confirm = options?.confirmStart;
+  if (!confirm) return undefined;
+  try {
+    return (await confirm({ dataDir, todoId: id, taskId })) ?? undefined;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[cez] the hub did not confirm the start claim for todo ${id} — not starting (${message})`);
+    return undefined;
+  }
+}
+
+/**
+ * `markStarted`, with the hub's verdict and a stated reason when it refuses.
+ *
+ * **Clustered, this is the one write that is never optimistic (D4/D9a).** Everything else in this
+ * file writes locally and lets the hub confirm afterwards, because the cost of being corrected is a
+ * value that changes under a reader. The cost here is a SECOND RUN of the same work on another
+ * machine, spending the same subscription twice, with neither agent able to see the other — so the
+ * claim goes to the hub first and the acknowledgement is the stamp. With the hub serializing
+ * claims there is no second lease to disagree with the first; the exactly-once property is the
+ * architecture, not a guard bolted over it.
+ *
+ * The order is: pre-check under the lease (cheap, and it skips a pointless round-trip for an entry
+ * that is already started) → ask the hub with NO lease held → re-read and decide under the lease
+ * again. The second read is authoritative and the first array is thrown away, never written back:
+ * a snapshot taken before the round-trip is exactly the stale state that must not reach the file.
+ */
+export async function markStartedWithClaim(
+  dataDir: string,
+  id: string,
+  taskId: string,
+  options?: TodoStartOptions,
+): Promise<TodoStartClaimResult> {
+  const clustered = clusteringOn(options);
+
+  if (clustered) {
+    const pre = await withTodosLease(dataDir, async () => {
+      const { items } = await readRaw(dataDir, options);
+      const item = items.find((t) => t.id === id);
+      if (!item) return { started: false, reason: 'not-found' as const };
+      if (item.startedTaskId) return { started: false, reason: 'already-started' as const };
+      return undefined;
+    });
+    if (pre) return pre;
+  }
+
+  const ack = clustered ? await askHubToConfirm(dataDir, id, taskId, options) : undefined;
+
   return withTodosLease(dataDir, async () => {
-    const { items } = await readRaw(dataDir);
+    const { items } = await readRaw(dataDir, options);
     const item = items.find((t) => t.id === id);
-    if (!item || item.startedTaskId) return false;
-    item.startedTaskId = taskId;
-    // Phase 2 autostart (`todo-autostart.ts`): the flag's only job was getting the entry to this
-    // point, and leaving it `true` next to a `startedTaskId` would read as "still pending" to the
-    // next reconcile pass. Deleted rather than set to `false` — same "absent, not falsy" contract
-    // `archivedAt`/`seenAt` use elsewhere in this file. A no-op for the ordinary "▶ Run" path,
-    // where the field was never set.
-    delete item.autostart;
+    if (!item) return { started: false, reason: 'not-found' };
+    // First start wins, re-checked here rather than trusted from the pre-check: another writer —
+    // or another node's replica push — may have claimed it during the round-trip.
+    if (item.startedTaskId) return { started: false, reason: 'already-started' };
+
+    const start = () => {
+      item.startedTaskId = taskId;
+      // Phase 2 autostart (`todo-autostart.ts`): the flag's only job was getting the entry to this
+      // point, and leaving it `true` next to a `startedTaskId` would read as "still pending" to the
+      // next reconcile pass. Deleted rather than set to `false` — same "absent, not falsy" contract
+      // `archivedAt`/`seenAt` use elsewhere in this file. A no-op for the ordinary "▶ Run" path,
+      // where the field was never set.
+      delete item.autostart;
+    };
+
+    if (!clustered) {
+      start();
+      await writeAtomic(dataDir, items);
+      return { started: true, todo: item };
+    }
+
+    if (ack && !ack.accepted) {
+      // Another node won the claim. Record the winner so the board can say WHO, instead of a bare
+      // refusal — `startedOn` is hub-confirmed here in the strictest sense: it is the hub's own
+      // applied value, arriving in the hub's own acknowledgement.
+      const winner = ack.fields?.startedOn;
+      if (typeof winner === 'string' && winner) item.startedOn = winner;
+      // Only when nothing else is outstanding. `cluster/ops.ts` drops a record whose `hubSeq` is at
+      // or under the acked watermark, so writing this seq onto a record that still carries unsent
+      // edits would silently retire them — a lost write, which is the one failure D5 exists to make
+      // impossible.
+      if (!item.pendingSince) item.hubSeq = ack.hubSeq;
+      await writeAtomic(dataDir, items);
+      return { started: false, reason: 'hub-refused', message: ack.reason ?? 'another node holds this claim' };
+    }
+
+    if (!ack) {
+      if (!options?.humanIntent) {
+        // Nothing is written. The absence is the point: the failure mode this refusal exists to
+        // prevent is a second run, not an error, so a start that "half happened" would be worse
+        // than either outcome.
+        return { started: false, reason: 'hub-unconfirmed', message: HUB_UNCONFIRMED_MESSAGE };
+      }
+      // D15a row 1. Optimistic, and marked as such — the hub reconciles it when the link returns.
+      // Computed BEFORE `start()`, which deletes `autostart` — the touched-field record has to
+      // name it while it is still there to be deleted.
+      const touched = item.autostart !== undefined ? ['startedTaskId', 'autostart'] : ['startedTaskId'];
+      start();
+      stampPending(item, options, touched);
+      await writeAtomic(dataDir, items);
+      return { started: true, todo: item };
+    }
+
+    start();
+    if (typeof ack.fields?.startedOn === 'string' && ack.fields.startedOn) item.startedOn = ack.fields.startedOn;
+    if (!item.pendingSince) item.hubSeq = ack.hubSeq;
+    // Deliberately NOT stamped pending: the hub has already applied this claim, so there is nothing
+    // for the outbox to owe. An existing marker from an EARLIER unsent edit is left exactly as it
+    // is, for the same reason `hubSeq` is conditional above.
     await writeAtomic(dataDir, items);
-    return true;
+    return { started: true, todo: item };
   });
 }
 
@@ -448,14 +826,69 @@ export async function markStarted(dataDir: string, id: string, taskId: string): 
  *  setting it `undefined`, the same "absent, not falsy" contract `archivedAt`/`autostart` use
  *  above. No-op (`undefined`) when no todo references the given run id — best-effort, mirroring
  *  `markStarted`'s own contract. */
-export async function clearStartedTaskId(dataDir: string, taskId: string): Promise<TodoItem | undefined> {
+export async function clearStartedTaskId(
+  dataDir: string,
+  taskId: string,
+  options?: TodoClusterOptions,
+): Promise<TodoItem | undefined> {
   return withTodosLease(dataDir, async () => {
-    const { items } = await readRaw(dataDir);
+    const { items } = await readRaw(dataDir, options);
     const item = items.find((t) => t.startedTaskId === taskId);
     if (!item) return undefined;
     delete item.startedTaskId;
+    // `startedOn` is deliberately left alone. It is hub-confirmed state (D9a) and this file never
+    // writes it on its own account; the hub releases the claim when it sees the cancel and pushes
+    // that down. Clearing it here would be this node deciding a claim it was not granted — the same
+    // move `markStartedWithClaim` refuses in the other direction.
+    stampPending(item, options, ['startedTaskId']);
     await writeAtomic(dataDir, items);
     return item;
+  });
+}
+
+// ---- the hub's replica push, applied through the store API (D7) --------------------------------
+
+export interface ApplyHubReplicaInput {
+  /** The hub's push, in hub order. */
+  changes: readonly ClusterOp[];
+  /** This node's own ops the hub has not acknowledged — what a correction is measured against. A
+   *  local value the hub has not seen yet is not a correction; it has not been decided. */
+  pending?: readonly ClusterOp[];
+  /** The highest hub order already applied here. */
+  appliedThroughHubSeq: number;
+  now?: () => Date;
+}
+
+/**
+ * Apply a hub replica push to this project's `todos.json` — **the only write-down path there is**
+ * (D7). Foreign ops go through this store API, under the same `withTodosLease` every local writer
+ * takes, never by writing the file: two consequences, both free. The existing `fs.watch` fires, so
+ * the Tasks board and the WS topics update with no new read path anywhere; and a replicated write
+ * can never interleave with a local one.
+ *
+ * The merge itself is `cluster/replica.ts`'s pure `applyReplica` — hub order, idempotent, per-field,
+ * tombstones both directions. This function is the I/O half and nothing more: read fresh INSIDE the
+ * lease, apply, write, return the corrections for the cockpit to render.
+ */
+export async function applyHubReplica(dataDir: string, input: ApplyHubReplicaInput): Promise<ReplicaApplyResult> {
+  return withTodosLease(dataDir, async () => {
+    // Read under the lease, never from a snapshot the caller took earlier: a reader that writes
+    // back state it fetched before somebody else's write is the most believable way for a todo to
+    // disappear with no error anywhere (one did, on production, 2026-08-22).
+    //
+    // `readRaw`, not `readTodos` — `readTodos` takes this same lease on the id-backfill path, and
+    // taking a non-reentrant `O_EXCL` lease from inside itself deadlocks until the 5s timeout. The
+    // heal happens anyway: `readRaw` assigns the ids and this write persists them.
+    const { items } = await readRaw(dataDir);
+    const result = applyReplica({
+      local: items,
+      pending: input.pending ?? [],
+      changes: input.changes,
+      appliedThroughHubSeq: input.appliedThroughHubSeq,
+      ...(input.now ? { now: input.now } : {}),
+    });
+    await writeAtomic(dataDir, result.todos);
+    return result;
   });
 }
 

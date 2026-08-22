@@ -235,7 +235,7 @@ class CodexSession implements AgentSession {
         this.stdinOpen = false;
       }
 
-      const exitCode = await waitForCodexAppServerExit(this.child);
+      const { code: exitCode, signal: exitSignal } = await waitForCodexAppServerExit(this.child);
       if (this.eofTermTimer) clearTimeout(this.eofTermTimer);
       if (this.eofKillTimer) clearTimeout(this.eofKillTimer);
       this.rpc.rejectPending();
@@ -269,6 +269,21 @@ class CodexSession implements AgentSession {
         });
         this.emit({ type: 'done' });
         return base;
+      }
+
+      // An external signal death — an operator's `kill -9`, the kernel OOM killer, anything cezar
+      // did not send. SIGKILL (and most other signals) cannot be trapped, so Node reports these as
+      // `code: null` with `signal` set, which used to fall straight through the check below
+      // (`exitCode !== null` is false) and read exactly like a clean exit. `terminatedByCezar` is
+      // what tells this apart from cezar's OWN teardown reaching an untrapped death, handled
+      // identically to before this check existed — see the branch above (the codex twin of
+      // claude-cli-runner.ts's identical check, #703).
+      if (exitSignal && !this.terminatedByCezar) {
+        const stderr = stderrChunks.join('').trim();
+        const detail = stderr ? ` — ${stderr.split('\n').slice(-3).join(' | ')}` : '';
+        const message = `codex app-server was killed by signal ${exitSignal}${detail}`;
+        this.emit({ type: 'error', message });
+        throw new Error(message);
       }
 
       if (exitCode !== 0 && exitCode !== null) {

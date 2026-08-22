@@ -259,3 +259,84 @@ describe('SIGTERM→SIGKILL escalation for an app-server that survives SIGTERM',
     });
   });
 });
+
+/**
+ * A run whose agent was killed by an untrapped signal used to report `done`, and the workflow
+ * continued as though the step had succeeded — the same defect fixed for the claude backend in
+ * `claude-cli-runner.ts` (#703's follow-up). `waitForCodexAppServerExit` discarded the signal
+ * before any branch could see it, so `code === null` alone read as a clean exit no matter who
+ * sent the signal or why — the kernel OOM killer, a cgroup bound, or an operator's `kill -9`.
+ */
+describe('an external signal kills the agent process directly (OOM killer / operator kill -9)', () => {
+  const mockBin = fileURLToPath(
+    new URL('./__fixtures__/codex/mock-codex-app-server.mjs', import.meta.url),
+  );
+
+  it('a real subprocess killed by an untrapped SIGKILL fails the run and names the signal', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      // MOCK_CODEX_SUICIDE_SIGKILL completes the real handshake, streams a bit of the turn to
+      // prove the session is live, then kills itself — nothing cezar did caused this.
+      { userPrompt: 'do it', cwd: process.cwd(), env: { MOCK_CODEX_SUICIDE_SIGKILL: '1' } },
+      (event) => events.push(event),
+    );
+
+    await expect(session.result).rejects.toThrow(/SIGKILL/);
+    expect(events.some((e) => e.type === 'error' && e.message.includes('SIGKILL'))).toBe(true);
+    // The damaging property of the bug: a `done` landing right after the signal, which is what let
+    // the run manager treat the step as finished.
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+  }, 15_000);
+
+  it.each([0, 1, 2])('floor: ordinary exit code %i with no signal is untouched by this fix', async (code) => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
+    const session = runner.startSession(
+      { userPrompt: 'do it', cwd: process.cwd(), env: { MOCK_CODEX_EXIT_CODE: String(code) } },
+    );
+
+    if (code === 0) {
+      await expect(session.result).resolves.toMatchObject({ text: '' });
+    } else {
+      await expect(session.result).rejects.toThrow(`codex app-server exited with code ${code}`);
+    }
+  }, 15_000);
+
+  /**
+   * Negative control: cezar's own SIGTERM→SIGKILL escalation reaching an untrapped death produces
+   * the IDENTICAL `code: null, signal: 'SIGKILL'` shape an external kill does — `terminatedByCezar`
+   * is the only thing that tells them apart. Without this, "treat every signal as failure" would
+   * pass the positive test above and break every cancel/EOF teardown that outlives its grace
+   * window. Real subprocess, real ~12s EOF_TERM_GRACE_MS + EOF_KILL_GRACE_MS wait — deliberately
+   * not faked, so the escalation genuinely has to punch through a live process's ignored SIGTERM.
+   */
+  it("negative control: cezar's own SIGTERM→SIGKILL escalation is NOT an external-kill failure", async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
+    const events: AgentEvent[] = [];
+    let sawText: () => void = () => {};
+    const firstText = new Promise<void>((resolve) => {
+      sawText = resolve;
+    });
+    const session = runner.startSession(
+      // MOCK_CODEX_IGNORE_SIGTERM stays alive through both EOF and SIGTERM — only the SIGKILL
+      // cezar's own escalation ends with can end it.
+      { userPrompt: 'check the working tree', cwd: process.cwd(), env: { MOCK_CODEX_IGNORE_SIGTERM: '1' } },
+      (event) => {
+        events.push(event);
+        if (event.type === 'text') sawText();
+      },
+    );
+    await firstText;
+
+    session.end();
+    const result = await session.result;
+
+    // The untrapped-signal shape (`code: null, signal: 'SIGKILL'`) never matches
+    // `isSignalTerminationExit` (that predicate is for the 128+signal codes a CLI that TRAPS the
+    // signal reports), so this resolves via the plain fall-through path — no error, no note, just
+    // the turn's own result, exactly as it did before this fix existed.
+    expect(result.text).toBe('Checking the working tree.');
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  }, 20_000);
+});

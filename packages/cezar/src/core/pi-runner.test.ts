@@ -1,13 +1,30 @@
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { PassThrough } from 'node:stream';
+import { fileURLToPath } from 'node:url';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentEvent } from './agent-runner.js';
 import { buildChildEnv } from './agent-env.js';
 import { detectEnvironment } from './backend-detect.js';
 import { createRunner } from './runner-factory.js';
 import { buildPiArgs, PiRunner } from './pi-runner.js';
+
+/** Only the signal-classification tests below swap the child out; every other test in this file
+ *  keeps spawning the real mock CLI (or the real "absent binary" probe) through untouched `spawn`. */
+const spawnHook = vi.hoisted(() => ({ override: null as null | (() => unknown) }));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: (...args: Parameters<typeof actual.spawn>) =>
+      spawnHook.override ? spawnHook.override() : actual.spawn(...args),
+  };
+});
 
 /**
  * The `pi` runner (#387): a new AgentBackend slotted into the runner seam as
@@ -185,5 +202,131 @@ describe('pi spawns under pi credentials, not another runner', () => {
 
   it('keeps the seam identity pi-specific', () => {
     expect(new PiRunner().backend).toBe('pi');
+  });
+});
+
+/**
+ * A run whose agent was killed by an untrapped signal used to report `done`, and the workflow
+ * continued as though the step had succeeded — the same defect fixed for the claude backend in
+ * `claude-cli-runner.ts` (#703's follow-up). `waitForExit` here discarded the signal before any
+ * branch could see it, so `code === null` alone read as a clean exit no matter who sent the
+ * signal or why — the kernel OOM killer, a cgroup bound, or an operator's `kill -9`.
+ */
+describe('an external signal kills the agent process directly (OOM killer / operator kill -9)', () => {
+  it('a real subprocess killed by an untrapped SIGKILL fails the run and names the signal', async () => {
+    const bin = fileURLToPath(new URL('../../scripts/mock-pi-rpc.mjs', import.meta.url));
+    const events: AgentEvent[] = [];
+    const session = new PiRunner({ bin, timeoutMs: 0 }).startSession(
+      { userPrompt: 'do it', cwd: process.cwd(), env: { MOCK_PI_SUICIDE_SIGKILL: '1' } },
+      (event) => events.push(event),
+    );
+
+    await expect(session.result).rejects.toThrow(/SIGKILL/);
+    expect(events.some((e) => e.type === 'error' && e.message.includes('SIGKILL'))).toBe(true);
+    // The damaging property of the bug: a `done` landing right after the signal, which is what let
+    // the run manager treat the step as finished.
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+  }, 15_000);
+
+  /** A fake child whose only source of truth is what the test tells it — used for the exit-code
+   *  floor and to pin the exact rejection message, which a real subprocess's stderr noise would
+   *  make brittle to assert on directly. */
+  function killableChild(): {
+    child: ChildProcessWithoutNullStreams;
+    exit: (code: number | null, signal: NodeJS.Signals | null) => void;
+  } {
+    const emitter = new EventEmitter();
+    const stdout = new PassThrough();
+    const child = Object.assign(emitter, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      killed: false,
+      pid: 9101,
+      kill: () => true, // cezar never signals in this block — the death is entirely external
+    }) as unknown as ChildProcessWithoutNullStreams;
+    const exit = (code: number | null, signal: NodeJS.Signals | null) => {
+      Object.assign(child, { exitCode: code, signalCode: signal });
+      stdout.end();
+      emitter.emit('exit', code, signal);
+    };
+    return { child, exit };
+  }
+
+  it('the fake child agrees with the real subprocess above, and names the signal in the message', async () => {
+    const fake = killableChild();
+    spawnHook.override = () => fake.child;
+    try {
+      const session = new PiRunner({ bin: 'pi', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it',
+        cwd: process.cwd(),
+      });
+      fake.exit(null, 'SIGKILL');
+      await expect(session.result).rejects.toThrow('pi CLI was killed by signal SIGKILL');
+    } finally {
+      spawnHook.override = null;
+    }
+  });
+
+  it.each([0, 1, 2])('floor: ordinary exit code %i with no signal is untouched by this fix', async (code) => {
+    const fake = killableChild();
+    spawnHook.override = () => fake.child;
+    try {
+      const session = new PiRunner({ bin: 'pi', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it',
+        cwd: process.cwd(),
+      });
+      fake.exit(code, null);
+      if (code === 0) {
+        await expect(session.result).resolves.toMatchObject({ text: '' });
+      } else {
+        await expect(session.result).rejects.toThrow(`pi CLI exited with code ${code}`);
+      }
+    } finally {
+      spawnHook.override = null;
+    }
+  });
+
+  it("negative control: cezar's own interrupt() is NOT an external-kill failure", async () => {
+    // pi installs no signal handler of its own (unlike claude, which traps SIGTERM and exits
+    // 143) — so cezar's own `interrupt()` sending SIGTERM produces the identical `code: null,
+    // signal: 'SIGTERM'` shape an external kill would. `terminatedByCezar` is the only thing
+    // that tells them apart, and this must resolve exactly as it always did: cleanly, no error,
+    // no signal named.
+    const signals: NodeJS.Signals[] = [];
+    const emitter = new EventEmitter();
+    const stdout = new PassThrough();
+    const child = Object.assign(emitter, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      killed: false,
+      pid: 9102,
+      kill: (signal: NodeJS.Signals) => {
+        signals.push(signal);
+        Object.assign(child, { killed: true, exitCode: null, signalCode: signal });
+        stdout.end();
+        emitter.emit('exit', null, signal);
+        return true;
+      },
+    }) as unknown as ChildProcessWithoutNullStreams;
+
+    spawnHook.override = () => child;
+    try {
+      const session = new PiRunner({ bin: 'pi', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it',
+        cwd: process.cwd(),
+      });
+      session.interrupt();
+
+      expect(signals).toEqual(['SIGTERM']);
+      await expect(session.result).resolves.toMatchObject({ text: '' });
+    } finally {
+      spawnHook.override = null;
+    }
   });
 });

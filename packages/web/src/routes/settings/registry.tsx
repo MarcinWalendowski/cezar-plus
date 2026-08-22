@@ -10,6 +10,7 @@ import {
   IdCardIcon,
   LogOutIcon,
   KeyboardIcon,
+  NetworkIcon,
   NotebookPenIcon,
   PaletteIcon,
   PlugZapIcon,
@@ -28,6 +29,9 @@ import { BackupSection } from './backup-section'
 import { AgentsSection } from './agents-section'
 import { AppearanceSection } from './appearance'
 import { BookmarkletsSection } from './bookmarklets-section'
+// Multi-node cluster (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, phase 1b): the fleet
+// panel. Declared here and nowhere else — see this file's own docblock.
+import { ClusterSection } from './cluster-section'
 import { NotificationsSection } from './notifications-section'
 import { ProjectGeneralSection } from './project-general'
 import { ProjectsSection } from './projects-section'
@@ -80,6 +84,7 @@ export type SettingsSectionId =
   | 'sources'
   | 'teams'
   | 'backup'
+  | 'cluster'
 
 /**
  * Who a section's value belongs to — and therefore which store it writes.
@@ -126,8 +131,13 @@ export interface SettingsSection {
   hidden?: boolean
   /** Central-hub scaffold gate (D19): the section drops out of the nav and the route list
    *  exactly like `hidden`, but the condition is a live capability rather than a permanent
-   *  build-time flag — flipping `CEZ_SOURCES=1` reveals it without a code change. */
-  capability?: 'sources'
+   *  build-time flag — flipping `CEZ_SOURCES=1` reveals it without a code change.
+   *
+   *  `'cluster'` joined it 2026-08-22 (`CEZ_CLUSTER=1`). It drops BOTH the nav entry and the
+   *  route, which is the half worth stating: the spec's Verification 12 asserts `/settings/cluster`
+   *  is a 404 with the flag off, not merely that the nav is empty — a test that checked only the
+   *  nav would pass against a reachable orphan route. */
+  capability?: 'sources' | 'cluster'
 }
 
 /**
@@ -136,7 +146,7 @@ export interface SettingsSection {
  * every prop typed with it, instead of leaving `settings-shell.tsx` passing a narrower `Pick`
  * that no longer satisfies the filter.
  */
-export type SettingsCapabilities = Pick<Capabilities, 'singleProject' | 'sources'>
+export type SettingsCapabilities = Pick<Capabilities, 'singleProject' | 'sources' | 'cluster'>
 
 /** A registry entry whose real section arrives in a later Step — routable, honest about it. */
 function comingSoon(title: string, Icon: ComponentType<SVGProps<SVGSVGElement>>): ComponentType {
@@ -310,6 +320,22 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     icon: HardDriveIcon,
     component: BackupSection,
     appliesTo: 'workspace',
+  },
+  {
+    // Multi-node cluster (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, phase 1b).
+    // `workspace`, not `per-project`: a cluster is a property of this machine and the nodes it is
+    // linked to, and its pairings are per project only INSIDE the panel — there is one answer to
+    // "what is my fleet", never one per repo. Gated on `capability: 'cluster'` rather than
+    // declared unconditionally like `backup`, because `capabilitiesSchema` DOES carry a `cluster`
+    // key (see `server/capabilities.ts#clusterEnabled` for why that differs from backup's
+    // deliberate absence), so there is a synchronous signal this gate can read.
+    id: 'cluster',
+    title: 'Cluster',
+    description: 'The nodes this cockpit is linked to, what they can run, and how to add one.',
+    icon: NetworkIcon,
+    component: ClusterSection,
+    appliesTo: 'workspace',
+    capability: 'cluster',
   },
   {
     id: 'keyboard',

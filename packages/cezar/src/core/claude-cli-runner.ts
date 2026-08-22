@@ -31,8 +31,18 @@ import { costWeightedTokens, type RawUsage } from './usage.ts';
 import { readNdjson } from './ndjson.ts';
 import type { UiEvent } from './ui-events.ts';
 import { BrokeredSession } from './brokered-session.ts';
-import { brokerArgs, resolveBrokerCommand, type BrokerSessionRequest } from './broker-launch.ts';
-import { buildBrokerLaunchArgv, nextBrokerInstanceId, userScopeEnv } from './broker-isolation.ts';
+import {
+  brokerArgs,
+  resolveBrokerCommand,
+  type BrokerSessionRequest,
+  type ResourceKillReport,
+} from './broker-launch.ts';
+import {
+  buildBrokerLaunchArgv,
+  detectResourceKill,
+  nextBrokerInstanceId,
+  userScopeEnv,
+} from './broker-isolation.ts';
 import { readSpoolMeta, spoolPaths, type SpoolExit } from './run-spool.ts';
 import {
   claudeTurnStarted,
@@ -303,7 +313,7 @@ export class ClaudeCliRunner implements AgentRunner {
         stdinOpen = false;
       }
 
-      const exitCode = await waitForExit(child);
+      const { code: exitCode, signal: exitSignal } = await waitForExit(child);
       if (eofTermTimer) clearTimeout(eofTermTimer);
       if (eofKillTimer) clearTimeout(eofKillTimer);
 
@@ -331,10 +341,20 @@ export class ClaudeCliRunner implements AgentRunner {
         return { text, toolCalls, tokensUsed, sessionId: spec.sessionId };
       }
 
+      // An external signal death — an operator's `kill -9`, the kernel OOM killer, anything cezar
+      // did not send. SIGKILL (and most other signals) cannot be trapped, so Node reports these as
+      // `code: null` with `signal` set, which used to fall straight through the check below
+      // (`exitCode !== null` is false) and read exactly like a clean exit. `terminatedByCezar` is
+      // what tells this apart from our OWN escalation reaching SIGKILL, handled identically to
+      // before this check existed — see the branch above.
+      if (exitSignal && !terminatedByCezar) {
+        const msg = `claude CLI was killed by signal ${exitSignal}${stderrDetail(stderrChunks)}`;
+        onEvent?.({ type: 'error', message: msg });
+        throw new Error(msg);
+      }
+
       if (exitCode !== 0 && exitCode !== null) {
-        const stderr = stderrChunks.join('').trim();
-        const detail = stderr ? ` — ${stderr.split('\n').slice(-3).join(' | ')}` : '';
-        const msg = `claude CLI exited with code ${exitCode}${detail}`;
+        const msg = `claude CLI exited with code ${exitCode}${stderrDetail(stderrChunks)}`;
         onEvent?.({ type: 'error', message: msg });
         throw new Error(msg);
       }
@@ -407,6 +427,12 @@ export class ClaudeCliRunner implements AgentRunner {
       // reused while the previous scope is still alive makes `systemd-run` exit 1 without starting
       // anything (`brokerScopeUnitName`).
       instanceId: nextBrokerInstanceId(),
+      // D14a's bounds actually reaching the scope. Without this line `MemoryHigh`/`MemoryMax`/
+      // `CPUWeight` and the `cezar-runs.slice` ceiling are config that governs nothing, and
+      // `attachBroker`'s kill attribution below would be describing a bound that is not there.
+      // `buildBrokerLaunchArgv` drops it outside `scope` isolation — there is no cgroup of the
+      // launch's own to put a property on — which is the same condition the attribution uses.
+      ...(request.resources ? { resources: request.resources } : {}),
       command: [
         ...brokerCommand,
         ...brokerArgs({
@@ -493,6 +519,9 @@ export class ClaudeCliRunner implements AgentRunner {
     let terminatedByCezar = false;
     let timedOut = false;
     let deadline: NodeJS.Timeout | undefined;
+    /** Set by `onExit` when this launch's cgroup bound killed the tree — read by `buildResult` so
+     *  the failure a step reports names the bound instead of only the signal (C3). */
+    let resourceKill: ResourceKillReport | undefined;
 
     const consumer = createClaudeConsumer({
       spec,
@@ -535,12 +564,17 @@ export class ClaudeCliRunner implements AgentRunner {
       launchFailure: mode.launchFailure,
       onExit: (exit) => {
         if (deadline) clearTimeout(deadline);
+        // THE moment of observation, and the only place that holds all three facts at once: the
+        // exit, the bounds this launch was actually created with, and whether the stop was ours.
+        resourceKill = reportedResourceKill(exit, request, { cezarInitiated: terminatedByCezar });
+        if (resourceKill) request.onResourceKill?.(resourceKill);
         emitBrokeredTerminalEvents({
           exit,
           onEvent,
           timedOut,
           limitMs,
           terminatedByCezar,
+          resourceKill,
           sawUsage: consumer.sawUsage(),
         });
       },
@@ -549,6 +583,14 @@ export class ClaudeCliRunner implements AgentRunner {
         if (failed) throw failed;
         const totals = consumer.buildResult();
         const failure = brokeredExitFailure(request.spoolDir, timedOut, terminatedByCezar);
+        // Ahead of `failure`, not folded into it, because the common shape of a cgroup kill —
+        // `{ code: null, signal: 'SIGKILL' }`, which is what Node reports when nothing traps the
+        // signal — makes `brokeredExitFailure` return NULL (`code === null` is its "ended
+        // acceptably" case). Left to that path a killed run resolves successfully and the step
+        // goes GREEN, which is worse than C3's "blamed on the test": it is a run that lost its
+        // agent mid-work and reported done. `resourceKill` is set only when a bound this launch
+        // actually carried can explain the signal, so this cannot swallow an ordinary exit.
+        if (resourceKill) throw resourceKillFailure(failure, resourceKill);
         if (failure) throw failure;
         return totals;
       },
@@ -974,6 +1016,8 @@ function emitBrokeredTerminalEvents(ctx: {
   timedOut: boolean;
   limitMs: number;
   terminatedByCezar: boolean;
+  /** Set when this launch's own cgroup bound killed the tree — see `reportedResourceKill`. */
+  resourceKill?: ResourceKillReport;
   sawUsage: boolean;
 }): void {
   const { onEvent } = ctx;
@@ -984,6 +1028,14 @@ function emitBrokeredTerminalEvents(ctx: {
     onEvent?.({ type: 'done' });
     return;
   }
+  if (ctx.resourceKill) {
+    // `error` and NOT `done`, and deliberately no `reason`: `AgentStopReason` is a published union
+    // and a cgroup kill is not a cezar-initiated stop, so widening it would be lying about who
+    // stopped the run. The step fails, its message names the bound, and `resourceKill` on the
+    // record is the machine-readable half.
+    onEvent?.({ type: 'error', message: resourceKillFailure(null, ctx.resourceKill).message });
+    return;
+  }
   const code = ctx.exit?.code ?? null;
   if (ctx.terminatedByCezar && isSignalTerminationExit(code)) {
     onEvent?.({
@@ -991,6 +1043,16 @@ function emitBrokeredTerminalEvents(ctx: {
       message: `claude CLI did not exit on its own after close; terminated by cezar (code ${code})`,
     });
     onEvent?.({ type: 'done' });
+    return;
+  }
+  // An external signal death — see the identical check in the pipe path's result handling
+  // (`startSession`) for why `code === null` alone used to read as a clean exit. `terminatedByCezar`
+  // is what tells this apart from OUR OWN escalation reaching SIGKILL, which is `code === null` too
+  // and is handled unchanged by the branch above (`isSignalTerminationExit` covers only the
+  // 128+signal shape a CLI that traps the signal reports; a bare untrapped SIGKILL has no code to
+  // match, so cezar's own escalation falls through both checks exactly as it always did).
+  if (ctx.exit?.signal && !ctx.terminatedByCezar) {
+    onEvent?.({ type: 'error', message: brokeredExitMessage(code, ctx.exit) });
     return;
   }
   if (code !== 0 && code !== null) {
@@ -1003,21 +1065,86 @@ function emitBrokeredTerminalEvents(ctx: {
   onEvent?.({ type: 'done' });
 }
 
+/**
+ * Whether this launch's own cgroup bound is what killed it, stamped with the instant it was
+ * observed — the caller `detectResourceKill` was written to expect (spec D14a, verification C3).
+ *
+ * Three narrowings, in order, and each one is a way this could otherwise fabricate a cause:
+ *
+ *  1. **`scope` isolation only.** `buildBrokerLaunchArgv` drops `resources` on the `delegated` and
+ *     `none` paths — there is no cgroup of the launch's own to bound — so on those hosts a
+ *     configured `runMemoryMaxMb` governs nothing. Consulting it anyway would attribute every
+ *     stray SIGKILL on a Mac to a limit that has never existed on that machine.
+ *  2. **`detectResourceKill`'s own two tests**: not a cezar-initiated stop, and a memory bound was
+ *     genuinely configured for this launch.
+ *  3. **`at` comes from the broker's `exitedAt` when it has one.** The broker writes `exit.json`
+ *     the moment the child dies; this function runs when the tail next notices the file, and after
+ *     a server restart that can be far later. The earlier of the two is the observation, so a
+ *     re-attach does not stamp a kill with the time cezar came back. A non-ISO `exitedAt` (the
+ *     spool schema checks that it is a string, not that it is a date) falls back to now rather
+ *     than putting an unparseable instant on the record.
+ */
+export function reportedResourceKill(
+  exit: SpoolExit | null,
+  request: Pick<BrokerSessionRequest, 'isolation' | 'resources'>,
+  opts: { cezarInitiated: boolean; now?: () => Date },
+): ResourceKillReport | undefined {
+  if (!exit) return undefined;
+  if (request.isolation !== 'scope') return undefined;
+  const detected = detectResourceKill(
+    { code: exit.code, signal: exit.signal as NodeJS.Signals | null },
+    request.resources ?? {},
+    { cezarInitiated: opts.cezarInitiated },
+  );
+  if (!detected) return undefined;
+  const observed = exit.exitedAt;
+  const at =
+    observed !== undefined && !Number.isNaN(Date.parse(observed))
+      ? observed
+      : (opts.now?.() ?? new Date()).toISOString();
+  return { limit: detected.limit, at, detail: detected.detail };
+}
+
+/** One message for a kill, whether or not the exit ALSO produced an ordinary failure to append to
+ *  (it usually does not — a bare `signal: 'SIGKILL'` carries no exit code at all). */
+function resourceKillFailure(failure: Error | null, kill: ResourceKillReport): Error {
+  return new Error(
+    failure ? `${failure.message} — ${kill.detail}` : `claude CLI was killed by a resource bound — ${kill.detail}`,
+  );
+}
+
 /** The `Error` a brokered run rejects with, or null when it ended acceptably. */
 function brokeredExitFailure(spoolDir: string, timedOut: boolean, terminatedByCezar: boolean): Error | null {
   if (timedOut) return null;
   const exit = readSpoolExitSafe(spoolDir);
   const code = exit?.code ?? null;
-  if (code === 0 || code === null) return null;
-  if (terminatedByCezar && isSignalTerminationExit(code)) return null;
+  if (code === 0) return null;
+  if (terminatedByCezar) {
+    // Our own teardown (EOF watchdog, cancel) reports back however the platform reports a signal
+    // death: 128+signal if the CLI traps it (`isSignalTerminationExit`), or a bare `code: null`
+    // when nothing does — SIGKILL cannot be trapped, so cezar's own SIGTERM→SIGKILL escalation
+    // lands here too. Unchanged from before this fix: both settle on the normal path.
+    if (code === null || isSignalTerminationExit(code)) return null;
+    return new Error(brokeredExitMessage(code, exit, spoolDir));
+  }
+  // Not our doing. `code === null` with no signal recorded means no exit was ever observed (the
+  // broker never wrote exit.json) — nothing to blame the run for. `code === null` WITH a signal is
+  // an external kill — an operator's `kill -9`, the kernel OOM killer, anything untrapped — and
+  // used to read exactly like a clean exit, because an untrapped signal carries no exit code at
+  // all (see the identical `exitSignal` check on the pipe path).
+  if (code === null && !exit?.signal) return null;
   return new Error(brokeredExitMessage(code, exit, spoolDir));
 }
 
-function brokeredExitMessage(code: number, exit: SpoolExit | null, spoolDir?: string): string {
+function brokeredExitMessage(code: number | null, exit: SpoolExit | null, spoolDir?: string): string {
   const stderr = spoolDir ? spooledStderrTail(spoolDir) : '';
   const detail = stderr ? ` — ${stderr}` : '';
-  const signal = exit?.signal ? ` (signal ${exit.signal})` : '';
-  return `claude CLI exited with code ${code}${signal}${detail}`;
+  const signal = exit?.signal ?? null;
+  const summary =
+    code === null
+      ? `claude CLI was killed by signal ${signal ?? 'unknown'}`
+      : `claude CLI exited with code ${code}${signal ? ` (signal ${signal})` : ''}`;
+  return `${summary}${detail}`;
 }
 
 function readSpoolExitSafe(spoolDir: string): SpoolExit | null {
@@ -1040,28 +1167,49 @@ function spooledStderrTail(spoolDir: string): string {
 
 // ---- subprocess plumbing --------------------------------------------------
 
-function waitForExit(child: ChildProcessWithoutNullStreams): Promise<number | null> {
-  if (child.exitCode != null) return Promise.resolve(child.exitCode);
+interface ChildExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+/**
+ * A child killed by an untrapped signal (SIGKILL, or any signal nothing installed a handler for)
+ * reports `code: null` — the signal is the only fact Node records about how it died. The old
+ * shape here returned the bare code and threw the signal away before any caller could see it,
+ * which is how an external `kill -9` (an operator, the kernel OOM killer) came to read exactly
+ * like a clean exit — see the `exitSignal` check in `startSession`'s result handling.
+ */
+function waitForExit(child: ChildProcessWithoutNullStreams): Promise<ChildExit> {
+  if (child.exitCode != null || child.signalCode != null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
   return new Promise((resolve) => {
     let done = false;
-    const fin = (code: number | null) => {
+    const fin = (code: number | null, signal: NodeJS.Signals | null) => {
       if (done) return;
       done = true;
       clearTimeout(safety);
-      resolve(code);
+      resolve({ code, signal });
     };
-    child.once('close', (code) => fin(code));
-    child.once('exit', (code) => fin(code));
+    child.once('close', (code, signal) => fin(code, signal));
+    child.once('exit', (code, signal) => fin(code, signal));
     // Don't swallow a late error as a clean null exit — fall back to the
     // child's own exit code (which is non-null/non-zero on failure).
-    child.once('error', () => fin(child.exitCode ?? null));
+    child.once('error', () => fin(child.exitCode ?? null, child.signalCode ?? null));
     // A SIGKILLed process may never emit 'close' through some edge cases.
     const safety = setTimeout(
-      () => fin(child.exitCode ?? null),
+      () => fin(child.exitCode ?? null, child.signalCode ?? null),
       EOF_TERM_GRACE_MS + EOF_KILL_GRACE_MS + KILL_GRACE_MS + 5_000,
     );
     safety.unref?.();
   });
+}
+
+/** The last few lines of the pipe path's own captured stderr, formatted as an error suffix — the
+ *  in-process twin of the brokered path's `spooledStderrTail`. */
+function stderrDetail(stderrChunks: string[]): string {
+  const stderr = stderrChunks.join('').trim();
+  return stderr ? ` — ${stderr.split('\n').slice(-3).join(' | ')}` : '';
 }
 
 /**

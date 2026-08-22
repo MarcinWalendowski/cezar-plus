@@ -1,5 +1,9 @@
 import { z } from 'zod';
 // `StartTodoResponse` embeds a whole run record, which belongs to the runs slice.
+// Imported rather than re-declared: `cluster.ts` owns these two shapes and a second copy here
+// would drift the moment either side gains a field. `cluster.ts` does not import this file, so
+// there is no cycle.
+import { clusterNodeIdSchema, clusterTodoPlacementSchema } from './cluster.ts';
 import { runRecordSchema } from './runs.ts';
 import { taskAuthorSchema } from './task-author.ts';
 
@@ -122,6 +126,34 @@ export const todoItemSchema = z.object({
    * entry written before 2026-08-21. Both read as "unknown", which is the honest answer.
    */
   author: taskAuthorSchema.optional(),
+  // ---- cluster (2026-08-22-multi-node-cezar-cluster.md, D12/D4) ------------------------------
+  // Two of the SIX cluster fields on the cezar-side `todoSchema`, and ONLY two. The board has to
+  // render these, and a plain `z.object` strips what it does not declare — so without them the
+  // cockpit silently shows an unpinned, unstarted todo for one that is pinned and running
+  // elsewhere. The other four (`pendingSince`, `pendingFields`, `hubSeq`, `tombstone`) are sync
+  // bookkeeping no reader renders and are deliberately NOT here: this is the cockpit-facing shape,
+  // not the on-disk one.
+  //
+  // Corrected 2026-08-23: this said "two of the five … the other three" and omitted
+  // `pendingFields`, which `clusterTodoFieldsSchema` gained when per-record ops became per-FIELD
+  // ops. A count that does not add up is how a field gets forgotten on one side of a split.
+  /**
+   * Where this todo may run: an explicit node pin, or labels that narrow the candidates.
+   * Client-written — a person pins it from the cockpit — so it stays creatable below.
+   *
+   * **Settable at CREATE only today, and that is a gap, not a decision.** `updateTodoInputSchema`
+   * is a hand-written object carrying `status`/`priority`/`archived` and nothing else, so it does
+   * not derive this field the way `createTodoInputSchema` does. Re-pinning a todo already on the
+   * board — the obvious thing to want once a node goes offline — has no route. Phase 4's board
+   * work needs it; naming it here so it is found at the schema rather than after the UI is built
+   * against a route that silently ignores the field.
+   */
+  placement: clusterTodoPlacementSchema.optional(),
+  /** The node this todo's run was claimed on. **Hub-confirmed only, never optimistic** (D4/D9a),
+   *  which is why it is omitted from `createTodoInputSchema` — a client that could assert where a
+   *  todo started could assert it twice, in two places, which is the double-start this design
+   *  exists to prevent. */
+  startedOn: clusterNodeIdSchema.optional(),
 });
 export type TodoItem = z.infer<typeof todoItemSchema>;
 
@@ -145,6 +177,12 @@ export const createTodoInputSchema = todoItemSchema.omit({
   // `archivedAt` gives: it is stamped server-side, never client-supplied. An author a caller can
   // set is forgeable, and a forgeable author is not provenance — see the field's doc comment.
   author: true,
+  // `startedOn` joined the omit list with the multi-node cluster (2026-08-22), for a reason
+  // stronger than either above: it is the ONE write D4 exempts from optimistic application, so a
+  // client that could supply it could claim a start the hub never granted. `placement` is
+  // deliberately NOT omitted — pinning a todo to a node is a person's decision, made at creation
+  // or later, and it is safe because placement is a request the scheduler honours, not a claim.
+  startedOn: true,
 });
 export type CreateTodoInput = z.infer<typeof createTodoInputSchema>;
 

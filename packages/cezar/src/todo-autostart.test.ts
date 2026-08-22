@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,7 +7,16 @@ import { RunStore } from './runs/store.ts';
 import type { RunManager, StartRunInput } from './workflows/run.ts';
 import type { WorkflowDef } from './workflows/types.ts';
 import { readTodos, todosPath, type TodoItem } from './todos.ts';
-import { reconcileAutostartTodos, watchTodoAutostart, type TodoAutostartProject } from './todo-autostart.ts';
+import {
+  mayAutostartTodo,
+  reconcileAutostartTodos,
+  watchTodoAutostart,
+  type AutostartRefusal,
+  type TodoAutostartCluster,
+  type TodoAutostartProject,
+  type TodoClaimResult,
+} from './todo-autostart.ts';
+import { mayStartWithoutHub } from './cluster/dispatch.ts';
 import { localCliAuthor } from './runs/task-author.ts';
 
 /**
@@ -209,5 +218,444 @@ describe('watchTodoAutostart', () => {
     cleanups.push(second);
     // The first subscription's own unsubscribe must be a safe no-op after being superseded.
     expect(() => first()).not.toThrow();
+  });
+});
+
+/**
+ * Phase 3 of the cluster — the autostart guard (spec
+ * `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D4 · D9a · D15a · D15b; PLAN 3.2).
+ * Verifications **9, 10, 11, 14**.
+ *
+ * **The hub is faked, not the guard.** `FakeHub` below is a linearized claim registry plus the
+ * replica push the real hub performs on ack (D7: `startedOn` is written down to every node through
+ * the store API). Nothing here stubs `mayAutostartTodo` itself — the tests drive
+ * `reconcileAutostartTodos` end to end so an ordering bug has somewhere to show up.
+ */
+
+/** The hub's ack, replicated down. Written straight into the file because the fake hub is standing
+ *  in for the replica path (`todos.ts`'s `applyHubReplica`), which is not this package's to call. */
+function patchTodoOnDisk(dataDir: string, todoId: string, fields: Partial<TodoItem>): void {
+  const path = todosPath(dataDir);
+  if (!existsSync(path)) return;
+  const items = JSON.parse(readFileSync(path, 'utf8')) as TodoItem[];
+  writeFileSync(
+    path,
+    JSON.stringify(
+      items.map((t) => (t.id === todoId ? { ...t, ...fields } : t)),
+      null,
+      2,
+    ),
+    'utf8',
+  );
+}
+
+class FakeHub {
+  /** todoId → the node whose claim the hub applied. This is the hub's ARRIVAL ORDER, which is the
+   *  whole of the mutual exclusion (D4) — there is no lease anywhere in this class. */
+  readonly claims = new Map<string, string>();
+  /** Every claim ATTEMPT, so a test can prove a node asked (or, for verification 10, that it never
+   *  did). Without this a "no second run" assertion passes just as well against a node that never
+   *  reached the guard at all. */
+  claimCalls: Array<{ nodeId: string; todoId: string }> = [];
+  private readonly nodes: string[] = [];
+
+  register(dataDir: string): void {
+    this.nodes.push(dataDir);
+  }
+
+  /** Blue-green self-deploy (D15b): the hub's own store is gone and it comes back empty. */
+  wipe(): void {
+    this.claims.clear();
+  }
+
+  async claim(nodeId: string, todo: TodoItem): Promise<TodoClaimResult> {
+    // Yield first, so two nodes claiming "concurrently" are both genuinely in flight before either
+    // decides — otherwise the first caller wins by call order rather than by the hub's arbitration.
+    await new Promise((r) => setImmediate(r));
+    this.claimCalls.push({ nodeId, todoId: todo.id });
+    const holder = this.claims.get(todo.id);
+    if (holder !== undefined && holder !== nodeId) {
+      return { accepted: false, reason: 'another node already holds this claim', startedOn: holder };
+    }
+    this.claims.set(todo.id, nodeId);
+    // D7 — the ack IS the stamp, and it replicates to every node, not just the winner.
+    for (const dataDir of this.nodes) patchTodoOnDisk(dataDir, todo.id, { startedOn: nodeId });
+    return { accepted: true, startedOn: nodeId };
+  }
+}
+
+interface FakeNode {
+  nodeId: string;
+  repoRoot: string;
+  dataDir: string;
+  store: RunStore;
+  started: StartRunInput[];
+  refusals: AutostartRefusal[];
+  project: TodoAutostartProject;
+  write(todos: TodoItem[]): void;
+}
+
+describe('cluster autostart guard — hub-confirmed claims (spec 2026-08-22-multi-node-cezar-cluster)', () => {
+  const cleanup: Array<() => void> = [];
+
+  const makeNode = (
+    nodeId: string,
+    options: {
+      hub?: FakeHub;
+      hubReachable?: boolean;
+      authoredHere?: boolean;
+      /** Simulates the kill in verification 11: the claim is already acknowledged when this throws. */
+      startThrows?: boolean;
+      /** Clustering OFF — no port at all, which is the whole of the switch. */
+      clustered?: boolean;
+      onStart?: (node: FakeNode) => void;
+    } = {},
+  ): FakeNode => {
+    const repoRoot = mkdtempSync(join(tmpdir(), `cez-cluster-autostart-${nodeId}-`));
+    const dataDir = join(repoRoot, '.ai/cezar');
+    mkdirSync(dataDir, { recursive: true });
+    const store = RunStore.open(dataDir);
+    const started: StartRunInput[] = [];
+    const refusals: AutostartRefusal[] = [];
+
+    const node: FakeNode = {
+      nodeId,
+      repoRoot,
+      dataDir,
+      store,
+      started,
+      refusals,
+      project: undefined as unknown as TodoAutostartProject,
+      write: (todos: TodoItem[]) => writeFileSync(todosPath(dataDir), JSON.stringify(todos, null, 2), 'utf8'),
+    };
+
+    const manager = {
+      startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
+        options.onStart?.(node);
+        if (options.startThrows) throw new Error('node killed between the claim and the start');
+        started.push(input);
+        return store.createRun({ author: input.author, title: 't', workflow: '(inbox)', task: input.task, steps: [] });
+      },
+    } as unknown as RunManager;
+
+    const hub = options.hub;
+    const clustered = options.clustered ?? true;
+    node.project = {
+      repoRoot,
+      dataDir,
+      manager,
+      onRefused: (r) => refusals.push(r),
+      ...(clustered
+        ? {
+            cluster: {
+              nodeId,
+              hubReachable: () => options.hubReachable ?? true,
+              authoredHere: () => options.authoredHere ?? false,
+              claimStart: (todo) => {
+                if (!hub) throw new Error('claimStart called with no hub wired');
+                return hub.claim(nodeId, todo as TodoItem);
+              },
+            } satisfies TodoAutostartCluster,
+          }
+        : {}),
+    };
+
+    hub?.register(dataDir);
+    cleanup.push(() => {
+      store.flush();
+      rmSync(repoRoot, { recursive: true, force: true });
+    });
+    return node;
+  };
+
+  afterEach(() => {
+    for (const off of cleanup.splice(0)) off();
+  });
+
+  // ---- the negative control that matters most --------------------------------------------------
+
+  describe('clustering OFF — behaviour is what it was before the cluster existed', () => {
+    it('starts, and still stamps AFTER acting: at startRun time the entry is unstamped and still flagged', async () => {
+      // The existing single-node path is act-then-stamp, and D9a changes that ordering on the
+      // CLUSTER path only. Read the file from inside `startRun` — the one moment where a
+      // stamp-first regression would be visible.
+      let seenAtStart: TodoItem | undefined;
+      const node = makeNode('node-off', {
+        clustered: false,
+        onStart: (n) => {
+          seenAtStart = (JSON.parse(readFileSync(todosPath(n.dataDir), 'utf8')) as TodoItem[])[0];
+        },
+      });
+      node.write([{ id: 't1', summary: 'Ship it', autostart: true }]);
+
+      await reconcileAutostartTodos(node.project);
+
+      expect(node.started).toHaveLength(1);
+      expect(seenAtStart?.autostart).toBe(true);
+      expect(seenAtStart?.startedTaskId).toBeUndefined();
+      const [after] = await readTodos(node.dataDir);
+      expect(after?.startedTaskId).toBeTruthy();
+      expect(after?.autostart).toBeUndefined();
+      expect(node.refusals).toEqual([]);
+    });
+
+    it('the guard cannot fire when off: a record carrying another node’s claim still starts', async () => {
+      // The sharpest form of the control. Every field the cluster guard keys on is present and
+      // says "someone else owns this" — and with no port wired none of them may gate anything,
+      // because they never can on a single-node install that has simply never heard of a cluster.
+      const node = makeNode('node-off-2', { clustered: false });
+      node.write([
+        { id: 't1', summary: 'Ship it', autostart: true, startedOn: 'node-somebody-else', pendingSince: '2026-08-22T00:00:00.000Z' },
+      ]);
+
+      await reconcileAutostartTodos(node.project);
+
+      expect(node.started).toHaveLength(1);
+      expect(node.refusals).toEqual([]);
+    });
+
+    it('mayAutostartTodo is a no-op that allows', async () => {
+      const node = makeNode('node-off-3', { clustered: false });
+      await expect(
+        mayAutostartTodo(node.project, { id: 't1', summary: 'Ship it', autostart: true, startedOn: 'node-x' }),
+      ).resolves.toEqual({ allowed: true });
+    });
+  });
+
+  // ---- verification 9 --------------------------------------------------------------------------
+
+  describe('verification 9 — exactly-once start', () => {
+    it('one autostart todo replicated to two nodes produces exactly ONE run', async () => {
+      const hub = new FakeHub();
+      const a = makeNode('node-a', { hub });
+      const b = makeNode('node-b', { hub });
+      const todo: TodoItem = { id: 'shared-1', summary: 'Ship it once', autostart: true };
+      a.write([todo]);
+      b.write([todo]);
+
+      await Promise.all([reconcileAutostartTodos(a.project), reconcileAutostartTodos(b.project)]);
+
+      expect(a.started.length + b.started.length).toBe(1);
+      // Both nodes actually TRIED — otherwise "exactly one run" would pass against a test in which
+      // the second node never reached the guard, and the guard would be untested.
+      expect(hub.claimCalls.map((c) => c.nodeId).sort()).toEqual(['node-a', 'node-b']);
+      // The loser refused with a stated reason naming the winner (D15a: never a silent skip).
+      const loser = a.started.length === 1 ? b : a;
+      const winner = a.started.length === 1 ? a : b;
+      expect(loser.refusals).toHaveLength(1);
+      expect(loser.refusals[0]?.reason).toContain(winner.nodeId);
+      expect(loser.refusals[0]?.todoId).toBe('shared-1');
+    });
+
+    it('confirm BEFORE start: the claim is already acknowledged by the time startRun is called', async () => {
+      const hub = new FakeHub();
+      let claimsAtStart = -1;
+      const a = makeNode('node-a', { hub, onStart: () => (claimsAtStart = hub.claims.size) });
+      a.write([{ id: 'shared-2', summary: 'Ship it', autostart: true }]);
+
+      await reconcileAutostartTodos(a.project);
+
+      expect(a.started).toHaveLength(1);
+      expect(claimsAtStart).toBe(1);
+      expect(hub.claims.get('shared-2')).toBe('node-a');
+    });
+  });
+
+  // ---- verification 10 -------------------------------------------------------------------------
+
+  describe('verification 10 — exactly-once across a hub lease-store wipe (blue-green deploy)', () => {
+    it('node B does not start a second run, and never even asks the wiped hub', async () => {
+      const hub = new FakeHub();
+      const a = makeNode('node-a', { hub });
+      const b = makeNode('node-b', { hub });
+      const todo: TodoItem = { id: 'shared-3', summary: 'Ship it once', autostart: true };
+      a.write([todo]);
+      b.write([todo]);
+
+      await reconcileAutostartTodos(a.project);
+      expect(a.started).toHaveLength(1);
+      const [startedOnA] = await readTodos(a.dataDir);
+      expect(startedOnA?.startedTaskId).toBeTruthy();
+
+      // The replica push of A's completed start (the ordinary optimistic op, post-start).
+      patchTodoOnDisk(b.dataDir, 'shared-3', { startedTaskId: startedOnA?.startedTaskId });
+
+      // ~10 blue-green restarts a day: the hub's store is gone and it comes back empty.
+      hub.wipe();
+      hub.claimCalls = [];
+
+      await reconcileAutostartTodos(b.project);
+
+      expect(b.started).toHaveLength(0);
+      // The durable key is the REPLICATED STAMP, not a lease: a wiped hub is never consulted, so
+      // wiping it cannot grant the same work twice.
+      expect(hub.claimCalls).toEqual([]);
+
+      const [onB] = await readTodos(b.dataDir);
+      await expect(mayAutostartTodo(b.project, onB as TodoItem)).resolves.toEqual({
+        allowed: false,
+        reason: `already started as run ${startedOnA?.startedTaskId}`,
+      });
+    });
+
+    it('negative control: the SAME wiped hub still grants an unstamped todo', async () => {
+      // Without this, "node B refused" would pass equally well against a hub that refuses
+      // everything after a wipe — which would be a different (and much worse) bug.
+      const hub = new FakeHub();
+      const b = makeNode('node-b', { hub });
+      b.write([
+        { id: 'stamped', summary: 'Already run elsewhere', autostart: true, startedTaskId: 'run-from-node-a' },
+        { id: 'fresh', summary: 'Nobody has claimed this', autostart: true },
+      ]);
+      hub.wipe();
+
+      await reconcileAutostartTodos(b.project);
+
+      expect(b.started.map((s) => s.task)).toEqual(['Nobody has claimed this']);
+      expect(hub.claimCalls).toEqual([{ nodeId: 'node-b', todoId: 'fresh' }]);
+    });
+
+    it('the crash-window stamp survives the wipe too: startedOn alone still refuses node B', async () => {
+      const hub = new FakeHub();
+      const b = makeNode('node-b', { hub });
+      b.write([{ id: 'claimed-elsewhere', summary: 'Claimed, not yet started', autostart: true, startedOn: 'node-a' }]);
+      hub.wipe();
+
+      await reconcileAutostartTodos(b.project);
+
+      expect(b.started).toHaveLength(0);
+      expect(hub.claimCalls).toEqual([]);
+      expect(b.refusals[0]?.reason).toBe('already claimed by node node-a');
+    });
+  });
+
+  // ---- verification 11 -------------------------------------------------------------------------
+
+  describe('verification 11 — stamp-before-start ordering', () => {
+    it('killed between the confirmed claim and startRun: stamped, un-started, and no second node picks it up', async () => {
+      const hub = new FakeHub();
+      const a = makeNode('node-a', { hub, startThrows: true });
+      const b = makeNode('node-b', { hub });
+      const todo: TodoItem = { id: 'shared-4', summary: 'Ship it once', autostart: true };
+      a.write([todo]);
+      b.write([todo]);
+
+      // `reconcileAutostartTodos` swallows a per-todo failure by design — the kill is the throw.
+      await reconcileAutostartTodos(a.project);
+
+      expect(a.started).toHaveLength(0);
+      const [onA] = await readTodos(a.dataDir);
+      // Stamped …
+      expect(onA?.startedOn).toBe('node-a');
+      expect(hub.claims.get('shared-4')).toBe('node-a');
+      // … and un-started. A VISIBLE PENDING START, never a duplicate.
+      expect(onA?.startedTaskId).toBeUndefined();
+      expect(onA?.autostart).toBe(true);
+
+      // No second node picks it up — the hub replicated the claim down to B on ack.
+      await reconcileAutostartTodos(b.project);
+      expect(b.started).toHaveLength(0);
+      expect(b.refusals[0]?.reason).toBe('already claimed by node node-a');
+      expect(hub.claimCalls.filter((c) => c.nodeId === 'node-b')).toEqual([]);
+    });
+
+    it('the node that holds the claim resumes it, and does not claim a second time', async () => {
+      const hub = new FakeHub();
+      const a = makeNode('node-a', { hub });
+      a.write([{ id: 'shared-5', summary: 'Resume me', autostart: true, startedOn: 'node-a' }]);
+
+      await reconcileAutostartTodos(a.project);
+
+      expect(a.started).toHaveLength(1);
+      expect(hub.claimCalls).toEqual([]);
+    });
+  });
+
+  // ---- verification 14, both halves ------------------------------------------------------------
+
+  describe('verification 14 — hub unreachable (D15a scopes, not an ordering)', () => {
+    it('half 1: a todo this node authored still autostarts with the hub down, and never waits on it', async () => {
+      const hub = new FakeHub();
+      const a = makeNode('node-a', { hub, hubReachable: false, authoredHere: true });
+      a.write([{ id: 'mine', summary: 'Filed here', autostart: true }]);
+
+      await reconcileAutostartTodos(a.project);
+
+      expect(a.started).toHaveLength(1);
+      expect(hub.claimCalls).toEqual([]);
+      expect(a.refusals).toEqual([]);
+    });
+
+    it('half 2: a REPLICATED todo refuses, with the stated reason', async () => {
+      const hub = new FakeHub();
+      const b = makeNode('node-b', { hub, hubReachable: false, authoredHere: false });
+      b.write([{ id: 'theirs', summary: 'Filed on another node', autostart: true }]);
+
+      await reconcileAutostartTodos(b.project);
+
+      expect(b.started).toHaveLength(0);
+      expect(b.refusals).toEqual([
+        {
+          dataDir: b.dataDir,
+          todoId: 'theirs',
+          summary: 'Filed on another node',
+          reason: 'waiting for the hub to confirm the claim',
+        },
+      ]);
+    });
+
+    it('half 1 and half 2 in ONE pass — refuse-everything and start-everything both fail here', async () => {
+      // Each half looks correct if you only test the other, so assert them against one file: the
+      // authored-here entry starts and the replicated one refuses, in the same reconcile.
+      const hub = new FakeHub();
+      const node = makeNode('node-mixed', { hub, hubReachable: false, authoredHere: false });
+      node.project = {
+        ...node.project,
+        cluster: {
+          ...(node.project.cluster as TodoAutostartCluster),
+          authoredHere: (todo) => todo.id === 'mine',
+        },
+      };
+      node.write([
+        { id: 'mine', summary: 'Filed here', autostart: true },
+        { id: 'theirs', summary: 'Filed on another node', autostart: true },
+      ]);
+
+      await reconcileAutostartTodos(node.project);
+
+      expect(node.started.map((s) => s.task)).toEqual(['Filed here']);
+      expect(node.refusals.map((r) => r.todoId)).toEqual(['theirs']);
+    });
+
+    it("the human half of D15a is untouched by this module: a person's ▶ Run proceeds with the hub down", async () => {
+      // `mayStartWithoutHub` is the ONE copy of the scope split, and this module consumes it rather
+      // than re-deciding. Asserting the human branch here is what keeps the two halves from drifting
+      // apart: if someone ever narrowed that function to refuse everything while offline, the
+      // autostart tests above would still pass and this one would not.
+      expect(mayStartWithoutHub({ trigger: 'human', authoredHere: false })).toEqual({ allowed: true });
+      expect(mayStartWithoutHub({ trigger: 'autostart', authoredHere: true })).toEqual({ allowed: true });
+      expect(mayStartWithoutHub({ trigger: 'autostart', authoredHere: false })).toEqual({
+        allowed: false,
+        reason: 'waiting for the hub to confirm the claim',
+      });
+    });
+  });
+
+  // ---- D6 --------------------------------------------------------------------------------------
+
+  it('a tombstoned autostart todo replicated from another node is never started', async () => {
+    // A delete is a tombstone, never a removal (D6), so a todo deleted elsewhere arrives here still
+    // carrying `autostart: true`. Starting the work somebody just deleted is the bug this skips.
+    const hub = new FakeHub();
+    const b = makeNode('node-b', { hub });
+    b.write([
+      { id: 'deleted', summary: 'Deleted on the hub', autostart: true, tombstone: { at: '2026-08-22T10:00:00.000Z' } },
+      { id: 'alive', summary: 'Still wanted', autostart: true },
+    ]);
+
+    await reconcileAutostartTodos(b.project);
+
+    expect(b.started.map((s) => s.task)).toEqual(['Still wanted']);
+    expect(hub.claimCalls).toEqual([{ nodeId: 'node-b', todoId: 'alive' }]);
   });
 });

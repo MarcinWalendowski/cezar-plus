@@ -45,6 +45,13 @@ export interface RunOptions {
    * infrastructure for. Absent means the deployment's one supervisor instance —
    * see `ServerState#orgSlug`'s own doc comment (`types.ts`) for the full contract. */
   orgSlug?: string;
+  /** `--role worker` (Phase 4, D17): marks this instance as a cluster spoke. The only value this
+   * cezar writes — see `ServerState#role`'s own doc comment (`types.ts`) for why the persisted
+   * field itself is a free string rather than this literal. */
+  role?: 'worker';
+  /** `--join <code>` — the hub-minted, single-use enrollment code (D17) a `--role worker` install
+   * consumes via `cezar cluster join`. See `ServerState#clusterJoinToken` (`types.ts`). */
+  clusterJoinToken?: string;
   /** Loopback port for this instance. For a NEW named instance the caller
    * passes an auto-picked free port; a resume keeps the recorded one. */
   port?: number;
@@ -155,6 +162,8 @@ export async function runInstall(strategy: PlatformStrategy, opts: RunOptions): 
     state.instance = opts.instance ?? state.instance ?? 'default';
     if (opts.domain) state.domain = opts.domain;
     if (opts.orgSlug) state.orgSlug = opts.orgSlug;
+    if (opts.role) state.role = opts.role;
+    if (opts.clusterJoinToken) state.clusterJoinToken = opts.clusterJoinToken;
     // Proxy mode + bind host are recorded before `steps(ctx)` runs, because the
     // platform selects its step list from them (external proxy ⇒ no nginx/SSL).
     if (opts.externalProxy !== undefined) state.externalProxy = opts.externalProxy;
@@ -339,6 +348,10 @@ export async function runUninstall(strategy: PlatformStrategy, opts: RunOptions)
     state.ephemeral = undefined;
     state.domain = undefined;
     state.orgSlug = undefined;
+    // Same guard as domain/orgSlug above: a cleared record must not still read as
+    // worker mode (isWorkerMode) for whatever install runs next on this host.
+    state.role = undefined;
+    state.clusterJoinToken = undefined;
     await ctx.save();
     // A named instance is fully gone now — drop its (empty) record so it no
     // longer reserves a port or shows up as an install. The default record is

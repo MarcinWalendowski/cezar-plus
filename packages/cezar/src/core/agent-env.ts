@@ -16,8 +16,13 @@
  *   - `CEZ_AGENT_ENV_FULL=1` restores the legacy full-`process.env` behavior.
  */
 
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import type { AgentBackend } from './agent-runner.ts';
 import { SECRET_NAME_RE } from './secret-redaction.ts';
+import { halfParallelism, positiveIntEnvOr } from './search-parallelism.ts';
 
 /**
  * Env var names are matched case-INSENSITIVELY (#427 review). Windows spells
@@ -292,6 +297,62 @@ function isTruthy(value: string | undefined): boolean {
   return v !== '' && v !== '0' && v !== 'false';
 }
 
+/**
+ * The other half of Phase 0 step 2 (D14a; plan package 0.5): cap the backend's OWN ripgrep the
+ * same way `vitest.config.ts` caps vitest's workers — relative to the box, not a hardcoded
+ * number. cezar never spawns `rg` itself; the coding-agent CLI this file spawns (`claude`,
+ * `codex`, ...) does, for its own Grep/search tool, and by default ripgrep claims one thread per
+ * core — the other named contributor to the burst in spec Problem §2 ("each agent search spawns
+ * a ripgrep that does the same [as vitest]").
+ *
+ * WHY A FILE: ripgrep has no direct "N threads" env var — `-j`/`--threads` is a CLI flag only.
+ * Its one env-driven default-args mechanism is `RIPGREP_CONFIG_PATH`, a file of one argument per
+ * line that ripgrep reads and prepends to its own argv before parsing, so an explicit flag the
+ * invoking CLI passes still wins (ripgrep's ordinary last-flag-wins semantics) — this can only
+ * lower an otherwise-unset default, never fight a CLI that already caps itself. Verified against
+ * the actual binaries this box spawns, not assumed: `strings` on the installed `claude` (2.1.231)
+ * shows ripgrep's `RIPGREP_CONFIG_PATH` handling and `@vscode/ripgrep` compiled directly into the
+ * binary, and `codex` (0.143.0) ships a real bundled `rg` 15.1.0 next to it
+ * (`codex-path/rg --version`). A live invocation with `--threads=2` in the config file and
+ * `RIPGREP_CONFIG_PATH` pointed at it logs `using 2 thread(s)` (`rg --debug`) — the cap measurably
+ * takes effect, it is not merely plausible.
+ *
+ * Applying this to every backend (not only `claude`/`codex`) is deliberate and cheap: a backend
+ * whose search tool is not ripgrep-backed just gets an unused env var.
+ */
+let ripgrepConfig: { threads: number; path: string } | undefined;
+let ripgrepConfigDir: string | undefined;
+
+/**
+ * **The file goes in a private 0700 directory, never at a predictable path in a shared `/tmp`.**
+ *
+ * The first version wrote `${tmpdir()}/cezar-ripgrep-threads-${threads}.conf`, and that is a local
+ * privilege-escalation vector on any multi-user box — which `prod-host` is. The name is
+ * fully predictable, so another local user can create it first; `writeFileSync` follows symlinks,
+ * and the path is written once per process and then reused from the cache, so an attacker who owns
+ * the file can rewrite it AFTER cezar's write and have every later agent read it. What they can
+ * put in it is the problem: a ripgrep config file takes any ripgrep flag, and `--pre=<command>`
+ * makes ripgrep execute that command for every file it searches. That turns "cap the thread count"
+ * into arbitrary command execution as the cezar user.
+ *
+ * `mkdtempSync` gives a randomly-named directory created 0700, so no other user can pre-create the
+ * path, and nothing outside this process can write into it afterwards. One directory per process,
+ * left behind on exit like every other tmpdir entry — the cost of not cleaning it is a few empty
+ * directories; the cost of the shared path was a shell.
+ */
+function ripgrepConfigPath(threads: number): string | undefined {
+  if (ripgrepConfig?.threads === threads) return ripgrepConfig.path;
+  try {
+    ripgrepConfigDir ??= mkdtempSync(join(tmpdir(), 'cezar-rg-'));
+    const path = join(ripgrepConfigDir, 'ripgrep.conf');
+    writeFileSync(path, `--threads=${threads}\n`, { encoding: 'utf8', mode: 0o600 });
+    ripgrepConfig = { threads, path };
+    return path;
+  } catch {
+    return undefined; // best-effort — losing the cap must never block spawning the agent
+  }
+}
+
 export interface BuildChildEnvOptions {
   backend: AgentBackend;
   /** Per-run env (CEZ_HANDOFF_FILE etc.) — always applied, wins over host. */
@@ -358,6 +419,16 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
   }
   // Per-run env last — it is cezar's own, never a host secret, and must win.
   for (const [name, value] of Object.entries(extra)) out[name] = value;
+
+  // Ripgrep thread cap (see `ripgrepConfigPath` above) — only when nothing already set
+  // RIPGREP_CONFIG_PATH: a real value forwarded via `CEZ_ENV_PASSTHROUGH`, or a per-run
+  // `extraEnv` override, is an explicit choice cezar's own default must not fight.
+  if (out.RIPGREP_CONFIG_PATH === undefined) {
+    const threads = positiveIntEnvOr(readVar(source, 'CEZ_RIPGREP_THREADS'), () => halfParallelism());
+    const configPath = ripgrepConfigPath(threads);
+    if (configPath) out.RIPGREP_CONFIG_PATH = configPath;
+  }
+
   return out;
 
   /** `name` is matched normalized; the caller keeps the original spelling. */

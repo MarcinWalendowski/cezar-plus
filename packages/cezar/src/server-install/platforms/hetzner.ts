@@ -16,6 +16,7 @@ import {
   hasPasswordlessSudo,
   HOSTNAME_RE,
   owned,
+  requireManualLogin,
   shared,
   shquote,
   StepAborted,
@@ -26,6 +27,7 @@ import {
 import { listServerInstances } from '../state.ts';
 import { isNpxExecStart, refreshNpxCacheForRedeploy, serviceExecStart } from './ubuntu-vps.ts';
 import {
+  agentCredentialLoginCommands,
   createCezHomeCommand,
   createOrgUserCommand,
   orgCezHome,
@@ -113,6 +115,45 @@ import { createTlsStep, publicUrlForDomain } from './hetzner/tls.ts';
  * `POST /internal/orgs` (D11's first half — "the org row... created by the installer") and prints
  * the one-time bootstrap claim code the org's intended owner needs to claim it (D11's second half,
  * unchanged: "the first user to sign in at that org's hostname with that org's bootstrap code").
+ *
+ * ## Worker role — ADDED for Phase 4 (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`)
+ *
+ * A THIRD `hetzner` target, `--role worker`: a cluster spoke, not a cockpit for an org. Reuses
+ * this platform's own building blocks (`orgUserProvisioningStep`'s dedicated-unix-user shape,
+ * `sudoStep`, the same idempotent check()/run() discipline) rather than a parallel script — the
+ * exact thing Problem §2b names as the failure this row exists to avoid: `cez
+ * server-migrate-releases` had to exist because the live `hel1` unit was hand-written and no
+ * generator authored it. A second bespoke worker-provisioning path would guarantee a third.
+ *
+ * A worker needs neither `--domain` nor nginx/TLS: spokes dial OUT to the hub (TLDR: "spokes dial
+ * out to it"), so nothing inbound ever reaches this box, and `preflight` below skips both the
+ * hostname requirement and the "must not be root" check the supervisor/org paths enforce — D17's
+ * minted one-liner runs `npx … server-install --platform hetzner --role worker --join cezj_…` AS
+ * ROOT on a bare VPS.
+ *
+ * Step order mirrors the plan's own description exactly: dependencies, a dedicated unix user +
+ * `CEZ_HOME` + project root (reusing `orgUserProvisioningStep` under the reserved pseudo-slug
+ * `worker`, below), repo checkouts, the D14/D14a admission caps written into `config.json`, the
+ * systemd unit (`CEZ_CLUSTER=1`, `CEZ_ENV_PASSTHROUGH`), the agent CLI **logins** — the one
+ * genuinely interactive step, so it STOPS the run (`requireManualLogin`, `steps.ts`) rather than
+ * finishing and reporting a worker that cannot run anything — and last, `cez cluster join` with
+ * the hub's token, so the very first presence report already carries accurate "which agent CLIs
+ * are logged in" labels instead of a stale "none" from before the logins landed.
+ *
+ * **A real gap this row could not close on its own, stated rather than hidden.** `--role` and
+ * `--join` are not, as of this change, parseable `server-install` flags: `index.ts`'s
+ * `serverCommand`, `engine.ts#RunOptions` and `types.ts#serverStateSchema` would each need one
+ * small additive field/line to carry them from argv into `ctx.state`, and none of those three
+ * files are this change's to edit (index.ts is a different package's; the other two sit outside
+ * this row's owns-list). Every worker-mode branch below therefore reads `ctx.state.role` /
+ * `ctx.state.clusterJoinToken` / `ctx.state.workerRepoUrls` / `ctx.state.workerEnvPassthrough`
+ * through `workerState()`, a local cast — safe because `serverStateSchema` is `.passthrough()`, so
+ * these keys already survive a real load+save round-trip today (`state.ts#saveServerState` writes
+ * `ctx.state` verbatim; `loadServerState`'s `.passthrough()` parse keeps them on the way back in).
+ * The step list, preflight and redeploy logic are therefore fully built and fully testable now —
+ * every test below drives them by constructing `ctx.state` directly, the same way every other test
+ * in this file already does — but `--role worker` is not reachable from the actual command line
+ * until that small amount of upstream plumbing lands.
  */
 
 // ---- shared naming / mode ---------------------------------------------------------------------
@@ -138,14 +179,59 @@ function orgSlugOf(ctx: InstallContext): string | undefined {
 }
 
 function isSupervisorMode(ctx: InstallContext): boolean {
-  return orgSlugOf(ctx) === undefined;
+  return orgSlugOf(ctx) === undefined && !isWorkerMode(ctx);
 }
 
-/** The unix user this instance's process runs as — the supervisor's own pseudo-slug, or the real
- *  org's, through the SAME derivation `provision-user.ts` (unit 2) already built and tested, so
- *  there is exactly one place `cez-<slug>` is computed (that file's own docblock: "import, do not
- *  recompute"). */
+/** Reserved — collides with the worker's own derived unix user (`orgUnixUsername('worker')`
+ *  below), the same reason `SUPERVISOR_PSEUDO_SLUG` is reserved. A real org may never claim it. */
+const WORKER_PSEUDO_SLUG = 'worker';
+
+/**
+ * Extra `ServerState` fields the worker role reads and writes — not (yet) part of
+ * `types.ts#serverStateSchema`. See this file's own module docblock, "Worker role" section, for
+ * why: threading `--role`/`--join` through `index.ts`, `engine.ts#RunOptions` and the schema is
+ * outside this change's owns-list. `serverStateSchema`'s `.passthrough()` is what makes reading
+ * and writing these through a cast safe — they round-trip through a real `save()`/`load()` today.
+ */
+interface WorkerExtraState {
+  /** `--role worker`. Absent (the default) leaves supervisor/org mode exactly as before. */
+  role?: 'worker';
+  /** `--join <code>` — the hub-minted, single-use enrollment code (D17). Consumed once by
+   *  `worker-enroll` below; not itself a durable credential, so passing it as a CLI argument to
+   *  `cezar cluster join` mirrors D17's own rendered command shape rather than inventing a second
+   *  input channel for it. */
+  clusterJoinToken?: string;
+  /** Recorded by `worker-checkouts` on its first prompt, so a resumed run doesn't ask twice. */
+  workerRepoUrls?: string[];
+  /** Recorded by `worker-systemd` on its first prompt. Comma-separated env var NAMES (never
+   *  values) forwarded into agent runs — see the systemd unit generator below. */
+  workerEnvPassthrough?: string;
+  /** Recorded by `worker-login` once the operator confirms the agent CLI logins are done, so a
+   *  re-run's `check()` can skip re-asking (see `requireManualLogin`, `steps.ts`). */
+  workerLoginsConfirmed?: boolean;
+}
+
+/** The one place `ctx.state` is cast to read/write the worker-only fields above. */
+function workerState(ctx: InstallContext): ServerState & WorkerExtraState {
+  return ctx.state as ServerState & WorkerExtraState;
+}
+
+function isWorkerMode(ctx: InstallContext): boolean {
+  return workerState(ctx).role === 'worker';
+}
+
+/** Trimmed, or `undefined` for a blank/absent token — mirrors `orgSlugOf`'s own normalisation. */
+function joinTokenOf(ctx: InstallContext): string | undefined {
+  const token = (workerState(ctx).clusterJoinToken ?? '').trim();
+  return token ? token : undefined;
+}
+
+/** The unix user this instance's process runs as — the supervisor's own pseudo-slug, the
+ *  worker's own pseudo-slug, or the real org's, through the SAME derivation `provision-user.ts`
+ *  (unit 2) already built and tested, so there is exactly one place `cez-<slug>` is computed
+ *  (that file's own docblock: "import, do not recompute"). */
 function resolveUnixUser(ctx: InstallContext): string {
+  if (isWorkerMode(ctx)) return orgUnixUsername(WORKER_PSEUDO_SLUG);
   return orgUnixUsername(orgSlugOf(ctx) ?? SUPERVISOR_PSEUDO_SLUG);
 }
 
@@ -921,6 +1007,401 @@ function orgRegistrationStep(orgSlug: string): InstallStep {
   };
 }
 
+// ---- worker: repo checkouts ---------------------------------------------------------------------
+
+/** A filesystem-safe directory name from a git remote URL — `git@host:org/repo.git` and
+ *  `https://host/org/repo.git` both become `repo`. Falls back to `repo` for anything that yields
+ *  nothing usable, so a clone destination is never empty or `.`. */
+function repoSlugFromUrl(url: string): string {
+  const base =
+    url
+      .trim()
+      .replace(/\.git$/i, '')
+      .split(/[/:]/)
+      .filter(Boolean)
+      .pop() ?? 'repo';
+  return base.replace(/[^a-zA-Z0-9._-]/g, '-').toLowerCase() || 'repo';
+}
+
+/** Clone `url` into `dest` AS `username`, idempotently — a bare `git clone` into an existing
+ *  `.git` would fail on a re-run, so this checks first (same "guard, don't fail" shape
+ *  `trustProjectRootCommand` in `provision-user.ts` already uses for its own idempotency). Never
+ *  writes as root: `sudo -u <user> -H` inside the already-root `sudoStep` body, the exact nesting
+ *  `trustProjectRootCommand` establishes. */
+function cloneRepoCommand(username: string, url: string, dest: string): string {
+  return `test -d ${shquote(`${dest}/.git`)} || sudo -u ${username} -H git clone ${shquote(url)} ${shquote(dest)}`;
+}
+
+/**
+ * Prompts once for the repos this worker should have checked out before it can be dispatched work
+ * (Phase 4: "Adds repo checkouts"). Blank = skip — mirrors `provision-user.ts`'s own established
+ * pattern for an org's `workspace`: created and trusted, real repositories "registered afterwards,
+ * through the cockpit" rather than demanded up front. The list is recorded on `ctx.state` (see
+ * `WorkerExtraState#workerRepoUrls`) so a resumed run does not prompt twice, and `check()` re-reads
+ * that recorded list rather than re-deriving it from whatever happens to exist on disk.
+ */
+function workerCheckoutsStep(): InstallStep {
+  return {
+    id: 'worker-checkouts',
+    title: 'Repo checkouts for dispatched work (Phase 4)',
+    async check(ctx) {
+      if (ctx.dryRun) return false;
+      const urls = workerState(ctx).workerRepoUrls;
+      if (!urls) return false; // never asked yet
+      const username = resolveUnixUser(ctx);
+      const root = orgProjectRoot(username);
+      for (const url of urls) {
+        if (!(await verifyCommand(ctx, 'test', ['-d', `${root}/${repoSlugFromUrl(url)}/.git`]))) return false;
+      }
+      return true;
+    },
+    async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
+      const username = resolveUnixUser(ctx);
+      const root = orgProjectRoot(username);
+      let urls = workerState(ctx).workerRepoUrls;
+      if (!urls) {
+        const answer = await ctx.ui.text({
+          message:
+            'Repos this worker should check out now (comma-separated git remote URLs; blank = register them later through the cockpit)',
+          placeholder: 'git@github.com:org/chat.git, git@github.com:org/cezar.git',
+        });
+        if (answer === CANCEL) throw new StepCancelled();
+        urls = String(answer)
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        workerState(ctx).workerRepoUrls = urls;
+      }
+      if (urls.length === 0) {
+        ctx.ui.info('No repos given — register them later through the cockpit.');
+        return { artifacts: [] };
+      }
+      const artifacts: StepArtifact[] = [];
+      for (const url of urls) {
+        const slug = repoSlugFromUrl(url);
+        const dest = `${root}/${slug}`;
+        await sudoStep(ctx, {
+          description: `Clone ${url} into ${dest}, as ${username}.`,
+          command: cloneRepoCommand(username, url, dest),
+          verify: (c) => verifyCommand(c, 'test', ['-d', `${dest}/.git`]),
+        });
+        artifacts.push(owned('checkout', { name: slug, path: dest }));
+      }
+      return { artifacts };
+    },
+    async undo(ctx, created) {
+      const checkouts = (created?.artifacts ?? []).filter((a) => a.type === 'checkout');
+      if (checkouts.length === 0) return;
+      ctx.ui.note(
+        checkouts.map((a) => `rm -rf ${a.path}`).join('\n'),
+        "Repo checkouts were left in place — remove them yourself if you're sure (uncommitted work may live there)",
+      );
+    },
+  };
+}
+
+// ---- worker: admission caps (D14/D14a) -----------------------------------------------------------
+
+/** `install -d`/`tee` as `username`, never as root — mirrors `cloneRepoCommand`'s nesting. No
+ *  atomic tmp+rename: this is a first-write-only provisioning step, not cezar's own runtime
+ *  writer, and nothing else races it at provisioning time. */
+function writeUserFileCommand(username: string, path: string, content: string): string {
+  const dir = path.slice(0, path.lastIndexOf('/')) || '/';
+  const b64 = Buffer.from(content, 'utf8').toString('base64');
+  const quoted = shquote(path);
+  return (
+    `install -d -m 0700 -o ${username} -g ${username} ${shquote(dir)} && ` +
+    `printf %s ${shquote(b64)} | base64 --decode | sudo -u ${username} -H tee ${quoted} > /dev/null && ` +
+    `sudo -u ${username} -H chmod 0600 ${quoted}`
+  );
+}
+
+/** D14's table, "CX43 worker (8/16)" row: `maxParallel: 8`, `maxHeavySteps: 2`. The D14a
+ *  memory/CPU-weight keys are deliberately left unset here — `resourcesSchema`'s own defaults
+ *  (`workspace/config.ts`) are `null` (bound not set), which is the safe value for a node this
+ *  install has never measured; tune it later through the cockpit once real load says how. */
+const WORKER_RESOURCES_CONFIG = { resources: { maxParallel: 8, maxHeavySteps: 2 } };
+
+function workerResourcesStep(): InstallStep {
+  return {
+    id: 'worker-resources',
+    title: 'Admission caps for this worker (D14: maxParallel 8 / maxHeavySteps 2)',
+    async check(ctx) {
+      if (ctx.dryRun) return false;
+      const username = resolveUnixUser(ctx);
+      return verifyCommand(ctx, 'test', ['-f', `${orgCezHome(username)}/config.json`]);
+    },
+    async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
+      const username = resolveUnixUser(ctx);
+      const path = `${orgCezHome(username)}/config.json`;
+      await sudoStep(ctx, {
+        description:
+          `Write ${path} — maxParallel: 8, maxHeavySteps: 2 (D14's CX43-worker row). cezar's own ` +
+          'config.json schema merges this with its other defaults the first time it boots here.',
+        command: writeUserFileCommand(username, path, `${JSON.stringify(WORKER_RESOURCES_CONFIG, null, 2)}\n`),
+        verify: (c) => verifyCommand(c, 'test', ['-f', path]),
+      });
+      return { artifacts: [owned('config', { path })] };
+    },
+    async undo() {
+      // config.json lives inside CEZ_HOME, which the unix-user artifact's own undo note already
+      // covers — nothing separate to reverse here.
+    },
+  };
+}
+
+// ---- worker: systemd unit (CEZ_CLUSTER, CEZ_ENV_PASSTHROUGH) --------------------------------------
+
+/** Local duplicate of `systemd-unit.ts`'s own private `sysd`/PATH helpers — that file exports
+ *  neither (same allowance its own top comment already takes for `ubuntu-vps.ts#sysd`: "duplicated
+ *  … rather than exporting a symbol from a file this task does not own"). systemd expands a
+ *  literal `%` in `Environment=`/`ExecStart=` values, so it must be doubled. */
+function workerSysd(s: string): string {
+  return s.replace(/%/g, '%%');
+}
+function workerPathEnvValue(): string {
+  const dirs = [dirname(process.execPath), ...(process.env.PATH ?? '').split(':'), '/usr/local/bin', '/usr/bin', '/bin'].filter(
+    (d, i, a) => d && d !== '.' && a.indexOf(d) === i,
+  );
+  return workerSysd(dirs.join(':'));
+}
+
+interface WorkerSystemdUnitOptions {
+  workingDirectory: string;
+  execStart: string;
+  port: number;
+  unixUser: string;
+  cezHome: string;
+  /** Comma-separated env var NAMES (never values) — `CEZ_ENV_PASSTHROUGH`. `''` omits the line
+   *  entirely rather than writing it empty, so an unconfigured worker's unit stays byte-identical
+   *  to one that predates this field. */
+  envPassthrough: string;
+}
+
+/**
+ * systemd unit for a cluster worker's `cezar serve` process. Deliberately its own generator, not
+ * `orgSystemdUnit`/`supervisorSystemdUnit` (`./hetzner/systemd-unit.ts`, not this row's to edit):
+ * neither shape fits — a worker terminates no auth of its own (`orgSystemdUnit`'s
+ * `CEZ_AUTH=supervisor` would claim a supervisor relationship that does not exist here) and
+ * terminates no OIDC/Google login (`supervisorSystemdUnit`'s whole reason for being). `CEZ_CLUSTER=1`
+ * is the flag that turns the link on at all (spec Verification #12, "flag off" — its absence must
+ * leave a plain cezar cockpit with no cluster machinery armed).
+ */
+function workerSystemdUnit(opts: WorkerSystemdUnitOptions): string {
+  const passthroughLine = opts.envPassthrough
+    ? `Environment=CEZ_ENV_PASSTHROUGH=${workerSysd(opts.envPassthrough)}\n`
+    : '';
+  return `# Managed by cezar server-install --platform hetzner --role worker — do not edit by hand.
+[Unit]
+Description=cezar worker (cluster spoke)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${workerSysd(opts.unixUser)}
+WorkingDirectory=${workerSysd(opts.workingDirectory)}
+Environment=CEZ_REMOTE=1
+Environment=CEZ_CLUSTER=1
+Environment=CEZ_HOME=${workerSysd(opts.cezHome)}
+${passthroughLine}Environment=PATH=${workerPathEnvValue()}
+ExecStart=${workerSysd(opts.execStart)} serve --no-open --port ${opts.port}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectProc=invisible
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
+`;
+}
+
+function workerSystemdStep(): InstallStep {
+  return {
+    id: 'worker-systemd',
+    title: 'cezar worker systemd unit (CEZ_CLUSTER=1)',
+    async check(ctx) {
+      if (ctx.dryRun) return false;
+      return verifyCommand(ctx, 'systemctl', ['is-enabled', unitName(ctx)]);
+    },
+    async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
+      let envPassthrough = workerState(ctx).workerEnvPassthrough;
+      if (envPassthrough === undefined) {
+        const answer = await ctx.ui.text({
+          message:
+            'Host env var NAMES to forward into this worker\'s agent runs (comma-separated; blank = none — see CEZ_ENV_PASSTHROUGH)',
+          placeholder: '',
+        });
+        if (answer === CANCEL) throw new StepCancelled();
+        envPassthrough = String(answer).trim();
+        workerState(ctx).workerEnvPassthrough = envPassthrough;
+      }
+
+      const username = resolveUnixUser(ctx);
+      const execStart = await resolveHetznerExecStart(ctx);
+      const unit = workerSystemdUnit({
+        workingDirectory: orgHomeDir(username),
+        execStart,
+        port: ctx.state.primaryPort,
+        unixUser: username,
+        cezHome: orgCezHome(username),
+        envPassthrough,
+      });
+      const unitPath = `/etc/systemd/system/${unitName(ctx)}`;
+      await sudoStep(ctx, {
+        description: 'Install the worker systemd unit, start it now, and enable it at boot.',
+        command: writeRootFileCmd(unitPath, unit, `systemctl daemon-reload && systemctl enable --now ${unitName(ctx)}`),
+        verify: (c) => verifyCommand(c, 'systemctl', ['is-enabled', unitName(ctx)]),
+      });
+      await confirmListening(ctx, ctx.state.primaryPort);
+
+      return { artifacts: [owned('service', { name: unitName(ctx), scope: 'system', path: unitPath })] };
+    },
+    async undo(ctx, created) {
+      const svc = (created?.artifacts ?? []).find((a) => a.type === 'service');
+      if (!svc) return;
+      await sudoStep(ctx, {
+        description: 'Disable and remove the worker systemd unit.',
+        command: `systemctl disable --now ${unitName(ctx)}; rm -f /etc/systemd/system/${unitName(ctx)} && systemctl daemon-reload`,
+        verify: (c) => verifyCommand(c, 'sh', ['-c', `! systemctl is-enabled ${unitName(ctx)}`]),
+      });
+    },
+  };
+}
+
+// ---- worker: agent CLI logins — the one step that must stop --------------------------------------
+
+/**
+ * The interactive gate Phase 4 names explicitly: "the run must stop and say so rather than
+ * half-provisioning silently". A worker that enrolls but cannot run anything is worse than one
+ * that never finished — see this file's module docblock. Positioned AFTER the systemd unit (so the
+ * worker's own `CEZ_HOME` already exists for the agent CLIs to write credentials into) and BEFORE
+ * enrollment (so the very first presence report already carries real "which agent CLIs are logged
+ * in" labels rather than a stale "none").
+ */
+function workerLoginStep(): InstallStep {
+  return {
+    id: 'worker-login',
+    title: 'Agent CLI logins for this worker — the one step this installer cannot script',
+    async check(ctx) {
+      if (ctx.dryRun) return false;
+      return workerState(ctx).workerLoginsConfirmed === true;
+    },
+    async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
+      if (ctx.dryRun) {
+        ctx.ui.info('DRY RUN — would stop here for the agent CLI logins.');
+        return { artifacts: [] };
+      }
+      const username = resolveUnixUser(ctx);
+      const logins = agentCredentialLoginCommands(username);
+      await requireManualLogin(ctx, {
+        description: `${username} needs its OWN agent CLI credentials — signing in as yourself does not reach it.`,
+        commands: logins.map((l) => l.command),
+        note: `Everyone who can run code as ${username} can act as this worker (D4's isolation note, applied here).`,
+      });
+      workerState(ctx).workerLoginsConfirmed = true;
+      return { artifacts: [] };
+    },
+    async undo() {
+      // Nothing owned: the agent CLIs' own credential stores live under CEZ_HOME, covered by the
+      // unix-user artifact's own undo note.
+    },
+  };
+}
+
+// ---- worker: enroll with the hub (D17) -------------------------------------------------------------
+
+function workerEnrollStep(): InstallStep {
+  return {
+    id: 'worker-enroll',
+    title: 'cez cluster join — enroll this worker with the hub (D17)',
+    async check(ctx) {
+      if (ctx.dryRun) return false;
+      const username = resolveUnixUser(ctx);
+      // `cluster/node-identity.ts` (Phase 1) writes this file on successful enrollment — its
+      // presence is "already enrolled", the same "probe the artefact, not a flag" discipline
+      // `org-register`'s own `isRegistered` uses above.
+      return verifyCommand(ctx, 'test', ['-f', `${orgCezHome(username)}/cluster/node.json`]);
+    },
+    async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
+      const token = joinTokenOf(ctx);
+      if (!token) {
+        throw new StepAborted(
+          "no cluster join code recorded for this install — provision with --join <code>, minted from the hub's " +
+            'Cluster settings ("Add node").',
+        );
+      }
+      if (ctx.dryRun) {
+        ctx.ui.info('DRY RUN — would run: cezar cluster join <code> (redacted) as the worker user.');
+        return { artifacts: [] };
+      }
+      const username = resolveUnixUser(ctx);
+      const execStart = await resolveHetznerExecStart(ctx);
+      const nodeJsonPath = `${orgCezHome(username)}/cluster/node.json`;
+      await sudoStep(ctx, {
+        description:
+          'Enroll this worker with the hub — redeems the single-use join code minted by the cockpit\'s "Add node".',
+        command: `sudo -u ${username} -H ${shquote(execStart)} cluster join ${shquote(token)}`,
+        verify: (c) => verifyCommand(c, 'test', ['-f', nodeJsonPath]),
+      });
+      return { artifacts: [owned('config', { path: nodeJsonPath })] };
+    },
+    async undo(ctx) {
+      // A real, reversible registry write on the hub, not local irreplaceable state — `cez cluster
+      // revoke` is the decommission path (Phase 4's own text), out of scope for this step's undo.
+      ctx.ui.note(
+        `This worker is still enrolled with the hub — run \`cez cluster revoke\` from the hub (or its ` +
+          `cockpit) if you're decommissioning it, before destroying this VPS.`,
+        'cluster enrollment',
+      );
+    },
+  };
+}
+
+// ---- worker: verify -------------------------------------------------------------------------------
+
+/** No nginx/TLS to probe (a worker terminates no inbound HTTP) — confirms only that the process
+ *  itself is up, the same loopback probe `confirmListening` already performs for every other
+ *  mode, plus one more curl so a failure here is loud rather than a later, unrelated dispatch
+ *  timeout. */
+function workerVerifyStep(): InstallStep {
+  return {
+    id: 'worker-verify',
+    title: 'Verify the worker process is up',
+    async check() {
+      return false; // always re-verify; it creates nothing
+    },
+    async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
+      if (ctx.dryRun) {
+        ctx.ui.info('DRY RUN — would verify the worker process is listening.');
+        return { artifacts: [] };
+      }
+      const port = ctx.state.primaryPort;
+      await confirmListening(ctx, port);
+      const upstreamCode = (
+        await ctx.runner.capture('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', `http://127.0.0.1:${port}/`])
+      ).stdout.trim();
+      if (upstreamCode === '' || upstreamCode === '000') {
+        throw new StepAborted(
+          `cezar is not answering on 127.0.0.1:${port}. Diagnostics:\n` +
+            `  • sudo systemctl status ${unitName(ctx)}\n` +
+            `  • sudo journalctl -u ${unitName(ctx)} -n 50 --no-pager`,
+        );
+      }
+      ctx.ui.success(`Worker is running (systemd unit ${unitName(ctx)}, loopback port ${port}).`);
+      return { artifacts: [] };
+    },
+    async undo() {
+      // nothing created
+    },
+  };
+}
+
 // ---- nginx: shared upgrade map + one vhost -------------------------------------------------------
 
 async function ensureSharedNginxUpgradeMap(ctx: InstallContext): Promise<void> {
@@ -1085,6 +1566,32 @@ export const hetzner: PlatformStrategy = {
   id: 'hetzner',
   label: 'Hetzner (or any bare Linux VPS) — OIDC/Google + per-org process isolation',
   async preflight(ctx: InstallContext) {
+    // A worker has no HTTP surface, no supervisor topology and no --org-slug — see this file's
+    // module docblock, "Worker role". Its own, much shorter preflight branches off first so the
+    // domain/org-slug checks below never see it.
+    if (isWorkerMode(ctx)) {
+      // Shape-only, so it runs even in dry-run — the exact same placement `hetzner requires
+      // --domain` gets below for supervisor/org mode: a shape error is a "you typed this wrong",
+      // not an OS/privilege probe a preview has no business running.
+      if (!joinTokenOf(ctx)) {
+        throw new PreflightError(
+          '--role worker requires --join <code> — mint one from the hub\'s Cluster settings ("Add node").',
+        );
+      }
+      if (ctx.dryRun) {
+        ctx.ui.info('DRY RUN — skipping OS/privilege preflight for the worker role.');
+        return;
+      }
+      const uname = await ctx.runner.capture('uname', ['-s']);
+      if (!uname.stdout.includes('Linux')) throw new PreflightError('hetzner requires Linux.');
+      if ((await ctx.runner.capture('apt-get', ['--version'])).code !== 0) {
+        throw new PreflightError('hetzner requires apt (Debian/Ubuntu).');
+      }
+      // Deliberately NO "must not be root" check here, unlike supervisor/org mode below: D17's
+      // minted one-liner runs `npx … --role worker --join …` as root on a bare VPS (Phase 4).
+      return;
+    }
+
     const domain = (ctx.state.domain ?? '').trim();
     if (!domain || !HOSTNAME_RE.test(domain)) {
       throw new PreflightError(
@@ -1099,6 +1606,11 @@ export const hetzner: PlatformStrategy = {
     if (orgSlug === SUPERVISOR_PSEUDO_SLUG) {
       throw new PreflightError(
         `"${SUPERVISOR_PSEUDO_SLUG}" is a reserved --org-slug (it names the supervisor's own dedicated unix user) — pick a different org slug.`,
+      );
+    }
+    if (orgSlug === WORKER_PSEUDO_SLUG) {
+      throw new PreflightError(
+        `"${WORKER_PSEUDO_SLUG}" is a reserved --org-slug (it names a cluster worker's own dedicated unix user) — pick a different org slug.`,
       );
     }
     if (orgSlug) {
@@ -1159,6 +1671,23 @@ export const hetzner: PlatformStrategy = {
     }
   },
   steps(ctx: InstallContext): InstallStep[] {
+    if (isWorkerMode(ctx)) {
+      // Order matches the plan's own description exactly (Phase 4): deps, dedicated unix user +
+      // CEZ_HOME + project root (reusing `orgUserProvisioningStep` under the reserved pseudo-slug
+      // — see the module docblock's "Worker role" section for why reusing it beats a parallel
+      // path), repo checkouts, admission caps, the systemd unit, the interactive login STOP, and
+      // enrollment last — so the first presence report already has real agent-CLI labels.
+      return [
+        depCheckStep(),
+        orgUserProvisioningStep(WORKER_PSEUDO_SLUG),
+        workerCheckoutsStep(),
+        workerResourcesStep(),
+        workerSystemdStep(),
+        workerLoginStep(),
+        workerEnrollStep(),
+        workerVerifyStep(),
+      ];
+    }
     if (isSupervisorMode(ctx)) {
       return [supervisorUserProvisioningStep(), supervisorSystemdStep(), nginxStep(), buildTlsStep(ctx), verifyStep()];
     }
@@ -1198,7 +1727,10 @@ export const hetzner: PlatformStrategy = {
       verify: (c) => verifyCommand(c, 'systemctl', ['is-active', name]),
     });
     await confirmListening(ctx, ctx.state.primaryPort);
-    await verifyStep().run(ctx); // throws StepAborted if the deployment isn't fully working
+    // Worker mode has no nginx/TLS to re-check (see workerVerifyStep's own doc comment) — throws
+    // StepAborted in either branch if the deployment isn't fully working.
+    if (isWorkerMode(ctx)) await workerVerifyStep().run(ctx);
+    else await verifyStep().run(ctx);
   },
 };
 

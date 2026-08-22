@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createAutoUi } from './ui.ts';
-import { depCheckStep, generatePassword, sudoStep, StepAborted, StepSkipped, verifyCommand } from './steps.ts';
+import {
+  depCheckStep,
+  generatePassword,
+  requireManualLogin,
+  StepAborted,
+  StepCancelled,
+  StepSkipped,
+  sudoStep,
+  verifyCommand,
+} from './steps.ts';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 import type { BackendCheck } from '../core/backend-detect.ts';
 import type { CommandResult, InstallContext, Runner, Ui } from './types.ts';
@@ -278,5 +287,49 @@ describe('depCheckStep — the agent-CLI gate', () => {
   it('stays unsatisfied in dry-run — the step must still be offered', async () => {
     const step = depCheckStep({ detect: async () => [check('claude', true)] });
     await expect(step.check!(makeCtx({ dryRun: true }))).resolves.toBe(false);
+  });
+});
+
+describe('requireManualLogin — stop for an interactive, unscriptable step', () => {
+  it('prints the commands and every one is shown, exactly as given', async () => {
+    const messages: string[] = [];
+    const ui = { ...scriptedUi([], [true]), message: (m: string) => messages.push(m) } as Ui;
+    const ctx = makeCtx({ ui });
+    await requireManualLogin(ctx, {
+      description: 'needs its own agent CLI credentials',
+      commands: ['sudo -u cez-worker -H claude auth login', 'sudo -u cez-worker -H codex login'],
+    });
+    expect(messages.some((m) => m.includes('sudo -u cez-worker -H claude auth login'))).toBe(true);
+    expect(messages.some((m) => m.includes('sudo -u cez-worker -H codex login'))).toBe(true);
+  });
+
+  it('--yes always throws StepAborted — it cannot supply a human at an interactive login', async () => {
+    const ctx = makeCtx({ assumeYes: true });
+    await expect(
+      requireManualLogin(ctx, { description: 'x', commands: ['sudo -u cez-worker -H claude auth login'] }),
+    ).rejects.toBeInstanceOf(StepAborted);
+  });
+
+  it('interactive + confirmed true: resolves without throwing', async () => {
+    const ctx = makeCtx({ assumeYes: false, ui: scriptedUi([], [true]) });
+    await expect(
+      requireManualLogin(ctx, { description: 'x', commands: ['sudo -u cez-worker -H claude auth login'] }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('interactive + confirmed false: throws StepAborted, naming that the commands still need running', async () => {
+    const ctx = makeCtx({ assumeYes: false, ui: scriptedUi([], [false]) });
+    await expect(
+      requireManualLogin(ctx, { description: 'x', commands: ['sudo -u cez-worker -H claude auth login'] }),
+    ).rejects.toThrow(/re-run/);
+  });
+
+  it('cancel (CANCEL sentinel from confirm) throws StepCancelled, not StepAborted', async () => {
+    const { CANCEL } = await import('./types.ts');
+    const ui = { ...createAutoUi(), confirm: async () => CANCEL } as Ui;
+    const ctx = makeCtx({ assumeYes: false, ui });
+    await expect(
+      requireManualLogin(ctx, { description: 'x', commands: ['sudo -u cez-worker -H claude auth login'] }),
+    ).rejects.toBeInstanceOf(StepCancelled);
   });
 });

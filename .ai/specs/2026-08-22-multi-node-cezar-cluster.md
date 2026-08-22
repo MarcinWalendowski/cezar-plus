@@ -1,9 +1,22 @@
 # Eight tasks at once: bound the burst, then spread across nodes
 
-**Status:** Proposed
+**Status:** Partial — implemented 2026-08-23, **not yet verified**
 **Date:** 2026-08-22
 **Revised:** 2026-08-22 (same day), twice — after the owner corrected the premise, then after the
 owner set the node economics
+**Implemented:** 2026-08-23. All of Phase 0 and every cluster module named below is written and
+covered by tests. The gate (`typecheck`, `build`, `test:unit`, `test:package`, `vitest run`) was run
+**on `prod-host`**, in a copy of the tree with its own `npm install` — not on the Mac, which
+under load (`fseventsd` pegged, load ~9) fails dozens of integration tests on their timeouts and
+never finished a full run. The one red on the box is `knowledge/catalog.test.ts` C18, a CPU-per-MiB
+budget with no host normalisation that fails identically at **pristine HEAD** on that machine; it is
+a standing red there, not a result of this work. What is **not** done is the measurement: the C0/C1 decision gate this
+spec's own Stage 0 puts in front of Phases 1+ has not been captured, so the throughput claim is
+designed-for, not measured; C1–C4 need `maxParallel` / `maxHeavySteps` / a memory bound written
+into `prod-host`'s `~/.cezar/config.json` first, and C3 cannot run on the Mac at all
+(`isolation: 'none'` applies no bound to blame). E2 has no runnable path yet — `cez cluster
+reconcile` still lacks a request/response transport. Open items:
+`.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md` → "Found during implementation".
 
 > **CORRECTED 2026-08-22 — the first draft led with "a second node is worth having for
 > *capability*, not for compute", and that was wrong.** Owner: *"It's mostly about machine compute:
@@ -1064,7 +1077,9 @@ Vertical slice following the `automations` convention — *"not modular; no plug
 - `capabilities.ts` — `cluster: boolean`, **always present** and `false` when off, like every other
   capability key. Do not re-assert the "flag-off health body is byte-identical" claim: it was
   measured false and corrected in place in that file, and this key makes the body grow by one more
-  pair. What opt-in buys is behavioural — no index, no watcher, no timer, no route, no nav item, no
+  pair. What opt-in buys is behavioural — no index, no watcher, no timer, no **live** route (the
+  family answers 200-with-`enabled: false` / 409 rather than 404 — corrected 2026-08-22, see
+  Verification 12), no nav item, no
   prompt bytes.
 - `workspace-runs-routes.ts` — union the remote projection into the workspace runs list.
 - `sources/registry.tsx`'s `SOURCE_PROVIDERS` — **one** row (`cezar-hub`). The seam's own docblock
@@ -1405,12 +1420,47 @@ Additive on `todoSchema`, all optional — an existing entry with none of them s
 is the same contract every field added since 2026-08-15 has kept:
 
 ```ts
-pendingSince?: string                   // set on optimistic local write, cleared on hub ack
-hubSeq?:       number                   // last hub order this record was confirmed at
+pendingSince?:  string                  // set on optimistic local write, cleared on hub ack
+pendingFields?: string[]                // WHICH keys are owed — see the amendment below
+hubSeq?:        number                  // last hub order this record was confirmed at
 tombstone?: { at: string }
 placement?: { node?: string; requires?: string[] }
-startedOn?: string                      // nodeId; hub-confirmed only, never optimistic (D4)
+startedOn?:     string                  // nodeId; hub-confirmed only, never optimistic (D4)
 ```
+
+**AMENDED 2026-08-22 during implementation — `pendingFields` was missing, and without it D4's
+central property could not be built.** This list originally carried `pendingSince` alone.
+`pendingSince` is a scalar: it says *that* a record is owed to the hub, never *which fields* are.
+So a derive-from-records outbox (D5) has nothing to narrow on and can only send the record's whole
+content, which is exactly what D4 above forbids:
+
+> *"An op carries only the fields it changed. Two spokes that queued edits to different fields of
+> one todo while partitioned both land, because the hub applies them in sequence. Had ops carried
+> whole records, the second would clobber the first — same failure the old D4 was written to
+> avoid."*
+
+That is not a hypothetical here. The 110-row reconcile this design exists for has **10 disagreeing
+`chat` rows, and they disagree on `status` and `archivedAt`** — field-level, on the two fields the
+board writes most. Whole-record ops throw one side of every one of those away.
+
+Found by package 2.1, which could not close it from inside its own scope and flagged it rather than
+shipping whole-record ops quietly. It was invisible from either side alone: 2.1's tests prove
+derivation and compaction are correct, 2.2's prove the hub applies per-field ops correctly, and
+both pass while nothing ever *emits* a per-field op. Two suites agreeing with themselves and not
+with each other.
+
+`pendingFields` is written **inside the same `O_EXCL` lease as the value**, exactly as
+`pendingSince` already is and for the same reason: marker and value cannot disagree, so the outbox
+stays re-derivable and a lost `ops.ndjson` tail stays harmless (D5). The failure mode it introduces
+is a writer that changes a field without naming it, which then never syncs — silent, so the lease
+is not optional bookkeeping, it is the mechanism. Every write path in `todos.ts` that stamps
+`pendingSince` must union the keys it touched into `pendingFields` in the same operation, and the
+hub's ack clears both together.
+
+Compaction unions field sets, never replaces them: two owed ops for one entity collapse to one op
+owing the union of their fields. A tombstone still clears the accumulator (package 2.1's own
+property test caught a pre-tombstone value resurrecting through a later upsert, and that fix
+stands — a later upsert is a fresh recreation, not a patch onto pre-delete content).
 
 ## API contracts
 
@@ -1426,7 +1476,9 @@ POST   /api/v1/cluster/enroll               hub: mint a single-use code (admin-g
 DELETE /api/v1/cluster/enroll/:codeId       hub: revoke an unredeemed code (Phase 1b)
 POST   /api/v1/cluster/join                 spoke: redeem a code (CLI-driven). Failures are
                                             NAMED: access-rejected | code-expired |
-                                            code-used | hub-unreachable | protocol-major
+                                            code-malformed | code-used | hub-unreachable |
+                                            protocol-major   (code-malformed CORRECTED IN
+                                            2026-08-22: client-local, never sent by the hub)
 DELETE /api/v1/cluster/nodes/:nodeId        hub: revoke
 PATCH  /api/v1/cluster/nodes/:nodeId        acceptsDispatch, name  (spoke re-enforces)
 GET    /api/v1/cluster/corpus                hub: manifest — { corpusVersion, docs:
@@ -1559,6 +1611,15 @@ ordering and per-field-merge tests are gone with the machinery they covered:
 2. Per-field ops: two spokes queue edits to **different** fields of one todo, hub applies both →
    **both survive**. *Negative control:* the same fixture with whole-record ops loses one — assert
    that, so the test cannot pass against the shape it exists to reject.
+   **AMENDED 2026-08-22: the ops must come from `deriveTodoOps`, not be hand-built.** As first
+   written this was satisfiable — and was satisfied — by a fixture the test author typed, which
+   proves the *apply* side and says nothing about whether anything ever emits such an op. It did
+   not: `deriveTodoOps` sent whole records, because `pendingSince` alone cannot say which fields
+   are owed (see the `pendingFields` amendment in Data Models). So this test and 2.1's derivation
+   tests both passed while the property they exist for was absent from the system. Drive this one
+   end to end: two real records, each edited on a different field through `todos.ts`'s own write
+   path, ops **derived**, applied at the hub in sequence, both edits present. A hand-built fixture
+   for the apply side may stay, as its own case, clearly labelled as testing apply in isolation.
 3. Tombstone and resurrection: a tombstone applied at a later `hubSeq` wins; an upsert at a later
    `hubSeq` un-tombstones. Both directions, so neither accidental erasure nor accidental
    resurrection can pass.
@@ -1608,29 +1669,40 @@ Integration (two servers in one vitest process, two `CEZ_HOME` temp dirs, linked
 11. **Stamp-before-start ordering**: kill node A between `markStarted` and `startRun` → the todo is
     stamped and un-started, and no second node picks it up; the failure mode is a *visible pending
     start*, never a duplicate.
-12. **Flag off**: with `CEZ_CLUSTER` unset — no timers armed, `/api/v1/cluster*` → 404, no file
+12. **Flag off**: with `CEZ_CLUSTER` unset — no timers armed, no file
     created under `~/.cezar/cluster` or `.ai/cezar/cluster`, `capabilities.cluster === false`, the
-    Cluster section absent from the settings nav **and** its route a 404 (the registry's `capability`
-    gate drops both, and asserting only the nav would pass against a reachable orphan route), and
-    the agent system prompt byte-identical.
+    Cluster section absent from the settings nav **and** its cockpit route a 404 (the registry's
+    `capability` gate drops both, and asserting only the nav would pass against a reachable orphan
+    route), and the agent system prompt byte-identical.
 
-Component (Phase 1b, `cluster-section.tsx`), lettered under 12 so the integration numbering
-above stays stable:
+    **CORRECTED 2026-08-22 during implementation — the API answers 409, not 404 and not 200.**
+    This item said ~~`/api/v1/cluster*` → 404~~ and Architecture's "no route" implied the same. It
+    took two wrong answers to get here, and both are worth recording because each was defended with
+    a real argument:
 
-   - **12a — the minted command carries the code and no long-lived credential.** Assert the
-     rendered string matches the expected `npx …` shape *and* assert it does **not** contain the
-     Access client id or secret, from a fixture where both are present in the environment. The
-     second assertion is the one that matters: a test checking only the happy shape passes just as
-     well against a command that leaks.
-   - **12b — a stale presence renders its age.** A node last seen 40 minutes ago shows "40m ago",
-     not a bare online dot. *Negative control:* a fresh reading renders **no** age badge, so the
-     test cannot pass by the badge always being present.
-   - **12c — enforcement is rendered, including `none`.** A node reporting `enforcement: 'none'`
-     shows it as a stated limitation, and the assertion is on the `none` case specifically — a
-     `cgroup`-only test passes against code that renders nothing for the others.
-   - **12d — the four queued reasons render four distinct strings** (Phase 4, listed here so it is
-     not lost), asserted **pairwise-distinct** rather than each against a literal, so a fifth
-     reason that reuses an existing string fails the test.
+    - I first ruled **200 with `enabled: false`**, from `sources.ts`'s documented contract
+      (*"every `GET` answers 200 with a schema-valid empty payload and every mutator answers 409 —
+      never 404"*). Wrong: that shape exists because the **Sources section is always rendered** and
+      needs a body to draw "not configured" with. A cluster that is off has no section, so a 200
+      would be inventing a reader.
+    - The contract scaffold then argued **404** from exactly that observation. Also wrong, and the
+      closest precedent settles it: **automations** is a feature with *no* settings section at all
+      when off — the same "no surface, no caller" property — and `server.ts` answers
+      `409 AUTOMATIONS_OFF` for **every route of the family**.
+
+    The argument neither of us made, and the one that decides it: **404 already means something
+    else in this codebase.** `sources-routes.ts` returns 404 for `UNKNOWN_CONNECTION`. If flag-off
+    also 404s, a caller cannot distinguish *clustering is off* from *no such node id* — in a design
+    whose whole premise is that a refusal names itself. So: **the family answers `409` with a
+    stated reason while `CEZ_CLUSTER` is unset**, the routes stay chained into `AppType`, and
+    `capabilities.cluster` (always present, `false` when off) is how the cockpit knows not to ask.
+
+    Consequently `clusterOverviewResponseSchema` carries **no `enabled` field** — with 409 there is
+    no served body to put it in, and a field that can only ever read `true` invites a branch that
+    never runs. The **cockpit's settings route stays absent** (the registry's `capability` gate
+    drops nav and route together); that is a different surface and the orphan-route reasoning above
+    is untouched.
+
 13. A node-authenticated link socket **cannot** subscribe to cockpit WS topics, and a
     browser-origin socket **cannot** send `ops`.
 14. Hub unreachable at dispatch → a run a person starts by hand still starts, dispatch recorded
@@ -1666,7 +1738,16 @@ Gates green is necessary, not sufficient. Until these have run the work is **QA 
   paths, each of which must name itself rather than reading as a network blip: redeem the same code
   **twice** (second → `code-used`), let one **expire** unused (→ `code-expired`), and run the
   command with **no Access credential** in the environment (→ `access-rejected`, not a generic
-  fetch failure). Finally revoke an unredeemed code from the UI and confirm it cannot be redeemed.
+  fetch failure). **A fourth path, added 2026-08-22 during implementation: paste a mangled code**
+  (drop a character) → `code-malformed`, **not** `hub-unreachable`. It was written as
+  `hub-unreachable` on the argument that the two read alike to an operator; they do not act alike.
+  `joinCluster` parses the code before it opens a socket, so nothing about DNS, the tunnel or
+  Access was ever tested — the unit test for that branch asserts `fetch` was never called and then
+  asserted the hub was unreachable. It is also the only enrollment failure the person reading the
+  screen can fix without anyone else, which is the rule the enum now splits members on: two values
+  when the operator's next move differs, one when it does not (a hub answering HTTP 500 stays
+  `hub-unreachable`, because retry-or-call-the-hub-owner is the same move as a hub that is down).
+  Finally revoke an unredeemed code from the UI and confirm it cannot be redeemed.
 - **E2** `cez cluster reconcile --dry-run` on the real divergence. The plan must name exactly
   **103 `cezar` adds, 7 `chat` adds, 579 + 33 identical, and 10 `chat` rows it refuses to decide**
   (plus whatever it reports for `aside`/`career-kit`, which were never diffed by id). Any other
