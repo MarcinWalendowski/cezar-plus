@@ -494,6 +494,7 @@ export class ClaudeCliRunner implements AgentRunner {
       onLine: (line) => consumer.handleLine(line),
       onOffset: request.onOffset,
       encodeSend: (content) => encodeClaudeUserMessage(content, spec.sessionId),
+      spawnFailed: mode.spawnFailed,
       onExit: (exit) => {
         if (deadline) clearTimeout(deadline);
         emitBrokeredTerminalEvents({
@@ -720,6 +721,9 @@ export function buildClaudeArgs(
   }
   if (spec.model) {
     args.push('--model', spec.model);
+  }
+  if (spec.effort) {
+    args.push('--effort', spec.effort);
   }
   for (const dir of spec.additionalDirectories ?? []) {
     args.push('--add-dir', dir);

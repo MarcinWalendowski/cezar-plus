@@ -19,6 +19,12 @@ export const workflowStepSchema = z
     prompt: z.string().optional(),
     skill: z.string().optional(),
     model: z.string().optional(),
+    /** claude CLI's own `--effort` (low|medium|high|xhigh|max) — a mechanical reasoning-depth
+     *  ceiling, mirroring `model` above. No normalization table: unlike `model`, `effort` is not
+     *  a per-backend alias, it is a fixed five-value enum the claude CLI defines directly.
+     *  Claude-only (`.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`) — the codex and
+     *  opencode runners never read it. */
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
     /** Per-step agent backend override (falls back to the task / config default).
      *
      *  Deliberately NOT widened to the legacy `claude-cli` the way the run store's
@@ -529,6 +535,16 @@ const SPEC_TO_DEPLOY_STEP_MODEL = 'sonnet';
 const SPEC_REVIEW_MODEL = 'opus';
 
 /**
+ * `run-tests`'s reasoning-depth ceiling (`.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`,
+ * Phase 1). A cezar-spawned `run-tests` step with no `--effort` flag runs at `high` — measured
+ * directly against the pinned CLI — and that is the level the 43,583-output-token outlier run
+ * ran at. `medium` is a one-notch cut from that measured default, not a guess about an unknown
+ * one: enough budget to interpret a gate failure, capped short of the open-ended, iterative
+ * root-causing that step's job never asked for.
+ */
+const RUN_TESTS_STEP_EFFORT = 'medium';
+
+/**
  * The owner's standard operating pipeline as ONE selectable chain (spec
  * `.ai/specs/2026-08-19-spec-to-deploy-default-workflow.md`): **gather the record → write the
  * spec → review the spec → implement → run tests → commit & push/merge → document → deploy.**
@@ -755,6 +771,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       id: 'run-tests',
       name: 'Run the tests',
       model: SPEC_TO_DEPLOY_STEP_MODEL,
+      effort: RUN_TESTS_STEP_EFFORT,
       allowedTools: DEFAULT_ALLOWED_TOOLS,
       // Same guarded allowlist as `implement`, by reference: it can install, run every gate, and
       // edit code to fix a failure — but it cannot reach the remote. `commit-push` does that next.
@@ -796,11 +813,22 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         '  knobs the server suites assert on). The measured run rediscovered both the hard way and',
         '  paid three full `npm test` runs for it.',
         '',
+        'Once a failure reproduces IDENTICALLY against a control that does not contain this run\'s',
+        'change (clean HEAD, the parent checkout, `git stash` — see AGENTS.md\'s own method for why',
+        'one shared-cause control is proof, not evidence), that is sufficient to call it "not mine".',
+        'Stop there. Do not also A/B environment variables, spawn additional probes, or read the',
+        'implicated subsystem\'s source hunting for a root cause — that diagnosis is real work, but',
+        'it belongs to whoever picks up the todo, not to a step whose contract is pass/fail. File',
+        'what you already have (`cezar todo add`): the failing test, the one repro command, the one',
+        'control command, and the shared file/line if the output already shows it. Then move on.',
+        '',
         'End your report with the exact gate commands you ran and their results, and QUOTE the',
         'exit-marker line from each saved log (`EXIT=0`, `Test Files  N passed`). That line cannot',
         'exist unless the process actually finished, which is the only thing separating a gate that',
         'passed from a gate you stopped watching. If a gate cannot be made to pass, say so plainly',
-        'and stop — do not let the chain ship a red build.',
+        'and stop — do not let the chain ship a red build. Report pass/fail plainly. Quote the',
+        'failing test\'s own output verbatim — never re-explain what the diff changed; that is',
+        'already in the commit this step is about to hand to `commit-push`.',
       ].join('\n'),
     },
     {

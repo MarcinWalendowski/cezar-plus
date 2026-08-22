@@ -4670,6 +4670,7 @@ export class RunManager {
           ],
           env: stepProfile.env,
           model: backendModel,
+          effort: step.effort,
           sessionId,
           resume: resumeFrom !== undefined,
           // Interactive sessions have no wall clock — the idle timer rules.
