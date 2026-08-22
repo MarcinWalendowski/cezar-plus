@@ -139,6 +139,8 @@ function toSummary(run: z.infer<typeof runRecordSchema>): TrimmedRun {
     finishedAt: run.finishedAt,
     diffStat: run.diffStat,
     branch: run.branch,
+    // Provenance for the global board's Author column (2026-08-21-task-author-provenance).
+    author: run.author,
     groupId: run.groupId,
     variant: run.variant,
     archived: run.archived,

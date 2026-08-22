@@ -10,6 +10,7 @@ import { pendingApprovalSchema } from '@loki-labs/better-cezar-contract';
 
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 import { contextWindowForModel } from '../core/context-window.ts';
+import { taskAuthorSchema, type TaskAuthor } from './task-author.ts';
 
 import type { RunnerId } from '../core/agent-runner.ts';
 // Type-only, so no runtime edge is added from the store to the contract package — one definition
@@ -220,6 +221,21 @@ export const runRecordSchema = z.object({
       githubUrl: z.string().url(),
     })
     .optional(),
+  /**
+   * Who created this task, stamped at creation and never rewritten (spec
+   * `.ai/specs/2026-08-21-task-author-provenance.md`). The wire twin is
+   * `contract/src/runs.ts`'s field of the same name.
+   *
+   * OPTIONAL here for the same reason `diffStat` is: `runs.json` is `safeParse`d as ONE array, so
+   * a required addition would silently drop every pre-existing run. What makes the field present
+   * on everything written since is `createRun`'s INPUT type below, where it is required — a
+   * creation path that names no author does not compile. No default, no `?? 'unknown'`: a default
+   * is precisely what would let a real path ship unattributed while still looking attributed.
+   *
+   * Written ONCE, in the record literal. `updateRun` never sets it, so an author cannot be edited
+   * after the fact — which is the property that makes it worth reading at all.
+   */
+  author: taskAuthorSchema.optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
   /**
    * Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —
@@ -688,6 +704,15 @@ export class RunStore extends EventEmitter {
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
+    /**
+     * Who created this task (spec 2026-08-21-task-author-provenance). REQUIRED, and required HERE
+     * rather than defaulted, because this is the ONLY place a `RunRecord` comes into being — so a
+     * required argument on this one object is a complete guarantee for runs, and `npm run
+     * typecheck` fails for the ninth creation path exactly as it did for the first eight.
+     *
+     * Build it with one of the constructors in `./task-author.ts`; never with a literal.
+     */
+    author: TaskAuthor;
   }): RunRecord {
     const run: RunRecord = {
       id: randomUUID(),
@@ -710,6 +735,8 @@ export class RunStore extends EventEmitter {
       workspaceProjects: input.workspaceProjects,
       groupId: input.groupId,
       variant: input.variant,
+      // Stamped once, at the only mint point, and never rewritten — see the schema field above.
+      author: input.author,
       status: 'queued',
       createdAt: new Date().toISOString(),
       tokensUsed: 0,

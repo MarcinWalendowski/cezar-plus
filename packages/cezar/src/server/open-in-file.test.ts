@@ -20,6 +20,7 @@ vi.mock('./open-in-app.js', async (importOriginal) => {
 
 import { openFileInDefaultApp } from './open-in-app.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 describe("POST /api/v1/runs/:id/open-in — target 'default' (local-mode file open, #365)", () => {
   let repoRoot: string;
@@ -36,7 +37,7 @@ describe("POST /api/v1/runs/:id/open-in — target 'default' (local-mode file op
     mkdirSync(join(worktree, 'sub'), { recursive: true });
     writeFileSync(join(worktree, 'sub', 'nested.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
-    runId = store.createRun({ title: 't', workflow: 'quick-task', task: 'do it', steps: [] }).id;
+    runId = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 'do it', steps: [] }).id;
     store.updateRun(runId, { worktreePath: worktree });
     delete process.env.CEZ_REMOTE;
   });

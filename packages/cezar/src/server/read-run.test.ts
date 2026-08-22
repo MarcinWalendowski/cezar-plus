@@ -7,6 +7,7 @@ import { RunStore, type RunRecord } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import { createApp } from './server.js';
 import { apiRequest } from './loopback-request.testkit.js';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Read receipts (#unread-done-items): `POST /api/v1/runs/:id/read` and `POST /api/v1/runs/read-all`
@@ -36,7 +37,7 @@ describe('read receipts (#unread-done-items)', () => {
 
   /** A finished run with a real finishedAt, so the unread rule has an instant to compare against. */
   function finished(status: 'done' | 'failed' | 'cancelled'): string {
-    const run = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', steps: [] });
     store.updateRun(run.id, { status, finishedAt: '2026-08-01T10:00:00.000Z' });
     return run.id;
   }

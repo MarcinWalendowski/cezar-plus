@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { RunManager } from './run.ts';
 import type { WorkflowDef } from './types.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -102,7 +103,7 @@ describe('a step cezar stopped is not a step that failed', () => {
     process.env.CEZ_MOCK_HANG = '1';
     const record = manager.startRun(
       chain([{ id: 'spec' }, { id: 'implement' }, { id: 'run-tests' }, { id: 'deploy' }]),
-      { task: 'do the thing', worktree: false },
+      { author: localCliAuthor(), task: 'do the thing', worktree: false },
     );
     const finished = await settled(record.id);
 
@@ -135,7 +136,7 @@ describe('a step cezar stopped is not a step that failed', () => {
     // about the re-entry and not about how a wedged final step behaves.
     const record = manager.startRun(
       chain([{ id: 'spec' }, { id: 'implement', prompt: 'mock:done finish up' }]),
-      { task: 'mock:hang do the thing', worktree: false },
+      { author: localCliAuthor(), task: 'mock:hang do the thing', worktree: false },
     );
     const finished = await settled(record.id);
 
@@ -156,7 +157,7 @@ describe('a step cezar stopped is not a step that failed', () => {
   it('the stopped metric carries the numbers the next investigation will need', async () => {
     process.env.CEZ_MOCK_HANG = '1';
     // Two steps so `spec` is NOT the interactive last one and therefore actually carries a bound.
-    const record = manager.startRun(chain([{ id: 'spec' }, { id: 'implement' }]), {
+    const record = manager.startRun(chain([{ id: 'spec' }, { id: 'implement' }]), { author: localCliAuthor(),
       task: 'do the thing',
       worktree: false,
     });
@@ -172,7 +173,7 @@ describe('a step cezar stopped is not a step that failed', () => {
   }, 70_000);
 
   it('a healthy run under the same bound is completely unaffected', async () => {
-    const record = manager.startRun(chain([{ id: 'spec' }, { id: 'implement' }]), {
+    const record = manager.startRun(chain([{ id: 'spec' }, { id: 'implement' }]), { author: localCliAuthor(),
       task: 'mock:done do the thing',
       worktree: false,
     });

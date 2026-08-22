@@ -50,6 +50,7 @@ import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 import { loadWorkflows } from './load.ts';
 import { evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
 import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/store.ts';
+import type { TaskAuthor } from '../runs/task-author.ts';
 import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.ts';
 import {
   AgentTempDirError,
@@ -437,7 +438,17 @@ function formatWakeInstant(at: Date): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'long' }).format(at);
 }
 
-export interface StartRunInput {
+/**
+ * What EXECUTING a run needs — everything `execute()` reads, and nothing about who asked for it.
+ *
+ * Split out from `StartRunInput` below (spec 2026-08-21-task-author-provenance) for a reason that
+ * is load-bearing rather than cosmetic: `pendingJobs` holds one of these, and the two RECOVERY
+ * paths (`reviveQueuedRun`, chain re-entry) rebuild one from a record for a run that ALREADY
+ * EXISTS. Authorship is a fact of the record at that point, stamped once and never rewritten, so
+ * a recovered job has nothing to say about it — and requiring a value there would have forced
+ * exactly the invented `system` placeholder the required field exists to prevent.
+ */
+export interface ExecuteRunInput {
   task: string;
   model?: string;
   /** Agent backend chosen for this task (GUI). Unset = the config default. */
@@ -481,6 +492,24 @@ export interface StartRunInput {
    *  and make the task bubble render the stack's images as its own. In-memory
    *  only: rebuilt from the record on every hydration, never persisted. */
   stackedImages?: ContentBlock[];
+}
+
+/**
+ * What CREATING a run needs: everything execution needs, plus WHO created it.
+ *
+ * `author` is REQUIRED (spec `.ai/specs/2026-08-21-task-author-provenance.md`), and required here
+ * rather than only on `RunStore.createRun`, because three of the creation paths — `cezar run` and
+ * the two notes triggers — never touch the store directly. Requiring it at both boundaries is what
+ * makes `npm run typecheck` fail for the ninth creation path exactly as it did for the first
+ * eight; there is deliberately no default and no fallback, since a default is precisely what
+ * would let a real path ship unattributed.
+ *
+ * Build it with one of the constructors in `../runs/task-author.ts` (`authorFromRequest` /
+ * `authorFromAgentEnv` / `inheritAuthor` / `agentAuthor` / `automationAuthor` / `localCliAuthor` /
+ * `systemAuthor`), never with a literal — the `kind`/`id` pairing is decided there, once.
+ */
+export interface StartRunInput extends ExecuteRunInput {
+  author: TaskAuthor;
 }
 
 /**
@@ -830,7 +859,7 @@ export class RunManager {
   private readonly monitoring = new Set<string>();
   private readonly pendingJobs = new Map<
     string,
-    { workflow: WorkflowDef; input: StartRunInput; resumeAt?: ChainResumePoint }
+    { workflow: WorkflowDef; input: ExecuteRunInput; resumeAt?: ChainResumePoint }
   >();
   /** Steps left in the chain at this run's last hand-back (spec 2026-08-20, R4). A re-entry that
    *  does not strictly reduce it is a loop, not progress, and fails the run loudly instead of
@@ -1138,7 +1167,26 @@ export class RunManager {
   private async agentEnvForStep(
     runId: string,
     backend: RunnerId,
-    options: { generateFollowups?: boolean; recordedProfileId?: string } = {},
+    options: {
+      generateFollowups?: boolean;
+      recordedProfileId?: string;
+      /**
+       * WHICH AGENT SESSION this env belongs to (spec 2026-08-21-task-author-provenance, Phase 2).
+       *
+       * `CEZ_TASK_ID` (set by `agentEnv`, per RUN) answers "which task"; a task filed from inside
+       * a run also has to name the session that filed it, and a session id is a STEP-level fact.
+       * These two are the halves that were unreachable from a child process before.
+       *
+       * `stepId` is the authoritative one: it is stable across resumes, restarts and session
+       * re-mints. `sessionId` is best-effort BY CONSTRUCTION — Codex/OpenCode overwrite the id
+       * cezar minted with their own when the backend reports one, which happens after this env is
+       * already built — so on those backends it records cezar's pre-mint id and `stepId` is what
+       * always resolves. On the Claude backend, the default and the overwhelming majority, it is
+       * exact.
+       */
+      stepId?: string;
+      sessionId?: string;
+    } = {},
   ): Promise<{ env: Record<string, string>; profileId: string; knowledgeSummary: KnowledgePromptSummary | undefined }> {
     const run = this.store.getRun(runId);
     const profileId = options.recordedProfileId
@@ -1153,6 +1201,13 @@ export class RunManager {
     return {
       env: {
         ...this.agentEnv(runId, options.generateFollowups ?? true, { enabled: kbEnabled, summary: knowledgeSummary }),
+        // Always PRESENT, empty when unknown — the `CEZ_TODOS_FILE` spelling above, for the same
+        // reason: a nested cezar inherits its parent's `process.env` wholesale, so omitting the
+        // key would let the PARENT run's session id shine through and a task filed by the child
+        // would name the wrong session. Empty reads as absent everywhere
+        // (`authorFromAgentEnv` trims), which is honest; a stale id would not be.
+        CEZ_STEP_ID: options.stepId ?? '',
+        CEZ_SESSION_ID: options.sessionId ?? '',
         ...resolved.env,
       },
       profileId: resolved.profile.id,
@@ -1183,6 +1238,10 @@ export class RunManager {
       // at the HTTP route because `cezar run`, the inbox's own "▶ Run" and variants all reach
       // startRun directly — a route-level gate would leave those writing todos.json.
       generateFollowups: followupsEnabled() ? input.generateFollowups : false,
+      // Who asked for this task, stamped at creation and never rewritten (spec
+      // 2026-08-21-task-author-provenance). Passed straight through: `startRun` decides nothing
+      // about authorship — the caller that KNOWS who acted is the only one that can.
+      author: input.author,
       // Persist autonomy on the record (#489) so the terminal review gate
       // (`settleSuccess`) and the group-pick winner-park can honor it — mid-run
       // auto-nudge reads `input.autonomous` (`execute`), but the record is the
@@ -2281,7 +2340,7 @@ export class RunManager {
   private requeueWhileHeld(
     runId: string,
     workflow: WorkflowDef,
-    input: StartRunInput,
+    input: ExecuteRunInput,
     runner: RunnerId,
     state?: ActiveRun,
   ): boolean {
@@ -2605,7 +2664,7 @@ export class RunManager {
    * back would re-append the whole stack on every recovery and compound without
    * bound — asserted directly by a test.
    */
-  private hydrateQueuedInput(runId: string, input: StartRunInput): StartRunInput {
+  private hydrateQueuedInput(runId: string, input: ExecuteRunInput): ExecuteRunInput {
     const run = this.store.getRun(runId);
     if (!run) return input;
     const stack = run.queuedMessages ?? [];
@@ -3439,6 +3498,8 @@ export class RunManager {
       continueProfile = await this.agentEnvForStep(runId, continueBackend, {
         generateFollowups,
         recordedProfileId: resumedProfileId,
+        stepId,
+        ...(sessionId === undefined ? {} : { sessionId }),
       });
     } catch (err) {
       if (!(err instanceof AgentTempDirError)) throw err;
@@ -3681,7 +3742,7 @@ export class RunManager {
   private async execute(
     runId: string,
     workflow: WorkflowDef,
-    input: StartRunInput,
+    input: ExecuteRunInput,
     /** Chain re-entry (spec 2026-08-20, P1): start the loop at this step instead of the top, and
      *  reattach its interrupted session when one survived. Absent on every ordinary start. */
     resumeAt?: ChainResumePoint,
@@ -4550,7 +4611,7 @@ export class RunManager {
     runId: string,
     state: ActiveRun,
     step: WorkflowStepDef,
-    input: StartRunInput,
+    input: ExecuteRunInput,
     skills: Skill[],
     checkFailure: string | null,
     interactive: boolean,
@@ -4809,6 +4870,10 @@ export class RunManager {
         // run under the account that created it — not whatever the project has been switched to
         // since. Same rule `runContinuation` applies to a resumed continuation.
         ...(resumeFrom?.profileId ? { recordedProfileId: resumeFrom.profileId } : {}),
+        // The session this step is about to run under, minted (or resumed) just above — see the
+        // option's own doc comment for why `stepId` is the authoritative half of the pair.
+        stepId: step.id,
+        sessionId,
       });
     } catch (err) {
       if (err instanceof AgentTempDirError) return err.message;

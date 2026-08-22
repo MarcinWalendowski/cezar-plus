@@ -47,6 +47,7 @@ import { runProjectsCommand } from './workspace/projects-cli.ts';
 import { runBackupCommand } from './backup/cli.ts';
 import { runKnowledgeCommand } from './knowledge/cli.ts';
 import { runTodoCommand } from './todo-cli.ts';
+import { localCliAuthor } from './runs/task-author.ts';
 import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 // FIX 6 (D13 repair pass 1): the production `listRegisteredProjectRoots` supplier lives in
 // `./registered-project-roots.ts` for the same reason `./auth-boot-gate.ts` was extracted from this
@@ -994,7 +995,9 @@ async function runCommand(
     }
   });
 
-  const run = manager.startRun(workflow, { task, model });
+  // A person typing at a terminal is a `user` with id `local` — the `approverOf` rule
+  // (spec 2026-08-21-task-author-provenance). There is no session and no request here.
+  const run = manager.startRun(workflow, { task, model, author: localCliAuthor('cli-run') });
   // `review` is terminal here too (spec 009) — headless runs must not hang on
   // the GUI's review gate; the diff waits on the task branch/cockpit instead.
   const final = await new Promise<string>((resolveStatus) => {

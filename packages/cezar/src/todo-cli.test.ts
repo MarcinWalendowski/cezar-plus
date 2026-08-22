@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { registerProject } from './workspace/projects.ts';
 import { runTodoCommand, type TodoCliIo } from './todo-cli.ts';
+import { todoSchema } from './todos.ts';
 
 /**
  * `cezar todo add|list` (Phase 1, `.ai/specs/2026-08-19-file-tasks-from-a-running-task.md`).
@@ -36,6 +37,9 @@ describe('cezar todo add/list', () => {
   });
 
   const run = (...args: string[]): Promise<number> => runTodoCommand(args, { repoRoot, io });
+  /** The same call with an AGENT's environment — what a `cezar todo add` from inside a run sees. */
+  const runAsAgent = (env: NodeJS.ProcessEnv, ...args: string[]): Promise<number> =>
+    runTodoCommand(args, { repoRoot, io, env });
   const readTodosFile = (root: string): unknown[] =>
     JSON.parse(readFileSync(join(root, '.ai/cezar/todos.json'), 'utf8'));
 
@@ -56,6 +60,44 @@ describe('cezar todo add/list', () => {
       expect(todos).toHaveLength(1);
       expect(todos[0]).toMatchObject({ summary: 'Fix the thing', origin: 'agent', status: 'todo' });
       expect((todos[0] as Record<string, unknown>).autostart).toBeUndefined();
+    });
+
+    it('an agent env stamps the filing task AND session as the author', async () => {
+      // The owner's third requirement, end to end: a task filed from inside a run names the parent
+      // task and the agent session inside it (spec 2026-08-21-task-author-provenance).
+      expect(
+        await runAsAgent(
+          { CEZ_TASK_ID: 'run_parent', CEZ_SESSION_ID: 'sess_1', CEZ_STEP_ID: 'implement' },
+          'add',
+          'Fix the thing',
+        ),
+      ).toBe(0);
+      const todo = readTodosFile(repoRoot)[0] as Record<string, unknown>;
+      expect(todo.author).toMatchObject({
+        kind: 'agent',
+        id: 'run_parent',
+        via: 'cli-todo-add',
+        parentTaskId: 'run_parent',
+        agentSessionId: 'sess_1',
+        parentStepId: 'implement',
+      });
+      // `origin` is unchanged and is NOT this field: it says 'agent' whoever the caller is.
+      expect(todo.origin).toBe('agent');
+    });
+
+    it('a person in their own terminal is the local user, not an agent', async () => {
+      // The distinction `origin: 'agent'` — hard-coded on every call — structurally cannot make.
+      expect(await runAsAgent({}, 'add', 'Fix the thing')).toBe(0);
+      const todo = readTodosFile(repoRoot)[0] as Record<string, unknown>;
+      expect(todo.author).toMatchObject({ kind: 'user', id: 'local', via: 'cli-todo-add' });
+      expect(todo.origin).toBe('agent');
+    });
+
+    it('a parent task with no session never claims `agent` — and the todo still validates', async () => {
+      expect(await runAsAgent({ CEZ_TASK_ID: 'run_parent' }, 'add', 'Fix the thing')).toBe(0);
+      const todo = readTodosFile(repoRoot)[0] as Record<string, unknown>;
+      expect((todo.author as Record<string, unknown>).kind).not.toBe('agent');
+      expect(todoSchema.safeParse(todo).success).toBe(true);
     });
 
     it('a multi-word positional summary is joined with spaces', async () => {

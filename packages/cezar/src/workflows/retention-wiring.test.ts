@@ -8,6 +8,7 @@ import { createWorktree } from '../git-worktree.ts';
 import { RunStore } from '../runs/store.ts';
 import { RunManager } from './run.ts';
 import type { WorkflowDef } from './types.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -73,7 +74,7 @@ describe('worktree retention fires on a terminal transition (#483)', () => {
       source: 'built-in',
       steps: [{ id: 'task', name: 'Do it', prompt: '{{task}}' }],
     };
-    const record = manager.startRun(workflow, { task: 'mock:done tidy up', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done tidy up', worktree: false });
 
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 20_000;
@@ -110,7 +111,7 @@ async function seedWithId(
   finishedAt: string,
 ): Promise<{ recId: string; path: string }> {
   const wt = await createWorktree(repoRoot, id, 'main');
-  const rec = store.createRun({ title: id, workflow: 'w', task: 't', steps: [] });
+  const rec = store.createRun({ author: localCliAuthor(), title: id, workflow: 'w', task: 't', steps: [] });
   store.updateRun(rec.id, { status, finishedAt, worktreePath: wt.path, branch: wt.branch });
   return { recId: rec.id, path: wt.path };
 }

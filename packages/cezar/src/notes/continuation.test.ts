@@ -11,6 +11,7 @@ import {
   type NoteContinuationStartOptions,
 } from './continuation.ts';
 import { NoteStore } from './store.ts';
+import { taskAuthorSchema } from '../runs/task-author.ts';
 
 /**
  * The trigger half of PLAN D27 Phase 3 (`.ai/specs/2026-08-15-autonomous-implementation-
@@ -222,6 +223,44 @@ describe('NoteContinuationTrigger', () => {
     // undefined here means "no per-run override" — `budgetSpent()` (`workflows/run.ts`) then reads
     // straight through to `config.stepBudget`, which is already 12.
     expect(started[0]?.options.stepBudgetOverride).toBeUndefined();
+  });
+
+  it('the implementation run is authored BY the spec run — parent task and session, not prose in a prompt', async () => {
+    // Before this (spec 2026-08-21-task-author-provenance) the child's only trace of its parent
+    // was the sentence "Implement the spec written by run <id>" inside its own prompt.
+    await seedAutonomousNote(true);
+    const { trigger, started } = makeTrigger();
+
+    await trigger.onRunSettled(
+      specRun({
+        declaredSpecPath: '.ai/specs/2026-08-15-widget.md',
+        steps: [
+          { id: 'spec', name: 'spec', kind: 'agent', status: 'done', iterations: 1, tokensUsed: 0, sessionId: 'sess_spec' },
+        ],
+      }),
+    );
+
+    expect(started[0]?.options.author).toMatchObject({
+      kind: 'agent',
+      id: 'run_spec_1',
+      via: 'note-continuation',
+      parentTaskId: 'run_spec_1',
+      agentSessionId: 'sess_spec',
+      parentStepId: 'spec',
+    });
+    expect(taskAuthorSchema.safeParse(started[0]?.options.author).success).toBe(true);
+  });
+
+  it('a spec run whose steps carry no session id yields `system` that still names the parent', async () => {
+    // The schema refuses an `agent` author it cannot fully name, so a half-true one is impossible
+    // by construction — and an honest `system` still records which run caused this one.
+    await seedAutonomousNote(true);
+    const { trigger, started } = makeTrigger();
+
+    await trigger.onRunSettled(specRun({ declaredSpecPath: '.ai/specs/2026-08-15-widget.md' }));
+
+    expect(started[0]?.options.author).toMatchObject({ kind: 'system', parentTaskId: 'run_spec_1' });
+    expect(taskAuthorSchema.safeParse(started[0]?.options.author).success).toBe(true);
   });
 });
 

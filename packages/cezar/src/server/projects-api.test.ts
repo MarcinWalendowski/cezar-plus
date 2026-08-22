@@ -34,6 +34,7 @@ import {
   type SessionResolver,
   type UpdateProjectResponse,
 } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Multi-project workspace API (spec 2026-07-20-multi-project-workspace, step
@@ -1307,7 +1308,7 @@ describe('workspace projects API', () => {
       await contexts.context(other.id);
       const ctx = contexts.peek(other.id);
       expect(ctx).toBeDefined();
-      const run = ctx!.store.createRun({
+      const run = ctx!.store.createRun({ author: localCliAuthor(),
         title: 'live',
         workflow: 'quick-task',
         task: 'x',

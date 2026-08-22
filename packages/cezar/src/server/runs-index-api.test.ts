@@ -15,6 +15,7 @@ import { ProjectContexts } from './project-context.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp, type ServerDeps } from './server.ts';
 import { __seedRefStatusCacheForTests } from './forge/github.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * `GET /api/v1/workspace/runs-index` — the ⌘K palette's cross-project task finder.
@@ -90,7 +91,7 @@ describe('workspace runs index API', () => {
   it('merges the boot project’s live store with a cold project read off disk, newest first', async () => {
     const boot = await registerProject(repoRoot);
     const other = await registerProject(otherRoot);
-    const live = store.createRun({ title: 'Boot task', workflow: 'build', task: 't', steps: [] });
+    const live = store.createRun({ author: localCliAuthor(), title: 'Boot task', workflow: 'build', task: 't', steps: [] });
     store.updateRun(live.id, { createdAt: '2026-07-10T10:00:00Z' });
     seedColdProject(otherRoot, [
       storedRun({ id: 'cold-1', title: 'Cold task', createdAt: '2026-07-15T10:00:00Z' }),
@@ -114,7 +115,7 @@ describe('workspace runs index API', () => {
     // The mutation: drop the synthetic boot row from `runsIndexRoutes`. The boot run below
     // vanishes, which is the bug exactly as it was reported.
     const other = await registerProject(otherRoot);
-    const live = store.createRun({ title: 'Workspace task', workflow: 'build', task: 't', steps: [] });
+    const live = store.createRun({ author: localCliAuthor(), title: 'Workspace task', workflow: 'build', task: 't', steps: [] });
     seedColdProject(otherRoot, [
       storedRun({ id: 'cold-1', title: 'Cold task', createdAt: '2026-07-01T10:00:00Z' }),
     ]);
@@ -134,7 +135,7 @@ describe('workspace runs index API', () => {
     // The other half of the same change. The mutation: remove the `isRegisteredRoot` guard, so the
     // synthetic row is appended on top of the registry's own and every boot run is indexed twice.
     const boot = await registerProject(repoRoot);
-    const live = store.createRun({ title: 'Boot task', workflow: 'build', task: 't', steps: [] });
+    const live = store.createRun({ author: localCliAuthor(), title: 'Boot task', workflow: 'build', task: 't', steps: [] });
 
     const body = await getIndex();
 
@@ -414,7 +415,7 @@ describe('workspace runs index API', () => {
     await registerProject(otherRoot);
     mkdirSync(join(otherRoot, '.ai/cezar'), { recursive: true });
     writeFileSync(join(otherRoot, '.ai/cezar/runs.json'), '{ not json', 'utf8');
-    const live = store.createRun({ title: 'Boot task', workflow: 'build', task: 't', steps: [] });
+    const live = store.createRun({ author: localCliAuthor(), title: 'Boot task', workflow: 'build', task: 't', steps: [] });
 
     const body = await getIndex();
 
@@ -431,7 +432,7 @@ describe('workspace runs index API', () => {
   describe('reference statuses', () => {
     it('ships an empty map when the server has looked nothing up', async () => {
       await registerProject(repoRoot);
-      const run = store.createRun({ title: 'Has a PR', workflow: 'build', task: 't', steps: [] });
+      const run = store.createRun({ author: localCliAuthor(), title: 'Has a PR', workflow: 'build', task: 't', steps: [] });
       store.updateRun(run.id, { pullRequestUrl: 'https://github.com/acme/demo/pull/42' });
 
       const body = await getIndex();
@@ -444,7 +445,7 @@ describe('workspace runs index API', () => {
 
     it('ships what the cache holds, keyed by project', async () => {
       await registerProject(repoRoot);
-      const run = store.createRun({ title: 'Has a PR', workflow: 'build', task: 't', steps: [] });
+      const run = store.createRun({ author: localCliAuthor(), title: 'Has a PR', workflow: 'build', task: 't', steps: [] });
       store.updateRun(run.id, {
         pullRequestUrl: 'https://github.com/acme/demo/pull/42',
         issueNumber: 7,
@@ -466,7 +467,7 @@ describe('workspace runs index API', () => {
       // re-derived here. A cache read costs nothing per number, so the superset is free — and it
       // is what lets the client apply its own rule to whatever it gets.
       await registerProject(repoRoot);
-      const run = store.createRun({ title: 'Several', workflow: 'build', task: 't', steps: [] });
+      const run = store.createRun({ author: localCliAuthor(), title: 'Several', workflow: 'build', task: 't', steps: [] });
       store.updateRun(run.id, {
         pullRequestUrl: 'https://github.com/acme/demo/pull/42',
         referencedPullRequestUrl: 'https://github.com/acme/demo/pull/40',

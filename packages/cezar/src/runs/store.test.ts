@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runStatusSchema as contractRunStatusSchema } from '@loki-labs/better-cezar-contract';
 import { RunStore, runRecordSchema } from './store.ts';
+import { localCliAuthor } from './task-author.ts';
 
 /** A minimal pre-#389 record, exactly as an old runs.json holds it — no
  *  titleSummary, no diffStat. Loading it must keep working (additive proof). */
@@ -32,7 +33,7 @@ describe('RunStore — directional usage persistence', () => {
 
   it('round-trips step checkpoints and complete run aggregates through runs.json', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'metered task',
       workflow: 'quick-task',
       task: 'metered task',
@@ -69,7 +70,7 @@ describe('RunStore — directional usage persistence', () => {
     expect(RunStore.open(dataDir).getRun(LEGACY_RUN.id)?.inputTokens).toBeUndefined();
 
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'partial task',
       workflow: 'quick-task',
       task: 'partial task',
@@ -103,7 +104,7 @@ describe('RunStore — context occupancy roll-up (spec 2026-08-19-context-usage-
 
   it('mirrors the LATEST turn (overwrite), never a sum, and sizes the window from the model', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'metered task',
       workflow: 'quick-task',
       task: 'metered task',
@@ -124,7 +125,7 @@ describe('RunStore — context occupancy roll-up (spec 2026-08-19-context-usage-
 
   it('leaves the window absent for an unmodelled model rather than inventing one', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'codex task',
       workflow: 'quick-task',
       task: 'codex task',
@@ -150,7 +151,7 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('round-trips the new fields through runs.json', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'fix the login bug',
       workflow: 'quick-task',
       task: 'fix the login bug',
@@ -170,8 +171,8 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('round-trips the repointed flag, and keeps it absent when it was never set (#751)', () => {
     const store = RunStore.open(dataDir);
-    const narrowed = store.createRun({ title: 'review pr 694', workflow: 'quick-task', task: 'review', steps: [] });
-    const normal = store.createRun({ title: 'fix the login bug', workflow: 'quick-task', task: 'fix', steps: [] });
+    const narrowed = store.createRun({ author: localCliAuthor(), title: 'review pr 694', workflow: 'quick-task', task: 'review', steps: [] });
+    const normal = store.createRun({ author: localCliAuthor(), title: 'fix the login bug', workflow: 'quick-task', task: 'fix', steps: [] });
     store.updateRun(narrowed.id, { diffStat: { adds: 1, dels: 0, files: 1, repointed: true } });
     store.updateRun(normal.id, { diffStat: { adds: 10, dels: 2, files: 3 } });
     store.flush();
@@ -210,7 +211,7 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('round-trips worktreeReclaimedAt and lets updateRun clear it (retention #483)', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(run.id, { worktreeReclaimedAt: '2026-07-18T00:00:00.000Z' });
     store.flush();
 
@@ -224,7 +225,7 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it("round-trips activity:'monitoring' and lets updateRun clear it (#490)", () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     // A fresh record has no activity (additive/optional).
     expect(run.activity).toBeUndefined();
     store.updateRun(run.id, { status: 'running', activity: 'monitoring' });
@@ -240,7 +241,7 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('round-trips the monitoring deadline and clears monitoring state on terminal writes', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 'monitor', task: 'monitor', workflow: 'quick-task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 'monitor', task: 'monitor', workflow: 'quick-task', steps: [] });
     const deadline = '2026-07-25T10:15:00.000Z';
     store.updateRun(run.id, { status: 'running', activity: 'monitoring', monitoringWakeAt: deadline });
     expect(store.getRun(run.id)?.monitoringWakeAt).toBe(deadline);
@@ -252,7 +253,7 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('clears process-local wake-cap display state when records reopen', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 'monitor', task: 'monitor', workflow: 'quick-task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 'monitor', task: 'monitor', workflow: 'quick-task', steps: [] });
     store.updateRun(run.id, { status: 'running', activity: 'monitoring', monitoringWakeCapReached: true });
     store.flush();
     const reopened = RunStore.open(dataDir, { keepLive: true }).getRun(run.id);
@@ -292,14 +293,14 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('persists an explicit follow-up opt-out while omission stays compatible', () => {
     const store = RunStore.open(dataDir);
-    const disabled = store.createRun({
+    const disabled = store.createRun({ author: localCliAuthor(),
       title: 'quiet task',
       workflow: 'quick-task',
       task: 'quiet task',
       generateFollowups: false,
       steps: [],
     });
-    const defaulted = store.createRun({
+    const defaulted = store.createRun({ author: localCliAuthor(),
       title: 'default task',
       workflow: 'quick-task',
       task: 'default task',
@@ -314,14 +315,14 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('round-trips the autonomous flag while omission stays compatible (#489)', () => {
     const store = RunStore.open(dataDir);
-    const autonomous = store.createRun({
+    const autonomous = store.createRun({ author: localCliAuthor(),
       title: 'autonomous task',
       workflow: 'quick-task',
       task: 'autonomous task',
       autonomous: true,
       steps: [],
     });
-    const interactive = store.createRun({
+    const interactive = store.createRun({ author: localCliAuthor(),
       title: 'interactive task',
       workflow: 'quick-task',
       task: 'interactive task',
@@ -337,7 +338,7 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('updateRun fans the new fields out on the run channel (the SSE feed)', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     const seen: Array<{ titleSummary?: string }> = [];
     store.on('run', (r: { titleSummary?: string }) => seen.push({ titleSummary: r.titleSummary }));
     store.updateRun(run.id, { titleSummary: 'A real summary of the turn' });
@@ -356,7 +357,7 @@ describe('RunStore — PR auto-link only on real creation (#fake-pr)', () => {
 
   const freshRun = () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     return { store, run };
   };
 
@@ -447,7 +448,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.appendEvent(run.id, {
       type: 'tool-result',
       result: 'printenv output: GITHUB_TOKEN=gho_thisisarealsecrettoken123456',
@@ -460,7 +461,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
   it('scrubs a token shape even when it never lived in cezar’s env', () => {
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.appendEvent(run.id, {
       type: 'tool-result',
       result: 'cat ~/.aws: AKIAIOSFODNN7EXAMPLE and sk-ant-api03-abcdefghijklmnopqrst',
@@ -473,7 +474,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     process.env.CEZ_REDACT_SECRETS = '0';
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.appendEvent(run.id, {
       type: 'tool-result',
       result: 'GITHUB_TOKEN=gho_thisisarealsecrettoken123456',
@@ -491,7 +492,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(run.id, {
       titleSummary: 'Set GITHUB_TOKEN=gho_thisisarealsecrettoken123456 in CI',
       error: 'auth failed for gho_thisisarealsecrettoken123456',
@@ -510,7 +511,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
   it('scrubs a token shape from a user-supplied title too', () => {
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(run.id, { title: 'rotate ghp_0123456789abcdefghijABCDEFGHIJ0123' });
     expect(store.getRun(run.id)?.title).toBe('rotate [REDACTED]');
   });
@@ -518,7 +519,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
   it('leaves ordinary record fields alone', () => {
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(run.id, {
       titleSummary: 'Catch AuthError in the login handler',
       status: 'done',
@@ -541,7 +542,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'task',
@@ -566,7 +567,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'task',
@@ -584,7 +585,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     process.env.CEZ_REDACT_SECRETS = '0';
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'task',
@@ -599,7 +600,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'rotate gho_thisisarealsecrettoken123456',
       workflow: 'w',
       task: 'task',
@@ -619,7 +620,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'deploy the thing', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'deploy the thing', steps: [] });
     expect(store.getRun(run.id)?.task).toBe('deploy the thing');
   });
 
@@ -627,7 +628,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     process.env.CEZ_REDACT_SECRETS = '0';
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(run.id, { titleSummary: 'gho_thisisarealsecrettoken123456' });
     expect(store.getRun(run.id)?.titleSummary).toBe('gho_thisisarealsecrettoken123456');
   });
@@ -635,7 +636,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
   it('does not disturb a PR URL (redaction leaves non-secrets intact)', () => {
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.appendEvent(run.id, {
       type: 'result',
       result: 'Opened a draft pull request: https://github.com/open-mercato/cezar/pull/42',
@@ -655,7 +656,7 @@ describe('RunStore — referenced-PR discovery (#407, spec 2026-07-16-pr-autodis
 
   const freshRun = (task = 'task') => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task, steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task, steps: [] });
     return { store, run };
   };
 
@@ -805,7 +806,7 @@ describe('RunStore — agent-declared marker refs (spec 2026-07-18-task-ref-mark
 
   const freshRun = (task = 'task') => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task, steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task, steps: [] });
     return { store, run };
   };
 
@@ -908,7 +909,7 @@ describe('RunStore — referenced-issue discovery (spec 2026-07-21-report-ref-di
 
   const freshRun = (task = 'task') => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task, steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task, steps: [] });
     return { store, run };
   };
 
@@ -1053,7 +1054,7 @@ describe('RunStore — seq survives a restart (#424 symptom class)', () => {
 
   it('continues numbering above the NDJSON max after reopen, so replayed clients keep receiving', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
     store.appendEvent(run.id, { type: 'note', message: 'one' });
     store.appendEvent(run.id, { type: 'note', message: 'two' });
     store.flush();
@@ -1069,7 +1070,7 @@ describe('RunStore — seq survives a restart (#424 symptom class)', () => {
 
   it('starts at 1 for a run with no event file', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
     expect(store.appendEvent(run.id, { type: 'note', message: 'first' }).seq).toBe(1);
   });
 });
@@ -1087,7 +1088,7 @@ describe('RunStore — provider authorization callouts', () => {
 
   it('persists the structured provider-auth-required event without vendor error text', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
 
     store.appendEvent(run.id, {
       type: 'provider-auth-required',
@@ -1133,7 +1134,7 @@ describe('RunStore — queuedMessages (#472)', () => {
 
   it('round-trips a record carrying the stack', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'ship it', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'ship it', steps: [] });
     store.updateRun(run.id, {
       queuedMessages: [
         { id: 'm1', text: 'and update the changelog', createdAt: '2026-07-21T10:00:00.000Z' },
@@ -1164,7 +1165,7 @@ describe('RunStore — queuedMessages (#472)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'deploy', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'deploy', steps: [] });
     store.updateRun(run.id, {
       queuedMessages: [
         { id: 'm1', text: 'use gho_thisisarealsecrettoken123456', createdAt: '2026-07-21T10:00:00.000Z' },
@@ -1193,7 +1194,7 @@ describe('RunStore — read receipts (#unread-done-items)', () => {
    *  future `finishedAt` would make a just-read run compare as still-unread. */
   const FINISHED_AT = '2020-01-01T00:00:00.000Z';
   function finishedRun(store: RunStore, status: 'done' | 'failed' | 'cancelled'): string {
-    const run = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', steps: [] });
     store.updateRun(run.id, { status, finishedAt: FINISHED_AT });
     return run.id;
   }
@@ -1269,7 +1270,7 @@ describe('RunStore — read receipts (#unread-done-items)', () => {
     const cancelled = finishedRun(store, 'cancelled');
     const alreadyRead = finishedRun(store, 'done');
     store.setRead(alreadyRead);
-    const running = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [] }).id;
+    const running = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', steps: [] }).id;
 
     expect(store.markAllRead()).toBe(2);
     expect(store.getRun(doneUnread)?.seenAt).toBeDefined();
@@ -1500,7 +1501,7 @@ describe('RunStore — stopReason (PLAN D27 Phase 1, step budget)', () => {
 
   it('is absent on an ordinary run, and round-trips through runs.json once set', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'budget stop',
       workflow: 'quick-task',
       task: 'do it',

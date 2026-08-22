@@ -20,6 +20,7 @@ import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { parseTaskMarkers } from '../runs/task-markers.ts';
 import { appendTurnText, RunManager } from './run.ts';
 import type { WorkflowDef } from './types.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 type UsageAccountingHarness = {
   beginUsageInvocation(runId: string, state: Record<string, unknown>, stepId: string): void;
@@ -85,7 +86,7 @@ describe('RunManager directional usage accounting', () => {
   });
 
   function fixture() {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'usage',
       workflow: 'quick-task',
       task: 'usage',
@@ -277,7 +278,7 @@ it('parallel variants ignore a worktree opt-out and retain isolated mode', () =>
         source: 'built-in',
         steps: [{ id: 'work', name: 'Work', prompt: '{{task}}' }],
       },
-      { task: 'compare approaches', worktree: false },
+      { author: localCliAuthor(), task: 'compare approaches', worktree: false },
       2,
     );
 
@@ -331,7 +332,7 @@ describe('RunManager.recordTurnEnd', () => {
 
   /** A run with a real worktree forked off main, holding an edit + a new file. */
   async function makeWorktreeRun(): Promise<RunRecord> {
-    const record = store.createRun({ title: 'fix the login bug', workflow: 'quick-task', task: 'fix the login bug', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 'fix the login bug', workflow: 'quick-task', task: 'fix the login bug', steps: [] });
     const wt = await createWorktree(repoRoot, record.id, 'main');
     store.updateRun(record.id, { worktreePath: wt.path, branch: wt.branch, baseBranch: wt.baseBranch });
     writeFileSync(join(wt.path, 'a.txt'), 'one\nTWO\nthree\n'); // 1 add, 1 del
@@ -412,7 +413,7 @@ describe('RunManager.recordTurnEnd', () => {
   });
 
   it('skips diffStat for a worktree-less run, and never throws', async () => {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'do the thing', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'do the thing', steps: [] });
     await expect(manager.recordTurnEnd(record.id, TURN_TEXT)).resolves.toBeUndefined();
     const after = store.getRun(record.id);
     expect(after?.titleSummary).toBeUndefined();
@@ -424,7 +425,7 @@ describe('RunManager.recordTurnEnd', () => {
   });
 
   it('applies in-band CEZ markers from the turn text (spec 2026-07-18-task-ref-markers)', async () => {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'implement comment threads', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'implement comment threads', steps: [] });
     await manager.recordTurnEnd(
       record.id,
       'Progress so far.\nCEZ:PR=500\nCEZ:ISSUE=433\nCEZ:TITLE=implementing comment threads\nMore to come.',
@@ -439,7 +440,7 @@ describe('RunManager.recordTurnEnd', () => {
   });
 
   it('a marker title never overwrites a user rename — but the numbers still land', async () => {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(record.id, { title: 'My name', titleSummary: 'My name', titleOrigin: 'user' });
     await manager.recordTurnEnd(record.id, 'CEZ:PR=500\nCEZ:TITLE=implementing comment threads');
     const after = store.getRun(record.id);
@@ -449,7 +450,7 @@ describe('RunManager.recordTurnEnd', () => {
   });
 
   it('a junk CEZ:TITLE never blanks the title', async () => {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     await manager.recordTurnEnd(record.id, 'CEZ:PR=500\nCEZ:TITLE=...');
     const after = store.getRun(record.id);
     expect(after?.titleSummary).toBeUndefined();
@@ -458,7 +459,7 @@ describe('RunManager.recordTurnEnd', () => {
   });
 
   it('prose that merely mentions a marker changes nothing', async () => {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     await manager.recordTurnEnd(record.id, 'I will emit CEZ:PR=442 once the PR exists.');
     const after = store.getRun(record.id);
     expect(after?.markerRefs).toBeUndefined();
@@ -500,7 +501,7 @@ describe('RunManager.continueRun override', () => {
 
   /** A finished run with a resumable session on the `claude`/`sonnet` backend. */
   function resumableRun(): string {
-    const record = store.createRun({
+    const record = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 't',
@@ -551,7 +552,7 @@ describe('RunManager.continueRun override', () => {
    *  `status: 'waiting'` (in-progress / needs-you) instead of settling `done`, and its session is
    *  still resumable. NOT in the active map — that is what makes it a park, not a live wait. */
   function parkedWaitingRun(): string {
-    const record = store.createRun({
+    const record = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 't',
@@ -626,7 +627,7 @@ describe('RunManager.continueRun override', () => {
   });
 
   it('a runner-only switch keeps a free-form model id — only known foreign presets are cleared', () => {
-    const record = store.createRun({
+    const record = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 't',
@@ -647,7 +648,7 @@ describe('RunManager.continueRun override', () => {
   });
 
   it('guards legacy records too — no persisted runner resolves to claude, like runContinuation', () => {
-    const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [{ id: 's1', name: 'Work', kind: 'agent' }] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', steps: [{ id: 's1', name: 'Work', kind: 'agent' }] });
     store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
     store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
     const result = manager.continueRun(record.id, { model: 'gpt-5.1-codex' });
@@ -662,7 +663,7 @@ describe('RunManager.continueRun override', () => {
   });
 
   it('refuses to continue a run with no resumable session (no override persisted)', () => {
-    const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', runner: 'claude', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', runner: 'claude', steps: [] });
     store.updateRun(record.id, { status: 'done' });
     const result = manager.continueRun(record.id, { runner: 'codex' });
     expect(result.ok).toBe(false);
@@ -718,7 +719,7 @@ describe('RunManager.settleSuccess — optional review gate', () => {
 
   /** A fresh run + worktree holding a real diff (edit + new file) vs main. */
   async function changedRun(autonomous?: boolean): Promise<RunRecord> {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', autonomous, steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', autonomous, steps: [] });
     const wt = await createWorktree(repoRoot, record.id, 'main');
     store.updateRun(record.id, { worktreePath: wt.path, branch: wt.branch, baseBranch: wt.baseBranch });
     writeFileSync(join(wt.path, 'a.txt'), 'one\nTWO\nthree\n');
@@ -728,7 +729,7 @@ describe('RunManager.settleSuccess — optional review gate', () => {
 
   /** A fresh run + worktree with no changes vs main (empty diff). */
   async function cleanRun(): Promise<RunRecord> {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     const wt = await createWorktree(repoRoot, record.id, 'main');
     store.updateRun(record.id, { worktreePath: wt.path, branch: wt.branch, baseBranch: wt.baseBranch });
     return store.getRun(record.id) as RunRecord;
@@ -830,7 +831,7 @@ describe('a chain of 2 selected skills runs BOTH steps, in order (#410)', () => 
     // `mock:done` makes the mock's turn end with CEZ:DONE — needed so the
     // last (interactive) step closes itself and the run reaches a terminal
     // status instead of parking at `waiting` for a real reply.
-    const record = manager.startRun(workflow, { task: 'mock:done fix the PR', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done fix the PR', worktree: false });
 
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 20_000;
@@ -920,7 +921,7 @@ describe('a single agent step plus a check step gets NO chain note (#410)', () =
         { id: 'verify', command: 'true', onFail: { retry: 'implement', max: 2 } },
       ],
     };
-    const record = manager.startRun(workflow, { task: 'mock:done fix the login bug', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done fix the login bug', worktree: false });
 
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 20_000;
@@ -1010,7 +1011,7 @@ describe('step budget (PLAN D27 Phase 1)', () => {
     // Mutation that must turn this red: land the budget stop in `done` instead of `review`
     // (`workflows/run.ts`'s `budgetExceeded` branch) — confirmed red, then reverted.
     const manager = managerWithBudget(2);
-    const record = manager.startRun(checkWorkflow(['s1', 's2', 's3']), { task: 'do it', worktree: false });
+    const record = manager.startRun(checkWorkflow(['s1', 's2', 's3']), { author: localCliAuthor(), task: 'do it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -1029,7 +1030,7 @@ describe('step budget (PLAN D27 Phase 1)', () => {
     // Mutation that must turn this red: set `stopReason: 'budget'` unconditionally on every
     // finish, not only on the budget branch — confirmed red, then reverted.
     const manager = managerWithBudget(0); // unlimited — the shipped default
-    const record = manager.startRun(checkWorkflow(['s1', 's2']), { task: 'do it', worktree: false });
+    const record = manager.startRun(checkWorkflow(['s1', 's2']), { author: localCliAuthor(), task: 'do it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -1045,7 +1046,7 @@ describe('step budget (PLAN D27 Phase 1)', () => {
     // `stepsExecuted >= config.stepBudget` to `stepsExecuted > config.stepBudget` (or the
     // reverse) — confirmed red, then reverted.
     const manager = managerWithBudget(2);
-    const record = manager.startRun(checkWorkflow(['s1', 's2']), { task: 'do it', worktree: false });
+    const record = manager.startRun(checkWorkflow(['s1', 's2']), { author: localCliAuthor(), task: 'do it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -1063,7 +1064,7 @@ describe('step budget (PLAN D27 Phase 1)', () => {
       source: 'file',
       steps: [{ id: 's1', command: 'false' }],
     };
-    const record = manager.startRun(workflow, { task: 'do it', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'do it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -1081,7 +1082,7 @@ describe('step budget (PLAN D27 Phase 1)', () => {
     // Mutation that must turn this red: read only `config.stepBudget` in `effectiveStepBudget()`,
     // ignoring `run.stepBudgetOverride` entirely — confirmed red, then reverted.
     const manager = managerWithBudget(0); // repo-wide: unlimited
-    const record = manager.startRun(checkWorkflow(['s1', 's2', 's3']), {
+    const record = manager.startRun(checkWorkflow(['s1', 's2', 's3']), { author: localCliAuthor(),
       task: 'do it',
       worktree: false,
       stepBudgetOverride: 2,
@@ -1158,7 +1159,7 @@ describe('step budget bounds an open session self-continuing, not only fresh wor
     // turn-end check in `runAgentStep`'s onEvent). A single-step, single-agent-step workflow never
     // re-enters that loop once its one step starts, so with only the loop-top check the run would
     // keep parking as `monitoring` forever instead of ever stopping. Confirmed red, then reverted.
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring turn 1', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring turn 1', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring'); // turn 1: spends 1/3, parks
     expect(store.getRun(record.id)?.status).toBe('running');
@@ -1249,7 +1250,7 @@ describe('a stepBudgetOverride bounds a self-continuing single-step run even whe
     // ignore `run.stepBudgetOverride`. Either way the run keeps parking as `monitoring` past turn
     // 2 instead of stopping, because `config.stepBudget` here is 0 — reachably unbounded. Confirmed
     // red, then reverted.
-    const record = manager.startRun(SINGLE_STEP, {
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(),
       task: 'mock:monitoring turn 1',
       worktree: false,
       autonomous: true,
@@ -1324,7 +1325,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
   };
 
   it('a CEZ:MONITORING turn-end parks the run as running/monitoring', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring');
     const parked = store.getRun(record.id);
@@ -1341,7 +1342,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
    * the run at `waiting`, not `done`: an unanswered handoff is never recorded as finished.
    */
   it('an idle-parked ordinary wait stays `waiting`, never settles `done`', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:hello', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:hello', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const state = (
@@ -1372,7 +1373,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
    * therefore publish a wake deadline: the run has to be able to resume itself.
    */
   it('a parked monitor schedules its own re-check under the zero-config default (#810)', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring');
     await waitFor(record.id, (r) => Boolean(r?.monitoringWakeAt));
@@ -1392,7 +1393,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
     manager = new RunManager(store, repoRoot, {
       semaphore: new WorkspaceSemaphore({ initial: { monitoringWakeIntervalMinutes: null } }),
     });
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring');
     expect(store.getRun(record.id)?.monitoringWakeAt).toBeUndefined();
@@ -1406,7 +1407,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
     manager.dispose();
     const semaphore = new WorkspaceSemaphore({ initial: { monitoringWakeIntervalMinutes: 0.001 } });
     manager = new RunManager(store, repoRoot, { semaphore });
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, () => {
       const path = join(repoRoot, '.ai/cezar/runs', `${record.id}.ndjson`);
@@ -1421,14 +1422,14 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
   }, 30_000);
 
   it('a markerless turn-end still parks as waiting with no activity', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'just do the thing', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'just do the thing', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     expect(store.getRun(record.id)?.activity).toBeUndefined();
   }, 30_000);
 
   it('strips the CEZ:MONITORING marker from server-emitted v1 text events', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring');
     // v1 `text` events are stripped server-side (like CEZ:DONE); v2 message items carry
@@ -1444,7 +1445,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
   }, 30_000);
 
   it('resuming a monitoring run clears the activity', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring');
     // A user reply (no marker) resumes the run: the follow-up turn re-parks as
@@ -1517,7 +1518,7 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
       .map((l) => JSON.parse(l));
 
   it('a CEZ:ASK turn-end parks the run as waiting (attention) and emits ask.requested', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask which library?', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:ask which library?', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const parked = store.getRun(record.id);
@@ -1532,7 +1533,7 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
   }, 30_000);
 
   it('strips the CEZ:ASK marker from server-emitted v1 text events', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask pick one', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:ask pick one', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const v1Text = readEvents(record.id).filter((e) => e.type === 'text');
@@ -1541,7 +1542,7 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
   }, 30_000);
 
   it('normalizes a near-valid presentation-only marker into exactly one ask card', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask-near choose', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:ask-near choose', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const events = readEvents(record.id);
@@ -1557,14 +1558,14 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
   }, 30_000);
 
   it('a markerless turn-end raises no ask.requested', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'just do the thing', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'just do the thing', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     expect(readEvents(record.id).some((e) => e.type === 'ask.requested')).toBe(false);
   }, 30_000);
 
   it('a malformed CEZ:ASK degrades gracefully: parks waiting, no ask card', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask-bad choose', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:ask-bad choose', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const parked = store.getRun(record.id);
@@ -1581,7 +1582,7 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
   // to answer. An invalid marker must survive as raw text (degraded but
   // answerable) and still park the run `waiting`.
   it('a schema-invalid CEZ:ASK stays visible in v1 text — no card will ever render it', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask-invalid choose', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:ask-invalid choose', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const events = readEvents(record.id);
@@ -1691,7 +1692,7 @@ describe('RunManager queued-stack mutators (#472)', () => {
 
   /** Seed a run that the engine still holds as queued. */
   const seedQueued = (task = 'ship it') => {
-    const record = store.createRun({ title: 't', workflow: 'w', task, steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task, steps: [] });
     (
       manager as unknown as {
         pendingJobs: Map<string, { workflow: WorkflowDef; input: { task: string } }>;
@@ -1738,7 +1739,7 @@ describe('RunManager queued-stack mutators (#472)', () => {
   });
 
   it('hydrates edits and stacked messages into a queued restart continuation', async () => {
-    const r = store.createRun({
+    const r = store.createRun({ author: localCliAuthor(),
       title: 'interrupted task',
       workflow: 'quick-task',
       task: 'original recovery goal',
@@ -2034,7 +2035,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
   });
 
   it('folds the task and every stacked message, in order, blank-line joined', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'build the thing', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'build the thing', steps: [] });
     stack(r.id, { text: 'also update the changelog' }, { text: 'and bump the version' });
 
     expect(hydrate(r.id, r.task).task).toBe(
@@ -2043,7 +2044,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
   });
 
   it('leaves the input untouched when nothing is stacked', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'build the thing', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'build the thing', steps: [] });
     expect(hydrate(r.id, r.task).task).toBe('build the thing');
   });
 
@@ -2053,7 +2054,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
    * this rule every recovery would grow the prompt without bound.
    */
   it('never writes the folded prompt back to the record, and is idempotent', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'build the thing', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'build the thing', steps: [] });
     stack(r.id, { text: 'also update the changelog' });
 
     const once = hydrate(r.id, r.task).task;
@@ -2070,7 +2071,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
   });
 
   it('re-encodes stacked attachments from disk into stackedImages', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'look at this', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'look at this', steps: [] });
     const dir = join(repoRoot, '.ai/cezar', 'runs', `${r.id}-images`);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'pasted-1.png'), 'the-bytes');
@@ -2085,7 +2086,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
   });
 
   it('re-encodes initial task images from disk after a queued-run restart (#612)', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'look at this', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'look at this', steps: [] });
     const dir = join(repoRoot, '.ai/cezar', 'runs', `${r.id}-images`);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'pasted-1.png'), 'the-task-bytes');
@@ -2105,7 +2106,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
 
   /** Degrade, never fail the boot (AGENTS.md). */
   it('skips an unreadable attachment, notes it, and still starts', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'look at this', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'look at this', steps: [] });
     stack(r.id, { text: 'see the mock', images: [`/api/v1/runs/${r.id}/images/gone-1.png`] });
 
     const hydrated = hydrate(r.id, r.task);
@@ -2163,8 +2164,8 @@ describe('queued stacking reaches the backend (#472)', () => {
   });
 
   it('delivers the task plus every stacked message, with the edit applied', async () => {
-    const first = manager.startRun(WORKFLOW, { task: 'mock:done occupy the slot', worktree: false });
-    const second = manager.startRun(WORKFLOW, { task: 'mock:done original prompt', worktree: false });
+    const first = manager.startRun(WORKFLOW, { author: localCliAuthor(), task: 'mock:done occupy the slot', worktree: false });
+    const second = manager.startRun(WORKFLOW, { author: localCliAuthor(), task: 'mock:done original prompt', worktree: false });
 
     // The second run is holding in the queue — amend it there.
     expect(store.getRun(second.id)?.status).toBe('queued');
@@ -2226,7 +2227,7 @@ describe('recover() carries the queued stack exactly once (#472)', () => {
   });
 
   it('folds once across repeated recoveries', async () => {
-    const r = store.createRun({ title: 't', workflow: '(planned)', task: 'the original task', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: '(planned)', task: 'the original task', steps: [] });
     store.updateRun(r.id, {
       status: 'queued',
       workflowDef: WORKFLOW,
@@ -2304,7 +2305,7 @@ describe('native Codex requestUserInput parks and resumes the run (#565)', () =>
   };
 
   it('persists the ask, parks immediately, then routes the answer to the pending RPC', async () => {
-    const record = manager.startRun(workflow, {
+    const record = manager.startRun(workflow, { author: localCliAuthor(),
       task: 'mock:native-codex-ask choose a library', runner: 'codex', worktree: false,
     });
     runId = record.id;
@@ -2393,7 +2394,7 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
    *  it is what a user pressing Finish does, and `continueRun` only accepts a run that
    *  reached a terminal status. */
   const finishedRun = async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'do the first thing', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'do the first thing', worktree: false });
     runId = record.id;
     await waitFor(() => store.getRun(record.id)?.status === 'waiting');
     expect(manager.finish(record.id)).toBe(true);
@@ -2504,7 +2505,7 @@ describe('a continuation cannot finish an unfinished chain (P2)', () => {
       ],
     };
     // `mock:done` makes every mock turn end with CEZ:DONE.
-    const record = manager.startRun(workflow, { task: 'mock:done do the thing', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done do the thing', worktree: false });
     await settled(record.id);
     expect(store.getRun(record.id)?.status).toBe('done');
 
@@ -2611,7 +2612,7 @@ describe('a step is green only when its post-condition holds', () => {
         { id: 'after', command: 'true' },
       ],
     };
-    const record = manager().startRun(workflow, { task: 'ship it', worktree: false });
+    const record = manager().startRun(workflow, { author: localCliAuthor(), task: 'ship it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -2639,7 +2640,7 @@ describe('a step is green only when its post-condition holds', () => {
         },
       ],
     };
-    const record = manager().startRun(workflow, { task: 'ship it', worktree: false });
+    const record = manager().startRun(workflow, { author: localCliAuthor(), task: 'ship it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -2657,7 +2658,7 @@ describe('a step is green only when its post-condition holds', () => {
       source: 'file',
       steps: [{ id: 'ship', command: 'true', verify: { command: 'false', max: 2 } }],
     };
-    const record = manager().startRun(workflow, { task: 'ship it', worktree: false });
+    const record = manager().startRun(workflow, { author: localCliAuthor(), task: 'ship it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -2674,7 +2675,7 @@ describe('a step is green only when its post-condition holds', () => {
       source: 'file',
       steps: [{ id: 's1', command: 'true' }, { id: 's2', command: 'true' }],
     };
-    const record = manager().startRun(workflow, { task: 'do it', worktree: false });
+    const record = manager().startRun(workflow, { author: localCliAuthor(), task: 'do it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -2691,7 +2692,7 @@ describe('a step is green only when its post-condition holds', () => {
       source: 'file',
       steps: [{ id: 'deploy', command: 'true', verify: { builtin: 'all-services-deployed', max: 0 } }],
     };
-    const record = manager().startRun(workflow, { task: 'deploy it', worktree: false });
+    const record = manager().startRun(workflow, { author: localCliAuthor(), task: 'deploy it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);

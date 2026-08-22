@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import type { WorkflowDef } from './types.ts';
 import { RunManager } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -84,7 +85,7 @@ describe('model identity wiring (dry run)', () => {
 
   async function runToEnd(input: { task: string; model?: string }): Promise<string> {
     writeFileSync(argsFile, '', 'utf8'); // fresh capture per run
-    const record = manager.startRun(workflow, input);
+    const record = manager.startRun(workflow, { ...input, author: localCliAuthor() });
     await settle(record.id);
     return record.id;
   }
