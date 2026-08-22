@@ -70,6 +70,13 @@ export interface BrokeredSessionOptions {
    * this is the one place the brokered path could quietly have broken it.
    */
   encodeSend?: (content: ContentBlock[]) => string;
+  /**
+   * The broker child's own OS-level spawn error, if any (`proc.on('error', …)` in `spawnBroker`).
+   * Consulted only when the control channel gives up after `PENDING_MAX_ATTEMPTS` — lets a
+   * broker that failed to spawn at all surface its real cause instead of the generic
+   * "did not respond" message that's all the connect-retry loop can see on its own.
+   */
+  spawnFailed?: () => Error | null;
 }
 
 export class BrokeredSession implements AgentSession {
@@ -97,7 +104,10 @@ export class BrokeredSession implements AgentSession {
     });
     this.tick();
     this.timer = setInterval(() => this.tick(), opts.pollMs ?? SPOOL_POLL_MS);
-    this.timer.unref?.();
+    // Deliberately ref'd (unlike every sibling unref'd timer in this codebase): this is the ONLY
+    // handle that keeps a one-shot `cezar run` process alive while its session is genuinely open.
+    // `finish()` and `detach()` both `clearInterval` it the moment the session reaches a terminal
+    // state, so this only holds the process open for exactly as long as a run is in flight.
   }
 
   /** The BACKEND's pid (from the spool's meta), not the broker's — callers use this for the
@@ -183,7 +193,7 @@ export class BrokeredSession implements AgentSession {
    * Strictly one in flight: the broker writes each `send` straight to the backend's stdin, so two
    * concurrent sends could interleave turns. `attempts` bounds the retry so a broker that died
    * between spawn and bind cannot spin this forever — after the budget the queue is dropped and
-   * the session reports itself closed, which is the truthful state.
+   * the session gives up for real (see `giveUp`), which is the truthful terminal state.
    */
   private async pumpPending(): Promise<void> {
     if (this.sending || this.pending.length === 0 || this.closed) return;
@@ -197,7 +207,11 @@ export class BrokeredSession implements AgentSession {
           this.attempts += 1;
           if (this.attempts >= PENDING_MAX_ATTEMPTS) {
             this.pending.length = 0;
-            this.stdinOpen = false;
+            const waitedMs = this.attempts * (this.opts.pollMs ?? SPOOL_POLL_MS);
+            this.giveUp(
+              this.opts.spawnFailed?.() ??
+                new Error(`run broker for ${this.spoolDir} did not respond after ${waitedMs}ms — giving up`),
+            );
           }
           return;
         }
@@ -207,6 +221,21 @@ export class BrokeredSession implements AgentSession {
     } finally {
       this.sending = false;
     }
+  }
+
+  /**
+   * Terminal path for "the control channel never came up." Distinct from `finish()`: there is no
+   * real backend exit to report (the backend may never even have started), so this deliberately
+   * does not call `opts.onExit` — that callback's vocabulary is for a real `SpoolExit`, and calling
+   * it here with nothing would read as a misleading `done`/`note` event ahead of the `failed`
+   * status the rejected `result` produces.
+   */
+  private giveUp(err: Error): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.stdinOpen = false;
+    if (this.timer) clearInterval(this.timer);
+    this.failWith(err);
   }
 
   sendMessage(content: ContentBlock[]): boolean {
