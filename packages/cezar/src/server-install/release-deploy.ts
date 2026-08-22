@@ -118,6 +118,7 @@ export interface ReleaseDeployHost {
   smokeBoot(dir: string): Promise<ProbeResult>;
   restart(unit: string): Promise<void>;
   probeReady(port: number): Promise<ProbeResult>;
+  waitReady(port: number, timeoutMs: number): Promise<ProbeResult>;
   freeBytes(path: string): number;
   now(): string;
   spawnDetached(argv: string[], env: NodeJS.ProcessEnv): void;
@@ -173,6 +174,9 @@ export function defaultHost(log: (line: string) => void): ReleaseDeployHost {
     },
     async probeReady(port) {
       return probeReady(port);
+    },
+    async waitReady(port, timeoutMs) {
+      return waitForReady(port, timeoutMs);
     },
     freeBytes,
     now: () => new Date().toISOString(),
@@ -273,7 +277,7 @@ export async function probeReady(port: number, path = '/api/v1/ready'): Promise<
   }
 }
 
-async function waitForReady(port: number, timeoutMs: number): Promise<ProbeResult> {
+export async function waitForReady(port: number, timeoutMs: number): Promise<ProbeResult> {
   const deadline = Date.now() + timeoutMs;
   let last: ProbeResult = { ok: false, detail: 'never probed' };
   while (Date.now() < deadline) {
@@ -384,7 +388,7 @@ export async function runReleaseDeploy(
   if (rollback) {
     const outcome = await runRollback(
       { releasesDir, linkPath, ...(options.rollbackTo ? { to: options.rollbackTo } : {}) },
-      { restart: () => fx.restart(unitName), emit, now: fx.now },
+      { restart: () => fx.restart(unitName), probeReady: () => fx.waitReady(port, 30_000), emit, now: fx.now },
     );
     return { ok: outcome.ok, outcome, ...(outcome.ok ? {} : { error: outcome.detail }) };
   }
