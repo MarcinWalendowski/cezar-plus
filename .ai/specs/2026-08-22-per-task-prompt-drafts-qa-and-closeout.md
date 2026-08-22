@@ -1,11 +1,13 @@
 # Per-task prompt drafts — closing the loop: QA verification, not new design
 
-> **Status:** QA needed — verification-only, no new code anticipated · **Date:** 2026-08-22 ·
+> **Status:** QA executed 2026-08-22 — gates green (two documented environment-trap failures, not
+> regressions), runtime E2E 7/8 steps confirmed live, one named gap (send-and-clear, driver
+> timeout — see the corrected Runtime E2E section of the extended spec below) · **Date:** 2026-08-22 ·
 > **Owner instruction (unchanged from the original run):** "right now we persist input value when
 > creating new agent, but let's do the same when adding prompt into any of tasks (running, etc. in
 > every state) it should be seperately persisted on task: on some interval + before navigating
 > await + use best practices" · **Extends:** `.ai/specs/2026-08-21-per-task-prompt-drafts.md`
-> (598 lines, status *"implemented (qa needed — the browser e2e has not been run)"*), which is
+> (598 lines, status now *"implemented, QA passed 2026-08-22 (one named gap)"*), which is
 > **already implemented and deployed** — see below. **Brief:** `.ai/specs/briefs/2026-08-22-per-task-prompt-drafts-rerun.md`
 > (step 1 of this run).
 
@@ -265,3 +267,43 @@ happened in the prior run):
   in flight elsewhere.
 - Why this task re-entered the chain after "SHIPPED" is not determinable from the repo or handoff
   alone (brief's open question #2) — flagged here again rather than guessed at.
+
+## Result (2026-08-22)
+
+Executed against the tree reconciled to `origin/main` (`ff06ecc7` reachable from `HEAD`; the
+running production instance separately confirmed at `deploy.sha=504ce87f`, a descendant that does
+not touch `task-drafts.ts` / `thread-composer.tsx` / `review-panel.tsx` / `approval-card.tsx`).
+
+**Gates (root, scrubbed env, clean `npm ci`):** `typecheck` 0, `test:unit` 0, `build` 0,
+`test:package` 0 (15/15). `npm test`: 2 failed / 9758 passed / 1 skipped. Both failures are
+environment traps, not regressions:
+- `catalog.test.ts` C18 ("stays under 40ms CPU... per MiB of scanned corpus", 70.29 observed) —
+  previously documented host-load flake.
+- `config-api.test.ts` ("uses the coding agents' native model settings as the initial defaults") —
+  **newly diagnosed this run**: `CLAUDE_CONFIG_DIR` (this agent's own Claude Code config dir) leaks
+  into the test's child process; the test saves/restores `HOME`/`CEZ_HOME`/`CODEX_HOME`/
+  `XDG_CONFIG_HOME` but not `CLAUDE_CONFIG_DIR`, so `agentHomePaths()` resolves `~/.claude` to the
+  real agent config dir instead of the test's scratch home. Isolated re-run with
+  `CLAUDE_CONFIG_DIR` also unset: 15/15 pass. This is a **third environment trap**, alongside the
+  `CEZ_*`-prefix scrub and the phantom-`node_modules` resolution `AGENTS.md` § "Five environment
+  traps" already documents — none of its files were touched by any commit since `ff06ecc7`.
+  The `store.test.ts` fixture-`author` typecheck failure named in earlier reviews of this run's
+  spec did **not** reproduce — `504ce87f` (already on this branch) fixed it, as anticipated.
+
+**Runtime E2E (raw Playwright, throwaway instance):** steps 1, 2, 3, 3b, 5, 6, 7, 8 **PASS**,
+observed live (log: composer survives tab-switch and reload; second task's composer starts empty
+and the first task's text is untouched by visiting it — the leak this spec exists to fix, confirmed
+absent; drafts survive on seeded `queued` and closed-`continuable` runs; exactly the two seeded
+`cez-task-prompt:<uuid>` keys exist; review-gate and approval-gate notes persist across tab-switch
+and reload). Step 4 and the send-clearing halves of 7/8 are a **named gap**: the driver that sends
+a real reply through a live `CEZ_DRY_RUN=1` run timed out waiting for the composer to render after
+run creation, and separately hung afterward (its error path never calls `browser.close()`, leaving
+an orphaned Chromium holding the process open — a bug in the throwaway script, not the product;
+the stray process was killed as part of this closeout). Per this spec's own rule, a claimed-but-
+unrun e2e is worse than naming the gap: send-and-clear is **not** independently browser-confirmed
+this run, though it remains covered by the passing unit suites cited in the shipped spec.
+
+**Closeout:** `.ai/specs/2026-08-21-per-task-prompt-drafts.md`'s status header and Runtime E2E
+section were amended in place (steps 1–8 executed, one named gap) rather than superseded — the
+shipped feature is not being re-litigated, only its verification record corrected. This spec's own
+status header above reflects the same result. No code changed as part of this closeout.

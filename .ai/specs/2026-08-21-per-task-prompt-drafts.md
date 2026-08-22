@@ -1,6 +1,6 @@
 # Per-task prompt drafts — the thread composer stops forgetting
 
-> **Status:** implemented (qa needed — the browser e2e has not been run) · **Date:** 2026-08-21 · **Owner instruction:** "right now we
+> **Status:** implemented, QA passed 2026-08-22 (one named gap — see Runtime E2E below) · **Date:** 2026-08-21 · **Owner instruction:** "right now we
 > persist input value when creating new agent, but let's do the same when adding prompt into any of
 > tasks (running, etc. in every state) it should be seperately persisted on task: on some interval
 > + before navigating await + use best practices" · **Brief:** written in step 1
@@ -560,8 +560,30 @@ running cockpit:
    approval-gated run is available in the fixture workspace, say so and cover it at the unit level
    only — a claimed e2e that was not run is worse than a named gap.
 
-Until steps 1–6 have actually been executed against a real browser, this is **"qa needed", not
-done** — per `AGENTS.md` and the repo's definition of done.
+**Corrected 2026-08-22 — QA executed, steps 1–8.** Driven with raw Playwright against a booted
+throwaway instance per `AGENTS.md` § "Verifying a cockpit UI change" (deployed `sha` at the time,
+`ff06ecc7`, confirmed reachable from the tested `HEAD`). Results, recorded in
+`.ai/specs/2026-08-22-per-task-prompt-drafts-qa-and-closeout.md`:
+
+- **Steps 1, 2, 3, 3b, 5, 6, 7, 8 — PASS**, live in a real browser: tab-switch and reload
+  persistence, cross-task isolation (the leak this spec exists to fix), draft survival on `queued`
+  and closed-`continuable` runs, exactly-one-key-per-task in `localStorage`, and review-gate /
+  approval-gate notes persistence — all observed directly, not inferred.
+- **Step 4 and the send-clearing halves of 7/8 — named gap, not a confirmed defect.** The
+  separate driver that sends a real reply through a live `CEZ_DRY_RUN=1` run
+  (`cez-eb9f65aa-qa-send.cjs`) timed out waiting for the composer to render after creating the run,
+  before it could observe a send-and-clear cycle end to end. The underlying clear-on-send behaviour
+  remains covered at the unit level (`task-thread.test.ts`, `review-panel.test.tsx`,
+  `approval-card.test.tsx`, 734/734 green per the original implementation), and this driver's own
+  hang (browser never closed on its error path, confirmed separately) points at a QA-tooling defect
+  in the throwaway script rather than the shipped feature. Per this section's own rule ("a claimed
+  e2e that was not run is worse than a named gap"), this is recorded as an open gap: a live,
+  browser-driven confirmation of send-and-clear has still not been captured, and should not be
+  assumed from the unit coverage alone.
+
+Steps 1–8 have now been executed against a real browser (with the one gap above named rather than
+skipped silently) — per `AGENTS.md` and the repo's definition of done, this clears "qa needed" for
+everything but that one send-and-clear path.
 
 ## Resolved at the review gate (2026-08-21)
 
