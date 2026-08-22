@@ -72,6 +72,16 @@ the exception: the biggest machine here, and the one that sleeps, so it is a *ca
 may take overflow, never a capacity number you can count on. The next ceiling after compute is not
 compute — it is the **agent subscription**, for which no measured number exists (§4, Q2a).
 
+**A fleet you cannot see is a fleet you will not run.** So the cockpit gets its own stage
+(**Phase 1b**, before any state replicates): one Settings section listing every node with the two
+numbers admission actually uses (`active/maxParallel`, `heavyActive/maxHeavySteps`), which
+enforcement it really has (`cgroup` on Linux, `process-tree` on the Mac, or `none` — stated, never
+implied), its labels, its repo drift, and the age of its last presence. Adding a node is one
+minted, copyable line — `npx -y @loki-labs/better-cezar@<hub version> cluster join cezj_…` — whose
+token is **single-use and short-lived by design**, because a command rendered in a UI ends up in
+screenshots and shell histories, and because every path on the hub 302s to Cloudflare Access, which
+rules `curl … | sh` out entirely (D17).
+
 The single most important thing in this document is a refusal: **replication must not ship before
 the claim lease.** `todo-autostart.ts` turns `autostart: true` into a live agent run from an
 `fs.watch` on `todos.json`, and the "first start wins" guarantee that stops a double start today is
@@ -708,6 +718,20 @@ indistinguishable from a quiet system. macOS `fs.watch` is known to go quiet acr
 low-frequency full reconcile (watermark comparison, then a diff pass) runs regardless of whether any
 op arrived, and its last-success time is a health signal the cockpit renders.
 
+**D17 — A node joins with one pasteable line, and that line never carries a durable credential.**
+The cockpit mints a code and renders the whole command — hub URL and code packed into one opaque
+`cezj_` token, with the hub's **own** version pinned into the `npx` spec rather than `@latest`,
+because protocol skew is permanent (D13) and a node should start life matched to the hub that
+minted it. The rule that constrains the design is what may appear in that string: a command
+rendered in a UI is screenshotted, pasted into chat, and left in the shell history of a machine we
+may not own, so only a **single-use, short-TTL, digest-at-rest** code goes in it. The Cloudflare
+Access credential — durable, and sufficient to reach the hub — is supplied from the operator's
+environment instead, which means enrollment answers **two independent gates** and must say which
+one refused it. And it is `npx`, not `curl … | sh`: measured 2026-08-22, every path on
+`cockpit.example.com` 302s to the Access login, so a piped installer would feed an HTML login page
+to a shell. The npm registry is the one distribution channel in this design that Access does not
+sit in front of.
+
 ### Rejected alternatives
 
 | rejected | why |
@@ -739,7 +763,7 @@ packages/cezar/src/cluster/
   reconcile.ts         periodic full reconcile + `cez cluster reconcile`
 packages/cezar/src/server/cluster-routes.ts
 packages/contract/src/cluster.ts
-packages/web/src/routes/settings/cluster.tsx
+packages/web/src/routes/settings/cluster-section.tsx    Phase 1b: the fleet panel + Add node
 ```
 
 Plus one extension rather than a new module: `server-install/platforms/hetzner.ts` gains a
@@ -770,6 +794,10 @@ Vertical slice following the `automations` convention — *"not modular; no plug
   pair. What opt-in buys is behavioural — no index, no watcher, no timer, no route, no nav item, no
   prompt bytes.
 - `workspace-runs-routes.ts` — union the remote projection into the workspace runs list.
+- `routes/settings/registry.tsx` — **one** entry (`id: 'cluster'`, `appliesTo: 'workspace'`,
+  `capability: 'cluster'`) and the `SettingsCapabilities` alias widened to include `cluster`, so
+  the shell that forwards capabilities cannot fall behind the filter that reads them. The registry
+  is by its own docblock the one place a section is declared; there is no other layout work.
 - `server-install/platforms/hetzner.ts` (+ `steps.ts`) — the **worker role** (Phase 4): checkouts,
   agent CLI logins, cgroup caps, `CEZ_ENV_PASSTHROUGH`, `cez cluster enroll`. An extension of the
   existing step list, not a second provisioning path.
@@ -781,7 +809,7 @@ Nothing else in phases 1-5. In particular `RunStatus`, `StepStatus` and every ex
 file format are unchanged, and `RunStore`/`RunRecord` are untouched *by the cluster half*.
 
 **Phase 0 is a separate, smaller diff, and it does touch the store** — the sentence above is about
-phases 1-5 only, and saying "nothing else" without this caveat would have been false:
+phases 1-5 only (1b included), and saying "nothing else" without this caveat would have been false:
 
 - `runs/store.ts` — four additive optional fields (`peakCpuPct`, `peakMemoryBytes`, `cpuSeconds`,
   `resourceKill`). Additive and optional, so an older cezar reading a newer `runs.json` is
@@ -849,9 +877,11 @@ dirty file while every pull silently failed. A push is not delivery; this makes 
 
 ## Phases
 
-Each phase is independently shippable and independently verifiable. Two rules set the ordering:
-**no phase creates shared state without the lease that makes it safe**, and **the box gets faster
-before it gets a partner** — otherwise a second node just reproduces the same saturation twice.
+Each phase is independently shippable and independently verifiable. Three rules set the ordering:
+**no phase creates shared state without the lease that makes it safe**; **the box gets faster
+before it gets a partner** — otherwise a second node just reproduces the same saturation twice; and
+**nothing is dispatched to a fleet nobody can see**, which is why the cockpit's Cluster section
+(1b) lands before any state replicates rather than after everything works.
 
 **Phase 0 — Raise concurrency on the box that already exists. No cluster.**
 This is the phase that delivers the owner's 8, and it needs no link, no replication and no second
@@ -870,9 +900,82 @@ and Phase 0's measurements are what tell you whether you need to.
 
 **Phase 1 — Identity and link (inert).**
 `nodeId`, discovered labels, enrollment, outbound WS, presence, protocol-version handshake,
-`capabilities.cluster`, the cockpit's Cluster panel showing peers online/offline and per-node
-repo drift. **No state replicates.** Provisioning: a cockpit-app Access service token (see Problem
-§7). Ship it and nothing about either cockpit's behaviour changes.
+`capabilities.cluster`. **No state replicates**, and there is no UI yet — Phase 1's surface is the
+API and the CLI, so the link can be proven before anything renders it. Provisioning: a cockpit-app
+Access service token (see Problem §7). Ship it and nothing about either cockpit's behaviour changes.
+
+**Phase 1b — The Cluster section in the cockpit: see the fleet, and add a node in one command.**
+Phase 1 makes a cluster addressable; this makes it *operable*. Without it every answer to "why is
+this queued" is an ssh session, and 8 concurrent tasks across N machines is precisely the situation
+where nobody wants to ssh.
+
+*One settings section, one registry entry.* `packages/web/src/routes/settings/cluster-section.tsx`
+plus one row in `routes/settings/registry.tsx` — `id: 'cluster'`, `appliesTo: 'workspace'` (the
+fleet is a property of this machine's cockpit, not of a repo), gated by `capability: 'cluster'`
+exactly as `sources` already is, which also means widening the `SettingsCapabilities` alias so the
+shell cannot fall behind the filter. That file's own docblock says the registry is *"the ONE place
+a section is declared"*, so this is one entry and no layout work.
+
+**What a node row shows** — and the ordering is deliberate, most-actionable first:
+
+| field | source | why it is on the row |
+|---|---|---|
+| online / offline **+ age of last presence** | link heartbeat | a 40-minute-old reading rendered without its age reads as current |
+| role: hub · worker · capability | node record | says whether losing it costs coordination or throughput |
+| `active / maxParallel` and `heavyActive / maxHeavySteps` | `presence` (D14) | the two numbers admission actually uses; one bar cannot express a bimodal load |
+| **enforcement: `cgroup` · `process-tree` · `none`** | `presence` (D14a) | the Mac has no cgroups, so its memory ceiling is the weaker guard. A limit that silently does not exist on one node is worse than one never claimed |
+| labels (`macos`, `imessage`, `browser`, `device-e2e`, …) | discovered, not configured | explains why a `requires:` task can only go one place |
+| repo drift per paired project: `HEAD` vs `origin/main`, dirty, `MERGE_HEAD` | `freshness` | the box's `chat` checkout sat six hours mid-conflict showing one ordinary dirty file |
+| `acceptsDispatch` toggle · revoke | node record (spoke re-enforces) | D11: the switch is shown where it is read, never as an env var |
+
+Three honesty rules the panel has to carry, because each one is a wrong answer waiting to be
+rendered:
+
+1. **A spoke's capacity is a claim, not a measurement.** The hub renders what the node reported and
+   labels it as of *when* it reported. Never present a peer's self-report as observed fact.
+2. **The four queued reasons must look different** (D12) — *no node carries this label*, *every
+   eligible node is at capacity*, *the node it needs is offline*, *this project has no `origin` and
+   may only run where it lives*. Collapsing them into "queued" is what sends a person to buy a node
+   when the real fix was opening a laptop lid. This one **lands with Phase 4**, since placement is
+   what produces the reasons; 1b's job is to make sure the node-level facts behind each of them —
+   labels, headroom, presence age — are already on screen when it does. Noted here so it is not
+   discovered as a gap after the board starts saying "queued".
+3. **Offline is a state, not an error.** The Mac sleeping is normal; the panel says "asleep since
+   HH:MM", not a red failure — the same *"a failed navigation is an exit, not an error"* rule.
+
+**Add a node — one command, one paste, and the token is the short-lived half.**
+An *Add node* action mints an enrollment code (admin-gated, single-use, short TTL, stored as a
+SHA-256 digest per the security section) and renders exactly one copyable line. The hub renders
+**its own version** into it rather than `@latest`, because protocol skew is permanent (D13) and a
+node minted today should start life matched to the hub that minted it:
+
+```
+npx -y @loki-labs/better-cezar@<hub version> cluster join cezj_<opaque>
+```
+
+(`0.10.0` today — the hub substitutes its own, so this spec is not the thing that goes stale.)
+
+`cezj_<opaque>` packs the hub URL and the code, so there is nothing else to type or get wrong. The
+UI shows the TTL counting down, lets the code be revoked before use, and says plainly that it is
+single-use — a code still on screen after it has been redeemed is a code someone will try again.
+
+**The one rule that makes this safe: nothing long-lived goes in the pasteable string.** The
+Cloudflare Access credential is *not* embedded, and that is a decision, not an oversight. A command
+rendered in a cockpit gets screenshotted, pasted into chat, and left in the shell history of a
+machine we may not own; a short-TTL single-use code survives that, an Access service token that
+admits the hub does not. So enrollment answers **two different gates** and the UI must say so:
+Access decides whether you may reach the hostname at all, the join code decides whether you are
+admitted as a node. The operator supplies the Access half from the environment they already have.
+
+**And no `curl … | sh`.** Measured 2026-08-22: **every** path on `cockpit.example.com` returns
+**302** to the Access login — `/`, `/api/v1/health`, and any install path alike. So
+`curl https://cockpit.example.com/install | sh` pipes an HTML login page into a shell: broken, and
+dangerous in the way that is hard to notice. `npx` is used instead because the package comes from
+the npm registry, which Access does not gate; the only Access-gated call is the join POST itself.
+That call must therefore fail with a **named** reason — *"Cloudflare Access rejected this request"*
+distinct from *"code expired or already used"* distinct from *"hub unreachable"*. Three failures
+that look identical from a generic network error, and an operator who cannot tell them apart will
+re-mint codes to fix a credential problem.
 
 **Phase 2 — Todo replication, with dispatch and autostart cluster-disabled.**
 Pairing UI, `cv` stamping, op derivation/compaction, `applyRemoteTodoOps`, watermark resume,
@@ -914,6 +1017,14 @@ repo checkouts, agent CLI **logins**, cgroup caps + `maxHeavySteps`, `CEZ_ENV_PA
 `cez cluster enroll` with the hub's token). Extend the step list and the strategy — do not author a
 parallel shell script, which is how the two provisioning paths that already exist
 (`server-install` and the hand-built hub) came to disagree.
+
+**The cockpit's *Add node* action (Phase 1b) grows a second variant here**, and it is the same
+button with a different target: *enroll an existing cezar* mints
+`npx … cluster join cezj_…`, while *provision a new worker* mints
+`npx -y @loki-labs/better-cezar@<hub version> server-install --platform hetzner --role worker
+--join cezj_…` — run as root on a bare VPS, carrying the same short-TTL single-use code and, still,
+**no long-lived credential in the pasteable string**. Same reason `curl … | sh` is not used: every
+path on the hub 302s to Access, so the script cannot be fetched anonymously; the npm registry can.
 
 The logins are the one genuinely interactive step, so the run must **stop and say so** rather than
 half-provisioning silently. Verified by being the **only** way a worker is ever created: E5b builds
@@ -995,8 +1106,15 @@ startedOn?: string                      // nodeId; NEVER LWW'd with another node
 
 ```
 GET    /api/v1/cluster                      roster, pairings, this node, link health
-POST   /api/v1/cluster/enroll               hub: mint a single-use code (admin-gated)
-POST   /api/v1/cluster/join                 spoke: redeem a code (CLI-driven)
+POST   /api/v1/cluster/enroll               hub: mint a single-use code (admin-gated).
+                                            Returns { code, expiresAt, commands: {
+                                              join, provision } } — the hub RENDERS the
+                                            one-liner, pinning its OWN version (D13), so
+                                            the cockpit never assembles it client-side
+DELETE /api/v1/cluster/enroll/:codeId       hub: revoke an unredeemed code (Phase 1b)
+POST   /api/v1/cluster/join                 spoke: redeem a code (CLI-driven). Failures are
+                                            NAMED: access-rejected | code-expired |
+                                            code-used | hub-unreachable | protocol-major
 DELETE /api/v1/cluster/nodes/:nodeId        hub: revoke
 PATCH  /api/v1/cluster/nodes/:nodeId        acceptsDispatch, name  (spoke re-enforces)
 GET    /api/v1/cluster/pairings             proposals + confirmed
@@ -1054,6 +1172,7 @@ terminal" for a run on somebody else's host.
 | **Watcher goes quiet after Mac sleep** | periodic reconcile is the floor, not the watcher (D16); last-successful-reconcile is a rendered health signal |
 | **Hub is a single point of failure** | it is one for *coordination*, never for local work (D15). A spoke with no hub is an ordinary cockpit. Stated as a bound, not hidden |
 | **Retired Mac corpus resurrected** | D8: corpus is explicitly out of tier 1; spokes read through the hub, cache read-only |
+| **A copy-paste install command leaks a durable credential** — cockpit commands get screenshotted, pasted into chat, and left in shell history on machines we don't own | nothing long-lived goes in the pasteable string: the code is single-use, short-TTL and stored as a digest; the Access credential comes from the operator's environment, never the rendered line. Test 13a asserts the *absence*, not just the shape |
 | **Enrollment grants code execution on the Mac** | outbound-only, `acceptsDispatch` off by default and spoke-enforced, per-node credential, two-sided revoke |
 | **A destroyed worker takes the only copy of something with it** — 4 of 12 projects have no `origin` | those projects are pinned to their holding node by placement, with their own `queuedReason`; decommission (`cez cluster revoke` + `cez server-uninstall`) drains first and refuses while it holds an unpushable-anywhere copy (D12) |
 | **The fleet drifts into N different machines** — each node is its own checkouts, logins, caps and env | provisioning is a script from the first extra node, never a runbook; E5b provisions twice and **diffs the two results**, which is the only assertion that can actually catch drift |
@@ -1129,8 +1248,28 @@ Integration (two servers in one vitest process, two `CEZ_HOME` temp dirs, linked
     stamped and un-started, and no second node picks it up; the failure mode is a *visible pending
     start*, never a duplicate.
 12. **Flag off**: with `CEZ_CLUSTER` unset — no timers armed, `/api/v1/cluster*` → 404, no file
-    created under `~/.cezar/cluster` or `.ai/cezar/cluster`, `capabilities.cluster === false`, and
+    created under `~/.cezar/cluster` or `.ai/cezar/cluster`, `capabilities.cluster === false`, the
+    Cluster section absent from the settings nav **and** its route a 404 (the registry's `capability`
+    gate drops both, and asserting only the nav would pass against a reachable orphan route), and
     the agent system prompt byte-identical.
+
+Component (Phase 1b, `cluster-section.tsx`), lettered under 12 so the integration numbering
+above stays stable:
+
+   - **12a — the minted command carries the code and no long-lived credential.** Assert the
+     rendered string matches the expected `npx …` shape *and* assert it does **not** contain the
+     Access client id or secret, from a fixture where both are present in the environment. The
+     second assertion is the one that matters: a test checking only the happy shape passes just as
+     well against a command that leaks.
+   - **12b — a stale presence renders its age.** A node last seen 40 minutes ago shows "40m ago",
+     not a bare online dot. *Negative control:* a fresh reading renders **no** age badge, so the
+     test cannot pass by the badge always being present.
+   - **12c — enforcement is rendered, including `none`.** A node reporting `enforcement: 'none'`
+     shows it as a stated limitation, and the assertion is on the `none` case specifically — a
+     `cgroup`-only test passes against code that renders nothing for the others.
+   - **12d — the four queued reasons render four distinct strings** (Phase 4, listed here so it is
+     not lost), asserted **pairwise-distinct** rather than each against a literal, so a fifth
+     reason that reuses an existing string fails the test.
 13. A node-authenticated link socket **cannot** subscribe to cockpit WS topics, and a
     browser-origin socket **cannot** send `ops`.
 14. Hub unreachable at dispatch → a run a person starts by hand still starts, dispatch recorded
@@ -1145,6 +1284,13 @@ Gates green is necessary, not sufficient. Until these have run the work is **QA 
 
 - **E1** Enroll the Mac against `cockpit.example.com`; both nodes list each other; kill the link and
   watch both report the peer offline within the heartbeat window.
+- **E1b** *Add node*, for real and end to end: mint a code in the cockpit, copy the single line,
+  paste it into a shell on the Mac, and watch the node appear in the roster — **timed**, because
+  "one command" is a claim about how long it takes someone who is not you. Then the three failure
+  paths, each of which must name itself rather than reading as a network blip: redeem the same code
+  **twice** (second → `code-used`), let one **expire** unused (→ `code-expired`), and run the
+  command with **no Access credential** in the environment (→ `access-rejected`, not a generic
+  fetch failure). Finally revoke an unredeemed code from the UI and confirm it cannot be redeemed.
 - **E2** `cez cluster reconcile --dry-run` on the real divergence. The plan must name exactly
   **103 `cezar` adds, 7 `chat` adds, 579 + 33 identical, and 10 `chat` rows it refuses to decide**
   (plus whatever it reports for `aside`/`career-kit`, which were never diffed by id). Any other
@@ -1187,7 +1333,11 @@ Events named while designing, per the workspace rule: `cluster.node_enrolled`,
 `cluster.link_up` / `link_down` (with duration), `cluster.ops_applied` (count, scope, lag ms),
 `cluster.conflict_resolved` (entity, field, winner node), `cluster.lease_granted` / `denied`,
 `cluster.dispatch_placed` (node, labels, queue wait), `cluster.reconcile_completed`
-(adds/updates/conflicts, duration). No analytics sink exists in this repo today — stated, not
+(adds/updates/conflicts, duration), and for Phase 1b `cluster.code_minted` /
+`cluster.code_redeemed` / `cluster.code_expired_unused` (the three together answer "did the
+one-liner actually work for people", which a mint count alone cannot) plus
+`cluster.join_failed` **carrying the named reason** — an access rejection and a stale code have
+different fixes and must not aggregate into one number. No analytics sink exists in this repo today — stated, not
 invented; these are the names to use when one lands.
 
 ## Non-goals
