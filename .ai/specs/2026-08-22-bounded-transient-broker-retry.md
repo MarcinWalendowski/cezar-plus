@@ -1,7 +1,15 @@
 # A step whose broker never answered is retried once; one that was never started is not
 
-**Status:** Proposed
+**Status:** Implemented (code) — QA Needed (production E2E steps 1-5 below are pending the next
+deploy; nothing on `prod-host` has exercised the retry yet).
 **Date:** 2026-08-22
+**Shipped:** commit `2258aee0` ("fix: retry a broker step once when it never answered, not when
+it was never started"), merged to `origin/main` at `541bc76d`. Gates run in-repo before merge:
+`npm run typecheck` EXIT=0; `npm test` — 531 passed, 3 failed, all 3 in files this diff never
+touches (`src/knowledge/catalog.test.ts` CPU-budget test, `cli-wiring.test.ts` `--help` timeout,
+`project-context.test.ts` init timeout — the documented load-sensitive flakiness, not a
+regression). `npm run build` / `npm run test:package` were not re-run at merge time; run them
+before closing out QA.
 **Brief:** `.ai/specs/briefs/2026-08-22-bounded-broker-retry.md` (KB `specs-855ce6ed75c2`)
 
 **CORRECTED 2026-08-22 after review:** `everAnswered` is initialized true for a re-attached

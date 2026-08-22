@@ -43,6 +43,17 @@ async function branchExists(repo: string, branch: string): Promise<boolean> {
   );
 }
 
+/** Polls until `predicate` is true or `timeoutMs` elapses — the deferred sweep (P3) runs off a
+ *  `setTimeout`, so a test that forces `CEZ_SWEEP_DELAY_MS=0` still has to yield to the event loop
+ *  for the sweep's own async `pruneOrphans` to actually complete before asserting on its effect. */
+async function waitForCondition(predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('waitForCondition: timed out');
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
 /**
  * Lazy per-project context map (spec 2026-07-20-multi-project-workspace,
  * step 2.1): nothing instantiated until first access, one instance per id,
@@ -563,17 +574,28 @@ describe('ProjectContexts — cross-project orphan-prune safety (spec 2026-08-22
     return { bootRoot, targetRoot, runId: created.id, worktreePath: wt.path, branch: wt.branch };
   }
 
+  // The per-project sweep (P3) is deferred behind a `setTimeout` — `disposeAll()` cancels a still-
+  // pending timer, so these tests force it to fire immediately (`CEZ_SWEEP_DELAY_MS=0`) and wait
+  // for its own `worktree-reaps.jsonl` outcome record before disposing, rather than asserting on a
+  // sweep that may simply not have run yet.
+  async function waitForReap(targetRoot: string, runId: string): Promise<void> {
+    const reapsPath = join(targetRoot, '.ai/cezar/worktree-reaps.jsonl');
+    await waitForCondition(() => existsSync(reapsPath) && readFileSync(reapsPath, 'utf8').includes(runId));
+  }
+
   it('a target project boot with bootRoot wired declines to reclaim a live workspace run\'s worktree — directory AND branch both survive', async () => {
-    const { bootRoot, targetRoot, worktreePath, branch } = await setUp();
+    const { bootRoot, targetRoot, runId, worktreePath, branch } = await setUp();
 
     const contexts = new ProjectContexts({
       // Deliberately NOT the boot root — matching `suppressBootRegistration`, and the precise
       // condition a `listProjects()`-only candidate list must NOT be sufficient to satisfy.
       listProjects: async () => [{ id: 'target', root: targetRoot, status: 'ok', name: 'target' }],
       bootRoot,
+      env: { CEZ_SWEEP_DELAY_MS: '0' },
     });
 
     await contexts.context('target');
+    await waitForReap(targetRoot, runId);
     contexts.disposeAll();
 
     expect(existsSync(worktreePath)).toBe(true);
@@ -581,15 +603,17 @@ describe('ProjectContexts — cross-project orphan-prune safety (spec 2026-08-22
   });
 
   it('omitting bootRoot from ProjectContexts (the old, listProjects()-only design) still loses the worktree directory', async () => {
-    const { targetRoot, worktreePath } = await setUp();
+    const { targetRoot, runId, worktreePath } = await setUp();
 
     const contexts = new ProjectContexts({
       listProjects: async () => [{ id: 'target', root: targetRoot, status: 'ok', name: 'target' }],
       // bootRoot omitted: the boot root's own `runs.json` — where this run's record actually
       // lives — is invisible to this candidate list, reproducing the 232ad6d4 incident's exact gap.
+      env: { CEZ_SWEEP_DELAY_MS: '0' },
     });
 
     await contexts.context('target');
+    await waitForReap(targetRoot, runId);
     contexts.disposeAll();
 
     // Layer 2 (branch-reachability) still saves the BRANCH — the unique commit above keeps it

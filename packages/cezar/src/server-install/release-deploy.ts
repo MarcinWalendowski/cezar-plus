@@ -66,11 +66,81 @@ export interface ReleaseDeployOptions {
   /** Tail the transient unit's log rather than returning as soon as it is launched. */
   follow?: boolean;
   sha?: string;
+  sourceHead?: string;
+  allowStaleArtifact?: boolean;
+  refuseDirty?: boolean;
+  allowUnrelated?: boolean;
   version?: string;
   note?: string;
   dryRun?: boolean;
   env?: NodeJS.ProcessEnv;
   log?: (line: string) => void;
+}
+
+interface BuildStamp {
+  stampVersion: 1;
+  sha: string;
+  builtAt: string;
+  dirty: boolean;
+  version: string;
+}
+
+const STAMP_MTIME_GRACE_MS = 1_000;
+
+function readBuildStamp(source: string): { stamp?: BuildStamp; error?: string } {
+  const path = join(source, 'packages/cezar/dist/.build-stamp.json');
+  if (!existsSync(path)) return { error: `${path} is absent, run npm run build first` };
+  try {
+    const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (typeof value !== 'object' || value === null) throw new Error('expected an object');
+    const stamp = value as Partial<BuildStamp>;
+    if (stamp.stampVersion !== 1 || typeof stamp.sha !== 'string' || !/^[0-9a-f]{7,40}$/.test(stamp.sha) ||
+        typeof stamp.builtAt !== 'string' || !Number.isFinite(Date.parse(stamp.builtAt)) ||
+        typeof stamp.dirty !== 'boolean' || typeof stamp.version !== 'string') throw new Error('schema mismatch');
+    return { stamp: stamp as BuildStamp };
+  } catch (error) {
+    return { error: `${path} is unreadable: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+function staleSource(source: string, builtAt: string): string | undefined {
+  const listed = run('git', ['ls-files', '-z', '--', 'packages/*/src', 'packages/*/package.json', 'packages/*/tsconfig*.json', 'packages/*/vite.config.ts'], { cwd: source });
+  if (!listed.ok) return `could not enumerate tracked source files: ${listed.out}`;
+  const limit = Date.parse(builtAt) + STAMP_MTIME_GRACE_MS;
+  for (const relative of listed.out.split('\0').filter(Boolean)) {
+    try {
+      if (statSync(join(source, relative)).mtimeMs > limit) return `${relative} is newer than the build stamp`;
+    } catch {
+      return `could not inspect tracked source file ${relative}`;
+    }
+  }
+  return undefined;
+}
+
+function gitRelation(source: string, incoming: string, live: string): 'equal' | 'descendant' | 'ancestor' | 'divergent' | 'unresolved' {
+  if (incoming === live) return 'equal';
+  const resolveIncoming = run('git', ['rev-parse', '--verify', `${incoming}^{commit}`], { cwd: source });
+  const resolveLive = run('git', ['rev-parse', '--verify', `${live}^{commit}`], { cwd: source });
+  if (!resolveIncoming.ok || !resolveLive.ok) return 'unresolved';
+  if (run('git', ['merge-base', '--is-ancestor', live, incoming], { cwd: source }).ok) return 'descendant';
+  if (run('git', ['merge-base', '--is-ancestor', incoming, live], { cwd: source }).ok) return 'ancestor';
+  return 'divergent';
+}
+
+function liveSha(releasesDir: string): { sha?: string; error?: string } {
+  const path = join(releasesDir, 'deploy.json');
+  if (!existsSync(path)) return {};
+  try {
+    const raw = readFileSync(path, 'utf8');
+    if (!raw.trim()) return { error: `${path} is empty` };
+    const parsed = JSON.parse(raw) as { current?: string; releases?: Array<{ id?: string; sha?: string }> };
+    const current = parsed.releases?.find((entry) => entry.id === parsed.current);
+    if (!current) return { error: `${path} does not identify the live release` };
+    if (current.sha) return { sha: current.sha };
+    return { error: `${path} does not identify the live artifact sha` };
+  } catch (error) {
+    return { error: `${path} is unreadable: ${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 export interface ReleaseDeployResult {
@@ -156,6 +226,10 @@ export function defaultHost(log: (line: string) => void): ReleaseDeployHost {
         '.ai/cezar/worktrees',
         '--exclude',
         '.ai/cezar/tmp',
+        '--exclude',
+        '.ai/cezar/worktree-reaps.jsonl',
+        '--exclude',
+        '.ai/cezar/worktree-leases',
         `${source.replace(/\/*$/, '')}/`,
         `${target.replace(/\/*$/, '')}/`,
       ]);
@@ -310,9 +384,66 @@ export async function runReleaseDeploy(
   const strategy: DeployStrategy = options.strategy ?? 'blue-green';
   const rollback = options.rollbackTo !== undefined && options.rollbackTo !== null;
 
+  // ---- P1: the install path must already be a symlink -------------------------------------------
+  // Checked first and unconditionally (ahead of the artifact/ancestry gates below, which assume a
+  // migrated install): it is a structural precondition independent of any build, so a not-yet-
+  // migrated box gets that message rather than an unrelated "build the artifact first".
+  if (existsSync(linkPath) && !isMigrated(linkPath)) {
+    return {
+      ok: false,
+      error:
+        `${linkPath} is a directory, not a release symlink — run \`cezar server-migrate-releases\` first. ` +
+        'Flipping would otherwise have to delete a live install to make room for the link.',
+    };
+  }
+
+  // Rollback activates an already-staged release. Forward artifact and ancestry gates do not
+  // apply, otherwise the recovery path would require a fresh source build by definition.
+  let stamp: BuildStamp | undefined;
+  let gateError: string | undefined;
+  let ancestorNoop: string | undefined;
+  if (!rollback) {
+    const read = readBuildStamp(options.source);
+    stamp = read.stamp;
+    gateError = read.error;
+    if (stamp) {
+      const sourceHead = options.sourceHead ?? run('git', ['rev-parse', 'HEAD'], { cwd: options.source }).out;
+      if (!sourceHead) gateError = 'could not resolve source HEAD';
+      else if (stamp.sha !== sourceHead) gateError = `build stamp sha ${stamp.sha} disagrees with source HEAD ${sourceHead}; run npm run build first`;
+      else if (options.sha && options.sha !== stamp.sha) gateError = `--sha ${options.sha} disagrees with build stamp sha ${stamp.sha}`;
+      else if (options.refuseDirty && stamp.dirty) gateError = 'build stamp records a dirty source tree';
+      else gateError = staleSource(options.source, stamp.builtAt);
+    }
+    if (gateError && options.allowStaleArtifact) {
+      log(`WARNING: allowing stale artifact: ${gateError}`);
+      gateError = undefined;
+    }
+    if (!gateError && stamp) {
+      const live = liveSha(releasesDir);
+      if (live.error && !options.allowUnrelated) gateError = `${live.error}; pass --allow-unrelated to force`;
+      else if (live.sha) {
+        const relation = gitRelation(options.source, stamp.sha, live.sha);
+        if (relation === 'ancestor') ancestorNoop = `already live: ${live.sha} contains ${stamp.sha}, nothing to deploy`;
+        if ((relation === 'divergent' || relation === 'unresolved') && !options.allowUnrelated) {
+          const details = relation === 'divergent' ? run('git', ['log', '--oneline', `${stamp.sha}..${live.sha}`], { cwd: options.source }).out : '';
+          gateError = `refusing: ${stamp.sha} is ${relation} from the live sha ${live.sha}.${details ? `\nlive has commits this tree does not: ${details}` : ''}\npass --allow-unrelated to force`;
+        }
+      }
+    }
+    if (gateError) {
+      log(`deploy gate: ${gateError}`);
+      if (!options.dryRun) return { ok: false, error: gateError };
+    }
+    if (ancestorNoop) {
+      log(ancestorNoop);
+      if (!options.dryRun) return { ok: true };
+    }
+    if (stamp?.dirty) log('WARNING: build stamp records a dirty source tree');
+  }
+
   const releaseId = rollback
     ? (options.rollbackTo || 'rollback')
-    : makeReleaseId(fx.now(), options.sha);
+    : makeReleaseId(fx.now(), stamp?.sha);
 
   // ---- P2: get out of the cgroup we are about to restart ---------------------------------------
   const decision = decideReExec({
@@ -371,16 +502,6 @@ export async function runReleaseDeploy(
     return { ok: true, detachedUnit: releaseId };
   }
 
-  // ---- P1: the install path must already be a symlink ------------------------------------------
-  if (existsSync(linkPath) && !isMigrated(linkPath)) {
-    return {
-      ok: false,
-      error:
-        `${linkPath} is a directory, not a release symlink — run \`cezar server-migrate-releases\` first. ` +
-        'Flipping would otherwise have to delete a live install to make room for the link.',
-    };
-  }
-
   const emit = (event: DeployEvent): void => {
     log(`[${event.name}] ${JSON.stringify({ ...event, name: undefined })}`);
   };
@@ -403,9 +524,8 @@ export async function runReleaseDeploy(
 
   const entry: ReleaseEntry = {
     id: releaseId,
-    ...(options.sha ? { sha: options.sha } : {}),
-    ...(options.version ? { version: options.version } : {}),
-    builtAt: fx.now(),
+    ...(stamp ? { sha: stamp.sha, version: stamp.version, builtAt: stamp.builtAt, dirty: stamp.dirty } : {}),
+    ...(options.allowStaleArtifact ? { stale: true as const } : {}),
     ...(options.note ? { note: options.note } : {}),
   };
 
@@ -440,6 +560,9 @@ function reExecCommand(options: ReleaseDeployOptions, releaseId: string): string
   if (options.linkPath) argv.push(`--link-path=${options.linkPath}`);
   if (options.releasesDir) argv.push(`--releases-dir=${options.releasesDir}`);
   if (options.sha) argv.push(`--sha=${options.sha}`);
+  if (options.allowStaleArtifact) argv.push('--allow-stale-artifact');
+  if (options.refuseDirty) argv.push('--refuse-dirty');
+  if (options.allowUnrelated) argv.push('--allow-unrelated');
   if (options.note) argv.push(`--note=${options.note}`);
   argv.push(`--release-id=${releaseId}`);
   return argv;

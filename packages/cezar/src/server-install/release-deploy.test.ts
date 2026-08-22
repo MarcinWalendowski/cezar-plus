@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -19,6 +20,7 @@ import type { ProbeResult } from './deploy-strategy.ts';
  */
 describe('runReleaseDeploy', () => {
   const dirs: string[] = [];
+  let nowTick = 0;
   afterEach(() => {
     while (dirs.length) rmSync(dirs.pop() as string, { recursive: true, force: true });
   });
@@ -61,7 +63,7 @@ describe('runReleaseDeploy', () => {
         return { ok: true };
       },
       freeBytes: () => Number.POSITIVE_INFINITY,
-      now: () => '2026-08-21T09:00:00.000Z',
+      now: () => new Date(Date.parse('2026-08-21T09:00:00.000Z') + nowTick++ * 1_000).toISOString(),
       spawnDetached: (argv) => rec.detached.push(argv),
       systemdRunAvailable: () => false,
       cgroup: () => '0::/user.slice/session-1.scope',
@@ -79,8 +81,29 @@ describe('runReleaseDeploy', () => {
     const linkPath = join(root, 'cezar');
     symlinkSync(seed, linkPath);
     const source = join(root, 'src');
-    mkdirSync(source, { recursive: true });
+    mkdirSync(join(source, 'packages/cezar/dist'), { recursive: true });
+    mkdirSync(join(source, 'packages/cezar/src'), { recursive: true });
+    writeFileSync(join(source, 'packages/cezar/package.json'), '{"version":"0.10.0"}\n');
+    writeFileSync(join(source, 'packages/cezar/src/index.ts'), 'export {};\n');
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: source });
+    execFileSync('git', ['add', '-A'], { cwd: source });
+    execFileSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@local', 'commit', '-q', '-m', 'source'], { cwd: source });
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8' }).trim();
+    writeFileSync(join(source, 'packages/cezar/dist/.build-stamp.json'), JSON.stringify({ stampVersion: 1, sha, builtAt: '2099-01-01T00:00:00.000Z', dirty: false, version: '0.10.0' }));
     return { linkPath, releasesDir, source };
+  }
+
+  /** A second real commit + matching build stamp, so a second deploy produces a genuinely
+   *  distinct release id rather than tripping the `--sha` gate with a fabricated one. */
+  function advanceSource(source: string, marker: string): void {
+    writeFileSync(join(source, 'packages/cezar/src/index.ts'), `export const marker = '${marker}';\n`);
+    execFileSync('git', ['add', '-A'], { cwd: source });
+    execFileSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@local', 'commit', '-q', '-m', marker], { cwd: source });
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8' }).trim();
+    writeFileSync(
+      join(source, 'packages/cezar/dist/.build-stamp.json'),
+      JSON.stringify({ stampVersion: 1, sha, builtAt: '2099-01-01T00:00:00.000Z', dirty: false, version: '0.10.0' }),
+    );
   }
 
   it('hands the deploy to a transient unit when it is inside the cgroup it is about to restart', async () => {
@@ -142,11 +165,11 @@ describe('runReleaseDeploy', () => {
     const box = migratedBox();
     // Seed a `current` so there is somewhere to roll back TO.
     const rec = recorder({ probeReady: async () => ({ ok: false, detail: '/api/v1/ready answered 500' }) });
-    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const firstCurrent = loadLedger(box.releasesDir).current;
     expect(firstCurrent).toBeTruthy();
 
-    const result = await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, rec.host);
+    const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
 
     expect(result.ok).toBe(false);
     expect(result.outcome?.failedAt).toBe('readiness');
@@ -176,8 +199,9 @@ describe('runReleaseDeploy', () => {
 
   it('reports a failed rollback readiness probe without rebuilding', async () => {
     const box = migratedBox();
-    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
-    await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+    advanceSource(box.source, 'second');
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const rec = recorder({ waitReady: async () => ({ ok: false, detail: 'boom' }) });
 
     const result = await runReleaseDeploy({ ...box, env: {}, rollbackTo: '' }, rec.host);
@@ -190,8 +214,9 @@ describe('runReleaseDeploy', () => {
 
   it('restores and probes the pre-rollback release when the target is dead', async () => {
     const box = migratedBox();
-    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
-    await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+    advanceSource(box.source, 'second');
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const before = loadLedger(box.releasesDir).current;
     let probes = 0;
     const rec = recorder({
@@ -217,9 +242,9 @@ describe('runReleaseDeploy', () => {
 
   it('rolls back to the previous release on request, with one restart', async () => {
     const box = migratedBox();
-    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const first = loadLedger(box.releasesDir).current;
-    await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     expect(loadLedger(box.releasesDir).current).not.toBe(first);
 
     const rec = recorder();
@@ -244,9 +269,9 @@ describe('runReleaseDeploy', () => {
 
   it('a rollback dry run does not flip the symlink or restart — regression for the gap where --rollback --dry-run performed a real rollback', async () => {
     const box = migratedBox();
-    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const first = loadLedger(box.releasesDir).current;
-    await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const second = loadLedger(box.releasesDir).current;
     expect(second).not.toBe(first);
 

@@ -559,7 +559,58 @@ describe('pruneOrphans (real git)', () => {
     return result;
   }
 
-  it('true orphan, branch fully merged into trunk: both directory and branch are removed', async () => {
+  it('autosaves untracked work before removal and never deletes the recovery branch', async () => {
+    const repo = await fixtureRepo('cez-prune-autosave-');
+    const runId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const wt = await createWorktree(repo, runId, 'main');
+    writeFileSync(join(wt.path, 'draft.txt'), 'recover me\n');
+
+    const report = await pruneOrphans(repo, new Set(), { findForeignOwner: () => undefined });
+
+    expect(report.removed).toEqual([runId]);
+    expect(existsSync(wt.path)).toBe(false);
+    expect(await branchExists(repo, branchFor(runId))).toBe(true);
+    const saved = await run('git', ['show', `${branchFor(runId)}:draft.txt`], { cwd: repo });
+    expect(saved.stdout).toBe('recover me\n');
+  });
+
+  it('does not autosave a plain candidate into the parent checkout', async () => {
+    const repo = await fixtureRepo('cez-prune-plain-');
+    const runId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const candidate = join(repo, WORKTREES_DIR, runId);
+    mkdirSync(candidate, { recursive: true });
+    writeFileSync(join(candidate, 'orphan.txt'), 'orphan\n');
+    writeFileSync(join(repo, 'dirty.txt'), 'must stay dirty\n');
+    const before = await run('git', ['rev-parse', 'HEAD'], { cwd: repo });
+
+    const report = await pruneOrphans(repo, new Set(), { findForeignOwner: () => undefined });
+
+    const after = await run('git', ['rev-parse', 'HEAD'], { cwd: repo });
+    expect(after.stdout).toBe(before.stdout);
+    expect((await run('git', ['status', '--porcelain'], { cwd: repo })).stdout).toContain('dirty.txt');
+    expect(report.removed).toEqual([runId]);
+    expect(existsSync(candidate)).toBe(false);
+  });
+
+  it('declines fresh and unreadable leases even without another ownership signal', async () => {
+    const repo = await fixtureRepo('cez-prune-lease-');
+    const freshId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const corruptId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const fresh = await createWorktree(repo, freshId, 'main');
+    const corrupt = await createWorktree(repo, corruptId, 'main');
+    const leaseDir = join(repo, '.ai/cezar/worktree-leases');
+    mkdirSync(leaseDir, { recursive: true });
+    writeFileSync(join(leaseDir, `${freshId}.json`), JSON.stringify({ leaseVersion: 1, runId: freshId, heartbeatAt: '2026-08-22T12:00:00.000Z' }));
+    writeFileSync(join(leaseDir, `${corruptId}.json`), '{');
+
+    const report = await pruneOrphans(repo, new Set(), { now: () => Date.parse('2026-08-22T12:01:00.000Z'), findForeignOwner: () => undefined });
+
+    expect(report.declined.map((entry) => entry.id).sort()).toEqual([freshId, corruptId].sort());
+    expect(existsSync(fresh.path)).toBe(true);
+    expect(existsSync(corrupt.path)).toBe(true);
+  });
+
+  it('true orphan is autosaved and removed while its recovery branch survives', async () => {
     const repo = await fixtureRepo('cez-prune-merged-');
     const runId = '44444444-4444-4444-8444-444444444444';
     const wt = await createWorktree(repo, runId, 'main');
@@ -571,7 +622,7 @@ describe('pruneOrphans (real git)', () => {
     expect(report.removed).toEqual([runId]);
     expect(report.declined).toEqual([]);
     expect(existsSync(wt.path)).toBe(false);
-    expect(await branchExists(repo, branch)).toBe(false);
+    expect(await branchExists(repo, branch)).toBe(true);
   });
 
   it('true orphan, branch carries a unique commit: directory is removed, branch survives (AC3)', async () => {
@@ -628,7 +679,7 @@ describe('pruneOrphans (real git)', () => {
     expect(existsSync(wt.path)).toBe(true);
   });
 
-  it('omitting opts entirely reproduces the pre-fix unconditional delete (no caller updated for this spec yet)', async () => {
+  it('omitting opts still keeps the branch on the destructive prune path', async () => {
     const repo = await fixtureRepo('cez-prune-no-opts-');
     const runId = '88888888-8888-4888-8888-888888888888';
     const wt = await createWorktree(repo, runId, 'main');
@@ -641,7 +692,7 @@ describe('pruneOrphans (real git)', () => {
 
     expect(report.removed).toEqual([runId]);
     expect(existsSync(wt.path)).toBe(false);
-    expect(await branchExists(repo, branch)).toBe(false);
+    expect(await branchExists(repo, branch)).toBe(true);
   });
 
   it('opts supplied but trunkRef omitted defaults to the SAFE direction: branch always kept', async () => {
@@ -661,6 +712,6 @@ describe('pruneOrphans (real git)', () => {
     const repo = await fixtureRepo('cez-prune-empty-');
     mkdirSync(join(repo, WORKTREES_DIR), { recursive: true });
     const report = await pruneOrphans(repo, new Set());
-    expect(report).toEqual({ removed: [], declined: [] });
+    expect(report).toEqual({ removed: [], declined: [], kept: [] });
   });
 });

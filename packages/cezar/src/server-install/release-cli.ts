@@ -43,6 +43,9 @@ export interface ReleaseDeployCliOptions {
   sha?: string;
   note?: string;
   dryRun?: boolean;
+  allowStaleArtifact?: boolean;
+  refuseDirty?: boolean;
+  allowUnrelated?: boolean;
 }
 
 const STRATEGIES = new Set(['restart', 'blue-green']);
@@ -69,7 +72,11 @@ export async function releaseDeployCommand(opts: ReleaseDeployCliOptions, host?:
       ...(opts.port ? { port: opts.port } : {}),
       strategy: opts.strategy as DeployStrategy,
       ...(opts.rollback !== undefined ? { rollbackTo: opts.rollback } : {}),
-      ...(opts.sha ? { sha: opts.sha } : { sha: gitSha(opts.source) }),
+      ...(opts.sha ? { sha: opts.sha } : {}),
+      sourceHead: gitSha(opts.source),
+      allowStaleArtifact: opts.allowStaleArtifact,
+      refuseDirty: opts.refuseDirty,
+      allowUnrelated: opts.allowUnrelated,
       ...(opts.note ? { note: opts.note } : {}),
       ...(opts.dryRun ? { dryRun: true } : {}),
       version: packageVersion(opts.source),

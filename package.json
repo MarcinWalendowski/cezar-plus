@@ -14,9 +14,10 @@
     "packages/web"
   ],
   "scripts": {
-    "build": "npm run build:server && npm run build:web && npm run check:pack",
-    "build:server": "npm run build -w @loki-labs/better-cezar",
-    "build:web": "npm run build -w @loki-labs/better-cezar-web",
+    "build": "npm run build:server && npm run build:web && npm run check:pack && npm run build:stamp",
+    "build:server": "rm -f packages/cezar/dist/.build-stamp.json && npm run build -w @loki-labs/better-cezar",
+    "build:web": "rm -f packages/cezar/dist/.build-stamp.json && npm run build -w @loki-labs/better-cezar-web",
+    "build:stamp": "node scripts/write-build-stamp.mjs",
     "check:pack": "npm run check:pack -w @loki-labs/better-cezar",
     "dev": "node scripts/dev.mjs",
     "dev:server": "npm run dev -w @loki-labs/better-cezar --",
