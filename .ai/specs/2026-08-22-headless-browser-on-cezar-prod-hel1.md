@@ -1,6 +1,8 @@
 # Document the headless browser on `prod-host` in `AGENTS.md`
 
-> **Status:** spec only — nothing in `AGENTS.md` changed by this step. · **Date:** 2026-08-22
+> **Status:** **implemented** 2026-08-22 — the `## Headless browser on prod-host` section
+> is in `AGENTS.md`, both documented invocations were executed on the box, and the Cloudflare
+> fallback was proven live. · **Date:** 2026-08-22
 >
 > **Brief:** `.ai/specs/briefs/2026-08-22-headless-browser-playwright-agents-md.md`, written by
 > step 1 ("context") of this run. This spec follows its citations and re-verifies the box state
@@ -115,8 +117,13 @@ configuration and needs neither step. The same reasoning applies to `require('pl
 resolving from any cwd: it works via `$HOME/.node_modules/{playwright,playwright-core}` symlinks
 to `/usr/lib/node_modules/{playwright,playwright-core}` (confirmed via `ls -la`), which rides on
 Node's own global-folder lookup (`node -e "require('module').globalPaths"` → includes
-`/var/lib/cezar/.node_modules`, confirmed this session) — **not** `NODE_PATH`, which would need the
-same passthrough treatment to work and is unnecessary to set for the same reason.
+`/var/lib/cezar/.node_modules`, confirmed this session) rather than `NODE_PATH`.
+**Corrected 2026-08-22 during review:** an earlier draft said `NODE_PATH` "would need the same
+passthrough treatment," which is false — `NODE_` **is** in `BASE_ALLOW_PREFIXES` (`agent-env.ts:138`)
+and `looksSecret('NODE_PATH')` is `false` against `SECRET_NAME_RE` (`secret-redaction.ts:29`,
+evaluated directly), so a host-set `NODE_PATH` forwards to every agent with no passthrough entry.
+The symlink is preferred for a different reason: it is a knob where a working default exists
+(§ Zero config), not because the allowlist would drop it.
 
 This is not a hypothetical: `AGENTS.md`'s own "Zero config" section (lines 15-28) already states
 the rule this install follows ("when a feature seems to need configuration, the design is
@@ -195,6 +202,29 @@ sections, and the new section is discoverable the same way `agent-browser` alrea
 scanning `AGENTS.md`'s own heading list.
 
 ### Exact content (verbatim, to land as written)
+
+> **Superseded 2026-08-22 by what actually landed in `AGENTS.md`.** The block below is the
+> pre-implementation draft, kept unchanged for the record; read `AGENTS.md` § "Headless browser
+> on prod-host" for the current text. Three corrections were made during implementation,
+> each verified on the box rather than reasoned about:
+>
+> 1. **The `NODE_PATH` clause was wrong** and is gone — see the correction in § Problem above.
+>    The shipped section says plainly that `NODE_PATH` *would* survive the allowlist and that the
+>    symlink is preferred on § Zero config grounds instead.
+> 2. **CommonJS-only resolution was missing.** This repo is `"type": "module"` and Node's
+>    global-folder lookup does not apply to ESM, so `import { chromium } from 'playwright'` in a
+>    `.mjs`/repo `.js` fails with `ERR_MODULE_NOT_FOUND` (reproduced). The shipped section warns
+>    about this and gives a `createRequire(import.meta.url)` escape hatch, executed and passing.
+> 3. **The Cloudflare fallback was rewritten against the live product**, read with this very
+>    browser: it is now **Browser Run** (renamed from Browser Rendering; the old name survives in
+>    the API path). The Puppeteer/Playwright-compatible route from a box like this one is
+>    **CDP over WebSocket** (`/devtools/browser` + `chromium.connectOverCDP()`), *not*
+>    `@cloudflare/playwright`, which is a Workers-only fork needing a `browser` binding. The REST
+>    "Quick Actions" endpoints are the other shape and are not a Playwright API. A live
+>    `POST .../browser-rendering/content` with the box's existing credentials returned **200 with
+>    rendered HTML**, so the fallback needs no new token — while
+>    `GET /user/tokens/verify` returns **401** for that same token, which is why the section ends
+>    by repeating SPEC-403's "probe the capability, never the token's identity papers."
 
 The block below uses a 4-backtick outer fence specifically so the two 3-backtick code fences
 inside it nest correctly under CommonMark (a 3-backtick fence cannot safely contain another
