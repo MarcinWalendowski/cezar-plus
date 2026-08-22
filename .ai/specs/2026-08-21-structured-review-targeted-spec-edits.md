@@ -1,9 +1,20 @@
 # Structured review verdicts, and targeted edits on spec revision
 
-**Status: DRAFT (2026-08-21) — spec only, nothing implemented.** Written in the `spec` step of
-the `spec-to-deploy` run for task `0762e872-f6e5-4a51-b1b1-8a7df9cdf4e7`, from the brief left by
-that run's `context` step: `.ai/specs/briefs/2026-08-21-structured-review-targeted-spec-edits.md`.
-Todo `a7ebbe3f-ec42-4ce0-8b9d-90c60dfed6b4` is this task.
+**Status: PHASES 0-3 IMPLEMENTED AND SHIPPED (2026-08-22, `ea0c8374` on `origin/main`) —
+PHASE 4 STILL OUTSTANDING.** Written in the `spec` step of the `spec-to-deploy` run for task
+`0762e872-f6e5-4a51-b1b1-8a7df9cdf4e7`, from the brief left by that run's `context` step:
+`.ai/specs/briefs/2026-08-21-structured-review-targeted-spec-edits.md`. Todo
+`a7ebbe3f-ec42-4ce0-8b9d-90c60dfed6b4` is this task. `review-spec`'s FILE/SECTION/CHANGE prompt
+(§ Solution 1), `specRevisionFeedback()` at all three `run.ts` call sites (§ Solution 2), and the
+reworded shared wrapper (§ Solution 3) are all live — verified directly: `specRevisionFeedback` is
+defined at `run.ts:727` and called at `run.ts:4016`, `4048` and `4384`; the reworded wrapper text
+is at `run.ts:4455`; the FILE/SECTION/CHANGE shape is in the `review-spec` prompt at
+`types.ts:782`. Phase 3's tests (`review-verdict.test.ts`, `types.test.ts`) pass: 51/51. **Phase 4
+(the real, out-of-band revision-run measurement of acceptance criteria 3 and 4) did not run inside
+this chain** — this run's own two `revise` verdicts (see Progress log below) both fired against
+the OLD `review-spec`/`spec` code, before this fix existed, since they critiqued the spec document
+itself rather than exercising the shipped feature. Filed as a follow-up todo per § Phases' own
+instruction; see that todo for the measurement recipe (§ Verification 3).
 
 ## TLDR
 
@@ -64,7 +75,8 @@ verdict sends the chain back to `spec` for up to two more passes.
      (`run.ts:4399-4400`). **This is the only difference between iteration 1's and iteration 2's
      prompt for `spec`**, and the sentence is not even true of a review — nothing in it says
      "these are edits, apply them, don't rewrite the file."
-   - The `spec` step's own literal prompt (`types.ts:697-732`, current text) is identical on both
+   - The `spec` step's own literal prompt (`types.ts:706-735`, current text on `origin/main` —
+     re-anchored here after the implement step found this citation was stale) is identical on both
      iterations: "write ONE spec file … following this repository's own conventions."
 3. **Result, measured on `70f19253`**: `review-spec` wrote a prose report; `spec` (iteration 2)
    read it wrapped in "a verification command failed," re-ran its unchanged "write ONE spec file"
@@ -562,23 +574,37 @@ to observe.
       journal and confirm its tool calls are `Read`/`Edit`, not a single `Write`/`Bash` heredoc
       covering the whole file — unless the reviewer's report explicitly named a structural
       rewrite, in which case a single larger `Write` is the expected, called-out exception.
-   c. **Output-token drop (acceptance criterion 3, first half).** Sum `output_tokens` from `usage`
-      events under iteration 1's session id and under iteration 2's session id separately (they
-      are disjoint sessions, so no need to diff cumulative step totals). Confirm iteration 2 is
-      **≥60% lower** than iteration 1, against the measured baseline this task was filed against
-      (50,052 → under 20,000 on `70f19253`).
+   c. **Output-token drop (acceptance criterion 3, first half). Corrected during implementation
+      (must-fix nit from review iteration 3) — the recipe below named artifacts that do not exist
+      in the journal.** Measured directly against `.ai/cezar/runs/70f19253-....ndjson`: the event
+      type is `usage.updated` (not `usage`), the field is `usage.output` (not `output_tokens`), and
+      the event is keyed by `stepId` ONLY — it never carries `sessionId`, so "sum under each
+      session id" is not executable. Exactly ONE `usage.updated` fires per session, at session end
+      (a cumulative total, not a per-turn delta) — so TAKE the event, don't sum. Iteration 1 vs
+      iteration 2 are the 1st and 2nd `usage.updated` event with `stepId === 'spec'`, ordered by
+      `ts`; cross-check against `session.started` events for the same `stepId` (those DO carry
+      `sessionId` + `stepId` + `ts`, one per session, which is what confirms which `usage.updated`
+      belongs to which iteration). Confirm iteration 2's `usage.output` is **≥60% lower** than
+      iteration 1's, against the measured baseline this task was filed against (50,052 → under
+      20,000 on `70f19253`; the verified reference pair on that same run was spec 40,619 then
+      50,052).
    c2. **New, from review iteration 2 (D2) — `review-spec`'s OWN output tokens, both iterations,
-      same method.** `review-spec` runs on `SPEC_REVIEW_MODEL` (`types.ts:160`, `opus` — the
-      expensive model), and its prompt now asks for a concrete change list instead of open prose
-      (§ Solution 1). That is not free: if `review-spec`'s output grows by roughly what `spec`'s
-      iteration-2 output shrinks by, criterion 3 goes green while the run gets no faster and costs
-      more. Sum `output_tokens` the same way as 3c, but for `review-spec`'s iteration-1 and
-      iteration-2 sessions. **Report the NET change**: `(spec iter1 − spec iter2) − (review-spec
-      iter2 − review-spec iter1)`, in tokens, alongside criterion 3's per-step number. Criterion 3
-      as literally asked is satisfied by 3c alone — but state explicitly whether the net figure is
-      negative (a real win) or not. If `review-spec`'s output grows by more than `spec`'s shrinks,
-      say so plainly and treat that as "the change-list format needs to get terser," a follow-up,
-      not as this task being done.
+      same corrected method.** `review-spec` runs on `SPEC_REVIEW_MODEL` (`types.ts:583` on
+      `origin/main` — re-anchored here after the implement step found this citation was stale,
+      `opus`, the expensive model), and its prompt now asks for a concrete change list instead of
+      open prose (§ Solution 1). That is not free: if `review-spec`'s output grows by roughly what
+      `spec`'s iteration-2 output shrinks by, criterion 3 goes green while the run gets no faster
+      and costs more. Read `usage.output` the same way as 3c — the 1st and 2nd `usage.updated`
+      event with `stepId === 'review-spec'` — for that step's iteration-1 and iteration-2 sessions
+      (the verified reference pair on `70f19253` was review-spec 21,784 then 18,812 — that run's
+      own `review-spec` output FELL between iterations rather than growing, so its net check was
+      not stress-tested there; recompute against whatever the real Phase 4 revision run actually
+      shows, don't assume the same direction). **Report the NET change**: `(spec iter1 − spec
+      iter2) − (review-spec iter2 − review-spec iter1)`, in tokens, alongside criterion 3's
+      per-step number. Criterion 3 as literally asked is satisfied by 3c alone — but state
+      explicitly whether the net figure is negative (a real win) or not. If `review-spec`'s output
+      grows by more than `spec`'s shrinks, say so plainly and treat that as "the change-list format
+      needs to get terser," a follow-up, not as this task being done.
    d. **Max tool-call input size (acceptance criterion 3, second half).** For every `tool-call`
       event in iteration 2's session, measure the serialized `input` length (`Edit.old_string.length
       + Edit.new_string.length`, or `Write.content.length` for the rare structural-rewrite case).
