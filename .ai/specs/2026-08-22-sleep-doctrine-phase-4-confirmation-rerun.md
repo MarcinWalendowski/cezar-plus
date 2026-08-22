@@ -1,6 +1,19 @@
 # Sleep doctrine Phase 4 — this run (`bde0ec40`) is a duplicate dispatch of an already-finished task
 
-**Status:** Confirmation pass designed, not yet executed. No code change.
+**Status:** ABANDONED, 2026-08-22 (`document` step, same dispatch's later steps). `review-spec`
+rejected the design in § Phases item 3 as unexecutable — `computeRunStats` buckets a run's stats
+cumulatively per `stepId`, not per dispatch, so a re-run of `run-tests` cannot produce an
+addressable delta against the pre-pass baseline this spec's Phase 5/Verification-4 depended on;
+its Phase 6 also assigned writing the addendum to `commit-push`, which has neither `Write`/`Edit`
+nor `cez run stats` in its `bashAllowlist`. The chain never revised this spec to fix either issue
+and never re-ran `implement`/`run-tests` a third time — confirmed by re-reading `cez run stats`
+from `document`: totals are byte-identical to the reading already recorded before this spec was
+written (§ Problem, Phase 3 baseline). **No second data point was produced.** Phase 4 of the
+governing spec rests on the single measurement in its revision 8 / § Verification §4, which this
+abandoned pass neither weakens nor corroborates. The addendum this spec called for is written
+instead as `.ai/specs/2026-08-21-wait-on-the-process-not-a-guess.md` § Verification §6, recording
+this outcome rather than a delta that was never available. A todo is filed for the recurring-
+redispatch question this spec's own Risks section flagged and left open.
 **Date:** 2026-08-22
 
 ## TLDR

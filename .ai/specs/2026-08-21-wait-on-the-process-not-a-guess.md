@@ -1193,6 +1193,56 @@ during the full-suite run — worth recording on its own account, because **reso
 timeout assertions are not safe gates on a machine that runs parallel agent workloads**, and two of
 these three were exactly that.
 
+### §6 — A third dispatch tried for a second data point and could not get one (2026-08-22, later the same day)
+
+**Not a supersession — nothing above is retracted.** Recorded here, not as a Status-line revision,
+because the confirmation attempt below produced no new claim to weigh against revision 8: it
+never reached a second measurement.
+
+Run `bde0ec40-06da-4628-8410-06a6a42694c7` — the same run id §4/§5 measure — was dispatched a
+third time (first dispatch: 01:51-02:27Z, ended on a broker failure; second: 12:13-12:24Z, the
+pass that produced the PASS result and §4/§5 above; third: 12:41Z onward) for the identical task
+text, after the second dispatch's own handoff had already recorded "TASK COMPLETE." The third
+dispatch's `spec` step, finding the task already done, wrote a new file,
+`.ai/specs/2026-08-22-sleep-doctrine-phase-4-confirmation-rerun.md`, proposing to treat the
+unwanted re-dispatch as free corroboration: let the chain's `run-tests` execute again and read the
+*delta* against a pre-pass baseline, as a second, independent data point for the same claim.
+
+`review-spec` rejected that design as unexecutable, for a reason worth keeping: `computeRunStats`
+(`packages/cezar/src/runs/stats.ts`) buckets a run's stats **cumulatively per `stepId`**, not per
+dispatch. A re-dispatch that re-runs a step named `run-tests` does not append a distinguishable
+second entry — it overwrites or merges into the *same* stored bucket that step id already owns. No
+new step id is minted, so there is nothing a "delta since the pre-pass baseline" query could
+address; the confirmation-rerun spec's own Phase 5 depended on a capability the storage model does
+not have. `review-spec` also flagged that the spec's Phase 6 assigned writing the addendum to
+`commit-push`, which holds no `Write`/`Edit` tool and no `cez run stats` in its `bashAllowlist`
+(confirmed directly against `AUTONOMOUS_IMPLEMENTATION_WORKFLOW`'s step definitions in `run.ts` —
+`document` is the only step after `run-tests` with both).
+
+The chain never revised the spec to fix either issue and never re-ran `implement`/`run-tests` a
+third time. Confirmed empirically, from `document` (this step, third dispatch), by re-running the
+exact command §4 pins:
+
+```
+cez run stats bde0ec40-06da-4628-8410-06a6a42694c7 --json --repo /var/lib/cezar/loki-labs/cezar
+```
+
+Totals: `blindSleepCalls 0`, `sleepCalls 5`, `sleepExecMs 16505`, `repeatedExpensiveCalls 3`,
+`batchFactor 1` — **byte-identical** to the 12:22Z reading already recorded in §4's "Standing
+caveat" table, and the `implement`/`run-tests` per-step rows are unchanged from §4's dump. That is
+direct confirmation of `review-spec`'s bucketing concern, not just its prediction: the third
+dispatch's `run-tests` never executed a second time: the chain went `review-spec` (revise) →
+`continue-1` → `continue-2` → `document` without a second pass through `implement`/`run-tests`.
+
+**So: no second data point exists, and none is claimed here.** The confirmation-rerun spec is
+marked abandoned (see its own Status line) rather than executed. This does not weaken revision 8 —
+the PASS in §4 was never in question — it only means Phase 4 still rests on **one** measurement,
+not two, and a fourth dispatch of this run id would face the identical bucketing obstacle if it
+tried the same design again. A todo is filed for the underlying question this section does not
+answer: why a `spec-to-deploy` run whose handoff says "TASK COMPLETE" gets redispatched at all
+(`cezar todo add`, filed 2026-08-22, see the confirmation-rerun spec's Risks section for the same
+flag raised and left open one dispatch earlier).
+
 ## Open questions — settled here
 
 **Q1. What mechanism?** Settled: the three tiers of L1, foreground first, plus the
