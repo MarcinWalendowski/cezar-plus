@@ -47,6 +47,8 @@ export const releaseEntrySchema = z
     /** `packages/cezar/package.json` version at build time. */
     version: z.string().optional().catch(undefined),
     builtAt: z.string().optional().catch(undefined),
+    dirty: z.boolean().optional().catch(undefined),
+    stale: z.literal(true).optional().catch(undefined),
     /** Set the moment this release became `current`; absent means "built, never activated". */
     activatedAt: z.string().optional().catch(undefined),
     /** Free text — replaces the hand-written `.deployed-commit` marker no code ever owned. */

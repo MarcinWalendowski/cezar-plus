@@ -15,6 +15,77 @@ Written against `HEAD` of `cez/f28edef5`
 re-opened for this document, and where the brief and the code disagreed the code won (noted
 inline).
 
+### Where the fix actually landed (read this before trusting a line number below)
+
+**Added 2026-08-22 by a retry run of this same task** (`f28edef5`, dispatched with "there is no
+prior work to build on"; that instruction was written for the earlier codex/`sonnet`-alias HTTP-400
+run described in `.ai/specs/2026-08-22-failed-turn-reads-as-done.md`, which produced zero commits,
+and it is **not** true of this worktree). The retry re-read the code rather than the record and
+confirms: this spec is implemented, at `HEAD` = `0b21e625`, with `2f91de4b` and `190cf588` both
+verified ancestors (`git merge-base --is-ancestor` → exit 0).
+
+**Every line citation in the sections below is anchored to the PRE-FIX tree (`2778fd52`) and is
+correct only as a description of the defect.** The fix moved all of them. Anchors re-measured at
+`0b21e625`:
+
+| What | Pre-fix (`2778fd52`) | Landed (`0b21e625`) |
+| --- | --- | --- |
+| `runRollback` | `deploy-strategy.ts:203-218` (16 lines) | `deploy-strategy.ts:214-319` (106 lines) |
+| `runGatedDeploy` | `:130-201` | `:126-211` (`deploy.drained` emit now `:209`) |
+| `DeployEvent` | `:44-57` | `:46-63` (`operation` `:60`, `ready` `:62`); `ProbeResult` follows at `:65-68` |
+| `DeployEffects` | `:65-84` | `:71-98` |
+| `DeployOutcome` | `:94-102` | `:100-111` (`operation` `:108`, `serving` `:110`) |
+| `ReleaseDeployHost.waitReady` (P1 step 1) | did not exist | `release-deploy.ts:121`, impl `:178` |
+| rollback wiring | `release-deploy.ts:366-372` | `:388-394` (`probeReady: () => fx.waitReady(port, 30_000)` at `:391`) |
+| CLI rollback branch | did not exist | `release-cli.ts:86-106`; success line `:122-123`; `Deploy complete.` now the `else` at `:125` |
+| File lengths | 218 / 455 / 323 | 319 / 490 / 360 |
+
+Tests landed as `deploy-strategy.test.ts:206` (`describe('explicit rollback readiness gate')`,
+alongside the pre-existing `describe('explicit rollback')` at `:183`) and
+`release-cli.test.ts:292` (`describe('releaseDeployCommand rollback')`). Note the landed describe
+titles differ from the ones Verification §1 and §3 propose (`'explicit rollback — the readiness
+gate'`, `'releaseDeployCommand — rollback'`); the coverage matches, the strings do not.
+
+**P4 was not implemented**, as its phase recommends: `followDeploy`'s exit code is unchanged.
+**Verification §5 and §6 have still not been run**, which is the whole of what stands between this
+spec and Done; §4's gates were run and were green. Nothing in the retry's re-reading changed a
+decision in this document, so no decision below is superseded.
+
+---
+
+## Status log — 2026-08-22: §7's record obligations closed; QA Needed is the true remaining state
+
+§7 ("Record") asked for four things once the code landed. All four are now done:
+
+1. **This spec's own status log** — this entry.
+2. **The two stale-open notes in `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`**
+   (its "Status log — 2026-08-21" section and the acceptance-run paragraph naming `6497f002`) were
+   corrected in place with a `CORRECTED 2026-08-22` lead-in, original text kept below, citing
+   `2f91de4b` / `c31af208` and this spec by path.
+3. **`AGENTS.md:13`'s trailing trap sentence** was corrected the same way: the `--rollback=` argv
+   trap (todo `f97ddd39`) is still true and unchanged; the "a rollback never probes readiness"
+   half is marked `CORRECTED 2026-08-22` and points here.
+4. **The durable decision was written to the corpus** via `CEZ_KB_WRITE_FILE` (project scope, path
+   `cezar/rollback-readiness-gate`), citing `specs-594acc539b36` and superseding nothing — the
+   `6497f002`-is-open notes it corrects are marked in place at their own locations (items 2–3
+   above), not superseded wholesale.
+
+Also done in this pass: the doc-only edits that anchored this spec's line citations to the LANDED
+tree (commits `190cf588`, `73286864`) were pushed as `cez/f28edef5` and squash-merged to
+`origin/main` as PR #2 (`331d5875`) — `origin/main` now carries both the code fix (`2f91de4b`, via
+`c31af208`) and this document's landed-anchor table. Tracker: workspace todo `6497f002` (filed by
+the 2026-08-21 acceptance run, `startedTaskId` = this task) is marked `status: done`, context
+appended, in `/var/lib/cezar/loki-labs/cezar/.ai/cezar/todos.json` — the main checkout's store, not
+this worktree's own (a git worktree resolves its own `.ai/cezar/todos.json` by git toplevel, which
+is a different, task-scoped file; the tracker of record for a workspace todo is always the main
+checkout's).
+
+**What is still open, and why "QA Needed" — not "Done" — remains the accurate status:** Verification
+§5 (a real `systemd --user` rollback-onto-a-dead-release E2E on a scratch install) and §6 (one real
+rollback of the live service, success path) have not been run. Gates green proves the unit and
+integration behavior; it does not prove a real rollback on `prod-host` now fails closed. That
+runtime pass is separate work — record it as pending, do not round it up.
+
 ---
 
 ## TLDR
@@ -403,7 +474,7 @@ fx: Pick<DeployEffects, 'restart' | 'emit' | 'now' | 'probeReady'>,
 (`deploy-strategy.test.ts:29-48`) already supplies `probeReady`, so no existing case needs editing
 to compile.
 
-### CLI contract (`release-cli.ts:80-92`)
+### CLI contract (landed: rollback branch `release-cli.ts:86-106`, success `:122-123`)
 
 `releaseDeployCommand` gains an **optional second parameter** `host?: ReleaseDeployHost`, passed
 straight through to `runReleaseDeploy(options, host)`. Production never passes it; it is the test
@@ -415,32 +486,55 @@ run a real `systemctl restart`.
 Output contract (exact strings are the assertion; `<detail>` is the probe's own text):
 
 ```
-success (exit 0)
-  Rolled back to <id> — /api/v1/ready passed.
+success (exit 0)                                                   [release-cli.ts:123]
+  Rolled back to <id>: /api/v1/ready passed.
   <describeReleases lines, as today>
 
-failure, nothing restored (exit 1)
-  Rollback FAILED: <id> did not become ready — <detail>
+failure, nothing restored (exit 1)                                 [:96-97]
+  Rollback FAILED: <id> did not become ready: <detail>
   <linkPath> still points at <id>, and it is NOT serving.
-  Pick another release: cezar server-deploy --rollback=<other-id>   (note the '=', see todo f97ddd39)
+  Pick another release: cezar server-deploy --rollback=<other-id>
 
-failure, pre-rollback release restored and proven ready (exit 1)   [P3]
-  Rollback FAILED: <id> did not become ready — <detail>
-  Restored <before>, which probed ready — the box is serving again, on the release you tried to leave.
+failure, pre-rollback release restored and proven ready (exit 1)   [P3, :100]
+  Rollback FAILED: <id> did not become ready: <detail>
+  Restored <before>, which probed ready. The box is serving again, on the release you tried to leave.
 
-failure, restored release not ready either (exit 1)                [P3]
-  Rollback FAILED: <id> did not become ready — <detail>
-  Restored <before>; it is NOT ready either — <detail2>
+failure, restored release not ready either (exit 1)                [P3, :102-103]
+  Rollback FAILED: <id> did not become ready: <detail>
+  Restored <before>; it is NOT ready either: <detail2>
   NOTHING is serving a proven release. Intervene by hand.
 
-failure, the RESTORATION's own restart threw (exit 1)              [P3, step 3a]
-  Rollback FAILED: <id> did not become ready — <detail>
-  Restored <before> — the restart itself failed: <error>. NOTHING is serving a proven release.
+failure, the RESTORATION's own restart threw (exit 1)              [P3 step 3a, :94]
+  Rollback FAILED: <id> did not become ready: <detail>
+  Restored <before>, but the restart itself failed: <error>. NOTHING is serving a proven release.
+
+failure, no rollback target / unknown release / missing on disk (exit 1)   [:108, generic path]
+  Deploy failed: no previous release to roll back to
+  Deploy failed: release <id> is not in the ledger
+  Deploy failed: release <id> has no directory under <releasesDir>
+  (no readiness sentence, because no flip and no probe ever happened)
 ```
 
-`Deploy failed:` and `Deploy complete.` are **not** printed for a rollback — they are the deploy
-path's words, and they are half of why this defect reads as success. `Rolled back to <id>; the
-previous release is serving.` (`:83`) may print only when `serving.ready === true`.
+The failure header at `:90` is shared by all four readiness cases; they differ only in the second
+line. The last of them is a **real coupling between `runRollback`'s detail string and the CLI**: the
+CLI recovers `<before>` and `<error>` by matching `/; restoring (.+) failed: (.+)$/` against
+`serving.detail` (`release-cli.ts:92`), so `runRollback` must keep appending
+`; restoring <before> failed: <error>` verbatim when the restoration's own restart throws. Change
+one side and the operator silently gets the "still points at" wording for a box where the symlink
+was in fact moved back.
+
+`Deploy complete.` is never printed for a rollback, and `Deploy failed:` is never printed for a
+*readiness* failure: those are the deploy path's words, and they are half of why this defect reads
+as success. The landed branch is narrower than that, deliberately. `release-cli.ts:87` is entered
+only when `failedAt === 'readiness'` **and** `outcome.serving` is set, so the two non-readiness
+rollback failures the terminal-state table lists (no rollback target at all,
+`deploy-strategy.ts:219-222`; unknown release or missing directory, the P1 guard at `:223-241`) fall
+through to the generic `Deploy failed: <detail>` at `release-cli.ts:108` and exit 1 with no
+readiness sentence. That is correct as shipped: nothing was flipped, nothing was restarted, and
+there is no serving-state claim to make. If we later decide a rollback must never say the word
+"Deploy" at all, that is a separate change to the generic branch, not a claim this contract may make
+about the code as it stands. `Rolled back to <id>; the previous release is serving.` (`:110`) may
+print only when `outcome.rolledBackTo` is set, which the readiness failure path no longer does.
 
 ---
 
@@ -741,16 +835,25 @@ B=$B L=$L R=$R node "$T/drive.mjs" good > "$T/ok.log"   2>&1; echo "EXIT=$?"
 
 Assertions:
 
-- **(a)** the `bad` run exits **1** — today it exits 0. This single number is the defect. **The
-  "today it exits 0" baseline must be measured with the same driver against a pre-change build**
-  (build `HEAD` before the fix into a second `$B0` and point `drive.mjs` at it), never against
-  `/usr/local/bin/cezar`, which runs the deployed release and would make the comparison meaningless.
+- **(a)** the `bad` run exits **1**; before the fix it exits 0. This single number is the defect.
+  **The "it exits 0" baseline must be measured with the same driver against a pre-change build**,
+  never against `/usr/local/bin/cezar`, which runs the deployed release and would make the
+  comparison meaningless. **`HEAD` is no longer that build**: the fix landed in `2f91de4b` and
+  `190cf588`, both ancestors of `0b21e625`, so the baseline must name the pre-fix commit
+  explicitly, or it will exit 1 and prove nothing:
+  `git worktree add /tmp/cez-prefix 2778fd52 && cd /tmp/cez-prefix && npm ci && npm run build`
+  (verified 2026-08-22: `runRollback` at that commit takes
+  `Pick<DeployEffects, 'restart' | 'emit' | 'now'>`, with no `probeReady`), then run `drive.mjs`
+  with `B=/tmp/cez-prefix`. The baseline run also needs its **own** freshly seeded scratch `$T`:
+  releases dir, `deploy.json`, symlink and a separate `cez-rb-test` unit. The first `drive.mjs` run
+  mutates `deploy.json` (`bad` gains `"healthy": false`) and moves the symlink, so a second run
+  against the same scratch box is not a clean comparison.
 - **(b)** `fail.log` contains `Rollback FAILED: bad did not become ready` and the probe's detail, and
   contains neither `Deploy complete.` nor `the previous release is serving`.
 - **(c)** `$R/deploy.json` shows `bad` with `"healthy": false`.
 - **(d)** P3 only: `fail.log` says `good` was restored and probed ready; `readlink $L` is
   `$R/good`; `/api/v1/ready` on :4399 answers 200 **after** the `bad` run, with no `good` run needed.
-- **(e)** the `good` run exits **0** and prints `Rolled back to good — /api/v1/ready passed.`
+- **(e)** the `good` run exits **0** and prints `Rolled back to good: /api/v1/ready passed.`
 - **(f)** the whole scratch tree is removed afterwards (`systemctl --user stop cez-rb-test`,
   `rm -rf $T`), and `find /var/lib/cezar -not -user cezar | wc -l` is still `0`.
 
@@ -770,7 +873,7 @@ until the fix is deployed this measures the old code and would "pass" by printin
    --seconds 120 --out .ai/cezar/tmp/f28edef5-…/rollback-live.json`
 2. `cezar server-deploy --rollback=<previous-id>` then `--rollback=<newest-id>` to return.
 3. Assert: the probe script exits **0** (zero non-2xx, zero connect errors, `seq` continuous), both
-   commands exit 0, both print the new `Rolled back to … — /api/v1/ready passed.` line, and
+   commands exit 0, both print the new `Rolled back to <id>: /api/v1/ready passed.` line, and
    `/opt/cezar-releases/deploy.json` now carries `"healthy": true` on both — a field a manual
    rollback never used to write.
 
@@ -815,6 +918,16 @@ into the corpus via `CEZ_KB_WRITE_FILE`, superseding nothing but citing `specs-5
 `deploy-strategy.test.ts:1-60,120-204`, `release-deploy.test.ts:1-70,120-200`,
 `release-cli.test.ts` (structure: `describe`s at `:20,131,138` only),
 `packages/cezar/scripts/deploy-e2e-probe.mjs:1-40`, root `package.json` scripts.
+
+**Re-read 2026-08-22 by the retry run, at `HEAD` = `0b21e625`** (for the anchor table near the top,
+which is the only thing that run changed in this document): `deploy-strategy.ts:195-319` (the landed
+`runRollback` in full) plus its type blocks `:38-111`; `release-deploy.ts:116-128,169-180,204-290,
+388-394`; `release-cli.ts:84-128`; `deploy-strategy.test.ts`, `release-cli.test.ts` and
+`release-deploy.test.ts` (`describe` structure only); `git diff --stat 2778fd52 HEAD` per file
+(`releases.ts` and the tests' pre-existing blocks unchanged; the three source files changed by
++108/-7, +26/-9, +51/-14). The retry did **not** re-run the gates: `git status` was clean and the
+code was unchanged since the run that measured them green, so re-running would have re-measured the
+same tree.
 
 **Specs / KB:** `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` (KB id
 `specs-594acc539b36`) — lines 110-117, 120-176, 184-200, 338-358, 495-525, 559-590, 608-640,

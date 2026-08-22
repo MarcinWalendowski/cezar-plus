@@ -48,6 +48,7 @@ import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
 import { readAgentModelProvider } from '../agent-config/models.ts';
 import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.ts';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.ts';
+import { LEASE_HEARTBEAT_MS, removeWorktreeLeases, touchWorktreeLeases, writeWorktreeLease } from '../workspace/worktree-lease.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 import { loadWorkflows } from './load.ts';
 import { evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
@@ -250,6 +251,8 @@ interface ActiveRun {
   monitoringWakeIntervalMinutes?: number;
   monitoringWakeups?: number;
   autosaveTimer?: NodeJS.Timeout;
+  leaseTimer?: NodeJS.Timeout;
+  leaseRoots?: string[];
   /* The screenshot counter lives on `RunManager.queuedImageSeq` (#472), keyed by
    * run id — a queued run persists attachments with no `ActiveRun` at all. */
   /** Has a session EVER opened on this run (#472)? `session` alone cannot answer
@@ -1088,6 +1091,7 @@ export class RunManager {
       this.clearIdleTimer(state);
       this.clearMonitoringWakeTimer(state, runId);
       this.clearAutosaveTimer(state);
+      this.clearWorktreeLeases(state, runId);
       state.releaseRepoRoot?.();
       state.releaseRepoRoot = undefined;
     }
@@ -2292,6 +2296,7 @@ export class RunManager {
   /** Remove a run from the live registries — keeps `waiting ⊆ active`. */
   private dropActive(runId: string): void {
     const state = this.active.get(runId);
+    if (state) this.clearWorktreeLeases(state, runId);
     state?.releaseRepoRoot?.();
     if (state) state.releaseRepoRoot = undefined;
     this.waiting.delete(runId);
@@ -3427,8 +3432,10 @@ export class RunManager {
           (snapshot) => {
             this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
           },
+          this.repoRoot,
         );
         this.store.updateRun(runId, { workspaceWorktrees: worktrees });
+        this.armWorktreeLeases(state, runId, worktrees.map((worktree) => worktree.root));
       }
     }
     if (state.cwd === this.repoRoot && !workspaceRun) {
@@ -4112,8 +4119,10 @@ export class RunManager {
         (snapshot) => {
           this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
         },
+        this.repoRoot,
       );
       this.store.updateRun(runId, { workspaceWorktrees: worktrees });
+      this.armWorktreeLeases(state, runId, worktrees.map((worktree) => worktree.root));
       emit({
         type: 'note',
         message:
@@ -4177,6 +4186,7 @@ export class RunManager {
       }
       try {
         const wt = await createWorktree(this.repoRoot, runId, base);
+        await writeWorktreeLease(this.repoRoot, runId, this.repoRoot);
         state.cwd = wt.path;
         this.store.updateRun(runId, {
           worktreePath: wt.path,
@@ -4191,6 +4201,7 @@ export class RunManager {
           emit({ type: 'note', message: `seeded personal agent config: ${seededConfig.join(', ')}` });
         }
         this.armAutosave(state);
+        this.armWorktreeLeases(state, runId, [this.repoRoot]);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const error = `worktree creation failed: ${message}`;
@@ -6072,6 +6083,25 @@ export class RunManager {
       clearInterval(state.autosaveTimer);
       state.autosaveTimer = undefined;
     }
+  }
+
+  private armWorktreeLeases(state: ActiveRun, runId: string, roots: string[]): void {
+    const unique = [...new Set(roots)];
+    if (unique.length === 0) return;
+    state.leaseRoots = unique;
+    if (state.leaseTimer) clearInterval(state.leaseTimer);
+    state.leaseTimer = setInterval(() => {
+      void touchWorktreeLeases(unique, runId, this.repoRoot);
+    }, LEASE_HEARTBEAT_MS);
+    state.leaseTimer.unref?.();
+  }
+
+  private clearWorktreeLeases(state: ActiveRun, runId: string): void {
+    if (state.leaseTimer) clearInterval(state.leaseTimer);
+    state.leaseTimer = undefined;
+    const roots = state.leaseRoots ?? [];
+    state.leaseRoots = undefined;
+    if (roots.length > 0) void removeWorktreeLeases(roots, runId);
   }
 
   private runCheckStep(

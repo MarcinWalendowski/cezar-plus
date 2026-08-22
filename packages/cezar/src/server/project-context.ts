@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { AutomationStore } from '../automations/store.ts';
 import { reconcileAutomationReceipts } from '../automations/task-template.ts';
 import { DEFAULT_WORKTREE_RETENTION, resolveWorktreeRetention } from '../config.ts';
@@ -141,6 +142,7 @@ export interface ProjectContext {
   sourceStore?: SourceStore;
   /** Bookmarklet auto-start secret (spec 011), ensured at context build. */
   launchKey: string;
+  sweepTimer?: NodeJS.Timeout;
 }
 
 /** Minimal registry shape the context map needs — matches
@@ -438,6 +440,7 @@ export class ProjectContexts {
       bindHost: this.deps.bindHost,
     });
 
+    let sweepTimer: NodeJS.Timeout | undefined;
     try {
       const launchKey = ensureLaunchKey(dataDir);
       // Startup reconcile (spec 006) + count-based retention (#483) — the same
@@ -457,20 +460,25 @@ export class ProjectContexts {
         ].filter((p) => canonicalPath(p.root) !== canonicalPath(project.root));
         const foreignSources = loadForeignWorkspaceRunSources(project.root, candidates);
         const unreadableSource = foreignSources.find((s) => s.unreadable);
-        const orphans = await pruneOrphans(project.root, new Set(store.listRuns().map((r) => r.id)), {
-          findForeignOwner: (path) => findForeignWorkspaceOwner(project.root, path, foreignSources),
-          trunkRef: repo.branch,
-          ownershipCheckUnavailable: unreadableSource
-            ? { reason: `project "${unreadableSource.projectName}"'s runs.json could not be read` }
-            : undefined,
-        }).catch(() => ({ removed: [] as string[], declined: [] as { id: string; reason: string }[] }));
-        if (orphans.declined.length > 0) {
-          console.log(
-            `[cez] project "${project.id}": declined to reclaim ${orphans.declined.length} worktree(s): ${orphans.declined
-              .map((d) => `${d.id.slice(0, 8)} (${d.reason})`)
-              .join(', ')}`,
-          );
-        }
+        const delay = Number(this.env.CEZ_SWEEP_DELAY_MS ?? 5 * 60_000);
+        sweepTimer = setTimeout(() => {
+          void pruneOrphans(project.root, new Set(store.listRuns().map((r) => r.id)), {
+            findForeignOwner: (path) => findForeignWorkspaceOwner(project.root, path, foreignSources),
+            trunkRef: repo.branch,
+            ownershipCheckUnavailable: unreadableSource
+              ? { reason: `project "${unreadableSource.projectName}"'s runs.json could not be read` }
+              : undefined,
+            onOutcome: (outcome) => {
+              mkdirSync(dataDir, { recursive: true });
+              appendFileSync(join(dataDir, 'worktree-reaps.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), runId: outcome.id, repoRoot: project.root, ...outcome })}\n`);
+            },
+          }).then((orphans) => {
+            if (orphans.removed.length > 0) console.log(`[cez] project "${project.id}": cleaned ${orphans.removed.length} orphaned worktree(s): ${orphans.removed.map((id) => id.slice(0, 8)).join(', ')}`);
+            if (orphans.kept.length > 0) console.log(`[cez] project "${project.id}": kept ${orphans.kept.length} unsafe-to-reclaim worktree(s): ${orphans.kept.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
+            if (orphans.declined.length > 0) console.log(`[cez] project "${project.id}": declined to reclaim ${orphans.declined.length} worktree(s): ${orphans.declined.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
+          }).catch(() => undefined);
+        }, Math.max(0, delay));
+        sweepTimer.unref?.();
         const keep = await resolveWorktreeRetention(project.root).catch(
           () => DEFAULT_WORKTREE_RETENTION,
         );
@@ -487,6 +495,7 @@ export class ProjectContexts {
         knowledgeStore,
         sourceStore,
         launchKey,
+        ...(typeof sweepTimer !== 'undefined' ? { sweepTimer } : {}),
       };
     } catch (err) {
       // A failed build must not leak the half-built context's subscriptions.
@@ -500,7 +509,8 @@ export class ProjectContexts {
  *  never on for this project; `dispose()`'s own optional chaining is the whole gate. `sourceStore`
  *  needs no teardown call: it holds no live resource beyond its own explicitly-acquired-and-released
  *  `SourceLease`, unlike `KnowledgeStore`'s fs.watch handles and debounce timers. */
-function teardown(ctx: { store: RunStore; manager: RunManager; knowledgeStore?: KnowledgeStore }): void {
+function teardown(ctx: { store: RunStore; manager: RunManager; knowledgeStore?: KnowledgeStore; sweepTimer?: NodeJS.Timeout }): void {
+  if (ctx.sweepTimer) clearTimeout(ctx.sweepTimer);
   ctx.manager.dispose();
   ctx.store.flush();
   ctx.store.removeAllListeners();

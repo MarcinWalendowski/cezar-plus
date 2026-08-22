@@ -1,5 +1,10 @@
 # A workspace run's per-project worktree is invisible to that project's own orphan prune, and gets destroyed — directory and branch
 
+**CORRECTED 2026-08-22 by `2026-08-22-live-worktree-reaped-mid-run.md`:** the ancestry-gated
+branch deletion described below is superseded for `pruneOrphans`. A sweep now always keeps the
+recovery branch and autosaves before removing the directory. The original text remains below as
+the historical Layer 2 design.
+
 **Status:** implemented — gates green (typecheck, build, unit + package tests; see handoff step 5), shipped 2026-08-22.
 
 **Brief:** `.ai/specs/briefs/2026-08-22-workspace-worktree-orphan-prune-cross-project.md`. That

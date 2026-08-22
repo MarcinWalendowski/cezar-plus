@@ -6,6 +6,7 @@ import { join, sep } from 'node:path';
 import type { WorkspaceGrantProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { autosaveCommit, createWorktree, removeWorktree, resolveBaseRef } from '../git-worktree.ts';
 import { getRepoInfo } from '../server/git.ts';
+import { writeWorktreeLease } from './worktree-lease.ts';
 
 /**
  * Per-project worktrees for a PARALLEL WORKSPACE RUN
@@ -107,6 +108,7 @@ export async function materializeWorkspaceWorktrees(
   projects: readonly WorkspaceGrantProject[],
   note: Note = () => undefined,
   persist: PersistWorktrees = () => undefined,
+  ownerBootRoot?: string,
 ): Promise<WorkspaceWorktree[]> {
   /** worktree path → the entry we keep, plus every registry entry that resolved to it. */
   const byWorktreePath = new Map<string, { entry: WorkspaceWorktree; members: string[] }>();
@@ -127,6 +129,7 @@ export async function materializeWorkspaceWorktrees(
     const base = (await resolveBaseRef(repoRoot, repo.branch)) ?? repo.branch;
     try {
       const wt = await createWorktree(repoRoot, runId, base);
+      if (ownerBootRoot) await writeWorktreeLease(repoRoot, runId, ownerBootRoot);
       const collapsed = byWorktreePath.get(wt.path);
       if (collapsed) {
         collapsed.members.push(project.name || project.id);
