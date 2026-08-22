@@ -5064,7 +5064,7 @@ export function createApp(deps: ServerDeps) {
           .map((b) => b.text)
           .join('\n');
         const images = content.filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image');
-        const resumed = manager.continueRun(id, { text, images });
+        const resumed = await manager.continueRun(id, { text, images });
         if (resumed.ok) return c.json({ continued: true });
         return c.json({ error: resumed.error ?? 'session closed' }, 409);
       }
@@ -5184,7 +5184,7 @@ export function createApp(deps: ServerDeps) {
       }
       const blocked = await providerActionError([providerForExistingRun(run, parsed.data.runner)]);
       if (blocked) return c.json({ error: blocked }, 409);
-      const result = manager.continueRun(id, {
+      const result = await manager.continueRun(id, {
         text: parsed.data.text,
         images: parsed.data.images?.map((img): ContentBlock => ({
           type: 'image',

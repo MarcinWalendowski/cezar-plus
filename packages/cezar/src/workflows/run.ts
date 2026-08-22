@@ -60,7 +60,13 @@ import {
 } from '../runs/agent-tmpdir.ts';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.ts';
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.ts';
-import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidateTitle } from '../runs/auto-name.ts';
+import {
+  autoNamingActive,
+  generateRunName,
+  liveTitleUpdatesEnabled,
+  postValidateTitle,
+  TITLE_MAX,
+} from '../runs/auto-name.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { approvalsSatisfied, minApprovers } from '../runs/approvals.ts';
 import { defDescribesRun, firstUnfinishedStep, pendingChainSteps, stepTerminal } from '../runs/chain.ts';
@@ -716,6 +722,37 @@ const RESTART_CONTINUATION_PROMPT =
   'The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.';
 
 /**
+ * cezar's own synthetic continuation prompts (spec 2026-08-22-continue-step-naming) — excluded
+ * from Phase 1's "name the step from what the user typed" naming so a restart/auto-resume
+ * continuation does not mint a step titled after its own boilerplate prompt text
+ * ("the cezar process restarted while you wer…"). A human-authored prompt, even one that also
+ * happens to defer for capacity (`reopen-watch.ts`'s reopen sweep), is never in this set.
+ */
+const SYNTHETIC_CONTINUE_PROMPTS: ReadonlySet<string> = new Set([
+  RESTART_CONTINUATION_PROMPT,
+  AUTO_RESUME_PROMPT,
+]);
+
+/** Suffix Phase 2 (spec 2026-08-22-continue-step-naming) appends when naming a new `continue-N`
+ *  step after the real step it's retrying. */
+const CONTINUED_STEP_SUFFIX = ' — continued';
+
+/**
+ * `` `${sessionStep.name} — continued` `` — but clamping `sessionStep.name` itself first, using
+ * the same code-point slicing and ellipsis-on-overflow `postValidateTitle` uses. Deliberately NOT
+ * `postValidateTitle` on the composed string: that would lowercase the first character (turning
+ * "Deploy — continued" into "deploy — continued") and clamp the WHOLE composed string to
+ * `TITLE_MAX`, which truncates the suffix away entirely on a step name over ~27 characters.
+ */
+function continuedStepName(sessionStepName: string): string {
+  const limit = TITLE_MAX - CONTINUED_STEP_SUFFIX.length;
+  const chars = [...sessionStepName];
+  const clamped =
+    chars.length > limit ? `${chars.slice(0, limit - 1).join('').trimEnd()}…` : sessionStepName;
+  return `${clamped}${CONTINUED_STEP_SUFFIX}`;
+}
+
+/**
  * The prompt a step gets when it is re-entered after CEZAR stopped it for inactivity.
  *
  * It resumes the SAME session, so the work so far is already in context. What the agent does not
@@ -827,6 +864,12 @@ interface PendingContinuation {
   backend: RunnerId;
   prompt: string;
   images: ContentBlock[];
+  /** The step's computed title (spec 2026-08-22-continue-step-naming), carried through a deferred
+   *  continuation so its eventual `step-start` event and `StepState.name` agree with what was
+   *  computed at `continueRun` time, not a re-derived (and possibly synthetic-prompt-derived)
+   *  value at dequeue. */
+  name: string;
+  nameOrigin: 'step' | 'prompt';
 }
 
 interface PersistedImages {
@@ -1523,6 +1566,7 @@ export class RunManager {
             void this.runContinuation(
               runId,
               hydrated.stepId,
+              hydrated.name,
               hydrated.sessionId,
               hydrated.backend,
               hydrated.prompt,
@@ -1600,6 +1644,16 @@ export class RunManager {
         backend,
         prompt: RESTART_CONTINUATION_PROMPT,
         images: [],
+        // Read off the already-persisted `continue-N` step, not re-derived from the restart
+        // prompt above — otherwise every restart would relabel the step "the cezar process
+        // restarted…" instead of preserving its real title (spec 2026-08-22-continue-step-naming).
+        // `PendingContinuation.nameOrigin` has no `'marker'` member — a step Phase 3 already
+        // refined is, like a Phase 1 prompt-derived one, still eligible for further refinement (it
+        // is only `'step'` that must never be overwritten), so a persisted `'marker'` folds to
+        // `'prompt'` here rather than widening this type for a distinction that doesn't matter to
+        // this path.
+        name: queuedContinuation.name,
+        nameOrigin: queuedContinuation.nameOrigin === 'step' ? 'step' : 'prompt',
       });
       this.queue.push(run.id);
       this.store.appendEvent(run.id, {
@@ -1759,7 +1813,7 @@ export class RunManager {
         finishedAt,
         currentStepId: undefined,
       });
-      const resumed = this.continueRun(
+      const resumed = await this.continueRun(
         run.id,
         {
           text: RESTART_CONTINUATION_PROMPT,
@@ -2216,7 +2270,7 @@ export class RunManager {
   /** Publish the deadline on the record (the cockpit's only source) and arm the timer for it. */
   private armAutoResume(runId: string, deadline: number): void {
     this.store.updateRun(runId, { autoResumeAt: new Date(deadline).toISOString() });
-    const timer = setTimeout(() => this.fireAutoResume(runId), Math.max(0, deadline - Date.now()));
+    const timer = setTimeout(() => void this.fireAutoResume(runId), Math.max(0, deadline - Date.now()));
     timer.unref?.();
     this.autoResumeTimers.set(runId, timer);
   }
@@ -2226,7 +2280,7 @@ export class RunManager {
    * user may have continued, deleted or cancelled the run in them — then hand the resume to the
    * ordinary queued-continuation path so it obeys both concurrency caps like any other work.
    */
-  private fireAutoResume(runId: string): void {
+  private async fireAutoResume(runId: string): Promise<void> {
     this.autoResumeTimers.delete(runId);
     const run = this.store.getRun(runId);
     if (!run || run.status !== 'failed' || !run.autoResumeAt) return;
@@ -2239,7 +2293,7 @@ export class RunManager {
     const attempts = (run.autoResumeAttempts ?? 0) + 1;
     // `continueRun` retires the pending resume (timer + record fields) on the way in — this is a
     // resume, not a user turn, so the counter is put back straight after.
-    const resumed = this.continueRun(runId, { text: AUTO_RESUME_PROMPT }, true);
+    const resumed = await this.continueRun(runId, { text: AUTO_RESUME_PROMPT }, true);
     if (!resumed.ok) {
       // Refusals happen before `continueRun` retires anything, so the deadline is still on the
       // record — and a deadline in the past is a promise the cockpit keeps displaying and the
@@ -3048,13 +3102,13 @@ export class RunManager {
    * behaves exactly like an interactive step: `waiting` after each turn,
    * messages via sendMessage, closed by finish/idle/cancel.
    */
-  continueRun(
+  async continueRun(
     runId: string,
     opts: { text?: string; images?: ContentBlock[]; runner?: RunnerId; model?: string } = {},
     /** Restart recovery may discover several interrupted tasks at once. Those
      *  continuations are queued; an explicit user Continue remains immediate. */
     deferForCapacity = false,
-  ): { ok: boolean; error?: string } {
+  ): Promise<{ ok: boolean; error?: string }> {
     if (agentModelsLocked(this.repoRoot) && opts.model?.trim()) {
       return { ok: false, error: AGENT_MODELS_LOCKED_ERROR };
     }
@@ -3118,9 +3172,54 @@ export class RunManager {
     // bound UNATTENDED resumes.
     this.clearAutoResume(runId);
 
+    // Phase 4 (spec 2026-08-22-continue-step-naming): a follow-up on a budget-stopped review may
+    // land right where the chain has real, untouched work waiting — re-enter the chain instead of
+    // opening a disconnected continue-N chat. Resolve the target FIRST — needed for the
+    // user-message event below, and `reenterChain` does not return it — duplicating its own
+    // internal resolution rather than widening its return type for its four other callers.
+    const budgetReentryEligible =
+      run.status === 'review' &&
+      run.stopReason === 'budget' &&
+      !run.pendingApproval &&
+      !opts.images?.length;
+    const workflow = budgetReentryEligible ? await this.reviveWorkflow(run) : undefined;
+    const resumeAt = workflow ? this.chainResumeAt(run, workflow) : undefined;
+    if (workflow && resumeAt) {
+      const handled = await this.reenterChain(run, 'follow-up continues the chain', {
+        feedback: opts.text,
+      });
+      if (handled) {
+        // `reenterChain` only appends a `lifecycle` event — without this the text the user just
+        // typed never reaches the rendered thread (it flows only into `resumeAt.feedback`, a
+        // retry-explanation channel `checkFailure` reads, not the transcript).
+        this.store.appendEvent(runId, {
+          type: 'user-message',
+          stepId: workflow.steps[resumeAt.index]?.id,
+          text: opts.text ?? '',
+          imageCount: 0,
+        });
+        // `reenterChain` ends with `queue.push` and deliberately does not pump itself — without
+        // this the re-queued run would sit at `queued` for up to `QUEUE_WATCHDOG_MS` before the
+        // sweep picks it up.
+        void this.pump();
+        return { ok: true };
+      }
+    }
+
+    // Naming (Phases 1 & 2, spec 2026-08-22-continue-step-naming): the new step is named after the
+    // real step it's retrying when one exists, or from the user's own text when there is none.
+    const retryingContinuation = sessionStep.id.startsWith('continue-');
+    const authored = opts.text?.trim();
+    const name = retryingContinuation
+      ? authored && !SYNTHETIC_CONTINUE_PROMPTS.has(authored)
+        ? postValidateTitle(authored)
+        : 'Continue'
+      : continuedStepName(sessionStep.name);
+    const nameOrigin: 'step' | 'prompt' = retryingContinuation ? 'prompt' : 'step';
+
     const continuations = run.steps.filter((s) => s.id.startsWith('continue-')).length;
     const stepId = `continue-${continuations + 1}`;
-    this.store.addStep(runId, { id: stepId, name: 'Continue', kind: 'agent' });
+    this.store.addStep(runId, { id: stepId, name, kind: 'agent', nameOrigin });
     const prompt = opts.text?.trim() || 'Continue.';
     const images = opts.images ?? [];
     if (deferForCapacity) {
@@ -3130,6 +3229,8 @@ export class RunManager {
         backend: targetRunner,
         prompt,
         images,
+        name,
+        nameOrigin,
       });
       this.queue.push(runId);
       this.store.updateRun(runId, {
@@ -3143,6 +3244,7 @@ export class RunManager {
     void this.runContinuation(
       runId,
       stepId,
+      name,
       resume ? sessionStep.sessionId : undefined,
       targetRunner,
       prompt,
@@ -3164,6 +3266,11 @@ export class RunManager {
   private async runContinuation(
     runId: string,
     stepId: string,
+    /** Computed once by the caller (spec 2026-08-22-continue-step-naming) — required, not
+     *  defaulted, so a call site that forgets it fails to typecheck rather than silently minting
+     *  a blank rail row. Threaded through so `StepState.name` and the `step-start` event's `name`
+     *  always agree (previously two independent `'Continue'` literals). */
+    name: string,
     sessionId: string | undefined,
     backend: RunnerId,
     prompt: string,
@@ -3272,7 +3379,7 @@ export class RunManager {
       sessionId,
       backend,
     });
-    this.store.appendEvent(runId, { type: 'step-start', stepId, name: 'Continue', kind: 'agent', iteration: 1 });
+    this.store.appendEvent(runId, { type: 'step-start', stepId, name, kind: 'agent', iteration: 1 });
     // Attachments pasted into the follow-up composer, on the same terms as a live-session
     // message (#357): persisted to the run's own image store so the thread renders the bubble's
     // images rather than a bare count, and handed to the agent BOTH as base64 blocks (so it can
@@ -3714,6 +3821,7 @@ export class RunManager {
         void this.runContinuation(
           runId,
           stepId,
+          name,
           undefined,
           backend,
           prompt,
@@ -5312,6 +5420,22 @@ export class RunManager {
       // nothing (or to a bare number prefix) must not blank the title.
       if (validated && validated !== `${refNumber}:`) {
         this.store.updateRun(runId, { titleSummary: validated, titleOrigin: 'marker' });
+      }
+      // Phase 3 (spec 2026-08-22-continue-step-naming): the same declaration also refines the
+      // active continuation step's own name — but never a Phase 2 "<step> — continued" title,
+      // which is what `nameOrigin !== 'step'` excludes. No `refNumber` here: a step name must not
+      // carry the run title's PR-number prefix.
+      if (run.currentStepId?.startsWith('continue-')) {
+        const step = current?.steps.find((s) => s.id === run.currentStepId);
+        if (step && step.nameOrigin !== 'step') {
+          const validatedStepName = postValidateTitle(markers.title);
+          if (validatedStepName) {
+            this.store.updateStep(runId, run.currentStepId, {
+              name: validatedStepName,
+              nameOrigin: 'marker',
+            });
+          }
+        }
       }
     }
     if (markers.specPath) {

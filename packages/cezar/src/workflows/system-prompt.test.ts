@@ -572,7 +572,9 @@ describe('systemPrompt end-to-end (dry run)', () => {
       'mock: implemented the change',
     );
 
-    expect(manager.continueRun(id, { text: 'continue without generating follow-ups' })).toEqual({
+    await expect(
+      manager.continueRun(id, { text: 'continue without generating follow-ups' }),
+    ).resolves.toEqual({
       ok: true,
     });
     const deadline = Date.now() + 20_000;

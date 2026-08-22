@@ -107,6 +107,12 @@ const stepStateSchema = z.object({
    *  pre-existing record and on every genuine failure, which keeps `runs.json` parseable both
    *  ways. Cleared implicitly when the step is re-entered and succeeds. */
   stopReason: z.enum(['inactivity']).optional(),
+  /** Which writer named this step (spec 2026-08-22-continue-step-naming): `'step'` when Phase 2
+   *  names a new `continue-N` after the real step it's retrying, `'prompt'` when Phase 1 names one
+   *  from the user's own text, `'marker'` when Phase 3 later patches it from a `CEZ:TITLE=`
+   *  declaration. Absent on every pre-existing record and on any step this naming logic never
+   *  touches. */
+  nameOrigin: z.enum(['step', 'prompt', 'marker']).optional(),
 });
 
 /** One prompt message stacked onto a run while it waits for a free agent slot
@@ -831,7 +837,10 @@ export class RunStore extends EventEmitter {
   }
 
   /** Append a step to an existing run (used by "Continue" — spec 003). */
-  addStep(runId: string, step: Pick<StepState, 'id' | 'name' | 'kind'>): void {
+  addStep(
+    runId: string,
+    step: Pick<StepState, 'id' | 'name' | 'kind'> & { nameOrigin?: StepState['nameOrigin'] },
+  ): void {
     const run = this.runs.get(runId);
     if (!run || run.steps.some((s) => s.id === step.id)) return;
     run.steps.push({ ...step, status: 'pending', iterations: 0, tokensUsed: 0 });

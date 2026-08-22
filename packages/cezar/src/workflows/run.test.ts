@@ -546,27 +546,27 @@ describe('RunManager.continueRun override', () => {
     return record.id;
   }
 
-  it('persists a runner + model override as the run current backend', () => {
+  it('persists a runner + model override as the run current backend', async () => {
     const id = resumableRun();
-    expect(manager.continueRun(id, { runner: 'codex', model: 'gpt-5.1-codex' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { runner: 'codex', model: 'gpt-5.1-codex' })).resolves.toEqual({ ok: true });
     const after = store.getRun(id);
     expect(after?.runner).toBe('codex');
     expect(after?.model).toBe('gpt-5.1-codex');
   });
 
-  it('starts fresh when Continue switches to a backend that does not own the session', () => {
+  it('starts fresh when Continue switches to a backend that does not own the session', async () => {
     const id = resumableRun();
     const calls: unknown[][] = [];
     (manager as unknown as { runContinuation: (...args: unknown[]) => Promise<void> }).runContinuation = async (...args) => {
       calls.push(args);
     };
 
-    expect(manager.continueRun(id, { runner: 'codex' })).toEqual({ ok: true });
-    expect(calls[0]?.[2]).toBeUndefined();
-    expect(calls[0]?.[3]).toBe('codex');
+    await expect(manager.continueRun(id, { runner: 'codex' })).resolves.toEqual({ ok: true });
+    expect(calls[0]?.[3]).toBeUndefined();
+    expect(calls[0]?.[4]).toBe('codex');
   });
 
-  it('resumes when Continue stays on the backend that owns the session', () => {
+  it('resumes when Continue stays on the backend that owns the session', async () => {
     const id = resumableRun();
     store.updateStep(id, 's1', { backend: 'claude' });
     const calls: unknown[][] = [];
@@ -574,9 +574,9 @@ describe('RunManager.continueRun override', () => {
       calls.push(args);
     };
 
-    expect(manager.continueRun(id, { runner: 'claude' })).toEqual({ ok: true });
-    expect(calls[0]?.[2]).toBe('sess-1');
-    expect(calls[0]?.[3]).toBe('claude');
+    await expect(manager.continueRun(id, { runner: 'claude' })).resolves.toEqual({ ok: true });
+    expect(calls[0]?.[3]).toBe('sess-1');
+    expect(calls[0]?.[4]).toBe('claude');
   });
 
   /** An idle-PARKED interactive wait (spec 2026-08-20-inactive-sessions-stay-in-progress): the
@@ -597,11 +597,11 @@ describe('RunManager.continueRun override', () => {
     return record.id;
   }
 
-  it('Continue resumes an idle-parked waiting run (spec 2026-08-20)', () => {
+  it('Continue resumes an idle-parked waiting run (spec 2026-08-20)', async () => {
     const id = parkedWaitingRun();
     // Before this change continueRun rejected every `waiting` run; a PARKED wait (not active) is
     // now resumable via --resume, which is the whole point of parking instead of finishing.
-    expect(manager.continueRun(id, { text: 'carry on' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: 'carry on' })).resolves.toEqual({ ok: true });
   });
 
   it('Cancel settles an idle-parked waiting run instead of 409', () => {
@@ -622,43 +622,43 @@ describe('RunManager.continueRun override', () => {
     expect(store.getRun(id)?.status).toBe('done');
   });
 
-  it('an omitted override preserves the run current backend/model (backward compat)', () => {
+  it('an omitted override preserves the run current backend/model (backward compat)', async () => {
     const id = resumableRun();
-    expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: 'keep going' })).resolves.toEqual({ ok: true });
     const after = store.getRun(id);
     expect(after?.runner).toBe('claude');
     expect(after?.model).toBe('sonnet');
   });
 
-  it("an empty model clears the pin so the runner picks the model (auto)", () => {
+  it("an empty model clears the pin so the runner picks the model (auto)", async () => {
     const id = resumableRun();
-    manager.continueRun(id, { model: '' });
+    await manager.continueRun(id, { model: '' });
     expect(store.getRun(id)?.model).toBeUndefined();
     // Runner untouched → the run keeps its backend.
     expect(store.getRun(id)?.runner).toBe('claude');
   });
 
-  it("rejects a model that is recognizably another runner's preset (no corruption persisted)", () => {
+  it("rejects a model that is recognizably another runner's preset (no corruption persisted)", async () => {
     const id = resumableRun();
     // The review's corruption case (#401): a codex preset landing on a claude continuation.
-    const result = manager.continueRun(id, { model: 'gpt-5.1-codex' });
+    const result = await manager.continueRun(id, { model: 'gpt-5.1-codex' });
     expect(result).toEqual({ ok: false, error: "model 'gpt-5.1-codex' is not a claude model" });
     expect(store.getRun(id)?.model).toBe('sonnet');
     expect(store.getRun(id)?.runner).toBe('claude');
   });
 
-  it('a runner-only switch clears the previous backend model pin instead of carrying it over', () => {
+  it('a runner-only switch clears the previous backend model pin instead of carrying it over', async () => {
     const id = resumableRun(); // claude/sonnet
     // The composer sends only `runner` when the user switches backend without touching the
     // model pill (it displays `auto` at that point). The inherited `sonnet` pin belongs to
     // claude and must not reach the codex runner via `runContinuation`'s `model: record.model`.
-    expect(manager.continueRun(id, { runner: 'codex' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { runner: 'codex' })).resolves.toEqual({ ok: true });
     const after = store.getRun(id);
     expect(after?.runner).toBe('codex');
     expect(after?.model).toBeUndefined();
   });
 
-  it('a runner-only switch keeps a free-form model id — only known foreign presets are cleared', () => {
+  it('a runner-only switch keeps a free-form model id — only known foreign presets are cleared', async () => {
     const record = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
@@ -669,35 +669,35 @@ describe('RunManager.continueRun override', () => {
     });
     store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
     store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
-    expect(manager.continueRun(record.id, { runner: 'codex' })).toEqual({ ok: true });
+    await expect(manager.continueRun(record.id, { runner: 'codex' })).resolves.toEqual({ ok: true });
     expect(store.getRun(record.id)?.model).toBe('my-org/custom-tune');
   });
 
-  it('a runner-only continue on the SAME backend keeps the pin (no spurious clear)', () => {
+  it('a runner-only continue on the SAME backend keeps the pin (no spurious clear)', async () => {
     const id = resumableRun(); // claude/sonnet
-    expect(manager.continueRun(id, { runner: 'claude' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { runner: 'claude' })).resolves.toEqual({ ok: true });
     expect(store.getRun(id)?.model).toBe('sonnet');
   });
 
-  it('guards legacy records too — no persisted runner resolves to claude, like runContinuation', () => {
+  it('guards legacy records too — no persisted runner resolves to claude, like runContinuation', async () => {
     const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', steps: [{ id: 's1', name: 'Work', kind: 'agent' }] });
     store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
     store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
-    const result = manager.continueRun(record.id, { model: 'gpt-5.1-codex' });
+    const result = await manager.continueRun(record.id, { model: 'gpt-5.1-codex' });
     expect(result.ok).toBe(false);
     expect(store.getRun(record.id)?.model).toBeUndefined();
   });
 
-  it('keeps free-form model ids working — only cross-runner presets are rejected', () => {
+  it('keeps free-form model ids working — only cross-runner presets are rejected', async () => {
     const id = resumableRun();
-    expect(manager.continueRun(id, { model: 'my-custom-alias' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { model: 'my-custom-alias' })).resolves.toEqual({ ok: true });
     expect(store.getRun(id)?.model).toBe('my-custom-alias');
   });
 
-  it('refuses to continue a run with no resumable session (no override persisted)', () => {
+  it('refuses to continue a run with no resumable session (no override persisted)', async () => {
     const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', runner: 'claude', steps: [] });
     store.updateRun(record.id, { status: 'done' });
-    const result = manager.continueRun(record.id, { runner: 'codex' });
+    const result = await manager.continueRun(record.id, { runner: 'codex' });
     expect(result.ok).toBe(false);
     expect(store.getRun(record.id)?.runner).toBe('claude');
   });
@@ -1785,6 +1785,8 @@ describe('RunManager queued-stack mutators (#472)', () => {
       backend: 'claude';
       prompt: string;
       images: ContentBlock[];
+      name: string;
+      nameOrigin: 'step' | 'prompt';
     };
     const internals = manager as unknown as {
       pendingContinuations: Map<string, PendingContinuation>;
@@ -1793,6 +1795,7 @@ describe('RunManager queued-stack mutators (#472)', () => {
       runContinuation(
         runId: string,
         stepId: string,
+        name: string,
         sessionId: string | undefined,
         backend: 'claude',
         prompt: string,
@@ -1807,6 +1810,8 @@ describe('RunManager queued-stack mutators (#472)', () => {
       backend: 'claude',
       prompt: 'restart recovery',
       images: [],
+      name: 'Continue',
+      nameOrigin: 'prompt',
     });
     internals.queue.push(r.id);
 
@@ -1826,6 +1831,7 @@ describe('RunManager queued-stack mutators (#472)', () => {
     internals.runContinuation = async (
       _runId,
       _stepId,
+      _name,
       _sessionId,
       _backend,
       prompt,
@@ -2436,7 +2442,7 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
 
   it("expands the continuation's OPENING prompt before it becomes the session userPrompt", async () => {
     const id = await finishedRun();
-    expect(manager.continueRun(id, { text: '/demo-review look at the diff' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: '/demo-review look at the diff' })).resolves.toEqual({ ok: true });
     await waitFor(() =>
       eventsOf(id).some((e) => e.stepId === 'continue-1' && e.type === 'text' && e.text?.includes('looking into')),
     );
@@ -2456,7 +2462,7 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
 
   it('expands a FOLLOW-UP delivered into the reopened continuation session', async () => {
     const id = await finishedRun();
-    expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: 'keep going' })).resolves.toEqual({ ok: true });
     await waitFor(() => store.getRun(id)?.status === 'waiting');
 
     expect(manager.sendMessage(id, [{ type: 'text', text: '/demo-review now review it' }])).toBe(true);
@@ -2470,7 +2476,7 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
 
   it('leaves an unknown slash command untouched so backend-native commands still work', async () => {
     const id = await finishedRun();
-    expect(manager.continueRun(id, { text: '/compact please' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: '/compact please' })).resolves.toEqual({ ok: true });
     await waitFor(() =>
       eventsOf(id).some((e) => e.stepId === 'continue-1' && e.type === 'text' && e.text?.includes('looking into')),
     );
@@ -2546,7 +2552,7 @@ describe('a continuation cannot finish an unfinished chain (P2)', () => {
     store.updateStep(record.id, 'two', { status: 'pending', finishedAt: undefined });
     // `mock:done` again: this continuation ends its turn claiming ITS goal is achieved — the
     // exact signal that used to finish the whole run.
-    expect(manager.continueRun(record.id, { text: 'mock:done carry on' })).toEqual({ ok: true });
+    await expect(manager.continueRun(record.id, { text: 'mock:done carry on' })).resolves.toEqual({ ok: true });
 
     // `worktree: false` serializes on the repo-root lease, so the continuation's session opens a
     // beat after the call returns — wait for it to actually START before waiting for the end.
