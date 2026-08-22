@@ -494,6 +494,7 @@ export class ClaudeCliRunner implements AgentRunner {
       onLine: (line) => consumer.handleLine(line),
       onOffset: request.onOffset,
       encodeSend: (content) => encodeClaudeUserMessage(content, spec.sessionId),
+      spawnFailed: mode.spawnFailed,
       onExit: (exit) => {
         if (deadline) clearTimeout(deadline);
         emitBrokeredTerminalEvents({

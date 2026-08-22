@@ -529,6 +529,35 @@ their sub-agents stay READ-ONLY and the orchestrating step writes every word. `i
 corrupt each other, `run-tests` is `npm`-bound (617 of its 826 s), and git's index is one lock.
 `workflows/types.test.ts` asserts that absence as hard as it asserts the presence.
 
+**Changing part of a file that already exists: edit it, never re-emit it** (spec
+`.ai/specs/2026-08-21-edit-an-existing-file-never-re-emit-it.md`). Bypass permissions mode injects
+its own reminder to prefer `sed`/heredocs/short scripts over `Read`/`Edit`/`Write` — cezar does not
+own that instruction and cannot switch it off, so the only lever is a later, more specific
+paragraph in the step prompt (`FILE_WRITE_RECIPE`, `workflows/types.ts`, shipped in `spec`,
+`implement` and `document`). Measured on run `70f19253`: 360 tool calls, zero `Edit`, zero `Write`;
+its `spec` step wrote one 807-line document twice — 34,845 characters, then 48,618, of which
+20,550 were unchanged lines carried for nothing — and its `deploy` step wrote a 1,383-character
+`/tmp` script twice, byte-identical. An `Edit` costs the CHANGE; a heredoc costs the whole FILE, so
+the waste scales with the size of the file touched, not the size of the edit, without limit.
+
+The rule is deliberately conditional, not "never re-emit": when a rewrite genuinely touches most of
+a file, re-emitting it is correct and cheaper than dozens of anchored edits — the same `spec` step's
+81-hunk revision would have cost ~65,045 characters as edits against the 48,618 it spent rewriting,
+in 81 round trips instead of 1. Judge by how much of the file changes, not by whether it existed.
+
+Metered the same way as the rest of this section — no new event, just five more fields on
+`cez run stats`' `StepStats`:
+
+```bash
+cez run stats <runId> --json | grep -E 'toolInputChars|heredocChars|heredocFileWrites|heredocRewrites'
+```
+
+`heredocRewriteWasteChars` is the hard gate (**target near 0** — the unchanged payload a
+re-emission carried for nothing). `heredocRewrites` is a diagnostic only: it cannot tell a wasteful
+re-emission from a legitimate near-total rewrite, which is exactly why the gate is the waste in
+characters and not this count. `heredocFileWrites` is not a defect on its own — a new file is not
+the problem this measures.
+
 ## Related documents
 
 - `AGENT_PROTOCOL.md` — the agent protocol: the runner seam, the v1 `AgentEvent` + v2 `UiEvent` streams, per-backend mapping, the golden-fixture testing contract, and the checklist for adding a new runner.

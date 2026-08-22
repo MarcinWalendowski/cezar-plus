@@ -138,6 +138,18 @@ describe('TOOL_BUDGET_DOCTRINE', () => {
     expect(TOOL_BUDGET_DOCTRINE.split(/\s+/).filter(Boolean).length).toBeLessThan(260);
   });
 
+  /**
+   * The file-write rule (spec `.ai/specs/2026-08-21-edit-an-existing-file-never-re-emit-it.md`,
+   * Q2) belongs in the STEP prompt, not here — `Edit`/`Write` are Claude Code tool names, the same
+   * class of violation that forced `run_in_background` out of this doctrine, and this text also
+   * rides on codex/opencode/pi via `prependSystemPrompt`. This is the negative pin that keeps it
+   * from migrating in later "for consistency".
+   */
+  it('keeps the file-write rule OUT of the backend-neutral doctrine', () => {
+    for (const t of ['Edit', 'Write', 'heredoc']) expect(TOOL_BUDGET_DOCTRINE).not.toContain(t);
+    expect(TOOL_BUDGET_DOCTRINE.split(/\s+/).filter(Boolean).length).toBeLessThan(260);
+  });
+
   it('appears exactly once in a full skill + extra + contract composition', () => {
     const composed = composeSystemPrompt('SKILL BODY', 'EXTRA', TOOL_BUDGET_DOCTRINE, HANDOFF_INSTRUCTIONS);
     expect(composed.split('## Tool budget (cezar)')).toHaveLength(2);
