@@ -4,7 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { todoItemSchema } from '@loki-labs/better-cezar-contract';
-import { createTodo, onTodosChanged, readTodos, todoSchema, todosPath, todosWatchActive, updateTodo } from './todos.ts';
+import {
+  clearStartedTaskId,
+  createTodo,
+  onTodosChanged,
+  readTodos,
+  todoSchema,
+  todosPath,
+  todosWatchActive,
+  updateTodo,
+} from './todos.ts';
 
 /**
  * Per-dataDir todos watch (multi-project spec, step 2.3): each project's
@@ -341,6 +350,75 @@ describe('updateTodo', () => {
 
     const result = await updatePromise;
     expect(result?.status).toBe('done');
+  }, 10_000);
+});
+
+/**
+ * `clearStartedTaskId` (2026-08-22-run-cancel-restores-todo.md) — the inverse of `markStarted`,
+ * called from the cancel route. Keyed by `startedTaskId`, not `id`: the cancel route only ever has
+ * the run id, never the todo it was started from. `todos-patch.test.ts`-style route coverage lives
+ * in `server/run-cancel-todo.test.ts`; these exercise the primitive directly.
+ */
+describe('clearStartedTaskId', () => {
+  let root: string;
+  let dataDir: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cez-todos-clear-started-'));
+    dataDir = join(root, '.ai/cezar');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const seed = async (todo: object) => {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(join(dataDir, 'todos.json'), JSON.stringify([todo]), 'utf8');
+  };
+
+  it('finds the todo by startedTaskId — NOT by its own id — and deletes the KEY entirely', async () => {
+    await seed({ id: 't1', summary: 'Ship it', startedTaskId: 'run-abc' });
+    const result = await clearStartedTaskId(dataDir, 'run-abc');
+    expect(result).toBeDefined();
+    expect('startedTaskId' in (result as object)).toBe(false);
+    const [stored] = await readTodos(dataDir);
+    expect('startedTaskId' in (stored as object)).toBe(false);
+  });
+
+  it('returns undefined when no todo references the given run id, and writes nothing', async () => {
+    await seed({ id: 't1', summary: 'Ship it', startedTaskId: 'run-abc' });
+    const result = await clearStartedTaskId(dataDir, 'run-does-not-exist');
+    expect(result).toBeUndefined();
+    const [stored] = await readTodos(dataDir);
+    expect(stored?.startedTaskId).toBe('run-abc');
+  });
+
+  it('a write blocked on a held lease waits, then applies once the lease frees', async () => {
+    await seed({ id: 't1', summary: 'Ship it', startedTaskId: 'run-abc' });
+
+    // Same real held lock file as `updateTodo`'s own lease test above, not an in-process
+    // ordering accident.
+    const lockPath = join(dataDir, 'todos.lock');
+    const fd = openSync(lockPath, 'wx', 0o600);
+    writeFileSync(fd, JSON.stringify({ pid: 999_999, startedAt: new Date().toISOString() }));
+
+    const clearPromise = clearStartedTaskId(dataDir, 'run-abc');
+    let settled = false;
+    void clearPromise.then(() => {
+      settled = true;
+    });
+
+    // Several retry cycles' worth of time (backoff starts at 10ms, caps at 200ms) — long enough
+    // to prove the write is actually WAITING on the lease, not failing fast or skipping silently.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(settled).toBe(false);
+
+    closeSync(fd);
+    unlinkSync(lockPath);
+
+    const result = await clearPromise;
+    expect(result && 'startedTaskId' in result).toBe(false);
   }, 10_000);
 });
 

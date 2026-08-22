@@ -111,6 +111,7 @@ import { discoverSkills } from '../skills.ts';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.ts';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.ts';
 import {
+  clearStartedTaskId,
   createTodo,
   markStarted,
   onTodosChanged,
@@ -4972,11 +4973,21 @@ export function createApp(deps: ServerDeps) {
       return c.json(store.getRun(id));
     })
 
-    .post('/runs/:id/cancel', (c) => {
-      const { store, manager } = c.get('project');
+    .post('/runs/:id/cancel', async (c) => {
+      const { store, manager, dataDir } = c.get('project');
       const id = c.req.param('id');
       if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
       const cancelled = manager.cancel(id);
+      if (cancelled) {
+        // Best-effort, same shape as `noteTodoStarted` on the start side: un-hiding the
+        // originating todo (2026-08-22-run-cancel-restores-todo.md) must never cost the user the
+        // cancel itself.
+        try {
+          await clearStartedTaskId(dataDir, id);
+        } catch (err) {
+          console.warn(`[cezar] could not clear started-todo link for cancelled run ${id}: ${String(err)}`);
+        }
+      }
       return c.json({ cancelled });
     })
 
