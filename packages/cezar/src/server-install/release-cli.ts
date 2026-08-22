@@ -13,7 +13,6 @@ import {
 import { activate, freshLedger, isMigrated, makeReleaseId, recordBuilt, releaseDir, saveLedger } from './releases.ts';
 import { cezarRunsSlice, cezarSocketUnit, nonDisruptiveDropIn } from './platforms/hetzner/socket-unit.ts';
 import type { DeployStrategy } from './deploy-strategy.ts';
-import type { ReleaseDeployHost } from './release-deploy.ts';
 
 /**
  * The CLI faces of P1–P5 (`.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`):

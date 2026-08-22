@@ -181,6 +181,9 @@ describe('server-deploy (releaseDeployCommand) --dry-run', () => {
       async probeReady(): Promise<ProbeResult> {
         throw new Error('a dry run must never probe');
       },
+      async waitReady(): Promise<ProbeResult> {
+        throw new Error('a dry run must never probe');
+      },
       freeBytes: () => Number.POSITIVE_INFINITY,
       now: () => '2026-08-22T09:00:00.000Z',
       spawnDetached: () => {
