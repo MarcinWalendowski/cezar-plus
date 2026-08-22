@@ -72,6 +72,28 @@ the exception: the biggest machine here, and the one that sleeps, so it is a *ca
 may take overflow, never a capacity number you can count on. The next ceiling after compute is not
 compute — it is the **agent subscription**, for which no measured number exists (§4, Q2a).
 
+**One writer, one order — the hub.** Revised 2026-08-22 on the owner's direction (*"single source
+of truth … working agents are pushing info to some master … data is very up to date"*), replacing an
+earlier CRDT design. Every tier-1 mutation is an op sent to the hub, applied there in arrival order,
+pushed back down as a replica. Spokes read locally and instantly, write optimistically with a
+`pendingSince` marker, and flush a **derived** outbox — so a hub blip means *pending*, never
+*failed*, and D15 (every local write survives the link being down) still holds. This deletes most of
+the hard part: **no hybrid logical clock, no per-field LWW merge, no convergence proof** —
+`cluster/clock.ts` and `cluster/merge.ts` never get written. Per-field granularity survives as the
+*shape of an op*, so two spokes editing different fields of one todo both land. And the headline
+hazard dissolves rather than being guarded: with one machine assigning order, `markStarted` is
+simply the one write that is **never optimistic**.
+
+**Coordination between agents is the hub arbitrating, not agents negotiating** (D19). Eight
+concurrent runs over four real repos collide four ways, and they are not equally hard: the exact
+duplicate is already gone (hub-confirmed claims); spec-number collision is the one where multi-node
+makes things *worse* unless the hub actually reserves; file overlap is caught by refusing the
+placement and naming the other run; and "what else is in flight" is a **read** (`cez cluster
+active`) over the `Bash`+`cez` surface agents already have. A chat channel is the last rung and
+deliberately deferred — two LLM agents can agree on something wrong as easily as something right,
+every exchange spends the subscription that is already the ceiling, and anything one agent writes
+for another is an injection surface that must stay attributed data, never prompt.
+
 **The knowledge corpus is the one thing that moves in exactly one direction.** It stays
 single-writer on the hub — that property is what the 2026-08-19 cutover bought — but every node
 that runs an agent needs it **on disk**, because an agent reads knowledge as `--add-dir` paths, not
@@ -91,8 +113,12 @@ token is **single-use and short-lived by design**, because a command rendered in
 screenshots and shell histories, and because every path on the hub 302s to Cloudflare Access, which
 rules `curl … | sh` out entirely (D17).
 
-The single most important thing in this document is a refusal: **replication must not ship before
-the claim lease.** `todo-autostart.ts` turns `autostart: true` into a live agent run from an
+The single most important thing in this document *was* a refusal — **replication must not ship
+before the claim lease** — and D4's move to a hub-linearized write path is what dissolves it. When
+one machine assigns the order, there is no second lease to disagree with the first: `markStarted`
+becomes the one write that is **never optimistic**, confirmed by the hub before a run starts, and
+everything else stays optimistic and local. The hazard is worth keeping in view anyway, because it
+explains why the ordering rule exists at all: `todo-autostart.ts` turns `autostart: true` into a live agent run from an
 `fs.watch` on `todos.json`, and the "first start wins" guarantee that stops a double start today is
 `markStarted`'s **`O_EXCL` file lease**, which is local to one filesystem by construction. Two
 nodes are two files and two leases. Replicate todos without a cluster lease and every autostarted
@@ -409,6 +435,22 @@ it took a deliberate act). The box self-deploys roughly ten times a day. **Versi
 steady state, not an incident**, so the link protocol has to survive it deliberately rather than by
 luck.
 
+### 9. Eight agents on four repos will collide, and only some collisions are worth a mechanism
+
+The goal is 8 concurrent tasks against a workspace of 12 registered projects where **4 repos carry
+essentially all the work**. Concurrency that high on a base that narrow means overlap is the normal
+case, not the exception. Four distinct collisions, and they are not equally hard:
+
+| collision | what it costs | already solved? |
+|---|---|---|
+| **Two nodes start the same todo** | two agent sessions of one subscription, two worktrees, one result | **yes** — `markStarted` is hub-confirmed and never optimistic (D4) |
+| **Two agents allocate the same spec number** | two specs share an identity; already happened here twice (SPEC-356, SPEC-357, both on 2026-08-03) | **no, and multi-node makes it worse** — `chat/tools/next-spec` unions refs and worktrees *on this disk* and, in its own words, "still reserves nothing". A spoke's uncommitted worktree is invisible to it entirely |
+| **Two agents edit the same files** | a merge conflict discovered at push, after both did the work | no |
+| **Two agents solve the same problem, differently** | duplicated work, and two contradictory decisions in the record | no |
+
+The last one is what the owner is pointing at, and it is the one where the obvious fix is the wrong
+one. See D19: the answer is the hub **arbitrating**, not the agents **negotiating**.
+
 ## Solution
 
 ### Shape
@@ -454,7 +496,7 @@ to remember — the *"prefer a proxy-free, daemon-free mechanism"* rule in AGENT
 
 The whole design is this table. Anything not in tier 1 does not replicate.
 
-**Tier 1 — replicated, converges on every node**
+**Tier 1 — hub-linearized, replicated down to every node (D4)**
 
 | entity | store | scope |
 |---|---|---|
@@ -475,7 +517,7 @@ was typed on is the same failure as the hand-mirrored backlog in §1. Its *proce
 
 | thing | why it cannot be replicated |
 |---|---|
-| todo **claim lease** (who may start it) | mutual exclusion is not eventually consistent |
+| todo **claim lease** (who may start it) | mutual exclusion needs one decider; `markStarted` is the one write that never applies optimistically (D4) |
 | agent-account **grant** + usage aggregate + limit holds | one subscription, N hosts |
 | **scheduler ownership** (automations, sources, backup) | a schedule ticked twice does the work twice |
 | the KB corpus (`notion-export`) — hub is the only writer, spokes get a **pull-only read mirror** | see D8/D8a: the Mac copy is *deliberately* retired, and a second writer is what the cutover killed |
@@ -512,28 +554,77 @@ one node is simply never paired and stays local.
 node-prefixing, no merge collisions. This is worth stating because it is the single biggest reason
 the merge is tractable.
 
-**D4 — Convergence is per-field last-writer-wins on a hybrid logical clock, not per-record.**
-The 10 real `chat` conflicts differ on `status` vs `archivedAt`; per-record LWW would discard one
-node's edit outright. Each replicated record carries an optional `cv` (cluster version): a record
-clock plus a clock for each *conflict-prone* field that has actually been written
-(`status`, `priority`, `archivedAt`, `summary`, `context`, `whatToDo`, `acceptanceCriteria`).
-Ordering is `(lamport, nodeId)` — nodeId only as a deterministic tiebreak.
+**D4 — The hub linearizes every write. Spokes hold a read replica and a durable write outbox.**
 
-An LWW-register per field **is** a CRDT; that is all the convergence this data shape needs, and it
-needs no dependency. cezar takes no runtime dependency of that kind.
+**SUPERSEDED 2026-08-22 (same day), on the owner's direction**, which is a better fit for this
+workload than what this decision originally said. Owner: *"it's very important that knowledge base,
+tasks list etc is coming from a single source of truth and working agents are pushing info to some
+master, and data is very up to date."* The previous text is kept below, unchanged, because the
+*field granularity* it argued for survives — what changes is **who decides the order**.
 
-Wall-clock LWW is rejected outright. Both hosts report `System clock synchronized: yes` with NTP
-active, and a bracketed measurement bounds the skew below ~950 ms (the bracket is dominated by the
-link round trip, so the true skew is smaller than that). That sounds safe — but the *normal* state
-of the Mac is suspend/resume, and a laptop that resumes with a stale clock silently mis-orders every
-write it makes, with no error anywhere. The HLC costs one integer and removes the question.
+> ~~**D4 — Convergence is per-field last-writer-wins on a hybrid logical clock, not per-record.**
+> The 10 real `chat` conflicts differ on `status` vs `archivedAt`; per-record LWW would discard one
+> node's edit outright. Each replicated record carries an optional `cv` (cluster version): a record
+> clock plus a clock for each *conflict-prone* field that has actually been written (`status`,
+> `priority`, `archivedAt`, `summary`, `context`, `whatToDo`, `acceptanceCriteria`). Ordering is
+> `(lamport, nodeId)` — nodeId only as a deterministic tiebreak. An LWW-register per field **is** a
+> CRDT; that is all the convergence this data shape needs, and it needs no dependency. Wall-clock
+> LWW is rejected outright … the *normal* state of the Mac is suspend/resume, and a laptop that
+> resumes with a stale clock silently mis-orders every write it makes, with no error anywhere. The
+> HLC costs one integer and removes the question.~~
 
-**D5 — The state carries the clock; the op log is a derived shipping queue.**
-Ops are *not* the source of truth. Each record's `cv` is written **inside the existing `O_EXCL`
-lease, in the same write as the change**, so the clock and the value can never disagree. The
-replication log (`.ai/cezar/cluster/ops.ndjson`) is a compactable queue derived from that, and a
-crash that loses the tail loses nothing: a boot-time scan re-derives unsent ops by comparing each
-record's `cv` against the last acknowledged watermark.
+**What it is now.** Every mutation of tier-1 state is an **op sent to the hub**, applied there in
+arrival order, and pushed back down to every spoke as a replica update. There is one writer and one
+order, so there is no merge to get right:
+
+- **Reads are local and instant** — a spoke serves its board from its own replica, so a hub blip
+  never blanks the cockpit and an asleep Mac still shows the last known state (D15 survives intact).
+- **Writes are optimistic locally and confirmed at the hub.** The local record is updated
+  immediately and marked `pendingSince`; the outbox is **re-derived** from records carrying that
+  marker, so D5's crash-safety reasoning is preserved exactly — a lost tail loses nothing, because
+  the marker is written inside the same `O_EXCL` lease as the value.
+- **The hub's decision is the truth, and a correction is visible.** If the hub's applied result
+  differs from the optimistic local value, the replica push corrects it and the cockpit shows that
+  it changed, rather than silently swapping the value under the reader.
+
+**Per-field granularity survives, as the shape of an op rather than as merge semantics.** An op
+carries only the fields it changed. Two spokes that queued edits to *different* fields of one todo
+while partitioned both land, because the hub applies them in sequence. Had ops carried whole
+records, the second would clobber the first — same failure the old D4 was written to avoid, reached
+by a different route.
+
+**What drops out of the build, which is the practical argument.** No hybrid logical clock, no
+`(lamport, nodeId)` ordering, no per-field LWW merge, no anti-entropy convergence proof:
+`cluster/clock.ts` and `cluster/merge.ts` disappear, and `ops.ts` keeps derivation and compaction
+while losing its merge half. Ordering is decided in one place by arrival, which is a real total
+order rather than a synthesized one — and the Mac's suspend/resume clock problem, which is the
+reason the old design needed an HLC at all, stops being anyone's problem.
+
+**The one write that is never optimistic: `markStarted`.** A run may only start once the hub has
+confirmed the claim, because an optimistic local start on a partitioned spoke is exactly the
+double-start this spec exists to prevent. Everything else — status, priority, text, archive — is
+optimistic and reconciled. This is a much narrower rule than guarding replication behind a lease,
+and it is the *architecture* removing the hazard rather than a guard defending against it: with the
+hub serializing claims there is no second lease to disagree with the first.
+
+**What this does not fix, and must not be claimed to:** the 110-row divergence that already exists
+predates every clock and every hub. It is still resolved by the classifying reconcile in Phase 2,
+which refuses to pick a winner for the 10 unclocked conflicts. A single source of truth prevents
+*future* divergence; it cannot adjudicate divergence that happened before it existed.
+
+**D5 — The state carries the pending marker; the outbox is a derived shipping queue.**
+*(Heading amended 2026-08-22 with D4: it said "carries the clock", and there is no clock any more.
+The property that mattered is unchanged.)*
+Ops are *not* the source of truth. Each record's `pendingSince` marker — formerly its `cv` — is
+written **inside the existing `O_EXCL` lease, in the same write as the change**, so the marker and
+the value can never disagree. The outbox (`.ai/cezar/cluster/ops.ndjson`) is a compactable queue
+derived from that, and a crash that loses the tail loses nothing: a boot-time scan re-derives unsent
+ops from the records still marked pending, against the last hub acknowledgement.
+
+This property is *more* load-bearing under D4 than it was before, not less. When the hub is the only
+writer, a lost outbox entry is a **lost write** rather than a merge that resolves later — so the
+outbox must never be the only place an intent exists. Deriving it from the records themselves is
+what makes that true by construction rather than by careful flushing.
 
 This follows the reasoning already written into `agent-account-usage.ts` for in-flight run counts:
 *"a count persisted here would be incremented at dispatch and decremented at completion, so every
@@ -542,10 +633,10 @@ takes to re-read, which is never."*
 
 **D5a — Unstamped records are healed on read, and the replicator reads through `readTodos`.**
 Not every todo arrives through `createTodo`. `handoff.ts`'s `FOLLOWUP_INSTRUCTIONS` tells the agent
-to append a raw object straight into `CEZ_TODOS_FILE` — no `id`, no `cv`. `readRaw` already handles
-exactly this for ids (*"entries without an id get one assigned … the file is rewritten (under the
-lock) on this read"*), so the `cv` stamp extends a proven, idempotent heal-on-read rather than
-inventing a second one.
+to append a raw object straight into `CEZ_TODOS_FILE` — no `id`, no marker. `readRaw` already
+handles exactly this for ids (*"entries without an id get one assigned … the file is rewritten
+(under the lock) on this read"*), so the pending stamp extends a proven, idempotent heal-on-read
+rather than inventing a second one. (Reworded with D4; it said `cv`.)
 
 The consequence is a rule, not a preference: **the replicator must read through `readTodos`, never
 parse `todos.json` itself.** Id assignment has to happen before an op is derived, or two nodes can
@@ -670,13 +761,18 @@ the same person.
 It is the wrong trade across nodes. A cross-node duplicate is two agents, in two worktrees, on two
 machines, neither of which can see the other, spending one subscription twice — and the first
 symptom is a merge conflict hours later. A lost start is a todo that stays visibly pending and gets
-picked up on the next pass. So the cluster path is: **acquire the claim lease → stamp
-`startedTaskId`/`startedOn` and emit the op → then start.** The local, single-node path is
-unchanged; nothing about a cezar install with clustering off moves.
+picked up on the next pass. So the cluster path is: **send the claim op → wait for the hub's
+acknowledgement, which carries the applied `startedTaskId`/`startedOn` → then start.** This is the
+one write D4 exempts from optimistic local application, and the exemption is the whole of it. The
+local, single-node path is unchanged; nothing about a cezar install with clustering off moves.
 
-The lease alone is not sufficient and must not be described as if it were: a TTL lease held by a
-node that dies is reclaimable by definition, so the durable idempotency key is the replicated
-`startedTaskId` stamp, and the lease is what stops the *race*, not what stops the duplicate.
+**Simplified 2026-08-22 with D4.** This read *"acquire the claim lease → stamp … → then start"*,
+and added that a TTL lease is reclaimable so the durable idempotency key had to be the replicated
+stamp rather than the lease. Under a hub that linearizes, the two collapse into one thing: the hub
+applies the claim op or it does not, and its acknowledgement **is** the stamp. There is no separate
+lease to expire, no second holder to race, and no window between acquiring and stamping — which was
+the window this decision existed to close. What survives verbatim is the ordering itself: **confirm
+before start, never start-then-record.**
 
 **D10 — A run never migrates.** Sessions, worktrees and broker scopes are node-local. A run starts
 on a node and finishes there. If that node goes away mid-run, the run is marked
@@ -810,14 +906,15 @@ locally and marks the dispatch `unattributed` for the hub to reconcile). AGENTS.
 *"a missing dependency, an absent peer, a read-only home: degrade to a smaller working cockpit,
 never fail the boot."*
 
-**D15a — …but autostarting a todo this node did not author needs the lease, and therefore needs the
-hub.** D15 and the claim lease pull in opposite directions, so they get **scopes, not an ordering**:
+**D15a — …but autostarting a todo this node did not author needs the hub's confirmation.**
+D15 (every local write survives the link being down) and the confirm-before-start rule pull in
+opposite directions, so they get **scopes, not an ordering**:
 
 | the node is doing | link down |
 |---|---|
 | a person clicks ▶ Run, or `cez run` | **proceeds** — a human is asserting intent on this host |
 | autostarting a todo **this node authored** | **proceeds** — it was never anyone else's to start |
-| autostarting a **replicated** todo | **refuses**, and says why (`waiting for the cluster lease`) |
+| autostarting a **replicated** todo | **refuses**, and says why (`waiting for the hub to confirm the claim`) |
 
 Without the scope split, one of the two rules quietly wins and nobody notices which: either an
 offline Mac double-starts every foreign task the moment the box files one, or a hub blip freezes the
@@ -854,6 +951,57 @@ one refused it. And it is `npx`, not `curl … | sh`: measured 2026-08-22, every
 to a shell. The npm registry is the one distribution channel in this design that Access does not
 sit in front of.
 
+**D19 — Agents coordinate by the hub arbitrating, not by talking to each other.**
+The owner's ask (*"agents should be able to communicate with each other via the master hub"*) is the
+right problem — Problem §9 — and worth being precise about, because "let the agents talk" is the
+expensive answer to most of it. Three reasons a chat channel is the wrong default here: two LLM
+agents can agree on something wrong as easily as something right, and there is no assertion that
+catches it; every exchange spends the **same subscription pool that is already the ceiling** (§4);
+and the failures in §9 are *coordination* problems, which one arbiter solves deterministically and
+two negotiators solve probabilistically.
+
+So a ladder, cheapest and most deterministic first. Build downward only while the rung above is
+insufficient:
+
+1. **Claim, don't announce.** Already the design: `markStarted` is hub-confirmed, so the exact
+   duplicate never happens. Nothing to add.
+2. **Reserve what is genuinely scarce, at the hub.** Spec numbers are the case with a track record.
+   `next-spec` reads one disk and reserves nothing, so two spokes will collide *more* readily than
+   two local sessions do. A hub allocator that actually hands out a number and records it is small,
+   exact, and removes a whole class. **Multi-node makes this a regression if it is skipped** — worth
+   saying plainly, because it is the one place where the cluster makes something worse rather than
+   just not-better.
+3. **Refuse overlapping placement, with the other run named.** The hub knows every active run: its
+   todo, its project, its branch, and — via `collectChanges` on the owning node, one git call at
+   dispatch — its touched paths. Before placing, ask whether an active run already holds this
+   project and overlapping files. If so, **queue with a reason that names the other run**, don't
+   start and hope. This is deterministic, costs no tokens, and catches the collision *before* the
+   work is wasted rather than at push time.
+4. **Let an agent read what else is in flight.** Agents already have `Bash` and `cez` on PATH, so
+   this needs no MCP server and no new transport: `cez cluster active` returns in-flight runs with
+   their todo summary, node, branch and touched paths. They also already write status — `handoff.ts`
+   seeds a per-run journal and the system prompt tells the agent to keep its Progress log current —
+   so the content exists; what is missing is that it is readable from another run. A **read** is
+   bounded, cacheable, and inspectable in the transcript in a way a conversation is not.
+5. **An attributed inbox — last, narrowest, and still not a chat.** For the genuine mid-flight case
+   ("I am changing the shape of this shared type"), an agent posts a finding to the hub and the next
+   agent to touch that project sees it on its next `cez` call. Asynchronous, one-directional,
+   durable. No turn-taking, no waiting on a peer, no deadlock. **Defer this until 2-4 prove
+   insufficient**, and say so rather than building it speculatively.
+
+**The rule that constrains rungs 4 and 5, and it is not optional: agent-authored text read by
+another agent is an injection surface.** The corpus is human-curated; a cross-agent channel is not.
+So anything one agent wrote and another reads is **data, attributed and framed as a report** — *"run
+`r_123` on `worker-2` reported: …"* — never merged into a system prompt, never able to grant a
+capability, name a tool, or widen an allowlist. cezar already holds this line elsewhere: the
+knowledge prompt block admits only tags matching `/^[a-z0-9][a-z0-9 _-]{0,31}$/`, dropping anything
+else entirely rather than truncating it, precisely so no document-derived text can carry
+punctuation, a URL, or a newline into the prompt. Rungs 4 and 5 inherit that discipline or they do
+not ship.
+
+**And one thing that is emphatically not on the ladder: a shared writable scratchpad.** Two agents
+editing one file is the collision, not the cure.
+
 ### Rejected alternatives
 
 | rejected | why |
@@ -872,14 +1020,15 @@ sit in front of.
 ```
 packages/cezar/src/cluster/
   node-identity.ts     nodeId/name/labels; discovered capability probe
-  clock.ts             hybrid logical clock; (lamport,nodeId) ordering
-  ops.ts               op shapes, derive-from-state, compaction
+  ops.ts               op shapes, derive-from-pending, compaction, outbox flush
   oplog.ts             append/read/compact `.ai/cezar/cluster/ops.ndjson`
-  merge.ts             per-field LWW merge (pure; the unit-test surface)
+  replica.ts           apply a hub replica push over local + pending state (pure)
   link-client.ts       spoke: outbound WS, resume watermarks, backoff
   link-server.ts       hub: /api/v1/cluster/link upgrade + frame routing
   enrollment.ts        code mint/redeem, per-node HMAC secret (0600)
-  leases.ts            hub: claim/account/scheduler leases, TTL + renew
+  leases.ts            hub: account + scheduler leases, TTL + renew (claims are not
+                       leases any more — the hub's ack IS the stamp, D4/D9a)
+  allocate.ts          hub: reserving allocator for scarce ids (spec numbers, D19)
   placement.ts         label matching, queue-with-reason (pure)
   peers.ts             roster + pairings store, presence
   reconcile.ts         periodic full reconcile + `cez cluster reconcile`
@@ -897,12 +1046,13 @@ Vertical slice following the `automations` convention — *"not modular; no plug
 
 ### What is touched in existing code, and how little
 
-- `todos.ts` — `applyRemoteTodoOps`, and a `cv` stamp inside the existing lease on every writer
-  (`createTodo`, `updateTodo`, `markStarted`, `clearStartedTaskId`, delete).
+- `todos.ts` — `applyHubReplica`, and a `pendingSince` stamp inside the existing lease on every writer
+  (`createTodo`, `updateTodo`, `markStarted`, `clearStartedTaskId`, delete) — `markStarted` being
+  the one that waits for the hub rather than applying optimistically (D4).
 - `todo-autostart.ts` — **two** changes, not one, and it is worth saying so: (a) a guard, start only
-  while holding the cluster claim lease (a no-op returning `true` when clustering is off); (b) the
-  D9a stamp-before-start ordering **on the cluster path only**, leaving the existing act-then-stamp
-  path exactly as it is when clustering is off.
+  once the hub has acknowledged the claim (a no-op returning `true` when clustering is off); (b) the
+  D9a confirm-before-start ordering **on the cluster path only**, leaving the existing
+  act-then-stamp path exactly as it is when clustering is off.
 - `server.ts` — one wiring line beside the existing `providerRuntimeAuth.watch` /
   `watchTodoAutostart` block; one route family chained into the builder.
 - **Nothing in `runs/store.ts` for the *cluster* half.** `RunStore extends EventEmitter` and already
@@ -1104,9 +1254,12 @@ distinct from *"code expired or already used"* distinct from *"hub unreachable"*
 that look identical from a generic network error, and an operator who cannot tell them apart will
 re-mint codes to fix a credential problem.
 
-**Phase 2 — Todo replication, with dispatch and autostart cluster-disabled.**
-Pairing UI, `cv` stamping, op derivation/compaction, `applyRemoteTodoOps`, watermark resume,
-`cez cluster reconcile [--dry-run]`. A replicated todo carrying `autostart` is **never** started by
+**Phase 2 — Hub-linearized todos: read replica down, write outbox up. Dispatch and autostart still
+cluster-disabled.**
+Pairing UI, `pendingSince` stamping inside the existing lease, outbox derivation and compaction,
+`applyHubReplica`, resume from `hubSeq`, `cez cluster reconcile [--dry-run]`. This is the phase that
+delivers the owner's *"single source of truth, agents pushing to a master, data very up to date"* —
+reads stay local and instant, writes are optimistic-then-confirmed, and the hub decides the order. A replicated todo carrying `autostart` is **never** started by
 a node that did not create it — asserted as a negative control, not a comment.
 
 The first real job is merging the divergence that already exists, and **it cannot be done by the
@@ -1117,19 +1270,22 @@ classifies rather than resolves:
 |---|---|---|
 | present on one node only | 103 (`cezar`) + 7 (`chat`) | **add**, stamped as authored by the node that has it |
 | present on both, identical | 579 (`chat`) + 33 (`cezar`) | stamp both, no change |
-| present on both, **differing, neither has a `cv`** | 10 (`chat`) | **refuse to pick.** List them and ask |
+| present on both, **differing, neither ever saw the hub** | 10 (`chat`) | **refuse to pick.** List them and ask |
 
 (`aside` 8 and `career-kit` 1 match on counts; they were not diffed by id, so the reconcile must
 report them rather than the spec assuming them.)
 
-An unclocked disagreement is not a conflict the LWW register can settle — there is no "later", only
-two values. Auto-picking one would be the most believable wrong answer available, so the tool
+A disagreement that predates the hub is not a conflict any ordering can settle — there is no
+"later", only two values. Auto-picking one would be the most believable wrong answer available, so the tool
 prints the pair and takes an explicit choice (`--take-hub` / `--take-spoke` / interactive). Dry-run
 first; `todos.json.bak` written on both sides before the first write.
 
-**Phase 3 — Cluster leases.**
-Claim lease (re-enables autostart for replicated todos, now exactly-once), account grants + usage
-aggregation + cluster-wide limit holds, run index projection.
+**Phase 3 — Hub-confirmed claims, and the leases that are still leases.**
+The **claim** is no longer a lease: the hub applies the claim op and its acknowledgement is the
+stamp (D9a as simplified by D4), which is what re-enables autostart for replicated todos, now
+exactly-once by construction. What genuinely remains lease-shaped lands here too, because it guards
+a resource rather than a record: **agent-account grants**, usage aggregation and cluster-wide limit
+holds. Plus the run index projection.
 
 **Phase 3b — Corpus mirror: a worker that cannot read the record cannot do the work.**
 Ordered here, immediately before dispatch, because Phase 4 is the first time a node other than the
@@ -1162,6 +1318,14 @@ repo checkouts, agent CLI **logins**, cgroup caps + `maxHeavySteps`, `CEZ_ENV_PA
 `cez cluster enroll` with the hub's token). Extend the step list and the strategy — do not author a
 parallel shell script, which is how the two provisioning paths that already exist
 (`server-install` and the hand-built hub) came to disagree.
+
+**Coordination lands here too, rungs 2-4 of D19**, because Phase 4 is when two nodes first run
+work at the same time: a **hub allocator** for scarce shared identities (spec numbers first —
+`next-spec` reserves nothing, and a spoke's uncommitted worktree is invisible to it, so skipping
+this makes multi-node *worse* than one machine); **overlap refusal at placement**, where a dispatch
+into a project an active run already holds with overlapping paths queues with the other run named
+rather than starting and hoping; and `cez cluster active`, a **read** an agent can make over the
+`Bash`+`cez` surface it already has. Rung 5, the inbox, is deliberately not in this phase.
 
 **The cockpit's *Add node* action (Phase 1b) grows a second variant here**, and it is the same
 button with a different target: *enroll an existing cezar* mints
@@ -1224,25 +1388,28 @@ atomic tmp+rename at `0600`, corrupt file degrades to empty with one warning and
 // ~/.cezar/cluster/watermarks.json     (per peer, per scope: last applied + last acked)
 // ~/.cezar/cluster/runs-remote.json    (foreign run PROJECTION — no worktreePath, no local paths)
 
-// .ai/cezar/cluster/ops.ndjson         (derived shipping queue, compactable)
-{ opId, nodeId, lamport, ts, scope: 'project'|'workspace',
+// .ai/cezar/cluster/ops.ndjson         (derived OUTBOX, compactable; re-derivable from
+//                                        records still marked pending — D5)
+{ opId, nodeId, ts, scope: 'project'|'workspace',
   projectKey?, entity: 'todo'|'run'|'triage',
   entityId, op: 'upsert'|'tombstone',
-  fields?: Record<string, unknown>,     // only what changed
-  cv: { r: Clock, f?: Record<string, Clock> },
+  fields?: Record<string, unknown>,     // ONLY what changed (D4: per-field op granularity)
   unknown?: Record<string, unknown> }   // D13: relayed verbatim by an older node
 
-type Clock = { l: number; n: string }   // lamport, nodeId
+// The hub assigns the order. `hubSeq` is the hub's own monotonic counter, echoed back on
+// acknowledgement and carried on every replica push, so a spoke resumes from a number it
+// did not invent. No lamport, no node clock — D4 superseded both.
 ```
 
 Additive on `todoSchema`, all optional — an existing entry with none of them still validates, which
 is the same contract every field added since 2026-08-15 has kept:
 
 ```ts
-cv?:        { r: Clock; f?: Record<string, Clock> }
+pendingSince?: string                   // set on optimistic local write, cleared on hub ack
+hubSeq?:       number                   // last hub order this record was confirmed at
 tombstone?: { at: string }
 placement?: { node?: string; requires?: string[] }
-startedOn?: string                      // nodeId; NEVER LWW'd with another node's run id
+startedOn?: string                      // nodeId; hub-confirmed only, never optimistic (D4)
 ```
 
 ## API contracts
@@ -1269,6 +1436,12 @@ GET    /api/v1/cluster/corpus/*path         hub: one document body
 POST   /api/v1/cluster/corpus/submit        spoke -> hub: forward a knowledge write
                                             (`cez kb submit`). The ONLY write direction
                                             that exists for the corpus
+GET    /api/v1/cluster/active               in-flight runs across the cluster: todo
+                                            summary, node, branch, touched paths.
+                                            Backs `cez cluster active` (D19 rung 4)
+POST   /api/v1/cluster/allocate/:kind       hub: hand out and RECORD a scarce shared
+                                            identity (`spec-number` first). Actually
+                                            reserves — unlike `next-spec` (D19 rung 2)
 GET    /api/v1/cluster/pairings             proposals + confirmed
 POST   /api/v1/cluster/pairings/:projectKey confirm / unpair
 POST   /api/v1/cluster/leases/:kind         acquire/renew  (claim | account | scheduler)
@@ -1284,8 +1457,9 @@ Frames (`.strict()`, versioned `protocol: { major, minor }`):
 ```
 → hello   { nodeId, protocol, version, labels, watermarks, projects[] }
 ← welcome { hubNodeId, protocol, roster, pairings, resumeFrom }   | refuse { reason }
-↔ ops     { scope, projectKey?, ops[], lamport }      batched, bounded
-↔ ack     { scope, projectKey?, throughLamport }
+→ ops     { scope, projectKey?, ops[] }               spoke -> hub outbox flush
+← ack     { scope, projectKey?, throughHubSeq }       hub's assigned order, echoed back
+← replica { scope, projectKey?, changes[], hubSeq }   hub -> spoke, the only write-down path
 ← dispatch{ todoId, projectKey, placement,                        Phase 4
             workflow: { builtinId } | { def },                    D12a: by value, never by name
             expect?: { headSha } }                                D12a: refuse a stale target
@@ -1315,15 +1489,19 @@ terminal" for a run on somebody else's host.
 | **Oversubscription thrashes instead of scaling** — 8 admitted, all correlated into `run-tests` together | `maxHeavySteps` is a semaphore, not a probability (D14); C2 tests the correlated launch specifically; C1's acceptance is *lower* wall time, so admitting 8 and finishing slower fails the phase |
 | **A resource kill reads as a broken test** and the agent "fixes" working code | C3 makes it a named resource kill with a reason, never a bare step failure — the same "every mechanism that terminates someone else's work owes the record a reason" rule the stopped-vs-failed work already established |
 | **Capacity that sleeps** — the big node is a laptop | queued tasks say "waiting for `mac`" rather than stalling; the hub must remain able to run work alone, so Phase 0's box-side ceiling is the floor of the design, not a stopgap |
-| **Double-started run** (the headline hazard) | claim lease before autostart is re-enabled for replicated todos; Phase 2 disables it outright; negative control asserts a node without the lease does not start |
+| **Two agents duplicate or contradict each other's work** — 8 concurrent runs over 4 real repos | D19's ladder, cheapest rung first: hub-confirmed claims, a hub allocator that actually reserves, overlap refusal at placement naming the other run, and a readable `cez cluster active`. Not a chat channel: two LLM agents can agree on something wrong as easily as something right, and every exchange spends the subscription that is already the ceiling |
+| **A cross-agent channel becomes an injection surface** — agent-written text lands in another agent's context shaped like instructions | rungs 4-5 carry agent-authored content as **attributed data** ("run `r_123` on `worker-2` reported: …"), never merged into a system prompt, never able to name a tool or widen an allowlist — the discipline `knowledge/prompt.ts` already enforces with `KNOWLEDGE_TAG_RE`, which drops non-matching text entirely rather than truncating it |
+| **Double-started run** (the headline hazard) | structurally removed by D4: the hub applies the claim op and its acknowledgement *is* the stamp, so there is no second lease to race and no window between acquiring and stamping. Phase 2 still disables replicated autostart outright; the negative control asserts a node that has not been acknowledged does not start |
 | **Shared subscription burned twice** | cluster account grants + shared limit holds (Phase 3); degraded fallback marks the dispatch `unattributed` rather than blocking |
 | **Wrong pairing writes a foreign backlog into a repo** | confirm-once pairing, never slug-only *and* never origin-only (a worktree shares its parent's origin — Problem §6); unpaired = replicates nothing; `--dry-run` before the first reconcile; `todos.json.bak` written before the first merge |
 | **A dispatched run builds on stale or wedged code** | pre-dispatch freshness report; refuse behind / mid-conflict targets by default, override explicit (D12a) |
-| **Lost field edit** | per-field LWW (D4) with a fixture built from the 10 real conflicting `chat` rows |
+| **Lost field edit** | ops carry only the fields they changed and the hub applies them in sequence (D4), with a fixture built from the 10 real conflicting `chat` rows |
+| **A queued write is lost with the outbox** — under one writer, a lost intent is a lost write, not a merge that resolves later | the outbox is **derived** from records marked `pendingSince` inside the same `O_EXCL` lease as the value (D5); test 5b deletes `ops.ndjson` outright and asserts the same ops come back |
+| **An optimistic value is silently corrected** — the reader sees a number change with no account of why | the hub's applied result replaces it **and flags it as corrected**; test 5a asserts the flag, not just the value |
 | **A hub deploy wipes the lease table** — ~10 blue-green restarts/day, each a re-acquire window | leases persisted on the hub; a reconnecting spoke re-asserts what it holds; resume-from-watermark, backoff with full jitter (D15b) |
-| **A long free-text field silently replaced** (`summary`, `whatToDo`) | LWW is per field, so only the edited field moves — and the losing value stays readable in the op log for the retention window; the cockpit shows "changed on `<node>`" rather than presenting it as always having been that |
+| **A long free-text field silently replaced** (`summary`, `whatToDo`) | ops are per field, so only the edited field moves — and the losing value stays readable in the outbox/op history for the retention window; the cockpit shows "changed on `<node>`" rather than presenting it as always having been that |
 | **An old node truncates the cluster's history** | unknown fields stored and re-emitted (D13); protocol-major mismatch refuses with a stated reason |
-| **Op log growth** | compaction to the latest `cv` per entity + bounded retention; a partition older than the window falls back to full snapshot reconcile, never a partial merge that reads as complete |
+| **Op log growth** | compaction to the latest op per entity + bounded retention; a partition older than the window falls back to full snapshot reconcile, never a partial merge that reads as complete |
 | **Watcher goes quiet after Mac sleep** | periodic reconcile is the floor, not the watcher (D16); last-successful-reconcile is a rendered health signal |
 | **Hub is a single point of failure** | it is one for *coordination*, never for local work (D15). A spoke with no hub is an ordinary cockpit. Stated as a bound, not hidden |
 | **Retired Mac corpus resurrected** — a "sync everything" cluster makes the frozen copy live again | D8: one writer, the hub. The mirror is pull-only and the `notion` root is already `readOnly: true` in the live manifest, so no code path writes back; the only write direction is `POST /cluster/corpus/submit` |
@@ -1372,17 +1550,37 @@ Gates, in order (`AGENTS.md` → Validation), run under the full `CEZ_*` scrub w
 any git repo:
 `npm run typecheck` · `npm test` · `npm run test:unit` · `npm run build` · `npm run test:package`.
 
-Unit (pure, in `cluster/merge.ts`, `clock.ts`, `placement.ts`, `ops.ts`):
+Unit (pure, in `cluster/replica.ts`, `placement.ts`, `ops.ts`) — **rewritten with D4**; the HLC
+ordering and per-field-merge tests are gone with the machinery they covered:
 
-1. HLC ordering is total and stable under equal lamports (nodeId tiebreak).
-2. Per-field merge: two nodes patch **different** fields of one todo → **both survive**.
-   *Negative control:* the same fixture under a per-record LWW merge loses one — assert that, so the
-   test cannot pass against the design it exists to reject.
-3. Tombstone beats a concurrent lower-clock patch; a concurrent **higher**-clock patch beats the
-   tombstone (no accidental resurrection, no accidental erasure).
+1. Hub order is respected: two ops applied in hub sequence produce the sequenced result, and
+   replaying them out of order produces the **same** result (the apply is idempotent and
+   order-declared, not order-sensitive).
+2. Per-field ops: two spokes queue edits to **different** fields of one todo, hub applies both →
+   **both survive**. *Negative control:* the same fixture with whole-record ops loses one — assert
+   that, so the test cannot pass against the shape it exists to reject.
+3. Tombstone and resurrection: a tombstone applied at a later `hubSeq` wins; an upsert at a later
+   `hubSeq` un-tombstones. Both directions, so neither accidental erasure nor accidental
+   resurrection can pass.
 4. An op carrying an unknown field round-trips through an older reader unchanged (D13).
-5. Compaction preserves the merge result exactly for a randomised op sequence (property-style).
+5. Compaction preserves the applied result exactly for a randomised op sequence (property-style).
+5a. **Optimistic write, then contradiction.** A local optimistic value that the hub's applied result
+   disagrees with is **replaced and flagged as corrected**, never silently swapped. Assert the flag,
+   not just the value — a silent correction is indistinguishable from the write having never
+   happened.
+5b. **The outbox is re-derivable.** Delete `ops.ndjson` entirely, re-scan, and the same unsent ops
+   come back from the records marked `pendingSince`. This is the whole of D5's crash-safety claim
+   and it is one test.
 6. Placement: unmet `requires` → `queued` with a reason naming the node, and **never** a start.
+   - **6b — overlap refusal** (D19 rung 3): dispatching into a project an active run already holds
+     with overlapping paths queues and **names the other run**. *Negative controls, both needed:*
+     the same project with **non**-overlapping paths **does** dispatch (otherwise the rule is just
+     "one run per project", which is not what was asked for), and an overlapping run that has
+     **finished** does not block (otherwise the check leaks and the board wedges).
+   - **6c — the allocator actually reserves** (D19 rung 2): N concurrent `allocate/spec-number`
+     calls return N **distinct** numbers. Assert distinctness across the whole set, not
+     pairwise-on-two — the failure mode is a duplicate anywhere in a burst, and two calls is the
+     one case a racy implementation usually gets right.
    - **6a** — a project whose `origin` is absent is **never** placed off its holding node, even
      when that node is the most loaded and a remote-less-capable peer is idle. *Negative control:*
      the same fixture with an `origin` present **does** get placed on the peer — otherwise the test
@@ -1392,9 +1590,14 @@ Unit (pure, in `cluster/merge.ts`, `clock.ts`, `placement.ts`, `ops.ts`):
 
 Integration (two servers in one vitest process, two `CEZ_HOME` temp dirs, linked over loopback):
 
-7. Convergence: 200 interleaved writes on both sides → identical state on both, both directions.
-8. **Partition**: link down → both sides accept local writes → reconnect → converge, and no write
-   was refused while the link was down.
+7. Convergence on hub order: 200 interleaved writes from both spokes → after the outbox drains,
+   **all three nodes hold byte-identical state**, and it equals what the hub applied. Assert against
+   the hub's own result, not merely that the two spokes agree — two spokes can agree with each other
+   and both be wrong about what the record says.
+8. **Partition**: link down → both sides still accept local writes, marked pending → reconnect →
+   the outbox drains and no write was refused while the link was down (D15). *Plus the half that is
+   easy to omit:* a write made during the partition is visible on the **other** spoke afterwards,
+   which is the thing the user actually asked for and which "it converged locally" does not prove.
 9. **Exactly-once start**: one `autostart` todo replicated to two nodes → exactly one run.
    *Prove the test fails without the fix*: `git stash push` the file the guard actually landed in,
    run it, confirm **red**, `git stash pop`. A regression test written after the diagnosis passes
@@ -1433,7 +1636,7 @@ above stays stable:
 14. Hub unreachable at dispatch → a run a person starts by hand still starts, dispatch recorded
     `unattributed`; a **replicated** todo's autostart refuses with a stated reason (D15a). Both
     halves asserted — one without the other is the rule silently collapsing to its neighbour.
-15. **Heal-on-read**: a raw agent append (no `id`, no `cv`) is stamped once, and a second read
+15. **Heal-on-read**: a raw agent append (no `id`, no marker) is stamped once, and a second read
     changes nothing (idempotent), and the derived op carries the id the file kept.
 16. **Corpus sweep, tombstone half** (D8a): delete a document on the hub → it is tombstoned on the
     spoke. *Negative control:* a document that merely fails to appear in one watermark-filtered
@@ -1502,7 +1705,7 @@ Gates green is necessary, not sufficient. Until these have run the work is **QA 
   and confirm it visibly cannot answer, rather than inventing an answer.
 - **E6** Account grants: dispatch from both nodes at once → the hub's account panel shows one
   coherent utilisation, and a limit hold observed on one node parks the other.
-- **E7** Sleep/resume: close the Mac for an hour with pending ops on both sides; on wake, converge
+- **E7** Sleep/resume: close the Mac for an hour with pending ops on both sides; on wake, drain and converge
   with no manual step, and confirm the periodic reconcile — not the watcher — is what recovered it
   (kill the watcher first).
 - **E8** Revoke the Mac from the hub → its ops are refused and its credential is gone; re-enroll.
@@ -1512,7 +1715,9 @@ Gates green is necessary, not sufficient. Until these have run the work is **QA 
 Events named while designing, per the workspace rule: `cluster.node_enrolled`,
 `cluster.link_up` / `link_down` (with duration), `cluster.ops_applied` (count, scope, lag ms),
 `cluster.conflict_resolved` (entity, field, winner node), `cluster.lease_granted` / `denied`,
-`cluster.dispatch_placed` (node, labels, queue wait), `cluster.reconcile_completed`
+`cluster.dispatch_placed` (node, labels, queue wait), `cluster.dispatch_refused_overlap` (the other
+run's id — a rising count is the signal that the backlog is being sliced too finely, not that the
+guard is noisy), `cluster.identity_allocated` (kind), `cluster.reconcile_completed`
 (adds/updates/conflicts, duration), and for Phase 1b `cluster.code_minted` /
 `cluster.code_redeemed` / `cluster.code_expired_unused` (the three together answer "did the
 one-liner actually work for people", which a mint count alone cannot) plus
