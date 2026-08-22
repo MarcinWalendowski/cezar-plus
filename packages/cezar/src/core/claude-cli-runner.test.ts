@@ -167,6 +167,15 @@ describe('a teardown cezar initiated', () => {
       type: 'turn.completed',
       turnId: 'turn_1',
       stopReason: 'end_turn',
+      blockCounts: {
+        text: 1,
+        thinking: 0,
+        thinkingWithheld: 0,
+        toolUse: 0,
+        redactedThinking: 0,
+        serverToolUse: 0,
+        other: 0,
+      },
     });
     expect(events.at(-1)).toEqual({ type: 'done' });
     expect(

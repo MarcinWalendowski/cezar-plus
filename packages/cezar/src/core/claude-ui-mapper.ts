@@ -25,6 +25,7 @@
  */
 
 import type {
+  ClaudeBlockCounts,
   FileDiff,
   PlanEntry,
   PlanStatus,
@@ -78,6 +79,59 @@ export interface ClaudeUiMapperState {
    *  2026-08-19-context-usage-in-tasks-table, point-in-time correction). Reset at
    *  each `turn.started`. */
   readonly lastMainAgentPromptTokens?: number;
+  /** Raw content-block occurrence tally for the CURRENT turn — MAIN-AGENT frames only
+   *  (`parent_tool_use_id` absent). A sub-agent frame tallies into {@link childBlockCounts}
+   *  instead — never merged (spec 2026-08-21-output-token-attribution, D2). Reset at each
+   *  `claudeTurnStarted` and again in `mapResult`, defensively, mirroring
+   *  `lastMainAgentPromptTokens`'s double reset. */
+  readonly blockCounts: ClaudeBlockCounts;
+  /** Same shape as {@link blockCounts}, but for sub-agent frames (`parent_tool_use_id` present). */
+  readonly childBlockCounts: ClaudeBlockCounts;
+}
+
+function zeroBlockCounts(): ClaudeBlockCounts {
+  return { text: 0, thinking: 0, thinkingWithheld: 0, toolUse: 0, redactedThinking: 0, serverToolUse: 0, other: 0 };
+}
+
+function isZeroBlockCounts(counts: ClaudeBlockCounts): boolean {
+  return (
+    counts.text === 0 &&
+    counts.thinking === 0 &&
+    counts.thinkingWithheld === 0 &&
+    counts.toolUse === 0 &&
+    counts.redactedThinking === 0 &&
+    counts.serverToolUse === 0 &&
+    counts.other === 0
+  );
+}
+
+/**
+ * Tally one raw content block into a fresh counts object — never mutates `counts`.
+ *
+ * `thinking` splits on blank vs non-blank (D1): a non-blank block is what the mapper mints a
+ * `reasoning` item for (`raw.thinking.trim() !== ''`, mirroring the item-minting condition
+ * below) — visible, measurable text. A blank block (`thinking: ""`, still carrying a
+ * `signature`) is Anthropic's documented shape for withheld-but-billed reasoning; a `thinking`
+ * block whose `thinking` field isn't even a string is treated the same way, defensively (there
+ * is definitely no visible text to measure either way).
+ */
+function tallyBlockType(counts: ClaudeBlockCounts, raw: Record<string, unknown>): ClaudeBlockCounts {
+  switch (raw.type) {
+    case 'text':
+      return { ...counts, text: counts.text + 1 };
+    case 'thinking':
+      return typeof raw.thinking === 'string' && raw.thinking.trim() !== ''
+        ? { ...counts, thinking: counts.thinking + 1 }
+        : { ...counts, thinkingWithheld: counts.thinkingWithheld + 1 };
+    case 'tool_use':
+      return { ...counts, toolUse: counts.toolUse + 1 };
+    case 'redacted_thinking':
+      return { ...counts, redactedThinking: counts.redactedThinking + 1 };
+    case 'server_tool_use':
+      return { ...counts, serverToolUse: counts.serverToolUse + 1 };
+    default:
+      return { ...counts, other: counts.other + 1 };
+  }
 }
 
 export interface ClaudeUiMapping {
@@ -97,6 +151,8 @@ export function createClaudeUiState(opts: { fallbackSessionId?: string } = {}): 
     openTools: new Map(),
     tasks: new Map(),
     pendingTaskCreates: new Map(),
+    blockCounts: zeroBlockCounts(),
+    childBlockCounts: zeroBlockCounts(),
   };
 }
 
@@ -110,7 +166,16 @@ export function claudeTurnStarted(state: ClaudeUiMapperState): ClaudeUiMapping {
   const turnId = `turn_${state.turnSeq + 1}`;
   // A new turn starts with an empty window reading: last turn's occupancy must not
   // survive into a turn that (e.g. a plain text reply) reports no assistant usage.
-  const next = { ...state, turnSeq: state.turnSeq + 1, currentTurnId: turnId, lastMainAgentPromptTokens: undefined };
+  // `blockCounts`/`childBlockCounts` reset here too — defensive double reset, mirroring
+  // `mapResult`'s own.
+  const next = {
+    ...state,
+    turnSeq: state.turnSeq + 1,
+    currentTurnId: turnId,
+    lastMainAgentPromptTokens: undefined,
+    blockCounts: zeroBlockCounts(),
+    childBlockCounts: zeroBlockCounts(),
+  };
   if (!state.sessionStarted) {
     return { events: [], state: { ...next, pendingTurnIds: [...state.pendingTurnIds, turnId] } };
   }
@@ -167,6 +232,11 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
   let tasks = state.tasks;
   let pendingTaskCreates = state.pendingTaskCreates;
   let sawAssistantText = state.sawAssistantText;
+  // Reference-stable while unchanged: only reassigned (to a NEW object) inside the loop below, so
+  // a frame with an empty/all-unreadable content array leaves it `=== state.blockCounts`. Exactly
+  // one of the two moves per frame — `parentItemId` is constant for the whole frame — never both.
+  let blockCounts = state.blockCounts;
+  let childBlockCounts = state.childBlockCounts;
   // Track this call's own prompt size for the point-in-time Context occupancy. Undefined
   // for a subagent frame (its window is separate) or a frame with no usage — then the
   // turn keeps whatever the last main-agent call reported (spec 2026-08-19, correction).
@@ -179,6 +249,15 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
 
   for (const raw of content) {
     if (!isRecord(raw)) continue;
+    // Occurrence tally over the RAW block type, before any minting/skip logic below — Phase 1
+    // of the output-token-attribution spec. This must run even for a block that mints no item
+    // (blank `thinking`, `redacted_thinking`, a malformed `tool_use`), which is why it is not
+    // folded into the branches that follow. A sub-agent frame (`parent_tool_use_id` present)
+    // tallies into `childBlockCounts` instead of `blockCounts` (D2) — `turn.completed.usage`
+    // never bills a dispatched sub-agent's own responses, so its blocks must not land in the
+    // same counter as the main agent's.
+    if (parentItemId !== undefined) childBlockCounts = tallyBlockType(childBlockCounts, raw);
+    else blockCounts = tallyBlockType(blockCounts, raw);
     if (raw.type === 'text' && typeof raw.text === 'string') {
       // Whole blocks per API round-trip — claude sends no deltas in this
       // mode, so we never fake `item.delta`s: started + completed.
@@ -245,13 +324,30 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
   }
 
   if (events.length === 0) {
-    return lastMainAgentPromptTokens === state.lastMainAgentPromptTokens
+    // N3: this early return must still carry forward the tally — a frame whose only block is a
+    // blank `thinking`, a `redacted_thinking`, or a `server_tool_use` mints no item, so `events`
+    // stays empty here, and a sub-agent frame is disproportionately likely to hit this exact
+    // path (`mainAgentPromptTokens` below already returns `undefined` for one, removing the one
+    // other thing that would otherwise keep `events` non-empty).
+    return lastMainAgentPromptTokens === state.lastMainAgentPromptTokens &&
+      blockCounts === state.blockCounts &&
+      childBlockCounts === state.childBlockCounts
       ? { events, state }
-      : { events, state: { ...state, lastMainAgentPromptTokens } };
+      : { events, state: { ...state, lastMainAgentPromptTokens, blockCounts, childBlockCounts } };
   }
   return {
     events,
-    state: { ...state, itemSeq, openTools: openTools ?? state.openTools, tasks, pendingTaskCreates, sawAssistantText, lastMainAgentPromptTokens },
+    state: {
+      ...state,
+      itemSeq,
+      openTools: openTools ?? state.openTools,
+      tasks,
+      pendingTaskCreates,
+      sawAssistantText,
+      lastMainAgentPromptTokens,
+      blockCounts,
+      childBlockCounts,
+    },
   };
 }
 
@@ -584,6 +680,13 @@ function mapResult(msg: Record<string, unknown>, state: ClaudeUiMapperState): Cl
   // Point-in-time occupancy = the last main-agent call's prompt (tracked above), NOT
   // `usage`, which is the turn's cross-call SUM (spec 2026-08-19, correction).
   if (state.lastMainAgentPromptTokens !== undefined) turnEvent.contextTokens = state.lastMainAgentPromptTokens;
+  // Flush this turn's block tally (Phase 1). `blockCounts` is always attached, even all-zero: a
+  // claude turn that never accumulated a count still answers "0 thinking blocks happened", which
+  // is a real fact, not an absence. `childBlockCounts` is attached ONLY when a sub-agent frame
+  // actually contributed to it this turn — undefined, not a fake zero-filled object, for a turn
+  // that dispatched nothing (D2).
+  turnEvent.blockCounts = state.blockCounts;
+  if (!isZeroBlockCounts(state.childBlockCounts)) turnEvent.childBlockCounts = state.childBlockCounts;
   events.push(turnEvent);
   if (usage) {
     const usageEvent: UiUsageUpdatedEvent = { type: 'usage.updated', usage };
@@ -602,6 +705,9 @@ function mapResult(msg: Record<string, unknown>, state: ClaudeUiMapperState): Cl
       sawAssistantText,
       // Turn closed — drop the occupancy so a stray frame can't reattribute it to the next turn.
       lastMainAgentPromptTokens: undefined,
+      // Flushed onto `turnEvent` above — reset for the next turn's tally.
+      blockCounts: zeroBlockCounts(),
+      childBlockCounts: zeroBlockCounts(),
     },
   };
 }

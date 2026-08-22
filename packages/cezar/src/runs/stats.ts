@@ -1,4 +1,7 @@
 import { createReadStream } from 'node:fs';
+import { access, readFile, readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import type { RunEvent } from '@loki-labs/better-cezar-contract';
@@ -264,6 +267,185 @@ export interface StepStats {
    * re-run after an edit, and says so rather than pretending to.
    */
   repeatedExpensiveCalls: number;
+  /**
+   * Where this step's output tokens went, reconciled against `turn.completed.usage.output`
+   * (`.ai/specs/2026-08-21-output-token-attribution.md`, Phase 2).
+   *
+   * **`undefined`, never a fake-zero object** — same convention as `peakContextTokens` — for a
+   * step that emitted no `turn.completed` at all (a cancelled step) OR when the caller of
+   * {@link computeRunStats} supplied no `tokenize` function (the default: computing this is
+   * opt-in, see {@link Tokenize}'s doc comment).
+   */
+  tokenBreakdown?: TokenBreakdown;
+}
+
+/** Which data a step's {@link TokenBreakdown} was computed from. */
+export type TokenBreakdownMode = 'calibrated' | 'basic' | 'unavailable';
+
+/**
+ * A replay-time RECONSTRUCTION of one step's output-token composition — not a wire-reported
+ * figure. No backend, claude included, reports a per-category token count; `usage.output` is one
+ * number covering every content-block type in the turn together (spec Solution section).
+ *
+ * **Three categories, three different epistemic statuses, not one number:**
+ * - `narrationTokens` / `toolArgTokens` / `thinkingTokens` are MEASURED — real BPE tokenization
+ *   of text cezar's own NDJSON already persists in full.
+ * - `withheldThinkingTokens` is INFERRED — a calibration-ratio subtraction over content Anthropic
+ *   never reveals (blank `thinking` blocks), never a measured count.
+ * - `unclassifiedGapTokens` (basic mode) is UNATTRIBUTED — a residual reported honestly as one
+ *   labeled line, with no attempt to split it further without the transcript's classification.
+ *
+ * `mode` says which of these are available. Every `*Tokens` field is tokenized with whatever
+ * {@link Tokenize} function the caller passed to {@link computeRunStats} — real, deterministic,
+ * reproducible, but an APPROXIMATION of the backend's own (undisclosed) tokenizer (spec Risk R1).
+ */
+export interface TokenBreakdown {
+  mode: TokenBreakdownMode;
+  /** Σ `turn.completed.usage.output` over this step's turns — the ground truth being reconciled.
+   *  MAIN-AGENT-ONLY: a dispatched sub-agent's turns are billed to its own `turn.completed` under
+   *  its own `sessionId`, never rolled into this one — every field below is filtered to match
+   *  (excludes any item with a `parentItemId`). Required in EVERY mode, including `'unavailable'`
+   *  — a defined `TokenBreakdown` always has a usage total, even when nothing downstream of it
+   *  could be measured (`StepStats.tokenBreakdown` itself is `undefined` when there is none). */
+  reportedTokens: number;
+  /** Tokenized text of every non-child `'message'` `item.completed` (`item.parentItemId`
+   *  absent — read directly, NOT via `ItemIndex.childIds`, which only indexes `kind === 'tool'`
+   *  items). `undefined` only in `'unavailable'` mode. */
+  narrationTokens?: number;
+  /** Tokenized `JSON.stringify(item.input)` of every non-child `'tool'` `item.completed`/
+   *  `item.started` (deduped by item id, `item.completed`'s input preferred). Filtered via
+   *  `ItemIndex.childIds` (`indexToolItems`). `undefined` only in `'unavailable'` mode. */
+  toolArgTokens?: number;
+  /** The same tokenization, but for tool items that DO carry a `parentItemId` — ran inside a
+   *  sub-agent's own context window. Real spend, but never counted in `reportedTokens`, so it is
+   *  reported here as its own explicitly-unbilled-to-this-step line, never folded into
+   *  `toolArgTokens`/`measuredTokens`. `0` for a step that dispatched nothing; `undefined` only
+   *  in `'unavailable'` mode — "dispatched nothing" and "couldn't be measured" stay distinguishable. */
+  childToolArgTokens?: number;
+  /** Tokenized text of every non-child `'reasoning'` `item.completed` — the mapper only mints
+   *  these for NON-BLANK `thinking` text, so this is genuinely MEASURED, never inferred. Zero on
+   *  a step whose model withholds thinking (opus/sonnet); real and nonzero on a step using a
+   *  model that emits visible thinking (haiku). Included in `measuredTokens`. `undefined` only
+   *  in `'unavailable'` mode. */
+  thinkingTokens?: number;
+  /** `narrationTokens + toolArgTokens + thinkingTokens`. Deliberately excludes
+   *  `childToolArgTokens` (unbilled to this step) and `withheldThinkingTokens`/
+   *  `unclassifiedGapTokens` (inferences, not measurements — folding either in here would make
+   *  "components sum to `reportedTokens`" true by construction, the tautology criterion 3 is
+   *  built to rule out). `undefined` only in `'unavailable'` mode. */
+  measuredTokens?: number;
+  /** `'calibrated'` mode only: `bearingTokens − (bearingChars / calibrationRatio)` — the
+   *  thinking-bearing subset's ground-truth usage minus its predicted visible-token cost, where
+   *  `bearingChars` includes any recorded NON-BLANK thinking-text length so a response whose
+   *  thinking was actually visible doesn't get double-counted as both measured (via
+   *  `thinkingTokens`) and withheld here. `calibrationRatio` is RUN-WIDE (pooled across every
+   *  step's thinking-free responses before the per-step computation, never this step's own —
+   *  a thin per-step sample is unstable). SIGNED. An INFERENCE, labeled as such in every
+   *  consumer — never confused with `thinkingTokens`, which is measured. `undefined` outside
+   *  `'calibrated'` mode, and within it, whenever the RUN has zero thinking-free responses
+   *  anywhere (no `calibrationRatio` is computable — that run's steps report `mode: 'basic'`
+   *  instead, never `NaN`). Collapses toward (not `undefined`, just small) `0` on a step where
+   *  thinking was fully visible. */
+  withheldThinkingTokens?: number;
+  /** `'calibrated'` mode only: `reportedTokens − (narrationTokens + toolArgTokens +
+   *  thinkingTokens + withheldThinkingTokens)`. SIGNED. Declared explicitly because the identity
+   *  does NOT close for a measurement reason, only a definitional one: `measuredTokens` is a real
+   *  BPE tokenization of NDJSON `item.completed` text, while `withheldThinkingTokens` is a
+   *  chars-ratio inference over TRANSCRIPT text — two independent estimators of different,
+   *  only-partially-overlapping evidence, with no algebraic reason for their sum to equal
+   *  `reportedTokens` on the nose. Reported honestly, not asserted small — Phase 4's falsifiable
+   *  test is `freeGapPct`, not this field. `undefined` outside `'calibrated'` mode. */
+  calibratedResidual?: number;
+  /** `'basic'` mode only: `reportedTokens − measuredTokens`, reported as ONE unattributed line —
+   *  no attempt to split it into thinking vs tokenizer noise without the transcript's
+   *  per-response classification. `undefined` in `'calibrated'`/`'unavailable'` mode. */
+  unclassifiedGapTokens?: number;
+  /** `'calibrated'` mode only: the gap on THIS STEP's own thinking-free response subset alone —
+   *  `(freeTokens − Σ tokenize(text/tool-args of those free responses)) / freeTokens × 100`, 1dp.
+   *  This is the falsifiable claim Phase 4's reconciliation test actually bounds — NOT computed
+   *  over thinking-bearing responses, where a gap is expected and reported via
+   *  `withheldThinkingTokens` instead. `undefined` outside `'calibrated'` mode, or when this
+   *  step's own local free-response count is zero (nothing to compute a per-step figure from). */
+  freeGapPct?: number;
+  /** Σ `blockCounts.{redactedThinking,serverToolUse,other}` over the step's turns — content
+   *  Anthropic bills as output but never reveals, so it can only be SIZED (via the residual
+   *  fields above), never tokenized. Unrelated to ordinary `thinking`/`thinkingWithheld`, which
+   *  is common and handled via `thinkingTokens`/`withheldThinkingTokens` — this is the genuinely
+   *  opaque, never-reconstructable-even-approximately category. `undefined`, NOT `0`, when no
+   *  turn in the step carried a `blockCounts` field at all (Phase 1 is forward-only) — must not
+   *  be read as "confirmed no opaque blocks occurred". */
+  opaqueBlocks?: number;
+  /** Present only in `'calibrated'` mode — diagnostic, not asserted against in tests.
+   *  `freeResponseCount`/`freeChars`/`freeTokens`/`ratio` are THIS STEP's OWN local
+   *  free-response numbers (useful for spotting a thin-sample step); NONE of these four is what
+   *  `withheldThinkingTokens` was actually computed from — `appliedRatio` is the RUN-WIDE
+   *  `calibrationRatio` that was. The two are deliberately different fields so a consumer can
+   *  never mistake a step's own noisy local ratio for the one that produced its
+   *  `withheldThinkingTokens`. */
+  calibration?: {
+    freeResponseCount: number;
+    freeChars: number;
+    freeTokens: number;
+    /** `undefined` exactly when THIS step's own `freeTokens === 0` — independent of the
+     *  run-wide zero-free-response guard on `calibrationRatio` itself; `appliedRatio` can still
+     *  be defined here even when `ratio` is not, since the run-wide pool draws from every step. */
+    ratio?: number;
+    /** The run-wide `calibrationRatio` actually applied to compute this step's
+     *  `withheldThinkingTokens` — `undefined` only when the whole run had zero thinking-free
+     *  responses. */
+    appliedRatio?: number;
+  };
+  /** `RunStats.totals.tokenBreakdown` ONLY — always `undefined` on a per-step `TokenBreakdown`.
+   *  Count of steps in the run whose own `tokenBreakdown.opaqueBlocks` was `undefined` (no turn
+   *  carried `blockCounts`), i.e. excluded from the `opaqueBlocks` sum. */
+  stepsWithoutBlockCounts?: number;
+  /** `RunStats.totals.tokenBreakdown` ONLY — always `undefined` on a per-step `TokenBreakdown`.
+   *  Count of steps in the run whose own `tokenBreakdown.mode` was NOT `'calibrated'`, i.e.
+   *  excluded from the `withheldThinkingTokens`/`calibratedResidual` sums. */
+  stepsNotCalibrated?: number;
+}
+
+/**
+ * A real tokenizer's `text → token count`, injected rather than imported at this module's top
+ * level (spec Risk R8/R10 — a tokenizer dependency must not add cold-start cost to every `cezar`
+ * invocation, only to the one that actually reads token stats). `computeRunStats` stays pure and
+ * synchronous whether or not one is supplied; `readRunStats` is the one caller that supplies it,
+ * via a lazily `import('gpt-tokenizer')`ed one. Omitting it (the default) forces every step's
+ * `tokenBreakdown.mode` to `'unavailable'` — nothing beyond `reportedTokens` can be measured
+ * without a tokenizer, the same "undefined, never a fake number" contract `'unavailable'` mode
+ * already gives a step with no `item.*` events.
+ */
+export type Tokenize = (text: string) => number;
+
+/**
+ * One de-duplicated API response from a Claude Code session transcript
+ * (`~/.claude/projects/*&#47;<sessionId>.jsonl`), classified for calibrated-mode reconciliation
+ * (Phase 2). The transcript carries ONE JSON record per raw content block, not per response — a
+ * multi-block response is split across several records that all repeat the SAME `usage`
+ * (measured on `70f19253`: 628 records / 272 unique `message.id`, naively summing overcounts
+ * 2.5×) — so building this shape means grouping transcript records by `message.id` FIRST
+ * (`readRunStats`'s job, the one fs-touching function; see Implementation-critical rule #1).
+ */
+export interface TranscriptResponse {
+  messageId: string;
+  /** This response's own `usage.output_tokens` — identical across every record in its group, by
+   *  construction (Anthropic repeats the whole response's usage on every block record). */
+  outputTokens: number;
+  /** Whether this response carries at least one `thinking` content block, blank or not. */
+  thinkingBearing: boolean;
+  /** `text` block text length + `JSON.stringify(tool_use.input)` length, summed — the
+   *  "thinking-free" chars a calibration ratio and `freeGapPct` are built from. Excludes
+   *  thinking-block text entirely (see `thinkingChars`). */
+  visibleChars: number;
+  /** Non-blank `thinking` block text length, summed — 0 for a blank/withheld block or a response
+   *  with no thinking block at all. Folded into `bearingChars` (Solution, D1) so a response whose
+   *  thinking was actually visible does not get double-counted as both measured and withheld. */
+  thinkingChars: number;
+  /** The concatenated text this response's `visibleChars` was measured from — narration text and
+   *  tool-arg JSON, newline-joined — kept so `freeGapPct` can tokenize the EXACT text a thinking-
+   *  free response's chars were counted from, not just its length. `undefined` for a
+   *  thinking-bearing response (never read for one). */
+  visibleText?: string;
 }
 
 /** Whole-run tool economy: the per-step rows plus their totals. */
@@ -272,9 +454,25 @@ export interface RunStats {
   /** First → last event. Always ≥ the sum of step wall clocks (queueing, gaps between steps). */
   spanMs: number;
   steps: StepStats[];
-  /** Summed across steps — **except `peakContextTokens`, which is the MAX**. `wallMs` is the SUM
-   *  of step wall clocks, not the run span — those are different numbers and both are worth
-   *  seeing (60.0 min vs 61.5 min on `ec6e8e06`). */
+  /**
+   * Summed across steps — **except `peakContextTokens`, which is the MAX**. `wallMs` is the SUM
+   * of step wall clocks, not the run span — those are different numbers and both are worth
+   * seeing (60.0 min vs 61.5 min on `ec6e8e06`).
+   *
+   * `totals.tokenBreakdown`: `reportedTokens` always SUMs across every step (required in every
+   * mode). `narrationTokens`/`toolArgTokens`/`thinkingTokens`/`childToolArgTokens`/
+   * `measuredTokens` SUM only across steps where each is itself defined (a run mixing
+   * `'unavailable'` with measurable steps undercounts by exactly the unavailable steps' own
+   * contribution, which by definition carried no measured information to add — no separate
+   * exclusion counter is needed, since `totals.mode` already reports `'unavailable'` when every
+   * step was). `opaqueBlocks` sums only across steps where it was itself defined, plus
+   * `stepsWithoutBlockCounts` names how many were excluded. `withheldThinkingTokens` and
+   * `calibratedResidual` sum only across `'calibrated'` steps, plus `stepsNotCalibrated`. `mode`
+   * on a mixed-mode run is `'calibrated'` if ANY step was calibrated, else `'basic'` if any step
+   * was basic, else `'unavailable'`. `freeGapPct` and `calibration` are ALWAYS `undefined` on
+   * totals — both are per-step diagnostics of different sample sizes, never a fabricated
+   * run-level average (spec Risk R9 — the same class of bug the peak-context fix above was about).
+   */
   totals: Omit<StepStats, 'stepId' | 'restarts'>;
 }
 
@@ -338,6 +536,59 @@ interface ItemIndex {
   dispatchIds: Set<string>;
 }
 
+/** The v2 item payload {@link tokenBreakdownItemOf} reads — every field optional, parsed off disk. */
+interface BreakdownItem {
+  kind?: unknown;
+  id?: unknown;
+  text?: unknown;
+  input?: unknown;
+  parentItemId?: unknown;
+}
+
+/** A `'message'` / `'reasoning'` / `'tool'` item on an `item.started` or `item.completed` event,
+ *  or `undefined` for anything else. Both lifecycle events are read for TOOL items — a tool's
+ *  `item.completed` can lose its `input` on the mapper's state-loss path
+ *  (`claude-ui-mapper.ts:454` — a result for a tool cezar never saw start), so
+ *  {@link computeRunStats} falls back to `item.started`'s input, deduped by id, exactly the
+ *  `item.started`/`item.completed` overlap {@link indexToolItems} already tolerates. */
+function tokenBreakdownItemOf(event: RunEvent): BreakdownItem | undefined {
+  if (event.type !== 'item.started' && event.type !== 'item.completed') return undefined;
+  const item = (event as { item?: unknown }).item;
+  if (typeof item !== 'object' || item === null) return undefined;
+  return item as BreakdownItem;
+}
+
+/** The `usage.output` + `blockCounts`/`childBlockCounts` payload a `turn.completed` event
+ *  carries, or `undefined` for anything else. `blockCounts` is `undefined` both for a non-claude
+ *  backend and for a turn recorded before Phase 1 shipped — {@link computeRunStats} cannot tell
+ *  those apart, which is exactly why "blockCounts available" reads as "unknown", never
+ *  "confirmed zero", in either case. */
+function turnCompletedOf(event: RunEvent): {
+  outputTokens: number | undefined;
+  blockCounts: Record<string, unknown> | undefined;
+} | undefined {
+  if (event.type !== 'turn.completed') return undefined;
+  const usage = (event as { usage?: unknown }).usage;
+  const outputTokens =
+    typeof usage === 'object' && usage !== null ? numberOf((usage as { output?: unknown }).output) : undefined;
+  const blockCounts = (event as { blockCounts?: unknown }).blockCounts;
+  return {
+    outputTokens,
+    blockCounts: typeof blockCounts === 'object' && blockCounts !== null ? (blockCounts as Record<string, unknown>) : undefined,
+  };
+}
+
+/** `session.started`'s `sessionId` + the `stepId` it was stamped with, or `undefined` for
+ *  anything else — the join key between cezar's own NDJSON and a Claude Code session transcript
+ *  (`~/.claude/projects/*&#47;<sessionId>.jsonl`, `readRunStats`). A restarted step has more than
+ *  one `session.started`, one per attempt — all of them belong to the step. */
+function sessionStartedOf(event: RunEvent): { sessionId: string; stepId: string } | undefined {
+  if (event.type !== 'session.started') return undefined;
+  const sessionId = stringOf((event as { sessionId?: unknown }).sessionId);
+  const stepId = stringOf(event.stepId);
+  return sessionId !== undefined && stepId !== undefined ? { sessionId, stepId } : undefined;
+}
+
 function indexToolItems(ordered: readonly RunEvent[]): ItemIndex {
   const index: ItemIndex = { known: new Set(), childIds: new Set(), dispatchIds: new Set() };
   for (const event of ordered) {
@@ -395,6 +646,26 @@ interface Bucket {
   /** Every expensive invocation this step made, in order — grouped into repeats after the replay,
    *  because whether a group counts depends on how long its FIRST call took. */
   expensive: Array<{ key: string; callId: string | undefined }>;
+  /** Non-child `'message'` `item.completed` text — tokenized once, at assembly time. */
+  narrationTexts: string[];
+  /** Non-child `'reasoning'` `item.completed` text (non-blank only, by construction — the
+   *  mapper never mints one for a blank block). */
+  reasoningTexts: string[];
+  reportedTokens: number;
+  opaqueBlocks: number;
+  /** Whether this step emitted at least one `turn.completed` — gates whether `tokenBreakdown`
+   *  is built at all, same as `peakContextTokens`'s own undefined-vs-sampled distinction. */
+  hasTurnCompleted: boolean;
+  /** Whether this step emitted at least one `item.*` event — `mode: 'unavailable'` otherwise
+   *  (spec N9: tightened to an item-presence check, not a backend check). */
+  hasItems: boolean;
+  /** Starts `true`; flips to `false` the first turn whose `blockCounts` is `undefined`. A step
+   *  with turns from BOTH eras (pre- and post-Phase-1) reads as unavailable as a whole, rather
+   *  than silently mixing a known zero with an unknown one. */
+  blockCountsAvailable: boolean;
+  /** Every distinct `sessionId` this step ran under (one per attempt, on a restarted step) — the
+   *  join key into the `transcripts` map for calibrated mode. */
+  sessionIds: Set<string>;
 }
 
 function emptyBucket(): Bucket {
@@ -413,7 +684,27 @@ function emptyBucket(): Bucket {
     blindSleepCalls: 0,
     sleepExecMs: 0,
     expensive: [],
+    narrationTexts: [],
+    reasoningTexts: [],
+    reportedTokens: 0,
+    opaqueBlocks: 0,
+    hasTurnCompleted: false,
+    hasItems: false,
+    blockCountsAvailable: true,
+    sessionIds: new Set(),
   };
+}
+
+/** One tool item's `input`, tracked by id across `item.started`/`item.completed` so a
+ *  state-loss-on-completion tool (`claude-ui-mapper.ts:454`) still contributes the input its
+ *  `item.started` carried. Whichever event most recently carried a defined `input` wins — in
+ *  practice `item.completed`'s does, except on the state-loss path, where it has none and
+ *  `item.started`'s stands. */
+interface ToolInputEntry {
+  stepId: string;
+  isChild: boolean;
+  input: unknown;
+  hasInput: boolean;
 }
 
 /**
@@ -467,7 +758,12 @@ function countRepeatedExpensive(
  * many round trips as its children happened to interrupt — so the child's *results* must be
  * dropped along with its calls, or the fix undoes itself.
  */
-export function computeRunStats(runId: string, events: readonly RunEvent[]): RunStats {
+export function computeRunStats(
+  runId: string,
+  events: readonly RunEvent[],
+  transcripts?: ReadonlyMap<string, readonly TranscriptResponse[]>,
+  tokenize?: Tokenize,
+): RunStats {
   const ordered = [...events].sort((a, b) => a.seq - b.seq);
   const items = indexToolItems(ordered);
   const buckets = new Map<string, Bucket>();
@@ -478,6 +774,9 @@ export function computeRunStats(runId: string, events: readonly RunEvent[]): Run
     buckets.set(stepId, created);
     return created;
   };
+  /** Tool item inputs, deduped by id across `item.started`/`item.completed` — see
+   *  {@link ToolInputEntry}. Populated regardless of `tokenize`; only tokenized at assembly time. */
+  const toolInputs = new Map<string, ToolInputEntry>();
 
   /** `tool-call` id → its start time + owning step, so a result can be matched back to it. */
   const pending = new Map<
@@ -585,9 +884,96 @@ export function computeRunStats(runId: string, events: readonly RunEvent[]): Run
         bucket.peakContextTokens = Math.max(bucket.peakContextTokens ?? 0, tokens);
         break;
       }
+      case 'item.started':
+      case 'item.completed': {
+        const item = tokenBreakdownItemOf(event);
+        if (!item) break;
+        const bucket = bucketFor(stepId ?? NO_STEP);
+        bucket.hasItems = true;
+        // Own AND sub-agent items alike are collected — `reportedTokens` (below) sums the WHOLE
+        // turn, every internal round-trip included, so a dispatched sub-agent's own tool calls
+        // ARE part of the wire the model streamed, but `turn.completed.usage.output` never bills
+        // them (they are billed to the sub-agent's own turn, under its own session) — hence the
+        // parent/child split below at assembly time, not here.
+        if (item.kind === 'message' && typeof item.text === 'string' && event.type === 'item.completed') {
+          if (item.parentItemId === undefined) bucket.narrationTexts.push(item.text);
+        } else if (item.kind === 'reasoning' && typeof item.text === 'string' && event.type === 'item.completed') {
+          if (item.parentItemId === undefined) bucket.reasoningTexts.push(item.text);
+        } else if (item.kind === 'tool') {
+          const id = stringOf(item.id);
+          if (id === undefined) break;
+          const existing = toolInputs.get(id);
+          // This event's own input wins when present; otherwise fall back to whatever is already
+          // stored. This is what recovers `item.started`'s input on the mapper's state-loss path
+          // (`claude-ui-mapper.ts:454`), where `item.completed` arrives with NO `input` at all —
+          // taking `item.completed`'s input unconditionally would silently ERASE a real value
+          // `item.started` already captured.
+          const hasNewInput = item.input !== undefined;
+          toolInputs.set(id, {
+            stepId: stepId ?? NO_STEP,
+            isChild: item.parentItemId !== undefined,
+            input: hasNewInput ? item.input : existing?.input,
+            hasInput: hasNewInput || (existing?.hasInput ?? false),
+          });
+        }
+        break;
+      }
+      case 'turn.completed': {
+        const turn = turnCompletedOf(event);
+        if (!turn) break;
+        const bucket = bucketFor(stepId ?? NO_STEP);
+        bucket.hasTurnCompleted = true;
+        if (turn.outputTokens !== undefined) bucket.reportedTokens += turn.outputTokens;
+        if (turn.blockCounts === undefined) {
+          bucket.blockCountsAvailable = false;
+        } else {
+          bucket.opaqueBlocks +=
+            (numberOf(turn.blockCounts.redactedThinking) ?? 0) +
+            (numberOf(turn.blockCounts.serverToolUse) ?? 0) +
+            (numberOf(turn.blockCounts.other) ?? 0);
+        }
+        break;
+      }
+      case 'session.started': {
+        const started = sessionStartedOf(event);
+        if (started) bucketFor(started.stepId).sessionIds.add(started.sessionId);
+        break;
+      }
       default:
         break;
     }
+  }
+
+  // ---- token breakdown assembly (Phase 2) ------------------------------------------------
+
+  /** Every tool item's tokenized input, split own/child, grouped by step — computed once, after
+   *  the replay, now that `item.completed` has had the chance to override `item.started`'s entry. */
+  const toolArgTokensByStep = new Map<string, number>();
+  const childToolArgTokensByStep = new Map<string, number>();
+  if (tokenize) {
+    for (const entry of toolInputs.values()) {
+      const tokens = tokenize(entry.hasInput ? JSON.stringify(entry.input) : '');
+      const bucket = entry.isChild ? childToolArgTokensByStep : toolArgTokensByStep;
+      bucket.set(entry.stepId, (bucket.get(entry.stepId) ?? 0) + tokens);
+    }
+  }
+
+  /** RUN-WIDE calibration ratio — pooled across EVERY step's thinking-free transcript responses
+   *  before any per-step computation (spec N4: a per-step pool is unstable on a thin sample).
+   *  `undefined` when the run has zero thinking-free responses anywhere (or no transcripts at
+   *  all) — every step then reports `mode: 'basic'`, never a `NaN` ratio. */
+  let calibrationRatio: number | undefined;
+  if (transcripts) {
+    let freeChars = 0;
+    let freeTokens = 0;
+    for (const responses of transcripts.values()) {
+      for (const r of responses) {
+        if (r.thinkingBearing) continue;
+        freeChars += r.visibleChars;
+        freeTokens += r.outputTokens;
+      }
+    }
+    calibrationRatio = freeTokens === 0 ? undefined : freeChars / freeTokens;
   }
 
   const steps: StepStats[] = [...buckets.entries()].map(([stepId, b]) => ({
@@ -609,6 +995,9 @@ export function computeRunStats(runId: string, events: readonly RunEvent[]): Run
     blindSleepCalls: b.blindSleepCalls,
     sleepExecMs: b.sleepExecMs,
     repeatedExpensiveCalls: countRepeatedExpensive(b.expensive, execById),
+    tokenBreakdown: b.hasTurnCompleted
+      ? tokenBreakdownOf(stepId, b, toolArgTokensByStep, childToolArgTokensByStep, transcripts, calibrationRatio, tokenize)
+      : undefined,
   }));
 
   const sum = (pick: (s: StepStats) => number): number => steps.reduce((acc, s) => acc + pick(s), 0);
@@ -618,6 +1007,7 @@ export function computeRunStats(runId: string, events: readonly RunEvent[]): Run
   // MAX, not sum: every step is a separate agent session with its own window, so summing peaks
   // would invent a number no window ever held.
   const sampled = steps.map((s) => s.peakContextTokens).filter((v): v is number => v !== undefined);
+  const withBreakdown = steps.map((s) => s.tokenBreakdown).filter((v): v is TokenBreakdown => v !== undefined);
 
   return {
     runId,
@@ -640,8 +1030,266 @@ export function computeRunStats(runId: string, events: readonly RunEvent[]): Run
       blindSleepCalls: sum((s) => s.blindSleepCalls),
       sleepExecMs: sum((s) => s.sleepExecMs),
       repeatedExpensiveCalls: sum((s) => s.repeatedExpensiveCalls),
+      tokenBreakdown: withBreakdown.length > 0 ? sumTokenBreakdowns(withBreakdown) : undefined,
     },
   };
+}
+
+/** 1 decimal place — every `gapPct` in this module rounds the same way. */
+function round1(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+/**
+ * One step's {@link TokenBreakdown}. Only called once `b.hasTurnCompleted` is known true (see the
+ * caller) — an all-zero breakdown for a step that emitted no turn would misread as "measured and
+ * found nothing", not "not measured".
+ *
+ * Mode selection: `'unavailable'` when there is no `tokenize` function (nothing downstream of
+ * `reportedTokens` can be measured at all) OR the step has no `item.*` events (N9 — tightened
+ * from a backend check to an item-presence check: every non-claude mapper emits `item.completed`
+ * including `kind: 'reasoning'`, so this is genuinely about data availability, not backend).
+ * `'calibrated'` when a run-wide `calibrationRatio` is computable AND this step has at least one
+ * transcript response of its own (joined via its `sessionIds`). `'basic'` otherwise.
+ */
+function tokenBreakdownOf(
+  stepId: string,
+  b: Bucket,
+  toolArgTokensByStep: ReadonlyMap<string, number>,
+  childToolArgTokensByStep: ReadonlyMap<string, number>,
+  transcripts: ReadonlyMap<string, readonly TranscriptResponse[]> | undefined,
+  calibrationRatio: number | undefined,
+  tokenize: Tokenize | undefined,
+): TokenBreakdown {
+  const reportedTokens = b.reportedTokens;
+  const opaqueBlocks = b.blockCountsAvailable ? b.opaqueBlocks : undefined;
+
+  if (!tokenize || !b.hasItems) {
+    return { mode: 'unavailable', reportedTokens, opaqueBlocks };
+  }
+
+  const narrationTokens = b.narrationTexts.reduce((acc, t) => acc + tokenize(t), 0);
+  const thinkingTokens = b.reasoningTexts.reduce((acc, t) => acc + tokenize(t), 0);
+  const toolArgTokens = toolArgTokensByStep.get(stepId) ?? 0;
+  const childToolArgTokens = childToolArgTokensByStep.get(stepId) ?? 0;
+  const measuredTokens = narrationTokens + toolArgTokens + thinkingTokens;
+
+  const stepResponses: TranscriptResponse[] = [];
+  if (transcripts) {
+    for (const sessionId of b.sessionIds) {
+      const responses = transcripts.get(sessionId);
+      if (responses) stepResponses.push(...responses);
+    }
+  }
+
+  if (calibrationRatio === undefined || stepResponses.length === 0) {
+    return {
+      mode: 'basic',
+      reportedTokens,
+      narrationTokens,
+      toolArgTokens,
+      childToolArgTokens,
+      thinkingTokens,
+      measuredTokens,
+      unclassifiedGapTokens: reportedTokens - measuredTokens,
+      opaqueBlocks,
+    };
+  }
+
+  const bearing = stepResponses.filter((r) => r.thinkingBearing);
+  const free = stepResponses.filter((r) => !r.thinkingBearing);
+  const bearingChars = bearing.reduce((acc, r) => acc + r.visibleChars + r.thinkingChars, 0);
+  const bearingTokens = bearing.reduce((acc, r) => acc + r.outputTokens, 0);
+  const expectedVisible = bearingChars / calibrationRatio;
+  const withheldThinkingTokens = bearingTokens - expectedVisible;
+  const calibratedResidual =
+    reportedTokens - (narrationTokens + toolArgTokens + thinkingTokens + withheldThinkingTokens);
+
+  const localFreeChars = free.reduce((acc, r) => acc + r.visibleChars, 0);
+  const localFreeTokens = free.reduce((acc, r) => acc + r.outputTokens, 0);
+
+  let freeGapPct: number | undefined;
+  if (localFreeTokens > 0) {
+    const freeMeasuredTokens = free.reduce((acc, r) => acc + tokenize(r.visibleText ?? ''), 0);
+    freeGapPct = round1(((localFreeTokens - freeMeasuredTokens) / localFreeTokens) * 100);
+  }
+
+  return {
+    mode: 'calibrated',
+    reportedTokens,
+    narrationTokens,
+    toolArgTokens,
+    childToolArgTokens,
+    thinkingTokens,
+    measuredTokens,
+    withheldThinkingTokens,
+    calibratedResidual,
+    freeGapPct,
+    opaqueBlocks,
+    calibration: {
+      freeResponseCount: free.length,
+      freeChars: localFreeChars,
+      freeTokens: localFreeTokens,
+      ratio: localFreeTokens === 0 ? undefined : localFreeChars / localFreeTokens,
+      appliedRatio: calibrationRatio,
+    },
+  };
+}
+
+/**
+ * The run-level `tokenBreakdown` — every field summed component-wise ONLY across steps where
+ * that field is itself defined (spec Risk R9 — no fabricated run-level average). `mode` follows
+ * `'calibrated'` > `'basic'` > `'unavailable'` precedence: a run counts as calibrated the moment
+ * any one of its steps is. `freeGapPct`/`calibration` are per-step diagnostics of different
+ * sample sizes and are never summed or averaged onto totals — they stay `undefined` here always.
+ */
+function sumTokenBreakdowns(breakdowns: readonly TokenBreakdown[]): TokenBreakdown {
+  const reportedTokens = breakdowns.reduce((acc, t) => acc + t.reportedTokens, 0);
+
+  const sumDefined = (pick: (t: TokenBreakdown) => number | undefined): number | undefined => {
+    const defined = breakdowns.map(pick).filter((v): v is number => v !== undefined);
+    return defined.length > 0 ? defined.reduce((a, v) => a + v, 0) : undefined;
+  };
+
+  const withBlockCounts = breakdowns.filter((t) => t.opaqueBlocks !== undefined);
+  const withCalibration = breakdowns.filter((t) => t.mode === 'calibrated');
+
+  const mode: TokenBreakdownMode =
+    withCalibration.length > 0 ? 'calibrated' : breakdowns.some((t) => t.mode === 'basic') ? 'basic' : 'unavailable';
+
+  return {
+    mode,
+    reportedTokens,
+    narrationTokens: sumDefined((t) => t.narrationTokens),
+    toolArgTokens: sumDefined((t) => t.toolArgTokens),
+    childToolArgTokens: sumDefined((t) => t.childToolArgTokens),
+    thinkingTokens: sumDefined((t) => t.thinkingTokens),
+    measuredTokens: sumDefined((t) => t.measuredTokens),
+    withheldThinkingTokens:
+      withCalibration.length > 0 ? withCalibration.reduce((a, t) => a + (t.withheldThinkingTokens ?? 0), 0) : undefined,
+    calibratedResidual:
+      withCalibration.length > 0 ? withCalibration.reduce((a, t) => a + (t.calibratedResidual ?? 0), 0) : undefined,
+    opaqueBlocks: withBlockCounts.length > 0 ? withBlockCounts.reduce((a, t) => a + (t.opaqueBlocks ?? 0), 0) : undefined,
+    stepsWithoutBlockCounts: breakdowns.length - withBlockCounts.length,
+    stepsNotCalibrated: breakdowns.length - withCalibration.length,
+  };
+}
+
+/** Same character-class guard `stats-cli.ts`'s `validRunId` already applies to `runId` — restated
+ *  here rather than imported, to avoid a `stats.ts` ↔ `stats-cli.ts` circular module dependency
+ *  for a two-line predicate. `sessionId` is attacker-influenced data (it rides the run's own
+ *  NDJSON) reaching a filesystem path, exactly like `runId` already is (D4). */
+function validSessionId(sessionId: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(sessionId) && sessionId.length <= 128;
+}
+
+/**
+ * Find `<sessionId>.jsonl` under `~/.claude/projects/`, whichever project-directory slug it
+ * landed in. The directory is NOT deterministically computable from a run's cwd — a single run
+ * can have several candidate project directories depending on how a step's worktree/lease was
+ * set up (Architecture) — so this globs by filename instead of re-deriving a slug. Returns
+ * `undefined` (never throws) when `~/.claude/projects/` itself is missing, or no subdirectory
+ * carries the file — both read the same way: no transcript for this session, degrade to basic
+ * mode for it.
+ */
+async function findTranscriptPath(sessionId: string): Promise<string | undefined> {
+  const projectsDir = join(homedir(), '.claude', 'projects');
+  let entries: string[];
+  try {
+    entries = await readdir(projectsDir);
+  } catch {
+    return undefined;
+  }
+  for (const entry of entries) {
+    const candidate = join(projectsDir, entry, `${sessionId}.jsonl`);
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // Not in this project directory — keep looking.
+    }
+  }
+  return undefined;
+}
+
+/** One raw Claude Code transcript record, as read off disk — every field optional. */
+interface RawTranscriptRecord {
+  type?: unknown;
+  isSidechain?: unknown;
+  message?: { id?: unknown; content?: unknown; usage?: { output_tokens?: unknown } };
+}
+
+/**
+ * Parse a Claude Code session transcript's lines into deduped {@link TranscriptResponse}s.
+ *
+ * **Grouping by `message.id` is mandatory** — the transcript carries one JSON record per raw
+ * content block, not per response, and every record in a group repeats the SAME `usage`
+ * (Implementation-critical rule #1; measured on `70f19253`: naive per-record summing over-counts
+ * 2.5×, 940,963 vs the correct 375,001). `isSidechain: true` records — a sub-agent's own turn,
+ * embedded inline in the parent's transcript file — are excluded entirely: this join already
+ * assumes the transcript holds only the main agent's own responses (Architecture), and a
+ * sidechain record would break that assumption if ever present.
+ */
+export function parseTranscriptResponses(lines: readonly string[]): TranscriptResponse[] {
+  const groups = new Map<string, { outputTokens: number; blocks: unknown[] }>();
+  for (const line of lines) {
+    if (line.trim() === '') continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) continue;
+    const record = parsed as RawTranscriptRecord;
+    if (record.type !== 'assistant' || record.isSidechain === true) continue;
+    const message = record.message;
+    if (typeof message !== 'object' || message === null) continue;
+    const messageId = stringOf(message.id);
+    const outputTokens = numberOf(
+      typeof message.usage === 'object' && message.usage !== null ? message.usage.output_tokens : undefined,
+    );
+    if (messageId === undefined || outputTokens === undefined) continue;
+    const content = Array.isArray(message.content) ? message.content : [];
+    const group = groups.get(messageId) ?? { outputTokens, blocks: [] };
+    group.blocks.push(...content);
+    groups.set(messageId, group);
+  }
+
+  const responses: TranscriptResponse[] = [];
+  for (const [messageId, group] of groups) {
+    let visibleChars = 0;
+    let thinkingChars = 0;
+    let thinkingBearing = false;
+    const visibleParts: string[] = [];
+    for (const raw of group.blocks) {
+      if (!isRecord(raw)) continue;
+      if (raw.type === 'text' && typeof raw.text === 'string') {
+        visibleChars += raw.text.length;
+        visibleParts.push(raw.text);
+      } else if (raw.type === 'tool_use' && raw.input !== undefined) {
+        const json = JSON.stringify(raw.input);
+        visibleChars += json.length;
+        visibleParts.push(json);
+      } else if (raw.type === 'thinking') {
+        thinkingBearing = true;
+        if (typeof raw.thinking === 'string' && raw.thinking.trim() !== '') thinkingChars += raw.thinking.length;
+      }
+    }
+    responses.push({
+      messageId,
+      outputTokens: group.outputTokens,
+      thinkingBearing,
+      visibleChars,
+      thinkingChars,
+      visibleText: thinkingBearing ? undefined : visibleParts.join('\n'),
+    });
+  }
+  return responses;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -651,6 +1299,17 @@ export function computeRunStats(runId: string, events: readonly RunEvent[]): Run
  *
  * Malformed lines are skipped, not fatal: a log truncated mid-write by a killed process is a
  * normal thing to want stats for.
+ *
+ * **Filesystem reads beyond the NDJSON**, since Phase 2's calibrated mode (D3/D4): every distinct
+ * `sessionId` the run's `session.started` events name gets a best-effort join against its Claude
+ * Code session transcript (`~/.claude/projects/*&#47;<sessionId>.jsonl`) — missing, unreadable, or
+ * unparseable transcripts degrade that session to no calibrated data silently, never fail the
+ * whole read (the same posture already applied to a malformed NDJSON line above).
+ *
+ * **The lazy `import('gpt-tokenizer')` is Risk R8/R10's named seam.** This is the one path that
+ * needs the tokenizer, so this is the one path that pays for loading it — `cez run stats` and
+ * nothing else. `computeRunStats` itself stays synchronous and importable everywhere without
+ * ever pulling the dependency in.
  */
 export async function readRunStats(ndjsonPath: string, runId: string): Promise<RunStats> {
   const events: RunEvent[] = [];
@@ -666,7 +1325,27 @@ export async function readRunStats(ndjsonPath: string, runId: string): Promise<R
       // Truncated or corrupt line — skip it, keep metering the rest.
     }
   }
-  return computeRunStats(runId, events);
+
+  const sessionIds = new Set<string>();
+  for (const event of events) {
+    const started = sessionStartedOf(event);
+    if (started) sessionIds.add(started.sessionId);
+  }
+  const transcripts = new Map<string, TranscriptResponse[]>();
+  for (const sessionId of sessionIds) {
+    if (!validSessionId(sessionId)) continue;
+    const path = await findTranscriptPath(sessionId);
+    if (!path) continue; // pruned, never captured, or an unexpected sessionId shape — basic mode
+    try {
+      const contents = await readFile(path, 'utf8');
+      transcripts.set(sessionId, parseTranscriptResponses(contents.split('\n')));
+    } catch {
+      // Unreadable/corrupt transcript file — degrade this session to no calibrated data.
+    }
+  }
+
+  const { countTokens } = await import('gpt-tokenizer');
+  return computeRunStats(runId, events, transcripts.size > 0 ? transcripts : undefined, (text) => countTokens(text));
 }
 
 function secs(ms: number): string {
@@ -755,6 +1434,109 @@ export function formatRunStats(stats: RunStats): string {
       ` (${secs(stats.totals.sleepExecMs)}s waited)` +
       (stats.totals.blindSleepCalls > 0 ? '  (blind = a guessed duration; target 0)' : '') +
       ` · ${stats.totals.repeatedExpensiveCalls} expensive call(s) re-run`,
+    ...tokenBreakdownLines(stats),
   ];
   return lines.join('\n');
+}
+
+/** Thousands of tokens with a trailing `k`, or an em dash when there is nothing to show (no
+ *  breakdown at all, or the field is `undefined` in this step's mode) — mirrors `ktok`. */
+function tokk(tokens: number | undefined): string {
+  return tokens === undefined ? '—' : `${(tokens / 1_000).toFixed(1)}k`;
+}
+
+/**
+ * Per-step annotation lines below the breakdown table — the fields that don't fit a fixed table
+ * column because their MEANING depends on `mode` (Phase 3, N8: an `'unavailable'` step gets its
+ * own branch rather than a row of fake zeros).
+ */
+function tokenBreakdownAnnotations(label: string, tb: TokenBreakdown | undefined): string[] {
+  if (!tb) return [];
+  if (tb.mode === 'unavailable') {
+    return [`  ${label}: breakdown unavailable — no tool/message events or transcript for this step`];
+  }
+  const lines: string[] = [];
+  if (tb.mode === 'basic' && tb.unclassifiedGapTokens !== undefined) {
+    lines.push(`  ${label}: ${tokk(tb.unclassifiedGapTokens)} tokens unattributed`);
+  }
+  if (tb.mode === 'calibrated') {
+    if (tb.withheldThinkingTokens !== undefined) {
+      lines.push(
+        `  ${label}: ${tokk(tb.withheldThinkingTokens)} tokens withheld thinking (inferred)` +
+          (tb.calibratedResidual !== undefined ? `, ${tokk(tb.calibratedResidual)} residual` : '') +
+          (tb.freeGapPct !== undefined ? `, freeGapPct ${tb.freeGapPct.toFixed(1)}%` : ''),
+      );
+    }
+    // N7: printed only when THIS step's own local ratio is defined — never NaN.
+    if (tb.calibration?.ratio !== undefined) {
+      lines.push(
+        `  ${label}: calibration ratio ${tb.calibration.ratio.toFixed(3)} chars/token` +
+          ` (local, n=${tb.calibration.freeResponseCount})` +
+          (tb.calibration.appliedRatio !== undefined ? ` — ${tb.calibration.appliedRatio.toFixed(3)} applied (run-wide)` : ''),
+      );
+    }
+  }
+  if (tb.childToolArgTokens !== undefined && tb.childToolArgTokens > 0) {
+    lines.push(`  ${label}: ${tokk(tb.childToolArgTokens)} tokens unbilled to this step (sub-agent tool args)`);
+  }
+  // N2: printed only when defined AND > 0 — never a `0` line when blockCounts was unavailable.
+  if (tb.opaqueBlocks !== undefined && tb.opaqueBlocks > 0) {
+    lines.push(`  ${label}: ${tb.opaqueBlocks} opaque block(s) (redacted_thinking/server_tool_use/other)`);
+  }
+  return lines;
+}
+
+/**
+ * The output-token breakdown block (Phase 3, `.ai/specs/2026-08-21-output-token-attribution.md`)
+ * — printed only when at least one step has a `tokenBreakdown` at all (`stats.totals.tokenBreakdown`
+ * defined); silently omitted otherwise, e.g. a run with no `turn.completed` events anywhere.
+ * `thinkingTokens` prints as a plain measured figure, never qualified "inferred" (D1) —
+ * `withheldThinkingTokens`, printed separately below the table, always carries that qualifier (R2).
+ */
+function tokenBreakdownLines(stats: RunStats): string[] {
+  const totalTb = stats.totals.tokenBreakdown;
+  if (!totalTb) return [];
+
+  const header = [
+    pad('step', 16, false),
+    pad('reported', 9),
+    pad('narrate', 9),
+    pad('think', 9),
+    pad('tool-arg', 9),
+    pad('child', 9),
+    pad('measured', 9),
+    pad('mode', 11),
+  ].join('');
+
+  const row = (label: string, tb: TokenBreakdown | undefined): string =>
+    [
+      pad(label, 16, false),
+      pad(tokk(tb?.reportedTokens), 9),
+      pad(tokk(tb?.narrationTokens), 9),
+      pad(tokk(tb?.thinkingTokens), 9),
+      pad(tokk(tb?.toolArgTokens), 9),
+      pad(tokk(tb?.childToolArgTokens), 9),
+      pad(tokk(tb?.measuredTokens), 9),
+      pad(tb?.mode ?? '—', 11),
+    ].join('');
+
+  return [
+    '',
+    'output tokens — where they went (narration/thinking/tool-arg are measured; unbilled/withheld/unattributed reported below, separately)',
+    header,
+    '-'.repeat(header.length),
+    ...stats.steps.map((s) => row(s.stepId, s.tokenBreakdown)),
+    '-'.repeat(header.length),
+    row('TOTAL', totalTb),
+    ...stats.steps.flatMap((s) => tokenBreakdownAnnotations(s.stepId, s.tokenBreakdown)),
+    ...tokenBreakdownAnnotations('TOTAL', totalTb),
+    ...(totalTb.stepsWithoutBlockCounts
+      ? [
+          `  (${totalTb.stepsWithoutBlockCounts} step(s) missing blockCounts — TOTAL opaqueBlocks excludes them, "unknown" not "confirmed zero")`,
+        ]
+      : []),
+    ...(totalTb.stepsNotCalibrated
+      ? [`  (${totalTb.stepsNotCalibrated} step(s) not calibrated — TOTAL withheldThinkingTokens/calibratedResidual exclude them)`]
+      : []),
+  ];
 }

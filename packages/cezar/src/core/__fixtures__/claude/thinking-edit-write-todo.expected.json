@@ -273,7 +273,16 @@
       "cacheWrite": 2400
     },
     "costUsd": 0.0128,
-    "contextTokens": 45
+    "contextTokens": 45,
+    "blockCounts": {
+      "text": 1,
+      "thinking": 1,
+      "thinkingWithheld": 0,
+      "toolUse": 3,
+      "redactedThinking": 0,
+      "serverToolUse": 0,
+      "other": 0
+    }
   },
   {
     "type": "usage.updated",
