@@ -101,6 +101,17 @@ depth, but it is not this bug's fix — against this cause a retry re-enters a p
 name and merely fails slower. Sizing a longer timeout is likewise rejected: the measurement above
 shows the timeout was never the constraint.
 
+**CORRECTED 2026-08-22: the step-level retry filed above has since shipped, and does not
+contradict this paragraph.** `c4cd4ab6` was not in the live tracker by the time it was picked up
+(task `9e110775-a190-4d91-94aa-da4791752b7e`), so it was actioned directly: commit `2258aee0`
+("fix: retry a broker step once when it never answered, not when it was never started"), spec
+`.ai/specs/2026-08-22-bounded-transient-broker-retry.md`, on `origin/main` since `541bc76d`. It
+retries only the case this spec's fix (per-instance scope unit + launcher log) makes possible to
+detect — a broker that wrote `meta.json` and then went deaf — and still fails fast, with no
+retry, when `meta.json` was never written. The "retry re-enters a permanently poisoned name"
+argument above is exactly why: it holds for the never-started case and does not apply to the
+transient one.
+
 Also observed, filed separately: agent-started background processes outlive their run and keep a
 cgroup (and a `claude`-spawned tree) alive indefinitely.
 
