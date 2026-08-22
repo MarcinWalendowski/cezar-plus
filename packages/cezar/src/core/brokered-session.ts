@@ -43,10 +43,30 @@ export const SPOOL_POLL_MS = 50;
  */
 export const PENDING_MAX_ATTEMPTS = 100;
 
+/** A broker process wrote its metadata but its control channel exhausted the startup budget. */
+export class BrokerUnavailableError extends Error {
+  override readonly name = 'BrokerUnavailableError';
+  readonly everAnswered: boolean;
+  readonly spoolDir: string;
+
+  constructor(message: string, opts: { everAnswered: boolean; spoolDir: string }) {
+    super(message);
+    this.everAnswered = opts.everAnswered;
+    this.spoolDir = opts.spoolDir;
+  }
+}
+
+/** Only a newly launched broker whose control channel never answered is safe to retry. */
+export function isRetryableBrokerLaunch(err: unknown): err is BrokerUnavailableError {
+  return err instanceof BrokerUnavailableError && !err.everAnswered;
+}
+
 export interface BrokeredSessionOptions {
   spoolDir: string;
   /** Byte offset to resume from — 0 for a fresh run, the persisted value when re-attaching. */
   startOffset?: number;
+  /** Re-attached sessions may already have delivered work before this reader existed. */
+  previouslyAnswered?: boolean;
   /** Called for each complete NDJSON line, in order, exactly once. */
   onLine: (line: string) => void;
   /** Called when the backend has exited and the spool is fully drained. */
@@ -120,11 +140,13 @@ export class BrokeredSession implements AgentSession {
   private readonly pending: BrokerRequest[] = [];
   private sending = false;
   private attempts = 0;
+  private everAnswered: boolean;
 
   constructor(opts: BrokeredSessionOptions) {
     this.opts = opts;
     this.spoolDir = opts.spoolDir;
     this.offset = opts.startOffset ?? 0;
+    this.everAnswered = opts.previouslyAnswered ?? false;
     this.result = new Promise<AgentRunResult>((resolve, reject) => {
       this.settle = resolve;
       this.failWith = reject;
@@ -238,12 +260,16 @@ export class BrokeredSession implements AgentSession {
             this.giveUp(
               this.opts.spawnFailed?.() ??
                 this.opts.launchFailure?.() ??
-                new Error(`run broker for ${this.spoolDir} did not respond after ${waitedMs}ms — giving up`),
+                new BrokerUnavailableError(
+                  `run broker for ${this.spoolDir} did not respond after ${waitedMs}ms — giving up`,
+                  { everAnswered: this.everAnswered, spoolDir: this.spoolDir },
+                ),
             );
           }
           return;
         }
         this.attempts = 0;
+        this.everAnswered = true;
         this.pending.shift();
       }
     } finally {

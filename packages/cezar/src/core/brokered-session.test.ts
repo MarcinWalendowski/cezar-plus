@@ -4,7 +4,12 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { brokerRequest } from './broker-client.ts';
-import { BrokeredSession, PENDING_MAX_ATTEMPTS } from './brokered-session.ts';
+import {
+  BrokeredSession,
+  BrokerUnavailableError,
+  PENDING_MAX_ATTEMPTS,
+  isRetryableBrokerLaunch,
+} from './brokered-session.ts';
 import { startRunBroker } from './run-broker.ts';
 
 /**
@@ -253,9 +258,28 @@ describe('BrokeredSession', () => {
     const start = Date.now();
     expect(session.sendMessage([{ type: 'text', text: 'hello' }])).toBe(true);
 
-    await expect(session.result).rejects.toThrow(/did not respond/);
+    const rejected = await session.result.catch((err: unknown) => err);
+    expect(rejected).toBeInstanceOf(BrokerUnavailableError);
+    expect(rejected).toMatchObject({ everAnswered: false, spoolDir: spool });
+    expect(isRetryableBrokerLaunch(rejected)).toBe(true);
     expect(session.open).toBe(false);
     expect(Date.now() - start).toBeLessThan(5_000);
+  }, TEST_TIMEOUT_MS);
+
+  it('never classifies a re-attached channel as a cold launch', async () => {
+    const spool = join(scratch(), 'reattached-no-broker.spool');
+    const session = new BrokeredSession({
+      spoolDir: spool,
+      onLine: () => {},
+      pollMs: 5,
+      previouslyAnswered: true,
+    });
+    session.sendMessage([{ type: 'text', text: 'follow-up' }]);
+
+    const rejected = await session.result.catch((err: unknown) => err);
+    expect(rejected).toBeInstanceOf(BrokerUnavailableError);
+    expect(rejected).toMatchObject({ everAnswered: true, spoolDir: spool });
+    expect(isRetryableBrokerLaunch(rejected)).toBe(false);
   }, TEST_TIMEOUT_MS);
 
   it('a spawn failure takes precedence over the generic give-up message', async () => {
