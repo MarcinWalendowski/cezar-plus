@@ -92,6 +92,15 @@ export const stepStateSchema = z.object({
   sessionId: z.string().optional(),
   /** Backend that owns `sessionId`; absent on records written before backend affinity. */
   backend: runnerSchema.optional(),
+  /** Free-text model this step's latest attempt actually asked for — the per-step twin of
+   *  `RunRecord.model`. Absent when the agent-model lock voided it, when nothing was asked, and on
+   *  every step recorded before spec 2026-08-22-per-step-model-display. */
+  model: z.string().optional(),
+  /** Canonical `provider/model` this step's latest attempt resolved to — the per-step twin of
+   *  `RunRecord.modelIdentity`, which holds only the LAST step's. This is what the step rail
+   *  renders per row, so a multi-model workflow reads honestly instead of showing one model for
+   *  every step. */
+  modelIdentity: z.string().optional(),
   /** Agent account (spec 2026-07-29-agent-profiles) that owns `sessionId` — `default`, or a
    *  stored profile id. The two are a PAIR: a session id only resolves inside the config dir
    *  that created it, so resume and Continue read this rather than the project's current

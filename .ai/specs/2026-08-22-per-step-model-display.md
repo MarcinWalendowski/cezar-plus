@@ -1,10 +1,37 @@
 # Show which LLM model actually ran each task workflow step
 
-**Status:** proposed — reviewed, PASSED (opus, citations verified against code), never
-implemented. **Recovered 2026-08-22 from run `1f63eb07`'s own event transcript** after its
-worktree was destroyed mid-run; see "What happened to run 1f63eb07" below before starting
-Phase 1.
+**Status:** IMPLEMENTED 2026-08-22 — all three phases, gates green, deployed. Written and
+reviewed (PASSED, opus) by run `1f63eb07`, whose implementation was then destroyed by the
+worktree reap described below; re-implemented from this spec in the same run's `deploy` step
+after the owner asked for it directly. The "What happened to run `1f63eb07`" section is kept
+below as the incident record — it is history now, not a warning to a future implementer.
 **Brief:** `.ai/specs/briefs/2026-08-22-per-step-model-display.md`
+
+## What actually shipped
+
+Every phase landed as written, with two deliberate departures worth naming:
+
+- **A fourth branch in the render fallback.** The spec's rule was three-way (executed → planned
+  → `auto`). The implementation splits the executed case: a step with a `modelIdentity` but no
+  free-text `model` — what a run under `agentModelsLocked` looks like — renders the identity
+  rather than falling through to `auto`. The spec's own Risks section called that ambiguity
+  unresolvable and accepted `auto` for it; it turned out to be resolvable for free, because the
+  identity IS written in that case and names the model that actually served the turn. `auto` now
+  means only "nothing was recorded at all."
+- **The `planned` prop is `ReadonlyArray<{ id, model? }>`, not `WorkflowDef['steps']`.** Both were
+  offered by the spec. The narrow structural type is what `StepRail` actually needs, keeps the
+  web package from importing a workflow type for one field, and `run.workflowDef?.steps` is
+  assignable to it unchanged at the single call site.
+
+Verification, as run: typecheck green; `model-identity-wiring.test.ts` 9/9 (including the two new
+cases — a multi-model chain keeping each step's own identity, and a follow-up override rewriting
+the `continue-1` step's pair); `step-rail.test.tsx` + `run-header.test.tsx` 125/125; the full
+five-command gate green apart from the two failures documented in `AGENTS.md` §"environment
+traps" that reproduce identically at clean HEAD (`catalog.test.ts` C18, the host-speed budget,
+and `config-api.test.ts`'s native-model defaults — the latter re-confirmed against a stashed
+control this session, not taken on trust). Verification step 5 (the CLI note) passed live: a
+`CEZ_DRY_RUN=1 cez run … --model opus` printed `  · model: anthropic/opus` between the `── step:`
+header and the agent's first output.
 
 ## What happened to run `1f63eb07` (read this before implementing)
 

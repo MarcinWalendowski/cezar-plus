@@ -3578,15 +3578,31 @@ export class RunManager {
     // in the un-normalised wire form the first step already converted away (`anthropic/opus`
     // instead of `opus`). Fail loud here too rather than let the backend pick a default.
     let continueModel: string | undefined;
+    // Hoisted for the same reason as `stepRawModel` in `runAgentStep`: the mapper and the record
+    // must read one expression, not two copies of it.
+    const continueRawModel = agentModelsLocked(this.repoRoot) ? undefined : record?.model;
     try {
-      const normalized = normalizeModelForBackend(
-        continueBackend,
-        agentModelsLocked(this.repoRoot) ? undefined : record?.model,
-        { configuredProvider: await configuredModelProvider(continueBackend, state.cwd) },
-      );
+      const normalized = normalizeModelForBackend(continueBackend, continueRawModel, {
+        configuredProvider: await configuredModelProvider(continueBackend, state.cwd),
+      });
       continueModel = normalized?.backendModel;
+      const continueModelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
       this.store.updateRun(runId, {
-        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+        modelIdentity: continueModelIdentity,
+      });
+      // The step half of the same write (spec 2026-08-22-per-step-model-display). Without it, a
+      // follow-up that switches model (#401) — or any resume, which re-resolves from the RUN-level
+      // `record.model` rather than the step's own — would move the run-level identity on and leave
+      // the step's frozen at its spawn-time value, reintroducing at step level the exact "the
+      // record asserts a model that is not what ran" defect #405 removed at run level.
+      this.store.updateStep(runId, stepId, {
+        model: continueRawModel,
+        modelIdentity: continueModelIdentity,
+      });
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: `model: ${continueModelIdentity ?? continueRawModel ?? 'auto'}`,
+        stepId,
       });
     } catch (err) {
       if (!(err instanceof ModelIdentityError)) throw err;
@@ -4949,19 +4965,39 @@ export class RunManager {
     // unresolvable model (e.g. a bare id on opencode) returns the step error
     // instead of letting the backend silently substitute its default.
     let backendModel: string | undefined;
+    // Hoisted rather than inlined into the call below, because it is now read TWICE — once by the
+    // mapper and once by the record. Two copies of the same expression is exactly how the thing
+    // that ran and the thing the record claims ran drift apart.
+    const stepRawModel = agentModelsLocked(this.repoRoot) ? undefined : step.model ?? input.model;
     try {
-      const normalized = normalizeModelForBackend(
-        stepBackend,
-        agentModelsLocked(this.repoRoot) ? undefined : step.model ?? input.model,
-        { configuredProvider: await configuredModelProvider(stepBackend, state.cwd) },
-      );
+      const normalized = normalizeModelForBackend(stepBackend, stepRawModel, {
+        configuredProvider: await configuredModelProvider(stepBackend, state.cwd),
+      });
       backendModel = normalized?.backendModel;
+      const stepModelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
       // Persist the identity of what ACTUALLY runs (#405, review M1). The run-start echo
       // (line ~993) is best-effort from `taskBackend`/`input.model`; a per-step `runner`/`model`
       // override makes it assert a model that never ran. Re-write it here, from the resolved
       // step identity, so the record — the product of this PR — is always one that ran.
       this.store.updateRun(runId, {
-        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+        modelIdentity: stepModelIdentity,
+      });
+      // ...and on the STEP, where the next step's resolution cannot overwrite it (spec
+      // 2026-08-22-per-step-model-display). The run-level field above is a single slot rewritten
+      // by every step, so a `spec-to-deploy` chain that runs `review-spec` on opus and its other
+      // seven steps on sonnet finishes asserting only sonnet, with every earlier step's real model
+      // discarded. The step rail reads this pair instead. Written beside `sessionId`/`backend`, the
+      // per-step execution facts that already live here, and at the same moment: before the spawn,
+      // so a running step already says what it is running on.
+      this.store.updateStep(runId, step.id, { model: stepRawModel, modelIdentity: stepModelIdentity });
+      // The same fact for `cez run`'s stdout and the web transcript, through the generic `note`
+      // channel both already render — no new event type and no handler change on either side. The
+      // CLI's `── step:` header is printed before this point in the control flow (the model is not
+      // resolved yet there), which is why the headless surface had no model line at all.
+      emit({
+        type: 'note',
+        stepId: step.id,
+        message: `model: ${stepModelIdentity ?? stepRawModel ?? 'auto'}`,
       });
     } catch (err) {
       if (err instanceof ModelIdentityError) return err.message;

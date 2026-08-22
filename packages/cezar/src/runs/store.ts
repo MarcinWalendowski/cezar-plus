@@ -93,6 +93,16 @@ const stepStateSchema = z.object({
   /** Backend that owns `sessionId`. Optional so pre-affinity runs.json files still parse;
    *  `storedRunnerSchema` so a legacy `claude-cli` folds to `claude` instead of failing (#547). */
   backend: storedRunnerSchema.optional(),
+  /** Free-text model this step's LATEST attempt actually asked for (`step.model ?? input.model`
+   *  on a spawn, the run-level `model` on a continuation) — `undefined` when `agentModelsLocked`
+   *  voided it or nothing was asked. The per-step twin of `RunRecord.model`, written where the
+   *  model is RESOLVED rather than where it was planned (spec 2026-08-22-per-step-model-display). */
+  model: z.string().optional(),
+  /** Canonical `provider/model` this step's latest attempt resolved to (`core/model-identity.ts`).
+   *  The per-step twin of `RunRecord.modelIdentity` — which the NEXT step overwrites, so the
+   *  run-level field only ever names the last one. This one is never clobbered, which is the whole
+   *  point: a chain running `review-spec` on opus and the rest on sonnet keeps both answers. */
+  modelIdentity: z.string().optional(),
   /** Agent profile (account) this step actually spawned under — `default`, or a stored profile
    *  id (spec 2026-07-29-agent-profiles). Recorded rather than re-derived because a session id
    *  only means something inside the config dir that created it: `sessionId` and `profileId` are
