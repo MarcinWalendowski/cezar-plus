@@ -1,8 +1,66 @@
 # Every task records its author — user, API, or the agent session that spawned it
 
-**Status: IMPLEMENTED 2026-08-22 — Phases 1-4. Phase 5 not started (it was always optional).
-QA NEEDED: the runtime e2e in §Verification steps 18-21 has NOT been run, so the cockpit surface
-is unverified in a real browser.** Written in the `spec` step of the `spec-to-deploy` run for task
+**Status: IMPLEMENTED + DEPLOYED + VERIFIED 2026-08-22 — Phases 1-4. Phase 5 not started (it was always
+optional). Shipped as `5f8cfced` + `64394362`, fast-forwarded onto `main`, deployed to
+cockpit.example.com as release `20260822T122039Z-64394362` (rootless blue-green; both
+`.ai/deploy-targets.json` probes exit 0 — backend `live=64394362 == HEAD`, UI `serving
+assets/index-3BBCV-iR.js == the built bundle`).**
+
+**The DATA path is verified in production, on real records, not fixtures:**
+
+- **`kind: 'agent'` with the pair the owner required.** `cezar todo add`, run by the deployed CLI
+  from inside this task's own agent session, stamped
+  `{kind: 'agent', via: 'cli-todo-add', parentTaskId: '232ad6d4-…', agentSessionId: '2aa7483d-…',
+  parentStepId: 'continue-5'}` — the parent task AND the agent session, which is requirement 3
+  read literally.
+- **`CEZ_STEP_ID` / `CEZ_SESSION_ID` reach a live agent.** Confirmed in this session's own
+  environment after the deployed server respawned it (`continue-5` / `2aa7483d-…`). Phase 2's
+  premise held on the real box, not just in the test.
+- **`kind: 'user'` from a real person.** A run a user started through the composer two seconds
+  after activation (12:20:43Z; activated 12:20:41Z) carries
+  `{kind: 'user', via: 'workspace-composer'}`. Not a fixture — an unrelated task someone filed.
+- **Backward compatibility proven against production data.** 61 run records scanned across the
+  workspace and every registered project: 1 carries an author, 60 do not, and all 61 load. The
+  additive-optional field does exactly what §Backward compatibility claims.
+
+**The BROWSER check (§Verification 18-20) has now been RUN and passed** — Playwright/Chromium on
+this box (`AGENTS.md` § Headless browser), against a throwaway cockpit seeded with one run of each
+author kind. Screenshot at the time of writing: `/tmp/qa-author-column.png`.
+
+- The `Author` header renders on the runs table, between `Ref` and `Workflow`.
+- All three kinds render as designed, in one table:
+  `[{kind: 'agent', via: 'cli-todo-add', text: '⤷ aaaaaaaa'}, {kind: 'user', via: 'composer',
+  text: 'Marcin'}, {kind: 'none', text: '—'}]`.
+- The agent cell is a real link to its parent — `href="/p/qa-cockpit/tasks/aaaaaaaa-1111-…"`,
+  resolved through `TaskLocationProvider` (divergence 1), not built from the child's own project.
+- Hovering it shows the full sentence: *"Started by an agent in task aaaaaaaa, session cb916c71
+  (step implement) via cezar todo add"* — the parent task AND the agent session, on screen.
+- Zero page errors.
+
+**Confirmed a second time, independently, and it covered two things the first pass did not**
+(2026-08-22, port 4399, fixture with all FOUR states). Recorded because the gap is the useful part:
+the run above checked the runs table and three kinds, so the **Filed board's** Author column and
+the **`api`** kind were unverified until now.
+
+- Both boards carry the header: `["Status","Task","Project","Author","Priority","Age","Actions"]`
+  (Filed) and `[…,"Ref","Author","Workflow",…]` (runs) — one page, two tables, one column.
+- `{kind: 'api', via: 'composer'}` renders `API`, and carries no parent link.
+- An agent-authored **todo** on the Filed board links to its parent exactly as an agent-authored
+  run does, which is what divergence 1's shared `AuthorCell` was for.
+
+The method both passes used is now written down in `AGENTS.md` §"Verifying a cockpit UI change —
+boot a throwaway cezar on a spare port", so the next UI change does not have to rediscover the
+Access wall, the inherited `CEZ_PUBLIC_URL` that blocks boot, or the org-adoption gate.
+
+**Why a throwaway cockpit and not production:** cockpit.example.com sits behind Cloudflare Access,
+and the prod API answers `401` to an unauthenticated loopback client, so the SPA redirects to the
+Access sign-in and never renders a board. Driving the real cockpit needs credentials this task does
+not have and should not acquire. The fixture instance ran the SAME deployed bundle
+(`/opt/cezar/packages/cezar/dist`), on an isolated `HOME` and its own port, and was stopped
+afterwards.
+
+**Remaining unverified: §Verification 21 only** — the Author FILTER, which is divergence 3 and was
+never built. Filed as todo `2d53e16c`. Written in the `spec` step of the `spec-to-deploy` run for task
 `232ad6d4-58a5-421e-941f-5c24bd5a8452`; Phases 1-3 built in the `implement` step of the same run,
 Phase 4 after the owner confirmed the orphan-prune fix (`5ffa383c`) had landed.
 

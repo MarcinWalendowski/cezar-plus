@@ -242,6 +242,8 @@ describe('workspace runs index API', () => {
       'issueNumber',
       'referencedIssueUrl',
       'markerRefs',
+      'referencedPrCandidates',
+      'referencedIssueCandidates',
       'costUsd',
       'peakRssBytes',
       'peakProcCount',
@@ -298,6 +300,38 @@ describe('workspace runs index API', () => {
       pullRequestUrl: 'https://github.com/acme/demo/pull/42',
       prNumber: 42,
       markerRefs: { pr: 42 },
+    });
+    // Still the slim row — the expensive half never rides along.
+    expect(row).not.toHaveProperty('steps');
+    expect(row).not.toHaveProperty('workflowDef');
+  });
+
+  it('carries the issue/PR candidates the client needs to refuse a foreign-number chip', async () => {
+    // Foreign-number guard (design ported, read-only, from `open-mercato/cezar` #840/#864 — see
+    // `.ai/specs/2026-08-22-github-issue-pr-links-multi-project.md`): the client's
+    // `namesNumberElsewhere()` needs these EVIDENCE-only arrays to tell a genuinely-this-repo
+    // number from one scraped out of another repository's transcript.
+    await registerProject(repoRoot);
+    await registerProject(otherRoot);
+    seedColdProject(otherRoot, [
+      storedRun({
+        id: 'foreign-candidates',
+        title: 'Prep the upstream issue',
+        issueNumber: 475,
+        referencedIssueCandidates: ['https://github.com/open-mercato/cezar/issues/475'],
+        prNumber: 900,
+        referencedPrCandidates: ['https://github.com/open-mercato/cezar/pull/900'],
+      }),
+    ]);
+
+    const body = await getIndex();
+    const row = body.runs.find((entry) => entry.id === 'foreign-candidates');
+
+    expect(row).toMatchObject({
+      issueNumber: 475,
+      referencedIssueCandidates: ['https://github.com/open-mercato/cezar/issues/475'],
+      prNumber: 900,
+      referencedPrCandidates: ['https://github.com/open-mercato/cezar/pull/900'],
     });
     // Still the slim row — the expensive half never rides along.
     expect(row).not.toHaveProperty('steps');

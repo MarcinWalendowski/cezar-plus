@@ -1062,17 +1062,53 @@ export function useHostMetrics(refetchIntervalMs = 3_000) {
  * undefined when it cannot be proven — the only authority `taskIssueUrl` may synthesize a link
  * against (#526).
  *
- * The boot-project guard is the load-bearing part. `/health` is WORKSPACE-level (project-scope.ts
- * `WORKSPACE_LEVEL`): the server always builds it from `bootRoot`, so its `repo.remote` names the
- * project cezar launched in, whichever project the URL is scoped to. Handing a non-boot project's
- * task a link built from the boot project's repo would point at a completely different repository
- * — the same wrong-link defect #526 exists to kill. Until a per-project remote is served, a
- * scoped view synthesizes nothing.
+ * The #526 guard is the load-bearing part: a synthesized link may only ever name the project
+ * genuinely on screen. `GET /api/v1/projects` (`workspaceQueryKeys.projects`) already carries
+ * every registered project's own server-computed `repoUrl`, so the normal path resolves the
+ * on-screen project's (or, when unscoped, the boot project's) row directly from that registry —
+ * no client-side remote parsing needed. `/health` is WORKSPACE-level (built from `bootRoot`,
+ * independent of the URL's `projectId`) and is kept only as a narrow fallback for the boot
+ * project when the registry has no row for it (an unregistered boot repo, or an errored/empty
+ * registry response) — never for a non-boot project, which would reintroduce #526 (handing a
+ * non-boot project's task a link built from a different repository).
+ *
+ * **Reads the SAME cache entry `useProjects()` does, but via its own `useQuery` call with
+ * `retryOnMount: false`, deliberately not `useProjects()` itself.** Every caller of this hook —
+ * `task-thread.tsx`, `run-header.tsx`, `tasks-overview.tsx`, `task-quick-list.tsx` — mounts INSIDE
+ * `ProjectScopeRoute` (`routes.tsx`), which already has its own `useProjects()` observer and has
+ * already decided how to handle an errored registry (fall through to a scope, or keep showing
+ * `ScopeResolving`) by the time anything under it mounts. TanStack's default `retryOnMount: true`
+ * means a BRAND NEW observer of an already-erroring query retries it immediately on mount — and
+ * since `ProjectScopeRoute` is itself subscribed to the same query, that retry's transient
+ * `pending`/`fetching` state flips the gate's `projects.isError` back to `false`, which unmounts
+ * the very component whose mount triggered the retry. Unmount → the fetch resolves to the same
+ * error → gate falls through again → remounts → retries again: an infinite gate/content
+ * oscillation that starves `waitFor` in an already-erroring-workspace scenario (confirmed live:
+ * `routes.test.tsx`'s "with the registry errored and no health either, the alias mounts the scope
+ * rather than spin" spun forever until this was found). `retryOnMount: false` here breaks the
+ * loop: this hook reads whatever the gate's own observer already resolved, and asks for nothing
+ * new.
  */
 export function useProjectRepoBase(): string | undefined {
+  const projects = useQuery({
+    queryKey: workspaceQueryKeys.projects,
+    queryFn: ({ signal }) => getProjects({ signal }),
+    retryOnMount: false,
+  }).data
   const health = useHealth().data
   const { projectId } = useProjectScope()
-  const isBootProject = projectId === null || projectId === health?.bootProject
+  const isUnscoped = projectId === null || projectId === 'default'
+  const bootId = projects?.bootProject ?? health?.bootProject
+  const effectiveId = isUnscoped ? bootId : projectId
+  const entry = projects?.projects?.find((p) => p.id === effectiveId)
+  if (entry) return entry.repoUrl
+  // Registry has no row for this id — an unregistered boot repo (server.ts resolveBootProject)
+  // or an errored/empty registry. Only the BOOT project may fall back to /health, which is built
+  // from bootRoot; a non-boot id with no row synthesizes nothing (#526). Unscoped IS the boot
+  // project regardless of whether `bootId` itself is yet known (health/registry both still
+  // loading) — gating this on `effectiveId !== undefined` would refuse the fallback the instant
+  // neither query has answered, which is exactly when the fallback is most needed.
+  const isBootProject = isUnscoped || (bootId !== undefined && projectId === bootId)
   return isBootProject ? githubRepoBase(health?.repo?.remote) : undefined
 }
 

@@ -27,7 +27,7 @@ import { Link, useNavigate } from '@/lib/project-router'
 
 import { archiveFinished, markAllRunsSeen, patchRun } from '@/api/client'
 import { useRunUsage } from '@/api/global-events'
-import { queryKeys, useHealth, useReferenceProjectId, useRuns } from '@/api/queries'
+import { queryKeys, useHealth, useProjectRepoBase, useReferenceProjectId, useRuns } from '@/api/queries'
 import type { RunRecord } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { DiffStatLabel } from '@/components/diff-stat'
@@ -101,6 +101,7 @@ export function TasksOverview({
   onToggleColumn = () => undefined,
   columnsPending = false,
   hostUsage = null,
+  repoBase,
 }: {
   /** Undefined while `/api/runs` has not answered: the header renders, the body stays empty —
    *  an empty state before we know there are no runs would be a lie. */
@@ -135,6 +136,11 @@ export function TasksOverview({
    *  presentational discipline as `showWorkspaceSwitch`: `TasksOverviewRoute` has query access
    *  and passes `<HostUsageStat />`; a direct render leaves it absent. */
   hostUsage?: React.ReactNode
+  /** The on-screen project's repo (`useProjectRepoBase()`, read once by `TasksOverviewRoute`) —
+   *  the only authority a numeric-only PR/Issue chip may synthesize a link against (#526). A
+   *  prop, not a hook read here, for the same presentational-component reason as
+   *  `showWorkspaceSwitch`. */
+  repoBase?: string
 }) {
   const [query, setQuery] = React.useState('')
   const all = runs ?? []
@@ -293,6 +299,7 @@ export function TasksOverview({
                         now={now}
                         columns={columns}
                         expandedColumns={expandedColumns}
+                        repoBase={repoBase}
                       />
                     ))}
                   </tbody>
@@ -310,6 +317,7 @@ export function TasksOverview({
                   now={now}
                   showTokens={showTokens}
                   showCost={showCost}
+                  repoBase={repoBase}
                 />
               ))}
             </div>
@@ -563,6 +571,7 @@ function TableRow({
   now,
   columns,
   expandedColumns,
+  repoBase,
 }: {
   run: RunRecord
   queuePosition: number | null
@@ -570,13 +579,15 @@ function TableRow({
   now: number
   columns: readonly TaskColumnDefinition[]
   expandedColumns: NormalizedExpandedColumns
+  /** The row's own project's repo — see `TasksOverview`'s doc comment on the prop. */
+  repoBase?: string
 }) {
   const navigate = useNavigate()
   const attention = deriveAttention(run)
   const scheduled = scheduledResume(run)
   const to = `/tasks/${run.id}`
   const cost = formatCost(run.costUsd)
-  const reference = taskReference(run)
+  const reference = taskReference(run, repoBase)
 
   return (
     <tr
@@ -882,18 +893,21 @@ function TaskCard({
   now,
   showTokens,
   showCost,
+  repoBase,
 }: {
   run: RunRecord
   queuePosition: number | null
   now: number
   showTokens: boolean
   showCost: boolean
+  /** The card's own project's repo — see `TasksOverview`'s doc comment on the prop. */
+  repoBase?: string
 }) {
   const navigate = useNavigate()
   const attention = deriveAttention(run)
   const scheduled = scheduledResume(run)
   const to = `/tasks/${run.id}`
-  const reference = taskReference(run)
+  const reference = taskReference(run, repoBase)
   // Read/unread (#unread-done-items) — the same promote-unread / dim-read treatment as the row.
   const unread = isUnread(run)
   const readDone = isReadDoneItem(run)
@@ -1057,6 +1071,10 @@ export function TasksOverviewRoute() {
   // provider wraps it instead, so the chips deep in the table and the cards read their status
   // from context and nothing in between has to relay it.
   const projectId = useReferenceProjectId()
+  // Called ONCE here, in the container's body — never inside the `flatMap` callback below, which
+  // is not a component and may not call hooks (multi-project spec Phase 5). The row/card
+  // components below receive the result as a prop instead of resolving it themselves.
+  const repoBase = useProjectRepoBase()
   const referenceRequests = React.useMemo(
     () =>
       // `taskReference`, singular: this table paints exactly one chip per row (the strongest
@@ -1064,10 +1082,10 @@ export function TasksOverviewRoute() {
       projectId === undefined
         ? []
         : (runs.data ?? []).flatMap((run) => {
-            const reference = taskReference(run)
+            const reference = taskReference(run, repoBase)
             return reference ? [{ projectId, kind: reference.kind, number: reference.number }] : []
           }),
-    [runs.data, projectId],
+    [runs.data, projectId, repoBase],
   )
 
   return (
@@ -1087,6 +1105,7 @@ export function TasksOverviewRoute() {
         onToggleColumn={taskTableColumns.toggleColumn}
         columnsPending={taskTableColumns.isPending}
         hostUsage={<HostUsageStat />}
+        repoBase={repoBase}
       />
     </ReferenceStatusProvider>
   )

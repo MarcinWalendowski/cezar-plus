@@ -441,6 +441,24 @@ export async function markStarted(dataDir: string, id: string, taskId: string): 
   });
 }
 
+/** The inverse of `markStarted`, for the cancel path (2026-08-22-run-cancel-restores-todo.md):
+ *  "Started → cancelled" had no way back to the Filed board, since `markStarted` is the only
+ *  writer of `startedTaskId` and never clears it. Keyed by `startedTaskId`, not `id` — the cancel
+ *  route only ever has the run id, never the todo it was started from. Deletes the key rather than
+ *  setting it `undefined`, the same "absent, not falsy" contract `archivedAt`/`autostart` use
+ *  above. No-op (`undefined`) when no todo references the given run id — best-effort, mirroring
+ *  `markStarted`'s own contract. */
+export async function clearStartedTaskId(dataDir: string, taskId: string): Promise<TodoItem | undefined> {
+  return withTodosLease(dataDir, async () => {
+    const { items } = await readRaw(dataDir);
+    const item = items.find((t) => t.startedTaskId === taskId);
+    if (!item) return undefined;
+    delete item.startedTaskId;
+    await writeAtomic(dataDir, items);
+    return item;
+  });
+}
+
 // ---- change notifications ----------------------------------------------------
 
 /**

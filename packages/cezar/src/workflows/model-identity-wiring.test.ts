@@ -127,7 +127,7 @@ describe('model identity wiring (dry run)', () => {
     const id = await runToEnd({ task: 'do the thing', model: 'anthropic/claude-opus-4-1' });
     expect(capturedModel(0)).toBe('claude-opus-4-1');
 
-    expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: 'keep going' })).resolves.toEqual({ ok: true });
     const deadline = Date.now() + 20_000;
     while (readFileSync(argsFile, 'utf8').trim().split('\n').length < 2) {
       if (Date.now() > deadline) throw new Error('continuation did not start in time');
@@ -148,7 +148,9 @@ describe('model identity wiring (dry run)', () => {
 
     // #401 lets a continuation switch the model. The record must follow what
     // actually ran, not keep asserting the model the run STARTED with.
-    expect(manager.continueRun(id, { text: 'keep going', model: 'haiku' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: 'keep going', model: 'haiku' })).resolves.toEqual({
+      ok: true,
+    });
     const deadline = Date.now() + 20_000;
     while (readFileSync(argsFile, 'utf8').trim().split('\n').length < 2) {
       if (Date.now() > deadline) throw new Error('continuation did not start in time');
@@ -179,12 +181,12 @@ describe('model identity wiring (dry run)', () => {
     const id = await runToEnd({ task: 'do the thing', model: 'opus' });
     expect(store.getRun(id)?.modelIdentity).toBe('anthropic/opus');
 
-    expect(
+    await expect(
       manager.continueRun(id, {
         text: 'keep going',
         runner: 'codex',
         model: 'anthropic/claude-opus-4-8',
       }),
-    ).toEqual({ ok: false, error: "model 'anthropic/claude-opus-4-8' is not a codex model" });
+    ).resolves.toEqual({ ok: false, error: "model 'anthropic/claude-opus-4-8' is not a codex model" });
   }, 40_000);
 });

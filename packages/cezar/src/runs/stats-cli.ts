@@ -8,9 +8,13 @@ import { formatRunStats, readRunStats } from './stats.ts';
  * `cez run stats <runId> [--json] [--repo <dir>]` — the tool-economy meter
  * (spec `.ai/specs/2026-08-20-agent-round-trip-batching-and-fanout.md`, Phase 1).
  *
- * Filesystem-only: it reads `<repo>/.ai/cezar/runs/<runId>.ndjson` and nothing else. No server,
- * no HTTP, no auth wall — same posture as `cez kb` and `cez todo`, and for the same reason: it
- * has to answer inside a running agent's Bash, where there is no cockpit to talk to.
+ * Filesystem-only — but no longer just the run's own NDJSON (corrected, D4, spec
+ * `.ai/specs/2026-08-21-output-token-attribution.md`, Phase 2): `readRunStats` additionally
+ * best-effort-reads `<repo>/.ai/cezar/runs/<runId>.ndjson` for `session.started.sessionId`s and,
+ * per session, `~/.claude/projects/*&#47;<sessionId>.jsonl` for calibrated-mode token
+ * reconciliation — still no server, no HTTP, no auth wall — same posture as `cez kb` and `cez
+ * todo`, and for the same reason: it has to answer inside a running agent's Bash, where there is
+ * no cockpit to talk to.
  *
  * **Why this is routed from raw argv in `index.ts` rather than from the command switch.** `cez
  * run "<task>"` joins every positional into the task text, so `cez run stats <id>` would start a

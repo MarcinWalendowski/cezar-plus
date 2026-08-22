@@ -112,6 +112,7 @@ import { discoverSkills } from '../skills.ts';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.ts';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.ts';
 import {
+  clearStartedTaskId,
   createTodo,
   markStarted,
   onTodosChanged,
@@ -4977,11 +4978,21 @@ export function createApp(deps: ServerDeps) {
       return c.json(store.getRun(id));
     })
 
-    .post('/runs/:id/cancel', (c) => {
-      const { store, manager } = c.get('project');
+    .post('/runs/:id/cancel', async (c) => {
+      const { store, manager, dataDir } = c.get('project');
       const id = c.req.param('id');
       if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
       const cancelled = manager.cancel(id);
+      if (cancelled) {
+        // Best-effort, same shape as `noteTodoStarted` on the start side: un-hiding the
+        // originating todo (2026-08-22-run-cancel-restores-todo.md) must never cost the user the
+        // cancel itself.
+        try {
+          await clearStartedTaskId(dataDir, id);
+        } catch (err) {
+          console.warn(`[cezar] could not clear started-todo link for cancelled run ${id}: ${String(err)}`);
+        }
+      }
       return c.json({ cancelled });
     })
 
@@ -5053,7 +5064,7 @@ export function createApp(deps: ServerDeps) {
           .map((b) => b.text)
           .join('\n');
         const images = content.filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image');
-        const resumed = manager.continueRun(id, { text, images });
+        const resumed = await manager.continueRun(id, { text, images });
         if (resumed.ok) return c.json({ continued: true });
         return c.json({ error: resumed.error ?? 'session closed' }, 409);
       }
@@ -5173,7 +5184,7 @@ export function createApp(deps: ServerDeps) {
       }
       const blocked = await providerActionError([providerForExistingRun(run, parsed.data.runner)]);
       if (blocked) return c.json({ error: blocked }, 409);
-      const result = manager.continueRun(id, {
+      const result = await manager.continueRun(id, {
         text: parsed.data.text,
         images: parsed.data.images?.map((img): ContentBlock => ({
           type: 'image',
@@ -6919,6 +6930,12 @@ export function createApp(deps: ServerDeps) {
     ...(run.issueNumber !== undefined ? { issueNumber: run.issueNumber } : {}),
     ...(run.referencedIssueUrl !== undefined ? { referencedIssueUrl: run.referencedIssueUrl } : {}),
     ...(run.markerRefs !== undefined ? { markerRefs: run.markerRefs } : {}),
+    ...(run.referencedPrCandidates !== undefined
+      ? { referencedPrCandidates: run.referencedPrCandidates }
+      : {}),
+    ...(run.referencedIssueCandidates !== undefined
+      ? { referencedIssueCandidates: run.referencedIssueCandidates }
+      : {}),
     ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
     ...(run.contextTokens !== undefined ? { contextTokens: run.contextTokens } : {}),
     ...(run.contextWindow !== undefined ? { contextWindow: run.contextWindow } : {}),

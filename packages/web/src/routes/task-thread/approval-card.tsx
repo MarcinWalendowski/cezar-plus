@@ -10,6 +10,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
 import { isSubmitShortcut } from '@/lib/use-submit-shortcut'
 
+import { readTaskDraft, writeTaskDraft } from './task-drafts'
+
 /**
  * The human approval gate's card (spec
  * `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`, P4).
@@ -28,7 +30,13 @@ export function ApprovalCard({ run }: { run: ApiRun }) {
   const pending = run.pendingApproval
   const queryClient = useQueryClient()
   const notesRef = useRef<HTMLTextAreaElement>(null)
-  const [notes, setNotes] = useState('')
+  // Read at mount — `ApprovalCard` is keyed by run id (task-thread.tsx), so this is a real mount
+  // per task. One helper writes state and store together so the two cannot drift.
+  const [notes, setNotes] = useState(() => readTaskDraft('approvalNotes', run.id))
+  const updateNotes = (next: string) => {
+    setNotes(next)
+    writeTaskDraft('approvalNotes', run.id, next)
+  }
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
 
@@ -43,7 +51,8 @@ export function ApprovalCard({ run }: { run: ApiRun }) {
   const sendBack = useMutation({
     mutationFn: () => requestRunChanges(run.id, notes.trim()),
     onSuccess: () => {
-      setNotes('')
+      // Spent: clear the box AND the store. A rejected request-changes keeps both.
+      updateNotes('')
       void invalidate()
     },
     onError: (error: Error) => toast(error.message || 'could not request changes', { tone: 'danger' }),
@@ -93,7 +102,7 @@ export function ApprovalCard({ run }: { run: ApiRun }) {
       <Textarea
         ref={notesRef}
         value={notes}
-        onChange={(e) => setNotes(e.target.value)}
+        onChange={(e) => updateNotes(e.target.value)}
         onKeyDown={(e) => {
           if (isSubmitShortcut(e) && notes.trim()) sendBack.mutate()
         }}

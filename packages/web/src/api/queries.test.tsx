@@ -22,6 +22,7 @@ import {
   useMarkRunUnseen,
   usePatchRun,
   usePutAgentConfigFile,
+  useProjectRepoBase,
   useRun,
   useRunChanges,
   useRuns,
@@ -982,6 +983,96 @@ describe('useReferenceProjectId', () => {
   it('answers undefined until health says which project that is', () => {
     // Better a neutral chip for a moment than an entry written under a name nothing else uses.
     const { result } = renderHook(() => useReferenceProjectId(), { wrapper: mounted(null) })
+    expect(result.current).toBeUndefined()
+  })
+})
+
+/**
+ * The rewritten hook (`.ai/specs/2026-08-22-github-issue-pr-links-multi-project.md` Phase 1):
+ * resolves the on-screen project's `repoUrl` from the registry (`GET /api/v1/projects`) instead of
+ * unconditionally reading workspace-level `/health`, which used to blank the link for every
+ * project except the one cezar booted in (#526's over-correction). `/health` stays as a narrow
+ * fallback for the BOOT project only, when the registry has no row for it.
+ */
+describe('useProjectRepoBase', () => {
+  const mounted = (scope: string | null, options: { health?: unknown; projects?: unknown } = {}) => {
+    const client = createQueryClient()
+    if (options.health !== undefined) client.setQueryData(queryKeys.health, options.health)
+    if (options.projects !== undefined) client.setQueryData(workspaceQueryKeys.projects, options.projects)
+    return function Wrapper({ children }: { children: ReactNode }) {
+      return (
+        <QueryClientProvider client={client}>
+          <ProjectScopeContext.Provider value={{ projectId: scope, apiBase: '/api/v1' }}>
+            {children}
+          </ProjectScopeContext.Provider>
+        </QueryClientProvider>
+      )
+    }
+  }
+
+  const REGISTRY = {
+    projects: [
+      { id: 'boot-id', name: 'Boot', repoUrl: 'https://github.com/acme/boot' },
+      { id: 'shop', name: 'Shop', repoUrl: 'https://github.com/acme/shop' },
+      { id: 'no-remote', name: 'No remote' },
+    ],
+    bootProject: 'boot-id',
+    projectsDir: '/repos',
+  }
+
+  it('unscoped resolves the registry entry whose id is the boot project', () => {
+    const { result } = renderHook(() => useProjectRepoBase(), {
+      wrapper: mounted(null, { projects: REGISTRY }),
+    })
+    expect(result.current).toBe('https://github.com/acme/boot')
+  })
+
+  it('scoped to a non-boot project resolves THAT project’s own repoUrl, not the boot project’s (#526)', () => {
+    const { result } = renderHook(() => useProjectRepoBase(), {
+      wrapper: mounted('shop', { projects: REGISTRY }),
+    })
+    expect(result.current).toBe('https://github.com/acme/shop')
+  })
+
+  it('is undefined for a project with no repoUrl (non-GitHub remote, no remote, or non-git)', () => {
+    const { result } = renderHook(() => useProjectRepoBase(), {
+      wrapper: mounted('no-remote', { projects: REGISTRY }),
+    })
+    expect(result.current).toBeUndefined()
+  })
+
+  it('is undefined, not a throw, while the registry has not answered yet', () => {
+    const { result } = renderHook(() => useProjectRepoBase(), { wrapper: mounted('shop') })
+    expect(result.current).toBeUndefined()
+  })
+
+  it('falls back to /health for an unregistered BOOT project (Phase 4)', () => {
+    const registryWithoutBoot = {
+      projects: [{ id: 'shop', name: 'Shop', repoUrl: 'https://github.com/acme/shop' }],
+      bootProject: 'boot-id',
+      projectsDir: '/repos',
+    }
+    const { result } = renderHook(() => useProjectRepoBase(), {
+      wrapper: mounted(null, {
+        projects: registryWithoutBoot,
+        health: { ...HEALTH, bootProject: 'boot-id', repo: { root: '/repo', branch: 'main', remote: 'git@github.com:acme/boot.git' } },
+      }),
+    })
+    expect(result.current).toBe('https://github.com/acme/boot')
+  })
+
+  it('never falls back to /health for a non-boot project with no registry row (#526)', () => {
+    const registryWithoutBoot = {
+      projects: [{ id: 'shop', name: 'Shop' }],
+      bootProject: 'boot-id',
+      projectsDir: '/repos',
+    }
+    const { result } = renderHook(() => useProjectRepoBase(), {
+      wrapper: mounted('shop', {
+        projects: registryWithoutBoot,
+        health: { ...HEALTH, bootProject: 'boot-id', repo: { root: '/repo', branch: 'main', remote: 'git@github.com:acme/boot.git' } },
+      }),
+    })
     expect(result.current).toBeUndefined()
   })
 })

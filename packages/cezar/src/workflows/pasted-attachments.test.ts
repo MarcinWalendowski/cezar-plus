@@ -249,7 +249,9 @@ describe('pasted screenshots materialize to disk and reach the agent as file pat
       type: 'image',
       source: { type: 'base64', media_type: 'image/png', data: TINY_PNG_B64 },
     };
-    expect(manager.continueRun(record.id, { text: 'fix what this shows', images: [image] })).toEqual({
+    await expect(
+      manager.continueRun(record.id, { text: 'fix what this shows', images: [image] }),
+    ).resolves.toEqual({
       ok: true,
     });
     await waitForStatus(record.id, ['waiting']);

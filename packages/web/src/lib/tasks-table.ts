@@ -172,12 +172,16 @@ export function finishedRunCount(runs: readonly RunRecord[]): number {
   return runs.filter((run) => !run.archived && FINISHED_STATUSES.has(run.status)).length
 }
 
-/** A git remote as a GitHub web root (`https://github.com/owner/repo`) — the caller passes the
- *  remote `/api/v1/health` reports (`repo.remote`), via `useProjectRepoBase`. Handles the scheme forms
- *  (`https://`, `ssh://`, credentials, port) and the scp-like `git@github.com:owner/repo.git`;
- *  undefined for every non-github.com host, local path, or absent remote — the cockpit only knows
- *  how to spell GitHub issue URLs. Mirrors the server's `parseRemote` (`src/server/forge/index.ts`),
- *  duplicated rather than imported because that module is server-only. */
+/** A git remote as a GitHub web root (`https://github.com/owner/repo`). No longer the normal
+ *  source of `repoBase` — `useProjectRepoBase()` reads the server-computed `repoUrl` off the
+ *  project registry (`GET /api/v1/projects`) for that. This is now reached only on that hook's
+ *  boot-only fallback path: a boot project the registry has no row for (unregistered), or an
+ *  errored/empty registry response, where the caller passes `/api/v1/health`'s `repo.remote`
+ *  instead. Handles the scheme forms (`https://`, `ssh://`, credentials, port) and the scp-like
+ *  `git@github.com:owner/repo.git`; undefined for every non-github.com host, local path, or absent
+ *  remote — the cockpit only knows how to spell GitHub issue URLs. Mirrors the server's
+ *  `parseRemote` (`src/server/forge/index.ts`), duplicated rather than imported because that
+ *  module is server-only. */
 export function githubRepoBase(remote: string | undefined): string | undefined {
   if (!remote) return undefined
   const trimmed = remote.trim().replace(/\/+$/, '')
@@ -220,6 +224,56 @@ function prUrls(run: TaskReferenceInput): string[] {
   return urls
 }
 
+/**
+ * Whether `candidates` — raw URLs scraped from a run's transcript (`referencedIssueCandidates` /
+ * `referencedPrCandidates`) — prove that `number` belongs to a DIFFERENT repository than
+ * `repoBase`. Design ported, read-only, from `open-mercato/cezar` PRs #840/#864 (a separate
+ * repository this workspace has pull-only access to; see spec
+ * `.ai/specs/2026-08-22-github-issue-pr-links-multi-project.md`).
+ *
+ * Evidence-only, in both directions:
+ * - With no known `repoBase` there is nothing to compare a candidate against, so the guard is
+ *   inert — a project with no resolvable repo behaves exactly as it did before this guard existed
+ *   (see the spec's risk note on a bare number with no candidates).
+ * - With no candidates there is no evidence either way, so a bare `#N` is never blocked merely for
+ *   lacking proof of innocence.
+ *
+ * The match is a case-insensitive prefix check against `${repoBase}/`, not a bare
+ * `startsWith(repoBase)` — `https://github.com/owner/repo` is itself a string-prefix of
+ * `https://github.com/owner/repo-two/issues/5`, and without the trailing slash a same-prefix,
+ * different-repo candidate would be misread as naming THIS repo instead of another one.
+ */
+function namesNumberElsewhere(
+  candidates: readonly string[] | undefined,
+  number: number,
+  repoBase: string | undefined,
+): boolean {
+  if (!repoBase || !candidates?.length) return false
+  const ownPrefix = `${repoBase}/`.toLowerCase()
+  return candidates.some(
+    (url) => prNumber(url) === String(number) && !url.toLowerCase().startsWith(ownPrefix),
+  )
+}
+
+/** The bare `issueNumber` a chip may safely show, dropped when `referencedIssueCandidates` proves
+ *  it names a different repository than `repoBase` (`namesNumberElsewhere`). Deliberately does
+ *  NOT read `markerRefs.issue` — that is `taskIssueUrl`'s own source, a DIFFERENT (marker-declared)
+ *  reference that can coexist with a distinct scraped `issueNumber`, and folding the two together
+ *  here would silently merge two references `taskReferences` must keep separate. */
+function chipIssueNumber(run: TaskReferenceInput, repoBase: string | undefined): number | undefined {
+  const number = run.issueNumber
+  if (number === undefined) return undefined
+  return namesNumberElsewhere(run.referencedIssueCandidates, number, repoBase) ? undefined : number
+}
+
+/** The PR chip's numeric-only twin of `chipIssueNumber`: `prNumber`, dropped when
+ *  `referencedPrCandidates` proves it names a different repository than `repoBase`. */
+function chipPrNumber(run: TaskReferenceInput, repoBase: string | undefined): number | undefined {
+  const number = run.prNumber
+  if (number === undefined) return undefined
+  return namesNumberElsewhere(run.referencedPrCandidates, number, repoBase) ? undefined : number
+}
+
 /** Display-only issue association. Action gates must continue to use their created-resource
  * fields directly; this accessor exists only for links painted by the cockpit.
  *
@@ -235,7 +289,12 @@ export function taskIssueUrl(run: TaskReferenceInput, repoBase?: string): string
   // `CEZ:ISSUE=524` beside an incidental `github.com/other/repo/pull/1` would rebuild the exact
   // wrong-link defect #526 exists to kill, just pointing at an issue instead of a PR.
   const number = run.markerRefs?.issue ?? run.issueNumber
-  if (!number || !repoBase) return undefined
+  // `namesNumberElsewhere` additionally refuses a number `referencedIssueCandidates` proves
+  // belongs to a different repo entirely (foreign-number guard, design ported read-only from
+  // `open-mercato/cezar` #840).
+  if (!number || !repoBase || namesNumberElsewhere(run.referencedIssueCandidates, number, repoBase)) {
+    return undefined
+  }
   return `${repoBase}/issues/${number}`
 }
 
@@ -256,6 +315,8 @@ export type TaskReferenceInput = Pick<
   | 'issueNumber'
   | 'referencedIssueUrl'
   | 'markerRefs'
+  | 'referencedPrCandidates'
+  | 'referencedIssueCandidates'
 >
 
 export interface TaskReference {
@@ -278,11 +339,14 @@ export interface TaskReference {
  * task created, the PR it is about, then the issue — which is also what makes `taskReference`
  * answer exactly what it always answered.
  *
- * What this deliberately does NOT read is `referencedPrCandidates` / `referencedIssueCandidates`.
- * Those are transcript scrapings that routinely name OTHER repositories (#526), so a further
- * reference has to arrive as a real field before it can be shown: the shape is ready for more,
- * the guesswork is not invited in. `markerRefs.pr` is the obvious next source, and is left out
- * only because today it never appears without one of the URLs below already carrying it.
+ * `referencedPrCandidates` / `referencedIssueCandidates` are never a SOURCE of a reference here —
+ * they are transcript scrapings that routinely name OTHER repositories (#526), so a further
+ * reference still has to arrive as a real field before it can be shown. They are read only as
+ * EVIDENCE, by `chipPrNumber`/`chipIssueNumber` via `namesNumberElsewhere`, to refuse a
+ * numeric-only reference the candidates prove belongs to a different repo than `repoBase`
+ * (foreign-number guard, design ported read-only from `open-mercato/cezar` #840/#864).
+ * `markerRefs.pr` is the obvious next SOURCE, and is left out only because today it never appears
+ * without one of the URLs below already carrying it.
  *
  * Deduped by kind+number, so one reference reached through two fields stays one chip.
  */
@@ -290,10 +354,12 @@ export function taskReferences(run: TaskReferenceInput, repoBase?: string): Task
   const sources: { kind: TaskReference['kind']; url?: string; number?: number }[] = [
     ...prUrls(run).map((url) => ({ kind: 'PR' as const, url })),
     // Numeric-only: a reference known by number before any URL was scraped. `repoBase` turns it
-    // into a real link — see the synthesis note below.
-    { kind: 'PR', number: run.prNumber },
+    // into a real link — see the synthesis note below. `chipPrNumber`/`chipIssueNumber` additionally
+    // refuse a number the run's own `referenced*Candidates` prove belongs to a different repo
+    // (foreign-number guard, design ported from open-mercato/cezar #840/#864).
+    { kind: 'PR', number: chipPrNumber(run, repoBase) },
     { kind: 'Issue', url: taskIssueUrl(run, repoBase) },
-    { kind: 'Issue', number: run.issueNumber },
+    { kind: 'Issue', number: chipIssueNumber(run, repoBase) },
   ]
 
   const seen = new Set<string>()
@@ -326,9 +392,14 @@ function synthesizeUrl(
 
 /** The strongest known tracker reference — what a row with space for exactly one shows (the
  *  sidebar row, the per-project table). PRs win once one exists; issue-driven queued runs still
- *  expose their already-known issue immediately. */
-export function taskReference(run: TaskReferenceInput): TaskReference | undefined {
-  return taskReferences(run)[0]
+ *  expose their already-known issue immediately.
+ *
+ *  `repoBase` is the repo of the project the ROW belongs to — the caller resolves it once (never
+ *  inside a `useMemo`/`flatMap` callback; see the multi-project spec's Phase 5) and passes it
+ *  down, exactly like `taskReferences`. Without it, a numeric-only reference stays inert text and
+ *  the foreign-number guard has no evidence to check a number against. */
+export function taskReference(run: TaskReferenceInput, repoBase?: string): TaskReference | undefined {
+  return taskReferences(run, repoBase)[0]
 }
 
 /** The PR chip's `#402`. Null when the URL's last segment is not a number — a forge we don't

@@ -577,6 +577,57 @@ One trap when checking that token: `GET /client/v4/user/tokens/verify` returns
 account-scoped, not user-scoped. Probe the capability you actually need, never the token's
 identity papers (the same rule SPEC-403 wrote down for `wrangler whoami`).
 
+## Verifying a cockpit UI change — boot a throwaway cezar on a spare port
+
+**You cannot drive the production cockpit, and you must not try.** `cockpit.example.com` is behind
+Cloudflare Access, and the loopback origin is not a way around it: a browser sent to
+`http://127.0.0.1:4321/tasks` is redirected to `example.cloudflareaccess.com` (the SPA
+follows its own auth), and `GET /api/v1/workspace/runs-index` on loopback answers **401**. Only
+`/api/v1/ready` and the static `/` are open, which is exactly why the two `.ai/deploy-targets.json`
+probes use those and nothing else. Do not reach for credentials, a service token, or
+`CEZ_ALLOW_UNAUTHENTICATED=1` on the prod box to get past this.
+
+**Boot your own instance instead.** It is fast, it needs no secrets, and it renders the SAME built
+bundle you just deployed. Four things have to be true or it will not come up:
+
+1. **A scratch `HOME`.** The project registry lives in `~/.cezar/config.json` and is shared by
+   every cezar on the machine — registering a fixture project into the real one would edit what
+   every other run sees. `HOME=/var/tmp/<scratch>/home` isolates it.
+2. **Scrub the hosted-mode env.** An agent inherits the service's `CEZ_*` namespace, and
+   `CEZ_PUBLIC_URL` alone is enough to put a fresh instance into hosted mode, where it refuses to
+   boot without auth (*"cezar refuses to boot: hosted mode with no authentication exposes shell
+   execution…"*). That message is not an invitation to set `CEZ_ALLOW_UNAUTHENTICATED=1` — unset
+   the inherited vars and it boots as an ordinary local cockpit. This is also why
+   `npm run test:e2e` fails on this box rather than skipping.
+3. **Seed the states you need.** Write `<proj>/.ai/cezar/runs.json` and `todos.json` directly. A
+   feature is only verified if the fixture covers the states that can render — for the Author
+   column that meant user / agent / api / absent in one board, and the absent one is the case a
+   happy-path fixture always forgets.
+4. **Walk the first-run wizard.** The gate is `probe.kind === 'ready' && !probe.hasProjects`, and
+   `hasProjects` counts projects *adopted into an org*, not registry entries — so a registered
+   project still lands you on `/onboarding`. Fill `[data-slot="onboarding-org-name"]`, click
+   `[data-slot="onboarding-org-submit"]`, then navigate to the page under test.
+
+```bash
+B=/var/tmp/uiverify; rm -rf $B; mkdir -p $B/home $B/proj/.ai/cezar
+cd $B/proj && git init -q . && git commit -q --allow-empty -m scratch
+# seed $B/proj/.ai/cezar/runs.json here
+env -u CEZ_PUBLIC_URL -u CEZ_REMOTE -u CEZ_OIDC_ISSUER -u CEZ_OIDC_CLIENT_ID -u CEZ_AUTH \
+    -u CEZ_TODOS_FILE -u CEZ_HANDOFF_FILE -u CEZ_KB_WRITE_FILE -u CEZ_PROJECTS_DIR -u NODE_ENV \
+    HOME=$B/home nohup node /opt/cezar/packages/cezar/dist/index.js \
+    --port 4399 --no-open --repo $B/proj > $B/server.log 2>&1 &
+until [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4399/api/v1/ready)" = 200 ]; do sleep 2; done
+env HOME=$B/home node /opt/cezar/packages/cezar/dist/index.js projects add $B/proj
+```
+
+Then drive it with Playwright (§ Headless browser above), asserting on `data-slot` /
+`data-*` attributes rather than on text or CSS classes — those are the stable contract, and
+several components already carry them for exactly this reason. **Kill the instance and delete the
+directory when done**; a stray cockpit on a spare port holds memory and keeps a worktree lease.
+
+Running against `/opt/cezar/...` verifies the DEPLOYED bytes. Point it at a local `dist/` instead
+when you want to check a build you have not shipped yet.
+
 ## How an agent step should spend its tool calls
 
 Measured on run `ec6e8e06` (spec `.ai/specs/2026-08-20-agent-round-trip-batching-and-fanout.md`):

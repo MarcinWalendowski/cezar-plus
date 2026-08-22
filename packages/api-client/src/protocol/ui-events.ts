@@ -168,6 +168,20 @@ export interface UiTurnStartedEvent {
   turnId: string
 }
 
+/** claude-only, occurrence counts of raw content-block types seen this turn — see the server
+ *  mirror (`core/ui-events.ts`) for the full doc. `thinking` = non-blank (visible) only;
+ *  `thinkingWithheld` = blank (billed, never revealed) — two counters, not one, since the two
+ *  regimes are model-specific (opus/sonnet withhold, haiku does not). */
+export interface ClaudeBlockCounts {
+  text: number
+  thinking: number
+  thinkingWithheld: number
+  toolUse: number
+  redactedThinking: number
+  serverToolUse: number
+  other: number
+}
+
 /** A turn finished. */
 export interface UiTurnCompletedEvent {
   type: 'turn.completed'
@@ -175,6 +189,9 @@ export interface UiTurnCompletedEvent {
   stopReason: StopReason
   usage?: TokenUsage
   costUsd?: number
+  blockCounts?: ClaudeBlockCounts
+  /** Sub-agent frames' own tally (parent_tool_use_id present) — see the server mirror. */
+  childBlockCounts?: ClaudeBlockCounts
 }
 
 /** An item entered the stream (tools usually with status pending/running). */
