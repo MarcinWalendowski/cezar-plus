@@ -1,9 +1,25 @@
 # Wait on the process, not on a guess — and slice the file you already saved
 
-> **Status — superseded 2026-08-22 by revision 5 (below): PHASES 1-3 IMPLEMENTED AND SHIPPED
+> **Status — IMPLEMENTED, SHIPPED, DEPLOYED AND NOW MEASURED (revision 8, 2026-08-22). All four
+> phases are done.** Phases 1-3 shipped in `ada8f376` and are deployed to `/opt/cezar`. **Phase 4 —
+> the after-run that decides whether any of it worked — has now been measured and it PASSES:** run
+> `bde0ec40-06da-4628-8410-06a6a42694c7` scores **`blindSleepCalls` 0** (whole run),
+> `sleepCalls` 5, `sleepExecMs` 16.5 s, `repeatedExpensiveCalls` 0, `batchFactor` 1.00 — against
+> baselines of 4 blind / 18 sleeps / 13.4 min / 18 re-runs (`7c2dd8f0`) and 2 blind / 14 sleeps /
+> 42.2 min / 0 re-runs (`c10864d1`). All four surviving executed sleeps are the doctrine's own
+> tier-3 idiom (`until grep -q "^EXIT=" …; do sleep N; done`); the fifth hit is a quoted mention.
+> The numbers, the full per-`stepId` command dump, the (a)/(b)/(c) classification, the attribution
+> argument and the one criterion that needed a `document`-step gate re-run to pass are in
+> **§ Verification §4 → Result**, with the re-run's own markers in § Verification §5.
+> **This spec claims the four counters, not a green suite.** The `document` gate re-run returned
+> `EXIT=0` for `npm ci`, `typecheck` and `test:unit` and `EXIT=1` for `npm test`, on 3 pre-existing
+> failures of 9634 that a one-markdown-file branch cannot have caused — 2 load flakes that passed on
+> re-run, and one reproducible index-build budget failure filed as todo
+> `90b00d11-b564-42ec-ae10-08bf057e5813`. See § Verification §5.
+> ~~superseded 2026-08-22 by revision 5 (below): PHASES 1-3 IMPLEMENTED AND SHIPPED
 > (`ada8f376`) AND NOW CONFIRMED DEPLOYED to `/opt/cezar`; Phase 4's after-run is DESIGNATED AND
 > IN PROGRESS (run `bde0ec40-06da-4628-8410-06a6a42694c7`) — not yet measured, because this is the
-> `spec` step of that same run and `run-tests`/`document` have not executed yet.** ~~superseded
+> `spec` step of that same run and `run-tests`/`document` have not executed yet.~~ ~~superseded
 > 2026-08-21 by revision 4 (below): PHASES 1-3 IMPLEMENTED AND SHIPPED (`ada8f376`, on
 > `origin/main`); Phase 4 — the after-run that decides whether any of it worked — STILL
 > OUTSTANDING, tracked as todo `ea54dd16-5913-4b8a-bbc8-d3b1db9da66c`.~~ ~~superseded 2026-08-21 by revision 3 (below):
@@ -44,10 +60,14 @@
 
 > ### Revision 3 — 2026-08-21, implemented
 >
-> **Phases 1-3 are shipped and green. Phase 4 (the after-run) is still outstanding** and cannot be
+> **Superseded 2026-08-22 by revision 8: Phase 4 has now run and passed** (`blindSleepCalls` 0 on
+> `bde0ec40`), so the admissibility bar this paragraph sets is met and a saving *is* now
+> demonstrated — see § Verification §4 → Result. Original text, unchanged:
+>
+> ~~**Phases 1-3 are shipped and green. Phase 4 (the after-run) is still outstanding** and cannot be
 > satisfied by this run — § Verification §4 stands unchanged as the thing that decides whether any
 > of this worked. Until it has run, this spec has changed prompt text and shipped a meter; it has
-> **not** demonstrated a saving, and no speed claim from it is admissible (R5).
+> **not** demonstrated a saving, and no speed claim from it is admissible (R5).~~
 >
 > What landed, against the plan:
 >
@@ -179,6 +199,39 @@
 > do not exist yet); read any `SLEEP |` lines from this run's own transcript; touch
 > `system-prompt.test.ts`, `types.test.ts`, `stats.ts` or any other Phase 1-3 file (none needed
 > changing, per point 3); or flip the Status line to implemented.
+
+> ### Revision 8 — 2026-08-22, the `document` step of the after-run: Phase 4 measured, PASS
+>
+> **Phase 4 is done and the doctrine works.** Everything revision 5 listed as "explicitly did NOT
+> do" has now been done, in this step, and the results are written into § Verification §4 → Result:
+>
+> 1. **The gate number is `blindSleepCalls` 0 on the whole run** — the criterion, met without
+>    needing the discount mechanism revision 7 built for it. `sleepCalls` 5, `sleepExecMs` 16.5 s,
+>    `repeatedExpensiveCalls` 0, `batchFactor` 1.00. Against `7c2dd8f0` (4 / 18 / 13.4 min / 18)
+>    and `c10864d1` (2 / 14 / 42.2 min / 0), both blind-sleep counts and the re-run count go to
+>    zero and the time spent asleep falls by ~1.5 orders of magnitude.
+> 2. **All five `SLEEP |` hits are quoted and classified** — four class (c) guarded waits, all in
+>    `run-tests`, all the doctrine's literal `until grep -q "^EXIT=" …; do sleep N; done` example;
+>    one class (b) mention in `review-spec`, which turned out to be a *different* call than
+>    revision 7 predicted (`review-spec` testing the predicate against `sleep 120; tail …` as a
+>    fixture, rather than § Problem quoting it). Same class, different call — recorded rather than
+>    smoothed over, because revision 7's prediction is the sort of thing a later reader would
+>    otherwise take as confirmed.
+> 3. **One criterion did not pass as measured, and was not rounded up.** Criterion 4 asks that
+>    `run-tests` quote an exit-marker line; it quoted two of three and ended mid-wait on `npm test`,
+>    because the run broker died 5 s later (`commit-push` failed with
+>    `run broker … did not respond after 5000ms`). That is the broker defect fixed separately on
+>    `origin/main` (`3e6d1b7e` / `8e20dfbf` / `0883256b`), not a sleep-doctrine failure — no sleep
+>    was involved and no counter moved. `document` merged `origin/main` (`0883256b`) into this
+>    branch and re-ran the full gate itself; § Verification §5 records those markers.
+> 4. **The doctrine's effect is attributable this time, unlike `70f19253`'s zero.** The four
+>    surviving sleeps are not merely consistent with the new text, they reproduce its shipped
+>    worked example verbatim, four times, against three log files — an idiom the old doctrine
+>    never contained. See § Verification §4 → Result → Attribution.
+>
+> **What this revision did NOT do:** change any Phase 1-3 code or prompt text (none needed
+> changing); re-measure after `deploy` (step 8 runs no gate and cannot move these counters — see
+> the scope note in § Verification §4).
 
 ## TLDR
 
@@ -975,12 +1028,170 @@ below is "as of `document`, `deploy` not included" — accepted, because `deploy
 cannot move any of these four counters; re-stated here only so nobody re-runs `cez run stats`
 post-`deploy`, gets an identical result, and wonders why it wasn't re-verified.
 
-**Result: PENDING.** To be filled in by the `document` step of run `bde0ec40-06da-4628-8410-06a6a42694c7`
-once `run-tests` (step 5 of 8) has executed — the whole-run `blindSleepCalls __`, `sleepCalls __`,
-`repeatedExpensiveCalls __`, `batchFactor __` (the gate, per revision 7), the `run-tests` step's own
-row as supporting detail, the per-`stepId` `SLEEP |` dump with each hit classified (a)/(b)/(c), and
-PASS/FAIL against the four conditions above. This line is the one the top Status block's flip to
-"implemented" must point at.
+**Result: PASS (criteria 1-3 outright; criterion 4 passes only after `document` re-ran the gate
+itself — see below).** Measured 2026-08-22T12:10Z by the `document` step of run
+`bde0ec40-06da-4628-8410-06a6a42694c7`, by running the three pinned commands above verbatim
+(all exit 0).
+
+**The whole-run total — the gate (revision 7):**
+
+| metric | after-run `bde0ec40` | baseline `7c2dd8f0` | baseline `c10864d1` |
+| --- | --- | --- | --- |
+| `blindSleepCalls` | **0** | 4 | 2 |
+| `sleepCalls` | 5 | 18 | 14 |
+| `sleepExecMs` | 16 505 (16.5 s) | ≈802 100 (13.4 min) | ≈2 532 000 (42.2 min) |
+| `repeatedExpensiveCalls` | **0** | 18 | 0 |
+| `batchFactor` | 1.00 | — | — |
+| `toolCalls` / `roundTrips` | 206 / 206 | — | — |
+
+**The `run-tests` row, as supporting detail:** `wallMs` 112 344 (1 m 52 s), `toolCalls` 22,
+`batchFactor` 1, `sleepCalls` 4, **`blindSleepCalls` 0**, `sleepExecMs` 15 289,
+`repeatedExpensiveCalls` 0.
+
+**The per-`stepId` `SLEEP |` dump, all five hits, each classified (a)/(b)/(c):**
+
+```
+review-spec | SLEEP | set +e W=/var/lib/cezar/loki-labs/cezar/.ai/cezar/worktrees/bde0ec40-… R=/var/lib/cezar/loki-labs/cezar cd "$W" printf '\n===== 1. cez …
+run-tests   | SLEEP | until grep -q "^EXIT=" /tmp/gate-typecheck.log 2>/dev/null; do sleep 5; done; tail -5 /tmp/gate-typecheck.log
+run-tests   | SLEEP | until grep -q "^EXIT=" /tmp/gate-test.log 2>/dev/null; do sleep 15; done; echo done
+run-tests   | SLEEP | until grep -q "^EXIT=" /tmp/gate-test-unit.log 2>/dev/null; do sleep 10; done; echo done
+run-tests   | SLEEP | until grep -q "^EXIT=" /tmp/gate-test.log 2>/dev/null; do sleep 15; done; echo done
+```
+
+1. **`review-spec` — class (b), a mention. Discounted.** The 160-char dump truncates the evidence,
+   so `document` re-dumped the call in full (1 647 chars): it runs `cez run stats … | grep`, then a
+   `node -e` sleep-dump, then a *self-contamination check* whose `node -e` array literal contains
+   the strings `until grep -q "^EXIT=" /tmp/g.log; do sleep 5; done` and
+   `sleep 120; tail -12 /tmp/full-suite-mine.log` as example commands to test the predicate against.
+   Both are quoted text inside a JS array; the call blocked on nothing. Note this is a *different*
+   class-(b) instance than the one revision 7 predicted — that paragraph guessed the hit would be
+   § Problem's `sleep 120` quotation, and it is in fact `review-spec` testing the predicate with
+   that same string as a fixture. Same class, different call; the prediction's reasoning holds.
+   It carried `blindSleepCalls` 0 regardless, so the discount changes no verdict.
+2-5. **`run-tests` — all four class (c), guarded waits.** Every one is the doctrine's tier-3 idiom
+   verbatim: `until grep -q "^EXIT=" <logfile>; do sleep N; done`, polling for the exit marker the
+   backgrounded gate writes, exiting on the first probe that finds it. Not one bare `sleep N`
+   anywhere in the run. Three of the four (`gate-test`, `gate-test-unit`, `gate-test` again) were
+   additionally dispatched as harness-backgrounded calls — their `tool-result` is
+   `Command running in background with ID: …`, so the loop never blocked the agent at all; only the
+   `gate-typecheck` wait actually blocked, which is where nearly all of the 15.3 s `sleepExecMs`
+   went.
+
+**Attribution — why this run's zero attributes to the deployed doctrine, unlike `70f19253`'s.** Two
+independent lines of evidence. (i) Revision 5 established the worktree was born 28.9 s after
+`/opt/cezar`'s dist carried `ada8f376`'s content, and revision 3 of `review-spec` re-verified it
+from the *composed system prompt* after a mid-run redeploy at 02:09:54; `implement` (02:23:13) and
+`run-tests` (02:25:37) both ran well after that. (ii) Stronger and cheaper: the four surviving
+sleeps are not merely *compatible* with the new doctrine, they are its **literal worked example** —
+the doctrine text ships the string `until grep -q EXIT= "$f"; do sleep 5; done`, and `run-tests`
+emitted that exact idiom four times against three different log files. The old doctrine contained no
+such example, which is why the baselines are full of bare `sleep 120; tail …`.
+
+**Against the four conditions:**
+
+1. **PASS.** `blindSleepCalls == 0` for the whole run, before any discounting — so the class-(b)
+   discount above is recorded for completeness, not needed to reach the number. A hit in
+   `implement` or `commit-push` would have counted; both scored 0 (`implement` 0 sleeps of 18 tool
+   calls, `commit-push` 0 of 0).
+2. **PASS.** Every surviving sleep is visibly inside an early-exit loop — read off the command text,
+   quoted above, not inferred from the count. Four class (c), one class (b), zero class (a).
+3. **PASS.** `repeatedExpensiveCalls == 0`, whole run and `run-tests` row alike, so the "explain
+   every survivor" branch is not needed. Read, not asserted: against the `7c2dd8f0` baseline of 18
+   (headed by one test file run 11 times), this run ran `npm ci` once, `npm run typecheck` once,
+   `npm test` once and `npm run test:unit` once.
+4. **PASS, but only after a `document`-step re-run, and the shortfall is recorded rather than
+   rounded up.** `batchFactor` (run total) is 1.00 and has not fallen below the 1.00–1.02 baseline.
+   The exit-marker half was **initially short**: `run-tests` quoted `EXIT=0` for `typecheck` and
+   `EXIT=0` / `# pass 44 # fail 0` for `test:unit`, but its final text is *"Waiting for the
+   `npm test` background monitor to report back"* — it never quoted `npm test`'s marker, because
+   the step ended and `commit-push` died 5 s later with
+   `run broker … did not respond after 5000ms — giving up`. That is the run-broker defect fixed
+   separately on `origin/main` by `3e6d1b7e` / `8e20dfbf` / `0883256b`, not a sleep-doctrine
+   failure — no sleep was involved and no counter moved. `document` closed it by merging
+   `origin/main` (`0883256b`) into this branch and re-running the full gate itself; the markers it
+   quotes are recorded in § Verification §5 below. **Had the gate not been re-run, the honest verdict
+   on criterion 4 would have been FAIL-by-its-own-wording** ("`run-tests` reports a gate whose marker
+   it cannot quote"), and this paragraph would have said so.
+   **The criterion is "quotes a marker", not "the marker is green", and the re-run's markers were
+   not all green:** `npm ci`, `typecheck` and `test:unit` returned `EXIT=0`, `npm test` returned
+   `EXIT=1` on 3 failures of 9634. All three are pre-existing on `origin/main` and cannot be caused
+   by a branch that changes one markdown file; two are load flakes that passed on re-run and the
+   third is a reproducible budget failure filed as todo `90b00d11-b564-42ec-ae10-08bf057e5813`.
+   § Verification §5 has the detail. **This spec therefore does not claim a green suite** — it
+   claims the four sleep counters, which no part of that failure touches.
+
+**Standing caveat on these numbers, with `document`'s own contribution measured rather than
+predicted.** The table above is the state at 12:10Z, before `document` did its work; `document` is
+itself a metered step, so the counters moved while this section was being written. Re-measured at
+12:22Z, after the gate re-run and these edits:
+
+| metric | at 12:10Z (the table above) | at 12:22Z (post-`document`) |
+| --- | --- | --- |
+| `blindSleepCalls` | **0** | **0** |
+| `sleepCalls` | 5 | 5 |
+| `repeatedExpensiveCalls` | 0 | 3 |
+| `toolCalls` | 206 | 245 |
+| `batchFactor` | 1.00 | 1.00 |
+
+Two things worth reading off that, neither smoothed over:
+
+- **`blindSleepCalls` held at 0 and `sleepCalls` did not move at all.** `document` ran four
+  long jobs — `npm ci`, `typecheck`, `npm test`, `test:unit` — and waited on every one without
+  emitting a single `sleep`, by using tier 2 (hand the job to the harness, get woken on
+  completion) rather than tier 3. That is the doctrine's *preferred* tier, so the after-run
+  demonstrates both of its legitimate patterns: `run-tests` used tier 3 and `document` used tier 2.
+- **`repeatedExpensiveCalls` rose 0 → 3, and the three are `document`'s own**, all of them
+  `npx vitest run src/knowledge/catalog.test.ts` — re-run deliberately, three times, to establish
+  whether the C18 budget failure in § Verification §5 was a load flake or reproducible (it is
+  reproducible: 68.12 / 62.81 / 59.41 ms/MiB). § Data models says this metric cannot tell a
+  legitimate repeat from a wasteful one and that a human read decides; this is the read.
+  **Re-running an expensive command to characterise its variance is the legitimate case** — it is
+  the one thing a saved log cannot be re-sliced to answer, since the question *is* the spread
+  across runs. That is a genuine third exception to § Verification §4 criterion 3's "after a code
+  change, or a defect" framing, and it is recorded here rather than quietly absorbed.
+
+`blindSleepCalls` is the number that must stay 0, it is the only one this section gates on, and it
+is 0 at both timestamps.
+
+This line is the one the top Status block's flip to "implemented" points at.
+
+### §5 — The `document`-step gate re-run (closing criterion 4's exit-marker half)
+
+Criterion 4 asks that the gate's exit markers be quoted, and `run-tests` could quote only two of
+three before the run broker killed the step (§4 → Result → condition 4). `document` closed the gap
+itself: it merged `origin/main` (`0883256b`) into `cez/bde0ec40` — the branch was 22 behind, 1
+ahead — reinstalled, and re-ran the full gate on 2026-08-22 from 12:11Z. Markers, quoted:
+
+| gate | marker | verdict |
+| --- | --- | --- |
+| `npm ci` | `EXIT=0` (`added 470 packages`) | pass |
+| `npm run typecheck` | `EXIT=0` | pass |
+| `npm run test:unit` | `EXIT=0` — `# tests 44  # pass 44  # fail 0` | pass |
+| `npm test` | **`EXIT=1`** — `Test Files 3 failed \| 520 passed (523)`, `Tests 3 failed \| 9630 passed \| 1 skipped (9634)` | **3 failures, none from this branch** |
+
+**The three `npm test` failures are pre-existing on `origin/main` and cannot be caused by this
+change, which modifies exactly one file — this markdown spec** (`git diff --name-only
+origin/main...HEAD` returns it alone). Re-running the three files by themselves separated them:
+
+- **`project-context.test.ts`** (`knowledgeStore is built only under CEZ_KB=1 …`, `Test timed out in
+  5000ms`) — **load flake, passed on re-run.**
+- **`add-project-dialog.test.tsx`** (`expected '/p/cezar/' to be '/p/added/'`, a navigation race) —
+  **load flake, passed on re-run.**
+- **`catalog.test.ts` C18** (`expected 67.58… to be less than 40`) — **reproducible, and a genuine
+  open defect.** Measured 67.58 / 68.12 / 62.81 / 59.41 ms/MiB across four runs at load average
+  8.5–19, including runs of the file alone. Filed as todo
+  `90b00d11-b564-42ec-ae10-08bf057e5813`. It is not a flake and is not being called one: the test
+  deliberately takes the **minimum of three repeats of process CPU time** rather than wall clock,
+  precisely so ambient load cannot move it, and its own comment records 17.4 ms/MiB alone and
+  23–34 ms/MiB loaded when the 40 line was set on 2026-08-06. Today's numbers are roughly double
+  the loaded figure from then. Either `buildCatalog` regressed or the line was never valid on this
+  box; the todo carries the measurement that would separate the two.
+
+**Why this does not change §4's verdict.** All three failures are in `npm test` on `origin/main`,
+touch no sleep-doctrine code, and move none of the four counters. The box was at load average 19
+during the full-suite run — worth recording on its own account, because **resource-budget and
+timeout assertions are not safe gates on a machine that runs parallel agent workloads**, and two of
+these three were exactly that.
 
 ## Open questions — settled here
 
