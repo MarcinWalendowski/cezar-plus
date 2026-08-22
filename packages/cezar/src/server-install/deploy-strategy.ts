@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+
 import {
   activate,
   flipSymlink,
@@ -54,6 +56,10 @@ export interface DeployEvent {
   /** `deploy.rollback` only. */
   reason?: string;
   failedAt?: 'smoke_boot' | 'readiness';
+  /** Whether this was emitted by deploy recovery or an explicit rollback command. */
+  operation?: 'deploy' | 'rollback';
+  /** `deploy.rollback` only: whether a readiness probe proved this release ready. */
+  ready?: boolean;
 }
 
 export interface ProbeResult {
@@ -99,6 +105,9 @@ export interface DeployOutcome {
   failedAt?: 'smoke_boot' | 'readiness';
   rolledBackTo?: string;
   detail?: string;
+  operation?: 'deploy' | 'rollback';
+  /** The release selected when an explicit rollback returns, and its measured readiness. */
+  serving?: { releaseId: string; ready: boolean; detail?: string };
 }
 
 /**
@@ -137,6 +146,7 @@ export async function runGatedDeploy(request: DeployRequest, fx: DeployEffects):
       releaseId: id,
       strategy,
       failedAt: 'smoke_boot',
+      operation: 'deploy',
       reason: smoke.detail ?? 'smoke boot failed',
     });
     // Nothing was flipped and nothing was restarted — the running release is untouched.
@@ -177,6 +187,7 @@ export async function runGatedDeploy(request: DeployRequest, fx: DeployEffects):
       releaseId: id,
       strategy,
       failedAt: 'readiness',
+      operation: 'deploy',
       reason: ready.detail ?? 'readiness probe failed',
     });
     return {
@@ -202,17 +213,107 @@ export async function runGatedDeploy(request: DeployRequest, fx: DeployEffects):
 /** Explicit `--rollback`: flip to `previous` (or a named release) and restart. */
 export async function runRollback(
   request: { releasesDir: string; linkPath: string; to?: string },
-  fx: Pick<DeployEffects, 'restart' | 'emit' | 'now'>,
+  fx: Pick<DeployEffects, 'restart' | 'emit' | 'now' | 'probeReady'>,
 ): Promise<DeployOutcome> {
-  const ledger = loadLedger(request.releasesDir);
+  let ledger = loadLedger(request.releasesDir);
   const target = request.to ?? rollbackTarget(ledger);
   if (!target) {
     return { ok: false, releaseId: ledger.current ?? '', ledger, detail: 'no previous release to roll back to' };
   }
-  flipSymlink(request.linkPath, releaseDir(request.releasesDir, target));
-  const next = activate(ledger, target, fx.now());
-  saveLedger(request.releasesDir, next);
+  if (!ledger.releases.some((release) => release.id === target)) {
+    return { ok: false, releaseId: target, ledger, operation: 'rollback', detail: `release ${target} is not in the ledger` };
+  }
+  const targetDir = releaseDir(request.releasesDir, target);
+  if (!existsSync(targetDir)) {
+    return {
+      ok: false,
+      releaseId: target,
+      ledger,
+      operation: 'rollback',
+      detail: `release ${target} has no directory under ${request.releasesDir}`,
+    };
+  }
+
+  const before = ledger.current;
+  flipSymlink(request.linkPath, targetDir);
+  ledger = activate(ledger, target, fx.now());
+  saveLedger(request.releasesDir, ledger);
   await fx.restart();
-  fx.emit({ name: 'deploy.rollback', releaseId: target, strategy: 'blue-green', reason: 'manual rollback' });
-  return { ok: true, releaseId: target, ledger: next, rolledBackTo: target };
+  const ready = await fx.probeReady();
+  ledger = markHealthy(ledger, target, ready.ok);
+  saveLedger(request.releasesDir, ledger);
+  fx.emit({
+    name: 'deploy.rollback',
+    releaseId: target,
+    strategy: 'blue-green',
+    operation: 'rollback',
+    ready: ready.ok,
+    ...(ready.ok ? {} : { failedAt: 'readiness' as const }),
+    reason: ready.ok ? 'manual rollback' : (ready.detail ?? 'readiness probe failed'),
+  });
+  if (ready.ok) {
+    return {
+      ok: true,
+      releaseId: target,
+      ledger,
+      operation: 'rollback',
+      rolledBackTo: target,
+      serving: { releaseId: target, ready: true },
+    };
+  }
+
+  const beforeRow = before ? ledger.releases.find((release) => release.id === before) : undefined;
+  const restore = before && before !== target && beforeRow && beforeRow.healthy !== false ? before : null;
+  if (!restore) {
+    return {
+      ok: false,
+      releaseId: target,
+      ledger,
+      operation: 'rollback',
+      failedAt: 'readiness',
+      detail: ready.detail,
+      serving: { releaseId: target, ready: false, ...(ready.detail ? { detail: ready.detail } : {}) },
+    };
+  }
+
+  try {
+    flipSymlink(request.linkPath, releaseDir(request.releasesDir, restore));
+    ledger = activate(ledger, restore, fx.now());
+    saveLedger(request.releasesDir, ledger);
+    await fx.restart();
+    const restored = await fx.probeReady();
+    ledger = markHealthy(ledger, restore, restored.ok);
+    saveLedger(request.releasesDir, ledger);
+    fx.emit({
+      name: 'deploy.rollback',
+      releaseId: restore,
+      strategy: 'blue-green',
+      operation: 'rollback',
+      ready: restored.ok,
+      ...(restored.ok ? {} : { failedAt: 'readiness' as const }),
+      reason: 'restored after a failed manual rollback',
+    });
+    return {
+      ok: false,
+      releaseId: target,
+      ledger,
+      operation: 'rollback',
+      failedAt: 'readiness',
+      ...(restored.ok ? { rolledBackTo: restore } : {}),
+      detail: ready.detail,
+      serving: { releaseId: restore, ready: restored.ok, ...(restored.detail ? { detail: restored.detail } : {}) },
+    };
+  } catch (error) {
+    const restoreError = error instanceof Error ? error.message : String(error);
+    const detail = `${ready.detail ?? 'readiness probe failed'}; restoring ${restore} failed: ${restoreError}`;
+    return {
+      ok: false,
+      releaseId: target,
+      ledger,
+      operation: 'rollback',
+      failedAt: 'readiness',
+      detail: ready.detail,
+      serving: { releaseId: target, ready: false, detail },
+    };
+  }
 }
