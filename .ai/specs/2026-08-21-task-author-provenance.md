@@ -1,8 +1,32 @@
 # Every task records its author — user, API, or the agent session that spawned it
 
-**Status: IMPLEMENTED 2026-08-22 — Phases 1-4. Phase 5 not started (it was always optional).
-QA NEEDED: the runtime e2e in §Verification steps 18-21 has NOT been run, so the cockpit surface
-is unverified in a real browser.** Written in the `spec` step of the `spec-to-deploy` run for task
+**Status: IMPLEMENTED + DEPLOYED 2026-08-22 — Phases 1-4. Phase 5 not started (it was always
+optional). Shipped as `5f8cfced` + `64394362`, fast-forwarded onto `main`, deployed to
+cockpit.example.com as release `20260822T122039Z-64394362` (rootless blue-green; both
+`.ai/deploy-targets.json` probes exit 0 — backend `live=64394362 == HEAD`, UI `serving
+assets/index-3BBCV-iR.js == the built bundle`).**
+
+**The DATA path is verified in production, on real records, not fixtures:**
+
+- **`kind: 'agent'` with the pair the owner required.** `cezar todo add`, run by the deployed CLI
+  from inside this task's own agent session, stamped
+  `{kind: 'agent', via: 'cli-todo-add', parentTaskId: '232ad6d4-…', agentSessionId: '2aa7483d-…',
+  parentStepId: 'continue-5'}` — the parent task AND the agent session, which is requirement 3
+  read literally.
+- **`CEZ_STEP_ID` / `CEZ_SESSION_ID` reach a live agent.** Confirmed in this session's own
+  environment after the deployed server respawned it (`continue-5` / `2aa7483d-…`). Phase 2's
+  premise held on the real box, not just in the test.
+- **`kind: 'user'` from a real person.** A run a user started through the composer two seconds
+  after activation (12:20:43Z; activated 12:20:41Z) carries
+  `{kind: 'user', via: 'workspace-composer'}`. Not a fixture — an unrelated task someone filed.
+- **Backward compatibility proven against production data.** 61 run records scanned across the
+  workspace and every registered project: 1 carries an author, 60 do not, and all 61 load. The
+  additive-optional field does exactly what §Backward compatibility claims.
+
+**Still QA NEEDED, narrowly: §Verification steps 18-21 — the BROWSER check.** The Author column
+has never been looked at rendering. What is known is one step short of that: the served HTML names
+the built bundle, and that bundle contains `task-author-parent-link`. That is evidence the code
+shipped, not evidence the column reads well. Written in the `spec` step of the `spec-to-deploy` run for task
 `232ad6d4-58a5-421e-941f-5c24bd5a8452`; Phases 1-3 built in the `implement` step of the same run,
 Phase 4 after the owner confirmed the orphan-prune fix (`5ffa383c`) had landed.
 
