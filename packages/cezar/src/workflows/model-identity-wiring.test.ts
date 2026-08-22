@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import type { WorkflowDef } from './types.ts';
 import { RunManager } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -82,11 +83,17 @@ describe('model identity wiring (dry run)', () => {
     }
   }
 
-  async function runToEnd(input: { task: string; model?: string }): Promise<string> {
+  async function runToEnd(input: { task: string; model?: string }, def: WorkflowDef = workflow): Promise<string> {
     writeFileSync(argsFile, '', 'utf8'); // fresh capture per run
-    const record = manager.startRun(workflow, input);
+    const record = manager.startRun(def, { ...input, author: localCliAuthor() });
     await settle(record.id);
     return record.id;
+  }
+
+  /** The persisted step, by id — the per-step half of the seam (spec
+   *  2026-08-22-per-step-model-display). */
+  function stepOf(runId: string, stepId: string) {
+    return store.getRun(runId)?.steps.find((s) => s.id === stepId);
   }
 
   /** The `--model` value the mock was actually invoked with, or undefined when unset. */
@@ -105,13 +112,51 @@ describe('model identity wiring (dry run)', () => {
     // … while the record carries the canonical identity (#405's whole point).
     expect(store.getRun(id)?.modelIdentity).toBe('anthropic/opus');
     expect(store.getRun(id)?.model).toBe('opus'); // the free-text surface is untouched
+    // … and the STEP carries its own copy, which no later step can clobber (spec
+    // 2026-08-22-per-step-model-display).
+    expect(stepOf(id, 'work')).toMatchObject({ model: 'opus', modelIdentity: 'anthropic/opus' });
+    // A check step never reaches `runAgentStep`, so it resolves nothing and records nothing.
+    expect(stepOf(id, 'verify')?.model).toBeUndefined();
+    expect(stepOf(id, 'verify')?.modelIdentity).toBeUndefined();
   }, 30_000);
 
   it('an auto (empty) model persists no identity and pins nothing on the wire', async () => {
     const id = await runToEnd({ task: 'do the thing' });
     expect(capturedModel()).toBeUndefined();
     expect(store.getRun(id)?.modelIdentity).toBeUndefined();
+    expect(stepOf(id, 'work')?.model).toBeUndefined();
+    expect(stepOf(id, 'work')?.modelIdentity).toBeUndefined();
   }, 30_000);
+
+  /**
+   * THE case this spec exists for. Before it, `RunRecord.modelIdentity` was one slot every step
+   * rewrote, so a chain that deliberately runs one step on a different model (`spec-to-deploy`
+   * puts `review-spec` on opus and its other seven steps on sonnet, spec
+   * 2026-08-21-per-step-model-policy) finished asserting only the LAST step's model and discarded
+   * every earlier one. Asserting `steps[0]` AND `steps[1]` after both have run is what pins that
+   * the second no longer overwrites the first.
+   */
+  it('each step of a multi-model chain keeps its OWN resolved model', async () => {
+    const chain: WorkflowDef = {
+      name: 'model-per-step-test',
+      source: 'built-in',
+      steps: [
+        { id: 'plan', prompt: '{{task}}', model: 'opus' },
+        { id: 'build', prompt: '{{task}}', model: 'haiku' },
+        { id: 'verify', command: 'true' },
+      ],
+    };
+    const id = await runToEnd({ task: 'do the thing', model: 'sonnet' }, chain);
+    // Both steps went to the CLI on their own model …
+    expect(capturedModel(0)).toBe('opus');
+    expect(capturedModel(1)).toBe('haiku');
+    // … and the record says so per step, rather than showing `haiku` twice.
+    expect(stepOf(id, 'plan')).toMatchObject({ model: 'opus', modelIdentity: 'anthropic/opus' });
+    expect(stepOf(id, 'build')).toMatchObject({ model: 'haiku', modelIdentity: 'anthropic/haiku' });
+    // The run-level field is unchanged in behaviour — still the last step's — which is exactly why
+    // it could not answer this question and the per-step pair had to exist.
+    expect(store.getRun(id)?.modelIdentity).toBe('anthropic/haiku');
+  }, 40_000);
 
   it('a provider-qualified model is normalised to the bare wire form for claude', async () => {
     // `anthropic/claude-opus-4-1` is deliberately NOT one of opencode's known
@@ -126,7 +171,7 @@ describe('model identity wiring (dry run)', () => {
     const id = await runToEnd({ task: 'do the thing', model: 'anthropic/claude-opus-4-1' });
     expect(capturedModel(0)).toBe('claude-opus-4-1');
 
-    expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: 'keep going' })).resolves.toEqual({ ok: true });
     const deadline = Date.now() + 20_000;
     while (readFileSync(argsFile, 'utf8').trim().split('\n').length < 2) {
       if (Date.now() > deadline) throw new Error('continuation did not start in time');
@@ -147,7 +192,9 @@ describe('model identity wiring (dry run)', () => {
 
     // #401 lets a continuation switch the model. The record must follow what
     // actually ran, not keep asserting the model the run STARTED with.
-    expect(manager.continueRun(id, { text: 'keep going', model: 'haiku' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: 'keep going', model: 'haiku' })).resolves.toEqual({
+      ok: true,
+    });
     const deadline = Date.now() + 20_000;
     while (readFileSync(argsFile, 'utf8').trim().split('\n').length < 2) {
       if (Date.now() > deadline) throw new Error('continuation did not start in time');
@@ -156,6 +203,12 @@ describe('model identity wiring (dry run)', () => {
     expect(capturedModel(1)).toBe('haiku');
     // The record now asserts what the continuation ran, not what the run started with.
     expect(store.getRun(id)?.modelIdentity).toBe('anthropic/haiku');
+    // The STEP half of the same guarantee. A continuation is its OWN step (`continue-1`), so this
+    // also proves `runContinuation` writes the pair rather than leaving the new step blank while
+    // the run-level field moves on — the run-level defect #405 removed, reintroduced one level
+    // down. The original step keeps the model IT ran on; nothing retroactively rewrites it.
+    expect(stepOf(id, 'continue-1')).toMatchObject({ model: 'haiku', modelIdentity: 'anthropic/haiku' });
+    expect(stepOf(id, 'work')).toMatchObject({ model: 'opus', modelIdentity: 'anthropic/opus' });
   }, 40_000);
 
   it('Claude gateway models run with their provider-qualified wire id', async () => {
@@ -178,12 +231,12 @@ describe('model identity wiring (dry run)', () => {
     const id = await runToEnd({ task: 'do the thing', model: 'opus' });
     expect(store.getRun(id)?.modelIdentity).toBe('anthropic/opus');
 
-    expect(
+    await expect(
       manager.continueRun(id, {
         text: 'keep going',
         runner: 'codex',
         model: 'anthropic/claude-opus-4-8',
       }),
-    ).toEqual({ ok: false, error: "model 'anthropic/claude-opus-4-8' is not a codex model" });
+    ).resolves.toEqual({ ok: false, error: "model 'anthropic/claude-opus-4-8' is not a codex model" });
   }, 40_000);
 });

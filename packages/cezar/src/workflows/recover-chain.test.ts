@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -65,7 +66,7 @@ describe('recover() re-enters the workflow chain (P1/P2)', () => {
 
   /** A six-step chain interrupted mid-`spec`, exactly as a SIGKILL leaves it. */
   function interruptedRun(opts: { status: 'running' | 'waiting'; withDef?: boolean; sessionId?: string } = { status: 'running' }): string {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'spec-to-deploy',
       task: 'fix the bug',
@@ -161,7 +162,7 @@ describe('recover() re-enters the workflow chain (P1/P2)', () => {
   // job for a single-step workflow — and it carries behaviour this fix has no business changing
   // (per-project cap queueing, #562 session-failure containment).
   it('a single-step quick-task still takes the continuation path', async () => {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'do it',
@@ -198,7 +199,7 @@ describe('recover() re-enters the workflow chain (P1/P2)', () => {
   // catalog, whose step is named `task` — while this record's step is named `work`. Every def
   // step then reads as "never reached", and an unguarded re-entry would re-run a finished step.
   it('does not re-enter against a catalog def that does not describe this run', async () => {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'do it',

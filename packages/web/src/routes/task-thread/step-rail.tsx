@@ -73,7 +73,7 @@ export function railProgress(steps: ReadonlyArray<Pick<StepState, 'status'>>): n
   return score / steps.length
 }
 
-export function StepRail({ steps }: { steps: StepState[] }) {
+export function StepRail({ steps, planned }: { steps: StepState[]; planned?: PlannedSteps }) {
   if (steps.length === 0) return null
   const pct = railProgress(steps) * 100
   return (
@@ -97,6 +97,7 @@ export function StepRail({ steps }: { steps: StepState[] }) {
               ×{step.iterations}
             </span>
           ) : null}
+          <StepModel step={step} planned={planned} />
           <span className="ml-auto shrink-0 pl-2 text-[11.5px] text-soft-foreground tabular-nums">
             {step.kind} · step {index + 1} of {steps.length}
           </span>
@@ -107,6 +108,89 @@ export function StepRail({ steps }: { steps: StepState[] }) {
         <div className="h-full rounded-full bg-pending" style={{ width: `${pct}%` }} />
       </div>
     </div>
+  )
+}
+
+/** The run's own frozen `workflowDef.steps` — the model each step was PLANNED to use, which is the
+ *  only thing that can answer for a step that has not run yet. `StepState` alone cannot: a
+ *  `pending` step has no execution facts. Optional everywhere, so the bare `<StepRail steps={…}/>`
+ *  call sites (tests, and any future caller without a def in hand) keep compiling. */
+export type PlannedSteps = ReadonlyArray<{ id: string; model?: string | undefined }>
+
+/**
+ * Which LLM model ran this step (spec 2026-08-22-per-step-model-display).
+ *
+ * Three-way, deliberately — a single `auto` fallback would be a lie on the common case. The rail
+ * renders `pending` steps too, and a run's frozen `workflowDef` already names a model for several
+ * of them (`spec-to-deploy` puts `review-spec` on opus and its other steps on sonnet), so `auto`
+ * next to a not-yet-run `review-spec` would contradict the run's own definition:
+ *
+ *  1. the EXECUTED model, when the step has resolved one — what actually ran;
+ *  2. else the PLANNED model from the def, rendered dimmed and marked as planned, so it can never
+ *     be mistaken for what ran;
+ *  3. else `auto` — the same word `AgentBadge` uses at the run level for the true no-data case.
+ *
+ * `check` steps never reach `runAgentStep` and never resolve a model; they get no chip at all
+ * rather than an `auto` that suggests an agent was involved.
+ *
+ * The identity (`provider/model`) stays in the tooltip rather than inline, mirroring how
+ * `AgentBadge` keeps `modelIdentity` out of its own truncating summary — the rail is already a
+ * dense single line, and the free-text ask (`opus`, `sonnet`) is the part a reader scans.
+ */
+function StepModel({ step, planned }: { step: StepState; planned?: PlannedSteps }) {
+  if (step.kind !== 'agent') return null
+  const executed = step.model
+  // Only when it says something `model` does not — the same `identity !== model` guard AgentBadge
+  // applies, for the same reason: repeating the ask back is noise, a different provider is not.
+  const identity = step.modelIdentity && step.modelIdentity !== executed ? step.modelIdentity : undefined
+  if (executed !== undefined) {
+    return (
+      <span
+        data-slot="step-model"
+        data-source="executed"
+        title={identity ? `Model this step ran on — ${identity}` : 'Model this step ran on.'}
+        className="min-w-0 shrink truncate font-mono text-[11px] text-soft-foreground"
+      >
+        {executed}
+      </span>
+    )
+  }
+  // An identity with no free-text ask is what a run under the agent-model LOCK looks like: nothing
+  // was asked for, but something concrete still served the turn. Show what served it.
+  if (identity !== undefined) {
+    return (
+      <span
+        data-slot="step-model"
+        data-source="executed"
+        title="Model this step ran on."
+        className="min-w-0 shrink truncate font-mono text-[11px] text-soft-foreground"
+      >
+        {identity}
+      </span>
+    )
+  }
+  const plannedModel = planned?.find((def) => def.id === step.id)?.model
+  if (plannedModel !== undefined) {
+    return (
+      <span
+        data-slot="step-model"
+        data-source="planned"
+        title="Planned by this workflow — this step has not resolved a model yet."
+        className="min-w-0 shrink truncate font-mono text-[11px] text-soft-foreground/70 italic"
+      >
+        {plannedModel}
+      </span>
+    )
+  }
+  return (
+    <span
+      data-slot="step-model"
+      data-source="none"
+      title="No model recorded for this step — the agent's own default."
+      className="shrink-0 font-mono text-[11px] text-soft-foreground/70"
+    >
+      auto
+    </span>
   )
 }
 
@@ -218,7 +302,15 @@ const openByRun = new Map<string, boolean>()
  * Collapsed by default because the summary already answers "where is this run?" at a glance;
  * an explicit expand is remembered for that run across tab switches.
  */
-export function WorkflowSteps({ runId, steps }: { runId: string; steps: StepState[] }) {
+export function WorkflowSteps({
+  runId,
+  steps,
+  planned,
+}: {
+  runId: string
+  steps: StepState[]
+  planned?: PlannedSteps
+}) {
   const [open, setOpen] = useState(() => openByRun.get(runId) ?? false)
   if (steps.length === 0) return null
   const toggle = (next: boolean) => {
@@ -243,8 +335,10 @@ export function WorkflowSteps({ runId, steps }: { runId: string; steps: StepStat
         <span className="shrink-0 text-soft-foreground tabular-nums">
           step {index + 1} of {steps.length}
         </span>
-        {/* The current step's clock, so the common (collapsed) case answers "how long has this
-            been going" without an expand. */}
+        {/* The current step's model and clock, so the common (collapsed) case answers "what is
+            this running on, and for how long" without an expand. Current step only — one chip per
+            dot would drown the summary line the dots exist to keep terse. */}
+        <StepModel step={current} planned={planned} />
         <StepClock step={current} />
         <span data-slot="step-summary-progress" className="h-0.5 min-w-[36px] flex-1 overflow-hidden rounded-full bg-muted">
           <span className="block h-full rounded-full bg-pending" style={{ width: `${pct}%` }} />
@@ -256,7 +350,7 @@ export function WorkflowSteps({ runId, steps }: { runId: string; steps: StepStat
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="pt-2">
-          <StepRail steps={steps} />
+          <StepRail steps={steps} planned={planned} />
         </div>
       </CollapsibleContent>
     </Collapsible>

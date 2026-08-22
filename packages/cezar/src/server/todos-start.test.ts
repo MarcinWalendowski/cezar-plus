@@ -10,6 +10,7 @@ import type { TodoItem } from '../todos.ts';
 import { createApp } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * `POST /api/v1/todos/:id/start` (spec 007, extended by #401 + #413): the "▶ Run" flow that turns
@@ -48,7 +49,7 @@ describe('POST /api/v1/todos/:id/start', () => {
     const manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
         captured = input;
-        return store.createRun({ title: 't', workflow: '(inbox)', task: input.task, steps: [] });
+        return store.createRun({ author: localCliAuthor(), title: 't', workflow: '(inbox)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
     app = createApp({

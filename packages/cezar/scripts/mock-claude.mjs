@@ -22,6 +22,20 @@ if (process.env.CEZ_MOCK_ARGS_FILE) {
   }
 }
 
+// Testability hook: MOCK_CLAUDE_REJECT_RESUME=1 rejects a `--resume <id>` exactly the way the
+// real CLI does when the target session was never created on its side (spec
+// 2026-08-22-resume-fresh-session-fallback, run 232ad6d4's `commit-push` iteration 2) —
+// mirrors MOCK_CODEX_REJECT_RESUME in mock-codex-app-server.mjs. Checked before anything else
+// is emitted: the real CLI fails on the resume target before any turn starts.
+{
+  const resumeIdx = process.argv.indexOf('--resume');
+  const resumeSessionId = resumeIdx >= 0 ? process.argv[resumeIdx + 1] : undefined;
+  if (resumeSessionId && process.env.MOCK_CLAUDE_REJECT_RESUME === '1') {
+    process.stderr.write(`No conversation found with session ID: ${resumeSessionId}\n`);
+    process.exit(1);
+  }
+}
+
 emit({ type: 'system', subtype: 'init' });
 
 let turn = 0;

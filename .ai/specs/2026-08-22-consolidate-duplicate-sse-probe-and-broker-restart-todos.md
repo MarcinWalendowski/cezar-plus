@@ -1,6 +1,19 @@
 # Consolidate the duplicate "deploy probe can't measure SSE" todos, and judge the broker-restart pair
 
-**Status:** Draft — spec only, no code or todo mutation done in this step.
+**Status:** Implemented, tested and shipped — 2026-08-22, commit `ef043ef6` on `origin/main`.
+Phase 1 (`UpdateTodoPatch` extension) and Phase 2 (the consolidation script) both ran against the
+live `todos.json`; all 10 verification checks in "Verification" below passed (typecheck +
+`test:unit` green, before/after count unchanged, exactly 6 of 8 in-scope ids archived, `6c89af7c`
+untouched, content-preservation prefix check passed, no leaked `todos.lock`, idempotent re-run
+confirmed a no-op). Both acceptance criteria from the originating brief are met: cluster A
+survives as the single open todo `8dc8bf3a`; cluster B (`45813876`/`7f92bd31`) was judged the SAME
+defect and `7f92bd31` archived pointing at `45813876`. This spec's own "the fix has two halves"
+(giving the probe a credential, making assertions refuse to pass on zero samples) is NOT part of
+what shipped here — that remains open work, now tracked on the single surviving todo `8dc8bf3a`
+rather than scattered across five. The parent spec's Status line (below, "SSE continuity remains
+unmeasured") is therefore still accurate and was deliberately left unchanged — 6f4a9f62's folded
+AC4 asks for that line to change once the SSE assertion itself runs green, which this task did not
+do.
 **Date:** 2026-08-22
 **Parent spec:** `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` (KB `specs-594acc539b36`)
 — cites four of this spec's seven todos by id in its own evolving narrative (see "What the record

@@ -4,7 +4,7 @@ import * as React from 'react'
 import { Link as RouterLink, useSearchParams } from 'react-router'
 
 import { putWorkspaceUiState } from '@/api/client'
-import { useHealth, useWorkspaceRuns, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
+import { useHealth, useProjects, useWorkspaceRuns, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
 import { workspaceViewsOffSubtitle } from '@/lib/capability-copy'
 import type { RunRecord, WorkspaceRunSummary } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
@@ -37,11 +37,16 @@ import {
  *
  * Workspace-level — mounted OUTSIDE `ProjectScopeRoute` (`routes.tsx`), reached from the
  * `[ This project | All projects ]` switch `tasks-overview.tsx` renders in its header
- * (scaffold-owned, PLAN D22c). **This file reads only `useHealth`, `useWorkspaceRuns`,
- * `useWorkspaceUiState` and `putWorkspaceUiState` — never a scope-led query or client function**
- * (the "scope trap": with no `ProjectScopeRoute` above it, `queryScope()` silently resolves to
- * the boot project's `'default'` sentinel, so a project-local call here would read data for the
- * wrong repo with no error). `workspace-tasks.test.tsx` asserts this by request log.
+ * (scaffold-owned, PLAN D22c). **This file reads only `useHealth`, `useProjects`,
+ * `useWorkspaceRuns`, `useWorkspaceUiState` and `putWorkspaceUiState` — never a scope-led query or
+ * client function** (the "scope trap": with no `ProjectScopeRoute` above it, `queryScope()`
+ * silently resolves to the boot project's `'default'` sentinel, so a project-local call here would
+ * read data for the wrong repo with no error). `useProjects()` (`GET /api/v1/projects`) is safe
+ * here despite the rule: it is workspace-level by construction, "one registry no matter which
+ * project is active" (its own doc comment), so it never touches `queryScope()` either — it is
+ * added (multi-project spec, foreign-number guard phase) so each cross-project ROW can resolve
+ * its OWN project's `repoUrl`, never the boot project's. `workspace-tasks.test.tsx` asserts the
+ * scope-led rule by request log (no `/api/v1/p/*` request), which this does not violate.
  *
  * **Divergence from the spec's literal wording, recorded here because the spec's "UI/UX" section
  * says "Reuses TasksOverview" and separately describes a row-href edit "inside the component":**
@@ -132,6 +137,17 @@ export function WorkspaceTasksRoute() {
   const { filter, setFilter } = useWorkspaceTasksFilter(registry?.map((p) => p.id))
   const projectsQuery = filter.projects === undefined ? undefined : filter.projects.join(',')
   const runsQuery = useWorkspaceRuns({ projects: projectsQuery, view: filter.view })
+  // Called ONCE here, in the route's body — never per-row. Each row resolves ITS OWN project's
+  // repo out of this map (multi-project spec Phase 5): unlike a project-scoped page, this board
+  // has no single on-screen project, so `useProjectRepoBase()` does not apply here.
+  const projects = useProjects()
+  const repoByProject = React.useMemo(() => {
+    const map = new Map<string, string>()
+    for (const project of projects.data?.projects ?? []) {
+      if (project.repoUrl) map.set(project.id, project.repoUrl)
+    }
+    return map
+  }, [projects.data])
 
   return (
     <div data-route="workspace-tasks" className="flex min-h-full flex-col">
@@ -175,6 +191,7 @@ export function WorkspaceTasksRoute() {
             filter={filter}
             onClearFilter={() => setFilter({ projects: undefined, view: filter.view })}
             runsQuery={runsQuery}
+            repoByProject={repoByProject}
           />
         )}
       </div>
@@ -213,10 +230,15 @@ function WorkspaceTasksBoard({
   filter,
   onClearFilter,
   runsQuery,
+  repoByProject,
 }: {
   filter: WorkspaceTasksFilter
   onClearFilter: () => void
   runsQuery: ReturnType<typeof useWorkspaceRuns>
+  /** Registered project id -> its own repo, from `useProjects()` (read once by
+   *  `WorkspaceTasksRoute`) — the only authority a row's numeric-only PR/Issue chip may
+   *  synthesize a link against (#526), and it must be THAT row's project, never the boot one. */
+  repoByProject: ReadonlyMap<string, string>
 }) {
   const [query, setQuery] = React.useState('')
   const now = useNow(30_000)
@@ -333,6 +355,7 @@ function WorkspaceTasksBoard({
                     projectName={projectNames.get(run.project)}
                     queuePosition={run.status === 'queued' ? (positions?.get(run.id) ?? null) : null}
                     now={now}
+                    repoBase={repoByProject.get(run.project)}
                   />
                 ))}
               </tbody>
@@ -346,6 +369,7 @@ function WorkspaceTasksBoard({
                 run={run}
                 projectName={projectNames.get(run.project)}
                 now={now}
+                repoBase={repoByProject.get(run.project)}
               />
             ))}
           </div>
@@ -418,17 +442,21 @@ function WorkspaceTaskRow({
   projectName,
   queuePosition,
   now,
+  repoBase,
 }: {
   run: WorkspaceRunRow
   projectName: string | undefined
   queuePosition: number | null
   now: number
+  /** This row's OWN project's repo, resolved by the board from `run.project` — see
+   *  `WorkspaceTasksBoard`'s doc comment on `repoByProject`. */
+  repoBase: string | undefined
 }) {
   const attention = deriveAttention(run)
   const scheduled = scheduledResume(run)
   const to = `/p/${run.project}/tasks/${run.id}`
   const cost = formatCost(run.costUsd)
-  const reference = taskReference(run)
+  const reference = taskReference(run, repoBase)
   const unread = isUnread(run)
   const readDone = isReadDoneItem(run)
   const title = runTitle(run)
@@ -494,15 +522,18 @@ function WorkspaceTaskCard({
   run,
   projectName,
   now,
+  repoBase,
 }: {
   run: WorkspaceRunRow
   projectName: string | undefined
   now: number
+  /** This card's OWN project's repo — see `WorkspaceTaskRow`'s doc comment on the prop. */
+  repoBase: string | undefined
 }) {
   const attention = deriveAttention(run)
   const scheduled = scheduledResume(run)
   const to = `/p/${run.project}/tasks/${run.id}`
-  const reference = taskReference(run)
+  const reference = taskReference(run, repoBase)
   const unread = isUnread(run)
   const readDone = isReadDoneItem(run)
   const cost = formatCost(run.costUsd)

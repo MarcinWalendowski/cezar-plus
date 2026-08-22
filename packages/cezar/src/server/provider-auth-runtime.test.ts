@@ -13,6 +13,7 @@ import {
   recoverWithProviderRuntimeAuthObservation,
   watchProviderRuntimeAuthFailures,
 } from './provider-auth-runtime.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const CONNECTED_OUTPUT: Record<ProviderId, string> = {
   claude: '{"loggedIn":true}',
@@ -69,7 +70,7 @@ describe('watchProviderRuntimeAuthFailures', () => {
 
   it('invalidates the step backend for an auth error in a mixed-provider run', () => {
     const onInvalidated = watch();
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'mixed',
       workflow: 'mixed',
       task: 'work',
@@ -102,7 +103,7 @@ describe('watchProviderRuntimeAuthFailures', () => {
 
   it('falls back to the run backend when the event has no matching step', () => {
     const onInvalidated = watch();
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'fallback',
       workflow: 'quick-task',
       task: 'work',
@@ -124,7 +125,7 @@ describe('watchProviderRuntimeAuthFailures', () => {
 
   it('treats a legacy run with no backend as Claude', () => {
     const onInvalidated = watch();
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'legacy',
       workflow: 'quick-task',
       task: 'work',
@@ -146,7 +147,7 @@ describe('watchProviderRuntimeAuthFailures', () => {
     'observes auth failures carried by %s events',
     (type) => {
       const onInvalidated = watch();
-      const run = store.createRun({
+      const run = store.createRun({ author: localCliAuthor(),
         title: type,
         workflow: 'quick-task',
         task: 'work',
@@ -168,7 +169,7 @@ describe('watchProviderRuntimeAuthFailures', () => {
 
   it('ignores unrelated errors and non-message events', () => {
     const onInvalidated = watch();
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'ignore',
       workflow: 'quick-task',
       task: 'work',
@@ -194,7 +195,7 @@ describe('watchProviderRuntimeAuthFailures', () => {
 
   it('appends one safe task event when v1 and v2 report the same provider failure', () => {
     const onInvalidated = watch();
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'duplicate',
       workflow: 'quick-task',
       task: 'work',
@@ -224,14 +225,14 @@ describe('watchProviderRuntimeAuthFailures', () => {
 
   it('records the current incident on each affected task but invalidates the workspace once', () => {
     const onInvalidated = watch();
-    const first = store.createRun({
+    const first = store.createRun({ author: localCliAuthor(),
       title: 'first',
       workflow: 'quick-task',
       task: 'work',
       runner: 'claude',
       steps: [],
     });
-    const second = store.createRun({
+    const second = store.createRun({ author: localCliAuthor(),
       title: 'second',
       workflow: 'quick-task',
       task: 'work',
@@ -259,7 +260,7 @@ describe('watchProviderRuntimeAuthFailures', () => {
   it('unsubscribes cleanly', () => {
     const onInvalidated = vi.fn();
     const unwatch = watchProviderRuntimeAuthFailures(store, providerAuth, onInvalidated);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'unsubscribed',
       workflow: 'quick-task',
       task: 'work',
@@ -279,7 +280,7 @@ describe('watchProviderRuntimeAuthFailures', () => {
   it('deduplicates observation when startup and app construction watch the same store', () => {
     const onInvalidated = vi.fn();
     const observer = new ProviderRuntimeAuthObserver(providerAuth, onInvalidated);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'deduplicated',
       workflow: 'quick-task',
       task: 'work',
@@ -298,7 +299,7 @@ describe('watchProviderRuntimeAuthFailures', () => {
   });
 
   it('attaches boot-store observation before recovery can emit an auth failure', async () => {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'boot recovery',
       workflow: 'quick-task',
       task: 'work',

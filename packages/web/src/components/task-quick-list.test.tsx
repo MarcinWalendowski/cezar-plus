@@ -261,6 +261,31 @@ describe('TaskQuickList', () => {
       expect(chip.tagName).toBe('SPAN')
       expect(chip.textContent).toBe('#402')
     })
+
+    it('links a bare number once a repoBase is threaded through (multi-project spec Phase 5)', () => {
+      renderList({
+        runs: [run({ id: 'linked', title: '402: now linkable', prNumber: 402 })],
+        repoBase: 'https://github.com/acme/demo',
+      })
+      const chip = document.querySelector('[data-run-id="linked"] [data-slot="pr-chip"]') as HTMLElement
+      expect(chip.tagName).toBe('A')
+      expect(chip.getAttribute('href')).toBe('https://github.com/acme/demo/pull/402')
+    })
+
+    it('stays inert for a candidate-proven foreign number, even with a repoBase (Phase 2/3 guard)', () => {
+      renderList({
+        runs: [
+          run({
+            id: 'foreign',
+            title: '475: an upstream number',
+            prNumber: 475,
+            referencedPrCandidates: ['https://github.com/open-mercato/cezar/pull/475'],
+          }),
+        ],
+        repoBase: 'https://github.com/acme/demo',
+      })
+      expect(document.querySelector('[data-run-id="foreign"] [data-slot="pr-chip"]')).toBeNull()
+    })
   })
 
   describe('the title vs. its metadata (#788, option C)', () => {

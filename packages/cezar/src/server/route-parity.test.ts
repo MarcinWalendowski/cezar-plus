@@ -9,6 +9,7 @@ import { clearProjectProbeCache, listProjects, registerProject } from '../worksp
 import { ProjectContexts } from './project-context.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp, projectRouteManifest, type ProjectRouteInfo } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Alias parity for the mirrored project-route table (spec
@@ -68,7 +69,7 @@ describe('project-route alias parity (unprefixed vs /api/v1/p/<boot> vs /api/v1/
     }
     clearProjectProbeCache();
     store = RunStore.open(join(repoRoot, '.ai/cezar'), { keepLive: true });
-    runId = store.createRun({
+    runId = store.createRun({ author: localCliAuthor(),
       title: 'parity',
       workflow: 'quick-task',
       task: 'parity',

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -77,7 +78,7 @@ describe('the approval gate survives a restart', () => {
 
   /** A run parked on `review-spec`'s gate, exactly as `awaitApproval` leaves the record. */
   function parkedRun(approvals: { by: string; at: string }[] = [], minApprovers = 1): string {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'spec-to-deploy',
       task: 'do the thing',
@@ -261,7 +262,7 @@ describe('the approval gate survives a restart', () => {
   });
 
   it('refuses a decision on a run that is not parked, and says so distinctly from "not found"', async () => {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'spec-to-deploy',
       task: 'x',

@@ -19,6 +19,12 @@ export const workflowStepSchema = z
     prompt: z.string().optional(),
     skill: z.string().optional(),
     model: z.string().optional(),
+    /** claude CLI's own `--effort` (low|medium|high|xhigh|max) — a mechanical reasoning-depth
+     *  ceiling, mirroring `model` above. No normalization table: unlike `model`, `effort` is not
+     *  a per-backend alias, it is a fixed five-value enum the claude CLI defines directly.
+     *  Claude-only (`.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`) — the codex and
+     *  opencode runners never read it. */
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
     /** Per-step agent backend override (falls back to the task / config default).
      *
      *  Deliberately NOT widened to the legacy `claude-cli` the way the run store's
@@ -579,8 +585,45 @@ export const BRIEFS_DIR = '.ai/specs/briefs';
  */
 const SPEC_TO_DEPLOY_STEP_MODEL = 'sonnet';
 
-/** The one exception above — see {@link SPEC_TO_DEPLOY_STEP_MODEL}. */
-const SPEC_REVIEW_MODEL = 'opus';
+/**
+ * The two judgement steps — see {@link SPEC_TO_DEPLOY_STEP_MODEL} and
+ * {@link SPEC_AUTHORING_RUNNER}.
+ *
+ * **Amended 2026-08-22** (owner: *"writing spec + spec review should be by opus always, the rest
+ * can be load balanced by codex or claude sonnet"*). `spec` joins `review-spec` on opus; it ran on
+ * sonnet under the 2026-08-21 policy. Writing the spec and reviewing it are the two places where
+ * the judgement IS the deliverable, and everything downstream is construction against whatever
+ * they produce.
+ */
+const SPEC_AUTHORING_MODEL = 'opus';
+
+/**
+ * `spec` and `review-spec` pin the RUNNER as well as the model, and the runner pin is what makes
+ * "always opus" true rather than aspirational.
+ *
+ * `opus` is a Claude alias. On a run started on codex, the model pin alone is dropped by
+ * `RunManager.modelForBackend` (it names no model codex serves) and the step would quietly fall
+ * back to codex's default — the opposite of always. Naming the runner keeps both halves of the
+ * instruction: these two steps are opus, on Claude, whatever the rest of the chain runs on.
+ *
+ * The other six steps carry no runner, so they follow the run's own — which is what leaves room
+ * for the balancing half of the instruction ("the rest can be load balanced by codex or claude
+ * sonnet"). Today that balance is per-run and chosen by hand: cezar has no cross-runner routing,
+ * because `pool:*` balances ACCOUNTS WITHIN a provider and the backend is already fixed before the
+ * pool is consulted. Filed as its own task, with making this whole table configurable in global
+ * settings. Spec: `.ai/specs/2026-08-22-failed-turn-reads-as-done.md`.
+ */
+const SPEC_AUTHORING_RUNNER = 'claude' as const;
+
+/**
+ * `run-tests`'s reasoning-depth ceiling (`.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`,
+ * Phase 1). A cezar-spawned `run-tests` step with no `--effort` flag runs at `high` — measured
+ * directly against the pinned CLI — and that is the level the 43,583-output-token outlier run
+ * ran at. `medium` is a one-notch cut from that measured default, not a guess about an unknown
+ * one: enough budget to interpret a gate failure, capped short of the open-ended, iterative
+ * root-causing that step's job never asked for.
+ */
+const RUN_TESTS_STEP_EFFORT = 'medium';
 
 /**
  * The owner's standard operating pipeline as ONE selectable chain (spec
@@ -693,7 +736,8 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'spec',
       name: 'Write the spec',
-      model: SPEC_TO_DEPLOY_STEP_MODEL,
+      model: SPEC_AUTHORING_MODEL,
+      runner: SPEC_AUTHORING_RUNNER,
       // Narrowed by the P1 split: the record sweep moved to `context`, so this step's window holds
       // the brief and the code it names rather than the raw search output. `Task` is deliberately
       // NOT granted here — the writing is the one job that must not be delegated, for the reason
@@ -737,7 +781,8 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'review-spec',
       name: 'Review the spec',
-      model: SPEC_REVIEW_MODEL,
+      model: SPEC_AUTHORING_MODEL,
+      runner: SPEC_AUTHORING_RUNNER,
       // P2 of `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`.
       //
       // READ-ONLY BY CONSTRUCTION — no `Write`, no `Edit`. A reviewer that can edit what it
@@ -832,6 +877,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       id: 'run-tests',
       name: 'Run the tests',
       model: SPEC_TO_DEPLOY_STEP_MODEL,
+      effort: RUN_TESTS_STEP_EFFORT,
       allowedTools: DEFAULT_ALLOWED_TOOLS,
       // Same guarded allowlist as `implement`, by reference: it can install, run every gate, and
       // edit code to fix a failure — but it cannot reach the remote. `commit-push` does that next.
@@ -867,17 +913,31 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         '  gate only after you have changed code. On a measured run one test file was re-run 11',
         '  times — 230 seconds of pure repetition — only to see a different filter of one output.',
         '- Never background anything that mutates the git index.',
-        '- Read this repo\'s own docs for environment traps that make its gates LIE before you',
-        '  conclude a suite is unrunnable here (in this repo: AGENTS.md § Validation — `NODE_ENV=',
-        '  production` makes `npm ci` install zero devDependencies, and a cockpit session exports',
-        '  knobs the server suites assert on). The measured run rediscovered both the hard way and',
-        '  paid three full `npm test` runs for it.',
+        '- Root `npm test` scrubs its own environment (`NODE_ENV` for `web`, ambient `CEZ_*` and',
+        '  in-repo `TMPDIR` for `server`) before running — see',
+        '  `2026-08-21-npm-test-gate-environment-scrub.md`. `npm run test:unit` and `npm run',
+        '  test:package` are NOT covered by that scrub — both are `node --test` scripts that never',
+        '  load it — so read AGENTS.md § Validation for the environment traps before running',
+        '  either of those, or any invocation the scrub above doesn\'t cover (`npm ci` before a',
+        '  `cezar.service` redeploy, non-vitest tooling), before concluding a suite is unrunnable',
+        '  here.',
+        '',
+        'Once a failure reproduces IDENTICALLY against a control that does not contain this run\'s',
+        'change (clean HEAD, the parent checkout, `git stash` — see AGENTS.md\'s own method for why',
+        'one shared-cause control is proof, not evidence), that is sufficient to call it "not mine".',
+        'Stop there. Do not also A/B environment variables, spawn additional probes, or read the',
+        'implicated subsystem\'s source hunting for a root cause — that diagnosis is real work, but',
+        'it belongs to whoever picks up the todo, not to a step whose contract is pass/fail. File',
+        'what you already have (`cezar todo add`): the failing test, the one repro command, the one',
+        'control command, and the shared file/line if the output already shows it. Then move on.',
         '',
         'End your report with the exact gate commands you ran and their results, and QUOTE the',
         'exit-marker line from each saved log (`EXIT=0`, `Test Files  N passed`). That line cannot',
         'exist unless the process actually finished, which is the only thing separating a gate that',
         'passed from a gate you stopped watching. If a gate cannot be made to pass, say so plainly',
-        'and stop — do not let the chain ship a red build.',
+        'and stop — do not let the chain ship a red build. Report pass/fail plainly. Quote the',
+        'failing test\'s own output verbatim — never re-explain what the diff changed; that is',
+        'already in the commit this step is about to hand to `commit-push`.',
       ].join('\n'),
     },
     {

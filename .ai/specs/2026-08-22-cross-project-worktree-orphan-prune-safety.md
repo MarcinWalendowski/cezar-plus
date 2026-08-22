@@ -1,6 +1,6 @@
 # A workspace run's per-project worktree is invisible to that project's own orphan prune, and gets destroyed — directory and branch
 
-**Status:** draft — not yet implemented.
+**Status:** implemented — gates green (typecheck, build, unit + package tests; see handoff step 5), shipped 2026-08-22.
 
 **Brief:** `.ai/specs/briefs/2026-08-22-workspace-worktree-orphan-prune-cross-project.md`. That
 brief also flagged an in-flight duplicate: run `b3b5719c-ccf6-445c-9b97-39dd7eaf077e` was

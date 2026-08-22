@@ -1,6 +1,6 @@
 import { ChevronDownIcon, ScaleIcon } from 'lucide-react'
 import * as React from 'react'
-import { useHealth, useReferenceProjectId, useRuns } from '@/api/queries'
+import { useHealth, useProjectRepoBase, useReferenceProjectId, useRuns } from '@/api/queries'
 import { Link, scopeTo, useProjectMatch } from '@/lib/project-router'
 import type { RunRecord } from '@loki-labs/better-cezar-api-client'
 import { DiffStatLabel } from '@/components/diff-stat'
@@ -43,6 +43,7 @@ export function TaskQuickList({
   now = Date.now(),
   showTokens = true,
   showCost = true,
+  repoBase,
 }: {
   runs: RunRecord[]
   view: ListView
@@ -54,6 +55,10 @@ export function TaskQuickList({
   /** Presentation capability; defaults visible for older health responses and direct renders. */
   showTokens?: boolean
   showCost?: boolean
+  /** This list's own project's repo (`useProjectRepoBase()`, read once by
+   *  `TaskQuickListContainer`) — the only authority a numeric-only PR/Issue chip may synthesize a
+   *  link against (#526). A prop, not a hook read here — presentational, like `showTokens`. */
+  repoBase?: string
 }) {
   const counts = listCounts(runs)
   const buckets = groupRuns(runs, view)
@@ -88,6 +93,7 @@ export function TaskQuickList({
           now={now}
           showTokens={showTokens}
           showCost={showCost}
+          repoBase={repoBase}
         />
       )}
     </div>
@@ -108,6 +114,7 @@ export function QuickListBuckets({
   scope = null,
   showTokens = true,
   showCost = true,
+  repoBase,
 }: {
   buckets: QuickListBucket[]
   currentRunId?: string | null
@@ -115,6 +122,8 @@ export function QuickListBuckets({
   scope?: string | null
   showTokens?: boolean
   showCost?: boolean
+  /** The repo of the project these buckets belong to — see `TaskQuickList`'s doc comment. */
+  repoBase?: string
 }) {
   // Which variant groups are open. Local: it is view state about this list, nothing else reads it.
   const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(() => new Set())
@@ -143,6 +152,7 @@ export function QuickListBuckets({
               showCost={showCost}
               expanded={row.kind === 'group' && expanded.has(row.groupId)}
               onToggle={toggleGroup}
+              repoBase={repoBase}
             />
           ))}
         </div>
@@ -195,6 +205,7 @@ function Row({
   onToggle,
   showTokens,
   showCost,
+  repoBase,
 }: {
   row: QuickListRow
   currentRunId: string | null
@@ -204,6 +215,7 @@ function Row({
   onToggle: (groupId: string) => void
   showTokens: boolean
   showCost: boolean
+  repoBase?: string
 }) {
   if (row.kind === 'run') {
     return (
@@ -215,6 +227,7 @@ function Row({
         scope={scope}
         showTokens={showTokens}
         showCost={showCost}
+        repoBase={repoBase}
       />
     )
   }
@@ -264,6 +277,7 @@ function Row({
               variant
               showTokens={showTokens}
               showCost={showCost}
+              repoBase={repoBase}
             />
           ))
         : null}
@@ -303,6 +317,7 @@ function RunRow({
   variant = false,
   showTokens,
   showCost,
+  repoBase,
 }: {
   run: RunRecord
   queuePosition: number | null
@@ -315,13 +330,15 @@ function RunRow({
   variant?: boolean
   showTokens: boolean
   showCost: boolean
+  /** The row's own project's repo — see `TaskQuickList`'s doc comment on the prop. */
+  repoBase?: string
 }) {
   const attention = deriveAttention(run)
   const isActive = run.id === currentRunId
   // The strongest tracker reference the run knows about — the PR once one exists, else the issue
   // it was opened on. It is the row's leading chip AND the reason the title may drop its `NNN: `
   // prefix (#788, option C): the number is painted once, as a link, instead of twice as digits.
-  const reference = taskReference(run)
+  const reference = taskReference(run, repoBase)
   const title = runTitle(run)
   // Only when the two numbers are the same number — see `refPrefixMatches`. A run opened on issue
   // #788 that shipped as PR #790 keeps its prefix, because the chip is no longer saying it.
@@ -468,15 +485,19 @@ export function TaskQuickListContainer() {
   // The sidebar's chips are the same chips as the tables', so they get their status the same way:
   // one batched request for the whole list, mounted here where the list is.
   const projectId = useReferenceProjectId()
+  // Called ONCE here, in the container's body — never inside the `flatMap` callback below, which
+  // is not a component and may not call hooks (multi-project spec Phase 5). `RunRow` receives the
+  // result as a prop instead of resolving it itself.
+  const repoBase = useProjectRepoBase()
   const referenceRequests = React.useMemo(
     () =>
       projectId === undefined
         ? []
         : (runs.data ?? []).flatMap((run) => {
-            const reference = taskReference(run)
+            const reference = taskReference(run, repoBase)
             return reference ? [{ projectId, kind: reference.kind, number: reference.number }] : []
           }),
-    [runs.data, projectId],
+    [runs.data, projectId, repoBase],
   )
 
   // Nothing at all until the list has answered: a skeleton here would be inventing rows, and an
@@ -494,6 +515,7 @@ export function TaskQuickListContainer() {
         now={now}
         showTokens={visibility.tokens}
         showCost={visibility.cost}
+        repoBase={repoBase}
       />
     </ReferenceStatusProvider>
   )

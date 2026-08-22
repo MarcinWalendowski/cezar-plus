@@ -8,7 +8,7 @@ import {
   type AskMarkerParseResult,
   type AskRequest,
 } from '../core/ask.ts';
-import { type AgentSession } from '../core/claude-cli-runner.ts';
+import { claudeSessionTranscriptExists, type AgentSession } from '../core/claude-cli-runner.ts';
 import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.ts';
 import { parseUsageLimit } from '../core/usage-limit.ts';
 import { createRunner } from '../core/runner-factory.ts';
@@ -19,7 +19,8 @@ import {
 } from '../core/broker-launch.ts';
 import { chooseIsolation, probeIsolationCapabilities, type BrokerIsolation } from '../core/broker-isolation.ts';
 import { isSpoolLive, readSpoolMeta, spoolDirFor } from '../core/run-spool.ts';
-import type { RunnerId } from '../core/agent-runner.ts';
+import { isMissingSessionRejection, type RunnerId } from '../core/agent-runner.ts';
+import { agentHomePaths } from '../paths.ts';
 import { modelConflictsWithRunner } from '../core/model-presets.ts';
 import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
 import {
@@ -49,6 +50,7 @@ import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 import { loadWorkflows } from './load.ts';
 import { evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
 import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/store.ts';
+import type { TaskAuthor } from '../runs/task-author.ts';
 import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.ts';
 import {
   AgentTempDirError,
@@ -58,7 +60,13 @@ import {
 } from '../runs/agent-tmpdir.ts';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.ts';
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.ts';
-import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidateTitle } from '../runs/auto-name.ts';
+import {
+  autoNamingActive,
+  generateRunName,
+  liveTitleUpdatesEnabled,
+  postValidateTitle,
+  TITLE_MAX,
+} from '../runs/auto-name.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { approvalsSatisfied, minApprovers } from '../runs/approvals.ts';
 import { defDescribesRun, firstUnfinishedStep, pendingChainSteps, stepTerminal } from '../runs/chain.ts';
@@ -309,6 +317,12 @@ interface ActiveRun {
     observed: boolean;
     startedTurns: Set<string>;
     recordedTurns: Set<string>;
+    /** A real backend-reported context-window max for THIS invocation (today: codex's
+     *  `usage.updated`), scoped to the invocation because a fresh backend process may report a
+     *  different figure next time. Threaded as `reportedWindow` into every subsequent
+     *  `contextTokens`-bearing patch so it wins over the model-string guess (spec
+     *  2026-08-22-context-window-denominator-per-step). */
+    reportedContextWindow?: number;
   };
 }
 
@@ -436,7 +450,17 @@ function formatWakeInstant(at: Date): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'long' }).format(at);
 }
 
-export interface StartRunInput {
+/**
+ * What EXECUTING a run needs — everything `execute()` reads, and nothing about who asked for it.
+ *
+ * Split out from `StartRunInput` below (spec 2026-08-21-task-author-provenance) for a reason that
+ * is load-bearing rather than cosmetic: `pendingJobs` holds one of these, and the two RECOVERY
+ * paths (`reviveQueuedRun`, chain re-entry) rebuild one from a record for a run that ALREADY
+ * EXISTS. Authorship is a fact of the record at that point, stamped once and never rewritten, so
+ * a recovered job has nothing to say about it — and requiring a value there would have forced
+ * exactly the invented `system` placeholder the required field exists to prevent.
+ */
+export interface ExecuteRunInput {
   task: string;
   model?: string;
   /** Agent backend chosen for this task (GUI). Unset = the config default. */
@@ -480,6 +504,24 @@ export interface StartRunInput {
    *  and make the task bubble render the stack's images as its own. In-memory
    *  only: rebuilt from the record on every hydration, never persisted. */
   stackedImages?: ContentBlock[];
+}
+
+/**
+ * What CREATING a run needs: everything execution needs, plus WHO created it.
+ *
+ * `author` is REQUIRED (spec `.ai/specs/2026-08-21-task-author-provenance.md`), and required here
+ * rather than only on `RunStore.createRun`, because three of the creation paths — `cezar run` and
+ * the two notes triggers — never touch the store directly. Requiring it at both boundaries is what
+ * makes `npm run typecheck` fail for the ninth creation path exactly as it did for the first
+ * eight; there is deliberately no default and no fallback, since a default is precisely what
+ * would let a real path ship unattributed.
+ *
+ * Build it with one of the constructors in `../runs/task-author.ts` (`authorFromRequest` /
+ * `authorFromAgentEnv` / `inheritAuthor` / `agentAuthor` / `automationAuthor` / `localCliAuthor` /
+ * `systemAuthor`), never with a literal — the `kind`/`id` pairing is decided there, once.
+ */
+export interface StartRunInput extends ExecuteRunInput {
+  author: TaskAuthor;
 }
 
 /**
@@ -680,6 +722,37 @@ const RESTART_CONTINUATION_PROMPT =
   'The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.';
 
 /**
+ * cezar's own synthetic continuation prompts (spec 2026-08-22-continue-step-naming) — excluded
+ * from Phase 1's "name the step from what the user typed" naming so a restart/auto-resume
+ * continuation does not mint a step titled after its own boilerplate prompt text
+ * ("the cezar process restarted while you wer…"). A human-authored prompt, even one that also
+ * happens to defer for capacity (`reopen-watch.ts`'s reopen sweep), is never in this set.
+ */
+const SYNTHETIC_CONTINUE_PROMPTS: ReadonlySet<string> = new Set([
+  RESTART_CONTINUATION_PROMPT,
+  AUTO_RESUME_PROMPT,
+]);
+
+/** Suffix Phase 2 (spec 2026-08-22-continue-step-naming) appends when naming a new `continue-N`
+ *  step after the real step it's retrying. */
+const CONTINUED_STEP_SUFFIX = ' — continued';
+
+/**
+ * `` `${sessionStep.name} — continued` `` — but clamping `sessionStep.name` itself first, using
+ * the same code-point slicing and ellipsis-on-overflow `postValidateTitle` uses. Deliberately NOT
+ * `postValidateTitle` on the composed string: that would lowercase the first character (turning
+ * "Deploy — continued" into "deploy — continued") and clamp the WHOLE composed string to
+ * `TITLE_MAX`, which truncates the suffix away entirely on a step name over ~27 characters.
+ */
+function continuedStepName(sessionStepName: string): string {
+  const limit = TITLE_MAX - CONTINUED_STEP_SUFFIX.length;
+  const chars = [...sessionStepName];
+  const clamped =
+    chars.length > limit ? `${chars.slice(0, limit - 1).join('').trimEnd()}…` : sessionStepName;
+  return `${clamped}${CONTINUED_STEP_SUFFIX}`;
+}
+
+/**
  * The prompt a step gets when it is re-entered after CEZAR stopped it for inactivity.
  *
  * It resumes the SAME session, so the work so far is already in context. What the agent does not
@@ -762,8 +835,17 @@ export function specRevisionFeedback(report: string, specPath?: string): string 
 interface ChainResumePoint {
   /** Index into the revived `WorkflowDef.steps`. */
   index: number;
-  /** Present only when that step already had a session this process may reattach to. */
-  resume?: { sessionId: string; profileId?: string; prompt: string };
+  /** Present only when that step already had a session this process may reattach to.
+   *  `verifyTranscript` marks it (spec 2026-08-22-resume-fresh-session-fallback, Phase 1): every
+   *  handle built here is a session id recorded by an EARLIER process invocation, of ambiguous
+   *  confirmation status — never a session this same process just observed running, the way a
+   *  cezar-initiated stop's own retry (`stopResume`, `execute()`'s chain loop) is. `runAgentStep`
+   *  reads it to decide whether the Claude-only proactive existence check applies; a `stopResume`
+   *  handle deliberately does not set it, or the check would downgrade a session that was
+   *  confirmed alive moments ago whenever the dev box's real `~/.claude/projects` (or a test's
+   *  unrelated `CLAUDE_CONFIG_DIR`) happens not to carry its transcript — losing the in-progress
+   *  work the stop-retry exists to preserve, and reproducing the stop as a second, terminal one. */
+  resume?: { sessionId: string; profileId?: string; prompt: string; verifyTranscript?: true };
   /**
    * Why the chain is re-entering here, in the words the resumed step should act on. Seeded into
    * `checkFailure`, the channel that appends explanatory text to a retried agent's prompt.
@@ -782,6 +864,12 @@ interface PendingContinuation {
   backend: RunnerId;
   prompt: string;
   images: ContentBlock[];
+  /** The step's computed title (spec 2026-08-22-continue-step-naming), carried through a deferred
+   *  continuation so its eventual `step-start` event and `StepState.name` agree with what was
+   *  computed at `continueRun` time, not a re-derived (and possibly synthetic-prompt-derived)
+   *  value at dequeue. */
+  name: string;
+  nameOrigin: 'step' | 'prompt';
 }
 
 interface PersistedImages {
@@ -820,7 +908,7 @@ export class RunManager {
   private readonly monitoring = new Set<string>();
   private readonly pendingJobs = new Map<
     string,
-    { workflow: WorkflowDef; input: StartRunInput; resumeAt?: ChainResumePoint }
+    { workflow: WorkflowDef; input: ExecuteRunInput; resumeAt?: ChainResumePoint }
   >();
   /** Steps left in the chain at this run's last hand-back (spec 2026-08-20, R4). A re-entry that
    *  does not strictly reduce it is a loop, not progress, and fails the run loudly instead of
@@ -1054,6 +1142,12 @@ export class RunManager {
    *  unset flag must leave the agent's environment untouched, and two extra empty keys are not
    *  untouched.
    *
+   *  **Corrected 2026-08-22:** the zero-config env is no longer "exactly the three keys" —
+   *  `NODE_ENV` below is a fourth, unconditional one. It is not gated by any flag, so it does not
+   *  touch the byte-identity invariant this paragraph cites (that invariant is about flag-gated
+   *  features going untouched when their flag is off); it is simply always present now, the same
+   *  way `TMPDIR`/`TEMP`/`TMP` always are.
+   *
    *  The empty-string spelling above is not the precedent it looks like, because the two cases
    *  differ in where the decision lives. `generateFollowups` is a PER-RUN boolean that flips
    *  inside one process whose `process.env` never changes, so omitting the key really would let
@@ -1082,6 +1176,11 @@ export class RunManager {
       CEZ_HANDOFF_FILE: handoffPath(this.dataDir, runId),
       CEZ_TASK_ID: runId,
       CEZ_TODOS_FILE: generateFollowups ? todosPath(this.dataDir) : '',
+      // `NODE_ENV=production` makes npm's own tooling (ci, test runners) install/resolve the
+      // production build of everything, which is never what an agent-driven `npm ci`/`npm test`
+      // wants (AGENTS.md trap 1). Unconditional, not gated by any CEZ_* flag: every agent-spawned
+      // command gets a sane default, the same way TMPDIR below always does.
+      NODE_ENV: '',
       ...(knowledge.enabled
         ? {
             CEZ_KB_ROOTS: knowledge.summary ? knowledge.summary.roots.map((r) => r.path).join(':') : '',
@@ -1114,10 +1213,65 @@ export class RunManager {
    * spawning a CLI. Never throws: an unreadable home degrades to the default profile, which is
    * exactly the behaviour that predates profiles.
    */
+  /**
+   * The model pin to hand `backend`, with a pin that backend cannot serve DROPPED rather than
+   * forwarded (`.ai/specs/2026-08-22-failed-turn-reads-as-done.md`).
+   *
+   * `modelConflictsWithRunner` already existed and already answered this — it is applied on the
+   * continuation path (`postMessage`) with a comment naming this exact hazard, "an inherited
+   * `opus` would survive a switch to codex". The per-step model policy that landed 2026-08-21
+   * (`.ai/specs/2026-08-21-per-step-model-policy.md`) pins `sonnet` on seven steps and `opus` on
+   * `review-spec`, and never routed through it. When codex went live the next day, every step of
+   * every codex run handed codex a Claude alias, and codex answered 400 on all 47 turns.
+   *
+   * **Dropped, not substituted.** The obvious alternative is to swap in that backend's equivalent
+   * id, and it was rejected on measurement: all three ids in `KNOWN_PRESETS_BY_RUNNER.codex`
+   * (`gpt-5.1-codex`, `gpt-5.1-codex-mini`, `gpt-5-codex`) are themselves dead on the production
+   * account — probed 2026-08-22, each one `Model metadata not found` then the same 400. A pinned
+   * vendor id is a thing that goes stale, so substituting one trades today's wrong model for
+   * tomorrow's. Dropping falls through to the backend's own current default, which does not rot.
+   *
+   * The drop is announced on the thread. A model pin silently ignored is its own small lie, and
+   * this whole spec exists because cezar told the owner something untrue about a run.
+   */
+  private modelForBackend(
+    runId: string,
+    stepId: string,
+    backend: RunnerId,
+    model: string | undefined,
+  ): string | undefined {
+    if (!model || !modelConflictsWithRunner(model, backend)) return model;
+    this.store.appendEvent(runId, {
+      type: 'note',
+      stepId,
+      message: `model "${model}" is not a ${backend} model — running on ${backend}'s default instead`,
+    });
+    return undefined;
+  }
+
   private async agentEnvForStep(
     runId: string,
     backend: RunnerId,
-    options: { generateFollowups?: boolean; recordedProfileId?: string } = {},
+    options: {
+      generateFollowups?: boolean;
+      recordedProfileId?: string;
+      /**
+       * WHICH AGENT SESSION this env belongs to (spec 2026-08-21-task-author-provenance, Phase 2).
+       *
+       * `CEZ_TASK_ID` (set by `agentEnv`, per RUN) answers "which task"; a task filed from inside
+       * a run also has to name the session that filed it, and a session id is a STEP-level fact.
+       * These two are the halves that were unreachable from a child process before.
+       *
+       * `stepId` is the authoritative one: it is stable across resumes, restarts and session
+       * re-mints. `sessionId` is best-effort BY CONSTRUCTION — Codex/OpenCode overwrite the id
+       * cezar minted with their own when the backend reports one, which happens after this env is
+       * already built — so on those backends it records cezar's pre-mint id and `stepId` is what
+       * always resolves. On the Claude backend, the default and the overwhelming majority, it is
+       * exact.
+       */
+      stepId?: string;
+      sessionId?: string;
+    } = {},
   ): Promise<{ env: Record<string, string>; profileId: string; knowledgeSummary: KnowledgePromptSummary | undefined }> {
     const run = this.store.getRun(runId);
     const profileId = options.recordedProfileId
@@ -1132,6 +1286,13 @@ export class RunManager {
     return {
       env: {
         ...this.agentEnv(runId, options.generateFollowups ?? true, { enabled: kbEnabled, summary: knowledgeSummary }),
+        // Always PRESENT, empty when unknown — the `CEZ_TODOS_FILE` spelling above, for the same
+        // reason: a nested cezar inherits its parent's `process.env` wholesale, so omitting the
+        // key would let the PARENT run's session id shine through and a task filed by the child
+        // would name the wrong session. Empty reads as absent everywhere
+        // (`authorFromAgentEnv` trims), which is honest; a stale id would not be.
+        CEZ_STEP_ID: options.stepId ?? '',
+        CEZ_SESSION_ID: options.sessionId ?? '',
         ...resolved.env,
       },
       profileId: resolved.profile.id,
@@ -1162,6 +1323,10 @@ export class RunManager {
       // at the HTTP route because `cezar run`, the inbox's own "▶ Run" and variants all reach
       // startRun directly — a route-level gate would leave those writing todos.json.
       generateFollowups: followupsEnabled() ? input.generateFollowups : false,
+      // Who asked for this task, stamped at creation and never rewritten (spec
+      // 2026-08-21-task-author-provenance). Passed straight through: `startRun` decides nothing
+      // about authorship — the caller that KNOWS who acted is the only one that can.
+      author: input.author,
       // Persist autonomy on the record (#489) so the terminal review gate
       // (`settleSuccess`) and the group-pick winner-park can honor it — mid-run
       // auto-nudge reads `input.autonomous` (`execute`), but the record is the
@@ -1437,6 +1602,7 @@ export class RunManager {
             void this.runContinuation(
               runId,
               hydrated.stepId,
+              hydrated.name,
               hydrated.sessionId,
               hydrated.backend,
               hydrated.prompt,
@@ -1514,6 +1680,16 @@ export class RunManager {
         backend,
         prompt: RESTART_CONTINUATION_PROMPT,
         images: [],
+        // Read off the already-persisted `continue-N` step, not re-derived from the restart
+        // prompt above — otherwise every restart would relabel the step "the cezar process
+        // restarted…" instead of preserving its real title (spec 2026-08-22-continue-step-naming).
+        // `PendingContinuation.nameOrigin` has no `'marker'` member — a step Phase 3 already
+        // refined is, like a Phase 1 prompt-derived one, still eligible for further refinement (it
+        // is only `'step'` that must never be overwritten), so a persisted `'marker'` folds to
+        // `'prompt'` here rather than widening this type for a distinction that doesn't matter to
+        // this path.
+        name: queuedContinuation.name,
+        nameOrigin: queuedContinuation.nameOrigin === 'step' ? 'step' : 'prompt',
       });
       this.queue.push(run.id);
       this.store.appendEvent(run.id, {
@@ -1673,7 +1849,7 @@ export class RunManager {
         finishedAt,
         currentStepId: undefined,
       });
-      const resumed = this.continueRun(
+      const resumed = await this.continueRun(
         run.id,
         {
           text: RESTART_CONTINUATION_PROMPT,
@@ -1922,6 +2098,8 @@ export class RunManager {
         // config dir finds no session and silently starts a fresh one instead.
         ...(record.profileId ? { profileId: record.profileId } : {}),
         prompt: restartContinuationPrompt({ position, total }),
+        // This id was recorded by an earlier process invocation — see `ChainResumePoint.resume`.
+        verifyTranscript: true,
       },
     };
   }
@@ -2128,7 +2306,7 @@ export class RunManager {
   /** Publish the deadline on the record (the cockpit's only source) and arm the timer for it. */
   private armAutoResume(runId: string, deadline: number): void {
     this.store.updateRun(runId, { autoResumeAt: new Date(deadline).toISOString() });
-    const timer = setTimeout(() => this.fireAutoResume(runId), Math.max(0, deadline - Date.now()));
+    const timer = setTimeout(() => void this.fireAutoResume(runId), Math.max(0, deadline - Date.now()));
     timer.unref?.();
     this.autoResumeTimers.set(runId, timer);
   }
@@ -2138,7 +2316,7 @@ export class RunManager {
    * user may have continued, deleted or cancelled the run in them — then hand the resume to the
    * ordinary queued-continuation path so it obeys both concurrency caps like any other work.
    */
-  private fireAutoResume(runId: string): void {
+  private async fireAutoResume(runId: string): Promise<void> {
     this.autoResumeTimers.delete(runId);
     const run = this.store.getRun(runId);
     if (!run || run.status !== 'failed' || !run.autoResumeAt) return;
@@ -2151,7 +2329,7 @@ export class RunManager {
     const attempts = (run.autoResumeAttempts ?? 0) + 1;
     // `continueRun` retires the pending resume (timer + record fields) on the way in — this is a
     // resume, not a user turn, so the counter is put back straight after.
-    const resumed = this.continueRun(runId, { text: AUTO_RESUME_PROMPT }, true);
+    const resumed = await this.continueRun(runId, { text: AUTO_RESUME_PROMPT }, true);
     if (!resumed.ok) {
       // Refusals happen before `continueRun` retires anything, so the deadline is still on the
       // record — and a deadline in the past is a promise the cockpit keeps displaying and the
@@ -2258,7 +2436,7 @@ export class RunManager {
   private requeueWhileHeld(
     runId: string,
     workflow: WorkflowDef,
-    input: StartRunInput,
+    input: ExecuteRunInput,
     runner: RunnerId,
     state?: ActiveRun,
   ): boolean {
@@ -2582,7 +2760,7 @@ export class RunManager {
    * back would re-append the whole stack on every recovery and compound without
    * bound — asserted directly by a test.
    */
-  private hydrateQueuedInput(runId: string, input: StartRunInput): StartRunInput {
+  private hydrateQueuedInput(runId: string, input: ExecuteRunInput): ExecuteRunInput {
     const run = this.store.getRun(runId);
     if (!run) return input;
     const stack = run.queuedMessages ?? [];
@@ -2960,13 +3138,13 @@ export class RunManager {
    * behaves exactly like an interactive step: `waiting` after each turn,
    * messages via sendMessage, closed by finish/idle/cancel.
    */
-  continueRun(
+  async continueRun(
     runId: string,
     opts: { text?: string; images?: ContentBlock[]; runner?: RunnerId; model?: string } = {},
     /** Restart recovery may discover several interrupted tasks at once. Those
      *  continuations are queued; an explicit user Continue remains immediate. */
     deferForCapacity = false,
-  ): { ok: boolean; error?: string } {
+  ): Promise<{ ok: boolean; error?: string }> {
     if (agentModelsLocked(this.repoRoot) && opts.model?.trim()) {
       return { ok: false, error: AGENT_MODELS_LOCKED_ERROR };
     }
@@ -3030,9 +3208,54 @@ export class RunManager {
     // bound UNATTENDED resumes.
     this.clearAutoResume(runId);
 
+    // Phase 4 (spec 2026-08-22-continue-step-naming): a follow-up on a budget-stopped review may
+    // land right where the chain has real, untouched work waiting — re-enter the chain instead of
+    // opening a disconnected continue-N chat. Resolve the target FIRST — needed for the
+    // user-message event below, and `reenterChain` does not return it — duplicating its own
+    // internal resolution rather than widening its return type for its four other callers.
+    const budgetReentryEligible =
+      run.status === 'review' &&
+      run.stopReason === 'budget' &&
+      !run.pendingApproval &&
+      !opts.images?.length;
+    const workflow = budgetReentryEligible ? await this.reviveWorkflow(run) : undefined;
+    const resumeAt = workflow ? this.chainResumeAt(run, workflow) : undefined;
+    if (workflow && resumeAt) {
+      const handled = await this.reenterChain(run, 'follow-up continues the chain', {
+        feedback: opts.text,
+      });
+      if (handled) {
+        // `reenterChain` only appends a `lifecycle` event — without this the text the user just
+        // typed never reaches the rendered thread (it flows only into `resumeAt.feedback`, a
+        // retry-explanation channel `checkFailure` reads, not the transcript).
+        this.store.appendEvent(runId, {
+          type: 'user-message',
+          stepId: workflow.steps[resumeAt.index]?.id,
+          text: opts.text ?? '',
+          imageCount: 0,
+        });
+        // `reenterChain` ends with `queue.push` and deliberately does not pump itself — without
+        // this the re-queued run would sit at `queued` for up to `QUEUE_WATCHDOG_MS` before the
+        // sweep picks it up.
+        void this.pump();
+        return { ok: true };
+      }
+    }
+
+    // Naming (Phases 1 & 2, spec 2026-08-22-continue-step-naming): the new step is named after the
+    // real step it's retrying when one exists, or from the user's own text when there is none.
+    const retryingContinuation = sessionStep.id.startsWith('continue-');
+    const authored = opts.text?.trim();
+    const name = retryingContinuation
+      ? authored && !SYNTHETIC_CONTINUE_PROMPTS.has(authored)
+        ? postValidateTitle(authored)
+        : 'Continue'
+      : continuedStepName(sessionStep.name);
+    const nameOrigin: 'step' | 'prompt' = retryingContinuation ? 'prompt' : 'step';
+
     const continuations = run.steps.filter((s) => s.id.startsWith('continue-')).length;
     const stepId = `continue-${continuations + 1}`;
-    this.store.addStep(runId, { id: stepId, name: 'Continue', kind: 'agent' });
+    this.store.addStep(runId, { id: stepId, name, kind: 'agent', nameOrigin });
     const prompt = opts.text?.trim() || 'Continue.';
     const images = opts.images ?? [];
     if (deferForCapacity) {
@@ -3042,6 +3265,8 @@ export class RunManager {
         backend: targetRunner,
         prompt,
         images,
+        name,
+        nameOrigin,
       });
       this.queue.push(runId);
       this.store.updateRun(runId, {
@@ -3055,6 +3280,7 @@ export class RunManager {
     void this.runContinuation(
       runId,
       stepId,
+      name,
       resume ? sessionStep.sessionId : undefined,
       targetRunner,
       prompt,
@@ -3076,6 +3302,11 @@ export class RunManager {
   private async runContinuation(
     runId: string,
     stepId: string,
+    /** Computed once by the caller (spec 2026-08-22-continue-step-naming) — required, not
+     *  defaulted, so a call site that forgets it fails to typecheck rather than silently minting
+     *  a blank rail row. Threaded through so `StepState.name` and the `step-start` event's `name`
+     *  always agree (previously two independent `'Continue'` literals). */
+    name: string,
     sessionId: string | undefined,
     backend: RunnerId,
     prompt: string,
@@ -3088,6 +3319,12 @@ export class RunManager {
      *  opening a recovered continuation does not persist duplicate files. */
     persistedImages: ContentBlock[] = [],
     persistedAttachments: PersistedAttachment[] = [],
+    /** Set only by this method's own reactive fallback (spec 2026-08-22-resume-fresh-session-
+     *  fallback, Phase 3) when it re-invokes itself with a fresh session after a resume was
+     *  rejected as targeting a conversation the backend never created — guards the one retry
+     *  against retrying a SECOND rejection in a row, which is a real failure, not a loop. Every
+     *  ordinary caller omits it. */
+    retriedMissingSession = false,
   ): Promise<void> {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
@@ -3119,6 +3356,12 @@ export class RunManager {
           runId,
           record?.workspaceProjects ?? [],
           (m) => this.store.appendEvent(runId, { type: 'note', message: m }),
+          // Same write-ordering fix as the initial materialize above — this resume path is the one
+          // that actually mattered for the 232ad6d4 incident's SECOND reclaim, which came after an
+          // interrupt-and-resume, not through the initial materialize.
+          (snapshot) => {
+            this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
+          },
         );
         this.store.updateRun(runId, { workspaceWorktrees: worktrees });
       }
@@ -3172,7 +3415,7 @@ export class RunManager {
       sessionId,
       backend,
     });
-    this.store.appendEvent(runId, { type: 'step-start', stepId, name: 'Continue', kind: 'agent', iteration: 1 });
+    this.store.appendEvent(runId, { type: 'step-start', stepId, name, kind: 'agent', iteration: 1 });
     // Attachments pasted into the follow-up composer, on the same terms as a live-session
     // message (#357): persisted to the run's own image store so the thread renders the bubble's
     // images rather than a bare count, and handed to the agent BOTH as base64 blocks (so it can
@@ -3371,15 +3614,31 @@ export class RunManager {
     // in the un-normalised wire form the first step already converted away (`anthropic/opus`
     // instead of `opus`). Fail loud here too rather than let the backend pick a default.
     let continueModel: string | undefined;
+    // Hoisted for the same reason as `stepRawModel` in `runAgentStep`: the mapper and the record
+    // must read one expression, not two copies of it.
+    const continueRawModel = agentModelsLocked(this.repoRoot) ? undefined : record?.model;
     try {
-      const normalized = normalizeModelForBackend(
-        continueBackend,
-        agentModelsLocked(this.repoRoot) ? undefined : record?.model,
-        { configuredProvider: await configuredModelProvider(continueBackend, state.cwd) },
-      );
+      const normalized = normalizeModelForBackend(continueBackend, continueRawModel, {
+        configuredProvider: await configuredModelProvider(continueBackend, state.cwd),
+      });
       continueModel = normalized?.backendModel;
+      const continueModelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
       this.store.updateRun(runId, {
-        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+        modelIdentity: continueModelIdentity,
+      });
+      // The step half of the same write (spec 2026-08-22-per-step-model-display). Without it, a
+      // follow-up that switches model (#401) — or any resume, which re-resolves from the RUN-level
+      // `record.model` rather than the step's own — would move the run-level identity on and leave
+      // the step's frozen at its spawn-time value, reintroducing at step level the exact "the
+      // record asserts a model that is not what ran" defect #405 removed at run level.
+      this.store.updateStep(runId, stepId, {
+        model: continueRawModel,
+        modelIdentity: continueModelIdentity,
+      });
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: `model: ${continueModelIdentity ?? continueRawModel ?? 'auto'}`,
+        stepId,
       });
     } catch (err) {
       if (!(err instanceof ModelIdentityError)) throw err;
@@ -3404,6 +3663,8 @@ export class RunManager {
       continueProfile = await this.agentEnvForStep(runId, continueBackend, {
         generateFollowups,
         recordedProfileId: resumedProfileId,
+        stepId,
+        ...(sessionId === undefined ? {} : { sessionId }),
       });
     } catch (err) {
       if (!(err instanceof AgentTempDirError)) throw err;
@@ -3411,6 +3672,32 @@ export class RunManager {
       return;
     }
     this.store.updateStep(runId, stepId, { profileId: continueProfile.profileId });
+
+    // Proactive Claude-only check (spec 2026-08-22-resume-fresh-session-fallback, Phase 1) — the
+    // twin of `runAgentStep`'s own check. `sessionId` here is a hint persisted before the backend
+    // ever confirmed the conversation exists (the `updateStep` above at the top of this method);
+    // verify a transcript actually exists before handing it to `--resume`. Unlike `runAgentStep`,
+    // no `userPrompt` rebuild is needed on a miss: `prompt` is the caller's own opening message
+    // either way, not a restart-continuation prompt tied to an assumption the session already
+    // holds context (see spec Phase 1, "Phase 3 is unaffected for a different reason").
+    let resumeDowngraded = false;
+    if (continueBackend === 'claude' && sessionId !== undefined) {
+      const claudeHome = agentHomePaths({ ...process.env, ...continueProfile.env }).claude;
+      const exists = await claudeSessionTranscriptExists(claudeHome, state.cwd, sessionId);
+      if (!exists) {
+        resumeDowngraded = true;
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId,
+          message: 'no transcript for the recorded session — starting fresh',
+        });
+      }
+    }
+    // A downgrade mints a NEW id rather than retrying the dead one — Claude never emits a
+    // `session` event to correct the record later the way Codex/OpenCode do, so the fresh id
+    // must be persisted here or the record keeps pointing at the dead one forever.
+    const spawnSessionId = resumeDowngraded ? randomUUID() : sessionId;
+    if (resumeDowngraded) this.store.updateStep(runId, stepId, { sessionId: spawnSessionId });
 
     // From the RECORD, not the registry — see `workspaceGrantOf`.
     const continueGrant = workspaceGrantOf(record);
@@ -3454,8 +3741,8 @@ export class RunManager {
         ],
         env: continueProfile.env,
         model: continueModel,
-        sessionId,
-        resume: sessionId !== undefined,
+        sessionId: spawnSessionId,
+        resume: resumeDowngraded ? false : sessionId !== undefined,
         timeoutMs: 0,
       },
       onEvent,
@@ -3474,6 +3761,11 @@ export class RunManager {
     /** Set by the success branch below when the chain must take the run back — acted on in
      *  `finally`, once this run has left the live registries. */
     let handBack: RunRecord | null = null;
+    /** Set by the catch branch below (spec 2026-08-22-resume-fresh-session-fallback, Phase 3)
+     *  when the failure is a recognized "unknown session" rejection and this is the first time —
+     *  acted on in `finally`, once this run has left the live registries, same reasoning as
+     *  `handBack`: re-invoking while still `active` lets a concurrent `pump()` race this method. */
+    let missingSessionRetry = false;
     try {
       await session.result;
       if (sessionError) throw new Error(sessionError);
@@ -3532,16 +3824,36 @@ export class RunManager {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      sink.sessionEnded('error', message);
-      this.store.updateStep(runId, stepId, { status: 'failed', error: message, finishedAt: finishedAt() });
-      appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=failed`);
-      this.store.updateRun(runId, {
-        status: 'failed',
-        error: `continue failed: ${message}`,
-        finishedAt: finishedAt(),
-        currentStepId: undefined,
-      });
-      this.store.appendEvent(runId, { type: 'lifecycle', message: `continue failed — ${message}` });
+      // Reactive fallback (spec 2026-08-22-resume-fresh-session-fallback, Phase 3) — the
+      // continuation-path twin of the chain loop's Phase 2 branch, and what
+      // `recover-session-failure.test.ts` exercises. `sessionId !== undefined` means this attempt
+      // actually resumed a session; `!retriedMissingSession` bounds it to one retry.
+      if (!retriedMissingSession && sessionId !== undefined && isMissingSessionRejection(backend, message)) {
+        missingSessionRetry = true;
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId,
+          message: `${message} — the session was never confirmed to exist; retrying with a fresh session`,
+        });
+        this.store.appendEvent(runId, {
+          type: 'metric',
+          stepId,
+          name: 'run.step.resumed_after_missing_session',
+          runId,
+          backend,
+        });
+      } else {
+        sink.sessionEnded('error', message);
+        this.store.updateStep(runId, stepId, { status: 'failed', error: message, finishedAt: finishedAt() });
+        appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=failed`);
+        this.store.updateRun(runId, {
+          status: 'failed',
+          error: `continue failed: ${message}`,
+          finishedAt: finishedAt(),
+          currentStepId: undefined,
+        });
+        this.store.appendEvent(runId, { type: 'lifecycle', message: `continue failed — ${message}` });
+      }
     } finally {
       this.recordUsagePeaks(runId);
       this.clearIdleTimer(state);
@@ -3551,7 +3863,34 @@ export class RunManager {
       // failed drops its worktree directories and keeps the branches (spec 2026-08-20, X3).
       await this.discardWorkspaceRun(runId);
       this.dropActive(runId);
-      if (handBack) {
+      if (missingSessionRetry) {
+        // Same shape as `handBack` below: re-invoke only after this run has left the live
+        // registries, so a concurrent `pump()` cannot race the new `ActiveRun` this creates.
+        // Re-entering `runContinuation` itself (rather than the chain loop) re-sets `status:
+        // 'running'`, `iterations: 1` and re-appends `step-start`/`user-message` unconditionally
+        // (above), so the record ends up looking like a step that took two iterations — the same
+        // shape the chain-loop fallback produces.
+        void this.runContinuation(
+          runId,
+          stepId,
+          name,
+          undefined,
+          backend,
+          prompt,
+          images,
+          persistedImages,
+          persistedAttachments,
+          true,
+        ).catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.store.updateRun(runId, {
+            status: 'failed',
+            error: `continue crashed: ${message}`,
+            finishedAt: new Date().toISOString(),
+          });
+          this.dropActive(runId);
+        });
+      } else if (handBack) {
         // Now that the run holds no slot and no `ActiveRun`, put it back in the queue at its next
         // pending step. `dropActive`'s own `releaseSlot()` pumped a queue this run was not in
         // yet, so pump once more — otherwise the re-queued run waits for an unrelated wakeup.
@@ -3569,7 +3908,7 @@ export class RunManager {
   private async execute(
     runId: string,
     workflow: WorkflowDef,
-    input: StartRunInput,
+    input: ExecuteRunInput,
     /** Chain re-entry (spec 2026-08-20, P1): start the loop at this step instead of the top, and
      *  reattach its interrupted session when one survived. Absent on every ordinary start. */
     resumeAt?: ChainResumePoint,
@@ -3656,8 +3995,17 @@ export class RunManager {
     const isWorkspaceRun = (this.store.getRun(runId)?.workspaceProjects?.length ?? 0) > 0;
     if (isWorkspaceRun) {
       const projects = this.store.getRun(runId)?.workspaceProjects ?? [];
-      const worktrees = await materializeWorkspaceWorktrees(runId, projects, (m) =>
-        emit({ type: 'note', message: m }),
+      const worktrees = await materializeWorkspaceWorktrees(
+        runId,
+        projects,
+        (m) => emit({ type: 'note', message: m }),
+        // Persist a snapshot after EVERY worktree, not just at the end (spec
+        // 2026-08-22-cross-project-worktree-orphan-prune-safety) — otherwise the first project's
+        // worktree sits on disk, unrecorded anywhere a target project's own boot-time prune can
+        // see, for as long as the rest of this loop takes.
+        (snapshot) => {
+          this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
+        },
       );
       this.store.updateRun(runId, { workspaceWorktrees: worktrees });
       emit({
@@ -3872,6 +4220,11 @@ export class RunManager {
     /** Steps already re-entered once after a cezar-initiated stop. One retry per step: a second
      *  stop is terminal for the run rather than a loop. */
     const resumedAfterStop = new Set<string>();
+    /** Steps already re-entered once after a resume rejected because the backend never actually
+     *  created the conversation being resumed (spec 2026-08-22-resume-fresh-session-fallback,
+     *  Phase 2). One retry per step, same reasoning as `resumedAfterStop`: a second miss in a row
+     *  is a real failure, not a loop to keep retrying. */
+    const resumedAfterMissingSession = new Set<string>();
     /** The resume handle a re-entry hands to the step it is re-running. Distinct from
      *  `resumeFrom`, which belongs to a RESTART re-entry and is spent on `resumeIdx` only. */
     let stopResume: { sessionId: string; profileId?: string; prompt: string } | undefined;
@@ -3973,6 +4326,33 @@ export class RunManager {
           this.finishStep(runId, step.id, 'failed', failure, emit, stopped);
           stopReason = stopped;
           break;
+        }
+        // Reactive fallback (spec 2026-08-22-resume-fresh-session-fallback, Phase 2) — the exact
+        // path run `232ad6d4` hit: `stepResume !== undefined` means this attempt actually resumed
+        // a session, and the predicate recognizes the backend's "never created that conversation"
+        // rejection. One retry per step, mirroring `resumedAfterStop` just above.
+        if (
+          failure &&
+          stepResume !== undefined &&
+          !resumedAfterMissingSession.has(step.id) &&
+          isMissingSessionRejection(step.runner ?? taskBackend, failure)
+        ) {
+          resumedAfterMissingSession.add(step.id);
+          this.store.updateStep(runId, step.id, { sessionId: undefined, status: 'pending', error: undefined });
+          emit({
+            type: 'note',
+            stepId: step.id,
+            message: `${failure} — the session was never confirmed to exist; retrying with a fresh session`,
+          });
+          emit({
+            type: 'metric',
+            stepId: step.id,
+            name: 'run.step.resumed_after_missing_session',
+            runId,
+            workflow: workflow.name,
+            backend: step.runner ?? taskBackend,
+          });
+          continue; // same `i` — resumeFrom/stopResume are already spent, so the next pass mints a fresh id
         }
         if (failure) {
           this.finishStep(runId, step.id, 'failed', failure, emit);
@@ -4397,7 +4777,7 @@ export class RunManager {
     runId: string,
     state: ActiveRun,
     step: WorkflowStepDef,
-    input: StartRunInput,
+    input: ExecuteRunInput,
     skills: Skill[],
     checkFailure: string | null,
     interactive: boolean,
@@ -4414,8 +4794,11 @@ export class RunManager {
     attachments: PersistedAttachment[] = [],
     /** Chain re-entry (spec 2026-08-20, P1): reattach the session this step was already running
      *  when the process died, and open it with the restart prompt instead of the step's own
-     *  template — the session already holds everything the template would have said. */
-    resumeFrom?: { sessionId: string; profileId?: string; prompt: string },
+     *  template — the session already holds everything the template would have said. Also the
+     *  vehicle for a stop-retry's own resume handle (`execute()`'s `stopResume`), which is why
+     *  `verifyTranscript` (spec 2026-08-22-resume-fresh-session-fallback) is a separate flag
+     *  rather than "resumeFrom is set" — see `ChainResumePoint.resume`. */
+    resumeFrom?: { sessionId: string; profileId?: string; prompt: string; verifyTranscript?: true },
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -4618,19 +5001,46 @@ export class RunManager {
     // unresolvable model (e.g. a bare id on opencode) returns the step error
     // instead of letting the backend silently substitute its default.
     let backendModel: string | undefined;
+    // Hoisted rather than inlined into the call below, because it is now read TWICE — once by the
+    // mapper and once by the record. Two copies of the same expression is exactly how the thing
+    // that ran and the thing the record claims ran drift apart.
+    // `modelForBackend` is applied HERE, before the hoist, so the dropped-pin case cannot make the
+    // record lie. `stepRawModel` is persisted onto the step as what ran (spec
+    // 2026-08-22-per-step-model-display); if a `sonnet` pin is dropped for a codex step and the
+    // drop happened only on the way to the runner, the step rail would keep displaying `sonnet`
+    // for a step that ran on codex's default. Same reason the hoist exists at all.
+    const stepRawModel = agentModelsLocked(this.repoRoot)
+      ? undefined
+      : this.modelForBackend(runId, step.id, stepBackend, step.model ?? input.model);
     try {
-      const normalized = normalizeModelForBackend(
-        stepBackend,
-        agentModelsLocked(this.repoRoot) ? undefined : step.model ?? input.model,
-        { configuredProvider: await configuredModelProvider(stepBackend, state.cwd) },
-      );
+      const normalized = normalizeModelForBackend(stepBackend, stepRawModel, {
+        configuredProvider: await configuredModelProvider(stepBackend, state.cwd),
+      });
       backendModel = normalized?.backendModel;
+      const stepModelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
       // Persist the identity of what ACTUALLY runs (#405, review M1). The run-start echo
       // (line ~993) is best-effort from `taskBackend`/`input.model`; a per-step `runner`/`model`
       // override makes it assert a model that never ran. Re-write it here, from the resolved
       // step identity, so the record — the product of this PR — is always one that ran.
       this.store.updateRun(runId, {
-        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+        modelIdentity: stepModelIdentity,
+      });
+      // ...and on the STEP, where the next step's resolution cannot overwrite it (spec
+      // 2026-08-22-per-step-model-display). The run-level field above is a single slot rewritten
+      // by every step, so a `spec-to-deploy` chain that runs `review-spec` on opus and its other
+      // seven steps on sonnet finishes asserting only sonnet, with every earlier step's real model
+      // discarded. The step rail reads this pair instead. Written beside `sessionId`/`backend`, the
+      // per-step execution facts that already live here, and at the same moment: before the spawn,
+      // so a running step already says what it is running on.
+      this.store.updateStep(runId, step.id, { model: stepRawModel, modelIdentity: stepModelIdentity });
+      // The same fact for `cez run`'s stdout and the web transcript, through the generic `note`
+      // channel both already render — no new event type and no handler change on either side. The
+      // CLI's `── step:` header is printed before this point in the control flow (the model is not
+      // resolved yet there), which is why the headless surface had no model line at all.
+      emit({
+        type: 'note',
+        stepId: step.id,
+        message: `model: ${stepModelIdentity ?? stepRawModel ?? 'auto'}`,
       });
     } catch (err) {
       if (err instanceof ModelIdentityError) return err.message;
@@ -4653,6 +5063,10 @@ export class RunManager {
         // run under the account that created it — not whatever the project has been switched to
         // since. Same rule `runContinuation` applies to a resumed continuation.
         ...(resumeFrom?.profileId ? { recordedProfileId: resumeFrom.profileId } : {}),
+        // The session this step is about to run under, minted (or resumed) just above — see the
+        // option's own doc comment for why `stepId` is the authoritative half of the pair.
+        stepId: step.id,
+        sessionId,
       });
     } catch (err) {
       if (err instanceof AgentTempDirError) return err.message;
@@ -4681,6 +5095,50 @@ export class RunManager {
           onOffset: (offset: number) => this.persistConsumedOffset(runId, offset),
         }
       : this.brokerFor(runId, step.id, stepBackend);
+
+    // Proactive Claude-only check (spec 2026-08-22-resume-fresh-session-fallback, Phase 1): a
+    // resume target is a HINT cezar minted and persisted before any confirmation the backend
+    // ever created the conversation — verify a transcript actually exists before handing it to
+    // `--resume`, so a session that died before writing one (run 232ad6d4's `commit-push`
+    // iteration 1) never reaches the CLI at all. Skipped for a P4 broker reattach: that path
+    // never spawns a new `claude` process or sends `--resume`, so there is nothing to verify.
+    // Gated on `resumeFrom.verifyTranscript`, NOT merely `resumeFrom !== undefined` — this same
+    // parameter also carries a cezar-initiated stop's own retry handle (`stopResume`, a session
+    // this very process observed running seconds ago), which `verifyTranscript` deliberately
+    // leaves unset. Without the gate this check would downgrade a stop-retry whenever the box's
+    // `~/.claude/projects` (or a test's unrelated `CLAUDE_CONFIG_DIR`) doesn't carry that
+    // session's transcript yet, discarding the in-progress work the stop-retry exists to
+    // preserve and turning one stop into two (the second being terminal).
+    let resumeDowngraded = false;
+    if (stepBackend === 'claude' && resumeFrom?.verifyTranscript === true && !reattach) {
+      const claudeHome = agentHomePaths({ ...process.env, ...stepProfile.env }).claude;
+      const exists = await claudeSessionTranscriptExists(claudeHome, state.cwd, resumeFrom.sessionId);
+      if (!exists) {
+        // The check fires AFTER `userPrompt` was frozen above (resumeFrom.prompt — the restart-
+        // continuation prompt), which assumes the session already holds everything the step's own
+        // template would have said. A downgrade falsifies that assumption by construction, so
+        // `userPrompt` must be rebuilt from the step's own template — not just the session id —
+        // or the fresh session runs contextless. Re-run exactly the three lines that built it the
+        // first time, with `resumeFrom` treated as absent.
+        userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task);
+        if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
+        if (checkFailure) {
+          userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
+        }
+        resumeDowngraded = true;
+        emit({
+          type: 'note',
+          stepId: step.id,
+          message: 'no transcript for the recorded session — starting fresh',
+        });
+      }
+    }
+    // A downgrade mints a NEW id rather than retrying the dead one — nothing to reattach to, and
+    // Claude never emits a `session` event to correct the record later the way Codex/OpenCode do,
+    // so the fresh id must be persisted here or the record keeps pointing at the dead one forever.
+    const spawnSessionId = resumeDowngraded ? randomUUID() : sessionId;
+    if (resumeDowngraded) this.store.updateStep(runId, step.id, { sessionId: spawnSessionId });
+
     try {
       const openSession = reattach && runner.reattachSession
         ? runner.reattachSession.bind(runner)
@@ -4725,8 +5183,9 @@ export class RunManager {
           ],
           env: stepProfile.env,
           model: backendModel,
-          sessionId,
-          resume: resumeFrom !== undefined,
+          effort: step.effort,
+          sessionId: spawnSessionId,
+          resume: resumeDowngraded ? false : resumeFrom !== undefined,
           // Interactive sessions have no wall clock — the idle timer rules.
           timeoutMs: interactive ? 0 : undefined,
         },
@@ -4853,13 +5312,31 @@ export class RunManager {
       return;
     }
 
+    // A real backend-reported context-window max (today: codex's `thread/tokenUsage/updated`,
+    // mapped to `usage.contextWindow`) — persist it immediately so the record is current
+    // before the next tick, and cache it on the invocation so every later patch this
+    // invocation makes keeps carrying the real number instead of reverting to a guess (spec
+    // 2026-08-22-context-window-denominator-per-step).
+    if (event.type === 'usage.updated') {
+      if (Number.isFinite(event.usage.contextWindow) && (event.usage.contextWindow ?? 0) > 0) {
+        invocation.reportedContextWindow = event.usage.contextWindow;
+        this.persistUsageCheckpoint(runId, invocation.stepId, { contextWindow: event.usage.contextWindow });
+      }
+      return;
+    }
+
     // Live occupancy (per round-trip): overwrite the step's `contextTokens` as each model call
     // reports its prompt size, so the Context column climbs DURING a long turn rather than
     // jumping only at `turn.completed`. Overwrite-only — never touches the turn's token totals,
     // which `turn.completed` still owns (spec 2026-08-19, live-refresh follow-up).
     if (event.type === 'context.updated') {
       if (Number.isFinite(event.contextTokens) && event.contextTokens >= 0) {
-        this.persistUsageCheckpoint(runId, invocation.stepId, { contextTokens: event.contextTokens });
+        this.persistUsageCheckpoint(runId, invocation.stepId, {
+          contextTokens: event.contextTokens,
+          ...(invocation.reportedContextWindow !== undefined
+            ? { contextWindow: invocation.reportedContextWindow }
+            : {}),
+        });
       }
       return;
     }
@@ -4893,6 +5370,9 @@ export class RunManager {
       inputTokens: (step.inputTokens ?? 0) + input,
       outputTokens: (step.outputTokens ?? 0) + output,
       contextTokens,
+      ...(invocation.reportedContextWindow !== undefined
+        ? { contextWindow: invocation.reportedContextWindow }
+        : {}),
       usageTurnsRecorded: (step.usageTurnsRecorded ?? 0) + 1,
     });
   }
@@ -5019,6 +5499,22 @@ export class RunManager {
       // nothing (or to a bare number prefix) must not blank the title.
       if (validated && validated !== `${refNumber}:`) {
         this.store.updateRun(runId, { titleSummary: validated, titleOrigin: 'marker' });
+      }
+      // Phase 3 (spec 2026-08-22-continue-step-naming): the same declaration also refines the
+      // active continuation step's own name — but never a Phase 2 "<step> — continued" title,
+      // which is what `nameOrigin !== 'step'` excludes. No `refNumber` here: a step name must not
+      // carry the run title's PR-number prefix.
+      if (run.currentStepId?.startsWith('continue-')) {
+        const step = current?.steps.find((s) => s.id === run.currentStepId);
+        if (step && step.nameOrigin !== 'step') {
+          const validatedStepName = postValidateTitle(markers.title);
+          if (validatedStepName) {
+            this.store.updateStep(runId, run.currentStepId, {
+              name: validatedStepName,
+              nameOrigin: 'marker',
+            });
+          }
+        }
       }
     }
     if (markers.specPath) {

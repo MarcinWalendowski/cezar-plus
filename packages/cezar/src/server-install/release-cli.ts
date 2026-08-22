@@ -8,6 +8,7 @@ import {
   describeReleases,
   readDeployLog,
   runReleaseDeploy,
+  type ReleaseDeployHost,
 } from './release-deploy.ts';
 import { activate, freshLedger, isMigrated, makeReleaseId, recordBuilt, releaseDir, saveLedger } from './releases.ts';
 import { cezarRunsSlice, cezarSocketUnit, nonDisruptiveDropIn } from './platforms/hetzner/socket-unit.ts';
@@ -42,6 +43,7 @@ export interface ReleaseDeployCliOptions {
   port?: number;
   sha?: string;
   note?: string;
+  dryRun?: boolean;
 }
 
 const STRATEGIES = new Set(['restart', 'blue-green']);
@@ -59,18 +61,22 @@ export async function releaseDeployCommand(opts: ReleaseDeployCliOptions, host?:
   const linkPath = opts.linkPath ?? DEFAULT_LINK_PATH;
   const releasesDir = opts.releasesDir ?? DEFAULT_RELEASES_DIR;
 
-  const result = await runReleaseDeploy({
-    source: opts.source,
-    linkPath,
-    releasesDir,
-    ...(opts.unit ? { unitName: opts.unit } : {}),
-    ...(opts.port ? { port: opts.port } : {}),
-    strategy: opts.strategy as DeployStrategy,
-    ...(opts.rollback !== undefined ? { rollbackTo: opts.rollback } : {}),
-    ...(opts.sha ? { sha: opts.sha } : { sha: gitSha(opts.source) }),
-    ...(opts.note ? { note: opts.note } : {}),
-    version: packageVersion(opts.source),
-  }, host);
+  const result = await runReleaseDeploy(
+    {
+      source: opts.source,
+      linkPath,
+      releasesDir,
+      ...(opts.unit ? { unitName: opts.unit } : {}),
+      ...(opts.port ? { port: opts.port } : {}),
+      strategy: opts.strategy as DeployStrategy,
+      ...(opts.rollback !== undefined ? { rollbackTo: opts.rollback } : {}),
+      ...(opts.sha ? { sha: opts.sha } : { sha: gitSha(opts.source) }),
+      ...(opts.note ? { note: opts.note } : {}),
+      ...(opts.dryRun ? { dryRun: true } : {}),
+      version: packageVersion(opts.source),
+    },
+    host,
+  );
 
   if (result.detachedUnit) {
     console.log(`\n  Deploy is running outside this process so a restart cannot kill it.`);
@@ -107,6 +113,12 @@ export async function releaseDeployCommand(opts: ReleaseDeployCliOptions, host?:
       console.error('  Nothing was flipped and nothing was restarted — the running release is untouched.');
     }
     return 1;
+  }
+  if (opts.dryRun) {
+    console.log('\n  Dry run complete — nothing was staged, flipped or restarted.');
+    for (const line of describeReleases(releasesDir, linkPath)) console.log(`  ${line}`);
+    console.log('');
+    return 0;
   }
   if (rollback && result.outcome?.serving?.ready) {
     console.log(`\n  Rolled back to ${result.outcome.serving.releaseId}: /api/v1/ready passed.`);

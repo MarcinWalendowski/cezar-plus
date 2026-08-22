@@ -23,6 +23,7 @@ import {
 } from './git-changes.ts';
 import { createApp } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Session git API (redesign R5 Step 1.2 — spec §"Git/session API additions"):
@@ -536,7 +537,7 @@ describe('session git API routes', () => {
     g(worktree, 'add', '-A');
     g(worktree, 'commit', '-m', 'base');
     g(worktree, 'checkout', '-b', 'task');
-    run = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [] });
+    run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', steps: [] });
     store.updateRun(run.id, { worktreePath: worktree, baseBranch: 'main', branch: 'task' });
   });
 
@@ -579,7 +580,7 @@ describe('session git API routes', () => {
   });
 
   it('runs without a worktree read Changes, Files and Commits from the current checkout', async () => {
-    const bare = store.createRun({
+    const bare = store.createRun({ author: localCliAuthor(),
       title: 'b',
       workflow: 'quick-task',
       task: 'b',
@@ -631,7 +632,7 @@ describe('session git API routes', () => {
   });
 
   it('runs whose isolated worktree was removed never fall through to the current checkout', async () => {
-    const removed = store.createRun({ title: 'removed', workflow: 'quick-task', task: 'removed', steps: [] });
+    const removed = store.createRun({ author: localCliAuthor(), title: 'removed', workflow: 'quick-task', task: 'removed', steps: [] });
     store.updateRun(removed.id, {
       worktreePath: join(repoRoot, 'removed-worktree'),
       branch: 'cez/removed',

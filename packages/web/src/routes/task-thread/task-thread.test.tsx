@@ -1,10 +1,11 @@
-import { QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ReactElement } from 'react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ProjectScopeProvider } from '@/api/project-scope-context'
+import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { queryKeys } from '@/api/queries'
 import { createQueryClient } from '@/api/query-client'
 import type {
@@ -17,6 +18,7 @@ import type {
 
 import { TaskThreadRoute, ThreadView } from './task-thread'
 import { buildTranscriptRows, mainTranscriptSections } from './session-transcript'
+import { readTaskDraft, resetTaskDrafts, writeTaskDraft } from './task-drafts'
 import { reduceThread } from './thread-state'
 
 afterEach(() => {
@@ -1081,5 +1083,136 @@ describe('TaskThreadRoute — read receipts', () => {
     visit('r1')
     await waitFor(() => expect(posted(sent, '/api/v1/runs/r1/read')).toBe(1))
     expect(await screen.findByRole('button', { name: 'Mark unread' })).not.toBeNull()
+  })
+})
+
+/**
+ * Per-task prompt drafts (spec `.ai/specs/2026-08-21-per-task-prompt-drafts.md`).
+ *
+ * The composer used to hold its text in its own `useState`, with no host keeping it: switching
+ * tasks carried the half-typed reply along, and a reload dropped it.
+ */
+describe('the thread composer`s draft', () => {
+  afterEach(() => {
+    act(() => resetToasts())
+    resetTaskDrafts()
+    localStorage.clear()
+  })
+
+  const textarea = () => screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement
+
+  const rerenderThread = (
+    rerender: (ui: ReactElement) => void,
+    queryClient: QueryClient,
+    ui: ReactElement,
+  ) =>
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>{ui}</MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+  /** Phase 1, and the reason the extraction exists at all: `/tasks/A` → `/tasks/B` re-renders the
+   *  same route element, so before `key={run.id}` the composer kept A's words while showing B. */
+  it('does NOT carry a half-typed reply from one task into the next', () => {
+    const { rerender, queryClient } = renderView(
+      <ThreadView run={run('waiting')} thread={reduceThread(EVENTS)} />,
+    )
+    fireEvent.change(textarea(), { target: { value: 'half a reply for r1' } })
+    expect(textarea().value).toBe('half a reply for r1')
+
+    rerenderThread(
+      rerender,
+      queryClient,
+      <ThreadView run={run('waiting', { id: 'r2' })} thread={reduceThread(EVENTS)} />,
+    )
+    expect(textarea().value).toBe('')
+  })
+
+  it('gives each task back its own text when you come back to it', () => {
+    const { rerender, queryClient } = renderView(
+      <ThreadView run={run('waiting')} thread={reduceThread(EVENTS)} />,
+    )
+    fireEvent.change(textarea(), { target: { value: 'words for r1' } })
+    rerenderThread(
+      rerender,
+      queryClient,
+      <ThreadView run={run('waiting', { id: 'r2' })} thread={reduceThread(EVENTS)} />,
+    )
+    fireEvent.change(textarea(), { target: { value: 'different words for r2' } })
+    rerenderThread(rerender, queryClient, <ThreadView run={run('waiting')} thread={reduceThread(EVENTS)} />)
+
+    expect(textarea().value).toBe('words for r1')
+    expect(readTaskDraft('prompt', 'r1')).toBe('words for r1')
+    expect(readTaskDraft('prompt', 'r2')).toBe('different words for r2')
+  })
+
+  it('paints a stored draft on the FIRST render, with no wrong frame in between', () => {
+    writeTaskDraft('prompt', 'r1', 'from the last sitting')
+    renderView(<ThreadView run={run('waiting')} thread={reduceThread(EVENTS)} />)
+    // Deliberately no `waitFor`: an effect-based restore would pass that and still flash an empty
+    // box (or the previous task's text) for one frame.
+    expect(textarea().value).toBe('from the last sitting')
+  })
+
+  it('persists in every authorable state — queued and closed-but-resumable, not just waiting', async () => {
+    const { unmount } = renderView(<ThreadView run={run('queued')} thread={reduceThread(EVENTS)} />)
+    fireEvent.change(textarea(), { target: { value: 'fold this into the prompt' } })
+    expect(readTaskDraft('prompt', 'r1')).toBe('fold this into the prompt')
+    unmount()
+
+    writeTaskDraft('prompt', 'r9', 'continue with this')
+    renderView(
+      <ThreadView
+        run={run('done', {
+          id: 'r9',
+          steps: [
+            { id: 'task', name: 'Do the task', kind: 'agent', status: 'done', iterations: 1, tokensUsed: 0, sessionId: 's-1' },
+          ],
+        })}
+        thread={reduceThread(EVENTS)}
+      />,
+    )
+    await waitFor(() => expect(textarea().disabled).toBe(false))
+    expect(textarea().value).toBe('continue with this')
+  })
+
+  it('a SUCCESSFUL send spends the draft — the box clears and the store keeps nothing', async () => {
+    renderView(<ThreadView run={run('waiting')} thread={reduceThread(EVENTS)} />)
+    fireEvent.change(textarea(), { target: { value: 'ship it' } })
+    expect(readTaskDraft('prompt', 'r1')).toBe('ship it')
+
+    fireEvent.keyDown(textarea(), { key: 'Enter' })
+    await waitFor(() => expect(textarea().value).toBe(''))
+    // The key is GONE, not stored as '' — a reload must not resurrect a sent message.
+    expect(localStorage.getItem('cez-task-prompt:r1')).toBeNull()
+  })
+
+  it('a REJECTED send puts the words back in the store, not just in the box', async () => {
+    renderView(
+      <>
+        <ThreadView run={run('waiting')} thread={reduceThread(EVENTS)} />
+        <Toaster />
+      </>,
+    )
+    // Re-stub after the render so the provider queries have already landed: only the send fails.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_input: RequestInfo | URL, init: RequestInit = {}) =>
+        Promise.resolve(
+          init.method === 'POST' ?
+            new Response(JSON.stringify({ error: 'the server said no' }), {
+              status: 500,
+              headers: { 'content-type': 'application/json' },
+            })
+          : new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } }),
+        ),
+      ),
+    )
+    fireEvent.change(textarea(), { target: { value: 'precious words' } })
+    fireEvent.keyDown(textarea(), { key: 'Enter' })
+
+    await waitFor(() => expect(textarea().value).toBe('precious words'))
+    expect(readTaskDraft('prompt', 'r1')).toBe('precious words')
   })
 })

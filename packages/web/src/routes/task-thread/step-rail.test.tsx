@@ -97,6 +97,116 @@ describe('StepRail', () => {
   })
 })
 
+/**
+ * Which model ran each step (spec 2026-08-22-per-step-model-display). The owner ask this whole
+ * feature exists for is "in every task workflow step show what LLM models were used" — PAST tense,
+ * so these pin the EXECUTED value first and treat the planned one as a clearly-marked stand-in.
+ */
+describe('per-step model chip', () => {
+  const modelOf = (row: Element) => row.querySelector('[data-slot="step-model"]')
+
+  it('shows the model a step actually ran on', () => {
+    render(<StepRail steps={[step('a', 'done', { model: 'sonnet' })]} />)
+    const chip = document.querySelector('[data-slot="step-model"]')!
+    expect(chip.textContent).toBe('sonnet')
+    expect(chip.getAttribute('data-source')).toBe('executed')
+  })
+
+  it('a multi-model chain shows each step its OWN model — the defect this spec exists to close', () => {
+    render(
+      <StepRail
+        steps={[
+          step('spec', 'done', { model: 'sonnet' }),
+          step('review-spec', 'done', { model: 'opus' }),
+          step('implement', 'running', { model: 'sonnet' }),
+        ]}
+      />,
+    )
+    const rows = [...document.querySelectorAll('[data-slot="step-row"]')]
+    expect(rows.map((row) => modelOf(row)?.textContent)).toEqual(['sonnet', 'opus', 'sonnet'])
+  })
+
+  it('keeps the canonical identity in the tooltip, not inline (the rail is one dense line)', () => {
+    render(<StepRail steps={[step('a', 'done', { model: 'opus', modelIdentity: 'anthropic/claude-opus-5' })]} />)
+    const chip = document.querySelector('[data-slot="step-model"]')!
+    expect(chip.textContent).toBe('opus')
+    expect(chip.getAttribute('title')).toContain('anthropic/claude-opus-5')
+  })
+
+  it('an identity that merely repeats the ask adds no tooltip noise', () => {
+    render(<StepRail steps={[step('a', 'done', { model: 'opus', modelIdentity: 'opus' })]} />)
+    expect(document.querySelector('[data-slot="step-model"]')?.getAttribute('title')).not.toContain('—')
+  })
+
+  it('under the model lock, an identity with no free-text ask still names what served the turn', () => {
+    render(<StepRail steps={[step('a', 'done', { modelIdentity: 'anthropic/claude-sonnet-5' })]} />)
+    const chip = document.querySelector('[data-slot="step-model"]')!
+    expect(chip.textContent).toBe('anthropic/claude-sonnet-5')
+    expect(chip.getAttribute('data-source')).toBe('executed')
+  })
+
+  it("a pending step falls back to the run's PLANNED model, visibly marked as planned", () => {
+    render(
+      <StepRail
+        steps={[step('review-spec', 'pending')]}
+        planned={[{ id: 'review-spec', model: 'opus' }]}
+      />,
+    )
+    const chip = document.querySelector('[data-slot="step-model"]')!
+    expect(chip.textContent).toBe('opus')
+    expect(chip.getAttribute('data-source')).toBe('planned')
+    expect(chip.getAttribute('title')).toMatch(/planned/i)
+  })
+
+  it('the executed model wins over the planned one — the def is only a stand-in', () => {
+    render(<StepRail steps={[step('s', 'done', { model: 'opus' })]} planned={[{ id: 's', model: 'sonnet' }]} />)
+    const chip = document.querySelector('[data-slot="step-model"]')!
+    expect(chip.textContent).toBe('opus')
+    expect(chip.getAttribute('data-source')).toBe('executed')
+  })
+
+  it('neither executed nor planned reads auto, the same word the run-level badge uses', () => {
+    render(<StepRail steps={[step('a', 'pending')]} />)
+    const chip = document.querySelector('[data-slot="step-model"]')!
+    expect(chip.textContent).toBe('auto')
+    expect(chip.getAttribute('data-source')).toBe('none')
+  })
+
+  it('a check step carries no chip at all — no agent, so no model to name', () => {
+    render(<StepRail steps={[step('gates', 'done', { kind: 'check' })]} planned={[{ id: 'gates', model: 'opus' }]} />)
+    expect(document.querySelector('[data-slot="step-model"]')).toBeNull()
+  })
+
+  it('the collapsed summary carries the CURRENT step\'s model only', () => {
+    render(
+      <WorkflowSteps
+        runId="model-summary"
+        steps={[step('spec', 'done', { model: 'sonnet' }), step('review-spec', 'running', { model: 'opus' })]}
+      />,
+    )
+    const chips = [...document.querySelectorAll('[data-slot="step-model"]')]
+    expect(chips).toHaveLength(1)
+    expect(chips[0]!.textContent).toBe('opus')
+  })
+
+  it('expanding the summary passes the planned models down to every row', () => {
+    render(
+      <WorkflowSteps
+        runId="model-planned-passthrough"
+        steps={[step('spec', 'running', { model: 'sonnet' }), step('review-spec', 'pending')]}
+        planned={[
+          { id: 'spec', model: 'sonnet' },
+          { id: 'review-spec', model: 'opus' },
+        ]}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button'))
+    const rows = [...document.querySelectorAll('[data-slot="step-row"]')]
+    expect(rows.map((row) => modelOf(row)?.textContent)).toEqual(['sonnet', 'opus'])
+    expect(modelOf(rows[1]!)?.getAttribute('data-source')).toBe('planned')
+  })
+})
+
 describe('activeStepIndex — who the summary speaks for', () => {
   it('points at the first in-flight step, else the last (a finished run reads "N of N")', () => {
     expect(activeStepIndex([step('a', 'done'), step('b', 'running'), step('c', 'pending')])).toBe(1)

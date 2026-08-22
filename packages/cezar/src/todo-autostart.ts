@@ -1,5 +1,6 @@
 import { markStarted, onTodosChanged, readTodos, todoTaskText, type TodoItem } from './todos.ts';
 import { resolveTodoWorkflow, type RunManager } from './workflows/run.ts';
+import { inheritAuthor } from './runs/task-author.ts';
 
 /**
  * Phase 2 — `cezar todo add --start` (`.ai/specs/2026-08-19-file-tasks-from-a-running-task.md`).
@@ -35,7 +36,14 @@ export interface TodoAutostartProject {
  */
 async function startAutostartTodo(project: TodoAutostartProject, todo: TodoItem): Promise<void> {
   const workflow = await resolveTodoWorkflow(project.repoRoot, todo);
-  const run = project.manager.startRun(workflow, { task: todoTaskText(todo) });
+  const run = project.manager.startRun(workflow, {
+    task: todoTaskText(todo),
+    // INHERITED, not re-derived (spec 2026-08-21-task-author-provenance): no human acted here, so
+    // the agent that filed the todo is the author of the run it caused. `via` becomes this door;
+    // `at` stays the moment that agent acted. A legacy todo with no author degrades to `system`,
+    // which is the honest answer rather than a guess.
+    author: inheritAuthor(todo.author, 'todo-autostart'),
+  });
   // TODO(analytics): emit `todo.autostarted` (project, queuedBehindLease) here once an event sink
   // exists — see `todo-cli.ts`'s matching TODO for `todo.filed`. No such mechanism exists in this
   // codebase today (grepped for analytics/telemetry/trackEvent — none), so this is left as a TODO

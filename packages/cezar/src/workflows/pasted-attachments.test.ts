@@ -9,6 +9,7 @@ import { HANDOFF_INSTRUCTIONS } from '../handoff.ts';
 import { RunStore } from '../runs/store.ts';
 import type { WorkflowDef } from './types.ts';
 import { RunManager, pastedAttachmentsNote, pastedAttachmentsText } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -149,8 +150,8 @@ describe('pasted screenshots materialize to disk and reach the agent as file pat
       source: 'built-in',
       steps: [{ id: 'hold', command: `${process.execPath} -e "setTimeout(() => {}, 500)"` }],
     };
-    manager.startRun(holder, { task: 'occupy the only slot', worktree: false });
-    const record = manager.startRun(workflow, {
+    manager.startRun(holder, { author: localCliAuthor(), task: 'occupy the only slot', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(),
       task: 'save the pasted screenshot to disk',
       images: [image],
       worktree: false,
@@ -196,7 +197,7 @@ describe('pasted screenshots materialize to disk and reach the agent as file pat
       source: 'built-in',
       steps: [{ id: 'work', prompt: '{{task}}' }],
     };
-    const record = manager.startRun(workflow, { task: 'chat with me' });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'chat with me' });
     await waitForStatus(record.id, ['waiting']);
 
     const image: ContentBlock = {
@@ -238,7 +239,7 @@ describe('pasted screenshots materialize to disk and reach the agent as file pat
       source: 'built-in',
       steps: [{ id: 'work', prompt: '{{task}}' }],
     };
-    const record = manager.startRun(workflow, { task: 'do a thing' });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'do a thing' });
     await waitForStatus(record.id, ['waiting']);
     manager.finish(record.id);
     await waitForStatus(record.id, ['done', 'review']);
@@ -248,7 +249,9 @@ describe('pasted screenshots materialize to disk and reach the agent as file pat
       type: 'image',
       source: { type: 'base64', media_type: 'image/png', data: TINY_PNG_B64 },
     };
-    expect(manager.continueRun(record.id, { text: 'fix what this shows', images: [image] })).toEqual({
+    await expect(
+      manager.continueRun(record.id, { text: 'fix what this shows', images: [image] }),
+    ).resolves.toEqual({
       ok: true,
     });
     await waitForStatus(record.id, ['waiting']);

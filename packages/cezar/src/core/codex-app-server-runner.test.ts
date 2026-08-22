@@ -75,6 +75,89 @@ describe('a teardown cezar initiated (codex app-server)', () => {
     expect(events).toContainEqual({ type: 'error', message: 'model unavailable' });
     expect(events).toContainEqual({ type: 'turn-end' });
   }, 15_000);
+
+  /**
+   * The production regression (`.ai/specs/2026-08-22-failed-turn-reads-as-done.md`). The test
+   * above only ever proved the `turn/failed` METHOD, which codex does not send for a provider
+   * rejection: it sends `turn/completed` with `status: "failed"`, and the runner emitted no error
+   * at all for it. Five runs on prod-host marked all eight steps `done` on the strength of
+   * that, having produced zero tokens and an empty diff.
+   */
+  it('fails the turn when codex rejects the model, even though the method says completed', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      { userPrompt: 'mock:provider-rejected', cwd: process.cwd() },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+
+    await session.result;
+
+    const errors = events.filter((e) => e.type === 'error');
+    expect(errors).toHaveLength(1);
+    // The provider's verbatim reason reaches the thread, so the cause is readable without ssh.
+    expect(errors[0]).toMatchObject({ message: expect.stringContaining('is not supported when using Codex') });
+    // The warning that named the bad model id is kept as a note rather than dropped.
+    expect(
+      events.some((e) => e.type === 'note' && e.message.includes('Model metadata for `sonnet` not found')),
+    ).toBe(true);
+  }, 15_000);
+
+  /**
+   * Covers the `error` notification ON ITS OWN. Mutation-tested: deleting the `error` case while
+   * keeping the turn-status fix left every other test in this file green, because a failed turn
+   * reports itself. This is the shape that has no second channel — codex states the problem out
+   * of band and the turn still ends `completed`, which is what a mid-turn stream drop looks like.
+   */
+  it('surfaces an out-of-band error even when the turn itself ends clean', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      { userPrompt: 'mock:error-then-clean-turn', cwd: process.cwd() },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+
+    await session.result;
+
+    expect(events.filter((e) => e.type === 'error')).toEqual([
+      { type: 'error', message: 'stream disconnected before completion' },
+    ]);
+  }, 15_000);
+
+  /** `willRetry: true` is codex saying it is handling this itself. Failing the step on a blip it
+   *  is about to retry would trade the old silent-success bug for a noisy-failure one. */
+  it('records a retryable error as a note, not a step failure', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      { userPrompt: 'mock:error-will-retry', cwd: process.cwd() },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+
+    await session.result;
+
+    expect(events.filter((e) => e.type === 'error')).toEqual([]);
+    expect(events.some((e) => e.type === 'note' && e.message.includes('rate limited, retrying'))).toBe(true);
+  }, 15_000);
+
+  /** Negative control for the two tests above: a healthy turn emits no error. Without this, code
+   *  that called every turn a failure would pass them both. */
+  it('leaves a healthy turn clean', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      { userPrompt: 'check the working tree', cwd: process.cwd() },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+
+    await session.result;
+
+    expect(events.filter((e) => e.type === 'error')).toEqual([]);
+  }, 15_000);
 });
 
 /**

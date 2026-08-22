@@ -191,6 +191,30 @@ describe('TasksOverview — the table', () => {
     expect(chip?.getAttribute('href')).toBe('https://github.com/open-mercato/cezar/issues/554')
   })
 
+  it('links a numeric-only reference once a repoBase is threaded through (multi-project spec Phase 5)', () => {
+    renderOverview({
+      runs: [run({ id: 'bare-number', issueNumber: 554 })],
+      repoBase: 'https://github.com/acme/demo',
+    })
+    const chip = tableRow('bare-number')?.querySelector('[data-slot="issue-chip"]')
+    expect(chip?.tagName).toBe('A')
+    expect(chip?.getAttribute('href')).toBe('https://github.com/acme/demo/issues/554')
+  })
+
+  it('renders no chip for a candidate-proven foreign number, even with a repoBase (Phase 2/3 guard)', () => {
+    renderOverview({
+      runs: [
+        run({
+          id: 'foreign-number',
+          issueNumber: 475,
+          referencedIssueCandidates: ['https://github.com/open-mercato/cezar/issues/475'],
+        }),
+      ],
+      repoBase: 'https://github.com/acme/demo',
+    })
+    expect(tableRow('foreign-number')?.querySelector('[data-slot="issue-chip"]')).toBeNull()
+  })
+
   it('fills the columns with the run facts, and honest dashes where no fact exists', () => {
     renderOverview({
       runs: [
@@ -972,6 +996,13 @@ describe('TasksOverviewRoute — wired to the app', () => {
       if (url === '/api/v1/runs') return new Response(JSON.stringify(runs), { status: 200 })
       if (url === '/api/v1/runs/archive-finished')
         return new Response(JSON.stringify({ archived: 1 }), { status: 200 })
+      // `useProjectRepoBase()` (multi-project spec Phase 1/5) reads this on every mount now —
+      // an empty-but-well-formed registry, matching what an unreadable workspace degrades to.
+      if (url === '/api/v1/projects') {
+        return new Response(JSON.stringify({ projects: [], bootProject: 'default', projectsDir: '/repos' }), {
+          status: 200,
+        })
+      }
       return new Response('[]', { status: 200 })
     })
     return render(

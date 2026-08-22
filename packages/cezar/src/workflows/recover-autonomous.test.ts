@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from './run.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -52,7 +53,7 @@ describe('recover() and the autonomous flag (#489)', () => {
   };
 
   const queuedRun = (autonomous: boolean): string => {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'do it',
