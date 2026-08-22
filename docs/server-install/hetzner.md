@@ -343,14 +343,20 @@ meaning. `GET /api/v1/health` reports what the machinery is actually doing —
 and the current `deploy.releaseId`/`sha` — and `GET /api/v1/ready` is the
 readiness gate the deploy probes (503 while draining or unready).
 
-**Two things to know before you drive one.** The service user needs to be able to
+**One thing to know before you drive one.** The service user needs to be able to
 manage its own units: grant it narrowly (a polkit rule for `manage-units` on
 `cezar.service`/`cezar.socket` only — never a unit-name prefix, and never the
 right to create *system* transient units, which run as root), plus
-`loginctl enable-linger` for cgroup delegation. And a deploy started from inside
-an agent task still fails even so, because it re-execs itself out of the service
-cgroup via a system `systemd-run` unit — drive the cutover as an operator, or from
-a detached unit.
+`loginctl enable-linger` for cgroup delegation.
+
+**CORRECTED 2026-08-22 — an agent-driven deploy no longer needs an operator.**
+`07f5c274` closed the re-exec gap below: `decideReExec` reads the unit's
+`KillMode`, finds `process` on this box, and takes no transient unit at all, so
+a deploy started from inside an agent task now succeeds on its own. Original
+text, kept unchanged: ~~"And a deploy started from inside an agent task still
+fails even so, because it re-execs itself out of the service cgroup via a system
+`systemd-run` unit — drive the cutover as an operator, or from a detached
+unit."~~
 
 Design, phases and current status:
 [`.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`](../../.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md).

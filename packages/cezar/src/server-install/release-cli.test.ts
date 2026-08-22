@@ -128,6 +128,38 @@ describe('server-migrate-releases', () => {
     const code = await migrateReleasesCommand({ linkPath: join(root, 'nope'), releasesDir, apply: true });
     expect(code).toBe(1);
   });
+
+  describe('runAsUid ordering hardening (Phase 0.3 of the broker-scope-isolation spec)', () => {
+    // Real uid 0 (root) always resolves — no useradd/id fixture needed to exercise the happy path.
+    it('reads the base unit\'s User= line and orders the drop-in after that user manager', async () => {
+      mkdirSync(etc, { recursive: true });
+      writeFileSync(join(etc, 'cezar.service'), '[Unit]\nDescription=x\n\n[Service]\nUser=root\nExecStart=/bin/true\n');
+      await migrate(true);
+      const dropIn = readFileSync(join(etc, 'cezar.service.d', '40-non-disruptive.conf'), 'utf8');
+      expect(dropIn).toContain('[Unit]');
+      expect(dropIn).toContain('After=user@0.service');
+      expect(dropIn).toContain('Wants=user@0.service');
+    });
+
+    it('skips the [Unit] section, without failing, when the base unit has no User= line', async () => {
+      mkdirSync(etc, { recursive: true });
+      writeFileSync(join(etc, 'cezar.service'), '[Unit]\nDescription=x\n\n[Service]\nExecStart=/bin/true\n');
+      const code = await migrate(true);
+      expect(code).toBe(0);
+      const dropIn = readFileSync(join(etc, 'cezar.service.d', '40-non-disruptive.conf'), 'utf8');
+      expect(dropIn).not.toContain('[Unit]');
+      expect(logs.join('\n')).toContain('no User= line');
+    });
+
+    it('skips the [Unit] section, without failing, when the base unit does not exist', async () => {
+      // `etc` is created lazily by the migration itself, so the base unit genuinely isn't there yet.
+      const code = await migrate(true);
+      expect(code).toBe(0);
+      const dropIn = readFileSync(join(etc, 'cezar.service.d', '40-non-disruptive.conf'), 'utf8');
+      expect(dropIn).not.toContain('[Unit]');
+      expect(logs.join('\n')).toContain('could not read');
+    });
+  });
 });
 
 describe('server-deploy (releaseDeployCommand) --dry-run', () => {

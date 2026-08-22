@@ -70,6 +70,14 @@ export interface NonDisruptiveDropInOptions {
   /** Slice that owns detached run brokers (P4). Runs live here, NOT in the service cgroup, so a
    *  deploy's restart cannot signal them. */
   runsSlice?: string;
+  /** uid the base unit's `User=` line names, when known. Orders the service after
+   *  `user@<uid>.service` — the manager `'scope'` isolation needs up first, since it owns
+   *  `/run/user/<uid>/systemd/private` (`.ai/specs/2026-08-22-broker-scope-isolation-full-stop-survival.md`,
+   *  Phase 0.3). Omitted rather than guessed: `user@0.service` orders against root's own manager,
+   *  which is worse than no ordering at all. Defense-in-depth only — `RunManager.brokerIsolation()`
+   *  re-probing instead of caching a non-`'scope'` result is what actually closes the race; this
+   *  just makes the race less likely to be hit in the first place. */
+  runAsUid?: number;
 }
 
 /**
@@ -89,10 +97,26 @@ export interface NonDisruptiveDropInOptions {
  * SIGKILL the process mid-drain and undo the graceful shutdown this spec just built.
  */
 export function nonDisruptiveDropIn(opts: NonDisruptiveDropInOptions): string {
+  // A drop-in may carry a [Unit] section alongside [Service] — systemd merges each section
+  // against the base unit independently — so this stays a single file rather than a second
+  // drop-in. Omitted entirely when the uid is unknown: an absent [Unit] section changes nothing,
+  // a wrong one (root's manager) is actively worse than no ordering at all.
+  const unitSection = opts.runAsUid !== undefined
+    ? `[Unit]
+# Defense-in-depth for the run-broker isolation probe's one hard dependency
+# (.ai/specs/2026-08-22-broker-scope-isolation-full-stop-survival.md, Phase 0.3): without this, a
+# boot where this service starts before user@${opts.runAsUid}.service has finished can leave the
+# probe reading a degraded result. RunManager.brokerIsolation() re-probes rather than caching that,
+# which is the fix that actually closes the race — this ordering just makes hitting it less likely.
+After=user@${opts.runAsUid}.service
+Wants=user@${opts.runAsUid}.service
+
+`
+    : '';
   return `# Managed by cezar — non-disruptive deploy (.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md).
 # A DROP-IN, not a unit rewrite: the base unit on this box is hand-written and carries operator
 # drop-ins (Cloudflare token, 1Password, agent env passthrough) that must not be disturbed.
-[Service]
+${unitSection}[Service]
 Sockets=${sysd(opts.socketUnit)}
 # Vector 1: the default control-group mode SIGKILLs every agent run on every deploy.
 KillMode=process

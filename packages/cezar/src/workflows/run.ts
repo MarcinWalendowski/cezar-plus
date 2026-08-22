@@ -983,9 +983,18 @@ export class RunManager {
   /** Last `consumedOffset` written per run, so the tail's 50 ms cadence does not become a 50 ms
    *  write cadence on `runs.json`. */
   private readonly offsetWrites = new Map<string, { offset: number; written: number; at: number }>();
-  /** Cached once: probing the host's cgroup privileges per run would be pure waste, and the answer
-   *  cannot change without the process being restarted anyway. */
+  /** Cached once `'scope'` is seen, but re-probed on every call until then.
+   *  CORRECTED 2026-08-22: this used to say the answer "cannot change without the process being
+   *  restarted anyway" and cache unconditionally — false whenever `cezar.service` starts before
+   *  `user@<uid>.service` has finished booting, which pins the probe to a non-`'scope'` result for
+   *  the rest of the process's life (`.ai/specs/2026-08-22-broker-scope-isolation-full-stop-survival.md`,
+   *  Phase 0.3). `'scope'` is the only outcome that cannot regress on its own, so it is the only one
+   *  worth caching. */
   private brokerIsolationCache?: BrokerIsolation;
+  /** Last non-`'scope'` value already warned about, so `brokerIsolation()` logs once per distinct
+   *  degraded result rather than once per call — it is consulted per health/ready poll
+   *  (`server.ts`'s `describeRuntime`), not only per run-start. */
+  private brokerIsolationWarnedFor?: BrokerIsolation;
   /** Interrupted agent turns recovered after a process restart. Unlike an
    *  explicit user Continue, these are bulk scheduler work and must re-enter
    *  through `pump()` so both workspace and per-project caps are honored. */
@@ -2305,9 +2314,21 @@ export class RunManager {
   // above the runner learns that a run moved out of process, which is what makes this tractable
   // against a file this size.
 
-  /** Which cgroup escape this host actually supports, probed once. */
+  /** Which cgroup escape this host actually supports. Re-probed until a `'scope'` result is
+   *  observed, then cached for the process's lifetime — see the field's own doc comment for why
+   *  a non-`'scope'` result must never be cached unconditionally. */
   brokerIsolation(): BrokerIsolation {
-    this.brokerIsolationCache ??= chooseIsolation(probeIsolationCapabilities());
+    if (this.brokerIsolationCache !== 'scope') {
+      this.brokerIsolationCache = chooseIsolation(probeIsolationCapabilities());
+    }
+    if (this.brokerIsolationCache !== 'scope' && this.brokerIsolationWarnedFor !== this.brokerIsolationCache) {
+      this.brokerIsolationWarnedFor = this.brokerIsolationCache;
+      console.warn(
+        `[cez] run broker isolation is '${this.brokerIsolationCache}', not 'scope' — brokered runs will`
+        + ` survive a 'systemctl restart' of this service but NOT a full 'systemctl stop' + 'start'.`
+        + ` See .ai/specs/2026-08-22-broker-scope-isolation-full-stop-survival.md.`,
+      );
+    }
     return this.brokerIsolationCache;
   }
 
