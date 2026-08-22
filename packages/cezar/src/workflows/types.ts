@@ -585,8 +585,35 @@ export const BRIEFS_DIR = '.ai/specs/briefs';
  */
 const SPEC_TO_DEPLOY_STEP_MODEL = 'sonnet';
 
-/** The one exception above — see {@link SPEC_TO_DEPLOY_STEP_MODEL}. */
-const SPEC_REVIEW_MODEL = 'opus';
+/**
+ * The two judgement steps — see {@link SPEC_TO_DEPLOY_STEP_MODEL} and
+ * {@link SPEC_AUTHORING_RUNNER}.
+ *
+ * **Amended 2026-08-22** (owner: *"writing spec + spec review should be by opus always, the rest
+ * can be load balanced by codex or claude sonnet"*). `spec` joins `review-spec` on opus; it ran on
+ * sonnet under the 2026-08-21 policy. Writing the spec and reviewing it are the two places where
+ * the judgement IS the deliverable, and everything downstream is construction against whatever
+ * they produce.
+ */
+const SPEC_AUTHORING_MODEL = 'opus';
+
+/**
+ * `spec` and `review-spec` pin the RUNNER as well as the model, and the runner pin is what makes
+ * "always opus" true rather than aspirational.
+ *
+ * `opus` is a Claude alias. On a run started on codex, the model pin alone is dropped by
+ * `RunManager.modelForBackend` (it names no model codex serves) and the step would quietly fall
+ * back to codex's default — the opposite of always. Naming the runner keeps both halves of the
+ * instruction: these two steps are opus, on Claude, whatever the rest of the chain runs on.
+ *
+ * The other six steps carry no runner, so they follow the run's own — which is what leaves room
+ * for the balancing half of the instruction ("the rest can be load balanced by codex or claude
+ * sonnet"). Today that balance is per-run and chosen by hand: cezar has no cross-runner routing,
+ * because `pool:*` balances ACCOUNTS WITHIN a provider and the backend is already fixed before the
+ * pool is consulted. Filed as its own task, with making this whole table configurable in global
+ * settings. Spec: `.ai/specs/2026-08-22-failed-turn-reads-as-done.md`.
+ */
+const SPEC_AUTHORING_RUNNER = 'claude' as const;
 
 /**
  * `run-tests`'s reasoning-depth ceiling (`.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`,
@@ -709,7 +736,8 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'spec',
       name: 'Write the spec',
-      model: SPEC_TO_DEPLOY_STEP_MODEL,
+      model: SPEC_AUTHORING_MODEL,
+      runner: SPEC_AUTHORING_RUNNER,
       // Narrowed by the P1 split: the record sweep moved to `context`, so this step's window holds
       // the brief and the code it names rather than the raw search output. `Task` is deliberately
       // NOT granted here — the writing is the one job that must not be delegated, for the reason
@@ -753,7 +781,8 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'review-spec',
       name: 'Review the spec',
-      model: SPEC_REVIEW_MODEL,
+      model: SPEC_AUTHORING_MODEL,
+      runner: SPEC_AUTHORING_RUNNER,
       // P2 of `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`.
       //
       // READ-ONLY BY CONSTRUCTION — no `Write`, no `Edit`. A reviewer that can edit what it

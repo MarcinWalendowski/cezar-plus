@@ -267,6 +267,56 @@ describe('mapCodexNotification edge cases', () => {
     }
   });
 
+  /**
+   * The regression this whole area exists for (`.ai/specs/2026-08-22-failed-turn-reads-as-done.md`).
+   *
+   * Codex reports a turn killed by a provider error as `turn/completed` with `turn.status:
+   * "failed"` — captured verbatim off the real app-server on prod-host. The mapper used to
+   * hardcode `failed: false` for that method, so the frame below produced `stopReason: end_turn`
+   * and the workflow step went green having done nothing.
+   *
+   * Both directions are asserted on purpose: without the `status: "completed"` row this test would
+   * still pass against code that simply called every `turn/completed` a failure.
+   */
+  it('reads failure from the turn, not from the notification method', () => {
+    const state = createCodexUiState()
+    const rejection = JSON.stringify({
+      type: 'error',
+      status: 400,
+      error: { message: "The 'sonnet' model is not supported when using Codex with a ChatGPT account." },
+    })
+    const failedFrame = {
+      method: 'turn/completed',
+      params: { turn: { id: 't1', status: 'failed', error: { message: rejection } } },
+    }
+    const [failed] = mapCodexNotification(failedFrame, state).events
+    expect(failed).toEqual({ type: 'turn.completed', turnId: 't1', stopReason: 'error' })
+
+    // Negative control: the same method with a healthy turn stays green, so the fix cannot be
+    // "call everything a failure".
+    const [ok] = mapCodexNotification(
+      { method: 'turn/completed', params: { turn: { id: 't1', status: 'completed', error: null } } },
+      state,
+    ).events
+    expect(ok).toEqual({ type: 'turn.completed', turnId: 't1', stopReason: 'end_turn' })
+  })
+
+  it('treats an error attached to a completed turn as failure, and an interrupt as cancelled', () => {
+    const state = createCodexUiState()
+    // `error` present without `status: "failed"` — the deliberate over-trigger.
+    const [errored] = mapCodexNotification(
+      { method: 'turn/completed', params: { turn: { id: 't1', error: { message: 'boom' } } } },
+      state,
+    ).events
+    expect(errored).toEqual({ type: 'turn.completed', turnId: 't1', stopReason: 'error' })
+    // The nested error position is read for the interrupt test too, not only the top-level one.
+    const [cancelled] = mapCodexNotification(
+      { method: 'turn/completed', params: { turn: { id: 't1', status: 'failed', error: { message: 'Turn interrupted' } } } },
+      state,
+    ).events
+    expect(cancelled).toEqual({ type: 'turn.completed', turnId: 't1', stopReason: 'cancelled' })
+  })
+
   it('mints deterministic fallback turn ids when frames carry none', () => {
     let s = createCodexUiState();
     const started = mapCodexNotification({ method: 'turn/started', params: {} }, s);

@@ -65,6 +65,34 @@ rl.on('line', (line) => {
       } });
       return;
     }
+    // The shape a real provider rejection takes, captured off the authenticated codex on
+    // prod-host 2026-08-22: a standalone `error` notification, then `turn/COMPLETED`
+    // carrying `status: "failed"`. Not `turn/failed` — that is the whole trap.
+    if (turnText.includes('mock:provider-rejected')) {
+      const detail = JSON.stringify({
+        type: 'error',
+        status: 400,
+        error: { type: 'invalid_request_error', message: "The 'sonnet' model is not supported when using Codex with a ChatGPT account." },
+      });
+      emit({ method: 'warning', params: { threadId: 'th_mock_1', message: 'Model metadata for `sonnet` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.' } });
+      emit({ method: 'error', params: { threadId: 'th_mock_1', turnId: 'turn_mock_1', willRetry: false, error: { message: detail, codexErrorInfo: 'other' } } });
+      emit({ method: 'turn/completed', params: { turn: { id: 'turn_mock_1', status: 'failed', error: { message: detail, codexErrorInfo: 'other' } } } });
+      return;
+    }
+    // An error codex states OUT OF BAND while the turn still ends cleanly. This is the shape that
+    // exercises the `error` notification on its own: the turn carries no failure of its own, so
+    // nothing else in the runner can surface it.
+    if (turnText.includes('mock:error-then-clean-turn')) {
+      emit({ method: 'error', params: { threadId: 'th_mock_1', turnId: 'turn_mock_1', willRetry: false, error: { message: 'stream disconnected before completion' } } });
+      emit({ method: 'turn/completed', params: { turn: { id: 'turn_mock_1', status: 'completed' } } });
+      return;
+    }
+    // The same, but codex says it will retry — a note, never a step failure.
+    if (turnText.includes('mock:error-will-retry')) {
+      emit({ method: 'error', params: { threadId: 'th_mock_1', turnId: 'turn_mock_1', willRetry: true, error: { message: 'rate limited, retrying' } } });
+      emit({ method: 'turn/completed', params: { turn: { id: 'turn_mock_1', status: 'completed' } } });
+      return;
+    }
     if (turnText.includes('mock:subagent-activity')) {
       emit({ method: 'item/started', params: { item: { type: 'subAgentActivity', id: 'activity_1', kind: 'started', agentThreadId: 'th_child', agentPath: '/root/scope_review' } } });
       emit({ method: 'item/completed', params: { item: { type: 'subAgentActivity', id: 'activity_1', kind: 'started', agentThreadId: 'th_child', agentPath: '/root/scope_review' } } });

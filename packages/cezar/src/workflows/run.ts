@@ -1213,6 +1213,42 @@ export class RunManager {
    * spawning a CLI. Never throws: an unreadable home degrades to the default profile, which is
    * exactly the behaviour that predates profiles.
    */
+  /**
+   * The model pin to hand `backend`, with a pin that backend cannot serve DROPPED rather than
+   * forwarded (`.ai/specs/2026-08-22-failed-turn-reads-as-done.md`).
+   *
+   * `modelConflictsWithRunner` already existed and already answered this — it is applied on the
+   * continuation path (`postMessage`) with a comment naming this exact hazard, "an inherited
+   * `opus` would survive a switch to codex". The per-step model policy that landed 2026-08-21
+   * (`.ai/specs/2026-08-21-per-step-model-policy.md`) pins `sonnet` on seven steps and `opus` on
+   * `review-spec`, and never routed through it. When codex went live the next day, every step of
+   * every codex run handed codex a Claude alias, and codex answered 400 on all 47 turns.
+   *
+   * **Dropped, not substituted.** The obvious alternative is to swap in that backend's equivalent
+   * id, and it was rejected on measurement: all three ids in `KNOWN_PRESETS_BY_RUNNER.codex`
+   * (`gpt-5.1-codex`, `gpt-5.1-codex-mini`, `gpt-5-codex`) are themselves dead on the production
+   * account — probed 2026-08-22, each one `Model metadata not found` then the same 400. A pinned
+   * vendor id is a thing that goes stale, so substituting one trades today's wrong model for
+   * tomorrow's. Dropping falls through to the backend's own current default, which does not rot.
+   *
+   * The drop is announced on the thread. A model pin silently ignored is its own small lie, and
+   * this whole spec exists because cezar told the owner something untrue about a run.
+   */
+  private modelForBackend(
+    runId: string,
+    stepId: string,
+    backend: RunnerId,
+    model: string | undefined,
+  ): string | undefined {
+    if (!model || !modelConflictsWithRunner(model, backend)) return model;
+    this.store.appendEvent(runId, {
+      type: 'note',
+      stepId,
+      message: `model "${model}" is not a ${backend} model — running on ${backend}'s default instead`,
+    });
+    return undefined;
+  }
+
   private async agentEnvForStep(
     runId: string,
     backend: RunnerId,
@@ -4968,7 +5004,14 @@ export class RunManager {
     // Hoisted rather than inlined into the call below, because it is now read TWICE — once by the
     // mapper and once by the record. Two copies of the same expression is exactly how the thing
     // that ran and the thing the record claims ran drift apart.
-    const stepRawModel = agentModelsLocked(this.repoRoot) ? undefined : step.model ?? input.model;
+    // `modelForBackend` is applied HERE, before the hoist, so the dropped-pin case cannot make the
+    // record lie. `stepRawModel` is persisted onto the step as what ran (spec
+    // 2026-08-22-per-step-model-display); if a `sonnet` pin is dropped for a codex step and the
+    // drop happened only on the way to the runner, the step rail would keep displaying `sonnet`
+    // for a step that ran on codex's default. Same reason the hoist exists at all.
+    const stepRawModel = agentModelsLocked(this.repoRoot)
+      ? undefined
+      : this.modelForBackend(runId, step.id, stepBackend, step.model ?? input.model);
     try {
       const normalized = normalizeModelForBackend(stepBackend, stepRawModel, {
         configuredProvider: await configuredModelProvider(stepBackend, state.cwd),

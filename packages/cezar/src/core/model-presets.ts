@@ -35,7 +35,27 @@ export const KNOWN_PRESETS_BY_RUNNER: Record<RunnerId, readonly string[]> = {
     'claude-sonnet-5',
     'claude-haiku-4-5',
   ],
-  codex: ['gpt-5.1-codex', 'gpt-5.1-codex-mini', 'gpt-5-codex'],
+  /**
+   * **CORRECTED 2026-08-22 — the three ids here before were all dead.** `gpt-5.1-codex`,
+   * `gpt-5.1-codex-mini` and `gpt-5-codex` were probed one by one against the authenticated codex
+   * on `prod-host` and every one answered `Model metadata for <id> not found` and then
+   * `400 ... is not supported when using Codex with a ChatGPT account`. The composer was offering
+   * a picker in which every choice failed, and (until the same day's fix) failed silently.
+   *
+   * Refreshed from the live `model/list` catalog on that box, then narrowed to the **5.6 family
+   * only** (owner instruction 2026-08-22: *"in codex use only 5.6"*). The catalog also offers
+   * `gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini`; they are deliberately not listed, so the picker
+   * cannot offer a previous generation. They are not BLOCKED — an id absent from every runner's
+   * list fails open by design (see the module doc), so someone who types one still gets it, and
+   * since 2026-08-22 a rejection would be visible rather than silent.
+   *
+   * Which means this list is exactly the kind of thing that goes stale again:
+   * `discoverCodexModels` (`core/codex-model-catalog.ts`) reads the same catalog at runtime and is
+   * the non-rotting source — this array should become a fallback for when discovery cannot run,
+   * not the authority. Filed with the settings task.
+   * Spec: `.ai/specs/2026-08-22-failed-turn-reads-as-done.md`.
+   */
+  codex: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
   opencode: [],
   // pi lists nothing for the same reason OpenCode does (#794), plus one of its own: it picks a
   // model with the canonical `provider/model` convention and has no default provider, so the

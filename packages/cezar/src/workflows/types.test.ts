@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { KNOWN_PRESETS_BY_RUNNER } from '../core/model-presets.ts';
+import { KNOWN_PRESETS_BY_RUNNER, modelConflictsWithRunner } from '../core/model-presets.ts';
 import {
   AUTONOMOUS_IMPLEMENTATION_WORKFLOW,
   BRIEFS_DIR,
@@ -173,11 +173,11 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
    * nothing at all. `runAgentStep` reads `step.model ?? input.model`, so a step that silently
    * lost its `model` does not fail: it quietly falls back to whatever the composer picked.
    */
-  it('pins every step to sonnet except the spec review, which is opus', () => {
+  it('pins the two authoring steps to opus and every other step to sonnet', () => {
     const models = SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => [s.id, s.model] as const);
     expect(models).toEqual([
       ['context', 'sonnet'],
-      ['spec', 'sonnet'],
+      ['spec', 'opus'],
       ['review-spec', 'opus'],
       ['implement', 'sonnet'],
       ['run-tests', 'sonnet'],
@@ -185,10 +185,59 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
       ['document', 'sonnet'],
       ['deploy', 'sonnet'],
     ]);
-    // The asymmetry itself, stated from the other side: opus is on exactly one step, and no step
-    // is left unpinned to fall through to the composer's pick.
-    expect(models.filter(([, m]) => m === 'opus').map(([id]) => id)).toEqual(['review-spec']);
+    // The asymmetry itself, stated from the other side: opus is on exactly the two judgement
+    // steps, and no step is left unpinned to fall through to the composer's pick.
+    expect(models.filter(([, m]) => m === 'opus').map(([id]) => id)).toEqual(['spec', 'review-spec']);
     expect(models.filter(([, m]) => !m)).toEqual([]);
+  });
+
+  /**
+   * "Always opus" has to survive a run started on ANOTHER runner, and the model pin alone does
+   * not: `opus` names no model codex can serve, so `RunManager.modelForBackend` drops it and the
+   * step would fall through to codex's default. The runner pin is the half that makes the owner's
+   * instruction (2026-08-22, "writing spec + spec review should be by opus always") true rather
+   * than true-on-Claude-runs.
+   *
+   * The complement is asserted too: every OTHER step must stay runner-free, because those are the
+   * ones the run's own runner is allowed to choose ("the rest can be load balanced by codex or
+   * claude sonnet"). A stray runner pin there would quietly disable that.
+   */
+  it('pins the runner on the two opus steps, and only there', () => {
+    const runners = SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => [s.id, s.runner] as const);
+    expect(runners.filter(([, r]) => r !== undefined)).toEqual([
+      ['spec', 'claude'],
+      ['review-spec', 'claude'],
+    ]);
+    // Count-anchored, so a renamed or dropped step list cannot make this vacuous.
+    expect(runners.filter(([, r]) => r === undefined).map(([id]) => id)).toEqual([
+      'context',
+      'implement',
+      'run-tests',
+      'commit-push',
+      'document',
+      'deploy',
+    ]);
+  });
+
+  /**
+   * The structural guard for the 2026-08-22 outage: a step must never pin a model its own pinned
+   * runner cannot serve. Five production runs reported eight green steps having done nothing
+   * because `sonnet` reached codex and codex answered 400 on every turn
+   * (`.ai/specs/2026-08-22-failed-turn-reads-as-done.md`).
+   *
+   * This checks the pairs the workflow FIXES. A step with no runner pin is deliberately skipped:
+   * its runner is not knowable here, and that case is handled at run time by
+   * `RunManager.modelForBackend` instead of being forbidden at authoring time.
+   */
+  it('never pins a model the step\'s own runner cannot serve', () => {
+    const pinned = SPEC_TO_DEPLOY_WORKFLOW.steps.filter((s) => s.runner && s.model);
+    expect(pinned.length).toBeGreaterThan(0); // floor: the assertion below must exercise something
+    for (const step of pinned) {
+      expect({ id: step.id, conflicts: modelConflictsWithRunner(step.model!, step.runner!) }).toEqual({
+        id: step.id,
+        conflicts: false,
+      });
+    }
   });
 
   /**
@@ -211,16 +260,31 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     ]);
   });
 
-  it('names models this runner actually offers, so a typo cannot fall through', () => {
+  it('names models the step\'s effective runner actually offers, so a typo cannot fall through', () => {
     // `modelConflictsWithRunner` fails open on an unknown id and `normalizeModelForBackend` would
     // refuse it only at run time — on the box, mid-chain. Catch it here instead.
-    const presets = KNOWN_PRESETS_BY_RUNNER.claude;
-    expect(presets.length).toBeGreaterThan(0);
+    //
+    // **Amended 2026-08-22.** This used to assert `step.runner` was undefined on every step and
+    // check every model against claude's presets. Both halves of that were premise, not intent:
+    // `spec` and `review-spec` now pin `runner: 'claude'` so their opus stays opus on a codex run
+    // (`.ai/specs/2026-08-22-failed-turn-reads-as-done.md`). The intent — a step never names a
+    // model its own runner cannot serve — is unchanged and is what is asserted now.
+    const checked: string[] = [];
     for (const step of SPEC_TO_DEPLOY_WORKFLOW.steps) {
-      // No step names a per-step `runner`, so every one of them resolves against claude.
-      expect(step.runner).toBeUndefined();
-      expect(presets).toContain(step.model);
+      // An unpinned step runs on the RUN's runner, which is claude by default; a pinned one is
+      // checked against what it actually pinned.
+      const runner = step.runner ?? 'claude';
+      const presets = KNOWN_PRESETS_BY_RUNNER[runner];
+      expect(presets.length).toBeGreaterThan(0);
+      expect({ id: step.id, offered: presets.includes(step.model as string) }).toEqual({
+        id: step.id,
+        offered: true,
+      });
+      checked.push(step.id);
     }
+    // Floor: a loop over an emptied or renamed step list would otherwise assert nothing at all.
+    expect(checked).toEqual(SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => s.id));
+    expect(checked.length).toBe(8);
   });
 
   it('the record-reading step cannot reach a shell beyond kb + read-only git', () => {

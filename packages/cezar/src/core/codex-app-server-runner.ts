@@ -29,6 +29,7 @@ import {
 } from './codex-app-server-transport.ts';
 import {
   codexSessionStarted,
+  codexTurnFailure,
   createCodexUiState,
   mapCodexNotification,
   type CodexUiMapping,
@@ -124,6 +125,15 @@ class CodexSession implements AgentSession {
    *  codex handles the signal and exits 143, so without this the runner reads
    *  its own teardown as a codex failure (#703). */
   private terminatedByCezar = false;
+
+  /**
+   * The failure message already reported for the turn now in flight, so the two channels codex
+   * states it on — the standalone `error` notification and the `turn/completed` that follows with
+   * `turn.status: "failed"` — surface it ONCE. Both are read (either can arrive without the
+   * other), and the pair carries the identical string, so without this every codex failure would
+   * read as two failures on the thread. Cleared at each turn boundary.
+   */
+  private reportedTurnError: string | undefined;
   /** "Has the app-server really terminated?" — the question `child.killed`
    *  does not answer: it flips on signal delivery, so the SIGTERM this runner
    *  sends would otherwise veto its own SIGKILL escalation (#844). */
@@ -451,6 +461,33 @@ class CodexSession implements AgentSession {
       case 'turn/started': {
         if (this.isForeignThreadTurn(params)) break; // sub-agent child thread — not our turn (#600)
         this.activeTurnId = turnIdOf(params) ?? this.activeTurnId;
+        this.reportedTurnError = undefined;
+        break;
+      }
+      // Codex's out-of-band failure channel, previously dropped on the floor by `default`. It
+      // arrives BEFORE `turn/completed` and carries the provider's verbatim message, which is the
+      // only place the real cause is ever stated (the turn's own error repeats it, but a turn that
+      // never completes would otherwise say nothing at all). `willRetry` marks a failure codex
+      // will handle itself — a note, not an error, so a retried blip never fails a step.
+      case 'error': {
+        if (this.isForeignThreadTurn(params)) break;
+        const message = errorMessage(params.error) ?? 'codex reported an error';
+        if (params.willRetry === true) {
+          this.emit({ type: 'note', message: `codex retrying — ${message}` });
+        } else if (!this.terminatedByCezar) {
+          this.reportedTurnError = message;
+          this.emit({ type: 'error', message });
+        }
+        break;
+      }
+      // Not fatal, but load-bearing evidence: `Model metadata for <id> not found` preceded every
+      // one of the 47 failed turns on 2026-08-22 and names the bad model id, which the 400 that
+      // follows does too but only after the step has already spawned. Surfaced as a note so it is
+      // on the thread when someone reads back.
+      case 'warning': {
+        if (this.isForeignThreadTurn(params)) break;
+        const message = stringField(params, 'message');
+        if (message) this.emit({ type: 'note', message: `codex: ${message}` });
         break;
       }
       case 'item/agentMessage/delta': {
@@ -503,10 +540,17 @@ class CodexSession implements AgentSession {
         // An interrupted/failed item never sees item/completed — surface its
         // partial prose before the turn boundary (run.ts reads markers there).
         this.textCoalescer.flush();
-        if (method === 'turn/failed' && !this.terminatedByCezar) {
-          const error = params.error as Record<string, unknown> | undefined;
-          const message = stringField(error ?? {}, 'message') ?? 'codex turn failed';
-          this.emit({ type: 'error', message });
+        // Read failure off the TURN, not off the method — see {@link codexTurnFailure}. This is
+        // the line that decides whether a workflow step is `done` or `failed`, and reading only
+        // the method is why five production runs reported eight green steps having done nothing
+        // (`.ai/specs/2026-08-22-failed-turn-reads-as-done.md`).
+        const failure = codexTurnFailure(method, params);
+        const alreadyReported = failure !== undefined && failure.message === this.reportedTurnError;
+        this.reportedTurnError = undefined; // turn boundary — the next turn reports afresh
+        if (failure && !alreadyReported && !this.terminatedByCezar) {
+          // No `reason`, so the run manager treats it as a genuine agent failure and ends the
+          // chain, rather than parking the run at `review` the way a cezar-initiated stop does.
+          this.emit({ type: 'error', message: failure.message });
         }
         this.emit({ type: 'turn-end' });
         if (this.opts.autoEndAfterFirstTurn && this.stdinOpen && !this.autoEndTimer) {
@@ -622,6 +666,15 @@ function clean<T extends Record<string, unknown>>(obj: T): Partial<T> {
 function stringField(obj: Record<string, unknown>, key: string): string | undefined {
   const v = obj[key];
   return typeof v === 'string' ? v : undefined;
+}
+
+/** Codex spells an error either as a bare string or as `{ message }`; both appear on the wire. */
+function errorMessage(error: unknown): string | undefined {
+  if (typeof error === 'string') return error.trim() || undefined;
+  if (error && typeof error === 'object' && !Array.isArray(error)) {
+    return stringField(error as Record<string, unknown>, 'message');
+  }
+  return undefined;
 }
 
 function threadIdOf(res: Record<string, unknown>): string | undefined {

@@ -548,10 +548,10 @@ describe('RunManager.continueRun override', () => {
 
   it('persists a runner + model override as the run current backend', async () => {
     const id = resumableRun();
-    await expect(manager.continueRun(id, { runner: 'codex', model: 'gpt-5.1-codex' })).resolves.toEqual({ ok: true });
+    await expect(manager.continueRun(id, { runner: 'codex', model: 'gpt-5.6-terra' })).resolves.toEqual({ ok: true });
     const after = store.getRun(id);
     expect(after?.runner).toBe('codex');
-    expect(after?.model).toBe('gpt-5.1-codex');
+    expect(after?.model).toBe('gpt-5.6-terra');
   });
 
   it('starts fresh when Continue switches to a backend that does not own the session', async () => {
@@ -641,8 +641,8 @@ describe('RunManager.continueRun override', () => {
   it("rejects a model that is recognizably another runner's preset (no corruption persisted)", async () => {
     const id = resumableRun();
     // The review's corruption case (#401): a codex preset landing on a claude continuation.
-    const result = await manager.continueRun(id, { model: 'gpt-5.1-codex' });
-    expect(result).toEqual({ ok: false, error: "model 'gpt-5.1-codex' is not a claude model" });
+    const result = await manager.continueRun(id, { model: 'gpt-5.6-terra' });
+    expect(result).toEqual({ ok: false, error: "model 'gpt-5.6-terra' is not a claude model" });
     expect(store.getRun(id)?.model).toBe('sonnet');
     expect(store.getRun(id)?.runner).toBe('claude');
   });
@@ -683,7 +683,7 @@ describe('RunManager.continueRun override', () => {
     const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', steps: [{ id: 's1', name: 'Work', kind: 'agent' }] });
     store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
     store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
-    const result = await manager.continueRun(record.id, { model: 'gpt-5.1-codex' });
+    const result = await manager.continueRun(record.id, { model: 'gpt-5.6-terra' });
     expect(result.ok).toBe(false);
     expect(store.getRun(record.id)?.model).toBeUndefined();
   });
