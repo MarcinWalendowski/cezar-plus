@@ -482,6 +482,60 @@ export const RECORD_READ_RECIPE = [
 ].join('\n');
 
 /**
+ * How an agent step should WRITE A FILE (spec
+ * `.ai/specs/2026-08-21-edit-an-existing-file-never-re-emit-it.md`, L1).
+ *
+ * This exists to argue with an instruction cezar does not own and cannot switch off: bypass
+ * permissions mode injects "make file changes with sed, heredocs, or short scripts, rather than
+ * using the dedicated Read, Edit, or Write tools" into every Claude-backed step
+ * (`core/claude-cli-runner.ts:702` sets `bypassPermissions` unconditionally). That instruction is
+ * right for a three-line `sed`, and wrong for changing one paragraph of a 50 KB document. The step
+ * prompt is the only lever, and it lands LATER in the transcript than the injected reminder
+ * (`run.ts:4300`).
+ *
+ * Measured on run `70f19253`: 360 tool calls containing zero `Edit` and zero `Write`. Its `spec`
+ * step wrote the same document through `cat > … <<'SPECEOF'` twice — 34,845 characters, then
+ * 48,618, of which 20,550 were unchanged lines carried for nothing — and its `deploy` step wrote
+ * `/tmp/probe-backend.sh` twice with a byte-identical body.
+ *
+ * NOTE the rule is deliberately CONDITIONAL, and that is measured, not cautious. That `spec`-step
+ * rewrite touched 81 separate hunks and grew the file by 14 KB; converted to 81 anchored `Edit`s it
+ * would have cost ~65,045 characters against the 48,618 the rewrite spent, in 81 round trips
+ * instead of 1. An unconditional "never re-emit" makes that case WORSE. See the spec's § Problem.
+ */
+export const FILE_WRITE_RECIPE = [
+  'CHANGING PART OF A FILE THAT ALREADY EXISTS: use your editor tool, not a heredoc that re-emits',
+  'the whole file. On Claude Code that is `Edit` (old_string → new_string) for a change and `Write`',
+  'for a file that does not exist yet; on another backend, whatever patch/edit tool it gives you.',
+  'This OVERRIDES the standing "make file changes with sed, heredocs, or short scripts" preference,',
+  'for file mutation only. Several edits to one file go out as PARALLEL edit calls in ONE turn.',
+  '',
+  'Why, because this rule is not boilerplate and must not be deleted as such: an edit costs the',
+  'CHANGE, a heredoc costs the FILE, and you pay for every character twice — once emitting it, once',
+  'carrying it in context afterwards. Measured on run `70f19253`: 360 tool calls, ZERO `Edit`, ZERO',
+  '`Write`. Its spec step wrote one document twice — 34,845 characters, then 48,618, of which',
+  '20,550 were unchanged lines carried for nothing. Its deploy step wrote the same 1,383-character',
+  'script twice, byte-identical. That cost scales with the size of the FILE and not with the size',
+  'of your change, so it gets worse the longer the file gets, without limit.',
+  '',
+  'The honest exception, so do not over-apply this: when you are genuinely rewriting MOST of a',
+  'file, re-emitting it is correct and cheaper than dozens of anchored edits. Judge by how much of',
+  'the file changes, not by whether it existed. Rewriting a whole file to change three paragraphs',
+  'is the failure; rewriting it because three paragraphs are all that survive is not.',
+  '',
+  'Also still correct, and NOT repealed here:',
+  '- Heredocs for a file that does not exist yet, and for a genuinely scripted multi-file transform',
+  '  (one script that rewrites twelve call sites). Writing those out as edits is worse.',
+  '- The batched `set +e` probe script for READING — that rule is about reading, this one is about',
+  '  writing, and they do not conflict.',
+  "- Redirecting an expensive command's output to a file and re-slicing it.",
+  '',
+  'If an edit fails to match, re-read the exact region and retry with a longer, unique anchor. Do',
+  'NOT fall back to rewriting the whole file — that is the failure this rule exists to prevent, and',
+  'the second attempt costs more than the first.',
+].join('\n');
+
+/**
  * The spec reviewer's verdict marker (`.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`,
  * P2) — `CEZ:REVIEW=pass` or `CEZ:REVIEW=revise`, a sibling of `CEZ:DONE` / `CEZ:SPEC_PATH`.
  *
@@ -659,8 +713,11 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       // Narrowed by the P1 split: the record sweep moved to `context`, so this step's window holds
       // the brief and the code it names rather than the raw search output. `Task` is deliberately
       // NOT granted here — the writing is the one job that must not be delegated, for the reason
-      // the prompt gives.
-      allowedTools: ['Read', 'Grep', 'Glob', 'Write', 'Bash'],
+      // the prompt gives. `Edit` added (spec `.ai/specs/2026-08-21-edit-an-existing-file-never-
+      // re-emit-it.md`, L3): decorative on Claude today (the grant only adds), but the prompt below
+      // now tells this step to use it, and a step told to use a tool its own grant omits is an
+      // inconsistency `444c7db2`'s `--disallowedTools` would turn into a real failure.
+      allowedTools: ['Read', 'Grep', 'Glob', 'Write', 'Edit', 'Bash'],
       bashAllowlist: ['git log', 'git show', 'git status', 'cez kb', 'sed -n', 'ls'],
       prompt: [
         'You are writing a SPEC for the task below. You are NOT implementing it in this step.',
@@ -686,6 +743,8 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         '',
         'Cite what you actually read — KB entry ids, spec numbers, file paths, commit hashes. If you',
         'could not find something, say so in the spec rather than inventing it.',
+        '',
+        FILE_WRITE_RECIPE,
         '',
         'Change NO other file in this step. When the spec file exists, declare its path on its own',
         'line: `CEZ:SPEC_PATH=<repo-relative path>`. The next step reviews it.',
@@ -731,8 +790,24 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         '',
         'Then end your report with your verdict on its OWN LAST LINE, exactly one of:',
         '  CEZ:REVIEW=pass     — good enough to build; list any nits above, they will not block.',
-        '  CEZ:REVIEW=revise   — a real defect. State each one plainly and say what would fix it;',
-        '                        your report is handed to the spec step as its instructions.',
+        '  CEZ:REVIEW=revise   — a real defect exists.',
+        '',
+        'A `revise` verdict is handed to the spec step as ITS INSTRUCTIONS, and it acts on it as a change',
+        'list to apply, not as prose to re-derive. So write every defect as its own numbered item, in',
+        'exactly this shape:',
+        '  1. FILE: <a path that resolves from YOUR OWN working directory — check it exists before you',
+        '     write it down. If it does not, use an absolute path instead of guessing a repo-relative one;',
+        '     a repo can have more than one directory of the same relative name (e.g. a worktree and the',
+        '     main checkout each have their own .ai/specs/).>',
+        '     SECTION: <the exact heading text the defect is in, e.g. "## Verification"> — or, for a',
+        '     missing section, "NEW — insert after <the heading before it>".',
+        '     CHANGE: what is wrong, and specifically what the section should say instead. Concrete',
+        '     enough to apply directly — not "clarify this part".',
+        '',
+        'List every defect this way, even several in the same section. If, taken together, the defects',
+        'touch MOST of the document rather than isolated sections, say so in one sentence before the',
+        'list (e.g. "This needs a structural rewrite: …") — that is the one case where the next step',
+        're-emitting the whole file is the right call instead of editing section by section.',
         '',
         'Judge the spec, not its prose. `revise` is for a spec that is wrong, incomplete against the',
         'ask, or built on facts that do not hold — not for one you would have worded differently.',
@@ -763,6 +838,8 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         'When you run a gate to check yourself, send its output to a file (`cmd >"$f" 2>&1; echo',
         'EXIT=$?`) and wait on the process — never guess with `sleep N`. Then re-read that file for a',
         'different slice instead of re-running the command; a filter is free, the command is not.',
+        '',
+        FILE_WRITE_RECIPE,
         '',
         'End your report with what you implemented and any assumptions you made.',
       ].join('\n'),
@@ -807,11 +884,14 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         '  gate only after you have changed code. On a measured run one test file was re-run 11',
         '  times — 230 seconds of pure repetition — only to see a different filter of one output.',
         '- Never background anything that mutates the git index.',
-        '- Read this repo\'s own docs for environment traps that make its gates LIE before you',
-        '  conclude a suite is unrunnable here (in this repo: AGENTS.md § Validation — `NODE_ENV=',
-        '  production` makes `npm ci` install zero devDependencies, and a cockpit session exports',
-        '  knobs the server suites assert on). The measured run rediscovered both the hard way and',
-        '  paid three full `npm test` runs for it.',
+        '- Root `npm test` scrubs its own environment (`NODE_ENV` for `web`, ambient `CEZ_*` and',
+        '  in-repo `TMPDIR` for `server`) before running — see',
+        '  `2026-08-21-npm-test-gate-environment-scrub.md`. `npm run test:unit` and `npm run',
+        '  test:package` are NOT covered by that scrub — both are `node --test` scripts that never',
+        '  load it — so read AGENTS.md § Validation for the environment traps before running',
+        '  either of those, or any invocation the scrub above doesn\'t cover (`npm ci` before a',
+        '  `cezar.service` redeploy, non-vitest tooling), before concluding a suite is unrunnable',
+        '  here.',
         '',
         'Once a failure reproduces IDENTICALLY against a control that does not contain this run\'s',
         'change (clean HEAD, the parent checkout, `git stash` — see AGENTS.md\'s own method for why',
@@ -951,6 +1031,8 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         '   actually landed.',
         '3. Tracker — sync the task/todo state (done, or what remains) so the record and the code do',
         '   not drift.',
+        '',
+        FILE_WRITE_RECIPE,
         '',
         'Commit the doc/spec edits and push them the same way the change was shipped (branch push or',
         'PR). If pushing is not authorized here, commit locally and say so. End your report listing',

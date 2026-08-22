@@ -482,6 +482,23 @@ today's interrupt-and-continue behaviour, and `/api/v1/health` reports which bac
 brokered. This box runs `claude`, so the acceptance criterion is met; the rest is follow-up work
 with a filed todo.
 
+**Added 2026-08-22 — the one-shot `cezar run` CLI is also a covered scenario, not just the
+server/cockpit path.** This section and its Verification were written and tested against the
+server/cockpit restart-survival case only; neither named the one-shot CLI (`cezar run <task>`
+without `cezar serve`) as something P4 had to keep working, because brokering was originally
+opt-in. "Implementation notes (2026-08-21)" below already flags that gating brokering on "is this
+a built tree" rather than a flag means production gets it by default with no opt-out — but never
+drew the conclusion that this pulls the one-shot CLI path into P4's scope too, since a built tree
+is exactly what a packaged/production `cezar run` runs as. A real gap followed: the CLI's own event
+loop has no listener keeping it alive the way `cezar serve`'s HTTP listener does, so nothing kept
+the process open while a brokered session was in flight, and a real regression shipped and reached
+production (`npm run test:package` red on `prod-host`, 2026-08-21) before anything caught it.
+Fixed by `.ai/specs/2026-08-22-run-broker-cli-keepalive.md` (`BrokeredSession`'s poll timer is now
+ref'd for exactly the lifetime of an open session, plus a repaired give-up path so a broker that
+never comes up fails the run loudly instead of hanging); `packages/cezar/test/e2e/package-cli.test.ts`
+is (part of) that scenario's regression coverage, and `brokered-session.test.ts` covers the
+keep-alive/give-up mechanism directly.
+
 ### P5 — Health-gated deploy with auto-rollback
 
 `server-deploy --strategy=blue-green` (the name is kept from the draft for continuity, though
@@ -719,6 +736,10 @@ name; artifacts and video kept per run):
   requirement `AGENT_PROTOCOL.md` already imposes on every backend);
   re-attach at offset N replays exactly the untail'd bytes; re-attach with a dead pid / missing
   spool / bad `meta.json` falls through to the legacy path.
+- **Added 2026-08-22:** the one-shot CLI path — `packages/cezar/test/e2e/package-cli.test.ts`
+  (`npm run test:package`) runs a brokered `cezar run` end to end from the packaged tarball, and
+  `brokered-session.test.ts` asserts the keep-alive/give-up mechanism directly. See the note added
+  to P4 above and `.ai/specs/2026-08-22-run-broker-cli-keepalive.md`.
 - `recover()`: a `running` run with a live spool stays `running` and is not force-continued; every
   existing `recover()` case (queued, waiting, running-without-spool) is unchanged — asserted
   against the current tests, which must pass untouched.

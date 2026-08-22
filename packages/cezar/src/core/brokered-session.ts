@@ -193,7 +193,7 @@ export class BrokeredSession implements AgentSession {
    * Strictly one in flight: the broker writes each `send` straight to the backend's stdin, so two
    * concurrent sends could interleave turns. `attempts` bounds the retry so a broker that died
    * between spawn and bind cannot spin this forever — after the budget the queue is dropped and
-   * the session reports itself closed, which is the truthful state.
+   * the session gives up for real (see `giveUp`), which is the truthful terminal state.
    */
   private async pumpPending(): Promise<void> {
     if (this.sending || this.pending.length === 0 || this.closed) return;

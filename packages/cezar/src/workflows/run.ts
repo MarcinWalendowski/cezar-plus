@@ -713,6 +713,47 @@ export function restartContinuationPrompt(chain?: { position: number; total: num
 }
 
 /**
+ * Wraps feedback destined for a re-entry into the `spec` step with a fixed instruction: apply it
+ * as targeted edits, don't re-emit the whole file. Used at every place in this file that builds
+ * feedback text for THAT step specifically — never at the generic `checkFailure` wrapper in
+ * `runAgentStep`, which stays step-agnostic (spec .ai/specs/2026-08-21-structured-review-targeted-
+ * spec-edits.md).
+ *
+ * `specPath`, when known, is `RunRecord.declaredSpecPath` (`store.ts:291`) — the concrete path the
+ * `spec` step itself declared on an earlier turn via `CEZ:SPEC_PATH=` (`applyTurnMarkers`,
+ * `run.ts:4969-4970`). It is NOT guaranteed to be set — measured on this task's own run, it isn't —
+ * so the `undefined` branch below is the case to design for, not an edge case.
+ */
+export function specRevisionFeedback(report: string, specPath?: string): string {
+  const locate = specPath
+    ? `Changes were requested for the spec at \`${specPath}\`.`
+    : [
+        'Changes were requested for the spec. This run never recorded its path, so before doing',
+        "anything else: find the existing file from the change list's own FILE: line(s) below, then",
+        "`ls .ai/specs/` or `git status` if a path doesn't resolve from your working directory. A",
+        'repo can have more than one `.ai/specs/` directory (for example a worktree plus the main',
+        "checkout) — if a path doesn't exist relative to your cwd, that means look elsewhere, not",
+        'that it needs to be created. Never write a second copy of the spec under a new path.',
+      ].join('\n');
+  return [
+    locate,
+    'Open the EXISTING file and apply each item below as a TARGETED EDIT to the section it names —',
+    'Read, then Edit (old_string → new_string), the same rule FILE_WRITE_RECIPE already gave you.',
+    'Do NOT re-emit or rewrite the whole file — no `cat > … <<EOF`, no full-file `Write` — unless',
+    'the notes below themselves say the changes touch most of the document and call for a',
+    'structural rewrite, or unless the items below, TAKEN TOGETHER, change most of the file — judge',
+    'by how much of the file changes, exactly as FILE_WRITE_RECIPE already told you. Rewriting the',
+    'file to fix three sections is the failure; rewriting it because the list genuinely touches',
+    'nearly every section is not. Every section the notes below do not name must come out',
+    'byte-identical.',
+    '',
+    'The requested changes:',
+    '',
+    report,
+  ].join('\n');
+}
+
+/**
  * Where a chain picks back up (spec 2026-08-20, P1/P2) — the first definition step that has
  * not reached a terminal state, plus the interrupted session to reattach to when there is one
  * and it is safe. In-memory only: it rides in `pendingJobs` alongside the revived workflow and
@@ -1013,6 +1054,12 @@ export class RunManager {
    *  unset flag must leave the agent's environment untouched, and two extra empty keys are not
    *  untouched.
    *
+   *  **Corrected 2026-08-22:** the zero-config env is no longer "exactly the three keys" —
+   *  `NODE_ENV` below is a fourth, unconditional one. It is not gated by any flag, so it does not
+   *  touch the byte-identity invariant this paragraph cites (that invariant is about flag-gated
+   *  features going untouched when their flag is off); it is simply always present now, the same
+   *  way `TMPDIR`/`TEMP`/`TMP` always are.
+   *
    *  The empty-string spelling above is not the precedent it looks like, because the two cases
    *  differ in where the decision lives. `generateFollowups` is a PER-RUN boolean that flips
    *  inside one process whose `process.env` never changes, so omitting the key really would let
@@ -1041,6 +1088,11 @@ export class RunManager {
       CEZ_HANDOFF_FILE: handoffPath(this.dataDir, runId),
       CEZ_TASK_ID: runId,
       CEZ_TODOS_FILE: generateFollowups ? todosPath(this.dataDir) : '',
+      // `NODE_ENV=production` makes npm's own tooling (ci, test runners) install/resolve the
+      // production build of everything, which is never what an agent-driven `npm ci`/`npm test`
+      // wants (AGENTS.md trap 1). Unconditional, not gated by any CEZ_* flag: every agent-spawned
+      // command gets a sane default, the same way TMPDIR below always does.
+      NODE_ENV: '',
       ...(knowledge.enabled
         ? {
             CEZ_KB_ROOTS: knowledge.summary ? knowledge.summary.roots.map((r) => r.path).join(':') : '',
@@ -3967,10 +4019,13 @@ export class RunManager {
             // `pending` a line later anyway (the slice is inclusive of `from`), but the step-end
             // event the rail reads must not call a working reviewer a failure.
             this.finishStep(runId, step.id, 'done', undefined, emit);
+            const reviewFeedback = report ?? 'The reviewer asked for changes but left no report.';
             i = loopBackTo(
               i,
               step,
-              report ?? 'The reviewer asked for changes but left no report.',
+              step.onFail?.retry === 'spec'
+                ? specRevisionFeedback(reviewFeedback, this.store.getRun(runId)?.declaredSpecPath)
+                : reviewFeedback,
               `spec review asked for changes — reworking from "${step.onFail.retry}" (revision ${used + 1}/${step.onFail.max})`,
             );
             continue;
@@ -4000,7 +4055,9 @@ export class RunManager {
               i = loopBackTo(
                 i,
                 step,
-                `A reviewer requested changes to the spec:\n\n${outcome.notes}`,
+                step.onFail?.retry === 'spec'
+                  ? specRevisionFeedback(outcome.notes, this.store.getRun(runId)?.declaredSpecPath)
+                  : `A reviewer requested changes to "${step.onFail?.retry ?? step.id}":\n\n${outcome.notes}`,
                 `changes requested — reworking from "${step.onFail?.retry}" (revision ${used + 1}/${step.onFail?.max})`,
               );
               continue;
@@ -4329,10 +4386,19 @@ export class RunManager {
     if (outcome.kind === 'approved') {
       this.store.updateStep(runId, pending.stepId, { status: 'done', finishedAt: new Date().toISOString() });
     }
+    let changesFeedback: string | undefined;
+    if (outcome.kind === 'changes') {
+      const def = await this.reviveWorkflow(run);
+      const target = def?.steps.find((s) => s.id === pending.stepId);
+      changesFeedback =
+        target?.onFail?.retry === 'spec'
+          ? specRevisionFeedback(outcome.notes, pending.specPath)
+          : `A reviewer requested changes to "${target?.onFail?.retry ?? pending.stepId}":\n\n${outcome.notes}`;
+    }
     await this.reenterChain(
       this.store.getRun(runId) ?? run,
       outcome.kind === 'approved' ? 'approved' : 'changes requested',
-      outcome.kind === 'changes' ? { feedback: outcome.notes, resetTo: pending.stepId } : {},
+      outcome.kind === 'changes' ? { feedback: changesFeedback, resetTo: pending.stepId } : {},
     );
     return { ok: true };
   }
@@ -4397,7 +4463,7 @@ export class RunManager {
     let userPrompt = resumeFrom?.prompt ?? applyTemplate(step.prompt ?? '{{task}}', input.task);
     if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
     if (checkFailure) {
-      userPrompt += `\n\nA verification command failed after the previous attempt. Fix the cause. Failing output:\n\n${checkFailure}`;
+      userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
     }
     if (images?.length) {
       emit({

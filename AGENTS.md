@@ -278,6 +278,33 @@ env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm ci \
   && env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm test
 ```
 
+**Corrected 2026-08-22 (`2026-08-21-npm-test-gate-environment-scrub.md`): only root `npm test`
+scrubs itself — not all three commands `.ai/agentic.config.json` lists, and not all five it
+actually has.** `.ai/agentic.config.json`'s `validation.commands` lists **five** entries
+(`typecheck`, `test`, `test:unit`, `build`, `test:package`); of those, `npm test` (`vitest run`)
+is the only one any part of this fix reaches. `packages/web/vitest.config.ts` sets
+`test.env.NODE_ENV = ''` (closes trap 1 for the `web` project, immediately — no redeploy) and
+`packages/cezar/vitest.setup.ts` unsets every ambient `CEZ_*` except
+`CEZ_HANDOFF_FILE`/`CEZ_TASK_ID` and repoints `TMPDIR`/`TMP`/`TEMP` at a fresh directory under
+real `/tmp` before any suite runs — but that `setupFiles` entry is wired into the `server`
+project only (`packages/cezar/vitest.config.ts:13`), so this closes traps 2 and 4 for `server`
+specifically, not for `web`/`api-client` (no live failure observed there today; see the spec's
+Risks section — there is simply no scrub there either). `run.ts`'s `agentEnv()` additionally sets
+`NODE_ENV: ''` in every agent-spawned process's env — a durable fix that reaches trap 1's *other*
+victim, `npm ci` under `NODE_ENV=production` (§1's "worse than a missing module" case above), but
+only once `cezar.service` is redeployed and restarted; until then, `npm ci` itself is still
+exactly as documented in point 1. **`npm run test:unit` and `npm run test:package` are
+unaffected by any of this** — both are `node --test` scripts (`packages/cezar/package.json`),
+neither loads `vitest.setup.ts` or any `vitest.config.ts`, so the recipe above still applies to
+them in full. The recipe also still applies to any invocation none of the above covers — `npm ci`
+before the next redeploy, and any non-vitest tooling. A single-file `vitest run` is now covered
+(it loads the same project config and `setupFiles` as the full run) and no longer needs it. Trap
+3 (the C18 host-speed budget) is unaffected either way; it was never an environment leak.
+`design-guardian.test.ts`/`vite-config.test.ts` (`node:` imports failing to resolve under the
+`web` project's `jsdom` environment) turned out to be a fifth, previously-undocumented failure,
+unrelated to any of the four traps — fixed with a `// @vitest-environment node` docblock in both
+files.
+
 1. **`NODE_ENV=production` makes `npm ci` install ZERO devDependencies.** cezar's own agent
    sessions run with it set, so a worktree installed under it has no vitest, no React and no
    testing-library in the tree at all. The symptom is not "missing module": it is
@@ -403,6 +430,12 @@ the race lives entirely inside the file's own helper and needs no competition fo
 One isolated pass proves nothing here; the original 3/3 was a small-n artifact of exactly the kind
 the sample-size note below warns about.
 
+**Second known live flake, as of 2026-08-22:** `auto-resume.test.ts` — same class as
+`add-project-dialog.test.tsx` above (genuine concurrency timing, not cross-file pollution): clean
+in isolation (22/22 across 3 re-runs, `2026-08-21-npm-test-gate-environment-scrub.md`) but an
+occasional single failure under the full `npm test` run's load. Not fixed — noted here so a red
+on that name is recognised rather than re-diagnosed from scratch.
+
 Two method notes, both learned the hard way here:
 
 - **Prove pollution by injecting it**, as above. A hypothesis about shared state is cheap to test
@@ -516,6 +549,35 @@ their sub-agents stay READ-ONLY and the orchestrating step writes every word. `i
 `run-tests`, `commit-push` and `deploy` deliberately do NOT — concurrent writers in one worktree
 corrupt each other, `run-tests` is `npm`-bound (617 of its 826 s), and git's index is one lock.
 `workflows/types.test.ts` asserts that absence as hard as it asserts the presence.
+
+**Changing part of a file that already exists: edit it, never re-emit it** (spec
+`.ai/specs/2026-08-21-edit-an-existing-file-never-re-emit-it.md`). Bypass permissions mode injects
+its own reminder to prefer `sed`/heredocs/short scripts over `Read`/`Edit`/`Write` — cezar does not
+own that instruction and cannot switch it off, so the only lever is a later, more specific
+paragraph in the step prompt (`FILE_WRITE_RECIPE`, `workflows/types.ts`, shipped in `spec`,
+`implement` and `document`). Measured on run `70f19253`: 360 tool calls, zero `Edit`, zero `Write`;
+its `spec` step wrote one 807-line document twice — 34,845 characters, then 48,618, of which
+20,550 were unchanged lines carried for nothing — and its `deploy` step wrote a 1,383-character
+`/tmp` script twice, byte-identical. An `Edit` costs the CHANGE; a heredoc costs the whole FILE, so
+the waste scales with the size of the file touched, not the size of the edit, without limit.
+
+The rule is deliberately conditional, not "never re-emit": when a rewrite genuinely touches most of
+a file, re-emitting it is correct and cheaper than dozens of anchored edits — the same `spec` step's
+81-hunk revision would have cost ~65,045 characters as edits against the 48,618 it spent rewriting,
+in 81 round trips instead of 1. Judge by how much of the file changes, not by whether it existed.
+
+Metered the same way as the rest of this section — no new event, just five more fields on
+`cez run stats`' `StepStats`:
+
+```bash
+cez run stats <runId> --json | grep -E 'toolInputChars|heredocChars|heredocFileWrites|heredocRewrites'
+```
+
+`heredocRewriteWasteChars` is the hard gate (**target near 0** — the unchanged payload a
+re-emission carried for nothing). `heredocRewrites` is a diagnostic only: it cannot tell a wasteful
+re-emission from a legitimate near-total rewrite, which is exactly why the gate is the waste in
+characters and not this count. `heredocFileWrites` is not a defect on its own — a new file is not
+the problem this measures.
 
 ## Related documents
 
