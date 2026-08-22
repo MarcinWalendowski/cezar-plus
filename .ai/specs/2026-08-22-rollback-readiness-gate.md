@@ -53,6 +53,41 @@ decision in this document, so no decision below is superseded.
 
 ---
 
+## Status log — 2026-08-22: §7's record obligations closed; QA Needed is the true remaining state
+
+§7 ("Record") asked for four things once the code landed. All four are now done:
+
+1. **This spec's own status log** — this entry.
+2. **The two stale-open notes in `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`**
+   (its "Status log — 2026-08-21" section and the acceptance-run paragraph naming `6497f002`) were
+   corrected in place with a `CORRECTED 2026-08-22` lead-in, original text kept below, citing
+   `2f91de4b` / `c31af208` and this spec by path.
+3. **`AGENTS.md:13`'s trailing trap sentence** was corrected the same way: the `--rollback=` argv
+   trap (todo `f97ddd39`) is still true and unchanged; the "a rollback never probes readiness"
+   half is marked `CORRECTED 2026-08-22` and points here.
+4. **The durable decision was written to the corpus** via `CEZ_KB_WRITE_FILE` (project scope, path
+   `cezar/rollback-readiness-gate`), citing `specs-594acc539b36` and superseding nothing — the
+   `6497f002`-is-open notes it corrects are marked in place at their own locations (items 2–3
+   above), not superseded wholesale.
+
+Also done in this pass: the doc-only edits that anchored this spec's line citations to the LANDED
+tree (commits `190cf588`, `73286864`) were pushed as `cez/f28edef5` and squash-merged to
+`origin/main` as PR #2 (`331d5875`) — `origin/main` now carries both the code fix (`2f91de4b`, via
+`c31af208`) and this document's landed-anchor table. Tracker: workspace todo `6497f002` (filed by
+the 2026-08-21 acceptance run, `startedTaskId` = this task) is marked `status: done`, context
+appended, in `/var/lib/cezar/loki-labs/cezar/.ai/cezar/todos.json` — the main checkout's store, not
+this worktree's own (a git worktree resolves its own `.ai/cezar/todos.json` by git toplevel, which
+is a different, task-scoped file; the tracker of record for a workspace todo is always the main
+checkout's).
+
+**What is still open, and why "QA Needed" — not "Done" — remains the accurate status:** Verification
+§5 (a real `systemd --user` rollback-onto-a-dead-release E2E on a scratch install) and §6 (one real
+rollback of the live service, success path) have not been run. Gates green proves the unit and
+integration behavior; it does not prove a real rollback on `prod-host` now fails closed. That
+runtime pass is separate work — record it as pending, do not round it up.
+
+---
+
 ## TLDR
 
 `runRollback` (`packages/cezar/src/server-install/deploy-strategy.ts:203-218`) flips the release
