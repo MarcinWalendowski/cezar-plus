@@ -137,6 +137,71 @@ describe('RunStore — context occupancy roll-up (spec 2026-08-19-context-usage-
   });
 });
 
+describe('RunStore — context window denominator (spec 2026-08-22-context-window-denominator-per-step)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('withdraws the guessed window once observed tokens exceed it, instead of showing 245k / 200k', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      title: 'metered task',
+      workflow: 'quick-task',
+      task: 'metered task',
+      model: 'opus',
+      steps: [{ id: 'review-spec', name: 'Review spec', kind: 'agent' }],
+    });
+    store.updateStep(run.id, 'review-spec', { iterations: 1, contextTokens: 245_000 });
+    expect(store.getRun(run.id)?.contextTokens).toBe(245_000);
+    expect(store.getRun(run.id)?.contextWindow).toBeUndefined();
+    expect(store.getRun(run.id)?.steps[0]?.contextWindow).toBeUndefined();
+  });
+
+  it('pairs the run-level window with the LATEST context step, never a newer step\'s different model', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      title: 'two-step task',
+      workflow: 'quick-task',
+      task: 'two-step task',
+      model: 'opus',
+      steps: [
+        { id: 'step-a', name: 'Step A', kind: 'agent' },
+        { id: 'step-b', name: 'Step B', kind: 'agent' },
+      ],
+    });
+    // Step A (opus) reports occupancy comfortably under its guessed window.
+    store.updateStep(run.id, 'step-a', { iterations: 1, contextTokens: 40_000 });
+    expect(store.getRun(run.id)).toMatchObject({ contextTokens: 40_000, contextWindow: 200_000 });
+    // Step B starts (a different model, via a fresh modelIdentity) but has not yet reported
+    // any contextTokens of its own.
+    store.updateRun(run.id, { modelIdentity: 'openai/gpt-5' });
+    store.updateStep(run.id, 'step-b', { iterations: 1 });
+    // The roll-up must still pair with step A's own window, not a fresh guess from step B's
+    // (unmodelled) identity — regression test for Defect B.
+    expect(store.getRun(run.id)).toMatchObject({ contextTokens: 40_000, contextWindow: 200_000 });
+  });
+
+  it('stores and returns an explicit contextWindow patch verbatim, even against the guess', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      title: 'codex task',
+      workflow: 'quick-task',
+      task: 'codex task',
+      model: 'gpt-5',
+      steps: [{ id: 'task', name: 'Do the task', kind: 'agent' }],
+    });
+    store.updateStep(run.id, 'task', { iterations: 1, contextTokens: 300_000, contextWindow: 400_000 });
+    expect(store.getRun(run.id)).toMatchObject({ contextTokens: 300_000, contextWindow: 400_000 });
+    expect(store.getRun(run.id)?.steps[0]).toMatchObject({ contextTokens: 300_000, contextWindow: 400_000 });
+  });
+});
+
 describe('RunStore — titleSummary + diffStat (#389)', () => {
   let dataDir: string;
 

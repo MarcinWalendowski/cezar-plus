@@ -74,6 +74,11 @@ export const stepStateSchema = z.object({
    *  `inputTokens` — it tracks "how full is the window now", not the running total (spec
    *  2026-08-19-context-usage-in-tasks-table). Absent until the first turn ends. */
   contextTokens: usageCounterSchema.optional(),
+  /** This step's own context-window max (spec 2026-08-22-context-window-denominator-per-step):
+   *  a real backend-reported figure when one exists (codex today), else the model-string
+   *  guess, else absent the moment this step's own `contextTokens` disproves that guess.
+   *  Paired 1:1 with `contextTokens` above — never recomputed from a different step's model. */
+  contextWindow: usageCounterSchema.optional(),
   usageInvocationsStarted: usageCounterSchema.optional(),
   usageInvocationsObserved: usageCounterSchema.optional(),
   usageTurnsStarted: usageCounterSchema.optional(),
@@ -316,8 +321,11 @@ export const runRecordSchema = z.object({
    *  (spec 2026-08-19-context-usage-in-tasks-table). Absent until the first turn ends. */
   contextTokens: usageCounterSchema.optional(),
   /** The model's maximum context window, the denominator in the cockpit's `45k / 200k`.
-   *  Derived from the model string (`contextWindowForModel`); absent for a runner/model
-   *  whose window we do not model, so the cell shows only the current figure. */
+   *  Superseded 2026-08-22 by 2026-08-22-context-window-denominator-per-step: sourced from
+   *  the same step's own `StepState.contextWindow` (a real report, else the model-string
+   *  guess, else withdrawn when that step's own tokens disprove it) rather than a fresh
+   *  independent guess — absent for a runner/model whose window we do not model, so the
+   *  cell shows only the current figure. */
   contextWindow: usageCounterSchema.optional(),
   costUsd: z.number().optional(),
   pullRequestUrl: z.string().optional(),

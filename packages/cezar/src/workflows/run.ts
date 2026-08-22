@@ -310,6 +310,12 @@ interface ActiveRun {
     observed: boolean;
     startedTurns: Set<string>;
     recordedTurns: Set<string>;
+    /** A real backend-reported context-window max for THIS invocation (today: codex's
+     *  `usage.updated`), scoped to the invocation because a fresh backend process may report a
+     *  different figure next time. Threaded as `reportedWindow` into every subsequent
+     *  `contextTokens`-bearing patch so it wins over the model-string guess (spec
+     *  2026-08-22-context-window-denominator-per-step). */
+    reportedContextWindow?: number;
   };
 }
 
@@ -5054,13 +5060,31 @@ export class RunManager {
       return;
     }
 
+    // A real backend-reported context-window max (today: codex's `thread/tokenUsage/updated`,
+    // mapped to `usage.contextWindow`) — persist it immediately so the record is current
+    // before the next tick, and cache it on the invocation so every later patch this
+    // invocation makes keeps carrying the real number instead of reverting to a guess (spec
+    // 2026-08-22-context-window-denominator-per-step).
+    if (event.type === 'usage.updated') {
+      if (Number.isFinite(event.usage.contextWindow) && (event.usage.contextWindow ?? 0) > 0) {
+        invocation.reportedContextWindow = event.usage.contextWindow;
+        this.persistUsageCheckpoint(runId, invocation.stepId, { contextWindow: event.usage.contextWindow });
+      }
+      return;
+    }
+
     // Live occupancy (per round-trip): overwrite the step's `contextTokens` as each model call
     // reports its prompt size, so the Context column climbs DURING a long turn rather than
     // jumping only at `turn.completed`. Overwrite-only — never touches the turn's token totals,
     // which `turn.completed` still owns (spec 2026-08-19, live-refresh follow-up).
     if (event.type === 'context.updated') {
       if (Number.isFinite(event.contextTokens) && event.contextTokens >= 0) {
-        this.persistUsageCheckpoint(runId, invocation.stepId, { contextTokens: event.contextTokens });
+        this.persistUsageCheckpoint(runId, invocation.stepId, {
+          contextTokens: event.contextTokens,
+          ...(invocation.reportedContextWindow !== undefined
+            ? { contextWindow: invocation.reportedContextWindow }
+            : {}),
+        });
       }
       return;
     }
@@ -5094,6 +5118,9 @@ export class RunManager {
       inputTokens: (step.inputTokens ?? 0) + input,
       outputTokens: (step.outputTokens ?? 0) + output,
       contextTokens,
+      ...(invocation.reportedContextWindow !== undefined
+        ? { contextWindow: invocation.reportedContextWindow }
+        : {}),
       usageTurnsRecorded: (step.usageTurnsRecorded ?? 0) + 1,
     });
   }

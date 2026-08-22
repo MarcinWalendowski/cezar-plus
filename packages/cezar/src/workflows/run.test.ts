@@ -164,6 +164,38 @@ describe('RunManager directional usage accounting', () => {
     expect(store.getRun(run.id)?.steps[0]?.inputTokens).toBeUndefined();
   });
 
+  it('persists a real reported contextWindow from usage.updated and keeps carrying it (spec 2026-08-22)', () => {
+    const { run, state, sink } = fixture();
+    internal.beginUsageInvocation(run.id, state, 'work');
+    internal.handleRunnerUiEvent(run.id, state, sink, {
+      type: 'usage.updated',
+      usage: { input: 0, output: 0, total: 0, contextWindow: 272_000 },
+    });
+    expect(store.getRun(run.id)?.steps[0]?.contextWindow).toBe(272_000);
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'turn.started', turnId: 'turn_1' });
+    // context.updated keeps carrying the same real window rather than reverting to a guess.
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'context.updated', contextTokens: 260_000 });
+    expect(store.getRun(run.id)?.steps[0]).toMatchObject({ contextTokens: 260_000, contextWindow: 272_000 });
+    internal.handleRunnerUiEvent(run.id, state, sink, {
+      type: 'turn.completed',
+      turnId: 'turn_1',
+      stopReason: 'end_turn',
+      usage: { input: 260_000, output: 500, total: 260_500 },
+      contextTokens: 260_000,
+    });
+    expect(store.getRun(run.id)?.steps[0]).toMatchObject({ contextTokens: 260_000, contextWindow: 272_000 });
+
+    // A fresh invocation resets the cached report: a new backend process may report a
+    // different figure, so nothing is carried over from the last one. This fixture's run has
+    // no `model` set, so with the report gone the patch falls through to an unmodelled guess
+    // (undefined) rather than keeping the stale 272_000.
+    internal.beginUsageInvocation(run.id, state, 'work');
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'turn.started', turnId: 'turn_2' });
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'context.updated', contextTokens: 10_000 });
+    expect(store.getRun(run.id)?.steps[0]).toMatchObject({ contextTokens: 10_000 });
+    expect(store.getRun(run.id)?.steps[0]?.contextWindow).toBeUndefined();
+  });
+
   it('falls back to the usage prompt sum for contextTokens when the event omits it', () => {
     const { run, state, sink } = fixture();
     internal.beginUsageInvocation(run.id, state, 'work');
