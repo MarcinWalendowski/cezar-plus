@@ -1,6 +1,6 @@
 # Every task records its author — user, API, or the agent session that spawned it
 
-**Status: IMPLEMENTED + DEPLOYED 2026-08-22 — Phases 1-4. Phase 5 not started (it was always
+**Status: IMPLEMENTED + DEPLOYED + VERIFIED 2026-08-22 — Phases 1-4. Phase 5 not started (it was always
 optional). Shipped as `5f8cfced` + `64394362`, fast-forwarded onto `main`, deployed to
 cockpit.example.com as release `20260822T122039Z-64394362` (rootless blue-green; both
 `.ai/deploy-targets.json` probes exit 0 — backend `live=64394362 == HEAD`, UI `serving
@@ -23,10 +23,29 @@ assets/index-3BBCV-iR.js == the built bundle`).**
   workspace and every registered project: 1 carries an author, 60 do not, and all 61 load. The
   additive-optional field does exactly what §Backward compatibility claims.
 
-**Still QA NEEDED, narrowly: §Verification steps 18-21 — the BROWSER check.** The Author column
-has never been looked at rendering. What is known is one step short of that: the served HTML names
-the built bundle, and that bundle contains `task-author-parent-link`. That is evidence the code
-shipped, not evidence the column reads well. Written in the `spec` step of the `spec-to-deploy` run for task
+**The BROWSER check (§Verification 18-20) has now been RUN and passed** — Playwright/Chromium on
+this box (`AGENTS.md` § Headless browser), against a throwaway cockpit seeded with one run of each
+author kind. Screenshot at the time of writing: `/tmp/qa-author-column.png`.
+
+- The `Author` header renders on the runs table, between `Ref` and `Workflow`.
+- All three kinds render as designed, in one table:
+  `[{kind: 'agent', via: 'cli-todo-add', text: '⤷ aaaaaaaa'}, {kind: 'user', via: 'composer',
+  text: 'Marcin'}, {kind: 'none', text: '—'}]`.
+- The agent cell is a real link to its parent — `href="/p/qa-cockpit/tasks/aaaaaaaa-1111-…"`,
+  resolved through `TaskLocationProvider` (divergence 1), not built from the child's own project.
+- Hovering it shows the full sentence: *"Started by an agent in task aaaaaaaa, session cb916c71
+  (step implement) via cezar todo add"* — the parent task AND the agent session, on screen.
+- Zero page errors.
+
+**Why a throwaway cockpit and not production:** cockpit.example.com sits behind Cloudflare Access,
+and the prod API answers `401` to an unauthenticated loopback client, so the SPA redirects to the
+Access sign-in and never renders a board. Driving the real cockpit needs credentials this task does
+not have and should not acquire. The fixture instance ran the SAME deployed bundle
+(`/opt/cezar/packages/cezar/dist`), on an isolated `HOME` and its own port, and was stopped
+afterwards.
+
+**Remaining unverified: §Verification 21 only** — the Author FILTER, which is divergence 3 and was
+never built. Filed as todo `2d53e16c`. Written in the `spec` step of the `spec-to-deploy` run for task
 `232ad6d4-58a5-421e-941f-5c24bd5a8452`; Phases 1-3 built in the `implement` step of the same run,
 Phase 4 after the owner confirmed the orphan-prune fix (`5ffa383c`) had landed.
 
