@@ -1,5 +1,28 @@
 # Fix per-project GitHub issue/PR links: `useProjectRepoBase` reads workspace `/health` instead of the project's own repo
 
+**Status: implemented and shipped 2026-08-22.** Commit `e38116cc` ("fix: resolve per-project
+GitHub repo instead of boot-only /health for issue/PR links"), pushed directly to `origin/main`
+(fast-forward `22c78934..e38116cc`; no branch protection on this repo, per standing ship
+authorization). All 5 phases landed together, 14 files changed. Gates green: root `npm run
+typecheck` exit 0 across all 4 packages; full `npm run test` 9780 passed / 2 failed / 1 skipped
+(9783) — the 2 failures (`catalog.test.ts`, `config-api.test.ts`) are pre-existing and unrelated,
+already filed as todos `72eba946`/`72129a4c`. One deviation from this spec's literal proposed
+code: `useProjectRepoBase()` uses its own `useQuery({ retryOnMount: false })` rather than calling
+`useProjects()` directly, because the spec's proposed code retry-looped forever against a
+permanently-erroring registry (broke `routes.test.tsx`); this also fixed a boot-fallback bug in
+the spec's proposed code where `effectiveId !== undefined` gated the `/health` fallback off
+exactly when both queries were still loading.
+
+**QA needed, not done:** the Phase 1 manual/e2e case (browsing ≥2 real projects on different
+GitHub repos to confirm the Issue/PR chip resolves into each project's own repo, not the boot
+project's) has not been run — flagged per this workspace's Definition of Done, not rounded up to
+done.
+
+Per Verification step 8: PRs `open-mercato/cezar#840`/`#864` (this spec's design source for the
+foreign-number guard) are **not** closed or superseded by this change — this account has
+`push:false, triage:false` on that upstream repo and cannot act on them. They remain independent,
+foreign-repo references; this repo's own foreign-number guard is a separate, reimplemented copy.
+
 ## TLDR
 
 The reported symptom ("Issues and PR link in UI are totally broken, because we are not open
@@ -16,8 +39,9 @@ network cost), keeping `/health` only as a narrow fallback for a boot project th
 not list. Phases 2–3 reimplement, against this repo, a guard whose design comes from
 `open-mercato/cezar` PRs #840/#864 — a separate upstream repository this workspace has read-only
 access to; their `CONFLICTING` state is against *that* repo's `main` and is irrelevant here, and
-this work neither lands nor closes anything there. Phase 4 removes the now-dead client-side
-remote parser. The wider multi-**forge** (GitHub+GitLab) rewrite tracked by issue #847 is
+this work neither lands nor closes anything there. Phase 4 keeps `githubRepoBase()` as a narrow
+boot-fallback parser (not a deletion — see Phase 4 below, which is authoritative over this
+sentence). The wider multi-**forge** (GitHub+GitLab) rewrite tracked by issue #847 is
 explicitly out of scope — it
 answers a different question (which forge) than this bug (which repo).
 
