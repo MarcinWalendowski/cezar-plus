@@ -35,11 +35,12 @@ describe('runReleaseDeploy', () => {
     host: ReleaseDeployHost;
     staged: string[];
     restarts: number;
+    probes: number;
     detached: string[][];
   }
 
   function recorder(overrides: Partial<ReleaseDeployHost> = {}): Recorder {
-    const rec: Recorder = { staged: [], restarts: 0, detached: [], host: {} as ReleaseDeployHost };
+    const rec: Recorder = { staged: [], restarts: 0, probes: 0, detached: [], host: {} as ReleaseDeployHost };
     rec.host = {
       async stage(_source, target) {
         mkdirSync(target, { recursive: true });
@@ -55,6 +56,10 @@ describe('runReleaseDeploy', () => {
         rec.restarts += 1;
       },
       async probeReady(): Promise<ProbeResult> {
+        return { ok: true };
+      },
+      async waitReady(): Promise<ProbeResult> {
+        rec.probes += 1;
         return { ok: true };
       },
       freeBytes: () => Number.POSITIVE_INFINITY,
@@ -179,6 +184,38 @@ describe('runReleaseDeploy', () => {
     expect(rec.staged).toEqual([]);
   });
 
+  it('reports a failed rollback readiness probe without rebuilding', async () => {
+    const box = migratedBox();
+    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, recorder().host);
+    const rec = recorder({ waitReady: async () => ({ ok: false, detail: 'boom' }) });
+
+    const result = await runReleaseDeploy({ ...box, env: {}, rollbackTo: '' }, rec.host);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('boom');
+    expect(result.outcome?.failedAt).toBe('readiness');
+    expect(rec.staged).toEqual([]);
+  });
+
+  it('restores and probes the pre-rollback release when the target is dead', async () => {
+    const box = migratedBox();
+    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, recorder().host);
+    const before = loadLedger(box.releasesDir).current;
+    let probes = 0;
+    const rec = recorder({
+      waitReady: async () => (++probes === 1 ? { ok: false, detail: 'dead target' } : { ok: true }),
+    });
+
+    const result = await runReleaseDeploy({ ...box, env: {}, rollbackTo: '' }, rec.host);
+
+    expect(result.ok).toBe(false);
+    expect(rec.restarts).toBe(2);
+    expect(loadLedger(box.releasesDir).current).toBe(before);
+    expect(result.outcome?.serving).toEqual({ releaseId: before, ready: true });
+  });
+
   it('refuses to stage when the disk is nearly full, before touching anything', async () => {
     const box = migratedBox();
     const rec = recorder({ freeBytes: () => 100 * 1024 * 1024 });
@@ -201,6 +238,7 @@ describe('runReleaseDeploy', () => {
     expect(result.ok).toBe(true);
     expect(loadLedger(box.releasesDir).current).toBe(first);
     expect(rec.restarts).toBe(1);
+    expect(rec.probes).toBe(1);
     // A rollback rebuilds nothing — it is a symlink rename, which is what makes it seconds.
     expect(rec.staged).toEqual([]);
   });

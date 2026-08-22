@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { runGatedDeploy, runRollback, type DeployEffects, type DeployEvent } from './deploy-strategy.ts';
-import { currentTarget, loadLedger, releaseDir, saveLedger } from './releases.ts';
+import { currentTarget, loadLedger, markHealthy, releaseDir, saveLedger } from './releases.ts';
 
 /**
  * P5 of `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`.
@@ -200,5 +200,122 @@ describe('explicit rollback', () => {
     const out = await runRollback({ releasesDir: h.releasesDir, linkPath: h.linkPath }, h.fx);
     expect(out.ok).toBe(false);
     expect(out.detail).toMatch(/no previous release/);
+  });
+});
+
+describe('explicit rollback readiness gate', () => {
+  it('flips, restarts, probes, records health and emits the measured success', async () => {
+    const order: string[] = [];
+    let h: ReturnType<typeof harness>;
+    h = harness({
+      restart: async () => {
+        if (currentTarget(h.linkPath) === releaseDir(h.releasesDir, 'r1')) order.push('flip');
+        order.push('restart');
+      },
+      probeReady: async () => { order.push('probe'); return { ok: true }; },
+    });
+    await seedCurrent(h, 'r1');
+    await seedCurrent(h, 'r2');
+    order.length = 0;
+    const originalLink = h.linkPath;
+
+    const out = await runRollback({ releasesDir: h.releasesDir, linkPath: originalLink }, h.fx);
+
+    expect(order).toEqual(['flip', 'restart', 'probe']);
+    expect(out).toMatchObject({ ok: true, operation: 'rollback', rolledBackTo: 'r1', serving: { releaseId: 'r1', ready: true } });
+    expect(loadLedger(h.releasesDir).releases.find((r) => r.id === 'r1')?.healthy).toBe(true);
+    expect(h.events.at(-1)).toMatchObject({ name: 'deploy.rollback', operation: 'rollback', ready: true });
+  });
+
+  it('returns readiness failure, records the dead target and never claims it is serving', async () => {
+    const h = harness({ probeReady: async () => ({ ok: false, detail: '/api/v1/ready answered 500' }) });
+    await seedCurrent(h, 'r1');
+    const out = await runRollback({ releasesDir: h.releasesDir, linkPath: h.linkPath, to: 'r1' }, h.fx);
+
+    expect(out).toMatchObject({ ok: false, failedAt: 'readiness', detail: '/api/v1/ready answered 500' });
+    expect(out.rolledBackTo).toBeUndefined();
+    expect(loadLedger(h.releasesDir).releases.find((r) => r.id === 'r1')?.healthy).toBe(false);
+    expect(h.events.at(-1)).toMatchObject({ name: 'deploy.rollback', operation: 'rollback', ready: false, failedAt: 'readiness' });
+  });
+
+  it('refuses an unknown target before changing the symlink or restarting', async () => {
+    const h = harness();
+    await seedCurrent(h, 'r1');
+    h.restart.mockClear();
+    const before = currentTarget(h.linkPath);
+
+    const out = await runRollback({ releasesDir: h.releasesDir, linkPath: h.linkPath, to: 'no-such-release' }, h.fx);
+
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/not in the ledger/);
+    expect(h.restart).not.toHaveBeenCalled();
+    expect(currentTarget(h.linkPath)).toBe(before);
+  });
+
+  it('restores the prior healthy release and probes it once when the target is dead', async () => {
+    let probes = 0;
+    const h = harness({ probeReady: async () => (++probes <= 2 ? { ok: true } : probes === 3 ? { ok: false, detail: 'dead target' } : { ok: true }) });
+    await seedCurrent(h, 'r1');
+    await seedCurrent(h, 'r2');
+    h.restart.mockClear();
+    h.events.length = 0;
+
+    const out = await runRollback({ releasesDir: h.releasesDir, linkPath: h.linkPath }, h.fx);
+
+    expect(out).toMatchObject({ ok: false, serving: { releaseId: 'r2', ready: true }, rolledBackTo: 'r2' });
+    expect(h.restart).toHaveBeenCalledTimes(2);
+    expect(currentTarget(h.linkPath)).toBe(releaseDir(h.releasesDir, 'r2'));
+    expect(h.events).toHaveLength(2);
+  });
+
+  it('does not restore a release already recorded unhealthy', async () => {
+    const h = harness();
+    await seedCurrent(h, 'r1');
+    await seedCurrent(h, 'r2');
+    let ledger = loadLedger(h.releasesDir);
+    ledger = markHealthy(ledger, 'r2', false);
+    saveLedger(h.releasesDir, ledger);
+    const probe = vi.fn(async () => ({ ok: false, detail: 'dead target' }));
+    h.restart.mockClear();
+
+    const out = await runRollback({ releasesDir: h.releasesDir, linkPath: h.linkPath }, { ...h.fx, probeReady: probe });
+
+    expect(out.serving).toEqual({ releaseId: 'r1', ready: false, detail: 'dead target' });
+    expect(h.restart).toHaveBeenCalledOnce();
+    expect(probe).toHaveBeenCalledOnce();
+  });
+
+  it('stops after both the target and restored release fail readiness', async () => {
+    const h = harness();
+    await seedCurrent(h, 'r1');
+    await seedCurrent(h, 'r2');
+    const probe = vi.fn(async () => ({ ok: false, detail: 'still dead' }));
+    h.restart.mockClear();
+
+    const out = await runRollback({ releasesDir: h.releasesDir, linkPath: h.linkPath }, { ...h.fx, probeReady: probe });
+
+    expect(out).toMatchObject({ ok: false, serving: { releaseId: 'r2', ready: false, detail: 'still dead' } });
+    expect(out.rolledBackTo).toBeUndefined();
+    expect(h.restart).toHaveBeenCalledTimes(2);
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a restoration restart failure without rejecting', async () => {
+    const h = harness();
+    await seedCurrent(h, 'r1');
+    await seedCurrent(h, 'r2');
+    let restarts = 0;
+    const restart = vi.fn(async () => { if (++restarts === 2) throw new Error('restart failed: job failed'); });
+
+    const promise = runRollback(
+      { releasesDir: h.releasesDir, linkPath: h.linkPath },
+      { ...h.fx, restart, probeReady: async () => ({ ok: false, detail: 'dead target' }) },
+    );
+
+    await expect(promise).resolves.toMatchObject({ ok: false, failedAt: 'readiness', serving: { ready: false } });
+    const out = await promise;
+    expect(out.serving?.detail).toContain('dead target');
+    expect(out.serving?.detail).toContain('restart failed: job failed');
+    expect(out.rolledBackTo).toBeUndefined();
   });
 });
