@@ -63,6 +63,7 @@ export const ORPHAN_TIMEOUT_MS = 30 * 60_000;
 export interface RunBrokerOptions {
   spoolDir: string;
   runId: string;
+  instanceId?: string;
   stepId?: string;
   backend: string;
   /** The backend CLI argv — `[bin, ...args]`. */
@@ -112,7 +113,7 @@ export function startRunBroker(opts: RunBrokerOptions): RunBrokerHandle {
 
   writeSpoolMeta(opts.spoolDir, {
     schema: 1,
-    protocol: BROKER_PROTOCOL,
+    protocol: opts.instanceId ? BROKER_PROTOCOL : 1,
     runId: opts.runId,
     stepId: opts.stepId,
     backend: opts.backend,
@@ -121,6 +122,7 @@ export function startRunBroker(opts: RunBrokerOptions): RunBrokerHandle {
     argv: opts.command,
     cwd: opts.cwd,
     startedAt: now(),
+    instanceId: opts.instanceId,
   });
 
   // The spool is append-only and never re-read by the broker, so a plain pipe is correct and
@@ -243,7 +245,13 @@ export function startRunBroker(opts: RunBrokerOptions): RunBrokerHandle {
       // Flush the tees before recording the exit: a server watching for `exit.json` must never
       // see it while output is still in flight, or it would stop reading early and lose the tail.
       const settle = (): void => {
-        writeSpoolExit(opts.spoolDir, { code, signal, exitedAt: now() });
+        writeSpoolExit(opts.spoolDir, {
+          code,
+          signal,
+          exitedAt: now(),
+          brokerPid: process.pid,
+          instanceId: opts.instanceId,
+        });
         server.close();
         rmSync(paths.ctl, { force: true });
         resolve({ code, signal });

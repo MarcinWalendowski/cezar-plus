@@ -1,7 +1,7 @@
 import { brokerRequest } from './broker-client.ts';
 import type { BrokerRequest } from './run-broker.ts';
 import type { AgentRunResult, AgentSession, ContentBlock } from './agent-runner.ts';
-import { readSpoolExit, readSpoolFrom, readSpoolMeta, spoolPaths, type SpoolExit } from './run-spool.ts';
+import { exitBelongsTo, isPidAlive, readSpoolExit, readSpoolFrom, readSpoolMeta, spoolPaths, type SpoolExit, type SpoolMeta } from './run-spool.ts';
 
 /**
  * `AgentSession` over a run broker (P4 of
@@ -45,6 +45,8 @@ export const PENDING_MAX_ATTEMPTS = 100;
 
 export interface BrokeredSessionOptions {
   spoolDir: string;
+  /** Immutable identity supplied by the launcher, or seeded from meta on re-attach. */
+  owner?: { instanceId?: string; brokerPid?: number };
   /** Byte offset to resume from — 0 for a fresh run, the persisted value when re-attaching. */
   startOffset?: number;
   /** Called for each complete NDJSON line, in order, exactly once. */
@@ -62,7 +64,7 @@ export interface BrokeredSessionOptions {
    * exact drift `AGENT_PROTOCOL.md`'s one-seam rule exists to prevent. The runner accumulates
    * while handling `onLine`, and this callback hands the totals back.
    */
-  buildResult?: () => AgentRunResult;
+  buildResult?: (exit: SpoolExit | null) => AgentRunResult;
   pollMs?: number;
   /**
    * Turn a user message into the exact line the backend expects on stdin.
@@ -120,6 +122,7 @@ export class BrokeredSession implements AgentSession {
   private readonly pending: BrokerRequest[] = [];
   private sending = false;
   private attempts = 0;
+  private lastMeta: SpoolMeta | null = null;
 
   constructor(opts: BrokeredSessionOptions) {
     this.opts = opts;
@@ -173,8 +176,16 @@ export class BrokeredSession implements AgentSession {
     // Before reading: a queued opening message is the reason there is anything to read at all.
     void this.pumpPending();
     this.drain();
+    const meta = readSpoolMeta(this.spoolDir);
+    if (meta) this.lastMeta = meta;
     const exit = readSpoolExit(this.spoolDir);
-    if (!exit) return;
+    if (!exit) {
+      if (this.lastMeta && !isPidAlive(this.lastMeta.pid)) {
+        this.failBrokerVanished(this.lastMeta);
+      }
+      return;
+    }
+    if (!this.exitBelongsToOwner(exit, meta)) return;
     // The broker writes exit.json strictly AFTER flushing its tees, so one final drain here is
     // guaranteed to see the whole transcript rather than racing the tail.
     this.drain();
@@ -192,10 +203,35 @@ export class BrokeredSession implements AgentSession {
       // A consumer defect in the terminal callback must not strand `result` unsettled.
     }
     try {
-      this.settle(this.opts.buildResult?.() ?? { text: '', toolCalls: [], tokensUsed: 0 });
+      this.settle(this.opts.buildResult?.(exit) ?? { text: '', toolCalls: [], tokensUsed: 0 });
     } catch (err) {
       this.failWith(err);
     }
+  }
+
+  private exitBelongsToOwner(exit: SpoolExit, meta: SpoolMeta | null): boolean {
+    const owner = this.opts.owner;
+    if (!owner) return true;
+    if (owner?.instanceId) return exit.instanceId === owner.instanceId;
+    if (owner?.brokerPid !== undefined) {
+      if (exit.brokerPid !== undefined) return exit.brokerPid === owner.brokerPid;
+      return meta !== null && meta.pid === owner.brokerPid && !isPidAlive(owner.brokerPid);
+    }
+    return exitBelongsTo(meta, exit);
+  }
+
+  private failBrokerVanished(meta: SpoolMeta): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.stdinOpen = false;
+    if (this.timer) clearInterval(this.timer);
+    try {
+      this.opts.onExit?.(null);
+    } catch {
+      // Terminal reporting must not mask the broker failure.
+    }
+    const instance = meta.instanceId ? ` (instance ${meta.instanceId})` : '';
+    this.failWith(new Error(`run broker ${meta.pid} died without recording an exit${instance}`));
   }
 
   /**
@@ -290,6 +326,6 @@ export class BrokeredSession implements AgentSession {
     if (this.closed) return;
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
-    this.settle(this.opts.buildResult?.() ?? { text: '', toolCalls: [], tokensUsed: 0 });
+    this.settle(this.opts.buildResult?.(null) ?? { text: '', toolCalls: [], tokensUsed: 0 });
   }
 }
