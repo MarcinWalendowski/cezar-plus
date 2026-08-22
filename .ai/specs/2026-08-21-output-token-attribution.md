@@ -1,6 +1,10 @@
 # A run's cost cannot be attributed — measure the thinking/text/tool-args split instead of guessing it
 
-**Status:** DRAFT, revision 12 — written against brief
+**Status: PARTIAL — Phases 1-4 implemented and shipped 2026-08-22** (commits `7ebaecd4`, `fbead776`
+on `origin/main`); **Phase 5 (a-c: a new comparable-shape run's measurement; d3: the third KB
+correction-in-place write) still pending** — see "Status log — 2026-08-22 (document step)" at the
+end of this file and follow-up todo `31ffff42-2a0f-4d51-821c-4618f02ec8e8`. The revision history
+below (DRAFT through revision 12) is preserved for the record: written against brief
 `.ai/specs/briefs/2026-08-22-output-token-attribution-revision4.md` (itself written against the
 original `.ai/specs/briefs/2026-08-21-output-token-attribution.md`); revised after an eighth review
 independently reproduced revision 8's headline numbers exactly (375,001 tokens / 11 turns / 8 step
@@ -2172,7 +2176,7 @@ later step, since it requires a NEW comparable-shape run after the D6/D7/D8 fixe
 | 2 — basic + calibrated `TokenBreakdown` | ~~partially superseded (D6)~~ **D6 landed 2026-08-22** | `runs/stats.ts`: `TokenBreakdown`/`TokenBreakdownMode`/`TranscriptResponse`/`Tokenize` types; `computeRunStats(runId, events, transcripts?, tokenize?)` (D3 seam); `parseTranscriptResponses` + the `~/.claude/projects/*/<sessionId>.jsonl` glob/join, `message.id` dedup (R4), `validSessionId` guard (D4) in `readRunStats` — all still correct; `tokenBreakdownOf` now computes the run-wide `tokenScaleFactor` and `calibratedNarrationTokens`/`calibratedToolArgTokens`/`calibratedThinkingTokens`/`calibratedMeasuredTokens`, and `withheldThinkingTokens`/`calibratedResidual` use the D6 formula (`bearingVisibleTokenized × tokenScaleFactor`) — `TranscriptResponse.visibleText` is now always defined (D6/D7 nit) |
 | 3 — `cez run stats` prints it | ~~needs D6 update~~ **D6 landed 2026-08-22** | `formatRunStats`'s breakdown table (unchanged, still the raw diagnostic figures) plus a new calibrated-headline annotation line (`calibrated narrate/think/tool-arg … (raw … × factor)`) and a per-step `calibratedResidual` line relabeled "fit diagnostic", never asserted against a tolerance |
 | 4 — reconciliation test | ~~needs D6/D7/D8 update~~ **D6/D7/D8/D12 landed 2026-08-22** | `stats.test.ts`'s Phase 4 describe block now asserts `HOLDOUT_TOLERANCE` (10%) on a messageId-sorted parity hold-out prediction of `tokenScaleFactor` (D7), not `RESIDUAL_TOLERANCE`; the fixture's pooled free-response set is extended from n=2 to n=8 (D8: `msg_free_2..4`/`msg_review_free_2..4` added, `msg_free_4`/`msg_review_free_4` carrying a deliberately non-proportional implied ratio), and `RECORDED_IMPLEMENT_FREE_GAP_PCT`/`RECORDED_REVIEW_FREE_GAP_PCT` are re-derived from the extended fixture (39.0/43.4, D12) rather than the stale 36.9/36.5 |
-| 5 — new-run verification (Phase 5a-d) | **pending** | needs commit → push → deploy, then a new `spec-to-deploy` run |
+| 5 — new-run verification (Phase 5a-d) | **d1/d2 done 2026-08-22 (document step); a-c and d3 pending** | d1/d2: two brief corrections landed this step (see Status log — document step). a-c/d3 need commit → push → deploy, then a NEW, separate `spec-to-deploy` run |
 
 **Baseline reproduction (Verification §8) — the shipped code, not hand arithmetic, run against
 `70f19253`'s real NDJSON + its still-present `~/.claude/projects/` transcripts. Left column is
@@ -2295,3 +2299,34 @@ against the cited 81.3 tok/s / R²=0.984, and write a dated addendum to KB entry
 figures. None of this blocks Phases 1/2's non-calibration parts (already shipped and correct); it
 is what acceptance criterion 3 (a real, non-tautological tolerance test) and criterion 4 (a NEW
 run's measurement, on the corrected scale) both still need.
+
+## Status log — 2026-08-22 (document step)
+
+**Phase 5d, writes (1) and (2) of 3 — executed now, ahead of Phase 5a-c, since D13 states they are
+unconditional on the new run (`70f19253` alone already refutes both figures).** Both corpus docs
+that carried a refuted thinking-share number now carry a dated `Corrected 2026-08-22` lead-in,
+original text left below unchanged, per `CLAUDE.md`'s correction-in-place rule:
+
+1. KB `specs-2c2d02c67406` (`.ai/specs/briefs/2026-08-21-output-token-attribution.md`, the "65.6%
+   residual" paragraph) — corrected in place, pointing at the shipped D6 measurement
+   (`withheldThinkingTokens` ~36.3%, `calibratedToolArgTokens` ~57.8%).
+2. KB `specs-a31bba3fd83e` (`.ai/specs/briefs/2026-08-22-output-token-attribution-revision4.md`,
+   the "39–63%" bullet) — same treatment.
+
+**Write (3) — `notion-cc6ebabb2ab4` — is deliberately NOT done in this step.** Phase 5d itself makes
+this one contingent on Phase 5b's confirm-vs-reopen decision rule, which needs a NEW comparable-shape
+run's own measured thinking share (Phase 5a-c) — no such run exists yet inside this chain (this is
+the `document` step; `deploy` is the next and last step of this chain, and Phase 5 explicitly
+requires launching a **separate** `spec-to-deploy` run *after* deploy, not the deploy step itself).
+Writing this addendum now, from `70f19253` alone, would be exactly the thing D10's own decision rule
+warns against — treating one run's result as generalized before the second data point exists.
+
+**Spec status: Phases 1-4 implemented and shipped (`7ebaecd4`, `fbead776`) — partial, not fully
+implemented.** Phase 5 (a-c: the new run + its three checks, and d3: the third KB write) remains
+outstanding and is **not achievable inside this task's remaining step**. Filed as a follow-up todo
+(see `cezar todo add` in this session) so it is not silently dropped when this chain reaches
+`deploy` and ends. Acceptance criteria 1-3 (breakdown measured from the stream, `cez run stats`
+prints it, criterion 3's tolerance asserted by `HOLDOUT_TOLERANCE`) are met by what shipped;
+criterion 4 (a NEW run confirming or refuting the thinking share, corpus corrected accordingly) is
+answered for `70f19253` itself (REFUTED, D10) but not yet for a second, independent run — that
+generalization check, and its resulting write (3) above, are what remains.

@@ -80,6 +80,18 @@ someone needs to re-derive the handoff's exact 307,118 / $32.53 figures from thi
 establish they came from a different run/subset) — right now the two totals disagree by 22%, and
 a test asserting "the fix dropped output by 40%" needs a trustworthy baseline first.**
 
+**Corrected 2026-08-22 (`.ai/specs/2026-08-21-output-token-attribution.md`, D6/D10, commit
+`fbead776`): the 65.6% chars÷4 residual above is REFUTED, not corroborated, by the shipped,
+consistently-scaled measurement.** The chars÷4 heuristic mixes scales — it estimates the
+"accounted for" categories in raw characters while the 375,001 total is real billed tokens — and
+that mismatch is exactly what made 65.6% land close to the handoff's 55–60% by coincidence, not
+agreement. The shipped `stats.ts` calibration (`tokenScaleFactor`, run-wide, fit against the run's
+own free responses) puts `withheldThinkingTokens` at **~36.3%** of `reportedTokens` on this same
+run, with `calibratedToolArgTokens` the larger category at **~57.8%** — the residual and the
+thinking/tool-args ordering this paragraph reported both come out wrong once the two sides of the
+subtraction are on the same scale. See the spec's Status log ("Baseline reproduction",
+Verification §8) for the full recomputation. Original text above left unchanged for the record.
+
 **3. A concrete, citable candidate for where the residual is actually going: `redacted_thinking`.**
 
 `claude-ui-mapper.ts:244` — `// Unknown block types (redacted_thinking, server_tool_use, …):

@@ -60,6 +60,16 @@ autosave (run finalize)"), and nothing since has touched either file (confirmed:
   `thinking: ""` (blank text) + a populated `signature` — Anthropic's shape for withheld-but-billed
   reasoning. Transcript-based calibration puts thinking at **39–63%** of output tokens (brackets
   both the handoff's 55–60% and the brief's own 65.6% chars÷4 figure).
+
+  **Corrected 2026-08-22 (`.ai/specs/2026-08-21-output-token-attribution.md`, D6/D10, commit
+  `fbead776`): the 39–63% range above is REFUTED, not bracketed, by the shipped, consistently-scaled
+  measurement.** That range came from a coarser transcript-classification pass; the shipped
+  `stats.ts` calibration (a run-wide `tokenScaleFactor` fit against the run's own free responses,
+  applied consistently to every category) measures `withheldThinkingTokens` at **~36.3%** of
+  `reportedTokens` on `70f19253` — below this range's low end — with `calibratedToolArgTokens` the
+  larger category at **~57.8%**, the opposite ordering of what a 39–63%-thinking reading implies.
+  See the spec's Status log ("Baseline reproduction", Verification §8) for the full derivation.
+  Original text above left unchanged for the record.
 - Designed a two-phase, complementary fix: **Phase 1** — tally raw content-block types
   (`text`/`thinking`/`tool_use`/`redacted_thinking`/`server_tool_use`/`other`) in `mapAssistant`
   (`claude-ui-mapper.ts:159-247`, the only place the raw block still exists before mapping/
