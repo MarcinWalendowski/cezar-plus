@@ -795,6 +795,30 @@ describe('global tasks page', () => {
     expect(document.querySelector('[data-slot="pr-chip"]')!.tagName).toBe('SPAN')
   })
 
+  it('renders no issue chip for a number the run’s own candidates prove is foreign', async () => {
+    // The foreign-number guard (design ported, read-only, from `open-mercato/cezar` #840 — see
+    // `.ai/specs/2026-08-22-github-issue-pr-links-multi-project.md`): a run whose issue number was
+    // scraped from another repository's transcript must not synthesize a link into THIS project's
+    // repo for that number.
+    stubFetch({
+      runs: [
+        {
+          ...RUNS[0]!,
+          pullRequestUrl: undefined,
+          referencedPullRequestUrl: undefined,
+          referencedIssueUrl: undefined,
+          markerRefs: undefined,
+          issueNumber: 475,
+          referencedIssueCandidates: ['https://github.com/open-mercato/cezar/issues/475'],
+        },
+      ],
+    })
+    renderPage()
+    await screen.findByText('Add checkout endpoint')
+
+    expect(document.querySelector('[data-slot="issue-chip"]')).toBeNull()
+  })
+
   it('paints chips from the INDEX, without waiting on a ref-status answer', async () => {
     // The statuses ride along with the rows that carry the references, so the chips are coloured
     // in the same paint as the table rather than a round trip later. `refStatus` is deliberately
