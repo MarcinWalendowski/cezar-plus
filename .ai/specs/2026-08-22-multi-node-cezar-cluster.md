@@ -2433,6 +2433,34 @@ invented; these are the names to use when one lands.
 > 4. Confirm the join code carries `https://cockpit.example.com` and not loopback.
 > 5. Only then does the Access service-token policy matter, and only then can the Mac join.
 >
+> ### Milestone B build status — 2026-08-23, in progress
+>
+> | piece | file | state |
+> |---|---|---|
+> | `hubSeq` allocator | `cluster/hub-seq.ts` | **done**, 17/17, 3 mutations red |
+> | hub applies an ops frame -> ack | `cluster/hub-ops.ts` | **done**, 8/8, 4 mutations red |
+> | replica fan-out planner | `cluster/replica-fanout.ts` | **done**, 11/11, 5 mutations red |
+> | durable per-`opId` verdict cache | `cluster/op-history.ts` | in flight |
+> | hub-side per-op apply (D9a verdict) | `cluster/hub-apply.ts` | in flight |
+> | spoke outbox flush + ack/replica wiring | `cluster/spoke-runtime.ts` | in flight |
+> | router wiring + watermarks | `cluster/hub-router.ts` | mine, next |
+>
+> **Two pieces were not in the original plan and were found while building**, both by an agent
+> pushing back on a brief rather than implementing it as written — worth noting because both are
+> load-bearing and neither is obvious from the spec text:
+> - **`op-history.ts`** — idempotence needs a DURABLE per-`opId` verdict cache, not a Map.
+> - **`hub-apply.ts`** — `hub-ops.ts` needs a PER-OP verdict, and the existing `applyHubReplica` is
+>   batch-shaped and computes corrections for a spoke against the hub's authority. The hub applying
+>   a spoke's op is the other direction. Reuse its mechanism (`withTodosLease`, `applyOpToRecord`,
+>   read-fresh-inside-the-lease), not its shape.
+>
+> **`welcome.resumeFrom` stays `[]` even after ops land, and the REASON changes.** Its comment
+> currently says there is no hub oplog to resume from. Ops replicating live does not change that:
+> the hub forwards NEW ops as they arrive and does not replay history on connect. Connect-time
+> replay from `oplog.ts#readOps` is a separate increment, so `[]` — "nothing to resume", not "you are
+> fully caught up" — remains the honest answer. Update the comment's reasoning when wiring, not the
+> value.
+>
 > ### Where the code stands
 >
 > Landed and green this session: hub-router, spoke-runtime, edge-auth (D23), the auth-wall seam
