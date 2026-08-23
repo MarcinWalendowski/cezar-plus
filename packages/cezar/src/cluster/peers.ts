@@ -187,9 +187,27 @@ export async function markNodeSeen(
  *  removal takes `enrollment.ts`'s `enroll-codes` write lease (`withEnrollCodesLease`), the SAME
  *  lease `redeemEnrollmentCode` holds while it writes a node's secret — `node-secrets.ts`'s module
  *  docblock is explicit that every writer of that file must share the one lease rather than each
- *  inventing its own lock, which could otherwise race the other. Only attempted when the roster edit
- *  actually found the node, so disabling an unknown id stays a cheap no-op rather than taking a lock
- *  for nothing. */
+ *  inventing its own lock, which could otherwise race the other.
+ *
+ *  **CORRECTED 2026-08-23, same day — the secret removal is now UNCONDITIONAL, never gated on the
+ *  roster edit having found the node.** It read *"only attempted when the roster edit actually
+ *  found the node, so disabling an unknown id stays a cheap no-op rather than taking a lock for
+ *  nothing"* — a reasonable-looking optimisation that was actually a security hole:
+ *  `redeemEnrollmentCode` could (until the same fix) mint and store a working secret for a node
+ *  that never got a roster row, and gating the removal on `found` meant `disableNode` returned
+ *  `false` for exactly that node and never called `removeNodeSecret` at all — so "revoking" it left
+ *  its credential valid and indefinitely usable. Revoking a credential can never depend on a roster
+ *  row existing; that is precisely the case where revocation matters most. `removeNodeSecret`
+ *  already returns `false` harmlessly for an absent entry (verified in this file's own test suite),
+ *  so calling it whether or not the roster edit found anything costs nothing on the common path and
+ *  closes the uncommon one.
+ *
+ *  **`found`'s MEANING is unchanged: it reports only whether the roster row existed.**
+ *  `DELETE /cluster/nodes/:nodeId` (a file this agent does not own) uses this return value to decide
+ *  a 404, and that HTTP contract is not touched here — only the WORK attempted changed, not what the
+ *  boolean means. The return value and the secret removal are now deliberately decoupled: one
+ *  answers "was there a roster row", the other always runs "make sure this id cannot authenticate
+ *  anymore". */
 export async function disableNode(nodeId: ClusterNodeId, options?: ClusterHomeOptions): Promise<boolean> {
   const now = nowIso(options);
   let found = false;
@@ -201,9 +219,7 @@ export async function disableNode(nodeId: ClusterNodeId, options?: ClusterHomeOp
     nodes[idx] = { ...nodes[idx]!, disabledAt: now };
     return { ...peers, nodes };
   }, options);
-  if (found) {
-    await withEnrollCodesLease(options, () => removeNodeSecret(nodeId, options));
-  }
+  await withEnrollCodesLease(options, () => removeNodeSecret(nodeId, options));
   return found;
 }
 

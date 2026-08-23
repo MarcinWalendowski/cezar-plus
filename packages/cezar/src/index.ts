@@ -63,10 +63,10 @@ import { registerAndAdoptProject, suppressBootRegistration } from './registered-
 // `cez cluster active` be a read an agent can make from inside a run (D19 rung 4).
 import { CLUSTER_PROTOCOL, type ClusterCorpusSubmitResponse } from '@loki-labs/better-cezar-contract';
 import { createEnrollmentCode, joinCluster, leaveCluster } from './cluster/enrollment.ts';
-import { loadNodeIdentity } from './cluster/node-identity.ts';
+import { ensureNodeIdentity, loadNodeIdentity, nodeIdentityPath } from './cluster/node-identity.ts';
 import { signedNodeRequestHeaders } from './cluster/node-auth.ts';
-import { disableNode, readPeers } from './cluster/peers.ts';
-import { createHttpReconcileTransport } from './cluster/reconcile-transport.ts';
+import { disableNode } from './cluster/peers.ts';
+import { resolveSpokeReconcileWiring } from './cluster/reconcile-wiring.ts';
 import { reconcileAll } from './cluster/reconcile.ts';
 import { readRemoteRuns } from './cluster/run-projection.ts';
 import { clusterEnabled } from './server/capabilities.ts';
@@ -1461,6 +1461,50 @@ async function runClusterCommand(args: string[]): Promise<number> {
 
   try {
     switch (sub) {
+      /**
+       * Mints THIS machine's hub identity — the step with no home before 2026-08-23, and the reason
+       * a real hub could never activate.
+       *
+       * `startClusterRuntime` refuses to arm anything without an identity on disk, deliberately: a
+       * server that self-mints on boot turns "someone restarted the process" into "this box is now a
+       * hub", and two boxes doing that quietly become two hubs with no shared roster. `enroll` does
+       * not mint one either — it writes a join CODE, and a code is not an identity. So on a fresh
+       * box every path led to the same "no cluster identity" warning with nothing to do about it:
+       * `ensureNodeIdentity({ role: 'hub' })` existed but was called only from tests, which is why
+       * a fully green loopback E2E proved nothing about a real hub starting.
+       *
+       * Making it an explicit operator command matches `enroll`/`join`: becoming a hub is a
+       * decision someone makes once, not a side effect of a restart.
+       *
+       * Idempotent, because `ensureNodeIdentity` reuses an existing `nodeId` — re-running this is
+       * safe and reports the same id. It refuses a ROLE CHANGE outright: a node already joined to a
+       * hub as a spoke holds that hub's URL and a secret the hub knows it by, and silently
+       * overwriting the role would strand both sides. Leave the cluster first.
+       */
+      case 'init': {
+        const existing = await loadNodeIdentity();
+        if (existing && existing.role !== 'hub') {
+          console.error(
+            `cez cluster init: this node is already a ${existing.role} of ${existing.hubUrl ?? 'a hub'}.`,
+          );
+          console.error('Run `cez cluster revoke --self` first if you really mean to make it a hub.');
+          return 1;
+        }
+        const identity = await ensureNodeIdentity({
+          role: 'hub',
+          ...(typeof values.name === 'string' ? { nodeName: values.name } : {}),
+        });
+        emit({ ok: true, nodeId: identity.nodeId, nodeName: identity.nodeName, role: identity.role }, () => [
+          `${existing ? 'already a hub' : 'hub identity created'}: ${identity.nodeId}`,
+          `name:     ${identity.nodeName}`,
+          `identity: ${nodeIdentityPath()}`,
+          '',
+          'Set CEZ_CLUSTER=1 and restart cezar so the link server attaches,',
+          'then run `cez cluster enroll` to mint a join code for the first node.',
+        ]);
+        return 0;
+      }
+
       case 'enroll': {
         const ttlSeconds = values.ttl === undefined ? undefined : Number(values.ttl);
         if (ttlSeconds !== undefined && !Number.isFinite(ttlSeconds)) {
@@ -1537,50 +1581,19 @@ async function runClusterCommand(args: string[]): Promise<number> {
         // `/append` — `cluster/reconcile-transport.ts#createHttpReconcileTransport`, signed with
         // D20's node principal. Runs FROM a spoke AGAINST its hub — the only direction addressable
         // at all (a spoke has no inbound address, Problem §7) — so this refuses outright on a hub
-        // and on a `--peer` that does not resolve to THIS node's own hub.
-        const peerNodeId = typeof values.peer === 'string' ? values.peer : await soleClusterPeer();
-        if (!peerNodeId) return 1;
-
-        const identity = await loadNodeIdentity();
-        if (!identity) {
-          console.error('cez cluster reconcile: this node has no cluster identity — run `cez cluster join <code>` first');
+        // and on a `--peer` that does not resolve to THIS node's own hub. The actual resolution
+        // (peer, identity, the three refusals, the hub check, `resolveLocalDataDir`, the HTTP
+        // transport) lives in `cluster/reconcile-wiring.ts#resolveSpokeReconcileWiring` — shared
+        // with the periodic reconcile the cluster runtime arms on server start, so the CLI and the
+        // timer can never disagree about which projects reconcile or which refusals apply.
+        const wiring = await resolveSpokeReconcileWiring({
+          peerNodeId: typeof values.peer === 'string' ? values.peer : undefined,
+        });
+        if (!wiring.ok) {
+          console.error(wiring.message);
           return 1;
         }
-        if (identity.role !== 'spoke' || !identity.hubUrl) {
-          console.error(
-            'cez cluster reconcile: this node IS the hub — reconcile dials OUT from a spoke to its hub, and a hub reconciling against a spoke is out of scope (D21); there is nothing to dial from here',
-          );
-          return 1;
-        }
-        if (!identity.secret) {
-          console.error(
-            'cez cluster reconcile: this node has no cluster secret on file — re-run `cez cluster join <code>` to re-enroll',
-          );
-          return 1;
-        }
-
-        const peers = await readPeers();
-        if (peers.nodes.find((node) => node.nodeId === peerNodeId)?.role !== 'hub') {
-          console.error(
-            `cez cluster reconcile: ${peerNodeId} is not this node's hub — reconcile only runs from a spoke against its own hub (reachable at ${identity.hubUrl})`,
-          );
-          return 1;
-        }
-
-        // `resolveLocalDataDir`: a confirmed pairing's `byNode[thisNodeId].projectId` → the
-        // workspace project registry's `root` (`ReconcileOptions`'s own doc, package 2.4's report).
-        // Built ONCE, synchronously, from THIS pass's own snapshot of `peers`/the registry — never
-        // re-read per project, so a pairing edited mid-run cannot make one project's resolution
-        // disagree with another's inside the same pass.
-        const config = await loadWorkspaceConfig();
-        const projectsById = new Map(config.projects.map((project) => [project.id, project]));
-        const localDataDirByProject = new Map<string, string>();
-        for (const pairing of peers.pairings) {
-          const member = pairing.byNode[identity.nodeId];
-          if (!member?.confirmedAt) continue;
-          const project = projectsById.get(member.projectId);
-          if (project) localDataDirByProject.set(pairing.projectKey, join(project.root, '.ai/cezar'));
-        }
+        const { peerNodeId } = wiring.options;
 
         // DRY RUN IS THE DEFAULT (D21: "the real merge is owner-gated … `--dry-run` is the default
         // posture"). `--apply` is the one way to opt into writing; `--dry-run` always forces a dry
@@ -1588,24 +1601,7 @@ async function runClusterCommand(args: string[]): Promise<number> {
         // than depending on flag ORDER.
         const dryRun = values['dry-run'] === true || values.apply !== true;
 
-        const reports = await reconcileAll({
-          dryRun,
-          peerNodeId,
-          resolveLocalDataDir: (projectKey) => {
-            const dataDir = localDataDirByProject.get(projectKey);
-            if (!dataDir) {
-              // `listProjects()` and this map are built from the SAME `peers` snapshot, so this is
-              // a wiring bug, not a caller mistake — named rather than a bare `undefined!` cast.
-              throw new Error(`cez cluster reconcile: no confirmed local project for "${projectKey}"`);
-            }
-            return dataDir;
-          },
-          remote: createHttpReconcileTransport({
-            nodeId: identity.nodeId,
-            secret: identity.secret,
-            hubUrl: identity.hubUrl,
-          }),
-        });
+        const reports = await reconcileAll({ dryRun, ...wiring.options });
 
         emit({ dryRun, peer: peerNodeId, reports }, () => {
           if (reports.length === 0) {
@@ -1661,6 +1657,7 @@ async function runClusterCommand(args: string[]): Promise<number> {
 
       default:
         console.error(`cez cluster: unknown subcommand "${sub}"`);
+        console.error('known: init, enroll, join, active, reconcile, revoke');
         console.error(CLUSTER_USAGE);
         return 1;
     }
@@ -1681,25 +1678,6 @@ function clusterHubUrl(): string {
   return state.domain ? `https://${state.domain}` : `http://127.0.0.1:${state.primaryPort}`;
 }
 
-/** `--peer` omitted: fall back to the one other node in the roster, and refuse rather than guess
- *  when there is none or more than one. Reconciling against the wrong peer writes another repo's
- *  backlog into this one, so this fails closed. */
-async function soleClusterPeer(): Promise<string | undefined> {
-  const self = await loadNodeIdentity();
-  const peers = await readPeers();
-  const others = peers.nodes.filter((node) => node.nodeId !== self?.nodeId && !node.disabledAt);
-  if (others.length === 1) return others[0]!.nodeId;
-  if (others.length === 0) {
-    console.error('cez cluster reconcile: no other node in the roster to reconcile against');
-    return undefined;
-  }
-  console.error(
-    `cez cluster reconcile: name the peer with --peer <nodeId> — the roster holds ${others.length}: ${others
-      .map((node) => node.nodeId)
-      .join(', ')}`,
-  );
-  return undefined;
-}
 
 // ---- `cez kb submit` — the spoke's one write path to the record ------------------------------
 
@@ -1911,7 +1889,59 @@ function firstLine(s: string): string {
   return line.length > 120 ? `${line.slice(0, 117)}…` : line;
 }
 
-main().catch((err: unknown) => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+// This module runs `main()` at load, unconditionally — so importing `index.ts` (e.g. to reach a
+// module-scope helper from a test) has always meant executing the real CLI dispatch against
+// whatever `process.argv` the importer happens to be running under.
+//
+// Deliberately NOT the usual `import.meta.url === pathToFileURL(process.argv[1]).href` "am I the
+// entry point" idiom: this binary ships THREE bin names (`cezar`/`cez`/`cezar-cli`, package.json
+// `bin`) that npm/npx install as symlinks into `node_modules/.bin` pointing at this same
+// `dist/index.js` — verified live in this repo (`node_modules/.bin/cezar` resolves to a real
+// symlink onto this package's own `dist/index.js`) — and a naive comparison FAILS for exactly
+// that shape: Node resolves `import.meta.url` through the symlink's realpath, but
+// `process.argv[1]` is the symlink path the OS was actually invoked with, so the two URLs never
+// match unless the entry is realpath-resolved first. Confirmed with a throwaway symlinked entry
+// point: the naive comparison reads `false` for a real symlinked invocation and `true` only after
+// `fs.realpathSync` on `argv[1]`. Even the corrected, realpath-based form still carries a
+// documented, unverified-here edge case on Windows — `import.meta.url` and a
+// `pathToFileURL(argv[1])` built independently can disagree on drive-letter casing — that a path
+// comparison can't fully rule out on every platform this package ships to.
+//
+// So the guard below is an explicit env opt-out instead — but NOT a `CEZ_*`-prefixed one, and
+// gated on two conditions, not one. Both choices exist because `CEZ_*` is not an inert namespace
+// in this codebase: `core/agent-env.ts#buildChildEnv` forwards every non-secret-shaped `CEZ_*`
+// host var into every spawned agent child by design (see that file's own doc comment — it is what
+// lets `CEZ_HOME`/`CEZ_KB`/etc. reach the tools that need them). A `CEZ_*`-prefixed test flag left
+// set in a shell, CI job, or service environment would therefore silently ride into every nested
+// `cez` invocation that process tree ever spawns, turning each into a successful-looking no-op —
+// exit 0, no output, nothing done. `CEZAR_TEST_SKIP_MAIN` deliberately does not start with `CEZ_`
+// (checked against `buildChildEnv`'s allowlist: neither its `CEZ_` prefix check nor any entry in
+// `BASE_ALLOW_NAMES`/`BASE_ALLOW_PREFIXES` matches it), so it is invisible to that passthrough
+// unless a caller explicitly lists it in `CEZ_ENV_PASSTHROUGH` — nobody would.
+//
+// The second condition, `process.env.VITEST`, is this repo's own existing signal for "this
+// process is a test run" (`paths.ts#assertCezarHomeWriteIsSandboxed`,
+// `server/open-in-terminal.ts#refuseSpawnUnderTest` both key off it the same way) — set
+// automatically by the test runner on every worker, never by a real install of this binary.
+// Requiring it too means an accidentally-exported `CEZAR_TEST_SKIP_MAIN=1` sitting in some
+// shell's rc file still does nothing outside an actual vitest process: both conditions holding at
+// once, outside a real test run, is not a realistic accident.
+//
+// Suppression is never silent even so: it writes a one-line notice to stderr naming the variable,
+// so a script or a human can never read "nothing happened, exit 0" as an ordinary successful run.
+// It deliberately leaves `process.exitCode` untouched rather than forcing it non-zero — the whole
+// point of this escape hatch is a side-effect-free import for a test, and forcing a failing exit
+// code would make every LEGITIMATE use of it (a test importing this module) look like the whole
+// worker failed unless that test remembered to reset `process.exitCode` afterward. The stderr
+// line alone already does the job this needs to do: turn a misuse of the flag from "silently
+// looks fine" into "visibly wrong" — not make it fail a check nothing is expected to run.
+if (process.env.VITEST && process.env.CEZAR_TEST_SKIP_MAIN === '1') {
+  console.error(
+    '[cez] main() skipped: CEZAR_TEST_SKIP_MAIN is set — test-only escape hatch, must never be set outside a test process',
+  );
+} else {
+  main().catch((err: unknown) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

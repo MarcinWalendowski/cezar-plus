@@ -206,15 +206,24 @@ export function relayTail(
  * Field names that are themselves a local-machine affordance, wherever they appear in the event
  * tree — the value is only ever meaningful ON the origin host (`workflows/run.ts`'s step state):
  * `sessionId` + `backend` is the exact pair "same-backend Continue" resumes a CLI session from,
- * `worktreePath`/`cwd`/`repoRoot` are filesystem locations, and `handoffPath` mirrors the literal
- * field name `handoff.ts`/`runs/store.ts` use for the per-run journal file. Dropped, not
- * redacted — the key itself is the affordance, there is no safe-to-keep partial value.
+ * `worktreePath`/`cwd`/`repoRoot` are filesystem locations, `spoolDir` is the local directory a
+ * detached broker's control socket is derived from (`core/run-spool.ts#controlSocketPath` builds
+ * the socket path FROM it) — a coordinate to reach a live process on the origin host, not just a
+ * location — and `handoffPath` mirrors the literal field name `handoff.ts`/`runs/store.ts` use
+ * for the per-run journal file. Dropped, not redacted — the key itself is the affordance, there
+ * is no safe-to-keep partial value.
+ *
+ * **CORRECTED 2026-08-23**: added `spoolDir`, found unlisted by
+ * `relay-affordance-inventory.test.ts`'s source-derived scan (`workflows/run.ts:4060`,
+ * `:4658`/`:4664`). Unambiguous addition — the key names an affordance regardless of what its
+ * value looks like, unlike `path` (see `LOCAL_PATH_RE` below, which is where that one is fixed).
  */
 const LOCAL_AFFORDANCE_KEYS = new Set([
   'worktreePath',
   'worktree',
   'cwd',
   'repoRoot',
+  'spoolDir',
   'sessionId',
   'backend',
   'profileId',
@@ -234,6 +243,24 @@ const LOCAL_AFFORDANCE_KEYS = new Set([
  * test cannot be generated from the type either, for the same reason. Inverting this is real work:
  * `RunEvent` has to stop being an index signature first.
  *
+ * **CORRECTED 2026-08-23**: the paragraph below claimed the residual was narrower than "any
+ * missed key" — limited to an opaque resume handle, because `stripDeep` redacts any *path-shaped*
+ * string regardless of key. `relay-affordance-inventory.test.ts`'s source-derived inventory found
+ * that claim wrong in a second way it did not anticipate: `spoolDir` and `PersistedAttachment.path`
+ * (`workflows/run.ts`) were both real, produced fields carrying path-shaped values that the OLD
+ * `LOCAL_PATH_RE` still missed, because it recognized only home-directory roots and this project's
+ * own production deploy roots (`prod-host` runs the checkout from `/opt/cezar`, state from
+ * `/var/lib/cezar`) are neither. Fixed two ways: `spoolDir` is now denylisted above (it names an
+ * affordance regardless of value shape), and `LOCAL_PATH_RE` now also recognizes `/opt/…`,
+ * `/var/…`, `/srv/…` (see its docblock) so `PersistedAttachment.path` — and any other absolute
+ * path a transcript happens to quote inline — is redacted by shape without needing `path` itself
+ * denylisted, which would have silently broken `FileDiff.path`/`ToolLocation.path`'s legitimate
+ * repo-relative use. The residual is narrower again now, but not closed: a deploy root outside
+ * the recognized set (home directories, and this project's known `/opt`, `/var`, `/srv` roots)
+ * still slips through unredacted, unlisted by key AND unmatched by pattern. The class to check
+ * for when adding a field is still an opaque resume handle (below), plus now: does this field's
+ * value carry an absolute path whose root might not be one `LOCAL_PATH_RE` recognizes.
+ *
  * **What the residual actually is, which is narrower than "any missed key":** `stripDeep` walks
  * every string anywhere in the tree and runs `scrubLocalPaths` over it, so a filesystem path is
  * redacted whether or not its key is listed here. The exposure is therefore limited to an event
@@ -247,14 +274,37 @@ const LOCAL_AFFORDANCE_KEYS = new Set([
  */
 
 /**
- * Absolute filesystem paths tied to a specific machine's home directory, the part of "absolute
- * paths" a key allowlist cannot catch — agent transcripts quote shell commands and tool
- * output/input verbatim, and either can carry a path inline. Deliberately narrow to recognizably
- * local roots (`/Users/…`, `/home/…`, `~/…`, a Windows drive letter, a WSL UNC root) rather than
+ * Absolute filesystem paths tied to a specific machine, the part of "absolute paths" a key
+ * denylist cannot catch — agent transcripts quote shell commands and tool output/input verbatim,
+ * and either can carry a path inline, under a field name this file has never seen. Recognizes
+ * home-directory roots (`/Users/…`, `/home/…`, `/root/…`, `~/…`, a Windows drive letter, a WSL
+ * UNC root) plus this project's own known deploy roots (`/opt/…`, `/var/…`, `/srv/…`) rather than
  * every leading slash, so a route like `/api/v1/cluster` or a markdown heading survives untouched.
+ *
+ * **CORRECTED 2026-08-23**: widened from home-directory roots only. The original text below
+ * ("deliberately narrow to recognizably local roots") was right about the intent but the root
+ * list was incomplete: `prod-host` — this project's own hub, the exact machine a foreign
+ * run gets relayed to and viewed from — runs its checkout from `/opt/cezar` and its state from
+ * `/var/lib/cezar` (both named in this workspace's deploy doctrine), and neither matched. That
+ * let `PersistedAttachment.path` (an absolute path under wherever this node's `.ai/cezar` data
+ * directory lives) go unredacted on precisely the deploy shape this cluster is being built for.
+ * Grepped the codebase for a legitimate non-filesystem use of `/opt`, `/var`, `/srv` as a leading
+ * path segment (an API route, a URL) before widening — found none; every hit was a real local
+ * path (`server-install/release-deploy.ts`'s deploy/log dirs, `macosx-ngrok.ts`'s binary path).
+ * This project's own API routes are all rooted at `/api/…`, which none of these three touch.
+ *
+ * The honest tradeoff: a wider regex also redacts legitimate prose that happens to mention
+ * `/var/…`/`/opt/…`/`/srv/…` (e.g. an agent discussing another server's layout in a tool
+ * result), and it still matches mid-string inside an unrelated URL that happens to contain one of
+ * these path segments — the same imprecision the original three roots already had (a URL
+ * containing `/Users/…` was never protected either). Accepted: this is a security boundary, and
+ * over-redacting prose is a far cheaper mistake than leaking a coordinate to the machine hosting
+ * this project's own hub. Still not closed — a deploy root outside this recognized set slips
+ * through both this regex and `LOCAL_AFFORDANCE_KEYS` untouched; see the correction note above
+ * `LOCAL_AFFORDANCE_KEYS` for the residual this leaves.
  */
 const LOCAL_PATH_RE =
-  /(?:\/Users\/[^\s'"]+|\/home\/[^\s'"]+|\/root\/[^\s'"]+|~\/[^\s'"]*|[A-Za-z]:\\[^\s'"]+|\\\\wsl\$\\[^\s'"]+)/g;
+  /(?:\/Users\/[^\s'"]+|\/home\/[^\s'"]+|\/root\/[^\s'"]+|\/opt\/[^\s'"]+|\/var\/[^\s'"]+|\/srv\/[^\s'"]+|~\/[^\s'"]*|[A-Za-z]:\\[^\s'"]+|\\\\wsl\$\\[^\s'"]+)/g;
 
 function scrubLocalPaths(text: string): string {
   return text.replace(LOCAL_PATH_RE, '[local path redacted]');

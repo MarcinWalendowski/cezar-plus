@@ -40,6 +40,7 @@ import {
   clusterProjectKeyParamSchema,
   clusterTodosAppendRequestSchema,
   type StoredClusterNode,
+  type StoredClusterNodeIdentity,
   type StoredClusterPairing,
 } from '@loki-labs/better-cezar-contract';
 import { clusterEnabled } from './capabilities.ts';
@@ -51,10 +52,14 @@ import {
   redeemEnrollmentCode,
   revokeEnrollmentCode,
 } from '../cluster/enrollment.ts';
+import { createHubFrameRouter } from '../cluster/hub-router.ts';
 import { acquireLease, releaseLease } from '../cluster/leases.ts';
+import { ClusterLinkClient } from '../cluster/link-client.ts';
+import { ClusterLinkServer, type UpgradeCapableServer } from '../cluster/link-server.ts';
 import { createNodeAuthMiddleware, getAuthenticatedClusterNode } from '../cluster/node-auth.ts';
-import { loadNodeIdentity } from '../cluster/node-identity.ts';
+import { clusterModeFromEnv, loadNodeIdentity, nodeIdentityPath } from '../cluster/node-identity.ts';
 import { lookupNodeSecret as lookupStoredNodeSecret } from '../cluster/node-secrets.ts';
+import { startSpokeRuntime } from '../cluster/spoke-runtime.ts';
 import { applyPairingAction, disableNode, readPeers, upsertNode } from '../cluster/peers.ts';
 import { readRemoteRuns } from '../cluster/run-projection.ts';
 import { loadServerState } from '../server-install/state.ts';
@@ -389,6 +394,55 @@ function todosDataDir(projectRoot: string): string {
   return join(projectRoot, '.ai/cezar');
 }
 
+/**
+ * D20's authenticated set, and the ONLY place it is named. Base paths relative to this router's
+ * own mount point (`/cluster/...` — no `/api/v1`, matching every other path constant in this
+ * file), one entry per family the module header's "D20" section names as node-authenticated:
+ * the corpus mirror, and the todos snapshot/backup/append trio. `/cluster/allocate` and
+ * `/cluster/leases` are hub-authenticated (`requireHub`) as well as node-authenticated — see the
+ * "CORRECTED 2026-08-23 (D22)" note above for why both gates apply to them.
+ *
+ * Two callers read this array and NEITHER hand-lists paths of its own, which is what makes them
+ * unable to disagree rather than merely consistent today:
+ *  - `createClusterRoutes` below `.use()`s `requireNodeAuth` on every entry (`base` and
+ *    `${base}/*`) in a loop over this exact array — the `.use()` targets are GENERATED from it,
+ *    not separately written and kept in sync by hand.
+ *  - `server.ts`'s cockpit auth wall calls `isNodeAuthenticatedClusterPath` (below) to decide
+ *    which `/api/v1/cluster/*` requests it lets past for `requireNodeAuth` to authenticate
+ *    instead of answering its own blanket 401. It does not duplicate the list or the matching
+ *    rule — it calls the same function this file's own `.use()` loop is built from.
+ *
+ * Adding a node-authenticated route means adding its base path here, in this one place. Nowhere
+ * else in this file or in `server.ts` may name one of these paths for either purpose.
+ */
+export const NODE_AUTHENTICATED_CLUSTER_BASE_PATHS = [
+  '/cluster/corpus',
+  '/cluster/todos',
+  '/cluster/allocate',
+  '/cluster/leases',
+] as const;
+
+/**
+ * True for `relativePath` (e.g. `/cluster/todos/workspace-root`, spelled the way this file's own
+ * `.use()` targets are — no `/api/v1` prefix) iff `requireNodeAuth` covers it: the base path
+ * itself, or anything nested under it.
+ *
+ * Matches Hono's own `X` + `X/*` wildcard semantics exactly — verified against the installed
+ * `hono@4.12.29` (a request to the bare base path, with no trailing segment, already reaches a
+ * `${base}/*`-registered middleware; the pairing below is defensive redundancy, not a second
+ * mechanism), never assumed: a `/`-bounded prefix test, so `/cluster/todos` matches but
+ * `/cluster/todosomething` does not — a bare `startsWith(base)` would wrongly admit the latter.
+ * `c.req.path` (what both this file and `server.ts`'s wall read) already excludes the query
+ * string and already has `..` segments resolved by the WHATWG `URL` parser `@hono/node-server`
+ * builds it from, so this needs no query-stripping or traversal-normalisation of its own — see
+ * `server.ts`'s call site for the one thing it still has to do, which is strip `V1_PREFIX`.
+ */
+export function isNodeAuthenticatedClusterPath(relativePath: string): boolean {
+  return NODE_AUTHENTICATED_CLUSTER_BASE_PATHS.some(
+    (base) => relativePath === base || relativePath.startsWith(`${base}/`),
+  );
+}
+
 export function createClusterRoutes(deps: ClusterRouteDeps) {
   const env = deps.env ?? process.env;
 
@@ -432,36 +486,39 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
     ...(deps.now ? { now: deps.now } : {}),
   });
 
-  return (
-    new Hono<ProjectApiEnv>()
-      // The gate, on explicit paths — see the module header for why never `use('*')`, and why the
-      // answer is 409 rather than the 404 an earlier draft of Verification 12 asked for.
-      .use('/cluster', requireCluster)
-      .use('/cluster/*', requireCluster)
-      // Hub-only, same mechanism and same explicit-path rule. Method-agnostic, which none of these
-      // paths minds — every route under them is hub-side by definition.
-      .use('/cluster/enroll', requireHub)
-      .use('/cluster/enroll/*', requireHub)
-      .use('/cluster/join', requireHub)
-      .use('/cluster/allocate/*', requireHub)
-      .use('/cluster/leases/*', requireHub)
-      // D20, after `requireCluster` so the flag wins first (off answers 409, never 401) — the
-      // corpus family (real content, scoped per node, D8a) plus `/cluster/todos/*` (D21's
-      // snapshot/backup/append trio — landed as this wildcard's own routes below, each further
-      // scoped to a confirmed pairing).
-      .use('/cluster/corpus', requireNodeAuth)
-      .use('/cluster/corpus/*', requireNodeAuth)
-      .use('/cluster/todos/*', requireNodeAuth)
-      // D20, added by this package: `requireHub` establishes ONLY that this server is a hub, never
-      // who is asking — `/cluster/allocate/:kind` and `/cluster/leases/*` need both, since they now
-      // attribute the allocation/lease to the caller (see the two handlers below, and the module
-      // header's D20 section for why this was held back before). Registered AFTER `requireHub`,
-      // same cheap-gate-first ordering the corpus/todos block above already follows relative to
-      // `requireCluster`: a request to a non-hub still gets `requireHub`'s 409 NOT_A_HUB rather than
-      // node-auth's 401, which is the more specific fact of the two.
-      .use('/cluster/allocate/*', requireNodeAuth)
-      .use('/cluster/leases/*', requireNodeAuth)
+  const app = new Hono<ProjectApiEnv>()
+    // The gate, on explicit paths — see the module header for why never `use('*')`, and why the
+    // answer is 409 rather than the 404 an earlier draft of Verification 12 asked for.
+    .use('/cluster', requireCluster)
+    .use('/cluster/*', requireCluster)
+    // Hub-only, same mechanism and same explicit-path rule. Method-agnostic, which none of these
+    // paths minds — every route under them is hub-side by definition.
+    .use('/cluster/enroll', requireHub)
+    .use('/cluster/enroll/*', requireHub)
+    .use('/cluster/join', requireHub)
+    .use('/cluster/allocate/*', requireHub)
+    .use('/cluster/leases/*', requireHub);
 
+  // D20, GENERATED from `NODE_AUTHENTICATED_CLUSTER_BASE_PATHS` above — that array's own doc
+  // explains why this loop is the ONLY place `requireNodeAuth` is `.use()`'d, and why
+  // `server.ts`'s cockpit wall cannot drift from this set. Broken out of the fluent chain above
+  // (rather than four more `.use()` lines) specifically so the registrations are generated,
+  // not hand-copied from the array beside it.
+  //
+  // Registered after `requireCluster` (flag wins first: off answers 409, never a node-auth 401)
+  // and after `requireHub` for `/cluster/allocate/*` and `/cluster/leases/*` — deliberately: a
+  // request to a non-hub still gets `requireHub`'s 409 NOT_A_HUB rather than node-auth's 401,
+  // the more specific fact of the two (unchanged from before this package). `.use()` returns
+  // `this` and does not touch the chain's inferred route schema (unlike `.get()`/`.post()`/etc,
+  // which is why the trap `requireHub`'s own doc warns about — a bare handler collapsing a
+  // route's schema — does not apply to a loop of `.use()` calls).
+  for (const base of NODE_AUTHENTICATED_CLUSTER_BASE_PATHS) {
+    app.use(base, requireNodeAuth);
+    app.use(`${base}/*`, requireNodeAuth);
+  }
+
+  return (
+    app
       // ---- roster ---------------------------------------------------------------------------
       .get('/cluster', async (c) => {
         const identity = await loadNodeIdentity({ env });
@@ -819,33 +876,146 @@ export interface ClusterRuntimeDeps {
   version: string;
   env?: NodeJS.ProcessEnv;
   warn?: (message: string) => void;
+  /**
+   * The `http.Server` `ClusterLinkServer.attach()`es to when this node is the hub — the same
+   * server `server/ws.ts`'s cockpit socket hub attaches to. **Required, not optional.** An optional
+   * field here would let a caller forget it and get a hub that starts up looking healthy and is
+   * silently unreachable over the link — exactly the class of failure the D20/D23/D24/D25
+   * corrections in the spec spent this whole session finding, the hard way, by measuring a running
+   * system rather than by a type catching it. `server/server.ts#startServer` is the only production
+   * caller and passes the real listening server once it exists; `createApp` has none to give,
+   * which is why this call lives in `startServer`, not `createApp` (package 1.5).
+   */
+  server: UpgradeCapableServer;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**
  * The ONE wiring line `server.ts` carries for this feature, beside the existing
- * `providerRuntimeAuth.watch` / `watchTodoAutostart` block — the single place the link
- * (`cluster/link-{client,server}.ts`, package 1.3), the periodic full reconcile
- * (`cluster/reconcile.ts#startPeriodicReconcile`, package 2.4) and the run-projection observer
- * (`cluster/run-projection.ts`, package 3.4) get attached. It lives here rather than in `server.ts`
- * so those packages fill a body in a file they can be given, instead of each editing the one file
+ * `providerRuntimeAuth.watch` / `watchTodoAutostart` block. It lives here rather than in
+ * `server.ts` so a package fills a body in a file it can be given, instead of editing the one file
  * twenty concurrent agents share (PLAN P3).
  *
  * **With `CEZ_CLUSTER` unset this returns immediately having armed nothing** — no timer, no socket,
  * no file under `~/.cezar/cluster` or `.ai/cezar/cluster` — which is the half of Verification 12
  * that neither a `capabilities` assertion nor a route probe can see.
  *
+ * **With the flag on, this is package 1.5's activation: it arms the node link, hub or spoke.** It
+ * deliberately does NOT arm the periodic full reconcile (`cluster/reconcile.ts#startPeriodicReconcile`)
+ * or the run-projection observer (`cluster/run-projection.ts`, package 3.4) — both are later
+ * increments. The reconcile timer in particular stays unarmed on purpose right now:
+ * `reconcile.ts#PeriodicReconcileOptions.run`'s own docblock names its production caller as a
+ * **non-dry-run** `reconcileAll`, which would perform the 110-row merge this whole design exists
+ * for automatically and unattended on first link — the one thing spec P9 gates on the owner being
+ * present. See `.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md` → "Found during
+ * implementation" for the open decision; arming it is a separate, deliberate step, not something
+ * that should ride in behind this one.
+ *
+ * **Hub vs spoke is decided from the PERSISTED identity (`loadNodeIdentity`), not from
+ * `clusterModeFromEnv(env)` directly.** The identity on disk is what actually carries the
+ * credential `ClusterLinkServer`/`ClusterLinkClient` sign and verify with, so it is the thing that
+ * determines which branch runs and with what secret; `clusterModeFromEnv(env)` is consulted only as
+ * a CROSS-CHECK against it. The two are written together at enrollment time
+ * (`enrollment.ts#joinCluster` → `ensureNodeIdentity`) and should never disagree in normal
+ * operation — a disagreement means the operator edited `CEZ_CLUSTER`/`CEZ_CLUSTER_HUB` without
+ * re-enrolling, or vice versa, which is a real misconfiguration. It gets a NAMED warning and arms
+ * nothing, the same "refuse rather than silently pick a side" posture D2 uses for an ambiguous
+ * project pairing — proceeding on a guess would run the wrong protocol against the wrong secret.
+ * **No identity on disk at all** is not that: it is the normal, honest starting state for a node
+ * that has never enrolled (a spoke gets one from `cezar cluster join <code>`), so it warns once and
+ * arms nothing without treating it as an error.
+ *
+ * `loadNodeIdentity` is the only asynchronous step this function takes. Once it resolves, every
+ * remaining check and the hub/spoke construction are synchronous, so the returned disposer needs
+ * exactly ONE `disposed` check — placed after that await, before anything is constructed — to
+ * cancel correctly even when called while identity is still loading: a `stop()` that raced the load
+ * must prevent the link from ever being armed, never leave a socket or a heartbeat timer behind for
+ * the caller to leak.
+ *
  * Returns the stop function, the disposal shape used throughout this codebase.
  */
 export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
   const env = deps.env ?? process.env;
+  const warn = deps.warn ?? ((message: string) => console.warn(message));
   if (!clusterEnabled(env)) return () => {};
-  // Reached only with the flag on. Nothing is armed yet: the link, the reconcile timer and the run
-  // projection are packages 1.3, 2.4 and 3.4 of
-  // `.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`. Said out loud rather than left as a
-  // silent no-op, because a cluster that is enabled and inert looks exactly like one that is
-  // working until somebody asks a second node a question.
-  (deps.warn ?? console.warn)(
-    'CEZ_CLUSTER=1: the cluster routes are served, but the node link and the periodic reconcile have not landed yet (plan packages 1.3 / 2.4) — no node will connect and nothing replicates.',
-  );
-  return () => {};
+
+  let disposed = false;
+  let teardown: (() => void) | undefined;
+
+  void (async () => {
+    let identity: StoredClusterNodeIdentity | undefined;
+    try {
+      identity = await loadNodeIdentity({ env, warn });
+    } catch (err) {
+      warn(`cluster: could not load this node's identity — arming nothing: ${errorMessage(err)}`);
+      return;
+    }
+    if (!identity) {
+      warn(
+        `CEZ_CLUSTER=1: this node has no cluster identity on disk yet (${nodeIdentityPath(env)} is ` +
+          'absent) — a spoke gets one from `cezar cluster join <code>`; arming nothing until it does.',
+      );
+      return;
+    }
+
+    const mode = clusterModeFromEnv(env);
+    if (!mode.enabled) return; // unreachable — `clusterEnabled` above reads the exact same env var
+
+    if (identity.role === 'hub') {
+      if (mode.role !== 'hub') {
+        warn(
+          `CEZ_CLUSTER: this node's identity says role "hub", but the environment says "${mode.role}" ` +
+            '(CEZ_CLUSTER_HUB is set) — refusing to guess which is right; arming nothing until they agree.',
+        );
+        return;
+      }
+      if (disposed) return; // stop() ran while identity was loading — never arm a link it cannot reach
+      const linkServer = new ClusterLinkServer({
+        identity,
+        onFrame: createHubFrameRouter({ identity, env, warn }),
+        warn,
+      });
+      linkServer.attach(deps.server);
+      teardown = () => void linkServer.close();
+      return;
+    }
+
+    // identity.role === 'spoke' — `clusterNodeRoleSchema` has no third value.
+    const hubUrl = identity.hubUrl;
+    if (!hubUrl) {
+      warn(
+        `cluster: this node's identity is a spoke with no hubUrl recorded (${nodeIdentityPath(env)} ` +
+          'is corrupt or was hand-edited) — arming nothing.',
+      );
+      return;
+    }
+    if (mode.role !== 'spoke' || mode.hubUrl !== hubUrl) {
+      const envSays = mode.role === 'spoke' ? `"${mode.hubUrl}"` : 'this node is the hub';
+      warn(
+        `CEZ_CLUSTER_HUB: this node was enrolled as a spoke of "${hubUrl}", but the environment says ` +
+          `${envSays} — refusing to guess which is right; arming nothing until they agree.`,
+      );
+      return;
+    }
+
+    if (disposed) return; // stop() ran while identity was loading — never arm a link it cannot reach
+    const linkClient = new ClusterLinkClient({ identity, hubUrl, version: deps.version, warn });
+    linkClient.start();
+    const stopHeartbeat = startSpokeRuntime({ link: linkClient, env, warn });
+    teardown = () => {
+      stopHeartbeat();
+      void linkClient.stop();
+    };
+  })().catch((err: unknown) => {
+    warn(`cluster: activation failed unexpectedly: ${errorMessage(err)}`);
+  });
+
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    teardown?.();
+  };
 }

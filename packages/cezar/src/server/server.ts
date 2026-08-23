@@ -27,7 +27,7 @@ import { currentRelease, runtimeInfo, type RuntimeInfo } from './runtime-info.ts
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
-import { createClusterRoutes, startClusterRuntime } from './cluster-routes.ts';
+import { createClusterRoutes, isNodeAuthenticatedClusterPath, startClusterRuntime } from './cluster-routes.ts';
 import { createWorkspaceReportsRoutes } from './workspace-reports-routes.ts';
 import { createNotesRoutes } from './notes-routes.ts';
 import {
@@ -1631,13 +1631,8 @@ export function createApp(deps: ServerDeps) {
   }
   contexts.onContextBuilt((ctx) => watchReopenRequests(reopenWatchProject(ctx)));
 
-  // The cluster's one wiring line (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, PLAN 1.5).
-  // Everything it attaches — the node link, the periodic full reconcile, the foreign-run
-  // projection — lives behind `startClusterRuntime` in `server/cluster-routes.ts` so the packages
-  // that fill those in edit a file they own rather than this one (PLAN P3). With `CEZ_CLUSTER`
-  // unset it returns immediately having armed nothing: no timer, no socket, no file under
-  // `~/.cezar/cluster` (spec Verification 12).
-  startClusterRuntime({ version: deps.version });
+  // The cluster's one wiring line moved to `startServer` below (PLAN 1.5's activation) — it needs
+  // the real `http.Server` to attach the node link to, which does not exist yet here in `createApp`.
 
   const app = new Hono();
 
@@ -1849,6 +1844,25 @@ export function createApp(deps: ServerDeps) {
   // stays the deliberate trade: one cast per reader against breaking ~30 callers' annotations.
   // (This comment previously said "No handler reads `c.get('principal')` yet"; corrected
   // 2026-08-07 at the repair stage, since four handlers below now do.)
+  //
+  // D20 exemption (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`): a request under
+  // `${V1_PREFIX}/cluster/*` on one of `cluster-routes.ts`'s node-authenticated prefixes carries
+  // no cockpit session — it is a SPOKE authenticating itself to the hub, and a spoke has no
+  // cockpit session to have. Left ungated, this middleware answered 401 before `requireNodeAuth`
+  // in `createClusterRoutes` ever ran, which meant the D20 mechanism could never fire in any real
+  // deployment (every one sets `CEZ_AUTH`) — measured on production: `GET /api/v1/cluster`
+  // answered 401 identically to an ordinary authed route, with no distinguishing reason. This
+  // check reads `isNodeAuthenticatedClusterPath`, the SAME function `createClusterRoutes` derives
+  // its `.use(base, requireNodeAuth)` registrations from — see that array's own doc in
+  // `cluster-routes.ts` for why the two cannot drift apart. It is deliberately narrower than
+  // `/cluster/*`: the roster (`GET /cluster`), `/cluster/enroll*` (mints enrollment codes) and
+  // `/cluster/join` stay behind THIS wall, cockpit-session-only — they are operator actions taken
+  // at a human's own browser, and admitting them here would expose enrollment-code minting to the
+  // open internet with no session required at all.
+  function isNodeAuthenticatedClusterRequest(path: string): boolean {
+    if (!path.startsWith(V1_PREFIX)) return false;
+    return isNodeAuthenticatedClusterPath(path.slice(V1_PREFIX.length));
+  }
   app.use('/api/*', async (c, next) => {
     if (c.req.path === `${V1_PREFIX}/health`) return next();
     // `/ready` joins the exemption for a concrete operational reason (P5 of
@@ -1862,6 +1876,12 @@ export function createApp(deps: ServerDeps) {
     // release id and a list of booleans, which is the shape `/health` already publishes to the
     // whole internet.
     if (c.req.path === `${V1_PREFIX}/ready`) return next();
+    // See the doc comment above this middleware's registration for what this is and why it is
+    // safe to let past with no cockpit principal: `requireNodeAuth` (D20), wired onto the
+    // identical path set in `createClusterRoutes`, is what actually authenticates the request
+    // from here — this branch only decides which requests get handed to it instead of the
+    // cockpit's own 401.
+    if (isNodeAuthenticatedClusterRequest(c.req.path)) return next();
     const principalContext = c as unknown as Context<{ Variables: { principal: Principal } }>;
     // `resolveAuthProvider`, not `resolveCapabilities(...).auth`: which provider a deployment
     // requires is a server-side policy, not a capability the cockpit is told about, and it is
@@ -7300,6 +7320,17 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   });
   server.once('close', () => { unsubscribe(); automationScheduler.stop(); backupScheduler.stop(); });
   socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost, deps.sessionResolver));
+  // The cluster's one wiring line (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, PLAN 1.5).
+  // Lives here, not in `createApp`, because `ClusterLinkServer.attach()` needs the real, listening
+  // `http.Server` this function just built — `createApp` has none to give. Everything this arms —
+  // the node link, hub or spoke — lives behind `startClusterRuntime` in `server/cluster-routes.ts`
+  // so the package that fills it in edits a file it owns rather than this one (PLAN P3). With
+  // `CEZ_CLUSTER` unset it returns immediately having armed nothing: no timer, no socket, no file
+  // under `~/.cezar/cluster` (spec Verification 12). With it set but this node never enrolled, it
+  // warns and arms nothing too — see that function's own doc for why that is the honest state
+  // rather than an error, and for why the hub/spoke branch is decided from the identity on disk
+  // rather than from the environment directly.
+  startClusterRuntime({ version: deps.version, server });
   // The one listener that destroys an upgrade nobody owns (ws.ts#attachUpgradeFallback).
   //
   // `CLUSTER_LINK_PATH` is listed only when `CEZ_CLUSTER` is on, and that asymmetry is deliberate.

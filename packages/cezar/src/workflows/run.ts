@@ -3668,7 +3668,14 @@ export class RunManager {
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
         const saved = this.persistImage(runId, event.mediaType, event.data);
-        if (saved) this.store.appendEvent(runId, { type: 'image', stepId, ...saved });
+        // Explicit `name`/`url` projection, not `...saved` — `PersistedAttachment.path` is an
+        // absolute LOCAL filesystem path (`join(this.dataDir, 'runs', ...)`), which a relay to
+        // another cluster node must never carry (cluster/relay.ts, spec D9a). Verified (grep -a,
+        // since 4 .ts files in this repo misclassify as binary) that no dashboard/web consumer
+        // reads the wire event's `path` — only `url`. This also closes the leak class at the
+        // producer: an open spread would silently relay whatever `PersistedAttachment` grows
+        // next, an explicit projection cannot.
+        if (saved) this.store.appendEvent(runId, { type: 'image', stepId, name: saved.name, url: saved.url });
         return;
       }
       if (event.type === 'text') {
@@ -5181,7 +5188,9 @@ export class RunManager {
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
         const saved = this.persistImage(runId, event.mediaType, event.data);
-        if (saved) emit({ type: 'image', stepId: step.id, ...saved });
+        // Explicit `name`/`url` projection, not `...saved` — see the twin site above for why
+        // (`PersistedAttachment.path` is an absolute local path a relay must never carry).
+        if (saved) emit({ type: 'image', stepId: step.id, name: saved.name, url: saved.url });
         return;
       }
       if (event.type === 'text') {

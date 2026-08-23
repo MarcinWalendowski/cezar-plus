@@ -1288,6 +1288,164 @@ schema: `contract-parity.cluster.test.ts` compares the response schema against H
 `InferResponseType`, which cannot carry an index signature, so a passthrough response schema fails
 parity by construction.
 
+**D23 — The cluster's only transport is a Cloudflare tunnel, so every hub-bound request crosses a
+SECOND, independent gate — and the two must never be confused for each other.** Owner decision,
+2026-08-23: *"of course the whole cluster should be only on CF tunnels."* The hub does not listen on
+a public port and will not be given one — measured on the production hub, it binds `127.0.0.1:4321`
+and is published only through a token-managed tunnel fronted by Cloudflare Access.
+
+This makes two gates in series, and the ordering matters: **Access proves you may reach the port;
+the node principal (D20 for HTTP, D17 for the link) proves WHICH NODE you are.** Neither substitutes
+for the other. An edge credential is not identity — it is shared by every node that has one and says
+nothing about who is calling — so nothing in cezar may ever read it as authentication. Conversely a
+valid node principal is worthless if the request never arrives.
+
+Both spoke-to-hub paths needed the edge credential added, because neither could carry one: the link
+client (`cluster/link-client.ts`) dials with exactly the three node-auth headers, and the D21 HTTP
+transport (`cluster/reconcile-transport.ts`) signs with D20 and nothing else. Measured before
+building anything: `GET https://<hub host>/api/v1/health` answers **302 both with and without** the
+existing Access service token, because that token is scoped to the SSH application only. So the
+symptom of not doing this is not a clean refusal — it is a link that reconnects forever against a
+redirect, and a reconcile that fails with an HTML body.
+
+Consequences that fall out of it, and are why this is a decision rather than a config note:
+
+- The credential is resolved from the environment (`cluster/edge-auth.ts`) and injected, never
+  hard-coded, and **a half-configuration fails closed and loudly** — one variable set without the
+  other would otherwise present as an unexplained 403 loop.
+- **The node-auth headers win on any key collision.** An edge credential must never be able to
+  overwrite the node principal, or the outer gate could weaken the inner one.
+- The credential is never logged, and never sent anywhere but the configured hub.
+- **The two variables are treated ASYMMETRICALLY by cezar's own agent-env allowlist, and the
+  asymmetry is load-bearing.** Verified against the live regex 2026-08-23: `agent-env.ts` forwards
+  any `CEZ_*` name that is not secret-shaped, and `SECRET_NAME_RE` matches `SECRET`. So
+  `CEZ_CLUSTER_ACCESS_CLIENT_ID` **is** inherited by a spawned agent while
+  `CEZ_CLUSTER_ACCESS_CLIENT_SECRET` **is not**. An agent inside a run therefore sees exactly one
+  half of the credential — which is precisely the case the fail-closed rule above turns into a
+  named, visible error rather than an unauthenticated request. That is the design working, not a
+  bug: the loud failure is strictly better than a silent 403 loop. The operational consequence is
+  the same two-step rule the Cloudflare API token already follows on the box — to let an agent run
+  a cluster command, the SECRET must ALSO be named in `CEZ_ENV_PASSTHROUGH`, and skipping that
+  second step fails as "the agent cannot see it".
+- Access applications are keyed on hostname AND path, so the cluster family can be governed
+  separately from the cockpit's human policy. Both cluster paths (`/api/v1/cluster/link` and D21's
+  todo routes) already share the `/api/v1/cluster` prefix, so one application covers both and no new
+  tunnel route or DNS record is needed.
+
+**D24 — The node-authenticated cluster routes are exempt from the cockpit auth wall, and the
+exemption list and the node-auth list are ONE definition.** Found by measurement on the production
+hub while wiring D23, with a control:
+
+```
+GET /api/v1/health   -> 200                            (exempt)
+GET /api/v1/cluster  -> 401 {"error":"unauthenticated"}
+GET /api/v1/todos    -> 401                            (control: an ordinary authed route)
+```
+
+`server.ts`'s `app.use('/api/*', ...)` exempts only `/health` and `/ready`. Everything else requires
+a **cockpit principal** — which a spoke has no way to obtain. So the entire D20/D21 HTTP family
+answered 401 before `requireCluster`/`requireNodeAuth` ever ran, on every deployment with `CEZ_AUTH`
+set, which is every real one. The 401 rather than the flag-off 409 is the proof the wall fires first.
+The WebSocket link was never affected: an upgrade never reaches Hono.
+
+The exemption covers exactly the five node-authenticated prefixes — `/cluster/corpus`,
+`/cluster/corpus/*`, `/cluster/todos/*`, `/cluster/allocate/*`, `/cluster/leases/*` — and nothing
+else. `/cluster` (the roster), `/cluster/enroll*` and `/cluster/join` stay behind the wall: they are
+cockpit routes, and widening the exemption to `/cluster/*` would put enrollment-code minting on the
+open internet.
+
+**The structural half is the point.** This is one concept enforced at two places, and the drift
+direction that matters is catastrophic and silent: a path exempted from the wall but not covered by
+`requireNodeAuth` is completely unauthenticated. So both are derived from a single exported
+definition, and the guard test asserts every exempt path is node-authenticated AND that each refuses
+an uncredentialed request with one of node-auth's four named reasons — with a floor assertion, so an
+empty derived list cannot pass vacuously as "all clear".
+
+**D25 — Redeeming an enrollment code writes the roster row, in the same lease as the secret; and
+revoking a credential never depends on a roster row existing.** A defect found 2026-08-23 while
+wiring the link, not a new design: `enrollment.ts#redeemEnrollmentCode` minted a per-node secret and
+**wrote no roster row at all**. The only production `upsertNode` call in the package is
+`PATCH /cluster/nodes/:nodeId`, which begins `if (!current) return 404` and can therefore only update
+a row that already exists. Nothing created one.
+
+So a node that ran `cezar cluster join` successfully held a working credential and did not exist in
+`peers.json`. Four consequences chained off that one missing write, and the third is a security
+defect:
+
+1. Invisible — absent from the cockpit roster and from the `welcome` frame's roster.
+2. Unstampable — `markNodeSeen` deliberately never fabricates a row, so every heartbeat was dropped.
+3. **Revoke did not revoke.** `disableNode` removed the node's secret only `if (found)`, and `found`
+   is "the roster row existed". For a joined-but-unrostered node it returned `false` and
+   `removeNodeSecret` was never called, leaving a valid, indefinitely usable credential behind an
+   operator who believed they had revoked it.
+4. `PATCH /cluster/nodes/:nodeId` answered 404 for a node that genuinely joined.
+
+The invariant the fix establishes, which is what makes revocation reliable at all: **there is never a
+stored node secret without a corresponding roster row.** The roster write goes inside the existing
+`withEnrollCodesLease` — never a second lock, per `node-secrets.ts`'s own rule — ordered so the
+invariant holds at every crash point. Separately, `disableNode` now attempts secret removal
+unconditionally: revoking a credential must not be conditional on roster state, precisely because the
+case where the row is missing is the case where revocation matters most. Its return value still means
+"the roster row was found", because `DELETE /cluster/nodes/:nodeId` reads it for a 404 — the return
+value and the revocation are deliberately decoupled.
+
+**The residual this leaves, stated rather than quietly closed.** A node enrolled BEFORE this fix
+already has a stored secret and no roster row, on disk, right now. The unconditional removal above
+revokes it — but only if someone knows its node id, and D22 deliberately exports **no list-all
+accessor** for `node-secrets.json` (a "list every node's credential" call is an invitation to render
+it somewhere it should not be, which is exactly why it does not exist). So an orphaned secret from
+before this fix is revocable in principle and not enumerable in practice.
+
+Deliberately NOT fixed with a startup repair. The two candidate repairs are both worse than the
+residual: dropping every secret without a roster row would revoke every node that legitimately
+joined before the fix — which, pre-fix, is *all* of them — and synthesising a roster row from a
+secret would fabricate roster state from a credential, inverting the direction of trust the whole
+design rests on. The honest remedy for a real occurrence is to delete `node-secrets.json` and
+re-join, since redemption re-mints; that is a documented operator action, not a silent migration.
+
+Measured exposure, 2026-08-23: no cluster state exists on the production hub
+(`/var/lib/cezar/.cezar/cluster/` absent) and `CEZ_CLUSTER` is set in none of its environment
+files, so nothing here is affected. The feature is flag-gated and its link never worked, so the
+realistic population is nodes enrolled by someone experimenting with `cez cluster join` against a
+hub whose link could not have replicated anything anyway.
+
+**D26 — The link client bounds a handshake that gets no reply, because nothing else in `dial()`
+can.** Found 2026-08-23 while making package 1.5's activation E2E pass, and it is a production
+defect, not a test artifact.
+
+Every failure path in `ClusterLinkClient.dial()` is edge-triggered: `unexpected-response` on an HTTP
+refusal, `close` on a socket that opens and then dies. Both funnel into `disconnect()` ->
+`scheduleReconnect()`, and `ws.on('error', ...)` is deliberately a no-op because an error is always
+followed by a close. An upgrade that receives **no reply at all** fires none of the three. The client
+then sits in `connecting` **forever** — no error, no close, no retry — and `health()` reads
+`connecting`, not `offline`, so no caller can tell a permanently wedged link from a slow one. D15b's
+reconnect ladder cannot help: it is only ever entered from `disconnect()`.
+
+This is reachable, and not only at startup. This server's own `attachUpgradeFallback` deliberately
+does not destroy a socket whose path it recognizes but whose handler has not registered yet ("the
+hang IS the safer error"), which is exactly the window between `startServer` returning and
+`startClusterRuntime`'s `await loadNodeIdentity` resolving. A hub that redeploys often reopens that
+window on every restart; a spoke that dials into it never returns on its own. The symptom in the
+cockpit is the worst kind: a node that is simply, permanently, quietly absent.
+
+**Measured, not reasoned about.** Against a server that listens and registers a silent `upgrade`
+listener, a client with no `handshakeTimeout` emitted nothing whatsoever for 900ms and would have
+waited indefinitely; with one it emitted `error('Opening handshake has timed out')` then `close`. It
+is the `close`, not the error, that reaches `disconnect()`. Note the shape matters: a server that
+registers **no** `upgrade` listener does not reproduce this — Node answers through the ordinary
+request handler and the client gets `unexpected-response`, a path that already worked. A test built
+on that weaker server would pass against the bug.
+
+So `dial()` now passes `handshakeTimeout` (`DEFAULT_LINK_HANDSHAKE_TIMEOUT_MS`, overridable per
+client). Regression test: `cluster/link-client-handshake-wedge.test.ts`, which carries the silent-
+upgrade server, a negative control on the replying path, and fails
+`expected 'connecting' not to be 'connecting'` when the option is removed.
+
+**What this says about the other two link ends.** The same question — "what happens if the peer
+simply never answers?" — has not been asked of `ClusterLinkServer`'s read side or of the reconcile
+transport's `fetch` calls (which today pass no signal or timeout). Neither is known to be broken;
+both are unmeasured. Listed in the open questions rather than assumed fine.
+
 ### Rejected alternatives
 
 | rejected | why |
@@ -2045,6 +2203,57 @@ Integration (two servers in one vitest process, two `CEZ_HOME` temp dirs, linked
     that reports correctly and mutated anyway is the failure this catches, and a count assertion
     alone cannot see it.
 
+23. **Every auth-wall exemption is node-authenticated** (D24). The list of exempted paths is derived
+    from the single shared definition, not typed into the test, and for EACH one an uncredentialed
+    request is refused with one of node-auth's four named reasons rather than reaching a handler.
+    *Floor assertion:* the derived list is non-empty and of the expected length — an empty list
+    would otherwise satisfy every other assertion and read as "all clear". *Containment half:*
+    `/cluster` (roster), `/cluster/enroll` and `/cluster/join` still answer the wall's 401 with
+    `CEZ_AUTH` on and no principal. Mutation controls: adding a bogus path to the exempt list, and
+    removing one `requireNodeAuth` registration, must each redden this.
+
+    **Path normalisation verified independently, with the attack shape rather than the happy
+    path** (2026-08-23, against the installed Hono + `@hono/node-server`, by probing a live server
+    and printing what the middleware actually received):
+
+    ```
+    /api/v1/cluster/todos/../enroll     -> wall sees "/api/v1/cluster/enroll"
+    /api/v1/cluster/todos/%2e%2e/enroll -> wall sees "/api/v1/cluster/enroll"
+    /api/v1/cluster/todos?q=1           -> wall sees "/api/v1/cluster/todos"
+    /api/v1/cluster/todosomething       -> stays distinct
+    ```
+
+    This is the check that matters: the exemption is a prefix test, so the obvious attack is to
+    smuggle a cockpit-only path past it as `/cluster/todos/../enroll`. Both the raw and the
+    percent-encoded form are resolved by the WHATWG `URL` parser **before** the middleware runs, so
+    the smuggled request arrives as `/cluster/enroll`, misses the exempt set, and gets the wall's
+    401 — the correct answer. The query string is already excluded, and the `/`-bounded matcher is
+    what keeps `/cluster/todosomething` from matching `/cluster/todos` (a bare `startsWith` would
+    have admitted it).
+
+24. **A node secret never outlives its roster row, and revoke removes it either way** (D25). Redeem a
+    code with the real functions and no mocks: assert `lookupNodeSecret` returns a secret AND the
+    roster row exists; `disableNode`; assert `lookupNodeSecret` is now `undefined`. *The negative
+    control is mandatory and is the whole point:* this test must FAIL against the pre-fix behaviour.
+    A test that passes on both sides is not testing the defect. Also assert a re-join after a revoke
+    clears `disabledAt`, so a deliberately re-enrolled node comes back usable.
+
+25. **The edge credential is additive and cannot weaken node auth** (D23). Three halves. *No-op:*
+    with no edge variables set, the dial headers and the fetch headers are EXACTLY what they are
+    today — this is the backward-compatibility guarantee for installed users and the most important
+    assertion in the group. *Precedence:* on a key collision the three node-auth headers win, so an
+    edge credential can never overwrite the node principal. *Fail-closed:* exactly one of the two
+    variables set is a named, visible error, never a silent fallback to unauthenticated — the
+    alternative symptom is a 403 reconnect loop with no explanation. Plus: the secret never appears
+    in anything emitted, mutation-checked so the assertion cannot pass vacuously.
+
+26. **Presence is a statement about now, and the disposer really disposes.** Two negative controls
+    on the spoke heartbeat that a "does not throw" test cannot give: after disposing, advance the
+    clock a long way and assert the send count did not move (an empty disposer passes the naive
+    test); and across an offline stretch, assert exactly ONE beat is sent on reconnect, not a
+    backlog — a replayed stale beat would let a sleeping machine's old capacity claim arrive as
+    current, which is exactly what `markNodeSeen`'s `capacityAt` stamp exists to prevent.
+
 ### Runtime E2E — the real pair, and the gate that actually decides
 
 Gates green is necessary, not sufficient. Until these have run the work is **QA Needed**.
@@ -2127,6 +2336,255 @@ read-only mirror, which is a finding, not a metric), `cluster.dispatch_refused_s
 `cluster.join_failed` **carrying the named reason** — an access rejection and a stale code have
 different fixes and must not aggregate into one number. No analytics sink exists in this repo today — stated, not
 invented; these are the names to use when one lands.
+
+## What remains, and what it takes to get this Mac running work
+
+> **HANDOFF STATE — updated 2026-08-23, written to survive a session change.**
+> Read this block first; it is the current truth and is kept current after every action.
+>
+> ### THE BLOCKER — found AND FIXED 2026-08-23 (`cez cluster init`)
+>
+> **FIXED. Read the diagnosis below for why it mattered; the fix is at the end of this block.**
+>
+> **No production code path could mint a HUB identity, so `prod-host` could never activate as
+> a hub.** Verified by hand, not inferred:
+> - `ensureNodeIdentity({ role: 'hub' })` appears **only in test files** across all of
+>   `packages/cezar/src`. Checked with `grep -a` (four `.ts` files in this repo misclassify as
+>   binary, so a plain grep would under-report).
+> - The one production `ensureNodeIdentity` call is `enrollment.ts:539`, inside `joinCluster`, and
+>   it mints `role: 'spoke'`.
+> - `createEnrollmentCode` (`enrollment.ts:299`) writes only a code record. It never touches node
+>   identity.
+> - `cez cluster` has exactly five subcommands — `enroll`, `join`, `active`, `reconcile`, `revoke`.
+>   There is **no `init`**.
+> - `startClusterRuntime` refuses to arm without an identity on disk (deliberately: it warns and
+>   arms nothing rather than guessing).
+>
+> So the real sequence on the box is: set `CEZ_CLUSTER=1`, restart, get a "no cluster identity"
+> warning, arm nothing; run `cez cluster enroll`, get a code, still no hub identity; the link server
+> never attaches, so no spoke can connect with that code anyway.
+>
+> **Why every test passes anyway:** the activation E2E calls `ensureNodeIdentity({role:'hub'})`
+> directly, which is something no shipped code does. A green loopback round trip is therefore NOT
+> evidence that a real hub can start. This is the same shape as D24 — a suite that is entirely
+> correct about a path production cannot reach.
+>
+> **THE FIX, landed 2026-08-23: `cez cluster init`.** A sixth subcommand alongside
+> `enroll`/`join`/`active`/`reconcile`/`revoke`, in `index.ts`. It calls
+> `ensureNodeIdentity({ role: 'hub' })` and prints the node id and the identity path.
+>
+> - **Idempotent** — `ensureNodeIdentity` reuses an existing `nodeId`, so a re-run reports
+>   `already a hub` with the same id rather than minting a second one.
+> - **Refuses a role change** — a node already joined as a spoke holds its hub's URL and a secret
+>   that hub knows it by; silently overwriting the role strands both sides. It tells the operator to
+>   `cez cluster revoke --self` first.
+> - **Deliberately NOT self-minting in `startClusterRuntime`.** Arming a hub identity as a side
+>   effect of a process restart is how two boxes quietly become two hubs with no shared roster.
+>   Becoming a hub is a decision made once, which is exactly the idiom `enroll`/`join` already use.
+>
+> **Verified against the built binary, not just typechecked** (fresh `CEZ_HOME`, `CEZ_CLUSTER=1`):
+> 1. `cluster init` -> `hub identity created: 191046e2-…`, `cluster/node.json` written.
+> 2. re-run -> `already a hub: 191046e2-…`, same id.
+> 3. `cluster enroll` -> mints a real join code. **This is the step that returned nothing usable
+>    before**, and is the whole point of the fix.
+>
+> Note the whole `cez cluster` family is gated on `CEZ_CLUSTER=1`; without it every subcommand
+> (including `init`) exits with "clustering is off".
+>
+> **One operational trap the test surfaced:** the join code EMBEDS the hub URL, from
+> `clusterHubUrl()` — `CEZ_CLUSTER_HUB` / `CEZ_COCKPIT_URL` if set, else the installed server's
+> `domain` as `https://<domain>`, else `http://127.0.0.1:<port>`. A code minted where none of those
+> resolve to a publicly reachable name carries **loopback**, and the Mac cannot join with it. On the
+> box, confirm the code says `https://cockpit.example.com` before pasting it anywhere — do not
+> assume it.
+>
+> ### Where the code stands
+>
+> Landed and green this session: hub-router, spoke-runtime, edge-auth (D23), the auth-wall seam
+> (D24), enrollment roster row (D25), reconcile-wiring, the CLI entry guard, relay affordance fixes
+> (`spoolDir` + widened `LOCAL_PATH_RE` + producer-side `name`/`url` projection in `run.ts`), the
+> link activation wiring, and the handshake-wedge fix (D26).
+>
+> **Nothing is committed yet.** 28 files dirty, 13 untracked. Commit message drafted at
+> `<scratchpad>/commitmsg.txt`.
+>
+> ### Gate status — run gates on the BOX, never the Mac
+>
+> The Mac sits at load ~10 and produces timing flakes (`workspace-parallel`, `cluster-flag-off`
+> both flake there and both pass on the box). Method:
+> `git ls-files -co --exclude-standard` -> `rsync --files-from` to `/var/lib/cezar/gate-cluster/`
+> on `prod-host` -> `npm ci` -> `git init && commit` (required: `build:stamp` runs
+> `git rev-parse HEAD`) -> gates with `CEZ_VITEST_MAX_WORKERS=3`.
+>
+> **Verify the trees match before trusting a result.** This bit twice in one session: a file list
+> can be identical while contents differ. Compare a manifest —
+> `md5 -q $(cat files) | sort | md5 -q` on the Mac against
+> `md5sum $(cat files) | cut -d' ' -f1 | sort | md5sum` on the box.
+>
+> Last full box run on a proven-identical tree: typecheck 0, build 0, `test:unit` 44/44,
+> `test:package` 18/18, full suite in flight at time of writing. The previous complete run was
+> **10,820 passed / 2 failed / 3 skipped**, the two being C18 (the standing red — a CPU budget
+> calibrated on an M4 Max, fails identically at pristine HEAD, so N-1 of N IS green) and a stale
+> copy of the activation test since fixed.
+>
+> ### Standing constraints that are easy to get wrong
+>
+> - Push to **`origin` only, never `upstream`**. Never a bare `git push`.
+> - Shared checkout: **no `git stash`, `git checkout .`, `git reset --hard`, `git clean`** — other
+>   sessions have uncommitted work here. Compare against HEAD with `git show HEAD:<path>`.
+> - Write the box's corpus as `cezar`, never root. End any box session with
+>   `find /var/lib/cezar -not -user cezar | wc -l` (must be 0).
+> - cezar is **published with real users** (`@loki-labs/better-cezar` v0.10.0) — normal backward
+>   compatibility applies. The pre-launch waiver is scoped to `chat/` only.
+> - There is no lint or prettier config in this repo. `prettier --check` fails on untouched HEAD
+>   files; house style is hand-maintained single quotes.
+
+
+**Written 2026-08-23, after the session that landed D23/D24/D25 and the link.** Everything below was
+verified against the tree rather than recalled — every symbol named here was confirmed to exist at
+the path given, and every "no production caller" claim was measured as described below rather than
+remembered.
+
+### The state to hold in your head
+
+Almost every cluster module is **built and unit-tested in isolation, and connected to nothing.**
+That is not a criticism of the work — it is the shape the plan chose, so twenty packages could land
+in parallel without fighting over one file. But it means "the module exists and its tests are green"
+says nothing about whether the feature runs, and the last three defects found (D23, D24, D25) were
+all in the seams *between* modules, invisible from inside any of them.
+
+Milestone A changed that for the LINK itself — `hub-router` and `spoke-runtime` now have real
+callers. Nothing below does. Measured 2026-08-23 **after** activation landed, counting every
+non-test mention and then reading each one: production call sites outside the symbol's own module,
+where a docblock mention and a same-module self-call are not callers.
+
+| symbol | module | production callers |
+|---|---|---|
+| `placeRun` | `cluster/placement.ts` | **0** |
+| `eligibleCandidates` | `cluster/placement.ts` | **0** — one hit, `placeRun` in the same file |
+| `buildDispatch` | `cluster/dispatch.ts` | **0** |
+| `offerDispatch` | `cluster/dispatch.ts` | **0** — one hit, its own docblock |
+| `applyReplicaFrame` | `cluster/replica.ts` | **0** — one hit, a comment in `spoke-runtime.ts:20` |
+| `startRelay`, `relayTail` | `cluster/relay.ts` | **0** — all hits are its own module docblock |
+| `watchRunProjection` | `cluster/run-projection.ts` | **0** — one hit, a self re-arm at `:110` |
+
+### Milestone A — a LINKED node. *Landed 2026-08-23; unverified against a real second machine.*
+
+A node that enrolls, connects, and is visible: its heartbeat, capacity and repo drift reach the hub
+and the roster shows it. **This does not replicate state and does not run work.**
+
+- `cluster/hub-router.ts` — `hello`→`welcome`, `presence`→`markNodeSeen`. Built, 11 tests.
+- `cluster/spoke-runtime.ts` — presence heartbeat, dispatch decline, downlink handling. Built.
+- `cluster/edge-auth.ts` + both transports — D23. Built.
+- The auth-wall seam — D24. Built.
+- Enrollment writes the roster row — D25. Built.
+- **Activation** — landed. `startClusterRuntime` now takes a **required** `server:
+  UpgradeCapableServer` and is called from `server/server.ts` (~7324) rather than `createApp`,
+  because `ClusterLinkServer.attach()` needs a real listening server. It constructs
+  `ClusterLinkServer` + `createHubFrameRouter` on a hub (`cluster-routes.ts` ~976) and
+  `ClusterLinkClient` + `startSpokeRuntime` on a spoke (~1005). The `server` field is deliberately
+  non-optional: an optional one lets a caller forget it and get a hub that boots looking healthy and
+  is silently unreachable — the same failure shape as D23/D24/D25.
+
+### Milestone B — REPLICATED state. *Not built.*
+
+The ops chain. Nothing in it is connected, though several pieces exist:
+
+| piece | where | status |
+|---|---|---|
+| derive ops from local todo writes | `cluster/ops.ts#deriveTodoOps` | exists |
+| pack them into a frame | `cluster/ops.ts#packOpsFrame` | exists |
+| the outbox itself | `todos.ts` `pendingSince`/`pendingFields` | **derived, never flushed** — no loop sends it |
+| hub applies an ops frame | `cluster/hub-router.ts` `ops` case | **warns and returns `[]`** |
+| hub oplog append | `cluster/oplog.ts#appendOps` | exists, no caller |
+| **`hubSeq` allocation** | — | **does not exist anywhere** |
+| hub emits `ack` | — | **not built** (deliberately: never fake an ack) |
+| spoke applies an ack | `todos.ts` (~908–939) | **exists already** |
+| hub fans out `replica` | — | **not built** |
+| spoke applies `replica` | `cluster/replica.ts#applyReplicaFrame` | exists, **zero callers** |
+
+The genuinely missing designs, as opposed to missing wiring, are: **`hubSeq` allocation and
+persistence** (a monotonic per-scope counter that survives a hub restart — the hub blue-green
+deploys ~10×/day, so an in-memory counter is not an option), **per-node watermark tracking** so
+`welcome.resumeFrom` can stop being `[]`, and **outbox flush scheduling** (when to send, how to
+bound a burst, what to do when the link is down mid-flush).
+
+Note the ordering constraint that makes this harder than a queue: **D9a requires the claim op to be
+confirmed before the run starts.** A cross-node duplicate is two agents on two machines spending one
+subscription twice, so the claim is the one write that never applies optimistically. That path has
+to exist before dispatch is safe.
+
+### Milestone C — a WORKER that runs dispatched work. *Not built. This is the one the question is about.*
+
+**"Linked" and "worker" are different milestones, and Milestone A is not most of the way to C.**
+Today `spoke-runtime.ts` explicitly *declines* every dispatch — truthfully, with a real
+repo-freshness reading, which is the honest placeholder rather than the feature.
+
+To run one real task on this Mac, dispatched from the VPS hub:
+
+1. **Hub-side placement.** `placeRun`/`eligibleCandidates`/`headroom` are pure and complete; nothing
+   calls them. Needs a caller that picks a node when a run starts and decides hub-local vs remote.
+2. **Hub emits `dispatch`.** `buildDispatch` exists; the hub has no code that sends the frame.
+3. **Spoke accepts instead of declining.** `offerDispatch` and `dispatchRefusalReason` exist and are
+   the acceptance logic; `spoke-runtime.ts`'s decline path is where they slot in. `mayStartWithoutHub`
+   and `isCorpusStale` already encode when a node may proceed.
+4. **The spoke actually runs it** — worktree creation, the run pipeline, the broker. This is the
+   largest single item and touches `workflows/run.ts`, the second-largest file in the package at
+   6,545 lines (only `server/server.ts` is bigger, at 7,527).
+5. **The claim path (Milestone B) must exist first**, or two nodes can start the same todo.
+6. **Foreign-run visibility**, or you cannot see what your Mac is doing: `run-projection.ts` (0
+   callers) plus relay, below.
+7. **Corpus freshness (D8a)** — a node with a stale mirror must refuse rather than run against old
+   knowledge. Routes exist and are node-authenticated; the sweep is partial.
+
+**Honest estimate of order:** C is larger than A and B combined, and 4 is most of it.
+
+### Milestone D — WATCHING a foreign run. *Not built.*
+
+`startRelay`/`relayTail` exist with 0 callers. Needs the cockpit run view to drive the 0→1/1→0
+subscription, the hub to send `relay-request` downlink, and the spoke to answer with `relay` uplink
+(`hub-router.ts` currently warns on both). **Two real defects were found here 2026-08-23 and fixed
+before any of it ships** — see the D9 note above on `spoolDir` and the image-event spread.
+
+### The ops work, which is not code
+
+1. **Cloudflare Access must admit a machine.** The existing service token is scoped to the SSH
+   application and answers **302** against the cockpit hostname — verified, with and without it. A
+   service-token policy has to be added and its credential given to the spoke as
+   `CEZ_CLUSTER_ACCESS_CLIENT_ID` / `_SECRET`.
+2. **`CEZ_CLUSTER=1` on the hub.** Verified absent from every file in `/etc/cezar/` today, and there
+   is no `/var/lib/cezar/.cezar/cluster/` — the hub has never run with clustering on.
+3. **Deploy the build carrying all of the above**, then `cez cluster enroll` on the hub and
+   `cez cluster join <code>` on the Mac.
+4. **Remember the env asymmetry** (D23): `..._CLIENT_SECRET` matches `SECRET_NAME_RE` and is stripped
+   from every agent child env, while `..._CLIENT_ID` is not — so an agent sees half a credential and
+   hits `edge-auth.ts`'s fail-closed named error. For an agent to run a cluster command the secret
+   must ALSO be named in `CEZ_ENV_PASSTHROUGH`. Verified on the box 2026-08-23, that file today reads:
+
+   ```
+   CEZ_ENV_PASSTHROUGH=OP_SERVICE_ACCOUNT_TOKEN,CLOUDFLARE_API_TOKEN,CLOUDFLARE_ACCOUNT_ID
+   ```
+
+   `CEZ_CLUSTER_ACCESS_CLIENT_SECRET` has to be appended to it. Note this is only needed for an
+   AGENT to run cluster commands; the cezar server itself reads the service env directly and needs
+   only step 2.
+
+### Known open questions, carried rather than closed
+
+- **May the periodic reconcile write unattended?** `PeriodicReconcileOptions.run`'s docblock says the
+  production caller is a *non-dry-run* `reconcileAll`; D21 says the real merge stays owner-gated.
+  Both statements are live in the tree. The divergence in question is ~110 one-side-only rows, which
+  is exactly the class a non-dry-run pass merges. **Arming it is owner-gated.** The wiring now exists
+  (`cluster/reconcile-wiring.ts`), so this is a decision, not work. Whichever way it goes, correct the
+  losing statement in place.
+- **`authFailureId` / `provider`** in `server/provider-auth-runtime.ts` — classified `safe` in the
+  relay inventory, but a cross-node retry-proxy risk could not be ruled out. Worth a second look
+  before relay ships.
+- **Orphaned secrets** predating D25 are revocable but not enumerable — see D25's residual note.
+- **Does either other link end hang the same way D26 did?** `ClusterLinkServer`'s read side and the
+  reconcile transport's `fetch` calls carry no timeout or abort signal today. Neither is known to be
+  broken; both are simply unmeasured, and D26 is the reason to stop assuming. The cheap check is the
+  one that found D26: stand up a peer that accepts the connection and then says nothing at all.
 
 ## Non-goals
 

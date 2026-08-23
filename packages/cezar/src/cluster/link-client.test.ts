@@ -1,8 +1,9 @@
-import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocketServer, type WebSocket } from 'ws';
+import { ClusterEdgeAuthConfigError } from './edge-auth.ts';
 import {
   CLUSTER_PROTOCOL,
   type ClusterDownlinkFrame,
@@ -18,7 +19,10 @@ import {
 } from './link-client.ts';
 import {
   authenticateLinkUpgrade,
+  CLUSTER_LINK_NODE_HEADER,
+  CLUSTER_LINK_PRINCIPAL_HEADER,
   CLUSTER_LINK_REFUSE_REASON_HEADER,
+  CLUSTER_LINK_SIGNATURE_HEADER,
 } from './link-server.ts';
 
 /**
@@ -98,6 +102,11 @@ interface HubStub {
   send: (frame: ClusterDownlinkFrame) => void;
   closeClient: (code?: number) => void;
   connections: number;
+  /** Resolves with the headers of the NEXT upgrade request the hub receives — captured
+   *  unconditionally, BEFORE `authenticateLinkUpgrade` runs, so a test can inspect what actually
+   *  reached the wire even for a request the hub goes on to refuse (edge-auth precedence: a
+   *  tampered node-auth header must fail verification, not merely "not be captured"). */
+  nextUpgradeHeaders: () => Promise<IncomingHttpHeaders>;
 }
 
 const servers: Server[] = [];
@@ -124,8 +133,16 @@ async function bootHub(secretFor: (nodeId: string) => string | undefined = () =>
   let currentWs: WebSocket | undefined;
   const helloWaiters: Array<(v: { nodeId: string; frame: ClusterUplinkFrame }) => void> = [];
   const helloQueue: Array<{ nodeId: string; frame: ClusterUplinkFrame }> = [];
+  const headerWaiters: Array<(h: IncomingHttpHeaders) => void> = [];
+  const headerQueue: IncomingHttpHeaders[] = [];
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    // Captured unconditionally, before authentication — what actually reached the wire, whether
+    // or not the hub goes on to accept this particular request.
+    const headerWaiter = headerWaiters.shift();
+    if (headerWaiter) headerWaiter(req.headers);
+    else headerQueue.push(req.headers);
+
     void (async () => {
       const verdict = await authenticateLinkUpgrade(req, async (nodeId) => secretFor(nodeId));
       if (!verdict.ok) {
@@ -167,6 +184,14 @@ async function bootHub(secretFor: (nodeId: string) => string | undefined = () =>
           }),
     send: (frame) => currentWs?.send(JSON.stringify(frame)),
     closeClient: (code) => currentWs?.close(code),
+    nextUpgradeHeaders: () =>
+      headerQueue.length > 0
+        ? Promise.resolve(headerQueue.shift()!)
+        : new Promise((resolve, reject) => {
+            headerWaiters.push(resolve);
+            const timer = setTimeout(() => reject(new Error('no upgrade request within budget')), 2_000);
+            timer.unref?.();
+          }),
     get connections() {
       return connections;
     },
@@ -335,5 +360,92 @@ describe('ClusterLinkClient', () => {
     const signed = signClusterFrame({ nodeId: NODE_ID, issuedAt: now().toISOString() }, SECRET);
     expect(signed.principal.length).toBeGreaterThan(0);
     expect(signed.signature.length).toBeGreaterThan(0);
+  });
+});
+
+// ---- edge auth (Cloudflare Access headers, edge-auth.ts) — independent of, and never allowed to
+// override, the node-auth headers above -----------------------------------------------------------
+
+describe('ClusterLinkClient — edge auth (Cloudflare Access headers)', () => {
+  it('no-op floor: with no edgeHeaders option and no CEZ_CLUSTER_ACCESS_* env vars set, the upgrade carries no CF-Access-* header at all — the backward-compat guarantee', async () => {
+    const prevId = process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID;
+    const prevSecret = process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET;
+    delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID;
+    delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET;
+    const hub = await bootHub();
+    try {
+      const c = client(hub);
+      const headersPromise = hub.nextUpgradeHeaders();
+      c.start();
+      const headers = await headersPromise;
+      expect(headers['cf-access-client-id']).toBeUndefined();
+      expect(headers['cf-access-client-secret']).toBeUndefined();
+      // Exactly what dial() has always sent — unchanged by this feature when it does not apply.
+      expect(headers[CLUSTER_LINK_NODE_HEADER]).toBe(NODE_ID);
+      expect(typeof headers[CLUSTER_LINK_PRINCIPAL_HEADER]).toBe('string');
+      expect(typeof headers[CLUSTER_LINK_SIGNATURE_HEADER]).toBe('string');
+      await c.stop();
+    } finally {
+      if (prevId === undefined) delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID;
+      else process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID = prevId;
+      if (prevSecret === undefined) delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET;
+      else process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET = prevSecret;
+    }
+  });
+
+  it('merges an injected edgeHeaders literal into the ACTUAL upgrade request on the wire (real WS server, not a mock)', async () => {
+    const hub = await bootHub();
+    const c = client(hub, {
+      edgeHeaders: { 'CF-Access-Client-Id': 'cid-e2e-123', 'CF-Access-Client-Secret': 'csecret-e2e-456' },
+    });
+    const headersPromise = hub.nextUpgradeHeaders();
+    c.start();
+    const headers = await headersPromise;
+    expect(headers['cf-access-client-id']).toBe('cid-e2e-123');
+    expect(headers['cf-access-client-secret']).toBe('csecret-e2e-456');
+    // And the connection still succeeds — an edge header is additive, not a substitute for node auth.
+    await hub.hello();
+    await c.stop();
+  });
+
+  it('precedence: an edgeHeaders entry that collides with a node-auth header name never wins — the genuine signed principal reaches the wire', async () => {
+    const hub = await bootHub();
+    const c = client(hub, {
+      edgeHeaders: {
+        [CLUSTER_LINK_NODE_HEADER]: 'attacker-supplied-node-id',
+        [CLUSTER_LINK_PRINCIPAL_HEADER]: 'attacker-supplied-principal',
+        [CLUSTER_LINK_SIGNATURE_HEADER]: 'attacker-supplied-signature',
+      },
+    });
+    const headersPromise = hub.nextUpgradeHeaders();
+    c.start();
+    const headers = await headersPromise;
+    expect(headers[CLUSTER_LINK_NODE_HEADER]).toBe(NODE_ID);
+    expect(headers[CLUSTER_LINK_NODE_HEADER]).not.toBe('attacker-supplied-node-id');
+    expect(headers[CLUSTER_LINK_PRINCIPAL_HEADER]).not.toBe('attacker-supplied-principal');
+    expect(headers[CLUSTER_LINK_SIGNATURE_HEADER]).not.toBe('attacker-supplied-signature');
+    // Proves it end to end, not just "a different string arrived": the hub's REAL verifier only
+    // ever accepts a genuinely signed principal, so a successful hello is only possible because the
+    // real node headers — not the colliding edge values — are what it actually checked.
+    const { nodeId } = await hub.hello();
+    expect(nodeId).toBe(NODE_ID);
+    await c.stop();
+  });
+
+  it('construction throws ClusterEdgeAuthConfigError when the environment is half-configured and no edgeHeaders override is given', () => {
+    const prevId = process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID;
+    const prevSecret = process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET;
+    process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID = 'only-the-id-is-set';
+    delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET;
+    try {
+      expect(
+        () => new ClusterLinkClient({ identity: identity(), hubUrl: 'http://127.0.0.1:0', version: '0.10.0' }),
+      ).toThrow(ClusterEdgeAuthConfigError);
+    } finally {
+      if (prevId === undefined) delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID;
+      else process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID = prevId;
+      if (prevSecret === undefined) delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET;
+      else process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET = prevSecret;
+    }
   });
 });

@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,9 +10,19 @@ import { composeSystemPrompt, TOOL_BUDGET_DOCTRINE } from '../workflows/run.ts';
 import { HANDOFF_INSTRUCTIONS } from '../handoff.ts';
 import { knowledgeSystemPrompt } from '../knowledge/prompt.ts';
 import { workspaceGrantSystemPrompt } from '../workspace/granted-roots.ts';
+import { nodeIdentityPath } from '../cluster/node-identity.ts';
+import type { UpgradeCapableServer } from '../cluster/link-server.ts';
 import { startClusterRuntime } from './cluster-routes.ts';
 import { createApp, startServer, type ServerDeps } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
+
+/** `startClusterRuntime` (package 1.5) requires a real upgrade-capable server to attach a hub link
+ *  to. Every call in THIS file is either flag-off or "no identity on disk yet", so none of them
+ *  ever reaches that attach — a bare, never-`listen()`ed `http.Server` satisfies the type without
+ *  needing a port. */
+function fakeUpgradeServer(): UpgradeCapableServer {
+  return createServer();
+}
 
 /**
  * **Verification 12** of `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`: with `CEZ_CLUSTER`
@@ -145,7 +156,7 @@ describe('cluster is inert with CEZ_CLUSTER unset (spec verification 12)', () =>
     it('writes nothing under ~/.cezar/cluster or .ai/cezar/cluster, even after every route is hit', async () => {
       const built = app();
       for (const [, path, init] of CLUSTER_ROUTES) await apiRequest(built, path, init);
-      startClusterRuntime({ version: '0.0.0-test' })();
+      startClusterRuntime({ version: '0.0.0-test', server: fakeUpgradeServer() })();
 
       expect(existsSync(join(home, 'cluster'))).toBe(false);
       expect(existsSync(join(dataDir, 'cluster'))).toBe(false);
@@ -160,24 +171,28 @@ describe('cluster is inert with CEZ_CLUSTER unset (spec verification 12)', () =>
     it('arms no timer and says nothing', () => {
       const interval = vi.spyOn(globalThis, 'setInterval');
       const warn = vi.fn();
-      const stop = startClusterRuntime({ version: '0.0.0-test', warn });
+      const stop = startClusterRuntime({ version: '0.0.0-test', warn, server: fakeUpgradeServer() });
       expect(interval).not.toHaveBeenCalled();
       expect(warn).not.toHaveBeenCalled();
       expect(() => stop()).not.toThrow();
     });
 
-    // The negative control for the case above. `startClusterRuntime` arms nothing today under
-    // EITHER flag state — the link and the reconcile timer are packages 1.3 / 2.4 — so "no timer"
-    // on its own is a test that cannot currently fail. This is what proves the function is
-    // reachable at all and that the flag is the thing deciding: on, it speaks; off, it returns
-    // before doing anything. When 1.3/2.4 land their timer, the assertion above starts carrying
-    // the weight on its own.
-    it('is reached and gated by the flag, not merely unimplemented', () => {
+    // The negative control for the case above, and the one this test was re-pointed at when
+    // activation landed (package 1.5): with the flag on and no identity ever enrolled on this
+    // node (a fresh `home`, per `beforeEach`), the function is reached, actually loads
+    // `~/.cezar/cluster/node.json` from disk, finds nothing, and says so by name — not a canned
+    // "not implemented yet" string. `loadNodeIdentity` is the one async step
+    // (`readFile`), so the warning lands on a later tick than this call; `vi.waitFor` is what
+    // makes waiting for it non-flaky rather than racing real disk I/O with a bare microtask.
+    it('is reached and gated by the flag, not merely unimplemented', async () => {
       process.env.CEZ_CLUSTER = '1';
       const warn = vi.fn();
-      startClusterRuntime({ version: '0.0.0-test', warn })();
-      expect(warn).toHaveBeenCalledTimes(1);
+      const stop = startClusterRuntime({ version: '0.0.0-test', warn, server: fakeUpgradeServer() });
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
       expect(warn.mock.calls[0]?.[0]).toContain('CEZ_CLUSTER=1');
+      expect(warn.mock.calls[0]?.[0]).toContain('no cluster identity');
+      expect(warn.mock.calls[0]?.[0]).toContain(nodeIdentityPath()); // reads process.env.CEZ_HOME, pinned to `home` above
+      expect(() => stop()).not.toThrow();
     });
 
     it('the API answers for real once the flag is on, so the 409s above are the gate speaking', async () => {

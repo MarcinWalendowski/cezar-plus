@@ -11,6 +11,7 @@ import {
   type ClusterUplinkFrame,
   type StoredClusterNodeIdentity,
 } from '@loki-labs/better-cezar-contract';
+import { resolveEdgeAuthHeaders } from './edge-auth.ts';
 import { signClusterFrame } from './enrollment.ts';
 import {
   CLUSTER_LINK_NODE_HEADER,
@@ -69,6 +70,39 @@ export interface ClusterLinkClientOptions {
   /** Full jitter over an exponential base. Injected so a test can pin it. */
   backoff?: LinkBackoffOptions;
   random?: () => number;
+  /**
+   * The EDGE credential (Cloudflare Access, `edge-auth.ts`) — headers proving this machine may
+   * reach the hub's hostname at all, merged into every `dial()` upgrade request. Independent of,
+   * and never a substitute for, the three `CLUSTER_LINK_*` node-auth headers below: on a key
+   * collision the node-auth headers always win (see `dial()`), so an edge credential can never
+   * overwrite the node principal. Injected rather than resolved in here directly, so a test can
+   * hand it a literal; when omitted this class resolves it once, at construction, from the
+   * environment via `resolveEdgeAuthHeaders()` — `undefined` (the zero-config path) unless
+   * `CEZ_CLUSTER_ACCESS_CLIENT_ID`/`CEZ_CLUSTER_ACCESS_CLIENT_SECRET` are set.
+   */
+  edgeHeaders?: Readonly<Record<string, string>>;
+  /**
+   * How long ONE upgrade attempt may sit with no reply before it is torn down and retried.
+   * Defaults to `DEFAULT_LINK_HANDSHAKE_TIMEOUT_MS`; injected so a test can pin it small.
+   *
+   * **This is not a tuning knob, it is the only thing that closes a permanent wedge.** Every other
+   * failure path in `dial()` is edge-triggered: `unexpected-response` fires on an HTTP refusal,
+   * `close` fires on a socket that opens and then goes away, and both funnel into `disconnect()` ->
+   * `scheduleReconnect()`. An upgrade that receives *no reply at all* fires none of them, so
+   * without a timeout the client stays in `connecting` forever — no error, no close, no retry, and
+   * a `health()` that reads `connecting` rather than `offline`, so nothing downstream can tell a
+   * wedged link from a slow one either.
+   *
+   * That is not hypothetical, and not only a startup race: this server's own
+   * `attachUpgradeFallback` deliberately does NOT destroy a socket whose path it recognizes but
+   * whose handler has not registered yet ("the hang IS the safer error"), which is exactly the
+   * window between `startServer` returning and `startClusterRuntime`'s `await loadNodeIdentity`
+   * completing. Measured directly against a server that registers an `upgrade` listener and stays
+   * silent: with no `handshakeTimeout` the client emitted nothing at all for 900ms and would have
+   * waited indefinitely; with one it emitted `error('Opening handshake has timed out')` then
+   * `close`, which is what lets `disconnect()` run at all.
+   */
+  handshakeTimeoutMs?: number;
 }
 
 export interface LinkBackoffOptions {
@@ -77,6 +111,10 @@ export interface LinkBackoffOptions {
 }
 
 export const DEFAULT_LINK_BACKOFF: LinkBackoffOptions = { baseMs: 1_000, maxMs: 60_000 };
+
+/** Deliberately well under `DEFAULT_LINK_BACKOFF.baseMs * 10` so a wedged attempt is abandoned and
+ *  retried on a timescale a human watching the roster would call "reconnecting", not "down". */
+export const DEFAULT_LINK_HANDSHAKE_TIMEOUT_MS = 10_000;
 
 /** Full jitter: `random() * min(maxMs, baseMs * 2**attempt)`. Not equal jitter, not decorrelated —
  *  the same shape `sources/sync.ts` already uses, so the two backoffs in this codebase are one
@@ -111,9 +149,15 @@ export class ClusterLinkClient extends EventEmitter {
   private healthState: ClusterLinkHealth = { state: 'offline' };
   private budgetWindowStart = 0;
   private budgetUsed = 0;
+  /** Resolved once, at construction — same idiom as `reconcile-transport.ts#createHttpReconcileTransport`
+   *  resolving `fetchImpl` once rather than on every call. Throws `ClusterEdgeAuthConfigError`
+   *  synchronously out of the constructor on a half-configured environment, so a misconfiguration
+   *  fails the boot immediately rather than surfacing later as an unexplained reconnect loop. */
+  private readonly edgeHeaders: Readonly<Record<string, string>> | undefined;
 
   constructor(private readonly options: ClusterLinkClientOptions) {
     super();
+    this.edgeHeaders = options.edgeHeaders ?? resolveEdgeAuthHeaders();
   }
 
   private now(): number {
@@ -142,7 +186,15 @@ export class ClusterLinkClient extends EventEmitter {
 
     const ws = new WebSocket(linkUrl(this.options.hubUrl), {
       maxPayload: CLUSTER_FRAME_MAX_BYTES,
+      // Bounds an attempt that gets NO reply — see `handshakeTimeoutMs`. `ws` turns the expiry into
+      // `error` followed by `close`, and it is that `close` (not the error, which is swallowed
+      // below) that reaches `disconnect()` and schedules the retry.
+      handshakeTimeout: this.options.handshakeTimeoutMs ?? DEFAULT_LINK_HANDSHAKE_TIMEOUT_MS,
       headers: {
+        // Edge headers spread FIRST: the three node-auth headers below are set after, in the same
+        // object literal, so they always win a key collision — an edge credential must never be
+        // able to overwrite the node principal (see `edgeHeaders`'s own doc on `ClusterLinkClientOptions`).
+        ...this.edgeHeaders,
         [CLUSTER_LINK_NODE_HEADER]: this.options.identity.nodeId,
         [CLUSTER_LINK_PRINCIPAL_HEADER]: signed.principal,
         [CLUSTER_LINK_SIGNATURE_HEADER]: signed.signature,

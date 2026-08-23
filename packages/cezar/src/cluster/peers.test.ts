@@ -9,9 +9,10 @@ import {
   type ClusterProjectAdvert,
   type StoredClusterNode,
 } from '@loki-labs/better-cezar-contract';
+import { createEnrollmentCode, redeemEnrollmentCode } from './enrollment.ts';
 import { hashRequestBody, signNodeHttpPrincipal, verifyNodeHttpPrincipal, type NodeHttpPrincipal } from './node-auth.ts';
 import { ensureNodeIdentity } from './node-identity.ts';
-import { lookupNodeSecret, storeNodeSecret } from './node-secrets.ts';
+import { lookupNodeSecret, nodeSecretsPath, storeNodeSecret } from './node-secrets.ts';
 import { registerProject } from '../workspace/projects.ts';
 import {
   advertisedProjects,
@@ -175,6 +176,100 @@ describe('cluster/peers', () => {
         ok: false,
         reason: 'unknown-node',
       });
+    });
+
+    // Isolated unit test of Part 2 of this session's fix, independent of `redeemEnrollmentCode`
+    // (Part 1): constructs the defect's exact pre-condition directly — a stored secret with NO
+    // roster row at all — by calling `storeNodeSecret` without ever calling `upsertNode`. This is
+    // the state that (before this session) `redeemEnrollmentCode` always left behind, and it is
+    // also the state a legacy install could already have on disk from before Part 1 shipped, so the
+    // guard has to hold on its own, not only in combination with Part 1.
+    it('disableNode removes the secret even when the node has NO roster row — revocation must not depend on the roster (Part 2, in isolation)', async () => {
+      await storeNodeSecret('ghost-node', 'ghost-secret');
+      expect(await lookupNodeSecret('ghost-node')).toBe('ghost-secret');
+
+      const found = await disableNode('ghost-node');
+      // `found`'s MEANING is unchanged — there never was a roster row, so this is still `false`.
+      expect(found).toBe(false);
+
+      // But the credential is gone regardless — the whole point of decoupling the two.
+      expect(await lookupNodeSecret('ghost-node')).toBeUndefined();
+    });
+  });
+
+  // ---- redeemEnrollmentCode → disableNode: the roster-row gap fixed this session --------------
+  //
+  // The `disableNode` test above proves revocation works once a roster row exists, but it gets
+  // there with `upsertNode` — a hand-built fixture that was never the bug. The actual defect was
+  // that `redeemEnrollmentCode` (`enrollment.ts`) never called `upsertNode` at all, so a node that
+  // only ever went through the real join path had no roster row for `disableNode` to find. These
+  // two tests drive the REAL join path end to end, with no manual roster row, no mocks.
+  describe('redeemEnrollmentCode → disableNode (real join path, no manual roster row)', () => {
+    async function realJoin(nodeId: string) {
+      const { response } = await createEnrollmentCode({ hubUrl: 'https://hub.example', hubVersion: '0.10.0' });
+      return redeemEnrollmentCode({
+        code: response.code,
+        nodeId,
+        nodeName: `worker-${nodeId}`,
+        labels: ['linux'],
+        protocol: CLUSTER_PROTOCOL,
+        version: '0.10.0',
+      });
+    }
+
+    // THE security regression test (task brief). Before this session's fix, `redeemEnrollmentCode`
+    // wrote a secret and nothing else — no roster row — so `disableNode` (gated on finding the row)
+    // returned `false` and never called `removeNodeSecret`. This test proves the full, real
+    // sequence: join, then revoke, then the credential is actually gone.
+    it('a node that only ever went through redeemEnrollmentCode is ACTUALLY revoked by disableNode', async () => {
+      await ensureNodeIdentity({ role: 'hub' });
+      const joined = await realJoin('spoke-real-join');
+      expect(joined.ok).toBe(true);
+      if (!joined.ok) return;
+
+      // Visible: redemption ALONE produced a roster row.
+      const afterJoin = await readPeers();
+      expect(afterJoin.nodes.find((n) => n.nodeId === 'spoke-real-join')).toBeDefined();
+
+      // Authenticatable: the stored secret is exactly the one handed to the spoke.
+      expect(await lookupNodeSecret('spoke-real-join')).toBe(joined.secret);
+
+      expect(await disableNode('spoke-real-join')).toBe(true);
+
+      // ACTUALLY revoked, not just hidden from the roster.
+      expect(await lookupNodeSecret('spoke-real-join')).toBeUndefined();
+    });
+
+    // Write-order negative control (mutation test 3 per the task brief): the invariant
+    // `redeemEnrollmentCode` protects is "never a stored secret without a roster row", which only
+    // holds if the roster row is written BEFORE the secret. Blocking the secret store's own tmp
+    // path forces `storeNodeSecret` to throw after the roster write has already landed; if a future
+    // edit reordered the two writes (secret first), this same crash would land BEFORE the roster
+    // write ever ran, and the first assertion below would go red.
+    it('a crash between the roster write and the secret write leaves the roster row and NO secret (write-order negative control)', async () => {
+      await ensureNodeIdentity({ role: 'hub' });
+      const { response } = await createEnrollmentCode({ hubUrl: 'https://hub.example', hubVersion: '0.10.0' });
+
+      const blockedTmp = `${nodeSecretsPath()}.tmp`;
+      mkdirSync(blockedTmp, { recursive: true });
+      try {
+        await expect(
+          redeemEnrollmentCode({
+            code: response.code,
+            nodeId: 'spoke-crash',
+            nodeName: 'worker-crash',
+            labels: [],
+            protocol: CLUSTER_PROTOCOL,
+            version: '0.10.0',
+          }),
+        ).rejects.toThrow();
+      } finally {
+        rmSync(blockedTmp, { recursive: true, force: true });
+      }
+
+      const peers = await readPeers();
+      expect(peers.nodes.find((n) => n.nodeId === 'spoke-crash')).toBeDefined();
+      expect(await lookupNodeSecret('spoke-crash')).toBeUndefined();
     });
   });
 
