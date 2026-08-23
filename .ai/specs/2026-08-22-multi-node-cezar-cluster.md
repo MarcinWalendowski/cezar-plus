@@ -4534,6 +4534,27 @@ both verified in source before being written down here. Read these BEFORE writin
    store and `inflight` as inputs and returns `PoolChoice | undefined` without writing. Nothing in
    either name tells you this.
 
+   **Read this as a hazard of THE POOL RESOLVERS, not of one function** — confirmed by that region's
+   owner 2026-08-23, who also named a sibling that did not exist when this was written:
+   `resolvePoolForProvider` (`agent-route-select.ts:246`) calls the same `recordDispatch` at `:273`
+   and carries the identical side effect. The family will grow; `selectPoolAccount` stays the pure
+   one.
+
+3. **`resources.fallbackAcrossAccountsWhenLimited` now DEFAULTS TRUE** (owner's ruling, 2026-08-23,
+   landed by that same session: *"a task is never blocked by a quota limit; it proceeds on the next
+   available provider"*). **So "parked because its account hit a limit" is no longer a state a
+   default host produces**, and any cluster logic that assumes it is now reasoning about a
+   configuration rather than about the product.
+
+   The cluster does model exactly that state: `cluster/account-grants.ts` refuses with
+   `reason: 'limit-hold'` plus a `retryAt` (`:136`) and describes it as *"the fleet-wide park"*
+   (`:26`). **Nothing is live** — `grantAccount`, `reportAccountLimit` and `releaseAccountGrant`
+   all have **zero** production callers today, verified `-a` — so nothing is broken right now. But
+   whoever wires the account-grant surface has to reconcile the two first: a fleet-wide park that
+   holds every node off an account, sitting on top of a per-host default that says never to park,
+   is two policies pulling in opposite directions, and the one that wins would be decided by
+   whichever code path happened to run first.
+
 Neither is hypothetical: (1) shipped as a real production defect, and (2) was hit while building the
 out-of-quota reroute. `run.ts` is otherwise settled — `cf2f0796` is committed, pushed and deployed,
 that worktree is clean, and the peer's footprint is clustered at `~456`, `~1357`, `~1904/1998`,
