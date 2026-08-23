@@ -1,12 +1,11 @@
 import {
-  clusterTodoFieldsSchema,
   type ClusterNodeId,
   type ClusterOp,
   type ClusterOpScope,
   type ClusterProjectKey,
 } from '@loki-labs/better-cezar-contract';
 import { todoSchema, type TodoItem } from '../todos.ts';
-import { newOpId } from './ops.ts';
+import { CLUSTER_META_TODO_FIELDS, newOpId } from './ops.ts';
 import {
   planReplicaFanout,
   type ReplicaFanoutExclusion,
@@ -82,8 +81,8 @@ import {
  * A whole row still needs to express a DELETION, and it does that better from state than a log
  * could: `clearedFields` is computed by checking, for every content field this schema declares
  * (`todoSchema.shape`, minus the six cluster-bookkeeping fields and `id` — `CLUSTER_META_KEYS`
- * below, kept in step with `cluster/ops.ts`'s own identically-scoped `CLUSTER_META_TODO_FIELDS` by
- * hand, since that file is not this file's to import a private constant from), whether the record
+ * below, which is now literally `cluster/ops.ts`'s exported `CLUSTER_META_TODO_FIELDS` rather than a
+ * hand-kept twin of it; corrected 2026-08-23, see its own note), whether the record
  * currently carries it. Absent means deleted-or-never-set — replaying state removes the ambiguity a
  * log has to resolve with `pendingFields`, because there is no delete EVENT to interpret, only a
  * present fact. A field this schema does not recognize (D13, a newer peer's addition) is preserved
@@ -94,17 +93,25 @@ import {
  * `unknown` docblock), not a new gap replay introduces.
  */
 
-/** Mirrors `cluster/ops.ts`'s `CLUSTER_META_TODO_FIELDS` — deliberately NOT
- *  `clusterTodoFieldsSchema.shape`'s full six keys: `placement` is excluded from THIS set on
- *  purpose, because `ops.ts` treats it as ordinary content (a spoke can propose it optimistically),
- *  and this file's whole-row projection has to agree with the outbox's own notion of "content" or a
- *  replayed row would treat `placement` differently depending on which path delivered it. Kept in
- *  step by hand because `ops.ts` does not export its version — see the module docblock, decision 4.
+/**
+ * **DEDUPLICATED 2026-08-23 — this was a fourth hand-maintained copy, and it was D36's root cause.**
+ * It used to be its own `new Set(['id', ...clusterTodoFieldsSchema.shape minus 'placement'])`,
+ * justified as *"kept in step by hand because `ops.ts` does not export its version"*. That premise
+ * died when D36's fix exported `CLUSTER_META_TODO_FIELDS` (`ops.ts:127`) — and `replay.ts` already
+ * imported `newOpId` from that same module, so the copy cost a dependency it was already paying.
+ *
+ * D36 (every replicated todo resending forever) was one concept kept in two hand-maintained lists;
+ * three copies were retired then and this one was left because another agent owned this file. A
+ * fourth copy is not a smaller version of that bug, it is the same bug waiting — so this is an
+ * import, not a parity test. Drift is now impossible by construction rather than merely detectable.
+ *
+ * The set is deliberately NOT `clusterTodoFieldsSchema.shape`'s full six keys: **`placement` is
+ * excluded on purpose**, because `ops.ts` treats it as ordinary content (a spoke may propose it
+ * optimistically), and this file's whole-row projection has to agree with the outbox's own notion of
+ * "content" — otherwise a replayed row would treat `placement` differently depending on which path
+ * delivered it. That reasoning now lives at the definition, in `ops.ts`.
  */
-const CLUSTER_META_KEYS: ReadonlySet<string> = new Set<string>([
-  'id',
-  ...Object.keys(clusterTodoFieldsSchema.shape).filter((key) => key !== 'placement'),
-]);
+const CLUSTER_META_KEYS: ReadonlySet<string> = CLUSTER_META_TODO_FIELDS;
 
 /** Every content field this build's schema declares — `todoSchema.shape` already carries the six
  *  cluster fields too (spread in, `todos.ts`'s own comment: "one definition of one record"), so
