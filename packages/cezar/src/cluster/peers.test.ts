@@ -9,7 +9,9 @@ import {
   type ClusterProjectAdvert,
   type StoredClusterNode,
 } from '@loki-labs/better-cezar-contract';
+import { hashRequestBody, signNodeHttpPrincipal, verifyNodeHttpPrincipal, type NodeHttpPrincipal } from './node-auth.ts';
 import { ensureNodeIdentity } from './node-identity.ts';
+import { lookupNodeSecret, storeNodeSecret } from './node-secrets.ts';
 import { registerProject } from '../workspace/projects.ts';
 import {
   advertisedProjects,
@@ -143,6 +145,36 @@ describe('cluster/peers', () => {
       expect(missing).toBe(false);
       const peers = await readPeers();
       expect(peers.nodes[0]?.disabledAt).toBe(now.toISOString());
+    });
+
+    // Spec Verification 26: the negative control is the BEFORE half — a signature that verified
+    // must be shown verifying before disableNode ever runs, or this test proves nothing about
+    // revocation and everything about a store that never worked in the first place.
+    it('disableNode removes the stored secret — a signature that verified BEFORE now refuses unknown-node AFTER (Verification 26)', async () => {
+      await upsertNode(makeStoredNode({ nodeId: 'n1' }));
+      await storeNodeSecret('n1', 'n1-secret');
+
+      const binding = { method: 'GET', path: '/cluster/corpus', bodyHash: hashRequestBody('') };
+      const principal: NodeHttpPrincipal = { nodeId: 'n1', issuedAt: new Date().toISOString(), ...binding };
+
+      // BEFORE: the negative control — prove the signature verifies while the secret is still
+      // there, using the SAME store `disableNode` is about to write to.
+      const signedBefore = signNodeHttpPrincipal(principal, 'n1-secret');
+      const secretBefore = await lookupNodeSecret('n1');
+      expect(verifyNodeHttpPrincipal(signedBefore, 'n1', secretBefore, binding)).toEqual({ ok: true, nodeId: 'n1' });
+
+      expect(await disableNode('n1')).toBe(true);
+
+      // AFTER: the secret is gone, so an otherwise-identical signed request now refuses
+      // unknown-node — the credential-revoking half of the two-sided revoke, not just a roster edit.
+      expect(await lookupNodeSecret('n1')).toBeUndefined();
+      const principalAfter: NodeHttpPrincipal = { ...principal, issuedAt: new Date().toISOString() };
+      const signedAfter = signNodeHttpPrincipal(principalAfter, 'n1-secret');
+      const secretAfter = await lookupNodeSecret('n1');
+      expect(verifyNodeHttpPrincipal(signedAfter, 'n1', secretAfter, binding)).toEqual({
+        ok: false,
+        reason: 'unknown-node',
+      });
     });
   });
 

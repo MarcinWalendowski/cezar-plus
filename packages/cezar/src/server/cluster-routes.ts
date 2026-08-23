@@ -48,6 +48,7 @@ import {
 import { acquireLease, releaseLease } from '../cluster/leases.ts';
 import { createNodeAuthMiddleware } from '../cluster/node-auth.ts';
 import { loadNodeIdentity } from '../cluster/node-identity.ts';
+import { lookupNodeSecret as lookupStoredNodeSecret } from '../cluster/node-secrets.ts';
 import { applyPairingAction, disableNode, readPeers, upsertNode } from '../cluster/peers.ts';
 import { readRemoteRuns } from '../cluster/run-projection.ts';
 import { loadServerState } from '../server-install/state.ts';
@@ -163,11 +164,15 @@ import { loadServerState } from '../server-install/state.ts';
  * bodies, which is out of this package's scope (`cluster-routes.ts` handler bodies belong to the
  * packages that wrote them); flagged for whoever owns that fix rather than guessed at here.
  *
- * `lookupSecret` (`ClusterRouteDeps#lookupNodeSecret`) has no real implementation wired below —
- * see `node-auth.ts`'s module docblock for why no hub-side store for a node's secret exists
- * anywhere in this codebase yet. The default fails closed (`unknown-node` for every node), which
- * is the correct, honest behaviour until a package builds that store — never a reason to leave the
- * gate off in the meantime.
+ * **CORRECTED 2026-08-23 (D22).** This paragraph used to read *"`lookupSecret`
+ * (`ClusterRouteDeps#lookupNodeSecret`) has no real implementation wired below … the default fails
+ * closed (`unknown-node` for every node), which is the correct, honest behaviour until a package
+ * builds that store."* That store now exists — `cluster/node-secrets.ts`, D22 — and the default
+ * below reads from it (`{env}` resolved to this call's own `env`, never the process's), so an
+ * enrolled node is admitted with NO override needed; a node the store has never heard of still
+ * fails closed as `unknown-node`, which is the correct behaviour for THAT case and not a
+ * regression from before. `ClusterRouteDeps#lookupNodeSecret` stays as an override hook for a test
+ * that wants a fake store instead of touching the filesystem.
  */
 
 export interface ClusterRouteDeps {
@@ -180,20 +185,21 @@ export interface ClusterRouteDeps {
   /**
    * D20: resolves a claimed node id to its enrollment secret, for `node-auth.ts`'s signed-principal
    * check on the routes that need it (see the module header's "D20" section for which). Omitted,
-   * this defaults to a function that always answers `undefined` — every node-authenticated request
-   * fails closed as `unknown-node` — because no hub-side store mapping a node id to its secret
-   * exists anywhere in this codebase yet (`node-auth.ts`'s own docblock has the full accounting).
-   * Real wiring plugs in here once a package builds that store; a test supplies a fake directly.
+   * this defaults to `cluster/node-secrets.ts#lookupNodeSecret` (D22) — the real hub-side store,
+   * reading this call's own resolved `env` — so a node that redeemed a code is admitted with no
+   * override at all; a node the store has never heard of still fails closed as `unknown-node`. A
+   * test that wants a fake store instead of touching the filesystem supplies this directly.
    */
   lookupNodeSecret?: (nodeId: ClusterNodeId) => Promise<string | undefined>;
   /** D20 test hook: pins the clock `node-auth.ts`'s freshness check reads. */
   now?: () => Date;
 }
 
-/** The default `lookupNodeSecret` — see `ClusterRouteDeps#lookupNodeSecret`'s own doc for why this
- *  is not a stub awaiting a TODO but the honest, fail-closed answer until a real store exists. */
-async function noStoredNodeSecret(_nodeId: ClusterNodeId): Promise<string | undefined> {
-  return undefined;
+/** The default `lookupNodeSecret` — D22's real store, `cluster/node-secrets.ts#lookupNodeSecret`,
+ *  read against THIS call's own resolved `env` (never `process.env` directly, matching every other
+ *  reader in this file). See `ClusterRouteDeps#lookupNodeSecret`'s own doc. */
+function storedNodeSecretLookup(env: NodeJS.ProcessEnv): (nodeId: ClusterNodeId) => Promise<string | undefined> {
+  return (nodeId) => lookupStoredNodeSecret(nodeId, { env });
 }
 
 const CLUSTER_OFF =
@@ -338,7 +344,7 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
    * `requireCluster`/`requireHub` above.
    */
   const requireNodeAuth = createNodeAuthMiddleware({
-    lookupSecret: deps.lookupNodeSecret ?? noStoredNodeSecret,
+    lookupSecret: deps.lookupNodeSecret ?? storedNodeSecretLookup(env),
     ...(deps.now ? { now: deps.now } : {}),
   });
 

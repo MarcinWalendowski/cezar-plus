@@ -33,6 +33,7 @@ import {
 } from '@loki-labs/better-cezar-contract';
 import { clusterHomeDir, ensureNodeIdentity, loadNodeIdentity, nodeIdentityPath } from './node-identity.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';
+import { storeNodeSecret } from './node-secrets.ts';
 import { assertCezarHomeWriteIsSandboxed } from '../paths.ts';
 
 /**
@@ -52,6 +53,14 @@ import { assertCezarHomeWriteIsSandboxed } from '../paths.ts';
  * Access credential, supplied from the operator's environment and never in the pasteable string, and
  * the join code itself. `access-rejected` and `code-expired` are different problems with different
  * fixes, and an operator who cannot tell them apart re-mints codes to fix a credential problem.
+ *
+ * **CORRECTED 2026-08-23 (D22).** `redeemEnrollmentCode` used to mint the per-node secret, hand it
+ * to the joining spoke, and persist it NOWHERE — D17's own "INCOMPLETE" note, found while
+ * implementing D20, diagnosed this: the hub could not verify any node, by any transport, because the
+ * receiving end of this handshake was never built. It now writes the secret to `node-secrets.ts`'s
+ * store, inside this file's own `enroll-codes` lease and BEFORE the code is marked redeemed — see
+ * `withEnrollCodesLease` and the call site in `redeemEnrollmentCode` for the ordering and why it is
+ * chosen deliberately, not incidentally.
  *
  * The code digest idiom is `auth/org-claim-token.ts`'s, verbatim rather than re-derived. The frame
  * signature idiom is `supervisor/forwarded-principal.ts`'s, also verbatim: sign-then-verify (the
@@ -238,8 +247,13 @@ async function acquireEnrollCodesLeaseBlocking(env: NodeJS.ProcessEnv | undefine
 
 /** Takes the lease, runs `fn`, always releases. Every mutation of `enroll-codes.json` goes through
  *  this — in particular `redeemEnrollmentCode`'s check-then-mark, so two spokes racing one code are
- *  serialized into one success and one `code-used` rather than two successes. */
-async function withEnrollCodesLease<T>(options: ClusterHomeOptions | undefined, fn: () => T | Promise<T>): Promise<T> {
+ *  serialized into one success and one `code-used` rather than two successes.
+ *
+ *  Exported (added D22) because it is no longer only this file's own lock: `node-secrets.ts`'s
+ *  module docblock says every writer of `node-secrets.json` must serialize through THIS lease
+ *  rather than inventing its own — `redeemEnrollmentCode` below is one such writer,
+ *  `peers.ts#disableNode` is the other, and both must share the one lock. */
+export async function withEnrollCodesLease<T>(options: ClusterHomeOptions | undefined, fn: () => T | Promise<T>): Promise<T> {
   const lease = await acquireEnrollCodesLeaseBlocking(options?.env);
   try {
     return await fn();
@@ -407,6 +421,15 @@ export async function redeemEnrollmentCode(
     }
 
     const secret = randomBytes(NODE_SECRET_BYTES).toString('hex');
+    // D22: the secret is persisted BEFORE the code is marked redeemed, inside this SAME lease.
+    // Ordering is a real choice here, not incidental, because the two writes touch different files
+    // and the failure between them is asymmetric: a crash after this line but before the next must
+    // leave an INERT orphan secret (nobody can authenticate as a node that never finished
+    // redeeming, and the next successful redeem of THIS code overwrites it) rather than a code
+    // burned with no secret recorded, which would strand the joining node holding a credential the
+    // hub can never verify and unable to re-join without a fresh code from an operator. Prefer the
+    // recoverable failure.
+    await storeNodeSecret(request.nodeId, secret, options);
     // Marked redeemed inside the SAME lease that just checked it — the whole point of the lease.
     codes[idx] = { ...record, redeemedAt: now.toISOString(), redeemedByNodeId: request.nodeId };
     writeEnrollCodes(codes, options);

@@ -14,6 +14,7 @@ import {
   type StoredClusterNodeIdentity,
 } from '@loki-labs/better-cezar-contract';
 import { verifyClusterFrame, LINK_PRINCIPAL_MAX_AGE_MS, type SignedClusterFrame } from './enrollment.ts';
+import { lookupNodeSecret } from './node-secrets.ts';
 
 /**
  * The hub end of the link: the `/api/v1/cluster/link` upgrade and frame routing (spec
@@ -131,7 +132,13 @@ export async function authenticateLinkUpgrade(
 export interface ClusterLinkServerOptions {
   /** The hub's own identity — `hubNodeId` on every `welcome`. */
   identity: StoredClusterNodeIdentity;
-  lookupSecret: (nodeId: ClusterNodeId) => Promise<string | undefined>;
+  /** D22: resolves a claimed node id to its enrollment secret. Optional — defaults to
+   *  `cluster/node-secrets.ts#lookupNodeSecret`, the real hub-side store (reading `process.env`,
+   *  since this class carries no separate `env` option of its own), so whoever attaches this
+   *  server without overriding `lookupSecret` still gets a working link the moment a node has
+   *  enrolled. Every current caller supplies this explicitly anyway (see `link-server.test.ts`),
+   *  which is what keeps a fake store from ever having to touch the filesystem. */
+  lookupSecret?: (nodeId: ClusterNodeId) => Promise<string | undefined>;
   /** Called for every admitted uplink frame, already parsed and bounds-checked. Its return value is
    *  the frame (or frames) to send back, so routing is a pure function of (node, frame) and the
    *  socket bookkeeping stays in this file. */
@@ -151,6 +158,7 @@ interface ConnectedNode {
 export class ClusterLinkServer {
   private readonly wss: WebSocketServer;
   private readonly nodes = new Map<ClusterNodeId, ConnectedNode>();
+  private readonly lookupSecret: (nodeId: ClusterNodeId) => Promise<string | undefined>;
   private heartbeat?: ReturnType<typeof setInterval>;
   private closed = false;
 
@@ -159,6 +167,8 @@ export class ClusterLinkServer {
     this.wss.on('connection', (ws: WebSocket, _req: IncomingMessage, nodeId: ClusterNodeId) => {
       this.onConnection(ws, nodeId);
     });
+    // Resolved once, here — see `ClusterLinkServerOptions#lookupSecret`'s own doc (D22).
+    this.lookupSecret = options.lookupSecret ?? ((nodeId) => lookupNodeSecret(nodeId));
   }
 
   private now(): Date {
@@ -286,7 +296,7 @@ export class ClusterLinkServer {
   }
 
   private async handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
-    const verdict = await authenticateLinkUpgrade(req, this.options.lookupSecret, { now: () => this.now() });
+    const verdict = await authenticateLinkUpgrade(req, this.lookupSecret, { now: () => this.now() });
     if (!verdict.ok) {
       try {
         if (socket.writable) {

@@ -56,6 +56,36 @@
   look its secret up. That one reason is renamed at the call site to name the real gap; the other
   three pass through unchanged, because they are accurate.
 
+- 🔑 **The hub stores node secrets now, so cluster authentication has a receiving end for the first
+  time** (spec **D22**). Enrollment minted a per-node HMAC secret, handed it to the joining spoke,
+  and persisted it nowhere — so `lookupNodeSecret` answered `undefined` for everyone, every
+  node-authenticated route refused by construction, and `verifyClusterFrame` had no receiving end
+  either. New `cluster/node-secrets.ts`: `<clusterHomeDir>/node-secrets.json`, `0600`, keyed by node
+  id, with one read that returns a single node's secret and deliberately no list-all accessor.
+
+  Three of its four decisions are the kind that look arbitrary and are not. **Its own file, not
+  `peers.json`** — that roster is served to every spoke, so a secret stored beside it is one
+  `readPeers()` from handing each node every other node's credential. **Plaintext at rest** —
+  enrollment codes are digest-at-rest because redemption only needs an equality check, and applying
+  the same reasoning here would fail every signature, since HMAC verification needs the key itself;
+  the docblock says so, because the next reader will otherwise "fix" it. **Written before the code
+  is marked redeemed**, inside the same lease: two files, one lock, and the failure between them is
+  asymmetric — redeem-first strands a node holding a credential the hub never stored *and* a code it
+  can never redeem again, secret-first strands an inert orphan that the next redemption overwrites.
+  Fourth: `disableNode` now drops the secret, which closes a live hole nobody had noticed — it was a
+  roster edit only, so a disabled node's signatures kept verifying.
+
+  Found and fixed during review, before it shipped: the store asked for a `0700` directory via
+  `mkdirSync`'s `mode` option, which does nothing to a directory that already exists — and every
+  other writer of that directory (`ensureNodeIdentity`, `writeEnrollCodes`, the enroll-codes lock)
+  creates it with no mode at all, and all of them run first. So the real directory would have been
+  whatever the umask gave, typically `0755`, while the docblock claimed the opposite. The test could
+  not have caught it: it stored into a fresh home, the one ordering that never happens in production.
+  Now an explicit `chmodSync`, with a control that pre-creates the directory loose and proves it gets
+  tightened. Every file in there is `0600` regardless, so the exposure was listing rather than
+  reading — but D22's whole premise is that file mode *is* the protection, so a claim about it has to
+  be true.
+
 - 🧭 **Decided, deliberately not built: how `cez cluster reconcile` gets its data** (**D21**). The
   gap turned out to be **one method, not four** — `apply` is an ops frame, `backup` is a local
   write on the receiver, `listProjects` is the confirmed-pairings list; only "give me your full todo

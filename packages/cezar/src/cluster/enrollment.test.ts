@@ -100,6 +100,7 @@ import {
   signClusterFrame,
   verifyClusterFrame,
 } from './enrollment.ts';
+import { lookupNodeSecret } from './node-secrets.ts';
 
 beforeEach(() => {
   homeDir = mkdtempSync(join(realpathSync(tmpdir()), 'cez-enrollment-'));
@@ -285,6 +286,43 @@ describe('redeemEnrollmentCode', () => {
       expect(result.secret.length).toBeGreaterThan(0);
       expect(result.protocol).toEqual(protocol);
     }
+  });
+
+  // Spec Verification 23: the STORED secret is the exact value handed to the spoke — asserting the
+  // value, not merely that node-secrets.json exists, is the whole point of this test.
+  it('persists the exact secret handed to the spoke, readable back via node-secrets.ts (Verification 23)', async () => {
+    const { response } = await createEnrollmentCode({ hubUrl: 'https://hub.example', hubVersion: '0.10.0' });
+    const result = await redeemEnrollmentCode(joinRequest(response.code));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const stored = await lookupNodeSecret('spoke-1');
+    expect(stored).toBe(result.secret);
+  });
+
+  // Spec Verification 25: the write order D22 pins is secret-first, code-second, and this is the
+  // test that PROVES that ordering rather than restating it. The enroll-codes write's own tmp path
+  // is pre-occupied by a directory, so `writeEnrollCodes`'s `writeFileSync` throws EISDIR — while
+  // `storeNodeSecret`'s differently-named tmp file is completely unaffected, so a write-order bug
+  // (redeem-first) would make this test's "still redeems afterwards" assertion fail: the code would
+  // already be burned.
+  it('ordering negative control: an enroll-codes write failing AFTER the secret write leaves the code unredeemed and still redeemable (Verification 25)', async () => {
+    const { response } = await createEnrollmentCode({ hubUrl: 'https://hub.example', hubVersion: '0.10.0' });
+
+    const blockedTmp = `${enrollmentCodesPath()}.tmp`;
+    mkdirSync(blockedTmp, { recursive: true });
+    try {
+      await expect(redeemEnrollmentCode(joinRequest(response.code))).rejects.toThrow();
+    } finally {
+      rmSync(blockedTmp, { recursive: true, force: true });
+    }
+
+    // The secret write ran FIRST and completed — an inert orphan, exactly D22's chosen failure.
+    expect(await lookupNodeSecret('spoke-1')).toBeDefined();
+
+    // The code write never completed (writeEnrollCodes threw before its renameSync), so the SAME
+    // code is still redeemable — the direct evidence that it was never marked redeemed.
+    const retried = await redeemEnrollmentCode(joinRequest(response.code));
+    expect(retried.ok).toBe(true);
   });
 
   // NEGATIVE CONTROL 2: single-use really is single-use — the second redemption of the SAME code

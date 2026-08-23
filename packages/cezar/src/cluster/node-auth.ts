@@ -35,6 +35,14 @@ import { LINK_PRINCIPAL_MAX_AGE_MS } from './enrollment.ts';
  * itself derived from, and it means there is exactly one place that number lives for this feature
  * rather than two that could drift apart.
  *
+ * **RESOLVED 2026-08-23 by D22 — the paragraph below described a gap that is now closed.** The
+ * hub-side store is `cluster/node-secrets.ts` (`<clusterHomeDir>/node-secrets.json`, `0600`,
+ * keyed by node id, plaintext because HMAC verification needs the key itself). `cluster-routes.ts`
+ * wires `lookupSecret` to it instead of the fail-closed default, and `link-server.ts` defaults its
+ * own injected `lookupSecret` to the same store — which is what makes the LINK's per-frame auth
+ * work too, not just this HTTP family. The injected-function design the paragraph argues for was
+ * right and is unchanged; only the claim that no store exists is now false. Original text:
+ *
  * **What this file does NOT do: decide where the hub persists a node's secret.**
  * `redeemEnrollmentCode` (`enrollment.ts`) mints a per-node secret and hands it to the joining
  * spoke, but — verified by reading every write in `enrollment.ts` and `peers.ts` — nothing
@@ -47,8 +55,10 @@ import { LINK_PRINCIPAL_MAX_AGE_MS } from './enrollment.ts';
  * there would hand every spoke every other spoke's credential. So `createNodeAuthMiddleware`
  * below takes `lookupSecret` as an injected function, exactly like `authenticateLinkUpgrade`
  * does, and stays correct and fully testable independent of where that store ends up living.
- * `cluster-routes.ts` wires a default that always answers `undefined` — fails closed, and is
- * honest about the gap rather than papering over it — until a package builds the real store.
+ * ~~`cluster-routes.ts` wires a default that always answers `undefined` — fails closed, and is
+ * honest about the gap rather than papering over it — until a package builds the real store.~~
+ * That package landed the same day; the fail-closed default is gone and `storedNodeSecretLookup`
+ * reads the real store. The `deps.lookupNodeSecret` override survives for tests and fakes.
  */
 
 // ---- the three headers a claimed node presents, mirroring `link-server.ts`'s shape -------------

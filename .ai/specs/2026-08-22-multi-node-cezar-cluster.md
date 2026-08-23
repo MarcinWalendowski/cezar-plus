@@ -968,7 +968,8 @@ to a shell. The npm registry is the one distribution channel in this design that
 sit in front of.
 
 **INCOMPLETE, found 2026-08-23 while implementing D20 — the hub mints the per-node secret and then
-throws it away.** `redeemEnrollmentCode` (`cluster/enrollment.ts`) generates
+throws it away. RESOLVED the same day by D22 below, which decides where it goes; read that for the
+answer and this for the diagnosis.** `redeemEnrollmentCode` (`cluster/enrollment.ts`) generates
 `randomBytes(NODE_SECRET_BYTES)`, marks the code redeemed, returns the secret to the joining node
 — and **persists it nowhere.** `cluster/peers.ts` contains the string `secret` zero times, and the
 contract's node schema says outright *"It has no `secret` field at all"*. Verified by grep across
@@ -990,9 +991,19 @@ routes that do not exist.
 Building it is not a one-liner and should not be treated as one. Where the secret lands is a
 security decision: `peers.json` is the wrong home unless it is proven that nothing renders it —
 `GET /api/v1/cluster` serves the roster, and the contract removed `secret` from the served node
-shape *on purpose*. The likely answer is a separate `0600` store keyed by node id, written inside
-the same lease that marks the code redeemed (so a crash cannot leave a node holding a secret the
-hub never recorded), with revocation removing it. That is its own package.
+shape *on purpose*.
+
+**SUPERSEDED 2026-08-23 by D22 — the sketch that stood here was right in outline and wrong in one
+detail that matters.** It read: *"The likely answer is a separate `0600` store keyed by node id,
+written inside the same lease that marks the code redeemed (so a crash cannot leave a node holding a
+secret the hub never recorded), with revocation removing it."* D22 keeps all of that and pins the
+**ordering**, which the sketch left open by saying only "inside the same lease": the secret must be
+written **before** the code is marked redeemed. Same lease, two files, and the failure is asymmetric
+— redeem-first strands a node holding a credential the hub never stored *and* a code it can never
+redeem again, while secret-first strands only an inert orphan. D22 also settles the question the
+sketch did not raise at all: the secret is stored in **plaintext**, because HMAC verification needs
+the key itself and digest-at-rest (correct for enrollment codes, which only need equality) would
+fail every signature here.
 
 **D19 — Agents coordinate by the hub arbitrating, not by talking to each other.**
 The owner's ask (*"agents should be able to communicate with each other via the master hub"*) is the
@@ -1127,6 +1138,65 @@ order is: hub-side secret store → D20's gate actually verifying someone → D2
 transport and CLI wiring → E2's dry run. The `/cluster/todos/*` path is already registered in the
 authenticated set (`cluster-routes.ts`'s D20 block) so the route inherits the gate the moment it
 exists, rather than depending on a second person remembering.
+
+**D22 — The hub stores each node's secret in its own `0600` file, in PLAINTEXT, written before the
+code is marked redeemed.**
+
+This is the correction to D17 above, and it unblocks both D20 and the link. `redeemEnrollmentCode`
+mints `randomBytes(NODE_SECRET_BYTES)`, returns it to the joining spoke, and persists it nowhere —
+so `node-auth.ts#lookupNodeSecret` answers `undefined` for everyone and `verifyClusterFrame` has no
+receiving end either. Four decisions, each of which someone would otherwise get wrong in a
+defensible-looking way.
+
+**Its own file, not `peers.json`.** `GET /api/v1/cluster` serves the roster, and the contract's
+served node shape says outright that it has no `secret` field — deliberately. A secret stored
+alongside the roster is one careless `readPeers()` away from being handed to every spoke, i.e. from
+giving each node every other node's credential. So: `nodeSecretsPath()` → `<clusterHomeDir>/node-secrets.json`,
+`0600`, keyed by node id, sibling to `node.json` and `enroll-codes.json`, and **never rendered by any
+route**. The one function that reads it returns a single node's secret by id; there is no "list all"
+accessor to be tempted by.
+
+**Plaintext at rest, and this is the part that looks wrong and is not.** D17 stores enrollment codes
+as a digest precisely because redemption only needs an *equality* check, and it would be natural —
+and wrong — to apply the same reasoning here. HMAC verification needs the actual key: you cannot
+recompute `HMAC(payload, secret)` from a digest of `secret`. A store that hashed these would fail
+every signature and read as a signing bug rather than a design mistake. The protection is therefore
+file mode and the fact that a hub compromised enough to read `0600` files in cezar's home already
+owns the process that holds the secrets in memory. Say this in the file's own docblock, because the
+next reader will otherwise "fix" it.
+
+**Written BEFORE the code is marked redeemed, inside the same `withEnrollCodesLease`.** The two
+writes touch different files, so ordering is a real choice with an asymmetric failure. Redeem-first
+means a crash between the writes leaves the code burned and no secret stored: the node holds a
+credential the hub can never verify, and cannot re-join without an operator minting a new code —
+unrecoverable from the node's side. Secret-first means a crash leaves an orphan secret for a node
+that never completed enrollment, which is inert (nobody can authenticate as that node without
+holding the secret, and it is overwritten on the next successful redeem of the same code). Prefer
+the recoverable failure. Note the lease being held is `enroll-codes`', not a lease on the secrets
+file — correct here because that lease already serialises the only path that writes a secret, but
+it means anything else that ever writes this file must take the same lease, not a new one.
+
+**Removed on revoke, replaced on re-join.** `disableNode` drops the entry, so disabling a node
+actually revokes its ability to authenticate rather than only hiding it from the roster — today
+`disableNode` is a roster edit and nothing else, which would leave a disabled node's signatures
+still verifying. A node re-joining replaces its entry rather than appending: one secret per node id,
+always the newest, so a re-enroll rotates the credential as a side effect.
+
+**What this unblocks, in order:** `cluster-routes.ts` wires `lookupNodeSecret` to this store instead
+of the fail-closed default, `link-server.ts#authenticateLinkUpgrade`'s injected `lookupSecret` gets
+the same store (which is what fixes the link's own per-frame auth, not just HTTP), then D21's todos
+routes stop being routes that can only 401, then the reconcile transport, then E2's dry run.
+
+**Verification.** (23) A redeemed enrollment writes a readable secret whose value is the one handed
+to the spoke — assert the value, not that the file exists. (24) The stored secret verifies a real
+`signNodeHttpPrincipal` from that node end-to-end through `createNodeAuthMiddleware`, and a
+different node's id does not. (25) Negative control on ordering: make the enroll-codes write throw
+after the secret write and assert the code is NOT marked redeemed and the same code still redeems
+afterwards. (26) `disableNode` removes the secret, and a signature that verified before it now
+refuses `unknown-node` — the negative control being that it verified *before*, or the test proves
+nothing. (27) The secrets file is `0600` and its parent is not world-readable, asserted on the mode
+bits. (28) No route response anywhere contains a stored secret: drive `GET /api/v1/cluster` with two
+enrolled nodes and assert neither secret appears in the serialised body.
 
 ### Rejected alternatives
 

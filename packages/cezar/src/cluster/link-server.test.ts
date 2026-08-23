@@ -1,6 +1,9 @@
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import {
   CLUSTER_FRAME_MAX_BYTES,
@@ -19,6 +22,7 @@ import {
   CLUSTER_LINK_SIGNATURE_HEADER,
   type ClusterLinkServerOptions,
 } from './link-server.ts';
+import { storeNodeSecret } from './node-secrets.ts';
 
 const NODE_ID = 'node-a';
 const SECRET = 'shhh-secret';
@@ -366,5 +370,52 @@ describe('ClusterLinkServer', () => {
       expect(onFrame).toHaveBeenCalledWith(NODE_ID, expect.objectContaining({ type: 'presence' }));
       c.ws.close();
     });
+  });
+});
+
+// D22: `lookupSecret` on `ClusterLinkServerOptions` is optional and defaults to
+// `cluster/node-secrets.ts#lookupNodeSecret` — every OTHER test in this file supplies it
+// explicitly (via `boot()`'s own default), which is exactly why this needs its own coverage: it is
+// the one path nothing else here exercises. `CEZ_HOME` is pinned only for this describe block, not
+// the whole file, since every other test in it never touches the filesystem.
+describe('lookupSecret defaults to the real node-secrets store when omitted (D22)', () => {
+  const originalHome = process.env.CEZ_HOME;
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'cez-link-server-secrets-'));
+    process.env.CEZ_HOME = home;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.CEZ_HOME;
+    else process.env.CEZ_HOME = originalHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('admits a node whose secret was stored via node-secrets.ts, with no lookupSecret override at all', async () => {
+    await storeNodeSecret(NODE_ID, SECRET);
+    const onFrame = vi.fn(async (): Promise<ClusterDownlinkFrame[]> => []);
+    const { url } = await boot(onFrame, { lookupSecret: undefined });
+    const c = await connectNode(url);
+
+    c.send({
+      type: 'presence',
+      protocol: CLUSTER_PROTOCOL,
+      capacity: { maxParallel: 1, active: 0, heavyActive: 0, enforcement: 'none' },
+      repoDrift: [],
+    });
+    await vi.waitFor(() => expect(onFrame).toHaveBeenCalledTimes(1));
+    expect(onFrame).toHaveBeenCalledWith(NODE_ID, expect.objectContaining({ type: 'presence' }));
+    c.ws.close();
+  });
+
+  it('refuses a node whose secret was never stored, even with no override — the default still fails closed', async () => {
+    const onFrame = vi.fn(async (): Promise<ClusterDownlinkFrame[]> => []);
+    const { url } = await boot(onFrame, { lookupSecret: undefined });
+    const c = connectRaw(url, signedHeaders('a-stranger', 'a-guessed-secret', new Date().toISOString()));
+    const { status, reason } = await c.waitUnexpectedResponse();
+    expect(status).toBe(401);
+    expect(reason).toBe('unknown-node');
   });
 });

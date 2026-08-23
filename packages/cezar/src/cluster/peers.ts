@@ -27,12 +27,14 @@ import { currentHostMetrics } from '../core/host-metrics.ts';
 import { getHeadCommit, getRepoInfo, getStatus } from '../server/git.ts';
 import { workspaceConfigPath } from '../paths.ts';
 import { atomicWriteJsonSync, loadWorkspaceConfig, type WorkspaceProject } from '../workspace/config.ts';
+import { withEnrollCodesLease } from './enrollment.ts';
 import {
   clusterHomeDir,
   detectCapacityEnforcement,
   loadNodeIdentity,
   type ClusterHomeOptions,
 } from './node-identity.ts';
+import { removeNodeSecret } from './node-secrets.ts';
 
 /**
  * The roster, the pairing store, and the presence a node advertises about itself —
@@ -178,7 +180,16 @@ export async function markNodeSeen(
 }
 
 /** The hub half of a two-sided revoke. The spoke half — deleting its credential — is
- *  `enrollment.ts`'s `leaveCluster`, and without it a revoked spoke keeps pushing ops. */
+ *  `enrollment.ts`'s `leaveCluster`, and without it a revoked spoke keeps pushing ops.
+ *
+ *  **D22, added 2026-08-23: also removes the node's stored secret**, or a disabled node's
+ *  signatures keep verifying — until this, `disableNode` was a roster edit and nothing else. The
+ *  removal takes `enrollment.ts`'s `enroll-codes` write lease (`withEnrollCodesLease`), the SAME
+ *  lease `redeemEnrollmentCode` holds while it writes a node's secret — `node-secrets.ts`'s module
+ *  docblock is explicit that every writer of that file must share the one lease rather than each
+ *  inventing its own lock, which could otherwise race the other. Only attempted when the roster edit
+ *  actually found the node, so disabling an unknown id stays a cheap no-op rather than taking a lock
+ *  for nothing. */
 export async function disableNode(nodeId: ClusterNodeId, options?: ClusterHomeOptions): Promise<boolean> {
   const now = nowIso(options);
   let found = false;
@@ -190,6 +201,9 @@ export async function disableNode(nodeId: ClusterNodeId, options?: ClusterHomeOp
     nodes[idx] = { ...nodes[idx]!, disabledAt: now };
     return { ...peers, nodes };
   }, options);
+  if (found) {
+    await withEnrollCodesLease(options, () => removeNodeSecret(nodeId, options));
+  }
   return found;
 }
 

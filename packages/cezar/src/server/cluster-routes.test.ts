@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { CLUSTER_PROTOCOL, type StoredClusterNode } from '@loki-labs/better-cezar-contract';
 import {
   CLUSTER_NODE_ID_HEADER,
   CLUSTER_NODE_PRINCIPAL_HEADER,
@@ -10,6 +11,8 @@ import {
   signNodeHttpPrincipal,
   type NodeHttpPrincipal,
 } from '../cluster/node-auth.ts';
+import { storeNodeSecret } from '../cluster/node-secrets.ts';
+import { upsertNode } from '../cluster/peers.ts';
 import { createClusterRoutes, type ClusterRouteDeps } from './cluster-routes.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 
@@ -102,6 +105,44 @@ describe('cluster-routes.ts wires D20 node-auth onto the right paths', () => {
       const error = ((await res.json()) as { error: string }).error;
       expect(error).toContain('corpus');
       expect(error).not.toContain('CEZ_CLUSTER');
+    });
+
+    // Spec Verification 24: the REAL store (no injected fake), end to end — `signNodeHttpPrincipal`
+    // from a node whose secret was actually persisted via `node-secrets.ts` verifies through the
+    // default wiring `createClusterRoutes` now carries, and a DIFFERENT node id (never stored)
+    // does not, even though nothing overrides `lookupNodeSecret` in either case.
+    it('the real store, no override: a node that redeemed a secret verifies through the default wiring (Verification 24)', async () => {
+      await storeNodeSecret(NODE_ID, SECRET, { env });
+      const clusterRoutes = routes(); // no lookupNodeSecret override — this is the D22 default path
+      const principal: NodeHttpPrincipal = {
+        nodeId: NODE_ID,
+        issuedAt: new Date().toISOString(),
+        method: 'GET',
+        path: '/cluster/corpus',
+        bodyHash: hashRequestBody(''),
+      };
+      const res = await apiRequest(clusterRoutes, '/cluster/corpus', {
+        headers: nodeAuthHeaders(principal, SECRET),
+      });
+      // Admitted past the gate — falls through to the corpus stub's own 409, never node-auth's 401.
+      expect(res.status).toBe(409);
+    });
+
+    it('the real store, no override: a DIFFERENT node id (never stored) is refused unknown-node (Verification 24)', async () => {
+      await storeNodeSecret(NODE_ID, SECRET, { env });
+      const clusterRoutes = routes(); // still no override
+      const principal: NodeHttpPrincipal = {
+        nodeId: 'a-stranger',
+        issuedAt: new Date().toISOString(),
+        method: 'GET',
+        path: '/cluster/corpus',
+        bodyHash: hashRequestBody(''),
+      };
+      const res = await apiRequest(clusterRoutes, '/cluster/corpus', {
+        headers: nodeAuthHeaders(principal, 'whatever-secret-a-stranger-might-guess'),
+      });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { reason: string }).reason).toBe('unknown-node');
     });
 
     it('unknown-node: a node the hub does not recognise is refused even with a validly-shaped signature', async () => {
@@ -213,9 +254,16 @@ describe('cluster-routes.ts wires D20 node-auth onto the right paths', () => {
     });
   });
 
-  describe('the default lookupNodeSecret (no store wired) fails closed', () => {
-    it('refuses every node as unknown-node when ClusterRouteDeps#lookupNodeSecret is omitted', async () => {
-      const clusterRoutes = routes(); // no lookupNodeSecret override
+  // CORRECTED 2026-08-23 (D22): this describe block used to be titled "the default lookupNodeSecret
+  // (no store wired) fails closed", on the premise that NO real store existed anywhere and the
+  // default therefore had nothing to consult. That premise is gone — `cluster/node-secrets.ts` now
+  // exists and `createClusterRoutes`'s default reads from it (see the two "Verification 24" tests
+  // above, which exercise the SAME default answering `ok` for a node that actually enrolled). What
+  // this test still proves, correctly, is narrower: the default still fails closed for a node this
+  // hub's store has never heard of — an unenrolled stranger, not "no store wired at all".
+  describe('the default lookupNodeSecret still fails closed for a node the store has never heard of', () => {
+    it('refuses an unenrolled node as unknown-node when ClusterRouteDeps#lookupNodeSecret is omitted', async () => {
+      const clusterRoutes = routes(); // no lookupNodeSecret override — reads the real, empty store
       const principal: NodeHttpPrincipal = {
         nodeId: NODE_ID,
         issuedAt: new Date().toISOString(),
@@ -228,6 +276,39 @@ describe('cluster-routes.ts wires D20 node-auth onto the right paths', () => {
       });
       expect(res.status).toBe(401);
       expect(((await res.json()) as { reason: string }).reason).toBe('unknown-node');
+    });
+  });
+
+  // Spec Verification 28.
+  describe('GET /cluster never renders a stored secret (Verification 28)', () => {
+    function makeStoredNode(overrides: Partial<StoredClusterNode> = {}): StoredClusterNode {
+      return {
+        nodeId: 'node-a',
+        nodeName: 'Node A',
+        role: 'spoke',
+        labels: [],
+        acceptsDispatch: false,
+        protocol: CLUSTER_PROTOCOL,
+        version: '0.10.0',
+        ...overrides,
+      };
+    }
+
+    it('two enrolled nodes, each with a stored secret — neither secret appears anywhere in the response body', async () => {
+      await upsertNode(makeStoredNode({ nodeId: 'node-a', nodeName: 'A' }), { env });
+      await upsertNode(makeStoredNode({ nodeId: 'node-b', nodeName: 'B' }), { env });
+      await storeNodeSecret('node-a', 'node-a-super-secret-value', { env });
+      await storeNodeSecret('node-b', 'node-b-super-secret-value', { env });
+
+      const res = await apiRequest(routes(), '/cluster');
+      expect(res.status).toBe(200);
+      const bodyText = await res.text();
+      expect(bodyText).not.toContain('node-a-super-secret-value');
+      expect(bodyText).not.toContain('node-b-super-secret-value');
+
+      const body = JSON.parse(bodyText) as { nodes: Array<Record<string, unknown>> };
+      expect(body.nodes).toHaveLength(2);
+      for (const node of body.nodes) expect(node).not.toHaveProperty('secret');
     });
   });
 });
