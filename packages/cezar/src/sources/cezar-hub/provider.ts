@@ -5,6 +5,7 @@ import {
   type ClusterCorpusManifestResponse,
 } from '@loki-labs/better-cezar-contract';
 import { z } from 'zod';
+import { signedNodeRequestHeaders } from '../../cluster/node-auth.ts';
 import type {
   SourceAvailability,
   SourceCapabilities,
@@ -48,11 +49,22 @@ import type { SourceConnection } from '../types.ts';
  * to that file. What this file does NOT yet have a landed contract for is `GET
  * /api/v1/cluster/corpus/*path`'s response body and the hub-side route handlers themselves — both
  * are package **3b.2**, which depends on 3b.1 (this package), not the other way around. So the doc
- * request/response shape below (`cezarHubDocResponseSchema`) and the auth headers
- * (`Authorization: Bearer <secret>` + `x-cezar-node-id`) are THIS file's own proposal, deliberately
- * lenient (`.passthrough()`) rather than `.strict()` — 3b.2 builds the hub side to match, or
- * revises this file if a better shape turns up. Flagged in the 3b.1 implementation report rather
- * than guessed at silently.
+ * request/response shape below (`cezarHubDocResponseSchema`) is THIS file's own proposal,
+ * deliberately lenient (`.passthrough()`) rather than `.strict()` — 3b.2 builds the hub side to
+ * match, or revises this file if a better shape turns up. Flagged in the 3b.1 implementation
+ * report rather than guessed at silently.
+ *
+ * **SUPERSEDED 2026-08-23 by D20.** ~~This paragraph originally went on to propose the auth
+ * headers the same way: `Authorization: Bearer <secret>` + `x-cezar-node-id`, this file's own
+ * invention, flagged rather than guessed at silently, same as the doc response shape above.~~ D20
+ * landed `cluster/node-auth.ts`'s request-bound signed principal for the whole
+ * `/api/v1/cluster/*` family in the meantime, which supersedes that proposal outright rather than
+ * sitting beside it — a bearer secret is a durable, replayable credential, and D20 exists
+ * specifically so a captured header pair can't be replayed against a different route or body, or
+ * outside a freshness window. `request()` below now signs every call through
+ * `signedNodeRequestHeaders` and sends no bearer header at all. Left in place, unlike a deletion,
+ * so a reader who only remembers the old shape finds out what replaced it rather than finding a
+ * header silently gone.
  *
  * **Auth never touches the real process environment.** `StoredClusterNodeIdentity.secret`
  * (`packages/contract/src/cluster.ts`) says so explicitly: "`0600`, and deliberately not in the
@@ -310,16 +322,29 @@ export class CezarHubSourceProvider implements SourceProvider {
     return { body: parsed.data.body };
   }
 
+  /** Signs with `cluster/node-auth.ts` (D20) rather than the bearer header this file used to send
+   *  (module header). Every call this method serves is a bodyless GET, so the default `bodyText` of
+   *  `''` is right for all of them. The `nodeId`/`secret` guard below is belt and suspenders — both
+   *  call sites (`fetchManifest`, `fetchDoc`) already refuse before reaching this method — but it
+   *  keeps this method honest on its own rather than trusting every future caller to re-derive the
+   *  same check, and it is what turns an impossible-today gap into a stated reason instead of a
+   *  signature over an empty-string secret. */
   private async request(url: string): Promise<FetchOutcome> {
+    if (!this.nodeId || !this.secret) {
+      return { ok: false, reason: 'no cluster credential for this node - it has not joined a cluster' };
+    }
+    const signed = signedNodeRequestHeaders({
+      nodeId: this.nodeId,
+      secret: this.secret,
+      method: 'GET',
+      url: new URL(url),
+      now: this.clock,
+    });
     let res: Response;
     try {
       res = await this.fetchImpl(url, {
         method: 'GET',
-        headers: {
-          authorization: `Bearer ${this.secret}`,
-          'x-cezar-node-id': this.nodeId ?? '',
-          accept: 'application/json',
-        },
+        headers: { ...signed.headers, accept: 'application/json' },
         signal: AbortSignal.timeout(this.requestTimeoutMs),
       });
     } catch (err) {

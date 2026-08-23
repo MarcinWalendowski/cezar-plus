@@ -24,10 +24,16 @@ import type { ClusterHomeOptions } from './node-identity.ts';
  * not after the first success — a reconcile that half-applied and then failed is exactly the case
  * the backup exists for.
  *
- * **This module never dials out itself.** `todos.ts` (`packages/cezar/src/todos.ts`) does not yet
- * carry the cluster fields (`pendingSince`/`hubSeq`/`tombstone`/`placement`/`startedOn` — package
- * 2.3, `.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`, still open as this file was written),
- * and neither the link (1.3) nor the ops/replica pipeline (2.1/2.2) exist yet either. So the
+ * **This module never dials out itself.** **CORRECTED 2026-08-23 — the first half of this
+ * paragraph is no longer true.** It said `todos.ts` *"does not yet carry the cluster fields
+ * (`pendingSince`/`hubSeq`/`tombstone`/`placement`/`startedOn` — package 2.3 … still open as this
+ * file was written)"*. Package 2.3 landed: `todoSchema` now spreads `clusterTodoFieldsSchema.shape`
+ * verbatim, so `TodoItem` carries all **six** of them — the original list is also one short,
+ * `pendingFields` was added after that note was written. `cluster/replica.ts` dropped its own
+ * `TodoItem & ClusterTodoFields` intersection on the same date for the same reason. The link (1.3)
+ * and the ops/replica pipeline (2.1/2.2) do now exist as modules, though nothing arms the link yet
+ * (`startClusterRuntime` is still a warning, not activation). What is unchanged, and is the actual
+ * point of this paragraph: the
  * REMOTE side of a reconcile — reading a peer's todos and writing a merge back onto it — is an
  * injected `RemoteReconcileTransport` rather than a socket this module opens: in production the
  * caller backs it with the established cluster link (out of this package's scope — see

@@ -8,6 +8,7 @@ import {
   getAuthenticatedClusterNode,
   hashRequestBody,
   signNodeHttpPrincipal,
+  signedNodeRequestHeaders,
   verifyNodeHttpPrincipal,
   type NodeHttpPrincipal,
 } from './node-auth.ts';
@@ -181,6 +182,117 @@ describe('verifyNodeHttpPrincipal', () => {
         maxAgeMs: 500,
       }),
     ).toEqual({ ok: false, reason: 'stale-principal' });
+  });
+});
+
+describe('signedNodeRequestHeaders (the caller side both real callers use)', () => {
+  const HUB = 'https://hub.example/api/v1/cluster/corpus/submit';
+
+  /** Verifies what a caller would ACTUALLY put on the wire, the way the hub would: bind against the
+   *  method/path/body taken from the request itself, never re-derived from the same inputs the
+   *  signature was built from. A test that recomputed `hashRequestBody(bodyText)` here would pass
+   *  even if the helper signed a different body than it returned, which is the single failure this
+   *  block exists to rule out. */
+  function verifyAsHubWould(
+    sent: { headers: Record<string, string>; body: string },
+    request: { method: string; url: string },
+    secret = SECRET,
+    now?: () => Date,
+  ) {
+    return verifyNodeHttpPrincipal(
+      {
+        principal: sent.headers[CLUSTER_NODE_PRINCIPAL_HEADER],
+        signature: sent.headers[CLUSTER_NODE_SIGNATURE_HEADER],
+      },
+      sent.headers[CLUSTER_NODE_ID_HEADER],
+      secret,
+      { method: request.method, path: new URL(request.url).pathname, bodyHash: hashRequestBody(sent.body) },
+      now ? { now } : {},
+    );
+  }
+
+  it('floor: a POST signed by this helper verifies against the hub, as the signing node — and the returned body is the one that was hashed', () => {
+    const bodyText = JSON.stringify({ path: 'knowledge/x.md', body: 'hello' });
+    const sent = signedNodeRequestHeaders({
+      nodeId: NODE_ID,
+      secret: SECRET,
+      method: 'POST',
+      url: new URL(HUB),
+      bodyText,
+    });
+    expect(sent.body).toBe(bodyText);
+    expect(verifyAsHubWould(sent, { method: 'POST', url: HUB })).toEqual({ ok: true, nodeId: NODE_ID });
+  });
+
+  it('a bodyless GET signs the empty body by default, and verifies', () => {
+    const url = 'https://hub.example/api/v1/cluster/corpus';
+    const sent = signedNodeRequestHeaders({ nodeId: NODE_ID, secret: SECRET, method: 'GET', url: new URL(url) });
+    expect(sent.body).toBe('');
+    expect(verifyAsHubWould(sent, { method: 'GET', url })).toEqual({ ok: true, nodeId: NODE_ID });
+  });
+
+  it('sends the three D20 headers and NO bearer credential — the superseded shape must be gone, not merely accompanied', () => {
+    const sent = signedNodeRequestHeaders({ nodeId: NODE_ID, secret: SECRET, method: 'GET', url: new URL(HUB) });
+    expect(Object.keys(sent.headers).sort()).toEqual(
+      [CLUSTER_NODE_ID_HEADER, CLUSTER_NODE_PRINCIPAL_HEADER, CLUSTER_NODE_SIGNATURE_HEADER].sort(),
+    );
+    expect(Object.keys(sent.headers).map((k) => k.toLowerCase())).not.toContain('authorization');
+  });
+
+  // ---- negative controls: each asserts the SAME headers fail when one bound fact differs -------
+
+  it('negative control — replayed against a different PATH: refused', () => {
+    const sent = signedNodeRequestHeaders({ nodeId: NODE_ID, secret: SECRET, method: 'POST', url: new URL(HUB), bodyText: '{}' });
+    expect(verifyAsHubWould(sent, { method: 'POST', url: 'https://hub.example/api/v1/cluster/todos/backup' })).toEqual({
+      ok: false,
+      reason: 'bad-signature',
+    });
+  });
+
+  it('negative control — replayed against a different METHOD: refused', () => {
+    const sent = signedNodeRequestHeaders({ nodeId: NODE_ID, secret: SECRET, method: 'POST', url: new URL(HUB), bodyText: '{}' });
+    expect(verifyAsHubWould(sent, { method: 'DELETE', url: HUB })).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('negative control — same headers, altered BODY: refused', () => {
+    const sent = signedNodeRequestHeaders({ nodeId: NODE_ID, secret: SECRET, method: 'POST', url: new URL(HUB), bodyText: '{"a":1}' });
+    const tampered = { headers: sent.headers, body: '{"a":2}' };
+    expect(verifyAsHubWould(tampered, { method: 'POST', url: HUB })).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('negative control — outside the freshness window: refused as stale, not as tampering', () => {
+    const issuedAt = new Date('2026-01-01T00:00:00.000Z');
+    const sent = signedNodeRequestHeaders({
+      nodeId: NODE_ID,
+      secret: SECRET,
+      method: 'POST',
+      url: new URL(HUB),
+      bodyText: '{}',
+      now: () => issuedAt.getTime(),
+    });
+    expect(
+      verifyAsHubWould(sent, { method: 'POST', url: HUB }, SECRET, () => new Date(issuedAt.getTime() + 100_000)),
+    ).toEqual({ ok: true, nodeId: NODE_ID });
+    expect(
+      verifyAsHubWould(sent, { method: 'POST', url: HUB }, SECRET, () => new Date(issuedAt.getTime() + 130_000)),
+    ).toEqual({ ok: false, reason: 'stale-principal' });
+  });
+
+  it('negative control — a hub holding a different secret for this node: refused', () => {
+    const sent = signedNodeRequestHeaders({ nodeId: NODE_ID, secret: SECRET, method: 'POST', url: new URL(HUB), bodyText: '{}' });
+    expect(verifyAsHubWould(sent, { method: 'POST', url: HUB }, OTHER_SECRET)).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('signs the path WITHOUT the query string, matching what Hono binds — a signed request carrying one still verifies', () => {
+    const withQuery = 'https://hub.example/api/v1/cluster/corpus?since=7';
+    const sent = signedNodeRequestHeaders({ nodeId: NODE_ID, secret: SECRET, method: 'GET', url: new URL(withQuery) });
+    // The binding uses `new URL(...).pathname`, i.e. the same query-less path Hono's `c.req.path`
+    // reports — so this passing IS the assertion that the search string was excluded on both sides.
+    expect(verifyAsHubWould(sent, { method: 'GET', url: withQuery })).toEqual({ ok: true, nodeId: NODE_ID });
+    const encoded = sent.headers[CLUSTER_NODE_PRINCIPAL_HEADER];
+    expect(encoded).toBeTypeOf('string');
+    const decoded = JSON.parse(Buffer.from(encoded!, 'base64url').toString('utf8')) as NodeHttpPrincipal;
+    expect(decoded.path).toBe('/api/v1/cluster/corpus');
   });
 });
 

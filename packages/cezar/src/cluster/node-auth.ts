@@ -109,16 +109,75 @@ export function hashRequestBody(bodyText: string): string {
 }
 
 /**
- * The CALLER side. Not wired to any client in this package — `cez kb submit`
- * (`packages/cezar/src/index.ts`) posts to `/cluster/corpus/submit` today with NO auth headers at
- * all, and `sources/cezar-hub/provider.ts` sends the now-superseded `Authorization: Bearer` +
- * `x-cezar-node-id` pair. Both need updating to call this instead; flagged in this package's
- * implementation report as a divergence rather than guessed at here, since neither file is this
- * package's to change.
+ * The CALLER side, and the low-level half of it — prefer `signedNodeRequestHeaders` below, which
+ * cannot be handed a body it did not hash.
+ *
+ * **CORRECTED 2026-08-23.** This docblock read *"Not wired to any client in this package"* and
+ * listed both callers as divergences still to be updated, which was true the hour it was written
+ * and false by the end of the same day: `cez kb submit` (`packages/cezar/src/index.ts`, which
+ * previously sent NO auth headers at all) and `sources/cezar-hub/provider.ts` (which sent the
+ * superseded `Authorization: Bearer` + `x-cezar-node-id` pair) both sign through this file now.
+ * What is still unwired is the HUB side — see the module header on the missing secret store.
  */
 export function signNodeHttpPrincipal(principal: NodeHttpPrincipal, secret: string): SignedNodeHttpPrincipal {
   const encoded = encodePrincipal(principal);
   return { principal: encoded, signature: signPayload(encoded, secret) };
+}
+
+export interface SignedNodeRequestInput {
+  readonly nodeId: string;
+  readonly secret: string;
+  readonly method: string;
+  /** The URL the request will actually be sent to. Only `pathname` is signed — see below. */
+  readonly url: URL;
+  /** The EXACT string that will be sent as the body. `''` for a bodyless request. */
+  readonly bodyText?: string;
+  readonly now?: () => number;
+}
+
+/**
+ * Builds the three headers a caller sends, from the request it is actually about to make.
+ *
+ * This exists because the one way to get D20 wrong is subtle and silent: sign over a body that is
+ * not byte-for-byte the body you send. `JSON.stringify` called twice on the same object is not
+ * guaranteed to produce the same string across engine versions or after an innocuous refactor, so
+ * a caller that stringifies once for `hashRequestBody` and again for `fetch`'s `body` verifies
+ * fine in a unit test and fails as `bad-signature` in production — the least diagnosable of the
+ * four reasons, because it reads as tampering. Taking `bodyText` as a STRING and returning it
+ * alongside the headers makes the two the same value by construction; there is nothing left for a
+ * test to enforce.
+ *
+ * **`url.pathname`, deliberately, and not `url.pathname + url.search`.** The verifier binds
+ * against Hono's `c.req.path`, which excludes the query string (`nodeHttpPrincipalSchema` says so
+ * on `path`). Signing the search string here would make every request with a query parameter fail
+ * `bad-signature` on arrival — so the asymmetry is load-bearing, not an oversight. It does mean a
+ * captured header pair can be replayed against the same path with DIFFERENT query parameters
+ * inside its 120s window, which is why no route in this family may put anything security-relevant
+ * in the query string; scope every answer to `getAuthenticatedClusterNode(c).nodeId` instead.
+ */
+export function signedNodeRequestHeaders(input: SignedNodeRequestInput): {
+  readonly headers: Record<string, string>;
+  readonly body: string;
+} {
+  const bodyText = input.bodyText ?? '';
+  const signed = signNodeHttpPrincipal(
+    {
+      nodeId: input.nodeId,
+      issuedAt: new Date(input.now ? input.now() : Date.now()).toISOString(),
+      method: input.method,
+      path: input.url.pathname,
+      bodyHash: hashRequestBody(bodyText),
+    },
+    input.secret,
+  );
+  return {
+    headers: {
+      [CLUSTER_NODE_ID_HEADER]: input.nodeId,
+      [CLUSTER_NODE_PRINCIPAL_HEADER]: signed.principal,
+      [CLUSTER_NODE_SIGNATURE_HEADER]: signed.signature,
+    },
+    body: bodyText,
+  };
 }
 
 // ---- verification, as a discriminated verdict rather than a null -------------------------------

@@ -64,6 +64,7 @@ import { registerAndAdoptProject, suppressBootRegistration } from './registered-
 import { CLUSTER_PROTOCOL, type ClusterCorpusSubmitResponse } from '@loki-labs/better-cezar-contract';
 import { createEnrollmentCode, joinCluster, leaveCluster } from './cluster/enrollment.ts';
 import { loadNodeIdentity } from './cluster/node-identity.ts';
+import { signedNodeRequestHeaders } from './cluster/node-auth.ts';
 import { disableNode, readPeers } from './cluster/peers.ts';
 import { readRemoteRuns } from './cluster/run-projection.ts';
 import { clusterEnabled } from './server/capabilities.ts';
@@ -1617,6 +1618,24 @@ const KB_SUBMIT_USAGE = 'usage: cez kb submit <corpus-path> [--content "..."] [-
  * that is easier than the wrong one.
  *
  * A HUB refuses: there is nothing to forward to, and the corpus is right here — `cez kb write`.
+ *
+ * **Signed with `cluster/node-auth.ts` (D20).** This used to POST with no auth headers at all —
+ * D20 gated the route behind node auth without updating this, its own caller. The body string is
+ * built once and reused for both the signature's `bodyHash` and the actual request body, and
+ * `path`/`method` are read off the same `URL` the request is sent to, so the principal is signed
+ * over exactly what goes over the wire (node-auth.ts's own docblock on why that binding matters).
+ * The hub cannot verify any of this yet — nothing persists a node's secret hub-side (see
+ * `node-auth.ts`'s module header) — so every submit fails closed with 401 `unknown-node` until
+ * that store lands; `describeHubRefusal` below names that gap explicitly rather than reporting a
+ * bare HTTP status, without adding any fallback that would sign as though it might not matter.
+ *
+ * Not exported: this module runs `main()` at load, so importing it from a test executes the CLI.
+ * `kb-submit-signing.test.ts` (repo root of this package's `src/`) drives this command the correct
+ * way instead — a SUBPROCESS through the real entry point, against a real local HTTP hub, checked
+ * with the real `verifyNodeHttpPrincipal` — and is what proves this specific caller (not just
+ * `signedNodeRequestHeaders` in isolation, covered generically in `cluster/node-auth.test.ts`)
+ * actually signs with the node's real identity, refuses closed with no secret on file, and turns a
+ * 401 `unknown-node` into `describeHubRefusal`'s message below rather than a bare HTTP status.
  */
 async function runKbSubmitCommand(args: string[]): Promise<number> {
   if (args[0] === '--help' || args[0] === '-h') {
@@ -1669,21 +1688,34 @@ async function runKbSubmitCommand(args: string[]): Promise<number> {
     console.error('cez kb submit: this node IS the hub — the corpus is local here, so write it directly (`cez kb write`)');
     return 1;
   }
+  if (!identity.secret) {
+    console.error(
+      'cez kb submit: this node has no cluster secret on file — re-run `cez cluster join <code>` to re-enroll',
+    );
+    return 1;
+  }
 
   try {
-    const response = await fetch(new URL('/api/v1/cluster/corpus/submit', identity.hubUrl), {
+    const url = new URL('/api/v1/cluster/corpus/submit', identity.hubUrl);
+    const signed = signedNodeRequestHeaders({
+      nodeId: identity.nodeId,
+      secret: identity.secret,
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
+      url,
+      bodyText: JSON.stringify({
         path,
         body,
         ...(typeof values.note === 'string' ? { note: values.note } : {}),
       }),
     });
-    const payload = (await response.json().catch(() => null)) as ClusterCorpusSubmitResponse | { error?: string } | null;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...signed.headers },
+      body: signed.body,
+    });
+    const payload = (await response.json().catch(() => null)) as ClusterCorpusSubmitResponse | { error?: string; reason?: string } | null;
     if (!response.ok) {
-      const detail = payload && 'error' in payload && payload.error ? payload.error : `HTTP ${response.status}`;
-      console.error(`cez kb submit: the hub refused — ${detail}`);
+      console.error(`cez kb submit: ${describeHubRefusal(response.status, payload)}`);
       return 1;
     }
     if (payload && 'ok' in payload && payload.ok === false) {
@@ -1697,6 +1729,28 @@ async function runKbSubmitCommand(args: string[]): Promise<number> {
     console.error(`cez kb submit: could not reach the hub at ${identity.hubUrl} — ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
+}
+
+/**
+ * Turns a non-2xx `/cluster/corpus/submit` response into the message an operator reads. A plain
+ * `${detail}` fallback would show `unknown-node`'s own wording verbatim — "this node is not known
+ * to the hub — enroll it first" — which is actively wrong advice right now: the request WAS
+ * signed by an enrolled node, the hub just has nowhere to look its secret up (node-auth.ts's
+ * module header, D20's known gap). Only that one reason gets renamed; every other 401
+ * (`bad-signature`, `stale-principal`, `no-credentials`) already carries an accurate, actionable
+ * message from `NODE_AUTH_MESSAGE` and is passed through unchanged.
+ */
+function describeHubRefusal(status: number, payload: unknown): string {
+  const record = payload && typeof payload === 'object' ? (payload as { error?: unknown; reason?: unknown }) : {};
+  if (status === 401 && record.reason === 'unknown-node') {
+    return (
+      'the hub rejected this signed request as unknown (401 unknown-node) — the hub does not yet ' +
+      "persist per-node secrets, so every signed write fails this way until that store lands; this " +
+      "is the known D20 gap, not a problem with this node's enrollment or this write"
+    );
+  }
+  const detail = typeof record.error === 'string' && record.error ? record.error : `HTTP ${status}`;
+  return `the hub refused — ${detail}`;
 }
 
 /** Stdin, or `''` when nothing is piped — mirrors `knowledge/cli.ts`'s own content fallback. */

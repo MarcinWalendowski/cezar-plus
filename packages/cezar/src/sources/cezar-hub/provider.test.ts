@@ -5,6 +5,14 @@ import { join } from 'node:path';
 import type { ClusterCorpusDoc, ClusterCorpusManifestResponse } from '@loki-labs/better-cezar-contract';
 import { CLUSTER_CORPUS_DEFAULT_SCOPE } from '@loki-labs/better-cezar-contract';
 import { afterEach, describe, expect, it } from 'vitest';
+import { LINK_PRINCIPAL_MAX_AGE_MS } from '../../cluster/enrollment.ts';
+import {
+  CLUSTER_NODE_ID_HEADER,
+  CLUSTER_NODE_PRINCIPAL_HEADER,
+  CLUSTER_NODE_SIGNATURE_HEADER,
+  hashRequestBody,
+  verifyNodeHttpPrincipal,
+} from '../../cluster/node-auth.ts';
 import { FileSourceSink } from '../sink.ts';
 import { SourceStore } from '../store.ts';
 import { computeDocId, runSourceSync } from '../sync.ts';
@@ -95,6 +103,34 @@ function makeHubFetch(fixture: HubFixture): { fetchImpl: typeof fetch; requests:
     return new Response('not found', { status: 404 });
   }) as unknown as typeof fetch;
   return { fetchImpl, requests };
+}
+
+interface CapturedRequest {
+  readonly url: string;
+  readonly method: string;
+  readonly headers: Record<string, string>;
+  readonly bodyText: string;
+}
+
+/** A fetch stub that answers a fixed 200 and records every request's method, headers and body
+ *  TEXT (not a re-derivation of what `request()` should have sent) - what the "node auth" tests
+ *  below verify is the SENT request, using the real `verifyNodeHttpPrincipal`. */
+function captureAuthFetch(responseBody: unknown = manifest([])): { fetchImpl: typeof fetch; calls: CapturedRequest[] } {
+  const calls: CapturedRequest[] = [];
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const headers: Record<string, string> = {};
+    new Headers(init?.headers).forEach((value, key) => {
+      headers[key] = value;
+    });
+    calls.push({
+      url: urlOf(input),
+      method: init?.method ?? 'GET',
+      headers,
+      bodyText: typeof init?.body === 'string' ? init.body : '',
+    });
+    return new Response(JSON.stringify(responseBody), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+  return { fetchImpl, calls };
 }
 
 describe('capabilities and kind', () => {
@@ -371,6 +407,105 @@ describe('auth wiring - the credential never rides real process.env', () => {
     const result = await provider.detect();
     expect(result.available).toBe(false);
     expect(requests).toHaveLength(0);
+  });
+});
+
+/**
+ * D20's caller-side follow-up: `request()` used to send `Authorization: Bearer <secret>` +
+ * `x-cezar-node-id` (module header's now-superseded proposal). It now signs with
+ * `cluster/node-auth.ts#signNodeHttpPrincipal` instead. Every test here verifies the request that
+ * was ACTUALLY captured by the fetch stub, using the real `verifyNodeHttpPrincipal` - never a
+ * re-derivation with the same signing helper that produced the headers, which would only prove the
+ * helper is deterministic with itself.
+ */
+describe('node auth (D20) - request-bound signed principal replaces the bearer header', () => {
+  it('signs the manifest GET with a principal the real verifier accepts, over exactly what was sent', async () => {
+    const { fetchImpl, calls } = captureAuthFetch();
+    const provider = new CezarHubSourceProvider(connectionFixture(), { ...AUTH, fetchImpl });
+    await provider.detect();
+
+    // Floor: the request actually happened, before trusting anything about its headers.
+    expect(calls).toHaveLength(1);
+    const sent = calls[0]!;
+    expect(sent.method).toBe('GET');
+
+    const url = new URL(sent.url);
+    const verdict = verifyNodeHttpPrincipal(
+      { principal: sent.headers[CLUSTER_NODE_PRINCIPAL_HEADER], signature: sent.headers[CLUSTER_NODE_SIGNATURE_HEADER] },
+      sent.headers[CLUSTER_NODE_ID_HEADER],
+      AUTH.secret,
+      { method: sent.method, path: url.pathname, bodyHash: hashRequestBody(sent.bodyText) },
+    );
+    expect(verdict).toEqual({ ok: true, nodeId: AUTH.nodeId });
+  });
+
+  it('sends no Authorization/bearer header at all - the superseded credential is gone, not merely alongside the new one', async () => {
+    const { fetchImpl, calls } = captureAuthFetch();
+    const provider = new CezarHubSourceProvider(connectionFixture(), { ...AUTH, fetchImpl });
+    await provider.detect();
+
+    const sent = calls[0]!;
+    expect(sent.headers.authorization).toBeUndefined();
+    expect(Object.values(sent.headers).some((value) => value.includes('Bearer'))).toBe(false);
+    expect(sent.headers[CLUSTER_NODE_ID_HEADER]).toBe(AUTH.nodeId);
+  });
+
+  it('negative control: the same signed headers do not verify against a different path', async () => {
+    const { fetchImpl, calls } = captureAuthFetch();
+    const provider = new CezarHubSourceProvider(connectionFixture(), { ...AUTH, fetchImpl });
+    await provider.detect();
+
+    const sent = calls[0]!;
+    const url = new URL(sent.url);
+    const verdict = verifyNodeHttpPrincipal(
+      { principal: sent.headers[CLUSTER_NODE_PRINCIPAL_HEADER], signature: sent.headers[CLUSTER_NODE_SIGNATURE_HEADER] },
+      sent.headers[CLUSTER_NODE_ID_HEADER],
+      AUTH.secret,
+      { method: sent.method, path: `${url.pathname}/not-the-signed-path`, bodyHash: hashRequestBody(sent.bodyText) },
+    );
+    expect(verdict).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('negative control: the same signed headers do not verify against a different body', async () => {
+    const { fetchImpl, calls } = captureAuthFetch();
+    const provider = new CezarHubSourceProvider(connectionFixture(), { ...AUTH, fetchImpl });
+    await provider.detect();
+
+    const sent = calls[0]!;
+    const url = new URL(sent.url);
+    const verdict = verifyNodeHttpPrincipal(
+      { principal: sent.headers[CLUSTER_NODE_PRINCIPAL_HEADER], signature: sent.headers[CLUSTER_NODE_SIGNATURE_HEADER] },
+      sent.headers[CLUSTER_NODE_ID_HEADER],
+      AUTH.secret,
+      { method: sent.method, path: url.pathname, bodyHash: hashRequestBody('a body this request never carried') },
+    );
+    expect(verdict).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('negative control: the same signed headers do not verify once the freshness window has passed', async () => {
+    const { fetchImpl, calls } = captureAuthFetch();
+    const provider = new CezarHubSourceProvider(connectionFixture(), { ...AUTH, fetchImpl });
+    await provider.detect();
+
+    const sent = calls[0]!;
+    const url = new URL(sent.url);
+    const verdict = verifyNodeHttpPrincipal(
+      { principal: sent.headers[CLUSTER_NODE_PRINCIPAL_HEADER], signature: sent.headers[CLUSTER_NODE_SIGNATURE_HEADER] },
+      sent.headers[CLUSTER_NODE_ID_HEADER],
+      AUTH.secret,
+      { method: sent.method, path: url.pathname, bodyHash: hashRequestBody(sent.bodyText) },
+      { now: () => new Date(Date.now() + LINK_PRINCIPAL_MAX_AGE_MS + 60_000) },
+    );
+    expect(verdict).toEqual({ ok: false, reason: 'stale-principal' });
+  });
+
+  it('refuses to sign - and sends no request - when this node has a nodeId but no secret on file', async () => {
+    const { fetchImpl, calls } = captureAuthFetch();
+    const provider = new CezarHubSourceProvider(connectionFixture(), { hubUrl: HUB_URL, nodeId: 'node-1', fetchImpl });
+
+    const result = await provider.detect();
+    expect(result).toEqual({ available: false, reason: 'no cluster credential for this node - it has not joined a cluster' });
+    expect(calls).toHaveLength(0);
   });
 });
 

@@ -32,6 +32,30 @@
   wrong home unless nothing renders it, and `GET /api/v1/cluster` serves the roster. It is the next
   package, and it is recorded as the top open item in the run plan.
 
+- 🔏 **…and its own two callers now sign, which they did not when the gate landed.** D20 gated the
+  route family in one package and left the only two clients unable to pass it: `cez kb submit`
+  posted to `/cluster/corpus/submit` with a `content-type` header and **nothing else**, and the
+  `cezar-hub` source provider still sent the bearer pair D20 supersedes. Both run on a *spoke*,
+  which does hold the secret, so both were fixable the same day even though the hub still cannot
+  verify anything.
+
+  They sign through one new helper, `signedNodeRequestHeaders`, and it exists for a specific
+  reason rather than for tidiness. The way to get a request-bound signature wrong is to hash one
+  body and send another — `JSON.stringify` called twice on the same object is not guaranteed to
+  agree across engine versions or after an innocuous refactor — and that mistake surfaces as
+  `bad-signature`, the one reason of the four that reads as *tampering*. The helper takes the body
+  as a string and **returns it alongside the headers**, so the signed bytes and the sent bytes are
+  the same value by construction and there is nothing left for a test to enforce. Both files are
+  verified against the real `verifyNodeHttpPrincipal` on the **captured outgoing request**, never a
+  re-derivation with the helper that produced it, with negative controls for a changed path,
+  method, body, freshness window and secret.
+
+  `cez kb submit` also stops repeating the hub's own words back at the operator. Every signed
+  write gets `401 unknown-node` today, whose message is "this node is not known to the hub — enroll
+  it first" — advice that is precisely wrong: the node *is* enrolled, the hub just has nowhere to
+  look its secret up. That one reason is renamed at the call site to name the real gap; the other
+  three pass through unchanged, because they are accurate.
+
 - 🧭 **Decided, deliberately not built: how `cez cluster reconcile` gets its data** (**D21**). The
   gap turned out to be **one method, not four** — `apply` is an ops frame, `backup` is a local
   write on the receiver, `listProjects` is the confirmed-pairings list; only "give me your full todo
@@ -117,8 +141,9 @@
   yet. Open items are tracked in `.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`.
 
   **Gates, run on `prod-host` and on the MERGED tree.** `typecheck` exit 0, `build`,
-  `test:unit` and `test:package` exit 0, and `npm test` at **562 of 563 files green** (10550 tests,
-  342 s). The single red is `knowledge/catalog.test.ts` C18, a CPU-per-MiB budget calibrated on an
+  `test:unit` and `test:package` exit 0, and `npm test` at **566 of 567 files green** (10650 tests,
+  337 s) on the final tree; **562 of 563** when the cluster work first landed, before the
+  caller-signing increment added its own files. The single red is `knowledge/catalog.test.ts` C18, a CPU-per-MiB budget calibrated on an
   M4 Max with no host normalisation: it reads 68.6 against a `< 40` ceiling on this box and fails
   identically at pristine HEAD unpacked from `git archive`, so it is a standing host red and not
   this work's. The budget was deliberately **not** raised. The gate was run on the box rather than
@@ -126,6 +151,15 @@
   core and individual `fs.watch` files took 50–650 s. Re-running after the `origin/main` merge was
   not ceremony: the merge left 12 tests failing in files it never touched textually (see the PLAN's
   "A green branch gate says nothing about the tree you will actually push").
+
+  One test is **not** claimed clean: `workflows/workspace-parallel.test.ts` has failed twice on this
+  box under full-suite load, always the same assertion (`git status --porcelain` in the fixture
+  checkout reads `?? .ai/` where it must be empty), and passes 3/3 in isolation. The final gate above
+  and a pristine-`origin/main` control run on the same host both passed it, which is one green
+  control — weak evidence, and deliberately not written up as "pre-existing". Nothing in this change
+  touches `workflows/`, `runs/` or worktree code; the plausible coupling is load rather than
+  semantics, since added test files change scheduling under a 3-worker cap. Tallied honestly in the
+  PLAN's open items, with the note that repeated control runs are what would settle it.
 - ✅ **The non-disruptive deploy is now MEASURED, not just shipped** (spec
   `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` § "Status log — 2026-08-21
   (18:31–18:41 UTC)"). Release `20260821T183127Z-be3aab61` is live on `prod-host`, deployed
