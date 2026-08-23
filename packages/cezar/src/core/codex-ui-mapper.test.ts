@@ -914,7 +914,14 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
   }, 30_000);
 
   it('keeps autonomous full-access permissions when resuming a thread', async () => {
-    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    // `resumeModel` injected so this test never spawns a real discovery child for the model
+    // catalog (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`) — it is about the sandbox/
+    // permission overrides, not model resolution.
+    const runner = new CodexAppServerRunner({
+      bin: mockBin,
+      timeoutMs: 60_000,
+      resumeModel: async () => ({ source: 'unavailable' }),
+    });
     const session = runner.startSession(
       { userPrompt: 'continue', cwd: process.cwd(), resume: true, sessionId: 'th_mock_1' },
       undefined,
@@ -982,7 +989,12 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
   }, 30_000);
 
   it('rejects a failed resume through session.result without an unhandled rejection', async () => {
-    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    // Same injection as above — this test is about the resume REJECTION, not model resolution.
+    const runner = new CodexAppServerRunner({
+      bin: mockBin,
+      timeoutMs: 60_000,
+      resumeModel: async () => ({ source: 'unavailable' }),
+    });
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown) => unhandled.push(reason);
     process.on('unhandledRejection', onUnhandled);

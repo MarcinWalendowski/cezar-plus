@@ -1,6 +1,12 @@
 # A failed agent turn reads as a done step
 
-**Status:** In progress
+**Status:** Implemented — shipped `c1ccbe79` 2026-08-22 (Phase 1 failed-turn signal, Phase 2
+dropped-pin dispatch guard). **CORRECTED 2026-08-23:** this spec's own record said reopening such
+a run "resumes the codex thread, whose stored settings still say `model: sonnet` … indistinguishable
+from nothing happening" (below) and left that open. It is now closed by
+`.ai/specs/2026-08-23-codex-resume-explicit-model.md` (commit `d76058b1`, merged to `main` at
+`9686b449`) — `thread/resume` now always sends an explicit, cezar-checked model instead of none.
+That spec is itself QA Needed until its own V7 (real-box reopen of the two named runs) is run.
 **Date:** 2026-08-22
 **Owner instruction:** *"ensure this type of errors won't make steps in workflow successful"*,
 *"writing spec + spec review should be by opus always, the rest can be load balanced by codex or
