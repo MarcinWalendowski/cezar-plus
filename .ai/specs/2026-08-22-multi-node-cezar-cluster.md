@@ -2582,6 +2582,32 @@ To run one real task on this Mac, dispatched from the VPS hub:
 
 **Honest estimate of order:** C is larger than A and B combined, and 4 is most of it.
 
+**Implementation detail for step 4, surveyed 2026-08-23 so the next session need not re-derive it.**
+The spoke does not need new run machinery — it needs to call the existing entry point with a
+faithfully translated input:
+
+- **The entry point is `RunManager.startRun(workflow, input)`** (`workflows/run.ts:1339`), taking
+  `StartRunInput extends ExecuteRunInput & { author: TaskAuthor }`. `startVariants` (`:1428`) is the
+  fan-out sibling. `RunManager` also already owns `cancel`, `isActive`, `finish`, `continueRun` and
+  `recordTurnEnd` — the whole lifecycle a dispatched run needs to report on.
+- **What `dispatch` actually carries** (`clusterDispatchFrameSchema`): `dispatchId`, `todoId`,
+  `projectKey`, `placement`, `workflow`, optional `expect: { headSha }`, optional `override`.
+  Deliberately **no path, no worktree, no session and no handoff target** — the schema's own doc
+  forbids adding one, because a foreign run must never request "open in terminal" on someone
+  else's host. So the spoke resolves every local affordance itself; none may arrive over the wire.
+- **The gap is a translation, not a new pipeline**: `todoId` + `projectKey` -> the local todo record
+  (which is why **Milestone B has to land first** — without replication the spoke may not hold that
+  row at all) -> a `StartRunInput` with `author` set to something that marks it dispatched, not
+  locally authored.
+- **`expect.headSha` is a refusal gate, not advice** (D12a): the target re-checks its own HEAD and
+  refuses if behind or mid-conflict, **naming which**. The default is refusal; `override` is set
+  only by a human, never by the scheduler. `dispatch.ts#isCorpusStale` and `mayStartWithoutHub`
+  already encode the sibling conditions.
+- **Report back on the `freshness` frame**, which is also where a refusal rides — the contract keeps
+  exactly ten frames and folds "cannot take work" into the same frame that answers "can you take
+  work". `spoke-runtime.ts` already sends this correctly for its decline path; accepting is the same
+  code with a different verdict.
+
 ### Milestone D — WATCHING a foreign run. *Not built.*
 
 `startRelay`/`relayTail` exist with 0 callers. Needs the cockpit run view to drive the 0→1/1→0
