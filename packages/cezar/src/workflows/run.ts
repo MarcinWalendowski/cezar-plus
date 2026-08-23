@@ -101,7 +101,12 @@ import {
   runAccountKey,
   usageHoldAccountKey,
 } from '@loki-labs/better-cezar-contract';
-import { resolvePoolForDispatch, selectPoolAccount, type PoolChoice } from '../workspace/agent-route-select.ts';
+import {
+  resolvePoolForDispatch,
+  resolvePoolForProvider,
+  selectPoolAccount,
+  type PoolChoice,
+} from '../workspace/agent-route-select.ts';
 import type { ProviderId } from '../core/provider-auth.ts';
 import {
   buildWorkspaceGrant,
@@ -1342,8 +1347,22 @@ export class RunManager {
     } = {},
   ): Promise<{ env: Record<string, string>; profileId: string; knowledgeSummary: KnowledgePromptSummary | undefined }> {
     const run = this.store.getRun(runId);
+    const runRunner = run?.runner ?? 'claude';
+    // A step that pins its OWN runner overrides the provider, and until 2026-08-23 nothing
+    // re-resolved the account for it: `profileId` fell through to `undefined`, `selectProfile`
+    // could not parse the pool route stored for that provider, and it degraded to that provider's
+    // DEFAULT login however exhausted that login was. Resolve the pool for the step's provider
+    // instead — limited-skip and the rest of the ranking come free from `selectPoolAccount`.
+    // Spec: `.ai/specs/2026-08-23-step-runner-account-resolution.md`.
+    const steppedProfile = options.recordedProfileId === undefined && backend !== runRunner
+      ? (await resolvePoolForProvider({
+          provider: backend as ProviderId,
+          repoRoot: this.repoRoot,
+          inflight: this.semaphore.accountInflight(),
+        }))?.accountId
+      : undefined;
     const profileId = options.recordedProfileId
-      ?? (backend === (run?.runner ?? 'claude') ? run?.agentProfile : undefined);
+      ?? (backend === runRunner ? run?.agentProfile : steppedProfile);
     // Zero I/O when off (D4) — `loadKnowledgeSummary` itself re-checks the flag, this short-circuit
     // just avoids the Promise.all overhead in the (overwhelmingly common, today) off case.
     const kbEnabled = process.env.CEZ_KB === '1';

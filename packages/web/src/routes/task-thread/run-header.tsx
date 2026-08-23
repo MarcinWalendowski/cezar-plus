@@ -290,7 +290,7 @@ export function RunHeader({
           <div className="border-t border-border pt-2 pb-1">
             {/* The run's OWN frozen def, not the current template: a workflow edited since this
                 run started must not restate this run's plan (spec 2026-08-22-per-step-model-display). */}
-            <WorkflowSteps runId={run.id} steps={run.steps} planned={run.workflowDef?.steps} />
+            <WorkflowSteps runId={run.id} steps={run.steps} planned={run.workflowDef?.steps} runRunner={run.runner} />
           </div>
         ) : null}
 

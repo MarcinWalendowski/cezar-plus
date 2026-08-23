@@ -8,10 +8,11 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 
-import type { StepState, StepStatus } from '@loki-labs/better-cezar-api-client'
+import type { Runner, StepState, StepStatus } from '@loki-labs/better-cezar-api-client'
 import { LiveDuration } from '@/components/live-duration'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { formatDuration } from '@/lib/format'
+import { modelConflictsWithRunner } from '@/routes/new-task-form'
 import { cn } from '@/lib/utils'
 
 import { ACTIVE_STEP_STATUSES, TERMINAL_STEP_STATUSES, stepElapsed } from './step-timing'
@@ -73,7 +74,15 @@ export function railProgress(steps: ReadonlyArray<Pick<StepState, 'status'>>): n
   return score / steps.length
 }
 
-export function StepRail({ steps, planned }: { steps: StepState[]; planned?: PlannedSteps }) {
+export function StepRail({
+  steps,
+  planned,
+  runRunner,
+}: {
+  steps: StepState[]
+  planned?: PlannedSteps
+  runRunner?: Runner | undefined
+}) {
   if (steps.length === 0) return null
   const pct = railProgress(steps) * 100
   return (
@@ -97,7 +106,7 @@ export function StepRail({ steps, planned }: { steps: StepState[]; planned?: Pla
               ×{step.iterations}
             </span>
           ) : null}
-          <StepModel step={step} planned={planned} />
+          <StepModel step={step} planned={planned} runRunner={runRunner} />
           <span className="ml-auto shrink-0 pl-2 text-[11.5px] text-soft-foreground tabular-nums">
             {step.kind} · step {index + 1} of {steps.length}
           </span>
@@ -115,7 +124,13 @@ export function StepRail({ steps, planned }: { steps: StepState[]; planned?: Pla
  *  only thing that can answer for a step that has not run yet. `StepState` alone cannot: a
  *  `pending` step has no execution facts. Optional everywhere, so the bare `<StepRail steps={…}/>`
  *  call sites (tests, and any future caller without a def in hand) keep compiling. */
-export type PlannedSteps = ReadonlyArray<{ id: string; model?: string | undefined }>
+export type PlannedSteps = ReadonlyArray<{
+  id: string
+  model?: string | undefined
+  /** A step may pin its own provider (`spec-to-deploy` pins `spec`/`review-spec` on claude).
+   *  Already on the wire — `workflowStepDefSchema` carries `runner` beside `model`. */
+  runner?: Runner | undefined
+}>
 
 /**
  * Which LLM model ran this step (spec 2026-08-22-per-step-model-display).
@@ -137,7 +152,15 @@ export type PlannedSteps = ReadonlyArray<{ id: string; model?: string | undefine
  * `AgentBadge` keeps `modelIdentity` out of its own truncating summary — the rail is already a
  * dense single line, and the free-text ask (`opus`, `sonnet`) is the part a reader scans.
  */
-function StepModel({ step, planned }: { step: StepState; planned?: PlannedSteps }) {
+function StepModel({
+  step,
+  planned,
+  runRunner,
+}: {
+  step: StepState
+  planned?: PlannedSteps
+  runRunner?: Runner | undefined
+}) {
   if (step.kind !== 'agent') return null
   const executed = step.model
   // Only when it says something `model` does not — the same `identity !== model` guard AgentBadge
@@ -169,7 +192,33 @@ function StepModel({ step, planned }: { step: StepState; planned?: PlannedSteps 
       </span>
     )
   }
-  const plannedModel = planned?.find((def) => def.id === step.id)?.model
+  const def = planned?.find((entry) => entry.id === step.id)
+  const plannedModel = def?.model
+  // The provider this step will actually use: its own pin first, else the run's.
+  const plannedRunner = def?.runner ?? runRunner
+  if (plannedModel !== undefined && plannedRunner !== undefined && modelConflictsWithRunner(plannedModel, plannedRunner)) {
+    // The workflow plans a model this backend cannot serve, and the engine has ALREADY decided to
+    // drop it — `modelForBackend` forwards nothing and the transcript says so outright ("model
+    // \"sonnet\" is not a codex model — running on codex's default instead"). Rendering the pin
+    // anyway made the rail contradict the transcript on every codex run of `spec-to-deploy`, whose
+    // six construction steps pin `sonnet`, a Claude alias. Reported from production 2026-08-23;
+    // spec `.ai/specs/2026-08-23-step-runner-account-resolution.md`.
+    //
+    // Named in the tooltip rather than dropped silently: the plan is still a true fact about the
+    // workflow, it is just not a fact about this run. And keyed on the STEP's runner, so the two
+    // `opus` chips on `spec`/`review-spec` — which pin `runner: claude` precisely so opus survives
+    // a codex run — stay exactly as they were.
+    return (
+      <span
+        data-slot="step-model"
+        data-source="planned-dropped"
+        title={`This workflow plans ${plannedModel}, which ${plannedRunner} cannot serve — the step will run on ${plannedRunner}'s default.`}
+        className="shrink-0 font-mono text-[11px] text-soft-foreground/70"
+      >
+        auto
+      </span>
+    )
+  }
   if (plannedModel !== undefined) {
     return (
       <span
@@ -306,10 +355,12 @@ export function WorkflowSteps({
   runId,
   steps,
   planned,
+  runRunner,
 }: {
   runId: string
   steps: StepState[]
   planned?: PlannedSteps
+  runRunner?: Runner | undefined
 }) {
   const [open, setOpen] = useState(() => openByRun.get(runId) ?? false)
   if (steps.length === 0) return null
@@ -338,7 +389,7 @@ export function WorkflowSteps({
         {/* The current step's model and clock, so the common (collapsed) case answers "what is
             this running on, and for how long" without an expand. Current step only — one chip per
             dot would drown the summary line the dots exist to keep terse. */}
-        <StepModel step={current} planned={planned} />
+        <StepModel step={current} planned={planned} runRunner={runRunner} />
         <StepClock step={current} />
         <span data-slot="step-summary-progress" className="h-0.5 min-w-[36px] flex-1 overflow-hidden rounded-full bg-muted">
           <span className="block h-full rounded-full bg-pending" style={{ width: `${pct}%` }} />
@@ -350,7 +401,7 @@ export function WorkflowSteps({
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="pt-2">
-          <StepRail steps={steps} planned={planned} />
+          <StepRail steps={steps} planned={planned} runRunner={runRunner} />
         </div>
       </CollapsibleContent>
     </Collapsible>
