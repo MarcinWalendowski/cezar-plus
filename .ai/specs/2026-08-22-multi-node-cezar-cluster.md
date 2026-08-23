@@ -2440,10 +2440,75 @@ invented; these are the names to use when one lands.
 > | `hubSeq` allocator | `cluster/hub-seq.ts` | **done**, 17/17, 3 mutations red |
 > | hub applies an ops frame -> ack | `cluster/hub-ops.ts` | **done**, 8/8, 4 mutations red |
 > | replica fan-out planner | `cluster/replica-fanout.ts` | **done**, 11/11, 5 mutations red |
-> | durable per-`opId` verdict cache | `cluster/op-history.ts` | in flight |
-> | hub-side per-op apply (D9a verdict) | `cluster/hub-apply.ts` | in flight |
-> | spoke outbox flush + ack/replica wiring | `cluster/spoke-runtime.ts` | in flight |
-> | router wiring + watermarks | `cluster/hub-router.ts` | mine, next |
+> | spoke outbox flush + ack/replica wiring | `cluster/spoke-runtime.ts` | **done**, 28/28, 3 mutations red |
+> | router wiring + watermarks | `cluster/hub-router.ts` | **code written, ZERO TESTS — see below** |
+> | durable per-`opId` verdict cache | `cluster/op-history.ts` | **done**, 16/16, fails closed on key/value mismatch |
+> | hub-side per-op apply (D9a verdict) | `cluster/hub-apply.ts` | **not delivered — does not exist** |
+> | constructing the deps in `startClusterRuntime` | `server/cluster-routes.ts` | **not started** |
+>
+> #### THE SINGLE MOST IMPORTANT THING TO KNOW ABOUT THIS BRANCH RIGHT NOW
+>
+> **`hub-router.ts`'s new replication path has NO test coverage whatsoever, and the suite is green
+> anyway.** Measured, not suspected: `grep -c replication hub-router.test.ts` returns **0**. Every
+> one of its `ops` tests builds `deps` without a `replication` field, so all of them take the
+> `if (!deps.replication)` early return and exercise none of the ~60 lines below it. The five
+> replication test files together report **75/75 passing** and that number says nothing at all about
+> the code that was just written.
+>
+> This is the exact shape the repo has been bitten by before (D24; the activation E2E that minted its
+> own hub identity): *a suite that is entirely correct about a path production does not take.* Do not
+> read the green as progress. **The first thing the next session should do is write `hub-router`
+> tests that pass a real `replication` object**, and each one should be mutation-checked, because a
+> test that constructs `deps.replication` but asserts only on the ack still never proves a `replica`
+> frame was built or pushed.
+>
+> Concretely, the cases that need to exist and do not:
+> 1. an accepted batch produces `[ack, ...origin's own replica frames]`, **ack first** (the origin is
+>    waiting on it, and `replica-fanout.ts` deliberately does not exclude the author);
+> 2. a second connected node is PUSHED via `sendTo`, and the returned array does **not** contain its
+>    frames;
+> 3. a rejected op does not appear in any `replica` frame, while its rejection still appears in
+>    `ack.results` with the winner's `fields`;
+> 4. `sendTo` returning `false` leaves that node's watermark **unadvanced**, so the next batch owes
+>    the frame again — with a negative control proving the watermark WOULD have advanced on success;
+> 5. a `hello` carrying a LOWER `appliedThroughHubSeq` than the hub last sent **overwrites** it
+>    (see the `seedWatermark` note below) — this one is a real bug guard, not a nicety;
+> 6. no `replication` wired -> still warns and returns `[]`, never a fabricated ack.
+>
+> #### What was written into `hub-router.ts` (2026-08-23), so the next session need not re-derive it
+>
+> Three patches, all applied, typecheck green across all four workspaces:
+>
+> - **`HubReplicationDeps`, and `replication` is OPTIONAL on `HubFrameRouterDeps`.** A hub with no
+>   replication wired is a legitimate state (that is every caller today), and the honest behaviour
+>   there is the pre-existing one: warn, apply nothing, send no ack. Making it required would have
+>   forced every existing caller and test to fake a replication surface, which is how a fake becomes
+>   the only thing that is ever exercised. The deps are `allocate`, `applyOp`, `findAppliedOp`,
+>   `recordAppliedOp`, `sendTo(nodeId, frame) => boolean`, `connectedNodes() => ClusterNodeId[]`.
+> - **In-closure watermarks**, `Map<nodeId, Map<scopeKey, hubSeq>>`, keyed `workspace` or
+>   `project:<key>`. In memory on purpose: a hub restart loses them and re-learns from each `hello`,
+>   which is the node's own truth, so there is nothing to persist and nothing to keep consistent.
+> - **`advanceWatermark` vs `seedWatermark` — and this distinction is load-bearing, was nearly got
+>   wrong, and is written up in the file itself.** Advancing WITHIN a session (on send) is monotonic,
+>   so a late or duplicate frame cannot walk a watermark backwards. Seeding from a `hello` is a
+>   **SET, not a max**. The hub advances when it SENDS, which is a claim about delivery, not about
+>   application; if a node dies between receiving and applying, the hub's number is too high, and on
+>   reconnect the node reports the LOWER, truthful value. That lower value must win, or the hub never
+>   resends and the node is permanently missing writes with nothing anywhere reporting it. The other
+>   direction is free — replica application is idempotent and the receiver drops anything at or below
+>   its own watermark — so a spoke that under-reports costs one redundant frame, while a hub that
+>   over-remembers costs a silent permanent gap. *(An earlier version of this same patch made `hello`
+>   monotonic and described that as a feature. It was a bug. Corrected the same day, before any test
+>   existed that could have caught it — which is itself the argument for case 5 above.)*
+> - **The `ops` case** now: early-returns the old warn when `replication` is absent; otherwise calls
+>   `applyOpsFrame` with `allocateSeq` closed over this frame's scope; rebuilds the applied set by
+>   matching `ack.results` back to `frame.ops` by `opId`, keeping **only `accepted`** ones and
+>   stamping `hubSeq`; calls `planReplicaFanout` with every connected node as a target at its current
+>   watermark; **returns** the origin's frames behind the ack and **pushes** everyone else's via
+>   `sendTo`, advancing a watermark only on a successful send.
+>
+> Backup of the pre-wiring file, if any of this needs reverting without touching git in a shared
+> checkout: `$SCRATCH/hub-router.prewire.bak` (this session's scratchpad; gone once it is cleaned).
 >
 > **Two pieces were not in the original plan and were found while building**, both by an agent
 > pushing back on a brief rather than implementing it as written — worth noting because both are
@@ -2454,12 +2519,82 @@ invented; these are the names to use when one lands.
 >   a spoke's op is the other direction. Reuse its mechanism (`withTodosLease`, `applyOpToRecord`,
 >   read-fresh-inside-the-lease), not its shape.
 >
-> **`welcome.resumeFrom` stays `[]` even after ops land, and the REASON changes.** Its comment
-> currently says there is no hub oplog to resume from. Ops replicating live does not change that:
-> the hub forwards NEW ops as they arrive and does not replay history on connect. Connect-time
-> replay from `oplog.ts#readOps` is a separate increment, so `[]` — "nothing to resume", not "you are
-> fully caught up" — remains the honest answer. Update the comment's reasoning when wiring, not the
-> value.
+> **`welcome.resumeFrom` stays `[]`, and the REASON has now changed — DONE 2026-08-23.** The comment
+> in `hub-router.ts` no longer says "nothing replicates". It now says what is actually true: ops
+> replicate LIVE (a node connected when a batch lands is pushed its frames immediately), but there is
+> no **connect-time replay** — nothing reads `oplog.ts#readOps` from a `hello` watermark and ships
+> what a node missed while it was away.
+>
+> **That gap is real and is Milestone B's largest remaining hole, not a cosmetic one.** A spoke that
+> is offline when a batch lands never receives it, and never will: it stays behind until some future
+> write happens to touch the same records. An empty `resumeFrom` is currently the honest "this hub
+> cannot replay" and is indistinguishable on the wire from "you are caught up" — so the value must
+> not be quietly treated as correct once replay lands.
+>
+> #### The spoke half is already wired in production, with a design choice worth reviewing
+>
+> `spoke-runtime.ts` (delivered, 28/28, three guards mutation-checked: reentrancy, no-backlog,
+> drop-only-on-ack) discovers its own project list via a new `discoverOutboxProjects`, reading
+> identity + `peers.json` + workspace config from disk rather than taking a list from its caller. Net
+> effect: **the flush loop is live today with zero changes to `cluster-routes.ts`'s existing
+> `startSpokeRuntime({ link, env, warn })` call site.** Its author flagged this as a call for whoever
+> owns `cluster-routes.ts` — if that layer should own and inject the project list for determinism,
+> change it there. Also deliberately out of scope in that file: `ackedThroughHubSeq` is in-memory
+> per-project state inside `spoke-runtime.ts`, **not** a call into `todos.ts`, because `todos.ts` has
+> no generic ack-application function — its only `hubSeq`-stamped path is `markStartedWithClaim`,
+> specific to the synchronous claim RPC (D9a) and not to the general outbox `ack` frame, which had
+> zero production callers before this change.
+>
+> ### REMAINING WORK, in the order it has to happen
+>
+> Nothing below is blocked on the owner except where it says so.
+>
+> **B1. Tests for `hub-router.ts`'s replication path.** Six cases listed above. Do this FIRST — the
+> code is written and unproven, and every hour it sits there is an hour the green suite is lying
+> about it.
+>
+> **B2. `hub-apply.ts` — this one really does not exist yet.** `op-history.ts` DOES: delivered
+> 2026-08-23, 393 lines, **16/16**, and verified by hand against both things that were flagged as
+> easy to get wrong. It throws when `record(opId, result)` is called with `result.opId !== opId`
+> rather than reconciling them (`ClusterAckResult` carries `opId` inside the value as well as being
+> the key, so a mismatch is a corruption signal, and failing closed is the only safe reading), and it
+> stores an `at` timestamp alongside each verdict, which is what makes `prune` /
+> `OP_HISTORY_RETENTION_MS` possible at all — the verdict shape itself has nowhere to put one.
+> `find` deliberately THROWS on a corrupt entry instead of answering `undefined`, because
+> `undefined` means "never applied" and would let the hub re-derive a fresh verdict for an op it had
+> already decided; the throw propagates out of `applyOpsFrame`, which is exactly the "thrown op gets
+> no ack, outbox resends" path.
+>
+> So B2 is now only `hub-apply.ts`. Its contract is already fixed by `hub-ops.ts`'s `HubOpsDeps`:
+> `applyOp(op & { hubSeq }) => Promise<HubOpOutcome>` where `HubOpOutcome = { accepted, fields?,
+> reason? }`. Reuse `applyHubReplica`'s MECHANISM (`withTodosLease`, `applyOpToRecord`,
+> read-fresh-inside-the-lease) and not its shape — it is batch-shaped and computes corrections for a
+> spoke against the hub's authority, whereas this is the other direction, one op at a time, and must
+> return a per-op verdict. Check `git status` before writing it; agents on this branch have landed
+> files after being reported as not delivered.
+>
+> **B3. Construct the deps in `startClusterRuntime` (`server/cluster-routes.ts`).** This is the wire
+> that makes any of Milestone B real. `allocate` <- `createHubSeqAllocator`; `applyOp` <-
+> `hub-apply.ts`; `findAppliedOp`/`recordAppliedOp` <- `op-history.ts`; `sendTo`/`connectedNodes` <-
+> `ClusterLinkServer`. Until this exists, `deps.replication` is `undefined` everywhere in production
+> and the hub still warns and never acks — i.e. **Milestone B is not shipped no matter how green the
+> unit tests are.**
+>
+> **B4. Connect-time replay** — `resumeFrom` from `oplog.ts#readOps`. See above for why this is not
+> optional for a real two-machine cluster: without it, any spoke restart or network blip drops writes
+> permanently and silently.
+>
+> **B5. Resolve the duplicated `toNodeWire`/`toPairingWire`** between `hub-router.ts` and
+> `cluster-routes.ts`. Two copies of one projection, already known to be a drift risk; a field added
+> to one is a field silently missing from the other.
+>
+> **B6. Full gate on the box, on a manifest-verified tree.** Method and the one standing red (C18)
+> are in "The state to hold in your head" below. Do not gate on the Mac and do not gate a moving
+> tree — both cost this session a full run.
+>
+> **Then, and only then:** Milestones C and D, which are entirely unbuilt, and the ops sequence
+> (merge -> deploy -> `cez cluster init` -> `CEZ_CLUSTER=1` -> join code -> Access policy) whose
+> first step is the owner's.
 >
 > ### Where the code stands
 >
