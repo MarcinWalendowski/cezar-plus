@@ -241,6 +241,18 @@ No HTTP route, request or response shape changes.
 - **The cockpit's fallback runner.** `queueHold` uses `health.defaultRunner` when a run names none.
   If that read is stale the row can be silent for a genuinely held task — silence, never a wrong
   account.
+- **Found while fixing, NOT fixed here: an explicit per-task runner does not constrain the account
+  pool.** `~/.cezar/agent-accounts.json` on the box carries `defaults: { claude: "pool:*", codex:
+  "pool:*" }`. `resolvePoolForDispatch` uses the task's runner only to LOOK UP that selection, then
+  `poolCandidates` on a `pool:*` route returns every profile-capable account across every provider.
+  So the reporting task, created explicitly on **codex**, was routed to a **claude** account — and
+  then correctly held behind a Claude weekly limit. That is the reporter's underlying problem: they
+  picked codex to get around a Claude limit, and the picker had no effect. It reads as deliberate
+  (the dispatch docblock says "`pool:*` picks the PROVIDER too") and it is a product decision, not
+  a defect to quietly reverse in a bugfix: either an explicit task runner filters the pool to that
+  provider's accounts, or the per-task picker is decorative whenever a wildcard pool is configured.
+  Flagged for the owner. The workaround needs no code: set the `codex` default to a codex account
+  instead of `pool:*`, or pick an account on the task itself.
 - **Found while auditing, NOT fixed here: `recordLimited()` has no production caller.** Every
   reference to it outside its own definition is a test (`agent-account-usage.test.ts`,
   `agent-route-select.test.ts`). So `AccountUsageEntry.limited` is never written by the limit path,

@@ -1007,8 +1007,8 @@ export class RunManager {
 
   /** Queued runs the SPAWN gate has refused, keyed run id -> the account it refused them on.
    *  `pump()` admits on the account the run RECORD names while `execute()` refuses on the account
-   *  the next STEP will use, and when those disagree the run is dequeued, bounced and re-queued
-   *  at loop speed. This memo is what makes admission ask the spawn's question too. Every read
+   *  DISPATCH resolves, and when those disagree the run is dequeued, bounced and re-queued at
+   *  loop speed. This memo is what makes admission ask the spawn's question too. Every read
    *  re-checks the account against the live holds, so the memo can only ever delay a start that
    *  the spawn gate was going to refuse anyway. */
   private readonly heldAtSpawn = new Map<string, string>();
@@ -1763,12 +1763,13 @@ export class RunManager {
    *
    * TWO keys, because the two gates ask about different accounts and a run BOUNCES forever when
    * they disagree. `pump()` admits on the account the run RECORD names; `execute()` refuses on
-   * the account the next STEP will actually use, which a workflow may pin independently (the
-   * built-in `spec-to-deploy` pins `spec` and `review-spec` to claude whatever the task was
-   * started on). A run whose record says codex and whose first step says claude was therefore
-   * admitted by the queue, refused by the spawn, re-queued, and admitted again — measured on
-   * `prod-host` on 2026-08-23 at roughly eleven round trips a second, each one appending a
-   * transcript note, 2626 of them in four minutes.
+   * the account DISPATCH resolves, and those differ for two independent reasons: a `pool:` route
+   * picks the PROVIDER as well as the login (`resolvePoolForDispatch`), and a workflow step may
+   * pin its own runner. The measured cause was the first — the box's `defaults` are `pool:*` for
+   * both providers, so a task created on codex resolved to a claude account. Its record said
+   * codex, so the queue admitted it; dispatch said claude, which was held, so the spawn handed it
+   * back; repeat. Measured on `prod-host` on 2026-08-23 at roughly eleven round trips a
+   * second, each one appending a transcript note, 2626 of them in four minutes.
    *
    * So the spawn gate's verdict is remembered (`heldAtSpawn`) and consulted at admission. It is a
    * MEMO, not a second source of truth: the remembered account must still be held right now for
