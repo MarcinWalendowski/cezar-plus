@@ -316,14 +316,57 @@ describe('cluster/hub-router', () => {
        *
        * `toEqual` rather than `objectContaining` is the point: it fails BOTH ways — on a field the
        * mapper stops emitting, AND on a stored-only key that leaks onto the wire. The second is why
-       * `secretHash` is seeded below. `storedClusterNodeSchema` is `.passthrough()`, so an unknown
+       * `secretHash` is seeded below.
+       *
+       * **EVERY optional is populated, and that is load-bearing rather than thorough.** The mapper
+       * carries fourteen fields, six of them as `...(x !== undefined ? { x } : {})`. A fixture that
+       * leaves one absent CANNOT pin its line: the field is missing from the output whether the
+       * spread is there or not, so deleting it stays green. An exhaustive-looking `toEqual` over a
+       * sparse fixture pins only the fields the fixture happens to set — which was this test's own
+       * first version, covering 8 of 14. `storedClusterNodeSchema` is `.passthrough()`, so an unknown
        * key really does survive `upsertNode`'s parse into peers.json, while `clusterNodeSchema` is
        * `.strict()` — and the ONLY thing standing between them is `toNodeWire` rebuilding the object
        * field-by-field. Nothing else would catch a spread creeping in.
        */
+      const capacity = {
+        maxParallel: 4,
+        active: 1,
+        maxHeavySteps: 2,
+        heavyActive: 0,
+        enforcement: 'cgroup',
+      } as const;
+      const hostMetrics = {
+        cpuPercent: 12.5,
+        memoryPercent: 41,
+        cpuCount: 8,
+        memoryUsedBytes: 1_000,
+        memoryTotalBytes: 4_000,
+        sampledAt: 1_724_400_000_000,
+      } as const;
+      const repoDrift = [
+        { projectKey: 'pk-1', headSha: 'abc123', ahead: 1, behind: 2, dirty: 3, merging: false },
+      ] as const;
+      const corpus = {
+        version: '7',
+        fetchedAt: '2026-08-23T00:00:00.000Z',
+        scope: ['knowledge'],
+        quarantined: 0,
+      } as const;
+
       await upsertNode(
         {
-          ...makeStoredNode({ nodeId: 'node-a', disabledAt: '2026-08-23T00:00:00.000Z' }),
+          ...makeStoredNode({
+            nodeId: 'node-a',
+            disabledAt: '2026-08-23T00:00:00.000Z',
+            // EVERY optional the mapper carries, populated — see the note above on why an absent
+            // field cannot pin its own spread line.
+            lastSeenAt: '2026-08-22T00:00:00.000Z',
+            capacity,
+            capacityAt: '2026-08-22T00:00:01.000Z',
+            hostMetrics,
+            repoDrift: [...repoDrift],
+            corpus: { ...corpus, scope: [...corpus.scope] },
+          }),
           secretHash: 'stored-only — must never reach the wire',
         } as StoredClusterNode,
         { env: env() },
@@ -342,6 +385,12 @@ describe('cluster/hub-router', () => {
           acceptsDispatch: false,
           protocol: CLUSTER_PROTOCOL,
           version: '0.10.0',
+          lastSeenAt: '2026-08-22T00:00:00.000Z',
+          capacity,
+          capacityAt: '2026-08-22T00:00:01.000Z',
+          hostMetrics,
+          repoDrift,
+          corpus,
           disabledAt: '2026-08-23T00:00:00.000Z',
         },
       ]);
