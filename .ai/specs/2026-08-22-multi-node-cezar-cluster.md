@@ -2398,6 +2398,20 @@ invented; these are the names to use when one lands.
 > box, confirm the code says `https://cockpit.example.com` before pasting it anywhere — do not
 > assume it.
 >
+> ### Committed and pushed — where to pick this up
+>
+> **Branch: `feat/multi-node-cluster`, NOT `main`.** This surprised this session and will surprise
+> the next one: the session began reporting `main`, but the work is on a feature branch, and local
+> `main` (`adeaa759`) is 12 commits behind `origin/main` and carries none of this. `git push origin
+> main` therefore fails with "remote contains work that you do not have" — that is the local `main`
+> being stale, not a problem with the work.
+>
+> - `9638d5c1` — the session's work, one commit.
+> - `3f00d234` — merge of `origin/main` (6 commits, the codex-resume-explicit-model work). Clean, no
+>   conflicts, though it did touch `server/server.ts`, which this branch also changes.
+> - Pushed to **`origin/feat/multi-node-cluster`**. Never pushed to `upstream`, and never should be.
+> - Not merged to `main`, and no PR opened — that is the owner's call.
+>
 > ### Where the code stands
 >
 > Landed and green this session: hub-router, spoke-runtime, edge-auth (D23), the auth-wall seam
@@ -2421,11 +2435,18 @@ invented; these are the names to use when one lands.
 > `md5 -q $(cat files) | sort | md5 -q` on the Mac against
 > `md5sum $(cat files) | cut -d' ' -f1 | sort | md5sum` on the box.
 >
-> Last full box run on a proven-identical tree: typecheck 0, build 0, `test:unit` 44/44,
-> `test:package` 18/18, full suite in flight at time of writing. The previous complete run was
-> **10,820 passed / 2 failed / 3 skipped**, the two being C18 (the standing red — a CPU budget
-> calibrated on an M4 Max, fails identically at pristine HEAD, so N-1 of N IS green) and a stale
-> copy of the activation test since fixed.
+> **Result on a proven-identical PRE-MERGE tree (commit `9638d5c1`): 579 test files passed, 1
+> failed, 1 skipped of 581.** The single failure is C18 — a CPU budget calibrated on an M4 Max that
+> fails identically at pristine HEAD. That IS the green result here. Ownership audit: 0 files not
+> owned by `cezar`.
+>
+> **The merged tree (`3f00d234`) has NOT been gated yet at time of writing** — a run was in flight.
+> Do not treat the number above as covering the merge: a clean textual merge has previously taken
+> this repo from 559/560 to 12 failures in files the merge never touched, because a changed contract
+> landed underneath them. Re-run and cite merged-tree numbers before merging to `main`.
+>
+> Also not covered by that run: `cez cluster init` was added after it. Covered instead by typecheck,
+> a real build, its three CLI test files (17/17), and a functional test against the built binary.
 >
 > ### Standing constraints that are easy to get wrong
 >
