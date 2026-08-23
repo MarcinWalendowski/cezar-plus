@@ -21,7 +21,10 @@ import {
   CLUSTER_LINK_PRINCIPAL_HEADER,
   CLUSTER_LINK_REFUSE_REASON_HEADER,
   CLUSTER_LINK_SIGNATURE_HEADER,
+  HEARTBEAT_MS,
+  HELLO_DEADLINE_MS,
   SEND_BUDGET_FRAMES_PER_TICK,
+  type ClusterFrameReplies,
   type ClusterLinkServerOptions,
 } from './link-server.ts';
 import { storeNodeSecret } from './node-secrets.ts';
@@ -198,6 +201,19 @@ async function connectNode(url: string) {
   return c;
 }
 
+const ackFrameFor = (): ClusterAckFrame => ({ type: 'ack', protocol: CLUSTER_PROTOCOL, scope: 'workspace', throughHubSeq: 0 });
+
+const validHello = (nodeId: string) => ({
+  type: 'hello' as const,
+  protocol: CLUSTER_PROTOCOL,
+  nodeId,
+  nodeName: 'spoke-1',
+  version: '0.10.0',
+  labels: [],
+  watermarks: [],
+  projects: [],
+});
+
 describe('ClusterLinkServer', () => {
   it('routes an admitted hello to onFrame and sends back whatever it returns', async () => {
     const onFrame = vi.fn(async (nodeId: string, frame: ClusterUplinkFrame): Promise<ClusterDownlinkFrame[]> => {
@@ -308,6 +324,238 @@ describe('ClusterLinkServer', () => {
     const refuse = await c.next();
     expect(refuse).toMatchObject({ type: 'refuse', reason: 'node-disabled' });
     await vi.waitFor(() => expect(server.connectedNodes()).toEqual([]));
+  });
+
+  // ---- D40a: the hub ends a socket that upgraded and never said anything usable ----------------
+  //
+  // The wedge this closes is not "a client that connects and sits idle" — it is a client that sends
+  // a `hello` the hub cannot parse. D13 says one bad frame is warned about and dropped, never a
+  // teardown, so `helloReceived` stays false; the node is therefore never served (`connectedNodes()`
+  // excludes it) and never reaped (ping/pong keeps `alive` true). The spoke, meanwhile, has a
+  // perfectly open socket and no reason to retry: measured still `connecting` at t+13.2s, past its
+  // own 10s `handshakeTimeout`, which bounds the HTTP 101 the hub already granted.
+  describe('the hello deadline (D40a)', () => {
+    it('refuses handshake-timeout for a socket whose hello was DROPPED as unparseable — the real wedge, not an idle client', async () => {
+      const warnings: string[] = [];
+      const onFrame = vi.fn(async (): Promise<ClusterDownlinkFrame[]> => []);
+      // `heartbeatMs` is kept far above a localhost pong's round trip on purpose. `reap()` also
+      // carries the LIVENESS reaper — a node that has not ponged since the previous tick is
+      // terminated — so a cadence tight enough to make the deadline fast also makes every node look
+      // dead. A first draft used 10ms and flaked 1 run in ~26, and the failure looked like the
+      // deadline firing early when it was the heartbeat killing a perfectly healthy socket.
+      const { url, server } = await boot(onFrame, {
+        heartbeatMs: 250,
+        helloDeadlineMs: 20,
+        warn: (m) => warnings.push(m),
+      });
+      const c = await connectNode(url);
+      const closed = c.waitClose();
+
+      // Schema-invalid: `type: 'hello'` with none of the fields a hello must carry. `onMessage`
+      // warns and returns BEFORE the `frame.type === 'hello'` line, which is the whole defect.
+      c.send({ type: 'hello', protocol: CLUSTER_PROTOCOL });
+      await vi.waitFor(() => expect(onFrame).not.toHaveBeenCalled());
+
+      // The reason reaches the spoke, so its cockpit reads "refused: handshake-timeout" rather than
+      // a bare disconnect — and `handshake-timeout` is a RETRIED reason, so it heals itself.
+      expect(await c.next()).toMatchObject({ type: 'refuse', reason: 'handshake-timeout' });
+      expect(await closed).toBe(1008);
+      expect(server.send(NODE_ID, ackFrameFor())).toBe(false); // gone from the roster entirely
+      expect(warnings.some((w) => w.includes('has sent no usable frame'))).toBe(true);
+    });
+
+    // Control 1. Without it, "refuse every node on every tick" passes the case above perfectly while
+    // destroying the cluster — and the surviving tests would not notice, because none of them lives
+    // long enough for a 30s reap tick to fire.
+    it('never touches a node that DID complete its hello, across many reap ticks', async () => {
+      const warnings: string[] = [];
+      const onFrame = vi.fn(async (): Promise<ClusterDownlinkFrame[]> => []);
+      const { url, server } = await boot(onFrame, {
+        heartbeatMs: 250,
+        helloDeadlineMs: 20,
+        warn: (m) => warnings.push(m),
+      });
+      const c = await connectNode(url);
+
+      c.send(validHello(NODE_ID));
+      await vi.waitFor(() => expect(server.connectedNodes()).toEqual([NODE_ID]));
+
+      await new Promise((resolve) => setTimeout(resolve, 800)); // 3 ticks, 40x the deadline
+      // The deadline's own decision, read from the one place only it writes. Asserting on the
+      // socket instead would make this test answer "did the socket survive", which the liveness
+      // reaper also gets a vote on — a different mechanism, and not the one under test.
+      expect(warnings.filter((w) => w.includes('has sent no usable frame'))).toEqual([]);
+      expect(server.connectedNodes()).toEqual([NODE_ID]);
+      c.ws.close();
+    });
+
+    // Control 2. The gate is the DEADLINE, not the tick: a tick that fires while a node is still
+    // inside its budget must leave it alone, or the deadline is decoration and the real behaviour is
+    // "refused on the first heartbeat after connecting".
+    it('leaves a silent node alone while it is still inside the deadline, however many ticks pass', async () => {
+      const warnings: string[] = [];
+      const onFrame = vi.fn(async (): Promise<ClusterDownlinkFrame[]> => []);
+      const { url } = await boot(onFrame, { heartbeatMs: 250, helloDeadlineMs: 60_000, warn: (m) => warnings.push(m) });
+      const c = await connectNode(url);
+
+      await new Promise((resolve) => setTimeout(resolve, 800)); // 3 ticks, deadline nowhere near
+      expect(warnings.filter((w) => w.includes('has sent no usable frame'))).toEqual([]);
+      c.ws.close();
+    });
+
+    // The floor. Both seams above exist so a test does not have to wait half a minute, and a seam
+    // that quietly becomes the production value is how a 30s deadline turns into a 20ms one.
+    it('the production defaults are the 30s constants, not the values these tests pin', () => {
+      expect(HEARTBEAT_MS).toBe(30_000);
+      expect(HELLO_DEADLINE_MS).toBe(30_000);
+    });
+  });
+
+  // ---- D40b: a router can END a link, not only answer it --------------------------------------
+  //
+  // `refuse()` above is the hub calling out of band. This is the other direction: the ROUTER, inside
+  // its reply to a frame, saying "and stop serving this node". It needed to exist because a `refuse`
+  // FRAME is advice — a peer that ignores it keeps a live socket, and a live socket is a
+  // `connectedNodes()` entry, which is a `planReplicaFanout` target. See
+  // `ClusterFrameReplies#closeAfterWrite`.
+  describe('closeAfterWrite — the router ends the link (D40b)', () => {
+    /**
+     * The close code, or the literal `'still-open'` if none arrived inside `withinMs`. Deliberately
+     * NOT a bare `await waitClose()`: a regression here is "the socket was never closed", and a bare
+     * await turns that into a 5s vitest timeout whose message describes the WAIT rather than the
+     * fact. Racing it produces `expected 'still-open' to be 1008` — which names what happened.
+     */
+    async function closeCodeWithin(closed: Promise<number>, withinMs = 750): Promise<number | 'still-open'> {
+      return Promise.race([
+        closed,
+        new Promise<'still-open'>((resolve) => {
+          setTimeout(() => resolve('still-open'), withinMs).unref();
+        }),
+      ]);
+    }
+
+    /** Any well-formed downlink frame — this suite only ever reads `send`'s BOOLEAN, which answers
+     *  "is this node still in the roster", not "did anything meaningful arrive". */
+    const ackFrame = (): ClusterAckFrame => ({ type: 'ack', protocol: CLUSTER_PROTOCOL, scope: 'workspace', throughHubSeq: 0 });
+
+    const helloFrom = (nodeId: string) => ({
+      type: 'hello' as const,
+      protocol: CLUSTER_PROTOCOL,
+      nodeId,
+      nodeName: 'spoke-1',
+      version: '0.10.0',
+      labels: [],
+      watermarks: [],
+      projects: [],
+    });
+
+    it('writes the frames FIRST, then closes the socket and drops the node from connectedNodes()', async () => {
+      const onFrame = async (): Promise<ClusterFrameReplies> => ({
+        frames: [{ type: 'refuse', protocol: CLUSTER_PROTOCOL, reason: 'unknown-node', message: 'claimed someone else' }],
+        closeAfterWrite: 'unknown-node',
+      });
+      const { url, server } = await boot(onFrame);
+      const c = await connectNode(url);
+      const closed = c.waitClose();
+
+      c.send(helloFrom('node-b'));
+
+      // Ordering is the point, not a detail: a close that raced ahead of the write would leave the
+      // spoke with a bare disconnect and no stated cause — the silent failure this whole defect
+      // class is about. `next()` resolving at all proves the frame reached the socket first.
+      const refuse = await c.next();
+      expect(refuse).toMatchObject({ type: 'refuse', reason: 'unknown-node' });
+      expect(await closeCodeWithin(closed)).toBe(1008); // RFC 6455 Policy Violation
+      await vi.waitFor(() => expect(server.connectedNodes()).toEqual([]));
+    });
+
+    // The control. `closeAfterWrite` is OPTIONAL, so a mistake in the `Array.isArray` extraction
+    // (reading it off the wrong branch, or defaulting it to a reason) would close every healthy
+    // link on its first frame — a failure this suite would otherwise not notice, because the
+    // surviving tests reply with a BARE ARRAY and never exercise the rich shape at all.
+    it('the SAME rich reply shape without closeAfterWrite leaves the link open', async () => {
+      const onFrame = async (): Promise<ClusterFrameReplies> => ({
+        frames: [{ type: 'welcome', protocol: CLUSTER_PROTOCOL, hubNodeId: 'hub-1', roster: [], pairings: [], resumeFrom: [] }],
+      });
+      const { url, server } = await boot(onFrame);
+      const c = await connectNode(url);
+
+      c.send(helloFrom(NODE_ID));
+
+      expect(await c.next()).toMatchObject({ type: 'welcome' });
+      await vi.waitFor(() => expect(server.connectedNodes()).toEqual([NODE_ID]));
+      expect(c.ws.readyState).toBe(WebSocket.OPEN);
+      c.ws.close();
+    });
+
+    // The close does NOT depend on the refusal having been delivered — see `closeAfterWrite`'s own
+    // doc. `message` here is far past the schema's `.max(500)`, which is deliberate and only
+    // possible from a test: `writeFrame` measures outgoing bytes and never re-validates, so this is
+    // the one way to make a returned frame go undelivered over a perfectly healthy socket. A node
+    // cut off because it named an id that answers to nobody must not stay served merely because the
+    // sentence explaining that would not fit.
+    it('closes even when the refusal itself was DROPPED undelivered — being cut off does not require being told', async () => {
+      const warnings: string[] = [];
+      const onFrame = async (): Promise<ClusterFrameReplies> => ({
+        frames: [
+          { type: 'refuse', protocol: CLUSTER_PROTOCOL, reason: 'unknown-node', message: 'x'.repeat(CLUSTER_FRAME_MAX_BYTES) },
+        ],
+        closeAfterWrite: 'unknown-node',
+      });
+      const { url, server } = await boot(onFrame, { warn: (m) => warnings.push(m) });
+      const c = await connectNode(url);
+      const closed = c.waitClose();
+
+      c.send(helloFrom('node-b'));
+
+      expect(await closeCodeWithin(closed)).toBe(1008);
+      await vi.waitFor(() => expect(server.connectedNodes()).toEqual([]));
+      expect(warnings.some((w) => w.includes('exceeds the frame bound'))).toBe(true);
+    });
+
+    // `closeNode` removes the node only if the map still holds THAT socket. Unlike `refuse()`, which
+    // looks the node up and closes it in one synchronous breath, this path spans an `await` on
+    // `onFrame` — and a reconnect during that await REPLACES the entry (`onConnection` terminates the
+    // old socket and overwrites the map). Deleting by id alone would then evict a live, newer link on
+    // behalf of the dead one it replaced: a spoke that had just successfully reconnected would go
+    // invisible to `connectedNodes()` and `send()` for the life of the socket, with nothing anywhere
+    // reporting a fault. The doomed reply is still written and the old socket still closed — only the
+    // eviction is withheld, because it is not this node's entry to evict.
+    it('a reconnect DURING the await keeps its own entry — the doomed link cannot evict the one that replaced it', async () => {
+      let signalEntered!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        signalEntered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      const onFrame = async (): Promise<ClusterFrameReplies> => {
+        signalEntered();
+        await gate;
+        return {
+          frames: [{ type: 'refuse', protocol: CLUSTER_PROTOCOL, reason: 'unknown-node' }],
+          closeAfterWrite: 'unknown-node',
+        };
+      };
+      const { url, server } = await boot(onFrame);
+
+      const first = await connectNode(url);
+      first.send(helloFrom('node-b'));
+      await entered; // the router is now holding the reply for the FIRST socket
+
+      // Same node reconnects. `onConnection` terminates the first socket and takes over the entry.
+      const second = await connectNode(url);
+      await vi.waitFor(() => expect(server.send(NODE_ID, ackFrame())).toBe(true));
+
+      release();
+
+      // Give the first socket's doomed reply every chance to evict the second one.
+      await vi.waitFor(() => expect(first.ws.readyState).toBe(WebSocket.CLOSED));
+      expect(server.send(NODE_ID, ackFrame())).toBe(true);
+      second.ws.close();
+    });
   });
 
   it('send() to a node with no live socket is false — the hub never queues for an absent node', async () => {

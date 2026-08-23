@@ -2576,6 +2576,42 @@ invented; these are the names to use when one lands.
 > use it. And when you replace a sampler with an observer, mutation-test the NEW failure mode (late
 > subscribe), not only the old one.
 >
+> ### D40 — BOTH HALVES FIXED 2026-08-23, gate green. Three defects closed, one of them latent everywhere.
+>
+> Delivered by HUB across `link-server.ts`, `hub-router.ts`, `link-client.ts` and
+> `contract/src/cluster.ts` (+665/-24, of which **459 lines are new tests**). Verified independently
+> of the agent's own account — it went idle without reporting, so the state was inspected rather than
+> taken on trust:
+>
+>  - **D40a — the hub now bounds the APPLICATION handshake.** A socket that has never completed a
+>    handshake is refused with the new `handshake-timeout` and closed **on the existing reap tick**
+>    (`link-server.ts:585`), no new timer. D13's per-frame-salvage rule is untouched: that rule is
+>    about one bad frame on a *working* link, and this is a link that never worked.
+>  - **D40b — the forged-hello branch now returns `closeAfterWrite: 'unknown-node'`**
+>    (`hub-router.ts:309`), so the socket is cut, not merely the content refused. Its comment states
+>    the load-bearing point: an open socket IS a `connectedNodes()` entry, which IS a
+>    `planReplicaFanout` target, so a peer that ignored the refusal went on being served.
+>  - **The 2.2-reconnects/second hot loop is closed** — `this.attempt = 0` now lives in the `welcome`
+>    branch (`link-client.ts:318`), not the `open` handler. **This was latent on EVERY
+>    refuse-after-open path, not just D40.**
+>  - **The false comment is corrected in place**, struck through with its replacement beneath: the old
+>    text asserted the forged-hello case "does not reopen D30's race" while naming that case as out of
+>    scope. It did reopen it, verbatim.
+>
+> **Both boundaries I set on `link-client.ts` were respected and were checked, not assumed:**
+> `sendHello` remains in `ws.on('open')` (moving it would deadlock the handshake against itself — the
+> code now says so) and the D38 `watermarks`/`helloWatermarks` surface has **zero diff lines**.
+>
+> **Gate, on the box, whole-tree mirror (root doc md5 `81de685c…` identical both sides):**
+> `tsc --noEmit` EXIT=0 · vitest **7092 passed / 1 failed / 4 skipped (7097)**. The single red is
+> `catalog.test.ts` C18, the standing calibration red. Ownership audit 0.
+>
+> **The framing I brought to this was wrong twice and is worth remembering over the fix itself.** I
+> asserted three times that a half-dead link "reads `online`" — it does not, and nobody had checked.
+> And I posed "terminal or transient?" as an owner decision, proposing a bounded-attempt retry
+> semantic; the real answer was a **one-line bug** in where the backoff reset lived. Both times the
+> measurement dissolved the question instead of answering it.
+>
 > ### B6 — MERGED-TREE GATE: DONE 2026-08-23. GREEN, and the harness bug it exposed matters more.
 >
 > Merged `origin/main` (`7eba4ac3`) into `feat/multi-node-cluster` at `b5ba78ab` — **clean, no
@@ -2937,7 +2973,7 @@ invented; these are the names to use when one lands.
 > to flush *to*, and its op must enter the SAME `applyOpAtHub` + fan-out path a spoke's op takes or
 > the two directions will diverge. That is a design decision, and this spec is the place for it.
 >
-> #### D40b — A FORGED `hello` SKIPS THE WATERMARK RESEED AND LEAVES THE SOCKET OPEN. D30 REOPENED.
+> #### D40b — ~~A FORGED `hello` SKIPS THE WATERMARK RESEED AND LEAVES THE SOCKET OPEN~~ — FIXED 2026-08-23
 >
 > **Found 2026-08-23 by HUB while investigating D40a; it is a separate defect and is the more serious
 > of the two.** `helloReceived` means *"a frame of type `hello` parsed"* but is used as if it meant
@@ -2980,7 +3016,7 @@ invented; these are the names to use when one lands.
 > instruction rather than inspecting what a frame MEANS) and closes the socket leak and the stale
 > watermark in one move.
 >
-> #### D40a — A MALFORMED `hello` LEAVES A LINK SILENTLY HALF-DEAD, AND D30's FIX CREATED IT
+> #### D40a — ~~A MALFORMED `hello` LEAVES A LINK SILENTLY HALF-DEAD~~ — FIXED 2026-08-23
 >
 > **OWNED BY HUB from 2026-08-23** (`link-server.ts` / `hub-router.ts`, which it already owns).
 > Investigating before building, because the honest fix may change link-refusal behaviour.

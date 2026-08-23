@@ -241,6 +241,29 @@ describe('cluster/hub-router', () => {
         },
       ]);
     });
+
+    // D40b. The frame above refuses the CONTENT; this is what ENDS the link. Separated because they
+    // fail independently: a router that returns the right refusal and no `closeAfterWrite` leaves a
+    // peer that ignores the frame holding a live socket, and a live socket is a `connectedNodes()`
+    // entry, which is a `planReplicaFanout` target. The consequence is measured two describes down
+    // ("a FORGED hello reseeds NOTHING").
+    it('the refusal also ENDS the link — a refused frame a peer can simply ignore is not enforcement (D40b)', async () => {
+      await upsertNode(makeStoredNode({ nodeId: 'node-a' }), { env: env() });
+      await upsertNode(makeStoredNode({ nodeId: 'node-b' }), { env: env() });
+      const reply = await router().raw('node-a', helloFrame({ nodeId: 'node-b' }));
+      expect(Array.isArray(reply)).toBe(false);
+      expect((reply as ClusterFrameReplies).closeAfterWrite).toBe('unknown-node');
+    });
+
+    // The control for the case above, and it is not decoration: `closeAfterWrite` is an OPTIONAL
+    // field, so a router that set it on every hello would satisfy the positive test perfectly while
+    // cutting off every healthy spoke in the cluster on its first frame.
+    it('a hello that PASSES the identity guard carries no closeAfterWrite — the link survives being welcomed', async () => {
+      await upsertNode(makeStoredNode({ nodeId: 'node-a' }), { env: env() });
+      const reply = await router().raw('node-a', helloFrame({ nodeId: 'node-a' }));
+      const closeAfterWrite = Array.isArray(reply) ? undefined : (reply as ClusterFrameReplies).closeAfterWrite;
+      expect(closeAfterWrite).toBeUndefined();
+    });
   });
 
   // ---- hello: the welcome shape -----------------------------------------------------------------
@@ -972,6 +995,50 @@ describe('cluster/hub-router', () => {
         expect(sentToA[1]?.changes.map((c) => c.entityId)).toEqual(['todo-w']);
       },
     );
+
+    // D40b — the consequence of the identity guard returning BEFORE `watermarks.delete(nodeId)`,
+    // observed directly on the watermark the hub holds rather than through a proxy for it. The two
+    // halves differ in exactly one character (the claimed nodeId) and nothing else, so the second
+    // half is a true control: it proves the retransmit machinery works and that the first half's
+    // silence is the forged hello's doing, not a broken fixture.
+    //
+    // This is why `closeAfterWrite` is load-bearing and not tidiness. The hub's memory of node-a is
+    // NOT corrected by a forged hello, so before the close existed the node stayed a fan-out target
+    // carrying a stale, possibly too-high mark — D30 root cause 1, reopened. The fix is not to make
+    // the forged path reseed (that would let an unauthenticated claim move the hub's state, which
+    // is the whole thing the guard refuses); it is to stop serving the node at all.
+    it('a FORGED hello reseeds NOTHING — the hub keeps its stale watermark, which is why the link must be ended (D40b)', async () => {
+      const sentToA: ClusterReplicaFrame[] = [];
+      const replication = makeReplication({
+        connectedNodes: () => ['node-a', 'node-b'],
+        sendTo: (nodeId, frame) => {
+          if (nodeId === 'node-a') sentToA.push(frame as ClusterReplicaFrame);
+          return true;
+        },
+      });
+      const r = router({ replication });
+      await upsertNode(makeStoredNode({ nodeId: 'node-a' }), { env: env() });
+      await upsertNode(makeStoredNode({ nodeId: 'node-b' }), { env: env() });
+
+      const op = makeOp('op-forged', { entityId: 'todo-forged', nodeId: 'node-b' });
+      await r('node-b', opsFrame([op], 'project', 'proj-1'));
+      expect(sentToA).toHaveLength(1); // watermark(node-a) advances to hubSeq 1
+
+      const reported = [{ scope: 'project' as const, projectKey: 'proj-1', appliedThroughHubSeq: 0, ackedThroughHubSeq: 0 }];
+
+      // node-a says it has applied nothing — but names node-b as itself. Refused, and the reseed
+      // below the guard never runs.
+      await r.raw('node-a', helloFrame({ nodeId: 'node-b', watermarks: reported }));
+      await r('node-b', opsFrame([op], 'project', 'proj-1'));
+      expect(sentToA).toHaveLength(1); // still 1: the hub still believes node-a holds hubSeq 1
+
+      // CONTROL — the identical claim, honestly attributed. Now the watermark is SET back to 0 and
+      // the same retransmit is owed again.
+      await r.raw('node-a', helloFrame({ nodeId: 'node-a', watermarks: reported }));
+      await r('node-b', opsFrame([op], 'project', 'proj-1'));
+      expect(sentToA).toHaveLength(2);
+      expect(sentToA[1]?.changes.map((c) => c.entityId)).toEqual(['todo-forged']);
+    });
 
     it('watermarkKey keeps workspace and project:<key> scopes independent — one does not shadow the other', async () => {
       const sentToA: ClusterReplicaFrame[] = [];

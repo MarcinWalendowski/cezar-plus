@@ -287,6 +287,150 @@ describe('ClusterLinkClient', () => {
     await c.stop();
   });
 
+  // ---- D40a: the backoff must actually CLIMB across refusals ---------------------------------
+  //
+  // The sibling test above ("reconnects with backoff after an abrupt drop") is the shape this one
+  // exists to correct: it proves a retry HAPPENS, which passes perfectly against a client stuck at
+  // attempt 0 retrying twice a second forever. Nothing here asserted the sequence, so the reset
+  // living in `ws.on('open')` — where every refused attempt reaches it — was invisible.
+  describe('the backoff climbs across successive refusals (D40a)', () => {
+    /** A hub that completes the upgrade and refuses every hello. `unknown-node` deliberately: an
+     *  ordinary RETRIED reason, unlike `protocol-major`, which suppresses reconnection outright and
+     *  would make this test vacuous by never scheduling a second attempt at all. */
+    async function bootRefusingHub(): Promise<{ base: string; hellos: () => number }> {
+      const server = createServer();
+      const wss = new WebSocketServer({ noServer: true });
+      let hellos = 0;
+      server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+        void (async () => {
+          const verdict = await authenticateLinkUpgrade(req, async () => SECRET);
+          if (!verdict.ok) {
+            socket.destroy();
+            return;
+          }
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            ws.on('message', () => {
+              hellos += 1;
+              ws.send(JSON.stringify({ type: 'refuse', protocol: CLUSTER_PROTOCOL, reason: 'unknown-node' }));
+            });
+          });
+        })();
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      servers.push(server);
+      wsServers.push(wss);
+      const { port } = server.address() as AddressInfo;
+      return { base: `http://127.0.0.1:${port}`, hellos: () => hellos };
+    }
+
+    /**
+     * Reads each scheduled delay back EXACTLY, with no clock arithmetic and no tolerance band.
+     *
+     * `scheduleReconnect` builds `retryAt` as `new Date(this.now() + delayMs)`, and that `now()` is
+     * the last call this clock receives before the `health` event fires — so subtracting the value
+     * it just handed out recovers `delayMs` itself rather than an elapsed-time estimate of it.
+     *
+     * A FROZEN clock cannot be used here, which is not obvious and cost a first attempt: `dial()`
+     * signs the link principal with `issuedAt: new Date(this.now())`, so a pinned timestamp makes
+     * every upgrade fail `LINK_PRINCIPAL_MAX_AGE_MS` as `stale-principal`. That path never reaches
+     * `ws.on('open')` at all — which means it climbed correctly even with the D40a bug present, and
+     * a test built on it would have passed against the code it was written to catch.
+     */
+    function trackingClock(): { now: () => number; last: () => number } {
+      let last = 0;
+      return {
+        now: () => {
+          last = Date.now();
+          return last;
+        },
+        last: () => last,
+      };
+    }
+
+    it('doubles the delay per attempt instead of retrying at a flat rate forever', async () => {
+      const hub = await bootRefusingHub();
+      const clock = trackingClock();
+      const offlineDelays: number[] = [];
+
+      const c = new ClusterLinkClient({
+        identity: identity(),
+        hubUrl: hub.base,
+        version: '0.10.0',
+        // `random: () => 1` pins full jitter to its ceiling, so `nextBackoffMs` returns the CAP
+        // exactly and the sequence is arithmetic rather than merely trending upward. Real
+        // `Math.random()` never returns 1; this is a test-only pin, and the jitter itself is covered
+        // by `nextBackoffMs`'s own suite at the top of this file.
+        backoff: { baseMs: 10, maxMs: 60_000 },
+        random: () => 1,
+        now: clock.now,
+      });
+      // Subscribed BEFORE start(): these transitions are ~10ms apart, so polling `health()` would
+      // sample a moving state and read whichever value happened to be current.
+      c.on('health', (h) => {
+        if (h.state === 'offline' && h.retryAt) offlineDelays.push(Date.parse(h.retryAt) - clock.last());
+      });
+
+      c.start();
+      await vi.waitFor(() => expect(offlineDelays.length).toBeGreaterThanOrEqual(4), { timeout: 4_000 });
+      await c.stop();
+
+      // THE assertion. `baseMs * 2**attempt` for attempt 0..3 — which can only be produced by an
+      // `attempt` that survives a refusal. With the reset in `ws.on('open')` every entry reads 10.
+      expect(offlineDelays.slice(0, 4)).toEqual([10, 20, 40, 80]);
+      expect(hub.hellos()).toBeGreaterThanOrEqual(4); // it really did keep trying — not a stall
+    });
+
+    it('a welcome DOES reset it — the fix narrows what counts as success, it does not remove the reset', async () => {
+      const hub = await bootHub();
+      const clock = trackingClock();
+      const offlineDelays: number[] = [];
+      const c = client(hub, { backoff: { baseMs: 10, maxMs: 60_000 }, random: () => 1, now: clock.now });
+      c.on('health', (h) => {
+        if (h.state === 'offline' && h.retryAt) offlineDelays.push(Date.parse(h.retryAt) - clock.last());
+      });
+
+      c.start();
+      // Two full cycles of welcome-then-drop. A hub that welcomes and immediately drops the link is
+      // a DIFFERENT fault from one that never completes a handshake, and it is deliberately still
+      // reconnected at full speed: the handshake genuinely completed, so the backoff genuinely has
+      // nothing to back off from. Documented here so nobody later reads the flat sequence as the
+      // D40a bug surviving.
+      for (let cycle = 0; cycle < 2; cycle += 1) {
+        await hub.hello();
+        hub.send({ type: 'welcome', protocol: CLUSTER_PROTOCOL, hubNodeId: 'hub-1', roster: [], pairings: [], resumeFrom: [] });
+        await vi.waitFor(() => expect(c.health().state).toBe('online'));
+        hub.closeClient();
+        await vi.waitFor(() => expect(offlineDelays.length).toBe(cycle + 1));
+      }
+      await c.stop();
+
+      expect(offlineDelays).toEqual([10, 10]); // reset by each welcome — NOT 10 then 20
+    });
+
+    // The other half of D40a, and the half that lives on this side of the link. The hub now ends a
+    // wedged socket with `handshake-timeout` (`link-server.ts`'s reap tick) — which only helps if
+    // this client treats it as an ordinary retried reason. `suppressReconnect` is set for
+    // `protocol-major` alone; adding a second member to that list is a one-line change that would
+    // convert every hub-side handshake deadline into a permanently dead spoke, silently.
+    it('handshake-timeout is RETRIED, not suppressed — the hub-side deadline must heal, not kill', async () => {
+      const hub = await bootHub();
+      const c = client(hub);
+      c.start();
+
+      await hub.hello();
+      hub.send({ type: 'refuse', protocol: CLUSTER_PROTOCOL, reason: 'handshake-timeout' });
+
+      // A SECOND connection is the proof: `protocol-major`'s own test above asserts the opposite
+      // outcome from the identical setup, so this cannot pass by accident. Counted after a fixed
+      // window rather than awaited, so a regression reads `expected 1 to be >= 2` — a fact about the
+      // client — instead of a timeout, which is only a fact about how long this test agreed to wait.
+      await new Promise((resolve) => setTimeout(resolve, 200)); // backoff here is 5-40ms
+      expect(hub.connections).toBeGreaterThanOrEqual(2);
+      expect(c.health().state).not.toBe('refused'); // it moved on, rather than parking on the refusal
+      await c.stop();
+    });
+  });
+
   it('send() is false before start() and after stop()', async () => {
     const hub = await bootHub();
     const c = client(hub);

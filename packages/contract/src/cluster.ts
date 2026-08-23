@@ -822,9 +822,21 @@ export type ClusterSelf = z.infer<typeof clusterSelfSchema>;
 
 // ---- link health, and the refusals that are values ----------------------------------------------
 
-/** Why the hub refused a link. Values, not prose, for the same reason the join reasons are:
- *  `protocol-major` is an upgrade, `bad-signature` is a credential, `node-disabled` is a revoke,
- *  and an operator who cannot tell them apart fixes the wrong one. */
+/**
+ * Why the hub refused a link. Values, not prose, for the same reason the join reasons are:
+ * `protocol-major` is an upgrade, `bad-signature` is a credential, `node-disabled` is a revoke,
+ * and an operator who cannot tell them apart fixes the wrong one.
+ *
+ * **Adding a member is a compatibility event, and this is a `z.enum`** — a spoke running an older
+ * build parses an unrecognized reason as an INVALID frame and drops it whole (`link-client.ts`'s
+ * `parseDownlink`), so it sees a bare close with no stated cause: the exact silent failure D40
+ * exists to remove, delivered by the mechanism meant to explain it. `handshake-timeout` was added
+ * on 2026-08-23 after checking that no such spoke can exist — `@loki-labs/better-cezar` has never
+ * been published (`npm view` → 404), `packages/contract` is private, and `CEZ_CLUSTER` is unset on
+ * every box. **Re-check both before adding the next one**, and prefer teaching the spoke to parse
+ * this leniently (a known-value union with an `unknown` fallback) over relying on that check
+ * holding forever.
+ */
 export const clusterLinkRefuseReasonSchema = z.enum([
   'protocol-major',
   'unknown-node',
@@ -832,6 +844,12 @@ export const clusterLinkRefuseReasonSchema = z.enum([
   'stale-principal',
   'node-disabled',
   'frame-too-large',
+  /** The socket upgraded and then said nothing this hub could use, past `HELLO_DEADLINE_MS`. D40a:
+   *  the spoke's own `handshakeTimeout` bounds the HTTP 101 only, so an upgrade that SUCCEEDS on a
+   *  link the hub never serves — a `hello` dropped as unparseable, leaving `helloReceived` false —
+   *  wedges at `connecting` forever with ping/pong keeping the socket healthy. Only the hub knows
+   *  whether a socket it accepted ever spoke, so only the hub can end it. */
+  'handshake-timeout',
   'internal',
 ]);
 export type ClusterLinkRefuseReason = z.infer<typeof clusterLinkRefuseReasonSchema>;

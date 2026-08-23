@@ -282,6 +282,21 @@ export function createHubFrameRouter(
         // the schema — no schema constraint can express "equal to a value carried on a different
         // layer (the upgrade), not on the frame itself".
         if (frame.nodeId !== nodeId) {
+          // **D40b, 2026-08-23: `closeAfterWrite` is the load-bearing half of this refusal, not a
+          // tidy-up.** Returning the frame alone refused the CONTENT and left the SOCKET open, and
+          // an open socket is a `connectedNodes()` entry, which is a `planReplicaFanout` target — so
+          // a peer that simply ignored the refusal went on being served. Worse, this `return`
+          // precedes the `watermarks.delete(nodeId)` below, so the forged hello reseeded nothing and
+          // the hub kept whatever stale, possibly too-high watermark a previous session left: D30
+          // root cause 1, reopened by the one frame a hub has the most reason to distrust. Measured
+          // by retransmitting an op below the stale mark — not re-sent after a forged hello, re-sent
+          // after a legitimate one.
+          //
+          // `unknown-node` rather than `bad-signature`: the signature on the UPGRADE was valid (that
+          // is how this socket exists at all), and it is the id named in the BODY that answers to
+          // nobody. `link-client.ts` retries every reason but `protocol-major`, which is right here
+          // — a spoke misconfigured into claiming the wrong id should keep trying and start working
+          // the moment it is fixed, with `refusedReason` rendered in the cockpit throughout.
           return {
             frames: [
               {
@@ -291,6 +306,7 @@ export function createHubFrameRouter(
                 message: `hello claimed nodeId "${frame.nodeId}", the link authenticated as "${nodeId}"`,
               },
             ],
+            closeAfterWrite: 'unknown-node',
           };
         }
 

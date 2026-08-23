@@ -129,13 +129,26 @@ export interface ClusterLinkClientOptions {
    * How long ONE upgrade attempt may sit with no reply before it is torn down and retried.
    * Defaults to `DEFAULT_LINK_HANDSHAKE_TIMEOUT_MS`; injected so a test can pin it small.
    *
-   * **This is not a tuning knob, it is the only thing that closes a permanent wedge.** Every other
-   * failure path in `dial()` is edge-triggered: `unexpected-response` fires on an HTTP refusal,
-   * `close` fires on a socket that opens and then goes away, and both funnel into `disconnect()` ->
-   * `scheduleReconnect()`. An upgrade that receives *no reply at all* fires none of them, so
-   * without a timeout the client stays in `connecting` forever — no error, no close, no retry, and
-   * a `health()` that reads `connecting` rather than `offline`, so nothing downstream can tell a
-   * wedged link from a slow one either.
+   * **This is not a tuning knob: it closes a permanent wedge.** Every other failure path in `dial()`
+   * is edge-triggered: `unexpected-response` fires on an HTTP refusal, `close` fires on a socket
+   * that opens and then goes away, and both funnel into `disconnect()` -> `scheduleReconnect()`. An
+   * upgrade that receives *no reply at all* fires none of them, so without a timeout the client
+   * stays in `connecting` forever — no error, no close, no retry, and a `health()` that reads
+   * `connecting` rather than `offline`, so nothing downstream can tell a wedged link from a slow one
+   * either.
+   *
+   * **CORRECTED 2026-08-23 (D40a) — this used to say "the ONLY thing that closes a permanent
+   * wedge", and the word `only` was false in the direction that stops a reader looking further.**
+   * `ws` receives this as its `handshakeTimeout` option, which bounds the HTTP 101 upgrade and
+   * nothing above it. There is a second wedge one layer up, with the identical symptom and no cover
+   * here at all: an upgrade that SUCCEEDS, on a socket the hub then never serves — a `hello` the hub
+   * drops as unparseable (`link-server.ts` warns and returns, by D13's design), leaving
+   * `helloReceived` false forever while the hub's own ping/pong keeps the socket healthy. No error,
+   * no close, no retry, and `connecting` again — measured still `connecting` at t+13.2s, well past
+   * this 10s timeout, precisely because the upgrade it bounds had already succeeded. That one is
+   * closed HUB-side (a handshake deadline on `link-server.ts`'s existing reap tick, refusing with
+   * `handshake-timeout`), because only the hub knows whether a socket it accepted ever said anything
+   * it could use.
    *
    * That is not hypothetical, and not only a startup race: this server's own
    * `attachUpgradeFallback` deliberately does NOT destroy a socket whose path it recognizes but
@@ -272,7 +285,10 @@ export class ClusterLinkClient extends EventEmitter {
     });
 
     ws.on('open', () => {
-      this.attempt = 0; // a successful handshake resets the backoff
+      // The hello goes the instant the socket opens (D38's wiring): the hub replies to a `hello`,
+      // so deferring this to any later signal would deadlock the handshake against itself. The
+      // backoff reset that used to sit above this line does NOT belong here — see the `welcome`
+      // branch below.
       this.sendHello(ws);
     });
 
@@ -283,6 +299,23 @@ export class ClusterLinkClient extends EventEmitter {
       const lastFrameAt = new Date(this.now()).toISOString();
 
       if (frame.type === 'welcome') {
+        // **D40a, 2026-08-23 — the backoff reset lives HERE, not in `ws.on('open')`.** It sat there
+        // under the comment "a successful handshake resets the backoff", and an open socket is not a
+        // completed handshake: the WebSocket upgrade succeeding says the hub's HTTP listener is
+        // alive, nothing more. Every refusal reaches `open` first (the hub must accept the socket to
+        // put a `refuse` frame on it) and every application-level wedge does too — so against a hub
+        // that refuses, `this.attempt` was reset on every single attempt and `scheduleReconnect`
+        // always computed `nextBackoffMs(0)` = uniform [0, baseMs). Measured: **11 reconnects in 5s,
+        // ~2.2/second, indefinitely**, with the 60s cap unreachable on this path by construction.
+        // A `welcome` is the first thing that proves the hub accepted this node AS this node, which
+        // is the event "the backoff has done its job" actually refers to.
+        //
+        // **What this deliberately does NOT cover, so it is not later read as a regression:** a hub
+        // that welcomes and then immediately drops the link still resets on every welcome, and
+        // still reconnects at full speed. That is correct — the handshake genuinely completed each
+        // time — and a flapping hub is a different fault with a different fix. The bug being closed
+        // here is a link that NEVER completes and retries as though it had.
+        this.attempt = 0;
         this.setHealth({ state: 'online', since: this.healthState.since, lastFrameAt });
       } else if (frame.type === 'refuse') {
         this.setHealth({

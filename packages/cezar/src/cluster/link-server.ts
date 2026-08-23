@@ -63,7 +63,27 @@ export const CLUSTER_LINK_REFUSE_REASON_HEADER = 'x-cezar-cluster-refuse-reason'
 /** Same cadence as `server/ws.ts`'s cockpit heartbeat — reaps a spoke that stops answering pings
  *  (sleep, a dead network path) so `connectedNodes()` reflects reality rather than a stale TCP
  *  handle. */
-const HEARTBEAT_MS = 30_000;
+export const HEARTBEAT_MS = 30_000;
+
+/**
+ * D40a. How long a socket may sit upgraded without having said ONE thing this hub can use, before
+ * the hub ends it with `handshake-timeout`. Enforced on the existing reap tick rather than a timer
+ * per node, so the granularity is `HEARTBEAT_MS` and the real cut lands somewhere in
+ * [HELLO_DEADLINE_MS, HELLO_DEADLINE_MS + HEARTBEAT_MS).
+ *
+ * **This is the only cover for the second of the two wedges**, and the spoke cannot supply it. Its
+ * `handshakeTimeoutMs` is `ws`'s `handshakeTimeout`, which bounds the HTTP 101 upgrade — and in this
+ * failure the upgrade SUCCEEDS. What follows is a `hello` the hub drops as unparseable (D13: one bad
+ * frame is warned about, never a teardown), so `helloReceived` stays false, the node is never served
+ * and never reaped, because ping/pong keeps `alive` true indefinitely. Measured on a real socket
+ * pair: still `connecting` at t+13.2s with no retry scheduled, past the client's own 10s timeout.
+ *
+ * Generous on purpose. The honest client sends its `hello` from `ws.on('open')`, so the only spokes
+ * this can reach are ones that said nothing usable for half a minute — and being cut is recoverable
+ * (`handshake-timeout` is an ordinary retried reason, unlike `protocol-major`), where being wedged
+ * is not.
+ */
+export const HELLO_DEADLINE_MS = 30_000;
 
 /** Per-node send budget: a spoke offline for hours, or a hub with a large backlog to push down,
  *  must not be able to starve every OTHER node sharing this process's event loop and bandwidth. */
@@ -102,6 +122,25 @@ export interface ClusterFrameReplies {
    * this whole interface exists to close, reintroduced one level up.
    */
   readonly onWritten?: (frame: ClusterDownlinkFrame, delivered: boolean) => void;
+  /**
+   * Close this node's socket and drop it from the roster AFTER the frames above are written, with
+   * `reason` as the RFC 6455 close reason (1008, Policy Violation) so the spoke can render a stated
+   * cause rather than a bare disconnect.
+   *
+   * **D40b.** A `refuse` FRAME is only advice: a peer that ignores it keeps a live socket, a live
+   * socket is a `connectedNodes()` entry, and a `connectedNodes()` entry is a `planReplicaFanout`
+   * target. So a router that has decided a node may not be served could not, before this existed,
+   * enforce that decision by replying at all — the strongest thing it could say was a sentence the
+   * other end was free to discard. This is how it says "and stop serving it" without being handed
+   * the socket it has no business holding (module doc: this file has no opinion on what a frame
+   * MEANS, and the router never has to know a socket exists).
+   *
+   * Frames first, close second, and **the close is UNCONDITIONAL** — it does not depend on the
+   * refusal having been delivered. The reason a node is cut off is never "the spoke agreed to it":
+   * an oversized or budget-dropped `refuse` would otherwise leave that node both uninformed AND
+   * still served, which is much the worse of the two failures.
+   */
+  readonly closeAfterWrite?: ClusterLinkRefuseReason;
 }
 
 /** Either shape is a legal `onFrame` return — see `ClusterFrameReplies`. */
@@ -190,6 +229,13 @@ export interface ClusterLinkServerOptions {
   onFrame: (nodeId: ClusterNodeId, frame: ClusterUplinkFrame) => Promise<ClusterFrameReply>;
   now?: () => Date;
   warn?: (message: string) => void;
+  /** Test seam, same role as `now`: the reap cadence and the D40a hello deadline, defaulting to
+   *  `HEARTBEAT_MS` and `HELLO_DEADLINE_MS`. A wedged link is by definition one that takes a long
+   *  time to declare itself, so without these a test either waits half a minute or asserts nothing
+   *  about the mechanism that actually runs in production. `link-server.test.ts` pins the defaults
+   *  so shrinking them here cannot pass unnoticed as a test convenience. */
+  heartbeatMs?: number;
+  helloDeadlineMs?: number;
 }
 
 interface ConnectedNode {
@@ -204,6 +250,10 @@ interface ConnectedNode {
    *  finished its upgrade has told the hub nothing yet, in particular not the watermark this hub
    *  should trust for it, and must not be handed to `planReplicaFanout` as a target until it has. */
   helloReceived: boolean;
+  /** When this socket finished its upgrade, for `HELLO_DEADLINE_MS`. Not `alive`'s business: a node
+   *  that answers pings while never sending a usable frame is exactly the wedge (D40a), so liveness
+   *  and usefulness have to be tracked separately or the heartbeat certifies the fault as health. */
+  connectedAt: number;
 }
 
 export class ClusterLinkServer {
@@ -244,6 +294,7 @@ export class ClusterLinkServer {
       budgetWindowStart: this.now().getTime(),
       budgetUsed: 0,
       helloReceived: false,
+      connectedAt: this.now().getTime(),
     };
     this.nodes.set(nodeId, node);
 
@@ -273,8 +324,19 @@ export class ClusterLinkServer {
     if (!result.success) {
       // D13's per-entry-salvage spirit at the frame level: one bad frame is dropped and logged,
       // never a reason to tear down an otherwise-good link. There is no generic "error" downlink
-      // frame in this protocol (unlike the cockpit bus) — `refuse` is reserved for the two named,
-      // link-ending reasons below.
+      // frame in this protocol (unlike the cockpit bus), so a frame this file cannot even parse has
+      // nowhere to state itself on the wire and is warned about locally instead.
+      //
+      // **CORRECTED 2026-08-23 — this used to read "`refuse` is reserved for the two named,
+      // link-ending reasons below", which was wrong twice over and in the direction that misleads.**
+      // `clusterLinkRefuseReasonSchema` (`contract/src/cluster.ts`) has EIGHT members —
+      // `protocol-major`, `unknown-node`, `bad-signature`, `stale-principal`, `node-disabled`,
+      // `frame-too-large`, `handshake-timeout`, `internal` — and only the first is raised "below" in
+      // this function; the rest come from the upgrade guard, `reap()`, `peers.ts`'s revoke, and
+      // `hub-router.ts`. Nor is every
+      // refusal link-ending in the same way: what IS reserved to exactly one reason lives at the
+      // OTHER end, where `link-client.ts` sets `suppressReconnect` for `protocol-major` alone, so
+      // every other reason is retried. Read that as the real decision surface, not this list.
       this.options.warn?.(`cluster link: invalid frame from ${node.nodeId}: ${result.error.message}`);
       return;
     }
@@ -291,13 +353,27 @@ export class ClusterLinkServer {
     // D30 (F3), root cause 1. Deliberately keyed on the INCOMING frame's type, not on what `onFrame`
     // replies — checking the reply (e.g. "only if it welcomed") would make `connectedNodes()`'s
     // behaviour depend on `hub-router.ts`'s internal verdict, which this file has no business
-    // inspecting (its own module doc: "it has no opinion on what any frame MEANS"). A `hello` whose
-    // CLAIMED nodeId disagrees with the authenticated one is refused by `hub-router.ts` with a
-    // `refuse` reply, not disconnected — that is a pre-existing, separate gap (the identity guard
-    // refuses the CONTENT, nothing here closes the SOCKET over it) and not this fix's concern: it
-    // does not reopen D30's race, because a socket that has attempted ANY hello has already run
-    // `seedWatermark` for this authenticated nodeId synchronously, before this node can next be read
-    // via `connectedNodes()` — see that function's own doc.
+    // inspecting (its own module doc: "it has no opinion on what any frame MEANS").
+    //
+    // **CORRECTED 2026-08-23, same day (D40b) — the paragraph that stood here was WRONG, and it was
+    // wrong about the exact safety property this line exists to hold.** Original text: ~~"A `hello`
+    // whose CLAIMED nodeId disagrees with the authenticated one is refused by `hub-router.ts` with a
+    // `refuse` reply, not disconnected — that is a pre-existing, separate gap … and not this fix's
+    // concern: it does not reopen D30's race, because a socket that has attempted ANY hello has
+    // already run `seedWatermark` for this authenticated nodeId synchronously."~~ It has not. That
+    // guard returns from `hub-router.ts`'s `hello` case BEFORE the `watermarks.delete(nodeId)` and
+    // the `seedWatermark` loop that follow it, so a forged `hello` set this flag and reseeded
+    // nothing: the node became a `connectedNodes()` fan-out target carrying whatever stale watermark
+    // a previous session left behind — D30 root cause 1 verbatim, reopened by the one frame that
+    // most deserves not to be trusted. Measured by retransmit: after a forged hello an op below the
+    // stale mark was NOT re-sent; after a legitimate one it was.
+    //
+    // The flag is still set here, unconditionally and on the frame TYPE, because the alternative is
+    // the layering violation named above. What changed is that the router can now END the link it
+    // has refused, via `ClusterFrameReplies#closeAfterWrite` — so the node is removed from
+    // `this.nodes` in this same call, right after its `refuse` is written, and is a fan-out target
+    // for no turn of the event loop in between (the guard replies without awaiting, so the `await`
+    // below spans microtasks only, and another socket's 'message' callback is a macrotask).
     if (frame.type === 'hello') node.helloReceived = true;
 
     let replies: ClusterFrameReply;
@@ -311,6 +387,7 @@ export class ClusterLinkServer {
     }
     const frames = Array.isArray(replies) ? replies : (replies as ClusterFrameReplies).frames;
     const onWritten = Array.isArray(replies) ? undefined : (replies as ClusterFrameReplies).onWritten;
+    const closeAfterWrite = Array.isArray(replies) ? undefined : (replies as ClusterFrameReplies).closeAfterWrite;
 
     // D28 (F4) — THE OTHER HALF of the fix. `writeFrame`'s return value used to be discarded
     // outright here, which is exactly what let the hub believe a reply had gone out when it had not:
@@ -341,6 +418,12 @@ export class ClusterLinkServer {
       onWritten?.(reply, delivered);
       if (!delivered) stopped = true;
     }
+
+    // D40b — the router asked for the link to END, not merely to be answered. Deliberately after the
+    // write loop (the spoke gets its stated reason) and deliberately NOT conditional on `stopped`:
+    // see `ClusterFrameReplies#closeAfterWrite` for why an undelivered refusal must still cut the
+    // node off rather than leaving it uninformed and still served.
+    if (closeAfterWrite !== undefined) this.closeNode(node, closeAfterWrite);
   }
 
   private consumeBudget(node: ConnectedNode): boolean {
@@ -407,7 +490,7 @@ export class ClusterLinkServer {
     server.on('close', () => {
       void this.close();
     });
-    this.heartbeat = setInterval(() => this.reap(), HEARTBEAT_MS);
+    this.heartbeat = setInterval(() => this.reap(), this.options.heartbeatMs ?? HEARTBEAT_MS);
     this.heartbeat.unref?.();
   }
 
@@ -472,15 +555,47 @@ export class ClusterLinkServer {
     const node = this.nodes.get(nodeId);
     if (!node) return;
     this.writeFrame(node, { type: 'refuse', protocol: CLUSTER_PROTOCOL, reason, message });
+    this.closeNode(node, reason);
+  }
+
+  /**
+   * End a link that has ALREADY been told why: close the socket with `reason` as the RFC 6455 close
+   * reason (1008, Policy Violation) and drop the node from the roster. Writes nothing — the two
+   * callers (`refuse`, and `onMessage`'s `closeAfterWrite`) each put their own frame on the wire
+   * first, and a second, unrequested `refuse` would be a frame the router never returned.
+   *
+   * The removal is guarded on identity, not just on the id, matching `onConnection`'s 'close'
+   * handler: a reconnect from the same node REPLACES the entry in `this.nodes` (`onConnection`
+   * terminates the old socket and overwrites the map), so deleting by id alone could evict a live,
+   * newer link on behalf of the dead one it replaced.
+   */
+  private closeNode(node: ConnectedNode, reason: ClusterLinkRefuseReason): void {
     try {
-      node.ws.close(1008, reason); // RFC 6455 Policy Violation
+      node.ws.close(1008, reason);
     } catch {
       // Already gone.
     }
-    this.nodes.delete(nodeId);
+    if (this.nodes.get(node.nodeId) === node) this.nodes.delete(node.nodeId);
   }
 
   private reap(): void {
+    // D40a — collected before acting, because `refuse` deletes from the map this loop is walking.
+    const t = this.now().getTime();
+    const wedged = [...this.nodes.values()].filter(
+      (node) => !node.helloReceived && t - node.connectedAt >= (this.options.helloDeadlineMs ?? HELLO_DEADLINE_MS),
+    );
+    for (const node of wedged) {
+      this.options.warn?.(
+        `cluster link: ${node.nodeId} upgraded ${Math.round((t - node.connectedAt) / 1_000)}s ago and has sent no usable frame — ` +
+          'refusing with handshake-timeout so the spoke retries instead of sitting in "connecting" forever',
+      );
+      // `refuse`, not a bare close: the whole point is that the spoke can render a cause and its
+      // backoff can climb. `handshake-timeout` is an ordinary RETRIED reason — `link-client.ts`
+      // suppresses reconnection for `protocol-major` alone — so a link wedged by a transient fault
+      // heals itself, which a bare `terminate()` (what `alive` does below) would not communicate.
+      this.refuse(node.nodeId, 'handshake-timeout');
+    }
+
     for (const node of this.nodes.values()) {
       if (!node.alive) {
         try {
