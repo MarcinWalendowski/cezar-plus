@@ -1,6 +1,26 @@
 # A brokered run must survive a full `systemctl stop && start`, not just a `restart` — verify `scope` isolation live, in production, under real disruption
 
-**Status: spec only — the code fix this task assumed was still needed is ALREADY LIVE and
+**Status: Phase 0 implemented and shipped 2026-08-23 — Phase 1 (the disruptive live-fire test)
+stays operator-gated and has NOT been run.** AC1 and AC2 (health reports `scope`; the broker's
+cgroup is disjoint from `cezar.service`'s own) were already true before this task started and are
+re-confirmed above. What this task actually built and shipped is: the two documentation
+corrections (0.1, 0.2 below — both applied in place, in this same commit lineage), the
+re-probe-until-`scope` hardening for the caching/ordering race (0.3, with the warn-once-per-value
+refinement from spec review), and the committed, re-runnable verification script (0.4,
+`packages/cezar/scripts/verify-stop-survival.sh`). Gates green (typecheck, full `packages/cezar`
+vitest run bar one pre-existing unrelated flaky perf test), unit-tested against synthetic fixtures.
+**AC3 and AC4 — a live run surviving a genuine `systemctl stop cezar.socket cezar.service &&
+systemctl start` — remain unmeasured.** No step in this task's chain ran Phase 1: it is a
+deliberate disruption of production (every in-flight task on the box, not just a test subject) and
+this workspace's own rules require explicit operator sign-off before it runs — see Phase 1 and
+Risks. The original framing below ("spec only... the remaining work is now three parts") is kept
+for its research value but is stale on the "spec only" characterization; Phase 0 is no longer
+spec-only, it is implemented code on `origin/main`.
+
+<details>
+<summary>Original status line (kept for the framing "This spec corrects the task's own framing" depends on)</summary>
+
+Status: spec only — the code fix this task assumed was still needed is ALREADY LIVE and
 independently reconfirmed during this spec step. Revised after review (see review notes on
 this task's handoff, 2026-08-22): the remaining work is now three parts — (0) two documentation
 corrections and one small hardening fix, all non-disruptive and shippable without sign-off; (0.5)
@@ -9,7 +29,9 @@ safe to re-run; and (1) a single deliberate, disruptive, operator-run production
 (a genuine `systemctl stop cezar.socket cezar.service && systemctl start cezar.socket
 cezar.service` — not just the service unit; see "This spec corrects the task's own framing"
 below and Phase 1 for why). See "This spec corrects the task's own framing" below before
-reading further — it changes what Phase 1 actually is.**
+reading further — it changes what Phase 1 actually is.
+
+</details>
 
 ## TLDR
 
