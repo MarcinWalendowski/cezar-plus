@@ -518,23 +518,95 @@ export async function appendTodosPreservingIds(
   options?: TodoClusterOptions,
 ): Promise<TodoItem[]> {
   if (items.length === 0) return [];
+  return withTodosLease(dataDir, () => appendPreservingIdsUnderLease(dataDir, items, options));
+}
+
+/** The merge itself, factored out of `appendTodosPreservingIds` so `backupAndAppendTodosPreservingIds`
+ *  below can share it — MUST be called from inside an already-held `withTodosLease`; it takes no
+ *  lease of its own. See `appendTodosPreservingIds`'s own docblock for why it reads with `readRaw`,
+ *  not `readTodos`, and why a heal is written even when nothing new landed. */
+async function appendPreservingIdsUnderLease(
+  dataDir: string,
+  items: readonly TodoItem[],
+  options?: TodoClusterOptions,
+): Promise<TodoItem[]> {
+  const { items: existing, needsRewrite } = await readRaw(dataDir, options);
+  const existingIds = new Set(existing.map((t) => t.id));
+  const appended: TodoItem[] = [];
+  for (const item of items) {
+    if (existingIds.has(item.id)) continue;
+    existingIds.add(item.id);
+    existing.push(item);
+    appended.push(item);
+  }
+  // Write even when nothing new landed, if `readRaw` healed an unrelated entry: that heal is
+  // only real once it is on disk (see `appendTodosPreservingIds`'s own docblock), and this is the
+  // one lease-guarded write this call makes.
+  if (needsRewrite || appended.length > 0) {
+    await writeAtomic(dataDir, existing);
+  }
+  return appended;
+}
+
+/** Raw-bytes snapshot to `todos.json.bak` — `[]` when the file does not exist yet, matching
+ *  `readTodos`'s own empty-inbox default. Shared by the standalone `backupTodos` (no lease of its
+ *  own — a backup alone has nothing to serialize against) and `backupAndAppendTodosPreservingIds`
+ *  below (called from INSIDE its lease, so the snapshot and the append it protects can never
+ *  observe two different states of the file). */
+async function writeTodosBackupRaw(dataDir: string): Promise<string> {
+  const file = todosPath(dataDir);
+  const backupFile = `${file}.bak`;
+  let raw: string;
+  try {
+    raw = await fs.readFile(file, 'utf8');
+  } catch {
+    raw = '[]';
+  }
+  await fs.mkdir(dataDir, { recursive: true });
+  await fs.writeFile(backupFile, raw, 'utf8');
+  return backupFile;
+}
+
+/** Standalone `todos.json.bak` snapshot, no lease — exported for
+ *  `POST /cluster/todos/:projectKey/backup` (`server/cluster-routes.ts`, D21), which the reconcile
+ *  transport's own contract calls before the FIRST mutation of a pass, whether or not this peer
+ *  ends up receiving any adds (the zero-adds case has no append to ride along with — see
+ *  `backupAndAppendTodosPreservingIds`'s own docblock for the route this is deliberately NOT
+ *  shared with). */
+export async function backupTodos(dataDir: string): Promise<string> {
+  return writeTodosBackupRaw(dataDir);
+}
+
+/**
+ * Backup-then-append under ONE lease — D21's amendment
+ * (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, "D21", "AMENDED 2026-08-23"), and the whole
+ * point of this function existing separately from `backupTodos` + `appendTodosPreservingIds`
+ * composed by the caller. Composing those two as separate calls is two separate lease
+ * acquisitions, which re-creates — and over a network WIDENS — a hazard already logged against
+ * `cluster/reconcile.ts#reconcileProject`: the `.bak` written outside the lease that guards the
+ * write it protects can be stale by a round trip's worth of concurrent local writes, not
+ * microseconds, and a stale backup is worse than none because it is TRUSTED — restoring from it
+ * would silently roll back a write the backup never saw.
+ *
+ * So `POST /cluster/todos/:projectKey/append` (`server/cluster-routes.ts`) calls this, and only
+ * this: the backup is taken (fresh, whatever is on disk right now) and the append is merged, both
+ * inside the SAME `withTodosLease` acquisition — nothing else can observe the file between the two
+ * steps. The backup is idempotent (overwrites `todos.json.bak` with a fresher snapshot every time),
+ * which is what "does not conflict with a preceding `/backup` call" means (D21's amendment,
+ * verbatim) — this route's own backup simply wins, because it is the freshest.
+ *
+ * Returns the backup path alongside `appendTodosPreservingIds`'s own return (rows actually
+ * appended, never the skipped ones) so a caller can report both.
+ */
+export async function backupAndAppendTodosPreservingIds(
+  dataDir: string,
+  items: readonly TodoItem[],
+  options?: TodoClusterOptions,
+): Promise<{ backupPath: string; appended: TodoItem[] }> {
   return withTodosLease(dataDir, async () => {
-    const { items: existing, needsRewrite } = await readRaw(dataDir, options);
-    const existingIds = new Set(existing.map((t) => t.id));
-    const appended: TodoItem[] = [];
-    for (const item of items) {
-      if (existingIds.has(item.id)) continue;
-      existingIds.add(item.id);
-      existing.push(item);
-      appended.push(item);
-    }
-    // Write even when nothing new landed, if `readRaw` healed an unrelated entry: that heal is
-    // only real once it is on disk (see the docblock above), and this is the one lease-guarded
-    // write this call makes.
-    if (needsRewrite || appended.length > 0) {
-      await writeAtomic(dataDir, existing);
-    }
-    return appended;
+    const backupPath = await writeTodosBackupRaw(dataDir);
+    const appended = await appendPreservingIdsUnderLease(dataDir, items, options);
+    return { backupPath, appended };
   });
 }
 

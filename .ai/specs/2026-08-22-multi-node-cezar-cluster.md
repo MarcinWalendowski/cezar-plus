@@ -1129,7 +1129,40 @@ The real merge stays owner-gated per P9 — `--dry-run` is the default posture, 
 into the record every session reads first is a data change that deserves the owner present. What
 D21 changes is that the dry run becomes **runnable at all**.
 
-**NOT YET IMPLEMENTED, and deliberately so (2026-08-23).** D21 is a decision, not a landed route.
+**UNBLOCKED 2026-08-23 by D22** — the paragraph below said these routes were held back because a
+node-authenticated route could only ever answer 401. The hub-side secret store now exists, so that
+reason is spent and D21 is buildable. The rest of the paragraph still describes why it was right to
+wait, and is kept for that.
+
+**AMENDED 2026-08-23 — `/append` takes its own backup, inside its own lease.** Building `/backup`
+and `/append` as two independent HTTP calls would re-create, and widen, a hazard already logged
+against `reconcileProject`: the `.bak` is written outside the lease that guards the write it
+protects, so a concurrent `createTodo`/`updateTodo`/`markStarted` landing in between is handled
+correctly by the append (which re-reads fresh under the lease) and is **absent from the backup**.
+Across a network the gap is not microseconds, it is a round trip. A backup that can be older than
+the state it backs up is worse than none, because it is trusted — restoring from it silently rolls
+back an unrelated write.
+
+So `POST /cluster/todos/:projectKey/append` performs backup-then-append **within one lease** on the
+hub, and the `.bak` write is idempotent so a preceding `/backup` call does not conflict with it.
+`/backup` remains a route because the transport's own contract calls `backup()` before the first
+mutation of a pass *whether or not that peer ends up receiving any adds* — the zero-adds case has no
+append to ride along with. The two are therefore not redundant: `/backup` covers "a pass is about to
+write something, somewhere", `/append`'s internal backup covers "this specific append is protected
+by a snapshot taken under the same lock it will write through".
+
+**AMENDED 2026-08-23 — the wire record must be a passthrough twin of a strict schema, not a strict schema.** The first implementation made `clusterTodoRecordSchema` `.strict()` with all 26 fields spelled out, dropping D13's unknown-field tolerance for this one shape. That was chosen to satisfy a **typechecking** problem — `contract-parity.cluster.test.ts`'s generic `Mutual<Schema, Route>` check disagrees with itself when a passthrough object's index signature is compared inside a generic type alias — and it traded a data guarantee to buy it, which is the wrong direction.
+
+Measured, not argued: a single row carrying one field this build does not know is `REJECTED — unrecognized_keys`, which fails the **entire** snapshot response, and gets a `/append` **400 before the append runs**. `todos.ts`'s own D13 docblock says why that shape is wrong and names this exact scenario: *"wrong the moment a newer node in the cluster writes a field this build has never heard of."* Reconcile is the lossless cross-node backfill, and a hub and a spoke on different machines upgrade at different times — version skew is the normal state of this system, not an edge case. The failure also reads as corrupt data rather than as version skew.
+
+Use the split this repo already uses twice (`todoSchema`/`storedTodoSchema`, `clusterOpSchema`/`storedClusterOpSchema`): keep `clusterTodoRecordSchema` plain for the TYPE and the parity check, and validate the wire with `storedClusterTodoRecordSchema = clusterTodoRecordSchema.passthrough()`. The type keeps its shape, the runtime keeps its tolerance, and the parity check never sees an index signature. Note the route comment claiming *"the wire shape is passthrough-by-design"* was left from the abandoned attempt and described the code accurately only BEFORE `.strict()` landed — a stale comment that made the defect read as intentional.
+
+**LANDED 2026-08-23** (superseding the "NOT YET IMPLEMENTED" paragraph below, kept for the ordering
+rationale it still states correctly). The three routes, the HTTP `RemoteReconcileTransport`
+(`cluster/reconcile-transport.ts`), and `cez cluster reconcile`'s CLI wiring (`index.ts`) are all
+built, on top of D22's real secret store — see the Verification paragraph after D22's own, below.
+
+~~NOT YET IMPLEMENTED, and deliberately so (2026-08-23).~~ D21 is a decision, not a landed route.
 The three routes are blocked behind the D17 correction above: with no hub-side node-secret store,
 `node-auth.ts` fails closed and a node-authenticated route can only ever refuse. Shipping
 `GET /cluster/todos/:projectKey` today would add a route that answers 401 by construction, which
@@ -1197,6 +1230,49 @@ refuses `unknown-node` — the negative control being that it verified *before*,
 nothing. (27) The secrets file is `0600` and its parent is not world-readable, asserted on the mode
 bits. (28) No route response anywhere contains a stored secret: drive `GET /api/v1/cluster` with two
 enrolled nodes and assert neither secret appears in the serialised body.
+
+**Verification, added 2026-08-23 (D21 landed — the three routes, the transport, and the CLI
+wiring).** Continues the numbering above; additive to items 20–22, which describe the same routes
+at spec-time and still hold. (29) `/append`'s own backup runs inside its own lease, proven by
+obstruction rather than restated: pre-occupy the append write's tmp path (`todos.json.tmp` as a
+directory — `enrollment.test.ts`'s own EISDIR trick) so the append half fails, and assert the
+backup still landed holding pre-mutation state while the data file itself is untouched
+(`todos.test.ts`); then, under the same obstruction, race a concurrent local write against the
+doomed call and assert it cannot land until the doomed call's lease releases — composing
+`backupTodos()` then a separate `appendTodosPreservingIds()` (the shape the amendment rejected, since
+`backupTodos` alone takes no lease) lets the concurrent write land inside the backup instead, and
+mutating to that composition is what turns this test red. (30) The transport signs every request
+with the real signer and the real verifier accepts it — `verifyNodeHttpPrincipal` against a
+captured request, never a re-derivation with the same signer that produced the headers
+(`reconcile-transport.test.ts`) — for `list`/`backup`/`apply` each, against both a bare local hub
+and the real `createClusterRoutes` served over a real socket (`@hono/node-server`). Also: the hub
+routes scope by a CONFIRMED pairing only, proven with the SAME authenticated node succeeding for a
+project it is paired with and refused for one it is not, in the same test
+(`cluster-routes.test.ts`). (31) `cez cluster reconcile`'s dry-run is the DEFAULT posture, proven
+end to end through a real subprocess CLI invocation against a real hub server
+(`cluster-reconcile-cli-wiring.test.ts`): a bare invocation with no flags writes nothing on either
+side (`todos.json` byte-identical before/after, no `.bak` created), `--apply` performs the real
+merge, and `--dry-run` wins when both are given, regardless of flag order. This is also the
+regression test for a bug found while wiring the command: the scaffold's original
+`'dry-run': { default: false }` meant a bare invocation would WRITE, silently reversing D21's own
+stated default (`node:util`'s `parseArgs` has no `--no-x` negation, so the fix adds `--apply` as
+the explicit opt-in rather than trying to default `--dry-run` to `true`). (32) **D13's unknown-field
+tolerance survives the wire in every direction**, asserted on the field's VALUE rather than on the
+request succeeding: a row carrying a field this build has never heard of round-trips (a) out through
+`GET /cluster/todos/:projectKey` (`cluster-routes.test.ts`), (b) back in through the transport's
+client-side parse (`reconcile-transport.test.ts`), and (c) through `POST .../append` — present in
+the response AND on the hub's disk afterwards, so it survives the WRITE and not merely the reply.
+Each row is seeded straight to disk rather than through any zod-typed helper, so the seed itself
+proves nothing and only the round trip does. **Mutation-checked, and the two halves are guarded in
+different places** — reverting `storedClusterTodoRecordSchema` to `.strict()` reddens exactly the
+three transport/append tests and leaves the snapshot-route one green, because the route never parses
+the contract schema at all (`c.json()` only types the handler's return); that one is guarded by
+`todos.ts#storedTodoSchema`, and reverting THAT to `.strict()` reddens exactly it. This exists
+because the wire record was first written `.strict()` to settle a typing problem, which traded away
+the one property the reconcile path exists for. The fix is a passthrough TWIN, not a wider response
+schema: `contract-parity.cluster.test.ts` compares the response schema against Hono's
+`InferResponseType`, which cannot carry an index signature, so a passthrough response schema fails
+parity by construction.
 
 ### Rejected alternatives
 

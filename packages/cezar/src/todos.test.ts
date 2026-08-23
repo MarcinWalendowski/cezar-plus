@@ -7,6 +7,8 @@ import { clusterTodoFieldsSchema, todoItemSchema, type ClusterAckResult, type Cl
 import {
   applyHubReplica,
   appendTodosPreservingIds,
+  backupAndAppendTodosPreservingIds,
+  backupTodos,
   clearStartedTaskId,
   createTodo,
   isTombstoned,
@@ -1294,5 +1296,150 @@ describe('appendTodosPreservingIds — insert primitive that keeps the caller-su
     // "a read must not materialize state") — asserting this the same way confirms nothing was
     // written by the call above.
     expect(await readTodos(dataDir)).toEqual([]);
+  });
+});
+
+describe('backupTodos — standalone snapshot, no lease of its own (D21, .ai/specs/2026-08-22-multi-node-cezar-cluster.md)', () => {
+  let root: string;
+  let dataDir: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cez-todos-backup-'));
+    dataDir = join(root, '.ai/cezar');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('writes the exact current bytes to todos.json.bak', async () => {
+    mkdirSync(dataDir, { recursive: true });
+    const seed = [{ id: 'a', summary: 'seed' }];
+    writeFileSync(todosPath(dataDir), JSON.stringify(seed, null, 2), 'utf8');
+
+    const backupPath = await backupTodos(dataDir);
+    expect(backupPath).toBe(`${todosPath(dataDir)}.bak`);
+    expect(JSON.parse(readFileSync(backupPath, 'utf8'))).toEqual(seed);
+  });
+
+  it("defaults to [] when there is no todos.json yet, matching readTodos's own empty-inbox default", async () => {
+    const backupPath = await backupTodos(dataDir);
+    expect(JSON.parse(readFileSync(backupPath, 'utf8'))).toEqual([]);
+  });
+});
+
+describe('backupAndAppendTodosPreservingIds — D21 amendment (2026-08-23): backup + append under ONE lease', () => {
+  let root: string;
+  let dataDir: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cez-todos-backup-append-'));
+    dataDir = join(root, '.ai/cezar');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('floor: appends verbatim and returns a backup path holding PRE-mutation state, not the merged result', async () => {
+    mkdirSync(dataDir, { recursive: true });
+    const seed: TodoItem = { id: 'seed', summary: 'seed row' };
+    writeFileSync(todosPath(dataDir), JSON.stringify([seed], null, 2), 'utf8');
+
+    const incoming: TodoItem = { id: 'peer-1', summary: 'copied from a peer', priority: 'high' };
+    const { backupPath, appended } = await backupAndAppendTodosPreservingIds(dataDir, [incoming]);
+
+    expect(appended).toEqual([incoming]);
+    expect(backupPath).toBe(`${todosPath(dataDir)}.bak`);
+    // The point of the control: the backup holds what was there BEFORE this call's append, not
+    // the merged output — mirrors `reconcile.test.ts`'s own ".bak content is pre-mutation" control.
+    expect(JSON.parse(readFileSync(backupPath, 'utf8'))).toEqual([seed]);
+
+    const after = await readTodos(dataDir);
+    expect(after.map((t) => t.id).sort()).toEqual(['peer-1', 'seed']);
+  });
+
+  it('idempotent by id: appending the same row twice leaves the file with the ORIGINAL field values, not a duplicate', async () => {
+    const incoming: TodoItem = { id: 'peer-1', summary: 'copied from a peer', priority: 'high' };
+    const first = await backupAndAppendTodosPreservingIds(dataDir, [incoming]);
+    expect(first.appended).toEqual([incoming]);
+
+    // Retried with DIFFERENT field values under the same id — idempotence means the existing row
+    // wins, not that the row is merely present; asserting values (not length) is the whole point.
+    const retried: TodoItem = { id: 'peer-1', summary: 'a different summary that must NOT land', priority: 'low' };
+    const second = await backupAndAppendTodosPreservingIds(dataDir, [retried]);
+    expect(second.appended).toEqual([]); // already there — the return value says so
+
+    const items = await readTodos(dataDir);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toEqual(incoming); // the ORIGINAL values, untouched by the retry
+  });
+
+  it('obstruction: the append phase failing still leaves a fresh backup on disk and the data file untouched (ordering proof, not a restatement)', async () => {
+    mkdirSync(dataDir, { recursive: true });
+    const seed: TodoItem = { id: 'seed', summary: 'seed row' };
+    writeFileSync(todosPath(dataDir), JSON.stringify([seed], null, 2), 'utf8');
+
+    // `writeAtomic` (the append phase's write) always goes through `${todosPath}.tmp` then renames
+    // — pre-occupy that path as a directory so the append's `fs.writeFile` throws EISDIR, the same
+    // trick `cluster/enrollment.test.ts` uses to force a write-order failure deterministically
+    // rather than asserting on timing.
+    const blockedTmp = `${todosPath(dataDir)}.tmp`;
+    mkdirSync(blockedTmp, { recursive: true });
+    try {
+      await expect(
+        backupAndAppendTodosPreservingIds(dataDir, [{ id: 'never-lands', summary: 'blocked by EISDIR' }]),
+      ).rejects.toThrow();
+    } finally {
+      rmSync(blockedTmp, { recursive: true, force: true });
+    }
+
+    // The backup ran — and ran BEFORE the doomed append — even though the append itself failed:
+    // this is what "does its own backup inside its own lease" means. The backup is not
+    // conditional on the append succeeding.
+    expect(JSON.parse(readFileSync(`${todosPath(dataDir)}.bak`, 'utf8'))).toEqual([seed]);
+
+    // And the data file itself is untouched — `writeAtomic`'s tmp+rename means a failed tmp write
+    // never reaches the real file, so the doomed append left no partial state behind.
+    expect(await readTodos(dataDir)).toEqual([seed]);
+  });
+
+  it('obstruction: a failing attempt still holds the lease for its WHOLE duration — a concurrent local write is blocked out entirely, not merely delayed past the backup half (proves ONE lease, not backup-then-release-then-append)', async () => {
+    mkdirSync(dataDir, { recursive: true });
+    const seed: TodoItem = { id: 'seed', summary: 'seed row' };
+    writeFileSync(todosPath(dataDir), JSON.stringify([seed], null, 2), 'utf8');
+
+    const blockedTmp = `${todosPath(dataDir)}.tmp`;
+    mkdirSync(blockedTmp, { recursive: true });
+
+    // Started synchronously and NOT awaited yet: the lease-acquiring prefix of
+    // `backupAndAppendTodosPreservingIds` (down through the blocking `openSync('wx', …)` syscall)
+    // runs synchronously before this call statement even returns — so `todos.lock` already exists
+    // on disk by the time the next statement runs.
+    const doomed = backupAndAppendTodosPreservingIds(dataDir, [{ id: 'never-lands', summary: 'blocked' }]);
+    // Fired immediately after, same tick: a concurrent local writer (a raw `createTodo`, the same
+    // shape as an agent's `CEZ_TODOS_FILE` append) racing for the SAME lease.
+    const concurrent = createTodo(dataDir, { summary: 'concurrent local write' }, localCliAuthor('cli-todo-add'));
+
+    await expect(doomed).rejects.toThrow();
+    // Clear the obstruction only now that `doomed` has released its lease, so the concurrent
+    // writer — which has been blocked on lease acquisition this whole time, never on the tmp path
+    // — can finally complete its own (unobstructed) write.
+    rmSync(blockedTmp, { recursive: true, force: true });
+    await concurrent;
+
+    // The mutation this test is built to catch: if backup+append were composed as two SEPARATE
+    // lease acquisitions (`backupTodos()` then `appendTodosPreservingIds()` — the shape D21's
+    // 2026-08-23 amendment rejected), `backupTodos` takes no lease at all (see its own doc), so the
+    // concurrent writer above could land, and be silently captured by, the backup this call takes
+    // before it ever reaches the append phase. It is not: the backup on disk is still exactly the
+    // pre-mutation seed row, proving the lease spans backup AND append as one block.
+    const backup = JSON.parse(readFileSync(`${todosPath(dataDir)}.bak`, 'utf8')) as TodoItem[];
+    expect(backup).toEqual([seed]);
+    expect(backup.map((t) => t.summary)).not.toContain('concurrent local write');
+
+    // The concurrent write was delayed, not lost — it landed once the lease was free.
+    const final = await readTodos(dataDir);
+    expect(final.some((t) => t.summary === 'concurrent local write')).toBe(true);
   });
 });

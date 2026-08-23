@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { hostMetricsResponseSchema } from './host-metrics.ts';
 import { runIndexEntrySchema } from './runs.ts';
+import { taskAuthorSchema } from './task-author.ts';
 import { workflowDefSchema } from './workflows.ts';
 
 /**
@@ -1016,6 +1017,223 @@ export const clusterCorpusSubmitResponseSchema = z.discriminatedUnion('ok', [
     .strict(),
 ]);
 export type ClusterCorpusSubmitResponse = z.infer<typeof clusterCorpusSubmitResponseSchema>;
+
+// ---- todos snapshot, backup, append (D21) ---------------------------------------------------------
+
+/**
+ * D21: the ONE new HTTP read `cluster/reconcile.ts#RemoteReconcileTransport` needed —
+ * `GET /api/v1/cluster/todos/:projectKey` returns a snapshot of the HUB's own `todos.json` for that
+ * project, node-authenticated (D20) and scoped to a CONFIRMED pairing with the caller
+ * (`server/cluster-routes.ts`). `POST …/backup` and `POST …/append` are reconcile's write half —
+ * `backup()`/`apply()` on the same transport interface, run FROM the spoke AGAINST the hub (a spoke
+ * has no inbound address — D21, Problem §7).
+ *
+ * **Every field here mirrors the ON-DISK shape, not the cockpit-facing `todoItemSchema`**
+ * (`./skills.ts`). `cluster/reconcile.ts#classify` needs `hubSeq` to tell "never seen the hub" from
+ * "already ordered" apart, and `apply` must copy a record across without dropping the fields that
+ * make it idempotent and resumable on the receiving side (`pendingSince`/`pendingFields`/`hubSeq`/
+ * `tombstone`/`placement`/`startedOn`) — reconcile never rewrites a field, so the wire shape has to
+ * carry every one of them, not the two `todoItemSchema` renders. `skills.ts` cannot be imported
+ * here either way: it already imports FROM this file, and the reverse would be a cycle — so the
+ * base fields are declared again rather than shared, the same duplication `todoKnowledgeRefSchema`
+ * would otherwise force onto this file too.
+ *
+ * **CORRECTED 2026-08-23 (code review, before this package's first commit) — `.strict()` alone,
+ * with no D13 tolerance at all, was the wrong trade.** This docblock used to end this paragraph at
+ * "no `.passthrough()` anywhere in this schema … and no D13 `unknown`-bag catch-all field either",
+ * accepting that a field this schema does not name is DROPPED by `.strict()` parsing. Measured
+ * cost, not a theoretical one: `.strict()` does not strip an unknown key, it REJECTS the whole
+ * payload — one row in a snapshot carrying one field this build has never heard of 400s the entire
+ * `/append` request and fails the entire `GET` snapshot, not just that row. Read against
+ * `todos.ts#storedTodoSchema`'s own docblock, that is exactly the scenario D13 exists to survive:
+ * *"wrong the moment a newer node in the cluster writes a field this build has never heard of …
+ * the older node would drop it on the next rewrite and silently truncate everyone's history."*
+ * Reconcile IS that cross-node backfill, and a hub/spoke pair upgrading at different times is this
+ * system's normal state, not an edge case — the failure read as corrupt data instead of version
+ * skew, which sends whoever hits it in exactly the wrong direction.
+ *
+ * The fix is the split this codebase already uses twice for this identical reason —
+ * `todos.ts#todoSchema`/`storedTodoSchema`, and this file's own `clusterOpSchema`/
+ * `storedClusterOpSchema` two sections up. `clusterTodoRecordSchema` below stays exactly as the
+ * bisection measured it: `.strict()`, used for the exported `ClusterTodoRecord` TYPE and by
+ * `contract-parity.cluster.test.ts`'s route-vs-schema check. `storedClusterTodoRecordSchema`,
+ * defined right after it, is its `.passthrough()` twin.
+ *
+ * **AMENDED 2026-08-23, same day — putting the stored twin directly into the three response/
+ * request schemas, as this paragraph originally said, does not work: it reproduces the identical
+ * `'schema-is-wider'` failure one level up.** Measured: wiring `storedClusterTodoRecordSchema`
+ * into `clusterTodosSnapshotResponseSchema.todos` and `clusterTodosAppendResponseSchema.appended`
+ * makes THOSE schemas' own `z.infer<>` carry the index signature, and
+ * `contract-parity.cluster.test.ts`'s `Assert<Exact<z.infer<typeof clusterTodosSnapshotResponseSchema>,
+ * TodosSnapshot200>>` (and the append equivalent) fail exactly the same way `clusterTodoRecordSchema`
+ * itself did before this correction — the bug fires on ANY schema whose inferred type embeds an
+ * index signature and is compared through this deferred-generic `Exact<>`, not only on
+ * `clusterTodoRecordSchema` specifically. The REQUEST side is the one exception: wiring the stored
+ * twin into `clusterTodosAppendRequestSchema.todos` measurably does NOT break its parity assertion
+ * (`Assert<Exact<z.input<typeof clusterTodosAppendRequestSchema>, TodosAppendBody>>` stayed green) —
+ * apparently `InferRequestType` doesn't route through whatever normalization step trips
+ * `InferResponseType` up, though this codebase has not chased down why.
+ *
+ * The actual placement of the passthrough boundary follows from where each schema is really
+ * `.parse()`'d, not from where its TYPE is used: **`clusterTodosAppendRequestSchema` is a real
+ * runtime gate** — `jsonZodValidator` calls it on every incoming `/append` body — so it keeps the
+ * stored twin directly, and that is the one schema level where a `.strict()` mistake would have
+ * actually 400'd a whole request. `clusterTodosSnapshotResponseSchema` and
+ * `clusterTodosAppendResponseSchema`, by contrast, are **never parsed server-side at all** —
+ * `c.json(body)` just types `body` with them and calls `JSON.stringify`, which serializes whatever
+ * fields the real on-disk record actually has regardless of the stated TS type, so leaving THEM
+ * plain costs nothing on the wire. The one place a response really is `.parse()`'d is client-side,
+ * in `cluster/reconcile-transport.ts`, so that is where the tolerance has to live: two more schemas
+ * declared right after their plain counterparts below, `storedClusterTodosSnapshotResponseSchema`
+ * and `storedClusterTodosAppendResponseSchema`, both built on `storedClusterTodoRecordSchema`, and
+ * it is those two the transport parses with. `clusterTodosBackupResponseSchema` needs no such twin —
+ * it carries no todo-record array. The parity check only ever compares the PLAIN response/request
+ * schemas, so it never sees an index signature; the runtime keeps D13's tolerance at both real
+ * enforcement points (the `/append` request validator and the transport's response parsing) without
+ * the type-level schemas the parity check touches ever going passthrough.
+ *
+ * **The bisection below is kept, unchanged, because it is still exactly why `tombstone` and
+ * `placement` are spelled out as their OWN `.strict()` shapes on the PLAIN schema, rather than
+ * reused from their already-`.passthrough()` stored siblings** (`storedClusterTombstoneSchema` /
+ * `storedClusterTodoPlacementSchema`): doing that on `clusterTodoRecordSchema` itself would
+ * reproduce precisely the measured bug below, even with the wire twin now sitting alongside it —
+ * the plain schema has to stay genuinely index-signature-free everywhere, not just at its own top
+ * level, or the parity check breaks again for the same reason.
+ *
+ * Both were tried first and both are the module header's usual discipline ("wire is `.strict()`,
+ * on-disk is `.passthrough()`" — `tombstone`/`placement` would otherwise reuse the already-existing
+ * `storedClusterTombstoneSchema`/`storedClusterTodoPlacementSchema`, and `ClusterOp.unknown`'s own
+ * `z.record(z.string(), z.unknown())` idiom looked like the obvious D13 hatch). **Both are
+ * measurably rejected** as a way to make `clusterTodoRecordSchema` ITSELF tolerant: any field whose
+ * TS type carries an index signature into `unknown` — a `.passthrough()`'d nested object, or a bare
+ * `z.record(_, z.unknown())` — makes Hono's `InferResponseType` and this schema's own `z.infer`
+ * disagree in a way `contract-parity.cluster.test.ts`'s generic `Mutual` check catches as
+ * `'schema-is-wider'`, even though a DIRECT (non-generic) structural comparison of the two types
+ * looks identical. Bisected field-by-field against the real route on 2026-08-23: `tombstone`,
+ * `placement` and a trial `unknown` field each independently reproduced it; every other field
+ * (including three enums, two nested arrays, and an imported `taskAuthorSchema`) did not.
+ */
+export const clusterTodoRecordSchema = z
+  .object({
+    id: z.string().min(1),
+    ts: z.string().optional(),
+    taskId: z.string().optional(),
+    summary: z.string().min(1),
+    action: z.string().optional(),
+    prUrl: z.string().optional(),
+    suggestedSkill: z.string().optional(),
+    suggestedArgs: z.string().optional(),
+    suggestedPrompt: z.string().optional(),
+    runnable: z.boolean().optional(),
+    startedTaskId: z.string().optional(),
+    status: z.enum(['todo', 'in-progress', 'blocked', 'done']).optional(),
+    priority: z.enum(['high', 'medium', 'low']).optional(),
+    archivedAt: z.string().optional(),
+    context: z.string().max(20_000).optional(),
+    whatToDo: z.string().max(100_000).optional(),
+    acceptanceCriteria: z.array(z.string().min(1).max(500)).max(20).optional(),
+    knowledgeRefs: z
+      .array(z.object({ project: z.string().min(1).max(64), slug: z.string().min(1).max(500), title: z.string().min(1).max(300) }).strict())
+      .max(20)
+      .optional(),
+    origin: z.enum(['agent', 'composer']).optional(),
+    autostart: z.boolean().optional(),
+    author: taskAuthorSchema.optional(),
+    // ---- the six additive cluster fields (`clusterTodoFieldsSchema`'s own shape, strict-ified) --
+    pendingSince: z.string().optional(),
+    pendingFields: z.array(z.string().min(1).max(120)).max(32).optional(),
+    hubSeq: clusterHubSeqSchema.optional(),
+    tombstone: z.object({ at: z.string() }).strict().optional(),
+    placement: clusterTodoPlacementSchema.optional(),
+    startedOn: clusterNodeIdSchema.optional(),
+  })
+  .strict();
+export type ClusterTodoRecord = z.infer<typeof clusterTodoRecordSchema>;
+
+/** The wire twin — see `clusterTodoRecordSchema`'s own docblock above (in particular the
+ *  "AMENDED 2026-08-23, same day" paragraph) for exactly which schemas use this and which stay
+ *  plain, and why: `clusterTodosAppendRequestSchema` below uses it directly (the real incoming
+ *  validator), and `storedClusterTodosSnapshotResponseSchema` / `storedClusterTodosAppendResponseSchema`
+ *  (declared beside their plain counterparts) use it for the transport's client-side response
+ *  parsing. `clusterTodoRecordSchema` itself stays the `ClusterTodoRecord` TYPE and the
+ *  contract-parity check's schema. */
+export const storedClusterTodoRecordSchema = clusterTodoRecordSchema.passthrough();
+export type StoredClusterTodoRecord = z.infer<typeof storedClusterTodoRecordSchema>;
+
+export const clusterTodosSnapshotResponseSchema = z
+  .object({
+    projectKey: clusterProjectKeySchema,
+    todos: z.array(clusterTodoRecordSchema),
+  })
+  .strict();
+export type ClusterTodosSnapshotResponse = z.infer<typeof clusterTodosSnapshotResponseSchema>;
+
+/** The wire twin of the response above — see `clusterTodoRecordSchema`'s docblock ("CORRECTED
+ *  2026-08-23, amended same day") for why a response schema needs a SEPARATE stored variant rather
+ *  than using the stored record type directly: `c.json()` never actually parses this schema
+ *  server-side (it only types the handler's return value, and `JSON.stringify` serializes whatever
+ *  is really on disk regardless of that type), so the plain schema above is what the parity check
+ *  compares and it stays index-signature-free. The one real `.parse()` of a snapshot response is
+ *  client-side, in `cluster/reconcile-transport.ts`, which uses THIS schema instead so a row
+ *  carrying a field this build has never heard of survives the round trip rather than throwing. */
+export const storedClusterTodosSnapshotResponseSchema = z
+  .object({
+    projectKey: clusterProjectKeySchema,
+    todos: z.array(storedClusterTodoRecordSchema),
+  })
+  .strict();
+export type StoredClusterTodosSnapshotResponse = z.infer<typeof storedClusterTodosSnapshotResponseSchema>;
+
+/** `POST /api/v1/cluster/todos/:projectKey/backup` — writes `todos.json.bak` on the hub from
+ *  whatever the hub currently holds. The transport's own contract calls this before the FIRST
+ *  mutation of a reconcile pass, whether or not this peer ends up receiving any adds — the
+ *  zero-adds case has no append to ride along with, so this stays its own route rather than folding
+ *  into `/append` (D21's amendment). Idempotent: overwriting `todos.json.bak` with a fresher
+ *  snapshot is the whole of what "does not conflict with a preceding call" means here. */
+export const clusterTodosBackupResponseSchema = z.object({ path: z.string().min(1).max(1000) }).strict();
+export type ClusterTodosBackupResponse = z.infer<typeof clusterTodosBackupResponseSchema>;
+
+/** `POST /api/v1/cluster/todos/:projectKey/append`'s body — bounded like a link frame's own op
+ *  batch (`CLUSTER_OPS_PER_FRAME_MAX`), for the same reason: an unbounded array is an unbounded
+ *  server-side merge. */
+export const clusterTodosAppendRequestSchema = z
+  .object({ todos: z.array(storedClusterTodoRecordSchema).max(CLUSTER_OPS_PER_FRAME_MAX) })
+  .strict();
+export type ClusterTodosAppendRequest = z.infer<typeof clusterTodosAppendRequestSchema>;
+
+/**
+ * `POST /api/v1/cluster/todos/:projectKey/append`'s response. **AMENDED 2026-08-23 — this route
+ * takes its OWN backup, inside its OWN lease, rather than trusting a `/backup` call that may have
+ * landed a round trip ago** (D21's amendment): composing `/backup` then `/append` as two separate
+ * HTTP calls — two separate lease acquisitions on the hub — leaves a window where a concurrent
+ * local write on the hub lands in between, and is silently absent from the `/backup` snapshot even
+ * though the LIVE file (correctly) picked it up. `backupPath` here is always THIS append's own
+ * fresh snapshot, taken under the same lease as the write that follows it, never the path an
+ * earlier `/backup` call wrote.
+ */
+export const clusterTodosAppendResponseSchema = z
+  .object({
+    /** Rows actually written — an id already present on the hub is skipped and never listed here
+     *  (idempotent by id). A retried append is therefore safe to re-send verbatim. */
+    appended: z.array(clusterTodoRecordSchema),
+    backupPath: z.string().min(1).max(1000),
+  })
+  .strict();
+export type ClusterTodosAppendResponse = z.infer<typeof clusterTodosAppendResponseSchema>;
+
+/** The wire twin — same reasoning as `storedClusterTodosSnapshotResponseSchema` above: the hub
+ *  never actually parses this schema on the way out, only types the handler's return value with
+ *  it, so it stays plain for the parity check. `cluster/reconcile-transport.ts` parses an
+ *  `/append` response with THIS schema instead, so a `appended[]` row carrying a field this build
+ *  has never heard of — e.g. echoed back from a hub newer than this spoke — survives rather than
+ *  throwing client-side. */
+export const storedClusterTodosAppendResponseSchema = z
+  .object({
+    appended: z.array(storedClusterTodoRecordSchema),
+    backupPath: z.string().min(1).max(1000),
+  })
+  .strict();
+export type StoredClusterTodosAppendResponse = z.infer<typeof storedClusterTodosAppendResponseSchema>;
 
 // ---- leases (D15b) and the allocator (D19 rung 2) ------------------------------------------------
 

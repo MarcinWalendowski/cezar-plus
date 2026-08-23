@@ -66,6 +66,8 @@ import { createEnrollmentCode, joinCluster, leaveCluster } from './cluster/enrol
 import { loadNodeIdentity } from './cluster/node-identity.ts';
 import { signedNodeRequestHeaders } from './cluster/node-auth.ts';
 import { disableNode, readPeers } from './cluster/peers.ts';
+import { createHttpReconcileTransport } from './cluster/reconcile-transport.ts';
+import { reconcileAll } from './cluster/reconcile.ts';
 import { readRemoteRuns } from './cluster/run-projection.ts';
 import { clusterEnabled } from './server/capabilities.ts';
 import { clusterActiveRunsFrom } from './server/cluster-routes.ts';
@@ -103,9 +105,9 @@ Usage:
                             usage)
   cezar cluster             multi-node cluster (CEZ_CLUSTER=1): enroll [--name N]
                             [--ttl S] · join <code> [--name N] · active [--json] ·
-                            reconcile [--dry-run] [--peer <nodeId>] · revoke
-                            <nodeId> | --self (run "cezar cluster" for the full
-                            usage)
+                            reconcile [--apply] [--peer <nodeId>] (dry run by
+                            default) · revoke <nodeId> | --self (run
+                            "cezar cluster" for the full usage)
   cezar backup              encrypted platform backup (CEZ_BACKUP=1): status ·
                             run · snapshots · verify · gc · restore [--snapshot
                             <id>] [--force]
@@ -1381,11 +1383,17 @@ const CLUSTER_USAGE = `usage:
   cez cluster active [--json]  what is in flight across the cluster: task summary,
                               node, branch, touched paths. Read this before starting
                               work in a repo somebody else may already be holding.
-  cez cluster reconcile [--dry-run] [--peer <nodeId>]
-                              full compare against a peer's backlog. Three classes:
-                              one side only · identical · differing-and-neither-saw-
-                              the-hub. The third is REFUSED, never auto-merged: no
-                              fact available says which side is right.
+  cez cluster reconcile [--apply] [--dry-run] [--peer <nodeId>]
+                              spoke → hub only: full compare against the hub's
+                              backlog for every project this node has confirmed
+                              paired with it. Three classes: one side only ·
+                              identical · differing-and-neither-saw-the-hub. The
+                              third is REFUSED, never auto-merged: no fact
+                              available says which side is right. DRY RUN IS THE
+                              DEFAULT — nothing is written unless you pass
+                              --apply. --dry-run forces a dry run even alongside
+                              --apply, for a script that wants to force the safe
+                              path regardless of its own flags.
   cez cluster revoke <nodeId>  hub: disable a node.
   cez cluster revoke --self    spoke: delete THIS node's credential. Revocation is
                               two-sided — a hub-side revoke alone does not stop a
@@ -1426,7 +1434,12 @@ async function runClusterCommand(args: string[]): Promise<number> {
         name: { type: 'string' },
         ttl: { type: 'string' },
         peer: { type: 'string' },
+        // `reconcile`'s own pair — see the case body for why the default is DRY RUN despite
+        // both flags themselves defaulting to `false` (there is no `--no-x` negation in
+        // `node:util`'s `parseArgs`, so "dry run unless told otherwise" has to be computed from
+        // the ABSENCE of `--apply`, not from either flag's own default).
         'dry-run': { type: 'boolean', default: false },
+        apply: { type: 'boolean', default: false },
         self: { type: 'boolean', default: false },
         json: { type: 'boolean', default: false },
       },
@@ -1519,22 +1532,107 @@ async function runClusterCommand(args: string[]): Promise<number> {
       }
 
       case 'reconcile': {
-        // The verb is wired, the peer resolution is real, and the body is not mine to write.
-        // `reconcileAll` takes a `RemoteReconcileTransport` — `listProjects`/`list`/`backup`/
-        // `apply` against the PEER — and there is no transport to build one from yet: it rides the
-        // node link (`cluster/link-*.ts`, package 1.3), and no HTTP route exposes another node's
-        // todo list. Package **2.4** owns this body and lands both halves together.
-        //
-        // Reachable-and-refusing rather than absent, deliberately: `cez kb search` shipped complete
-        // and wired to nothing for months, answering `unknown command: kb` to the exact command the
-        // agent system prompt told every run to use. A verb that names what it is waiting for
-        // cannot fail that way.
+        // D21 (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`): reads over HTTP (the ONE new
+        // route, `GET /cluster/todos/:projectKey`) and writes over the same family's `/backup` +
+        // `/append` — `cluster/reconcile-transport.ts#createHttpReconcileTransport`, signed with
+        // D20's node principal. Runs FROM a spoke AGAINST its hub — the only direction addressable
+        // at all (a spoke has no inbound address, Problem §7) — so this refuses outright on a hub
+        // and on a `--peer` that does not resolve to THIS node's own hub.
         const peerNodeId = typeof values.peer === 'string' ? values.peer : await soleClusterPeer();
         if (!peerNodeId) return 1;
-        console.error(
-          `cez cluster reconcile: not available yet — the peer transport rides the node link, which has not landed (plan packages 1.3 / 2.4). Peer resolved as ${peerNodeId}; nothing was read or written.`,
-        );
-        return 1;
+
+        const identity = await loadNodeIdentity();
+        if (!identity) {
+          console.error('cez cluster reconcile: this node has no cluster identity — run `cez cluster join <code>` first');
+          return 1;
+        }
+        if (identity.role !== 'spoke' || !identity.hubUrl) {
+          console.error(
+            'cez cluster reconcile: this node IS the hub — reconcile dials OUT from a spoke to its hub, and a hub reconciling against a spoke is out of scope (D21); there is nothing to dial from here',
+          );
+          return 1;
+        }
+        if (!identity.secret) {
+          console.error(
+            'cez cluster reconcile: this node has no cluster secret on file — re-run `cez cluster join <code>` to re-enroll',
+          );
+          return 1;
+        }
+
+        const peers = await readPeers();
+        if (peers.nodes.find((node) => node.nodeId === peerNodeId)?.role !== 'hub') {
+          console.error(
+            `cez cluster reconcile: ${peerNodeId} is not this node's hub — reconcile only runs from a spoke against its own hub (reachable at ${identity.hubUrl})`,
+          );
+          return 1;
+        }
+
+        // `resolveLocalDataDir`: a confirmed pairing's `byNode[thisNodeId].projectId` → the
+        // workspace project registry's `root` (`ReconcileOptions`'s own doc, package 2.4's report).
+        // Built ONCE, synchronously, from THIS pass's own snapshot of `peers`/the registry — never
+        // re-read per project, so a pairing edited mid-run cannot make one project's resolution
+        // disagree with another's inside the same pass.
+        const config = await loadWorkspaceConfig();
+        const projectsById = new Map(config.projects.map((project) => [project.id, project]));
+        const localDataDirByProject = new Map<string, string>();
+        for (const pairing of peers.pairings) {
+          const member = pairing.byNode[identity.nodeId];
+          if (!member?.confirmedAt) continue;
+          const project = projectsById.get(member.projectId);
+          if (project) localDataDirByProject.set(pairing.projectKey, join(project.root, '.ai/cezar'));
+        }
+
+        // DRY RUN IS THE DEFAULT (D21: "the real merge is owner-gated … `--dry-run` is the default
+        // posture"). `--apply` is the one way to opt into writing; `--dry-run` always forces a dry
+        // run even alongside `--apply`, so a script combining both stays on the safe side rather
+        // than depending on flag ORDER.
+        const dryRun = values['dry-run'] === true || values.apply !== true;
+
+        const reports = await reconcileAll({
+          dryRun,
+          peerNodeId,
+          resolveLocalDataDir: (projectKey) => {
+            const dataDir = localDataDirByProject.get(projectKey);
+            if (!dataDir) {
+              // `listProjects()` and this map are built from the SAME `peers` snapshot, so this is
+              // a wiring bug, not a caller mistake — named rather than a bare `undefined!` cast.
+              throw new Error(`cez cluster reconcile: no confirmed local project for "${projectKey}"`);
+            }
+            return dataDir;
+          },
+          remote: createHttpReconcileTransport({
+            nodeId: identity.nodeId,
+            secret: identity.secret,
+            hubUrl: identity.hubUrl,
+          }),
+        });
+
+        emit({ dryRun, peer: peerNodeId, reports }, () => {
+          if (reports.length === 0) {
+            return [`no confirmed, paired project reconciled against ${peerNodeId} — nothing to do.`];
+          }
+          const lines: string[] = [];
+          for (const report of reports) {
+            const { counts } = report;
+            lines.push(
+              `${report.projectKey}: local-only ${counts['local-only']}  remote-only ${counts['remote-only']}  ` +
+                `identical ${counts.identical}  divergent-unclocked ${counts['divergent-unclocked']}` +
+                (report.backupPaths.length > 0 ? `  (backed up: ${report.backupPaths.join(', ')})` : ''),
+            );
+            if (counts['divergent-unclocked'] > 0) {
+              lines.push(
+                `  ${counts['divergent-unclocked']} row(s) diverge with neither side ever seen by the hub — REFUSED, not merged; resolve by hand.`,
+              );
+            }
+          }
+          lines.push(
+            dryRun
+              ? '(dry run — nothing was written; re-run with --apply to write.)'
+              : '(written.)',
+          );
+          return lines;
+        });
+        return 0;
       }
 
       case 'revoke': {

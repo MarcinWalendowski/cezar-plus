@@ -86,7 +86,11 @@
   reading — but D22's whole premise is that file mode *is* the protection, so a claim about it has to
   be true.
 
-- 🧭 **Decided, deliberately not built: how `cez cluster reconcile` gets its data** (**D21**). The
+- 🧭 **~~Decided, deliberately not built:~~ BUILT 2026-08-23, same day — how `cez cluster reconcile`
+  gets its data** (**D21**). *The heading below said "not built" and was true for a few hours: the
+  routes were held back only because the hub could not verify a signature, and **D22 removed that
+  blocker the same day** by giving the hub a secret store. What follows is the decision as it was
+  taken; the entry after it is what actually shipped.* The
   gap turned out to be **one method, not four** — `apply` is an ops frame, `backup` is a local
   write on the receiver, `listProjects` is the confirmed-pairings list; only "give me your full todo
   list" had no rail. So one new read, `GET /api/v1/cluster/todos/:projectKey`, scoped to a confirmed
@@ -95,6 +99,41 @@
   wired yet, on purpose: behind a fail-closed gate they could only ever answer 401, and a route that
   reads as "built" in every list that counts routes while refusing every caller is worse than its
   absence.
+
+- 🔁 **`cez cluster reconcile` runs — reads over HTTP, writes over the same signed family, and a
+  dry run is what you get unless you ask otherwise** (**D21**, `CEZ_CLUSTER=1`). The verb had been
+  reachable-and-refusing since package 2.4, naming the transport it was waiting for. It exists now:
+  `cluster/reconcile-transport.ts` dials the hub with D20's signed principal on every request —
+  there is no unsigned fallback, since a route family that refuses `no-credentials` by construction
+  could only ever make one dead code that looks like a feature. Three routes on the hub:
+  `GET /cluster/todos/:projectKey`, and `POST .../backup` + `.../append`, each scoped to a
+  **confirmed pairing** (an unpaired project is refused `unpaired-project`, on all three, not only
+  the read).
+
+  **`/append` takes its own backup inside its own lease**, rather than trusting a `/backup` call
+  from a round trip ago. Composed as two calls they are two lease acquisitions, and a concurrent
+  local write landing between them is picked up correctly by the append and is **absent from the
+  backup** — so restoring would silently roll back a write the backup never saw. A stale backup is
+  worse than none precisely because it is trusted. `/backup` remains its own route because the
+  transport's contract calls it before the first mutation of a pass *whether or not* that peer
+  receives any adds; the zero-adds case has no append to ride along with.
+
+  **Dry run is the default posture** — `--apply` is the only way to write, and `--dry-run` wins
+  even when both are passed, so a script combining them stays on the safe side rather than
+  depending on flag order. Verified end to end through the real CLI entry as a subprocess, against
+  a real HTTP hub with both sides seeded so the "wrote nothing" assertions have a floor: a bare
+  invocation leaves both `todos.json` files byte-identical and creates no `.bak` at all.
+
+  **D13's tolerance is preserved across the wire, and this took a correction.** The wire record was
+  first written `.strict()` to satisfy a typing problem, which silently traded away the one property
+  the path exists for: a row a *newer* node wrote failed the whole snapshot response and 400'd
+  `/append` — on a lossless cross-node backfill. The fix is a passthrough **twin** rather than a
+  wider response schema, because `contract-parity.cluster.test.ts` compares the response schema
+  against Hono's `InferResponseType`, which cannot carry an index signature: the plain schema stays
+  the type and the parity check, the `stored*` twin is what the transport actually parses with. Four
+  tests assert the unknown field's **value** survives — through the route and through the transport,
+  in the reply and on disk — and each was mutation-checked to confirm it goes red when its own guard
+  is removed.
 
 - 🛠 **`appendTodosPreservingIds`** — `todos.ts` had no insert that preserves an existing id
   (`createTodo` always mints a fresh one), which is what forced `cluster/reconcile.ts` to
@@ -166,9 +205,11 @@
   for and not measured; C1–C4 additionally require `maxParallel`, `maxHeavySteps` and a memory
   bound to be written into `prod-host`'s `~/.cezar/config.json` first, and C3 cannot run on
   the Mac at all because the bounds exist only under `scope` isolation. The cluster has not yet
-  been stood up across two real nodes: `cez cluster reconcile` still has no request/response
-  transport, so E2 — the 110-row reconcile that motivated the whole design — has no runnable path
-  yet. Open items are tracked in `.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`.
+  been stood up across two real nodes. **CORRECTED 2026-08-23 — this said `cez cluster reconcile`
+  "still has no request/response transport, so E2 has no runnable path yet"; D21 landed that
+  transport the same day.** E2 (the 110-row reconcile that motivated the whole design) now has a
+  runnable path and a default-safe dry run, but remains **unrun**: it needs two real nodes, and the
+  real merge stays owner-gated by P9. Open items are tracked in `.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`.
 
   **Gates, run on `prod-host` and on the MERGED tree.** `typecheck` exit 0, `build`,
   `test:unit` and `test:package` exit 0, and `npm test` at **566 of 567 files green** (10650 tests,

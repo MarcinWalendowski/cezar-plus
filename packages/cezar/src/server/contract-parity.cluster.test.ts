@@ -33,6 +33,10 @@ import type {
   clusterPairingActionSchema,
   clusterPairingsResponseSchema,
   clusterProjectKeyParamSchema,
+  clusterTodosAppendRequestSchema,
+  clusterTodosAppendResponseSchema,
+  clusterTodosBackupResponseSchema,
+  clusterTodosSnapshotResponseSchema,
 } from '@loki-labs/better-cezar-contract';
 import type { AppType } from './app-type.ts';
 
@@ -108,6 +112,29 @@ describe('src/contract cluster schemas match the cluster routes exactly', () => 
   // ---- corpus (request half only — see the header) -------------------------------------------
   type CorpusSubmitBody = InferRequestType<typeof client.api.v1.cluster.corpus.submit.$post>['json'];
 
+  // ---- todos snapshot, backup, append (D21) --------------------------------------------------
+  type TodosSnapshot200 = InferResponseType<(typeof client.api.v1.cluster.todos)[':projectKey']['$get'], 200>;
+  type TodosSnapshotParam = InferRequestType<
+    (typeof client.api.v1.cluster.todos)[':projectKey']['$get']
+  >['param'];
+  type TodosBackup200 = InferResponseType<
+    (typeof client.api.v1.cluster.todos)[':projectKey']['backup']['$post'],
+    200
+  >;
+  type TodosBackupParam = InferRequestType<
+    (typeof client.api.v1.cluster.todos)[':projectKey']['backup']['$post']
+  >['param'];
+  type TodosAppend200 = InferResponseType<
+    (typeof client.api.v1.cluster.todos)[':projectKey']['append']['$post'],
+    200
+  >;
+  type TodosAppendBody = InferRequestType<
+    (typeof client.api.v1.cluster.todos)[':projectKey']['append']['$post']
+  >['json'];
+  type TodosAppendParam = InferRequestType<
+    (typeof client.api.v1.cluster.todos)[':projectKey']['append']['$post']
+  >['param'];
+
   // ---- active, allocate, leases ---------------------------------------------------------------
   type Active200 = InferResponseType<typeof client.api.v1.cluster.active.$get, 200>;
   type Allocate201 = InferResponseType<(typeof client.api.v1.cluster.allocate)[':kind']['$post'], 201>;
@@ -177,6 +204,10 @@ describe('src/contract cluster schemas match the cluster routes exactly', () => 
     Assert<Exact<z.infer<typeof clusterLeaseResponseSchema>, Lease200>>,
     Assert<Exact<z.input<typeof clusterLeaseRequestSchema>, LeaseBody>>,
     Assert<Exact<z.infer<typeof clusterLeaseReleaseResponseSchema>, LeaseRelease200>>,
+    Assert<Exact<z.infer<typeof clusterTodosSnapshotResponseSchema>, TodosSnapshot200>>,
+    Assert<Exact<z.infer<typeof clusterTodosBackupResponseSchema>, TodosBackup200>>,
+    Assert<Exact<z.infer<typeof clusterTodosAppendResponseSchema>, TodosAppend200>>,
+    Assert<Exact<z.input<typeof clusterTodosAppendRequestSchema>, TodosAppendBody>>,
 
     Assert<Exact<z.input<typeof clusterCodeIdParamSchema>, EnrollRevokeParam>>,
     Assert<Exact<z.input<typeof clusterNodeIdParamSchema>, NodePatchParam>>,
@@ -185,6 +216,9 @@ describe('src/contract cluster schemas match the cluster routes exactly', () => 
     Assert<Exact<z.input<typeof clusterAllocateKindParamSchema>, AllocateParam>>,
     Assert<Exact<z.input<typeof clusterLeaseKindParamSchema>, LeaseParam>>,
     Assert<Exact<z.input<typeof clusterLeaseIdParamSchema>, LeaseReleaseParam>>,
+    Assert<Exact<z.input<typeof clusterProjectKeyParamSchema>, TodosSnapshotParam>>,
+    Assert<Exact<z.input<typeof clusterProjectKeyParamSchema>, TodosBackupParam>>,
+    Assert<Exact<z.input<typeof clusterProjectKeyParamSchema>, TodosAppendParam>>,
   ];
 
   it('is enforced by tsc, not at runtime', () => {

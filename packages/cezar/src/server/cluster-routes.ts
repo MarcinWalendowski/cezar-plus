@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Context, Next } from 'hono';
+import { join } from 'node:path';
 import {
   CLUSTER_PROTOCOL,
   type ClusterActiveResponse,
@@ -18,8 +19,12 @@ import {
   type ClusterPairing,
   type ClusterPairingProposal,
   type ClusterPairingsResponse,
+  type ClusterProjectKey,
   type ClusterRemoteRun,
   type ClusterSelf,
+  type ClusterTodosAppendResponse,
+  type ClusterTodosBackupResponse,
+  type ClusterTodosSnapshotResponse,
   clusterAllocateKindParamSchema,
   clusterAllocateRequestSchema,
   clusterCodeIdParamSchema,
@@ -33,6 +38,7 @@ import {
   clusterNodePatchSchema,
   clusterPairingActionSchema,
   clusterProjectKeyParamSchema,
+  clusterTodosAppendRequestSchema,
   type StoredClusterNode,
   type StoredClusterPairing,
 } from '@loki-labs/better-cezar-contract';
@@ -46,12 +52,15 @@ import {
   revokeEnrollmentCode,
 } from '../cluster/enrollment.ts';
 import { acquireLease, releaseLease } from '../cluster/leases.ts';
-import { createNodeAuthMiddleware } from '../cluster/node-auth.ts';
+import { createNodeAuthMiddleware, getAuthenticatedClusterNode } from '../cluster/node-auth.ts';
 import { loadNodeIdentity } from '../cluster/node-identity.ts';
 import { lookupNodeSecret as lookupStoredNodeSecret } from '../cluster/node-secrets.ts';
 import { applyPairingAction, disableNode, readPeers, upsertNode } from '../cluster/peers.ts';
 import { readRemoteRuns } from '../cluster/run-projection.ts';
 import { loadServerState } from '../server-install/state.ts';
+import { workspaceConfigPath } from '../paths.ts';
+import { backupAndAppendTodosPreservingIds, backupTodos, readTodos, type TodoItem } from '../todos.ts';
+import { loadWorkspaceConfig } from '../workspace/config.ts';
 
 /**
  * The CLUSTER family of `/api/v1` (`CEZ_CLUSTER=1`). See
@@ -139,9 +148,12 @@ import { loadServerState } from '../server-install/state.ts';
  * It is registered on the routes that are genuinely reached over the network by a REMOTE node and
  * serve or accept content scoped to one: the corpus family (`GET /cluster/corpus`,
  * `GET /cluster/corpus/*`, `POST /cluster/corpus/submit` — D8a's mirror scope and the one write
- * path the corpus has), plus `/cluster/todos/*` pre-wired for package 3b/D21's
- * `GET /cluster/todos/:projectKey` before that route exists, so it inherits the gate the moment it
- * is added rather than needing a second person to remember to add it.
+ * path the corpus has), plus `/cluster/todos/*` (D21's snapshot/backup/append trio, below —
+ * **LANDED 2026-08-23**; this paragraph used to say the family was pre-wired for a route that did
+ * not exist yet, which described the state before this package. All three route bodies additionally
+ * scope themselves to a CONFIRMED pairing with `getAuthenticatedClusterNode(c).nodeId` via
+ * `resolveHubTodosRoot` — node-auth alone says WHICH node is asking, never which project it may
+ * ask about).
  *
  * Everything else in this file is answered LOCALLY, by whichever machine's own cockpit or `cez`
  * process asks its own local server — `GET /cluster`, the pairings and node-management routes, and
@@ -208,6 +220,18 @@ const NOT_A_HUB = 'this node is a spoke — enrollment, leases and allocation ar
 const NO_IDENTITY = 'this node has no cluster identity yet — run `cezar cluster join <code>` first';
 const CORPUS_PENDING =
   'the corpus mirror is not available yet — the hub-side corpus sweep (plan 3b.2) has not landed; nothing is mirrored and nothing can be submitted';
+
+/**
+ * D21/D20's closing rule, in one message: "an authenticated spoke asking for a project it is not
+ * paired with gets the same refusal as a stranger" — so this never distinguishes "no such
+ * pairing", "pairing proposed but not confirmed by the caller", "confirmed by the caller but not
+ * by this hub" or "confirmed, but this hub's own local project has since been deregistered". Every
+ * one of those is the same 404 to the caller; see `resolveHubTodosRoot`'s own doc for why.
+ */
+const TODOS_PROJECT_REFUSED = 'no confirmed pairing between this hub and the asking node for that project';
+/** Reached only if `requireNodeAuth` let a request through with no identity attached — a wiring
+ *  bug (the middleware not actually running ahead of this handler), never a caller mistake. */
+const TODOS_NO_IDENTITY_ON_GATED_ROUTE = 'internal: no authenticated cluster node on a node-auth-gated route';
 
 /**
  * In flight, for `GET /cluster/active`. `server.ts` counts `queued`/`running`/`waiting` for its
@@ -305,6 +329,48 @@ function linkHealth(): ClusterLinkHealth {
   return { state: 'offline' };
 }
 
+/**
+ * D21's scoping rule for the whole `/cluster/todos/*` family: resolves `.ai/cezar` under THIS
+ * hub's own local project for `projectKey`, but only when the confirmed pairing runs BOTH ways —
+ * the asking node has confirmed it (`pairing.byNode[callerNodeId]?.confirmedAt`) AND this hub has
+ * confirmed it too (`pairing.byNode[<this hub's own nodeId>]?.confirmedAt`). `undefined` for
+ * anything short of that — no pairing row, an unconfirmed proposal, confirmed only by the caller,
+ * or confirmed but pointing at a project id this hub's own registry no longer has — every one of
+ * those is refused identically by the caller, never distinguished (D20's closing rule: "an
+ * authenticated spoke asking for a project it is not paired with gets the same refusal as a
+ * stranger").
+ *
+ * Reads `readPeers`/`loadNodeIdentity` (already exported, general-purpose) rather than
+ * `peers.ts`'s own private `confirmedProjectsForNode` — that helper answers "this node's own
+ * confirmed projects", which happens to be the right query for a SPOKE advertising itself
+ * (`advertisedProjects`), but here the caller is the REMOTE node and the local side is always this
+ * hub's own identity, two different node ids in the same lookup — reusing it would mean exporting
+ * it and re-deriving which id plays which role at the call site anyway.
+ */
+async function resolveHubTodosRoot(
+  projectKey: ClusterProjectKey,
+  callerNodeId: ClusterNodeId,
+  env: NodeJS.ProcessEnv,
+): Promise<string | undefined> {
+  const [peers, identity] = await Promise.all([readPeers({ env }), loadNodeIdentity({ env })]);
+  if (!identity) return undefined;
+  const pairing = peers.pairings.find((p) => p.projectKey === projectKey);
+  if (!pairing) return undefined;
+  if (!pairing.byNode[callerNodeId]?.confirmedAt) return undefined;
+  const hubMember = pairing.byNode[identity.nodeId];
+  if (!hubMember?.confirmedAt) return undefined;
+  const config = await loadWorkspaceConfig(workspaceConfigPath(env));
+  const project = config.projects.find((p) => p.id === hubMember.projectId);
+  return project?.root;
+}
+
+/** `.ai/cezar` under a project root — the same join every other reader of `todos.json` uses
+ *  (`project-context.ts`, `todo-cli.ts`, `index.ts`). Not exported elsewhere as a helper, so
+ *  repeated here rather than imported, matching how each of those three call sites already does. */
+function todosDataDir(projectRoot: string): string {
+  return join(projectRoot, '.ai/cezar');
+}
+
 export function createClusterRoutes(deps: ClusterRouteDeps) {
   const env = deps.env ?? process.env;
 
@@ -362,9 +428,9 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
       .use('/cluster/allocate/*', requireHub)
       .use('/cluster/leases/*', requireHub)
       // D20, after `requireCluster` so the flag wins first (off answers 409, never 401) — the
-      // corpus family (real content, scoped per node, D8a) plus `/cluster/todos/*` pre-wired for
-      // D21's route before it exists, so it inherits the gate rather than needing a second person
-      // to remember to add it.
+      // corpus family (real content, scoped per node, D8a) plus `/cluster/todos/*` (D21's
+      // snapshot/backup/append trio — landed as this wildcard's own routes below, each further
+      // scoped to a confirmed pairing).
       .use('/cluster/corpus', requireNodeAuth)
       .use('/cluster/corpus/*', requireNodeAuth)
       .use('/cluster/todos/*', requireNodeAuth)
@@ -543,6 +609,104 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
         '/cluster/corpus/submit',
         jsonZodValidator(clusterCorpusSubmitRequestSchema),
         (c) => c.json({ error: CORPUS_PENDING }, 409),
+      )
+
+      // ---- todos snapshot, backup, append (D21) ----------------------------------------------
+      /** `RemoteReconcileTransport#list` (`cluster/reconcile.ts`, run from `cluster/reconcile-
+       *  transport.ts` on the SPOKE against this hub). Scoped by `resolveHubTodosRoot` — never by
+       *  a header or a body field, only by the identity `requireNodeAuth` (D20) established. */
+      .get(
+        '/cluster/todos/:projectKey',
+        paramZodValidator(clusterProjectKeyParamSchema),
+        async (c) => {
+          const { projectKey } = c.req.valid('param');
+          const node = getAuthenticatedClusterNode(c);
+          if (!node) return c.json({ error: TODOS_NO_IDENTITY_ON_GATED_ROUTE }, 500);
+          const root = await resolveHubTodosRoot(projectKey, node.nodeId, env);
+          if (!root) return c.json({ error: TODOS_PROJECT_REFUSED, reason: 'unpaired-project' }, 404);
+          // No cast: `readTodos` parses with `storedTodoSchema`, so the runtime value ALREADY
+          // carries any field a newer node wrote (D13), and `TodoItem` structurally satisfies
+          // `ClusterTodosSnapshotResponse.todos`'s element type (`clusterTodoRecordSchema`, plain)
+          // as-is — nothing here strips an extra field and nothing here rejects one, this route
+          // serializes whatever `readTodos` actually returned, verbatim.
+          //
+          // `clusterTodoRecordSchema` is named on the response type on purpose, and the tolerance
+          // lives one layer out: `contract-parity.cluster.test.ts` compares this route against
+          // `z.infer<>` through Hono's `InferResponseType`, which disagrees with a passthrough
+          // schema's inferred type in that specific deferred-generic comparison, so a passthrough
+          // RESPONSE schema fails parity by construction (`contract/src/cluster.ts`'s
+          // `clusterTodoRecordSchema` docblock, "AMENDED 2026-08-23", has the measured detail). The
+          // split is therefore three-way rather than two — plain schema for the type and the parity
+          // check, and a `stored*` passthrough twin (`storedClusterTodosSnapshotResponseSchema`)
+          // that the SPOKE's transport parses the reply with (`cluster/reconcile-transport.ts`). The
+          // contract names the fields it guarantees; the parse site is the one that must not reject
+          // the rest, and it is the only place a rejection could actually happen — this route itself
+          // never calls `.parse()` on its own response, so its `.strict()` response schema costs
+          // nothing on the wire.
+          const todos = await readTodos(todosDataDir(root));
+          const body: ClusterTodosSnapshotResponse = { projectKey, todos };
+          return c.json(body);
+        },
+      )
+
+      /** `RemoteReconcileTransport#backup` — called before the FIRST mutation of a reconcile
+       *  pass, whether or not this peer ends up receiving any adds (`/append` below takes its OWN
+       *  backup for the case that does — D21's amendment; the two are not redundant, see
+       *  `todos.ts#backupAndAppendTodosPreservingIds`'s own doc). */
+      .post(
+        '/cluster/todos/:projectKey/backup',
+        paramZodValidator(clusterProjectKeyParamSchema),
+        async (c) => {
+          const { projectKey } = c.req.valid('param');
+          const node = getAuthenticatedClusterNode(c);
+          if (!node) return c.json({ error: TODOS_NO_IDENTITY_ON_GATED_ROUTE }, 500);
+          const root = await resolveHubTodosRoot(projectKey, node.nodeId, env);
+          if (!root) return c.json({ error: TODOS_PROJECT_REFUSED, reason: 'unpaired-project' }, 404);
+          const path = await backupTodos(todosDataDir(root));
+          const body: ClusterTodosBackupResponse = { path };
+          return c.json(body);
+        },
+      )
+
+      /** `RemoteReconcileTransport#apply` — appends rows verbatim (id/`ts`/`author` intact,
+       *  reconcile never rewrites a field), idempotent by id. Backup-then-append under ONE lease
+       *  (`todos.ts#backupAndAppendTodosPreservingIds`, D21's amendment) — never composed here from
+       *  `backupTodos` + a separate append call, which would re-open the exact gap the amendment
+       *  closes. */
+      .post(
+        '/cluster/todos/:projectKey/append',
+        paramZodValidator(clusterProjectKeyParamSchema),
+        jsonZodValidator(clusterTodosAppendRequestSchema),
+        async (c) => {
+          const { projectKey } = c.req.valid('param');
+          const node = getAuthenticatedClusterNode(c);
+          if (!node) return c.json({ error: TODOS_NO_IDENTITY_ON_GATED_ROUTE }, 500);
+          const root = await resolveHubTodosRoot(projectKey, node.nodeId, env);
+          if (!root) return c.json({ error: TODOS_PROJECT_REFUSED, reason: 'unpaired-project' }, 404);
+          const { todos } = c.req.valid('json');
+          // **CORRECTED 2026-08-23, before this shipped.** This read "The wire shape is
+          // passthrough-by-design (`clusterTodoRecordSchema`'s own doc)", which was true of an
+          // earlier draft and then survived the change that made that schema `.strict()` — so it
+          // credited passthrough to the one schema that no longer had it, and made a real defect
+          // (a row from a newer node 400ing here) read as intentional. The passthrough is
+          // `storedClusterTodoRecordSchema`, the twin `clusterTodosAppendRequestSchema` (this
+          // route's REQUEST validator, above) actually validates with — that is the one real
+          // runtime gate on this data, so it is the one schema that must carry the tolerance
+          // directly; `clusterTodoRecordSchema` stays plain for the TYPE and the contract-parity
+          // check. Same split as `todoSchema`/`storedTodoSchema` and `clusterOpSchema`/
+          // `storedClusterOpSchema`. Trusting the hub's own paired peer the same way `readRaw`
+          // trusts this node's own disk.
+          //
+          // No cast either side: `todos`' element type (`StoredClusterTodoRecord`, from the
+          // request validator above) structurally satisfies `backupAndAppendTodosPreservingIds`'
+          // `TodoItem` parameter as-is, and its `TodoItem[]` return structurally satisfies
+          // `ClusterTodosAppendResponse.appended`'s plain `clusterTodoRecordSchema` element type —
+          // same reasoning as the GET handler above for why the plain RESPONSE schema costs
+          // nothing on the wire (this route never `.parse()`s its own response either).
+          const { backupPath, appended } = await backupAndAppendTodosPreservingIds(todosDataDir(root), todos);
+          const body: ClusterTodosAppendResponse = { appended, backupPath };
+          return c.json(body);
+        },
       )
 
       // ---- what else is in flight (D19 rung 4) -----------------------------------------------

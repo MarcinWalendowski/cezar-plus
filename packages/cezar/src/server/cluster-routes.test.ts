@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -11,8 +11,11 @@ import {
   signNodeHttpPrincipal,
   type NodeHttpPrincipal,
 } from '../cluster/node-auth.ts';
+import { ensureNodeIdentity } from '../cluster/node-identity.ts';
 import { storeNodeSecret } from '../cluster/node-secrets.ts';
-import { upsertNode } from '../cluster/peers.ts';
+import { applyPairingAction, upsertNode } from '../cluster/peers.ts';
+import { workspaceConfigPath } from '../paths.ts';
+import { atomicWriteJsonSync, defaultWorkspaceConfig } from '../workspace/config.ts';
 import { createClusterRoutes, type ClusterRouteDeps } from './cluster-routes.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 
@@ -67,11 +70,11 @@ describe('cluster-routes.ts wires D20 node-auth onto the right paths', () => {
 
   const lookupOnlyNodeA = async (nodeId: string) => (nodeId === NODE_ID ? SECRET : undefined);
 
-  describe('the authenticated set: corpus family + the pre-wired /cluster/todos/*', () => {
+  describe('the authenticated set: corpus family + /cluster/todos/* (D21)', () => {
     const gatedGets: Array<[label: string, path: string]> = [
       ['GET /cluster/corpus', '/cluster/corpus'],
       ['GET /cluster/corpus/*', '/cluster/corpus/knowledge/decisions.md'],
-      ['GET /cluster/todos/:projectKey (pre-wired, D21 not yet landed)', '/cluster/todos/workspace-root'],
+      ['GET /cluster/todos/:projectKey', '/cluster/todos/workspace-root'],
     ];
 
     it.each(gatedGets.map(([label]) => label))('%s refuses with 401 no-credentials when unauthenticated', async (label) => {
@@ -246,7 +249,7 @@ describe('cluster-routes.ts wires D20 node-auth onto the right paths', () => {
       expect(((await res.json()) as { error: string }).error).toContain('CEZ_CLUSTER');
     });
 
-    it('with CEZ_CLUSTER unset, the pre-wired /cluster/todos/* also stays a flag-off 409, not a node-auth 401', async () => {
+    it('with CEZ_CLUSTER unset, /cluster/todos/* also stays a flag-off 409, not a node-auth 401', async () => {
       const off = createClusterRoutes({ version: '0.0.0-test', env: { CEZ_HOME: home } });
       const res = await apiRequest(off, '/cluster/todos/workspace-root');
       expect(res.status).toBe(409);
@@ -309,6 +312,242 @@ describe('cluster-routes.ts wires D20 node-auth onto the right paths', () => {
       const body = JSON.parse(bodyText) as { nodes: Array<Record<string, unknown>> };
       expect(body.nodes).toHaveLength(2);
       for (const node of body.nodes) expect(node).not.toHaveProperty('secret');
+    });
+  });
+
+  // D21 (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`): the snapshot/backup/append trio
+  // itself, scoped by a CONFIRMED pairing — never by a header or body field, only by
+  // `getAuthenticatedClusterNode(c).nodeId` (D20) plus `resolveHubTodosRoot`'s own two-sided
+  // confirmation check. `node-auth.ts` mechanism and the flag-gate ordering are already covered
+  // above; this block is the route BODIES.
+  describe('GET/POST /cluster/todos/:projectKey — D21 snapshot/backup/append', () => {
+    /** Mints a hub identity in THIS test's `env`-pinned home and registers `projects` as this
+     *  hub's own local workspace registry — the set `resolveHubTodosRoot` resolves `projectId`
+     *  against. Returns the hub's own node id, needed to confirm the HUB side of a pairing. */
+    async function seedHubWorkspace(projects: ReadonlyArray<{ id: string; root: string }>): Promise<string> {
+      const identity = await ensureNodeIdentity({ role: 'hub' }, { env });
+      const config = {
+        ...defaultWorkspaceConfig(),
+        projects: projects.map((p) => ({
+          id: p.id,
+          root: p.root,
+          name: '',
+          addedAt: '',
+          lastOpenedAt: '',
+          source: 'local' as const,
+        })),
+      };
+      atomicWriteJsonSync(workspaceConfigPath(env), config);
+      return identity.nodeId;
+    }
+
+    /** Confirms BOTH sides of a pairing — the hub's own local `projectId` AND the caller node —
+     *  the two-sided check `resolveHubTodosRoot`'s own doc spells out. The caller's own local
+     *  `projectId` is never read by `resolveHubTodosRoot` (only that ITS side is confirmed at
+     *  all), so any distinct string works there. */
+    async function confirmPairing(projectKey: string, hubNodeId: string, hubProjectId: string, callerNodeId: string): Promise<void> {
+      await applyPairingAction(projectKey, { action: 'confirm', nodeId: hubNodeId, projectId: hubProjectId }, { env });
+      await applyPairingAction(
+        projectKey,
+        { action: 'confirm', nodeId: callerNodeId, projectId: `${hubProjectId}-spoke-side` },
+        { env },
+      );
+    }
+
+    function signedHeadersFor(method: 'GET' | 'POST', path: string, bodyText: string): Record<string, string> {
+      const principal: NodeHttpPrincipal = {
+        nodeId: NODE_ID,
+        issuedAt: new Date().toISOString(),
+        method,
+        path,
+        bodyHash: hashRequestBody(bodyText),
+      };
+      return nodeAuthHeaders(principal, SECRET);
+    }
+
+    let projectRootA: string;
+    let projectRootB: string;
+
+    beforeEach(() => {
+      projectRootA = mkdtempSync(join(tmpdir(), 'cez-todos-route-a-'));
+      projectRootB = mkdtempSync(join(tmpdir(), 'cez-todos-route-b-'));
+    });
+
+    afterEach(() => {
+      rmSync(projectRootA, { recursive: true, force: true });
+      rmSync(projectRootB, { recursive: true, force: true });
+    });
+
+    it('floor: a real signed request from a paired node gets 200 with the actual row VALUES, not merely a count or a status', async () => {
+      const dataDir = join(projectRootA, '.ai/cezar');
+      mkdirSync(dataDir, { recursive: true });
+      const seedRow = { id: 'row-1', summary: 'a real todo row', priority: 'high' };
+      writeFileSync(join(dataDir, 'todos.json'), JSON.stringify([seedRow], null, 2), 'utf8');
+
+      const hubNodeId = await seedHubWorkspace([{ id: 'proj-a', root: projectRootA }]);
+      await confirmPairing('project-a', hubNodeId, 'proj-a', NODE_ID);
+
+      const res = await apiRequest(routes({ lookupNodeSecret: lookupOnlyNodeA }), '/cluster/todos/project-a', {
+        headers: signedHeadersFor('GET', '/cluster/todos/project-a', ''),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { projectKey: string; todos: Array<Record<string, unknown>> };
+      expect(body.projectKey).toBe('project-a');
+      expect(body.todos).toEqual([seedRow]); // field VALUES, not `.length` or a bare 200
+    });
+
+    it('scoping negative control: the SAME authenticated node succeeds for a project it is paired with and is refused for one it is not', async () => {
+      const dataDirA = join(projectRootA, '.ai/cezar');
+      mkdirSync(dataDirA, { recursive: true });
+      writeFileSync(join(dataDirA, 'todos.json'), JSON.stringify([{ id: 'a1', summary: 'in the paired project' }], null, 2), 'utf8');
+      // `proj-b` is registered as a local project — it exists — but no pairing row names it at all.
+      const hubNodeId = await seedHubWorkspace([
+        { id: 'proj-a', root: projectRootA },
+        { id: 'proj-b', root: projectRootB },
+      ]);
+      await confirmPairing('project-a', hubNodeId, 'proj-a', NODE_ID);
+
+      const clusterRoutes = routes({ lookupNodeSecret: lookupOnlyNodeA });
+
+      const paired = await apiRequest(clusterRoutes, '/cluster/todos/project-a', {
+        headers: signedHeadersFor('GET', '/cluster/todos/project-a', ''),
+      });
+      expect(paired.status).toBe(200);
+      expect(((await paired.json()) as { todos: unknown[] }).todos).toHaveLength(1);
+
+      const unpaired = await apiRequest(clusterRoutes, '/cluster/todos/project-b', {
+        headers: signedHeadersFor('GET', '/cluster/todos/project-b', ''),
+      });
+      expect(unpaired.status).toBe(404);
+      expect(((await unpaired.json()) as { reason: string }).reason).toBe('unpaired-project');
+    });
+
+    it('POST .../backup writes todos.json.bak on the hub and returns its path', async () => {
+      const dataDir = join(projectRootA, '.ai/cezar');
+      mkdirSync(dataDir, { recursive: true });
+      const seedRow = { id: 'row-1', summary: 'back this up' };
+      writeFileSync(join(dataDir, 'todos.json'), JSON.stringify([seedRow], null, 2), 'utf8');
+
+      const hubNodeId = await seedHubWorkspace([{ id: 'proj-a', root: projectRootA }]);
+      await confirmPairing('project-a', hubNodeId, 'proj-a', NODE_ID);
+
+      const res = await apiRequest(routes({ lookupNodeSecret: lookupOnlyNodeA }), '/cluster/todos/project-a/backup', {
+        method: 'POST',
+        headers: signedHeadersFor('POST', '/cluster/todos/project-a/backup', ''),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { path: string };
+      expect(body.path).toBe(join(dataDir, 'todos.json.bak'));
+      expect(JSON.parse(readFileSync(body.path, 'utf8'))).toEqual([seedRow]);
+    });
+
+    it('POST .../append inserts rows verbatim (id/ts/author intact) and is idempotent by id — field VALUES survive a retry, not just row count', async () => {
+      const dataDir = join(projectRootA, '.ai/cezar');
+      const hubNodeId = await seedHubWorkspace([{ id: 'proj-a', root: projectRootA }]);
+      await confirmPairing('project-a', hubNodeId, 'proj-a', NODE_ID);
+      const clusterRoutes = routes({ lookupNodeSecret: lookupOnlyNodeA });
+
+      const incoming = {
+        id: 'peer-1',
+        ts: '2026-08-22T10:00:00.000Z',
+        summary: 'copied from a peer',
+        priority: 'high' as const,
+      };
+      const bodyText = JSON.stringify({ todos: [incoming] });
+      const first = await apiRequest(clusterRoutes, '/cluster/todos/project-a/append', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...signedHeadersFor('POST', '/cluster/todos/project-a/append', bodyText) },
+        body: bodyText,
+      });
+      expect(first.status).toBe(200);
+      const firstBody = (await first.json()) as { appended: unknown[]; backupPath: string };
+      expect(firstBody.appended).toEqual([incoming]);
+      expect(firstBody.backupPath).toBe(join(dataDir, 'todos.json.bak'));
+
+      // Retried with a DIFFERENT summary under the SAME id — idempotence means the original row's
+      // values win, not merely that a row with this id exists.
+      const retry = { ...incoming, summary: 'a different summary that must NOT land' };
+      const retryBodyText = JSON.stringify({ todos: [retry] });
+      const second = await apiRequest(clusterRoutes, '/cluster/todos/project-a/append', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...signedHeadersFor('POST', '/cluster/todos/project-a/append', retryBodyText),
+        },
+        body: retryBodyText,
+      });
+      expect(second.status).toBe(200);
+      expect(((await second.json()) as { appended: unknown[] }).appended).toEqual([]); // already there
+
+      const onDisk = JSON.parse(readFileSync(join(dataDir, 'todos.json'), 'utf8')) as Array<Record<string, unknown>>;
+      expect(onDisk).toEqual([incoming]); // the ORIGINAL values, not the retried ones
+    });
+
+    it('GET snapshot round-trips a row carrying a field this build has never heard of, value intact (D13, response schema stays plain per contract/src/cluster.ts)', async () => {
+      const dataDir = join(projectRootA, '.ai/cezar');
+      mkdirSync(dataDir, { recursive: true });
+      // `futureField` names nothing `clusterTodoRecordSchema` declares — the exact "a newer node
+      // wrote a field this build has never heard of" scenario D13 exists to survive. Written
+      // straight to disk (not through any zod-typed helper) so the seed itself proves nothing
+      // about the route — only the round trip below does.
+      const seedRow = { id: 'row-1', summary: 'has an extra field', futureField: 'from-a-newer-node' };
+      writeFileSync(join(dataDir, 'todos.json'), JSON.stringify([seedRow], null, 2), 'utf8');
+
+      const hubNodeId = await seedHubWorkspace([{ id: 'proj-a', root: projectRootA }]);
+      await confirmPairing('project-a', hubNodeId, 'proj-a', NODE_ID);
+
+      const res = await apiRequest(routes({ lookupNodeSecret: lookupOnlyNodeA }), '/cluster/todos/project-a', {
+        headers: signedHeadersFor('GET', '/cluster/todos/project-a', ''),
+      });
+      expect(res.status).toBe(200); // not a 400 — the request/response as a WHOLE must not be rejected
+      const body = (await res.json()) as { todos: Array<Record<string, unknown>> };
+      // The VALUE, not merely "the request succeeded" or "a row came back".
+      expect(body.todos[0]?.futureField).toBe('from-a-newer-node');
+    });
+
+    it('POST .../append round-trips a row carrying an unknown field — in the response AND on disk — value intact (D13)', async () => {
+      const dataDir = join(projectRootA, '.ai/cezar');
+      const hubNodeId = await seedHubWorkspace([{ id: 'proj-a', root: projectRootA }]);
+      await confirmPairing('project-a', hubNodeId, 'proj-a', NODE_ID);
+      const clusterRoutes = routes({ lookupNodeSecret: lookupOnlyNodeA });
+
+      const incoming = { id: 'peer-1', summary: 'sent by a newer spoke', futureField: 'from-a-newer-node' };
+      const bodyText = JSON.stringify({ todos: [incoming] });
+      const res = await apiRequest(clusterRoutes, '/cluster/todos/project-a/append', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...signedHeadersFor('POST', '/cluster/todos/project-a/append', bodyText) },
+        body: bodyText,
+      });
+      expect(res.status).toBe(200); // not a 400 on the whole request
+      const body = (await res.json()) as { appended: Array<Record<string, unknown>> };
+      expect(body.appended[0]?.futureField).toBe('from-a-newer-node');
+
+      const onDisk = JSON.parse(readFileSync(join(dataDir, 'todos.json'), 'utf8')) as Array<Record<string, unknown>>;
+      expect(onDisk[0]?.futureField).toBe('from-a-newer-node'); // survives the WRITE, not only the reply
+    });
+
+    it('an unpaired node is refused on backup and append too, not only on the snapshot GET', async () => {
+      await seedHubWorkspace([{ id: 'proj-a', root: projectRootA }]); // registered, never paired
+      const clusterRoutes = routes({ lookupNodeSecret: lookupOnlyNodeA });
+
+      const backupRes = await apiRequest(clusterRoutes, '/cluster/todos/project-a/backup', {
+        method: 'POST',
+        headers: signedHeadersFor('POST', '/cluster/todos/project-a/backup', ''),
+      });
+      expect(backupRes.status).toBe(404);
+      expect(((await backupRes.json()) as { reason: string }).reason).toBe('unpaired-project');
+
+      const appendBodyText = JSON.stringify({ todos: [] });
+      const appendRes = await apiRequest(clusterRoutes, '/cluster/todos/project-a/append', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...signedHeadersFor('POST', '/cluster/todos/project-a/append', appendBodyText),
+        },
+        body: appendBodyText,
+      });
+      expect(appendRes.status).toBe(404);
+      expect(((await appendRes.json()) as { reason: string }).reason).toBe('unpaired-project');
     });
   });
 });
