@@ -3900,7 +3900,9 @@ invented; these are the names to use when one lands.
 >   `link-client.parseDownlink` drops the **WHOLE frame**, so replay silently does nothing.
 >   **Nothing anywhere validates a synthesized op against `clusterOpShape` before it goes on the
 >   wire.** That missing validation is the real defect; the headroom is just how long it stays quiet.
-> - **B6 — the box gate HAS run, and was clean.** `/var/lib/cezar/gate-cluster` on `prod-host`
+> - **B6 — SUPERSEDED 2026-08-23 by B6a below, which gated the MERGED tree.** The numbers here are
+>   from the pre-merge branch snapshot and are no longer the ones to cite. ~~the box gate HAS run, and
+>   was clean.~~ `/var/lib/cezar/gate-cluster` on `prod-host`
 >   is a purpose-built snapshot repo (no remote; commits literally named "gate snapshot 2/3/4", so its
 >   `git rev-parse HEAD` tells you NOTHING about what was gated — verify the tree, never the hash).
 >   Run 4, 08:57 today: `typecheck` 0 · `build` 0 · `test:unit` 0 · `test:package` 0 · full `npm test`
@@ -3914,6 +3916,130 @@ invented; these are the names to use when one lands.
 >   `op://Vault/Server/Access Service Token/CF_ACCESS_CLIENT_ID` and
 >   `/CF_ACCESS_CLIENT_SECRET` (exported as `TUNNEL_SERVICE_TOKEN_ID`/`_SECRET` — the names differ,
 >   which costs a session ten minutes every time it is rediscovered).
+>
+> - **B6a — THE MERGED-TREE GATE. This is the number to cite; B6 above is the pre-merge one.**
+>   Run 2026-08-23 on `prod-host` in `/var/lib/cezar/gate-mergegate/`, a FRESH `cezar`-owned
+>   dir that no other agent shared — the fix for the partial-rsync hazard that once named the wrong
+>   owner. The merge itself was done in a **scratch clone**, so the shared checkout was never written
+>   and **nothing was pushed anywhere**.
+>   - **The merge is CLEAN.** merge-base `cf2f0796`; `origin/main` was 1 commit ahead
+>     (`9c65f9e9`, 19 files). `git merge` → `Merge made by the 'ort' strategy`, merge commit
+>     **`e7e04012`**, **zero conflicts**, zero `<<<<<<<` markers (checked with `grep -ra`).
+>   - **Exactly ONE file was touched by both sides**: `workflows/run.ts`, auto-merged, hunks disjoint
+>     (nearest adjacency 15 lines), and **both sides verified present in the merged output** by
+>     quoting a line from each. That last step is what separates "git reported success" from "the
+>     merge kept both changes" — auto-merge succeeding is not evidence that it merged correctly.
+>   - **Tree identity proven, and proven NOT MOVING**: box `ls-tree` vs Mac `ls-tree e7e04012`
+>     differ by exactly one line (an uninitialized `.ship-drafts` submodule gitlink); **2013/2013**
+>     real files byte-identical; `SRC_MD5` and all 7 manifest md5s identical BEFORE and AFTER all
+>     three runs. This is the "never gate a moving tree" guard, satisfied on both ends.
+>   - **Run 1 (loadavg 0.56 → 4.87) is the N-1-of-N green result**: `typecheck` **0** · `build` **0**
+>     · `test:unit` **0** (44/44) · `test:package` **0** (18/18) · full `npm test` exit 1 with
+>     **Files 1 failed | 600 passed | 2 skipped (603)**, **Tests 1 failed | 11234 passed | 4 skipped
+>     (11239)**. The single red is `catalog.test.ts > C18`, the expected standing one.
+>   - **Merging `9c65f9e9` broke NOTHING the branch gate had green**, and the merged tree is
+>     **strictly better** than the pre-merge branch gate: all 8 test files main brought in are green
+>     in all three runs, and `runs/task-author-coverage.test.ts` — red in the pre-merge snapshot — is
+>     now green. That is the question a merge gate exists to answer, and it is answered.
+>   - **`npm run build` did NOT fail here, correcting standing guidance.** The known failure is
+>     `scripts/write-build-stamp.mjs` needing a `.git`; `git init` in the gate dir fixes it. The
+>     rule was "build fails on the box gate dir" — the truth is "build needs a git dir, so make one".
+>
+> - **B6b — the standing-red list was WRONG AT ONE, and the correction is a flake POOL.** B6 says
+>   C18 is "the ONE standing red". Measured across three runs of one provably-identical tree:
+>   **C18 reproduces 3/3 (deterministic, 69.3 / 61.9 / 65.2 against a `< 40` budget)** — but TWO more
+>   files move: `workspace-parallel.test.ts` (green r1, red r2, red r3) and `test:package`'s
+>   `cold-broker-retry` "deaf-once" (ok r1, ok r2, **not ok r3** — the run where loadavg hit **23.12**).
+>   So the honest statement is **one deterministic red plus a load-sensitive flake pool of at least
+>   two**, not one red.
+>   **`workspace-parallel` was proven PRE-EXISTING, and the proof is the good part**: another agent's
+>   log at `/var/lib/cezar/gate-ctl/wp1.log`, mtime **14:30:22**, hours before this merge existed,
+>   carries the *identical* assertion `expected '?? .ai/' to be ''` — while `wp2/wp3.log` from the
+>   same minute are green. Somebody had already probed this exact flake 3x that afternoon. **A
+>   pre-existing red is established by finding it in an artifact that predates your change**, which
+>   is stronger than re-running your own tree and much cheaper than bisecting.
+>   Corollary, and it is why the three runs were worth their wall clock: **one run cannot tell a
+>   deterministic red from a flake.** Run 1 alone would have reported the clean N-1-of-N and hidden
+>   both flakes; run 3 alone would have reported three reds and implicated the merge. Check loadavg
+>   before attributing any `test:package` red.
+>
+> - **B7 — `heartbeatMs` is OPTIONAL, and the argument sharpened the branch's own defect test.**
+>   I asked BEAT-SEAM to justify optional-vs-required, expecting it to concede. It did not, and it
+>   was right. The rule I had been applying — "this branch keeps getting burned by optional fields at
+>   a seam, so prefer required" — is too blunt. **The defects (D23-D26, D47, D48) are not about
+>   optionality. They are fields whose omission silently substitutes a materially different,
+>   wrong-but-plausible production claim**: a forgotten `semaphore` made real load report as
+>   fabricated idle; unwired `watermarks` defaults to `[]`, indistinguishable from a freshly-connected
+>   node. In each, behaviour changes on omission, *toward something that still looks correct*.
+>   **`heartbeatMs` cannot do that, because no second legitimate value competes with its default.**
+>   One production caller (`server.ts:7457`), which has never set it; every omitting caller gets the
+>   identical 30s beat the code has always shipped. And the inversion is the part I had not
+>   considered: **required would be strictly WORSE** — `server.ts` would have to pass
+>   `DEFAULT_HEARTBEAT_MS` explicitly, duplicating the constant at the call site and manufacturing a
+>   real wrong-but-plausible failure (a caller with a stale copy) where none existed.
+>   **The test to apply, replacing "prefer required": ask what a caller who omits the field gets —
+>   one correct value, or a plausible wrong one.** Only the second case argues for required.
+>   Note this is a DIFFERENT defect from today's three dead fields (`capacityAt`, `corpusStalenessMs`,
+>   `expect.headSha`), which have no reader at all. Unread field and forgettable field are not the
+>   same bug and do not have the same fix.
+>   Prior art check passed too: `SpokeRuntimeDeps#heartbeatMs` already existed in this exact
+>   optional/named-default shape, and `ClusterRouteDeps#now` (D20's clock hook) is the same
+>   test-only-timing-knob pattern in the same file. The seam was threaded, not invented.
+>
+> - **B8 — THE SINGLE-CANDIDATE BLINDNESS IS NOT ONE DEFECT, IT IS SIX. Three are on the live
+>   replica path and can corrupt across projects with the whole suite green.** The placement bug I
+>   found (every `candidates:` array single-element) was the visible instance of a fixture habit that
+>   runs through this branch. A sweep with real applied-and-restored mutations, each verified by md5
+>   and by `grep -ran MUTANT` returning nothing afterwards, found six more. **`peers.test.ts` was
+>   given a negative control first** (removing the `claimed` dedupe guard → `Tests 1 failed | 34
+>   passed`, `expected 1 to be 2`), so its greens are real blindness and not an inert runner.
+>
+>   **A-tier — a defect could hide here TODAY:**
+>   | # | site | mutation that stays GREEN | fixture flaw |
+>   |---|---|---|---|
+>   | 1 | `spoke-runtime.ts:744` | `repoDrift.find(d => d.projectKey === projectKey)` → `repoDrift[0]` | **0 of 8** `repoDrift` fixtures have ≥2 entries |
+>   | 2 | `spoke-runtime.ts:767` | `discovery.projects.find(p => …)` → `[0]` | every dispatch test has exactly one project |
+>   | 3 | `spoke-runtime.ts:662` | `discovery.projects.find(p => p.projectKey === frame.projectKey)` → `[0]` | same; **GREEN 68/68 including the real-wire e2e** |
+>   | 4 | `peers.ts:366` | `[...advertsByNode.keys()].sort()` → `.sort().slice(0, 2)` | all 4 `proposePairings` tests are exactly 2 nodes |
+>   | 5 | `peers.ts:384` | `advertA.projectKey ?? advertB.projectKey ?? randomUUID()` → `randomUUID()` | the `advert()` helper **never sets `projectKey`** |
+>   | 6 | `leases.ts:419` | drop the `expiresAt > nowMs` conjunct | `leasesHeldBy` is only ever called against all-live rows |
+>
+>   **Rows 1-3 are the serious ones and they are all in `handleDispatch`/`applyReplicaDownlink`** —
+>   the exact path `cluster-link-activation.test.ts` advertises as "a real hub and a real spoke can
+>   talk". With all three `.find`s unfalsifiable, a spoke can be gated on the **wrong repo's**
+>   freshness, start a run in the **wrong checkout**, and write **project B's replicated todos into
+>   project A's `todos.json`** — and every suite stays green. Note row 3 survived the real-socket
+>   e2e: **an e2e over a single-project fixture is exactly as blind as a unit test over one.**
+>   **Row 4 is the placement defect's identical twin** ("only ever consider the first two nodes" is
+>   invisible with no 3-node fixture). **Row 5 is worse than it reads**: `projectKey` is the durable
+>   cross-node identity of a repo, so minting a random one instead of adopting the one a node already
+>   carries is precisely how two nodes end up with two keys for one project.
+>
+>   **B-tier — blind, but thin or unpopulated today** (record, do not necessarily fix): `ops.ts:360`
+>   `opGroupKey` → `String(op.entityId)` stays green because every fixture is
+>   `scope:'project'`/`entity:'todo'` — 3 of the 4 key components never vary. Blast radius is low
+>   *only while* run/triage ops do not ship (`grep -ran "entity: 'run'"` → one hit, in a test); the
+>   day they do, two ops sharing an `entityId` across kinds collapse and one is silently dropped.
+>   And `ops.ts:446`'s `.sort((a,b) => a.ts.localeCompare(b.ts))` can be deleted green, because every
+>   fixture — including the 200-trial property test — hands ops in already-ascending order, while the
+>   sort exists precisely for relayed foreign ops carrying another node's clock.
+>
+>   **THE FIX PATTERN IS ALREADY IN THIS REPO, and it is cheap.** `replay.test.ts` looks like a
+>   sparse-fixture offender (its fixtures write 4 of 21 content fields) and is not: a per-field
+>   deletion sweep scored **21/21 RED, 0 unpinned**, because of ONE test at `:355` carrying every
+>   declared key. **A single `everyField` test converts a sparse fixture set into a total assertion**
+>   — that is the lowest-cost fix for any finding of this shape. `hub-router.test.ts:592` is the
+>   model for rows 1-4, and its comment states the principle outright: without a deliberate
+>   *non-matching* second row, "candidates are the pairings mentioning this node" and "candidates are
+>   every pairing" are indistinguishable, *and the filter could be deleted with the file still green*.
+>   `replica.test.ts:66,193` and `replica-fanout.test.ts` do the same for ordering (`scrambled`
+>   fixtures, watermarks at `(0,0,1)` and `(9,12)`) — which is why rows 1-3 are a flaw in the
+>   **spoke's fixtures**, not in the primitive.
+>
+>   **The generalisable rule, sharper than "use more than one element":** for any selection,
+>   ranking, filtering or dedupe code, **mutate the discriminator to a constant and run the suite.
+>   Every suite that stays green is blind by construction.** That is cheaper than reasoning about
+>   whether a fixture is adequate, and it localises immediately.
 > - **~~~25% of the whole spec. Milestone C and D are at 0%~~ — SUPERSEDED 2026-08-23 by the HANDOFF STATE block at the top of this file.** Milestone C landed in `f6a9bad6`: the SPOKE half is wired and live, the HUB half is built with zero production callers. **D is still at 0%.** Left below because the estimate of what C *was* still holds; it is not a statement of what remains. This is the "not built" label sitting over built code, which reads as licence to rebuild it. The original: ~25% of the whole spec, and the spec's own estimate is that C is
 >   *larger than A and B combined*.
 > - **0% verified on real hardware.** Every test runs both ends of the socket inside one process on
