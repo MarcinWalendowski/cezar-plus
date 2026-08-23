@@ -2586,6 +2586,55 @@ invented; these are the names to use when one lands.
 > > `reportRefusals` says so in as many words — "a run started here for that claim is NOT stopped by
 > > this ack". The loser keeps running and re-derives a doomed claim op on every flush tick.
 > >
+> > **11. THE MILESTONE-D HARNESS IS ALREADY BROKEN, and it would make D's first assertions vacuous.**
+> > In `cluster-link-activation.test.ts` the hub's router is built as
+> > `createHubFrameRouter({ identity: hubIdentity })` at `:381` — **with no `env`** — while `:396`
+> > sets `process.env.CEZ_HOME = spokeHome`. `clusterHomeDir(undefined)` falls through to
+> > `process.env`, so **the hub writes into the SPOKE's home.** An assertion of the form "the
+> > projection now has the row" would therefore pass even if the spoke wrote it locally and nothing
+> > ever crossed the wire. Fix before D1: build the hub router with `env: { CEZ_HOME: hubHome }`,
+> > assert the row under `hubHome`, **and** assert `existsSync(remoteRunsPath({CEZ_HOME: spokeHome}))`
+> > is false. The negative half is what makes it a test rather than a coincidence.
+> >
+> > **12. NO TWO-PROCESS E2E HAS EVER RUN ON THIS BRANCH, and the harness to do it does not exist.**
+> > `.ai/scripts/test-env-up.sh` boots exactly one server, one port, with `CEZ_HOME` pinned to a
+> > single `.ai/qa/cez-home`; `packages/cezar/test/e2e/` is packaging/release tests only. **Do not
+> > write "verified by the two-process E2E" into any phase's exit criteria.** Building that harness
+> > (second boot, own `CEZ_HOME`/port/`CEZ_CLUSTER_HUB`, scripted enroll/join) is its own work item,
+> > roughly the size of Milestone D phase 1. What it alone can cover: genuinely per-node home
+> > resolution (in-process there is one mutable `process.env`, and the read path `index.ts:1568` calls
+> > `readRemoteRuns()` with **no options at all**); real link loss as opposed to a clean `ws.close()`;
+> > real event volume against the frame budget; the WS upgrade through Cloudflare Access (a 302 on an
+> > upgrade is a failure mode no in-process test produces); and the CLI reading a file the *server*
+> > process wrote.
+> >
+> > **13. `run-projection.ts`'s own docblock describes a wiring that cannot typecheck.** It says the
+> > observer is "wired through the same `onStoreCreated` / `onContextBuilt` hooks". `onStoreCreated`'s
+> > signature is `(store: RunStore) => void` (`project-context.ts:334`) and
+> > `ClusterRunProjectionProject` requires `{ id }`. Harmless today, but whoever implements D by
+> > following that sentence will widen a hook for nothing. **Correct the docblock; do not widen the
+> > hook** — the initial `store.listRuns()` sync pass is what already makes `onContextBuilt`-only
+> > wiring complete.
+> >
+> > **14. "What is in flight, where" has THREE independent consumers each defaulting to nothing, and
+> > ZERO producers.** `presence.active` (declared, never set, never read), `PlacementRequest.activeRuns`
+> > (`?? []`, no producer — so the D19 rung-3 overlap refusal is a silent no-op for the same reason
+> > `/cluster/active` is), and `readRemoteRuns` itself. That framing should drive D: give the fact
+> > **one** producer and **one** narrowing point, and delete the other two defaults. `applyRemoteRuns`
+> > is also a read-modify-write across an `await` with no lease, so with N spokes beating at one hub a
+> > whole node's row-set can vanish until its next beat — serialise it in D's first phase.
+> >
+> > **15. Scope honesty for D, stated before anyone starts it.** The spec's acceptance sentence for D
+> > (E5) is *"its live events render in the cockpit while watched, and stop being relayed when the
+> > view closes"* — that is **live streaming**, and live streaming depends on the projection, not the
+> > reverse: the hub today learns a run id from exactly one place, `freshness.accepted.runId`, which
+> > covers only runs it dispatched itself. A run someone started on the Mac has no path to a run id on
+> > the hub at all, and nothing can subscribe to what it cannot name. So the projection lands first —
+> > but **shipping projection + terminal tail and writing "Milestone D closed" would repeat exactly
+> > the mistake this handoff block had to correct for Milestone C.** The honest sentence at that point
+> > is: *a foreign run appears on the board with its status, and a finished one can be read back;
+> > nothing streams live.*
+> >
 > > *(Both 5 and 6 are latent: `createHubDispatcher` still has zero production callers. They become
 > > real the moment Milestone C's hub half is wired, which makes them prerequisites for that work,
 > > not follow-ups to it.)*
