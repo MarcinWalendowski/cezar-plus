@@ -2817,6 +2817,61 @@ invented; these are the names to use when one lands.
 > > `undefined` (unknown ⇒ stale) leaves them green and makes a forgetful future test exercise the
 > > stale path rather than silently the fresh one.
 > >
+> > **26. CORRECTION, MINE: the "Design 1 / Design 2 (projection + terminal tail)" attribution in my
+> > own Milestone D brief was INVENTED.** No scoping agent proposed it; I inherited the label from a
+> > compaction summary and passed it downstream as though it were measured. The scoping agent's
+> > actual candidates are A/B/C below. **No harm reached the plan** — the planning agent could not
+> > reach the scoper, and explicitly refused to inherit the label, writing that it would name designs
+> > "by content, not by label — if the labels were swapped somewhere, the content is what should be
+> > built." That refusal is the behaviour to keep: **a label with no reachable source is not a
+> > citation.**
+> >
+> > **27. MILESTONE D'S EVENT HALF — the real candidate set, and the recommendation is C-then-B.**
+> > (Distinct axis from the run-ROWS half above; on rows the two analyses independently agree on
+> > replacing the dead `presence.active` with a required `presence.runs`.)
+> >
+> > - **A — memory-only pass-through. REJECTED on measured restart rate.** Hub holds
+> >   `runId → Set<SSE stream>`, persists nothing. Measured restarts of 29/34/12 per day against a
+> >   **p50 run of 61 min** breaks ~1.3× per median watched run and ~41× over a p90 (32.8 h) run. The
+> >   killer is the failure mode, not the frequency: **a reloaded viewer gets an empty transcript that
+> >   renders identically to "this run produced nothing"** — the same false-negative shape as the
+> >   `asOf: new Date()` defect found on `/cluster/active` today.
+> > - **B — the hub APPENDS relay frames** to `<dataDir>/cluster/<nodeId>/runs/<runId>.ndjson` and
+> >   serves that file over a new SSE route, so a foreign run inherits the local path's restart
+> >   survival unchanged. **Resume by `seq`, never by byte offset.**
+> > - **C — the same mirror, filled by POLLING**: `relay{subscribe: false, afterSeq: N}` every ~2 s,
+> >   no subscription state anywhere. **Measured at ~8 KB/s — the same bytes as push.**
+> >
+> > **Recommendation: C then B.** Polling costing the same as push removes the usual reason to prefer
+> > push, and building the pull primitive first means **a broken push half degrades to ~2 s latency
+> > rather than to a gap**. Also rejected, each for a measured reason: the `ops` frame for run rows
+> > (`hub-apply.ts:295` throws for `entity !== 'todo'`, verified independently by both analyses);
+> > mirroring into the hub's own `RunStore` (affordances are driven by the record, not by the events
+> > `stripLocalAffordances` cleans); and hub-pulls-over-HTTP (the Mac has no inbound address).
+> >
+> > **No candidate needs a new frame.** All three extend the two `relay` frames already in the
+> > discriminated unions, optionally: the downlink gains `afterSeq?` + `projectKey?`, and the uplink's
+> > `truncated` becomes `{fromSeq, toSeq}`. The missing per-run subscriber count is real but does not
+> > block B or C — the refcount lives in a new hub-side registry, incremented at the foreign SSE
+> > handler's start and decremented in `stream.onAbort`, the same pair the local route already uses at
+> > `server.ts:6082-6087`. The `ws.ts` 0→1/1→0 discipline is the *pattern the relay docblock cites*,
+> > not a mechanism to reuse.
+> >
+> > **28. THREE RELAY DEFECTS THAT ARE PHASES REGARDLESS OF WHICH CANDIDATE WINS.**
+> > - **`startRelay` has NO frame-budget path, and `relayTail` does.** Verified: `fitToFrameBudget`
+> >   is defined at `relay.ts:166` and applied only at `:202`, on the tail path; grepping
+> >   `startRelay`'s body for budget/MAX_BYTES/drop/skip returns nothing. **Two real production
+> >   events already exceed `CLUSTER_FRAME_MAX_BYTES`, the largest at 701,011 B.** Composed with the
+> >   roster finding above, this is worse than "dropped": `link-server.ts:457-461` emits one hub-side
+> >   warn and puts **nothing on the wire**, so those events vanish with no signal reaching the
+> >   viewer at all.
+> > - **`relayTail` reads the whole file synchronously** — `readFileSync` plus **12,605 `JSON.parse`
+> >   calls over a 25.69 MB file**. `readRunHistoryPage` already exists and should be used instead.
+> > - **Every `startRelay` test emits into an EMPTY store** (`relay.test.ts:223-320`): construct the
+> >   subscription, then `store.emit(...)`. So the suite **cannot observe that the relay is
+> >   live-only** — it never has history to miss. Same fixture blindness that hid the placement
+> >   hot-spot: the fixture excludes the very condition the defect needs.
+> >
 > > *(Both 5 and 6 are latent: `createHubDispatcher` still has zero production callers. They become
 > > real the moment Milestone C's hub half is wired, which makes them prerequisites for that work,
 > > not follow-ups to it.)*
