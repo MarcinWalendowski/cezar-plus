@@ -2443,7 +2443,7 @@ invented; these are the names to use when one lands.
 > | spoke outbox flush + ack/replica wiring | `cluster/spoke-runtime.ts` | **done**, 28/28, 3 mutations red |
 > | router wiring + watermarks | `cluster/hub-router.ts` | **code written, ZERO TESTS — see below** |
 > | durable per-`opId` verdict cache | `cluster/op-history.ts` | **done**, 16/16, fails closed on key/value mismatch |
-> | hub-side per-op apply (D9a verdict) | `cluster/hub-apply.ts` | **not delivered — does not exist** |
+> | hub-side per-op apply (D9a verdict) | `cluster/hub-apply.ts` | **done**, 11/11 — but NOT mutation-checked (see B2) |
 > | constructing the deps in `startClusterRuntime` | `server/cluster-routes.ts` | **not started** |
 >
 > #### THE SINGLE MOST IMPORTANT THING TO KNOW ABOUT THIS BRANCH RIGHT NOW
@@ -2553,7 +2553,24 @@ invented; these are the names to use when one lands.
 > code is written and unproven, and every hour it sits there is an hour the green suite is lying
 > about it.
 >
-> **B2. `hub-apply.ts` — this one really does not exist yet.** `op-history.ts` DOES: delivered
+> **B2. `hub-apply.ts` — DELIVERED 2026-08-23, but held to a lower standard than its five siblings,
+> and that difference matters.** The agent writing it was stopped along with 57 others before it
+> reported, so the file landed with no written account of itself. Verified by hand instead: 331
+> lines, not truncated (it ends on a complete function), `npm run typecheck` green across all four
+> workspaces, its own suite **11/11**, full cluster directory **591/591**. It exports
+> `applyOpAtHub(dataDir, op & { hubSeq }, options)` and `createHubApplyOp(dataDir, options)`, the
+> latter typed directly as `HubOpsDeps['applyOp']` — so it is drop-in for B3 with no adapter, and the
+> `projectKey -> dataDir` mapping is deliberately left to the caller.
+>
+> **What is missing is not code, it is evidence.** Every other module in this milestone had its
+> guards mutation-tested — a guard removed, the red captured, the file restored and md5-verified.
+> `hub-apply.ts` has none of that, so its passing tests prove only that the tests agree with the
+> code, which is the weakest thing a green suite can mean. Before B3 wires it into a path that
+> mutates the hub's real todo store under a lease, mutation-check at least: the lease being taken at
+> all, the read-fresh-inside-the-lease ordering, and whatever decides `accepted: false` (the D9a
+> claim-already-won path, which is the one whose verdict travels back to a spoke as authority).
+>
+> Its remaining historical note, kept because the contract is what it is: `op-history.ts` DOES: delivered
 > 2026-08-23, 393 lines, **16/16**, and verified by hand against both things that were flagged as
 > easy to get wrong. It throws when `record(opId, result)` is called with `result.opId !== opId`
 > rather than reconciling them (`ClusterAckResult` carries `opId` inside the value as well as being
@@ -2605,6 +2622,7 @@ invented; these are the names to use when one lands.
 > | symbol | callers outside its own file + test |
 > |---|---|
 > | `createOpHistoryStore` | **0** |
+> | `createHubApplyOp` / `applyOpAtHub` | **0** |
 > | `createHubSeqAllocator` | **0** |
 > | `OpHistoryStore.prune` | **0** |
 > | `applyOpsFrame` | 1 — `hub-router.ts` only |
