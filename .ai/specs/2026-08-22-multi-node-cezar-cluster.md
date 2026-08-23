@@ -2508,6 +2508,84 @@ invented; these are the names to use when one lands.
 > > on the idler node, so the new test proves spread came from in-flight accounting rather than from
 > > a broken ranking.
 > >
+> > **7. REVOKE DOES NOT CLOSE THE LINK — the one finding here with a security consequence, and it
+> > is NOT latent.** `link-server.ts` imports only `enrollment.ts` and `node-secrets.ts`; it never
+> > reads `peers.json`, so `disabledAt` is invisible to a live socket. `disableNode` writes the flag
+> > and deletes the secret — it does not close the connection, and `DELETE /cluster/nodes/:nodeId`
+> > (`cluster-routes.ts:599-606`) does nothing further. So a revoked node **keeps its socket, keeps
+> > `helloReceived: true`, and keeps receiving the cluster's entire todo stream**, while the cockpit
+> > renders it as "Revoked". The revoke only bites on the NEXT upgrade attempt, and then as
+> > `bad-signature` (the secret is gone) rather than as `node-disabled`.
+> >
+> > `node-disabled` is defined in the contract (`cluster.ts:845`) and raised by **exactly one caller
+> > in the whole repo — `link-server.test.ts:323`, a test calling `server.refuse()` directly.** No
+> > production path emits it. `link-server.ts:333-336`'s own docblock claims the reason "comes from …
+> > `peers.ts`'s revoke". It does not. A tested, documented, unreachable mechanism.
+> >
+> > **This is the same shape as the `disableNode` defect already recorded on this branch** — a
+> > revocation that updates the roster while the credential or the session it was meant to kill lives
+> > on. The invariant to hold: *a revoke must terminate the live session, not merely mark the
+> > record.* Fixing it is cheap and independent of everything else here, which is why it should go
+> > first.
+> >
+> > **8. The welcome frame is unbounded and fails by SILENT WHOLE-FRAME DROP, at ~62 nodes.**
+> > `clusterWelcomeFrameSchema`'s `roster` and `pairings` arrays have **no `.max()`** (only
+> > `resumeFrom` is capped, at 500, and that one overflow IS handled deliberately). Nothing ever
+> > removes a node from the persisted roster: all four `mergeWritePeers` callers either replace by id
+> > or set `disabledAt` and keep the row — and a revoked row is **larger** than a live one, and is
+> > shipped in the welcome unfiltered. So the ceiling is on LIFETIME nodes, not concurrent ones.
+> >
+> > Measured against the real `ClusterLinkServer` over a real socket, at the box's actual 12-project
+> > topology: **N=61 fits (261,108 B); N=62 is 265,377 B > 262,144 → dropped.** At 3 projects it is
+> > 160; the schema-legal worst case is **6**. The failure mode is the bad one:
+> > `link-server.ts:457-461` emits one hub-side warn and returns false — **nothing goes on the wire**.
+> > Not truncated, not refused, not thrown. And `clusterWelcomeFrameSchema.safeParse()` SUCCEEDS on a
+> > welcome at twice the byte bound, so validation is not the gate.
+> >
+> > **9. Liveness and fan-out are different predicates, and they disagree in two reachable states.**
+> > Fan-out targets `n.helloReceived` (`link-server.ts:548-550`), set on the incoming frame's TYPE at
+> > `:377` — deliberately not on the reply having been delivered. `reap()` terminates only `!alive`
+> > and refuses only `!helloReceived` past the deadline, so a node answering pings is never touched.
+> > Compose that with 8 and you get the permanent wedge, MEASURED: a spoke whose welcome was dropped
+> > reports `{"state":"connecting"}` **forever**, while still receiving `replica` frames —
+> > `setHealth('online')` fires only in the `welcome` branch (`link-client.ts:319`), and every other
+> > frame type takes the `else` at `:330-331`, which preserves the state **and bumps `lastFrameAt`**.
+> > So the one field that would expose the wedge looks perfectly fresh. There is no spoke-side welcome
+> > deadline, nothing reconnects, and `attempt` never resets so the backoff is stuck too.
+> >
+> > **No test can catch 8 or 9: the largest roster in ANY cluster test is three nodes.** There are
+> > `Buffer.byteLength` size assertions on `replica` and `relay` frames — none on a welcome. And
+> > `link-server.test.ts:604-607` states as fact that "an oversized frame no longer reaches this point
+> > at all now that `replica-fanout.ts` excludes one before building a frame" — true of `replica`
+> > frames, **false for `welcome`**, which is built in `hub-router.ts` with no size guard at all. A
+> > comment asserting a guarantee that holds for its own frame type and not for the neighbour.
+> >
+> > **10. `sweepUnanswered` converts a lost accept into TWO LIVE RUNS — do not ship it as designed.**
+> > `hub-dispatch.test.ts:758` deliberately asserts that a second dispatch for the same `todoId` is
+> > allowed once the first reached `unanswered`. Chain that with three measured facts: (i) the hub
+> > never queues a downlink for an absent node, so an unsent dispatch is **dropped** and nothing
+> > re-sends it — dispatch frames carry no watermark and are not part of the `hello` replay; (ii) the
+> > spoke's accept reply has **no retry**; (iii) `startTodoRun` calls `manager.startRun(...)` BEFORE
+> > `markStarted(...)`, and `handleDispatch` sends the accept before checking `result.stamped`.
+> >
+> > Sequence: spoke starts run 1 → accept lost → 90s → hub sweeps to `unanswered` → guard unblocks →
+> > next reconcile re-dispatches → spoke starts **run 2** → `markStarted` returns `already-started` →
+> > spoke replies `accepted: {runId: run2}` anyway. Two live runs on one machine, the hub's record
+> > pointing at run 2 and the todo at run 1.
+> >
+> > **TWO DOCBLOCKS ASSERT A RECOVERY THAT DOES NOT EXIST**, and each is the reason someone would
+> > believe the above is already handled: `hub-dispatch.ts:293` says an unsent dispatch is "left
+> > pending; the next reconnect may still answer it" — nothing re-sends it. `spoke-runtime.ts:912`
+> > says of a lost acceptance that "the next presence beat is the fallback" — `ClusterPresenceFrame`
+> > has **no `accepted` field**. Both are false, both are load-bearing for a reader's confidence, and
+> > neither is testable as written. **Fix the comments in the same change as the code.**
+> >
+> > The cheap fix is one line on the SPOKE — check `todo.startedTaskId` in `handleDispatch` before
+> > `startTodoRun` — which closes the same-spoke case entirely. The cross-spoke case is D41 and is
+> > worse: `applyOpAtHub` serializes the claims correctly, but the loser is only *told*, and
+> > `reportRefusals` says so in as many words — "a run started here for that claim is NOT stopped by
+> > this ack". The loser keeps running and re-derives a doomed claim op on every flush tick.
+> >
 > > *(Both 5 and 6 are latent: `createHubDispatcher` still has zero production callers. They become
 > > real the moment Milestone C's hub half is wired, which makes them prerequisites for that work,
 > > not follow-ups to it.)*
@@ -2527,7 +2605,7 @@ invented; these are the names to use when one lands.
 > assumed:
 >
 > ```
-> grep -ran "startSpokeRuntime"   --include='*.ts' packages/ | grep -v '\.test\.ts' | grep -v /dist/   → 9   (positive control: the grep works)
+> grep -ran "startSpokeRuntime"   --include='*.ts' packages/ | grep -v '\.test\.ts' | grep -v /dist/   → 9   ← ***WRONG READING — see the correction below. 8 of these 9 are PROSE.***
 > grep -ran "createHubDispatcher" --include='*.ts' packages/ | grep -v '\.test\.ts' | grep -v /dist/   → 2   (both are COMMENTS / the definition itself)
 > grep -ran "sweepUnanswered"     --include='*.ts' packages/ | grep -v '\.test\.ts' | grep -v /dist/   → 6   (all inside hub-dispatch.ts: docblock, interface, definition)
 > grep -ran "dispatchCorrelation" --include='*.ts' packages/ | grep -v '\.test\.ts' | grep -v /dist/   → 3   (the optional field, its comment, its `?.` call)
@@ -2538,7 +2616,21 @@ invented; these are the names to use when one lands.
 >
 > | half | state |
 > | --- | --- |
-> | **SPOKE** — a dispatch that ARRIVES really starts a run and replies with `accepted: {dispatchId, runId}` | **WIRED AND LIVE.** Full boot chain traced hop by hop: `index.ts:770` builds the `WorkspaceSemaphore` → `server.ts:7457` → `cluster-routes.ts:1172` → `spoke-runtime.ts:390`. |
+> | **SPOKE** — a dispatch that ARRIVES really starts a run and replies with `accepted: {dispatchId, runId}` | **WIRED AND LIVE, by exactly ONE chain.** `index.ts:770` builds the `WorkspaceSemaphore` → `server.ts:7457` → `cluster-routes.ts:1172` → `spoke-runtime.ts:381`. |
+>
+> **CORRECTED 2026-08-23 — I said "9 production callers" and it is ONE.** `startSpokeRuntime` has
+> exactly one call expression in production: `cluster-routes.ts:1172`. The nine non-test mentions
+> break down as 1 in `dist/*.d.ts` (build output), 4 inside `spoke-runtime.ts` itself (the
+> definition plus three docblock lines), 1 docblock in `link-client.ts:92`, and 4 in
+> `cluster-routes.ts` — of which the import at `:65` and the docblocks at `:863`/`:868` are not
+> calls either. **Eight of the nine are prose.**
+>
+> **This is precisely the error the `task-author-coverage` gate exists to catch, and I made it while
+> auditing someone else for it.** A raw `grep` counts comments as call sites; a docblock that
+> *mentions* a function is indistinguishable from one that *invokes* it. "9 callers" also implied
+> nine independent entry points and a redundancy that does not exist — the spoke half is one chain,
+> one deep, with no second path. **When a caller count is load-bearing, count call EXPRESSIONS, not
+> matching lines.**
 > | **HUB** — `hub-dispatch.ts`, 420 lines + 803 test lines, 33 tests, every guard mutation-proven | **ZERO PRODUCTION CALLERS.** Nothing constructs `createHubDispatcher`. Nothing arms `sweepUnanswered`. Nothing wires `dispatchCorrelation` into `startClusterRuntime`. |
 >
 > **So in production today, no dispatch is ever emitted**, and every line of the hub's dispatch
@@ -2900,7 +2992,21 @@ invented; these are the names to use when one lands.
 > > wrong cause** (it says the optional field was what started the todo forever); the commit is pushed
 > > and is not being rewritten, so THIS is the correction of record.
 >
-> ### ~~D48 — THE ACCEPT PATH CANNOT BE CORRELATED.~~ **FIXED 2026-08-23 in `f6a9bad6`.** The wire now carries `accepted: {dispatchId, runId}` on the success path. It *used to* carry `dispatchId` back on a REFUSAL and on nothing else. Found 2026-08-23 building C-f.
+> ### ~~D48 — THE ACCEPT PATH CANNOT BE CORRELATED.~~ **HALF-FIXED 2026-08-23 in `f6a9bad6` — the WIRE carries it; production still does not RECORD it.** Found 2026-08-23 building C-f.
+>
+> **AMENDED later the same day — I marked this FIXED and that was too generous.** The frame half is
+> genuinely done: `freshness` now carries `accepted: {dispatchId, runId}` on the success path, where
+> it previously carried `dispatchId` back on a REFUSAL and on nothing else. But the consumer is
+> **not wired**: `dispatchCorrelation` is an OPTIONAL field on `HubFrameRouterDeps`
+> (`hub-router.ts:154`), and the one production `createHubFrameRouter(...)` call —
+> `cluster-routes.ts:1112` — passes `{ identity, env, warn, replication }` and **omits it**. So above
+> the router, an accept and a refusal remain indistinguishable in production today.
+>
+> **The defect fixed itself into the branch's own signature shape.** D48 *was* an optional field at
+> a seam defaulting to a wrong-but-plausible value; the fix added a second optional field at the
+> same seam, and that one is already forgotten at the only place it matters. Per C-c and D24/D43 the
+> answer is to make `dispatchCorrelation` **required** on `HubFrameRouterDeps` — a typecheck error
+> until it is wired IS the mechanism. Do not add it as optional a second time.
 >
 > **Why the stale heading mattered enough to amend rather than append:** it sat as an open defect
 > while the text closing it lived elsewhere in this same file. A reader scanning headings — which is
