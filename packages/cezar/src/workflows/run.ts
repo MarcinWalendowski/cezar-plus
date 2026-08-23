@@ -416,14 +416,28 @@ const NO_HOLDS: AccountHolds = { deadline: new Set(), inFlight: new Set() };
  *  - an `inFlight` hold means a resume is testing the window right now and nothing is proven, so
  *    it blocks fresh work but not other resumes. Blocking those deadlocked a live workspace.
  */
+function accountHeldOn(
+  key: string,
+  run: Pick<RunRecord, 'status' | 'autoResumeAttempts'>,
+  holds: AccountHolds,
+): boolean {
+  if (holds.deadline.has(key)) return true;
+  return holds.inFlight.has(key) && !resumeInFlight(run);
+}
+
+/**
+ * The same question about the account the RUN RECORD names — admission's default reading.
+ *
+ * The key is a parameter above rather than derived here because the queue has to ask about TWO
+ * accounts, not one: this one, and the account the spawn gate has already refused this run on.
+ * See `heldAccountFor`, and the production busy-loop that forced the split.
+ */
 function accountHeldFor(
   run: Pick<RunRecord, 'runner' | 'agentProfile' | 'status' | 'autoResumeAttempts'>,
   holds: AccountHolds,
   fallbackRunner: RunnerId,
 ): boolean {
-  const key = runAccountKey(run, fallbackRunner);
-  if (holds.deadline.has(key)) return true;
-  return holds.inFlight.has(key) && !resumeInFlight(run);
+  return accountHeldOn(runAccountKey(run, fallbackRunner), run, holds);
 }
 
 // `runAccountKey` — which agent ACCOUNT a run's work runs on (spec
@@ -990,6 +1004,14 @@ export class RunManager {
    *  speaks again while a long one stays quiet. `pump()` runs on every lifecycle event, so an
    *  un-deduped note would bury the thread it is meant to explain. */
   private readonly heldNotified = new Map<string, string>();
+
+  /** Queued runs the SPAWN gate has refused, keyed run id -> the account it refused them on.
+   *  `pump()` admits on the account the run RECORD names while `execute()` refuses on the account
+   *  the next STEP will use, and when those disagree the run is dequeued, bounced and re-queued
+   *  at loop speed. This memo is what makes admission ask the spawn's question too. Every read
+   *  re-checks the account against the live holds, so the memo can only ever delay a start that
+   *  the spawn gate was going to refuse anyway. */
+  private readonly heldAtSpawn = new Map<string, string>();
 
   /** Unsubscribe handle for the constructor's `onUsage` subscription — released
    *  by dispose() so a torn-down manager stops receiving sampler ticks. */
@@ -1608,7 +1630,21 @@ export class RunManager {
         // account). A held run is otherwise indistinguishable from an ordinary queued one — it
         // wears `queued`, it wears `#1 in queue`, and it does not move for hours. The queue was
         // right and the cockpit was silent, which reads as a wedged workspace.
-        this.noteHeldRuns(holds, (defaultRunner ?? 'claude') as RunnerId);
+        //
+        // A FORCED sweep is skipped entirely: it reads `NO_HOLDS` by construction, which is an
+        // instruction to ignore the holds, never evidence that none exist. Letting it run here
+        // cleared the dedupe state on every watchdog tick, so the next ordinary sweep said
+        // everything again — two notes per hold on a quiet queue, and a note per round trip on a
+        // bouncing one.
+        if (!forced) {
+          if (anyHold) {
+            this.noteHeldRuns(holds, (defaultRunner ?? 'claude') as RunnerId);
+          } else {
+            // Nothing is held anywhere, so every memo and every spent note is stale.
+            this.heldNotified.clear();
+            this.heldAtSpawn.clear();
+          }
+        }
         while (this.queue.length > 0 && capacity()) {
           // FIFO among the runs that CAN start; a held one keeps its place in the queue rather
           // than being dequeued and re-queued (which would churn its position and its record).
@@ -1616,12 +1652,13 @@ export class RunManager {
             ? 0
             : this.queue.findIndex((id) => {
                 const queued = this.store.getRun(id);
-                return !queued || !accountHeldFor(queued, holds, defaultRunner ?? 'claude');
+                return !queued || !this.heldAccountFor(queued, holds, defaultRunner ?? 'claude');
               });
           if (next === -1) break; // everything queued is waiting on a held account
           const runId = this.queue.splice(next, 1)[0];
           if (!runId) break;
           this.heldNotified.delete(runId);
+          this.heldAtSpawn.delete(runId);
           // A forced sweep has to reach the spawn: the gate inside `execute` asks the same
           // question and would send this run straight back to the queue.
           if (forced) this.forceStarted.add(runId);
@@ -1703,15 +1740,53 @@ export class RunManager {
     for (const runId of this.heldNotified.keys()) {
       if (!this.queue.includes(runId)) this.heldNotified.delete(runId);
     }
+    for (const runId of this.heldAtSpawn.keys()) {
+      if (!this.queue.includes(runId)) this.heldAtSpawn.delete(runId);
+    }
     for (const runId of this.queue) {
       const queued = this.store.getRun(runId);
       if (!queued) continue;
-      if (!accountHeldFor(queued, holds, defaultRunner)) {
+      // Whichever account is actually holding it — its own, or the one the spawn gate refused.
+      // Naming the run's own account for a run bounced on a step's account would print a sentence
+      // about an account that is wide open, which is worse than the silence this replaced.
+      const account = this.heldAccountFor(queued, holds, defaultRunner);
+      if (!account) {
         this.heldNotified.delete(runId);
         continue;
       }
-      this.noteHeld(runId, runAccountKey(queued, defaultRunner));
+      this.noteHeld(runId, account);
     }
+  }
+
+  /**
+   * Which account is holding this queued run right now, or undefined when nothing is.
+   *
+   * TWO keys, because the two gates ask about different accounts and a run BOUNCES forever when
+   * they disagree. `pump()` admits on the account the run RECORD names; `execute()` refuses on
+   * the account the next STEP will actually use, which a workflow may pin independently (the
+   * built-in `spec-to-deploy` pins `spec` and `review-spec` to claude whatever the task was
+   * started on). A run whose record says codex and whose first step says claude was therefore
+   * admitted by the queue, refused by the spawn, re-queued, and admitted again — measured on
+   * `prod-host` on 2026-08-23 at roughly eleven round trips a second, each one appending a
+   * transcript note, 2626 of them in four minutes.
+   *
+   * So the spawn gate's verdict is remembered (`heldAtSpawn`) and consulted at admission. It is a
+   * MEMO, not a second source of truth: the remembered account must still be held right now for
+   * it to count, and a stale one is dropped on read. The worst case is that a hold moves to a
+   * different account and the run bounces once more, which records the new account and settles
+   * again — bounded by the number of accounts, not by time.
+   *
+   * The memo cannot wedge a queue. It only ever holds back a run the spawn gate would refuse a
+   * millisecond later, and the watchdog's forced sweep bypasses this predicate entirely.
+   */
+  private heldAccountFor(run: RunRecord, holds: AccountHolds, defaultRunner: RunnerId): string | undefined {
+    const own = runAccountKey(run, defaultRunner);
+    if (accountHeldOn(own, run, holds)) return own;
+    const atSpawn = this.heldAtSpawn.get(run.id);
+    if (atSpawn === undefined) return undefined;
+    if (accountHeldOn(atSpawn, run, holds)) return atSpawn;
+    this.heldAtSpawn.delete(run.id);
+    return undefined;
   }
 
   /** One held run, one line, once per account it is held on. Shared by the dequeue-time sweep
@@ -2709,13 +2784,18 @@ export class RunManager {
     // hand an in-place run straight back, re-wedging the queue the rescue had just freed.
     // `dropActive` retires the entry on every terminal path, so the set still cleans itself up.
     if (this.forceStarted.has(runId)) return false;
-    if (!accountHeldFor({ ...run, runner }, this.semaphore.accountHolds(), runner)) return false;
+    // The account THIS SPAWN would use, which is the step's runner and not necessarily the run's.
+    const account = runAccountKey({ ...run, runner }, runner);
+    if (!accountHeldOn(account, run, this.semaphore.accountHolds())) return false;
     state?.releaseRepoRoot?.();
     if (state) state.releaseRepoRoot = undefined;
     this.pendingJobs.set(runId, { workflow, input });
     this.queue.push(runId);
     this.store.updateRun(runId, { status: 'queued', startedAt: undefined, currentStepId: undefined });
-    this.noteHeld(runId, runAccountKey({ ...run, runner }, runner));
+    // Tell admission what was refused here, or it re-admits this run immediately and the two
+    // gates trade it back and forth for as long as the hold lasts.
+    this.heldAtSpawn.set(runId, account);
+    this.noteHeld(runId, account);
     this.dropActive(runId);
     return true;
   }

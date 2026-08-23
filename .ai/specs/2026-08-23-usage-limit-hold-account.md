@@ -1,7 +1,8 @@
 # A usage limit holds the account it was refused on, and the cockpit says so
 
 **Status:** Implemented — QA Needed until V5 (a real held row in the deployed cockpit) is seen on
-the box.
+the box. Deployed to `prod-host` at 12:23 UTC, **rolled back at 12:27** on the note storm
+described in TLDR item 4, and redeployed with the memo fix.
 **Date:** 2026-08-23
 **Reported:** the owner, from production: *"I added a task on custom model codex, but it's queued
 for some reason, when all the rest of tasks is scheduled: scheduled tasks shouldn't be counted as
@@ -28,6 +29,15 @@ running:
 3. **Nothing said any of this.** A held run is byte-identical to an ordinary queued one: status
    `queued`, `#1 in queue`, no movement. The only existing note fires on the spawn path
    (`requeueWhileHeld`), which a run held at dequeue never reaches.
+
+4. **A fourth defect, found by deploying the first three.** With the hold keyed correctly, the
+   codex task was admitted by the queue and refused by the spawn — and bounced between them at
+   about eleven round trips a second, writing a transcript note on every one. 2626 notes in the
+   four minutes the fix was live, which is what the rollback below was for. The two gates ask
+   about different accounts: `pump()` reads the run RECORD, `execute()` reads what the dispatch
+   actually resolves (a `pool:` route picks the PROVIDER too, which is how a codex task comes to
+   run every step on claude accounts). That disagreement predates this spec; keying the hold
+   correctly is simply what made it reachable, because before it the run never got past admission.
 
 The reporter's own hypothesis — that scheduled tasks are counted as running — is not what
 happened. `maxParallel` was 5, nothing was running, and a scheduled run correctly holds no slot.
@@ -128,7 +138,30 @@ schedule that is wrong in the early direction.
   The row stays **silent when the run names no runner and the workspace default is unknown**: the
   account would be a guess, and a confident wrong sentence is worse than none.
 
-### 4. Run the contract package's tests
+### 4. Stop the two gates trading a run back and forth
+
+`heldAtSpawn` (run id -> the account key `requeueWhileHeld` refused it on) is consulted by
+`pump()`'s admission predicate through `heldAccountFor`. It is a MEMO of the spawn gate's verdict,
+not a second source of truth: the remembered account must still be held at the moment it is read,
+and a stale one is dropped on read, so the memo can only ever delay a start the spawn gate was
+about to refuse anyway. A hold that moves to another account costs one more bounce, which records
+the new account and settles — bounded by the number of accounts, not by time.
+
+Admission deliberately does NOT resolve the pool itself. `resolvePoolForDispatch` advances the
+round-robin cursor as a side effect (that is what stops a burst of dispatches stacking onto one
+least-recently-used account), so asking it per sweep would corrupt the balancer. The memo learns
+the answer from the one place allowed to compute it.
+
+Two smaller repairs in the same area, both found by the same production run:
+
+- **The forced sweep no longer runs the note pass.** A watchdog sweep reads `NO_HOLDS` by
+  construction — an instruction to ignore the holds, never evidence that none exist — and letting
+  it through the note pass cleared the dedupe state on every tick, so the next ordinary sweep said
+  everything again. That is why two idle queued runs each carried exactly two notes.
+- **`requeueWhileHeld` computes its account once** and reuses it for the gate, the memo and the
+  note, so the three cannot disagree about which account refused the run.
+
+### 5. Run the contract package's tests
 
 `packages/contract` had test files and no vitest project, so `npm test` never ran them —
 `agent-route.test.ts` had been green by absence, and `usage-hold.test.ts` would have been too. Now
@@ -187,11 +220,21 @@ No HTTP route, request or response shape changes.
 
 ## Risks
 
-- **A run that touches several accounts is still admitted on one.** The gate asks about the
-  account the run's TASK backend will use; a workflow step pinned to a different backend can still
-  start on a closed account one step later. That is narrower than the bug fixed here (it costs one
-  step, not a whole queue) and is left open deliberately rather than widened by guesswork. A
-  step-time hold check is the follow-up if it is ever measured.
+- **CORRECTED 2026-08-23, after the first deploy: this was measured, and it cost more than a
+  step.** This bullet originally read *"a workflow step pinned to a different backend can still
+  start on a closed account one step later… it costs one step, not a whole queue"*. What actually
+  happens is that the run never starts at all: the spawn gate refuses it and hands it back to the
+  queue, which admits it again immediately. Eleven round trips a second, 2626 transcript notes,
+  until the release was rolled back. Fixed by the `heldAtSpawn` memo in Solution 4. What remains
+  open is only the narrow original claim — a run whose LATER step pins a different backend can
+  still reach that step and be refused there, which costs one bounce and one note, not a loop.
+- **A queued row stays silent for a run dispatched through an account POOL.** The cockpit derives
+  its rows from the run record, and a pool route resolves the provider at dispatch — server-side,
+  once, with a cursor side effect. So the exact production run renders no `held` pill while its
+  transcript names the account plainly. Silence, not a wrong account, and the surface the reporter
+  actually opened (the task thread) is the one that answers. Persisting the held account on the
+  record is the follow-up that would close it; it touches `RunRecord` plus five summary
+  projections, which is a wider change than this fix should carry.
 - **The single-project list sees only its own runs.** The engine's hold is workspace-wide, so a
   row in project A held by a limit a project-B run is carrying shows nothing there. The workspace
   board, fed the whole aggregate, answers completely. Silence again, never a wrong account.
@@ -231,6 +274,11 @@ Automated (all executed):
   dedupe assertion).
 - V4 `packages/contract/src/usage-hold.test.ts` and `packages/web/src/lib/account-hold.test.ts` —
   the three tiers of the hold key, and the cockpit's derivation over the production record shape.
+
+- V6 `packages/cezar/src/workflows/auto-resume.test.ts` — a run the queue admits and the spawn
+  refuses settles after ONE note instead of ping-ponging. Confirmed to FAIL pre-fix by pointing
+  the admission predicate back at `accountHeldFor`: `expected [ … ] to have a length of 1 but got
+  25` in a one-second window, the same shape as production.
 
 Manual, on the box (QA):
 

@@ -61,6 +61,13 @@ export function usageLimitHolds(runs: readonly RunRecord[], now: number = Date.n
  * no `runner` until the engine stamps one. Guessing `claude` there would print a confident
  * sentence about an account this task may never touch, so the row says nothing instead: silence is
  * recoverable, a wrong explanation is not.
+ *
+ * **Also undefined for a run dispatched through an account POOL**, which is the case the reporting
+ * run was. A `pool:` route picks the PROVIDER as well as the login, and it resolves server-side at
+ * dispatch (with a cursor side effect, so it cannot be re-asked here or anywhere else). The record
+ * therefore says `codex` while the work goes to a claude account, and this function has no honest
+ * way to know. The run's transcript names the account outright — that is the surface that answers
+ * for a pooled run, and it is the one a person opens from the row.
  */
 export function queueHold(
   run: Pick<RunRecord, 'status' | 'archived' | 'runner' | 'agentProfile'>,

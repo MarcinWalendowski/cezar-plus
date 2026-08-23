@@ -278,6 +278,38 @@ describe('a run stopped by a usage limit resumes itself', () => {
     expect([...holds.deadline]).not.toContain('codex:default');
   }, 30_000);
 
+  it('does not ping-pong a run the queue admits and the spawn refuses', async () => {
+    // The two gates ask about DIFFERENT accounts. `pump()` admits on the account the run RECORD
+    // names; `execute()` refuses on the account the dispatch actually resolves — a pool route
+    // picks the provider too, and a workflow step may pin its own runner. When they disagree the
+    // run is dequeued, bounced back, admitted again… Measured on `prod-host` on 2026-08-23
+    // at roughly eleven round trips a second: 2626 transcript notes in four minutes, on a task
+    // that was simply waiting for a window to reopen.
+    manager = new RunManager(store, repoRoot);
+    const limited = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
+    await settle(limited.id);
+    expect([...manager.accountHolds().deadline]).toEqual(['claude:default']);
+
+    // A second task whose RECORD says codex while its pending job still dispatches to claude —
+    // the production shape, reproduced without needing a configured account pool. Admission reads
+    // the record and lets it through; the spawn resolves claude and hands it straight back.
+    const bounced = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done ship it', worktree: false });
+    store.updateRun(bounced.id, { runner: 'codex' });
+
+    // A full second of real pump sweeps, including at least one watchdog-shaped forced sweep.
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+    expect(store.getRun(bounced.id)?.status).toBe('queued');
+    expect(store.getRun(bounced.id)?.startedAt).toBeUndefined();
+    const notes = store
+      .readEvents(bounced.id)
+      .filter((event) => typeof event.message === 'string' && event.message.startsWith('held in the queue'));
+    // ONE note is the whole assertion: it is also the bounce counter, because the spawn path
+    // writes one every time it hands the run back.
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.message).toContain('claude:default');
+  }, 40_000);
+
   it('keeps the account held while a resume is in flight, until a turn proves the window', async () => {
     manager = new RunManager(store, repoRoot);
     const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
