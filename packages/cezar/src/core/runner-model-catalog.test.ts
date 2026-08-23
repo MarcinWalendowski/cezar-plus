@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { RunnerModelCatalog, type ModelOption } from './runner-model-catalog.ts';
+import { RunnerModelCatalog, sharedRunnerModelCatalog, type ModelOption } from './runner-model-catalog.ts';
+
+vi.mock('./codex-model-catalog.ts', () => ({
+  discoverCodexModels: vi.fn(async () => [{ id: 'codex-model', label: 'Codex', description: '' }]),
+}));
+vi.mock('./opencode-model-catalog.ts', () => ({
+  discoverOpencodeModels: vi.fn(async () => [{ id: 'opencode/model', label: 'OpenCode', description: '' }]),
+}));
 
 const models: ModelOption[] = [
   { id: 'gpt-latest', label: 'GPT Latest', description: 'Latest model' },
@@ -90,5 +97,29 @@ describe('RunnerModelCatalog', () => {
     await Promise.all([catalog.get('codex'), catalog.get('claude')]);
     expect(codex).toHaveBeenCalledOnce();
     expect(claude).toHaveBeenCalledOnce();
+  });
+});
+
+describe('sharedRunnerModelCatalog', () => {
+  it('is a process-wide singleton wired to both the codex and opencode adapters', async () => {
+    // The whole point of the singleton (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`,
+    // "Wiring the catalog to the runner"): the codex resume path and `GET /api/models` share ONE
+    // cache, not two — a second call must return the SAME instance, not a fresh one.
+    const first = sharedRunnerModelCatalog();
+    const second = sharedRunnerModelCatalog();
+    expect(second).toBe(first);
+
+    await expect(first.get('codex')).resolves.toMatchObject({
+      runner: 'codex',
+      source: 'live',
+      models: [{ id: 'codex-model', label: 'Codex', description: '' }],
+    });
+    // Regression control for the defect an earlier draft of the wiring introduced: registering
+    // codex only would leave opencode discovery silently `unavailable` in production.
+    await expect(first.get('opencode')).resolves.toMatchObject({
+      runner: 'opencode',
+      source: 'live',
+      models: [{ id: 'opencode/model', label: 'OpenCode', description: '' }],
+    });
   });
 });

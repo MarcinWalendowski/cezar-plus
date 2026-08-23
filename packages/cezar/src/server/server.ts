@@ -83,8 +83,6 @@ import { detectEnvironment } from '../core/backend-detect.ts';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 import type { ContentBlock, RunnerId } from '../core/agent-runner.ts';
 import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
-import { discoverCodexModels } from '../core/codex-model-catalog.ts';
-import { discoverOpencodeModels } from '../core/opencode-model-catalog.ts';
 import {
   PROVIDER_IDS,
   ProviderAuthService,
@@ -93,7 +91,7 @@ import {
   type ProviderStatusResponse,
 } from '../core/provider-auth.ts';
 import { applyProviderEnablement } from '../core/provider-availability.ts';
-import { RunnerModelCatalog } from '../core/runner-model-catalog.ts';
+import { RunnerModelCatalog, sharedRunnerModelCatalog } from '../core/runner-model-catalog.ts';
 import { currentUsage, onUsage } from '../core/process-usage.ts';
 import { currentHostMetrics } from '../core/host-metrics.ts';
 import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.ts';
@@ -1402,12 +1400,9 @@ export function createApp(deps: ServerDeps) {
   // turns into a compile error instead.
   const bootRoot = deps.repoRoot;
   const bootDataDir = join(bootRoot, '.ai/cezar');
-  const modelCatalog = deps.modelCatalog ?? new RunnerModelCatalog({
-    adapters: {
-      codex: { discover: () => discoverCodexModels({ cwd: bootRoot }) },
-      opencode: { discover: () => discoverOpencodeModels({ cwd: bootRoot }) },
-    },
-  });
+  // Shared with `CodexAppServerRunner`'s `thread/resume` path (`core/codex-resume-model.ts`) so
+  // the host has one 5-minute discovery cache, not two (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`).
+  const modelCatalog = deps.modelCatalog ?? sharedRunnerModelCatalog();
   const providerAuth = deps.providerAuth ?? new ProviderAuthService();
   const workspaceConfig = deps.workspaceConfig ?? {
     load: loadWorkspaceConfig,
