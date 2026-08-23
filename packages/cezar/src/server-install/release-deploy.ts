@@ -104,7 +104,11 @@ function readBuildStamp(source: string): { stamp?: BuildStamp; error?: string } 
 }
 
 function staleSource(source: string, builtAt: string): string | undefined {
-  const listed = run('git', ['ls-files', '-z', '--', 'packages/*/src', 'packages/*/package.json', 'packages/*/tsconfig*.json', 'packages/*/vite.config.ts'], { cwd: source });
+  // `packages/*/src` alone matches nothing recursively — git's pathspec glob does not cross `/`
+  // on its own, so it silently matched zero files and this whole check never fired for a single
+  // source edit. `packages/*/src/**` is what actually walks the tree (measured: confirmed both
+  // ways against a real repo before and after this fix).
+  const listed = run('git', ['ls-files', '-z', '--', 'packages/*/src/**', 'packages/*/package.json', 'packages/*/tsconfig*.json', 'packages/*/vite.config.ts'], { cwd: source });
   if (!listed.ok) return `could not enumerate tracked source files: ${listed.out}`;
   const limit = Date.parse(builtAt) + STAMP_MTIME_GRACE_MS;
   for (const relative of listed.out.split('\0').filter(Boolean)) {
@@ -402,12 +406,22 @@ export async function runReleaseDeploy(
   let stamp: BuildStamp | undefined;
   let gateError: string | undefined;
   let ancestorNoop: string | undefined;
+  // The identity this deploy ships under. Resolved even when the stamp is missing or unreadable:
+  // it is the fallback `--allow-stale-artifact` deploys ship under, and B1 must never be skipped
+  // just because A2 was overridden — writing a ledger row with no `sha` at all is what makes
+  // EVERY LATER deploy's `liveSha()` lookup fail closed forever (measured: this is exactly the
+  // shape that wedges the box).
+  let effectiveSha: string | undefined;
+  // Set only when --allow-unrelated actually suppressed a divergent/unresolved/unreadable-ledger
+  // refusal — never merely because the flag was passed — so the ledger records "this deploy was
+  // forced", not "the operator typed a flag".
+  let unrelatedOverride: { lostCommits?: string } | undefined;
   if (!rollback) {
     const read = readBuildStamp(options.source);
     stamp = read.stamp;
     gateError = read.error;
+    const sourceHead = options.sourceHead ?? (run('git', ['rev-parse', 'HEAD'], { cwd: options.source }).out || undefined);
     if (stamp) {
-      const sourceHead = options.sourceHead ?? run('git', ['rev-parse', 'HEAD'], { cwd: options.source }).out;
       if (!sourceHead) gateError = 'could not resolve source HEAD';
       else if (stamp.sha !== sourceHead) gateError = `build stamp sha ${stamp.sha} disagrees with source HEAD ${sourceHead}; run npm run build first`;
       else if (options.sha && options.sha !== stamp.sha) gateError = `--sha ${options.sha} disagrees with build stamp sha ${stamp.sha}`;
@@ -418,16 +432,41 @@ export async function runReleaseDeploy(
       log(`WARNING: allowing stale artifact: ${gateError}`);
       gateError = undefined;
     }
-    if (!gateError && stamp) {
+    effectiveSha = stamp?.sha ?? sourceHead;
+    if (!gateError && effectiveSha) {
       const live = liveSha(releasesDir);
-      if (live.error && !options.allowUnrelated) gateError = `${live.error}; pass --allow-unrelated to force`;
-      else if (live.sha) {
-        const relation = gitRelation(options.source, stamp.sha, live.sha);
-        if (relation === 'ancestor') ancestorNoop = `already live: ${live.sha} contains ${stamp.sha}, nothing to deploy`;
-        if ((relation === 'divergent' || relation === 'unresolved') && !options.allowUnrelated) {
-          const details = relation === 'divergent' ? run('git', ['log', '--oneline', `${stamp.sha}..${live.sha}`], { cwd: options.source }).out : '';
-          gateError = `refusing: ${stamp.sha} is ${relation} from the live sha ${live.sha}.${details ? `\nlive has commits this tree does not: ${details}` : ''}\npass --allow-unrelated to force`;
+      if (live.error) {
+        if (options.allowUnrelated) {
+          log(`WARNING: allowing unrelated deploy: ${live.error}`);
+          unrelatedOverride = {};
+        } else {
+          gateError = `${live.error}; pass --allow-unrelated to force`;
         }
+      } else if (live.sha) {
+        const relation = gitRelation(options.source, effectiveSha, live.sha);
+        if (relation === 'ancestor') {
+          ancestorNoop = `already live: ${live.sha} contains ${effectiveSha}, nothing to deploy`;
+        } else if (relation === 'divergent' || relation === 'unresolved') {
+          const details = relation === 'divergent' ? run('git', ['log', '--oneline', `${effectiveSha}..${live.sha}`], { cwd: options.source }).out : '';
+          if (options.allowUnrelated) {
+            log(`WARNING: allowing ${relation} deploy over live sha ${live.sha}${details ? `: ${details}` : ''}`);
+            unrelatedOverride = details ? { lostCommits: details } : {};
+          } else if (relation === 'divergent') {
+            gateError =
+              `refusing: ${effectiveSha} is divergent from the live sha ${live.sha}.` +
+              (details ? `\nlive has commits this tree does not: ${details}` : '') +
+              `\nmerge the live sha ${live.sha} — it is in this repo's object db even when it is not on origin/main — or pass --allow-unrelated to force.`;
+          } else {
+            gateError = `refusing: could not resolve the relation between ${effectiveSha} and the live sha ${live.sha}; pass --allow-unrelated to force.`;
+          }
+        }
+      }
+    } else if (!gateError && !effectiveSha) {
+      if (options.allowUnrelated) {
+        log('WARNING: allowing deploy with no sha to identify it');
+        unrelatedOverride = {};
+      } else {
+        gateError = 'could not resolve a sha to identify this deploy; pass --allow-unrelated to force';
       }
     }
     if (gateError) {
@@ -443,7 +482,7 @@ export async function runReleaseDeploy(
 
   const releaseId = rollback
     ? (options.rollbackTo || 'rollback')
-    : makeReleaseId(fx.now(), stamp?.sha);
+    : makeReleaseId(fx.now(), effectiveSha);
 
   // ---- P2: get out of the cgroup we are about to restart ---------------------------------------
   const decision = decideReExec({
@@ -524,8 +563,17 @@ export async function runReleaseDeploy(
 
   const entry: ReleaseEntry = {
     id: releaseId,
-    ...(stamp ? { sha: stamp.sha, version: stamp.version, builtAt: stamp.builtAt, dirty: stamp.dirty } : {}),
+    ...(stamp
+      ? { sha: stamp.sha, version: stamp.version, builtAt: stamp.builtAt, dirty: stamp.dirty }
+      // No stamp at all (missing/unreadable, forced through with --allow-stale-artifact): still
+      // record SOME sha, never leave the row unidentifiable — that is the fail-open this closes.
+      : effectiveSha
+        ? { sha: effectiveSha, builtAt: fx.now() }
+        : {}),
     ...(options.allowStaleArtifact ? { stale: true as const } : {}),
+    ...(unrelatedOverride
+      ? { unrelated: true as const, ...(unrelatedOverride.lostCommits ? { unrelatedLostCommits: unrelatedOverride.lostCommits } : {}) }
+      : {}),
     ...(options.note ? { note: options.note } : {}),
   };
 
