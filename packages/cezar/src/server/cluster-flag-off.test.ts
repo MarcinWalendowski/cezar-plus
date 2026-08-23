@@ -188,13 +188,24 @@ describe('cluster is inert with CEZ_CLUSTER unset (spec verification 12)', () =>
       const roster = await apiRequest(built, '/api/v1/cluster');
       expect(roster.status).toBe(200);
 
-      // And the corpus routes now answer with their OWN reason, which is the check that the
+      // And `/cluster/join` now answers with ITS OWN reason, which is the check that the
       // `toContain('CEZ_CLUSTER')` assertions above were not passing on this message by accident.
-      const corpus = await apiRequest(built, '/api/v1/cluster/corpus');
-      expect(corpus.status).toBe(409);
-      const error = ((await corpus.json()) as { error: string }).error;
+      // Not `/cluster/corpus` any more (superseded 2026-08-23, D20): that route now requires a
+      // signed node principal first (`node-auth.ts`), so an unauthenticated request there answers
+      // node-auth's 401 rather than the corpus stub's 409 — a real, correct refusal from a
+      // DIFFERENT gate, not a regression of this one. `/cluster/join` is deliberately excluded
+      // from node-auth (a joining node has no secret yet to sign with, D20 §"which routes"), so it
+      // still reaches `requireHub`'s own 409 with no credentials of any kind, which is exactly the
+      // "a different gate is speaking" case this assertion exists to prove.
+      const join = await apiRequest(built, '/api/v1/cluster/join', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code: 'cezj_not-a-real-code' }),
+      });
+      expect(join.status).toBe(409);
+      const error = ((await join.json()) as { error: string }).error;
       expect(error).not.toContain('CEZ_CLUSTER');
-      expect(error).toContain('corpus');
+      expect(error).toContain('no cluster identity');
 
       const health = await apiRequest(built, '/api/v1/health');
       expect(((await health.json()) as { capabilities: { cluster: boolean } }).capabilities.cluster).toBe(

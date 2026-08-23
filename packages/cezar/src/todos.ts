@@ -487,6 +487,57 @@ export async function createTodo(
   });
 }
 
+/**
+ * Insert `items` verbatim — id, `ts`, `author`, every field the caller already set — skipping
+ * any id already present, under a SINGLE `withTodosLease`, the same lease every writer in this
+ * file takes. No writer here previously exposed an insert that preserves an existing id
+ * (`createTodo`, above, always mints a fresh one); its absence is what forced
+ * `cluster/reconcile.ts`'s `appendLocalTodos` to re-implement this file's own `O_EXCL` lease
+ * locally, and then call `readTodos` FROM INSIDE that lease — which deadlocks the moment the file
+ * needs an id backfill (`readTodos` takes this same lease on that path, and a lease is not
+ * reentrant) until the lease's 5s timeout, after which the throw was swallowed and the backfill
+ * silently skipped. This primitive exists so reconcile, and any future caller copying a record
+ * that already has an identity, never has to touch a lease directly.
+ *
+ * Reads with `readRaw`, not `readTodos`, for the same reason `applyHubReplica` does (see there):
+ * `readTodos` takes this exact lease on its own id-backfill path, so calling it from in here would
+ * be the same deadlock this function exists to remove. Whatever `readRaw` reports — including a
+ * healed id for an unrelated raw agent append that predates this call — is what gets WRITTEN in
+ * this same write, per `readTodos`'s 2026-08-22 correction: the healed read is what was written,
+ * never a snapshot taken before someone else's write landed. Skipping that persistence here would
+ * reproduce the exact bug this function exists to fix, just with the healed id assigned by this
+ * call instead of `readTodos`'s.
+ *
+ * Idempotent by id: an id already present is skipped, so a retried reconcile pass (or any other
+ * caller) never duplicates a row. Returns the items actually appended — never the skipped ones —
+ * so a caller can tell "already there" from "written" instead of getting back `void`.
+ */
+export async function appendTodosPreservingIds(
+  dataDir: string,
+  items: readonly TodoItem[],
+  options?: TodoClusterOptions,
+): Promise<TodoItem[]> {
+  if (items.length === 0) return [];
+  return withTodosLease(dataDir, async () => {
+    const { items: existing, needsRewrite } = await readRaw(dataDir, options);
+    const existingIds = new Set(existing.map((t) => t.id));
+    const appended: TodoItem[] = [];
+    for (const item of items) {
+      if (existingIds.has(item.id)) continue;
+      existingIds.add(item.id);
+      existing.push(item);
+      appended.push(item);
+    }
+    // Write even when nothing new landed, if `readRaw` healed an unrelated entry: that heal is
+    // only real once it is on disk (see the docblock above), and this is the one lease-guarded
+    // write this call makes.
+    if (needsRewrite || appended.length > 0) {
+      await writeAtomic(dataDir, existing);
+    }
+    return appended;
+  });
+}
+
 /** `PATCH /:projectId/todos/:id`'s body, server-side — mirrors the wire twin's
  *  `updateTodoInputSchema` (`contract/src/skills.ts`) field-for-field, EXCEPT `context` and
  *  `acceptanceCriteria` below, which are maintenance-only additions with no wire-schema

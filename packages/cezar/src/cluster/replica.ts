@@ -1,10 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import type {
-  ClusterOp,
-  ClusterReplicaCorrection,
-  ClusterReplicaFrame,
-  ClusterTodoFields,
-} from '@loki-labs/better-cezar-contract';
+import type { ClusterOp, ClusterReplicaCorrection, ClusterReplicaFrame } from '@loki-labs/better-cezar-contract';
 import type { TodoItem } from '../todos.ts';
 
 /**
@@ -36,15 +31,24 @@ import type { TodoItem } from '../todos.ts';
  * updates with no new read path anywhere. That is the caller's job, not this file's: this file
  * computes and returns.
  *
- * **`TodoItem` does not carry the five cluster fields yet** — package 2.0 (contract + `todos.ts`
- * schema) lands separately and this file must not touch `todos.ts`. `ClusteredTodoItem` below is
- * this file's own typed view of a record that DOES carry them; every record that flows through this
- * module is treated as one. Once 2.0 merges `clusterTodoFieldsSchema` into `todoSchema`, `TodoItem`
- * itself will structurally satisfy `ClusteredTodoItem` and the internal casts become redundant
- * rather than wrong.
+ * **CORRECTED 2026-08-23 — the merge landed, and this file's own casts are gone.** This paragraph
+ * used to say `TodoItem` does not carry the cluster fields yet, and that `ClusteredTodoItem` below
+ * is this file's own typed view of a record that DOES carry them (it also said "five" fields;
+ * `pendingFields` was added after this note was written, making six — see the contract's
+ * `clusterTodoFieldsSchema`). Package 2.3 spread `clusterTodoFieldsSchema.shape` verbatim into
+ * `todoSchema` (`todos.ts`), so `TodoItem` now carries all six — `pendingSince`, `pendingFields`,
+ * `hubSeq`, `tombstone`, `placement`, `startedOn` — with the exact same zod definitions, and
+ * `TodoItem` structurally satisfies `ClusterTodoFields` on its own. The intersection below is gone;
+ * every function in this file now reads and builds a plain `TodoItem`, with no cast needed anywhere
+ * a `ClusteredTodoItem` used to be threaded through.
+ *
+ * `ClusteredTodoItem` itself is kept, as a plain alias rather than deleted: `todo-autostart.ts`
+ * imports it by name — its own words are "the type the cluster seam speaks" — and that file sits
+ * outside this package's scope for this change. Anything assignable to `TodoItem` is assignable to
+ * it and vice versa, so keeping the alias changes nothing for that caller.
  */
 
-export type ClusteredTodoItem = TodoItem & ClusterTodoFields;
+export type ClusteredTodoItem = TodoItem;
 
 export interface ReplicaApplyInput {
   /** This node's records as they stand, including optimistic writes still marked `pendingSince`. */
@@ -77,9 +81,7 @@ export function applyReplica(input: ReplicaApplyInput): ReplicaApplyResult {
   // number is what is guaranteed.
   const ordered = [...input.changes].sort((a, b) => (a.hubSeq ?? 0) - (b.hubSeq ?? 0));
 
-  const byId = new Map<string, ClusteredTodoItem>(
-    input.local.map((t) => [t.id, t as ClusteredTodoItem]),
-  );
+  const byId = new Map<string, TodoItem>(input.local.map((t) => [t.id, t]));
   // Entities the hub has spoken about in THIS push (applied or skipped-as-already-applied both
   // count: either way, the hub has an opinion as of some `hubSeq`).
   const spoken = new Set<string>();
@@ -103,7 +105,7 @@ export function applyReplica(input: ReplicaApplyInput): ReplicaApplyResult {
       const before = byId.get(change.entityId);
       const after = applyOpToRecord(before, change);
       if (after === undefined) byId.delete(change.entityId);
-      else byId.set(change.entityId, after as ClusteredTodoItem);
+      else byId.set(change.entityId, after);
     }
 
     if (change.hubSeq !== undefined && change.hubSeq > appliedThroughHubSeq) {
@@ -159,12 +161,12 @@ export function applyReplicaFrame(
  * "removed" as a real, reachable case once compaction exists.
  */
 export function applyOpToRecord(record: TodoItem | undefined, op: ClusterOp): TodoItem | undefined {
-  const base: ClusteredTodoItem = record
-    ? { ...(record as ClusteredTodoItem) }
+  const base: TodoItem = record
+    ? { ...record }
     : // A tombstone or upsert for an entity this node has never seen (e.g. it joined after the
       // create op was compacted away). `summary` is required by `todoSchema`; an empty shell is
       // the defensible placeholder for a row whose whole point, at this moment, is a tombstone.
-      ({ id: op.entityId, summary: '' } as ClusteredTodoItem);
+      { id: op.entityId, summary: '' };
 
   // D4: `fields` carries only what changed. D13: `unknown` rides alongside it, verbatim, for a
   // field this node's schema does not recognize — merged the same way, so it round-trips through
@@ -222,13 +224,11 @@ export function diffCorrections(
   const fieldNames = [...(op.fields ? Object.keys(op.fields) : []), ...(op.clearedFields ?? [])];
   if (fieldNames.length === 0) return [];
 
-  const localRec = local as ClusteredTodoItem | undefined;
-  const appliedRec = applied as ClusteredTodoItem | undefined;
   const corrections: ClusterReplicaCorrection[] = [];
 
   for (const field of fieldNames) {
-    const localValue = localRec?.[field as keyof ClusteredTodoItem];
-    const hubValue = appliedRec?.[field as keyof ClusteredTodoItem];
+    const localValue = local?.[field as keyof TodoItem];
+    const hubValue = applied?.[field as keyof TodoItem];
     if (isDeepStrictEqual(localValue, hubValue)) continue;
 
     corrections.push({
@@ -237,7 +237,7 @@ export function diffCorrections(
       field,
       localValue,
       hubValue,
-      hubSeq: appliedRec?.hubSeq ?? op.hubSeq ?? 0,
+      hubSeq: applied?.hubSeq ?? op.hubSeq ?? 0,
       at: now().toISOString(),
     });
   }

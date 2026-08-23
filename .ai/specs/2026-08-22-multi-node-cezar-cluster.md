@@ -967,6 +967,33 @@ one refused it. And it is `npx`, not `curl … | sh`: measured 2026-08-22, every
 to a shell. The npm registry is the one distribution channel in this design that Access does not
 sit in front of.
 
+**INCOMPLETE, found 2026-08-23 while implementing D20 — the hub mints the per-node secret and then
+throws it away.** `redeemEnrollmentCode` (`cluster/enrollment.ts`) generates
+`randomBytes(NODE_SECRET_BYTES)`, marks the code redeemed, returns the secret to the joining node
+— and **persists it nowhere.** `cluster/peers.ts` contains the string `secret` zero times, and the
+contract's node schema says outright *"It has no `secret` field at all"*. Verified by grep across
+`packages/cezar/src` and `packages/contract/src`: no hub-side store maps a node id to its secret.
+
+The consequence is larger than D20. **The hub cannot verify any node, by any transport.**
+`verifyClusterFrame` needs that secret, so the LINK's own per-frame authentication (D17's *"the
+secret every link frame is signed with"*) is equally unusable on the hub side — this is not a gap
+D20 introduced, it is one D20 tripped over. The pieces on the spoke are all correct; the half that
+was never built is the receiving end.
+
+So the enrollment story reads as complete and is not: a node can join, be recorded in the roster,
+and hold a secret that nothing on the other side can check. Until a hub-side store exists,
+`node-auth.ts`'s `lookupNodeSecret` correctly fails closed (`unknown-node` for every caller), which
+means **every node-authenticated route answers a refusal by construction** — the honest posture,
+and the reason D21's todos routes are not being wired yet: routes that can only 401 are worse than
+routes that do not exist.
+
+Building it is not a one-liner and should not be treated as one. Where the secret lands is a
+security decision: `peers.json` is the wrong home unless it is proven that nothing renders it —
+`GET /api/v1/cluster` serves the roster, and the contract removed `secret` from the served node
+shape *on purpose*. The likely answer is a separate `0600` store keyed by node id, written inside
+the same lease that marks the code redeemed (so a crash cannot leave a node holding a secret the
+hub never recorded), with revocation removing it. That is its own package.
+
 **D19 — Agents coordinate by the hub arbitrating, not by talking to each other.**
 The owner's ask (*"agents should be able to communicate with each other via the master hub"*) is the
 right problem — Problem §9 — and worth being precise about, because "let the agents talk" is the
@@ -1018,6 +1045,89 @@ not ship.
 **And one thing that is emphatically not on the ladder: a shared writable scratchpad.** Two agents
 editing one file is the collision, not the cure.
 
+**D20 — The cluster HTTP family authenticates the NODE, with the link's own signed
+freshness-bounded principal, before it serves any data route.** Added 2026-08-23, during
+implementation.
+
+Every route under `/api/v1/cluster/*` today is gated on two things and only two: `CEZ_CLUSTER=1`
+(`requireCluster`) and, on some paths, "this node is the hub" (`requireHub`). Neither of those is
+authentication. That was harmless while the family carried only control operations whose payloads
+are the node's own roster, and it stops being harmless the moment a route returns **content** —
+which is why `GET /cluster/corpus` and `GET /cluster/corpus/*path` are parked at 409
+`CORPUS_PENDING` rather than serving, and why `cluster/reconcile.ts` refused to invent a transport
+for a peer's todo list.
+
+Cloudflare Access in front of the production hub is not the answer to this. It is an outer
+perimeter that gates *people* and today admits any principal holding the org's service token; it
+says nothing about which **node** is asking, and the mirror scope in D8a is per-node by
+construction. A data route that cannot name its caller cannot scope its answer.
+
+The mechanism is already decided and already built, for the link: *"Signed freshness-bounded
+principal per `supervisor/forwarded-principal.ts`"*. Extend it from the WS upgrade to the HTTP
+family rather than inventing a second scheme —
+
+- the signing key is the **per-node HMAC secret** enrollment already mints and writes `0600`
+  (`cluster/enrollment.ts`, D17), so nothing new is stored and nothing durable is pasteable;
+- the payload names the node and the request, and is **freshness-bounded**, so a captured header
+  is not a standing credential — which a bare `Authorization: Bearer <secret>` would be;
+- verification is `verifyForwardedPrincipal`'s existing constant-time path, not a new comparison.
+
+This **supersedes the auth shape package 3b.1 invented** (`Authorization: Bearer` +
+`x-cezar-node-id`), which was flagged at the time as invented rather than specified and left for
+3b.2 to match or revise. This revises it. A bearer secret over a route family with no replay window
+is the weaker half of a choice that was never actually made.
+
+Two properties that are the point of writing this down rather than adding a middleware quietly:
+**a route joins the authenticated set by its path, never by remembering to call a helper** — the
+same argument `requireCluster`'s docblock already makes, and the same failure it already avoided
+once. And **a node authenticates as itself, not as "a node"**: the identity the middleware
+establishes is what scopes the answer, so an authenticated spoke asking for a project it is not
+paired with gets the same refusal as a stranger.
+
+**D21 — Reconcile reads over HTTP and writes over the ops path; only the SNAPSHOT is new.**
+Added 2026-08-23, during implementation.
+
+`cluster/reconcile.ts` landed complete and unwired: `RemoteReconcileTransport` is an interface with
+no implementation, so `cez cluster reconcile` throws a named error and **E2 — the 110-row backfill
+that motivated this entire design — has no runnable path.** The gap is smaller than it looks, and
+naming which half is actually missing is what keeps it small.
+
+Of the transport's four methods, three already have rails. `apply` is "append these rows to the
+peer", which is what an `ops` frame carrying creates already is (D4/D5); `backup` is a local write
+on the receiving side; `listProjects` is the confirmed-pairings list the roster already serves. Only
+`list` — *give me your full todo list for this project* — has no primitive, because the link is
+deliberately fire-and-forget and event-streamed, with no request/response (D16 reconciles
+periodically precisely because there is nothing to ask).
+
+So: **one new read.** `GET /api/v1/cluster/todos/:projectKey` on the hub, returning a snapshot of
+that project's `todos.json`, scoped to a **confirmed pairing** with the authenticated node (D20).
+Reconcile then runs **from the spoke against the hub**, which is the direction E2 needs and the only
+direction that is addressable anyway — a spoke dials out and has no inbound address (Problem §7,
+and the reason the link is an outbound WS in the first place).
+
+Two consequences worth stating rather than discovering:
+
+- **This is a snapshot, not a subscription.** It is the one-off backfill for rows that predate the
+  link. Once a project's rows are flowing as ops, reconcile is the periodic *check* D16 describes,
+  not the transport. Nothing should grow to depend on polling this route.
+- **A hub reconciling against a spoke is out of scope, and stays out.** Not an omission: there is
+  no address to reach. If it is ever wanted, the answer is a request/response frame family on the
+  existing link, not a second HTTP surface.
+
+The real merge stays owner-gated per P9 — `--dry-run` is the default posture, and writing 110 rows
+into the record every session reads first is a data change that deserves the owner present. What
+D21 changes is that the dry run becomes **runnable at all**.
+
+**NOT YET IMPLEMENTED, and deliberately so (2026-08-23).** D21 is a decision, not a landed route.
+The three routes are blocked behind the D17 correction above: with no hub-side node-secret store,
+`node-auth.ts` fails closed and a node-authenticated route can only ever refuse. Shipping
+`GET /cluster/todos/:projectKey` today would add a route that answers 401 by construction, which
+reads as "built" in every list that counts routes and is strictly worse than its absence. The
+order is: hub-side secret store → D20's gate actually verifying someone → D21's routes → the
+transport and CLI wiring → E2's dry run. The `/cluster/todos/*` path is already registered in the
+authenticated set (`cluster-routes.ts`'s D20 block) so the route inherits the gate the moment it
+exists, rather than depending on a second person remembering.
+
 ### Rejected alternatives
 
 | rejected | why |
@@ -1048,6 +1158,9 @@ packages/cezar/src/cluster/
   placement.ts         label matching, queue-with-reason (pure)
   peers.ts             roster + pairings store, presence
   reconcile.ts         periodic full reconcile + `cez cluster reconcile`
+  node-auth.ts         D20: sign/verify a node principal on the HTTP family, keyed on
+                       enrollment's per-node HMAC secret
+  reconcile-transport.ts  D21: RemoteReconcileTransport over the hub's todos routes
 packages/cezar/src/server/cluster-routes.ts
 packages/contract/src/cluster.ts
 packages/web/src/routes/settings/cluster-section.tsx    Phase 1b: the fleet panel + Add node
@@ -1491,6 +1604,14 @@ GET    /api/v1/cluster/corpus/*path         hub: one document body
 POST   /api/v1/cluster/corpus/submit        spoke -> hub: forward a knowledge write
                                             (`cez kb submit`). The ONLY write direction
                                             that exists for the corpus
+GET    /api/v1/cluster/todos/:projectKey     hub: a paired project's todos.json snapshot
+                                            (D21). Node-authenticated (D20) and scoped to a
+                                            CONFIRMED pairing — the one read reconcile has
+                                            no rail for. Snapshot, never a subscription
+POST   /api/v1/cluster/todos/:projectKey/backup   hub: write todos.json.bak before a
+                                            reconcile pass mutates either side (D21)
+POST   /api/v1/cluster/todos/:projectKey/append   hub: append rows verbatim, idempotent by
+                                            id — the receiving half of reconcile (D21)
 GET    /api/v1/cluster/active               in-flight runs across the cluster: todo
                                             summary, node, branch, touched paths.
                                             Backs `cez cluster active` (D19 rung 4)
@@ -1663,9 +1784,18 @@ Integration (two servers in one vitest process, two `CEZ_HOME` temp dirs, linked
    easy to omit:* a write made during the partition is visible on the **other** spoke afterwards,
    which is the thing the user actually asked for and which "it converged locally" does not prove.
 9. **Exactly-once start**: one `autostart` todo replicated to two nodes → exactly one run.
-   *Prove the test fails without the fix*: `git stash push` the file the guard actually landed in,
-   run it, confirm **red**, `git stash pop`. A regression test written after the diagnosis passes
-   against the bug more often than anyone expects.
+   *Prove the test fails without the fix* — a regression test written after the diagnosis passes
+   against the bug more often than anyone expects. **CORRECTED 2026-08-23: do NOT do this with
+   `git stash`, which this line originally instructed.** `~/loki-labs/cezar` is one working tree
+   shared by every agent in a fan-out, so `git stash push` takes *everyone's* uncommitted work, not
+   the one file you meant — roughly a hundred files across ~20 packages when an agent did exactly
+   this on 2026-08-23. A pop that conflicts, or a peer writing during the window, is unrecoverable,
+   and `.ai/cezar` is gitignored so part of the state would not be in the stash to restore at all.
+   The blast radius, not the intent, is what makes it wrong; the same applies to `git checkout .`,
+   `git reset --hard` and `git clean -fd`. Instead: copy the guard's file to a scratchpad, revert
+   **only** that file (`git checkout -- <that one path>`, and only if you are its sole writer),
+   run, then restore from the copy and verify byte-identical. Or cheaper and always safe: assert
+   the guard's own condition directly, so the test cannot pass with the guard removed.
 10. **Exactly-once across a lease wipe**: node A claims and starts; delete the hub's lease store and
     restart the hub (simulating a blue-green deploy); node B must **not** start a second run,
     because the replicated `startedTaskId` stamp — not the lease — is the durable key (D9a, D15b).
@@ -1728,6 +1858,32 @@ Integration (two servers in one vitest process, two `CEZ_HOME` temp dirs, linked
     the spoke's mirror back past the bound, dispatch → refused, reason names the corpus. *Negative
     control:* a fresh mirror does not refuse, so the test cannot pass against a node that refuses
     everything.
+
+20. **The HTTP family authenticates the node, and says which failure it is** (D20). One case per
+    named refusal — no credentials, bad signature, stale/replayed, unknown node — each reaching
+    *that* reason and not a neighbour: a test asserting "some 401" cannot tell a forged signature
+    from an expired one, which is the whole point of naming them. **The replay case is the one that
+    distinguishes D20 from the bearer scheme it supersedes**, so without it the change is
+    decorative. Plus a positive floor that asserts the **identity** the middleware established, not
+    merely a 200 — a handler that ignores the principal returns 200 too. And the two boundaries:
+    with `CEZ_CLUSTER` unset the family still answers 409 with the flag's reason (auth must not
+    turn a flag-off refusal into a 401), and a node that has never enrolled — and so holds no
+    secret — can still reach whatever route it joins through, proven by a test rather than by
+    inspection.
+21. **The todos snapshot serves a paired project and refuses an unpaired one** (D21). Both halves:
+    an authenticated node with a **confirmed** pairing gets the rows, and the *same* node asking
+    for a project it is not paired with is refused — asserting only the happy path passes against
+    a route that serves everything to anyone enrolled. *Negative control on the append half:*
+    replaying the same append twice adds no duplicate row (idempotent by id), and a row already
+    present on the receiving side is skipped rather than rewritten — reconcile never rewrites a
+    field, so a test that only counts rows would miss a mutated one. Assert the field values, not
+    the count.
+22. **`cez cluster reconcile --dry-run` runs end to end and writes nothing** (D21). Against a live
+    pair: it classifies, reports counts, and `backupPaths` is **empty** — with the standing warning
+    that an empty list must not be read as "nothing to back up". Then the floor that makes it
+    meaningful: assert the receiving side's `todos.json` is byte-identical afterwards. A dry run
+    that reports correctly and mutated anyway is the failure this catches, and a count assertion
+    alone cannot see it.
 
 ### Runtime E2E — the real pair, and the gate that actually decides
 

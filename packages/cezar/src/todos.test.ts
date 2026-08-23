@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { clusterTodoFieldsSchema, todoItemSchema, type ClusterAckResult, type ClusterOp } from '@loki-labs/better-cezar-contract';
 import {
   applyHubReplica,
+  appendTodosPreservingIds,
   clearStartedTaskId,
   createTodo,
   isTombstoned,
@@ -19,6 +20,7 @@ import {
   todosWatchActive,
   updateTodo,
   type TodoClusterOptions,
+  type TodoItem,
 } from './todos.ts';
 import { deriveTodoOps } from './cluster/ops.ts';
 import { localCliAuthor } from './runs/task-author.ts';
@@ -1174,5 +1176,123 @@ describe('applyHubReplica — the hub write-down path', () => {
     });
     expect(result.corrections.map((c) => c.field)).toEqual(['status']);
     expect(result.corrections[0]?.hubValue).toBe('blocked');
+  });
+});
+
+/**
+ * The insert-preserving-an-existing-id primitive (2026-08-23 fix, `.ai/specs/2026-08-22-multi-
+ * node-cezar-cluster.md`, PLAN "Found during implementation" row). `createTodo` always mints a
+ * fresh id, which is wrong for `cluster/reconcile.ts` copying a record that already exists on the
+ * peer; before this existed, reconcile re-implemented this file's own lease locally and deadlocked
+ * calling `readTodos` from inside it — see `cluster/reconcile.test.ts`'s regression test for the
+ * end-to-end reproduction. What's asserted here is the primitive's own contract in isolation.
+ */
+describe('appendTodosPreservingIds — insert primitive that keeps the caller-supplied id', () => {
+  let root: string;
+  let dataDir: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cez-todos-append-preserving-'));
+    dataDir = join(root, '.ai/cezar');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('appends verbatim — id, ts, author and every other field survive untouched', async () => {
+    const incoming: TodoItem = {
+      id: 'peer-1',
+      ts: '2026-08-22T10:00:00.000Z',
+      summary: 'copied from a peer',
+      author: localCliAuthor('cli-todo-add'),
+      priority: 'high',
+    };
+    const appended = await appendTodosPreservingIds(dataDir, [incoming]);
+    expect(appended).toEqual([incoming]);
+    expect(await readTodos(dataDir)).toEqual([incoming]);
+  });
+
+  it('idempotent by id: appending the same id twice does not duplicate the row', async () => {
+    const incoming: TodoItem = { id: 'peer-1', summary: 'copied from a peer' };
+    const first = await appendTodosPreservingIds(dataDir, [incoming]);
+    expect(first).toEqual([incoming]);
+
+    const second = await appendTodosPreservingIds(dataDir, [incoming]);
+    expect(second).toEqual([]); // already there — the return value says so, not just the file
+
+    const items = await readTodos(dataDir);
+    expect(items).toHaveLength(1);
+  });
+
+  it('negative control: a file where every entry already has an id still accepts a plain append', async () => {
+    // Floor: prove the pre-state first, so this cannot pass vacuously.
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(todosPath(dataDir), JSON.stringify([{ id: 'already-here', summary: 'pre-existing' }]), 'utf8');
+    expect((await readTodos(dataDir)).map((t) => t.id)).toEqual(['already-here']);
+
+    const appended = await appendTodosPreservingIds(dataDir, [{ id: 'new-one', summary: 'freshly copied' }]);
+    expect(appended.map((t) => t.id)).toEqual(['new-one']);
+
+    const items = await readTodos(dataDir);
+    expect(items.map((t) => t.id).sort()).toEqual(['already-here', 'new-one']);
+  });
+
+  it('heals an id-less entry under the SAME lease and PERSISTS the healed id (readTodos 2026-08-22 invariant)', async () => {
+    // Floor: the id-less entry is really there, and the incoming id is really absent, before acting.
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(todosPath(dataDir), JSON.stringify([{ summary: 'raw agent append, no id yet' }]), 'utf8');
+    const before = JSON.parse(readFileSync(todosPath(dataDir), 'utf8')) as Array<{ id?: string }>;
+    expect(before[0]?.id).toBeUndefined();
+
+    const incoming: TodoItem = { id: 'peer-1', summary: 'copied from a peer' };
+    const appended = await appendTodosPreservingIds(dataDir, [incoming], CLUSTER_ON);
+    expect(appended).toEqual([incoming]);
+
+    const items = await readTodos(dataDir, CLUSTER_ON);
+    expect(items).toHaveLength(2);
+    const healed = items.find((t) => t.summary === 'raw agent append, no id yet');
+    expect(healed?.id).toBeTruthy();
+
+    // Persisted, not just returned to this caller: `readRaw` mints a FRESH uuid on every call, so
+    // a fallback that only returned an unwritten id would show a DIFFERENT id on the next read —
+    // exactly the hazard `readTodos`'s 2026-08-22 correction exists to prevent.
+    const onDisk = JSON.parse(readFileSync(todosPath(dataDir), 'utf8')) as Array<{ id: string; summary: string }>;
+    const onDiskHealed = onDisk.find((t) => t.summary === 'raw agent append, no id yet');
+    expect(onDiskHealed?.id).toBe(healed?.id);
+
+    const second = await readTodos(dataDir, CLUSTER_ON);
+    expect(second.find((t) => t.summary === 'raw agent append, no id yet')?.id).toBe(healed?.id);
+  });
+
+  it('completes well under the write lease timeout even when the file needs an id heal — no reentrant lease (the deadlock this replaces)', async () => {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(todosPath(dataDir), JSON.stringify([{ summary: 'raw agent append, no id yet' }]), 'utf8');
+
+    const startedAt = Date.now();
+    await appendTodosPreservingIds(dataDir, [{ id: 'peer-1', summary: 'copied from a peer' }], CLUSTER_ON);
+    expect(Date.now() - startedAt).toBeLessThan(500); // the old nested-lease bug stalled for 5000ms
+  });
+
+  it('cluster off: heals the id and writes the same bytes it always would — no stamp added', async () => {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(todosPath(dataDir), JSON.stringify([{ summary: 'raw agent append, no id yet' }]), 'utf8');
+
+    await appendTodosPreservingIds(dataDir, [{ id: 'peer-1', summary: 'copied from a peer' }], CLUSTER_OFF);
+
+    const items = await readTodos(dataDir, CLUSTER_OFF);
+    expect(items).toHaveLength(2);
+    for (const item of items) {
+      expect(item.pendingSince).toBeUndefined();
+    }
+  });
+
+  it('returns [] and does not write the file when items is empty', async () => {
+    const appended = await appendTodosPreservingIds(dataDir, []);
+    expect(appended).toEqual([]);
+    // readTodos on a never-created dataDir returns [] without materializing anything (AGENTS.md:
+    // "a read must not materialize state") — asserting this the same way confirms nothing was
+    // written by the call above.
+    expect(await readTodos(dataDir)).toEqual([]);
   });
 });

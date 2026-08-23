@@ -308,6 +308,67 @@ describe('reconcileProject', () => {
     expect(localAfter.map((t) => t.id)).toContain('during-partition-remote');
     expect(remoteAfter.map((t) => t.id)).toContain('during-partition-local');
   });
+
+  it(
+    'regression: appendLocalTodos must not deadlock when local gains an id-less entry mid-pass (PLAN "Found during implementation" row)',
+    async () => {
+      // Floor: prove the pre-state before acting, so this cannot pass vacuously.
+      await writeJson(localDataDir, []);
+      await writeJson(remoteDataDir, [{ id: 'r1', summary: 'remote only' }]);
+      expect(await readTodos(localDataDir)).toEqual([]);
+      expect((await readTodos(remoteDataDir)).map((t) => t.id)).toEqual(['r1']);
+
+      // A transport whose `backup()` — called after the initial classification read and BEFORE
+      // reconcile copies remote-only rows onto local — writes a fresh id-LESS entry onto the
+      // LOCAL side. This is the real-world trigger: a raw agent append (`CEZ_TODOS_FILE`) landing
+      // on this node's todos.json during a reconcile pass. `readTodos` reports `needsRewrite` for
+      // that shape, which is exactly the condition `appendLocalTodos`'s own inner `readTodos` call
+      // deadlocks on while it still holds the outer lease.
+      const transport: RemoteReconcileTransport = {
+        listProjects: async () => [PROJECT],
+        list: async () => readTodos(remoteDataDir),
+        backup: async () => {
+          await fsp.writeFile(
+            todosPath(localDataDir),
+            JSON.stringify([{ summary: 'raw agent append landed mid-pass' }], null, 2),
+            'utf8',
+          );
+          const file = todosPath(remoteDataDir);
+          const backupFile = `${file}.bak`;
+          let raw: string;
+          try {
+            raw = await fsp.readFile(file, 'utf8');
+          } catch {
+            raw = '[]';
+          }
+          await fsp.mkdir(remoteDataDir, { recursive: true });
+          await fsp.writeFile(backupFile, raw, 'utf8');
+          return backupFile;
+        },
+        apply: async () => undefined,
+      };
+
+      const options: ReconcileOptions = {
+        dryRun: false,
+        peerNodeId: 'peer-1',
+        resolveLocalDataDir: () => localDataDir,
+        remote: transport,
+      };
+
+      const startedAt = Date.now();
+      await reconcileProject(PROJECT, options);
+      const elapsedMs = Date.now() - startedAt;
+
+      // The deadlock stalls for the full 5s lease timeout before the swallowed throw lets this
+      // continue; a correct append completes in milliseconds.
+      expect(elapsedMs).toBeLessThan(2_000);
+
+      // And the id the caller was handed ('r1') is the id that actually lands in the file.
+      const localAfter = await readTodos(localDataDir);
+      expect(localAfter.map((t) => t.id)).toContain('r1');
+    },
+    10_000,
+  );
 });
 
 describe('reconcileAll', () => {

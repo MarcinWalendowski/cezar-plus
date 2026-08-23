@@ -91,6 +91,9 @@ class OpencodeSession implements AgentSession {
   private ready!: Promise<void>;
   private resolveExit!: () => void;
   private exited!: Promise<void>;
+  /** code/signal from whichever of 'exit'/'close' fires first. The exit gate's only source of
+   *  truth for how the child actually died, read against `terminatedByCezar` below. */
+  private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   private readonly sse = new AbortController();
   private readonly toolCalls: AgentToolCallRecord[] = [];
   private readonly textChunks: string[] = [];
@@ -125,6 +128,13 @@ class OpencodeSession implements AgentSession {
   private bumpIdle: () => void = () => undefined;
   /** One teardown per session — see `terminate()`. */
   private signalled = false;
+  /** True once CEZAR itself has initiated the child's teardown — set inside `terminate()`, at
+   *  the moment it actually sends a signal (never merely requested). Distinguishes a session
+   *  cezar tore down — the NORMAL case here, see the note above `finally` in the constructor —
+   *  from an untrapped external kill or a crash the child suffered entirely on its own. Mirrors
+   *  claude-cli-runner's `terminatedByCezar` (#703/#858 lineage) for this runner's single-process
+   *  shape, where there is no broker to report the distinction instead. */
+  private terminatedByCezar = false;
 
   constructor(
     private readonly bin: string,
@@ -152,8 +162,12 @@ class OpencodeSession implements AgentSession {
     this.exited = new Promise<void>((resolve) => {
       this.resolveExit = resolve;
     });
-    this.child.once('exit', () => this.resolveExit());
-    this.child.once('close', () => this.resolveExit());
+    const captureExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (this.exitInfo === undefined) this.exitInfo = { code, signal };
+      this.resolveExit();
+    };
+    this.child.once('exit', captureExit);
+    this.child.once('close', captureExit);
 
     const stderrChunks: string[] = [];
     this.child.stderr.setEncoding('utf8');
@@ -216,7 +230,32 @@ class OpencodeSession implements AgentSession {
       if (this.timedOut) {
         // Not an agent failure — `reason` routes it to `review` + `stopReason` in the run manager.
         this.emit({ type: 'error', message: stopMessage('inactivity', limitMs), reason: 'inactivity' });
+        this.emit({ type: 'done' });
+        return base;
       }
+
+      // Exit gate: once cezar has initiated teardown (`terminate()`, reached from end()/
+      // interrupt()/the `finally` above), the exit that follows — whatever code or signal the OS
+      // reports back — is the ordinary consequence of that and stays `done`; that is the common
+      // case for this runner (see the note above `terminate()`). This only fires for the other
+      // case: the child died — an untrapped signal, or a non-zero exit — while cezar had not yet
+      // initiated any teardown. The SSE stream cannot be trusted to catch that on its own: a kill
+      // mid-session never produces a `session.error` frame, so without this the run fell through
+      // to `done` with whatever prose had streamed so far.
+      if (!this.terminatedByCezar) {
+        const exit = this.exitInfo;
+        if (exit?.signal) {
+          const msg = `opencode serve was killed by signal ${exit.signal}`;
+          this.emit({ type: 'error', message: msg });
+          throw new Error(msg);
+        }
+        if (exit && exit.code !== null && exit.code !== 0) {
+          const msg = `opencode serve exited with code ${exit.code}`;
+          this.emit({ type: 'error', message: msg });
+          throw new Error(msg);
+        }
+      }
+
       this.emit({ type: 'done' });
       return base;
     })();
@@ -281,10 +320,15 @@ class OpencodeSession implements AgentSession {
    * once SIGTERM is out with SIGKILL armed there is nothing a second pass adds.
    * The old `!child.killed` test deduplicated this as a side effect of being
    * wrong; `signalled` keeps that property on purpose.
+   *
+   * Also the one place `terminatedByCezar` is set, on the same `hasExited()` guard: a call that
+   * arrives after the child already died on its own leaves it false, so the exit gate in
+   * `result` can tell "we tore it down" apart from "it was already gone."
    */
   private terminate(): void {
     if (this.signalled || this.hasExited()) return;
     this.signalled = true;
+    this.terminatedByCezar = true;
     this.child.kill('SIGTERM');
     setTimeout(() => {
       if (this.hasExited()) return;

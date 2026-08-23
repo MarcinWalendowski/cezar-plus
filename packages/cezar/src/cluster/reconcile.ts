@@ -1,9 +1,7 @@
-import { closeSync, mkdirSync, openSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { ClusterNodeId, ClusterProjectKey, ClusterTodoFields } from '@loki-labs/better-cezar-contract';
-import { readTodos, todosPath, type TodoItem } from '../todos.ts';
+import { appendTodosPreservingIds, readTodos, todosPath, type TodoItem } from '../todos.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';
 
 /**
@@ -226,80 +224,16 @@ function classifyEntries(
 }
 
 // ---- local filesystem I/O --------------------------------------------------------------------
-// Mirrors `todos.ts`'s own `O_EXCL` write lease idiom exactly — same lock file name, same dataDir
-// — so a concurrent `createTodo`/`updateTodo`/`markStarted` on a live server is correctly excluded
-// rather than racing this write. Re-implemented rather than imported because `todos.ts` does not
-// export it (private to that file, same as `identity-store.ts`/`automations/store.ts`/
-// `sources/store.ts` each keep their own copy of this idiom already), and because reconcile needs a
-// write that PRESERVES an existing id — `createTodo` always mints a fresh one, which is wrong for
-// copying a record that already exists on the other side.
-
-const TODOS_LOCK_FILE = 'todos.lock';
-const MAX_RETRY_DELAY_MS = 200;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-interface WriteLease {
-  release: () => void;
-}
-
-function acquireLease(dataDir: string, staleAfterMs = 10 * 60_000): WriteLease | undefined {
-  mkdirSync(dataDir, { recursive: true });
-  const path = join(dataDir, TODOS_LOCK_FILE);
-  try {
-    const fd = openSync(path, 'wx', 0o600);
-    writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
-    let released = false;
-    return {
-      release: () => {
-        if (released) return;
-        released = true;
-        closeSync(fd);
-        try {
-          unlinkSync(path);
-        } catch {
-          // Already removed during shutdown cleanup.
-        }
-      },
-    };
-  } catch {
-    try {
-      if (Date.now() - statSync(path).mtimeMs > staleAfterMs) {
-        unlinkSync(path);
-        return acquireLease(dataDir, staleAfterMs);
-      }
-    } catch {
-      // A contender released it first, or the directory is read-only.
-    }
-    return undefined;
-  }
-}
-
-async function acquireLeaseBlocking(dataDir: string, lockTimeoutMs = 5_000): Promise<WriteLease> {
-  const deadline = Date.now() + lockTimeoutMs;
-  let delay = 10;
-  for (;;) {
-    const lease = acquireLease(dataDir);
-    if (lease) return lease;
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      throw new Error(`todos.json write lease stayed held for over ${lockTimeoutMs}ms — another writer may be stuck`);
-    }
-    await sleep(Math.min(delay, remaining));
-    delay = Math.min(delay * 2, MAX_RETRY_DELAY_MS);
-  }
-}
-
-async function withLease<T>(dataDir: string, fn: () => Promise<T>): Promise<T> {
-  const lease = await acquireLeaseBlocking(dataDir);
-  try {
-    return await fn();
-  } finally {
-    lease.release();
-  }
-}
+// This section used to re-implement `todos.ts`'s own `O_EXCL` write lease locally — same lock
+// file name, same dataDir — because `todos.ts` exported no insert that PRESERVES an existing id
+// (`createTodo` always mints a fresh one, which is wrong for copying a record that already exists
+// on the other side). That re-implementation nested a second, non-reentrant acquisition of the
+// SAME lease (`appendLocalTodos` called `readTodos`, which takes this lease on its own id-backfill
+// path, from inside its own `withLease`) and deadlocked for the lease's 5s timeout the moment the
+// local file needed an id backfill — see the PLAN's "Found during implementation" row and the
+// report for this fix. **Corrected 2026-08-23:** `todos.ts` now exports
+// `appendTodosPreservingIds`, built for exactly this call site, so the local re-implementation is
+// gone; `appendLocalTodos` below is a thin wrapper over it.
 
 /** `todos.json.bak`, copied from whatever is on disk right now — raw bytes, not re-serialized, so
  *  the safety net is exactly what was there before this run touched anything. `[]` when the file
@@ -318,27 +252,14 @@ async function backupLocalTodos(dataDir: string): Promise<string> {
   return backupFile;
 }
 
-/** Appends `items` verbatim (id, `ts`, `author` — every field the entry already carries) under the
- *  same lease and read-modify-write shape as every writer in `todos.ts`, reading through
- *  `readTodos` per D5a (an unstamped raw agent append is healed on read before this ever sees it).
- *  Idempotent: an id already present on this side is skipped, so a retried reconcile pass never
- *  duplicates a row it already added. */
+/** Appends `items` verbatim (id, `ts`, `author` — every field the entry already carries) by
+ *  delegating to `todos.ts`'s `appendTodosPreservingIds` — the same lease and read-modify-write
+ *  shape as every other writer in that file, in a single lease acquisition (see that function's
+ *  docblock for why this used to deadlock before it existed). Idempotent: an id already present on
+ *  this side is skipped, so a retried reconcile pass never duplicates a row it already added. */
 async function appendLocalTodos(dataDir: string, items: readonly TodoItem[]): Promise<void> {
   if (items.length === 0) return;
-  await withLease(dataDir, async () => {
-    const existing = await readTodos(dataDir);
-    const existingIds = new Set(existing.map((t) => t.id));
-    const next = [...existing];
-    for (const item of items) {
-      if (existingIds.has(item.id)) continue;
-      next.push(item);
-    }
-    const file = todosPath(dataDir);
-    const tmp = `${file}.tmp`;
-    await fs.mkdir(dataDir, { recursive: true });
-    await fs.writeFile(tmp, JSON.stringify(next, null, 2), 'utf8');
-    await fs.rename(tmp, file);
-  });
+  await appendTodosPreservingIds(dataDir, items);
 }
 
 // ---- the classifier + merge, per project and across every paired project ----------------------

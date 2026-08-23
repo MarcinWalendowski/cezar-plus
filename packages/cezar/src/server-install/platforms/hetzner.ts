@@ -1679,7 +1679,11 @@ export const hetzner: PlatformStrategy = {
       // enrollment last — so the first presence report already has real agent-CLI labels.
       return [
         depCheckStep(),
-        orgUserProvisioningStep(WORKER_PSEUDO_SLUG),
+        // The second argument is the LABEL, not a second slug: `WORKER_PSEUDO_SLUG` is a real
+        // slug but not a real org, so the step's default `org "<slug>"` phrasing rendered
+        // `org "worker"` to the operator. The commands and the artifact are identical either way
+        // — only the words describing them change.
+        orgUserProvisioningStep(WORKER_PSEUDO_SLUG, 'this cluster worker'),
         workerCheckoutsStep(),
         workerResourcesStep(),
         workerSystemdStep(),

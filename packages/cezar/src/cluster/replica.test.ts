@@ -14,8 +14,10 @@ function makeTodo(fields: Partial<ClusteredTodoItem> & { id: string; summary: st
   return fields as TodoItem;
 }
 
-/** `TodoItem` itself does not carry the cluster fields yet (package 2.0 lands that separately) —
- *  this is this test file's read-side counterpart to `replica.ts`'s own `ClusteredTodoItem`. */
+/** CORRECTED 2026-08-23 — `TodoItem` now carries the cluster fields directly (package 2.3 merged
+ *  them into `todoSchema`), so this cast is no longer bridging a gap; `ClusteredTodoItem` is a
+ *  plain alias for `TodoItem` (see `replica.ts`'s own docblock). Kept as a narrow, named accessor
+ *  for the cluster-only fields in assertions below, purely for readability at the call site. */
 function clustered(item: TodoItem | undefined): ClusteredTodoItem | undefined {
   return item as ClusteredTodoItem | undefined;
 }

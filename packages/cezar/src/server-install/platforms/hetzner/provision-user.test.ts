@@ -293,3 +293,87 @@ describe('orgUserProvisioningStep', () => {
     expect(note).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * `label` vs `orgSlug`: `hetzner.ts` reuses this ONE step, unmodified, for its cluster worker's
+ * own identity under the reserved `WORKER_PSEUDO_SLUG` ('worker') — a real slug, but not a real
+ * org. Before this test existed, every string below was built from `orgSlug` alone, so the worker
+ * case rendered "org \"worker\"" — literally false, since 'worker' is a pseudo-slug for a single
+ * cluster worker process, not an organization. `git diff` against the commit before this change
+ * confirms the floor: `orgUserProvisioningStep('worker').title` there reads
+ * `... for org "worker" (D4 process isolation)`. Every assertion below is on the RENDERED string,
+ * for BOTH call shapes this step is actually invoked with (`hetzner.ts`'s org and worker modes),
+ * not just the one case named in the bug — a fix that only covered 'worker' could not catch the
+ * same mistake reappearing in a future third mode.
+ */
+describe('orgUserProvisioningStep — label describes who this is for, independent of the slug', () => {
+  /** Same shape as the "happy path" runner above, parameterized by username so it fits both the
+   *  org and the worker-mode unix user. */
+  function fullRunner(username: string): Runner {
+    return {
+      capture: async (program, args) => {
+        if (program === 'sudo' && args[0] === '-n' && args[1] === 'true') return { code: 0, stdout: '', stderr: '' };
+        if (program === 'sudo' && args.includes('bash')) return { code: 0, stdout: '', stderr: '' };
+        if (program === 'sh') return { code: 0, stdout: `700 ${username}`, stderr: '' };
+        if (program === 'test') return { code: 0, stdout: '', stderr: '' };
+        if (program === 'id') return { code: 0, stdout: '1001', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      interactive: async () => 0,
+    };
+  }
+
+  it('with no label, defaults to `org "<slug>"` — unchanged from before this parameter existed', () => {
+    const step = orgUserProvisioningStep('acme');
+    expect(step.title).toBe('Dedicated unix user + CEZ_HOME + project root for org "acme" (D4 process isolation)');
+  });
+
+  it('with an explicit label, the title reads correctly for a caller whose slug is not an org name', () => {
+    const step = orgUserProvisioningStep('worker', 'this worker');
+    expect(step.title).toBe('Dedicated unix user + CEZ_HOME + project root for this worker (D4 process isolation)');
+    expect(step.title).not.toContain('org "worker"');
+  });
+
+  it('threads the label into the create-user command description, for both modes', async () => {
+    const orgInfo: string[] = [];
+    const orgUi = { ...createAutoUi(), info: (m: string) => orgInfo.push(m) } as Ui;
+    await orgUserProvisioningStep('acme').run(ctxWith({ ui: orgUi, runner: fullRunner('cez-acme') }));
+    expect(orgInfo.some((m) => m.includes('for org "acme" and lock its home to 0700'))).toBe(true);
+
+    const workerInfo: string[] = [];
+    const workerUi = { ...createAutoUi(), info: (m: string) => workerInfo.push(m) } as Ui;
+    await orgUserProvisioningStep('worker', 'this worker').run(
+      ctxWith({ ui: workerUi, runner: fullRunner('cez-worker') }),
+    );
+    expect(workerInfo.some((m) => m.includes('for this worker and lock its home to 0700'))).toBe(true);
+    expect(workerInfo.some((m) => m.includes('org "worker"'))).toBe(false);
+  });
+
+  it('threads the label into the agent-credentials note title and body, for both modes', async () => {
+    const orgNotes: Array<{ message: string; title?: string }> = [];
+    const orgUi = {
+      ...createAutoUi(),
+      note: (message: string, title?: string) => orgNotes.push({ message, title }),
+    } as Ui;
+    await orgUserProvisioningStep('acme').run(ctxWith({ ui: orgUi, runner: fullRunner('cez-acme') }));
+    const orgNote = orgNotes.find((n) => n.title?.startsWith('Agent credentials'));
+    expect(orgNote?.title).toBe('Agent credentials for org "acme"');
+    expect(orgNote?.message).toContain('member of org "acme". Invite accordingly.');
+
+    const workerNotes: Array<{ message: string; title?: string }> = [];
+    const workerUi = {
+      ...createAutoUi(),
+      note: (message: string, title?: string) => workerNotes.push({ message, title }),
+    } as Ui;
+    await orgUserProvisioningStep('worker', 'this worker').run(
+      ctxWith({ ui: workerUi, runner: fullRunner('cez-worker') }),
+    );
+    const workerNote = workerNotes.find((n) => n.title?.startsWith('Agent credentials'));
+    expect(workerNote?.title).toBe('Agent credentials for this worker');
+    expect(workerNote?.message).toContain('member of this worker. Invite accordingly.');
+    // The negative half: the bug this test guards against is specifically the word "org"
+    // showing up next to the pseudo-slug, not just SOME wrong string.
+    expect(workerNote?.title).not.toContain('org "worker"');
+    expect(workerNote?.message).not.toContain('org "worker"');
+  });
+});

@@ -12,6 +12,7 @@ import {
   type ClusterLeaseResponse,
   type ClusterLinkHealth,
   type ClusterNode,
+  type ClusterNodeId,
   type ClusterNodeRevokeResponse,
   type ClusterOverviewResponse,
   type ClusterPairing,
@@ -45,6 +46,7 @@ import {
   revokeEnrollmentCode,
 } from '../cluster/enrollment.ts';
 import { acquireLease, releaseLease } from '../cluster/leases.ts';
+import { createNodeAuthMiddleware } from '../cluster/node-auth.ts';
 import { loadNodeIdentity } from '../cluster/node-identity.ts';
 import { applyPairingAction, disableNode, readPeers, upsertNode } from '../cluster/peers.ts';
 import { readRemoteRuns } from '../cluster/run-projection.ts';
@@ -124,6 +126,48 @@ import { loadServerState } from '../server-install/state.ts';
  * answer a stated 409 until then — the same posture `sources-routes.ts` takes with
  * `SYNC_ENGINE_PENDING`, and for the same reason: a route that pretends is worse than a route that
  * says which package it is waiting for.
+ *
+ * ## D20 — which routes authenticate the NODE, and which do not
+ *
+ * `requireCluster` and `requireHub` answer two questions — is clustering on, and is this node the
+ * hub — and NEITHER says which node is asking. `node-auth.ts#createNodeAuthMiddleware` (a signed,
+ * freshness-bounded, request-bound principal keyed on the enrollment secret, D17/D20) answers that
+ * third one, gated the same way as the two above — `.use()` on explicit paths, never `use('*')` or
+ * inline in a handler.
+ *
+ * It is registered on the routes that are genuinely reached over the network by a REMOTE node and
+ * serve or accept content scoped to one: the corpus family (`GET /cluster/corpus`,
+ * `GET /cluster/corpus/*`, `POST /cluster/corpus/submit` — D8a's mirror scope and the one write
+ * path the corpus has), plus `/cluster/todos/*` pre-wired for package 3b/D21's
+ * `GET /cluster/todos/:projectKey` before that route exists, so it inherits the gate the moment it
+ * is added rather than needing a second person to remember to add it.
+ *
+ * Everything else in this file is answered LOCALLY, by whichever machine's own cockpit or `cez`
+ * process asks its own local server — `GET /cluster`, the pairings and node-management routes, and
+ * `GET /cluster/active` all read this node's own locally-mirrored state, and `/cluster/enroll` is
+ * an operator action taken at the hub's own cockpit. None of those is a node authenticating itself
+ * to another node, so node-auth is not on them.
+ *
+ * `POST /cluster/join` is excluded on purpose and would be a lockout bug if it weren't: it is the
+ * enrollment handshake ITSELF, and a joining node has no secret yet to sign with.
+ *
+ * `/cluster/allocate/:kind` and `/cluster/leases/*` are left OUT of the authenticated set too, and
+ * that is a judgement call rather than an oversight — recorded here because the reasoning does not
+ * fit in a `.use()` line. Two things are true about them today: the HUB has no secret of its own
+ * (`StoredClusterNodeIdentity#secret` is documented spoke-only), so gating them uniformly would
+ * strand the hub's own local reservations with no way to authenticate to itself; and both handlers
+ * currently attribute every allocation/lease to `loadNodeIdentity({env})` — THIS SERVER's own local
+ * identity — rather than to whoever the caller actually is, so establishing an authenticated caller
+ * here without also fixing that attribution would produce a route that looks secured but silently
+ * ignores the identity it just verified. Fixing the attribution is a change to these routes'
+ * bodies, which is out of this package's scope (`cluster-routes.ts` handler bodies belong to the
+ * packages that wrote them); flagged for whoever owns that fix rather than guessed at here.
+ *
+ * `lookupSecret` (`ClusterRouteDeps#lookupNodeSecret`) has no real implementation wired below —
+ * see `node-auth.ts`'s module docblock for why no hub-side store for a node's secret exists
+ * anywhere in this codebase yet. The default fails closed (`unknown-node` for every node), which
+ * is the correct, honest behaviour until a package builds that store — never a reason to leave the
+ * gate off in the meantime.
  */
 
 export interface ClusterRouteDeps {
@@ -133,6 +177,23 @@ export interface ClusterRouteDeps {
   version: string;
   /** Injected so a test can pin the flag without mutating `process.env`. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * D20: resolves a claimed node id to its enrollment secret, for `node-auth.ts`'s signed-principal
+   * check on the routes that need it (see the module header's "D20" section for which). Omitted,
+   * this defaults to a function that always answers `undefined` — every node-authenticated request
+   * fails closed as `unknown-node` — because no hub-side store mapping a node id to its secret
+   * exists anywhere in this codebase yet (`node-auth.ts`'s own docblock has the full accounting).
+   * Real wiring plugs in here once a package builds that store; a test supplies a fake directly.
+   */
+  lookupNodeSecret?: (nodeId: ClusterNodeId) => Promise<string | undefined>;
+  /** D20 test hook: pins the clock `node-auth.ts`'s freshness check reads. */
+  now?: () => Date;
+}
+
+/** The default `lookupNodeSecret` — see `ClusterRouteDeps#lookupNodeSecret`'s own doc for why this
+ *  is not a stub awaiting a TODO but the honest, fail-closed answer until a real store exists. */
+async function noStoredNodeSecret(_nodeId: ClusterNodeId): Promise<string | undefined> {
+  return undefined;
 }
 
 const CLUSTER_OFF =
@@ -270,6 +331,17 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
     await next();
   };
 
+  /**
+   * D20. Which routes get this is decided and justified in the module header's "D20" section, not
+   * here — this is only the gate. `node-auth.ts` owns the signature/freshness/binding check and
+   * the named refusals; this file owns nothing but wiring it onto the right paths, same rule as
+   * `requireCluster`/`requireHub` above.
+   */
+  const requireNodeAuth = createNodeAuthMiddleware({
+    lookupSecret: deps.lookupNodeSecret ?? noStoredNodeSecret,
+    ...(deps.now ? { now: deps.now } : {}),
+  });
+
   return (
     new Hono<ProjectApiEnv>()
       // The gate, on explicit paths — see the module header for why never `use('*')`, and why the
@@ -283,6 +355,13 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
       .use('/cluster/join', requireHub)
       .use('/cluster/allocate/*', requireHub)
       .use('/cluster/leases/*', requireHub)
+      // D20, after `requireCluster` so the flag wins first (off answers 409, never 401) — the
+      // corpus family (real content, scoped per node, D8a) plus `/cluster/todos/*` pre-wired for
+      // D21's route before it exists, so it inherits the gate rather than needing a second person
+      // to remember to add it.
+      .use('/cluster/corpus', requireNodeAuth)
+      .use('/cluster/corpus/*', requireNodeAuth)
+      .use('/cluster/todos/*', requireNodeAuth)
 
       // ---- roster ---------------------------------------------------------------------------
       .get('/cluster', async (c) => {
