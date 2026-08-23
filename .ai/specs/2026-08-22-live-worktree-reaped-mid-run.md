@@ -1,7 +1,29 @@
 # A live task's worktree is deleted out from under it, mid-run, with its uncommitted work
 
-**Status:** implemented and merged to `origin/main`, **not yet deployed**. **CORRECTED
-2026-08-23T00:31Z (task `b34867ee`, final round):** the paragraph below described an intermediate
+**Status:** **DEPLOYED 2026-08-23T00:42:28Z (task `b34867ee`, deploy step).** `prod-host`
+release `20260823T004223Z-3c6095e0` (blue-green cutover, `gapMs: 67`) is live: `deploy.json` and
+`GET /api/v1/ready` both report `sha: "3c6095e0665ac51cffe6452a3572dea823416b6a"`, confirmed against
+`git rev-parse HEAD` on the source checkout. It is a clean descendant of the previously-live
+`b885e11b`, so this was an ordinary forward deploy, no re-anchor needed. `healthy: true`, and
+`/opt/cezar/packages/cezar/dist/runs/worktree-ownership.js` and `workspace/worktree-lease.js` are
+present in the shipped tree. Read the deployed `git-worktree.js`'s `pruneOrphans` directly (not just
+this note) to confirm the shape: it calls `leaseDeclineReason` before `findForeignOwner`, then
+`autosaveCommit` before `removeWorktree`, keeping the directory (`outcome: 'kept'`) when autosave
+`refused`/`failed`, and every emitted outcome carries `branchKept: true` — there is no
+`git branch -D` call anywhere on the removal path. One residue: the build stamp on this release
+records `dirty: true` (a stray tracked-but-missing `.ship-drafts` submodule gitlink and three
+pre-existing untracked spec briefs in the source checkout, unrelated to this change and left alone
+rather than blind-deleted) — `server-deploy` only warns on `dirty`, it does not `--refuse-dirty` by
+default, so this did not block the cutover, but a future deploy should start from a clean tree.
+**Still QA Needed**: the runtime E2E (Verification steps 13–19 — 3 concurrent workspace runs
+surviving a forward deploy with zero live worktrees/branches removed, plus the ancestor-refusal and
+stale-artifact-refusal negative controls) has still never been run anywhere; today's deploy shipped
+the code and confirmed it boots and answers ready, not that the E2E scenario holds under real
+concurrent load.
+
+Original status line, superseded by the paragraph above: *"implemented and merged to
+`origin/main`, **not yet deployed**."* **CORRECTED 2026-08-23T00:31Z (task `b34867ee`, final
+round):** the paragraph below described an intermediate
 state — `362865ec`/`a3e70792` was live in production for a window on 2026-08-22, but that build still
 had the fail-open gap review pass 7 found (a missing stamp plus `--allow-stale-artifact` skipped B1
 entirely), the `runContinuation` lease gap, and zero automated coverage for gates 5–9b/12. A second
