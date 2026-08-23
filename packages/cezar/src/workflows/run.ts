@@ -1819,18 +1819,35 @@ export class RunManager {
    */
   private heldAccountFor(run: RunRecord, holds: AccountHolds, defaultRunner: RunnerId): string | undefined {
     // Out-of-quota fallback (spec 2026-08-23-retarget-task-to-another-engine, Phase 4): with the
-    // setting on, "this account is limited" stops being a reason to WAIT, so admission holds
-    // nothing and the run goes through to dispatch, which is the only place allowed to resolve an
-    // account. If dispatch finds nowhere better, `requeueWhileHeld` parks it exactly as before —
-    // so the worst case of admitting it is one dequeue, not a start on a closed login.
+    // setting on, "the account the RECORD names is limited" stops being a reason to WAIT, so
+    // admission does not hold on it and the run goes through to dispatch, which is the only place
+    // allowed to resolve an account. If dispatch finds nowhere better, `requeueWhileHeld` parks it
+    // exactly as before — so the worst case of admitting it is one dequeue, not a start on a
+    // closed login.
+    //
+    // **The SPAWN MEMO is exempt from that bypass, and it has to be.** CORRECTED 2026-08-23 by
+    // `.ai/specs/2026-08-23-never-block-a-task.md`: the setting's first version returned here
+    // unconditionally, which threw away the memo as well as the record's hold. That is the brake.
+    // Without it the queue ran hot — dequeue, resolve, park, release, pump, dequeue — and because
+    // `noteHeldRuns` reads THIS predicate to decide whether the thread has already spoken, an
+    // `undefined` answer deleted the dedupe memo on every sweep too. **Measured on a genuinely
+    // stuck run: 37 identical "held in the queue" notes in 1.5 seconds**, the same shape as the
+    // 2626-note write storm rolled back earlier the same day.
+    //
+    // The memo is safe to honour under the fallback because it is not the record's guess: it is
+    // what dispatch ACTUALLY refused, after the full resolve. Re-dequeuing a millisecond later can
+    // only refuse again — the inputs (`limited`, holds) move on a timescale of minutes. It still
+    // self-clears the moment that account stops being held, `retargetQueuedRun` drops it outright,
+    // and the watchdog's forced sweep bypasses this predicate entirely, so it cannot wedge.
     //
     // Deliberately NOT "resolve the alternative here and compare". This predicate is synchronous
     // and runs on every pump sweep, while choosing an account means reading two JSON files; worse,
     // the obvious helper (`resolvePoolForDispatch`) advances the round-robin cursor as a side
     // effect, so asking it per sweep would corrupt the balancer it is asking.
-    if (this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
     const own = runAccountKey(run, defaultRunner);
-    if (accountHeldOn(own, run, holds)) return own;
+    if (!this.semaphore.fallbackAcrossAccountsWhenLimited() && accountHeldOn(own, run, holds)) {
+      return own;
+    }
     const atSpawn = this.heldAtSpawn.get(run.id);
     if (atSpawn === undefined) return undefined;
     if (accountHeldOn(atSpawn, run, holds)) return atSpawn;
@@ -2589,6 +2606,17 @@ export class RunManager {
     // corrupts the run, so a mismatch simply starts the step fresh. Same affinity rule
     // `continueRun` applies — new records carry explicit affinity, legacy ones fall back to the
     // run's current runner as the conservative owner.
+    //
+    // A step-level pin can be DOWNGRADED at dispatch when its provider is wholly out of quota
+    // (`downgradePinnedRunner`, `2026-08-23-never-block-a-task.md`), so `def.runner` and
+    // `record.backend` can now legitimately differ on a step that ran perfectly well. That reads
+    // here as a mismatch and starts the step fresh — **safe in both directions** (a codex session
+    // is never handed to claude, or the reverse) and **lossy in one**: after a restart with the
+    // pinned provider still exhausted, the step re-runs instead of resuming its downgraded
+    // session. Deliberately left lossy. Resolving it properly means re-asking the downgrade
+    // question, which is async and reads two JSON files, from a synchronous predicate that runs on
+    // every recovery sweep — and getting that wrong reattaches a session to the wrong provider,
+    // which corrupts the run rather than costing a turn.
     const stepBackend = def.runner ?? run.runner ?? 'claude';
     const sessionBackend = record?.backend ?? run.runner ?? 'claude';
     // `pending` means the step never opened a session in the first place — any `sessionId` on it
@@ -2917,6 +2945,58 @@ export class RunManager {
   }
 
   /**
+   * A step pins a provider that is WHOLLY out of quota — return where to run it instead.
+   *
+   * `undefined` means "keep the pin", which is every ordinary case: the setting is off, the step
+   * pins nothing, or at least one account of the pinned provider is still open. Only when the
+   * pinned provider has no usable login anywhere does this answer, and then it answers with the
+   * best available account on another provider.
+   *
+   * **Keyed on EVERY account of the provider being limited, never on one.** One exhausted login is
+   * `resolvePoolForProvider`'s job — it moves within the provider and keeps the pin's promise
+   * intact. Downgrading there would throw away a working Claude account to satisfy a rule about
+   * availability, which is the opposite of what the rule is for.
+   *
+   * Never throws: an unreadable home keeps the pin, which is the behaviour that predates this.
+   */
+  private async downgradePinnedRunner(
+    runId: string,
+    step: { id: string; model?: string | undefined },
+    pinned: RunnerId,
+  ): Promise<RunnerId | undefined> {
+    if (!this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
+    try {
+      const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
+      const all = listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS);
+      const open = all.filter(
+        (profile) =>
+          !isLimited(
+            usageEntry(usage, accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id)).limited,
+          ),
+      );
+      // Still somewhere to go on the pinned provider — not this function's problem.
+      if (open.some((profile) => profile.provider === pinned)) return undefined;
+      const choice = open.length > 0
+        ? selectPoolAccount({ candidates: open, store: usage, inflight: this.semaphore.accountInflight() })
+        : undefined;
+      // Nothing open anywhere. Keep the pin and let the turn fail honestly rather than moving the
+      // work somewhere no better — rung 4 of the ladder, and the bottom of "never blocked".
+      if (!choice || choice.provider === pinned) return undefined;
+
+      this.store.appendEvent(runId, {
+        type: 'note',
+        stepId: step.id,
+        message:
+          `this step asks for ${step.model ? `${step.model} on ` : ''}${pinned}, and every ${pinned} account is out of quota — ` +
+          `running on ${accountUsageKey(choice.provider, choice.accountId)} instead`,
+      });
+      return choice.provider as RunnerId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * A turn on this account completed, so the window is open — drop any recorded limit on it.
    *
    * **A completed turn is the only honest proof.** The stored `until` is a provider's prediction,
@@ -3072,6 +3152,9 @@ export class RunManager {
     input: ExecuteRunInput,
     runner: RunnerId,
     state?: ActiveRun,
+    /** What dispatch resolved for this run, when it resolved anything — a pool choice or an
+     *  out-of-quota reroute. The record does not carry it; see the comment on `account` below. */
+    resolved?: PoolChoice,
   ): boolean {
     const run = this.store.getRun(runId);
     if (!run || run.status === 'cancelled' || state?.cancelled) return false;
@@ -3081,8 +3164,27 @@ export class RunManager {
     // hand an in-place run straight back, re-wedging the queue the rescue had just freed.
     // `dropActive` retires the entry on every terminal path, so the set still cleans itself up.
     if (this.forceStarted.has(runId)) return false;
-    // The account THIS SPAWN would use, which is the step's runner and not necessarily the run's.
-    const account = runAccountKey({ ...run, runner }, runner);
+    // The account THIS SPAWN would use.
+    //
+    // `resolved` when dispatch has already chosen one — a `pool:` route, or the out-of-quota
+    // reroute (`.ai/specs/2026-08-23-never-block-a-task.md`). Taking it is not an optimisation, it
+    // is the correctness fix: the reroute stamps its choice on the INPUT and deliberately leaves
+    // the record saying what the user asked for, so rebuilding the key from the record parked runs
+    // on the very account they had just been moved off — admission let them through, this gate
+    // handed them straight back.
+    //
+    // Falling back to the record is right when dispatch resolved nothing: then the run really is
+    // going to the account the record names, and a hold on it still means wait. **Deliberately not
+    // "skip the hold whenever the never-block setting is on".** That was the first attempt and it
+    // was too blunt — it disabled the hold outright on a default host, including the herd control
+    // that keeps a dozen queued runs from all walking into one closed window, which the ruling
+    // never asked for. The ruling is that a task proceeds on the next AVAILABLE provider; when
+    // there is none, a visible appointment with a real `autoResumeAt` is the honest answer and
+    // costs no quota. Measured: the blunt version reddened 23 tests in `auto-resume.test.ts`, and
+    // they were right.
+    const account = resolved
+      ? accountUsageKey(resolved.provider, resolved.accountId)
+      : runAccountKey({ ...run, runner }, runner);
     if (!accountHeldOn(account, run, this.semaphore.accountHolds())) return false;
     state?.releaseRepoRoot?.();
     if (state) state.releaseRepoRoot = undefined;
@@ -4646,7 +4748,8 @@ export class RunManager {
     });
     // Out-of-quota fallback (spec 2026-08-23-retarget-task-to-another-engine, Phase 4). Only for
     // an EXPLICIT pick — `pooled` being set means the user asked for a pool, which already routed
-    // around the limit on its own (Phase 1) and needs no override. Off by default.
+    // around the limit on its own (Phase 1) and needs no override. **ON by default** since
+    // `2026-08-23-never-block-a-task.md` (this comment said "Off by default" until then).
     const rerouted = pooled ?? (await this.rerouteExplicitAccountIfLimited(runId, input, config.defaultRunner));
     const chosen = pooled ?? rerouted;
     const taskBackend: RunnerId = chosen?.provider ?? input.runner ?? config.defaultRunner;
@@ -4654,7 +4757,7 @@ export class RunManager {
     // gate cannot be the only one, because dequeue is not the moment of no return. Nothing has
     // happened yet here, so the run goes back to the queue untouched (spec
     // 2026-08-03-auto-resume-after-usage-limit).
-    if (this.requeueWhileHeld(runId, workflow, input, taskBackend)) return;
+    if (this.requeueWhileHeld(runId, workflow, input, taskBackend, undefined, chosen)) return;
     // Extra system prompt (R2 2.3): POST override > config default; echoed on
     // the record so the UI/API can show what the run actually used.
     const extraSystemPrompt = resolveExtraSystemPrompt(input.systemPrompt, config.systemPrompt);
@@ -4847,7 +4950,7 @@ export class RunManager {
       // is a spawn, and hand the run back to the queue if the account closed meanwhile. This
       // check also covers the explicit lock-bypass path, where the account may close while the
       // run is preparing its first step.
-      if (this.requeueWhileHeld(runId, workflow, input, taskBackend, state)) return;
+      if (this.requeueWhileHeld(runId, workflow, input, taskBackend, state, chosen)) return;
     }
 
     // Handoff journal (spec 007) — seeded after the worktree exists so the
@@ -5063,11 +5166,21 @@ export class RunManager {
         // path run `232ad6d4` hit: `stepResume !== undefined` means this attempt actually resumed
         // a session, and the predicate recognizes the backend's "never created that conversation"
         // rejection. One retry per step, mirroring `resumedAfterStop` just above.
+        // From the RECORD, not `step.runner ?? taskBackend`. A step-level pin can be DOWNGRADED at
+        // dispatch when its provider is wholly out of quota (`downgradePinnedRunner`,
+        // `2026-08-23-never-block-a-task.md`), so the definition and the thing that ran no longer
+        // always agree — and this classifies one provider's rejection strings while reporting a
+        // metric about another. `runAgentStep` stamps `backend` before it spawns, so the record is
+        // the one place both facts are the same.
+        const ranOn =
+          this.store.getRun(runId)?.steps.find((s) => s.id === step.id)?.backend
+          ?? step.runner
+          ?? taskBackend;
         if (
           failure &&
           stepResume !== undefined &&
           !resumedAfterMissingSession.has(step.id) &&
-          isMissingSessionRejection(step.runner ?? taskBackend, failure)
+          isMissingSessionRejection(ranOn, failure)
         ) {
           resumedAfterMissingSession.add(step.id);
           this.store.updateStep(runId, step.id, { sessionId: undefined, status: 'pending', error: undefined });
@@ -5082,7 +5195,7 @@ export class RunManager {
             name: 'run.step.resumed_after_missing_session',
             runId,
             workflow: workflow.name,
-            backend: step.runner ?? taskBackend,
+            backend: ranOn,
           });
           continue; // same `i` — resumeFrom/stopResume are already spent, so the next pass mints a fresh id
         }
@@ -5614,7 +5727,17 @@ export class RunManager {
 
     // A resumed step keeps the session id it already owns — that id IS the work done so far.
     const sessionId = resumeFrom?.sessionId ?? randomUUID();
-    const backend = step.runner ?? taskBackend;
+    // Never blocked (`.ai/specs/2026-08-23-never-block-a-task.md`). A step may pin its own runner,
+    // and `spec-to-deploy` pins `runner: claude` + `opus` on `spec`/`review-spec` from the owner's
+    // 2026-08-22 "writing spec + spec review should be by opus always". When EVERY account of that
+    // provider is out of quota, that pin has nowhere to go and the step used to die there.
+    //
+    // The owner's 2026-08-23 ruling is that availability outranks the pin: proceed on whatever is
+    // available and say so. So the quality pin is now a preference with a fallback, not a
+    // guarantee — a real reduction in what the workflow promises, mitigated by announcement rather
+    // than prevention, which is why the note below is asserted by a test rather than decorative.
+    const pinned = step.runner ?? undefined;
+    const backend = (pinned ? await this.downgradePinnedRunner(runId, step, pinned) : undefined) ?? step.runner ?? taskBackend;
     this.store.updateStep(runId, step.id, { sessionId, backend });
 
     // Loaded once, closed over by `onEvent` below — the step budget (PLAN D27 Phase 1) is
@@ -5758,7 +5881,15 @@ export class RunManager {
       }
     };
 
-    const stepBackend = step.runner ?? taskBackend;
+    // The SAME value stamped on the record ~140 lines up, not a second evaluation of
+    // `step.runner ?? taskBackend`. It read that way until 2026-08-23, when
+    // `downgradePinnedRunner` made the two expressions able to disagree: the record said codex
+    // while `createRunner(stepBackend)` below still spawned claude, so the downgrade recorded a
+    // lie instead of changing anything. Caught because the test asserted the RECORD — which is
+    // the half a record-only bug agrees with. Everything downstream reads this one binding:
+    // `modelForBackend`, `normalizeModelForBackend`, `agentEnvForStep`, `createRunner`,
+    // `brokerFor`, and the claude-only transcript verification.
+    const stepBackend = backend;
     // Normalise the selected model to canonical `provider/model` and back to the
     // backend's own wire form via the ONE shared mapper (#405). Fail-loud: an
     // unresolvable model (e.g. a bare id on opencode) returns the step error

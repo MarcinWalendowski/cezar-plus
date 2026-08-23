@@ -98,10 +98,13 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
       ),
     },
   )
-  // Shipped OFF, and read as OFF when absent — the mirror image of `autoResume` above and for the
-  // opposite reason: this one OVERRIDES a choice the user made, so a server that predates the key
-  // must not appear to have it on.
-  const accountFallback = config.resources.fallbackAcrossAccountsWhenLimited ?? false
+  // Shipped ON, and read as ON when absent (spec 2026-08-23-never-block-a-task, on the owner's
+  // decision: "task should never be blocked ... it should always automatically proceed on next
+  // available provider & model"). It was OFF when introduced, because overriding an account the
+  // user named is a product decision — that decision has now been made, so the absent key reads
+  // as ON to match the engine, whose own default is `?? true`. The two must agree: a UI reading
+  // absent-as-OFF over an engine reading absent-as-ON shows a switch that lies.
+  const accountFallback = config.resources.fallbackAcrossAccountsWhenLimited ?? true
   const saveAccountFallback = (on: boolean) => save.mutate(
     { resources: { fallbackAcrossAccountsWhenLimited: on } },
     {
@@ -262,7 +265,7 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
 
       <SettingsField
         title="Out-of-quota fallback"
-        hint="When the account a task was given is out of quota, start it on any available account instead of waiting. Off (the default) means an account you picked is a requirement, not a preference: the task waits for that account's window. Tasks set to use an account pool already move around a limit either way."
+        hint="When the account a task was given is out of quota, start it on any available account — another login, or another agent — instead of waiting. On is the default: a task is never blocked by a limit. Off makes an account you picked a requirement rather than a preference, and the task waits for that account's window. Tasks set to use an account pool move around a limit either way."
       >
         <select
           aria-label="Out-of-quota fallback"
@@ -276,7 +279,8 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
           <option value="off">Off</option>
         </select>
         <p className="text-[11px] text-soft-foreground">
-          The task's thread always records which account it actually ran on.
+          The task's thread always records which account it actually ran on, and the engine picker
+          says the choice is a preference while this is on.
         </p>
       </SettingsField>
 

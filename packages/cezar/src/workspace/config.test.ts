@@ -63,7 +63,7 @@ describe('workspace config', () => {
     expect(config.schemaVersion).toBe(0);
     expect(config.browseRoot).toBe('~/');
     expect(config.projectsDir).toBe('~/cezar/projects');
-    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, fallbackAcrossAccountsWhenLimited: false, memoryLimitMb: null, runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null, runsSliceMemoryMaxMb: null, worktreeRetentionDefault: 1000 });
+    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, fallbackAcrossAccountsWhenLimited: true, memoryLimitMb: null, runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null, runsSliceMemoryMaxMb: null, worktreeRetentionDefault: 1000 });
     expect(config.composerDefaults).toEqual({});
     expect(config.projects).toEqual([]);
     expect(warn).not.toHaveBeenCalled();
@@ -236,7 +236,7 @@ describe('workspace config', () => {
     expect(config.schemaVersion).toBe(0);
     expect(config.browseRoot).toBe('~/');
     expect(config.projectsDir).toBe('~/cezar/projects');
-    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, fallbackAcrossAccountsWhenLimited: false, memoryLimitMb: null, runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null, runsSliceMemoryMaxMb: null, worktreeRetentionDefault: 1000 });
+    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, fallbackAcrossAccountsWhenLimited: true, memoryLimitMb: null, runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null, runsSliceMemoryMaxMb: null, worktreeRetentionDefault: 1000 });
     expect(config.projects).toEqual([project('good')]);
   });
 

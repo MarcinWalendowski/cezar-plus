@@ -22,7 +22,9 @@ import { AppRoutes } from '@/routes'
 
 let requests: Array<{ method: string; url: string; body?: unknown }> = []
 
-function serve(resources: Partial<WorkspaceConfigResponse['resources']> = {}) {
+/** Returns the served state so a case can mutate it — `delete`, notably, which is how "the server
+ *  omits this key" is expressed and is not reachable through the `resources` argument. */
+function serve(resources: Partial<WorkspaceConfigResponse['resources']> = {}): WorkspaceConfigResponse {
   requests = []
   const state: WorkspaceConfigResponse = {
     agentDefaults: {},
@@ -63,6 +65,7 @@ function serve(resources: Partial<WorkspaceConfigResponse['resources']> = {}) {
       return new Promise<never>(() => {})
     }),
   )
+  return state
 }
 
 /** Seeds the step-3.2 route gates so the shell renders immediately. The global settings area is
@@ -100,6 +103,8 @@ const monitoringSelect = () => document.querySelector<HTMLSelectElement>('[data-
 const wakeMode = () => document.querySelector<HTMLSelectElement>('[data-slot="resources-monitoring-wake-mode"]')
 const wakeInterval = () => document.querySelector<HTMLInputElement>('[data-slot="resources-monitoring-wake-interval"]')
 const saveWake = () => document.querySelector<HTMLButtonElement>('[data-action="resources-save-monitoring-wake"]')
+const accountFallback = () =>
+  document.querySelector<HTMLSelectElement>('[data-slot="resources-account-fallback"]')
 
 afterEach(() => {
   act(() => resetToasts())
@@ -211,6 +216,46 @@ describe('Global settings → Resources', () => {
     await waitFor(() => expect(parallelSelect()).not.toBeNull())
     expect(document.querySelector('[data-slot="resources-worktree-retention"]')).toBeNull()
     expect(screen.queryByText('Keep last N worktrees')).toBeNull()
+  })
+
+  /**
+   * The out-of-quota fallback (`2026-08-23-never-block-a-task.md`) ships ON, and this pane's
+   * reading of an ABSENT key is the whole behaviour: no host has ever written it, so `?? true` vs
+   * `?? false` here decides what every existing installation is shown. It flipped from `false` on
+   * 2026-08-23 with the engine's own default, and the two must stay in step — a pane reading
+   * absent-as-OFF over an engine reading absent-as-ON is a switch that lies about what will
+   * happen, which is worse than either answer.
+   */
+  it('shows the out-of-quota fallback as On when the server omits the key', async () => {
+    // Deleted rather than served as `false`: `false` is a host that chose it, and the case that
+    // matters is the host that has never seen the setting at all.
+    const state = serve()
+    delete (state.resources as Partial<WorkspaceConfigResponse['resources']>)
+      .fallbackAcrossAccountsWhenLimited
+    renderResources()
+
+    await waitFor(() => expect(accountFallback()).not.toBeNull())
+    expect(accountFallback()!.value).toBe('on')
+  })
+
+  it('shows it as Off when the host has explicitly turned it off', async () => {
+    // The control. Without it the assertion above passes against a select hard-wired to "on".
+    serve({ fallbackAcrossAccountsWhenLimited: false })
+    renderResources()
+
+    await waitFor(() => expect(accountFallback()).not.toBeNull())
+    expect(accountFallback()!.value).toBe('off')
+  })
+
+  it('writes false when turned off — the direction a falsy-swallowing merge would drop', async () => {
+    serve()
+    renderResources()
+    await waitFor(() => expect(accountFallback()).not.toBeNull())
+
+    fireEvent.change(accountFallback()!, { target: { value: 'off' } })
+
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(puts()[0]?.body).toEqual({ resources: { fallbackAcrossAccountsWhenLimited: false } })
   })
 
   it('renders and saves New task On/Off/Inherit policy', async () => {

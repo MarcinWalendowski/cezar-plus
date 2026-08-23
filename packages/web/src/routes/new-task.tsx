@@ -23,6 +23,7 @@ import {
   useAgentProfiles,
   useStartWorkspaceRun,
   useConfig,
+  useEngineAdvisory,
   useHealth,
   useProviderStatus,
   useProjects,
@@ -285,6 +286,7 @@ export function NewTaskRoute() {
   // Pools (spec 2026-08-16, Phase C) ride the same slot as an account id and are offered only with
   // the `accountUsage` capability, which is what maintains the signals they balance on.
   const poolsOffered = health.data?.capabilities?.accountUsage === true
+  const engineAdvisory = useEngineAdvisory()
   // A draft account belonging to ANOTHER runner is ignored rather than sent: switching runner must
   // not silently carry a foreign account along. A POOL is exempt — it names no runner's login, so
   // there is no foreign account to carry, and dropping it here would silently downgrade every
@@ -762,6 +764,7 @@ export function NewTaskRoute() {
                   account={agentProfile}
                   repoAccount={repoAccount}
                   pools={poolsOffered}
+                  advisory={engineAdvisory}
                   // Changing the AGENT clears the model pin: presets are per-runner, so a kept
                   // model would be one the new runner does not have. Changing only the account
                   // keeps it — the model catalog is the same either way.
