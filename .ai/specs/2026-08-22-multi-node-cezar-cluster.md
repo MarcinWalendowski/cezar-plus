@@ -4174,7 +4174,9 @@ invented; these are the names to use when one lands.
 >   collision" from "the collision check did not run". **A module being honest with itself is not the
 >   same as a surface being honest with its caller.**
 >
-> - **B14 — the Milestone D harness bug is WORSE than item 11 recorded: scenario 4 has it too.**
+> - **B14 — CORRECTED SAME DAY by B16: it is FOUR sites, and broken in TWO ways.** The entry below
+>   understates it; read B16. ~~the Milestone D harness bug is WORSE than item 11 recorded: scenario
+>   4 has it too.~~
 >   `cluster-link-activation.test.ts:737` builds the hub router with **no `env`**, then sets
 >   `process.env.CEZ_HOME = spokeHome` at `:767`. The hub's `markNodeSeen` therefore writes into the
 >   **spoke's** home, and every hub-side assertion in that scenario is one `CEZ_HOME` away from being
@@ -4196,6 +4198,80 @@ invented; these are the names to use when one lands.
 >   before checking `result.stamped`**, so a todo with `autostart: true` can have the spoke's own
 >   reconcile start a SECOND run · `resolvePoolForDispatch`/`resolvePoolForProvider`, which
 >   **advance the fairness cursor as a side effect** — use `selectPoolAccount` for speculative queries.
+>
+> - **B16 — THE D HARNESS IS BROKEN AT FOUR SITES AND IN TWO INDEPENDENT WAYS.** Not scenario 4
+>   alone: `cluster-link-activation.test.ts` **`:381`, `:453`, `:630`, `:737`** all call
+>   `createHubFrameRouter({ identity: hubIdentity })` with no `env`, and each then sets
+>   `process.env.CEZ_HOME = spokeHome` (`:396, :473, :645, :767`), so `clusterHomeDir(undefined)`
+>   falls through to the spoke's home.
+>   **The second break is the one that makes every future D assertion vacuous:** none of the four
+>   seeds a hub roster, and `markNodeSeen` (`peers.ts:164`) *"never fabricates a row"* — so the hub
+>   router **writes nothing at all** and emits `presence from unrostered node` into a swallowed
+>   `warn`. A D test asserting "the projection has the row" would therefore pass **on the spoke's own
+>   local write**. Two independent defects producing one passing test; fixing only the `env` half
+>   leaves it passing for the wrong reason.
+>   The D0 fix needs three assertions, red today for three different reasons: the hub's roster row
+>   exists under `hubHome`; **`existsSync(<spokeHome>/cluster/peers.json)` is FALSE** (the negative
+>   half, without which the first is a coincidence); and the `presence from unrostered node` warn was
+>   **not** emitted.
+>
+> - **B17 — MEASURED: ONE WATCHED RUN CONSUMES ~48% OF A NODE'S ENTIRE LINK BUDGET, AND THE DROPS
+>   ARE SILENT.** This is the number that decides D's design, and it was measured, not guessed.
+>   `RunStore` emits `'event'` from `appendEvent` **and from `emitEphemeral`** (`store.ts:1255`,
+>   never written to disk); `startRelay`'s `store.on('event')` receives both. `ui-event-sink.ts` has
+>   `DELTA_FLUSH_MS = 40` and emits **once per buffered field**, so one streaming item with `text` +
+>   `reasoning` produces ~50 events/sec.
+>   **`RELAY_TICK_EVENT_BUDGET = 64` never engages**, because `scheduleFlush` uses `setImmediate`
+>   (`relay.ts:106-109`) which fires long before the next 40 ms event — the queue never holds more
+>   than one entry. Simulated against a real 40 ms cadence: **48 events → 48 frames, 1.00
+>   events-per-frame, 24-48 frames/s against `SEND_BUDGET_FRAMES_PER_TICK = 100`.** Two watched runs
+>   exhaust the link.
+>   **And the failure is silent**: `link-client.writeFrame` warns on the byte bound, but
+>   `if (!this.consumeSendBudget()) return false;` warns nothing — so the ops flush's drops on an
+>   exhausted budget leave no trace. **Watching a foreign run can starve todo replication on the same
+>   link, silently.** The fix is one constant (`setTimeout(flush, RELAY_FLUSH_MS = 200)`), and the
+>   proof must carry the control that matters: with 2 runs watched for 5s, assert **an `ops` frame
+>   also got through** — a frame-count assertion alone does not prove non-starvation.
+>   Mitigating facts, both verified: `writeFrame` refuses an oversized frame *before* sending, so the
+>   hub's `maxPayload` 1009-kills-the-socket path is never reached from a relay; and a single >256 KB
+>   event degrades to `truncated: true`, never to silence.
+>
+> - **B18 — D IS NOT BLOCKED ON C. This inverts the spec's own item 15.** Item 15 says D depends on
+>   C because *"the hub today learns a run id from exactly one place, `freshness.accepted.runId`,
+>   which covers only runs it dispatched itself."* True of **today's** hub — and it stops being true
+>   the moment the projection lands, which gives the hub every run id on every linked node,
+>   **including runs a person started by hand on the Mac**, which `accepted.runId` could never cover.
+>   Wiring `createHubDispatcher` + `onAccepted` then only improves *latency* for dispatched runs.
+>   The real overlap is **three call sites, not a dependency** — `cluster-routes.ts:1165` (C adds
+>   `dispatchCorrelation`, D adds `relaySink`), `:1225`, and `server.ts:7457` — all additive fields
+>   on the same two objects, so either order works.
+>
+> - **B19 — D19 rung 3 is STRUCTURALLY unreachable, not merely unwired (sharpens B13).**
+>   `clusterActiveRunsFrom` hardcodes `paths: []`, `placement.ts:144` reads `run.paths`, and
+>   **`clusterRemoteRunSchema` has no `paths` field at all** — so the projection can never fill it.
+>   Adding it is four lines, but it widens the wire shape of a run against a docblock that says
+>   *"Nothing may be added here that would let a foreign run request one."* Repo-relative paths are
+>   safe by that rule; still an owner call.
+>
+> - **B20 — the recommended D design is the hub-side per-run SPOOL, and the reason for rejecting the
+>   cheaper option is worth keeping.** Three candidates, named by content: projected-status-only;
+>   demand-relay with a hub in-memory **ring**; demand-relay onto a hub **spool** with a `fromSeq`
+>   cursor. The spool wins because it is the only one where a browser reconnect AND a link drop both
+>   resume without a gap, and where joining mid-run shows the run from its start — and because
+>   `useRunEvents` already assumes replay-on-every-reconnect, which a ring cannot promise.
+>   **"The ring is not a cheaper spool — it is a spool you have to throw away."** Building a second
+>   splitter/dedup you intend to replace is precisely how the D29 fan-out postmortem happened.
+>   Status-only is the correct **first phase** and a dishonest **whole** (item 15 already warns that
+>   shipping it as "D closed" repeats Milestone C's mistake).
+>   The planner explicitly **refused to inherit my unsourced "poll first, then subscribe" label**:
+>   its phase order is projection-first because the spoke cannot resolve a `runId` to a `RunStore`
+>   without it, not because polling is a design stage. There is no polling in the plan.
+>
+> - **B21 — `asOf` is ALREADY FIXED; do not re-plan it.** `clusterActiveAsOfFrom`
+>   (`cluster-routes.ts:326-334`) derives it from roster `lastSeenAt`, the contract is
+>   `asOf: z.string().optional()`, and both call sites branch three ways. Recorded because two
+>   separate agents were briefed on the `asOf` defect after it had already been repaired — the
+>   open-items decay this branch keeps producing.
 > - **~~~25% of the whole spec. Milestone C and D are at 0%~~ — SUPERSEDED 2026-08-23 by the HANDOFF STATE block at the top of this file.** Milestone C landed in `f6a9bad6`: the SPOKE half is wired and live, the HUB half is built with zero production callers. **D is still at 0%.** Left below because the estimate of what C *was* still holds; it is not a statement of what remains. This is the "not built" label sitting over built code, which reads as licence to rebuild it. The original: ~25% of the whole spec, and the spec's own estimate is that C is
 >   *larger than A and B combined*.
 > - **0% verified on real hardware.** Every test runs both ends of the socket inside one process on
