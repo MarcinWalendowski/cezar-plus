@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,8 +10,9 @@ import {
   PENDING_MAX_ATTEMPTS,
   isRetryableBrokerLaunch,
 } from './brokered-session.ts';
+import { brokerNeverStarted } from './claude-cli-runner.ts';
 import { startRunBroker } from './run-broker.ts';
-import { ensureSpoolDir, writeSpoolExit, writeSpoolMeta } from './run-spool.ts';
+import { ensureSpoolDir, spoolPaths, writeSpoolExit, writeSpoolMeta } from './run-spool.ts';
 import { spoolDirFor } from './run-spool.ts';
 
 /**
@@ -377,5 +378,66 @@ describe('BrokeredSession', () => {
     expect(session.sendMessage([{ type: 'text', text: 'hello' }])).toBe(true);
 
     await expect(session.result).rejects.toBe(spawnErr);
+  }, TEST_TIMEOUT_MS);
+
+  it(
+    'protects billed work: a session that answered once and then went silent is not retryable',
+    async () => {
+      const spool = join(scratch(), 'answered-then-died.spool');
+      const broker = startRunBroker({ spoolDir: spool, runId: 'answered-then-died', backend: 'claude', command: echoBackend() });
+      const seen: string[] = [];
+      const session = new BrokeredSession({ spoolDir: spool, onLine: (l) => seen.push(l), pollMs: 5 });
+
+      // One real round-trip over the bound control socket — this is what sets `everAnswered` at
+      // the runtime assignment (`brokered-session.ts:308`), not the constructor seed the
+      // "re-attached channel" test above exercises.
+      session.sendMessage([{ type: 'text', text: 'one' }]);
+      await waitFor(() => seen.some((l) => l.includes('"echo"')));
+
+      // "close the socket": remove the control socket the broker is bound to, so every request
+      // from here on fails to connect. The broker process itself (this test process — brokers
+      // run in-process, only the backend is a real child) stays alive, so this exercises the
+      // give-up path rather than `failBrokerVanished`.
+      rmSync(spoolPaths(spool).ctl, { force: true });
+
+      const start = Date.now();
+      expect(session.sendMessage([{ type: 'text', text: 'after-death' }])).toBe(true);
+      const rejected = await session.result.catch((err: unknown) => err);
+      expect(rejected).toBeInstanceOf(BrokerUnavailableError);
+      expect(rejected).toMatchObject({ everAnswered: true, spoolDir: spool });
+      expect(isRetryableBrokerLaunch(rejected)).toBe(false);
+      expect(Date.now() - start).toBeLessThan(5_000);
+
+      await broker.close();
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it('the give-up seam rejects with launchFailure\'s own object when the broker was never started', async () => {
+    const spoolDir = join(scratch(), 'never-started.spool');
+    const launchLog = join(scratch(), 'never-started.broker.log');
+    writeFileSync(
+      launchLog,
+      'Failed to start transient scope unit: Unit cezar-run-x.scope was already loaded.\n',
+    );
+    let launchErr: Error | null = null;
+    const session = new BrokeredSession({
+      spoolDir,
+      onLine: () => {},
+      pollMs: 5,
+      launchFailure: () => {
+        launchErr = brokerNeverStarted(spoolDir, launchLog);
+        return launchErr;
+      },
+    });
+    expect(session.sendMessage([{ type: 'text', text: 'hello' }])).toBe(true);
+
+    const rejected = await session.result.catch((err: unknown) => err);
+    expect(rejected).toBe(launchErr);
+    expect(rejected).not.toBeInstanceOf(BrokerUnavailableError);
+    expect(isRetryableBrokerLaunch(rejected)).toBe(false);
+    expect((rejected as Error).message).toMatch(
+      /was never started — no meta\.json was written; launcher said: .*already loaded/,
+    );
   }, TEST_TIMEOUT_MS);
 });

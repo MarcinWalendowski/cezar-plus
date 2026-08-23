@@ -1,5 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import {
+  appendFileSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -411,6 +412,10 @@ export class ClaudeCliRunner implements AgentRunner {
       throw new Error('run broker requested but this cezar has no built entry point to re-exec');
     }
     if (!request.instanceId) throw new Error('fresh broker launch requires an instance id');
+    // Fault injection for `.ai/specs/2026-08-22-bounded-transient-broker-retry.md` Verification
+    // §4/§6 only: reproduces the permanent "nothing was ever started" case without a poisoned
+    // systemd scope. Inert unless the variable is set (Verification §5).
+    const neverStart = process.env.CEZ_BROKER_FAULT === 'never-start';
     // A previous session's spool must never be mistaken for this one's. Removing it before the
     // broker writes `meta.json` also means `isSpoolLive` can never observe a half-replaced spool:
     // it either sees the old complete one, or nothing, or the new complete one.
@@ -449,49 +454,59 @@ export class ClaudeCliRunner implements AgentRunner {
     let spawnFailed: Error | null = null;
     const [bin, ...rest] = argv;
     const launchLog = brokerLaunchLogPath(request.spoolDir);
-    const launchLogFd = openLaunchLog(launchLog);
-    try {
-      const proc = nodeSpawn(bin as string, rest, {
-        cwd: spec.cwd,
-        // The agent's environment, not ours: the broker execs the backend with its OWN
-        // `process.env`, so `buildChildEnv`'s allowlist has to be applied here or the agent would
-        // inherit the server's environment wholesale — the exact least-privilege regression #427
-        // closed.
-        // `buildChildEnv` is an ALLOWLIST, so it drops XDG_RUNTIME_DIR — and without that,
-        // `systemd-run --user` cannot find the user bus, so the scope launch fails even where a
-        // lingering user manager exists. Added only in `scope` mode, and only when the variable is
-        // genuinely absent, so the allowlist stays as narrow as #427 made it.
-        env: {
-          ...buildChildEnv({ backend: this.backend, extraEnv: spec.env }),
-          ...(request.isolation === 'scope' ? userScopeEnv() : {}),
-        },
-        // Detached, and stdio that is never a PIPE: the broker must not hold a pipe whose read end
-        // dies with us. That pipe is the thing this entire phase exists to remove.
-        //
-        // It used to be `stdio: 'ignore'` outright, which also threw away the LAUNCHER's diagnostics
-        // — and when `systemd-run` refuses to start a scope it says so on stderr and exits 1, which
-        // is not a spawn `error` event, so `spawnFailed` stays null and nothing is recorded
-        // anywhere on the box. A run then failed with "run broker did not respond after 5000ms",
-        // naming a process that was never created. A FILE fd keeps the no-pipe property intact
-        // while making that class of failure legible
-        // (`.ai/specs/2026-08-22-broker-scope-unit-name-collision.md`).
-        detached: true,
-        stdio: ['ignore', launchLogFd ?? 'ignore', launchLogFd ?? 'ignore'],
-      });
-      proc.on('error', (err: NodeJS.ErrnoException) => {
-        spawnFailed = wrapSpawnError(err, bin as string);
-      });
-      proc.unref();
-    } catch (err) {
-      throw wrapSpawnError(err, bin as string);
-    } finally {
-      // Ours to close either way: the child has its own duplicate of the descriptor, so closing
-      // here neither truncates its output nor leaks an fd per step in a long-running server.
-      if (launchLogFd !== null) {
-        try {
-          closeSync(launchLogFd);
-        } catch {
-          // Already gone (spawn failure paths can close it for us) — nothing to recover.
+    if (neverStart) {
+      // Nothing spawned, so `meta.json` is never written — the launch log line is the only trace,
+      // exactly like a launcher that refused on the way out.
+      try {
+        appendFileSync(launchLog, 'fault injection: never-start\n');
+      } catch {
+        // Diagnostics must never block a run.
+      }
+    } else {
+      const launchLogFd = openLaunchLog(launchLog);
+      try {
+        const proc = nodeSpawn(bin as string, rest, {
+          cwd: spec.cwd,
+          // The agent's environment, not ours: the broker execs the backend with its OWN
+          // `process.env`, so `buildChildEnv`'s allowlist has to be applied here or the agent would
+          // inherit the server's environment wholesale — the exact least-privilege regression #427
+          // closed.
+          // `buildChildEnv` is an ALLOWLIST, so it drops XDG_RUNTIME_DIR — and without that,
+          // `systemd-run --user` cannot find the user bus, so the scope launch fails even where a
+          // lingering user manager exists. Added only in `scope` mode, and only when the variable is
+          // genuinely absent, so the allowlist stays as narrow as #427 made it.
+          env: {
+            ...buildChildEnv({ backend: this.backend, extraEnv: spec.env }),
+            ...(request.isolation === 'scope' ? userScopeEnv() : {}),
+          },
+          // Detached, and stdio that is never a PIPE: the broker must not hold a pipe whose read end
+          // dies with us. That pipe is the thing this entire phase exists to remove.
+          //
+          // It used to be `stdio: 'ignore'` outright, which also threw away the LAUNCHER's diagnostics
+          // — and when `systemd-run` refuses to start a scope it says so on stderr and exits 1, which
+          // is not a spawn `error` event, so `spawnFailed` stays null and nothing is recorded
+          // anywhere on the box. A run then failed with "run broker did not respond after 5000ms",
+          // naming a process that was never created. A FILE fd keeps the no-pipe property intact
+          // while making that class of failure legible
+          // (`.ai/specs/2026-08-22-broker-scope-unit-name-collision.md`).
+          detached: true,
+          stdio: ['ignore', launchLogFd ?? 'ignore', launchLogFd ?? 'ignore'],
+        });
+        proc.on('error', (err: NodeJS.ErrnoException) => {
+          spawnFailed = wrapSpawnError(err, bin as string);
+        });
+        proc.unref();
+      } catch (err) {
+        throw wrapSpawnError(err, bin as string);
+      } finally {
+        // Ours to close either way: the child has its own duplicate of the descriptor, so closing
+        // here neither truncates its output nor leaks an fd per step in a long-running server.
+        if (launchLogFd !== null) {
+          try {
+            closeSync(launchLogFd);
+          } catch {
+            // Already gone (spawn failure paths can close it for us) — nothing to recover.
+          }
         }
       }
     }
