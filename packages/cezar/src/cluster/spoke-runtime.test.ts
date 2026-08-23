@@ -2,9 +2,12 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import {
+  CLUSTER_FRAME_MAX_BYTES,
   CLUSTER_PROTOCOL,
   type ClusterAckFrame,
+  type ClusterAckResult,
   type ClusterDispatchFrame,
   type ClusterDownlinkFrame,
   type ClusterFreshnessFrame,
@@ -14,6 +17,7 @@ import {
   type ClusterReplicaFrame,
   type ClusterRepoFreshness,
   type ClusterUplinkFrame,
+  clusterWatermarkSchema,
 } from '@loki-labs/better-cezar-contract';
 import type { ApplyHubReplicaInput, TodoItem } from '../todos.ts';
 import { applyHubReplica as applyHubReplicaFile, readTodos as readTodosFile } from '../todos.ts';
@@ -862,5 +866,742 @@ describe('startSpokeRuntime — replica downlink', () => {
       expect(onDisk[0]!.summary).toBe('updated by hub');
       dispose();
     });
+  });
+});
+
+/**
+ * The multi-project sweep, and specifically what `flushOps`'s `link-down` early break does to the
+ * projects BEHIND the one that failed. Every other outbox test in this file drives exactly one
+ * project, so the break itself — and the ordering it interacts with — was unpinned until here.
+ */
+describe('startSpokeRuntime — outbox flush across many projects (the link-down early break)', () => {
+  const KEYS = ['proj_a', 'proj_b', 'proj_c', 'proj_d', 'proj_e'] as const;
+
+  /** Five confirmed pairings in registry order. `discoverOutboxProjects` builds this list by walking
+   *  `peers.pairings` (`peers.ts` appends a new pairing and index-replaces an updated one), so the
+   *  order is insertion order and is STABLE across ticks — which is exactly what makes "who is at
+   *  the front" a durable property rather than a per-tick coin flip. */
+  function fiveProjects(): SpokeOutboxProject[] {
+    return KEYS.map((projectKey) => ({ projectKey, dataDir: `/fake/${projectKey}/.ai/cezar` }));
+  }
+
+  function projectOf(dataDir: string): string {
+    return dataDir.split('/')[2]!;
+  }
+
+  function opsKeysOf(sent: readonly ClusterUplinkFrame[]): string[] {
+    return opsFramesOf(sent).map((f) => f.projectKey!);
+  }
+
+  /** One pending todo per project, so every project owes exactly one op and therefore attempts
+   *  exactly one send — making "which projects were attempted" readable straight off the frames. */
+  function onePendingTodoPerProject(summaryBytes: Partial<Record<string, number>> = {}) {
+    return async (dataDir: string): Promise<TodoItem[]> => {
+      const key = projectOf(dataDir);
+      return [
+        makeTodo({
+          id: `t_${key}`,
+          summary: 'x'.repeat(summaryBytes[key] ?? 8),
+          pendingSince: '2026-08-23T00:00:00.000Z',
+          pendingFields: ['summary'],
+        }),
+      ];
+    };
+  }
+
+  it('a link drop mid-sweep stops the pass — the projects behind the failure are not even READ this tick', async () => {
+    const { link, sent, setOnline } = createFakeLink();
+    const readTodos = vi.fn(async (dataDir: string): Promise<TodoItem[]> => {
+      // The link drops WHILE project 3 of 5 is being flushed — before its own send, after a & b's.
+      if (projectOf(dataDir) === 'proj_c') setOnline(false);
+      return onePendingTodoPerProject()(dataDir);
+    });
+    const warn = vi.fn();
+    const dispose = startSpokeRuntime({
+      link,
+      heartbeatMs: 60_000,
+      opFlushMs: 1_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => makeDiscovery({ projects: fiveProjects() }),
+      readTodos,
+      warn,
+    });
+
+    await vi.advanceTimersByTimeAsync(0); // the immediate flush
+
+    // The two ahead of the drop landed; proj_c's send was attempted and refused.
+    expect(opsKeysOf(sent)).toEqual(['proj_a', 'proj_b']);
+    // The sharp pin on the break: d and e were never even read, let alone sent. Their `todos.json`
+    // is not touched at all once the link is known to be down.
+    expect(readTodos.mock.calls.map(([d]) => projectOf(d))).toEqual(['proj_a', 'proj_b', 'proj_c']);
+    // Post-loop bookkeeping still ran after the early exit: one outage warning for the whole sweep,
+    // not one per remaining project and not none.
+    expect(warn.mock.calls.filter(([m]) => (m as string).includes('outbox flush'))).toHaveLength(1);
+    dispose();
+  });
+
+  it('nothing behind the drop is lost — the next tick re-derives from disk and delivers every skipped project', async () => {
+    const { link, sent, setOnline } = createFakeLink();
+    let dropAtC = true;
+    const readTodos = vi.fn(async (dataDir: string): Promise<TodoItem[]> => {
+      if (dropAtC && projectOf(dataDir) === 'proj_c') setOnline(false);
+      return onePendingTodoPerProject()(dataDir);
+    });
+    const dispose = startSpokeRuntime({
+      link,
+      heartbeatMs: 60_000,
+      opFlushMs: 1_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => makeDiscovery({ projects: fiveProjects() }),
+      readTodos,
+      warn: () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(0); // tick 1: stops at proj_c
+    expect(opsKeysOf(sent)).toEqual(['proj_a', 'proj_b']);
+
+    dropAtC = false;
+    setOnline(true);
+    sent.length = 0;
+    await vi.advanceTimersByTimeAsync(1_000); // tick 2, link healthy again
+
+    // c is still owed (it was never sent, only attempted), and d & e were never lost — the records
+    // themselves are the durable intent (D5), so a re-derivation is all it takes. Asserted as a
+    // SET, not a sequence: this tick's sweep resumes past the project that blocked the last one, so
+    // the order is d,e,a,b,c here. Which five, and how many, is the property this test is about —
+    // the rotated order itself is pinned by its own test below, and the unrotated one above.
+    expect([...opsKeysOf(sent)].sort()).toEqual([...KEYS].sort());
+    expect(opsKeysOf(sent)[0]).toBe('proj_d'); // resumed just past proj_c, rather than re-doing a,b
+    dispose();
+  });
+
+  it('control: with the link up throughout, every project flushes on every tick, in registry order', async () => {
+    const { link, sent } = createFakeLink();
+    const dispose = startSpokeRuntime({
+      link,
+      heartbeatMs: 60_000,
+      opFlushMs: 1_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => makeDiscovery({ projects: fiveProjects() }),
+      readTodos: onePendingTodoPerProject(),
+      warn: () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(opsKeysOf(sent)).toEqual([...KEYS]);
+
+    sent.length = 0;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(opsKeysOf(sent)).toEqual([...KEYS]); // unchanged order, nothing rotated away on a clean pass
+    dispose();
+  });
+
+  /** `send()` returning `false` is THREE conditions, not one (`link-client.ts#send`/`writeFrame`):
+   *  offline, over this window's frame budget, or over `CLUSTER_FRAME_MAX_BYTES`. Only the first
+   *  matches the early break's stated premise ("the link is down for this node, not just this
+   *  project"). This link models the third — the one that is neither transient nor about the link:
+   *  it recurs identically on every tick until the RECORD changes. */
+  function createFrameBoundLink() {
+    const base = createFakeLink();
+    const rejecting: SpokeLink['send'] = (frame: ClusterUplinkFrame): boolean => {
+      if (Buffer.byteLength(JSON.stringify(frame), 'utf8') > CLUSTER_FRAME_MAX_BYTES) return false;
+      return base.link.send(frame);
+    };
+    return { ...base, link: { ...base.link, send: vi.fn(rejecting) } as unknown as SpokeLink & { send: ReturnType<typeof vi.fn> } };
+  }
+
+  it('a project whose frame the link can NEVER accept must not starve the projects behind it', async () => {
+    const { link, sent } = createFrameBoundLink();
+    // proj_c owes one record too big for any frame — `packOpsFrame` sends an oversized single op
+    // rather than stalling on it (`ops.ts`), and the link then refuses the frame, every tick.
+    const readTodos = vi.fn(onePendingTodoPerProject({ proj_c: CLUSTER_FRAME_MAX_BYTES + 1_000 }));
+    const dispose = startSpokeRuntime({
+      link,
+      heartbeatMs: 3_600_000,
+      opFlushMs: 1_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => makeDiscovery({ projects: fiveProjects() }),
+      readTodos,
+      warn: () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    for (let tick = 0; tick < 11; tick++) await vi.advanceTimersByTimeAsync(1_000);
+
+    const delivered = opsKeysOf(sent);
+    // The unrepresentable project itself genuinely cannot be flushed — that is a separate defect
+    // (see this module's docblock) and this test does not pretend to fix it.
+    expect(delivered).not.toContain('proj_c');
+    // Everything AHEAD of it keeps flowing, as it always did.
+    expect(delivered.filter((k) => k === 'proj_a').length).toBeGreaterThan(0);
+    // ...and everything BEHIND it must get its turn too. One poisoned record in one project is not
+    // allowed to be a permanent outage for every project after it in a stable ordering.
+    expect(delivered.filter((k) => k === 'proj_d').length).toBeGreaterThan(0);
+    expect(delivered.filter((k) => k === 'proj_e').length).toBeGreaterThan(0);
+    dispose();
+  });
+
+  it('the rotation is bounded, not a queue: a persistent blocker costs the tail a turn, never its place', async () => {
+    const { link, sent } = createFrameBoundLink();
+    const readTodos = vi.fn(onePendingTodoPerProject({ proj_a: CLUSTER_FRAME_MAX_BYTES + 1_000 }));
+    const dispose = startSpokeRuntime({
+      link,
+      heartbeatMs: 3_600_000,
+      opFlushMs: 1_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => makeDiscovery({ projects: fiveProjects() }),
+      readTodos,
+      warn: () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(0); // tick 1 stops on proj_a, the very first project
+    expect(opsKeysOf(sent)).toEqual([]);
+
+    sent.length = 0;
+    await vi.advanceTimersByTimeAsync(1_000); // tick 2 starts past it — the other four all flush
+
+    expect(opsKeysOf(sent)).toEqual(['proj_b', 'proj_c', 'proj_d', 'proj_e']);
+    dispose();
+  });
+});
+
+/**
+ * D35 — the ack's `results[]` was read by nothing at all, and a refusal has no second copy: the hub
+ * fans out ACCEPTED ops only, so a refused op never comes back as a `replica`, and `replica` is the
+ * only thing that clears `pendingSince`. See `spoke-runtime.ts#applyAck`'s amended docblock.
+ */
+describe('startSpokeRuntime — the ack’s refusals (D35 / D9a)', () => {
+  function claimRefusal(overrides: Partial<ClusterAckResult> = {}): ClusterAckResult {
+    return {
+      opId: 'op_claim_1',
+      hubSeq: 7,
+      accepted: false,
+      reason: 'already-started',
+      fields: { startedTaskId: 'run-winner', startedOn: 'node_hel1' },
+      ...overrides,
+    };
+  }
+
+  function ackWith(results: ClusterAckResult[], overrides: Partial<ClusterAckFrame> = {}): ClusterAckFrame {
+    return {
+      type: 'ack',
+      protocol: CLUSTER_PROTOCOL,
+      scope: 'project',
+      projectKey: 'proj_a',
+      throughHubSeq: 7,
+      results,
+      ...overrides,
+    };
+  }
+
+  /** No outbox, no disk — these tests drive `applyAck` alone through the frame listener. */
+  function startWithWarnCapture(): { emit: (frame: ClusterDownlinkFrame) => void; warns: string[]; dispose: () => void } {
+    const { link, emit } = createFakeLink();
+    const warns: string[] = [];
+    const dispose = startSpokeRuntime({
+      link,
+      heartbeatMs: 60_000,
+      opFlushMs: 60_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: NOOP_OUTBOX,
+      warn: (message) => warns.push(message),
+    });
+    return { emit, warns, dispose };
+  }
+
+  it('a refused claim is REPORTED, naming the op, the reason, and the run/node that won it', async () => {
+    const { emit, warns, dispose } = startWithWarnCapture();
+    await vi.advanceTimersByTimeAsync(0);
+    warns.length = 0;
+
+    emit(ackWith([claimRefusal()]));
+
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('REFUSED 1 of 1 op(s)');
+    expect(warns[0]).toContain('op op_claim_1');
+    expect(warns[0]).toContain('hubSeq 7');
+    expect(warns[0]).toContain('already-started');
+    expect(warns[0]).toContain('held by run "run-winner"');
+    expect(warns[0]).toContain('node "node_hel1"');
+    dispose();
+  });
+
+  it('says the run this node already started is NOT stopped by the ack — D9a’s asynchronous path reads backwards without it', async () => {
+    const { emit, warns, dispose } = startWithWarnCapture();
+    await vi.advanceTimersByTimeAsync(0);
+    warns.length = 0;
+
+    emit(ackWith([claimRefusal()]));
+
+    // Length first, so a regression that reports NOTHING fails with "expected [] to have a length
+    // of 1" rather than chai's "undefined ... is invalid for this assertion", which names neither
+    // the test nor the breakage.
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('a claim this node LOST');
+    expect(warns[0]).toContain('is NOT stopped by this ack');
+    dispose();
+  });
+
+  it('negative control: an ack whose results are ALL accepted says nothing — and the fixture really did carry results', async () => {
+    const { emit, warns, dispose } = startWithWarnCapture();
+    await vi.advanceTimersByTimeAsync(0);
+    warns.length = 0;
+
+    const accepted: ClusterAckResult[] = [
+      { opId: 'op_a', hubSeq: 6, accepted: true },
+      // An ACCEPTED claim carries `fields` too (`hub-apply.ts` stamps the winner's own values), so
+      // this is the case that catches a report keyed on `fields` instead of on `accepted`.
+      { opId: 'op_b', hubSeq: 7, accepted: true, fields: { startedTaskId: 'run-mine', startedOn: 'node_me' } },
+    ];
+    const frame = ackWith(accepted);
+    // The floor: without this the test would pass just as happily against an empty `results`, which
+    // is the vacuous version of this control.
+    expect(frame.results).toHaveLength(2);
+    emit(frame);
+
+    expect(warns).toHaveLength(0);
+    dispose();
+  });
+
+  it('negative control: an ack with no `results` field at all is silent', async () => {
+    const { emit, warns, dispose } = startWithWarnCapture();
+    await vi.advanceTimersByTimeAsync(0);
+    warns.length = 0;
+
+    emit({ type: 'ack', protocol: CLUSTER_PROTOCOL, scope: 'project', projectKey: 'proj_a', throughHubSeq: 7 });
+
+    expect(warns).toHaveLength(0);
+    dispose();
+  });
+
+  it('ONE line per frame, never one per result — a 500-result frame may not write 500 lines', async () => {
+    const { emit, warns, dispose } = startWithWarnCapture();
+    await vi.advanceTimersByTimeAsync(0);
+    warns.length = 0;
+
+    const many = Array.from({ length: 9 }, (_, i) => claimRefusal({ opId: `op_${i}`, hubSeq: 10 + i }));
+    emit(ackWith(many, { throughHubSeq: 18 }));
+
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('REFUSED 9 of 9 op(s)');
+    expect(warns[0]).toContain('op_0');
+    expect(warns[0]).toContain('op_2');
+    expect(warns[0]).not.toContain('op_3'); // spelled out to REFUSALS_DETAILED_MAX, then counted
+    expect(warns[0]).toContain('+6 more');
+    dispose();
+  });
+
+  it('a refusal WITHOUT `fields` is reported plainly — forged-author is not a claim loss and must not be described as one', async () => {
+    const { emit, warns, dispose } = startWithWarnCapture();
+    await vi.advanceTimersByTimeAsync(0);
+    warns.length = 0;
+
+    emit(
+      ackWith([
+        { opId: 'op_forged', hubSeq: 4, accepted: false, reason: 'forged-author: op claims "node_x", link authenticated "node_a"' },
+      ]),
+    );
+
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('forged-author');
+    expect(warns[0]).not.toContain('held by run');
+    expect(warns[0]).not.toContain('a claim this node LOST');
+    dispose();
+  });
+
+  it('a refusal carrying `fields` but no `startedTaskId` is not a claim loss either — the key, not the object, is the signal', async () => {
+    const { emit, warns, dispose } = startWithWarnCapture();
+    await vi.advanceTimersByTimeAsync(0);
+    warns.length = 0;
+
+    // No such refusal exists in the tree today (`hub-apply.ts#claimFields` always sets
+    // `startedTaskId`), which is exactly why this is worth pinning: a future refusal that returns
+    // any other corrected field would otherwise be announced as a lost claim "held by run
+    // undefined".
+    emit(ackWith([{ opId: 'op_other', hubSeq: 5, accepted: false, reason: 'some-future-reason', fields: { summary: 'corrected' } }]));
+
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('some-future-reason');
+    expect(warns[0]).not.toContain('a claim this node LOST');
+    expect(warns[0]).not.toContain('held by run');
+    expect(warns[0]).not.toContain('undefined');
+    dispose();
+  });
+
+  it('a WORKSPACE-scope ack’s refusal is still reported — the scope guard governs the watermark, not the verdict', async () => {
+    const { emit, warns, dispose } = startWithWarnCapture();
+    await vi.advanceTimersByTimeAsync(0);
+    warns.length = 0;
+
+    emit(ackWith([claimRefusal({ opId: 'op_ws' })], { scope: 'workspace', projectKey: undefined }));
+
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('op op_ws');
+    expect(warns[0]).toContain('workspace ack');
+    dispose();
+  });
+
+  it('an ACCEPTED result above a gap must not advance the outbox watermark past the gap — the silent loss `hub-ops.ts` names', async () => {
+    const { link, sent, emit } = createFakeLink();
+    // Op 6 THREW at the hub (a lock timeout, a write error) — so it gets no `results` entry, its
+    // hubSeq is burned, and `throughHubSeq` stops at 5. Op 7, in the same frame, succeeded and DOES
+    // get a result. `hub-ops.ts`: "a spoke that trusts the watermark alone would then believe the
+    // failed op was also durably applied, and drop it."
+    const readTodos = vi.fn(async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z', hubSeq: 6 })]);
+    const dispose = startSpokeRuntime({
+      link,
+      heartbeatMs: 60_000,
+      opFlushMs: 1_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => makeDiscovery(),
+      readTodos,
+      warn: () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(opsFramesOf(sent)).toHaveLength(1); // floor: the record really is owed to begin with
+
+    emit(ackWith([{ opId: 'op_7', hubSeq: 7, accepted: true }], { throughHubSeq: 5 }));
+
+    sent.length = 0;
+    await vi.advanceTimersByTimeAsync(1_000);
+    // Still owed. Reading `results[].hubSeq` as a watermark would retire op 6 — a write the hub
+    // never applied, dropped from the only place it still exists.
+    expect(opsFramesOf(sent)).toHaveLength(1);
+    dispose();
+  });
+
+  // CHARACTERISATION, NOT A GUARD — stated plainly because an unmarked test that cannot fail is
+  // worse than no test. No mutation of `spoke-runtime.ts` turns this red: the behaviour it pins is
+  // `ops.ts#deriveTodoOps`'s, and the record's `hubSeq` being `undefined` is what disarms that
+  // file's watermark guard no matter what this file does with the ack. It is here to make D35's
+  // leak concrete and to fail the day someone claims it is fixed without changing `ops.ts`,
+  // `replica.ts` or `todos.ts`.
+  it('reporting a refusal retires NOTHING — `throughHubSeq` alone still governs the outbox (the D35 leak, characterised)', async () => {
+    const { link, sent, emit } = createFakeLink();
+    // `pendingSince` set, no `hubSeq` on the record — exactly the state a refused op is left in,
+    // since a refusal is never fanned back as a `replica` and nothing else clears `pendingSince`.
+    const readTodos = vi.fn(async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z' })]);
+    const dispose = startSpokeRuntime({
+      link,
+      heartbeatMs: 60_000,
+      opFlushMs: 1_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => makeDiscovery(),
+      readTodos,
+      warn: () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(opsFramesOf(sent)).toHaveLength(1); // floor: it really was sent once
+
+    // The hub refused it and its `throughHubSeq` covers the refusal (a rejection IS resolved, per
+    // `hub-ops.ts`) — but the RECORD carries no `hubSeq`, so `deriveTodoOps`'s watermark guard
+    // cannot fire and the record is derived again, with a fresh opId, on the very next tick.
+    emit(ackWith([claimRefusal({ opId: 'op_1' })]));
+
+    sent.length = 0;
+    await vi.advanceTimersByTimeAsync(1_000);
+    const resent = opsFramesOf(sent);
+    expect(resent).toHaveLength(1);
+    expect(resent[0]!.ops[0]!.opId).not.toBe('op_1'); // a FRESH opId — the hub will durably re-apply
+    dispose();
+  });
+});
+
+/**
+ * The hub registers a node in `this.nodes` at socket upgrade (`link-server.ts:196`), BEFORE
+ * `hello`/`welcome`, so `connectedNodes()` can hand the fan-out a node mid-handshake. This is what
+ * the spoke does when that frame lands first.
+ */
+describe('startSpokeRuntime — a replica frame that arrives before `welcome`', () => {
+  function makeChange(overrides: Record<string, unknown> = {}) {
+    return {
+      opId: 'op_pre',
+      nodeId: 'node_other',
+      ts: '2026-08-23T00:00:00.000Z',
+      scope: 'project' as const,
+      projectKey: 'proj_a',
+      entity: 'todo' as const,
+      entityId: 't1',
+      op: 'upsert' as const,
+      fields: { summary: 'set by the hub' },
+      hubSeq: 3,
+      ...overrides,
+    };
+  }
+
+  it('is APPLIED, not dropped — there is no handshake gate here, and adding one would silently lose the push', async () => {
+    const { link, emit, listeners } = createFakeLink();
+    const applyResult: ReplicaApplyResult = { todos: [makeTodo()], corrections: [], appliedThroughHubSeq: 3, skipped: 0 };
+    const applyHubReplica = vi.fn(async (_dataDir: string, _input: ApplyHubReplicaInput) => applyResult);
+    const seen: ClusterDownlinkFrame[] = [];
+    const dispose = startSpokeRuntime({
+      link,
+      heartbeatMs: 60_000,
+      opFlushMs: 60_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => makeDiscovery(),
+      readTodos: async () => [makeTodo()],
+      applyHubReplica,
+      warn: () => {},
+    });
+    // Floor for "before welcome": record every frame the runtime is given, and assert at the end
+    // that no `welcome` was ever among them. Without this the test would pass against a fixture
+    // that simply forgot to send one.
+    listeners.push((frame) => seen.push(frame));
+
+    const frame: ClusterReplicaFrame = {
+      type: 'replica',
+      protocol: CLUSTER_PROTOCOL,
+      scope: 'project',
+      projectKey: 'proj_a',
+      changes: [makeChange()],
+      hubSeq: 3,
+    };
+    emit(frame);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(seen.some((f) => f.type === 'welcome')).toBe(false);
+    expect(applyHubReplica).toHaveBeenCalledTimes(1);
+    expect(applyHubReplica.mock.calls[0]![1].changes).toEqual([makeChange()]);
+    expect(applyHubReplica.mock.calls[0]![1].appliedThroughHubSeq).toBe(0);
+    dispose();
+  });
+
+  it('a frame whose `hubSeq` outruns what it delivered marks the gap applied — a later push of the skipped op is handed a watermark above it', async () => {
+    const { link, emit } = createFakeLink();
+    // `applyReplica` itself only advances over changes it saw; `applyReplicaFrame` then takes
+    // `max(that, frame.hubSeq)`. So the FRAME's declaration is what wins here.
+    const applyHubReplica = vi.fn(async (_dataDir: string, input: ApplyHubReplicaInput) => ({
+      todos: [makeTodo()],
+      corrections: [],
+      appliedThroughHubSeq: input.appliedThroughHubSeq,
+      skipped: 0,
+    }));
+    const dispose = startSpokeRuntime({
+      link,
+      heartbeatMs: 60_000,
+      opFlushMs: 60_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => makeDiscovery(),
+      readTodos: async () => [makeTodo()],
+      applyHubReplica,
+      warn: () => {},
+    });
+
+    // Ops 1..11 were never delivered to this node (D30's stale hub watermark, or D29's exclusion).
+    emit({
+      type: 'replica',
+      protocol: CLUSTER_PROTOCOL,
+      scope: 'project',
+      projectKey: 'proj_a',
+      changes: [makeChange({ opId: 'op_12', hubSeq: 12 })],
+      hubSeq: 12,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(applyHubReplica.mock.calls[0]![1].appliedThroughHubSeq).toBe(0); // floor: it started at 0
+
+    // Replay now ships op 8, which this node never received.
+    emit({
+      type: 'replica',
+      protocol: CLUSTER_PROTOCOL,
+      scope: 'project',
+      projectKey: 'proj_a',
+      changes: [makeChange({ opId: 'op_8', hubSeq: 8 })],
+      hubSeq: 8,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(applyHubReplica).toHaveBeenCalledTimes(2);
+    // 12, not 8 — and `replica.ts#applyReplica` skips any change at or below the watermark it is
+    // given, so op 8 is discarded rather than applied. Recorded as the current behaviour, not
+    // endorsed: the fix belongs where the frame's `hubSeq` is chosen (`replica-fanout.ts`).
+    expect(applyHubReplica.mock.calls[1]![1].appliedThroughHubSeq).toBe(12);
+    dispose();
+  });
+});
+
+/**
+ * D38 — `link-client.ts#sendHello` hardcodes `hello.watermarks: []`, so the hub asks every node
+ * where it is and every node answers "nowhere", and each reconnect replays the whole scope. These
+ * pin the spoke's half: report the live position, report nothing this node cannot vouch for, and
+ * persist nothing.
+ */
+describe('startSpokeRuntime — watermarks() for hello (D38)', () => {
+  function startWithProject(overrides: Partial<Parameters<typeof startSpokeRuntime>[0]> = {}) {
+    const { link, sent, emit } = createFakeLink();
+    const handle = startSpokeRuntime({
+      link,
+      heartbeatMs: 60_000,
+      opFlushMs: 60_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => makeDiscovery(),
+      readTodos: async () => [makeTodo()],
+      warn: () => {},
+      ...overrides,
+    });
+    return { handle, sent, emit };
+  }
+
+  const ackFor = (projectKey: string, throughHubSeq: number): ClusterAckFrame => ({
+    type: 'ack',
+    protocol: CLUSTER_PROTOCOL,
+    scope: 'project',
+    projectKey,
+    throughHubSeq,
+  });
+
+  it('reports a position this node actually holds — the ack watermark, read back off the handle', async () => {
+    const { handle, emit } = startWithProject();
+    await vi.advanceTimersByTimeAsync(0);
+    // The floor. If this were not empty the rest of the test would prove nothing about `emit`.
+    expect(handle.watermarks()).toEqual([]);
+
+    emit(ackFor('proj_a', 9));
+
+    expect(handle.watermarks()).toEqual([
+      { scope: 'project', projectKey: 'proj_a', appliedThroughHubSeq: 0, ackedThroughHubSeq: 9 },
+    ]);
+    handle();
+  });
+
+  it('is a GETTER, not a snapshot — a position taken after the handle was made is still visible', async () => {
+    const { handle, emit } = startWithProject();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const reader = handle.watermarks; // what `sendHello` would hold across reconnects
+    expect(reader()).toEqual([]); // floor: nothing yet
+
+    emit(ackFor('proj_a', 3));
+    expect(reader()).toHaveLength(1);
+    expect(reader()[0]!.ackedThroughHubSeq).toBe(3);
+
+    emit(ackFor('proj_a', 11)); // a second reconnect must see the NEWER position
+    expect(reader()[0]!.ackedThroughHubSeq).toBe(11);
+    handle();
+  });
+
+  it('carries BOTH positions on one entry — applied from a replica, acked from an ack', async () => {
+    const applyHubReplica = vi.fn(async (_dataDir: string, _input: ApplyHubReplicaInput) => ({
+      todos: [makeTodo()],
+      corrections: [],
+      appliedThroughHubSeq: 6,
+      skipped: 0,
+    }));
+    const { handle, emit } = startWithProject({ applyHubReplica });
+    await vi.advanceTimersByTimeAsync(0);
+
+    emit({
+      type: 'replica',
+      protocol: CLUSTER_PROTOCOL,
+      scope: 'project',
+      projectKey: 'proj_a',
+      changes: [],
+      hubSeq: 6,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    emit(ackFor('proj_a', 4));
+
+    expect(handle.watermarks()).toEqual([
+      { scope: 'project', projectKey: 'proj_a', appliedThroughHubSeq: 6, ackedThroughHubSeq: 4 },
+    ]);
+    handle();
+  });
+
+  it('a project that has only ever FLUSHED is omitted, not advertised at zero', async () => {
+    const { link, sent, emit } = createFakeLink();
+    const handle = startSpokeRuntime({
+      link,
+      heartbeatMs: 60_000,
+      opFlushMs: 60_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => makeDiscovery(),
+      readTodos: async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z' })],
+      warn: () => {},
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // THE FLOOR, and the whole point of this test: the flush really ran, and `flushProject` calls
+    // `stateFor(projectKey)` before it derives anything — so a `{0,0}` entry for proj_a exists in
+    // the map right now. An assertion of `[]` here is about the FILTER, not about an absent entry.
+    expect(opsFramesOf(sent)).toHaveLength(1);
+    expect(handle.watermarks()).toEqual([]);
+
+    // Proof that the entry was reachable all along: the same key, once it holds a real position,
+    // reports immediately — no second project, no re-discovery.
+    emit(ackFor('proj_a', 2));
+    expect(handle.watermarks()).toEqual([
+      { scope: 'project', projectKey: 'proj_a', appliedThroughHubSeq: 0, ackedThroughHubSeq: 2 },
+    ]);
+    handle();
+  });
+
+  it('reports one entry per project, and only the projects that have a position', async () => {
+    const { link, emit } = createFakeLink();
+    const handle = startSpokeRuntime({
+      link,
+      heartbeatMs: 60_000,
+      opFlushMs: 60_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: async () => ({
+        nodeId: 'node_a' as const,
+        projects: [makeProject(), makeProject({ projectKey: 'proj_b', dataDir: '/fake/proj_b/.ai/cezar' })],
+      }),
+      readTodos: async () => [makeTodo()],
+      warn: () => {},
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    emit(ackFor('proj_a', 5));
+    emit(ackFor('proj_b', 8));
+    expect(handle.watermarks()).toHaveLength(2); // floor: both really are there
+
+    const byKey = Object.fromEntries(handle.watermarks().map((m) => [m.projectKey, m.ackedThroughHubSeq]));
+    expect(byKey).toEqual({ proj_a: 5, proj_b: 8 });
+    handle();
+  });
+
+  it('every entry validates against the wire schema — `.strict()`, so a stray key would fail here', async () => {
+    const { handle, emit } = startWithProject();
+    await vi.advanceTimersByTimeAsync(0);
+    emit(ackFor('proj_a', 7));
+
+    const marks = handle.watermarks();
+    expect(marks).toHaveLength(1); // floor: `z.array(...).parse([])` passes vacuously
+    expect(() => z.array(clusterWatermarkSchema).parse(marks)).not.toThrow();
+    handle();
+  });
+
+  it('keeps answering after dispose — the position it reached is still a true statement', async () => {
+    const { handle, emit } = startWithProject();
+    await vi.advanceTimersByTimeAsync(0);
+    emit(ackFor('proj_a', 12));
+    expect(handle.watermarks()).toHaveLength(1); // floor
+
+    handle(); // the disposer, still the same callable it always was
+
+    expect(handle.watermarks()).toEqual([
+      { scope: 'project', projectKey: 'proj_a', appliedThroughHubSeq: 0, ackedThroughHubSeq: 12 },
+    ]);
+  });
+
+  it('the handle is still callable as the plain disposer `cluster-routes.ts` treats it as', async () => {
+    const { link, sent } = createFakeLink();
+    const handle = startSpokeRuntime({
+      link,
+      heartbeatMs: 1_000,
+      opFlushMs: 60_000,
+      collectPresence: async () => makePresence(),
+      collectOutboxProjects: NOOP_OUTBOX,
+      warn: () => {},
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const afterFirstBeat = sent.length;
+    expect(afterFirstBeat).toBeGreaterThan(0); // floor: the heartbeat really was running
+
+    handle(); // `stopHeartbeat()` at cluster-routes.ts:1157
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(sent).toHaveLength(afterFirstBeat); // stopped
   });
 });

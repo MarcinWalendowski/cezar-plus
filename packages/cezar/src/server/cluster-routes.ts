@@ -15,6 +15,7 @@ import {
   type ClusterNode,
   type ClusterNodeId,
   type ClusterNodeRevokeResponse,
+  type ClusterOp,
   type ClusterOverviewResponse,
   type ClusterPairing,
   type ClusterPairingProposal,
@@ -52,14 +53,18 @@ import {
   redeemEnrollmentCode,
   revokeEnrollmentCode,
 } from '../cluster/enrollment.ts';
-import { createHubFrameRouter } from '../cluster/hub-router.ts';
+import { applyOpAtHub } from '../cluster/hub-apply.ts';
+import { createHubFrameRouter, type HubReplicationDeps } from '../cluster/hub-router.ts';
+import type { HubOpOutcome } from '../cluster/hub-ops.ts';
+import { createHubSeqAllocator } from '../cluster/hub-seq.ts';
 import { acquireLease, releaseLease } from '../cluster/leases.ts';
 import { ClusterLinkClient } from '../cluster/link-client.ts';
 import { ClusterLinkServer, type UpgradeCapableServer } from '../cluster/link-server.ts';
 import { createNodeAuthMiddleware, getAuthenticatedClusterNode } from '../cluster/node-auth.ts';
 import { clusterModeFromEnv, loadNodeIdentity, nodeIdentityPath } from '../cluster/node-identity.ts';
 import { lookupNodeSecret as lookupStoredNodeSecret } from '../cluster/node-secrets.ts';
-import { startSpokeRuntime } from '../cluster/spoke-runtime.ts';
+import { createOpHistoryStore, OP_HISTORY_PRUNE_INTERVAL_MS } from '../cluster/op-history.ts';
+import { startSpokeRuntime, type SpokeRuntimeHandle } from '../cluster/spoke-runtime.ts';
 import { applyPairingAction, disableNode, readPeers, upsertNode } from '../cluster/peers.ts';
 import { readRemoteRuns } from '../cluster/run-projection.ts';
 import { loadServerState } from '../server-install/state.ts';
@@ -894,6 +899,111 @@ function errorMessage(err: unknown): string {
 }
 
 /**
+ * Builds the `HubReplicationDeps` `startClusterRuntime`'s hub branch hands to
+ * `createHubFrameRouter` — the wiring that makes Milestone B's `hub-apply.ts`/`hub-seq.ts`/
+ * `op-history.ts` (~1,500 lines, fully tested, zero production callers before this function)
+ * reachable outside a test file. Exported and unit-tested on its own, separate from the E2E in
+ * `cluster-link-activation.test.ts` that proves this is actually the function `startClusterRuntime`
+ * calls — see that file for why both are needed.
+ *
+ * `linkServer` is a GETTER, not the `ClusterLinkServer` instance itself, so this function can be
+ * built and exercised (including its throw paths) without ever standing up a real link. The
+ * production caller passes `() => linkServer`, closing over a `let` it assigns synchronously right
+ * after this call returns — safe because `ClusterLinkServer` never invokes `onFrame` (the only path
+ * that reaches `sendTo`/`connectedNodes`) before a real socket has authenticated and delivered a
+ * frame, which is always later than this synchronous assignment (see `link-server.ts`: `onFrame` is
+ * called only from `onMessage`, reachable only via `ws.on('message')` on a socket that only exists
+ * after the `'connection'` listener fires, which only happens after `handleUpgrade` accepts the
+ * auth). `identity` is accepted for parity with `HubFrameRouterDeps` and to name this hub in the
+ * pairing-refusal message below; it plays no role in `resolveHubTodosRoot`, which loads its own
+ * copy of the hub's identity from disk per call (it has to — it is also reachable from the HTTP
+ * `/cluster/todos/*` family, which does not have this function's `identity` in scope).
+ *
+ * **`applyOp` resolves its dataDir PER OP, never once.** A `ClusterOp` carries its own
+ * `scope`/`projectKey` and nothing anywhere validates that they agree with the frame's — a hub
+ * accepting a single fixed `dataDir` closure would write project B's ops into project A's
+ * `todos.json` the moment a frame's `projectKey` and an op's disagreed. The required mutation test
+ * for this file is exactly that substitution; see the "REQUIRED mutation" note in the test.
+ *
+ * **Every unresolvable case THROWS, never returns `{accepted:false}`.** Per `hub-ops.ts`'s own
+ * reject-vs-throw contract, a returned rejection is a DURABLE verdict — the spoke advances past it
+ * and drops the op from its outbox forever. Neither case below is durable: an unconfirmed pairing
+ * is confirmed by a human at any later time, and a corrupt `peers.json` degrades to an empty roster
+ * (`peers.ts`), which is indistinguishable here from "genuinely unpaired" — treating either as a
+ * permanent rejection would silently discard writes behind a transient or operator-fixable state. A
+ * throw costs only a burned `hubSeq` (an unbounded counter, so log noise, not a failure) and leaves
+ * the op owed in the spoke's outbox, which is the far better failure per `hub-router.ts`'s own
+ * stated posture for this whole file.
+ *
+ * **The authorization gap this closes.** Nothing else on the link path checked that the AUTHORING
+ * node (`op.nodeId`) is confirmed-paired with the project it is writing, while the HTTP
+ * `/cluster/todos/*` family gates exactly that, both ways (D20/D21 — see `resolveHubTodosRoot`
+ * above). Passing `op.nodeId` as `resolveHubTodosRoot`'s `callerNodeId` makes the link path match:
+ * today the two already agree by construction (`deriveTodoOps` stamps `nodeId: input.nodeId`, the
+ * authoring node's own), so this costs nothing for the honest case, but it is what stops a node
+ * refused a project over HTTP from writing that project over the socket instead. A stronger
+ * guard — refusing an op whose `op.nodeId` disagrees with the link's AUTHENTICATED identity — has to
+ * live in `hub-router.ts`'s `ops` case, not here; this function only ever sees the op, not the
+ * socket that carried it.
+ */
+export function buildHubReplication(
+  identity: StoredClusterNodeIdentity,
+  env: NodeJS.ProcessEnv,
+  warn: (message: string) => void,
+  linkServer: () => ClusterLinkServer | undefined,
+): HubReplicationDeps {
+  const allocator = createHubSeqAllocator({ env, warn });
+  const opHistory = createOpHistoryStore({ env, warn });
+
+  const applyOp = async (op: ClusterOp & { hubSeq: number }): Promise<HubOpOutcome> => {
+    if (op.scope !== 'project' || !op.projectKey) {
+      // No workspace-scoped todo store exists anywhere in the tree yet (module docblock of
+      // `hub-apply.ts` names the same "never fabricate" posture for `entity`). Thrown, not
+      // returned — see this function's own docblock.
+      throw new Error(
+        `cluster hub: no ${op.scope}-scoped store exists on this build — op ${op.opId} left unacknowledged`,
+      );
+    }
+    // `op.nodeId` is the AUTHORING node, the same both-ways-confirmed gate the HTTP
+    // /cluster/todos family applies (D20/D21, `resolveHubTodosRoot` above in this file).
+    const root = await resolveHubTodosRoot(op.projectKey, op.nodeId, env);
+    if (!root) {
+      throw new Error(
+        `cluster hub (${identity.nodeId}): project "${op.projectKey}" is not confirmed-paired with ` +
+          `node "${op.nodeId}" on this hub — op ${op.opId} left unacknowledged; it stays in that ` +
+          "node's outbox until the pairing is confirmed",
+      );
+    }
+    return applyOpAtHub(todosDataDir(root), op);
+  };
+
+  return {
+    allocate: (input) => allocator.allocate(input),
+    applyOp,
+    findAppliedOp: (opId) => opHistory.find(opId),
+    recordAppliedOp: (opId, result) => opHistory.record(opId, result),
+    // `false` = "not connected", which `hub-router.ts`'s `ops` case already handles correctly: it
+    // warns and deliberately does NOT advance that node's watermark, so the frame is owed again on
+    // the next batch. That is also the right answer for the pre-assignment window (this function
+    // called before `linkServer()` has anything to return) — over-sending is free, under-sending
+    // loses a write.
+    sendTo: (nodeId, frame) => linkServer()?.send(nodeId, frame) ?? false,
+    // B4 — connect-time replay's ONE production read. Deliberately the SAME two calls `applyOp`
+    // above makes, in the same order: `resolveHubTodosRoot` (D20/D21's both-ways-confirmed pairing
+    // gate) and then the project's todos. Not a second implementation of that gate that happens to
+    // agree today — one rule, one call site, so a change to who may be replayed a project cannot
+    // drift from who may write it. `undefined` here is that gate's REFUSAL and is passed through
+    // unchanged; `hub-router.ts#readTodosFor` documents why it must stay distinguishable from `[]`.
+    readTodosFor: async (projectKey, nodeId) => {
+      const root = await resolveHubTodosRoot(projectKey, nodeId, env);
+      if (!root) return undefined;
+      return readTodos(todosDataDir(root));
+    },
+    connectedNodes: () => linkServer()?.connectedNodes() ?? [],
+  };
+}
+
+/**
  * The ONE wiring line `server.ts` carries for this feature, beside the existing
  * `providerRuntimeAuth.watch` / `watchTodoAutostart` block. It lives here rather than in
  * `server.ts` so a package fills a body in a file it can be given, instead of editing the one file
@@ -973,13 +1083,51 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
         return;
       }
       if (disposed) return; // stop() ran while identity was loading — never arm a link it cannot reach
-      const linkServer = new ClusterLinkServer({
+
+      // A forward declaration so `buildHubReplication`'s `sendTo`/`connectedNodes` can reach the
+      // `ClusterLinkServer` instance whose OWN constructor needs the router that needs them. Safe —
+      // see `buildHubReplication`'s docblock for the full argument — because `onFrame` cannot run
+      // before a real socket has authenticated and delivered a message, which is always later than
+      // this synchronous assignment.
+      let linkServer: ClusterLinkServer | undefined;
+      const replication = buildHubReplication(identity, env, warn, () => linkServer);
+
+      // B2a: sweep op-history's durable per-opId verdict cache on its own timer, independent of the
+      // instance `buildHubReplication` builds internally for `applyOp`/`findAppliedOp`/
+      // `recordAppliedOp` — both point at the same `op-history.json` and neither holds in-memory
+      // state beyond the file, so two instances are exactly as correct as one (op-history.ts's own
+      // module docblock). See `OP_HISTORY_PRUNE_INTERVAL_MS`'s docblock for the cadence trade. One
+      // immediate sweep on arm: at ~10 blue-green restarts/day this is the sweep that actually runs
+      // in production; the interval is the backstop for a long-lived hub.
+      const opHistory = createOpHistoryStore({ env, warn });
+      const pruneOnce = (): void => {
+        // `prune()` REJECTS on whole-file corruption (op-history.ts). Unhandled inside a timer
+        // callback has no caller to receive it — an uncaught rejection there kills the process.
+        void opHistory
+          .prune()
+          .then((removed) => {
+            if (removed > 0) warn(`cluster hub: pruned ${removed} expired op-history verdict(s)`);
+          })
+          .catch((err: unknown) => {
+            warn(`cluster hub: op-history prune failed, retrying next sweep: ${errorMessage(err)}`);
+          });
+      };
+      pruneOnce();
+      const pruneTimer = setInterval(pruneOnce, OP_HISTORY_PRUNE_INTERVAL_MS);
+      // A CLI process must be able to exit with a hub link open; a maintenance sweep must never be
+      // the thing holding the event loop alive — same reason as `spoke-runtime.ts`'s own timers.
+      pruneTimer.unref?.();
+
+      linkServer = new ClusterLinkServer({
         identity,
-        onFrame: createHubFrameRouter({ identity, env, warn }),
+        onFrame: createHubFrameRouter({ identity, env, warn, replication }),
         warn,
       });
       linkServer.attach(deps.server);
-      teardown = () => void linkServer.close();
+      teardown = () => {
+        clearInterval(pruneTimer);
+        void linkServer?.close();
+      };
       return;
     }
 
@@ -1002,9 +1150,38 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
     }
 
     if (disposed) return; // stop() ran while identity was loading — never arm a link it cannot reach
-    const linkClient = new ClusterLinkClient({ identity, hubUrl, version: deps.version, warn });
+    // D38 — the spoke's `hello` reports where it actually is, instead of the hardcoded `[]` that
+    // made every reconnect replay the whole scope. LATE-BOUND, and not as a matter of taste: the
+    // runtime holding these numbers does not exist yet on the next line, and it takes `linkClient`
+    // as its own dependency, so this is a genuine cycle and a value passed here could only ever be
+    // the empty one. Same shape as `buildHubReplication`'s `sendTo: (…) => linkServer()?.…` above.
+    //
+    // The `?? []` is a floor, NOT a window this code actually passes through — measured, because
+    // the first version of this comment claimed it was. `start()` -> `dial()` -> `new WebSocket()`
+    // returns synchronously and `sendHello` fires from `ws.on('open')` (`link-client.ts:274`),
+    // which needs a network round trip; the assignment below runs synchronously two statements
+    // later. So no `hello` is ever sent with `spokeRuntime` unassigned, and a test asserting an
+    // empty first `hello` is observing "nothing applied yet", never "the runtime is unwired" —
+    // two true statements producing identical bytes, only one of them a mechanism. Keep the
+    // fallback anyway: it costs nothing and the ordering above is a property of another file.
+    //
+    // `[]` is also the correct answer after a process
+    // restart: `spoke-runtime.ts` holds these in memory only, deliberately, so `[]` there means
+    // "I genuinely do not know where I am", and a full replay is the right consequence. Nothing is
+    // persisted here for exactly that reason — persisting would reassert a position across a
+    // restart that the runtime cannot vouch for, turning a bounded over-send into a silent
+    // under-send.
+    let spokeRuntime: SpokeRuntimeHandle | undefined;
+    const linkClient = new ClusterLinkClient({
+      identity,
+      hubUrl,
+      version: deps.version,
+      warn,
+      watermarks: () => spokeRuntime?.watermarks() ?? [],
+    });
     linkClient.start();
     const stopHeartbeat = startSpokeRuntime({ link: linkClient, env, warn });
+    spokeRuntime = stopHeartbeat;
     teardown = () => {
       stopHeartbeat();
       void linkClient.stop();

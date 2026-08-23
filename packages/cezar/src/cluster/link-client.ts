@@ -5,10 +5,12 @@ import {
   CLUSTER_LINK_PATH,
   CLUSTER_PROTOCOL,
   clusterDownlinkFrameSchema,
+  clusterWatermarkSchema,
   type ClusterDownlinkFrame,
   type ClusterLinkHealth,
   type ClusterLinkRefuseReason,
   type ClusterUplinkFrame,
+  type ClusterWatermark,
   type StoredClusterNodeIdentity,
 } from '@loki-labs/better-cezar-contract';
 import { resolveEdgeAuthHeaders } from './edge-auth.ts';
@@ -38,10 +40,22 @@ import {
  * jitter** (`sources/sync.ts`'s own shape), re-asserts the leases it still holds, and resumes from
  * watermarks rather than replaying from zero.
  *
- * **Phase 1 is inert — no state replicates yet** (spec Phases → "Phase 1"), so the `hello` this
- * class sends carries empty `watermarks`/`projects`: there is nothing to resume or advertise until a
- * later phase's reconcile/pairing machinery exists to feed it. `send()` is how that content reaches
- * the wire once it does — this class stays a thin, honest transport rather than guessing.
+ * **CORRECTED 2026-08-23 (D38) — `watermarks` is no longer hardcoded empty.** This paragraph read
+ * *"Phase 1 is inert — no state replicates yet (spec Phases → "Phase 1"), so the `hello` this class
+ * sends carries empty `watermarks`/`projects`: there is nothing to resume or advertise until a later
+ * phase's reconcile/pairing machinery exists to feed it"* — and its premise died when replication
+ * landed. State DOES replicate now, `spoke-runtime.ts` tracks an applied position per project, and a
+ * `hello` that reported `[]` regardless made the hub's `seedWatermark` dead code against every real
+ * node: every reconnect resumed the whole scope from zero. `watermarks` now comes from the
+ * `watermarks` option (still `[]` when unwired, which is honest rather than inert).
+ *
+ * **`projects` IS still hardcoded empty, and that one is not an oversight.** It feeds D2's pairing
+ * PROPOSALS, and there is no consumer: `hub-router.ts`'s `hello` case deliberately OMITS `proposals`
+ * from the `welcome` rather than computing one, because the hub has no store of another node's
+ * adverts to compare against. Advertising into a hub that cannot use it would be motion, not
+ * progress. Left for whoever builds the proposal store.
+ *
+ * **Nothing here is persisted, deliberately** — see the `watermarks` option.
  *
  * Events emitted (`EventEmitter`, the shape `RunStore` already uses):
  *  - `frame` — `(frame: ClusterDownlinkFrame)`, already parsed and protocol-checked;
@@ -56,6 +70,10 @@ import {
 const SEND_BUDGET_FRAMES_PER_TICK = 100;
 const SEND_BUDGET_TICK_MS = 1_000;
 
+/** `clusterHelloFrameSchema.watermarks` is `.max(500)`. Named here rather than inlined because the
+ *  consequence of exceeding it is not a rejected field but a DROPPED frame — see `helloWatermarks()`. */
+const HELLO_WATERMARKS_MAX = 500;
+
 export interface ClusterLinkClientOptions {
   identity: StoredClusterNodeIdentity;
   hubUrl: string;
@@ -65,6 +83,32 @@ export interface ClusterLinkClientOptions {
    * — injected the same way `ServerDeps.version` is, by whoever boots this class.
    */
   version: string;
+  /**
+   * D38 — this node's applied position per scope, read FRESH at every `hello` (each reconnect calls
+   * it again). Omitted, or returning `[]`, means "I report nothing", which the hub reads as position
+   * zero and answers with a full replay of every scope: safe, and merely wasteful.
+   *
+   * **Must be a getter, not a value, and that is forced by construction order rather than taste.**
+   * `cluster-routes.ts` does `new ClusterLinkClient(...)` → `.start()` → `startSpokeRuntime({ link })`,
+   * so the runtime that HOLDS these numbers does not exist when this class is built, and it takes
+   * this class as its own dependency. A value passed at construction could only ever be the empty
+   * one. Same late-bound shape `buildHubReplication`'s `sendTo` already uses for `linkServer()`.
+   * The first `hello` therefore fires before the runtime is wired and reports `[]` — truthful:
+   * nothing has been applied yet.
+   *
+   * **Report what is known right now; persist NOTHING.** `spoke-runtime.ts` holds these in memory on
+   * purpose (its `ProjectOutboxState` doc says losing them on restart is harmless), so after a
+   * process restart `[]` is the TRUE answer and a full replay is the CORRECT one. The bug this
+   * option closes is the narrower and far more common case: a reconnect WITHOUT a restart — a hub
+   * blue-green (~10/day), a dropped socket, a network blip — where the runtime still holds live
+   * numbers and the `hello` used to throw them away. Writing these to disk would reassert across a
+   * restart a position this node cannot vouch for, turning a bounded over-send into a silent
+   * under-send. Do not add durability here even though it looks like an improvement.
+   *
+   * The returned entries are validated and capped before they reach the wire — see
+   * `helloWatermarks()`, and note that every guard there fails toward over-sending.
+   */
+  watermarks?: () => readonly ClusterWatermark[];
   now?: () => number;
   warn?: (message: string) => void;
   /** Full jitter over an exponential base. Injected so a test can pin it. */
@@ -339,6 +383,93 @@ export class ClusterLinkClient extends EventEmitter {
     return true;
   }
 
+  /**
+   * The `watermarks` option's output, made safe to put on the wire. Every guard below fails toward
+   * OVER-sending — a watermark dropped here is read by the hub as zero and replayed in full, which
+   * costs one idempotent re-apply, whereas letting a bad one through costs the whole link.
+   *
+   * **Why a guard at all, on a number this node computed itself.** `writeFrame` does not validate:
+   * it JSON-encodes and checks the byte bound only. An invalid `hello` is therefore SENT, and
+   * `link-server.ts:272` drops it with a warn rather than refusing the connection — so the socket
+   * stays open, the hub never records the handshake, and (since `connectedNodes()` was narrowed to
+   * handshaken nodes for D30) that node gets no `welcome` and no fan-out at all, indefinitely,
+   * while the spoke's own health still reads `online`. A silently half-dead link is a far worse
+   * outcome than a wasted replay, and it is reachable from one malformed entry.
+   *
+   * Two concrete ways a well-meaning provider produces one, neither of them a bug on its side:
+   *
+   *  - **The stored shape is `.passthrough()`, the wire shape is `.strict()`.**
+   *    `storedClusterWatermarkSchema` deliberately tolerates extra keys; `clusterWatermarkSchema`
+   *    deliberately rejects them. Handing a stored watermark straight through is the obvious
+   *    implementation and it is invalid on the wire. Hence the explicit five-field projection
+   *    below rather than a `safeParse` of the caller's object — parsing alone would DROP such an
+   *    entry, when the fix is to narrow it.
+   *  - **`.max(500)` on the array.** More scopes than that and the whole frame is invalid, so the
+   *    cap has to be enforced here rather than hoped for. Which 500 survive does not matter: the
+   *    omitted ones replay from zero.
+   */
+  private helloWatermarks(): ClusterWatermark[] {
+    const provider = this.options.watermarks;
+    if (!provider) return [];
+
+    let reported: readonly ClusterWatermark[];
+    try {
+      reported = provider();
+    } catch (err) {
+      // A throwing provider must not cost the handshake. Report nothing and replay in full.
+      this.options.warn?.(
+        `cluster link: the watermarks provider threw (${err instanceof Error ? err.message : String(err)}) — ` +
+          'sending an empty hello watermark list, so the hub will replay every scope from zero rather than ' +
+          'this node ' +
+          'silently failing to connect',
+      );
+      return [];
+    }
+
+    const valid: ClusterWatermark[] = [];
+    const rejected: string[] = [];
+    for (const entry of reported) {
+      // Narrow to exactly the wire fields FIRST — see the passthrough/strict note above. That
+      // narrowing is the load-bearing part: `.strict()` rejects keys it does not know, which is
+      // exactly what a stored watermark carries.
+      //
+      // The conditional spread on the two `.optional()` fields is NOT required for validity —
+      // measured, not assumed: `clusterWatermarkSchema.safeParse({ scope: 'workspace', projectKey:
+      // undefined, … })` succeeds, because `.strict()` polices unknown keys, not known ones holding
+      // `undefined`. It is here so the object carries no `undefined`-valued own key, which keeps an
+      // exact-equality assertion on the parsed result meaningful.
+      const parsed = clusterWatermarkSchema.safeParse({
+        scope: entry.scope,
+        ...(entry.projectKey !== undefined ? { projectKey: entry.projectKey } : {}),
+        appliedThroughHubSeq: entry.appliedThroughHubSeq,
+        ackedThroughHubSeq: entry.ackedThroughHubSeq,
+        ...(entry.updatedAt !== undefined ? { updatedAt: entry.updatedAt } : {}),
+      });
+      // The PARSED value, never the caller's object — the thing validated has to be the thing sent.
+      if (parsed.success) valid.push(parsed.data);
+      else rejected.push(`${entry.scope}:${entry.projectKey ?? ''}`);
+    }
+    if (rejected.length > 0) {
+      this.options.warn?.(
+        `cluster link: ${rejected.length} of ${reported.length} reported watermark(s) are not valid on the ` +
+          `wire and were dropped from this hello: ${rejected.slice(0, 5).join(', ')}${
+            rejected.length > 5 ? ', …' : ''
+          }. Those scopes will be replayed from zero.`,
+      );
+    }
+
+    if (valid.length > HELLO_WATERMARKS_MAX) {
+      this.options.warn?.(
+        `cluster link: ${valid.length} watermarks exceed the hello frame's ${HELLO_WATERMARKS_MAX}-entry cap — ` +
+          `reporting the first ${HELLO_WATERMARKS_MAX} and letting the rest replay from zero. Sending them all ` +
+          'would make the whole frame invalid, and the hub DROPS an invalid hello rather than refusing it, ' +
+          'which would leave this node connected but never handshaken.',
+      );
+      return valid.slice(0, HELLO_WATERMARKS_MAX);
+    }
+    return valid;
+  }
+
   private sendHello(ws: WebSocket): void {
     const frame: ClusterUplinkFrame = {
       type: 'hello',
@@ -347,9 +478,10 @@ export class ClusterLinkClient extends EventEmitter {
       nodeName: this.options.identity.nodeName,
       version: this.options.version,
       labels: this.options.identity.labels,
-      // Phase 1 is inert (see the module doc) — nothing has replicated yet, so there is nothing
-      // to resume from or advertise.
-      watermarks: [],
+      // Read fresh on EVERY hello, never cached across reconnects — the whole point is that the
+      // number moved while the link was down. See the `watermarks` option.
+      watermarks: this.helloWatermarks(),
+      // Still empty, deliberately, and not for the same reason: nothing consumes it. See the module doc.
       projects: [],
     };
     this.writeFrame(ws, frame);

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ClusterOp, ClusterTodoFields } from '@loki-labs/better-cezar-contract';
 import {
+  CLUSTER_META_TODO_FIELDS,
   DEFAULT_OP_SEND_BUDGET,
   compactOps,
   deriveTodoOps,
@@ -13,7 +14,8 @@ import {
   type DeriveTodoOpsInput,
 } from './ops.ts';
 import { applyOpToRecord } from './replica.ts';
-import { readTodos, todosPath, updateTodo, type TodoClusterOptions, type TodoItem } from '../todos.ts';
+import { createTodo, readTodos, todosPath, updateTodo, type TodoClusterOptions, type TodoItem } from '../todos.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Package 2.1 (`.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`), covering spec Verification
@@ -49,6 +51,29 @@ describe('cluster/ops — newOpId', () => {
     const b = newOpId();
     expect(a).not.toBe(b);
     expect(a.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The set is DERIVED (`clusterTodoFieldsSchema.shape` minus `placement`, plus `id`) rather than
+ * typed out, so that a seventh cluster bookkeeping field added to the contract is un-sendable by
+ * default instead of by someone remembering to update a literal — a field that should have been
+ * content merely fails to replicate (visible), whereas a bookkeeping field stamped as owed loops
+ * forever (D36). A derivation can also silently SHRINK, which is why its exact membership is pinned
+ * here against the hand-written list this set replaced.
+ */
+describe('cluster/ops — CLUSTER_META_TODO_FIELDS', () => {
+  it('is exactly the six keys no op may carry — the literal it was derived from, member for member', () => {
+    expect([...CLUSTER_META_TODO_FIELDS].sort()).toEqual(
+      ['hubSeq', 'id', 'pendingFields', 'pendingSince', 'startedOn', 'tombstone'].sort(),
+    );
+  });
+
+  it('excludes placement on purpose — "run this one on the box" is ordinary content a spoke may propose', () => {
+    expect(CLUSTER_META_TODO_FIELDS.has('placement')).toBe(false);
+    const placement = { node: 'node-box' };
+    const pending = { ...todo({ id: 't1', placement }), pendingSince: '2026-08-22T10:00:00.000Z', pendingFields: ['placement'] };
+    expect(deriveTodoOps(baseInput({ todos: [pending] }))[0]?.fields).toEqual({ placement });
   });
 });
 
@@ -746,6 +771,42 @@ describe('cluster/ops — end to end: derive from real writes, apply in sequence
     // whole-record clobber this design exists to prevent.
     const withoutCleared: ClusterOp = { ...op, clearedFields: undefined };
     expect(applyOpToRecord(receiverBaseline, withoutCleared)?.archivedAt).toBe('2026-08-22T00:00:00.000Z');
+  });
+
+  /**
+   * **D36 — the resend loop, expressed directly.** Found 2026-08-23 by the first two-process E2E
+   * (hub + spoke, real socket): the spoke's replicated row settled at `pendingFields: ["id"]` and
+   * stayed there, and `hub-seq.json` climbed ~1 every 5 seconds with the cluster idle (~17,280
+   * ops/day) because `deriveTodoOps` re-derived that record on every flush tick, forever.
+   *
+   * The assertion that matters is NOT "pendingFields is empty" — that is the mechanism, and a fix
+   * could satisfy it while still owing an op. It is that **a record the hub has fully
+   * acknowledged produces no further ops on the next derive.** That is the loop itself.
+   *
+   * The floor below is what keeps it non-vacuous: a second derive trivially returns nothing if the
+   * first one never produced anything, so the first pass is asserted non-empty before the second
+   * is believed.
+   */
+  it('D36 — a record the hub has fully acknowledged derives NO further ops on the next pass (the every-tick resend loop)', async () => {
+    // The real create path, not a record literal: `createTodo` stamps `pendingFields` from
+    // `Object.keys(todo)`, which is where `id` — a key no op can ever carry — enters the owed set.
+    const created = await createTodo(dirA, { summary: 'Ship it', status: 'todo' }, localCliAuthor('cli-todo-add'), CLUSTERED);
+    const items = await readTodos(dirA, CLUSTERED);
+
+    const first = deriveTodoOps({ nodeId: 'node-a', projectKey: 'proj-1', todos: items, ackedThroughHubSeq: 0 });
+    // FLOOR — the first pass really did owe something, so "0 on the second pass" means the record
+    // settled rather than never having been owed at all.
+    expect(first).toHaveLength(1);
+    expect(first[0]!.entityId).toBe(created.id);
+
+    // The hub applies the op and echoes it back with its allocated order — the same
+    // `applyOpToRecord` reducer the hub and every spoke's replica share.
+    const acked: ClusterOp = { ...first[0]!, hubSeq: 7 };
+    const settled = applyOpToRecord(items.find((t) => t.id === created.id)!, acked)!;
+
+    // Second derive over post-ack state, at a watermark that covers the hub's own order.
+    const second = deriveTodoOps({ nodeId: 'node-a', projectKey: 'proj-1', todos: [settled], ackedThroughHubSeq: 7 });
+    expect(second).toEqual([]);
   });
 
   it('a key that was never touched appears in neither fields nor clearedFields end to end, so a real edit cannot manufacture a phantom deletion of some OTHER field', async () => {

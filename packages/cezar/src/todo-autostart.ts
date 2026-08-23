@@ -35,6 +35,16 @@ import { mayStartWithoutHub } from './cluster/dispatch.ts';
  * nothing, because this file was never in that path."*
  */
 
+/**
+ * The explicit "this cockpit is not clustered" answer for `TodoAutostartProject#cluster` (D43).
+ *
+ * A named literal rather than `undefined` on purpose: the failure this replaces was an *absence*
+ * that read as a deliberate choice to every reader and to the typechecker, while being nothing of
+ * the kind. A grep for `CLUSTERING_OFF` now lists every place clustering is switched off, which a
+ * grep for a missing property cannot do.
+ */
+export const CLUSTERING_OFF = 'clustering-off' as const;
+
 /** The subset of a project context this module needs — matches (a slice of)
  *  `server/project-context.ts`'s `ProjectContext`, duck-typed so this module carries no
  *  dependency on the server layer. */
@@ -43,19 +53,29 @@ export interface TodoAutostartProject {
   dataDir: string;
   manager: RunManager;
   /**
-   * **Absent means clustering is off, and that is the whole of the switch** (spec
-   * `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D4 · D9a · D15a; PLAN 3.2).
+   * **REQUIRED, and `CLUSTERING_OFF` is how you say "off" — changed 2026-08-23 (D43).**
    *
-   * Deliberately ONE condition rather than two. The guard below is gated on nothing else — no
-   * second `CEZ_CLUSTER` read here — because a rule enforced at two points drifts silently, and
-   * because "there is no port object" makes the off path structurally unable to fire rather than
-   * merely configured not to. `server.ts` is the single place that decides, from
-   * `clusterModeFromEnv` (`cluster/node-identity.ts`, D1's own and only home for hub-ness).
+   * It used to be `cluster?: TodoAutostartCluster`, whose docblock said *"Absent means clustering
+   * is off, and that is the whole of the switch"* and named `server.ts` as *"the single place that
+   * decides, from `clusterModeFromEnv`"*. **That wiring never existed.** `server.ts:1601` built
+   * this object as `{ repoRoot, dataDir, manager }` and never set the field, so the entire D9a
+   * guard below was dead code and `mayAutostartTodo` allowed on its first line — while `todos.ts`
+   * independently read clustering from `process.env` and refused the write. One concept, two
+   * sources, disagreeing. Measured cost: with `CEZ_CLUSTER=1`, three reconcile passes started
+   * three runs for one todo and never stamped it.
    *
-   * With it absent this module behaves exactly as it did before the cluster existed: resolve the
-   * workflow, start the run, THEN stamp — the local act-then-stamp order, untouched.
+   * The type is the fix, not the docblock. An optional field whose absence silently disables a
+   * guard is off by default and its own tests pass, because a test constructs the object WITH the
+   * field — nothing fails, the feature is simply absent. This branch produced that same failure
+   * three times in one day (D24, the `readTodosFor` near-miss, and this), so the switch is now
+   * un-omittable: every caller writes either a seam or the literal `CLUSTERING_OFF`, and leaving
+   * it out is a typecheck error rather than a silent downgrade.
+   *
+   * `CLUSTERING_OFF` behaves EXACTLY as absence did — resolve the workflow, start the run, THEN
+   * stamp, the local act-then-stamp order untouched — so this change moves no behaviour. It only
+   * makes the choice visible and greppable at the call site.
    */
-  cluster?: TodoAutostartCluster;
+  cluster: TodoAutostartCluster | typeof CLUSTERING_OFF;
   /**
    * Where a refusal is RENDERED. D15a: *"the refusal is a stated, rendered state — never a silent
    * skip"*, so a refused autostart has to reach a surface, not only a log line. Optional because
@@ -148,7 +168,20 @@ export async function mayAutostartTodo(
   todo: TodoItem,
 ): Promise<AutostartDecision> {
   const cluster = project.cluster;
-  if (!cluster) return { allowed: true };
+  if (cluster === CLUSTERING_OFF) return { allowed: true };
+  // Unreachable from TypeScript — `cluster` is required and this module is internal (it is not
+  // re-exported from `index.ts`, and the package exports only `.` and `./app-type`), so every
+  // caller is in this repo and typechecked. Stated anyway, and LOUDLY, because the alternative
+  // readings are both worse: silently treating a missing seam as "clustering off" is precisely the
+  // D43 failure this field was made required to end, and letting it fall through would raise a bare
+  // `TypeError` on `cluster.nodeId` two lines down, which names nothing. `reconcileAutostartTodos`
+  // catches per todo, so this stops the todo and says why rather than the process.
+  if (!cluster || typeof cluster !== 'object') {
+    throw new Error(
+      `todo autostart: project ${project.dataDir} has no cluster seam and did not say CLUSTERING_OFF — ` +
+        'the field is required precisely so that "off" is a decision rather than an omission (D43)',
+    );
+  }
 
   // `TodoItem` carries the six cluster fields directly (package 2.3 spread
   // `clusterTodoFieldsSchema` into `todoSchema`), so no cast is needed to read them here.
@@ -185,6 +218,27 @@ export async function mayAutostartTodo(
  *  every pass; only the log line is deduped, and a CHANGED reason always warns again. */
 const lastRefusalReason = new Map<string, string>();
 
+/**
+ * **D43 — `dataDir todoId` → the run id already started for it, whose stamp was REFUSED.**
+ *
+ * The distinction this module was missing: *a start that was attempted and refused* versus *a
+ * start never attempted*. Nothing on disk can tell them apart, because the refusal's whole design
+ * is to write nothing, and `reconcileAutostartTodosOnce` keys on `startedTaskId` — the exact field
+ * the refusal withholds. So every reconcile pass, and there is one per `todos.json` write plus one
+ * per context rebuild, saw a fresh-looking `autostart: true` row and started the work again.
+ *
+ * **In-process, and that is the right scope, not a compromise.** The runaway is a within-process
+ * one: the passes are driven by this process's own `fs.watch` subscription. A restart costs one
+ * further attempt, which is bounded and self-limiting, whereas persisting it would mean a new
+ * on-disk field — `todos.ts` territory, a replicated record, and a second source of truth about
+ * whether a run exists. Same lifetime and same keying as `lastRefusalReason` directly above.
+ *
+ * **A pass that finds an entry here retries the STAMP with the run that already exists; it never
+ * starts a second one.** So the outcome converges rather than being suppressed: the moment the
+ * write side can confirm, the record is stamped with the real run's id.
+ */
+const pendingStamp = new Map<string, string>();
+
 const refusalKey = (dataDir: string, todoId: string) => `${dataDir} ${todoId}`;
 
 function reportRefusal(project: TodoAutostartProject, todo: TodoItem, reason: string): void {
@@ -214,6 +268,22 @@ function reportRefusal(project: TodoAutostartProject, todo: TodoItem, reason: st
  * (never re-gated on providers either).
  */
 async function startAutostartTodo(project: TodoAutostartProject, todo: TodoItem): Promise<void> {
+  // **D43, before anything else.** A run for this todo already exists and only its stamp is
+  // outstanding, so this pass owes a STAMP, not a run. Ahead of `resolveTodoWorkflow` and ahead of
+  // the claim: both are work, and the second claim in particular would ask the hub to grant
+  // something this node was already granted.
+  const key = refusalKey(project.dataDir, todo.id);
+  const already = pendingStamp.get(key);
+  if (already !== undefined) {
+    if (await markStarted(project.dataDir, todo.id, already)) {
+      pendingStamp.delete(key);
+      lastRefusalReason.delete(key);
+      return;
+    }
+    reportRefusal(project, todo, `run ${already} started but the record could not be stamped`);
+    return;
+  }
+
   const workflow = await resolveTodoWorkflow(project.repoRoot, todo);
 
   // **(b) D9a's confirm-before-start ordering, on the CLUSTER path only.** This file and
@@ -252,7 +322,20 @@ async function startAutostartTodo(project: TodoAutostartProject, todo: TodoItem)
   // exists — see `todo-cli.ts`'s matching TODO for `todo.filed`. No such mechanism exists in this
   // codebase today (grepped for analytics/telemetry/trackEvent — none), so this is left as a TODO
   // rather than inventing one.
-  await markStarted(project.dataDir, todo.id, run.id);
+  const stamped = await markStarted(project.dataDir, todo.id, run.id);
+  if (!stamped) {
+    // **D43.** The run EXISTS and the record does not know it. Remember that, or the next pass
+    // reads a row that still says `autostart: true` with no `startedTaskId` and starts a second
+    // one — which is exactly what it did: three passes, three runs, one todo.
+    //
+    // `markStarted` refuses without writing anything, deliberately (*"the absence is the point:
+    // the failure mode this refusal exists to prevent is a second run"*) — but the stamp it
+    // withholds is the very thing `reconcileAutostartTodosOnce` keys on, so the absence that was
+    // meant to prevent a second run is what causes one.
+    pendingStamp.set(refusalKey(project.dataDir, todo.id), run.id);
+    reportRefusal(project, todo, `run ${run.id} started but the record could not be stamped`);
+    return;
+  }
   // The run exists and is stamped; any refusal this todo accumulated is history, so a later
   // refusal for the same id warns again rather than being deduped against a dead reason.
   lastRefusalReason.delete(refusalKey(project.dataDir, todo.id));

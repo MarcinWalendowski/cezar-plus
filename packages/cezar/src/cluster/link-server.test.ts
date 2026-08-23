@@ -8,6 +8,7 @@ import WebSocket from 'ws';
 import {
   CLUSTER_FRAME_MAX_BYTES,
   CLUSTER_PROTOCOL,
+  type ClusterAckFrame,
   type ClusterDownlinkFrame,
   type ClusterUplinkFrame,
   type StoredClusterNodeIdentity,
@@ -20,6 +21,7 @@ import {
   CLUSTER_LINK_PRINCIPAL_HEADER,
   CLUSTER_LINK_REFUSE_REASON_HEADER,
   CLUSTER_LINK_SIGNATURE_HEADER,
+  SEND_BUDGET_FRAMES_PER_TICK,
   type ClusterLinkServerOptions,
 } from './link-server.ts';
 import { storeNodeSecret } from './node-secrets.ts';
@@ -322,6 +324,145 @@ describe('ClusterLinkServer', () => {
     hubs.push(server);
     server.attach(httpServer);
     expect(() => server.attach(httpServer)).toThrow(/already attached/);
+  });
+
+  // D30 (F3), root cause 1: `connectedNodes()` used to report a node from the moment its upgrade
+  // completed, before it had said anything at all — a socket a concurrent fan-out could reach with
+  // a watermark the hub had never actually learned. See `connectedNodes()`'s own doc for the fix and
+  // why it is closed for good, not merely narrowed.
+  it('a freshly connected node is not in connectedNodes() until it has attempted a hello on this connection (D30/F3)', async () => {
+    const onFrame = vi.fn(async (): Promise<ClusterDownlinkFrame[]> => []);
+    const { url, server } = await boot(onFrame);
+    const c = await connectNode(url);
+
+    // The upgrade succeeded — the socket is open and authenticated — but nothing has been sent on
+    // it yet. This is exactly the pre-hello window D30 names: it must not look like a valid target.
+    expect(server.connectedNodes()).toEqual([]);
+
+    c.send({
+      type: 'hello',
+      protocol: CLUSTER_PROTOCOL,
+      nodeId: NODE_ID,
+      nodeName: 'spoke-1',
+      version: '0.10.0',
+      labels: [],
+      watermarks: [],
+      projects: [],
+    });
+    await vi.waitFor(() => expect(server.connectedNodes()).toEqual([NODE_ID]));
+    c.ws.close();
+  });
+
+  // D28 (F4): the send budget is the ONE of `writeFrame`'s three failure paths that is realistically
+  // reachable in ordinary operation (an oversized frame no longer reaches this point at all now that
+  // `replica-fanout.ts` excludes one before building a frame; "socket not open" is a disconnect
+  // race, not a burst). This freezes `now()` so the budget window never rolls over, then hands
+  // `onFrame` more replies than one window allows — deterministic, no reliance on a real 1s clock or
+  // on actually saturating link throughput.
+  it('a reply dropped because the per-node send budget is exhausted is warned about, never silently dropped (D28/F4)', async () => {
+    const warnings: string[] = [];
+    // Frozen at "now", not a fixed past date — `now()` also drives the upgrade's own signed-principal
+    // freshness check (`authenticateLinkUpgrade`), so a stale frozen clock would 401 the handshake
+    // before this test ever got to exercise the send budget.
+    //
+    // FIXED 2026-08-23: the principal must be signed with THIS EXACT instant, not with a fresh
+    // `new Date()` at connect time. `verifyClusterFrame` refuses a NEGATIVE age as firmly as a stale
+    // one ("a payload claiming to be from the future is exactly as suspect as one that is stale",
+    // enrollment.ts:675) — and with the server's clock frozen before `boot()` and the client signing
+    // milliseconds later, the age was always negative. The test 401'd on the handshake every single
+    // run and never reached the send budget it exists to exercise.
+    const frozenNow = new Date();
+    const replyCount = SEND_BUDGET_FRAMES_PER_TICK + 1;
+    const onFrame = vi.fn(
+      async (): Promise<ClusterDownlinkFrame[]> =>
+        Array.from({ length: replyCount }, (_, i): ClusterAckFrame => ({
+          type: 'ack',
+          protocol: CLUSTER_PROTOCOL,
+          scope: 'workspace',
+          throughHubSeq: i,
+        })),
+    );
+    const { url } = await boot(onFrame, { now: () => frozenNow, warn: (m) => warnings.push(m) });
+    const c = connectRaw(url, signedHeaders(NODE_ID, SECRET, frozenNow.toISOString()));
+    await c.waitOpen();
+
+    c.send({
+      type: 'presence',
+      protocol: CLUSTER_PROTOCOL,
+      capacity: { maxParallel: 1, active: 0, heavyActive: 0, enforcement: 'none' },
+      repoDrift: [],
+    });
+
+    // Exactly the budgeted number actually reaches the wire...
+    const received: unknown[] = [];
+    for (let i = 0; i < SEND_BUDGET_FRAMES_PER_TICK; i++) received.push(await c.next());
+    expect(received).toHaveLength(SEND_BUDGET_FRAMES_PER_TICK);
+
+    // ...and the one over budget is warned about, by name, rather than discarded without a trace.
+    await vi.waitFor(() => expect(warnings.some((w) => w.includes('budget'))).toBe(true));
+    const budgetWarning = warnings.find((w) => w.includes('budget'));
+    expect(budgetWarning).toContain(NODE_ID);
+    expect(budgetWarning).toContain('ack');
+    c.ws.close();
+  });
+
+  // D28 (F4), the reply-channel contract itself. `hub-router.ts` advances a watermark per RETURNED
+  // frame, and the write happens here, after that router has already resolved — so "was it actually
+  // written" has to travel back, or the router is guessing. The two properties that make the report
+  // safe to build on are asserted together because neither is sufficient alone: every frame gets a
+  // verdict, and the batch STOPS at the first failure rather than writing past it.
+  it('onWritten reports every returned frame, and the batch stops at the first undelivered one (D28/F4)', async () => {
+    const verdicts: Array<[string, boolean]> = [];
+    // Frame 2 alone is over CLUSTER_FRAME_MAX_BYTES, so `writeFrame` refuses it while the socket
+    // stays perfectly healthy — which is the case that distinguishes "stop" from "skip and carry
+    // on". Carrying on would put frame 3's higher hubSeq on the wire ahead of a frame 2 the
+    // receiver never got, and a receiver's watermark is monotonic: frame 2 would then be
+    // undeliverable forever. That is a gap manufactured by the writer.
+    const oversized: ClusterDownlinkFrame = {
+      type: 'replica',
+      protocol: CLUSTER_PROTOCOL,
+      scope: 'project',
+      projectKey: 'proj-1',
+      changes: [],
+      hubSeq: 2,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- deliberately over the wire bound
+      big: 'x'.repeat(CLUSTER_FRAME_MAX_BYTES + 1_000),
+    } as unknown as ClusterDownlinkFrame;
+    const frames: ClusterDownlinkFrame[] = [
+      { type: 'ack', protocol: CLUSTER_PROTOCOL, scope: 'workspace', throughHubSeq: 1 },
+      oversized,
+      { type: 'ack', protocol: CLUSTER_PROTOCOL, scope: 'workspace', throughHubSeq: 3 },
+    ];
+    const onFrame = vi.fn(async () => ({
+      frames,
+      onWritten: (frame: ClusterDownlinkFrame, delivered: boolean) => {
+        verdicts.push([frame.type === 'ack' ? `ack-${(frame as ClusterAckFrame).throughHubSeq}` : frame.type, delivered]);
+      },
+    }));
+    const { url } = await boot(onFrame);
+    const c = await connectNode(url);
+
+    c.send({
+      type: 'presence',
+      protocol: CLUSTER_PROTOCOL,
+      capacity: { maxParallel: 1, active: 0, heavyActive: 0, enforcement: 'none' },
+      repoDrift: [],
+    });
+
+    await vi.waitFor(() => expect(verdicts).toHaveLength(3));
+    // Frame 1 landed; frame 2 was refused; frame 3 was never attempted and says so rather than
+    // going unreported — "not reported" and "delivered" must not be the same observation.
+    expect(verdicts).toEqual([
+      ['ack-1', true],
+      ['replica', false],
+      ['ack-3', false],
+    ]);
+
+    // ...and only frame 1 is on the wire. Proven by sending a second, ordinary reply afterwards and
+    // seeing it arrive next: if frame 3 had been written it would be sitting ahead of this one.
+    const first = await c.next();
+    expect(first).toMatchObject({ type: 'ack', throughHubSeq: 1 });
+    c.ws.close();
   });
 
   // ---- Verification 13 ---------------------------------------------------------------------------

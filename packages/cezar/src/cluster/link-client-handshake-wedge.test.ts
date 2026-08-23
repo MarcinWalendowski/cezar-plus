@@ -2,8 +2,22 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { StoredClusterNodeIdentity } from '@loki-labs/better-cezar-contract';
+import type { ClusterLinkHealth, StoredClusterNodeIdentity } from '@loki-labs/better-cezar-contract';
 import { ClusterLinkClient } from './link-client.ts';
+
+/** Fails with a message naming what was awaited, rather than vitest's generic hook timeout — a bare
+ *  timeout here reads as "the client is broken" when it may equally be this harness. */
+async function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const bomb = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms: ${what}`)), ms);
+  });
+  try {
+    return await Promise.race([p, bomb]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
 
 /**
  * The silent-upgrade wedge, found 2026-08-23 while wiring package 1.5's activation E2E.
@@ -86,17 +100,48 @@ describe('cluster/link-client — an upgrade that is never answered must not wed
     const hubUrl = await silentUpgradeHub();
     const client = spoke(hubUrl, 150);
 
+    // **CORRECTED 2026-08-23 — subscribe to `health` BEFORE `start()`, and never SAMPLE the state.**
+    // This block used to poll `client.health()` every 25ms for 4s and then assert on whatever it
+    // happened to see:
+    //
+    //   ~~const deadline = Date.now() + 4_000;
+    //     while (client.health().state === 'connecting' && Date.now() < deadline) {
+    //       await new Promise((r) => setTimeout(r, 25));
+    //     }~~
+    //
+    // That passes on a loaded machine and FAILS 5/5 on an idle one, which is the opposite of the
+    // usual flake and is why it survived review. The client is not wedged in either case — measured
+    // on prod-host, it cycles `connecting` (the 150ms handshake timeout) -> `offline+retryAt`
+    // (~10ms) -> `connecting`, at 159 / 314 / 467 / 622 / 775ms. So the state this test wants is true
+    // for only ~6% of the time, in a ~10ms window recurring every ~155ms. A 25ms PERIODIC sampler
+    // beats against a ~155ms periodic window: on an idle box the cycle is metronome-regular and the
+    // sample phase can stay in the 94% for the whole 4s, while a loaded Mac's jitter randomizes the
+    // phase and hits almost immediately. The green was the accident, not the red.
+    //
+    // `setHealth` emits `health` on every transition (`link-client.ts:213`), so observing the EDGE
+    // cannot miss a window no matter how narrow it is, and needs no deadline tuning.
+    //
+    // **An edge-observer trades a missed-WINDOW race for a missed-EDGE race, and it is worth being
+    // precise about which one actually protects this test — the honest answer is neither ordering
+    // nor a latch.** `EventEmitter` does not replay to a late subscriber, so a listener attached
+    // after the transition would hang to the full timeout and read as "the client is wedged" — the
+    // exact false diagnosis this file exists to prevent. Measured, though: moving this subscribe
+    // BELOW `client.start()` still passes 2/2, because the first non-`connecting` edge is one whole
+    // handshake timeout away (150ms) and subscription is synchronous. So the safety margin is that
+    // 150ms gap, not the statement order. The order is kept anyway, because it is the only part that
+    // stays true if the gap ever shrinks — set `handshakeTimeoutMs` near zero, or make `dial()` emit
+    // a non-`connecting` state synchronously, and the margin vanishes while this line still holds.
+    // Do not "tidy" it below `start()`.
+    const left = new Promise<ClusterLinkHealth>((resolve) => {
+      client.on('health', (h: ClusterLinkHealth) => {
+        if (h.state !== 'connecting') resolve(h);
+      });
+    });
+
     client.start();
     expect(client.health().state).toBe('connecting');
 
-    // Poll rather than sleep a fixed span: the assertion is "it leaves `connecting` on its own",
-    // and a fixed sleep would pass just as well against a client that left for the wrong reason.
-    const deadline = Date.now() + 4_000;
-    while (client.health().state === 'connecting' && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 25));
-    }
-
-    const health = client.health();
+    const health = await withTimeout(left, 4_000, 'client never left `connecting`');
     // THE assertion that fails without `handshakeTimeout`: pre-fix this is still 'connecting'.
     expect(health.state).not.toBe('connecting');
     expect(health.state).toBe('offline');

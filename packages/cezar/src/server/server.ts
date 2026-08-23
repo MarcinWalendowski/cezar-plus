@@ -121,7 +121,7 @@ import {
   updateTodo,
   type TodoItem,
 } from '../todos.ts';
-import { watchTodoAutostart, type TodoAutostartProject } from '../todo-autostart.ts';
+import { CLUSTERING_OFF, watchTodoAutostart, type TodoAutostartProject } from '../todo-autostart.ts';
 import { watchReopenRequests, type ReopenWatchProject } from '../reopen-watch.ts';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.ts';
 import {
@@ -1602,6 +1602,24 @@ export function createApp(deps: ServerDeps) {
     repoRoot: ctx.root,
     dataDir: ctx.dataDir,
     manager: ctx.manager,
+    // **D43, 2026-08-23 — stated, not omitted.** This object used to end at `manager`, and
+    // `TodoAutostartProject#cluster` was optional with "absent means clustering is off" as its
+    // contract. The result was that the whole D9a autostart guard was dead code while `todos.ts`
+    // read `CEZ_CLUSTER` from the environment and refused the write, so setting that flag started
+    // one todo on every reconcile pass, forever, and never stamped it.
+    //
+    // `CLUSTERING_OFF` is the SAME behaviour that absence had — it changes nothing today — but it
+    // is now a decision this file makes out loud, and omitting it is a typecheck error.
+    //
+    // **Deliberately not `clusterModeFromEnv` yet, and this is not an oversight.** Handing this a
+    // live seam requires a production `claimStart` — a hub round trip for the claim — and there is
+    // none: `TodoAutostartCluster` has no implementation anywhere outside tests. Wiring the flag
+    // through without one does not enable the feature, it only moves the same failure: measured,
+    // an autostart todo authored on this node still starts unboundedly (the read-side guard allows
+    // via `mayStartWithoutHub`, the write side still refuses `hub-unconfirmed`). Switching this on
+    // is a behavioural decision with production consequences and belongs to the owner, not to this
+    // wiring line. See D43 in `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`.
+    cluster: CLUSTERING_OFF,
   });
   watchTodoAutostart(todoAutostartProject(bootContext));
   for (const id of contexts.ids()) {

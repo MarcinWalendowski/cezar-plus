@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { clusterTodoFieldsSchema, type ClusterAckResult, type ClusterOp } from '@loki-labs/better-cezar-contract';
 import { clusterModeFromEnv } from './cluster/node-identity.ts';
+import { CLUSTER_META_TODO_FIELDS } from './cluster/ops.ts';
 import { applyReplica, type ReplicaApplyResult } from './cluster/replica.ts';
 import { taskAuthorSchema, type TaskAuthor } from './runs/task-author.ts';
 
@@ -317,14 +318,37 @@ function clusterNow(options?: TodoClusterOptions): string {
  *  - **An outstanding cycle** (`pendingSince` already set) unions `touchedFields` into whatever is
  *    already owed — never replaces — so an edit to field B before field A's earlier edit has
  *    synced does not make A's edit un-owed.
+ *
+ * **Both branches drop `CLUSTER_META_TODO_FIELDS` (D36, 2026-08-23).** `pendingFields` names keys
+ * an op will be expected to carry; a key `cluster/ops.ts` can never put on an op is not "owed", it
+ * is unrepresentable, and recording it as owed is a `pendingSince` that can never clear. Note what
+ * this does NOT change: `pendingSince` is still stamped even when every touched key is meta —
+ * `removeTodo` touches only `tombstone`, and the marker is what makes `deriveTodoOps` emit the
+ * tombstone op at all. The marker says THAT something is owed; the array says which CONTENT is.
  */
 function stampPending(item: TodoItem, options: TodoClusterOptions | undefined, touchedFields: readonly string[]): void {
   if (!clusteringOn(options)) return;
+  // D36 — a key that can never RIDE an op must never be recorded as OWED. `createTodo` and
+  // `readRaw`'s id backfill both stamp `Object.keys(item)`, which includes `id`; `id` is in
+  // `CLUSTER_META_TODO_FIELDS`, so `cluster/ops.ts#partitionTodoFields` puts it in neither
+  // `op.fields` nor `op.clearedFields`, so D27's narrowing in `cluster/replica.ts` can never
+  // resolve it, so `pendingSince` never clears and `deriveTodoOps` re-sends that record on every
+  // flush tick forever (measured: ~17,280 ops/day with the cluster idle). Filtering here rather
+  // than teaching the narrowing to skip meta keys is the fix at the SOURCE: the un-sendable key
+  // never enters the record in the first place. The set is imported, never restated — one concept
+  // enforced from two hand-kept lists is what produced D36.
+  const owed = touchedFields.filter((field) => !CLUSTER_META_TODO_FIELDS.has(field));
   if (!item.pendingSince) {
     item.pendingSince = clusterNow(options);
-    item.pendingFields = [...new Set(touchedFields)];
+    item.pendingFields = [...new Set(owed)];
   } else {
-    item.pendingFields = [...new Set([...(item.pendingFields ?? []), ...touchedFields])];
+    // The union is filtered too, not just the incoming keys: a record already on disk from before
+    // this fix carries `pendingFields: ['id']` and is stuck in exactly that loop, so the next local
+    // edit — which takes this same lease and rewrites the record anyway — heals it in passing. The
+    // other heal is receive-side (`cluster/replica.ts`), for a stuck record nobody edits again.
+    item.pendingFields = [...new Set([...(item.pendingFields ?? []), ...owed])].filter(
+      (field) => !CLUSTER_META_TODO_FIELDS.has(field),
+    );
   }
 }
 

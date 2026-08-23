@@ -8,6 +8,7 @@ import type { RunManager, StartRunInput } from './workflows/run.ts';
 import type { WorkflowDef } from './workflows/types.ts';
 import { readTodos, todosPath, type TodoItem } from './todos.ts';
 import {
+  CLUSTERING_OFF,
   mayAutostartTodo,
   reconcileAutostartTodos,
   watchTodoAutostart,
@@ -63,7 +64,7 @@ describe('reconcileAutostartTodos', () => {
         return store.createRun({ author: input.author, title: 't', workflow: '(inbox)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
-    project = { repoRoot, dataDir, manager };
+    project = { repoRoot, dataDir, manager, cluster: CLUSTERING_OFF };
   });
 
   afterEach(() => {
@@ -189,7 +190,7 @@ describe('watchTodoAutostart', () => {
         return store.createRun({ author: input.author, title: 't', workflow: '(inbox)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
-    return { repoRoot, dataDir, manager };
+    return { repoRoot, dataDir, manager, cluster: CLUSTERING_OFF };
   };
 
   it('the boot pass starts an autostart todo already sitting in the file at subscribe time', async () => {
@@ -345,19 +346,19 @@ describe('cluster autostart guard — hub-confirmed claims (spec 2026-08-22-mult
       dataDir,
       manager,
       onRefused: (r) => refusals.push(r),
-      ...(clustered
-        ? {
-            cluster: {
-              nodeId,
-              hubReachable: () => options.hubReachable ?? true,
-              authoredHere: () => options.authoredHere ?? false,
-              claimStart: (todo) => {
-                if (!hub) throw new Error('claimStart called with no hub wired');
-                return hub.claim(nodeId, todo as TodoItem);
-              },
-            } satisfies TodoAutostartCluster,
-          }
-        : {}),
+      // D43: the unclustered branch STATES it. It used to spread `{}` — an absence that read as a
+      // deliberate choice and was the exact shape of the production bug this suite never caught.
+      cluster: clustered
+        ? ({
+            nodeId,
+            hubReachable: () => options.hubReachable ?? true,
+            authoredHere: () => options.authoredHere ?? false,
+            claimStart: (todo) => {
+              if (!hub) throw new Error('claimStart called with no hub wired');
+              return hub.claim(nodeId, todo as TodoItem);
+            },
+          } satisfies TodoAutostartCluster)
+        : CLUSTERING_OFF,
     };
 
     hub?.register(dataDir);
@@ -657,5 +658,136 @@ describe('cluster autostart guard — hub-confirmed claims (spec 2026-08-22-mult
 
     expect(b.started.map((s) => s.task)).toEqual(['Still wanted']);
     expect(hub.claimCalls).toEqual([{ nodeId: 'node-b', todoId: 'alive' }]);
+  });
+});
+
+/**
+ * D43 — setting `CEZ_CLUSTER=1` started the same todo on every reconcile pass, forever.
+ *
+ * These drive the REAL `markStarted`, with `CEZ_CLUSTER` genuinely set, and no cluster seam wired —
+ * which is precisely the production configuration that produced the loop. Nothing is mocked: the
+ * refusal comes from `todos.ts` reading the environment and finding no `confirmStart`, exactly as it
+ * does on a box where someone sets the flag.
+ *
+ * The shape of the bug is worth keeping in the test names: `reconcileAutostartTodosOnce` keys on
+ * `startedTaskId`, and the refusal it races is defined to write NOTHING — so the field that says
+ * "already handled" is the one the refusal withholds, and every pass saw a fresh-looking row.
+ */
+describe('todo autostart — a refused stamp must not restart the run (D43)', () => {
+  let repoRoot: string;
+  let dataDir: string;
+  let store: RunStore;
+  let runIds: string[];
+  let project: TodoAutostartProject;
+  const savedFlag = process.env.CEZ_CLUSTER;
+
+  const writeTodos = (todos: TodoItem[]) => {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(todosPath(dataDir), JSON.stringify(todos, null, 2), 'utf8');
+  };
+  const readFile1 = () => readTodos(dataDir).then((t) => t[0]!);
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-d43-'));
+    dataDir = join(repoRoot, '.ai/cezar');
+    store = RunStore.open(dataDir);
+    runIds = [];
+    const manager = {
+      startRun: (_w: WorkflowDef, input: StartRunInput) => {
+        const run = store.createRun({
+          author: input.author,
+          title: 't',
+          workflow: '(inbox)',
+          task: input.task,
+          steps: [],
+        });
+        runIds.push(run.id);
+        return run;
+      },
+    } as unknown as RunManager;
+    project = { repoRoot, dataDir, manager, cluster: CLUSTERING_OFF };
+    writeTodos([{ id: 't1', summary: 'do the thing', autostart: true } as TodoItem]);
+  });
+
+  afterEach(() => {
+    store.flush();
+    if (savedFlag === undefined) delete process.env.CEZ_CLUSTER;
+    else process.env.CEZ_CLUSTER = savedFlag;
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('starts the run ONCE across three passes when the stamp is refused — the loop itself', async () => {
+    process.env.CEZ_CLUSTER = '1'; // `markStarted` now refuses `hub-unconfirmed` and writes nothing
+
+    await reconcileAutostartTodos(project);
+    await reconcileAutostartTodos(project);
+    await reconcileAutostartTodos(project);
+
+    // Measured before the fix: ["run-1","run-2","run-3"].
+    expect(runIds).toHaveLength(1);
+    // ...and the record genuinely was never stamped, so this is not passing because the ordinary
+    // `startedTaskId` guard caught it. Without that, "1 run" could mean the refusal never happened.
+    const todo = await readFile1();
+    expect(todo.startedTaskId).toBeUndefined();
+    expect(todo.autostart).toBe(true);
+  });
+
+  it('retries the STAMP with the run that already exists, and converges once the write side can confirm', async () => {
+    process.env.CEZ_CLUSTER = '1';
+    await reconcileAutostartTodos(project);
+    expect(runIds).toHaveLength(1);
+    const firstRun = runIds[0]!;
+
+    // The condition clears — the same shape as an operator unsetting the flag, or a write side that
+    // can finally confirm. The next pass owes a stamp, not a run.
+    delete process.env.CEZ_CLUSTER;
+    await reconcileAutostartTodos(project);
+
+    expect(runIds).toHaveLength(1); // still ONE run — never a second
+    const todo = await readFile1();
+    // The stamp names the run that actually exists. A fix that started a fresh run here would also
+    // produce a stamped record, so asserting the ID is what separates the two.
+    expect(todo.startedTaskId).toBe(firstRun);
+    expect(todo.autostart).toBeUndefined();
+  });
+
+  it('a refused stamp is REPORTED, not swallowed — it names the run that exists without a record', async () => {
+    process.env.CEZ_CLUSTER = '1';
+    const refusals: AutostartRefusal[] = [];
+    await reconcileAutostartTodos({ ...project, onRefused: (r) => refusals.push(r) });
+
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]?.todoId).toBe('t1');
+    expect(refusals[0]?.reason).toContain(runIds[0]!);
+    expect(refusals[0]?.reason).toContain('could not be stamped');
+  });
+
+  it('CONTROL — with the flag unset nothing above changes the live path: one run, stamped, autostart cleared', async () => {
+    delete process.env.CEZ_CLUSTER;
+
+    await reconcileAutostartTodos(project);
+    await reconcileAutostartTodos(project);
+
+    expect(runIds).toHaveLength(1);
+    const todo = await readFile1();
+    expect(todo.startedTaskId).toBe(runIds[0]);
+    expect(todo.autostart).toBeUndefined();
+  });
+
+  it('a project that omits the cluster switch fails LOUDLY rather than defaulting to off', async () => {
+    process.env.CEZ_CLUSTER = '1';
+    const warn = console.warn;
+    const lines: string[] = [];
+    console.warn = (...a: unknown[]) => void lines.push(a.join(' '));
+    try {
+      // Only reachable by defeating the type — which is the point: the field is required so this
+      // state cannot be constructed by a caller, and the old silent "absent means off" is gone.
+      await reconcileAutostartTodos({ repoRoot, dataDir, manager: project.manager } as TodoAutostartProject);
+    } finally {
+      console.warn = warn;
+    }
+
+    expect(runIds).toHaveLength(0); // nothing started on an unstated switch
+    expect(lines.join('\n')).toContain('CLUSTERING_OFF');
   });
 });

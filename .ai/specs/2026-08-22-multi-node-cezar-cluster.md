@@ -2342,6 +2342,541 @@ invented; these are the names to use when one lands.
 > **HANDOFF STATE — updated 2026-08-23, written to survive a session change.**
 > Read this block first; it is the current truth and is kept current after every action.
 >
+> **THIS BLOCK IS ~1,000 LINES. THE NEXT 40 ARE THE ONES YOU MUST READ; the rest is the record of
+> WHY, and is there to be searched, not read start to finish.** If you read only this summary you
+> will know what to do next and what not to touch. (Added 2026-08-23 after the block tripled in one
+> day — a handoff nobody can finish reading is not a handoff.)
+>
+> ### D43 — ~~SETTING `CEZ_CLUSTER=1` STARTS THE SAME TODO FOREVER~~ — FIXED 2026-08-23, THE WAY IT WAS ASKED FOR
+>
+> **FIXED, verified in-source.** `todo-autostart.ts:78` is now `cluster: TodoAutostartCluster | typeof
+> CLUSTERING_OFF` — **required, not optional** — so a caller that forgets it is a TYPE ERROR rather
+> than a silently disarmed guard, and `server.ts:1622` passes `CLUSTERING_OFF` explicitly. That is the
+> right half of the fix and only that half: the D9a gate was **not** made live unilaterally, which
+> remains an owner decision (see D41). `grep CLUSTERING_OFF` now enumerates every place clustering is
+> switched off. Typecheck EXIT=0; full box gate green apart from the standing C18 red.
+>
+> **The rule this proves, and the reason it is kept at the top rather than deleted:** *generate the
+> wiring or make the field required; never document that a caller ought to set it.* This branch
+> produced that same failure three times (D24, D43, and the `readTodosFor` near-miss) before the fix
+> changed the type instead of the docs. Original diagnosis kept below, unchanged.
+>
+> **Latent, not armed — verified 2026-08-23: `CEZ_CLUSTER` is absent from `/etc/cezar/`, from the
+> systemd unit and dropins, and from the live server process env on `prod-host`.** So nothing
+> is looping today, and merging PR #9 alone does not start it. **But the day someone sets that flag,
+> one node — no peer, no hub, no cluster — creates unbounded duplicate runs.**
+>
+> Measured, three passes of `reconcileAutostartTodos` with a fake RunManager:
+> ```
+> CEZ_CLUSTER=1     -> ["run-1"], ["run-1","run-2"], ["run-1","run-2","run-3"]
+>                      todos.json unchanged: {"autostart": true}     <- never stamped
+> CEZ_CLUSTER unset -> ["run-1"], ["run-1"], ["run-1"]
+>                      todos.json: {"startedTaskId": "run-1"}        <- stamped, autostart cleared
+> ```
+>
+> **Chain, every link verified in-source:**
+> 1. `server.ts:1601` builds `TodoAutostartProject` as `{ repoRoot, dataDir, manager }` and **never
+>    sets `cluster`**. On `todo-autostart.ts:58` that field is `cluster?:` — optional — and its own
+>    docblock says *"Absent means clustering is off, and that is the whole of the switch."* So the
+>    entire D9a autostart gate (`claimStart`, `mayStartWithoutHub`, the `startedOn` checks) is **dead
+>    code**, and `mayAutostartTodo` allows on its first line.
+> 2. `todos.ts` meanwhile reads clustering from **`process.env`**. One concept, two sources, and they
+>    disagree. `todo-autostart.ts:52` claims *"server.ts is the single place that decides, from
+>    `clusterModeFromEnv`"* — **that wiring does not exist.**
+> 3. So the run starts. Then `markStarted` refuses `hub-unconfirmed` (env says clustered,
+>    `confirmStart` has no production implementation at all) and **writes nothing**.
+> 4. `reconcileAutostartTodosOnce:284` is `if (!todo.autostart || todo.startedTaskId) continue;`.
+>    The refusal withheld the very stamp that line keys on, so both conditions survive and the next
+>    pass starts it again. `todo-autostart.ts:132` calls `startedTaskId` *"the durable key"* — it is
+>    exactly what the refusal withholds. Every `todos.json` write and every context rebuild fires
+>    another pass, and `server.ts:4794` treats the same `false` as harmless bookkeeping
+>    (*"The run has already been created by the time we get here"*).
+>
+> **The general shape, which is why this went unseen:** a guard whose activation is a field the
+> caller must remember to pass is off by default, silently, and its own tests pass because they
+> construct the object WITH the field. Nothing fails; the feature is simply absent. Compare D24 and
+> the `readTodosFor` near-miss the same day — this branch has now produced this failure three times.
+> **Generate the wiring or make the field required; do not document that a caller ought to set it.**
+>
+> Probes: `<scratchpad>/probe-autostart-loop.mts`, `probe-autostart-control.mts`, `probe-markstarted.mts`.
+>
+> ### D44 — D38 REMOVED THE ONLY ANTI-ENTROPY PASS THE CLUSTER HAD, AND IT WAS ACCIDENTAL
+>
+> **CORRECTED 2026-08-23, within the hour, before anyone was assigned.** This entry first led with
+> D29's oversized-op exclusion, on the reporting agent's diagnosis, and concluded the fix belonged in
+> `replica-fanout.ts`. **That framing was wrong and the assignment would have been wasted work.**
+> `replica-fanout.ts`'s own docblock is explicit that an excluded op *"will never become representable
+> by waiting (its size does not change)"* — and `replay.ts:160` ships each record at its own stored
+> `hubSeq`, so a replayed oversized record hits the identical exclusion. **Replay never repaired the
+> oversize case, so D38 cannot have broken that repair.** Capping a frame's `hubSeq` below an excluded
+> op would re-introduce D29's permanent per-target stall to fix a gap that was already permanent, and
+> permanent *by an explicit, reasoned decision* recorded in that file. Original text kept below.
+>
+> **What is actually true, every link verified in source:**
+>
+> 1. `spoke-runtime.ts:621` — `state.appliedThroughHubSeq = Math.max(result.appliedThroughHubSeq,
+>    preview.appliedThroughHubSeq)`, and `preview` comes from `applyReplicaFrame`, which is
+>    `max(applyReplica(...), frame.hubSeq)` (`replica.ts:149`). So `preview >= frame.hubSeq`
+>    **unconditionally**: the on-disk apply result can never hold the watermark back. Whatever the
+>    frame DECLARES becomes the spoke's position, independent of what actually landed. (The throw path
+>    is handled correctly — it returns early without advancing. This is about a write that *reports
+>    success*.)
+> 2. `replay.ts:160` + `planReplicaFanout`'s watermark filter — replay can only ship records whose
+>    stored `hubSeq` is ABOVE the target's watermark. Anything below it is unreachable by replay.
+> 3. `hub-router.ts:325` — delete-then-seed on hello. **Pre-D38 `sendHello` hardcoded `watermarks: []`,
+>    so the hub deleted the node's watermarks and re-seeded from nothing: every reconnect replayed the
+>    entire scope from zero.**
+>
+> **That full-scope replay was a blanket anti-entropy pass, and nothing in the design named it as one.**
+> It healed ANY divergence below the watermark from ANY cause — including causes nobody has enumerated.
+> The one this repo has already SEEN is the relevant one: a `todos.json` write that vanished silently
+> under a correctly-taken `O_EXCL` lease, no error raised, nothing in either `.bak`. Against a
+> success-reporting write that did not durably land, step 1 advances the watermark anyway and step 2
+> then makes the record permanently unreachable. Pre-D38 the next reconnect fixed it and no one noticed.
+>
+> **D38 is correct and must not be reverted.** Reporting the position the runtime holds is right, and
+> the hub trusting it is right. The defect is that **repair was a side effect of the hub FORGETTING**,
+> and D38 correctly stopped the hub forgetting. The `hub-router.ts:325` comment even predicted this in
+> its own words — *"gets more precise if it does"* — without noticing that precision here means the hub
+> now believes an assertion the spoke cannot vouch for.
+>
+> **OWNER DECISION — repair has to become deliberate, and it is a design choice, not a one-file fix.**
+> The options, with the trade-off each answers:
+>  - **(a) Digest-at-hello.** `hello` carries a per-project content digest; the hub compares it against
+>    its own and replays the full scope from zero on mismatch, ignoring the watermark. Restores the
+>    blanket property, keeps D38's cheap steady state, and is the only option that catches a cause
+>    nobody has enumerated. Costs a digest on both sides and a contract change.
+>  - **(b) Periodic full replay**, on a slow timer, independent of reconnect. Simplest; wastes bandwidth
+>    proportional to scope size and repairs only as fast as the period.
+>  - **(c) Accept it**, and rely on a restart. Defensible *today* precisely because the watermarks are
+>    deliberately NOT persisted (`spoke-runtime.ts` docblock: `[]` after a restart is TRUE) — so a
+>    process restart still forces a full replay. It stops being defensible the moment anyone persists
+>    them, which that docblock currently argues against for a different and still-valid reason.
+> **Recommendation: (a), specced, not built inside this branch.** Do NOT assign a `replica-fanout.ts`
+> fix — there is nothing there to fix, and the original entry below is retained only so the wrong
+> conclusion is not re-derived from scratch.
+>
+> <details><summary>Original D44 entry, 2026-08-23, superseded within the hour — kept per the
+> correct-in-place rule so the wrong path is not walked twice</summary>
+>
+> > **The repair mechanism and the new reporting path turned out to be the same mechanism, and D38
+> > switched it off for exactly the records that needed it.** (Mechanism 1-5 as originally recorded:
+> > `replica-fanout.ts:59-60` sets each frame's `hubSeq` to the highest in THAT frame regardless of
+> > which bound caused the split; an EXCLUDED op is absent from `changes`; `replica.ts:149` takes the
+> > max, so the gap is recorded as applied; `replica.ts:97` then skips a later push of it. The
+> > recommendation was *"cap, do not skip"* in `replica-fanout.ts`.) **Wrong because the excluded op is
+> > unrepresentable at any time, so there was never a repair to lose — see the correction above.** The
+> > general shape of the argument survives; only the cause and the owning file were wrong.
+>
+> </details>
+>
+> ### D45 — A TEST THAT PASSED ONLY BECAUSE THE MAC WAS BUSY (FIXED)
+>
+> `link-client-handshake-wedge.test.ts` passed on the Mac and failed **5/5 on the idle box**. That is
+> the inverse of a normal flake, which is why it survived review, and the green was the accident.
+>
+> **The client was never wedged.** Instrumented on prod-host: it cycles `connecting` (the 150ms
+> handshake timeout) -> `offline+retryAt` (~10ms) -> `connecting`, at 159 / 314 / 467 / 622 / 775ms.
+> The state the test wants is true ~6% of the time, in a ~10ms window recurring every ~155ms. The test
+> SAMPLED `client.health()` every 25ms — and a 25ms periodic sampler beats against a ~155ms periodic
+> window, so on an idle box (metronome-regular) the sample phase can sit in the 94% for the whole 4s,
+> while a loaded Mac's jitter randomizes the phase and hits almost at once.
+>
+> Ruled out first, so the attribution is not a guess: `ws` honours `handshakeTimeout` identically on
+> both machines (probe: `error` then `close` at ~158ms, readyState 3, Node v22.12.0 and v22.23.2, ws
+> 8.21.1 both). And **it is not a D38 regression** — the control, HEAD's own `link-client.ts` dropped
+> into the box tree, fails there too.
+>
+> **Fix: observe the EDGE, never sample the level.** `setHealth` emits `health` on every transition
+> (`link-client.ts:213`), subscribed before `start()` (which dials synchronously), with a `withTimeout`
+> helper so a failure names what was awaited instead of reading as a generic hook timeout. Verified:
+> 5/5 green on the box, green on the Mac, and **mutation-proven** — deleting the `handshakeTimeout`
+> option turns it red at 4039ms while the file's negative control stays green (restore md5-verified,
+> `7a6fa89039f33ad352f1030471a31eb2` both sides).
+>
+> **AMENDED — an edge-observer trades a missed-WINDOW race for a missed-EDGE race, and the mutation
+> above does not reach it.** Raised by the peer session: dropping `handshakeTimeout` proves the test
+> can fail when the behaviour is broken, not that it cannot miss an EARLY edge when the behaviour is
+> fine — a listener attached after the transition hangs to the full timeout and reads as "the client
+> is wedged", the very false diagnosis this file exists to prevent. The discriminating mutation is to
+> move the subscribe BELOW the trigger and check for a TIMEOUT rather than a pass. **Ran it: it still
+> passes 2/2.** So safety here comes from neither ordering nor a latch (`EventEmitter` does not replay
+> to a late subscriber) but from the first non-`connecting` edge being one whole 150ms handshake
+> timeout away. The subscribe is kept above `start()` regardless, since it is the only part that stays
+> true if that gap ever shrinks — recorded at the point of use so a refactor does not "tidy" it down.
+>
+> **The transferable rule: a sampling test's flakiness is set by the RATIO of the window to the sample
+> period, and an idle machine makes periodicity WORSE, not better.** Load is not the only thing that
+> exposes timing bugs; regularity exposes a different class. Anything edge-triggered has an event —
+> use it. And when you replace a sampler with an observer, mutation-test the NEW failure mode (late
+> subscribe), not only the old one.
+>
+> ### GATE — 2026-08-23, on the box, clean tree
+>
+> `/var/lib/cezar/gate-cluster` (rsync `--delete` mirror of `packages/`, manifests md5-identical to the
+> Mac, `node_modules` already present so no `npm ci`):
+>
+> **`tsc --noEmit` EXIT=0 · vitest 7027 passed / 1 failed / 4 skipped (7032), 405 files passed / 1
+> failed / 2 skipped (408).** The single failure is `catalog.test.ts` C18 (`67.0ms` vs a `<40ms`
+> budget) — the known standing red on this box, a CPU budget calibrated on the Mac. **That IS the
+> green result.**
+>
+> This is the BRANCH gate, not B6's merged-tree gate. Per the merged-tree rule a green branch gate
+> says nothing about the tree that gets pushed, so B6 still has to merge `origin/main` and re-run.
+>
+> **Do not gate in `/var/lib/cezar/gate-retarget`** — it belongs to the peer session working on
+> retarget/account-pool routing. I rsynced into it by mistake and produced a 24-failure run that was
+> pure artifact. **A partial-file-list rsync into a shared gate tree MERGES rather than replaces, and
+> the mixed tree fails in a way that NAMES THE WRONG OWNER**: whichever side's *tests* survive is the
+> side that appears broken, regardless of whose *source* was replaced — so the failure is reported
+> against a file that genuinely exists and genuinely fails. A gate directory needs one owner. (The
+> peer confirmed nothing of theirs was lost: it is a disposable rsync tree, not a git worktree, their
+> own numbers predate it by 28 minutes, and `find /var/lib/cezar -not -user cezar | wc -l` is still 0
+> because the sync ran as `cezar`.) Two more box gotchas from them, both of which read as real gate
+> failures and are not: `npm run build` dies in an rsync'd tree because `scripts/write-build-stamp.mjs`
+> shells `git rev-parse HEAD` and there is no `.git` (it fails AFTER `check:pack ok`), and
+> `--reporter=basic` is not a valid vitest reporter in this repo — it exits 1 with a startup error and
+> no `Test Files` line at all.
+>
+> #### WHERE THIS STANDS, 2026-08-23 end of the multi-agent session
+>
+> - **Milestone B is REACHABLE IN PRODUCTION for the first time.** `cluster-routes.ts:1112` now passes
+>   `replication` to `createHubFrameRouter`; the hub allocates, applies, acks and fans out. Proven by
+>   deleting the wiring and watching a real-socket E2E fail — run twice, independently. Before today
+>   ~1,500 lines of this milestone were tested and had **zero production callers**.
+> - **DONE:** B1 · B2 (mutation-checking found 3 real bugs — D31/D32/D33) · B2a (prune timer armed;
+>   `prune()` had zero production callers for the life of the branch) · B2b · B3 (the wiring) ·
+>   **B4 (replay engine + hub-router wiring + `readTodosFor` supplied and tested)** · D27 · D29 ·
+>   D34 · **D28** · **D30** · **D36**. HUB's pass alone carries **22 mutations, all RED and quoted**.
+> - **D28's landed fix was SUPERSEDED the same day, and the second one is right.** The first attempt
+>   simply never advanced the origin's watermark — safe for live fan-out, but it re-sends a duplicate
+>   on every same-`opId` retransmit and leaves B4 resuming the origin from 0 forever. Replaced by a
+>   **delivery report on the reply channel**: `ClusterFrameReplies { frames, onWritten? }`
+>   (`link-server.ts:93`), with a bare array still legal so no un-owned caller changed. Ack still
+>   goes out first — it is frame 0 of the same reply. Mutation-checked in BOTH directions.
+> - **D30 is closed, and one of its three root causes was invisible until traced:** `seedWatermark`
+>   only overwrote keys the `hello` MENTIONED, and a real `hello` mentions none — so a watermark
+>   advanced in a previous session survived every reconnect, uncorrectable. `hub-router.ts:325` now
+>   DELETES the node's watermarks before seeding. The Map "leak" was measured and deliberately NOT
+>   fixed: bound is ~39 integers on the production box. Nothing to do, and that is the evidence.
+> - **D38 IS DONE AND THE THREE HALVES DEMONSTRABLY COMPOSE** — `link-client.ts:111` declares the
+>   provider, `spoke-runtime.ts:278` supplies the live reader, `cluster-routes.ts:1173` wires it
+>   late-bound. Typecheck exit 0. `link-client.test.ts` 24/24, `hub-router.test.ts` 37/37,
+>   `link-server.test.ts` 22/22, `spoke-runtime` 53/53. **7 mutations on the client + 8 on the spoke,
+>   all RED.** The one that earns the suite is **N-G — memoise the provider so it is read once**:
+>   it kills the reconnect test *and nothing else*, which is what makes that test a claim about
+>   FRESHNESS rather than presence. A watermark read once is exactly as useless as a hardcoded `[]`,
+>   because the number moves precisely while the link is down. Deliberately NOT a fourth
+>   declared-and-unsupplied option.
+> - **IN FLIGHT / OPEN:** **D43 (top of this block — highest priority)** · D37 · D39 · D41 · D42 ·
+>   B5 (near no-op, see below) · B6 (see below).
+>
+> #### D38 / D39 — two more found while wiring B4, neither fixed
+>
+> - **D38: `link-client.ts:352-353` — `sendHello` hardcodes `watermarks: []` and `projects: []`**
+>   ("Phase 1 is inert … nothing has replicated yet, so there is nothing to resume from or
+>   advertise"). That comment's premise died today: replication landed. So **no spoke ever reports
+>   its position**, `seedWatermark` never fires from a real node, and every reconnect replays the
+>   WHOLE scope. **This is why B4 must not be read as "replay works" yet** — the hub's half is built
+>   and tested; the spoke never asks for anything.
+>
+>   **CORRECTED before anyone acts on it — "`sendHello` lies" is the wrong framing, and the right one
+>   decides the fix.** `spoke-runtime.ts:239` holds those watermarks **in memory only, deliberately**.
+>   So after a spoke PROCESS RESTART, reporting `[]` is *truthful* and a full replay is *correct*.
+>   The defect is the narrower and far more common case: a reconnect **without** a restart — socket
+>   drop, hub restart, network blip — where the runtime still holds live watermarks and `sendHello`
+>   discards them. Therefore the fix is **report what the runtime currently knows, and persist
+>   NOTHING.** Adding durability here will look like an improvement and is not: it would reassert a
+>   position across a restart the module deliberately cannot vouch for, turning a bounded over-send
+>   into a silent under-send, which is the one failure direction this feature exists to prevent.
+>
+>   **It pairs with D30's fix and must land in the same session.** `hub-router.ts:325` now DELETES
+>   everything remembered for a node before seeding, so the hub trusts the node's report absolutely.
+>   Previously a stale hub-side watermark accidentally suppressed part of the re-replay — accidentally
+>   and wrongly. D30 made the hub honest about what the node claims; D38 makes the node's claim true.
+>   Shipping the first without the second leaves the hub maximally trusting a report that is always
+>   empty.
+>
+>   **Wired end to end 2026-08-23 across three files and three owners** — `link-client.ts` declares
+>   the provider, `spoke-runtime.ts` exposes the position it already computes at `:245`/`:514` and
+>   showed to nobody, `cluster-routes.ts:1153` supplies it at construction. Deliberately NOT left as
+>   a declared-but-unsupplied option: that is the fourth instance of this branch's signature failure
+>   (`readTodosFor`, `prune()`, the whole of Milestone B) and doing it knowingly, today, would be
+>   indefensible.
+> - **D39: `replay.ts#projectWholeRow` builds `clearedFields` from every absent content key.**
+>   Measured: `todoSchema` has 21 content keys, a maximally sparse record yields **20**, and
+>   `clusterOpShape.clearedFields` is capped at **32**. Fits today with 11 keys of headroom. Add 12
+>   content fields to `todoSchema` and every replay op becomes schema-invalid — and
+>   `link-client.parseDownlink` drops the **WHOLE frame**, so replay silently does nothing.
+>   **Nothing anywhere validates a synthesized op against `clusterOpShape` before it goes on the
+>   wire.** That missing validation is the real defect; the headroom is just how long it stays quiet.
+> - **B6 — the box gate HAS run, and was clean.** `/var/lib/cezar/gate-cluster` on `prod-host`
+>   is a purpose-built snapshot repo (no remote; commits literally named "gate snapshot 2/3/4", so its
+>   `git rev-parse HEAD` tells you NOTHING about what was gated — verify the tree, never the hash).
+>   Run 4, 08:57 today: `typecheck` 0 · `build` 0 · `test:unit` 0 · `test:package` 0 · full `npm test`
+>   **581 passed / 1 failed / 2 skipped (584)**. The one red is `knowledge/catalog.test.ts > C18`, a
+>   CPU-budget ratio calibrated on an M4 Max — **it is the ONE standing red on this box, and
+>   581/584-with-only-C18 IS the green result.** (Older notes say 559/560; the suite has grown since.)
+>   What is NOT done: re-running it on the CURRENT tree. Run 5 at 12:23 correctly **REFUSED to start**,
+>   logging 24 files that differed from the Mac — the "never gate a moving tree" guard doing its job.
+>   Reuse `boxgate4.sh` there; it already sets `CEZ_VITEST_MAX_WORKERS=3`, `CI=1` and `nice -n 10`.
+>   Reach the box as **`cezar@`**, and the Access token fields are
+>   `op://Vault/Server/Access Service Token/CF_ACCESS_CLIENT_ID` and
+>   `/CF_ACCESS_CLIENT_SECRET` (exported as `TUNNEL_SERVICE_TOKEN_ID`/`_SECRET` — the names differ,
+>   which costs a session ten minutes every time it is rediscovered).
+> - **~25% of the whole spec. Milestone C and D are at 0%**, and the spec's own estimate is that C is
+>   *larger than A and B combined*.
+> - **0% verified on real hardware.** Every test runs both ends of the socket inside one process on
+>   the Mac. **Nothing here has ever executed in production, and no two machines have ever paired.**
+>   That is the number that matters, and it is blocked on the owner (below).
+>
+> #### THE THREE THINGS THAT ARE THE OWNER'S CALL, NOT YOURS
+>
+> 1. **Do not merge PR #9** (`feat/multi-node-cluster` -> `main`, open). It auto-deploys to
+>    `prod-host` where the owner's agents run. **Owner's bar, stated 2026-08-23 and verbatim:
+>    "let's merge where we have e2e working version, not now."**
+>
+>    **Read that together with the next sentence, because the two form a deadlock.** The box tracks
+>    `main`, so a merge is also the hard prerequisite for any E2E on real hardware — "merge after
+>    E2E" and "E2E needs the merge" block each other, and that circularity, not the code, is why this
+>    feature is ~25% built and 0% verified on hardware. **Do not resolve it by merging.** The way out
+>    that respects the bar is a **two-process E2E on one machine**: hub and spoke as separate OS
+>    processes, real WebSocket on a real port, two data dirs, two node identities, real `todos.json`
+>    on both sides. That is not two machines and does not exercise the tunnel, but it is the first
+>    time this code crosses a process boundary at all — every test today runs BOTH ENDS OF THE SOCKET
+>    INSIDE ONE PROCESS, which is exactly how ~1,500 lines stayed green with zero production callers.
+>    Started 2026-08-23; if its result is not recorded below, it did not finish.
+> 2. **Do not run the Access service-token provisioning script.**
+> 3. **3b (`deriveTodoOps` refusing an op too large to ever fit a frame)** changes local write
+>    behaviour. Recommended, not built.
+>
+> #### GIT STATE — MEASURED 2026-08-23, AND TWO REFS IN THIS CHECKOUT LIE TO YOU
+>
+> - **`origin/main` is `b862ef05`.** Branch head is `961ebcd3`: **12 ahead, 8 behind.**
+> - **`refs/heads/main` in this checkout is `adeaa759` — 19 commits behind and NOT an ancestor of
+>   `origin/main`.** So `git log main`, and anything diffing against `main`, reports fiction. Compare
+>   against `refs/remotes/origin/main` after a fresh fetch, or against
+>   `gh api repos/MarcinWalendowski/cezar/commits/main --jq .sha`.
+> - **`git fetch origin` FAILS over ssh** — `ssh-add -l` lists the GitHub key but the 1Password agent
+>   is locked, so signing fails and git reports *"Please make sure you have the correct access
+>   rights, and the repository exists"*, which reads as a permissions problem and is not. Measured:
+>   ssh fetch **exit 128**. Working form, no config change:
+>   `git -c credential.helper='!gh auth git-credential' fetch https://github.com/MarcinWalendowski/cezar.git 'refs/heads/main:refs/remotes/origin/main'` → exit 0.
+> - **Capture that exit code with a redirect, not a pipe.** `git fetch … | tail -3; echo "EXIT=$?"`
+>   printed `EXIT=0` over the failure text — that is `tail`'s status, and it nearly went into this
+>   spec as "fetch succeeded".
+> - **The gate that counts is on the MERGED tree, not the branch.** Being 8 behind is not cosmetic:
+>   merging `origin/main` previously took this repo from 559/560 to **12 failed** in files the merge
+>   never touched textually. Do not cite a branch-only gate as a pre-push number.
+> - **The box may have TWO standing reds, not one** (reported by a parallel session, NOT verified
+>   here): `catalog.test.ts` C18 as always, plus `workflows/workspace-parallel.test.ts`
+>   (`expected '?? .ai/' to be ''`) — intermittent and pre-existing, failing 2 of 3 targeted runs on
+>   one tree and 1 of 3 on a pristine `origin/main` control, and passing on the Mac. **It passed in
+>   one full-suite run, so a single green does not clear that file.** Confirm before treating 581/584
+>   as the expected shape.
+>
+> #### THE FIVE THINGS THAT WILL BITE YOU
+>
+> - **`origin` only, never `upstream`. Never a bare `git push`.**
+> - **Shared checkout with OTHER LIVE SESSIONS that commit.** Never `git stash` / `checkout .` /
+>   `reset --hard` / `clean`. Re-take a scratchpad backup **immediately before** each mutation — a
+>   backup taken minutes ago restores over another agent's work and nothing reports it.
+> - **`grep -a`, and QUOTE `--include='*.ts'`.** Four `.ts` files here misclassify as binary and plain
+>   grep silently finds nothing in them; an unquoted glob makes every symbol report zero callers.
+> - **No lint, no prettier config.** `prettier --check` fails on untouched HEAD files. Not a gate.
+> - **Never trust a test result taken while a mutation sweep is live.** One cluster run showed 1 failed
+>   / 604 mid-sweep and 604/604 thirty seconds later.
+>
+> #### ~~IN FLIGHT~~ — ALL FOUR AGENTS FINISHED 2026-08-23. Kept as the ownership map, not a live roster.
+>
+> **Nothing is half-written any more**: every agent below has completed, `tsc --noEmit` is EXIT=0, and
+> the full box gate is green apart from the standing C18 red (see GATE, above). The table is retained
+> because it records **which agent owned which file**, which is what you need to interpret a docblock
+> that says "reported separately, this file does not own it". The warning below still applies to any
+> NEW fan-out you start.
+>
+> If you are picking this up mid-flight, these files may be half-written. Check `git status` before
+> rebuilding anything: **agents on this branch have landed files after reporting them not delivered**
+> (`op-history.ts` did exactly that, and `hub-apply.ts` did it again the same day).
+>
+> | Owner | Files it alone may edit | Doing |
+> | --- | --- | --- |
+> | HUB | `hub-router.ts` + test, `link-server.ts` + test | D28 origin half · D30 · **then B4 wiring** |
+> | REPLAY-TEST | `cluster/replay.test.ts` (new) | tests + mutation-check for `replay.ts` |
+> | SPOKE | `spoke-runtime.ts` + test | D35's real dead end · pre-`welcome` replica frame |
+> | REVIEW-REPLAY | *(read-only)* | adversarial review of Design B |
+>
+> **`replay.ts` landed today with NO test file and NO production caller** — verified with
+> `grep -a --include='*.ts'`, the only form of that negative that is trustworthy here (`ops.ts` and
+> `notifications/decider.ts` misclassify as binary, so a plain grep finds nothing in them, silently).
+> It is therefore the exact shape of the thing that produced this whole day's defect list: a green,
+> unreachable module. **Wiring it is tracked as required, not optional.** Its own docblock says so.
+>
+> #### B5 IS SMALLER THAN IT LOOKS (checked 2026-08-23, do not re-spend an agent on this)
+>
+> B5's headline item was the `'todos.lock'` literal declared twice — `todos.ts:181` and
+> `hub-apply.ts:111`, both module-private, so a rename of one would silently stop the two processes
+> sharing a lock and cost a lost write with nothing red. **That class is already closed by test.**
+> `hub-apply.test.ts:235` asserts it from the only side that proves anything: one hardcoded lock path
+> must block a `todos.ts` writer AND a `hub-apply` writer *in the same test*, because asserting only
+> the `todos.ts` side stays true no matter what `hub-apply` names its own lock. It is mutation-verified
+> (renaming `TODOS_LOCK_FILE` in `hub-apply.ts` leaves `applied` true). A `todosLockPath(dataDir)`
+> export is now tidiness, not a defect fix — worth doing, worth doing last. What is left of B5 is the
+> `toNodeWire`/`toPairingWire` duplication between `hub-router.ts` and `cluster-routes.ts`, and
+> `hub-router.ts`'s own docblock argues that one is deliberate (package boundary, straight field-copy).
+> So B5 may be close to a no-op. Confirm before scheduling it.
+>
+> #### D36 — EVERY REPLICATED TODO RESENDS FOREVER. Found 2026-08-23 by the two-process E2E.
+>
+> **This is the most serious defect on the branch, and no unit test could see it.** The first real
+> two-process run (hub + spoke, separate OS processes, real socket) reproduced it on the very first
+> replicated row.
+>
+> **Mechanism, traced end to end and confirmed independently of the agent that found it:**
+> `todos.ts#stampPending` writes `'id'` into `pendingFields` (measured: `["summary","status",
+> "origin","id","ts","author"]`). But `ops.ts#partitionTodoFields` **skips every key in
+> `CLUSTER_META_TODO_FIELDS`** — which contains `'id'` — so `id` lands in neither `op.fields` nor
+> `op.clearedFields`. Then D27's fix in `replica.ts:217` builds `touchedFieldNames` from exactly
+> `op.fields ∪ op.clearedFields ∪ op.unknown`, filters `pendingFields` by it, and clears
+> `pendingSince` only when `stillPending.length === 0`. **`id` can never be touched, so it can never
+> be filtered out, so `stillPending` never empties, so `pendingSince` never clears.**
+>
+> Consequence: `deriveTodoOps` re-derives an op for that record on **every flush tick, forever**,
+> each allocating a fresh `hubSeq`. Measured on the E2E: the spoke's replicated row settles at
+> `pendingFields: ["id"]` and stays there, and **`hub-seq.json` climbs ~1 every 5 seconds with the
+> cluster completely idle** — ~17,280/day, which is exactly D35's predicted leak rate.
+>
+> **This reclassifies D35.** D35 assumed the leak required an *unreplicable* record (one too big to
+> frame). It does not: it happens to **every single replicated row**, on the happy path. D35's
+> "case 3" framing understates it by an order of magnitude.
+>
+> **D27's fix caused it.** Before D27, `applyOpToRecord` cleared `pendingSince` unconditionally,
+> which was wrong for a different reason (it dropped un-sent local edits) but did not loop. The fix
+> is correct in its own terms and created this; that is the shape to watch for, not a reason to
+> revert it.
+>
+> **The real fault is one concept enforced in two places that never agreed:** "which keys can ride an
+> op" lives in `partitionTodoFields`, and "which keys are still owed" lives in `stampPending` +
+> the D27 narrowing. A key that is definitionally never sendable must never be recorded as owed.
+> Fix at the source (do not stamp meta keys as pending) rather than by teaching the narrowing to
+> special-case them, or the two will drift again.
+>
+> **D36 fix, as landed (verify before trusting — I read it, I did not re-run its tests).**
+> `CLUSTER_META_TODO_FIELDS` is now **exported from `ops.ts` and derived from the contract**
+> (`clusterTodoFieldsSchema.shape`, minus `placement`, plus `'id'`) rather than hand-typed. That is
+> better than what was asked for: a seventh cluster field added to the contract becomes un-sendable
+> **by default**, so it fails CLOSED (the field silently does not replicate, which is visible) rather
+> than OPEN (stamped as owed, loops forever, which is D36 again). Three readers now share the one
+> set — `partitionTodoFields` (what may ride), `stampPending` (what may be owed),
+> `applyOpToRecord` (what may remain owed). Stuck on-disk records heal two ways: the next local edit
+> re-filters the union, and the next replica apply filters `stillPending`.
+>
+> **STILL OPEN — there is a FOURTH copy.** `cluster/replay.ts` derives its own `CLUSTER_META_KEYS`
+> identically and independently; it was correctly left alone (another agent owned that file), but
+> until it imports the shared set, D36's root cause — one concept kept in two hand-maintained lists —
+> is only three-quarters retired. Retire it before Milestone C.
+>
+> #### D37 — REPLICATION IS ONE-DIRECTIONAL. A HUB-LOCAL WRITE NEVER LEAVES THE HUB.
+> **Found 2026-08-23 by the same two-process E2E. Structural, not a bug — half the design is absent.**
+>
+> Measured: `HUB-ORIGIN-BETA`, created on the hub, sits in the hub's `todos.json` with
+> `pendingSince` and a full `pendingFields`, and is **absent from the spoke** indefinitely. Meanwhile
+> `SPOKE-ORIGIN-ALPHA` reached the hub correctly. Replication works spoke -> hub only.
+>
+> **Cause, verified with `grep -a --include='*.ts'`: `deriveTodoOps` has exactly ONE production
+> caller — `spoke-runtime.ts`.** There is no hub-side equivalent. Nothing derives, allocates,
+> applies or fans out an op for a write that originates on the hub. `todos.ts` still stamps
+> `pendingSince` on the hub (clustering is on there too), so every hub-local write also accumulates a
+> pending marker that nothing will ever clear — a second instance of D36's pathology, on the hub,
+> which the D36 fix does NOT address because there is no ack coming for a record nobody sent.
+>
+> **Why this is worse than it sounds: the production hub is `prod-host`, and that is where the
+> owner's agents run.** So the direction that does not work is the one carrying agent-created todos
+> out to the operator's Mac. The working direction is the less important one.
+>
+> **Not scoped away anywhere.** The spec's only "bidirectional" statements (lines ~674, ~3712, ~3724)
+> are about the KNOWLEDGE CORPUS, which is deliberately one-way; none of them speak to todos.
+> Milestone B's stated "largest remaining hole" is the replay gap, not this.
+>
+> **Do not build a hub-side outbox without recording the design first.** The hub cannot simply reuse
+> `spoke-runtime.ts`'s loop: it allocates `hubSeq` locally rather than requesting it, it has no link
+> to flush *to*, and its op must enter the SAME `applyOpAtHub` + fan-out path a spoke's op takes or
+> the two directions will diverge. That is a design decision, and this spec is the place for it.
+>
+> #### D40 — A MALFORMED `hello` LEAVES A LINK SILENTLY HALF-DEAD, AND D30's FIX CREATED IT
+>
+> Found 2026-08-23 while wiring D38, by the same agent that wrote D30's fix. **Not a hypothetical —
+> it is why the watermark provider validates rather than trusting a number the node computed itself.**
+>
+> Chain: `writeFrame` does not validate (JSON-encode plus a byte bound, nothing more), and
+> `link-server.ts:272` **DROPS** an invalid uplink frame with a warn rather than refusing the
+> connection. So ONE malformed watermark entry means the `hello` is never processed, and
+> `helloReceived` is never set. Before D30 that was survivable. **Now that `connectedNodes()` is
+> narrowed to handshaken nodes, that node gets no `welcome` and no fan-out AT ALL, indefinitely —
+> while its own health still reads `online`.** A silently half-dead link: connected, never served.
+>
+> Two general points worth carrying past this defect:
+> - **Tightening a gate can convert a tolerated fault into a permanent one.** D30's narrowing is
+>   correct and should stay. But it moved the cost of a dropped `hello` from "a stale watermark"
+>   to "this node is never served again", and nothing in the D30 change itself is where you would
+>   look for that.
+> - **`storedClusterWatermarkSchema` is `.passthrough()`; the wire's `clusterWatermarkSchema` is
+>   `.strict()`.** So handing a stored watermark straight to the wire is invalid the moment it
+>   carries any extra key. `helloWatermarks()` narrows to the wire fields, re-validates per entry,
+>   caps at 500, and catches a throwing provider — every failure mode falling toward over-send,
+>   never toward a dead link. Construct the wire shape deliberately; do not rely on that guard.
+>
+> `hello.projects` stays hardcoded `[]` deliberately, for a DIFFERENT reason than the watermarks:
+> nothing consumes it (`hub-router.ts`'s `hello` case omits `proposals` rather than computing one),
+> so advertising into it would be motion, not progress. Recorded separately so a future reader does
+> not "finish the job" by wiring it.
+>
+> #### D41 — THE D9a DOUBLE-START IS REAL, AND IT IS REPORTED RATHER THAN PREVENTED
+>
+> **The hub refusing a claim does not stop the run this node already started.** `spoke-runtime.ts`
+> now says so in its own warn text: *"a claim this node LOST (D9a): a run started here for that
+> claim is NOT stopped by this ack"*. So two nodes can be running the same task, and the guard
+> built to prevent exactly that reports the collision after the fact instead of preventing it.
+>
+> **Why it was not simply fixed, and this reasoning is worth preserving:** settling the record needs
+> an `opId -> entity` mapping, and this module cannot form one without holding a sent-but-unacked
+> map across ticks — the one thing its module doc says it never does, and the thing that makes a
+> link outage harmless. Re-deriving from disk cannot recover the mapping either (see D42). So the
+> honest contribution available was to make the refusal VISIBLE, and it takes it. Silence was the
+> worst option; a fabricated mapping would have been worse than silence.
+>
+> **This is an owner decision, not an engineering one.** Either a claim becomes synchronous (the
+> spoke waits for `accepted` before starting, which is what D9a's own text says `accepted` means and
+> costs a round trip on every start), or the double-start is accepted and something must reconcile
+> it. It is currently neither: documented, warned about, and live.
+>
+> #### D42 — `deriveTodoOps` IS DOCUMENTED AS DETERMINISTIC AND IS NOT
+>
+> `ops.ts:175` claimed *"Deterministic: called twice over the same state it produces the same ops,
+> so a re-derive after a crash is a no-op rather than a duplicate flush."* **False.** `opId:
+> newOpId()` is `randomUUID()`, so two derives over identical state differ in exactly the field the
+> hub deduplicates on — `op-history.ts#findAppliedOp` keys on `opId`. A re-derive is therefore a
+> duplicate flush the dedupe **cannot recognise**, durably re-applied at the hub.
+>
+> This is the engine behind D35/D36: a record that stays `pendingSince` re-derives every 5 s with a
+> fresh id and op history grows without bound. **D36's fix removes the usual trigger but does not
+> make the sentence true** — any future path that leaves a record pending gets the same behaviour.
+> Docblock corrected in place 2026-08-23, original text kept beneath the correction.
+>
+> The general shape, worth more than the instance: **a docblock asserting a safety property is not
+> evidence of it, and this one had been read and relied on repeatedly.** D35's whole analysis rested
+> on it. Two of today's defects were found by comparing a module against its mirror-image sibling
+> and the shared contract, never by reading its own documentation — a docblock shares the code's
+> blind spot by construction.
+>
+> #### THE ONE LESSON, IF YOU READ NOTHING ELSE
+>
+> **Wiring dead code makes every latent defect inside it live at the same instant.** Nine defects
+> (D27-D35) were found in a single day, all inside code that had been green for weeks, none visible to
+> any single-module suite. The dangerous moment for a feature built module-by-module in isolation is
+> not when the modules are written — it is the day they are connected. Milestone C is being built the
+> same way and will have the same day.
+>
 > ### THE BLOCKER — found AND FIXED 2026-08-23 (`cez cluster init`)
 >
 > **FIXED. Read the diagnosis below for why it mattered; the fix is at the end of this block.**
@@ -2410,7 +2945,10 @@ invented; these are the names to use when one lands.
 > - `3f00d234` — merge of `origin/main` (6 commits, the codex-resume-explicit-model work). Clean, no
 >   conflicts, though it did touch `server/server.ts`, which this branch also changes.
 > - Pushed to **`origin/feat/multi-node-cluster`**. Never pushed to `upstream`, and never should be.
-> - Not merged to `main`, and no PR opened — that is the owner's call.
+> - **CORRECTED 2026-08-23: a PR now exists.** ~~Not merged to `main`, and no PR opened~~ — PR **#9**
+>   is open (https://github.com/MarcinWalendowski/cezar/pull/9) and still NOT merged. Merging remains
+>   the owner's call, and is the hard prerequisite for any E2E (see the deploy path below). `HEAD` has
+>   also moved on past `3f00d234`: it is `961ebcd3` as of 13:11.
 >
 > ### The deploy path — why merging to `main` is a HARD prerequisite for any E2E
 >
@@ -2441,12 +2979,30 @@ invented; these are the names to use when one lands.
 > | hub applies an ops frame -> ack | `cluster/hub-ops.ts` | **done**, 8/8, 4 mutations red |
 > | replica fan-out planner | `cluster/replica-fanout.ts` | **done**, 11/11, 5 mutations red |
 > | spoke outbox flush + ack/replica wiring | `cluster/spoke-runtime.ts` | **done**, 28/28, 3 mutations red |
-> | router wiring + watermarks | `cluster/hub-router.ts` | **code written, ZERO TESTS — see below** |
+> | router wiring + watermarks | `cluster/hub-router.ts` | **done 2026-08-23**, 17/17, 7 mutations red (was "code written, ZERO TESTS") |
 > | durable per-`opId` verdict cache | `cluster/op-history.ts` | **done**, 16/16, fails closed on key/value mismatch |
 > | hub-side per-op apply (D9a verdict) | `cluster/hub-apply.ts` | **done**, 11/11 — but NOT mutation-checked (see B2) |
-> | constructing the deps in `startClusterRuntime` | `server/cluster-routes.ts` | **not started** |
+> | constructing the deps in `startClusterRuntime` | `server/cluster-routes.ts` | **DONE 2026-08-23** — wired; the remove-the-wiring negative control verified twice, independently |
 >
-> #### THE SINGLE MOST IMPORTANT THING TO KNOW ABOUT THIS BRANCH RIGHT NOW
+> #### ~~THE SINGLE MOST IMPORTANT THING TO KNOW ABOUT THIS BRANCH RIGHT NOW~~ — CLOSED 2026-08-23 13:18
+>
+> **B1 is DONE; this section is kept only as the record of what was wrong and how it was proved.**
+> `grep -ac replication hub-router.test.ts` now returns **20**, up from 0, and the file is **17/17**
+> (was 11). Six new tests cover the six cases listed below; a seventh covers `watermarkKey` keeping
+> `workspace` and `project:<key>` independent. **Every one was mutation-checked RED**, and the
+> orchestrating session re-ran the highest-stakes mutation itself rather than accepting the report:
+> re-introducing the monotonic `seedWatermark` (the real bug that was caught and fixed the same day
+> it was written) turns exactly one test red —
+> `AssertionError: expected [ { type: 'replica', …(5) } ] to have a length of 2 but got 1` — and
+> `hub-router.ts` was `8a781584c20dcb01b817e965889109f8` before and after, unchanged against HEAD.
+>
+> **The residual gap, stated honestly, because it is the same shape as the defect this closes.** These
+> tests inject FAKES for all six `HubReplicationDeps` members. They prove the router's logic; they
+> prove nothing about the real `hub-seq.ts` / `hub-apply.ts` / `op-history.ts` behind it. **That
+> integration test is B3's deliverable, not a nicety** — a wiring change with no test that fails when
+> the wiring is removed is exactly the D23/D24/D25 defect class.
+>
+> The original text follows, unchanged:
 >
 > **`hub-router.ts`'s new replication path has NO test coverage whatsoever, and the suite is green
 > anyway.** Measured, not suspected: `grep -c replication hub-router.test.ts` returns **0**. Every
@@ -2545,13 +3101,390 @@ invented; these are the names to use when one lands.
 > specific to the synchronous claim RPC (D9a) and not to the general outbox `ack` frame, which had
 > zero production callers before this change.
 >
+> ### FOUR LIVE DEFECTS ON THE MILESTONE B PATH — D27-D30, found 2026-08-23 while designing B4
+>
+> **All four are in code that is already written and already "green". None was found by a test; all
+> four were found by reading the path end to end.** Each was then re-verified independently by the
+> orchestrating session against the named lines before being written here. They are listed before the
+> remaining work because two of them are hazards to B3, which is wiring this exact path right now.
+>
+> **FIXED 2026-08-23, and the fix needed a SECOND gate nobody had looked at.** `applyOpToRecord` now
+> narrows `pendingFields` by whatever the op actually names (`fields` keys u `clearedFields` u
+> `unknown` keys) and clears `pendingSince` only when nothing remains owed. The false comment is
+> corrected in place. 25/25 in `replica.test.ts` (20 pre-existing untouched), 95/95 across
+> `replica`/`ops`/`spoke-runtime`, four mutations red.
+>
+> **The second gate is the part worth reading.** The load-bearing test came out RED against the
+> *fix*, not against the bug — because `deriveTodoOps` has **two** gates, not one:
+>
+> ```ts
+> if (!todo.pendingSince) continue;
+> if (todo.hubSeq !== undefined && todo.hubSeq <= input.ackedThroughHubSeq) continue;
+> ```
+>
+> Preserving `pendingSince` correctly (gate 1) achieves nothing if gate 2 drops the record anyway —
+> and it does, because the project-wide `ackedThroughHubSeq` advances on every push while a
+> partially-resolved record's own `hubSeq` lands at or below it one tick later, which is the NORMAL
+> case. **Same bug, reachable through the sibling gate.** Gate 2 is now additionally conditioned on
+> `todo.pendingFields === undefined`, deferring to the precise per-field answer wherever one exists
+> and remaining the backstop it always was where one does not. Verified load-bearing by an
+> independent re-run of the mutation: reverting that one condition fails exactly the load-bearing
+> test (`expected [] to have a length of 1 but got +0`, 1 failed / 66 passed) with the `replica.ts`
+> fix fully intact.
+>
+> Note `todos.ts#markStartedWithClaim` already knew this shape — `if (!item.pendingSince) item.hubSeq
+> = ack.hubSeq;`, twice, commented against "writing this seq onto a record that still carries unsent
+> edits would silently retire them". The knowledge existed, in a different file, for a different
+> write path, and did not generalize.
+>
+> Also folded in: a **tombstone** resolves every pending field unconditionally (it carries no
+> `fields`/`clearedFields`, so it would otherwise leave `pendingSince` set forever on a deleted row),
+> matching `ops.ts#collapseOwed`'s own "a tombstone wipes whatever accumulated" rule.
+>
+> ### THE REACHABILITY POINT, WHICH IS THE LESSON OF THIS WHOLE DAY
+>
+> **D27 had ZERO live blast radius until B3's wiring landed — and B3 is what made it live.** Traced:
+> `applyOpToRecord`'s only observable path is the spoke's `applyReplicaDownlink`, which fires solely
+> on receipt of a `ClusterReplicaFrame`. Before B3, **nothing anywhere constructed or sent one** —
+> the hub had no such mechanism at all. The hub-side call (via `hub-apply.ts`) writes markers on the
+> hub's own copy that nothing ever reads, because a hub never runs the spoke's outbox machinery.
+>
+> So this fix closed the bug **just ahead of** it becoming reachable, rather than closing one that
+> was already losing data. Generalized, and this is the thing to carry forward:
+>
+> > **Wiring dead code makes every latent defect inside it live at the same instant.** B3 made ~1,500
+> > lines reachable in a single change. D27, D28, D29, D30 and D35 were all sitting inside those
+> > lines, all "green", all invisible to every single-module suite — and all of them went from
+> > harmless to load-bearing the moment one line at `cluster-routes.ts:1112` started passing
+> > `replication`. The dangerous moment for a feature built module-by-module in isolation is not
+> > when the modules are written. It is the day they are connected.
+>
+> The original defect, kept:
+>
+> **D27 — applying a replica frame silently DELETES the receiver's own un-sent local edits.**
+> `applyOpToRecord` ends with an unconditional `delete base.pendingSince` (`cluster/replica.ts`,
+> just after the `hubSeq` assignment), and `deriveTodoOps` gates the ENTIRE outbox on that one marker
+> (`cluster/ops.ts:191`, `if (!todo.pendingSince) continue;`). `pendingSince` is **per record, not per
+> field**. So when the hub replicates node B's write to a record that node A also has un-sent local
+> edits on, A's edits lose the only marker that would ever have sent them upward, and nothing
+> re-derives it. The record's *values* may survive for fields the hub did not name; the intent to
+> send them does not.
+>
+> The code's own comment defends the delete — *"the hub has now spoken for whatever it held.
+> `applyReplica` is the one that decides, from `pending`, whether that outstanding work was confirmed
+> or corrected"*. **That claim is false**, and this is the docblock-disagrees-with-the-code pattern:
+> `input.pending` is read in exactly one place (`replica.ts:120-127`) and used only to compute
+> `corrections` **for display**. It never guards a field from being overwritten and never preserves a
+> marker. Fix: a replay or replica apply may not clear or overwrite a field named in the receiver's
+> own `pendingFields`. This is a `replica.ts` change, not a contract change.
+>
+> **D28 — the origin path advances a watermark with NO delivery check, and the writer it depends on
+> can fail silently.** `hub-router.ts`'s `ops` case checks `sendTo`'s boolean before advancing for a
+> PUSHED node (`if (replication.sendTo(...)) advanceWatermark(...)`), but the ORIGIN branch calls
+> `advanceWatermark` unconditionally right after `downlink.push(replicaFrame)`. Those returned frames
+> are written by `link-server.ts:248` — `for (const reply of replies) this.writeFrame(node, reply);` —
+> which **ignores `writeFrame`'s return value**. `writeFrame` returns false for an oversized frame
+> (warned, `:265-267`) and for a budget-exhausted one (**silently**, `:257`). So a replica frame can be
+> dropped while the hub has already recorded it as delivered: silent permanent loss, on the one path
+> that skips the check that the other path makes. D29 makes oversized frames the normal case, not the
+> exotic one.
+>
+> **D29 — `planReplicaFanout` enforces the frame's COUNT cap and not its BYTE cap, while its docblock
+> claims both.** It splits on `CLUSTER_OPS_PER_FRAME_MAX` only
+> (`for (let i = 0; i < owed.length; i += CLUSTER_OPS_PER_FRAME_MAX)`), with no `maxBytes` anywhere —
+> unlike the spoke's mirror-image `packOpsFrame`, whose `DEFAULT_OP_SEND_BUDGET` carries
+> `maxBytes: CLUSTER_FRAME_MAX_BYTES` (`ops.ts:218-222`). The module's own docblock lists "**Frame
+> cap**" among "the remaining requirements … that the tests pin". It pins the count half only. At
+> `chat/`-sized records (~3 KB) a 500-op replica frame is ~1.5 MB against a 256 KB
+> `CLUSTER_FRAME_MAX_BYTES`, i.e. **six times over**, and is rejected at `link-server.ts:265`.
+> **The direction matters:** spoke->hub is budgeted, hub->spoke is not, so this is exactly the half
+> that Milestone B newly makes hot.
+>
+> **ESCALATED 2026-08-23 by an independent second look — this is a CONTRACT violation, not a docblock
+> slip.** The bounds are stated in `packages/contract/src/cluster.ts:100-107` as an obligation on
+> every sender: *"Bounds are part of the contract, not an implementation detail… a **sender that
+> would exceed either splits and resumes** from the last `ack`, so a dropped frame costs a
+> retransmit and never a gap."* **"Either" means both, explicitly.** `planReplicaFanout` builds
+> `ClusterReplicaFrame`s, is exactly such a sender, and honours one bound. Measured: `grep -a` for
+> `byte|Bytes|BYTES` returns **zero hits in `replica-fanout.ts` and zero in its test file** — there
+> is no guard to mutate, so the break is permanent and unconditional rather than merely untested.
+>
+> **And the drop is silent in a way `link-server.ts` says it never is.** Its own module docblock
+> (`:34`) states *"A refusal is a stated reason, never a silent drop (D13)"*, but the byte-oversize
+> outgoing path warns server-side and `return false`s with no exception, no signal back to the plan
+> generator, and no re-split at the right granularity anywhere. From the sender's point of view it is
+> a silent drop. Same defect family as D28, and it is why D28's fix must reach `link-server.ts:248`
+> and not only `hub-router.ts`.
+>
+> **FIXED 2026-08-23 (byte-aware splitting), and the fix surfaced a second, sharper question.**
+> `planReplicaFanout` now packs against the byte bound as well as the count bound, 15/15, three
+> mutations red. Two things from it worth keeping:
+>
+> - **Measure the quantity the wire enforces, not a proxy for it.** `link-server.ts` checks
+>   `Buffer.byteLength(JSON.stringify(frame))` on the whole frame; the spoke's `packOpsFrame` sums
+>   per-op bytes and never counts the **envelope** (`type`/`protocol`/`scope`/`projectKey`). The
+>   undercount is small (~150-300 bytes against 256 KB) but it is the wrong quantity to bind a hard
+>   ceiling to, which is the exact mistake D29 was. The fix measures the encoded frame; to avoid
+>   re-stringifying a growing batch per candidate op (quadratic — ~500 ops x up-to-500-element
+>   re-stringify is hundreds of MB of string work per call) it tracks an incremental estimate and
+>   does one real measurement per COMPLETED frame as a **defensive assertion, not a decision point**.
+>   That assertion fired during mutation testing and caught the mutation before the test's own
+>   assertions did — the difference between a live invariant and a decorative one.
+> - **`ops.ts#packOpsFrame` has the same envelope undercount, smaller**, and its single-oversized-op
+>   policy is "emit anyway". Recorded as a known, deliberate difference rather than a defect: that
+>   policy was a real decision there, unlike D29 which was an omission.
+>
+> **THE FOLLOW-ON, and it is why "fixed" is not yet "done".** The fix throws when a SINGLE op exceeds
+> the frame bound alone. The throw aborts the whole `planReplicaFanout` call, so every normal-sized op
+> in the same batch also fails to replicate and **the origin never gets its ack** — its outbox
+> resends the identical frame into the identical throw, forever. No data is lost (the hub applied it
+> before this step) but it does not self-heal.
+>
+> **That state is REACHABLE, measured rather than assumed:** `clusterOpShape.fields` and `.unknown`
+> are both `z.record(z.string(), z.unknown()).optional()` (`contract/src/cluster.ts:365`, `:381`) —
+> **completely unbounded.** `entityId` is capped at 200, `clearedFields` at 32x120, `pendingFields`
+> likewise; the payload itself has no ceiling at all. A todo carrying a pasted stack trace, log
+> excerpt or spec body can exceed 256 KB, and in this repo todos routinely carry
+> "Context / What to do / Acceptance criteria" prose. So one oversized record **permanently wedges
+> that project's entire replication.** Louder than the silent drop D29 caused, which is an
+> improvement, and still a poor terminal state.
+>
+> Being narrowed now: exclude the unrepresentable op, replicate the rest, **still ack the origin**
+> (or a replication wedge is merely traded for an outbox wedge), and keep the defensive throw for a
+> genuine splitter bug. Note the constraint that makes this more than a warning change: **B4's
+> connect-time replay will hit the same wall on the same record every time that spoke reconnects**,
+> so the handling has to be stable under repetition, not merely correct once.
+>
+> **NARROWED 2026-08-23 — and the narrowing uncovered D35, below.** `planReplicaFanout` now returns
+> `{ plans, excluded }`, both **non-optional**. The reasoning for a return field over an input
+> callback is worth keeping: with a callback, swallowing the report means passing a no-op; with an
+> always-present return field, swallowing it means actively not reading something that is right
+> there. Choose the shape that is harder to ignore by accident. An oversized op is now excluded per
+> (target, op) pair, warned by name — and the warn says explicitly when the excluded target is the
+> ORIGIN, because that case is strictly worse. The rest of the batch replicates, the origin still
+> gets its ack, and the defensive per-frame throw is kept and deliberately distinguished: "this op
+> cannot be represented" is an input condition and is handled; "the frame I built is over budget" is
+> a bug in the splitter and still throws. 40/40 across both files, three mutations red — including
+> one that simulates "stop trying once you hit an op you cannot represent", proving the rest of the
+> batch still gets through.
+>
+> `planReplicaFanout` stays **pure**: same op, same target, same input -> same exclusion, every call,
+> forever. That is what makes it stable under B4's repeated replay attempts rather than a
+> fires-once-then-goes-quiet report.
+>
+> ### D35 — THE ACK DOES NOT STOP RE-DERIVATION, AND AN UNREPLICABLE RECORD LEAKS FOREVER
+>
+> **Found while narrowing D29; confirmed independently against the code.** The assumption that "the
+> ack stops the outbox resending" is only half true, and the half that is false is expensive.
+>
+> The ack stops raw retransmission of one unacked frame. It does **not** stop the record being
+> RE-DERIVED. Chain, every link verified:
+>
+> 1. A record that cannot be replicated never receives a `replica` frame, and receiving one is the
+>    only thing that clears `pendingSince`.
+> 2. The ack path **would** stamp the record's `hubSeq` — `todos.ts:912` and `:936` do
+>    `item.hubSeq = ack.hubSeq` — but both are guarded by **`if (!item.pendingSince)`**, and
+>    `pendingSince` is precisely what is stuck set. So `hubSeq` stays `undefined`.
+> 3. `deriveTodoOps`'s defensive guard is
+>    `if (todo.hubSeq !== undefined && todo.hubSeq <= input.ackedThroughHubSeq) continue;` — whose own
+>    comment says it exists so such a record "is not owed, so it must not be re-sent forever".
+>    **It can never fire**, because step 2 guarantees `todo.hubSeq` is `undefined`.
+> 4. So every 5 s flush tick (`DEFAULT_OP_FLUSH_MS`) re-derives the record with a **fresh
+>    `newOpId()`**. A fresh `opId` misses `op-history`'s idempotence cache by construction, so the hub
+>    **durably re-applies it**, burning a new `hubSeq` and a full `todos.json` read-modify-write under
+>    lease, and appending another `op-history.json` entry.
+>
+> **~17,280 op-history entries per day, per stuck record, indefinitely**, each with a lease cycle and
+> a hubSeq burn. This is an unbounded resource leak, not a stalled write — and note the shape of it:
+> a guard written *specifically* to prevent "re-sent forever" is disarmed by a second guard two files
+> away, and each is locally correct.
+>
+> **Not yet fixed.** The fix lives in `replica.ts`/`todos.ts`, the same code region as D27's
+> unconditional `delete base.pendingSince`, so one owner must hold both — the two are the same
+> question (*when may `pendingSince` legitimately clear?*) approached from opposite directions.
+> **D27 and D35 must be resolved together, or a fix for either will look complete and leave the other
+> live.**
+>
+> **CORRECTED 2026-08-23, same day — step 2 above names the wrong dead end, and the correction
+> matters because it invalidates the obvious fix.** `todos.ts:912`/`:936` are inside
+> `markStartedWithClaim`'s **synchronous** claim path (`askHubToConfirm` -> `options.confirmStart`),
+> and **`confirmStart` is never wired to a real implementation anywhere in `src`** — only the type and
+> the two call sites inside `todos.ts` itself. So today every clustered claim takes the `!ack` branch
+> and **those two lines are unreachable from any call in the codebase.** Relaxing them, which is what
+> the entry above implies, would not have reached the leak at all.
+>
+> The real dead end is `spoke-runtime.ts#applyAck`, and it discards the answer **on purpose**:
+>
+> > `throughHubSeq` is the ONLY thing that may retire an owed op (never `results`, which exists for a
+> > **future** synchronous claim-confirmation correlation, not for outbox bookkeeping)
+> > — `spoke-runtime.ts:311-313`
+>
+> That "future" work was never built. `results[]` arrives on every ack fully populated by the hub
+> (`opId`, `hubSeq`, `accepted`, `fields?`, `reason?`) and is read by nothing.
+>
+> **And case 3 is two defects, not one.** They have different triggers and are NOT fixable by the same
+> mechanism:
+>
+> - **3a — a REJECTED op** (a claim collision, `already-started`; the only real todo-op rejection
+>   besides the `forged-author` security refusal). The ack carries `accepted:false` **with the
+>   winner's `fields`** — the wire already carries everything needed to settle it.
+> - **3b — an ACCEPTED op permanently excluded from the replica to its own origin** (D29's oversized
+>   record). The ack says `accepted:true`, because it *was* applied. **Nothing on today's wire
+>   distinguishes this from a normal accepted op that will replicate a moment later.**
+>   `ClusterAckResult` has no field for "you will never get this back". Unclosable from the ack by
+>   construction.
+>
+> **RESOLUTION — 3a needs no new mechanism; connect-time replay closes it.** Traced: a losing
+> claimant can only exist if it claimed BEFORE receiving the winner's op (`markStartedWithClaim`
+> checks `if (item.startedTaskId)` first), so its watermark is necessarily below the winner's
+> `hubSeq`. The reason it does not self-heal today is that `planReplicaFanout` fans out
+> `input.applied` — **this frame's accepted ops only** — so a historical op above a node's watermark
+> is never re-shipped by the live path. That is exactly and only the replay gap. Under B4's Design B
+> the scan finds the winner's record, ships it as an ordinary replica, and D27's logic settles it.
+>
+> **So the `opId -> entity` correlation map in `spoke-runtime.ts` was considered and REJECTED.** It
+> would relax an invariant that file's docblock states three separate times (it never holds a
+> sent-but-unacked queue, which is what makes an outage harmless) in order to solve a problem an
+> already-planned piece solves for free. A `replica.ts` settlement helper was likewise rejected as
+> premature: with 3a closing via replay it would have **no caller**, which is the precise pattern that
+> put 1,500 lines of green unreachable code on this branch.
+>
+> **3b stays OPEN and is recorded as a contract question**, with two candidate shapes:
+> 1. A field on `ClusterAckResult` (`replicable`, or `excludedFrom`) — which forces the hub to compute
+>    the fan-out exclusion set **before** building the ack, a reordering in `hub-router.ts`, not just a
+>    schema addition.
+> 2. **Refuse it at the source** — have `deriveTodoOps` decline to derive an op that could never fit a
+>    frame, and mark the record un-syncable locally with a visible reason. No wire change at all: the
+>    record never enters the outbox, never leaks, and the person who wrote a 256 KB todo is told so,
+>    instead of the failure surfacing three components downstream as a silent exclusion.
+>
+> **Recommendation: (2), fail fast where the size is created rather than late where it is
+> discovered.** Not built — it changes local write behaviour and should be an owner decision rather
+> than something slipped in mid-milestone.
+>
+> **D30 — the hub-side watermark can jump past ops it never sent, and the race is structural.**
+> `advanceWatermark` jumps to the frame's max `hubSeq`. A node at watermark 5 with 6-11 owed, when a
+> live batch allocates 12: `owedFor` filters `op.hubSeq > 5` so the frame carries only op 12, the
+> frame is sent, and the watermark jumps **5 -> 12**. The hub now asserts the node holds 6-11. It does
+> not, and the only thing that ever re-seeds truth is that node's next `hello`. Three facts make the
+> window real rather than theoretical:
+> 1. **A node is in `connectedNodes()` BEFORE it has said `hello`** (`link-server.ts:196` sets the map
+>    at connection setup; `connectedNodes()` is `[...this.nodes.keys()]`), so a concurrent `ops` frame
+>    from another node fans out to a node whose position the hub has not yet learned.
+> 2. **The `hello` handler awaits after seeding** — it seeds the watermarks, then
+>    `await readPeers(...)`. An `ops` frame handled during that await advances the watermark, and a
+>    replay computed after the await reads the advanced value and finds nothing owed.
+> 3. **The `watermarks` Map is never cleaned on disconnect.** `link-server.ts:204-206` deletes the
+>    node from `this.nodes`; the router's closure Map keeps the entry. With (1), the pre-`hello` window
+>    uses a **stale, too-high** watermark from the previous session — and since a spoke's own position
+>    resets to 0 on restart (`spoke-runtime.ts:196`), "too high" is the overwhelmingly likely case.
+>
+> **B4 cannot be considered done without fixing D30**, or replay repairs the steady state while the
+> race re-opens the hole on the very next reconnect — invisible to a green suite, which is this
+> branch's signature failure. The two pieces: gate a node out of live fan-out until its replay has been
+> dispatched, and drop its watermark entry on disconnect.
+>
+> **Why none of this was caught:** every one of these modules is unit-tested in isolation and passes.
+> D27 needs a receiver with its OWN pending edits, D28 needs a writer that fails, D29 needs a realistic
+> record SIZE rather than a realistic record count, and D30 needs two nodes and a reconnect. No
+> single-module suite has any of those, and the integration test that would has never existed because
+> the wiring (B3) has never run.
+>
+> ### D34 — THE LINK PATH HAD NO PAIRING GATE AT ALL. Found and closed 2026-08-23.
+>
+> **Nothing on the link path checked that a sending node was paired with the project it was writing**,
+> while the HTTP `/cluster/todos/*` family gates exactly that, both ways, and calls it D20's closing
+> rule (`cluster-routes.ts:356-364`). `hub-router.ts`'s `ops` case and `applyOpsFrame` went straight
+> to `applyOp`. So **a node refused project P over HTTP could write P over the socket.** Two halves,
+> both now landed:
+>
+> - **B3's half** — `startClusterRuntime` resolves each op's dataDir through
+>   `resolveHubTodosRoot(op.projectKey, op.nodeId, env)`, the same both-ways-confirmed gate.
+> - **The half without which the first is decorative** — `resolveHubTodosRoot` authorizes against
+>   `op.nodeId`, which is **frame body, not authenticated identity**. A node that forges that field
+>   borrows another node's pairings. `hub-router.ts` now refuses any op whose `op.nodeId` disagrees
+>   with the id the upgrade authenticated — the `hello` guard's principle one layer down, and checked
+>   in code rather than in the schema for the identical reason: no schema constraint can express
+>   "equal to a value carried on a different layer".
+>
+> **A consequence nobody had flagged:** `op.nodeId` is also what `hub-apply.ts` stamps an accepted
+> D9a claim's `startedOn` from, and `startedOn` is what the cockpit renders as "started on <node>".
+> So a forged author is not only an authorization bypass — it is a run durably attributed to a machine
+> that never made it.
+>
+> **Three design decisions, made deliberately rather than by default:**
+> 1. **Refuse the op, do not filter it out.** The guard fires at the `applyOp` seam, where a verdict
+>    can be RETURNED. Filtering the frame up front would leave the op with no `results` entry, which
+>    `hub-ops.ts` defines as a GAP — so the spoke would keep it owed and resend it every flush tick
+>    **forever, for a verdict that can never change.**
+> 2. **A returned rejection, never a throw**, by `hub-ops.ts`'s own test — "retrying does not change
+>    the state that produced it". The state is the op's immutable `nodeId` against this socket's
+>    authenticated identity; neither moves. Note a retransmit never even reaches the guard:
+>    `findAppliedOp` answers from the cached verdict first — **which is why a future op-RELAY design
+>    would have to invalidate those cached verdicts, not merely relax the guard.**
+> 3. **One warning per FRAME, never per op.** A frame may legally carry 500 ops, so a per-op line lets
+>    a single misbehaving node flood the log 500 entries at a time — denial of the record, by a sender
+>    already misbehaving. The message names both sides, because that IS the content of a security
+>    event: which credential sent the frame, and whose name it wrote under.
+>
+> **And one bound that was checked rather than assumed, which is the detail worth copying.** The
+> refusal string embeds two node ids. `clusterAckResultSchema.reason` is `.max(200)`
+> (`contract/src/cluster.ts:1512`) and `clusterNodeIdSchema` is `.max(64)` (`:118`), so the worst case
+> is **exactly 178** — verified by construction, not by eye. Had it exceeded 200, the SPOKE's parse of
+> the whole downlink frame would fail, **taking every other op's verdict in that ack down with it**:
+> an error message long enough to destroy the report of the errors around it. Any generated `reason`
+> on this wire needs the same arithmetic.
+>
+> Covered by four tests (21/21 in `hub-router.test.ts`, up from 17): refused-never-applied-never-
+> replicated; only the forged op refused while an honest op in the same frame still applies and
+> replicates; the refusal is DURABLE (`throughHubSeq` advances past it so the spoke stops owing it);
+> and warns exactly once per frame naming every distinct claimed id.
+>
+> ### THE OTHER FIVE MODULES' MUTATION CLAIMS WERE AUDITED, AND THEY HOLD — 2026-08-23
+>
+> Because `hub-apply.ts` was reported "done" in the table above and turned out to have no mutation
+> testing at all, **every other module's self-reported mutation count was treated as an unaudited
+> claim of the same kind** and independently re-tested. Guards were chosen by "what silently loses
+> data or fabricates a durable verdict if this is wrong", not by what was easiest to mutate.
+>
+> **Result: 16 mutations across 5 modules, 16/16 RED. No GREEN. The claims check out.** That is a
+> more useful result than it sounds — it means `hub-apply.ts` was the outlier rather than the norm,
+> so the rest of the milestone's evidence can be relied on. Highlights, each reproducing a hazard the
+> module exists to prevent: `hub-seq` restart persistence (`expected 1 to be greater than 7`);
+> `hub-ops` gap-stops-the-watermark, thrown-op-fabricates-no-verdict, and rejected-op-still-recorded
+> (which reproduces the false-conflict replay bug from the allocator side); `op-history`'s
+> `find()` poisoned-key gate (the same hazard from the durable-cache side); `replica-fanout`'s
+> count-split dropping an op (`expected […(199)] to have a length of 200 but got 199`);
+> `spoke-runtime`'s ack watermark monotonicity, where an out-of-order ack un-acks a higher one.
+>
+> **THE METHOD LESSON, which is the durable part.** The auditor did **not** find D29 in its own
+> mutation pass, and said so unprompted: it had been *"pattern-matching 'what property does the
+> docblock assert' rather than cross-checking against the sibling module `ops.ts` and the contract's
+> own stated bounds."* Generalized: **auditing a module against its own docblock can never find a
+> guard the docblock does not claim** — the docblock is written by the same author at the same time
+> with the same blind spot, so it cannot be the oracle. What found D29 was reading the *mirror-image
+> sibling on the other direction of the same wire* and the *shared contract*, neither of which shares
+> the module's blind spot. Use those as the oracle when auditing anything on this wire.
+>
+> **One untested corner, surfaced rather than chased:** `spoke-runtime.ts#flushOps` does
+> `if (outcome === 'link-down') { linkDown = true; break; }`, which stops iterating the REMAINING
+> projects. No multi-project test exercises that early break, so what a link-down mid-sweep does to
+> the projects after it is unpinned. Not a disproven claim — an absent one.
+>
 > ### REMAINING WORK, in the order it has to happen
 >
 > Nothing below is blocked on the owner except where it says so.
 >
-> **B1. Tests for `hub-router.ts`'s replication path.** Six cases listed above. Do this FIRST — the
-> code is written and unproven, and every hour it sits there is an hour the green suite is lying
-> about it.
+> **B1. Tests for `hub-router.ts`'s replication path. — DONE 2026-08-23 13:18.** ~~Six cases listed
+> above. Do this FIRST — the code is written and unproven, and every hour it sits there is an hour the
+> green suite is lying about it.~~ All six exist, plus a seventh for scope keying; 17/17; each
+> mutation-checked RED with the failure quoted; `hub-router.ts` unchanged (md5 verified before and
+> after). Case 6 ("no replication wired -> warns, returns `[]`") already existed in the pre-existing
+> `ops` block and was deliberately not duplicated. **No bug was found in `hub-router.ts`** — every
+> mutation that produced a red mapped to a hazard the module's own docblocks already name.
+>
+> Carried forward to B3: these tests use fakes for every `HubReplicationDeps` member, so the real
+> allocator, applier and verdict cache are still unexercised end to end.
 >
 > **B2. `hub-apply.ts` — DELIVERED 2026-08-23, but held to a lower standard than its five siblings,
 > and that difference matters.** The agent writing it was stopped along with 57 others before it
@@ -2569,6 +3502,71 @@ invented; these are the names to use when one lands.
 > mutates the hub's real todo store under a lease, mutation-check at least: the lease being taken at
 > all, the read-fresh-inside-the-lease ordering, and whatever decides `accepted: false` (the D9a
 > claim-already-won path, which is the one whose verdict travels back to a spoke as authority).
+>
+> **DONE 2026-08-23 13:30 — and the mutation pass paid for itself immediately: it found THREE real
+> bugs, two of them serious.** The suite went 11/11 -> **18/18**, seven new tests. Verified by the
+> orchestrating session independently of the agent's own account: `hub-apply.test.ts` 18/18, and the
+> whole `packages/cezar/src/cluster/` directory **604/604 across 30 files** with the fixes in the
+> tree. This is the concrete answer to "what is a green suite worth on a module nobody mutation-
+> tested" — it was worth three bugs, on a module already reported as done.
+>
+> **D31 — a claim could be granted with NOTHING WRITTEN, which is the double-start this module
+> exists to prevent, arriving THROUGH its guard rather than around it.** The staleness guard
+> (`op.hubSeq <= existing.hubSeq -> { accepted: true }`) ran after the claim check, and the module's
+> docblock argued that ordering made it safe. **The ordering argument covered only a claim that
+> LOSES.** It left the mirror case open: a claim on a still-UNCLAIMED row, where an ordinary field op
+> from another node reached the lease first and carried the record's `hubSeq` past the claim's own.
+> That claim passes the conflict check (nobody holds it), then meets the staleness guard and is
+> answered `{ accepted: true }` with no write and no `fields` — and **`accepted` is precisely the
+> spoke's permission to START** (`todos.ts#markStartedWithClaim` calls `start()` on it). The hub
+> grants a run it holds no record of, and grants the NEXT node's claim on the same row identically.
+> Fix: a claim never takes that exit (`!claiming && …`), because *"nothing to re-apply" is true of a
+> field patch, whose value is already on the record; it is never true of a claim, whose whole purpose
+> is to BECOME the record.* A companion guard keeps `max(existing.hubSeq, op.hubSeq)` on write so an
+> out-of-order claim cannot regress the record's hub order.
+>
+> **D32 — an unreadable `todos.json` was REPLACED BY A SINGLE ROW.** `readTodosRaw` answered `[]` for
+> ANY read failure, and its caller writes the whole array straight back. Answering `[]` is survivable
+> for a reader — `todos.ts#readRaw` does exactly that — and destructive for a read-modify-write.
+> **The production shape is not hypothetical on this project's own box:** a `todos.json` left owned by
+> `root` in a `cezar`-owned directory fails the read and still passes the `rename`, because rename
+> needs write permission on the DIRECTORY, not on the file. That is the same root-ownership failure
+> mode this workspace's doctrine already warns about for the corpus, reappearing where it destroys
+> data instead of merely blocking a rewrite. Fixed to `ENOENT` only, and to THROW otherwise —
+> deliberately a throw and not a rejection, because an I/O failure is transient and `hub-ops.ts`
+> leaves a gap the spoke resends.
+>
+> **REPRODUCED, not reasoned — 2026-08-23.** The orchestrating session ran the mechanism rather than
+> accepting the argument, because "read fails but rename succeeds" is the kind of claim that sounds
+> right and is worth ten seconds to settle:
+>
+> ```
+> write todos.json  ->  [{"id":"real-1","summary":"REAL DATA"}]
+> chmod 000 todos.json
+> read  of the unreadable file   ->  EACCES
+> rename OVER the unreadable file ->  SUCCEEDED
+> file now contains               ->  [{"id":"replacement","summary":"ONE ROW"}]
+> ```
+>
+> So with the pre-fix `catch { return []; }`, a `todos.json` this process could not read was
+> **silently replaced by a single row.** Not a hypothetical: the permission asymmetry is real,
+> because `rename(2)` needs write permission on the DIRECTORY and none on the file it replaces.
+> The matching production shape on this project's own box — a corpus/data file left owned by `root`
+> in a `cezar`-owned tree — is already documented workspace doctrine as a thing that happens, and
+> the doctrine only ever warned that such a file *cannot be rewritten by the app*. This is the same
+> ownership fault one layer along, where it does not block the write but **destroys the data**.
+> Worth carrying beyond this spec: any read-modify-write whose read degrades to "empty" turns an
+> unreadable store into an erased one, and `todos.ts#readRaw` has exactly that shape (correctly, for
+> a pure reader — the hazard is created by the CALLER that writes the result back).
+>
+> **D33 — an empty-string `startedTaskId` would have wedged a todo against every future claim.**
+> `todoSchema` types it as a bare `z.string().optional()` with no `min(1)`, so `''` stores;
+> `todos.ts#markStartedWithClaim` tests `if (item.startedTaskId)` and therefore reads `''` as
+> UNCLAIMED and goes on to ask the hub — while `hub-apply.ts` tested `!== undefined` and would have
+> read `''` as a HOLDER, refusing every claim on that row forever and naming a winner of `''`. One
+> concept decided at two points, in two files, disagreeing.
+>
+> The original evidence gap, kept because it is the reason all three were found:
 >
 > Its remaining historical note, kept because the contract is what it is: `op-history.ts` DOES: delivered
 > 2026-08-23, 393 lines, **16/16**, and verified by hand against both things that were flagged as
@@ -2608,8 +3606,43 @@ invented; these are the names to use when one lands.
 > Whole-file corruption still refuses `record()`, because merging into unparseable JSON would
 > silently discard every other entry.
 >
-> **B3. Construct the deps in `startClusterRuntime` (`server/cluster-routes.ts`).** This is the wire
-> that makes any of Milestone B real. `allocate` <- `createHubSeqAllocator`; `applyOp` <-
+> **B3. Construct the deps in `startClusterRuntime` — DONE 2026-08-23. THE HUB NOW ACKS.**
+>
+> `cluster-routes.ts:1112` now reads
+> `onFrame: createHubFrameRouter({ identity, env, warn, replication })`. A new exported
+> `buildHubReplication(identity, env, warn, linkServer)` (`:949`) builds one `HubSeqAllocator`, one
+> `OpHistoryStore`, and an `applyOp` resolving `resolveHubTodosRoot(op.projectKey, op.nodeId, env)`
+> **per op** — never a fixed dataDir — throwing rather than returning `{accepted:false}` for
+> `scope !== 'project'` or an unresolvable pairing. The construction-order cycle is closed with a
+> `linkServer: () => ClusterLinkServer | undefined` getter.
+>
+> **THE PROOF, which is the thing this branch never had.** The wiring was deleted from the production
+> call site and the end-to-end test — a real `ops` frame over a real socket — failed:
+>
+> ```
+> cluster hub: ops from "spoke-1" (scope project, project project-hub-e2e, 1 op(s))
+>   — no replication wired on this hub, not applied, no ack sent
+> x B3: a real ops frame is replicated end to end — ack, durable write, replica after the ack
+>   AssertionError: expected undefined to be defined
+>   Tests  1 failed | 4 passed (5)
+> ```
+>
+> **Run twice — by the implementing agent, then independently by the orchestrating session** — with
+> `cluster-routes.ts` restored to md5 `415b165647d50aacfa1e09efba9333b9` both times. This discharges
+> the D24 lesson: a unit test of `buildHubReplication` structurally CANNOT see this, because it never
+> touches the call site. Only deleting the wiring and watching production behaviour change can.
+>
+> Also RED: the per-op dataDir mutation (hardcode one project) gives
+> `expected [ 'row-a', 'row-b' ] to deeply equal [ 'row-a' ]` — project B's write landing in project
+> A's `todos.json`, the exact bug a fixed-dataDir closure would have shipped.
+>
+> **B2a shipped with it:** `OP_HISTORY_PRUNE_INTERVAL_MS = 24h`, one immediate sweep on arm (the one
+> that will actually run, given ~10 restarts/day), `setInterval` `.unref?.()`'d and `clearInterval`'d
+> in teardown, with a mandatory `.catch()` because `prune()` rejects on whole-file corruption and an
+> unhandled rejection in a timer callback has no caller. Negative control RED. **`prune()` had zero
+> production callers for the life of the branch; it has one now.**
+>
+> The original text, kept: this is the wire that makes any of Milestone B real. `allocate` <- `createHubSeqAllocator`; `applyOp` <-
 > `hub-apply.ts`; `findAppliedOp`/`recordAppliedOp` <- `op-history.ts`; `sendTo`/`connectedNodes` <-
 > `ClusterLinkServer`. Until this exists, `deps.replication` is `undefined` everywhere in production
 > and the hub still warns and never acks — i.e. **Milestone B is not shipped no matter how green the
@@ -2618,6 +3651,27 @@ invented; these are the names to use when one lands.
 > How dead this code currently is, measured rather than estimated (2026-08-23, `grep -arn` with a
 > QUOTED `--include='*.ts'` — an unquoted one is eaten by zsh and reports "no matches" for
 > everything, which reads exactly like a real zero and cost this session one wrong answer):
+>
+> **RE-MEASURED 2026-08-23 AFTER B3 — every one of these now has a real production caller.** The
+> original table is kept below because it is the record of what "1,500 lines of tested, unreachable
+> code" looked like, and because the shape recurs. Current counts, same method (`grep -arn`, QUOTED
+> `--include='*.ts'`, test files excluded):
+>
+> | symbol | production callers NOW |
+> |---|---|
+> | `createOpHistoryStore` | 2 — `cluster-routes.ts:956` (replication) and `:1091` (prune timer) |
+> | `applyOpAtHub` | 1 — `cluster-routes.ts:977` |
+> | `createHubSeqAllocator` | 1 — `cluster-routes.ts:955` |
+> | `OpHistoryStore.prune` | 1 — `cluster-routes.ts:1096` |
+> | `OP_HISTORY_PRUNE_INTERVAL_MS` | 1 — `cluster-routes.ts:1105` |
+> | `applyOpsFrame` / `planReplicaFanout` | reached via `hub-router.ts`, whose `ops` branch is now ENTERED |
+>
+> `createHubApplyOp` remains at **0** and that is now correct rather than a gap: B3 calls
+> `applyOpAtHub` directly, because the factory closes over ONE `dataDir` and the hub must resolve a
+> dataDir per op. The spec's earlier "drop-in for B3 with no adapter" was true only for a
+> single-project hub.
+>
+> The pre-B3 state, kept verbatim:
 >
 > | symbol | callers outside its own file + test |
 > |---|---|
@@ -2633,9 +3687,82 @@ invented; these are the names to use when one lands.
 > code. That is a fine state to be in mid-milestone — it is NOT a state to describe as "Milestone B
 > is done bar the wiring", because the wiring is the part that has never been executed even once.
 >
-> **B4. Connect-time replay** — `resumeFrom` from `oplog.ts#readOps`. See above for why this is not
-> optional for a real two-machine cluster: without it, any spoke restart or network blip drops writes
-> permanently and silently.
+> **B4. Connect-time replay** — ~~`resumeFrom` from `oplog.ts#readOps`~~. See above for why this is
+> not optional for a real two-machine cluster: without it, any spoke restart or network blip drops
+> writes permanently and silently.
+>
+> **CORRECTED 2026-08-23 — `oplog.ts` is very likely the WRONG source, and naming it made B4 look
+> like one task when it is at least two.** Two things measured rather than recalled:
+>
+> - **`appendOps` has ZERO production callers.** `grep -arn --include='*.ts' "appendOps" packages/`
+>   returns only `oplog.test.ts`, one docblock line in `ops.test.ts`, and the compiled
+>   `dist/cluster/oplog.d.ts`. So **the hub's op log is never written**, and a replay reading it would
+>   return empty forever *while looking implemented* — `resumeFrom: []` again, now with code behind it
+>   and no warning attached. Note this is the same shape as the empty `resumeFrom` it was meant to
+>   fix: indistinguishable on the wire from "you are caught up".
+> - **`oplog.ts`'s own docblock disqualifies it for the job.** It describes the file as the SPOKE's
+>   outbox cache, states that "losing it is survivable by design" because the truth is the records
+>   marked `pendingSince` and `deriveTodoOps` re-derives them, that the append path "may be fast and
+>   un-fsynced", that a torn last line is dropped on read by per-entry salvage, and that it takes
+>   **no cross-process lease, deliberately**. Every one of those is defensible for a re-derivable
+>   cache and indefensible for a replication log: a dropped line there is a permanently missed write
+>   on a spoke, with nothing to re-derive it from.
+>
+> So B4 is a design choice that has not been made, not a wiring task. The two candidates, being
+> evaluated 2026-08-23:
+>
+> **A — a durable hub-side op log.** Append every accepted, `hubSeq`-stamped op; replay above each
+> watermark. Either `oplog.ts` gains a lease, an fsync and a second durability contract (which would
+> change its spoke behaviour too), or this is a new module. Carries its own retention problem, which
+> has to be reconciled with `op-history.ts`'s.
+>
+> **B — replay from CURRENT STATE, with no log at all.** Scan the hub's own `todos.json` for records
+> whose stored `hubSeq` exceeds the node's watermark and synthesize replica frames from present
+> values. Replica application is last-writer-wins by `hubSeq` and idempotent, so a spoke that missed
+> three successive edits to one field needs only the LATEST value — the intermediate ops are not
+> information it can act on. And a delete is a tombstone that STAYS in the file, so unlike most
+> state scans this one is not blind to deletions. **This design lives or dies on whether stored todo
+> records actually persist a per-record `hubSeq` through `storedTodoSchema`** — if they do not, it is
+> dead, and that check is the first thing to run.
+>
+> Whichever wins, two hazards are already known and neither is optional:
+> - **`resumeFrom` rides inside ONE `welcome` frame.** A node away long enough overflows it, and a
+>   truncated `resumeFrom` that the spoke reads as complete is the same silent-loss bug in a new
+>   place. `clusterWelcomeFrameSchema` may not be able to express "there is more" today.
+> - **The negative control must fail when `resumeFrom` silently returns to `[]` or to a truncated
+>   list.** "A spoke reconnects and is caught up" is not that test — it passes when nothing was
+>   missing, which is the usual case.
+>
+> **DECIDED 2026-08-23 — Design B, replay from current state, and B4's real content is now four
+> fixes rather than one feature.** Design A is rejected on three measured grounds, not on taste:
+> its source module is disqualified by its own contract and rewriting it to qualify breaks its
+> spoke use; its retention needs exactly the durable per-node watermark this design deliberately
+> refuses, so a node that never returns pins the log forever; and **the dominant replay case is
+> "from 0", not "from N-1"** (a spoke's `ackedThroughHubSeq` is in-memory, so every restart resets
+> it), which is precisely where a log's cost is unbounded and a state scan's is flat. The asymmetry
+> settles it: a state scan systematically OVER-sends, which is free, while a log under-sends
+> whenever a line is lost or an append races a compaction, which is the expensive direction.
+>
+> Design B survived its own checks: records do persist `hubSeq` and it is monotonic per record;
+> tombstones stay in the file; and `clearedFields` deletions replay **better** from state than from a
+> log, because an absent key reproduces the absence exactly.
+>
+> **The four fixes B4 must carry, and they are the same defects listed above:**
+> - **F1 = D27.** A replay may not clear or overwrite a field named in the receiver's own
+>   `pendingFields`. Without this, B4 makes things strictly WORSE: as literally specified, a
+>   whole-record replay converts "the spoke is missing a remote write" into "the spoke loses its own
+>   local writes", across the spoke's whole board on every restart.
+> - **F2 = D29.** A byte budget in `planReplicaFanout`.
+> - **F3 = D30.** Live fan-out must not advance a node's watermark past an unfinished replay, and the
+>   watermark entry must be dropped on disconnect.
+> - **F4 = D28.** The origin path must check delivery before advancing, and `link-server.ts:248` must
+>   stop discarding `writeFrame`'s return value.
+>
+> **Where Design A would still be right, recorded so this is not read as "a log is never needed":**
+> if `run`/`triage` stores ever land and carry ops whose effect is an EVENT rather than a value, or if
+> replaying a REJECTED claim becomes a requirement — a rejection writes nothing to state
+> (`hub-apply.ts` returns `{accepted:false}` and only accepted ops fan out), so it is recoverable from
+> a log and structurally unrecoverable from a scan. Both are Milestone C/D territory.
 >
 > **B5. Resolve the duplicated `toNodeWire`/`toPairingWire`** between `hub-router.ts` and
 > `cluster-routes.ts`. Two copies of one projection, already known to be a drift risk; a field added
@@ -2656,16 +3783,69 @@ invented; these are the names to use when one lands.
 > (`spoolDir` + widened `LOCAL_PATH_RE` + producer-side `name`/`url` projection in `run.ts`), the
 > link activation wiring, and the handshake-wedge fix (D26).
 >
-> **Nothing is committed yet.** 28 files dirty, 13 untracked. Commit message drafted at
-> `<scratchpad>/commitmsg.txt`.
+> **CORRECTED 2026-08-23 13:11 — everything IS committed and pushed.** ~~Nothing is committed yet.
+> 28 files dirty, 13 untracked. Commit message drafted at `<scratchpad>/commitmsg.txt`.~~ That was
+> true when written and is not now. The working tree is **clean**, `HEAD` is `961ebcd3`, and it is
+> level with `origin/feat/multi-node-cluster` (`git rev-list --left-right --count` -> `0 0`).
+> **PR #9 is open** — https://github.com/MarcinWalendowski/cezar/pull/9 — and is NOT merged. Do not
+> merge it: it auto-deploys to `prod-host`, where the owner's agents run, and that is the
+> owner's call.
+>
+> ### THIS CHECKOUT HAS MORE THAN ONE LIVE SESSION IN IT, AND THE OTHER ONE COMMITS
+>
+> **Recorded 2026-08-23 13:08 because it is invisible until it bites.** A second, unrelated Claude
+> session was working this same branch in this same checkout at the same time as the session writing
+> this, and it **committed and pushed** `961ebcd3` ("feat: hub-side per-op apply (hub-apply.ts),
+> delivered unreported") mid-read — the spec file changed under an open read, and `git status` went
+> from two untracked files to clean, with no action from this session.
+>
+> That is not a curiosity, it is a hazard with two sharp edges:
+>
+> - **A mutation check is a window in which broken code sits in the shared tree.** The house method
+>   is: break the source, watch the test go red, restore from a scratchpad copy, verify the md5. If
+>   the other session runs `git add -A` inside that window, the *mutation* is what gets committed and
+>   pushed. Keep the window to a single test run, restore immediately, and re-check the md5 of a file
+>   you are about to mutate as well as after — not only after.
+> - **Do not `git pull`, rebase, or restore a stale scratchpad copy over a file that moved.** A
+>   scratchpad copy is a restore for YOUR OWN mutation, never a general-purpose revert; writing it
+>   over another session's edit silently reverts work that nothing will report as missing.
+>
+> The already-standing rule (never `git stash` / `git checkout .` / `git reset --hard` /
+> `git clean -fd` here) exists for the same reason and is now doubly load-bearing: `git clean` would
+> have deleted `hub-apply.ts` outright during the ~2 hours it sat untracked.
 >
 > ### Gate status — run gates on the BOX, never the Mac
 >
 > The Mac sits at load ~10 and produces timing flakes (`workspace-parallel`, `cluster-flag-off`
-> both flake there and both pass on the box). Method:
-> `git ls-files -co --exclude-standard` -> `rsync --files-from` to `/var/lib/cezar/gate-cluster/`
-> on `prod-host` -> `npm ci` -> `git init && commit` (required: `build:stamp` runs
-> `git rev-parse HEAD`) -> gates with `CEZ_VITEST_MAX_WORKERS=3`.
+> both flake there and both pass on the box).
+>
+> **CORRECTED 2026-08-23 — do NOT use `rsync --files-from` for this.** The method below used to read
+> *"`git ls-files -co --exclude-standard` -> `rsync --files-from` to `/var/lib/cezar/gate-cluster/`"*,
+> and following it is how I contaminated the PEER's `/var/lib/cezar/gate-retarget` the same day: a
+> file-list rsync **merges** with whatever is already there rather than replacing it, and the mixed
+> tree (their tests, my source) failed 23 times in a way that **named the wrong owner** — the side
+> whose *tests* survive is the side that looks broken. Use instead:
+>
+> ```
+> rsync -a --delete --exclude node_modules/ --exclude dist/ --exclude .turbo/ \
+>   ./packages/ cezar@ssh-cockpit.example.com:/var/lib/cezar/gate-cluster/packages/
+> ```
+>
+> **`/var/lib/cezar/gate-cluster` is THIS branch's dir; `gate-retarget` belongs to another session.**
+> One owner per gate dir, and expect `--delete` to remove any `.log` you left there (which is correct
+> — a stale log from a previous run is indistinguishable from the current one).
+>
+> `npm ci` is NOT needed when the three manifests already match — check first, it saves minutes:
+> `md5 -q package.json package-lock.json packages/cezar/package.json` vs `md5sum` of the same on the
+> box. Confirm the tree landed by comparing `find packages/cezar/src -name '*.ts' | wc -l` on both
+> sides (718 = 718 on 2026-08-23). Connect as **`cezar@`, not `root@`**, or every file you write is
+> root-owned in a cezar-owned tree; `find /var/lib/cezar -not -user cezar | wc -l` must stay 0.
+>
+> **Two box-only failures that are NOT gate failures.** `npm run build` dies in an rsync'd tree
+> because `scripts/write-build-stamp.mjs` shells `git rev-parse HEAD` and there is no `.git` — and it
+> dies *after* printing `check:pack ok`, so it reads like a real build break. And `--reporter=basic`
+> is not a valid vitest reporter in this repo: it exits 1 with a startup error and no `Test Files`
+> line at all, which also reads exactly like a failing gate.
 >
 > **Verify the trees match before trusting a result.** This bit twice in one session: a file list
 > can be identical while contents differ. Compare a manifest —

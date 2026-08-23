@@ -82,6 +82,21 @@ import type { HubOpOutcome, HubOpsDeps } from './hub-ops.ts';
  * check's own conflict test does not need `hubSeq` at all (it is keyed on "does the record already
  * name someone else"), which is what makes it correct independent of write-arrival order.
  *
+ * **Corrected 2026-08-23 — running the staleness guard after the claim check is necessary and NOT
+ * sufficient; a claim now skips that guard entirely.** The paragraph above reasoned only about a
+ * claim that LOSES, and ordering does protect that one. It leaves the mirror case open: a claim on
+ * a still-UNCLAIMED row, where an ordinary field op from another node reached this lease first and
+ * carried the record's `hubSeq` past the claim's own. That claim passes the conflict check (nobody
+ * holds it), then meets `op.hubSeq <= existing.hubSeq` and is answered `{ accepted: true }` with
+ * nothing written and no `fields` — and `accepted` is precisely the spoke's permission to START
+ * (`todos.ts#markStartedWithClaim` calls `start()` on it). The hub would be granting a run it has no
+ * record of, and would grant the NEXT node's claim on the same row the same way: the double start
+ * this module exists to prevent, arriving through the guard rather than around it. So the guard is
+ * now `!claiming && …`. "Not strictly newer, therefore nothing to re-apply" is a true statement
+ * about a field patch, whose value is already on the record. It is never true of a claim, whose
+ * whole purpose is to become the record. The write path compensates by keeping
+ * `max(existing.hubSeq, op.hubSeq)` so an out-of-order claim cannot regress the watermark.
+ *
  * **D6 — a tombstone op is applied like any other non-claim op** (`applyOpToRecord` already
  * encodes "value, not a hole" — see its own docblock) and is never a removal from the array.
  *
@@ -195,8 +210,22 @@ async function readTodosRaw(dataDir: string): Promise<StoredTodoRow[]> {
   let raw: string;
   try {
     raw = await fs.readFile(todosPath(dataDir), 'utf8');
-  } catch {
-    return []; // no file yet
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return []; // no file yet — the only read failure that means "empty"
+    // Deliberately STRICTER than `todos.ts#readRaw`, which answers `[]` for ANY read failure. That
+    // is survivable for a reader; here it is destructive, because this function's caller writes the
+    // WHOLE array straight back — so an unreadable store would be REPLACED by a single row. The
+    // production shape is not hypothetical on this project's own box: a `todos.json` left owned by
+    // root in a `cezar`-owned directory fails the read and still passes the `rename`, since rename
+    // needs write permission on the directory and not on the file. Thrown, not swallowed: an I/O
+    // failure is transient (hub-ops.ts leaves a gap and the spoke resends), where "the content is
+    // broken" — handled below — is a fact about the file that a retry cannot change.
+    throw new Error(
+      `cluster hub-apply: todos.json at ${todosPath(dataDir)} could not be read (${code ?? String(err)}) — refusing to apply, ` +
+        'because writing over a store this process could not read would replace it with a single row. This is a TRANSIENT ' +
+        'failure: the caller must not turn it into an accepted:false verdict.',
+    );
   }
   let parsed: unknown;
   try {
@@ -276,9 +305,16 @@ export async function applyOpAtHub(dataDir: string, op: ClusterOp & { hubSeq: nu
     const idx = rows.findIndex((row) => row.id === op.entityId);
     const existing = idx >= 0 ? rows[idx] : undefined;
 
-    if (isClaimUpsert(op)) {
+    const claiming = isClaimUpsert(op);
+
+    if (claiming) {
       const proposed = op.fields.startedTaskId as string;
-      if (existing?.startedTaskId !== undefined && existing.startedTaskId !== proposed) {
+      // Truthiness, not `!== undefined`: `todoSchema` types `startedTaskId` as a bare
+      // `z.string().optional()` with no `min(1)`, so `''` stores, and `todos.ts#markStartedWithClaim`
+      // tests `if (item.startedTaskId)` — it reads `''` as UNCLAIMED and goes on to ask the hub. One
+      // concept decided at two points: reading `''` as a HOLDER here would refuse every claim on
+      // that row forever, naming a winner of `''`, for a value the rest of the system calls empty.
+      if (existing?.startedTaskId && existing.startedTaskId !== proposed) {
         // D9a: another node's claim already won. Considered, durable, no write — `fields` carries
         // the WINNER's applied values so `todos.ts#markStartedWithClaim` can render who holds it.
         return { accepted: false, reason: 'already-started', fields: claimFields(existing) };
@@ -290,7 +326,17 @@ export async function applyOpAtHub(dataDir: string, op: ClusterOp & { hubSeq: nu
     // the record changes nothing — still a resolved, accepted verdict (matches
     // `cluster/replica.ts#applyReplica`'s own "skip, not re-apply" contract for the same case),
     // never a rejection. Runs AFTER the claim check on purpose — see module docblock.
-    if (existing?.hubSeq !== undefined && op.hubSeq <= existing.hubSeq) {
+    //
+    // **A CLAIM never takes this exit at all** (`!claiming`), which is a stronger statement than
+    // the ordering above and was added after the ordering alone proved insufficient. Ordering only
+    // covers a claim that LOSES; it does nothing for a claim on a still-UNCLAIMED row whose hubSeq
+    // an ordinary field op from another node has already carried past this claim's own. That op
+    // would fall through to here and be answered `{ accepted: true }` without being written — and
+    // `accepted` is the spoke's permission to START (`markStartedWithClaim`), so the hub would be
+    // granting a run it holds no record of, and would grant the next node's claim the same way.
+    // "Nothing to re-apply" is true of a field patch, whose value is already on the record; it is
+    // never true of a claim, whose whole purpose is to BECOME the record.
+    if (!claiming && existing?.hubSeq !== undefined && op.hubSeq <= existing.hubSeq) {
       return { accepted: true };
     }
 
@@ -304,8 +350,14 @@ export async function applyOpAtHub(dataDir: string, op: ClusterOp & { hubSeq: nu
       throw new Error(`cluster hub-apply: applying op ${op.opId} produced no record for ${op.entityId}`);
     }
 
+    // `applyOpToRecord` stamps `after.hubSeq = op.hubSeq` unconditionally. For an out-of-order
+    // claim — the case exempted from the guard above — that would drag the record's hub order
+    // BACKWARDS, and `cluster/ops.ts` reads that number to decide what is still unsent. The claim
+    // is applied; the watermark is not regressed by it.
+    if (existing?.hubSeq !== undefined && existing.hubSeq > op.hubSeq) after.hubSeq = existing.hubSeq;
+
     let outcomeFields: Record<string, unknown> | undefined;
-    if (isClaimUpsert(op)) {
+    if (claiming) {
       // Not a clock read (module docblock): `startedOn` names the CLAIMING node, always the op's
       // own author — true whether this is a fresh claim or the winner resending its own claim
       // because an earlier ack never reached it.

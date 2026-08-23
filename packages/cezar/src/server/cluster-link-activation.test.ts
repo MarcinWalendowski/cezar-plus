@@ -4,7 +4,16 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CLUSTER_PROTOCOL, type ClusterPresenceFrame, type StoredClusterNodeIdentity } from '@loki-labs/better-cezar-contract';
+import {
+  CLUSTER_PROTOCOL,
+  type ClusterAckFrame,
+  type ClusterDownlinkFrame,
+  type ClusterHelloFrame,
+  type ClusterOp,
+  type ClusterPresenceFrame,
+  type ClusterUplinkFrame,
+  type StoredClusterNodeIdentity,
+} from '@loki-labs/better-cezar-contract';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { persistNodeCredential } from '../cluster/enrollment.ts';
@@ -13,7 +22,10 @@ import { ClusterLinkClient } from '../cluster/link-client.ts';
 import { ClusterLinkServer } from '../cluster/link-server.ts';
 import { ensureNodeIdentity } from '../cluster/node-identity.ts';
 import { storeNodeSecret } from '../cluster/node-secrets.ts';
-import { readPeers, upsertNode } from '../cluster/peers.ts';
+import { applyPairingAction, readPeers, upsertNode } from '../cluster/peers.ts';
+import { readTodos } from '../todos.ts';
+import { workspaceConfigPath } from '../paths.ts';
+import { atomicWriteJsonSync, defaultWorkspaceConfig } from '../workspace/config.ts';
 import { startClusterRuntime } from './cluster-routes.ts';
 import { startServer } from './server.ts';
 
@@ -90,8 +102,10 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
     else process.env.CEZ_HOME = savedHome;
   });
 
+  const HUB_E2E_PROJECT_KEY = 'project-hub-e2e';
+
   describe('1. the hub side, through startServer', () => {
-    async function bootHub(): Promise<{ port: number; hubNodeId: string }> {
+    async function bootHub(): Promise<{ port: number; hubNodeId: string; projectKey: string; dataDir: string }> {
       const repoRoot = tempDir('cez-cluster-hub-repo-');
       const dataDir = join(repoRoot, '.ai/cezar');
       mkdirSync(dataDir, { recursive: true });
@@ -116,6 +130,23 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
         version: '0.0.0-test',
       });
 
+      // Registered as this hub's own local project and confirmed-paired BOTH ways with
+      // `spoke-1` (D20/D21's two-sided check, `resolveHubTodosRoot`) — what B3's replication
+      // path needs to accept an `ops` frame for `HUB_E2E_PROJECT_KEY`. Harmless to the
+      // hello/presence scenarios this helper already served before B3: neither reads the
+      // project registry or the pairing store.
+      const config = {
+        ...defaultWorkspaceConfig(),
+        projects: [{ id: 'proj-hub-e2e', root: repoRoot, name: '', addedAt: '', lastOpenedAt: '', source: 'local' as const }],
+      };
+      atomicWriteJsonSync(workspaceConfigPath(process.env), config);
+      await applyPairingAction(HUB_E2E_PROJECT_KEY, { action: 'confirm', nodeId: hubIdentity.nodeId, projectId: 'proj-hub-e2e' });
+      await applyPairingAction(HUB_E2E_PROJECT_KEY, {
+        action: 'confirm',
+        nodeId: 'spoke-1',
+        projectId: 'proj-hub-e2e-spoke-side',
+      });
+
       const server = startServer(
         { repoRoot, store, manager: { isActive: () => false } as unknown as RunManager, version: '0.0.0-test' },
         0,
@@ -123,7 +154,7 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
       booted.push(server);
       await new Promise<void>((resolve) => server.once('listening', () => resolve()));
       const port = (server.address() as AddressInfo).port;
-      return { port, hubNodeId: hubIdentity.nodeId };
+      return { port, hubNodeId: hubIdentity.nodeId, projectKey: HUB_E2E_PROJECT_KEY, dataDir };
     }
 
     it('THE TEST THAT MATTERS: a real spoke reaches online against a real, activated hub', async () => {
@@ -200,6 +231,84 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
         expect(after?.capacity).toEqual({ maxParallel: 4, active: 2, heavyActive: 1, enforcement: 'none' });
       });
     }, 10_000); // headroom over the `waitFor` calls above, for the same startup-race reason as the backoff comment
+
+    it('B3: a real ops frame is replicated end to end — ack, durable write, replica after the ack', async () => {
+      const { port, projectKey, dataDir } = await bootHub();
+      const hubUrl = `http://127.0.0.1:${port}`;
+
+      const spokeIdentity: StoredClusterNodeIdentity = {
+        nodeId: 'spoke-1',
+        nodeName: 'spoke-1',
+        createdAt: new Date().toISOString(),
+        role: 'spoke',
+        hubUrl,
+        secret: NODE_SECRET,
+        acceptsDispatch: false,
+        labels: [],
+      };
+      const client = new ClusterLinkClient({ identity: spokeIdentity, hubUrl, version: '0.0.0-test' });
+      stoppableClients.push(client);
+
+      // Same accelerator loop as "THE TEST THAT MATTERS" above, for the same real startup race —
+      // see its comment for the full explanation. Condensed here since the reasoning is not new.
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        client.start();
+        try {
+          await vi.waitFor(() => expect(client.health().state).toBe('online'), { timeout: 300 });
+          break;
+        } catch (err) {
+          await client.stop();
+          if (Date.now() > deadline) throw err;
+        }
+      }
+
+      const frames: ClusterDownlinkFrame[] = [];
+      client.on('frame', (frame: ClusterDownlinkFrame) => frames.push(frame));
+
+      const op: ClusterOp = {
+        opId: 'op-b3-e2e-1',
+        nodeId: 'spoke-1',
+        ts: new Date().toISOString(),
+        scope: 'project',
+        projectKey,
+        entity: 'todo',
+        entityId: 'todo-b3-e2e-1',
+        op: 'upsert',
+        fields: { summary: 'a real todo from a real socket' },
+      };
+      const sent = client.send({ type: 'ops', protocol: CLUSTER_PROTOCOL, scope: 'project', projectKey, ops: [op] });
+      expect(sent).toBe(true);
+
+      // (1) THE deliverable: a real `ack` frame, over a real socket, for a real op, with the
+      // acceptance and the hub-assigned order — never a fabricated or silently-missing reply. This
+      // is the assertion the negative control below (deleting `replication` from the wiring at
+      // `cluster-routes.ts`'s `createHubFrameRouter({...})` call) must make time out.
+      const ack = await vi.waitFor(
+        () => {
+          const found = frames.find((f): f is ClusterAckFrame => f.type === 'ack');
+          expect(found).toBeDefined();
+          return found as ClusterAckFrame;
+        },
+        { timeout: 5_000 },
+      );
+      expect(ack.results?.[0]?.accepted).toBe(true);
+      expect(ack.throughHubSeq).toBe(1);
+
+      // (2) durable on the hub's own disk, not merely acked — the row carries the field values AND
+      // the hub-assigned `hubSeq`, not just a count or a bare presence check.
+      const rows = await readTodos(dataDir);
+      const row = rows.find((r) => r.id === 'todo-b3-e2e-1');
+      expect(row?.hubSeq).toBe(1);
+      expect(row?.summary).toBe('a real todo from a real socket');
+
+      // (3) the origin's own replica frame rides BEHIND the ack, never ahead of it — `hub-router.ts`
+      // returns `[ack, ...originFrames]` deliberately, so the node waiting on its ack gets it first.
+      const ackIndex = frames.findIndex((f) => f.type === 'ack');
+      const replicaIndex = frames.findIndex((f) => f.type === 'replica');
+      expect(replicaIndex).toBeGreaterThan(-1);
+      expect(replicaIndex).toBeGreaterThan(ackIndex);
+    }, 10_000);
 
     it('an identity that disagrees with the environment refuses to guess, and arms nothing — proven behaviourally', async () => {
       // Not a source mutation of `startClusterRuntime` itself — the equivalent, reachable-from-
@@ -289,6 +398,215 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
 
       await vi.waitFor(() => expect(hubServer.connectedNodes()).toEqual(['spoke-1']), { timeout: 5_000 });
     });
+
+    /**
+     * D38, END TO END ACROSS ALL THREE FILES — the one thing every unit test on this feature is
+     * structurally unable to see.
+     *
+     * The fix is spread over three files owned by three different sessions, and each one is
+     * separately, thoroughly unit-tested: `link-client.test.ts` proves the `watermarks` option
+     * reaches the wire when a provider is handed in; `spoke-runtime.test.ts` proves
+     * `SpokeRuntimeHandle.watermarks()` reports what `projectState` holds. **Neither can prove they
+     * are connected to each other**, because both supply their own fake for the other side. The
+     * join lives in exactly one place — `cluster-routes.ts`'s
+     * `watermarks: () => spokeRuntime?.watermarks() ?? []`, whose `spokeRuntime` is assigned on the
+     * line AFTER the client is constructed — and nothing above this test has ever executed it.
+     *
+     * That gap is this branch's signature failure, four times over: `readTodosFor` sat
+     * declared-and-unsupplied while B4 read as done, `prune()` had no production caller for the
+     * life of the branch, ~1,500 lines of Milestone B were green with no caller at all — and D38's
+     * own `helloWatermarks()` sat fully written and CALLED BY NOBODY for part of 2026-08-23, with
+     * `sendHello` still returning the literal `[]` it was built to replace. A well-typed no-op
+     * passes every unit test in the repo.
+     *
+     * **The decisive property is not "hello carries a `watermarks` field" — an unwired provider
+     * carries one too, holding `[]`. It is that a SUBSEQUENT hello reports a position the spoke
+     * reached after the FIRST one.** Only a reconnect can show it, and only a reconnect without a
+     * process restart, which is precisely the case D38 exists for: the hub blue-green deploys ~10
+     * times a day, and each one drops every socket while every spoke keeps its in-memory position.
+     */
+    it('D38: after applying a replica, a RECONNECT reports the position — first hello [], second hello the real watermark', async () => {
+      const D38_PROJECT_KEY = 'project-d38-reconnect';
+      const spokeHome = tempDir('cez-cluster-d38-home-');
+      const spokeRepoRoot = tempDir('cez-cluster-d38-repo-');
+      const spokeDataDir = join(spokeRepoRoot, '.ai/cezar');
+      mkdirSync(spokeDataDir, { recursive: true });
+
+      // The hub is built directly, for scenario 2's reason (its own state is observable straight
+      // off the instance) plus one this test adds: `onFrame` is WRAPPED, so every `hello` that
+      // arrives over the real socket is captured. `createHubFrameRouter` is already constructed
+      // inline in this file, so the wrap touches no file this test does not own — and it observes
+      // the frame the HUB received off the wire, never the object the client built, which is the
+      // only reading that can distinguish a live provider from a well-typed no-op.
+      const hubIdentity: StoredClusterNodeIdentity = {
+        nodeId: 'hub-d38',
+        nodeName: 'hub-d38',
+        createdAt: new Date().toISOString(),
+        role: 'hub',
+        acceptsDispatch: false,
+        labels: [],
+      };
+      const router = createHubFrameRouter({ identity: hubIdentity });
+      const hellos: ClusterHelloFrame[] = [];
+      const hubServer = new ClusterLinkServer({
+        identity: hubIdentity,
+        onFrame: async (nodeId: string, frame: ClusterUplinkFrame) => {
+          // Pushed synchronously, before the first `await` — so a `hello` is always captured by the
+          // time `connectedNodes()` can report this node (`link-server.ts` sets `helloReceived`
+          // synchronously, in the same call stack, immediately before invoking this).
+          if (frame.type === 'hello') hellos.push(frame);
+          return router(nodeId, frame);
+        },
+        lookupSecret: async (nodeId) => (nodeId === 'spoke-1' ? NODE_SECRET : undefined),
+      });
+      const httpServer = createServer();
+      await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
+      booted.push(httpServer);
+      hubServer.attach(httpServer);
+      disposers.push(() => void hubServer.close());
+      const hubUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
+
+      process.env.CEZ_HOME = spokeHome;
+      process.env.CEZ_CLUSTER = '1';
+      process.env.CEZ_CLUSTER_HUB = hubUrl;
+      await persistNodeCredential({ nodeId: 'spoke-1', hubUrl, secret: NODE_SECRET }, { env: { CEZ_HOME: spokeHome } });
+
+      // The project has to be REGISTERED on this node and CONFIRMED-paired for it, or
+      // `spoke-runtime.ts#discoverOutboxProjects` yields nothing and `applyReplicaDownlink` refuses
+      // the push outright ("not a project this node has confirmed pairing for") — no apply, no
+      // watermark, and the test would pass its first assertion and prove nothing at the second.
+      atomicWriteJsonSync(workspaceConfigPath(process.env), {
+        ...defaultWorkspaceConfig(),
+        projects: [
+          { id: 'proj-d38', root: spokeRepoRoot, name: '', addedAt: '', lastOpenedAt: '', source: 'local' as const },
+        ],
+      });
+      await applyPairingAction(D38_PROJECT_KEY, { action: 'confirm', nodeId: 'spoke-1', projectId: 'proj-d38' });
+
+      // The real production path: `startClusterRuntime`'s spoke branch, which is the ONLY place the
+      // provider is supplied.
+      const stop = startClusterRuntime({ version: '0.0.0-test', server: fakeUpgradeServer() });
+      disposers.push(stop);
+
+      await vi.waitFor(() => expect(hubServer.connectedNodes()).toEqual(['spoke-1']), { timeout: 5_000 });
+
+      // (1) THE FIRST HELLO IS EMPTY, AND THAT IS CORRECT — DO NOT "FIX" THIS ASSERTION.
+      // Nothing has been applied yet, so `[]` is the truthful answer and the full replay the hub
+      // sends in response is the correct consequence. A change that makes this line report a
+      // position is reasserting a place this node has not been, which is the silent UNDER-send
+      // D38's design notes forbid.
+      //
+      // **This is NOT observing an unwired provider**, though it would look identical if it were.
+      // `cluster-routes.ts`'s own comment records the measurement: `start()` -> `dial()` ->
+      // `new WebSocket()` returns synchronously and `sendHello` fires from `ws.on('open')`, which
+      // needs a network round trip, while `spokeRuntime = stopHeartbeat` runs synchronously two
+      // statements later — so no `hello` is ever sent with `spokeRuntime` unassigned. The `?? []`
+      // in that provider is a floor, not a window this path passes through. Which is exactly why
+      // the assertion that carries this test is the SECOND hello and not this one: an empty first
+      // hello is what a live wiring and a dead one both produce.
+      expect(hellos).toHaveLength(1);
+      expect(hellos[0]?.watermarks).toEqual([]);
+
+      // (2) Drive a REAL replication so the spoke's `appliedThroughHubSeq` actually moves, then
+      // force a reconnect and return the `hello` that follows it.
+      //
+      // The replica goes hub -> spoke over the same live socket, through
+      // `spoke-runtime.ts#applyReplicaDownlink` and the real file-backed `todos.ts#applyHubReplica`
+      // (no `applyHubReplica` test hook is passed by `startClusterRuntime`, so this is the
+      // production write path under its real lease).
+      //
+      // THE RECONNECT is driven from the hub with `refuse`, deterministically, rather than by
+      // sleeping or racing a socket teardown: it writes a `refuse` frame and closes that node's
+      // socket (1008). The spoke takes the ordinary reconnect path from there —
+      // `link-client.ts`'s message handler calls `ws.close()`, `close` reaches `disconnect()`, and
+      // `scheduleReconnect()` re-dials after `nextBackoffMs(0)`, which is under
+      // `DEFAULT_LINK_BACKOFF.baseMs` (1s). A bare socket drop (the hub blue-green case, ~10/day)
+      // takes the identical path; `refuse` differs only in the health LABEL the spoke renders, and
+      // `suppressReconnect` is set for `protocol-major` alone, so `'internal'` reconnects.
+      //
+      // Crucially the spoke PROCESS never restarts across any of this: `startSpokeRuntime`'s
+      // `projectState` map is the same object throughout, which is the whole premise of D38.
+      async function replicateThenReconnect(entityId: string, summary: string, hubSeq: number): Promise<ClusterHelloFrame> {
+        const helloCountBefore = hellos.length;
+        const op: ClusterOp = {
+          opId: `op-${entityId}`,
+          nodeId: 'hub-d38',
+          ts: new Date().toISOString(),
+          scope: 'project',
+          projectKey: D38_PROJECT_KEY,
+          entity: 'todo',
+          entityId,
+          op: 'upsert',
+          fields: { summary },
+          hubSeq,
+        };
+        expect(
+          hubServer.send('spoke-1', {
+            type: 'replica',
+            protocol: CLUSTER_PROTOCOL,
+            scope: 'project',
+            projectKey: D38_PROJECT_KEY,
+            changes: [op],
+            hubSeq,
+          }),
+        ).toBe(true);
+
+        // Independent, durable proof the spoke APPLIED it rather than merely receiving it — the row
+        // is on the spoke's own disk. Asserting the watermark alone would let a frame that was
+        // parsed and dropped look identical to one that was applied.
+        await vi.waitFor(
+          async () => {
+            const rows = await readTodos(spokeDataDir);
+            expect(rows.find((r) => r.id === entityId)?.summary).toBe(summary);
+          },
+          { timeout: 5_000 },
+        );
+
+        hubServer.refuse('spoke-1', 'internal', 'forcing a reconnect for D38');
+
+        return vi.waitFor(
+          () => {
+            expect(hellos.length).toBeGreaterThan(helloCountBefore);
+            return hellos[hellos.length - 1] as ClusterHelloFrame;
+          },
+          { timeout: 8_000 },
+        );
+      }
+
+      // (3) THE DELIVERABLE: the second hello names where this node actually is, rather than the
+      // `[]` the first one truthfully carried.
+      //
+      // This is the assertion the three wiring mutations break. Note that all three —
+      // `watermarks: () => []`, deleting the option so `helloWatermarks()` takes its
+      // `if (!provider) return []` path, and never assigning `spokeRuntime` so `?.` short-circuits
+      // — reduce the provider to the SAME constant `[]` function, so they are observationally
+      // identical here and everywhere else. They are one property cut at three junctions, not three
+      // independent signals; no assertion on the wire can separate them, because the chain has one
+      // output and each cut zeroes it.
+      const second = await replicateThenReconnect('todo-d38-1', 'replicated to the spoke by the hub', 7);
+      expect(second.watermarks).toEqual([
+        { scope: 'project', projectKey: D38_PROJECT_KEY, appliedThroughHubSeq: 7, ackedThroughHubSeq: 0 },
+      ]);
+
+      // (4) A SECOND reconnect, after the position has moved AGAIN — the one property above that is
+      // genuinely separable from "the provider is wired", and the only one a `() => []` mutation
+      // cannot also produce.
+      //
+      // A provider that reads the runtime ONCE and caches passes every assertion above: hello 1 is
+      // `[]`, hello 2 reports 7. It is wrong from hello 3 onward, permanently, and in the silent
+      // direction — the node claims a position it has since moved past, so the hub replays from
+      // there and the gap is never re-sent. `link-client.test.ts` calls this "THE bug. A watermark
+      // that is only read once is exactly as useless as a hardcoded `[]`" and covers it against a
+      // FAKE runtime; nothing until now covered it across the real three-file chain, where the
+      // caching would live in `cluster-routes.ts`'s provider closure.
+      //
+      // Verified load-bearing by a fourth mutation (memoize the provider's first non-empty result),
+      // which leaves (3) green and fails HERE.
+      const third = await replicateThenReconnect('todo-d38-2', 'a second replicated row, further along', 12);
+      expect(third.watermarks).toEqual([
+        { scope: 'project', projectKey: D38_PROJECT_KEY, appliedThroughHubSeq: 12, ackedThroughHubSeq: 0 },
+      ]);
+    }, 25_000);
   });
 
   describe('3. the disposal race', () => {

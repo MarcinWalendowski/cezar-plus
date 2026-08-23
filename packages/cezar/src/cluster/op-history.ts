@@ -144,6 +144,16 @@ const DEFAULT_LEASE_TIMEOUT_MS = 5_000;
  *  "Retention" for why 30 days and not `notifications/outbox.ts`'s 7. */
 export const OP_HISTORY_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
+/**
+ * The sweep cadence `server/cluster-routes.ts#startClusterRuntime`'s hub branch arms `prune()` on.
+ * An entry can outlive `OP_HISTORY_RETENTION_MS` by at most this much (residency overshoot, not a
+ * second retention window) — 24h costs 3.3% overshoot for one lock cycle/day, against 0.14% for an
+ * hourly sweep at 24x the lock traffic on the same file `record()` needs on the hot path. See
+ * `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`'s B2a recon for the full table. Additive: this
+ * constant has no effect until something calls `prune()` on a timer.
+ */
+export const OP_HISTORY_PRUNE_INTERVAL_MS = 24 * 60 * 60_000;
+
 export function opHistoryPath(env?: NodeJS.ProcessEnv): string {
   return join(clusterHomeDir(env), OP_HISTORY_FILE);
 }

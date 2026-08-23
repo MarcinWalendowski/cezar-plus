@@ -13,7 +13,7 @@ import { workspaceGrantSystemPrompt } from '../workspace/granted-roots.ts';
 import { nodeIdentityPath } from '../cluster/node-identity.ts';
 import type { UpgradeCapableServer } from '../cluster/link-server.ts';
 import { startClusterRuntime } from './cluster-routes.ts';
-import { createApp, startServer, type ServerDeps } from './server.ts';
+import { createApp, projectRouteManifest, startServer, type ServerDeps } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 
 /** `startClusterRuntime` (package 1.5) requires a real upgrade-capable server to attach a hub link
@@ -137,7 +137,19 @@ describe('cluster is inert with CEZ_CLUSTER unset (spec verification 12)', () =>
     // and there is deliberately no `/p/:projectId` spelling to protect. A 409 here would mean the
     // family had leaked into the project mount and grown a second surface with no consumer.
     it('has no project-scoped mirror to gate', async () => {
-      const res = await apiRequest(app(), '/api/v1/p/default/cluster');
+      const built = app();
+      // POSITIVE CONTROL, and the reason this test is not vacuous. `expect(404)` alone is satisfied
+      // by "the cluster family is absent from the project mount" AND by "the project mount does not
+      // exist at all in this builder" — and an absent mount is not something this file proves
+      // anywhere else (the suites that do exercise `/api/v1/p/:projectId` build their apps
+      // differently). So assert the mount is alive and populated FIRST, from the app's own
+      // registrations rather than by probing a path that could itself be retired:
+      // `projectRouteManifest` is derived from `app.routes`, so it cannot drift from the code.
+      const scoped = projectRouteManifest(built);
+      expect(scoped.length).toBeGreaterThan(0);
+      expect(scoped.filter((r) => r.path.startsWith('/cluster'))).toEqual([]);
+
+      const res = await apiRequest(built, '/api/v1/p/default/cluster');
       expect(res.status).toBe(404);
     });
 

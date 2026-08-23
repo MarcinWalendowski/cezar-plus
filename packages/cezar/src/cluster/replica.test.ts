@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ClusterOp } from '@loki-labs/better-cezar-contract';
 import type { TodoItem } from '../todos.ts';
 import { applyOpToRecord, applyReplica, applyReplicaFrame, diffCorrections } from './replica.ts';
+import { deriveTodoOps } from './ops.ts';
 
 /**
  * Package 2.2 (`.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`) — the five automated
@@ -405,6 +406,256 @@ describe('verification 5a — optimistic write, then contradiction: replaced and
     const op = makeOp({ entityId: 't1', op: 'upsert', hubSeq: 8, fields: { status: 'blocked' } });
 
     expect(diffCorrections(local, applied, op, () => new Date('2026-08-22T00:00:00.000Z'))).toEqual([]);
+  });
+});
+
+// ---- D27: a per-record `pendingSince` marker must not drop per-field owed work --------------------
+
+/**
+ * `pendingSince` is per-RECORD; the work it stands for is tracked per-FIELD, in `pendingFields`.
+ * `applyOpToRecord` used to clear `pendingSince` unconditionally on ANY hub-applied change to the
+ * record — so a hub push that touched a completely different field of the same todo silently
+ * dropped this node's own un-sent edit from its outbox forever, with nothing anywhere reporting a
+ * failure. `cluster/ops.ts#deriveTodoOps` is the only reader that matters (`if (!todo.pendingSince)
+ * continue;`), so these tests assert through it, not through `pendingSince` directly — the marker
+ * is a mechanism, the outbox is the property.
+ */
+describe('D27 — a hub push to one field must not drop a receiver\'s own pending edit on another', () => {
+  it('LOAD-BEARING: the receiver\'s own un-sent edit is still in its outbox after the hub replicates a DIFFERENT field of the same record', () => {
+    const local: TodoItem[] = [
+      makeTodo({
+        id: 't1',
+        summary: 'ship it',
+        priority: 'high', // this node's own un-sent edit
+        whatToDo: 'old plan',
+        pendingSince: '2026-08-22T00:00:00.000Z',
+        pendingFields: ['priority'],
+        hubSeq: 5,
+      }),
+    ];
+    // A different node's op, touching a field this receiver has nothing pending on.
+    const foreignChange = makeOp({
+      entityId: 't1',
+      op: 'upsert',
+      hubSeq: 6,
+      nodeId: 'node-b',
+      fields: { whatToDo: 'new plan from B' },
+    });
+
+    const result = applyReplica({ local, pending: [], changes: [foreignChange], appliedThroughHubSeq: 5 });
+    const t1 = result.todos.find((t) => t.id === 't1');
+    expect(t1?.whatToDo).toBe('new plan from B');
+    expect(t1?.priority).toBe('high');
+
+    // The realistic next step: a spoke's `ackedThroughHubSeq` catches up to the frame's own hubSeq
+    // in the SAME call that applied it (`spoke-runtime.ts#applyReplicaDownlink`), so this is what
+    // the very next outbox tick actually sees — not a relaxed, best-case watermark.
+    const outbox = deriveTodoOps({
+      nodeId: 'node-a',
+      projectKey: 'proj-1',
+      todos: result.todos,
+      ackedThroughHubSeq: result.appliedThroughHubSeq,
+    });
+
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]).toMatchObject({ entityId: 't1', fields: { priority: 'high' } });
+  });
+
+  it('SAME-FIELD conflict: the hub\'s write to the field the receiver ALSO has pending wins outright, and is not re-sent', () => {
+    const local: TodoItem[] = [
+      makeTodo({
+        id: 't1',
+        summary: 'ship it',
+        priority: 'high', // this node's own un-sent proposal for the SAME field
+        pendingSince: '2026-08-22T00:00:00.000Z',
+        pendingFields: ['priority'],
+        hubSeq: 5,
+      }),
+    ];
+    const ownPendingOp = makeOp({ opId: 'op-local-1', entityId: 't1', op: 'upsert', nodeId: 'node-a', fields: { priority: 'high' } });
+    const foreignChange = makeOp({ entityId: 't1', op: 'upsert', hubSeq: 6, nodeId: 'node-b', fields: { priority: 'low' } });
+
+    const result = applyReplica({ local, pending: [ownPendingOp], changes: [foreignChange], appliedThroughHubSeq: 5 });
+    const t1 = result.todos.find((t) => t.id === 't1');
+
+    // The hub wins outright — no per-field LWW to referee it, matching every other write in this
+    // design (D4).
+    expect(t1?.priority).toBe('low');
+    expect(t1?.pendingSince).toBeUndefined();
+    expect(t1?.pendingFields).toBeUndefined();
+    // ... and flagged, not silently swapped (same discipline as verification 5a).
+    expect(result.corrections).toHaveLength(1);
+    expect(result.corrections[0]).toMatchObject({ field: 'priority', localValue: 'high', hubValue: 'low' });
+
+    // Not re-sent: the receiver's overruled proposal must not loop forever.
+    const outbox = deriveTodoOps({ nodeId: 'node-a', projectKey: 'proj-1', todos: result.todos, ackedThroughHubSeq: result.appliedThroughHubSeq });
+    expect(outbox).toEqual([]);
+  });
+
+  it('CLAIM path: a receiver\'s own optimistic (D15a humanIntent) claim, once the hub replicates a different node\'s winning claim, is settled and does not re-claim forever', () => {
+    const local: TodoItem[] = [
+      makeTodo({
+        id: 't1',
+        summary: 'ship it',
+        startedTaskId: 'task-A', // this node's own optimistic humanIntent claim (D15a)
+        pendingSince: '2026-08-22T00:00:00.000Z',
+        pendingFields: ['startedTaskId'],
+        hubSeq: 5,
+      }),
+    ];
+    // The hub already ruled: a different node's claim was accepted and fanned out. A rejected op
+    // is never fanned out (only ACCEPTED ops are, per `hub-router.ts`), so this replica push IS
+    // what "the hub refused ours" looks like from this node's side — there is no separate signal.
+    const winningClaim = makeOp({ entityId: 't1', op: 'upsert', hubSeq: 7, nodeId: 'node-b', fields: { startedTaskId: 'task-B' } });
+
+    const result = applyReplica({ local, pending: [], changes: [winningClaim], appliedThroughHubSeq: 5 });
+    const t1 = result.todos.find((t) => t.id === 't1');
+
+    expect(t1?.startedTaskId).toBe('task-B');
+    expect(t1?.pendingSince).toBeUndefined();
+    expect(t1?.pendingFields).toBeUndefined();
+
+    const outbox = deriveTodoOps({ nodeId: 'node-a', projectKey: 'proj-1', todos: result.todos, ackedThroughHubSeq: result.appliedThroughHubSeq });
+    expect(outbox).toEqual([]); // no re-claim loop
+  });
+
+  it('a hub deletion still deletes even when the record has OTHER fields genuinely pending, and does not resurrect the deleted field via the pendingFields guard', () => {
+    const before = makeTodo({
+      id: 't1',
+      summary: 'x',
+      context: 'old context',
+      priority: 'high', // untouched by this op — genuinely still owed afterward
+      pendingSince: '2026-08-22T00:00:00.000Z',
+      pendingFields: ['priority', 'context'],
+    });
+    const op = makeOp({ entityId: 't1', op: 'upsert', hubSeq: 9, clearedFields: ['context'] });
+
+    const after = applyOpToRecord(before, op)!;
+
+    // The delete still happens — the pendingFields guard must not stand in its way.
+    expect(Object.hasOwn(after, 'context')).toBe(false);
+    // Resolved out of pendingFields (the hub HAS spoken for this field, by deleting it) — it must
+    // not come back from the outbox as if the hub had never touched it.
+    expect(after.pendingFields).toEqual(['priority']);
+    expect(after.pendingSince).toBeDefined();
+
+    const outbox = deriveTodoOps({ nodeId: 'node-a', projectKey: 'proj-1', todos: [after], ackedThroughHubSeq: 0 });
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]?.fields).toEqual({ priority: 'high' });
+    expect(outbox[0]?.clearedFields ?? []).not.toContain('context');
+  });
+
+  it('a tombstone resolves every pending field unconditionally — nothing survives to be re-sent onto a deleted row', () => {
+    const before = makeTodo({
+      id: 't1',
+      summary: 'x',
+      priority: 'high',
+      whatToDo: 'plan',
+      pendingSince: '2026-08-22T00:00:00.000Z',
+      pendingFields: ['priority', 'whatToDo'],
+    });
+    const op = makeOp({ entityId: 't1', op: 'tombstone', hubSeq: 10 });
+
+    const after = applyOpToRecord(before, op)!;
+
+    expect(after.tombstone).toBeDefined();
+    expect(after.pendingFields).toBeUndefined();
+    expect(after.pendingSince).toBeUndefined();
+    expect(after.hubSeq).toBe(10);
+  });
+});
+
+// ---- D36: a key no op can carry must not keep a record owed forever -----------------------------
+
+/**
+ * **D36 — every replicated todo re-sent forever.** Found 2026-08-23 by the first two-process E2E.
+ * `todos.ts#stampPending` wrote `'id'` into `pendingFields`; `cluster/ops.ts#partitionTodoFields`
+ * skips every key in `CLUSTER_META_TODO_FIELDS`, so `id` reached neither `op.fields` nor
+ * `op.clearedFields`; so the D27 narrowing above could never take it out of `pendingFields`,
+ * `pendingSince` never cleared, and `deriveTodoOps` re-derived that record on every flush tick —
+ * `hub-seq.json` climbing ~1 every 5 seconds with the cluster idle, ~17,280/day.
+ *
+ * The fix is at the source (`stampPending` no longer records an un-sendable key as owed, pinned in
+ * `todos.test.ts`). These cover the RECEIVE-side heal, which is what settles the records already on
+ * disk in the stuck shape, and the control that the heal did not eat D27 on its way through.
+ *
+ * They assert through `deriveTodoOps`, like D27's own: an empty `pendingFields` is the mechanism,
+ * an empty OUTBOX is the property.
+ */
+describe('D36 — a record stuck on an un-sendable pendingFields entry settles instead of looping', () => {
+  it('a record already on disk at pendingFields: [id] settles on the next hub push and derives NOTHING afterwards', () => {
+    const local: TodoItem[] = [
+      makeTodo({
+        id: 't1',
+        summary: 'Ship it',
+        status: 'todo',
+        pendingSince: '2026-08-23T00:00:00.000Z',
+        pendingFields: ['id'], // the exact stuck shape measured on the E2E
+        hubSeq: 5,
+      }),
+    ];
+
+    // FLOOR — one tick of the loop, as it runs today: the record IS owed, and the op it derives is
+    // the empty upsert that made `hub-seq.json` climb for nothing.
+    const before = deriveTodoOps({ nodeId: 'node-a', projectKey: 'proj-1', todos: local, ackedThroughHubSeq: 5 });
+    expect(before).toHaveLength(1);
+    expect(before[0]?.fields).toEqual({});
+
+    // The hub applies that op and echoes it back at its allocated order — exactly what the measured
+    // loop did every five seconds, and what now has to end it.
+    const echo = makeOp({ entityId: 't1', op: 'upsert', hubSeq: 6, nodeId: 'node-a', fields: {} });
+    const result = applyReplica({ local, pending: [], changes: [echo], appliedThroughHubSeq: 5 });
+    const t1 = result.todos.find((t) => t.id === 't1');
+    expect(t1?.pendingSince).toBeUndefined();
+    expect(t1?.pendingFields).toBeUndefined();
+    // The record's content is untouched by the heal — this settles the marker, it does not discard
+    // the row.
+    expect(t1?.summary).toBe('Ship it');
+
+    const after = deriveTodoOps({
+      nodeId: 'node-a',
+      projectKey: 'proj-1',
+      todos: result.todos,
+      ackedThroughHubSeq: result.appliedThroughHubSeq,
+    });
+    expect(after).toEqual([]);
+  });
+
+  it('CONTROL — the heal does not eat D27: a stuck [id] alongside a genuinely owed field still owes that field after a push touching neither', () => {
+    const local: TodoItem[] = [
+      makeTodo({
+        id: 't1',
+        summary: 'Ship it',
+        priority: 'high', // this node's own un-sent edit
+        whatToDo: 'old plan',
+        pendingSince: '2026-08-23T00:00:00.000Z',
+        pendingFields: ['id', 'priority'],
+        hubSeq: 5,
+      }),
+    ];
+    const foreignChange = makeOp({
+      entityId: 't1',
+      op: 'upsert',
+      hubSeq: 6,
+      nodeId: 'node-b',
+      fields: { whatToDo: 'new plan from B' },
+    });
+
+    const result = applyReplica({ local, pending: [], changes: [foreignChange], appliedThroughHubSeq: 5 });
+    const t1 = result.todos.find((t) => t.id === 't1');
+    // `id` is gone (it could never be resolved by any op) — `priority` is not (no op has spoken for
+    // it yet). A heal that cleared the whole marker would be D27's own bug, reached from here.
+    expect(t1?.pendingFields).toEqual(['priority']);
+    expect(t1?.pendingSince).toBe('2026-08-23T00:00:00.000Z');
+
+    const outbox = deriveTodoOps({
+      nodeId: 'node-a',
+      projectKey: 'proj-1',
+      todos: result.todos,
+      ackedThroughHubSeq: result.appliedThroughHubSeq,
+    });
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]).toMatchObject({ entityId: 't1', fields: { priority: 'high' } });
   });
 });
 
