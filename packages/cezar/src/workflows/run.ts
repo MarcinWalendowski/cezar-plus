@@ -81,8 +81,27 @@ import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { approvalsSatisfied, minApprovers } from '../runs/approvals.ts';
 import { defDescribesRun, firstUnfinishedStep, pendingChainSteps, stepTerminal } from '../runs/chain.ts';
 import { resolveProfileEnvForRoot } from '../workspace/agent-profiles.ts';
-import { accountUsageKey, countInflight, type InflightStep } from '../workspace/agent-account-usage.ts';
-import { resolvePoolForDispatch } from '../workspace/agent-route-select.ts';
+import {
+  clearLimited,
+  countInflight,
+  isLimited,
+  loadAgentAccountUsage,
+  mergeWriteAgentAccountUsage,
+  recordDispatch,
+  recordLimited,
+  usageEntry,
+  type InflightStep,
+} from '../workspace/agent-account-usage.ts';
+import { loadAgentAccounts } from '../workspace/agent-accounts.ts';
+import { listAgentProfiles } from '../workspace/agent-profiles.ts';
+import { PROFILE_CAPABLE_PROVIDERS } from '../core/agent-profiles.ts';
+import {
+  accountUsageKey,
+  DEFAULT_AGENT_ACCOUNT_ID,
+  runAccountKey,
+  usageHoldAccountKey,
+} from '@loki-labs/better-cezar-contract';
+import { resolvePoolForDispatch, selectPoolAccount, type PoolChoice } from '../workspace/agent-route-select.ts';
 import type { ProviderId } from '../core/provider-auth.ts';
 import {
   buildWorkspaceGrant,
@@ -415,42 +434,41 @@ const NO_HOLDS: AccountHolds = { deadline: new Set(), inFlight: new Set() };
  *  - an `inFlight` hold means a resume is testing the window right now and nothing is proven, so
  *    it blocks fresh work but not other resumes. Blocking those deadlocked a live workspace.
  */
-function accountHeldFor(
-  run: Pick<RunRecord, 'runner' | 'agentProfile' | 'status' | 'autoResumeAttempts'>,
+function accountHeldOn(
+  key: string,
+  run: Pick<RunRecord, 'status' | 'autoResumeAttempts'>,
   holds: AccountHolds,
-  fallbackRunner: RunnerId,
 ): boolean {
-  const key = runAccountKey(run, fallbackRunner);
   if (holds.deadline.has(key)) return true;
   return holds.inFlight.has(key) && !resumeInFlight(run);
 }
 
 /**
- * Which agent ACCOUNT a run's work runs on — the thing a provider usage limit actually closes
- * (spec 2026-08-03-auto-resume-after-usage-limit).
+ * The same question about the account the RUN RECORD names — admission's default reading.
  *
- * Backend plus agent account, because those are the two axes a limit is scoped to: a Claude
- * limit must never stall a Codex task, and a second Claude login is a second budget. A record
- * that names no runner has not started yet and will take the configured default, which is what
- * `fallbackRunner` carries; a run that HAS started always carries its resolved runner (execute
- * persists it), and only started runs can be holding.
- *
- * Spelled through `accountUsageKey` rather than re-composed here. It is the same key the usage
- * registry, the sidebar panel and the pool balancer are all keyed on, and two `${a}:${b}` templates
- * for one concept is a drift waiting to happen — the moment either side changes how it spells the
- * discovered account, holds stop matching usage and neither reports an error.
- *
- * A run still carrying a `pool:` route has not been resolved yet, so it names no account; the pool
- * string becomes its own key, which can only ever match another unresolved run on the same pool.
- * That is the conservative reading — `execute()` overwrites `agentProfile` with the concrete login
- * before the run can hold anything.
+ * The key is a parameter above rather than derived here because the queue has to ask about TWO
+ * accounts, not one: this one, and the account the spawn gate has already refused this run on.
+ * See `heldAccountFor`, and the production busy-loop that forced the split.
  */
-export function runAccountKey(
-  run: Pick<RunRecord, 'runner' | 'agentProfile'>,
+function accountHeldFor(
+  run: Pick<RunRecord, 'runner' | 'agentProfile' | 'status' | 'autoResumeAttempts'>,
+  holds: AccountHolds,
   fallbackRunner: RunnerId,
-): string {
-  return accountUsageKey((run.runner ?? fallbackRunner) as ProviderId, run.agentProfile);
+): boolean {
+  return accountHeldOn(runAccountKey(run, fallbackRunner), run, holds);
 }
+
+// `runAccountKey` — which agent ACCOUNT a run's work runs on (spec
+// 2026-08-03-auto-resume-after-usage-limit) — MOVED 2026-08-23 to
+// `@loki-labs/better-cezar-contract` (`usage-hold.ts`), and SPLIT IN TWO there (spec
+// 2026-08-23-usage-limit-hold-account). The single function that used to sit here answered the
+// admission question ("where will this run's work go?") and was then also used for the hold
+// question ("which account did a provider refuse?"), which are not the same question whenever a
+// workflow step pins its own runner or the pool routes two steps to two logins. `runAccountKey`
+// keeps the first; `usageHoldAccountKey` answers the second off the STEP that actually ran.
+// Measured cost of conflating them: a codex task held for hours by a Claude weekly limit, while a
+// claude task would not have been held at all. It also had to leave this module so the browser
+// could import it — see the contract file's own docblock.
 
 /**
  * Is this run an automatic resume that has not completed a turn yet?
@@ -998,6 +1016,20 @@ export class RunManager {
   /** Runs currently being paused by the memory guard — dedupes the ~2 s samples so one breach
    *  triggers one pause, not a burst. Cleared in dropActive when the run leaves the registry. */
   private readonly memoryPausing = new Set<string>();
+
+  /** Queued runs that have already been TOLD, on their own transcript, which account they are
+   *  waiting on — keyed run id -> that account, so a hold that moves to a different account
+   *  speaks again while a long one stays quiet. `pump()` runs on every lifecycle event, so an
+   *  un-deduped note would bury the thread it is meant to explain. */
+  private readonly heldNotified = new Map<string, string>();
+
+  /** Queued runs the SPAWN gate has refused, keyed run id -> the account it refused them on.
+   *  `pump()` admits on the account the run RECORD names while `execute()` refuses on the account
+   *  DISPATCH resolves, and when those disagree the run is dequeued, bounced and re-queued at
+   *  loop speed. This memo is what makes admission ask the spawn's question too. Every read
+   *  re-checks the account against the live holds, so the memo can only ever delay a start that
+   *  the spawn gate was going to refuse anyway. */
+  private readonly heldAtSpawn = new Map<string, string>();
 
   /** Unsubscribe handle for the constructor's `onUsage` subscription — released
    *  by dispose() so a torn-down manager stops receiving sampler ticks. */
@@ -1612,6 +1644,25 @@ export class RunManager {
         // Only pay for the config read when something is actually held: a queued record may name
         // no runner, and then the account it would use is the configured default.
         const defaultRunner = anyHold ? (await loadConfig(this.repoRoot)).defaultRunner : undefined;
+        // Say so on the transcript before deciding anything (spec 2026-08-23-usage-limit-hold-
+        // account). A held run is otherwise indistinguishable from an ordinary queued one — it
+        // wears `queued`, it wears `#1 in queue`, and it does not move for hours. The queue was
+        // right and the cockpit was silent, which reads as a wedged workspace.
+        //
+        // A FORCED sweep is skipped entirely: it reads `NO_HOLDS` by construction, which is an
+        // instruction to ignore the holds, never evidence that none exist. Letting it run here
+        // cleared the dedupe state on every watchdog tick, so the next ordinary sweep said
+        // everything again — two notes per hold on a quiet queue, and a note per round trip on a
+        // bouncing one.
+        if (!forced) {
+          if (anyHold) {
+            this.noteHeldRuns(holds, (defaultRunner ?? 'claude') as RunnerId);
+          } else {
+            // Nothing is held anywhere, so every memo and every spent note is stale.
+            this.heldNotified.clear();
+            this.heldAtSpawn.clear();
+          }
+        }
         while (this.queue.length > 0 && capacity()) {
           // FIFO among the runs that CAN start; a held one keeps its place in the queue rather
           // than being dequeued and re-queued (which would churn its position and its record).
@@ -1619,11 +1670,13 @@ export class RunManager {
             ? 0
             : this.queue.findIndex((id) => {
                 const queued = this.store.getRun(id);
-                return !queued || !accountHeldFor(queued, holds, defaultRunner ?? 'claude');
+                return !queued || !this.heldAccountFor(queued, holds, defaultRunner ?? 'claude');
               });
           if (next === -1) break; // everything queued is waiting on a held account
           const runId = this.queue.splice(next, 1)[0];
           if (!runId) break;
+          this.heldNotified.delete(runId);
+          this.heldAtSpawn.delete(runId);
           // A forced sweep has to reach the spawn: the gate inside `execute` asks the same
           // question and would send this run straight back to the queue.
           if (forced) this.forceStarted.add(runId);
@@ -1683,6 +1736,260 @@ export class RunManager {
     } finally {
       this.pumping = false;
     }
+  }
+
+  /**
+   * Tell each held queued run, once, which account it is waiting on and until when.
+   *
+   * The hold itself is correct and deliberate — starting a task on an account that is out of
+   * window just burns a CLI spawn on a doomed run. What was missing is that the refusal left no
+   * trace anywhere a person looks: the record stays plain `queued`, the row still counts it `#1
+   * in queue`, and the only other note of this kind (`requeueWhileHeld`) fires on the SPAWN path,
+   * which a run held at dequeue never reaches. Measured 2026-08-23: a task sat queued behind an
+   * eleven-hour hold with nothing in its transcript, its row, or the log saying so.
+   *
+   * Deduped per account rather than per run: a run whose hold moves to a different account is
+   * waiting on something new and should say so, while a run parked on one account for hours
+   * should not repeat itself on every sweep.
+   */
+  private noteHeldRuns(holds: AccountHolds, defaultRunner: RunnerId): void {
+    // Self-pruning: a run can leave the queue by paths that never reach the dequeue below (a
+    // cancel, most obviously), and this map must not outlive the queue it describes.
+    for (const runId of this.heldNotified.keys()) {
+      if (!this.queue.includes(runId)) this.heldNotified.delete(runId);
+    }
+    for (const runId of this.heldAtSpawn.keys()) {
+      if (!this.queue.includes(runId)) this.heldAtSpawn.delete(runId);
+    }
+    for (const runId of this.queue) {
+      const queued = this.store.getRun(runId);
+      if (!queued) continue;
+      // Whichever account is actually holding it — its own, or the one the spawn gate refused.
+      // Naming the run's own account for a run bounced on a step's account would print a sentence
+      // about an account that is wide open, which is worse than the silence this replaced.
+      const account = this.heldAccountFor(queued, holds, defaultRunner);
+      if (!account) {
+        this.heldNotified.delete(runId);
+        continue;
+      }
+      this.noteHeld(runId, account);
+    }
+  }
+
+  /**
+   * Which account is holding this queued run right now, or undefined when nothing is.
+   *
+   * TWO keys, because the two gates ask about different accounts and a run BOUNCES forever when
+   * they disagree. `pump()` admits on the account the run RECORD names; `execute()` refuses on
+   * the account DISPATCH resolves, and those differ for two independent reasons: a `pool:` route
+   * picks the PROVIDER as well as the login (`resolvePoolForDispatch`), and a workflow step may
+   * pin its own runner. The measured cause was the first — the box's `defaults` are `pool:*` for
+   * both providers, so a task created on codex resolved to a claude account. Its record said
+   * codex, so the queue admitted it; dispatch said claude, which was held, so the spawn handed it
+   * back; repeat. Measured on `prod-host` on 2026-08-23 at roughly eleven round trips a
+   * second, each one appending a transcript note, 2626 of them in four minutes.
+   *
+   * So the spawn gate's verdict is remembered (`heldAtSpawn`) and consulted at admission. It is a
+   * MEMO, not a second source of truth: the remembered account must still be held right now for
+   * it to count, and a stale one is dropped on read. The worst case is that a hold moves to a
+   * different account and the run bounces once more, which records the new account and settles
+   * again — bounded by the number of accounts, not by time.
+   *
+   * The memo cannot wedge a queue. It only ever holds back a run the spawn gate would refuse a
+   * millisecond later, and the watchdog's forced sweep bypasses this predicate entirely.
+   */
+  private heldAccountFor(run: RunRecord, holds: AccountHolds, defaultRunner: RunnerId): string | undefined {
+    // Out-of-quota fallback (spec 2026-08-23-retarget-task-to-another-engine, Phase 4): with the
+    // setting on, "this account is limited" stops being a reason to WAIT, so admission holds
+    // nothing and the run goes through to dispatch, which is the only place allowed to resolve an
+    // account. If dispatch finds nowhere better, `requeueWhileHeld` parks it exactly as before —
+    // so the worst case of admitting it is one dequeue, not a start on a closed login.
+    //
+    // Deliberately NOT "resolve the alternative here and compare". This predicate is synchronous
+    // and runs on every pump sweep, while choosing an account means reading two JSON files; worse,
+    // the obvious helper (`resolvePoolForDispatch`) advances the round-robin cursor as a side
+    // effect, so asking it per sweep would corrupt the balancer it is asking.
+    if (this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
+    const own = runAccountKey(run, defaultRunner);
+    if (accountHeldOn(own, run, holds)) return own;
+    const atSpawn = this.heldAtSpawn.get(run.id);
+    if (atSpawn === undefined) return undefined;
+    if (accountHeldOn(atSpawn, run, holds)) return atSpawn;
+    this.heldAtSpawn.delete(run.id);
+    return undefined;
+  }
+
+  /** One held run, one line, once per account it is held on. Shared by the dequeue-time sweep
+   *  above and the spawn-time gate (`requeueWhileHeld`) so a run that is refused at both does not
+   *  say the same thing twice, and so both spell the account the same way. */
+  private noteHeld(runId: string, account: string): void {
+    if (this.heldNotified.get(runId) === account) return;
+    this.heldNotified.set(runId, account);
+    const until = this.holdReopensAt(account);
+    this.store.appendEvent(runId, {
+      type: 'note',
+      // No em dash in the cockpit-visible half of this line (owner's standing rule for product
+      // copy); the surrounding comments keep the file's own style.
+      message: until
+        ? `held in the queue: the ${account} agent account is waiting out a usage limit until ${formatWakeInstant(until)}`
+        : `held in the queue: the ${account} agent account is waiting out a usage limit`,
+    });
+  }
+
+  /** When the named account's earliest scheduled resume fires, or null when the hold is an
+   *  in-flight resume with no published instant behind it. */
+  private holdReopensAt(account: string): Date | null {
+    let soonest: number | undefined;
+    for (const run of this.store.listRuns()) {
+      if (run.status !== 'failed' || !run.autoResumeAt) continue;
+      if (usageHoldAccountKey(run, run.runner ?? 'claude') !== account) continue;
+      const at = Date.parse(run.autoResumeAt);
+      if (!Number.isFinite(at) || at <= Date.now()) continue;
+      if (soonest === undefined || at < soonest) soonest = at;
+    }
+    return soonest === undefined ? null : new Date(soonest);
+  }
+
+  /**
+   * Move a QUEUED run to a different engine before it has started anything
+   * (`.ai/specs/2026-08-23-retarget-task-to-another-engine.md`, Phase 2).
+   *
+   * The parked-task counterpart to `continueRun`'s `{runner, model}` override, which cannot serve
+   * this case: it requires a session to resume, and a queued run has none. Everything here happens
+   * before a single agent turn, so there is nothing to migrate — no session, no worktree, no cost.
+   *
+   * ## Why the pending input must be rewritten, not just the record
+   *
+   * `execute()` reads `input.runner` / `input.agentProfile` / `input.model`, never the record. A
+   * retarget that updated only the record would show the new engine everywhere a human looks and
+   * dispatch to the old one — the most expensive shape of wrong, because it looks like it worked.
+   * The record is updated too, and must be: `pump()`'s admission gate keys on `runAccountKey(run)`
+   * off the RECORD, so leaving it stale would have admission and dispatch disagreeing about the
+   * account, which is the exact ping-pong `2026-08-23-usage-limit-hold-account.md` had to fix.
+   *
+   * ## The memo has to go
+   *
+   * `heldAtSpawn` remembers the account a spawn refused this run on, and it is stale the instant
+   * the target changes — it would otherwise keep the run out of the queue on the strength of a
+   * verdict about a DIFFERENT account, so the retarget would appear to do nothing until the old
+   * account's hold expired. `heldNotified` goes with it so the thread speaks again for the new
+   * account rather than staying quiet on a dedupe key that no longer applies.
+   *
+   * ## Refusals
+   *
+   * A run with no pending work item is the wedge `reviveQueuedRun` exists to repair — a queued
+   * record that `pump()` cannot see. Retargeting it would write a new engine onto a record that
+   * still has nothing to execute, which reads as success and changes nothing. Refused instead; the
+   * queue watchdog revives it within a sweep and the retarget then works.
+   */
+  async retargetQueuedRun(
+    runId: string,
+    target: { runner?: RunnerId; agentProfile?: string; model?: string },
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (agentModelsLocked(this.repoRoot) && target.model?.trim()) {
+      return { ok: false, error: AGENT_MODELS_LOCKED_ERROR };
+    }
+    const run = this.store.getRun(runId);
+    if (!run) return { ok: false, error: 'not found' };
+    if (run.status !== 'queued') return { ok: false, error: `cannot retarget a ${run.status} run` };
+
+    const job = this.pendingJobs.get(runId);
+    const continuation = this.pendingContinuations.get(runId);
+    if (!job && !continuation) {
+      return { ok: false, error: 'this task has no queued work item yet, try again in a moment' };
+    }
+
+    const targetRunner = target.runner ?? run.runner ?? 'claude';
+    // The same pairing guard `continueRun` applies, for the same reason and with the same words:
+    // a model that is recognizably another runner's preset would corrupt the run. Free-form and
+    // custom ids pass untouched.
+    if (target.model && modelConflictsWithRunner(target.model, targetRunner)) {
+      return { ok: false, error: `model '${target.model}' is not a ${targetRunner} model` };
+    }
+    // A runner switch carrying NO explicit model must not leave the previous backend's pin behind
+    // — the guard above only sees `target.model`. Cleared, never substituted: dropping falls
+    // through to the new backend's own current default, whereas swapping in "the equivalent id"
+    // trades today's wrong model for tomorrow's stale one
+    // (`.ai/specs/2026-08-22-failed-turn-reads-as-done.md`, and `modelForBackend` below).
+    const inheritedPinIsForeign =
+      target.model === undefined && run.model !== undefined && modelConflictsWithRunner(run.model, targetRunner);
+    const model = target.model === undefined ? (inheritedPinIsForeign ? undefined : run.model) : target.model || undefined;
+    const agentProfile = target.agentProfile === undefined ? run.agentProfile : target.agentProfile || undefined;
+
+    this.store.updateRun(runId, {
+      runner: targetRunner,
+      model,
+      agentProfile,
+      // A retarget is a decision to run this task somewhere else NOW. Any pending usage-limit
+      // appointment was made about the old engine and is meaningless for the new one.
+      autoResumeAt: undefined,
+    });
+
+    if (job) {
+      this.pendingJobs.set(runId, {
+        ...job,
+        input: { ...job.input, runner: targetRunner, agentProfile, model },
+      });
+    }
+    if (continuation) {
+      // A session id is provider-owned. Sending the new backend the old one's handle is the
+      // failure `reviveQueuedRun` already guards against on its own path, so a continuation whose
+      // engine changed starts a fresh session instead of resuming a thread the target cannot read.
+      const sessionSurvives = continuation.backend === targetRunner;
+      this.pendingContinuations.set(runId, {
+        ...continuation,
+        backend: targetRunner,
+        sessionId: sessionSurvives ? continuation.sessionId : undefined,
+      });
+    }
+
+    this.heldAtSpawn.delete(runId);
+    this.heldNotified.delete(runId);
+    this.chainReentries.delete(runId);
+
+    const where = agentProfile ? `${targetRunner} (${agentProfile})` : targetRunner;
+    this.store.appendEvent(runId, {
+      type: 'lifecycle',
+      message: `moved to ${where}${model ? ` on ${model}` : ''}, waiting for a slot`,
+    });
+    void this.pump();
+    return { ok: true };
+  }
+
+  /**
+   * The executable input for a run going BACK into the queue, rebuilt from its record.
+   *
+   * Three callers had this same object spelled out inline — `reviveQueuedRun` (boot recovery and
+   * the queue watchdog), `reattachBrokeredRun` (a live spool survived a restart) and
+   * `reenterChain` (a chain hands itself back) — and **all three dropped `agentProfile`**, which is
+   * what this helper exists to make impossible to repeat. `execute()` resolves the account from
+   * `input.agentProfile`, never from the record, so every one of those paths silently downgraded
+   * an explicit account pick back to the project's own selection. The record kept the value the
+   * whole time, which is exactly what hid it: the cockpit went on showing the account the user
+   * chose while the dispatch used a different one.
+   *
+   * It matters more now than it did: `retargetQueuedRun` writes the user's new engine onto both
+   * the record and the pending input, and any path that rebuilds the input from the record would
+   * otherwise undo the retarget at the next restart, hand-back or re-attach.
+   *
+   * `generateFollowups` stays a parameter rather than being read here, because the callers do not
+   * agree on it: `reviveQueuedRun` normalizes the value onto the record first (#471) and the other
+   * two compute it inline. Folding that decision in would change behaviour in one of the three.
+   */
+  private queuedInputFromRecord(run: RunRecord, generateFollowups: boolean | undefined): ExecuteRunInput {
+    return this.hydrateQueuedInput(run.id, {
+      task: run.task,
+      model: run.model,
+      runner: run.runner,
+      agentProfile: run.agentProfile,
+      generateFollowups,
+      // Re-thread autonomy (#489): the rebuilt input feeds `execute`, whose mid-run auto-nudge
+      // reads `input.autonomous`. Without this a recovered autonomous run would run
+      // non-autonomously and later wrongly park at `review`.
+      autonomous: run.autonomous,
+      // Preserve an explicit worktree opt-out across a queued restart.
+      worktree: run.worktree,
+    });
   }
 
   /**
@@ -1760,18 +2067,7 @@ export class RunManager {
       // Folded through the same helper `pump()` uses (#472) so a restart carries the stack.
       // Idempotent: hydration always composes from `run.task` + the stack, never from an
       // already-folded `input.task`, so re-hydrating at dequeue yields the same string.
-      input: this.hydrateQueuedInput(run.id, {
-        task: run.task,
-        model: run.model,
-        runner: run.runner,
-        generateFollowups,
-        // Re-thread autonomy (#489): the rebuilt input feeds `execute`, whose mid-run auto-nudge
-        // reads `input.autonomous`. Without this a recovered autonomous run would run
-        // non-autonomously and later wrongly park at `review`.
-        autonomous: run.autonomous,
-        // Preserve an explicit worktree opt-out across a queued restart.
-        worktree: run.worktree,
-      }),
+      input: this.queuedInputFromRecord(run, generateFollowups),
     });
     this.queue.push(run.id);
     this.store.appendEvent(run.id, { type: 'lifecycle', message: `${reason} — task re-queued` });
@@ -2179,14 +2475,7 @@ export class RunManager {
       message: 'cezar restarted — this run kept going',
     });
     this.starting.add(run.id);
-    const input = this.hydrateQueuedInput(run.id, {
-      task: run.task,
-      model: run.model,
-      runner: run.runner,
-      generateFollowups: followupsEnabled() ? run.generateFollowups : false,
-      autonomous: run.autonomous,
-      worktree: run.worktree,
-    });
+    const input = this.queuedInputFromRecord(run, followupsEnabled() ? run.generateFollowups : false);
     void this.execute(run.id, workflow, input, resumeAt).catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       this.pendingReattach.delete(run.id);
@@ -2392,14 +2681,7 @@ export class RunManager {
     const generateFollowups = followupsEnabled() ? run.generateFollowups : false;
     this.pendingJobs.set(run.id, {
       workflow,
-      input: this.hydrateQueuedInput(run.id, {
-        task: run.task,
-        model: run.model,
-        runner: run.runner,
-        generateFollowups,
-        autonomous: run.autonomous,
-        worktree: run.worktree,
-      }),
+      input: this.queuedInputFromRecord(run, generateFollowups),
       resumeAt,
     });
     // Steps about to re-run go back to `pending` so the GUI rail reads top-to-bottom truthfully
@@ -2485,6 +2767,13 @@ export class RunManager {
     if (run.archived) return;
     const limit = parseUsageLimit(run.error);
     if (!limit) return;
+    // Write the limit down BEFORE any of the refusals below. Whether THIS run will resume itself
+    // is a different question from whether THAT account is exhausted, and every early return under
+    // this line answers only the first: the setting being off, the run having no session to resume,
+    // and the resume cap being spent are all reasons not to re-run this task, and none of them is
+    // evidence the provider's window reopened. Recording under them would leave the pool routing
+    // onto a login that just said no, which is the production failure this closes.
+    this.recordAccountLimit(run, limit.resetAt);
     if (!this.semaphore.autoResumeOnUsageLimit()) return;
     // No session to resume = nothing this feature can do; `continueRun` would refuse anyway.
     if (!run.steps.some((step) => step.sessionId)) return;
@@ -2502,6 +2791,130 @@ export class RunManager {
       type: 'lifecycle',
       message: `usage limit reached — resuming automatically at ${formatWakeInstant(wakeAt)}`,
     });
+  }
+
+  /**
+   * Tell the account balancer that a provider just refused this run's account
+   * (`.ai/specs/2026-08-23-retarget-task-to-another-engine.md`, Phase 1).
+   *
+   * `selectPoolAccount` has ranked "skip a limited account" as signal 1 since
+   * `2026-08-16-agent-account-usage-routing.md` — the stated reason pools exist at all. It was
+   * dead code in production for a week: `recordLimited()` had no caller outside its own tests, so
+   * `AccountUsageEntry.limited` was never written, `isLimited()` answered `false` for an account
+   * that had just said no, and the pool routed straight back onto it. What masked the gap is the
+   * queue hold, which stops the work a different way — but the hold is per-run and per-account,
+   * and it parks the task instead of moving it, which is exactly what the reporter hit.
+   *
+   * **Keyed with `usageHoldAccountKey`, not `runAccountKey`.** The account that was refused is on
+   * the STEP that ran, not on the run record: `spec-to-deploy` pins `spec` and `review-spec` to
+   * claude whatever the task was started on, and a `pool:` route may put two steps of one run on
+   * two logins. Keying off the record is the bug `2026-08-23-usage-limit-hold-account.md` was
+   * filed for, and repeating it here would poison the balancer in both directions at once —
+   * excluding a healthy login while leaving the closed one eligible.
+   *
+   * `until` is the provider's own stated reset, passed through only because `parseUsageLimit`
+   * extracted it from the provider's own words. An absent one would fall to
+   * `ASSUMED_LIMIT_COOLDOWN_MS`; here there is always one, because a `limit` is what got us here.
+   *
+   * Fire-and-forget, like every other write to this store: `mergeWriteAgentAccountUsage` never
+   * throws (a read-only home degrades to in-memory state), and a lost write costs one dispatch's
+   * fairness, never a run. Blocking the failure path on a JSON write would be the worse trade.
+   */
+  private recordAccountLimit(run: RunRecord, resetAt: Date): void {
+    const account = usageHoldAccountKey(run, run.runner ?? 'claude');
+    void mergeWriteAgentAccountUsage((store) =>
+      recordLimited(store, account, { source: 'usage-limit', until: resetAt.toISOString() }),
+    );
+  }
+
+  /**
+   * The account a task NAMED is out of quota — move it to one that is not
+   * (`.ai/specs/2026-08-23-retarget-task-to-another-engine.md`, Phase 4). `undefined` means "leave
+   * the run where it is", which is also every answer when the setting is off.
+   *
+   * **Only for an explicit pick.** A `pool:` route is resolved by `resolvePoolForDispatch` before
+   * this is reached and already skips limited logins as its first signal — that is Phase 1, and it
+   * needs no setting because a pool is the user asking to be balanced. This is the other case: a
+   * user who named `codex`, or a specific login, and whose choice cezar would otherwise honour by
+   * making them wait.
+   *
+   * **This is the one place the override may live.** The admission gate is synchronous and runs
+   * per pump sweep; resolving an account there would mean two JSON reads per sweep, and doing it
+   * through `resolvePoolForDispatch` would advance the fairness cursor as a side effect. So
+   * admission simply stops holding when the setting is on (`heldAccountFor`) and the real decision
+   * happens here, once, at the moment the run stops being a plan and becomes work.
+   *
+   * `selectPoolAccount` is reused rather than reimplemented: "best available login" is the same
+   * question a pool asks, and a second ranking would drift from the first the moment either
+   * changed. It is pure, so unlike `resolvePoolForDispatch` it moves no cursor — `recordDispatch`
+   * below is written explicitly, so the account this run takes still counts toward fairness.
+   */
+  private async rerouteExplicitAccountIfLimited(
+    runId: string,
+    input: ExecuteRunInput,
+    defaultRunner: RunnerId,
+  ): Promise<PoolChoice | undefined> {
+    if (!this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
+    try {
+      const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
+      const provider = (input.runner ?? defaultRunner) as ProviderId;
+      const current = accountUsageKey(provider, input.agentProfile);
+      // Nothing to route around. The common case, and the cheap exit.
+      if (!isLimited(usageEntry(usage, current).limited)) return undefined;
+
+      const candidates = listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS).filter(
+        (profile) => !isLimited(usageEntry(usage, accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id)).limited),
+      );
+      // Every login limited: `selectPoolAccount` would still answer (by design — see its docblock),
+      // and its answer would be another closed account. Filtering FIRST and refusing an empty set
+      // is what keeps this from quietly moving the run somewhere no better, which would burn a turn
+      // and lose the account the user actually chose.
+      const choice = candidates.length > 0
+        ? selectPoolAccount({ candidates, store: usage, inflight: this.semaphore.accountInflight() })
+        : undefined;
+      if (!choice) return undefined;
+      if (choice.provider === provider && choice.accountId === (input.agentProfile || DEFAULT_AGENT_ACCOUNT_ID)) {
+        return undefined;
+      }
+
+      await mergeWriteAgentAccountUsage((store) =>
+        recordDispatch(store, accountUsageKey(choice.provider, choice.accountId)),
+      );
+      // Say so, always. Overriding a choice the user made in silence is the failure this whole
+      // setting is a decision about — the note is what makes it a fallback rather than cezar
+      // ignoring the picker, which is the bug this spec was filed for in the first place.
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message:
+          `${current} is out of quota, so this task starts on ${accountUsageKey(choice.provider, choice.accountId)} instead ` +
+          '(Settings, Resources, "Out-of-quota fallback")',
+      });
+      return choice;
+    } catch {
+      // An unreadable home must never fail a run: fall through to the account the task named and
+      // let the ordinary hold park it, which is exactly the behaviour with this setting off.
+      return undefined;
+    }
+  }
+
+  /**
+   * A turn on this account completed, so the window is open — drop any recorded limit on it.
+   *
+   * **A completed turn is the only honest proof.** The stored `until` is a provider's prediction,
+   * and `isLimited` already expires it on time; this covers the other direction, where the window
+   * reopened earlier than stated or the limit was recorded against the wrong window. Without it a
+   * pool would keep avoiding a working login until the clock caught up.
+   *
+   * Reads the STEP's own `backend`/`profileId` — the account that actually served the turn, which
+   * for a pooled run is not the one the record names. A step with no `backend` (a `check` step, or
+   * one from before backend affinity) is not evidence about any account, so it clears nothing:
+   * guessing here would clear a limit on a login that never ran.
+   */
+  private clearAccountLimit(runId: string, stepId: string): void {
+    const step = this.store.getRun(runId)?.steps.find((candidate) => candidate.id === stepId);
+    if (!step?.backend) return;
+    const account = accountUsageKey(step.backend, step.profileId);
+    void mergeWriteAgentAccountUsage((store) => clearLimited(store, account));
   }
 
   /** Publish the deadline on the record (the cockpit's only source) and arm the timer for it. */
@@ -2649,16 +3062,18 @@ export class RunManager {
     // hand an in-place run straight back, re-wedging the queue the rescue had just freed.
     // `dropActive` retires the entry on every terminal path, so the set still cleans itself up.
     if (this.forceStarted.has(runId)) return false;
-    if (!accountHeldFor({ ...run, runner }, this.semaphore.accountHolds(), runner)) return false;
+    // The account THIS SPAWN would use, which is the step's runner and not necessarily the run's.
+    const account = runAccountKey({ ...run, runner }, runner);
+    if (!accountHeldOn(account, run, this.semaphore.accountHolds())) return false;
     state?.releaseRepoRoot?.();
     if (state) state.releaseRepoRoot = undefined;
     this.pendingJobs.set(runId, { workflow, input });
     this.queue.push(runId);
     this.store.updateRun(runId, { status: 'queued', startedAt: undefined, currentStepId: undefined });
-    this.store.appendEvent(runId, {
-      type: 'note',
-      message: 'held in the queue — this agent account is waiting out a usage limit',
-    });
+    // Tell admission what was refused here, or it re-admits this run immediately and the two
+    // gates trade it back and forth for as long as the hold lasts.
+    this.heldAtSpawn.set(runId, account);
+    this.noteHeld(runId, account);
     this.dropActive(runId);
     return true;
   }
@@ -2789,9 +3204,12 @@ export class RunManager {
     const deadline = new Set<string>();
     const inFlight = new Set<string>();
     for (const run of this.store.listRuns()) {
-      // A holding run always carries the runner it actually ran on, so the fallback is unused
-      // here — it is spelled out rather than `!` so a future record shape degrades, not throws.
-      const key = () => runAccountKey(run, run.runner ?? 'claude');
+      // The account a provider actually refused, read off the STEP that ran — NOT off the run
+      // (spec 2026-08-23-usage-limit-hold-account). A run's steps do not all run on the run's own
+      // backend: `spec-to-deploy` pins two steps to claude, and the pool may route two steps of
+      // one run to two logins. The fallback is unused for a run that has started a step; it is
+      // spelled out rather than `!` so a future record shape degrades, not throws.
+      const key = () => usageHoldAccountKey(run, run.runner ?? 'claude');
       if (run.status === 'failed' && run.autoResumeAt) {
         const at = Date.parse(run.autoResumeAt);
         if (Number.isFinite(at) && at > now) deadline.add(key());
@@ -4013,6 +4431,7 @@ export class RunManager {
         // same precedence `execute()`'s own terminal block gives budget over a plain finish. The
         // step itself completed its turn; only the RUN is stopped from taking another.
         this.store.updateStep(runId, stepId, { status: 'done', finishedAt: finishedAt() });
+        this.clearAccountLimit(runId, stepId);
         this.store.appendEvent(runId, { type: 'step-end', stepId, status: 'done' });
         this.store.updateRun(runId, {
           status: 'review',
@@ -4038,6 +4457,7 @@ export class RunManager {
         appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" parked — status=waiting (idle)`);
       } else {
         this.store.updateStep(runId, stepId, { status: 'done', finishedAt: finishedAt() });
+        this.clearAccountLimit(runId, stepId);
         this.store.appendEvent(runId, { type: 'step-end', stepId, status: 'done' });
         // The continuation step is done either way; whether the RUN is depends on the chain
         // (spec 2026-08-20, P2). With steps still pending, hand back to the chain instead of
@@ -4212,7 +4632,12 @@ export class RunManager {
       // included, which no project-context map can see. See `SemaphoreParticipant.accountInflight`.
       inflight: this.semaphore.accountInflight(),
     });
-    const taskBackend: RunnerId = pooled?.provider ?? input.runner ?? config.defaultRunner;
+    // Out-of-quota fallback (spec 2026-08-23-retarget-task-to-another-engine, Phase 4). Only for
+    // an EXPLICIT pick — `pooled` being set means the user asked for a pool, which already routed
+    // around the limit on its own (Phase 1) and needs no override. Off by default.
+    const rerouted = pooled ?? (await this.rerouteExplicitAccountIfLimited(runId, input, config.defaultRunner));
+    const chosen = pooled ?? rerouted;
+    const taskBackend: RunnerId = chosen?.provider ?? input.runner ?? config.defaultRunner;
     // The account may have gone into a usage-limit hold since this run was dequeued — the queue
     // gate cannot be the only one, because dequeue is not the moment of no return. Nothing has
     // happened yet here, so the run goes back to the queue untouched (spec
@@ -4247,7 +4672,11 @@ export class RunManager {
       // reads the account that actually ran, the thread header keeps meaning what it means, and
       // "which account spent this" stays answerable after the fact. A record that stayed `pool:…`
       // would re-balance on every resume and could answer differently each time.
-      ...(pooled ? { agentProfile: pooled.accountId } : {}),
+      // `chosen`, not `pooled`: an out-of-quota reroute (Phase 4) resolves a concrete login for
+      // the same reason a pool does, and leaving the record naming the limited account the user
+      // originally picked would make the thread header, the resume and "which account spent this"
+      // all answer with an account that ran nothing.
+      ...(chosen ? { agentProfile: chosen.accountId } : {}),
     });
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
@@ -6412,6 +6841,11 @@ export class RunManager {
       ...(stopReason ? { stopReason } : {}),
       finishedAt: new Date().toISOString(),
     });
+    // The WORKFLOW-step half of the limit clear (the continuation half is in `runContinuation`).
+    // Every ordinary agent step lands here, so this is the seam that matters most: a `spec` or
+    // `review-spec` turn completing is the commonest proof a provider's window reopened. A `check`
+    // step carries no `backend` and is skipped inside the helper rather than guarded here.
+    if (status === 'done') this.clearAccountLimit(runId, stepId);
     emit({
       type: 'step-end',
       stepId,

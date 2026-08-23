@@ -602,7 +602,7 @@ export async function runReleaseDeploy(
 function reExecCommand(options: ReleaseDeployOptions, releaseId: string): string[] {
   const argv = [process.execPath, process.argv[1] as string, 'server-deploy', `--strategy=${options.strategy ?? 'blue-green'}`];
   if (options.rollbackTo !== undefined && options.rollbackTo !== null) {
-    argv.push(options.rollbackTo ? `--rollback=${options.rollbackTo}` : '--rollback');
+    argv.push(options.rollbackTo ? `--rollback=${options.rollbackTo}` : '--rollback=');
   }
   if (options.source) argv.push(`--source=${options.source}`);
   if (options.linkPath) argv.push(`--link-path=${options.linkPath}`);

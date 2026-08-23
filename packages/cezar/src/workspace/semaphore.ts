@@ -55,6 +55,9 @@ export interface WorkspaceResourceLimits {
   monitoringWakeIntervalMinutes?: number | null;
   /** Resume a run stopped by a provider usage limit when that limit resets. Default ON. */
   autoResumeOnUsageLimit?: boolean;
+  /** Start a task on another account when the one it NAMED is limited, rather than waiting.
+   *  Default OFF: overriding an explicit pick is a product decision, not a bug fix. */
+  fallbackAcrossAccountsWhenLimited?: boolean;
   /** Per-task process-tree memory ceiling in MiB; null = no limit. */
   memoryLimitMb: number | null;
   /**
@@ -137,6 +140,7 @@ const DEFAULT_LIMITS: WorkspaceResourceLimits = {
   maxMonitoringSessions: 2,
   monitoringWakeIntervalMinutes: DEFAULT_MONITORING_WAKE_MINUTES,
   autoResumeOnUsageLimit: true,
+  fallbackAcrossAccountsWhenLimited: false,
   memoryLimitMb: null,
 };
 
@@ -161,6 +165,7 @@ async function loadResourceLimits(): Promise<WorkspaceResourceLimits> {
     maxMonitoringSessions: resources.maxMonitoringSessions,
     monitoringWakeIntervalMinutes: resources.monitoringWakeIntervalMinutes,
     autoResumeOnUsageLimit: resources.autoResumeOnUsageLimit,
+    fallbackAcrossAccountsWhenLimited: resources.fallbackAcrossAccountsWhenLimited,
     memoryLimitMb: resources.memoryLimitMb,
     projectLimits,
   };
@@ -304,6 +309,12 @@ export class WorkspaceSemaphore {
    *  written before the key existed) reads as ON — the shipped default. */
   autoResumeOnUsageLimit(): boolean {
     return this.limits.autoResumeOnUsageLimit ?? true;
+  }
+
+  /** Absent reads as OFF — an older `load` stub, or a config predating the key, must behave
+   *  exactly like today's cezar and never silently start overriding explicit account picks. */
+  fallbackAcrossAccountsWhenLimited(): boolean {
+    return this.limits.fallbackAcrossAccountsWhenLimited ?? false;
   }
 
   /** Cached per-task memory ceiling (MiB), or null for no limit. */

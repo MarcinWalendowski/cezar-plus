@@ -25,6 +25,7 @@ import { displayWorkflowName, taskIssueUrl, taskPrUrl } from '@/lib/tasks-table'
 import { cn, isHttpUrl } from '@/lib/utils'
 
 import { AutoResumeHint } from './auto-resume-hint'
+import { RetargetHint } from './retarget-hint'
 import { RunStatusLine } from './run-status-line'
 import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
@@ -422,6 +423,11 @@ export function ThreadView({
           {/* A usage-limit stop is the one `failed` state that is still going somewhere — the
               dock says so before the composer offers a Continue nobody needs to press. */}
           <AutoResumeHint run={run} />
+
+          {/* …and the way out of BOTH parked states: a queued task behind an exhausted account,
+              and a scheduled one whose reset may be days away. Renders nothing for every other
+              status (`runActionFlags.retarget`). */}
+          <RetargetHint run={run} />
 
           {run.status === 'waiting' ? (
             <div

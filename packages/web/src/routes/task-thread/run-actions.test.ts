@@ -43,17 +43,22 @@ describe('runActionFlags — the visibility matrix, all 7 statuses × archived',
   //   active(running|queued|waiting) → cancel, no delete/archive/continue/terminal;
   //   finish only at the waiting/review gates; continue+terminal need a closed run WITH a
   //   session; notes always. `archived` flips nothing here — it only relabels Archive.
+  // `retarget` (spec 2026-08-23-retarget-task-to-another-engine) is true ONLY for `queued` here:
+  // the other parked state is `failed` WITH an `autoResumeAt`, and this fixture sets none, so
+  // `failed` reads false in this matrix and gets its own cases below. That asymmetry is the point
+  // of the flag — a plain failed run already offers Continue, whose composer carries the same
+  // engine pills, and two buttons for one act is worse than one.
   // `markUnread` (#775) is false in every cell of this matrix because the fixture carries no
   // `finishedAt` — a record with no finish instant can never wear the unread marker, whatever
   // its status says. The flag's real matrix is the FINISHED one in its own describe below.
   const matrix: Array<{ status: RunStatus; expected: Omit<ReturnType<typeof runActionFlags>, 'notes'> }> = [
-    { status: 'queued', expected: { finish: false, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false } },
-    { status: 'running', expected: { finish: false, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false } },
-    { status: 'waiting', expected: { finish: true, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false } },
-    { status: 'review', expected: { finish: true, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true } },
-    { status: 'done', expected: { finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true } },
-    { status: 'failed', expected: { finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true } },
-    { status: 'cancelled', expected: { finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true } },
+    { status: 'queued', expected: { finish: false, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false, retarget: true } },
+    { status: 'running', expected: { finish: false, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false, retarget: false } },
+    { status: 'waiting', expected: { finish: true, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false, retarget: false } },
+    { status: 'review', expected: { finish: true, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
+    { status: 'done', expected: { finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
+    { status: 'failed', expected: { finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
+    { status: 'cancelled', expected: { finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
   ]
 
   it.each(matrix)('$status (live)', ({ status, expected }) => {
@@ -78,6 +83,30 @@ describe('runActionFlags — the visibility matrix, all 7 statuses × archived',
     expect(flags.continueRun).toBe(false)
     expect(flags.terminal).toBe(false)
     expect(flags.deleteRun).toBe(true)
+  })
+
+  it('retarget: a SCHEDULED run offers it, a plain failed one does not', () => {
+    // The scheduled state is what a usage limit leaves behind: `failed`, but with a promise to
+    // retry at an instant that may be days away. That is a parked task and the header must offer
+    // to move it. Without the appointment the same record is just finished, and Continue already
+    // covers it.
+    expect(runActionFlags(run('failed', { autoResumeAt: '2026-08-26T23:00:30.000Z' })).retarget).toBe(true)
+    expect(runActionFlags(run('failed')).retarget).toBe(false)
+  })
+
+  it('retarget is never offered while the engine is mid-turn', () => {
+    // Even with an appointment somehow stamped on it — there is a live agent turn, and no engine
+    // path can move it.
+    expect(runActionFlags(run('running', { autoResumeAt: '2026-08-26T23:00:30.000Z' })).retarget).toBe(false)
+    expect(runActionFlags(run('waiting', { autoResumeAt: '2026-08-26T23:00:30.000Z' })).retarget).toBe(false)
+  })
+
+  it('retarget and cancel never both claim the same queued run is theirs to act on', () => {
+    // Both are offered for `queued`, deliberately — "move it" and "stop it" are different answers
+    // to the same stuck task. This pins that as intended rather than accidental.
+    const flags = runActionFlags(run('queued'))
+    expect(flags.retarget).toBe(true)
+    expect(flags.cancel).toBe(true)
   })
 })
 

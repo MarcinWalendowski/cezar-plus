@@ -16,6 +16,7 @@ export * from './skills.ts';
 export * from './agent-config.ts';
 export * from './agent-profiles.ts';
 export * from './agent-account-usage.ts';
+export * from './usage-hold.ts';
 export * from './agent-route.ts';
 export * from './automations.ts';
 export * from './knowledge.ts';

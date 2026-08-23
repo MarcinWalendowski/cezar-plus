@@ -5,6 +5,7 @@ import { createServer } from 'node:net';
 import { appendFileSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withOptionalFlagValues } from './argv.ts';
 import { detectEnvironment } from './core/backend-detect.ts';
 import { runBrokerCommand } from './core/run-broker-cli.ts';
 import { migrateReleasesCommand, releaseDeployCommand } from './server-install/release-cli.ts';
@@ -303,6 +304,7 @@ async function main(): Promise<void> {
   }
 
   const { values, positionals } = parseArgs({
+    args: withOptionalFlagValues(rawArgs),
     options: {
       port: { type: 'string', short: 'p', default: '4321' },
       repo: { type: 'string' },

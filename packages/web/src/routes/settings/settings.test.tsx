@@ -109,6 +109,7 @@ const WORKSPACE_CONFIG = {
     maxMonitoringSessions: 2,
     monitoringWakeIntervalMinutes: null,
     autoResumeOnUsageLimit: true,
+    fallbackAcrossAccountsWhenLimited: false,
     memoryLimitMb: null,
     worktreeRetentionDefault: 10,
   },

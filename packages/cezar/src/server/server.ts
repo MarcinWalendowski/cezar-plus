@@ -812,6 +812,7 @@ export interface WorkspaceConfigResponse {
     maxMonitoringSessions: number;
     monitoringWakeIntervalMinutes: number | null;
     autoResumeOnUsageLimit: boolean;
+    fallbackAcrossAccountsWhenLimited: boolean;
     memoryLimitMb: number | null;
     worktreeRetentionDefault: number;
   };
@@ -1195,6 +1196,22 @@ const continueSchema = z.object({
   text: z.string().max(100_000, 'must be at most 100000 characters').optional(),
   images: z.array(imageInputSchema).max(4).optional(),
   runner: z.enum(RUNNER_IDS).optional(),
+  model: z.string().max(200).optional(),
+});
+
+// "Run on…" body (spec 2026-08-23-retarget-task-to-another-engine): move a PARKED task to a
+// different engine. A sibling of `continueSchema` rather than a reuse of it — this is not a
+// continuation and carries no `text` or `images`, and a body that accepted them would imply the
+// task can be spoken to while it is queued, which it cannot. `agentProfile` is here and not on
+// `continueSchema` because the account is exactly what a person retargets around: the reported
+// case was a task on a `pool:*` route that resolved onto an exhausted claude login.
+//
+// Kept in this file, beside `continueSchema`, deliberately. Two near-identical request bodies
+// split across packages drift, and the contract package holds the shapes BOTH sides need — the
+// cockpit posts this one and reads nothing back from it.
+const retargetRunSchema = z.object({
+  runner: z.enum(RUNNER_IDS).optional(),
+  agentProfile: z.string().max(200).optional(),
   model: z.string().max(200).optional(),
 });
 
@@ -4129,6 +4146,7 @@ export function createApp(deps: ServerDeps) {
       maxMonitoringSessions: config.resources.maxMonitoringSessions,
       monitoringWakeIntervalMinutes: config.resources.monitoringWakeIntervalMinutes,
       autoResumeOnUsageLimit: config.resources.autoResumeOnUsageLimit,
+      fallbackAcrossAccountsWhenLimited: config.resources.fallbackAcrossAccountsWhenLimited,
       memoryLimitMb: config.resources.memoryLimitMb,
       worktreeRetentionDefault: config.resources.worktreeRetentionDefault,
     },
@@ -4207,6 +4225,9 @@ export function createApp(deps: ServerDeps) {
           }
           if (resources?.autoResumeOnUsageLimit !== undefined) {
             config.resources.autoResumeOnUsageLimit = resources.autoResumeOnUsageLimit;
+          }
+          if (resources?.fallbackAcrossAccountsWhenLimited !== undefined) {
+            config.resources.fallbackAcrossAccountsWhenLimited = resources.fallbackAcrossAccountsWhenLimited;
           }
           if (resources?.memoryLimitMb !== undefined) config.resources.memoryLimitMb = resources.memoryLimitMb;
           if (resources?.worktreeRetentionDefault !== undefined) {
@@ -4299,6 +4320,7 @@ export function createApp(deps: ServerDeps) {
         maxMonitoringSessions: z.number().int().min(0).max(16).optional(),
         monitoringWakeIntervalMinutes: z.number().int().min(1).max(60).nullable().optional(),
         autoResumeOnUsageLimit: z.boolean().optional(),
+        fallbackAcrossAccountsWhenLimited: z.boolean().optional(),
         memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().optional(),
         worktreeRetentionDefault: z.number().int().min(0).max(1000).optional(),
       })
@@ -5238,6 +5260,64 @@ export function createApp(deps: ServerDeps) {
       });
       if (!result.ok) return c.json({ error: result.error }, 409);
       return c.json({ continued: true });
+    })
+
+    /**
+     * "Run on…" — move a PARKED task to another engine
+     * (spec 2026-08-23-retarget-task-to-another-engine, Phase 3).
+     *
+     * One route for the two states a person actually finds a task parked in, because from the
+     * thread they look the same — nothing is happening and nothing will happen soon — and asking
+     * the cockpit to know which engine call to make would put the engine's internals in the UI:
+     *
+     *  - `queued` behind an account hold → `retargetQueuedRun`, which rewrites the pending work
+     *    item as well as the record (the record alone would not change where it dispatches).
+     *  - `failed` with a session (the scheduled/auto-resume state) → `continueRun`, which already
+     *    reopens on a named engine from the last completed step. No new engine code for this half.
+     *
+     * Anything else is a 409 that says the status, never a silent 200: a button that reports
+     * success and moves nothing is worse than one that refuses.
+     */
+    .post('/runs/:id/agent', jsonZodValidator(retargetRunSchema, { absent: ({}) }), async (c) => {
+      const { root: repoRoot, store, manager } = c.get('project');
+      const id = c.req.param('id');
+      const run = store.getRun(id);
+      if (!run) return c.json({ error: 'not found' }, 404);
+      const target = c.req.valid('json');
+      if (agentModelsLocked(repoRoot) && target.model?.trim()) {
+        return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
+      }
+      // The provider being moved TO is the one that has to be usable — `providerForExistingRun`
+      // falls back to the run's own when no override was sent, which is the right question for a
+      // retarget that only changes the account or the model.
+      const blocked = await providerActionError([providerForExistingRun(run, target.runner)]);
+      if (blocked) return c.json({ error: blocked }, 409);
+
+      if (run.status === 'queued') {
+        const result = await manager.retargetQueuedRun(id, target);
+        if (!result.ok) return c.json({ error: result.error }, 409);
+        return c.json({ run: store.getRun(id) });
+      }
+      // The scheduled state is a `failed` record with a live `autoResumeAt`. `continueRun` retires
+      // that appointment on the way in, so pressing this is also the answer to "stop waiting until
+      // Tuesday and run it now".
+      if (run.status === 'failed') {
+        // `continueRun` takes no account, and that is not an oversight to paper over here: a
+        // resume reattaches to a session, and `sessionId`/`profileId` are a PAIR — the session
+        // belongs to the login that created it, so "same thread, different account" is not a
+        // thing a provider can do. Refuse it plainly rather than accepting the field and dropping
+        // it, which would report success and change nothing about where the work runs.
+        if (target.agentProfile !== undefined) {
+          return c.json(
+            { error: 'this task already has a session, so it can move to another engine but not to another account' },
+            409,
+          );
+        }
+        const result = await manager.continueRun(id, { runner: target.runner, model: target.model });
+        if (!result.ok) return c.json({ error: result.error }, 409);
+        return c.json({ run: store.getRun(id) });
+      }
+      return c.json({ error: `cannot move a ${run.status} run to another engine` }, 409);
     })
 
     // "Open in terminal" (spec 003): hand the session off to a real terminal —

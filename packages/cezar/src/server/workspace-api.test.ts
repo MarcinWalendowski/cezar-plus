@@ -98,6 +98,7 @@ describe('the workspace settings API (step 2.7)', () => {
         maxMonitoringSessions: 2,
         monitoringWakeIntervalMinutes: 5,
         autoResumeOnUsageLimit: true,
+        fallbackAcrossAccountsWhenLimited: false,
         memoryLimitMb: null,
         worktreeRetentionDefault: 1000,
       },
@@ -150,6 +151,7 @@ describe('the workspace settings API (step 2.7)', () => {
         maxMonitoringSessions: 3,
         monitoringWakeIntervalMinutes: 5,
         autoResumeOnUsageLimit: false,
+        fallbackAcrossAccountsWhenLimited: false,
         memoryLimitMb: 2048,
         worktreeRetentionDefault: 1000,
       },
@@ -170,6 +172,26 @@ describe('the workspace settings API (step 2.7)', () => {
     // asks, not just the file.
     expect(semaphore.autoResumeOnUsageLimit()).toBe(false);
     expect(semaphore.memoryLimitMb()).toBe(2048);
+  });
+
+  /**
+   * The out-of-quota fallback is default-OFF (spec `2026-08-23-retarget-task-to-another-engine.md`),
+   * so the write worth pinning is the one that turns it ON — and it has to survive all four
+   * threading points, not just the schema: the contract's PUT input, `config.ts`'s parse, the GET
+   * response, and `WorkspaceSemaphore`. A key wired into three of those and missed in the fourth
+   * fails silently, as a switch the settings screen shows and the engine never reads.
+   */
+  it('PUT turns the out-of-quota fallback on, and it reaches the semaphore the engine asks', async () => {
+    expect(semaphore.fallbackAcrossAccountsWhenLimited()).toBe(false); // the shipped default
+    const res = await putConfig({ resources: { fallbackAcrossAccountsWhenLimited: true } });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as WorkspaceConfigResponse).resources.fallbackAcrossAccountsWhenLimited).toBe(true);
+    expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).resources.fallbackAcrossAccountsWhenLimited).toBe(true);
+    expect((rawConfig().resources as Record<string, unknown>).fallbackAcrossAccountsWhenLimited).toBe(true);
+    expect(semaphore.fallbackAcrossAccountsWhenLimited()).toBe(true);
+    // A partial write of an unrelated key must not drag it back to the default.
+    await putConfig({ resources: { maxParallel: 4 } });
+    expect(semaphore.fallbackAcrossAccountsWhenLimited()).toBe(true);
   });
 
   /** #810 — the cadence now ships ON, so the write worth pinning is the one that turns it
@@ -267,6 +289,7 @@ describe('the workspace settings API (step 2.7)', () => {
       maxMonitoringSessions: 2,
       monitoringWakeIntervalMinutes: 5,
       autoResumeOnUsageLimit: true,
+      fallbackAcrossAccountsWhenLimited: false,
       memoryLimitMb: null,
       worktreeRetentionDefault: 3,
     });

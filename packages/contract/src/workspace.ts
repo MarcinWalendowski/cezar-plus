@@ -43,6 +43,10 @@ export const workspaceConfigResponseSchema = z.object({
     monitoringWakeIntervalMinutes: z.number().nullable(),
     /** Resume a run a provider usage limit stopped, once the limit resets. Default `true`. */
     autoResumeOnUsageLimit: z.boolean(),
+    /** Start a task on another account when the one it NAMED is out of quota, instead of waiting
+     *  for that account's window. Default `false` — see the config schema for why overriding an
+     *  explicit pick is opt-in while a `pool:` route routes around a limit unconditionally. */
+    fallbackAcrossAccountsWhenLimited: z.boolean(),
     memoryLimitMb: z.number().nullable(),
     worktreeRetentionDefault: z.number(),
   }),
@@ -129,6 +133,7 @@ export const setWorkspaceConfigInputSchema = z.object({
       maxMonitoringSessions: z.number().int().min(0).max(16).optional(),
       monitoringWakeIntervalMinutes: z.number().int().min(1).max(60).nullable().optional(),
       autoResumeOnUsageLimit: z.boolean().optional(),
+      fallbackAcrossAccountsWhenLimited: z.boolean().optional(),
       memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().optional(),
       worktreeRetentionDefault: z.number().int().min(0).max(1000).optional(),
     })

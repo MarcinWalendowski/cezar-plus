@@ -347,6 +347,22 @@ describe('runReleaseDeploy', () => {
       // Vitest does not run as root, so this exercises the real branch.
       if ((process.getuid?.() ?? 0) !== 0) expect(argv).toContain('--user');
     });
+
+    it('emits `--rollback=`, never a bare `--rollback`, in the transient unit argv for an empty rollback (`.ai/specs/2026-08-23-bare-rollback-argv-trap.md`)', async () => {
+      // Before the fix, `reExecCommand` pushed the literal bare `--rollback` token here, followed
+      // unconditionally by `--release-id=…` — an argv the child's own `parseArgs` cannot accept
+      // (`argument is ambiguous`), so the detached rollback died silently while the parent reported
+      // `{ ok: true, detachedUnit }` and exited 0. This is the fail-OPEN half of the bug.
+      const box = migratedBox();
+      const rec = recorder({ killMode: () => 'control-group', cgroup: () => INSIDE, systemdRunAvailable: () => true });
+      const result = await runReleaseDeploy({ ...box, env: {}, rollbackTo: '' }, rec.host);
+
+      expect(result.detachedUnit).toBeTruthy();
+      expect(rec.detached).toHaveLength(1);
+      const argv = rec.detached[0] ?? [];
+      expect(argv).toContain('--rollback=');
+      expect(argv).not.toContain('--rollback');
+    });
   });
 
   describe('defaultHost(log).stage — the real rsync, not a mock (2026-08-22)', () => {
