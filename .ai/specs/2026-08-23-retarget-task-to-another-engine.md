@@ -1,7 +1,10 @@
 # Run a parked task on another engine, and route around an exhausted account
 
-**Status:** All five phases implemented; gates green. **QA Needed** until the runtime E2E on
-`prod-host` (below) is run against a deployed release.
+**Status:** All five phases implemented; gates green; deployed to `prod-host` as
+`20260823T150053Z-b862ef05`. **Phase 1 is Done** — verified in production against a real usage-limit
+refusal (see Verification). **Phases 2, 3 and 5 are QA Needed**: the endpoint is live and mounted,
+but its effect needs one authenticated click on a task that is safe to start, and the only two
+parked runs on the box are not (one of them is a request for this very feature).
 **Date:** 2026-08-23
 **Reported:** the owner, from production — the same report that produced
 `.ai/specs/2026-08-23-usage-limit-hold-account.md`. That spec made the queue honest about *why*
@@ -10,11 +13,22 @@ still cannot do afterwards: move the task, or have cezar move it for them.
 **Extends:** `.ai/specs/2026-08-16-agent-account-usage-routing.md` (the pool and its four signals)
 and `.ai/specs/2026-08-03-auto-resume-after-usage-limit.md` (the hold and the schedule). It
 reverses nothing in either.
-**Closes:** the two "found while auditing, NOT fixed here" risks recorded in
-`2026-08-23-usage-limit-hold-account.md` — `recordLimited()` having no production caller (Phase 1,
-todo `c8142431`) and an explicit per-task runner not constraining the pool (Phase 4's setting, the
-decision todo `81ab4ebd` asks for). Todo `dab1c7f8` (persist the held account on the record) stays
-open and is not touched here.
+**Closes:** one of the two "found while auditing, NOT fixed here" risks recorded in
+`2026-08-23-usage-limit-hold-account.md` — `recordLimited()` having no production caller. Phase 1
+wires it, and todo `c8142431` was closed 2026-08-23 after the write was seen in production.
+
+**Corrected 2026-08-23, against the plan this spec was built from:** the plan asserted that
+"Phase 4's setting is the decision todo `81ab4ebd` asks for", and that is **wrong** — it was
+written from the todo's summary rather than its acceptance criteria. `81ab4ebd` asks for one of two
+things: either an explicit task-level runner **filters** pool candidates to that provider's
+accounts (with a test proving a codex-created run never dispatches to a claude account), or the
+per-task picker is **documented as advisory** whenever a wildcard pool is configured, *and the UI
+says so*. `fallbackAcrossAccountsWhenLimited` is neither. It moves a different axis: whether an
+**explicit, non-pool** account may be routed around when it is out of quota. A pool route still
+picks the provider, and the picker still has no effect on it. So `81ab4ebd` stays **open**, and the
+knowledge note this spec filed records the finding, not the decision it asks for.
+
+Todo `dab1c7f8` (persist the held account on the record) also stays open and is not touched here.
 
 ## TLDR
 
@@ -538,23 +552,100 @@ targeted runs on the patched tree: **2 of 3 failed.** Three on a pristine `origi
 (`git archive HEAD` into `/var/lib/cezar/gate-ctl`, `cp -al` node_modules, `.vite` removed, with
 `grep -c fallbackAcrossAccountsWhenLimited packages/cezar/src/workspace/config.ts` printing **0**
 in the same output as proof the control carried none of this work): **1 of 3 failed.** So it is not
-this change. It deserves its own todo: something writes `.ai/` into the fixture project after a run
-that did not succeed, which is either a real leak or a fixture that races its own cleanup.
+this change. **Filed as todo `ffc3f805`** (2026-08-23): something writes `.ai/` into the fixture
+project after a run that did not succeed, which is either a real leak or a fixture that races its
+own cleanup. Its acceptance criteria require naming the writer by file and line rather than
+inferring it, and proving the fix with 20 consecutive green runs of the single case **on the box**,
+since the Mac is not where it reproduces.
 
 ### Runtime E2E on `prod-host`
 
-**Not yet run.** It needs a deployed release, and there is a real held run available right now
-(`7c01e21d`, queued since 11:28 UTC behind a Claude weekly limit that does not lift until Aug 26),
-which is a rare and perishable fixture. Steps:
+Deployed `b862ef05` as release `20260823T150053Z-b862ef05` (blue-green, cutover gap **69 ms**,
+service active, `find /var/lib/cezar -not -user cezar` = **0** throughout). The deploy gate earned
+its keep: the first attempt refused with *"build stamp sha 81635378 disagrees with source HEAD
+b862ef05; run npm run build first"* — a pull is not a build.
 
-1. Deploy, then confirm `~/.cezar/agent-account-usage.json` gains a `limited` entry for
-   `claude:default` whose `until` equals the parsed reset.
-2. Press "Run on… codex" on `7c01e21d` and watch it start on a codex account — the record's
-   `runner`/`agentProfile`, the transcript note, and a step whose `backend` is `codex`.
-3. Confirm the queue is quiet afterwards: `grep -c 'held in the queue'` on the run's `.ndjson`
-   twice, 60 s apart, must not move. Deploy probes prove the SHA is live, not that it behaves —
-   this spec's parent was rolled back on a 2626-note write storm that both probes reported green.
-4. Only then write the changelog and knowledge note into
-   `/var/lib/cezar/loki-labs/notion-export/` (as `cezar`, verified indexed), and close the pending
-   V5 of `2026-08-23-usage-limit-hold-account.md` — a real held row in the deployed cockpit is
-   exactly what step 2 exercises.
+**Step 1 — PASSED, and better than the plan asked for.** Within 90 seconds of the cutover the
+restart re-queued `7c01e21d`, it dispatched, its `spec` step ran and was refused, and Phase 1 wrote:
+
+```
+claude:default -> {"since":"2026-08-23T15:01:18.385Z","source":"usage-limit","until":"2026-08-26T23:00:00.000Z"}
+claude:secondary -> no limit    codex:default -> no limit
+```
+
+Three separate things are proven by that one line:
+
+- **The key is the account the STEP was refused on, not the run's.** The run's `runner` is `codex`;
+  the entry is `claude:default`, because `spec-to-deploy` pins claude on its `spec` step
+  (`steps: context=done/codex, spec=failed/claude:default`). That is `usageHoldAccountKey` doing
+  exactly what the parent spec added it for, now with something to write.
+- **`until` is Aug 26, not Aug 23.** The same account's older record, `76680e19`, still carries
+  `autoResumeAt: 2026-08-23T23:00:30.000Z` — written by the pre-fix parser, three days early, same
+  clock time. The two records sit side by side in `runs.json` as a before/after of the tier-3
+  named-date fix, and the new run's lifecycle note reads *"resuming automatically at Aug 26, 2026,
+  11:00:30 PM UTC"*.
+- **The pool now has somewhere to go.** `claude:secondary` is unlimited at 18% session / 25% week
+  with 2672 dispatches, against `claude:default`'s 8. Signal 1 has real data in production for the
+  first time.
+
+**Step 3 — PASSED.** Note write rate measured 70 s apart on the live box: transcript lines
+**46 → 46**, `held in the queue` count **2 → 2**, total `.ndjson` bytes across every run
+**86,686,381 → 86,686,381**. Zero growth, `systemctl is-active` = active, local health probe 200.
+The parent spec's rollback was a 2626-note storm that both deploy probes called green, so this is
+the measurement that matters, not the cutover's own `[deploy.drained]`.
+
+**Step 2 — NOT RUN, deliberately, and it needs the owner.** Two blockers, either of which is
+sufficient:
+
+1. **The fixture is obsolete.** `7c01e21d`'s task text is *"Add an option to resume a task with
+   different provider/model if we hit limit"* — it is a request for **this spec**. It is
+   `autonomous: true` on `spec-to-deploy`, so pressing "Run on…" would have set an autonomous agent
+   to write a spec for, implement, commit, push and deploy a feature that landed on `main` minutes
+   earlier. The only other parked run, `76680e19`, is the one whose stale appointment fires tonight.
+
+   **Re-checked at 15:20 UTC, and the inventory moved under this paragraph** — worth recording,
+   because it is the kind of drift that makes a stale "here is the fixture" note dangerous. Both
+   runs live in the **workspace** project's store (`/var/lib/cezar/workspace/.ai/cezar/runs.json`),
+   not the `cezar` one, and both have since gone `queued` → `failed` with a future `autoResumeAt`.
+   So they no longer exercise Phase 2 at all; they now land on the Phase 3 `failed`-with-a-session
+   branch that delegates to `continueRun`. The only run in the whole box that is currently `queued`
+   is `da0119ec` — which is the run started from todo `81ab4ebd`, i.e. the decision this spec did
+   **not** make. Retargeting it would be retargeting an investigation into its own subject.
+   Blocker 1 therefore still stands, for a different run than when it was written.
+2. **The API cannot be driven headlessly.** `CEZ_AUTH` is on, so an unauthenticated
+   `POST /api/v1/runs/:id/agent` answers `401 {"error":"unauthenticated"}` before the handler runs.
+   Verified as the WALL and not the route by a control: `/cancel`, `/continue` and `/agent` all
+   answer `401` identically on the same run, while `/health` answers `200` — and `runs/:id/agent`
+   is present in the deployed `dist/server/server.js`. A 401 where the inner gate would have said
+   409 is evidence about the perimeter, not about the endpoint.
+
+So the endpoint is live, mounted, and indistinguishable from its established siblings at the
+perimeter; what remains unproven at runtime is the retarget's *effect*, which needs one authenticated
+click on a task that is safe to start. **This ships as QA Needed** on Phases 2/3/5. Phase 1 is Done.
+
+**Step 4 — DONE.** Written to the production corpus as `cezar`, and verified **indexed** rather
+than merely written, against the live workspace-scoped catalog
+(`/var/lib/cezar/workspace/.ai/cezar/knowledge-index/catalog.ndjson` — not the stale project-scoped
+one). A phrase-grep is not proof for a `domains/*.md`-sized document, so both were checked by
+comparing the catalog's `bytes` and `hash` against the file on disk:
+
+| document | bytes | hash | catalog `updatedAt` |
+| --- | --- | --- | --- |
+| `changelog/2026-08-23-retarget-task-to-another-engine--local.md` | 5495 = 5495 | `5e2497be15ab9ae2…` = disk | 15:07:59Z |
+| `knowledge/sections/334-…-pool-route-picks-the-provider-too--local.md` | 4727 = 4727 | `b78a996ae670a3a7…` = disk | 15:09:49Z |
+
+Todo bookkeeping, done through the shipped store helpers as `cezar` (`updateTodo` / `cez todo add`,
+so the lease and the cluster stamp are the product's, not a hand-edit), each re-read by id
+afterwards because a `todos.json` write has been observed to vanish silently under a correctly-taken
+lease:
+
+- `c8142431` (`recordLimited()` has no production caller) → **done**. Re-read confirms `done`.
+- `81ab4ebd` → **stays open**, against the plan's prediction. See the correction at the top of this
+  spec: its acceptance criteria ask for a pool *filter* or an advisory-picker note in the UI, and
+  `fallbackAcrossAccountsWhenLimited` is neither.
+- `dab1c7f8` → stays open by design, untouched.
+- `ffc3f805` → **new**, the pre-existing `workspace-parallel.test.ts` flake.
+
+And the parent spec's **V5 is no longer pending**: its derivation was confirmed against the live
+production records, with a negative control, and its Verification section now carries the numbers.
+`find /var/lib/cezar -not -user cezar | wc -l` = **0** after every write in this session.

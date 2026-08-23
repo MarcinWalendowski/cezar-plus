@@ -1,8 +1,9 @@
 # A usage limit holds the account it was refused on, and the cockpit says so
 
-**Status:** Implemented — QA Needed until V5 (a real held row in the deployed cockpit) is seen on
-the box. Deployed to `prod-host` at 12:23 UTC, **rolled back at 12:27** on the note storm
-described in TLDR item 4, and redeployed with the memo fix.
+**Status:** Implemented. V5's derivation was confirmed 2026-08-23 against the live production
+record set (with a negative control); the rendered cockpit row remains the owner's visual pass.
+Deployed to `prod-host` at 12:23 UTC, **rolled back at 12:27** on the note storm described in
+TLDR item 4, and redeployed with the memo fix.
 **Date:** 2026-08-23
 **Reported:** the owner, from production: *"I added a task on custom model codex, but it's queued
 for some reason, when all the rest of tasks is scheduled: scheduled tasks shouldn't be counted as
@@ -295,5 +296,44 @@ Automated (all executed):
 Manual, on the box (QA):
 
 - V5 with a live hold, a queued row on the held account shows `held <when>` and its queue cell
-  reads `#N held`; a queued row on any OTHER account shows neither. **Not yet run** — it needs a
-  real limit, which is why this ships as QA Needed.
+  reads `#N held`; a queued row on any OTHER account shows neither. **Confirmed 2026-08-23 15:18
+  UTC at the derivation level, against the live production record set** — the pixels are still the
+  owner's pass, see below.
+
+  A real limit finally existed (`.ai/specs/2026-08-23-retarget-task-to-another-engine.md` Phase 1
+  wrote the first one), so `packages/cezar/.ai/cezar/runs.json` was pulled off `prod-host`
+  and fed to the shipped `usageLimitHolds` / `queueHold` / `queuePositions` unmodified, with
+  `defaultRunner: 'claude'` read from the deployed `/api/v1/health` rather than assumed:
+
+  - `usageLimitHolds` → exactly one hold, `claude:default` until `2026-08-23T23:00:30.000Z`,
+    from run `eeceb869`.
+  - the one queued run, `da0119ec`, renders `held Aug 24 1:00 AM`, titled *"Held: the
+    claude:default agent account is waiting out a provider usage limit until Aug 24, 2026,
+    1:00:30 AM GMT+2."*
+  - its queue cell renders **`#1 held`**.
+  - **Negative control**, the half that makes the rest mean something: the same derivation over a
+    queued run on `codex:default` — an account with no hold — returns **no pill at all**.
+
+  Note which path this exercised. `da0119ec` carries **no `runner`**, so the pill came out of the
+  `defaultRunner` fallback, over a production record, with the production default. That is the
+  branch the docblock warns is easiest to get confidently wrong.
+
+  **Still open, and it is the owner's:** the rendered cockpit. `CEZ_AUTH` is on, so no headless
+  probe reaches a rendered row, and this verification says the numbers and strings are right, not
+  that they are on screen. A derivation cannot see a pill placed off-view, clipped, or rendered
+  under a stale cached bundle.
+
+  **Not confirmable from this data, and not a regression:** `da0119ec` reaching the pill through
+  `defaultRunner` is not the same as a run whose record names a **pooled** account. That case stays
+  silent by design — see the `queueHold` docblock and open todo `dab1c7f8`.
+
+  **And the run that filed this spec keys correctly, measured.** `7c01e21d` and `76680e19` live in
+  the *workspace* project's store, not the `cezar` one, and both now sit `failed` with a future
+  `autoResumeAt`. Both carry `runner: codex, agentProfile: default` on the record — and
+  `usageHoldAccountKey` returns **`claude:default`** for each. That is §1 of this spec doing its
+  job on the original evidence: the record says codex, the pool sent the work to a claude account,
+  and the hold names claude. Pre-fix this keyed `codex:default` and held an account nothing was
+  refused on. The workspace-scoped `usageLimitHolds` and the cross-project aggregate agree
+  (`claude:default` until `2026-08-23T23:00:30.000Z`, from `76680e19`), and the queued run's pill is
+  identical under both scopes — so the "scoped to the runs it is given" caveat in the docblock is
+  not biting here.
