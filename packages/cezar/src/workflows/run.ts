@@ -81,7 +81,8 @@ import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { approvalsSatisfied, minApprovers } from '../runs/approvals.ts';
 import { defDescribesRun, firstUnfinishedStep, pendingChainSteps, stepTerminal } from '../runs/chain.ts';
 import { resolveProfileEnvForRoot } from '../workspace/agent-profiles.ts';
-import { accountUsageKey, countInflight, type InflightStep } from '../workspace/agent-account-usage.ts';
+import { countInflight, type InflightStep } from '../workspace/agent-account-usage.ts';
+import { runAccountKey, usageHoldAccountKey } from '@loki-labs/better-cezar-contract';
 import { resolvePoolForDispatch } from '../workspace/agent-route-select.ts';
 import type { ProviderId } from '../core/provider-auth.ts';
 import {
@@ -425,32 +426,17 @@ function accountHeldFor(
   return holds.inFlight.has(key) && !resumeInFlight(run);
 }
 
-/**
- * Which agent ACCOUNT a run's work runs on — the thing a provider usage limit actually closes
- * (spec 2026-08-03-auto-resume-after-usage-limit).
- *
- * Backend plus agent account, because those are the two axes a limit is scoped to: a Claude
- * limit must never stall a Codex task, and a second Claude login is a second budget. A record
- * that names no runner has not started yet and will take the configured default, which is what
- * `fallbackRunner` carries; a run that HAS started always carries its resolved runner (execute
- * persists it), and only started runs can be holding.
- *
- * Spelled through `accountUsageKey` rather than re-composed here. It is the same key the usage
- * registry, the sidebar panel and the pool balancer are all keyed on, and two `${a}:${b}` templates
- * for one concept is a drift waiting to happen — the moment either side changes how it spells the
- * discovered account, holds stop matching usage and neither reports an error.
- *
- * A run still carrying a `pool:` route has not been resolved yet, so it names no account; the pool
- * string becomes its own key, which can only ever match another unresolved run on the same pool.
- * That is the conservative reading — `execute()` overwrites `agentProfile` with the concrete login
- * before the run can hold anything.
- */
-export function runAccountKey(
-  run: Pick<RunRecord, 'runner' | 'agentProfile'>,
-  fallbackRunner: RunnerId,
-): string {
-  return accountUsageKey((run.runner ?? fallbackRunner) as ProviderId, run.agentProfile);
-}
+// `runAccountKey` — which agent ACCOUNT a run's work runs on (spec
+// 2026-08-03-auto-resume-after-usage-limit) — MOVED 2026-08-23 to
+// `@loki-labs/better-cezar-contract` (`usage-hold.ts`), and SPLIT IN TWO there (spec
+// 2026-08-23-usage-limit-hold-account). The single function that used to sit here answered the
+// admission question ("where will this run's work go?") and was then also used for the hold
+// question ("which account did a provider refuse?"), which are not the same question whenever a
+// workflow step pins its own runner or the pool routes two steps to two logins. `runAccountKey`
+// keeps the first; `usageHoldAccountKey` answers the second off the STEP that actually ran.
+// Measured cost of conflating them: a codex task held for hours by a Claude weekly limit, while a
+// claude task would not have been held at all. It also had to leave this module so the browser
+// could import it — see the contract file's own docblock.
 
 /**
  * Is this run an automatic resume that has not completed a turn yet?
@@ -998,6 +984,12 @@ export class RunManager {
   /** Runs currently being paused by the memory guard — dedupes the ~2 s samples so one breach
    *  triggers one pause, not a burst. Cleared in dropActive when the run leaves the registry. */
   private readonly memoryPausing = new Set<string>();
+
+  /** Queued runs that have already been TOLD, on their own transcript, which account they are
+   *  waiting on — keyed run id -> that account, so a hold that moves to a different account
+   *  speaks again while a long one stays quiet. `pump()` runs on every lifecycle event, so an
+   *  un-deduped note would bury the thread it is meant to explain. */
+  private readonly heldNotified = new Map<string, string>();
 
   /** Unsubscribe handle for the constructor's `onUsage` subscription — released
    *  by dispose() so a torn-down manager stops receiving sampler ticks. */
@@ -1612,6 +1604,11 @@ export class RunManager {
         // Only pay for the config read when something is actually held: a queued record may name
         // no runner, and then the account it would use is the configured default.
         const defaultRunner = anyHold ? (await loadConfig(this.repoRoot)).defaultRunner : undefined;
+        // Say so on the transcript before deciding anything (spec 2026-08-23-usage-limit-hold-
+        // account). A held run is otherwise indistinguishable from an ordinary queued one — it
+        // wears `queued`, it wears `#1 in queue`, and it does not move for hours. The queue was
+        // right and the cockpit was silent, which reads as a wedged workspace.
+        this.noteHeldRuns(holds, (defaultRunner ?? 'claude') as RunnerId);
         while (this.queue.length > 0 && capacity()) {
           // FIFO among the runs that CAN start; a held one keeps its place in the queue rather
           // than being dequeued and re-queued (which would churn its position and its record).
@@ -1624,6 +1621,7 @@ export class RunManager {
           if (next === -1) break; // everything queued is waiting on a held account
           const runId = this.queue.splice(next, 1)[0];
           if (!runId) break;
+          this.heldNotified.delete(runId);
           // A forced sweep has to reach the spawn: the gate inside `execute` asks the same
           // question and would send this run straight back to the queue.
           if (forced) this.forceStarted.add(runId);
@@ -1683,6 +1681,68 @@ export class RunManager {
     } finally {
       this.pumping = false;
     }
+  }
+
+  /**
+   * Tell each held queued run, once, which account it is waiting on and until when.
+   *
+   * The hold itself is correct and deliberate — starting a task on an account that is out of
+   * window just burns a CLI spawn on a doomed run. What was missing is that the refusal left no
+   * trace anywhere a person looks: the record stays plain `queued`, the row still counts it `#1
+   * in queue`, and the only other note of this kind (`requeueWhileHeld`) fires on the SPAWN path,
+   * which a run held at dequeue never reaches. Measured 2026-08-23: a task sat queued behind an
+   * eleven-hour hold with nothing in its transcript, its row, or the log saying so.
+   *
+   * Deduped per account rather than per run: a run whose hold moves to a different account is
+   * waiting on something new and should say so, while a run parked on one account for hours
+   * should not repeat itself on every sweep.
+   */
+  private noteHeldRuns(holds: AccountHolds, defaultRunner: RunnerId): void {
+    // Self-pruning: a run can leave the queue by paths that never reach the dequeue below (a
+    // cancel, most obviously), and this map must not outlive the queue it describes.
+    for (const runId of this.heldNotified.keys()) {
+      if (!this.queue.includes(runId)) this.heldNotified.delete(runId);
+    }
+    for (const runId of this.queue) {
+      const queued = this.store.getRun(runId);
+      if (!queued) continue;
+      if (!accountHeldFor(queued, holds, defaultRunner)) {
+        this.heldNotified.delete(runId);
+        continue;
+      }
+      this.noteHeld(runId, runAccountKey(queued, defaultRunner));
+    }
+  }
+
+  /** One held run, one line, once per account it is held on. Shared by the dequeue-time sweep
+   *  above and the spawn-time gate (`requeueWhileHeld`) so a run that is refused at both does not
+   *  say the same thing twice, and so both spell the account the same way. */
+  private noteHeld(runId: string, account: string): void {
+    if (this.heldNotified.get(runId) === account) return;
+    this.heldNotified.set(runId, account);
+    const until = this.holdReopensAt(account);
+    this.store.appendEvent(runId, {
+      type: 'note',
+      // No em dash in the cockpit-visible half of this line (owner's standing rule for product
+      // copy); the surrounding comments keep the file's own style.
+      message: until
+        ? `held in the queue: the ${account} agent account is waiting out a usage limit until ${formatWakeInstant(until)}`
+        : `held in the queue: the ${account} agent account is waiting out a usage limit`,
+    });
+  }
+
+  /** When the named account's earliest scheduled resume fires, or null when the hold is an
+   *  in-flight resume with no published instant behind it. */
+  private holdReopensAt(account: string): Date | null {
+    let soonest: number | undefined;
+    for (const run of this.store.listRuns()) {
+      if (run.status !== 'failed' || !run.autoResumeAt) continue;
+      if (usageHoldAccountKey(run, run.runner ?? 'claude') !== account) continue;
+      const at = Date.parse(run.autoResumeAt);
+      if (!Number.isFinite(at) || at <= Date.now()) continue;
+      if (soonest === undefined || at < soonest) soonest = at;
+    }
+    return soonest === undefined ? null : new Date(soonest);
   }
 
   /**
@@ -2655,10 +2715,7 @@ export class RunManager {
     this.pendingJobs.set(runId, { workflow, input });
     this.queue.push(runId);
     this.store.updateRun(runId, { status: 'queued', startedAt: undefined, currentStepId: undefined });
-    this.store.appendEvent(runId, {
-      type: 'note',
-      message: 'held in the queue — this agent account is waiting out a usage limit',
-    });
+    this.noteHeld(runId, runAccountKey({ ...run, runner }, runner));
     this.dropActive(runId);
     return true;
   }
@@ -2789,9 +2846,12 @@ export class RunManager {
     const deadline = new Set<string>();
     const inFlight = new Set<string>();
     for (const run of this.store.listRuns()) {
-      // A holding run always carries the runner it actually ran on, so the fallback is unused
-      // here — it is spelled out rather than `!` so a future record shape degrades, not throws.
-      const key = () => runAccountKey(run, run.runner ?? 'claude');
+      // The account a provider actually refused, read off the STEP that ran — NOT off the run
+      // (spec 2026-08-23-usage-limit-hold-account). A run's steps do not all run on the run's own
+      // backend: `spec-to-deploy` pins two steps to claude, and the pool may route two steps of
+      // one run to two logins. The fallback is unused for a run that has started a step; it is
+      // spelled out rather than `!` so a future record shape degrades, not throws.
+      const key = () => usageHoldAccountKey(run, run.runner ?? 'claude');
       if (run.status === 'failed' && run.autoResumeAt) {
         const at = Date.parse(run.autoResumeAt);
         if (Number.isFinite(at) && at > now) deadline.add(key());

@@ -242,7 +242,41 @@ describe('a run stopped by a usage limit resumes itself', () => {
     expect(runs.filter((r) => store.getRun(r.id)?.startedAt !== undefined)).toHaveLength(1);
     // Handed back untouched — plain `queued`, no half-started record left behind.
     expect(runs.filter((r) => store.getRun(r.id)?.status === 'queued')).toHaveLength(4);
+
+    // …and every one of them SAYS why, once. A held run is otherwise indistinguishable from an
+    // ordinary queued one — same status, same queue position, no movement for hours — which is
+    // what read as a wedged workspace before this note existed. Many pumps ran in the second
+    // above, so the count is also the dedupe assertion.
+    for (const record of runs.filter((r) => store.getRun(r.id)?.status === 'queued')) {
+      const notes = store
+        .readEvents(record.id)
+        .filter((event) => typeof event.message === 'string' && event.message.startsWith('held in the queue'));
+      expect(notes).toHaveLength(1);
+      expect(notes[0]?.message).toContain('claude:default');
+      expect(notes[0]?.message).toContain('waiting out a usage limit until');
+    }
   }, 60_000);
+
+  it('holds the account the STEP was refused on, not the one the run record names', async () => {
+    // The production shape (prod-host, 2026-08-23, run 76680e19): the run was created with
+    // `runner: codex`, but `spec-to-deploy` pins `review-spec` to claude, so the step that hit the
+    // weekly limit ran on claude. Keying the hold off the RUN put a Claude limit on `codex:default`
+    // and left `claude:default` unheld — blocking an unrelated codex task for hours while a real
+    // claude task would have walked straight into the closed window.
+    manager = new RunManager(store, repoRoot);
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit pinned step', worktree: false });
+    await settle(record.id);
+    const failed = store.getRun(record.id)?.steps.find((step) => step.status === 'failed');
+    expect(failed?.backend).toBe('claude');
+    expect(failed?.profileId ?? 'default').toBe('default');
+
+    // Only the RUN-level fields move — exactly what a task started on codex whose pinned step ran
+    // on claude leaves behind. The step record is untouched.
+    store.updateRun(record.id, { runner: 'codex', agentProfile: 'default' });
+    const holds = manager.accountHolds();
+    expect([...holds.deadline]).toEqual(['claude:default']);
+    expect([...holds.deadline]).not.toContain('codex:default');
+  }, 30_000);
 
   it('keeps the account held while a resume is in flight, until a turn proves the window', async () => {
     manager = new RunManager(store, repoRoot);
