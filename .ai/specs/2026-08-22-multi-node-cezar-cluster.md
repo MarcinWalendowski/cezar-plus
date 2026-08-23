@@ -2505,11 +2505,30 @@ invented; these are the names to use when one lands.
 > supplies. **100% covered, 0% reachable** — the same shape as D23-D26, and the reason a green suite
 > is not evidence here.
 >
-> **The fix is free if it rides Milestone C, and expensive if it does not.** The real numbers are
-> `semaphore.busy()`, `semaphore.heavyActive()` and `semaphore.maxParallel()` (`workflows/run.ts`
-> `:1628`/`:2269`/`:3155`), which live on the `RunManager` — the very reference C-d is threading into
-> the spoke so it can EXECUTE a dispatch. One wiring, two fixes. Do it in that change or the cluster
-> ships placing work by alphabetical order.
+> **The fix is free if it rides Milestone C, and expensive if it does not.** One wiring, two fixes.
+> Do it in that change or the cluster ships placing work by alphabetical order.
+>
+> > **CORRECTED 2026-08-23, same session — this paragraph named the wrong object.** It said the live
+> > numbers "live on the `RunManager` — the very reference C-d is threading into the spoke". They do
+> > not, and following it leads straight into a wall: `RunManager.semaphore` is **`private readonly`**
+> > (`run.ts:1056`) and `RunManager` exposes no public load accessor, so the counts are unreachable
+> > through the manager — and `run.ts` is owned by another live session, so adding one is not on the
+> > table either.
+> >
+> > **The source is the shared `WorkspaceSemaphore`, a different object**, whose surface is already
+> > public: `busy()` (`workspace/semaphore.ts:218`), `heavyActive()` (`:242`), `maxParallel()`
+> > (`:225`). It is workspace-wide by construction — `semaphore.ts:10` says the boot path
+> > *"constructs a single `WorkspaceSemaphore` and threads it through `ProjectContexts` and the boot
+> > manager"*, and `server.ts:6849` confirms *"every manager REGISTERS with the semaphore"*, which is
+> > what makes `busy()` a true workspace count rather than one manager's view.
+> >
+> > It is already in the scope being wired: `ServerDeps.semaphore` (`server.ts:341`, used at `:7279`)
+> > sits in the same function as the `startClusterRuntime` call at `:7426`. So it threads through
+> > with no new plumbing and `run.ts` is never touched. The established idiom for its optionality is
+> > at `server.ts:6842-6861`, which asks the shared semaphore rather than assembling the answer and
+> > says why — but note the fallback differs by field: `?? {}` is a safe empty for an inflight map,
+> > whereas defaulting capacity back to `active: 0` would re-create this very defect, so an absent
+> > semaphore should omit `liveCapacity` rather than assert idleness.
 >
 > ### D46 — CLUSTERED AUTOSTART STILL DOES NOT WORK. Bounded now, not correct. OWNER DECISION.
 >
