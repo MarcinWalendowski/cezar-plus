@@ -2347,6 +2347,29 @@ invented; these are the names to use when one lands.
 > will know what to do next and what not to touch. (Added 2026-08-23 after the block tripled in one
 > day — a handoff nobody can finish reading is not a handoff.)
 >
+> ### WHERE THE WORK IS, 2026-08-23 — Milestones A and B are CLOSED. Milestone C is STARTED.
+>
+> Branch `feat/multi-node-cluster`, PR #9, **deliberately unmerged** — the owner's call, and it is
+> also the hard prerequisite for any E2E, since `prod-host` tracks `main` and auto-deploys.
+> The owner's condition, verbatim: *"let's merge where we have e2e working version, not now."* So
+> the merge gate is **one real task dispatched from the VPS hub and run on the Mac**, which is
+> exactly Milestone C.
+>
+> **Read `### Milestone C — THE PLAN, surveyed and decided 2026-08-23` before writing any of it.**
+> Every seam in it was read in source that day rather than remembered. Six decisions, and three of
+> them are the kind that are cheap now and expensive later:
+> - **C-a** — a dispatched run is `startAutostartTodo` with a remote trigger, so extract the
+>   todo→run body rather than writing a fourth reconstruction of it.
+> - **C-b** — steps 3 and 4 land in ONE change. A spoke that accepts and does not run puts a lie on
+>   the wire and is strictly worse than today's honest decline.
+> - **C-f** — the hub currently forgets every reply it gets (`hub-router.ts:582` is observe-and-log),
+>   so an emitter built without a correlation store dispatches into silence.
+>
+> **Five owner decisions are still open and none of them blocks C:** D37 (replication is
+> one-directional), D41 (D9a double-start is reported, not prevented), D42 (`deriveTodoOps` is
+> documented deterministic and is not), D44 (D38 removed the cluster's only anti-entropy pass —
+> recommendation is digest-at-hello), D46 (clustered autostart is bounded now, not correct).
+>
 > ### D43 — ~~SETTING `CEZ_CLUSTER=1` STARTS THE SAME TODO FOREVER~~ — FIXED 2026-08-23, THE WAY IT WAS ASKED FOR
 >
 > **FIXED, verified in-source.** `todo-autostart.ts:78` is now `cluster: TodoAutostartCluster | typeof
@@ -4437,6 +4460,84 @@ faithfully translated input:
   exactly ten frames and folds "cannot take work" into the same frame that answers "can you take
   work". `spoke-runtime.ts` already sends this correctly for its decline path; accepting is the same
   code with a different verdict.
+
+### Milestone C — THE PLAN, surveyed and decided 2026-08-23. Read this before writing any of it.
+
+Every seam below was read in source today, not remembered. Line numbers are `df7cbae8`.
+
+**C-a. A DISPATCHED RUN IS `startAutostartTodo` WITH A REMOTE TRIGGER. It is not new machinery, and
+it must not become a fourth reconstruction.** `todo-autostart.ts:270` already does the whole
+translation Milestone C step 4 needs: `resolveTodoWorkflow(repoRoot, todo)` → `todoTaskText(todo)` →
+`manager.startRun(workflow, { task, author: inheritAuthor(todo.author, …) })` → `markStarted`. A
+dispatch carries `todoId` + `projectKey` and *deliberately* carries no path, no worktree, no session
+and no handoff target, so the spoke resolves every local affordance itself — which means its input is
+derived from **the local todo record**, exactly as autostart derives it. The only differences are the
+trigger (a frame, not `fs.watch`) and the claim (already granted by the hub, so `mayAutostartTodo`'s
+round trip must not happen a second time).
+
+So: **extract the todo→run body of `startAutostartTodo` and call it from both**, rather than writing
+the same five lines in `spoke-runtime.ts`. This is the `wire.ts` argument (B5) and the peer's
+`queuedInputFromRecord` argument (above) for the third time on this branch, now in our own region,
+and the reason it keeps recurring is that a second *correct* copy costs nothing on the day it is
+written and everything on the day one of them changes. Note what the divergence would cost here
+specifically: `author` is `inheritAuthor(todo.author, 'todo-autostart')` — a copy that guessed
+`system`, or stamped the dispatching human, would put a **false provenance** on a run, and the
+provenance spec (`2026-08-21-task-author-provenance`) is the thing that makes a cross-node run
+attributable at all.
+
+**C-b. STEPS 3 AND 4 MUST LAND IN ONE CHANGE. Step 3 alone is strictly worse than today.** Today
+`spoke-runtime.ts:629`'s `handleDispatch` refuses every dispatch with `dispatch-not-accepted`, and
+that refusal is *true* — it also refuses to answer at all rather than fabricate repo-freshness
+fields it cannot read truthfully (`:641`). Replacing the refusal with `offerDispatch` **without** a
+run behind it produces a spoke that tells the hub `accepted` and then does nothing: the hub records
+a placement, the todo is claimed, and no run exists anywhere. That is a lie on the wire, and it is
+the exact failure class (D23-D26) that a green suite cannot see. Do not split this for the sake of a
+smaller diff.
+
+**C-c. THE SEAM IS A REQUIRED DEP, NOT AN OPTIONAL ONE.** `SpokeRuntimeDeps` (`:171`) is all optional
+test hooks today plus a required `link`. The dispatch executor joins `link` on the required side, for
+the reason `ClusterRuntimeDeps#server` (`cluster-routes.ts:850`) already spells out in full: an
+optional field lets a caller forget it and get a runtime *that starts up looking healthy and is
+silently unable to do the one thing it was armed for*. This is the same rule D24/D43 produced —
+**generate the wiring or make the field required; never document that a caller ought to set it** —
+and this branch has now paid for it three times. Making it required is a typecheck error at
+`cluster-routes.ts:1148` until the wiring lands, which is the point, not a cost.
+
+**C-d. THE WIRING PATH EXISTS AND IS SHORTER THAN IT LOOKS.** The open question was how a spoke
+reaches a `RunManager`, since `startClusterRuntime({ version, server })` (`server.ts:7426`) takes
+neither a project registry nor a manager. It does not need a new one: `sharedContexts` is already in
+scope in `startServer` at `:7405` (`sharedContexts.peek(project.id)?.store`), and
+`spoke-runtime.ts#discoverOutboxProjects` (`:148`) already resolves `projectKey` → the local project,
+computing `join(project.root, '.ai/cezar')` — so it holds `project.root` and merely drops it.
+`SpokeOutboxProject` gains `repoRoot`, and `startClusterRuntime` gains one dep resolving a project id
+to its context, wired exactly the way `todoAutostartProject` is at `server.ts:1621`.
+
+**C-e. WHAT THE SPOKE MUST READ FOR ITSELF, because `offerDispatch` will not.**
+`DispatchAcceptanceInput` (`dispatch.ts:109`) takes `acceptsDispatch`, `paired`, `freshness`,
+`corpus`, `capacityAvailable`. `handleDispatch` currently collects `presence` and uses only
+`repoDrift` — `freshness` comes from there, `paired` from the same `discoverOutboxProjects` set, and
+`corpus` from the presence frame. **`acceptsDispatch` and `capacityAvailable` have no reader today**
+and are the two that will be guessed if nobody says so here: `acceptsDispatch` is this node's own
+opt-in (`ClusterNode.acceptsDispatch`, D11 — the spoke enforces its own policy *regardless of what
+the hub sent and regardless of `override`*), and `capacityAvailable` must come from the same
+`RunManager` that will run the work, never from the presence snapshot, or the answer is stale by
+exactly the window that matters.
+
+**C-f. THE HUB FORGETS EVERY REPLY IT GETS.** `hub-router.ts:582`'s `freshness` case is
+`OBSERVED AND LOGGED, NOT PERSISTED` — its own comment says *"nothing here writes `frame` anywhere,
+and nothing downstream (dispatch, placement, the cockpit) can read a freshness claim this handler
+received."* So step 2 (hub emits `dispatch`) is not complete when the frame is sent: without a
+correlation store keyed on `dispatchId`, an accept and a refusal are indistinguishable to everything
+above the router, and `DispatchOutcome.dispatchId` — which exists *precisely* to correlate an attempt
+that never became a run — has nowhere to land. **Building the emitter without the correlation store
+produces a hub that dispatches into silence.**
+
+**Order, and what may go in parallel.** 5 is done (Milestone B). 3+4 are one change (C-b) and are
+independently testable by synthesizing a `dispatch` frame — they do not need the hub to emit
+anything real. 1+2+C-f are the hub half and meet the spoke half only at
+`clusterDispatchFrameSchema`, which already exists and is already validated on both sides. So the two
+halves are genuinely parallelizable; the wiring (C-d) is one change that must come last, after both
+sides typecheck, and 6+7 are after that.
 
 ### Milestone D — WATCHING a foreign run. *Not built.*
 
