@@ -10,8 +10,12 @@ covered by tests. The gate (`typecheck`, `build`, `test:unit`, `test:package`, `
 under load (`fseventsd` pegged, load ~9) fails dozens of integration tests on their timeouts and
 never finished a full run. The one red on the box is `knowledge/catalog.test.ts` C18, a CPU-per-MiB
 budget with no host normalisation that fails identically at **pristine HEAD** on that machine; it is
-a standing red there, not a result of this work. The gate was re-run **after** merging
-`origin/main` and it is that run — 562 of 563 files green, typecheck 0 — that authorises the push:
+a standing red there, not a result of this work. **EXPIRED 2026-08-23 — the authorisation below no
+longer holds.** ~~The gate was re-run **after** merging `origin/main` and it is that run — 562 of
+563 files green, typecheck 0 — that authorises the push:~~ `origin/main` advanced
+`cf2f0796..9c65f9e9` on 2026-08-23, so that run is now a **branch** gate, not a merged-tree gate,
+and its numbers describe a tree that no longer exists. A merged-tree gate against `9c65f9e9` is in
+flight. The historical detail still worth keeping is why a merged-tree gate is required at all:
 the merge itself broke 12 tests in files it never touched textually, by making `instanceId` a
 required field of a fresh broker launch. What is **not** done is the measurement: the C0/C1 decision gate this
 spec's own Stage 0 puts in front of Phases 1+ has not been captured, so the throughput claim is
@@ -2349,6 +2353,76 @@ invented; these are the names to use when one lands.
 >
 > ### WHERE THE WORK IS, 2026-08-23 (18:35 UTC) — A and B CLOSED. **C is HALF-WIRED, not closed.**
 >
+> ---
+>
+> > **NEWER THAN THE ABOVE — 2026-08-23, later. Read this first; it changes what is safe to do.**
+> >
+> > **1. The gate that authorised the push has EXPIRED.** `origin/main` advanced
+> > `cf2f0796..9c65f9e9` ("feat: a task is never blocked by a quota limit"), announced by the peer
+> > session that pushed it. Until today `origin/main` was an ancestor of this branch, which is what
+> > made the `f6a9bad6` run a merged-tree gate. It is not one any more — **it is now a branch gate,
+> > and a green branch gate says nothing about the tree you push.** That exact substitution already
+> > cost this repo once: merging `origin/main` took it 559/560 → 12 failed, in files the merge never
+> > touched textually. A fresh merged-tree gate against `9c65f9e9` is in flight. **Do not push or
+> > merge on the strength of any number recorded above this line.**
+> >
+> > **2. That merge lands near D47's work but does NOT reach it — MEASURED, not assumed.**
+> > `fallbackAcrossAccountsWhenLimited` flipped OFF→ON by default in the peer's push. It has **zero
+> > occurrences anywhere under `cluster/`** (verified with `grep -a`, including `cluster/ops.ts`,
+> > which is one of the files plain grep misclassifies as binary and silently skips). Its only three
+> > consumers are in `workflows/run.ts`. The counts a spoke advertises are unaffected: `busy()` and
+> > `heavyActive()` are pure counters that never read the flag, and the spoke does not advertise the
+> > semaphore's cached limits at all — `peers.ts:558-561` reads `resources.maxParallel` fresh from
+> > `~/.cezar/config.json`. *(Two path corrections to the peer's own description, and to my brief
+> > that repeated it: the files are `workspace/semaphore.ts` and `workspace/config.ts`, not
+> > `core/semaphore.ts` and a top-level `config.ts`.)*
+> >
+> > **The one real second-order effect runs TOWARD truth.** With the flag off, a run held by a quota
+> > limit sat in `this.queue`, never entered `this.starting`, and so was not counted by
+> > `busySlots()`. With it on, that run is admitted and counted. So a node whose named account is
+> > limited now reports **higher** `active` — it previously advertised headroom it could not use.
+> > The definition is unchanged; the fidelity improved.
+> >
+> > **What this exposed instead is a blind test.** The only cluster test that builds a real
+> > `WorkspaceSemaphore` — `spoke-runtime.test.ts:731` — registers a **stub**, `busySlots: () => 2`.
+> > It proves the plumbing (semaphore → `liveCapacity`) and says nothing whatever about what
+> > `busySlots()` COUNTS, so it is structurally incapable of detecting a change of this class. It
+> > passes identically on both trees, and that green is not evidence. The optional-field hazard is
+> > confined to the test surface: **production passes `semaphore` at 1 of 1 call sites**
+> > (`index.ts:864` → `:876`, chain verified end to end), while tests pass it at **1 of 50**
+> > `startSpokeRuntime` and **0 of 9** `startClusterRuntime` constructions.
+> >
+> > **Merge outlook:** the branch is one commit behind; only `workflows/run.ts` is in both
+> > footprints, and the nearest hunks are nine lines clear, so a textually clean merge is likely.
+> > Textual cleanliness is not semantic cleanliness — the merged-tree gate still decides.
+> >
+> > **3. Milestone D is not merely unbuilt — it is a shipped falsehood.** Measured today:
+> > `run-projection.ts`'s writers (`applyRemoteRuns`, `markNodeUnreachable`) have **0 production
+> > callers**; its reader `readRemoteRuns` has **2** — `index.ts:1568` (`cez cluster active`) and
+> > `cluster-routes.ts:774` (`GET /cluster/active`). Two shipped human-facing surfaces read a file
+> > nothing writes and answer *"nothing in flight on any linked node"*, always. See the Milestone D
+> > section for the test trap this creates. Whether those surfaces are reachable with `CEZ_CLUSTER`
+> > unset — latent vs LIVE — is being verified; that distinction decides the merge risk.
+> >
+> > **4. Seven contradictions in THIS FILE were corrected in place today**, found by an audit agent
+> > and each verified against the code before editing: D48's heading still read as an open defect;
+> > Milestone B's and C's headings still read "*Not built.*" (C had **three** conflicting statuses);
+> > the npm "published with real users" bullet, which this file had already refuted ~1,100 lines
+> > earlier; the Status header's now-expired authorisation; and **a wrong line number inside my own
+> > correction from an hour before** (`server.ts:7448` → `7457`). The lesson worth carrying: a
+> > 5,000-line record accumulates contradictions faster than one reader can notice them, and the
+> > stale entry is usually the one a reader hits FIRST.
+> >
+> > **Standing constraints, unchanged:** push to `origin` only, never `upstream`, never a bare
+> > `git push`. Do NOT merge PR #9 (it auto-deploys to `prod-host`, where the owner's agents
+> > run — the owner's call, and the hard prerequisite for any E2E). Do NOT run the Access
+> > service-token provisioning script. This checkout is SHARED with live agents: no `git stash`,
+> > `checkout .`, `reset --hard`, or `clean`. Gate on the box, not the Mac; expect exactly one
+> > standing red (`catalog.test.ts` C18) plus a known ROTATING flake pool — run the gate twice
+> > before attributing a red to anything.
+>
+> ---
+>
 > **CORRECTED 2026-08-23, same day, by me — this heading said "Milestones A, B and C are CLOSED. D is
 > next." for about fifteen minutes and it was wrong.** Measured with a positive control rather than
 > assumed:
@@ -2365,7 +2439,7 @@ invented; these are the names to use when one lands.
 >
 > | half | state |
 > | --- | --- |
-> | **SPOKE** — a dispatch that ARRIVES really starts a run and replies with `accepted: {dispatchId, runId}` | **WIRED AND LIVE.** Full boot chain traced hop by hop: `index.ts:770` builds the `WorkspaceSemaphore` → `server.ts:7448` → `cluster-routes.ts:1172` → `spoke-runtime.ts:390`. |
+> | **SPOKE** — a dispatch that ARRIVES really starts a run and replies with `accepted: {dispatchId, runId}` | **WIRED AND LIVE.** Full boot chain traced hop by hop: `index.ts:770` builds the `WorkspaceSemaphore` → `server.ts:7457` → `cluster-routes.ts:1172` → `spoke-runtime.ts:390`. |
 > | **HUB** — `hub-dispatch.ts`, 420 lines + 803 test lines, 33 tests, every guard mutation-proven | **ZERO PRODUCTION CALLERS.** Nothing constructs `createHubDispatcher`. Nothing arms `sweepUnanswered`. Nothing wires `dispatchCorrelation` into `startClusterRuntime`. |
 >
 > **So in production today, no dispatch is ever emitted**, and every line of the hub's dispatch
@@ -2727,7 +2801,12 @@ invented; these are the names to use when one lands.
 > > wrong cause** (it says the optional field was what started the todo forever); the commit is pushed
 > > and is not being rewritten, so THIS is the correction of record.
 >
-> ### D48 — THE ACCEPT PATH CANNOT BE CORRELATED. The wire carries `dispatchId` back on a REFUSAL and on nothing else. Found 2026-08-23 building C-f.
+> ### ~~D48 — THE ACCEPT PATH CANNOT BE CORRELATED.~~ **FIXED 2026-08-23 in `f6a9bad6`.** The wire now carries `accepted: {dispatchId, runId}` on the success path. It *used to* carry `dispatchId` back on a REFUSAL and on nothing else. Found 2026-08-23 building C-f.
+>
+> **Why the stale heading mattered enough to amend rather than append:** it sat as an open defect
+> while the text closing it lived elsewhere in this same file. A reader scanning headings — which is
+> how a 5,000-line record is actually read — would have carried away the falsehood and re-done the
+> fix. That is the second time on this branch a corrected entry was left readable as current.
 >
 > `dispatchId` appears in exactly **two** places in the whole contract (grepped `-a`,
 > `packages/contract/src/cluster.ts`): the `dispatch` frame (`:1580`) and the OPTIONAL `refused`
@@ -4692,8 +4771,15 @@ invented; these are the names to use when one lands.
 >   sessions have uncommitted work here. Compare against HEAD with `git show HEAD:<path>`.
 > - Write the box's corpus as `cezar`, never root. End any box session with
 >   `find /var/lib/cezar -not -user cezar | wc -l` (must be 0).
-> - cezar is **published with real users** (`@loki-labs/better-cezar` v0.10.0) — normal backward
->   compatibility applies. The pre-launch waiver is scoped to `chat/` only.
+> - ~~cezar is **published with real users** (`@loki-labs/better-cezar` v0.10.0) — normal backward
+>   compatibility applies.~~ **CORRECTED 2026-08-23 — FALSE, and this file already knew it.**
+>   `npm view @loki-labs/better-cezar` returns **E404: never published** (re-verified today). The
+>   v0.10.0 on npm is `@open-mercato/cezar` — UPSTREAM's lineage, which we never push to, so it is
+>   not downstream of us. The verified finding earlier in this file ("the compatibility worry that
+>   made it look like an owner call is provably empty") contradicted this bullet while both stood,
+>   and this bullet is the one a reader hits first. There is **no released consumer of our
+>   artifact**, so no backward-compatibility burden follows from publication. The pre-launch waiver
+>   is scoped to `chat/` only.
 > - There is no lint or prettier config in this repo. `prettier --check` fails on untouched HEAD
 >   files; house style is hand-maintained single quotes.
 
@@ -4744,7 +4830,7 @@ and the roster shows it. **This does not replicate state and does not run work.*
   non-optional: an optional one lets a caller forget it and get a hub that boots looking healthy and
   is silently unreachable — the same failure shape as D23/D24/D25.
 
-### Milestone B — REPLICATED state. *Not built.*
+### Milestone B — REPLICATED state. *~~Not built.~~ **STATUS SUPERSEDED 2026-08-23** — this is the ORIGINAL survey, not a current status. The live status is the HANDOFF STATE block at the top of this file. B's own status has not been re-measured since; treat "nothing in it is connected" below as unverified rather than as current fact.*
 
 The ops chain. Nothing in it is connected, though several pieces exist:
 
@@ -4817,7 +4903,15 @@ confirmed before the run starts.** A cross-node duplicate is two agents on two m
 subscription twice, so the claim is the one write that never applies optimistically. That path has
 to exist before dispatch is safe.
 
-### Milestone C — a WORKER that runs dispatched work. *Not built. This is the one the question is about.*
+### Milestone C — a WORKER that runs dispatched work. *~~Not built.~~ **SUPERSEDED 2026-08-23 — C is HALF-WIRED.***
+
+> **Measured, not reasoned about.** The SPOKE half is live: `startSpokeRuntime` has **9 production
+> callers** and the boot chain is traced hop by hop. The HUB half is not: `createHubDispatcher`,
+> `sweepUnanswered` and the `dispatchCorrelation` store have **0 production callers** — code that is
+> written, tested, and unreachable. This heading is the THIRD status C has carried in this file;
+> the other two ("Not built" here, "CLOSED" in an earlier handoff edit) were both wrong in
+> different directions. The paragraph immediately below describes the pre-C-f survey, and its
+> "declines every dispatch" reading is **FALSE** as of `f6a9bad6`.
 
 **"Linked" and "worker" are different milestones, and Milestone A is not most of the way to C.**
 Today `spoke-runtime.ts` explicitly *declines* every dispatch — truthfully, with a real
@@ -5144,7 +5238,20 @@ behaviour, or the D23 env asymmetry that strips `..._CLIENT_SECRET` from an agen
 environment. Those are real and still ops-gated. **Two different claims: "the code works end to end"
 is reachable now; "it works between this Mac and the VPS" is not, and needs the four items below.**
 
-### Milestone D — WATCHING a foreign run. *Not built.*
+### Milestone D — WATCHING a foreign run. *Not built — and its absence is not silent. See below.*
+
+> **FOUND 2026-08-23 — D's absence is a shipped FALSEHOOD, not a missing feature.**
+> `cluster/run-projection.ts`'s writers — `applyRemoteRuns` and `markNodeUnreachable` — have **zero
+> production callers**; only `run-projection.test.ts` calls them. Its reader `readRemoteRuns` has
+> **two**: `index.ts:1568` (the `cez cluster active` CLI) and `cluster-routes.ts:774`
+> (`GET /cluster/active`). Both are shipped, human-facing surfaces reading a file that nothing ever
+> writes, so both answer *"nothing in flight on any linked node"* — confidently, always, without
+> warning. An unbuilt feature 404s; this one lies. Any D plan must state what those two surfaces say
+> in the interim, and in which phase they start telling the truth.
+>
+> **The test trap this creates:** asserting `runs: []` passes against BOTH the lying code and the
+> honest code. The assertion has to separate *empty because nothing is running* from *empty because
+> nothing is tracked*. If no assertion separates them, that is itself the finding.
 
 `startRelay`/`relayTail` exist with 0 callers. Needs the cockpit run view to drive the 0→1/1→0
 subscription, the hub to send `relay-request` downlink, and the spoke to answer with `relay` uplink
