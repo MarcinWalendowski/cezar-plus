@@ -2931,6 +2931,40 @@ invented; these are the names to use when one lands.
 > > real the moment Milestone C's hub half is wired, which makes them prerequisites for that work,
 > > not follow-ups to it.)*
 > >
+> > **CODE LANDED AND PUSHED — `f728a3e4`.** Three fixes, each proven red-then-green against
+> > unmodified code: placement by real headroom (`{node-a: 6}` → `{4, 2}`), `/cluster/active`
+> > answering honestly (`asOf` is evidence, not a request-time stamp), and `heartbeatMs` threaded so
+> > the capacity beat is testable without a real 30-second wait. `tsc` EXIT=0 on both packages;
+> > 107 tests green across the four affected files. **QA Needed** — no runtime pass.
+> >
+> > **THE PROCESS LESSON FROM LANDING IT, which cost three clobbers: uncommitted work in a shared
+> > checkout is not saved.** The same four edits to `cluster-routes.ts` were silently destroyed
+> > three separate times — twice by whole-file writes, once by a stale-read targeted edit — each
+> > time with no merge conflict and no error, last writer winning. The third one **broke the build**
+> > (`index.ts` importing a symbol the clobber had removed) and silently reinstated the very defect
+> > that had just been fixed. What ended it was not a better rule; it was **committing**. After the
+> > commit a clobber is a `git diff` away from being seen and recovered; before it, the only copy is
+> > in one agent's memory. **Commit completed work promptly when the tree is contended, even if the
+> > session would otherwise batch it.** The three rules still hold (targeted edits only; restore the
+> > HUNK never the file; re-read immediately before writing, since an edit computed against a stale
+> > read is as destructive as a whole-file write) — but they reduce the odds, and committing removes
+> > the consequence.
+> >
+> > **Two gaps reported rather than papered over**, both by the implementing agents themselves: the
+> > CLI's new three-way branch has no automated test (`runClusterCommand`'s `active` case is not
+> > exported and no CLI harness exists), and the one-in-twelve `active: 0` flake seen earlier **could
+> > not be reproduced** in 20 targeted trials at a 5 ms heartbeat — the leading hypothesis (semaphore
+> > read before registration) was disproved, because `startClusterRuntime`'s `await
+> > loadNodeIdentity` dwarfs a synchronous `register()`. Recorded as unreproduced, **not**
+> > root-caused.
+> >
+> > **And an honest correction to my own framing of the heartbeat fix:** I assumed it removed a
+> > 30-second cost from every run. Measured, typical wall clock barely moves — 4.48 s → 4.86 s —
+> > because the fire-immediately beat usually resolves the assertion. What actually closes is the
+> > **worst-case ceiling** when that first beat loses the race against the WS handshake: 30 s → ~2 s.
+> > That is still worth having in a suite with a rotating flake pool, but it is a ceiling fix, not a
+> > speedup.
+> >
 > > **Standing constraints, unchanged:** push to `origin` only, never `upstream`, never a bare
 > > `git push`. Do NOT merge PR #9 (it auto-deploys to `prod-host`, where the owner's agents
 > > run — the owner's call, and the hard prerequisite for any E2E). Do NOT run the Access
