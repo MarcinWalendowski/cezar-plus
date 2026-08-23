@@ -2967,12 +2967,14 @@ invented; these are the names to use when one lands.
 > fault.
 >
 > **SPLIT IN TWO. Only the second half is an owner decision.**
->  1. **Stop `health` lying — no contract change, no refusal, correct under every answer to (2).**
->     D40's actual harm is that the node is never served *while health reads `online`*, which is what
->     makes it undiagnosable. A connection that has not completed a handshake must not report
->     `online`. Do this first and independently. Worth checking whether the HUB's view and the
->     SPOKE's `health` already disagree in this state — if the hub knows the node is unserved, the
->     repair signal exists on one side and only needs plumbing.
+>  1. ~~**Stop `health` lying**~~ — **NO-OP. MEASURED 2026-08-23: health does NOT lie, and this half of
+>     my split was wrong.** I asserted it three times; it was never checked. `state: 'online'` is set
+>     in exactly one place, `link-client.ts:286`, inside the `frame.type === 'welcome'` branch — so a
+>     spoke whose hello is dropped never receives a welcome and therefore **never claims to be
+>     online**. Probed against a hub that accepts the upgrade and drops the hello (`link-server.ts:272`):
+>     `connecting` with no `retryAt` at t+200ms, 2.2s, 7.2s and 13.2s. The state is undiagnosable
+>     because it is **STUCK, and honest** — indistinguishable from a slow dial — not because it is
+>     false. Probe: `<scratchpad>/probe-d40-health.mts`.
 >  2. **Whether to refuse, and with what retry semantics.** A third option exists that neither
 >     current semantic gives: a **bounded-attempt** refusal (refuse, allow retry, and after N
 >     identical refusals stop and surface it). It may be what this case wants, but it is a new
@@ -3016,6 +3018,49 @@ invented; these are the names to use when one lands.
 > `helloReceived` is never set. Before D30 that was survivable. **Now that `connectedNodes()` is
 > narrowed to handshaken nodes, that node gets no `welcome` and no fan-out AT ALL, indefinitely —
 > while its own health still reads `online`.** A silently half-dead link: connected, never served.
+>
+> > **CORRECTED 2026-08-23 — "while its own health still reads `online`" is FALSE.** `state: 'online'`
+> > is set only at `link-client.ts:286`, inside the `welcome` branch; no welcome ever arrives on this
+> > path, so the spoke reports `connecting` forever with no `retryAt`. The link IS silently half-dead
+> > — that part stands — but the symptom is a STUCK, honest state, not a lying one. Measured at
+> > t+200ms / 2.2s / 7.2s / 13.2s, all `connecting`.
+> >
+> > **THE REAL D40a: nothing times out the APPLICATION handshake, on either side.**
+> > `link-client.ts`'s `handshakeTimeoutMs` (10s) — whose docblock calls itself *"not a tuning knob,
+> > it is the only thing that closes a permanent wedge"* — is handed to `ws` as `handshakeTimeout`
+> > and bounds the **HTTP 101 upgrade**. In D40a the upgrade SUCCEEDS; only the application-level
+> > `hello`/`welcome` never completes, so it never fires (hence still `connecting` at 13.2s, past
+> > 10s). The spoke never retries because `scheduleReconnect` is reachable only from `close`/`error`,
+> > and the hub's `reap()` ping/pong keeps the socket alive indefinitely. **There are two wedges and
+> > that docblock closes one** — being corrected in place. Consequence for scope: a hub-side deadline
+> > needs no `link-client.ts` change, because closing the socket reaches the existing close handler →
+> > `disconnect()` → `scheduleReconnect()`.
+> >
+> > **AND THE RETRY PATH IS A HOT LOOP TODAY — 2.2 reconnects/second, on the DEFAULT backoff.**
+> > `link-client.ts:275` does `this.attempt = 0` in the **`open`** handler, commented *"a successful
+> > handshake resets the backoff"*. **An open socket is not a completed handshake** — that happens on
+> > `welcome`. Every attempt reaches `open` before being refused, so `attempt` can never leave 0.
+> > Verified arithmetically as well as by measurement: `nextBackoffMs` is
+> > `cap = min(maxMs, baseMs * 2**attempt)` and is called at `:327` **before** `this.attempt += 1` at
+> > `:328`, so every schedule computes `min(60_000, 1_000)` → uniform [0, 1000ms), mean 500ms.
+> > Measured: **11 reconnects in 5s against a refusing hub**, where a climbing backoff would give 3-4
+> > total. `DEFAULT_LINK_BACKOFF`'s 60s cap is unreachable on this path. **This is a latent bug on
+> > EVERY refuse-after-open path, not just D40.** Probe: `<scratchpad>/probe-d40-loop.mts`.
+> >
+> > **Fix (approved 2026-08-23), and it makes the earlier "terminal or transient?" framing moot:**
+> > (a) a hub-side handshake deadline on the existing 30s `reap()` tick — refuse and close a socket
+> > that never completed a handshake, no new timer, D13's per-frame-salvage rule untouched because
+> > that rule is about one bad frame on a *working* link; and (b) **move `this.attempt = 0` from the
+> > `open` handler into the `welcome` branch — one line.** Together, a deterministic malformation
+> > becomes a properly climbing backoff to the existing 60s cap with `refusedReason` set and
+> > rendered, self-healing if transient. **The bounded-attempt third option is unnecessary** — it was
+> > a workaround for a hot loop that is a one-line bug, not a property of retry semantics, and
+> > `suppressReconnect` is never touched. `sendHello` STAYS in `ws.on('open')` (D38's wiring; moving
+> > it would deadlock the handshake), and the `watermarks` option is not to be touched (D38/D44).
+> > Tests must assert the backoff **climbs** across successive refusals — "it reconnected" passes
+> > against the broken code — with the reverting mutation red. Deliberately not covered, so it is not
+> > later read as a regression: a hub that welcomes then immediately drops still resets each time,
+> > because a welcome IS a completed handshake.
 >
 > Two general points worth carrying past this defect:
 > - **Tightening a gate can convert a tolerated fault into a permanent one.** D30's narrowing is
