@@ -2907,6 +2907,23 @@ invented; these are the names to use when one lands.
 > `.strict()` boundary.** It fails both ways — on a field the mapper stops emitting AND on a
 > stored-only key that leaks onto the wire. An id-only assertion looks like coverage and is not.
 >
+> **AMENDED, same day — and the amendment is the sharper lesson. `toEqual` was not enough either.**
+> The peer session asked the right question: *"for each field the mapper produces, is there an
+> assertion that would fail if that field vanished?"* The answer was **no for 6 of 14**. The mapper
+> emits six fields as `...(x !== undefined ? { x } : {})`, and the fixture left all six ABSENT — so
+> deleting any of those spread lines changed nothing observable and stayed green. **An exhaustive
+> assertion over a SPARSE FIXTURE pins only the fields the fixture happens to set**, while reading, to
+> a reviewer, exactly like full coverage. That is a nastier failure than `objectContaining`, because
+> `toEqual` *looks* airtight.
+>
+> Fixed by populating every optional (`lastSeenAt`, `capacity`, `capacityAt`, `hostMetrics`,
+> `repoDrift`, `corpus`) and asserting them. Proven by a **mutation sweep deleting each of the 14
+> field lines in turn: 14 RED, 0 GREEN**, restore md5-verified — not by re-reading the test.
+>
+> **The general form, worth carrying beyond this file: deduplicating made drift OBSERVABLE, and
+> observable is not observed.** Closing a duplicate earns you the ability to write the pinning test;
+> it does not write it. Ask the per-field question explicitly, and answer it with a sweep.
+>
 > #### D36 — EVERY REPLICATED TODO RESENDS FOREVER. Found 2026-08-23 by the two-process E2E.
 >
 > **This is the most serious defect on the branch, and no unit test could see it.** The first real
