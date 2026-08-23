@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CLUSTER_PROTOCOL, type StoredClusterNode } from '@loki-labs/better-cezar-contract';
+import { readAllocations } from '../cluster/allocate.ts';
+import { readLeases } from '../cluster/leases.ts';
 import {
   CLUSTER_NODE_ID_HEADER,
   CLUSTER_NODE_PRINCIPAL_HEADER,
@@ -230,14 +232,147 @@ describe('cluster-routes.ts wires D20 node-auth onto the right paths', () => {
       expect(((await res.json()) as { error: string }).error).toContain('no cluster identity');
     });
 
-    it('POST /cluster/allocate/:kind answers with no node credentials (left out — see the module header)', async () => {
-      const res = await apiRequest(routes(), '/cluster/allocate/spec-number', json({}));
-      expect(res.status).not.toBe(401);
+    // `/cluster/allocate/:kind` and `/cluster/leases/*` used to be tested here too — moved to
+    // their own describe block below, now that they ARE node-authenticated (module header's
+    // "CORRECTED 2026-08-23 (this package)" paragraph).
+  });
+
+  // Added by this package: `/cluster/allocate/:kind` and `/cluster/leases/*` are now
+  // node-authenticated ON TOP OF `requireHub` (module header's "CORRECTED 2026-08-23 (this
+  // package)" paragraph), and both handlers now attribute to the AUTHENTICATED caller rather than
+  // to this server's own `loadNodeIdentity`. `requireHub` still runs first, so every test here
+  // seeds a hub identity — otherwise `requireHub`'s 409 NO_IDENTITY would be reached before
+  // node-auth ever runs, same ordering already documented for `/cluster/join` above.
+  describe('the authenticated set: allocate + leases (this package)', () => {
+    let hubNodeId: string;
+
+    beforeEach(async () => {
+      hubNodeId = (await ensureNodeIdentity({ role: 'hub' }, { env })).nodeId;
     });
 
-    it('POST /cluster/leases/:kind answers with no node credentials (left out — see the module header)', async () => {
-      const res = await apiRequest(routes(), '/cluster/leases/port', json({ id: 'p-1' }));
-      expect(res.status).not.toBe(401);
+    function signedHeadersFor(method: string, path: string, bodyText: string, nodeId = NODE_ID, secret = SECRET): Record<string, string> {
+      const principal: NodeHttpPrincipal = {
+        nodeId,
+        issuedAt: new Date().toISOString(),
+        method,
+        path,
+        bodyHash: hashRequestBody(bodyText),
+      };
+      return nodeAuthHeaders(principal, secret);
+    }
+
+    const gatedRoutes: Array<[label: string, method: string, path: string, bodyText: string | undefined]> = [
+      ['POST /cluster/allocate/:kind', 'POST', '/cluster/allocate/spec-number', '{}'],
+      ['POST /cluster/leases/:kind', 'POST', '/cluster/leases/port', JSON.stringify({ id: 'p-1', ttlMs: 60_000 })],
+      ['DELETE /cluster/leases/:kind/:id', 'DELETE', '/cluster/leases/port/p-1', undefined],
+    ];
+
+    it.each(gatedRoutes.map(([label]) => label))('%s refuses 401 no-credentials when unauthenticated', async (label) => {
+      const [, method, path, bodyText] = gatedRoutes.find(([name]) => name === label)!;
+      const res = await apiRequest(routes(), path, bodyText !== undefined ? json(JSON.parse(bodyText), method) : { method });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { reason: string }).reason).toBe('no-credentials');
+    });
+
+    it.each(gatedRoutes.map(([label]) => label))('%s refuses 401 unknown-node when signed by a node the hub has never enrolled', async (label) => {
+      const [, method, path, bodyText] = gatedRoutes.find(([name]) => name === label)!;
+      const text = bodyText ?? '';
+      const headers = signedHeadersFor(method, path, text, 'a-stranger', 'whatever-secret-a-stranger-might-guess');
+      const res = await apiRequest(routes({ lookupNodeSecret: async () => undefined }), path, {
+        method,
+        headers: bodyText !== undefined ? { 'content-type': 'application/json', ...headers } : headers,
+        ...(bodyText !== undefined ? { body: text } : {}),
+      });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { reason: string }).reason).toBe('unknown-node');
+    });
+
+    // The regression test: under the OLD `loadNodeIdentity({env})` attribution, this would have
+    // recorded `hubNodeId` as `byNodeId` regardless of who signed the request — indistinguishable
+    // from a bug because the response would still be a 201 with SOME node id in it.
+    it('attribution (Verification, this package): an allocation is recorded under the AUTHENTICATED caller, not the hub’s own identity', async () => {
+      expect(NODE_ID).not.toBe(hubNodeId); // the two identities this test tells apart must actually differ
+      const bodyText = '{}';
+      const headers = { 'content-type': 'application/json', ...signedHeadersFor('POST', '/cluster/allocate/spec-number', bodyText) };
+      const res = await apiRequest(routes({ lookupNodeSecret: lookupOnlyNodeA }), '/cluster/allocate/spec-number', {
+        method: 'POST',
+        headers,
+        body: bodyText,
+      });
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { byNodeId: string };
+      expect(body.byNodeId).toBe(NODE_ID);
+      expect(body.byNodeId).not.toBe(hubNodeId);
+
+      // Persisted, not only in the response.
+      const stored = await readAllocations('spec-number', { env });
+      expect(stored).toHaveLength(1);
+      expect(stored[0]?.byNodeId).toBe(NODE_ID);
+    });
+
+    it('attribution (Verification, this package): a lease is granted to and held by the AUTHENTICATED caller, not the hub’s own identity', async () => {
+      expect(NODE_ID).not.toBe(hubNodeId);
+      const bodyText = JSON.stringify({ id: 'account-1', ttlMs: 60_000 });
+      const headers = { 'content-type': 'application/json', ...signedHeadersFor('POST', '/cluster/leases/account', bodyText) };
+      const res = await apiRequest(routes({ lookupNodeSecret: lookupOnlyNodeA }), '/cluster/leases/account', {
+        method: 'POST',
+        headers,
+        body: bodyText,
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { acquired: boolean; lease: { holderNodeId: string } };
+      expect(body.acquired).toBe(true);
+      expect(body.lease.holderNodeId).toBe(NODE_ID);
+      expect(body.lease.holderNodeId).not.toBe(hubNodeId);
+
+      const stored = await readLeases({ env });
+      const row = stored.find((l) => l.kind === 'account' && l.id === 'account-1');
+      expect(row?.holderNodeId).toBe(NODE_ID);
+    });
+
+    it('release attribution: the node that actually holds the lease can release it, and the hub’s own identity cannot release a lease it never held', async () => {
+      const acquireBodyText = JSON.stringify({ id: 'account-2', ttlMs: 60_000 });
+      const acquireHeaders = { 'content-type': 'application/json', ...signedHeadersFor('POST', '/cluster/leases/account', acquireBodyText) };
+      const clusterRoutes = routes({ lookupNodeSecret: lookupOnlyNodeA });
+      const acquireRes = await apiRequest(clusterRoutes, '/cluster/leases/account', {
+        method: 'POST',
+        headers: acquireHeaders,
+        body: acquireBodyText,
+      });
+      expect(acquireRes.status).toBe(200);
+
+      // NODE_ID (the real holder) releases it — must succeed.
+      const releaseHeaders = signedHeadersFor('DELETE', '/cluster/leases/account/account-2', '');
+      const releaseRes = await apiRequest(clusterRoutes, '/cluster/leases/account/account-2', {
+        method: 'DELETE',
+        headers: releaseHeaders,
+      });
+      expect(releaseRes.status).toBe(200);
+      expect(((await releaseRes.json()) as { released: boolean }).released).toBe(true);
+    });
+
+    it('two different authenticated nodes get distinct attribution in the same allocations store', async () => {
+      const NODE_B = 'node-b';
+      const SECRET_B = 'node-b-secret';
+      const lookupBoth = async (nodeId: string) => (nodeId === NODE_ID ? SECRET : nodeId === NODE_B ? SECRET_B : undefined);
+      const clusterRoutes = routes({ lookupNodeSecret: lookupBoth });
+
+      async function allocateAs(nodeId: string, secret: string): Promise<{ byNodeId: string; values: string[] }> {
+        const bodyText = '{}';
+        const headers = {
+          'content-type': 'application/json',
+          ...signedHeadersFor('POST', '/cluster/allocate/spec-number', bodyText, nodeId, secret),
+        };
+        const res = await apiRequest(clusterRoutes, '/cluster/allocate/spec-number', { method: 'POST', headers, body: bodyText });
+        expect(res.status).toBe(201);
+        return (await res.json()) as { byNodeId: string; values: string[] };
+      }
+
+      const a = await allocateAs(NODE_ID, SECRET);
+      const b = await allocateAs(NODE_B, SECRET_B);
+      expect(a.byNodeId).toBe(NODE_ID);
+      expect(b.byNodeId).toBe(NODE_B);
+      expect(a.values).not.toEqual(b.values); // N distinct callers, N distinct allocations
     });
   });
 

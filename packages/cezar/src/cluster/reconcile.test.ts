@@ -1,9 +1,10 @@
 import { promises as fsp } from 'node:fs';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { readTodos, todosPath, type TodoItem } from '../todos.ts';
+import { createTodo, readTodos, todosPath, type TodoItem } from '../todos.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 import {
   classify,
   reconcileAll,
@@ -310,6 +311,90 @@ describe('reconcileProject', () => {
   });
 
   it(
+    'obstruction: the local append failing still leaves a fresh local backup on disk and the local data file untouched (D21 "Found during implementation" row — the local half of the same fix `todos.test.ts` proves for `backupAndAppendTodosPreservingIds` itself)',
+    async () => {
+      await writeJson(localDataDir, [{ id: 'seed', summary: 'seed row' }]);
+      await writeJson(remoteDataDir, [{ id: 'r1', summary: 'remote only' }]);
+
+      // `writeAtomic` (the append's write) always goes through `${todosPath}.tmp` then renames —
+      // pre-occupy that path as a directory so the LOCAL append throws EISDIR, the same trick
+      // `todos.test.ts`'s own obstruction test uses on `backupAndAppendTodosPreservingIds`
+      // directly. This is the same proof one layer up, through `reconcileProject`.
+      const blockedTmp = `${todosPath(localDataDir)}.tmp`;
+      mkdirSync(blockedTmp, { recursive: true });
+      try {
+        await expect(reconcileProject(PROJECT, optionsFor(false))).rejects.toThrow();
+      } finally {
+        rmSync(blockedTmp, { recursive: true, force: true });
+      }
+
+      // The local backup ran, and ran BEFORE the doomed append, even though the append itself
+      // failed — holding the pre-mutation seed row, not a partial or merged result. The backup
+      // is not conditional on the append succeeding.
+      expect(await readBackup(localDataDir)).toEqual([{ id: 'seed', summary: 'seed row' }]);
+      // And the local data file itself is untouched: `writeAtomic`'s tmp+rename means a failed
+      // tmp write never reaches the real file, so the doomed append left no partial state behind.
+      expect(await readTodos(localDataDir)).toEqual([{ id: 'seed', summary: 'seed row' }]);
+    },
+  );
+
+  it(
+    'a concurrent local write cannot land between the local backup and the local append: remote backup — where that gap used to live — is never reached once the local phase has failed',
+    async () => {
+      await writeJson(localDataDir, [{ id: 'seed', summary: 'seed row' }]);
+      await writeJson(remoteDataDir, [{ id: 'r1', summary: 'remote only' }]);
+
+      const blockedTmp = `${todosPath(localDataDir)}.tmp`;
+      mkdirSync(blockedTmp, { recursive: true });
+
+      // Before this fix, `reconcileProject` called `remoteTransport.backup()` in the WINDOW
+      // between the (lease-free) local backup and the (separately-leased) local append — exactly
+      // where a concurrent local writer racing for `todos.lock` could land, unprotected by the
+      // backup already taken. This hook stands in for whatever might run during that round trip
+      // (a real network call in production): it starts a real, lease-respecting writer
+      // (`createTodo`, the SAME lease reconcile's own local phase uses) and records that it ran,
+      // so the test can tell whether it was ever reached.
+      let concurrentWrite: Promise<TodoItem> | undefined;
+      const transport: RemoteReconcileTransport = {
+        listProjects: async () => [PROJECT],
+        list: async () => readTodos(remoteDataDir),
+        backup: async () => {
+          concurrentWrite = createTodo(localDataDir, { summary: 'concurrent write' }, localCliAuthor('cli-todo-add'));
+          return `${todosPath(remoteDataDir)}.bak`;
+        },
+        apply: async () => undefined,
+      };
+
+      try {
+        await expect(
+          reconcileProject(PROJECT, {
+            dryRun: false,
+            peerNodeId: 'peer-1',
+            resolveLocalDataDir: () => localDataDir,
+            remote: transport,
+          }),
+        ).rejects.toThrow();
+
+        // The mutation this test is built to catch: composing a standalone `backupLocalTodos()`
+        // (no lease) with a separately-leased `appendLocalTodos()` — the shape this file used to
+        // be — reopens exactly this window, and `remoteTransport.backup()` (and this hook) would
+        // run, starting this concurrent write, before the doomed append is even attempted. Fused
+        // into one lease, the local phase throws before `remoteTransport.backup()` is ever called
+        // at all.
+        expect(concurrentWrite).toBeUndefined();
+      } finally {
+        if (concurrentWrite) await concurrentWrite.catch(() => undefined);
+        rmSync(blockedTmp, { recursive: true, force: true });
+      }
+
+      // And the local side is exactly as the obstruction test above shows: the failure happened
+      // before any remote call, so nothing here observed a half-done local pass.
+      expect(await readBackup(localDataDir)).toEqual([{ id: 'seed', summary: 'seed row' }]);
+      expect(await readTodos(localDataDir)).toEqual([{ id: 'seed', summary: 'seed row' }]);
+    },
+  );
+
+  it(
     'regression: appendLocalTodos must not deadlock when local gains an id-less entry mid-pass (PLAN "Found during implementation" row)',
     async () => {
       // Floor: prove the pre-state before acting, so this cannot pass vacuously.
@@ -318,21 +403,33 @@ describe('reconcileProject', () => {
       expect(await readTodos(localDataDir)).toEqual([]);
       expect((await readTodos(remoteDataDir)).map((t) => t.id)).toEqual(['r1']);
 
-      // A transport whose `backup()` — called after the initial classification read and BEFORE
-      // reconcile copies remote-only rows onto local — writes a fresh id-LESS entry onto the
-      // LOCAL side. This is the real-world trigger: a raw agent append (`CEZ_TODOS_FILE`) landing
-      // on this node's todos.json during a reconcile pass. `readTodos` reports `needsRewrite` for
-      // that shape, which is exactly the condition `appendLocalTodos`'s own inner `readTodos` call
-      // deadlocks on while it still holds the outer lease.
+      // A transport whose `list()` — called as part of the initial classification read,
+      // concurrently with the local `readTodos` inside `reconcileProject`'s own `Promise.all`,
+      // and before ANY local mutation — writes a fresh id-LESS entry onto the LOCAL side. This is
+      // the real-world trigger: a raw agent append (`CEZ_TODOS_FILE`) landing on this node's
+      // todos.json during a reconcile pass. Whichever of the two concurrent reads observes it
+      // first, `readTodos` (racing against this write in the same `Promise.all`) and
+      // `backupAndAppendTodosPreservingIds`'s own internal `readRaw` (reading fresh, later) both
+      // report `needsRewrite` for that shape — exactly the condition `appendLocalTodos`'s old,
+      // since-removed re-implementation deadlocked on by calling `readTodos` (lease-taking) from
+      // inside its own already-held lease.
+      //
+      // **Moved here 2026-08-23** from `backup()`, where this test originally injected the write:
+      // D21's amendment (see the two tests above this one) fused the local backup and the local
+      // append into ONE lease that now runs BEFORE `remoteTransport.backup()` is ever called, so a
+      // write landing there no longer lands "mid-pass" at all — it would land strictly after the
+      // local append had already finished, which is not what this regression needs to exercise.
       const transport: RemoteReconcileTransport = {
         listProjects: async () => [PROJECT],
-        list: async () => readTodos(remoteDataDir),
-        backup: async () => {
+        list: async () => {
           await fsp.writeFile(
             todosPath(localDataDir),
             JSON.stringify([{ summary: 'raw agent append landed mid-pass' }], null, 2),
             'utf8',
           );
+          return readTodos(remoteDataDir);
+        },
+        backup: async () => {
           const file = todosPath(remoteDataDir);
           const backupFile = `${file}.bak`;
           let raw: string;

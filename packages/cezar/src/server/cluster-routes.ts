@@ -164,6 +164,22 @@ import { loadWorkspaceConfig } from '../workspace/config.ts';
  * `POST /cluster/join` is excluded on purpose and would be a lockout bug if it weren't: it is the
  * enrollment handshake ITSELF, and a joining node has no secret yet to sign with.
  *
+ * **CORRECTED 2026-08-23 (this package) — `/cluster/allocate/:kind` and `/cluster/leases/*` are
+ * now IN the authenticated set, alongside `requireHub`, not instead of it.** The paragraph below
+ * explains why they were held back and is kept for that reasoning, which mostly still holds; only
+ * its conclusion is overturned. The first half — "the HUB has no secret of its own" — is still
+ * literally true (`StoredClusterNodeIdentity#secret` is still spoke-only) but turned out not to
+ * matter: verified by `grep -arn "allocate/" "leases/"` across `packages/{cezar,web,api-client,
+ * contract}/src` (the four `.ts` files this repo silently classifies as `data` and skips without
+ * `-a` are not among the matches, checked separately) — there is no HTTP client for either route
+ * anywhere in this repo. `cluster/account-grants.ts` imports `acquireLease`/`releaseLease` straight
+ * from `cluster/leases.ts`, not over HTTP, and nothing calls `allocate` remotely either. So the
+ * "strand the hub's own local reservations" worry describes a caller that does not exist; there is
+ * nothing to strand. The second half is the actual fix in this package: both handlers now attribute
+ * to `getAuthenticatedClusterNode(c).nodeId` — the caller `requireNodeAuth` (below) established —
+ * never to `loadNodeIdentity({env})`, which was always this SERVER's own local identity regardless
+ * of who asked. Original text, describing the state before this package:
+ *
  * `/cluster/allocate/:kind` and `/cluster/leases/*` are left OUT of the authenticated set too, and
  * that is a judgement call rather than an oversight — recorded here because the reasoning does not
  * fit in a `.use()` line. Two things are true about them today: the HUB has no secret of its own
@@ -230,8 +246,10 @@ const CORPUS_PENDING =
  */
 const TODOS_PROJECT_REFUSED = 'no confirmed pairing between this hub and the asking node for that project';
 /** Reached only if `requireNodeAuth` let a request through with no identity attached — a wiring
- *  bug (the middleware not actually running ahead of this handler), never a caller mistake. */
-const TODOS_NO_IDENTITY_ON_GATED_ROUTE = 'internal: no authenticated cluster node on a node-auth-gated route';
+ *  bug (the middleware not actually running ahead of this handler), never a caller mistake. Shared
+ *  by every node-auth-gated handler in this file (todos trio, allocate, leases), not just todos —
+ *  named for what it means rather than for its first caller. */
+const NO_AUTHENTICATED_NODE_ON_GATED_ROUTE = 'internal: no authenticated cluster node on a node-auth-gated route';
 
 /**
  * In flight, for `GET /cluster/active`. `server.ts` counts `queued`/`running`/`waiting` for its
@@ -434,6 +452,15 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
       .use('/cluster/corpus', requireNodeAuth)
       .use('/cluster/corpus/*', requireNodeAuth)
       .use('/cluster/todos/*', requireNodeAuth)
+      // D20, added by this package: `requireHub` establishes ONLY that this server is a hub, never
+      // who is asking — `/cluster/allocate/:kind` and `/cluster/leases/*` need both, since they now
+      // attribute the allocation/lease to the caller (see the two handlers below, and the module
+      // header's D20 section for why this was held back before). Registered AFTER `requireHub`,
+      // same cheap-gate-first ordering the corpus/todos block above already follows relative to
+      // `requireCluster`: a request to a non-hub still gets `requireHub`'s 409 NOT_A_HUB rather than
+      // node-auth's 401, which is the more specific fact of the two.
+      .use('/cluster/allocate/*', requireNodeAuth)
+      .use('/cluster/leases/*', requireNodeAuth)
 
       // ---- roster ---------------------------------------------------------------------------
       .get('/cluster', async (c) => {
@@ -621,7 +648,7 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
         async (c) => {
           const { projectKey } = c.req.valid('param');
           const node = getAuthenticatedClusterNode(c);
-          if (!node) return c.json({ error: TODOS_NO_IDENTITY_ON_GATED_ROUTE }, 500);
+          if (!node) return c.json({ error: NO_AUTHENTICATED_NODE_ON_GATED_ROUTE }, 500);
           const root = await resolveHubTodosRoot(projectKey, node.nodeId, env);
           if (!root) return c.json({ error: TODOS_PROJECT_REFUSED, reason: 'unpaired-project' }, 404);
           // No cast: `readTodos` parses with `storedTodoSchema`, so the runtime value ALREADY
@@ -659,7 +686,7 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
         async (c) => {
           const { projectKey } = c.req.valid('param');
           const node = getAuthenticatedClusterNode(c);
-          if (!node) return c.json({ error: TODOS_NO_IDENTITY_ON_GATED_ROUTE }, 500);
+          if (!node) return c.json({ error: NO_AUTHENTICATED_NODE_ON_GATED_ROUTE }, 500);
           const root = await resolveHubTodosRoot(projectKey, node.nodeId, env);
           if (!root) return c.json({ error: TODOS_PROJECT_REFUSED, reason: 'unpaired-project' }, 404);
           const path = await backupTodos(todosDataDir(root));
@@ -680,7 +707,7 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
         async (c) => {
           const { projectKey } = c.req.valid('param');
           const node = getAuthenticatedClusterNode(c);
-          if (!node) return c.json({ error: TODOS_NO_IDENTITY_ON_GATED_ROUTE }, 500);
+          if (!node) return c.json({ error: NO_AUTHENTICATED_NODE_ON_GATED_ROUTE }, 500);
           const root = await resolveHubTodosRoot(projectKey, node.nodeId, env);
           if (!root) return c.json({ error: TODOS_PROJECT_REFUSED, reason: 'unpaired-project' }, 404);
           const { todos } = c.req.valid('json');
@@ -723,16 +750,24 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
       // ---- the reserving allocator (D19 rung 2) ----------------------------------------------
       /** Unlike `tools/next-spec`, which reads one checkout and reserves NOTHING, this hands out
        *  and RECORDS in one lease. Skipping it is the single place this design would make
-       *  multi-node worse than one machine. */
+       *  multi-node worse than one machine.
+       *
+       *  Attributed to `getAuthenticatedClusterNode(c).nodeId` — the caller `requireNodeAuth`
+       *  established above — not to `loadNodeIdentity({env})`, which is always THIS server's own
+       *  local identity regardless of who asked. See the module header's D20 section (the
+       *  "CORRECTED 2026-08-23 (this package)" paragraph) for why the earlier attribution was a
+       *  bug and why gating this route without fixing it would have been worse than leaving it
+       *  open. */
       .post(
         '/cluster/allocate/:kind',
         paramZodValidator(clusterAllocateKindParamSchema),
         jsonZodValidator(clusterAllocateRequestSchema, { absent: {} }),
         async (c) => {
-          const identity = await loadNodeIdentity({ env });
+          const node = getAuthenticatedClusterNode(c);
+          if (!node) return c.json({ error: NO_AUTHENTICATED_NODE_ON_GATED_ROUTE }, 500);
           const body: ClusterAllocateResponse = await allocate(
             c.req.valid('param').kind,
-            identity?.nodeId ?? '',
+            node.nodeId,
             c.req.valid('json'),
             { env },
           );
@@ -742,16 +777,20 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
 
       // ---- leases (D15b) ---------------------------------------------------------------------
       /** What is still a lease after D4/D9a: what guards a RESOURCE rather than a record. A claim
-       *  is not here — the hub linearizes, so its acknowledgement IS the stamp. */
+       *  is not here — the hub linearizes, so its acknowledgement IS the stamp.
+       *
+       *  Same attribution fix as the allocator above: the holder is the AUTHENTICATED caller, not
+       *  this server's own identity. */
       .post(
         '/cluster/leases/:kind',
         paramZodValidator(clusterLeaseKindParamSchema),
         jsonZodValidator(clusterLeaseRequestSchema),
         async (c) => {
-          const identity = await loadNodeIdentity({ env });
+          const node = getAuthenticatedClusterNode(c);
+          if (!node) return c.json({ error: NO_AUTHENTICATED_NODE_ON_GATED_ROUTE }, 500);
           const body: ClusterLeaseResponse = await acquireLease(
             c.req.valid('param').kind,
-            identity?.nodeId ?? '',
+            node.nodeId,
             c.req.valid('json'),
             { env },
           );
@@ -764,10 +803,11 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
         paramZodValidator(clusterLeaseIdParamSchema),
         async (c) => {
           const { kind, id } = c.req.valid('param');
-          const identity = await loadNodeIdentity({ env });
+          const node = getAuthenticatedClusterNode(c);
+          if (!node) return c.json({ error: NO_AUTHENTICATED_NODE_ON_GATED_ROUTE }, 500);
           // `false` when this node is not the recorded holder: releasing someone else's lease is
           // the bug this return value exists to make visible, not a no-op to swallow.
-          const released = await releaseLease(kind, id, identity?.nodeId ?? '', { env });
+          const released = await releaseLease(kind, id, node.nodeId, { env });
           const body: ClusterLeaseReleaseResponse = { released };
           return c.json(body);
         },

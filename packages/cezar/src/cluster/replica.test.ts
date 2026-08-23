@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ClusterOp } from '@loki-labs/better-cezar-contract';
 import type { TodoItem } from '../todos.ts';
-import { applyOpToRecord, applyReplica, applyReplicaFrame, diffCorrections, type ClusteredTodoItem } from './replica.ts';
+import { applyOpToRecord, applyReplica, applyReplicaFrame, diffCorrections } from './replica.ts';
 
 /**
  * Package 2.2 (`.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`) — the five automated
@@ -10,16 +10,8 @@ import { applyOpToRecord, applyReplica, applyReplicaFrame, diffCorrections, type
  * LWW merge to test any more, only hub-order application and the corrections it produces.
  */
 
-function makeTodo(fields: Partial<ClusteredTodoItem> & { id: string; summary: string }): TodoItem {
+function makeTodo(fields: Partial<TodoItem> & { id: string; summary: string }): TodoItem {
   return fields as TodoItem;
-}
-
-/** CORRECTED 2026-08-23 — `TodoItem` now carries the cluster fields directly (package 2.3 merged
- *  them into `todoSchema`), so this cast is no longer bridging a gap; `ClusteredTodoItem` is a
- *  plain alias for `TodoItem` (see `replica.ts`'s own docblock). Kept as a narrow, named accessor
- *  for the cluster-only fields in assertions below, purely for readability at the call site. */
-function clustered(item: TodoItem | undefined): ClusteredTodoItem | undefined {
-  return item as ClusteredTodoItem | undefined;
 }
 
 let opSeq = 0;
@@ -175,7 +167,7 @@ describe('verification 3 — tombstone and resurrection, both directions', () =>
     const result = applyReplica({ local: [], pending: [], changes: [tombstone, upsert], appliedThroughHubSeq: 0 });
     const t1 = result.todos.find((t) => t.id === 't1');
 
-    expect(clustered(t1)?.tombstone).toBeDefined();
+    expect(t1?.tombstone).toBeDefined();
   });
 
   it('an upsert at a later hubSeq un-tombstones an earlier tombstone', () => {
@@ -185,7 +177,7 @@ describe('verification 3 — tombstone and resurrection, both directions', () =>
     const result = applyReplica({ local: [], pending: [], changes: [upsert, tombstone], appliedThroughHubSeq: 0 });
     const t1 = result.todos.find((t) => t.id === 't1');
 
-    expect(clustered(t1)?.tombstone).toBeUndefined();
+    expect(t1?.tombstone).toBeUndefined();
     expect(t1?.summary).toBe('resurrected');
   });
 
@@ -202,7 +194,7 @@ describe('verification 3 — tombstone and resurrection, both directions', () =>
     });
     const t1 = result.todos.find((t) => t.id === 't1');
 
-    expect(clustered(t1)?.tombstone).toBeDefined();
+    expect(t1?.tombstone).toBeDefined();
   });
 });
 
@@ -262,7 +254,7 @@ describe('clearedFields — a deletion crosses the link, and only the keys it na
   it('removes exactly the keys the op lists', () => {
     const before = makeTodo({ id: 't1', summary: 'x', archivedAt: '2026-08-22T00:00:00.000Z', priority: 'high' });
     // Floor: the record HAS the key, so "absent afterwards" is not vacuously true.
-    expect(clustered(before)?.archivedAt).toBe('2026-08-22T00:00:00.000Z');
+    expect(before?.archivedAt).toBe('2026-08-22T00:00:00.000Z');
 
     const after = applyOpToRecord(before, makeOp({ entityId: 't1', op: 'upsert', hubSeq: 5, clearedFields: ['archivedAt'] }));
 
@@ -270,10 +262,10 @@ describe('clearedFields — a deletion crosses the link, and only the keys it na
     expect(Object.hasOwn(after!, 'archivedAt')).toBe(false);
     // A key the op never named survives — this deletes what is LISTED, never what is merely absent
     // from `fields`, which would be the whole-record clobber in a second costume.
-    expect(clustered(after)?.priority).toBe('high');
+    expect(after?.priority).toBe('high');
     // hubSeq still lands: the loop runs before the bookkeeping fields are written, so a peer can
     // never clear the hub's own statement about the record.
-    expect(clustered(after)?.hubSeq).toBe(5);
+    expect(after?.hubSeq).toBe(5);
   });
 
   it('does not mutate the record handed to it', () => {
@@ -281,13 +273,13 @@ describe('clearedFields — a deletion crosses the link, and only the keys it na
     applyOpToRecord(before, makeOp({ entityId: 't1', op: 'upsert', hubSeq: 6, clearedFields: ['archivedAt'] }));
     // `applyReplica` diffs local against applied afterwards; a mutating apply would make every
     // correction read as "they agree".
-    expect(clustered(before)?.archivedAt).toBe('2026-08-22T00:00:00.000Z');
+    expect(before?.archivedAt).toBe('2026-08-22T00:00:00.000Z');
   });
 
   it('an op with no clearedFields removes nothing — the negative control for the case above', () => {
     const before = makeTodo({ id: 't1', summary: 'x', archivedAt: '2026-08-22T00:00:00.000Z' });
     const after = applyOpToRecord(before, makeOp({ entityId: 't1', op: 'upsert', hubSeq: 7, fields: { summary: 'y' } }));
-    expect(clustered(after)?.archivedAt).toBe('2026-08-22T00:00:00.000Z');
+    expect(after?.archivedAt).toBe('2026-08-22T00:00:00.000Z');
     expect(after?.summary).toBe('y');
   });
 
@@ -363,7 +355,7 @@ describe('verification 5a — optimistic write, then contradiction: replaced and
     const t1 = result.todos.find((t) => t.id === 't1');
     // Replaced ...
     expect(t1?.status).toBe('done');
-    expect(clustered(t1)?.pendingSince).toBeUndefined();
+    expect(t1?.pendingSince).toBeUndefined();
     // ... and FLAGGED, not silently swapped. Asserting the flag (not just the value) is the point.
     expect(result.corrections).toHaveLength(1);
     expect(result.corrections[0]).toMatchObject({
@@ -404,7 +396,7 @@ describe('verification 5a — optimistic write, then contradiction: replaced and
 
     expect(result.corrections).toEqual([]);
     expect(result.todos.find((t) => t.id === 't1')?.priority).toBe('high');
-    expect(clustered(result.todos.find((t) => t.id === 't1'))?.pendingSince).toBeDefined();
+    expect(result.todos.find((t) => t.id === 't1')?.pendingSince).toBeDefined();
   });
 
   it('diffCorrections agrees when local and applied match on every proposed field — the common case costs nothing', () => {

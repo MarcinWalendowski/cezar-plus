@@ -1,7 +1,6 @@
-import { promises as fs } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import type { ClusterNodeId, ClusterProjectKey, ClusterTodoFields } from '@loki-labs/better-cezar-contract';
-import { appendTodosPreservingIds, readTodos, todosPath, type TodoItem } from '../todos.ts';
+import { backupAndAppendTodosPreservingIds, backupTodos, readTodos, type TodoItem } from '../todos.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';
 
 /**
@@ -20,9 +19,20 @@ import type { ClusterHomeOptions } from './node-identity.ts';
  * sides differ and neither ever saw the hub is **refused**, named, and left for a human — an agent
  * auto-picking a side here is the most believable wrong answer available (PLAN P9).
  *
- * **Back up before any write, on both sides.** `todos.json.bak` is written before the first mutation,
- * not after the first success — a reconcile that half-applied and then failed is exactly the case
- * the backup exists for.
+ * **Back up before any write, per side.** `todos.json.bak` is written before THAT SIDE's own first
+ * mutation, not after the first success — a reconcile that half-applied and then failed is exactly
+ * the case the backup exists for. **CORRECTED 2026-08-23 — this used to say "on both sides"
+ * meaning both backups land before EITHER side mutates.** That joint ordering is gone:
+ * `reconcileProject`'s local backup and local append are now fused into one lease
+ * (`backupLocalAndMaybeAppend`, D21's amendment — the "Found during implementation" row about a
+ * `.bak` written outside the lease that guarded the write it protected), so local can finish
+ * mutating before the remote backup is even taken. Each backup still strictly precedes its OWN
+ * side's mutation, which is the property this file actually needs; giving up the joint ordering is
+ * safe because both mutation paths are idempotent by id (`appendTodosPreservingIds`/
+ * `backupAndAppendTodosPreservingIds` locally, `RemoteReconcileTransport#apply` on the peer, per
+ * its own docblock below) — a pass that dies between the local mutation and the remote backup
+ * converges cleanly on retry: nothing duplicates, nothing corrupts, and the remote side was never
+ * touched this pass, so it needed no backup yet.
  *
  * **This module never dials out itself.** **CORRECTED 2026-08-23 — the first half of this
  * paragraph is no longer true.** It said `todos.ts` *"does not yet carry the cluster fields
@@ -67,8 +77,10 @@ export interface ReconcileReport {
   projectKey: ClusterProjectKey;
   entries: ReconcileEntry[];
   counts: Record<ReconcileClass, number>;
-  /** Written before the first mutation. Empty on a dry run — and a caller must not read an empty
-   *  list as "nothing to back up". */
+  /** Each path is written before THAT SIDE's own mutation, not necessarily before the other side's
+   *  (module header, "CORRECTED 2026-08-23" — the local backup+append are fused under one lease
+   *  and can both complete before the remote backup is even taken). Empty on a dry run — and a
+   *  caller must not read an empty list as "nothing to back up". */
   backupPaths: string[];
   /** True when nothing was written. The dry run is the default posture for the real divergence. */
   dryRun: boolean;
@@ -240,32 +252,33 @@ function classifyEntries(
 // report for this fix. **Corrected 2026-08-23:** `todos.ts` now exports
 // `appendTodosPreservingIds`, built for exactly this call site, so the local re-implementation is
 // gone; `appendLocalTodos` below is a thin wrapper over it.
+//
+// **CORRECTED again 2026-08-23, same day — `appendLocalTodos` and the standalone
+// `backupLocalTodos` above it are both gone.** The paragraph above fixed the deadlock but left a
+// second hazard in place: `backupLocalTodos` took no lease at all, and `appendLocalTodos` took its
+// own, so a concurrent local `createTodo`/`updateTodo`/`markStarted`/`removeTodo` landing in the
+// gap between the two calls was picked up correctly by the append (a fresh read, under its own
+// lease) and absent from the `.bak` — a backup that can be older than the state it backs up, and
+// trusted anyway (PLAN "Found during implementation", the row this fixes). `todos.ts` now exports
+// `backupAndAppendTodosPreservingIds`, doing both under ONE lease — the same primitive
+// `server/cluster-routes.ts`'s `/cluster/todos/:projectKey/append` route uses on the hub side
+// (D21's amendment) — so this file delegates to it directly rather than composing its own pair of
+// calls. `backupLocalAndMaybeAppend`, below, is the one call site.
 
-/** `todos.json.bak`, copied from whatever is on disk right now — raw bytes, not re-serialized, so
- *  the safety net is exactly what was there before this run touched anything. `[]` when the file
- *  does not exist yet, matching `readTodos`'s own empty-inbox default. */
-async function backupLocalTodos(dataDir: string): Promise<string> {
-  const file = todosPath(dataDir);
-  const backupFile = `${file}.bak`;
-  let raw: string;
-  try {
-    raw = await fs.readFile(file, 'utf8');
-  } catch {
-    raw = '[]';
-  }
-  await fs.mkdir(dataDir, { recursive: true });
-  await fs.writeFile(backupFile, raw, 'utf8');
-  return backupFile;
-}
-
-/** Appends `items` verbatim (id, `ts`, `author` — every field the entry already carries) by
- *  delegating to `todos.ts`'s `appendTodosPreservingIds` — the same lease and read-modify-write
- *  shape as every other writer in that file, in a single lease acquisition (see that function's
- *  docblock for why this used to deadlock before it existed). Idempotent: an id already present on
- *  this side is skipped, so a retried reconcile pass never duplicates a row it already added. */
-async function appendLocalTodos(dataDir: string, items: readonly TodoItem[]): Promise<void> {
-  if (items.length === 0) return;
-  await appendTodosPreservingIds(dataDir, items);
+/** Local half of "back up, then (maybe) append" for one project's `todos.json`, done under ONE
+ *  lease when there is something to append — see the correction above for the hazard this closes.
+ *  Delegates to `todos.ts`'s `backupAndAppendTodosPreservingIds` whenever `adds` is non-empty.
+ *  `adds` is empty exactly when every divergent entry classified `local-only` (headed to the peer
+ *  instead of landing here) — there is no append to fold a backup into, but a backup is still
+ *  owed: `RemoteReconcileTransport#backup`'s own docblock states the same "before the first
+ *  mutation of a pass, whether or not THIS side ends up receiving an add" contract for the peer,
+ *  and the local side honors it the same way, via the standalone, lease-free `backupTodos`
+ *  (mirrors the hub's own `/cluster/todos/:projectKey/backup` route, which exists for exactly this
+ *  zero-adds case). Returns the backup path either way, for `reconcileProject`'s `backupPaths`. */
+async function backupLocalAndMaybeAppend(dataDir: string, adds: readonly TodoItem[]): Promise<string> {
+  if (adds.length === 0) return backupTodos(dataDir);
+  const { backupPath } = await backupAndAppendTodosPreservingIds(dataDir, adds);
+  return backupPath;
 }
 
 // ---- the classifier + merge, per project and across every paired project ----------------------
@@ -285,17 +298,36 @@ export async function reconcileProject(
 
   const backupPaths: string[] = [];
   if (willWrite) {
-    // Both sides, before the FIRST mutation — a reconcile that half-applied and then failed is
-    // exactly the case the backup exists for (module header).
-    backupPaths.push(await backupLocalTodos(localDataDir));
-    backupPaths.push(await remoteTransport.backup(projectKey));
-
-    if (remoteOnly.length > 0) {
-      await appendLocalTodos(
+    // **Each side is backed up under the same step as its own mutation.** The local half backs up
+    // and (when there is one) appends under a SINGLE lease — `backupLocalAndMaybeAppend`, above,
+    // and the correction in the "local filesystem I/O" section explaining why a separate backup
+    // call and a separate append call is exactly the hazard this closes. The remote half is
+    // symmetric but out of this file's hands: `remoteTransport.backup`/`apply` are the peer's own
+    // primitives to pair correctly (the hub's `/cluster/todos/:projectKey/append` route fuses them
+    // the same way on its side, D21's amendment).
+    //
+    // **CORRECTED 2026-08-23 — this said "Both sides, before the FIRST mutation", and fusing the
+    // local pair made that false in the same edit that made it safe.** The local append now lands
+    // BEFORE `remoteTransport.backup()` is taken, where it used to land after; a reader trusting
+    // the old sentence would conclude nothing is mutated until both `.bak` files exist, and that
+    // is no longer what happens. What is actually guaranteed, and is the property that matters:
+    // **no side is ever mutated without a fresh backup OF THAT SIDE** — local under one lease
+    // here, remote by the hub's own fused route. What was given up is cross-side atomicity: a pass
+    // that dies between the local append and the remote backup leaves this side written and the
+    // peer untouched. That is recoverable rather than corrupting, because both append paths skip
+    // an id already present (`appendTodosPreservingIds`, on both sides), so re-running the pass
+    // converges instead of duplicating — and the local `.bak` written under that same lease is a
+    // true pre-mutation snapshot either way. Ordering the remote backup first would restore the
+    // stronger reading, at the cost of paying a network round trip before touching local state; it
+    // is not free either way, and this is the trade that was taken, deliberately.
+    backupPaths.push(
+      await backupLocalAndMaybeAppend(
         localDataDir,
         remoteOnly.map((e) => e.remote as TodoItem),
-      );
-    }
+      ),
+    );
+    backupPaths.push(await remoteTransport.backup(projectKey));
+
     if (localOnly.length > 0) {
       await remoteTransport.apply(
         projectKey,

@@ -1256,7 +1256,21 @@ merge, and `--dry-run` wins when both are given, regardless of flag order. This 
 regression test for a bug found while wiring the command: the scaffold's original
 `'dry-run': { default: false }` meant a bare invocation would WRITE, silently reversing D21's own
 stated default (`node:util`'s `parseArgs` has no `--no-x` negation, so the fix adds `--apply` as
-the explicit opt-in rather than trying to default `--dry-run` to `true`). (32) **D13's unknown-field
+the explicit opt-in rather than trying to default `--dry-run` to `true`).
+
+**OPEN, and it contradicts this decision — do not wire Stage 1.5 until it is settled (found
+2026-08-23).** D21 says above that "the real merge remains owner-gated by P9", and the CLI ships
+dry-run-by-default because of it. `cluster/reconcile.ts`'s `PeriodicReconcileOptions.run` docblock
+says the production caller is "a **non-dry-run** `reconcileAll` against every peer this node is
+linked to". Both are in the tree. The disagreement is not cosmetic: the safety property that makes
+an unattended pass sound is that `divergent-unclocked` rows are refused, but the divergence this
+design exists for is **110 rows present on one side only**, which is precisely the class a
+non-dry-run pass *does* merge. Arming the periodic reconcile therefore performs **E2**,
+automatically and unattended, the first time two nodes link. `CEZ_CLUSTER` is currently unset on
+`prod-host`, so nothing is armed and there is no urgency — which is also why this will not
+announce itself. Full statement of the options in
+`.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`. Whichever way it is decided, the losing
+statement gets corrected in place. (32) **D13's unknown-field
 tolerance survives the wire in every direction**, asserted on the field's VALUE rather than on the
 request succeeding: a row carrying a field this build has never heard of round-trips (a) out through
 `GET /cluster/todos/:projectKey` (`cluster-routes.test.ts`), (b) back in through the transport's

@@ -42,13 +42,12 @@ import type { TodoItem } from '../todos.ts';
  * every function in this file now reads and builds a plain `TodoItem`, with no cast needed anywhere
  * a `ClusteredTodoItem` used to be threaded through.
  *
- * `ClusteredTodoItem` itself is kept, as a plain alias rather than deleted: `todo-autostart.ts`
- * imports it by name — its own words are "the type the cluster seam speaks" — and that file sits
- * outside this package's scope for this change. Anything assignable to `TodoItem` is assignable to
- * it and vice versa, so keeping the alias changes nothing for that caller.
+ * `ClusteredTodoItem` itself is now gone. It was kept a while longer than the intersection above,
+ * as a plain alias, because `todo-autostart.ts` imported it by name and sat outside this
+ * package's scope for that change. It has since been switched to `TodoItem` directly — the last
+ * caller keeping the name alive — so there is no second spelling of this record's type left
+ * anywhere in this package.
  */
-
-export type ClusteredTodoItem = TodoItem;
 
 export interface ReplicaApplyInput {
   /** This node's records as they stand, including optimistic writes still marked `pendingSince`. */

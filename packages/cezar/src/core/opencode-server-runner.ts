@@ -155,10 +155,6 @@ class OpencodeSession implements AgentSession {
     }
     this.hasExited = trackChildExit(this.child);
 
-    this.child.on('error', (err: NodeJS.ErrnoException) => {
-      this.spawnFailed = wrapSpawnError(err, bin);
-    });
-
     this.exited = new Promise<void>((resolve) => {
       this.resolveExit = resolve;
     });
@@ -168,6 +164,18 @@ class OpencodeSession implements AgentSession {
     };
     this.child.once('exit', captureExit);
     this.child.once('close', captureExit);
+
+    this.child.on('error', (err: NodeJS.ErrnoException) => {
+      this.spawnFailed = wrapSpawnError(err, bin);
+      // Node makes no promise that 'error' is followed by 'exit' — a post-fork spawn failure
+      // (EACCES, an exec that dies before the OS even assigns it a pid) can leave captureExit
+      // unreached forever. Without this, every `await this.exited` below — the result's own
+      // wait, and any teardown path that awaits it — hangs permanently instead of surfacing
+      // `spawnFailed`: a hang, not a wrong answer, and invisible in a way a bad result is not.
+      // Mirrors claude-cli-runner's/pi-runner's `waitForExit`, which resolves from 'error' the
+      // same way, falling back to whatever the child's own exitCode/signalCode already carry.
+      captureExit(this.child.exitCode ?? null, this.child.signalCode ?? null);
+    });
 
     const stderrChunks: string[] = [];
     this.child.stderr.setEncoding('utf8');
@@ -201,7 +209,14 @@ class OpencodeSession implements AgentSession {
         // Live for the whole session; the SSE loop runs until end()/interrupt.
         await this.exited;
       } catch (err) {
-        if (!this.timedOut) {
+        // `this.ready` (bootstrap()) can reject because CEZAR itself tore the child down while
+        // its first-turn POST was still in flight — end()/interrupt() racing bootstrap()'s
+        // unguarded `await this.prompt(first)` turns the connection breaking under the request
+        // into a generic fetch rejection here. `terminate()` sets `terminatedByCezar` the moment
+        // it sends a signal, synchronously and before any await, so by the time that rejection
+        // reaches this catch it reliably tells "cezar did this" apart from a genuine bootstrap
+        // failure — a shutdown cezar asked for must not surface as a run error.
+        if (!this.timedOut && !this.terminatedByCezar) {
           const message = err instanceof Error ? err.message : String(err);
           this.emit({ type: 'error', message: `opencode: ${message}` });
         }

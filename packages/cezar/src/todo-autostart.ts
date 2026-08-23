@@ -3,7 +3,6 @@ import { isTombstoned, markStarted, onTodosChanged, readTodos, todoTaskText, typ
 import { resolveTodoWorkflow, type RunManager } from './workflows/run.ts';
 import { inheritAuthor } from './runs/task-author.ts';
 import { mayStartWithoutHub } from './cluster/dispatch.ts';
-import type { ClusteredTodoItem } from './cluster/replica.ts';
 
 /**
  * Phase 2 — `cezar todo add --start` (`.ai/specs/2026-08-19-file-tasks-from-a-running-task.md`).
@@ -104,9 +103,9 @@ export interface TodoAutostartCluster {
    * double-start D15a scopes away. A wrong answer here can only ever matter while the hub is
    * unreachable; with the link up every claim goes through the hub regardless of authorship (D4).
    */
-  authoredHere(todo: ClusteredTodoItem): boolean;
+  authoredHere(todo: TodoItem): boolean;
   /** Send the claim op and WAIT for the hub's acknowledgement (D9a). Never optimistic. */
-  claimStart(todo: ClusteredTodoItem): Promise<TodoClaimResult>;
+  claimStart(todo: TodoItem): Promise<TodoClaimResult>;
 }
 
 /** `{ allowed: true }` is the no-op answer clustering-off always gives. A refusal always carries a
@@ -151,17 +150,13 @@ export async function mayAutostartTodo(
   const cluster = project.cluster;
   if (!cluster) return { allowed: true };
 
-  // `TodoItem` now carries the five cluster fields (package 2.3 spread `clusterTodoFieldsSchema`
-  // into `todoSchema`), so this reads them directly. The cast is only to `cluster/replica.ts`'s
-  // `ClusteredTodoItem`, which is the same record plus the contract's `.passthrough()` index —
-  // the type the cluster seam speaks, so a port implementation needs no translation.
-  const record = todo as ClusteredTodoItem;
-
-  if (record.startedTaskId) {
-    return { allowed: false, reason: `already started as run ${record.startedTaskId}` };
+  // `TodoItem` carries the six cluster fields directly (package 2.3 spread
+  // `clusterTodoFieldsSchema` into `todoSchema`), so no cast is needed to read them here.
+  if (todo.startedTaskId) {
+    return { allowed: false, reason: `already started as run ${todo.startedTaskId}` };
   }
 
-  const startedOn = record.startedOn;
+  const startedOn = todo.startedOn;
   if (startedOn !== undefined && startedOn !== cluster.nodeId) {
     return { allowed: false, reason: `already claimed by node ${startedOn}` };
   }
@@ -171,10 +166,10 @@ export async function mayAutostartTodo(
   if (startedOn === cluster.nodeId) return { allowed: true };
 
   if (!cluster.hubReachable()) {
-    return mayStartWithoutHub({ trigger: 'autostart', authoredHere: cluster.authoredHere(record) });
+    return mayStartWithoutHub({ trigger: 'autostart', authoredHere: cluster.authoredHere(todo) });
   }
 
-  const claim = await cluster.claimStart(record);
+  const claim = await cluster.claimStart(todo);
   if (claim.accepted) return { allowed: true };
   return {
     allowed: false,
