@@ -4590,6 +4590,39 @@ specifically: `author` is `inheritAuthor(todo.author, 'todo-autostart')` — a c
 provenance spec (`2026-08-21-task-author-provenance`) is the thing that makes a cross-node run
 attributable at all.
 
+**C-a2. THE SPOKE MUST NOT STAMP THE TODO. Extract the resolve→start half of
+`startAutostartTodo`, NOT the `markStarted` half — they differ, and copying the whole body walks
+straight into D46.** Traced 2026-08-23:
+
+`markStarted(dataDir, id, runId)` with no options → `markStartedWithClaim` → `askHubToConfirm`
+(`todos.ts:846`), which returns `undefined` when `confirmStart` is absent, and `TodoStartOptions`
+says of that field: *"Absent means the hub cannot be asked, which refuses exactly like an
+unreachable hub does — a start seam that is not wired up must not degrade into an optimistic
+start."* On a dispatch, `CEZ_CLUSTER=1` is true **by definition** — a node cannot receive a
+dispatch otherwise — so a spoke that stamps the way autostart does gets `hub-unconfirmed` every
+time: **the run exists and the record does not know it**, which is exactly D46, now on the
+Milestone C path rather than beside it. And `humanIntent: true` is not the escape: a dispatch is a
+scheduler, not a person, and `todos.ts:840` sets that default `false` precisely so autostart —
+*"the path that can double-start work nobody is watching"* — cannot claim the exemption.
+
+**The right answer is that the spoke never stamps: the HUB does.** The hub already granted this
+claim when it chose the node, and it is the one participant that can confirm its own claim without
+a round trip — `hub-apply.ts#claimFields` is already the only thing in the tree that writes
+`startedTaskId` on a claim. So the spoke starts the run, reports the run id back on the accept
+reply, the hub stamps the replicated record, and the stamp reaches the spoke through the ordinary
+`replica` fan-out. That is D4/D9a's architecture applied unchanged, not a special case for
+dispatch — *"the acknowledgement is the stamp"*.
+
+**This makes D48's `accepted: { dispatchId, runId }` load-bearing for more than correlation: it is
+how the record learns the run exists at all.** Without it there is no path by which a dispatched
+run's id ever reaches the todo it satisfies, and the board shows the todo unstarted forever while
+an agent works on it — the D46 symptom, reached by a different road.
+
+**Consequence for the D46 owner decision: it does NOT block Milestone C, but only because the
+dispatch path routes around it.** D46 is about *autostart* under clustering, which stays option 1
+(`CLUSTERING_OFF`, honest, single-node). Do not "fix" D46 as a prerequisite for C, and do not let C
+quietly depend on it being fixed.
+
 **C-b. STEPS 3 AND 4 MUST LAND IN ONE CHANGE. Step 3 alone is strictly worse than today.** Today
 `spoke-runtime.ts:629`'s `handleDispatch` refuses every dispatch with `dispatch-not-accepted`, and
 that refusal is *true* — it also refuses to answer at all rather than fabricate repo-freshness
