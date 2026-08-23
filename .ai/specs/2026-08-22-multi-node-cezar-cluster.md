@@ -4625,6 +4625,34 @@ anything real. 1+2+C-f are the hub half and meet the spoke half only at
 halves are genuinely parallelizable; the wiring (C-d) is one change that must come last, after both
 sides typecheck, and 6+7 are after that.
 
+**THE MILESTONE C E2E DOES NOT NEED THE OPS WORK, AND THE HARNESS ALREADY EXISTS. Found
+2026-08-23.** The "ops work, which is not code" section below reads as though the E2E is gated on
+Cloudflare Access, `CEZ_CLUSTER=1` in production and a merged PR #9. **It is not — those gate the
+cross-machine DEMONSTRATION, not the end-to-end proof.**
+
+`server/cluster-link-activation.test.ts` already stands up a real hub through `startServer` and a
+real spoke through `ClusterLinkClient`, over a real socket on a real `node:http` server bound to
+`127.0.0.1:0`, and it has already proved Milestone B end to end that way. Read its B3 case
+(`:235`) as the template — it is not a mock in any part:
+- a real `ops` frame is sent over the socket and a real `ack` comes back with the hub-assigned order;
+- the row is then read **off the hub's own disk** (`readTodos(dataDir)`) and asserted to carry both
+  `hubSeq` and the field values — durable, not merely acknowledged;
+- frame ORDER is asserted (`replica` must ride behind `ack`, never ahead);
+- and the test names its own negative control: deleting `replication` from the
+  `createHubFrameRouter({...})` call at `cluster-routes.ts` must make it TIME OUT.
+
+So **Milestone C's E2E is the sibling test in that same file**: a real `dispatch` frame over a real
+socket, accepted by a real spoke, producing a real run, with the acceptance read back off the wire.
+Write it there, with the same negative control discipline, and the merge gate is met by something
+that runs in the suite on every future change rather than by a demonstration nobody can repeat.
+
+**What that E2E honestly does NOT prove, and must not be reported as proving.** Hub and spoke share
+one process there, over loopback. It covers the protocol and the wiring; it does not cover the
+systemd/deploy path, Cloudflare Access admitting the link, cross-machine clock and network
+behaviour, or the D23 env asymmetry that strips `..._CLIENT_SECRET` from an agent's child
+environment. Those are real and still ops-gated. **Two different claims: "the code works end to end"
+is reachable now; "it works between this Mac and the VPS" is not, and needs the four items below.**
+
 ### Milestone D — WATCHING a foreign run. *Not built.*
 
 `startRelay`/`relayTail` exist with 0 callers. Needs the cockpit run view to drive the 0→1/1→0
