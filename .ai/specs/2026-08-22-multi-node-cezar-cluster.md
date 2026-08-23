@@ -2546,6 +2546,33 @@ The ops chain. Nothing in it is connected, though several pieces exist:
 | hub fans out `replica` | — | **not built** |
 | spoke applies `replica` | `cluster/replica.ts#applyReplicaFrame` | exists, **zero callers** |
 
+**`throughHubSeq`: a RETURNED rejection and a THROWN error are not the same thing.** Settled
+2026-08-23 in `cluster/hub-ops.ts`, and it is the difference between correctness and silent data
+loss, because a spoke drops everything at or below this watermark from its outbox forever.
+
+- `applyOp` **returns** `{accepted:false, reason}` — a considered, durable verdict (D9a: another node
+  won the claim). It is resolved. It extends the watermark normally and appears in `results`.
+  `todos.ts#markStartedWithClaim` already treats this as terminal (`TodoStartRefusal` carries
+  `'hub-refused'`).
+- `applyOp` **throws** — transient or infrastructural, never a business decision. This creates a
+  **gap**: no `results` entry, nothing recorded, and the watermark stops at the last CONTIGUOUS
+  resolved op *before* it, even when later ops in the same frame individually succeeded (those still
+  get `results` entries; they just may not extend the watermark). A watermark cannot express a hole,
+  so advancing past one tells the spoke an un-applied op is durable and it drops it forever.
+- **Never convert a throw into a synthetic `accepted:false`.** That fabricates a permanent verdict
+  for a temporary failure, which is exactly the loss above wearing a success costume.
+
+**Replay needs a DURABLE per-`opId` verdict cache** — `cluster/op-history.ts`. Without it a
+retransmit re-runs `allocateSeq` and `applyOp`, burning a second `hubSeq`, and for a claim op makes
+it **collide with its own first application** and report "already claimed" against itself; the spoke
+then declines work it legitimately owns. In-memory is not sufficient: the hub blue-green deploys
+~10x/day, so a process-lifetime cache turns every restart into that bug.
+
+**Known limitation, recorded rather than fixed:** the wire schema does not forbid two ops sharing one
+`opId` **inside a single frame**. Idempotence lookups happen before any of that frame's writes land,
+so both read as cache misses and both apply. The replay guarantee is about *the same frame arriving
+twice*, not a duplicate within one frame.
+
 **The hub-side watermark, designed 2026-08-23 while wiring.** `planReplicaFanout` needs each
 target's `appliedThroughHubSeq`, and **no hub-side store for it exists** — the only watermark
 plumbing today is spoke-side (`ops.ts#ackedThroughHubSeq`, `todos.ts#applyHubReplica`). The spoke
