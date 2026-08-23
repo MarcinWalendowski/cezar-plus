@@ -2825,6 +2825,28 @@ invented; these are the names to use when one lands.
 > `hub-router.ts`'s own docblock argues that one is deliberate (package boundary, straight field-copy).
 > So B5 may be close to a no-op. Confirm before scheduling it.
 >
+> **CONFIRMED 2026-08-23. B5 is a no-op minus ONE real item, and it is not the one B5 named.**
+>  - **Item 1 (`todos.lock` declared twice) — closed, do not spend on it.** The hazard is pinned by
+>    `hub-apply.test.ts`, which hardcodes `join(dataDir, 'todos.lock')` and asserts a lock at that
+>    literal path blocks BOTH writers. Renaming the constants together would fail it. A
+>    `todosLockPath(dataDir)` export is pure tidiness and buys nothing the test does not already buy.
+>  - **Item 2 (`toNodeWire`/`toPairingWire`) — the real item, and B5 mis-stated why.** The two copies
+>    (`hub-router.ts:149/178`, `cluster-routes.ts:306/325`) are **byte-identical today**, so there is
+>    no drift to fix — the defect is that drift is **unpinned and unpinnable**: neither function is
+>    exported, so no test can compare them, and `ClusterNode` is `.strict()` so each copy rebuilds
+>    field-by-field. **Adding a field to `StoredClusterNode` + `ClusterNode` and updating only one
+>    copy typechecks cleanly and leaves one route silently serving a node without it.**
+>  - **The stated justification is a stale process artifact, not architecture.** `hub-router.ts:145`
+>    says *"this file may only touch `cluster/hub-router.ts` and `cluster/hub-router.test.ts` (package
+>    boundary for this increment)"* — that was a past agent's FILE-OWNERSHIP rule, not a layering
+>    constraint, and it no longer binds. `cluster-routes.ts` already imports from `cluster/`
+>    (`ClusterLinkClient`, `startSpokeRuntime`), so a shared `cluster/` mapper adds no new dependency
+>    direction at all.
+>  - **Fix: one shared mapper in `cluster/`, imported by both** — same reasoning as D36's fourth copy
+>    above, and the same choice of construction over detection.
+>  - **BLOCKED ON COORDINATION, not on difficulty.** `hub-router.ts` is HUB's file and HUB is live in
+>    it for D40. Do not edit it concurrently; schedule this the moment D40 lands.
+>
 > #### D36 — EVERY REPLICATED TODO RESENDS FOREVER. Found 2026-08-23 by the two-process E2E.
 >
 > **This is the most serious defect on the branch, and no unit test could see it.** The first real
@@ -2870,10 +2892,23 @@ invented; these are the names to use when one lands.
 > `applyOpToRecord` (what may remain owed). Stuck on-disk records heal two ways: the next local edit
 > re-filters the union, and the next replica apply filters `stillPending`.
 >
-> **STILL OPEN — there is a FOURTH copy.** `cluster/replay.ts` derives its own `CLUSTER_META_KEYS`
-> identically and independently; it was correctly left alone (another agent owned that file), but
-> until it imports the shared set, D36's root cause — one concept kept in two hand-maintained lists —
-> is only three-quarters retired. Retire it before Milestone C.
+> **~~STILL OPEN — there is a FOURTH copy.~~ RETIRED 2026-08-23 (`562a3f6f`).** `cluster/replay.ts`
+> derived its own `CLUSTER_META_KEYS` identically and independently, justified in its own docblock as
+> *"kept in step by hand because `ops.ts` does not export its version"*. **That premise died the
+> moment D36's own fix exported `CLUSTER_META_TODO_FIELDS` (`ops.ts:127`)** — and `replay.ts` already
+> imported `newOpId` from that same module, so the copy was paying a dependency cost it had already
+> paid. Now `const CLUSTER_META_KEYS = CLUSTER_META_TODO_FIELDS`, one line, with the `placement`
+> reasoning moved to the definition.
+>
+> **An import, not a parity test — deliberately.** A parity test detects drift; an import makes it
+> impossible. That distinction is the whole of D36's lesson, and a fourth copy is not a smaller
+> version of that bug, it is the same bug waiting.
+>
+> Behaviour-preserving by construction (the two definitions were textually identical) and
+> mutation-proven anyway: adding `'placement'` to the set turns `replay.test.ts` **red 2/31**,
+> including the case named for exactly that divergence ("`placement` rides as ordinary content").
+> Restored, md5 `ee79b95d81ecc842e3df2d78580a30d5`. Baseline `replay`+`ops` 76 passed, `tsc` EXIT=0.
+> **D36's root cause is now fully retired**, and the Milestone C prerequisite is met.
 >
 > #### D37 — REPLICATION IS ONE-DIRECTIONAL. A HUB-LOCAL WRITE NEVER LEAVES THE HUB.
 > **Found 2026-08-23 by the same two-process E2E. Structural, not a bug — half the design is absent.**
