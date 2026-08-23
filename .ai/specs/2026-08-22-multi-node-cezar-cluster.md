@@ -2904,6 +2904,41 @@ invented; these are the names to use when one lands.
 >
 > #### D40 — A MALFORMED `hello` LEAVES A LINK SILENTLY HALF-DEAD, AND D30's FIX CREATED IT
 >
+> **OWNED BY HUB from 2026-08-23** (`link-server.ts` / `hub-router.ts`, which it already owns).
+> Investigating before building, because the honest fix may change link-refusal behaviour.
+>
+> **Two premises corrected before work started, both checked in source:**
+>  - The `refuse` enum is **not reserved to two reasons — it has seven**
+>    (`contract/src/cluster.ts:643`: `protocol-major`, `unknown-node`, `bad-signature`,
+>    `stale-principal`, `node-disabled`, `frame-too-large`, `internal`). Adding a reason is not a
+>    contract widening; the schema's own "values, not prose" rationale invites one when an operator
+>    would otherwise fix the wrong thing.
+>  - What IS reserved to exactly one reason is the **client's retry semantics**: `link-client.ts`
+>    sets `suppressReconnect = true` **only** for `protocol-major`; every other refusal retries on
+>    backoff. That is the real decision surface.
+>
+> **So the question is not "may we add a reason" but "is a malformed `hello` terminal or transient?"**
+> — and both existing answers are bad alone. Retried: a deterministic malformation (version skew, a
+> bug in the spoke's frame builder) becomes a hot reconnect loop against a hub that refuses
+> identically every time. Suppressed: a node is permanently dead on what may be a transient encoding
+> fault.
+>
+> **SPLIT IN TWO. Only the second half is an owner decision.**
+>  1. **Stop `health` lying — no contract change, no refusal, correct under every answer to (2).**
+>     D40's actual harm is that the node is never served *while health reads `online`*, which is what
+>     makes it undiagnosable. A connection that has not completed a handshake must not report
+>     `online`. Do this first and independently. Worth checking whether the HUB's view and the
+>     SPOKE's `health` already disagree in this state — if the hub knows the node is unserved, the
+>     repair signal exists on one side and only needs plumbing.
+>  2. **Whether to refuse, and with what retry semantics.** A third option exists that neither
+>     current semantic gives: a **bounded-attempt** refusal (refuse, allow retry, and after N
+>     identical refusals stop and surface it). It may be what this case wants, but it is a new
+>     client-side behaviour and therefore a decision, not a fix.
+>
+> `link-client.ts` carries the D38 watermark wiring and is load-bearing for D44 — flag before
+> touching it.
+>
+>
 > Found 2026-08-23 while wiring D38, by the same agent that wrote D30's fix. **Not a hypothetical —
 > it is why the watermark provider validates rather than trusting a number the node computed itself.**
 >
