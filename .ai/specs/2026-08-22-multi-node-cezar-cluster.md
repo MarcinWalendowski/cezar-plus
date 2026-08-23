@@ -2413,6 +2413,105 @@ invented; these are the names to use when one lands.
 > > 5,000-line record accumulates contradictions faster than one reader can notice them, and the
 > > stale entry is usually the one a reader hits FIRST.
 > >
+> > **5. The `/cluster/active` falsehood is LATENT, not live — and sharper than "an empty array".**
+> > Both surfaces are genuinely gated: the CLI returns early on `!clusterEnabled(process.env)`
+> > (`index.ts:1425-1428`, before the `switch`), and the route 409s via `requireCluster`
+> > (`cluster-routes.ts:427-430`). `clusterEnabled` is `env.CEZ_CLUSTER === '1'` — **exact string**,
+> > so unset, empty, `0` and `true` all read as off. So it is latent. But it is **one documented
+> > step from live**: this spec's own rollout is "set `CEZ_CLUSTER=1`, restart", and at that instant
+> > both surfaces begin lying with no error and no warning.
+> >
+> > **What makes it worse than a false empty:** `ClusterActiveResponse` already carries the field
+> > designed to separate the two cases, and the implementation fills it with the one value that
+> > defeats it. `contract/src/cluster.ts:552-556` documents `asOf` as existing *"so a caller can tell
+> > 'nothing is running' from 'nobody has reported recently'"* — and both call sites hardcode
+> > `asOf: new Date().toISOString()`, i.e. wall-clock **now**. The response does not merely say
+> > "nothing in flight"; it says "nothing in flight, **as of this instant**", which is the most
+> > convincing possible form of a false negative.
+> >
+> > **The dark region is bigger than one dead writer.** `watchRunProjection` and
+> > `ClusterRunProjectionObserver` also have 0 production callers, so nothing ever *produces* a
+> > `ClusterRemoteRun`; `runs-remote.json` has **no writer anywhere in the repo**. `collectPresence`
+> > (`peers.ts:547-580`) never populates the presence frame's `active` field although the schema
+> > declares it. The one genuinely-maintained signal is `lastSeenAt`, written by `markNodeSeen`
+> > (`hub-router.ts:591`) — which is what an honest answer can be built from.
+> >
+> > **Three docblocks are part of the defect, and one of them is dangerous.** The CLI help
+> > (`index.ts:1385-1387`) reads: *"what is in flight across the cluster … **Read this before
+> > starting work in a repo somebody else may already be holding.**"* That instructs an operator or
+> > an agent to use an always-empty answer as a **collision safety check**, and promises "touched
+> > paths" that `clusterActiveRunsFrom` hardcodes to `paths: []`. `cluster-routes.ts:170` asserts as
+> > present tense that the route reads *"this node's own locally-mirrored state"*; there is none.
+> > The in-file precedent for the right posture is `linkHealth()` at `:319-325`, which handles the
+> > identical situation correctly: *"until then **it reports what is true** — a link that has never
+> > been established."*
+> >
+> > **DECISION (mine, 2026-08-23): option (b) — make the surfaces honest before wiring anything.**
+> > Not (a) wire the writer (that is Milestone D, weeks, ops-gated), not (c) delete them (throws away
+> > a correct read path and its contract), not (d) leave it (indefensible when the rollout step is to
+> > set the flag). The contract already specified the discriminator; the defect is that the
+> > implementation ignores it. `asOf` becomes correct by itself once D lands, so nothing is wasted.
+> > Compute `asOf` from the roster's `lastSeenAt` rather than `new Date()`, make it optional with
+> > **absent = nothing is tracked**, and branch the CLI three ways (no linked nodes / linked but
+> > never reported / reported).
+> >
+> > **The separating test, and why the clock must be frozen.** Two scenarios are byte-identical
+> > today — an untracked cluster and a tracked-but-idle one both return
+> > `{runs: [], asOf: <now>}` — so `expect(untracked).not.toEqual(idle)` is RED today and green
+> > after. The trap inside the trap: without pinning the clock through the already-declared
+> > `deps.now` (`cluster-routes.ts:233`), the two `new Date()` calls differ by a millisecond and that
+> > assertion goes **green today for the wrong reason** — jitter, not honesty. Injecting the clock is
+> > not a convenience; it is what makes the assertion capable of failing. Note also that no existing
+> > test reads this route's BODY with the flag on: `cluster-routes.test.ts:215-218` asserts only
+> > `status === 200`. The lie is untested in both directions.
+> >
+> > **6. The placement hot-spot is CONFIRMED — latent, and pinned by nothing.** Between two presence
+> > beats, placements 2..N see byte-identical candidates to placement 1. The only line reading load
+> > is `placement.ts:108` (`parallel: capacity.maxParallel - capacity.active`); `hub-dispatch.ts:263`
+> > passes `input.candidates` through unadjusted, and the pending-dispatch map `records` is **never
+> > consulted during placement**. The one guard that does run, `outstandingFor(input.todoId)`, is
+> > keyed on **todoId, not nodeId**, so N distinct todos sail past it. Measured against unmodified
+> > HEAD with a driver over a two-node roster and six distinct todos in one presence window:
+> > `{"node-a": 6}`. With an optimistic decrement applied: `{"node-a": 4, "node-b": 2}`.
+> >
+> > **D47's characterisation was right: permanent → 30 seconds, not fixed.** Pre-D47 every node beat
+> > `active: 0` forever, so `rankByHeadroom` fell through to the `nodeId` ascending tiebreak
+> > (`placement.ts:199`) and pinned permanently on the lexicographically-first node. D47 makes the
+> > beat carry real counts, and `DEFAULT_HEARTBEAT_MS = 30_000`, so the pin now rotates every ~30s.
+> >
+> > **Nothing ages the claim, at either end.** `PlacementCandidate` has no timestamp field at all,
+> > and `placeRun` has no clock. `corpusStalenessMs` is declared at `placement.ts:59` and — verified
+> > with `grep -a` — has **exactly one occurrence in the repo: that declaration**. Nothing reads it.
+> > `capacityAt` is written (`peers.ts:170`), forwarded (`wire.ts:61`), and documented in the
+> > contract as existing *"so the cockpit can render its [age]"* — and read by **no logic anywhere**.
+> > So a wedged process holding its socket open with a 30-minute-old "idle" boast stays a placement
+> > target indefinitely. This contradicts this spec's own rule that *"a spoke's capacity is a claim,
+> > not a measurement"*: the panel is required to label the age, and placement consumes the same
+> > claim with no age at all.
+> >
+> > **The negative-control finding, with one honest refutation.** `placement.test.ts` is NOT built on
+> > all-zero candidates — it has `loaded` (active 6) vs `idle` (active 0) — so the audit's blanket
+> > claim was wrong there, and neutering the load comparison does turn it red (2 failed / 26 passed).
+> > But every *other* level is blind: all 31 `candidates:` arrays in `hub-dispatch.test.ts` are
+> > **single-element**, and the merge-gate e2e's `candidate()` helper hardcodes one node at
+> > `{maxParallel: 4, active: 0}`. Under the same mutation, `hub-dispatch.test.ts` passes 33/33 and
+> > `cluster-link-activation.test.ts` passes 8/8. **A one-candidate placement cannot distinguish any
+> > ranking rule from any other.** And the defect is unpinned in the other direction too: applying
+> > the actual fix leaves all three suites green (69/69), so nothing would notice it being fixed.
+> >
+> > **Fix belongs in `hub-dispatch.ts`, not `placement.ts`** — `placeRun` is pure and correct given
+> > its inputs, and subtracting `request.activeRuns` inside it would double-count, since those are
+> > the same runs as `capacity.active` by definition. What the beat cannot yet include is exactly
+> > what `records` already holds: this hub's own pending dispatches. ~8 lines, self-reconciling, no
+> > new state. The test that fails pre-fix needs **two candidates with DIFFERENT loads held constant
+> > across six distinct todos** — plus a mirror control dispatching ONE todo and asserting it lands
+> > on the idler node, so the new test proves spread came from in-flight accounting rather than from
+> > a broken ranking.
+> >
+> > *(Both 5 and 6 are latent: `createHubDispatcher` still has zero production callers. They become
+> > real the moment Milestone C's hub half is wired, which makes them prerequisites for that work,
+> > not follow-ups to it.)*
+> >
 > > **Standing constraints, unchanged:** push to `origin` only, never `upstream`, never a bare
 > > `git push`. Do NOT merge PR #9 (it auto-deploys to `prod-host`, where the owner's agents
 > > run — the owner's call, and the hard prerequisite for any E2E). Do NOT run the Access
