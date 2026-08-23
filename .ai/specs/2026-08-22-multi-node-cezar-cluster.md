@@ -2640,12 +2640,19 @@ before any of it ships** — see the D9 note above on `spoolDir` and the image-e
 
 ### Known open questions, carried rather than closed
 
-- **May the periodic reconcile write unattended?** `PeriodicReconcileOptions.run`'s docblock says the
-  production caller is a *non-dry-run* `reconcileAll`; D21 says the real merge stays owner-gated.
-  Both statements are live in the tree. The divergence in question is ~110 one-side-only rows, which
-  is exactly the class a non-dry-run pass merges. **Arming it is owner-gated.** The wiring now exists
-  (`cluster/reconcile-wiring.ts`), so this is a decision, not work. Whichever way it goes, correct the
-  losing statement in place.
+- **May the periodic reconcile write unattended? — the CONTRADICTION is resolved; the DECISION is
+  still the owner's.** Measured 2026-08-23: `startPeriodicReconcile` has **zero production callers**
+  (two references outside its own tests — its definition, and a note in `server/cluster-routes.ts`
+  recording that activation deliberately does not arm it), and `dryRun` is a required option with no
+  default. So the docblock's "in production, a non-dry-run `reconcileAll`" was describing a caller
+  that does not exist — an intent written in the present tense, which a reader would fairly take
+  either as "a non-dry-run pass is already running" or as "arming one non-dry-run is just
+  implementing the documented design". Neither is true. The docblock is now corrected in place, with
+  the original kept below it.
+  **What is still open:** whether the first real caller runs dry or not. The wiring exists
+  (`cluster/reconcile-wiring.ts`), so this is a decision, not work. The divergence in play is ~110
+  one-side-only rows — exactly the class a non-dry-run pass merges — so it stays owner-gated.
+  Whoever arms it must correct that docblock again to say which way it went.
 - **`authFailureId` / `provider`** in `server/provider-auth-runtime.ts` — classified `safe` in the
   relay inventory, but a cross-node retry-proxy risk could not be ruled out. Worth a second look
   before relay ships.

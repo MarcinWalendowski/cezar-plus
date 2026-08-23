@@ -377,10 +377,33 @@ export async function reconcileAll(options: ReconcileOptions): Promise<Reconcile
 
 export interface PeriodicReconcileOptions extends ClusterHomeOptions {
   intervalMs: number;
-  /** One pass: in production, a non-dry-run `reconcileAll` against every peer this node is linked
-   *  to (peer enumeration is `cluster/peers.ts`'s pairing store, out of this package's scope — see
-   *  the module header); a test supplies a double directly, so the scheduling guarantees below are
-   *  provable without depending on that module landing first. */
+  /**
+   * One pass.
+   *
+   * **CORRECTED 2026-08-23 — there is no production caller, so this described one that does not
+   * exist.** Verified: `startPeriodicReconcile` is referenced in exactly two places outside its own
+   * tests — its definition here, and a docblock in `server/cluster-routes.ts` recording that
+   * activation *deliberately does not arm it*. Nothing constructs these options in production, and
+   * `dryRun` is a REQUIRED field on `ReconcileOptions` with no default, so there is no standing
+   * behaviour for this sentence to have been describing.
+   *
+   * This matters because the original text was written in the present tense and directly
+   * contradicts D21, which keeps the real merge owner-gated. A reader hitting it would reasonably
+   * conclude either that a periodic non-dry-run reconcile is already running (it is not), or that
+   * arming one non-dry-run is simply implementing the documented design (it is not — it is the
+   * decision D21 reserved). The divergence in play is ~110 one-side-only rows, which is exactly the
+   * class a non-dry-run pass merges, so guessing here is expensive.
+   *
+   * What is true today: a test supplies a double directly, which is what makes the scheduling
+   * guarantees below provable without depending on peer enumeration. Whoever arms the first real
+   * caller owns the dry-run decision, must get it from the owner, and must correct this block again
+   * to say which way it went. Original text, describing an intent rather than a caller:
+   *
+   * > in production, a non-dry-run `reconcileAll` against every peer this node is linked to (peer
+   * > enumeration is `cluster/peers.ts`'s pairing store, out of this package's scope — see the
+   * > module header); a test supplies a double directly, so the scheduling guarantees below are
+   * > provable without depending on that module landing first.
+   */
   run: () => Promise<unknown>;
   /** Stamped on success only. A reconcile that threw must leave the previous timestamp alone, or
    *  the health signal reports freshness it does not have. */
