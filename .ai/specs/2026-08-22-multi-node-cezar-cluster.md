@@ -2425,6 +2425,52 @@ invented; these are the names to use when one lands.
 > > wrong cause** (it says the optional field was what started the todo forever); the commit is pushed
 > > and is not being rewritten, so THIS is the correction of record.
 >
+> ### D47 — EVERY NODE REPORTS ITSELF PERMANENTLY IDLE. Found 2026-08-23 while surveying C-e. NOT an owner decision — it is a bug, and Milestone C is what arms it.
+>
+> **`ClusterCapacity.active` and `.heavyActive` are pinned at 0 on every presence beat every node has
+> ever sent, no matter how many runs are in flight.** `peers.ts:555` is
+> `options?.liveCapacity ?? { active: 0, heavyActive: 0 }`, and the ONLY production caller,
+> `spoke-runtime.ts:310`, calls `collectClusterPresence({ env, warn })` — no `liveCapacity`. Grepped
+> `-a` across `packages/cezar/src`: the single other mention in the tree is `peers.test.ts:583`.
+>
+> The docblock at `peers.ts:531` is honest about the seam and says exactly why it is safe:
+> *"the caller that DOES hold one injects the live numbers here. Absent means nothing has wired live
+> counts in yet: both report 0, which is an honest 'idle' claim rather than a refusal to build a
+> frame at all."* **No caller ever did.** And the justification is time-limited in a way the comment
+> does not say: "an honest idle claim" is true while nothing places work on it, and becomes a **lie
+> on the wire** the first time `placeRun` reads it — which is Milestone C step 1. This is the
+> D24/D43 rule for the fourth time on this branch: *generate the wiring or make the field required;
+> never document that a caller ought to set it.*
+>
+> **What it does to placement, traced rather than assumed.** `headroom()` is `maxParallel − active`
+> (`placement.ts:106`); `rankByHeadroom` (`:193`) sorts on `parallel`, then `heavy`, then `nodeId`
+> ascending; `placeRun` (`:90`) returns `placed` whenever `headroom(best).parallel > 0`. With
+> `active` constant at 0:
+>  - ranking is by each node's **configured bound**, never by its actual load, so a node running four
+>    tasks and a node running none are indistinguishable and the tiebreak decides;
+>  - among equal bounds the winner is **alphabetically first by `nodeId`**, forever, so every
+>    dispatch piles onto the same node;
+>  - `config.ts:57` is `.min(1).max(16).default(2)`, so `maxParallel` can never be 0 — which makes
+>    **the capacity-`queued` branch of `placeRun` structurally unreachable in production**, not
+>    merely unlikely. D12's "all eligible nodes at capacity" can never be reported.
+>
+> The spoke's own `capacityAvailable` check in `dispatchRefusalReason` then becomes the only thing
+> that stops an overloaded node — turning the REFUSAL path into the load-bearing one, which is the
+> exact inverse of what D14 designed ("placement filling nodes up to their OWN advertised limits").
+>
+> **The suite cannot see any of this, and is not weak.** `placement.test.ts` is thorough — it ranks
+> `loaded` (`active: 6`) against `idle` (`active: 0`) at `:151`, exercises the full capacity-queued
+> branch at `:188-202`, and `peers.test.ts:583` passes `{ active: 3, heavyActive: 1 }` and proves it
+> lands on the frame. Every one of those tests constructs the value the production caller never
+> supplies. **100% covered, 0% reachable** — the same shape as D23-D26, and the reason a green suite
+> is not evidence here.
+>
+> **The fix is free if it rides Milestone C, and expensive if it does not.** The real numbers are
+> `semaphore.busy()`, `semaphore.heavyActive()` and `semaphore.maxParallel()` (`workflows/run.ts`
+> `:1628`/`:2269`/`:3155`), which live on the `RunManager` — the very reference C-d is threading into
+> the spoke so it can EXECUTE a dispatch. One wiring, two fixes. Do it in that change or the cluster
+> ships placing work by alphabetical order.
+>
 > ### D46 — CLUSTERED AUTOSTART STILL DOES NOT WORK. Bounded now, not correct. OWNER DECISION.
 >
 > D43's fix makes the loop converge; it does not make clustered autostart function. In the wired,
