@@ -4382,6 +4382,36 @@ To run one real task on this Mac, dispatched from the VPS hub:
 
 **Honest estimate of order:** C is larger than A and B combined, and 4 is most of it.
 
+**TWO TRAPS IN `workflows/run.ts`, handed over 2026-08-23 by the session that owns that region, and
+both verified in source before being written down here. Read these BEFORE writing step 4.**
+
+1. **Route a dispatched run's input through `queuedInputFromRecord` — do not rebuild it.**
+   (`run.ts:1998`, three callers today: `:2089`, `:2497`, `:2703`.) That helper exists *because*
+   `reviveQueuedRun`, `reattachBrokeredRun` and `reenterChain` each rebuilt a queued run's executable
+   input from the record, and **all three dropped `agentProfile`** — an explicit account pick was
+   silently downgraded across a restart, a hand-back or a re-attach, **while the record kept the value
+   the whole time**, which is exactly what hid it. Step 4 is "translate `dispatch` + the local todo
+   into a `StartRunInput`", i.e. **a fourth input-reconstruction path, and a node hand-off is the most
+   likely place to repeat the bug.** Verified: it now carries `task`, `model`, `runner`,
+   `agentProfile`, `generateFollowups`, `autonomous`, `worktree`. This is the same argument as
+   `cluster/wire.ts` (see B5) landing in someone else's region: one reconstruction, not a fourth copy.
+   The failure mode is silent and **the record keeps looking correct**.
+
+2. **`resolvePoolForDispatch` cannot be called speculatively — it advances the fairness cursor as a
+   SIDE EFFECT.** Verified at `workspace/agent-route-select.ts:208`: *"The cursor advances HERE, at
+   the choice, not when the run finishes."* So if a cluster node ever asks "which account *would* this
+   run take?" — for placement, for a pre-dispatch capability check, or for a refusal that names the
+   account — calling it burns a turn of the rotation for a run that may never start. **Use
+   `selectPoolAccount` (`:108`) directly over filtered candidates for any pure query**; it takes the
+   store and `inflight` as inputs and returns `PoolChoice | undefined` without writing. Nothing in
+   either name tells you this.
+
+Neither is hypothetical: (1) shipped as a real production defect, and (2) was hit while building the
+out-of-quota reroute. `run.ts` is otherwise settled — `cf2f0796` is committed, pushed and deployed,
+that worktree is clean, and the peer's footprint is clustered at `~456`, `~1357`, `~1904/1998`,
+`~2795/2871/2932`. Cluster-routing-shaped work will land near 2795-2932; lifecycle-shaped work
+probably misses it entirely.
+
 **Implementation detail for step 4, surveyed 2026-08-23 so the next session need not re-derive it.**
 The spoke does not need new run machinery — it needs to call the existing entry point with a
 faithfully translated input:
