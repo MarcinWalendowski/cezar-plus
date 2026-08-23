@@ -4590,7 +4590,7 @@ specifically: `author` is `inheritAuthor(todo.author, 'todo-autostart')` — a c
 provenance spec (`2026-08-21-task-author-provenance`) is the thing that makes a cross-node run
 attributable at all.
 
-**C-a2. THE SPOKE MUST NOT STAMP THE TODO. Extract the resolve→start half of
+**C-a2. ~~THE SPOKE MUST NOT STAMP THE TODO.~~ SUPERSEDED SAME DAY BY C-a3 BELOW — the premise is false and the spoke's `humanIntent: true` stamp is correct. Kept unchanged for the D46 trace, which stands. Extract the resolve→start half of
 `startAutostartTodo`, NOT the `markStarted` half — they differ, and copying the whole body walks
 straight into D46.** Traced 2026-08-23:
 
@@ -4622,6 +4622,43 @@ an agent works on it — the D46 symptom, reached by a different road.
 dispatch path routes around it.** D46 is about *autostart* under clustering, which stays option 1
 (`CLUSTERING_OFF`, honest, single-node). Do not "fix" D46 as a prerequisite for C, and do not let C
 quietly depend on it being fixed.
+
+**C-a3. CORRECTED 2026-08-23, hours after C-a2 was written — C-a2's PREMISE IS FALSE, AND SO IS
+HALF OF ITS CONCLUSION. Measured against the code, not argued.**
+
+C-a2 above says *"the hub already granted this claim when it chose the node"* and concludes that the
+hub should stamp. **The hub grants no claim.** `hub-dispatch.ts#dispatch` places, builds the frame,
+records a pending attempt in memory, and sends — it never writes `startedTaskId` anywhere. Nor
+*could* it: a claim IS `startedTaskId` (`hub-apply.ts#claimFields`, and `applyOpAtHub` reads `''` as
+unclaimed), and the run id does not exist until the spoke's `startRun` mints it. **So there is no run
+id for the hub to claim with, and "the hub stamps on accept" is not implementable as written.**
+
+The sequence the architecture actually supports is the one already built: the spoke starts, mints the
+id, writes the claim **optimistically-pending**, and the ordinary outbox flush carries it to the hub,
+which SERIALIZES — the second claimant gets `accepted: false, reason: 'already-started'` carrying the
+winner's fields. That is D9a working as designed, and it is why **`humanIntent: true` on the spoke's
+`markStarted` is correct here, not the forbidden shortcut C-a2 called it.** What that flag actually
+gates is "skip the round trip, write pending" — precisely what a node acting on a hub-issued dispatch
+needs. The flag is named for D15a's human case and reads wrong at this call site; the behaviour is
+right. Say so at the call site rather than picking a different flag.
+
+**But the hazard C-a2 was reaching for is real, and it has a proper home.** `dispatch()` today has
+**no guard against dispatching the same `todoId` twice while one attempt is still pending** — it
+places and sends unconditionally. Two dispatches for one todo to two nodes both start, and the loser
+finds out only when its claim op is refused, hours in. That is exactly D41 ("the double-start is
+reported, not prevented"), reached by the dispatch road.
+
+**The fix belongs in `hub-dispatch.ts`, not in the spoke's stamp:** refuse to dispatch a `todoId` that
+already has a `pending` or `accepted` record. It is in-memory, same scope as the store that already
+exists, and costs nothing. It does not close D41 in general — a hub restart forgets the pending set,
+and a spoke's own local autostart can still race a dispatch — but it closes the case this feature
+creates, which is the case this feature owes.
+
+**The lesson, recorded because it cost a wrong instruction to an agent:** "the hub already granted the
+claim" was inherited from D9a's *design intent* and never checked against `hub-dispatch.ts`, which had
+been written that same hour. A premise about a module written this session is not a premise; it is a
+guess with good provenance. The agent implementing it checked and was right; the instruction was
+wrong.
 
 **C-b. STEPS 3 AND 4 MUST LAND IN ONE CHANGE. Step 3 alone is strictly worse than today.** Today
 `spoke-runtime.ts:629`'s `handleDispatch` refuses every dispatch with `dispatch-not-accepted`, and
