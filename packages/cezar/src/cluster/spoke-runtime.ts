@@ -834,7 +834,7 @@ export function startSpokeRuntime(deps: SpokeRuntimeDeps): SpokeRuntimeHandle {
     // todo yet — and BOTH must be checked before the accept reply goes out, never after: sending
     // `outcome.reply` and then failing to start is exactly the lie C-b forbids ("tells the hub
     // accepted and then does nothing"). Checked here, before any reply is sent, so that once the
-    // accept is on the wire, starting the run is a plain `manager.startRun()` call, not a second
+    // accept is on the wire, starting the run is a plain call into the manager, not a second
     // place this can still go wrong.
     const workflow = resolveDispatchWorkflow(frame.workflow);
     if (!workflow) {

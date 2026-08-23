@@ -2347,13 +2347,214 @@ invented; these are the names to use when one lands.
 > will know what to do next and what not to touch. (Added 2026-08-23 after the block tripled in one
 > day — a handoff nobody can finish reading is not a handoff.)
 >
-> ### WHERE THE WORK IS, 2026-08-23 — Milestones A and B are CLOSED. Milestone C is STARTED.
+> ### WHERE THE WORK IS, 2026-08-23 (18:35 UTC) — A and B CLOSED. **C is HALF-WIRED, not closed.**
+>
+> **CORRECTED 2026-08-23, same day, by me — this heading said "Milestones A, B and C are CLOSED. D is
+> next." for about fifteen minutes and it was wrong.** Measured with a positive control rather than
+> assumed:
+>
+> ```
+> grep -ran "startSpokeRuntime"   --include='*.ts' packages/ | grep -v '\.test\.ts' | grep -v /dist/   → 9   (positive control: the grep works)
+> grep -ran "createHubDispatcher" --include='*.ts' packages/ | grep -v '\.test\.ts' | grep -v /dist/   → 2   (both are COMMENTS / the definition itself)
+> grep -ran "sweepUnanswered"     --include='*.ts' packages/ | grep -v '\.test\.ts' | grep -v /dist/   → 6   (all inside hub-dispatch.ts: docblock, interface, definition)
+> grep -ran "dispatchCorrelation" --include='*.ts' packages/ | grep -v '\.test\.ts' | grep -v /dist/   → 3   (the optional field, its comment, its `?.` call)
+> ```
+>
+> **The two halves of Milestone C are in completely different states, and calling C "closed" hid
+> that:**
+>
+> | half | state |
+> | --- | --- |
+> | **SPOKE** — a dispatch that ARRIVES really starts a run and replies with `accepted: {dispatchId, runId}` | **WIRED AND LIVE.** Full boot chain traced hop by hop: `index.ts:770` builds the `WorkspaceSemaphore` → `server.ts:7448` → `cluster-routes.ts:1172` → `spoke-runtime.ts:390`. |
+> | **HUB** — `hub-dispatch.ts`, 420 lines + 803 test lines, 33 tests, every guard mutation-proven | **ZERO PRODUCTION CALLERS.** Nothing constructs `createHubDispatcher`. Nothing arms `sweepUnanswered`. Nothing wires `dispatchCorrelation` into `startClusterRuntime`. |
+>
+> **So in production today, no dispatch is ever emitted**, and every line of the hub's dispatch
+> machinery is unreachable. That was a deliberate boundary — step 1's live trigger was left unwired
+> on purpose, because arming it changes the behaviour of an auto-deploying hub — and the module's own
+> docblock says so plainly. What was NOT deliberate is my summary rounding it up to "closed".
+>
+> **This is the branch's signature defect, and my own E2E has it.** Scenario 4 in
+> `cluster-link-activation.test.ts` constructs `createHubDispatcher` directly, so it proves the
+> MECHANISM and not the WIRING — the same shape as `peers.test.ts` passing `liveCapacity` while
+> production supplied none (D47), which is the defect this whole branch keeps re-learning. The E2E's
+> value is real and its mutation table stands; the claim it supports is just narrower than
+> "Milestone C is done". **The honest sentence is: given a dispatch, the spoke runs it and says so —
+> and nothing yet produces a dispatch.**
 >
 > Branch `feat/multi-node-cluster`, PR #9, **deliberately unmerged** — the owner's call, and it is
-> also the hard prerequisite for any E2E, since `prod-host` tracks `main` and auto-deploys.
-> The owner's condition, verbatim: *"let's merge where we have e2e working version, not now."* So
-> the merge gate is **one real task dispatched from the VPS hub and run on the Mac**, which is
-> exactly Milestone C.
+> also the hard prerequisite for any CROSS-MACHINE E2E, since `prod-host` tracks `main` and
+> auto-deploys. The owner's condition, verbatim: *"let's merge where we have e2e working version,
+> not now."*
+>
+> **CORRECTED 2026-08-23 — the merge gate was mis-stated above as "one real task dispatched from
+> the VPS hub and run on the Mac", i.e. as ops-blocked.** It is not. The gate is a demonstration
+> that a dispatched run really starts on its target, and that is now **proven in-process** by the
+> Milestone C E2E (`cluster-link-activation.test.ts`, scenario 4, `f6a9bad6`). What remains
+> genuinely ops-blocked is only the *cross-machine* demonstration. Whether a two-PROCESS E2E on one
+> machine — separate data dirs, a localhost link, no deploy — would satisfy the owner is the open
+> question, and it is the cheapest path to merge if the link does not hard-require the tunnel.
+>
+> **Milestone C landed in `f6a9bad6`** (pushed to `origin` at 18:14 UTC; note it sat committed and
+> UNPUSHED for a while, so verify `git rev-list --left-right --count origin/<branch>...HEAD` rather
+> than trusting a commit's existence). What it does: the hub's `hub-dispatch.ts` correlates a
+> dispatch, the spoke's `handleDispatch` really calls `startTodoRun`, and the reply carries
+> `accepted: { dispatchId, runId }` so the hub can tell an acceptance from an ordinary freshness
+> beat. Two contract changes made it expressible: the optional `accepted` block (with a `.refine`
+> forbidding `refused` and `accepted` together) and a ninth refusal reason, `'start-failed'`.
+>
+> **The E2E is mutation-proven, and row C is why the whole exercise is worth doing:**
+>
+> | mutation | E2E | `tsc --noEmit` |
+> | --- | --- | --- |
+> | A. `runId: result.run.id` → `runId: dispatchId` | RED | — |
+> | B. reply `accepted` but never call `startTodoRun` | RED | — |
+> | C. drop the `accepted` block — **the bug that actually existed** | RED | **EXIT=0, ZERO LINES** |
+>
+> Row C is the seam gap that shipped: the hub consumed `accepted.runId`, the spoke never sent it,
+> and the typechecker was silent **because the field is optional**. That is this branch's signature
+> defect in its purest form, and it is the fourth time it has appeared (D23-D26, D47, D48).
+>
+> **Box gate for `f6a9bad6`, run 18:16 UTC on `prod-host` in `/var/lib/cezar/gate-cluster`**
+> (manifest hash `2f3a7711580c9e4c3806e1723ce63d9a` verified identical on both sides first, so
+> `node_modules` was reused and the tree was NOT moving): typecheck 0, build 0, test:unit 0,
+> test:package 0. Ownership audit 0. **The full suite came back 3 failed / 598 passed / 2 skipped
+> (603 files), 11216 tests passing — NOT the single standing red.** Do not read that as two new
+> regressions; both extra reds were run down, and only one was real:
+>
+> | red | verdict |
+> | --- | --- |
+> | `knowledge/catalog.test.ts` C18 index-cost budget | the STANDING red. Expected, unchanged. |
+> | `runs/task-author-coverage.test.ts` — *every `.startRun(` call passes an author* | **REAL, and mine.** Fixed. |
+> | `workflows/workspace-parallel.test.ts` — *discards its worktrees and keeps its branches* | **NOT deterministic** — passes 2/2 isolated on an idle box. Under investigation. |
+>
+> **The author-coverage red is the most instructive thing the box gate has produced.** The gate
+> greps `src/` for `.createRun(` / `.startRun(` / `startVariants(` call sites and fails any that does
+> not pass an author. It flagged `cluster/spoke-runtime.ts: .startRun()` — **which is a COMMENT, not
+> a call.** My prose said *"starting the run is a plain `manager.startRun()` call"*, and the gate
+> scans raw source text without stripping comments, so English tripped a structural gate.
+>
+> Two things worth carrying forward from it:
+>
+> 1. **This is the exhaustive-shared-gate failure mode, exactly.** The red is in a file this branch
+>    never touched, its own suites were green, and no per-file run would ever have shown it. Only the
+>    full gate sees it — which is the whole argument for running the full gate on the box rather than
+>    trusting the files you edited.
+> 2. **The gate has a real blind spot: it treats comments as code.** That cuts both ways — prose can
+>    trip it (what happened), and prose could equally SATISFY it, since a comment containing the word
+>    `author` next to a `.startRun(` would pass a check no code backs. **Recommended fix: strip
+>    comments before the sweep.** That strictly improves it in both directions. I have NOT made that
+>    change: `task-author-coverage.test.ts` is a shared review gate whose own docblock says a new
+>    forwarder "has to be added here deliberately, which is the review moment", so widening or
+>    narrowing it deserves its own decision rather than a drive-by edit from a branch it caught.
+>
+> **What I did instead was reword my comment**, which is not lowering the floor: the hazard the gate
+> defends is a real `startRun` site with no author, and a comment is not a site, so removing a false
+> positive leaves the floor exactly where it was. Negative control run rather than assumed — with the
+> original comment restored the gate goes RED naming that file, with the reworded comment 8/8 green,
+> and the file was restored to md5 `e267d0d837382adae78ea404abc85b03`.
+>
+> **The third red ROTATES between runs — settled by a second full run, and the answer was not the
+> one a single run suggested.** Same tree, same box, back to back:
+>
+> | | run 1 (18:17) | run 2 (18:26) |
+> | --- | --- | --- |
+> | 1 | `catalog.test.ts` C18 | `catalog.test.ts` C18 |
+> | 2 | `task-author-coverage.test.ts` | `task-author-coverage.test.ts` |
+> | 3 | **`workflows/workspace-parallel.test.ts`** | **`workflows/auto-resume.test.ts`** |
+>
+> Two reds reproduce exactly; the third **moved to a different file**. (Reds 1 and 2 reproducing is
+> expected: C18 is the standing red, and the author-coverage fix was made on the Mac AFTER the tree
+> was rsynced to the gate dir, so the gate dir still carries the original comment.)
+>
+> **So there is no single broken test — there is a POOL of timing-sensitive tests, of which roughly
+> one fails per full run.** Both members seen so far are in the same domain and are both about
+> timing rather than logic: `workspace-parallel` asserts a failed run leaves the checkout clean and
+> failed on `git status --porcelain` returning `?? .ai/` (the per-project state dir still present
+> after the discard — a cleanup race); `auto-resume` failed on *"watchdog: an idle queue with no
+> appointment behind the hold starts work anyway"* — a watchdog timer test. `workspace-parallel`
+> passes 2/2 isolated on an idle box.
+>
+> **Attribution, stated carefully because it would be easy to get self-servingly wrong in either
+> direction.** Both files exist in `main`. `workspace-parallel` is untouched by this branch;
+> `auto-resume` WAS touched, by `b862ef05` (*move a parked task to another engine*) — a
+> retarget/queue commit, not a cluster commit. So this is **not a cluster regression**, and equally
+> it is **not exonerated as "pre-existing"**: the GATE4 baseline ran 584 test files and these runs ran
+> 603, and more files under a fixed `CEZ_VITEST_MAX_WORKERS=3` means more contention. A suite that
+> cannot run clean twice in a row is a real quality signal about the queue/watchdog area, and it is
+> worth someone's attention even though it blocks nothing here.
+>
+> **Honest status of this branch's gate: one standing red, one real red found and fixed, and a
+> rotating timing flake in the workflows/queue domain at a rate of about one per full run.** Not
+> green, and not broken by the cluster either.
+>
+> Baseline for comparison, GATE4: **1 failed / 581 passed / 2 skipped (584 files)**.
+>
+> ### PR #9 IS NOT "THE CLUSTER BRANCH" — measured 2026-08-23, and it changes the merge decision
+>
+> `feat/multi-node-cluster` is **61 commits** ahead of `main` and adds **34 test files**. Only some
+> of that is the cluster. The branch also carries, at least:
+>
+> - `b862ef05` feat: move a parked task to another engine (retarget-task-to-another-engine)
+> - `daa52f87` fix: hold the account a usage limit was refused on, and say so
+> - `9e582f3c` fix: stop the queue and the spawn trading a held run back and forth
+> - `cf2f0796` fix: a step that pins its own runner resolves its own account
+> - codex resume-model work, `kb-submit-signing`, a bare-rollback argv trap
+> - four merge commits, three of them PR merges from `cez/…` branches
+>
+> **Every commit is authored as the same git identity**, because every agent commits as the owner —
+> so authorship separates nothing here and subject lines are the only signal.
+>
+> **Why this matters, and it cuts against the way the merge has been costed so far.** The merge has
+> been held on its RISK: merging auto-deploys to `prod-host`. Nobody has costed the other
+> side. Several of the commits above are not features at all but fixes to things production is
+> plausibly suffering today — an account not held after a usage limit refused it, a queue and a spawn
+> trading a held run back and forth. Holding PR #9 holds those too, and that cost has been invisible
+> because the branch is *named* after the cluster.
+>
+> Combined with the two measurements above — clustering is OFF on the box and proven inert with the
+> flag unset — the decision the owner is actually facing is: *merge 61 commits of which the cluster
+> portion is dark by default, or keep holding several production fixes to avoid deploying code that
+> does nothing until a flag is set.* That is a different question from the one that has been asked,
+> and it is theirs to answer either way. **The alternative worth pricing is splitting the branch**:
+> whether the non-cluster fixes can be cherry-picked to `main` on their own is not yet known.
+>
+> ### THE MERGE RISK IS SMALLER THAN IT LOOKS — measured on the box 2026-08-23, not argued
+>
+> The merge has been held partly because merging PR #9 auto-deploys to `prod-host`, where the
+> owner's real agents run. Two facts, both measured on the live box rather than inferred, bound that
+> risk:
+>
+> 1. **`CEZ_CLUSTER` is not set anywhere in the live service environment.** Not in `/etc/cezar/*.env`,
+>    not in any `/etc/systemd/system/cezar.service.d/*.conf`. There is no cluster identity or node
+>    file in the live data dir either (`/var/lib/cezar/loki-labs/.ai/cezar/` holds only the ordinary
+>    config, runs, todos, knowledge index and worktree leases). **Clustering is entirely OFF in
+>    production today**, and turning it on is a deliberate, separate act.
+> 2. **The flag-off suite is unusually strong, so "off means inert" is proven rather than assumed.**
+>    `cluster-flag-off.test.ts` carries the three things that make a negative claim mean something:
+>    a **negative control** (`with CEZ_CLUSTER=1 the same handshake is NOT destroyed`), a **floor**
+>    (`a path nothing has ever owned is destroyed under both flag states`), and an explicit guard
+>    against a vacuous comparison (`really composed a prompt — the comparison above is not two empty
+>    strings`). It also pins the disk (`writes nothing under ~/.cezar/cluster or .ai/cezar/cluster,
+>    even after every route is hit`), the timers (`arms no timer and says nothing`), and byte-identity
+>    of the agent system prompt with the flag on and off.
+>
+> **So merging deploys DARK CODE.** That is a materially different decision from "merging turns on a
+> distributed system on the box", which is how the risk has been carried until now. It remains the
+> owner's call, and this note argues for nothing — it only replaces an assumption with a measurement.
+>
+> **The same two facts set the price of the E2E.** A cross-machine demonstration needs `CEZ_CLUSTER`
+> deliberately set on the box, which is exactly the act that is currently absent — so the E2E is not
+> blocked by the merge so much as by that flag, and a two-PROCESS local E2E may avoid both.
+>
+> **And they locate the real security question.** `CEZ_ENV_PASSTHROUGH` on the box is exactly
+> `OP_SERVICE_ACCOUNT_TOKEN`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. The 1Password service
+> account reaches the whole `Loki Labs` vault — live Stripe, the Privy custody keys, and the platform
+> JWT signing key. A cluster dispatch is, by design, node A causing node B to run an agent with
+> instructions node A supplied; on that box, such a run holds vault access. Nothing is exploitable
+> while the flag is off, but **the day it is turned on, the blast radius of a dispatch is the vault**,
+> and that is configuration rather than code — so narrowing the passthrough is in the fix space
+> alongside hardening the dispatch path. Audit in flight; see the injection-surface findings below
+> when they land.
 >
 > **Read `### Milestone C — THE PLAN, surveyed and decided 2026-08-23` before writing any of it.**
 > Every seam in it was read in source that day rather than remembered. Six decisions, and three of
@@ -2465,7 +2666,37 @@ invented; these are the names to use when one lands.
 > accepted, and every available reason misstates why. Needs a ninth (`start-failed`), or the accept
 > reply needs a failure shape. Do not paper over this by reusing `at-capacity`.
 >
-> ### D47 — EVERY NODE REPORTS ITSELF PERMANENTLY IDLE. Found 2026-08-23 while surveying C-e. NOT an owner decision — it is a bug, and Milestone C is what arms it.
+> ### D47 — ~~EVERY NODE REPORTS ITSELF PERMANENTLY IDLE~~ — **FIXED 2026-08-23 in `f6a9bad6`**. Found while surveying C-e; closed the same day.
+>
+> **FIXED, and I am recording how badly I tracked that, because the tracking failure is the more
+> useful lesson.** The fix landed in `f6a9bad6` as part of Milestone C: `WorkspaceSemaphore` is now
+> threaded `index.ts:770` → `server.ts:7457` → `cluster-routes.ts:1177` → `spoke-runtime.ts:390`,
+> where the default `collectPresence` reads `semaphore.busy()` / `.heavyActive()` into
+> `liveCapacity`. When no semaphore is wired it **omits the option entirely** rather than sending
+> `{active: 0}` — the right call, because a fabricated zero is the D47 lie restated, whereas omission
+> falls through to `peers.ts`'s existing default and claims nothing new.
+>
+> Covered by `spoke-runtime.test.ts:704-780`, `describe('startSpokeRuntime — D47 live capacity in the
+> presence beat')`, which crucially does **not** override `deps.collectPresence` — so it drives the
+> real wiring rather than re-proving the plumbing the way `peers.test.ts` did. Independently
+> mutation-proven: dropping the `liveCapacity` spread reintroduces D47 verbatim and yields
+> `expected +0 to be 2` at `spoke-runtime.test.ts:753`; restored to md5 `cb15bf5ed663e3a794bb3ebf7e3479af`.
+>
+> **The tracking failure: I dispatched an agent to fix this AFTER it was already fixed**, from my own
+> spec, hours later, having personally written the memory that says a tracked findings list decays and
+> must be re-verified against the code before assigning. The agent read the code, found the fix in
+> place, and said so instead of inventing work — which is the behaviour to keep. *Re-verify a row
+> against the code before assigning it, and strike it in place the moment it closes.*
+>
+> **One real gap survives the fix, found during that verification and NOT closed:** the two one-line
+> pass-throughs `semaphore: deps.semaphore` at `cluster-routes.ts:1177` and `server.ts:7457` have no
+> test of their own. Every `startClusterRuntime` caller in `cluster-link-activation.test.ts` passes no
+> semaphore, and `spoke-runtime.test.ts` calls `startSpokeRuntime` directly, so it cannot see those
+> hops. **Delete either line and nothing goes red** — which is D47's own shape, one level up the call
+> chain. Left open deliberately rather than patched into a file three sessions are editing.
+>
+> The original entry follows unchanged.
+>
 >
 > **`ClusterCapacity.active` and `.heavyActive` are pinned at 0 on every presence beat every node has
 > ever sent, no matter how many runs are in flight.** `peers.ts:555` is
