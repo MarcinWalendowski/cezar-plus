@@ -2724,6 +2724,99 @@ invented; these are the names to use when one lands.
 > > nothing" case checks `warn` synchronously while the warn lands a tick later — a sibling test uses
 > > `vi.waitFor` for exactly that reason. It stayed green under a mutation the disk test caught.)*
 > >
+> > **22. THE WEDGE WITH NO DETECTION PATH — the most serious thing found today. A node can go
+> > permanently silent on the capacity channel while looking maximally alive on every other, and it
+> > is then PREFERENTIALLY selected for every placement.** Traced in code, not hypothesised:
+> >
+> > `spoke-runtime.ts:492` — `if (disposed || beatInFlight) return;` — **silent, no warn**, with
+> > `beatInFlight` cleared in a `finally` at `:513`. The beat calls `collectPresence` →
+> > `collectRepoFreshness` → `runGit` → `execFileAsync('git', args, { cwd, maxBuffer, encoding })`
+> > (`peers.ts:262`). **There is no `timeout` option.** A git that never returns — an `index.lock`
+> > wait, a credential prompt on a tty-less child, a stale network mount — leaves that promise
+> > unsettled, so the `finally` never runs and **`beatInFlight` latches `true` permanently.** Every
+> > subsequent tick returns at `:492` in silence; `outageWarned` fires only on a failed *send*, never
+> > on a skipped beat.
+> >
+> > **Nothing catches it, and each miss is for a different reason:** a hung child process does not
+> > block the event loop, so `ws` keeps ponging and `reap()`'s `!node.alive` branch never fires;
+> > `HELLO_DEADLINE_MS` cannot help because `reap()` filters `!helloReceived` and this node HAS
+> > hello'd (D40a covers the pre-hello wedge by construction); `flushOps` has its own independent
+> > latch and touches no git, so ops keep flowing. The node looks alive on every channel except the
+> > one carrying its capacity. `sweepUnanswered` would time out its dispatches — it has no caller.
+> > `markNodeUnreachable` — no caller.
+> >
+> > **And the pathology inverts the ranking.** The frozen claim is almost always `active: 0`, because
+> > a node wedges while idle far more often than while saturated. So `rankByHeadroom` scores it
+> > `maxParallel − 0` — **the highest headroom in the cluster** — and it stays top-ranked because it
+> > is the only node whose load never rises. It is not merely still eligible; it is a black hole that
+> > attracts everything.
+> >
+> > **THE PART THAT CHANGES WHAT WE SHIP: the in-flight hot-spot fix accidentally bounds this, and
+> > wiring `sweepUnanswered` would REOPEN it.** With the `pendingByNode` adjustment, each dispatch
+> > inflates the wedged node's `active` by one, so after `maxParallel` it finally shows no headroom
+> > and placement moves on — but those todos are **permanently stranded**, since `outstandingFor`
+> > blocks re-dispatch while a record is `pending` and nothing resolves it. Give the sweeper its
+> > timer and at 90s each record turns `unanswered`, which is terminal and does **not** block a fresh
+> > attempt; the pending count drops, the wedged node looks idle again, and everything is
+> > re-dispatched to it. **Steady state: a black hole absorbing `maxParallel` dispatches every 90
+> > seconds, indefinitely.** Whoever wires the sweeper reopens this without touching placement.
+> > **Fix them together, or not at all.**
+> >
+> > **23. Three corrections to how this file describes node liveness.**
+> > - **`lastSeenAt` is not "last contact" — it is "last PRESENCE BEAT".** `markNodeSeen` is called
+> >   from exactly one place, `hub-router.ts:591`, the `presence` case. `hello`, `ops`, `freshness`
+> >   and `ack` do not touch it. A node that reconnects, hellos, and flushes ops every five seconds
+> >   has a `lastSeenAt` frozen at its previous session.
+> > - **`lastSeenAt` and `capacityAt` can never disagree.** `peers.ts:168` and `:170` write the same
+> >   `now` in the same object literal. They are one age wearing two field names, and a reader will
+> >   eventually assume otherwise.
+> > - **`capacityAt` is `z.string().optional()`, NOT `.datetime()`** (same for `lastSeenAt`). So
+> >   `"yesterday"` parses, `new Date("yesterday").getTime()` is `NaN`, and **`NaN > bound` is
+> >   `false` ⇒ FRESH**. The correct handling is already written in a sibling file —
+> >   `dispatch.ts:293`: *"An unparsable fetch stamp cannot be proven fresh"* — copy it rather than
+> >   re-deriving it.
+> >
+> > **24. A LIVE, SHIPPED cockpit bug of exactly the `asOf` shape.** `cluster-section.tsx:455` renders
+> > the claim age as `{capacityAt ? … : null}`. With `capacity` present and `capacityAt` absent —
+> > reachable on disk, since they are independent optionals, `storedClusterNodeSchema` is
+> > `.passthrough()`, and `readPeers` salvages per entry — it renders **bare numbers with no age
+> > label at all**, while the docblock three lines up claims the case is handled (it handles absent
+> > *capacity*, not absent *capacity-at*). With a malformed stamp, `shortAge` returns `''` and it
+> > renders literally **"claimed  ago"**, which skims as "just now". Eighty lines up in the same file,
+> > `derivePresence` gets the identical question RIGHT by accident (`NaN < 60_000` is false ⇒
+> > `asleep`). One concept, two points, opposite outcomes, same file.
+> >
+> > **25. The staleness rule, decided: DE-RANK, never exclude.** `corpusStalenessMs` is not merely
+> > dead — it is the *unfinished half* of this rule, and its own docblock states the idiom: *"Stale
+> > knowledge has no natural error, so it is an INPUT here rather than a discovery at dispatch
+> > time."* So keep `placeRun` clockless (its header commits to purity) and pass
+> > `capacityAgeMs?: number` in as data, `undefined` meaning unknown meaning **stale**. Threshold
+> > `3 × DEFAULT_HEARTBEAT_MS = 90_000`: 2× is the cockpit's render freshness, and acting needs one
+> > more beat of slack than rendering because a single dropped send is documented as a normal
+> > transient; 3× also equals `DEFAULT_DISPATCH_TIMEOUT_MS`, so a node can never be both "fresh
+> > enough to place on" and "already timed out for its last dispatch".
+> >
+> > **Exclude is wrong for three reasons, and the third is the one that matters:** it manufactures a
+> > lie (an emptied pool routes to `all-eligible-at-capacity`, which is false — the node is not at
+> > capacity, its claim is old — and that is exactly the reason-collapse D12 exists to prevent); it
+> > is a shared-mode failure (one hub clock jump, one deploy window, or one root-owned `peers.json`
+> > write failure makes EVERY node stale in the same window, halting the cluster); and placement is
+> > not the last gate anyway, because the spoke re-measures and can refuse. De-rank is a leading sort
+> > key in `rankByHeadroom` — no new queued reason, no contract change, never empties the pool.
+> >
+> > **The test, and the twin that will get written instead.** The real one needs load ordering to
+> > **oppose** freshness ordering: `staleIdle` (headroom 8, age 300s) vs `freshBusy` (headroom 2, age
+> > 5s), asserting `freshBusy` wins — it loses on headroom AND on the `nodeId` tiebreak, so only the
+> > staleness key can produce it. Measured: 2 of 5 tests fail against HEAD, **with different
+> > discriminating fixtures**, so it is two proofs rather than one counted twice.
+> > **Reject the vacuous twin — and it is the one that looks most real:** a fixture where the stale
+> > node is *also* the busier one passes against unmodified HEAD, because the existing headroom rule
+> > already produces the expected answer and the age contributes nothing. **Discriminator: if the
+> > fixture's load ordering AGREES with its freshness ordering, the test is vacuous.** Also reject
+> > `capacityAgeMs: 0` as the fixture default — it would make all 28 existing cases permanently fresh;
+> > `undefined` (unknown ⇒ stale) leaves them green and makes a forgetful future test exercise the
+> > stale path rather than silently the fresh one.
+> >
 > > *(Both 5 and 6 are latent: `createHubDispatcher` still has zero production callers. They become
 > > real the moment Milestone C's hub half is wired, which makes them prerequisites for that work,
 > > not follow-ups to it.)*
