@@ -4766,6 +4766,24 @@ socket, accepted by a real spoke, producing a real run, with the acceptance read
 Write it there, with the same negative control discipline, and the merge gate is met by something
 that runs in the suite on every future change rather than by a demonstration nobody can repeat.
 
+**AND IT ALREADY EARNED ITS KEEP, before it was written.** Milestone C was built as two halves in
+parallel — the spoke accepting and running, the hub placing, emitting and correlating — meeting at
+`clusterFreshnessFrameSchema`. The hub half added the D48 `accepted: { dispatchId, runId }` block
+and consumed it. **The spoke half never sent it**, and kept replying with the bare frame.
+
+Nothing caught it. `tsc --noEmit` was **EXIT=0 with zero output across both packages** — because
+`accepted` is OPTIONAL, so omitting it is not a type error. Neither suite could catch it either, and
+not because either is weak: **the spoke's tests assert what the spoke sends, and the hub's tests
+construct the frames the hub wants to consume.** Each half is internally consistent and correct, and
+together they do not connect. That is the same shape as D23-D26 — and the same shape as D47's
+`liveCapacity`, an optional field whose own test proves it works while no producer supplies it. **An
+optional field at a seam between two owners is the defect that survives every gate either owner can
+run.**
+
+This is the argument for the E2E stated as a measurement rather than a principle: the only thing
+that fails on this bug is a test that sends a real dispatch over a real socket and reads the real
+reply. Write it before declaring Milestone C done, not after.
+
 **What that E2E honestly does NOT prove, and must not be reported as proving.** Hub and spoke share
 one process there, over loopback. It covers the protocol and the wiring; it does not cover the
 systemd/deploy path, Cloudflare Access admitting the link, cross-machine clock and network
