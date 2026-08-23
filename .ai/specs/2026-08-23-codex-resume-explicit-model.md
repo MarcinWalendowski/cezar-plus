@@ -1,7 +1,20 @@
 # Reopening a codex run replays the model codex persisted, not the one cezar chose
 
-**Status:** Implemented — gates green (typecheck, full `vitest run`); QA Needed until V7 (real-box
-reopen of the two named poisoned runs, `9cd43b1b` and `0f59fcd0`) is run post-deploy.
+**Status:** Implemented and DEPLOYED to production — QA Needed until V7 (real-box reopen of the
+two named poisoned runs, `9cd43b1b` and `0f59fcd0`) is run against the deployed release.
+
+**Deployed 2026-08-23T08:34:24Z** on `prod-host` via `cezar server-deploy
+--strategy=blue-green` (the `systemd-run --user` re-exec path this box uses, per `AGENTS.md`
+§"Always self-deploy"), triggered from inside this task's own cockpit session. Release
+`20260823T083415Z-27b50bb3`, sha `27b50bb3` (HEAD of `origin/main`, includes this fix's merge
+commit `9686b449` and the doc-closeout merge `27b50bb3`), ledger-marked `healthy: true`,
+`previous` retained as `20260823T004641Z-863861d0` for `--rollback`. Verified: `GET
+/api/v1/health` reports `deploy.sha` = `27b50bb3f4e776867acbcce1dc97a39c03400666`; `GET
+/api/v1/ready` → 200; `cezar.service` `MainPID` replaced and running; the deployed
+`dist/core/codex-resume-model.js` contains `resolveCodexResumeModel`, confirmed wired into
+`dist/core/codex-app-server-runner.js`. **V7 itself was NOT run as part of this deploy** —
+reopening `9cd43b1b`/`0f59fcd0` touches real production runs and is a separate QA action, not
+implied by "deploy succeeded."
 **Date:** 2026-08-23
 **Task:** `d2babee3-22cf-4e26-bcb9-64dd531a5b37`; todo `52278e94-0a7a-455a-a6f7-2e30eef187a2`
 (project `cezar`, priority high), filed by the 2026-08-23 correction to KB note
