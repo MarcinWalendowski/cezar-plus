@@ -276,6 +276,53 @@ export async function sudoStep(ctx: InstallContext, opts: SudoStepOpts): Promise
   }
 }
 
+export interface ManualStepOpts {
+  /** One-line description of what/why (shown above the commands). */
+  description: string;
+  /** The exact command(s) the operator runs themselves, on the host, as-is — no `sudo`/delegate
+   *  wrapper. Unlike `sudoStep`, these are commands ONE runs interactively (a login flow reads
+   *  from a real TTY, writes a browser URL, waits on a code) — there is no "run it via sudo
+   *  non-interactively" mode for them to offer. */
+  commands: string[];
+  /** Optional context shown once, above the commands. */
+  note?: string;
+}
+
+/**
+ * Stop the install for something genuinely unscriptable — an interactive agent CLI login being
+ * the motivating case (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, Phase 4: "the run
+ * must stop and say so rather than half-provisioning silently"). Prints the exact commands, then:
+ *
+ * - `--yes` (unattended: CI, IaC, a `npx … --join …` one-liner with no human watching) can never
+ *   supply a human at a login prompt, so this ALWAYS throws `StepAborted` here — naming the
+ *   commands still to run and that re-running this install resumes past this step. A half-open
+ *   agent login recorded as "done" would be the exact silent half-provisioning this exists to
+ *   prevent.
+ * - Interactive: the wizard pauses at a confirm, exactly the shape `sudoStep`'s own delegate mode
+ *   already uses for every privileged command in this codebase — the operator runs the printed
+ *   command(s) themselves, in another window, then answers here. Defaults to **false**: a
+ *   yes/no this easy to rubber-stamp should never default toward "done".
+ */
+export async function requireManualLogin(ctx: InstallContext, opts: ManualStepOpts): Promise<void> {
+  const { ui } = ctx;
+  ui.info(opts.description);
+  if (opts.note) ui.message(opts.note);
+  for (const command of opts.commands) ui.message(`  ${command}`);
+
+  if (ctx.assumeYes) {
+    throw new StepAborted(
+      `${opts.description} — this cannot be completed unattended (--yes). Run the command(s) above ` +
+        'interactively, then re-run this install to continue past this step.',
+    );
+  }
+
+  const done = await ui.confirm({ message: 'Have you completed the login(s) above?', initialValue: false });
+  if (done === CANCEL) throw new StepCancelled();
+  if (done !== true) {
+    throw new StepAborted('Login not confirmed — re-run this install once the command(s) above are done.');
+  }
+}
+
 /** Convenience: an `owned` file/service/etc. artifact. */
 export function owned(type: string, fields: Omit<StepArtifact, 'kind' | 'type'>): StepArtifact {
   return { kind: 'owned', type, ...fields };

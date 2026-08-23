@@ -8,15 +8,24 @@
 // `MOCK_CODEX_IGNORE_EOF=1` switches to the #703 teardown shape instead: the
 // server stays deaf to stdin EOF (the CLI hang the EOF watchdog exists for)
 // and handles SIGTERM itself, exiting 143 rather than dying from the signal.
+//
+// `MOCK_CODEX_IGNORE_SIGTERM=1` is the signal-classification twin: also deaf to EOF, but
+// SWALLOWS SIGTERM instead of trapping it into an exit — the shape cezar's own SIGTERM→SIGKILL
+// escalation has to punch all the way through, so only the untrappable SIGKILL ends this process.
 import { createInterface } from 'node:readline';
 
 const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 const rl = createInterface({ input: process.stdin });
 
 const ignoreEof = process.env.MOCK_CODEX_IGNORE_EOF === '1';
+const ignoreSigterm = process.env.MOCK_CODEX_IGNORE_SIGTERM === '1';
 if (ignoreEof) {
   process.on('SIGTERM', () => process.exit(143));
   // Keep the event loop alive so EOF alone can never end the process.
+  setInterval(() => {}, 60_000);
+}
+if (ignoreSigterm) {
+  process.on('SIGTERM', () => {}); // swallow it — only SIGKILL (untrappable) can end this process
   setInterval(() => {}, 60_000);
 }
 
@@ -57,6 +66,24 @@ rl.on('line', (line) => {
   } else if (msg.method === 'turn/start') {
     emit({ id: msg.id, result: { turn: { id: 'turn_mock_1' } } });
     emit({ method: 'turn/started', params: { turn: { id: 'turn_mock_1', status: 'inProgress', items: [] } } });
+    // An EXTERNAL untrapped signal death mid-turn — the kernel OOM killer, a cgroup MemoryMax
+    // breach, or an operator's `kill -9`. The bootstrap handshake above already completed for
+    // real, so this fires only once the runner is doing genuine work; nothing cezar did causes
+    // it, so `terminatedByCezar` must stay false throughout.
+    if (process.env.MOCK_CODEX_SUICIDE_SIGKILL === '1') {
+      emit({ method: 'item/started', params: { threadId: 'th_mock_1', turnId: 'turn_mock_1', item: { type: 'agentMessage', id: 'item_m1', text: '' } } });
+      emit({ method: 'item/agentMessage/delta', params: { threadId: 'th_mock_1', turnId: 'turn_mock_1', itemId: 'item_m1', delta: 'Checking the working tree.' } });
+      setTimeout(() => process.kill(process.pid, 'SIGKILL'), 150);
+      return;
+    }
+    // A deliberate, non-signal exit with an arbitrary code — the "ordinary exit floor" a signal
+    // fix must leave untouched.
+    if (process.env.MOCK_CODEX_EXIT_CODE !== undefined) {
+      const code = Number(process.env.MOCK_CODEX_EXIT_CODE);
+      emit({ method: 'turn/completed', params: { turn: { id: 'turn_mock_1', status: 'completed' } } });
+      process.stdout.end(() => process.exit(code));
+      return;
+    }
     const turnText = msg.params?.input?.map?.((part) => part.text ?? '').join('\n') ?? '';
     if (turnText.includes('mock:turn-failed')) {
       emit({ method: 'turn/failed', params: {
@@ -142,5 +169,5 @@ rl.on('line', (line) => {
 });
 
 rl.on('close', () => {
-  if (!ignoreEof) process.exit(0);
+  if (!ignoreEof && !ignoreSigterm) process.exit(0);
 });

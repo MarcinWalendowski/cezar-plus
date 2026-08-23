@@ -27,13 +27,14 @@ import { currentRelease, runtimeInfo, type RuntimeInfo } from './runtime-info.ts
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
+import { createClusterRoutes, startClusterRuntime } from './cluster-routes.ts';
 import { createWorkspaceReportsRoutes } from './workspace-reports-routes.ts';
 import { createNotesRoutes } from './notes-routes.ts';
 import {
   createAgentAccountUsageRoutes,
   type AgentAccountUsageRouteDeps,
 } from './agent-account-usage-routes.ts';
-import { isAgentPoolId } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_LINK_PATH, isAgentPoolId } from '@loki-labs/better-cezar-contract';
 import { inflightFromRuns } from '../workspace/agent-account-usage.ts';
 import { NoteStore } from '../notes/store.ts';
 import { NoteCoordinator } from '../notes/coordinator.ts';
@@ -220,7 +221,7 @@ import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { MAX_APPROVERS } from '../runs/approvals.ts';
 import { readUiState, uiStatePath } from '../ui-state.ts';
 import { agentHomePaths, expandTilde } from '../paths.ts';
-import { backupEnabled, isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCapabilities } from './capabilities.ts';
+import { backupEnabled, clusterEnabled, isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCapabilities } from './capabilities.ts';
 // D3's single construction of "who is this request". Imported STATICALLY, unlike most other
 // `../auth/*` modules (which `src/index.ts` reaches only through a `CEZ_AUTH`-gated dynamic
 // `import()`), and that asymmetry is deliberate: `auth/principal.ts` has no runtime imports of
@@ -256,7 +257,7 @@ import { localSessionResolver } from '../auth/local-gates.ts';
 // `./project-team-registry.ts`'s own doc comment. `registered-project-roots.ts` imports the
 // identical `openProjectTeamRegistry` for its non-HTTP `cezar projects remove` caller.
 import { openProjectTeamRegistry, type ProjectTeamRegistry } from './project-team-registry.ts';
-import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
+import { attachUpgradeFallback, createSocketHub, WS_PATH, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import {
   browseDirectory,
   isInsideBrowseRoot,
@@ -1629,6 +1630,14 @@ export function createApp(deps: ServerDeps) {
     if (ctx) watchReopenRequests(reopenWatchProject(ctx));
   }
   contexts.onContextBuilt((ctx) => watchReopenRequests(reopenWatchProject(ctx)));
+
+  // The cluster's one wiring line (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, PLAN 1.5).
+  // Everything it attaches — the node link, the periodic full reconcile, the foreign-run
+  // projection — lives behind `startClusterRuntime` in `server/cluster-routes.ts` so the packages
+  // that fill those in edit a file they own rather than this one (PLAN P3). With `CEZ_CLUSTER`
+  // unset it returns immediately having armed nothing: no timer, no socket, no file under
+  // `~/.cezar/cluster` (spec Verification 12).
+  startClusterRuntime({ version: deps.version });
 
   const app = new Hono();
 
@@ -6672,6 +6681,14 @@ export function createApp(deps: ServerDeps) {
   const knowledgeRoutes = createKnowledgeRoutes();
   const sourcesRoutes = createSourcesRoutes();
 
+  // The CLUSTER family (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, `CEZ_CLUSTER=1`), on
+  // the same terms as the two above: its own file, built by a factory, chained into
+  // `workspaceV1` below. Workspace-level and single-mount — a cluster answers for the whole
+  // machine, so there is no project-scoped spelling to mirror. With the flag unset every route in
+  // it answers 404 from its own gate (spec Verification 12), which is why it is constructed
+  // unconditionally: the routes must stay in `AppType` either way, or the typed client loses them.
+  const clusterRoutes = createClusterRoutes({ version: deps.version });
+
   // ---- the notes pipeline (P2.2/P2.3) --------------------------------------
   // ONE store, shared by the routes and the pipeline. `NoteStore` caches the inbox in memory
   // after its first read, so two instances over one `notes.json` would each hold a stale half of
@@ -7075,7 +7092,8 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceTodosRoutes)
     .route('/', workspaceRunRoutes)
     .route('/', notificationsRoutes)
-    .route('/', backupRoutes);
+    .route('/', backupRoutes)
+    .route('/', clusterRoutes);
 
   // ---- mount ---------------------------------------------------------------
   // Scoped first, then the unscoped alias bound to the boot project. The paths are disjoint (no
@@ -7282,6 +7300,24 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   });
   server.once('close', () => { unsubscribe(); automationScheduler.stop(); backupScheduler.stop(); });
   socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost, deps.sessionResolver));
+  // The one listener that destroys an upgrade nobody owns (ws.ts#attachUpgradeFallback).
+  //
+  // `CLUSTER_LINK_PATH` is listed only when `CEZ_CLUSTER` is on, and that asymmetry is deliberate.
+  // An earlier version listed it unconditionally, reasoning that a listed-but-unattached path only
+  // "hangs instead of being killed, which is strictly safer". It is not: with the flag off nothing
+  // in this process will ever handle that upgrade, so every request to it parks a socket that is
+  // never answered and never closed — an unbounded fd leak on a path that is supposed to be
+  // switched off, reachable by anyone who can reach the port. Destroying it is both correct and
+  // the honest answer (`1006` immediately, rather than a stall).
+  //
+  // With the flag ON the path stays listed even before `cluster-routes.ts`'s activation attaches
+  // the link server, because there the hang IS the safer error: a node dialling a hub that is
+  // still booting should stall and retry, not be told the endpoint does not exist. Both branches
+  // read the same `clusterEnabled(env)` the routes do, so there is one spelling of the flag and no
+  // way for the two to disagree. This does not weaken `attachUpgradeFallback`'s
+  // order-independence: it still decides purely from set membership, and the set is fixed here at
+  // wiring time rather than from whether some other listener already ran.
+  attachUpgradeFallback(server, clusterEnabled() ? [WS_PATH, CLUSTER_LINK_PATH] : [WS_PATH]);
   return server;
 }
 

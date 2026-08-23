@@ -258,9 +258,12 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
         // only there to satisfy URL parsing of a relative reference.
         const pathname = new URL(req.url ?? '', 'http://localhost').pathname;
         if (pathname !== WS_PATH) {
-          // With an `upgrade` listener installed, Node no longer auto-destroys
-          // unhandled upgrades — do it explicitly or the socket leaks.
-          socket.destroy();
+          // Not ours — leave it for another listener on the same `http.Server` (e.g. the cluster
+          // link, `cluster/link-server.ts`). Node fires every registered `'upgrade'` listener for
+          // one event with no `stopPropagation`, so destroying here regardless of registration
+          // order would race — and sometimes win against — whichever listener actually owns this
+          // path. Nothing here leaks: `attachUpgradeFallback` below is the one place that destroys
+          // a path nobody owns, and it runs after every owner has had its turn.
           return;
         }
         const verdict = verifyUpgrade(req);
@@ -324,4 +327,36 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
   };
 
   return hub;
+}
+
+/**
+ * One `'upgrade'` listener that destroys a socket if and only if its pathname is not one of
+ * `ownedPaths`. This is the single place responsible for the "with an `upgrade` listener
+ * installed, Node no longer auto-destroys an unhandled upgrade" duty — every per-path listener
+ * (this hub's `attach` above, `cluster/link-server.ts`'s own `attach`) now leaves a foreign path
+ * alone instead of destroying it, so exactly one listener ever calls `socket.destroy()` for a
+ * given upgrade.
+ *
+ * **Deliberately order-independent, on purpose.** Node calls every registered `'upgrade'`
+ * listener for a single event, synchronously, with no `stopPropagation` — that is the whole bug
+ * this fixes (`attach` used to destroy a path another listener owned, in either registration
+ * order, because it decided from "is this MY path" rather than "does ANYONE own this path"). This
+ * listener decides purely from `ownedPaths` membership, never from whether some other listener
+ * already handled the request, so it can never race an owner: it only ever destroys a path that
+ * nothing in `ownedPaths` claims, regardless of when it runs relative to the owners. Do not
+ * reintroduce a "did someone else handle it" flag or a `setImmediate` deferral here — both would
+ * bring the ordering hazard back.
+ *
+ * Call once, after every per-path `attach` has been wired, naming every path anything on `server`
+ * may own — including one gated off by an env flag. A listed-but-unattached path just means an
+ * upgrade there hangs instead of being destroyed, which is strictly safer than the flag deciding
+ * whether the socket gets killed.
+ */
+export function attachUpgradeFallback(server: UpgradeCapableServer, ownedPaths: readonly string[]): void {
+  const owned = new Set(ownedPaths);
+  server.on('upgrade', (req, socket) => {
+    const pathname = new URL(req.url ?? '', 'http://localhost').pathname;
+    if (owned.has(pathname)) return; // some other listener on this server owns it
+    socket.destroy();
+  });
 }

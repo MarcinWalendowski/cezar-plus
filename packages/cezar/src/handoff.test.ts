@@ -35,7 +35,29 @@ describe('HANDOFF_INSTRUCTIONS', () => {
   /** The server assigns these on read/start/archive — an agent never writes them. `archivedAt`
    *  joined this set with the filed-tasks table (2026-08-17-filed-tasks-table-statuses.md):
    *  stamped by `updateTodo`'s `archived: true`, never client- or agent-supplied. */
-  const SERVER_MANAGED = new Set(['id', 'startedTaskId', 'archivedAt']);
+  const SERVER_MANAGED = new Set([
+    'id',
+    'startedTaskId',
+    'archivedAt',
+    // ---- cluster (2026-08-22-multi-node-cezar-cluster.md) ------------------------------------
+    // Sync bookkeeping. `pendingSince` is stamped by `todos.ts`'s own writers inside the `O_EXCL`
+    // lease that guards the value it marks; `hubSeq` and `tombstone` arrive on the hub's replica
+    // push. No agent append and no API client writes any of the three.
+    'pendingSince',
+    // `pendingFields` is the companion marker: WHICH keys are owed to the hub, unioned in by the
+    // same writer inside the same lease. It exists because `pendingSince` is a scalar and a
+    // derive-from-records outbox cannot narrow on it, which is how ops came to carry whole records
+    // and clobber a second spoke's edit (D4, and the `pendingFields` amendment in Data Models).
+    'pendingFields',
+    'hubSeq',
+    'tombstone',
+    // `startedOn` belongs here for a stronger reason than the three above rather than a weaker
+    // one: it is the single write D4 exempts from optimistic local application, so it is omitted
+    // from `createTodoInputSchema` as well. A client that could supply it could assert a start the
+    // hub never granted — in two places at once, which is the double-start the design exists to
+    // prevent.
+    'startedOn',
+  ]);
 
   /**
    * Written through `POST /todos` or `PATCH /todos/:id` by an API client, never by an agent's
@@ -50,6 +72,16 @@ describe('HANDOFF_INSTRUCTIONS', () => {
    * client-created todo set them, never an agent's plain append.
    */
   const CLIENT_WRITTEN = new Set([
+    // `placement` (2026-08-22-multi-node-cezar-cluster.md, D12): pinning a todo to a node, or
+    // naming labels that narrow the candidates, is a person's decision made from the cockpit. Safe
+    // to expose because placement is a REQUEST the scheduler honours, not a claim about what
+    // happened — which is exactly what separates it from `startedOn` next door in SERVER_MANAGED,
+    // the one write D4 exempts from optimistic application.
+    // Set at `POST /todos` only for now: `updateTodoInputSchema` carries status/priority/archived
+    // and does not derive this field, so there is no re-pin route yet. That is a gap recorded at
+    // the field's own declaration in `contract/src/skills.ts`, not a reason to reclassify it —
+    // this set's floor asks whether a client MAY write the field, and it may.
+    'placement',
     'context',
     'whatToDo',
     'acceptanceCriteria',

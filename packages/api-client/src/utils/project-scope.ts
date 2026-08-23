@@ -120,10 +120,12 @@ export function queryScope(): string {
  * Workspace-level routes — single-mount on the server, never mirrored under `/p/:projectId`, so
  * scoping them would 404. `/workspace/*` (config, ui-state, events), `/projects` (the registry
  * plus `/checkout`), `/fs/*` (the folder picker — one filesystem, not one per project),
- * `/providers/*` and `/models` (host state shared across projects), and `/health`.
+ * `/providers/*` and `/models` (host state shared across projects), `/health`, and `/cluster/*`
+ * (this cezar's own membership in a cluster — a property of the machine's cockpit, not of a
+ * registered project; `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`).
  */
 const WORKSPACE_LEVEL =
-  /^\/(?:health$|models(?:$|[/?])|providers(?:$|[/?])|projects(?:$|[/?])|workspace\/|fs\/)/
+  /^\/(?:health$|models(?:$|[/?])|providers(?:$|[/?])|projects(?:$|[/?])|workspace\/|fs\/|cluster(?:$|[/?]))/
 
 /**
  * Turn a ROUTE into the request path: `/runs` → `/api/v1/runs`, or `/api/v1/p/<id>/runs` when a

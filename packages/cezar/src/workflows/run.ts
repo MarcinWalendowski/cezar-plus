@@ -16,8 +16,15 @@ import {
   BROKERED_BACKENDS,
   brokerAvailable,
   type BrokerSessionRequest,
+  type ResourceKillReport,
 } from '../core/broker-launch.ts';
-import { chooseIsolation, nextBrokerInstanceId, probeIsolationCapabilities, type BrokerIsolation } from '../core/broker-isolation.ts';
+import {
+  chooseIsolation,
+  nextBrokerInstanceId,
+  probeIsolationCapabilities,
+  type BrokerIsolation,
+  type BrokerResourceLimits,
+} from '../core/broker-isolation.ts';
 import { isPidAlive, isSpoolLive, legacySpoolDirFor, readSpoolMeta, SPOOL_ORPHAN_GRACE_MS, spoolDirFor, type SpoolMeta } from '../core/run-spool.ts';
 import { isRetryableBrokerLaunch } from '../core/brokered-session.ts';
 import { reapAbandonedBroker } from '../core/reap-abandoned-broker.ts';
@@ -91,6 +98,7 @@ import {
 } from '../workspace/workspace-worktrees.ts';
 import type { PendingApproval, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
+import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { UiEventSink } from '../runs/ui-event-sink.ts';
 import type { UiEvent } from '../core/ui-events.ts';
 import {
@@ -1899,6 +1907,65 @@ export class RunManager {
     void this.pump();
   }
 
+  // ---- the second admission gate (D14) ----------------------------------------------------
+
+  /**
+   * Run one step's work while holding a heavy-step slot — but ONLY when the step's own definition
+   * says it is heavy (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D14).
+   *
+   * `maxParallel` bounds how many runs are admitted at all; this bounds how many of them may be
+   * inside a CPU/memory-heavy step at the same time. Two numbers, because one count cannot express
+   * a workload that sits near 0.5 GB for most of a run and wants several GB inside `run-tests`.
+   *
+   * **`step.heavy === true` is the whole test, and it is read from the DEFINITION.** Never the
+   * step's id, name, command or prompt: a name-match would be a second, invisible definition of
+   * "heavy" that drifts the moment somebody names a step `tests`, and it could not be turned off
+   * for a chain that genuinely wants an unbounded step. `heavy` is absent on every step of every
+   * existing workflow except the catalog's `run-tests`, so this is a no-op for everything else.
+   *
+   * **A step that is not heavy is never gated, at any occupancy** — it does not pass through the
+   * semaphore at all, so a saturated heavy gate cannot delay a `commit-push` or a check step.
+   *
+   * `runHeavyStep` releases in a `finally`, so a step that throws still frees its slot; that is
+   * why this wraps rather than exposing acquire/release. And when `maxHeavySteps` is absent the
+   * gate is `Infinity` — an install nobody opted in stays exactly as it is today, which is the
+   * whole reason the config key has no schema default (`workspace/config.ts`).
+   *
+   * Two stated limits, both deliberate rather than overlooked:
+   *
+   *  - an INTERACTIVE last step holds its slot while it is parked waiting for a follow-up, because
+   *    the slot's lifetime is the step's turn and an interactive turn ends at finish/idle/cancel.
+   *    No built-in workflow marks such a step heavy (`run-tests` always has steps after it), so
+   *    this costs nothing today — but a chain that marks its final step heavy would hold a heavy
+   *    slot while idle, which is the #347 exemption's problem in a second place.
+   *  - a **Continue** (`runContinuation`) and a message into an open session are NOT gated. The
+   *    chain's own re-entries come back through this loop and are; those two are a person acting on
+   *    one run by hand, and D15a's rule for exactly this shape is that a human asserting intent on
+   *    this host proceeds. Making the owner's Continue queue behind two other runs' test steps
+   *    would be the gate deciding something it was not built to decide.
+   */
+  private async withHeavyStep<T>(
+    step: WorkflowStepDef,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (step.heavy !== true) return fn();
+    const max = this.semaphore.maxHeavySteps();
+    const active = this.semaphore.heavyActive();
+    // Queueing at this gate is expected and correct — thrashing is what it prevents — but a step
+    // that sits `running` while it is actually waiting is a state the cockpit cannot read. Same
+    // reasoning as the repository-root lease's "waiting for exclusive access" note. Advisory only:
+    // the gate is `runHeavyStep`, and this line never decides anything.
+    if (active >= max) {
+      emit({
+        type: 'note',
+        stepId: step.id,
+        message: `waiting for a heavy-step slot — ${active}/${max} heavy steps running across the workspace`,
+      });
+    }
+    return this.semaphore.runHeavyStep(fn);
+  }
+
   // ---- run brokering (P4) ---------------------------------------------------------------
   //
   // `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`. The seam is deliberately tiny:
@@ -1944,7 +2011,11 @@ export class RunManager {
    * must have a built entry point to re-exec as the broker, and the run must not already be
    * re-attaching to a live spool for this very step.
    */
-  private brokerFor(runId: string, stepId: string, backend: RunnerId): BrokerSessionRequest | undefined {
+  private async brokerFor(
+    runId: string,
+    stepId: string,
+    backend: RunnerId,
+  ): Promise<BrokerSessionRequest | undefined> {
     if (!(BROKERED_BACKENDS as readonly string[]).includes(backend)) return undefined;
     if (!brokerAvailable()) return undefined;
     const instanceId = nextBrokerInstanceId();
@@ -1959,8 +2030,70 @@ export class RunManager {
       instanceId,
       stepId,
       isolation: this.brokerIsolation(),
+      resources: await this.runResourceLimits(),
+      onResourceKill: (kill) => this.recordResourceKill(runId, stepId, kill),
       onOffset: (offset) => this.persistConsumedOffset(runId, offset),
     };
+  }
+
+  /**
+   * The D14a cgroup bounds one broker launch is created with, read from workspace `resources`.
+   *
+   * Read from the FILE here rather than from `WorkspaceSemaphore`'s cache, because the semaphore
+   * caches only the two admission numbers and the process-tree memory guard — these four keys are
+   * not in its snapshot, and widening that snapshot is `workspace/semaphore.ts`'s call, not this
+   * file's. The read is once per broker launch (once per step), never per tick, which is the
+   * invariant the semaphore's own docblock defends: it exists because the memory guard samples
+   * every ~2 s per manager, not because reading the config is expensive.
+   *
+   * An unreadable config degrades to no bounds — which is exactly today's behaviour, and the right
+   * direction to fail: an unbounded run is what cezar has always shipped, whereas guessing a
+   * ceiling from a file we could not read would kill work for a number nobody chose.
+   */
+  private async runResourceLimits(): Promise<BrokerResourceLimits> {
+    try {
+      const { resources } = await loadWorkspaceConfig();
+      return {
+        runMemoryHighMb: resources.runMemoryHighMb,
+        runMemoryMaxMb: resources.runMemoryMaxMb,
+        runCpuWeight: resources.runCpuWeight,
+        runsSliceMemoryMaxMb: resources.runsSliceMemoryMaxMb,
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * A cgroup bound killed this run's processes (C3).
+   *
+   * Written on the RUN, not the step, because that is where the field lives (`runs/store.ts`) and
+   * because the fact outlives the step: a chain re-entry re-runs the step, and the record must
+   * still be able to answer "was this run ever killed by a bound?" afterwards. The step's own
+   * failure message names the bound too — `claude-cli-runner.ts` appends the detail — so the two
+   * surfaces agree.
+   *
+   * The note is not decoration. It is the sentence a person (and the run's own next agent) reads
+   * instead of concluding that the tests broke: "a bound whose failure mode is indistinguishable
+   * from a code failure will be blamed on the code."
+   */
+  private recordResourceKill(runId: string, stepId: string | undefined, kill: ResourceKillReport): void {
+    this.store.updateRun(runId, { resourceKill: kill });
+    this.store.appendEvent(runId, {
+      type: 'note',
+      ...(stepId ? { stepId } : {}),
+      message: `run killed by a resource bound — ${kill.detail}. This is NOT a test or code failure; the step was stopped by the host.`,
+    });
+    // Named now so "how often does a bound actually fire, and on which step?" has an answer next
+    // time instead of a grep — the same reason `run.step.stopped` is emitted.
+    this.store.appendEvent(runId, {
+      type: 'metric',
+      ...(stepId ? { stepId } : {}),
+      name: 'run.resource_kill',
+      runId,
+      limit: kill.limit,
+      at: kill.at,
+    });
   }
 
   /**
@@ -3799,7 +3932,7 @@ export class RunManager {
     // live path applies (#811). Delivery-only: the `user-message` event above already
     // persisted the user's original text, and the transcript must keep showing that.
     const openingPrompt = expandRegistrySlashSkillText(prompt, state.skills ?? []);
-    const continueBroker = this.brokerFor(runId, stepId, continueBackend);
+    const continueBroker = await this.brokerFor(runId, stepId, continueBackend);
     const session = runner.startSession(
       {
         // The Continue step is a fresh agent session on the same run — the
@@ -4402,24 +4535,34 @@ export class RunManager {
         resumeFrom = undefined;
         state.stepStopped = undefined;
         state.brokerNeverAnswered = undefined;
+        // These three snapshots serve two purposes at once, and both need the value AS SENT.
+        // Theirs: a broker that never answered is retried once, and the retry restores exactly
+        // what this attempt was given (see `coldBroker` below). Ours: `withHeavyStep` may not call
+        // `fn` until a heavy slot frees, and `startImages`/`startAttachments`/`checkFailure` are
+        // one-shot — they belong to the step entering now, not to whatever the loop is doing when
+        // it resumes. Passing the snapshots rather than the live variables makes the call
+        // independent of when it actually runs.
         const sentImages = startImages;
         const sentAttachments = startAttachments;
         const sentCheckFailure = checkFailure;
-        const failure = await this.runAgentStep(
-          runId,
-          state,
-          step,
-          input,
-          skills,
-          checkFailure,
-          interactive,
-          emit,
-          startImages,
-          taskBackend,
-          extraSystemPrompt,
-          chainStepNote(workflow.steps, i, { resumed: stepResume !== undefined }),
-          startAttachments,
-          stepResume,
+        const stepChainNote = chainStepNote(workflow.steps, i, { resumed: stepResume !== undefined });
+        const failure = await this.withHeavyStep(step, emit, () =>
+          this.runAgentStep(
+            runId,
+            state,
+            step,
+            input,
+            skills,
+            sentCheckFailure,
+            interactive,
+            emit,
+            sentImages,
+            taskBackend,
+            extraSystemPrompt,
+            stepChainNote,
+            sentAttachments,
+            stepResume,
+          ),
         );
         startImages = undefined;
         startAttachments = [];
@@ -4618,7 +4761,7 @@ export class RunManager {
         continue;
       }
 
-      const { ok, output } = await this.runCheckStep(state, step, emit);
+      const { ok, output } = await this.withHeavyStep(step, emit, () => this.runCheckStep(state, step, emit));
       this.spendBudgetUnit(runId); // a check attempt is one unit, same as an agent turn
       if (state.cancelled) break;
       if (ok) {
@@ -5264,9 +5407,20 @@ export class RunManager {
           stepId: step.id,
           startOffset: reattach.startOffset,
           isolation: this.brokerIsolation(),
+          // A re-attach spawns nothing, so these bounds are never APPLIED here — the surviving
+          // scope already carries whatever it was created with. They are passed for attribution
+          // only, and they are read from the config as it is NOW: nothing records what a scope was
+          // created with, and the run this path exists for survived a self-deploy that happens
+          // ~10x a day on the box. So the trade is stated rather than hidden — a bound changed
+          // between the spawn and the kill makes the reported detail name the current value. The
+          // alternative, attributing nothing across every deploy, would silently drop C3's
+          // reporting for a large share of real runs, and `detectResourceKill` is documented as a
+          // detection rather than a proof for exactly this class of reason.
+          resources: await this.runResourceLimits(),
+          onResourceKill: (kill: ResourceKillReport) => this.recordResourceKill(runId, step.id, kill),
           onOffset: (offset: number) => this.persistConsumedOffset(runId, offset),
         }
-      : this.brokerFor(runId, step.id, stepBackend);
+      : await this.brokerFor(runId, step.id, stepBackend);
 
     // Proactive Claude-only check (spec 2026-08-22-resume-fresh-session-fallback, Phase 1): a
     // resume target is a HINT cezar minted and persisted before any confirmation the backend

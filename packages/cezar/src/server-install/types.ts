@@ -103,6 +103,21 @@ export const serverStateSchema = z
      */
     orgSlug: z.string().min(1).optional().catch(undefined),
     /**
+     * `--platform hetzner --role worker` only (D17, spec `2026-08-22-multi-node-cezar-cluster.md`):
+     * marks this instance as a cluster spoke rather than a supervisor/org cockpit. Free string, not
+     * an enum — same reason `platform` above is one — so a `server.json` written by a newer cezar
+     * with a role this version doesn't know still parses. The only role this version recognises is
+     * `'worker'` (`platforms/hetzner.ts`'s `isWorkerMode`); anything else behaves as absent.
+     */
+    role: z.string().min(1).optional().catch(undefined),
+    /**
+     * `--join <code>` — the hub-minted, single-use enrollment code (D17) supplied at `--role worker`
+     * install time and consumed once by `cezar cluster join`. Not itself a durable credential (D17:
+     * the durable Access credential comes from the operator's environment instead), so no stricter
+     * shape check than "non-empty string" belongs here.
+     */
+    clusterJoinToken: z.string().min(1).optional().catch(undefined),
+    /**
      * `--platform hetzner` only. The auth provider chosen for the SUPERVISOR instance's OIDC/Google
      * credential prompt (`supervisorSystemdStep` in `platforms/hetzner.ts`) — recorded so a resumed
      * run that finds the `EnvironmentFile=` secret already written can regenerate the same unit text

@@ -21,6 +21,7 @@ interface SentRequest {
 }
 
 const CAPABILITIES_ON: HealthResponse['capabilities'] = {
+  cluster: false,
   localHandoff: true,
   followups: true,
   singleProject: false,

@@ -47,6 +47,7 @@ const HEALTH_ON: HealthResponse = {
   checks: [],
   forge: null,
   capabilities: {
+    cluster: false,
     localHandoff: true,
     tokenMetrics: true,
     tokenUsageMetrics: true,

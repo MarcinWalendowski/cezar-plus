@@ -80,6 +80,44 @@ const resourcesSchema = z
   .object({
     /** Workspace-wide parallel-task cap (moved from per-repo config.json). */
     maxParallel: z.number().int().min(1).max(16).default(2).catch(2),
+    /**
+     * The SECOND admission number: how many runs may be inside a CPU/memory-heavy step at once
+     * (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D14). `maxParallel` above bounds
+     * how many runs are admitted at all; this bounds how many of them may be spiking.
+     *
+     * Two numbers rather than one because the workload is bimodal and one count cannot express
+     * it: a run sits near 0.5 GB for most of its life and wants ~5 GB inside `run-tests`. Set
+     * `maxParallel` for the spike and the box idles at 2 while every run is cheap; set it for the
+     * median and three runs hit `run-tests` together and the machine thrashes. Measured duty cycle
+     * for the heavy phase is 12.9 %, so 8 admitted runs expect ~1 simultaneous heavy step — which
+     * is what makes real oversubscription safe, and what this gate is here to hold when the
+     * independence assumption fails (eight tasks launched together do not have it).
+     *
+     * **Which steps count is DECLARED, not guessed** — `heavy` on the step definition
+     * (`workflows/types.ts`), never a name-match at runtime.
+     *
+     * **ABSENT MEANS UNBOUNDED — not 0, and not 1.** A reader must spell this
+     * `maxHeavySteps ?? Infinity`, never `?? 0`, `?? 1` or `?? 2`; `undefined` here means "no
+     * second gate", which is exactly today's behaviour and the only value that is safe to ship.
+     *
+     * Deliberately `.optional()` and NOT `.default(2)`, which is the one thing about this key
+     * that is easy to get wrong. cezar is published as `@loki-labs/better-cezar` and installed by
+     * `npx` on machines this repo does not control, and `run-tests` declares `heavy: true` — so a
+     * schema default of 2 would silently cap every installed user's concurrent heavy steps the
+     * next time they upgraded. Someone running `maxParallel: 8` on a big machine would drop to 2
+     * concurrent test steps and experience it as "cezar got slower", with nothing in their own
+     * config file to point at. That is a behaviour change under installed users, which plan
+     * decision P8 forbids. A gate nobody opted into is worse than a gate nobody turned on.
+     *
+     * The spec's "**2 on this box**" (D14's table, Phase 0 step 3) is therefore a VALUE WRITTEN
+     * INTO `prod-host`'s own `config.json`, not a default that arrives by upgrading — and
+     * Phase 0's C1/C2 load measurements do not gate anything until it is actually set there.
+     *
+     * `min(1)` rather than `min(0)`: a 0 is not a spelling of "unbounded", it is a gate no heavy
+     * step can ever pass — a deadlock dressed as a config value — so it degrades to absent along
+     * with every other out-of-range value.
+     */
+    maxHeavySteps: z.number().int().min(1).max(16).optional().catch(undefined),
     /** Extra durable `CEZ:MONITORING` sessions exempt from the active-task cap. */
     maxMonitoringSessions: z.number().int().min(0).max(16).default(2).catch(2),
     /**
@@ -115,6 +153,30 @@ const resourcesSchema = z
     /** Per-task memory ceiling in MiB; null = no limit (matches the file's
      *  literal `"memoryLimitMb": null` in the spec's Data Model). */
     memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().default(null).catch(null),
+    /**
+     * cgroup bounds on the transient scope `core/broker-isolation.ts` already creates per run
+     * (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D14a). `maxHeavySteps` decides
+     * HOW MANY heavy steps run; these decide how big one is allowed to GET. Both are needed — a
+     * gate of 2 over two unbounded 6 GB runs is still 12 GB.
+     *
+     * `null` = leave the property off the scope entirely, which is today's behaviour: the scope
+     * exists already and carries no resource properties at all. **Linux only** — the scope itself
+     * is, so on macOS these are inert rather than wrong.
+     *
+     * A kill that fires here must surface on the run record as `resourceKill` with its named
+     * limit (`runs/store.ts`), never as a failed test step. A bound whose failure mode is
+     * indistinguishable from a code failure gets blamed on the code, and the run's own agent then
+     * "fixes" a test that was never broken.
+     *
+     * `runMemoryHigh`/`runMemoryMax` mirror systemd's `MemoryHigh`/`MemoryMax` (throttle, then
+     * kill); `runCpuWeight` mirrors `CPUWeight`, whose systemd range is 1-10000; and
+     * `runsSliceMemoryMaxMb` is the ceiling on the whole `cezar-runs.slice`, which is what keeps
+     * the cockpit answerable while the runs beneath it saturate the box.
+     */
+    runMemoryHighMb: z.number().int().min(0).max(1_048_576).nullable().default(null).catch(null),
+    runMemoryMaxMb: z.number().int().min(0).max(1_048_576).nullable().default(null).catch(null),
+    runCpuWeight: z.number().int().min(1).max(10_000).nullable().default(null).catch(null),
+    runsSliceMemoryMaxMb: z.number().int().min(0).max(1_048_576).nullable().default(null).catch(null),
     /** Default worktree retention for projects that don't override it. 1000 since 2026-08-20 —
      *  see `DEFAULT_WORKTREE_RETENTION` (`../config.ts`) for why the ceiling is this high. */
     worktreeRetentionDefault: z.number().int().min(0).max(1000).default(1000).catch(1000),

@@ -118,6 +118,30 @@ export const capabilitiesSchema = z.object({
   /** `CEZ_NOTIFY=1` (F4, outbound notification transports). */
   notify: z.boolean(),
   /**
+   * `CEZ_CLUSTER=1` (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D1) — this server takes
+   * part in a cluster, as the hub (flag alone) or as a spoke (flag + `CEZ_CLUSTER_HUB`). One key
+   * for both roles: which one it is comes from `GET /api/v1/cluster`, not from a second flag that
+   * could contradict this one.
+   *
+   * **Always present, `false` when off**, like every key above — and unlike `authProvider`, whose
+   * own note explains why it stayed out. That exemption does not extend here: the spec's
+   * Architecture section addresses this key by name and says not to re-assert the "flag-off health
+   * body is byte-identical" claim, because it was measured false and corrected in place in this
+   * file. This key makes the body grow by one more pair, knowingly.
+   *
+   * What the flag buys is behavioural, not cosmetic: no index, no watcher, no timer, no nav item,
+   * no prompt bytes — and `/api/v1/cluster*` answering **409** with a stated reason, the same shape
+   * `requireAutomations` uses for the other family that has no settings section when it is off.
+   * (CORRECTED 2026-08-22 during implementation: this said ~~"**no route** — `/api/v1/cluster*`
+   * answers 404"~~. 404 is already `UNKNOWN_CONNECTION` in `sources-routes.ts`, so a flag-off 404
+   * could not be told apart from an unknown node id on the same route. The full history is in
+   * `./cluster.ts`'s module header and in spec Verification 12.)
+   *
+   * This key is what makes the 409 acceptable rather than merely correct: a cockpit that reads
+   * `cluster: false` here never issues the request at all.
+   */
+  cluster: z.boolean(),
+  /**
    * `CEZ_ACCOUNT_USAGE=1` (`.ai/specs/2026-08-16-agent-account-usage-routing.md`) — the sidebar
    * panel showing what each agent account is doing and how close it is to its limit.
    *

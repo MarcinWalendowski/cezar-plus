@@ -393,6 +393,144 @@ describe('SIGTERM→SIGKILL escalation for a CLI that survives SIGTERM', () => {
   });
 });
 
+/**
+ * A run whose agent was killed by an untrapped signal used to report `done`, and the workflow
+ * continued as though the step had succeeded. Two shapes were already handled — a TRAPPED signal
+ * death (128+signal, `isSignalTerminationExit`, the "teardown cezar initiated" describe above) and
+ * cezar's own SIGTERM→SIGKILL escalation surviving to a real exit (the describe above this one).
+ * What fell through was the bare `code: null, signal: '...'` shape an UNTRAPPED signal produces —
+ * exactly what SIGKILL always is, and what any signal becomes once nothing installs a handler for
+ * it. `waitForExit` discarded the signal before any branch could see it, so `code === null` alone
+ * read as a clean exit no matter who sent the signal or why — the kernel OOM killer, a cgroup
+ * bound, or an operator's `kill -9` all produced a silent "done".
+ */
+describe('an external signal kills the agent process directly (OOM killer / operator kill -9)', () => {
+  it('a real subprocess killed by an untrapped SIGKILL fails the run and names the signal', async () => {
+    const bin = fileURLToPath(new URL('./__fixtures__/claude/stub-suicide-sigkill.mjs', import.meta.url));
+    const events: AgentEvent[] = [];
+    const session = new ClaudeCliRunner({ bin, timeoutMs: 0 }).startSession(
+      { userPrompt: 'do it', cwd: process.cwd() },
+      (event) => events.push(event),
+    );
+
+    await expect(session.result).rejects.toThrow(/SIGKILL/);
+    expect(events.some((e) => e.type === 'error' && e.message.includes('SIGKILL'))).toBe(true);
+    // The damaging property of the bug: a `done` landing right after the signal, which is what let
+    // the run manager treat the step as finished.
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+  }, 15_000);
+
+  /** A fake child whose only source of truth is what the test tells it — used for the exit-code
+   *  floor and to pin the exact rejection message, which a real subprocess's stderr noise would
+   *  make brittle to assert on directly. */
+  function killableChild(): {
+    child: ChildProcessWithoutNullStreams;
+    exit: (code: number | null, signal: NodeJS.Signals | null) => void;
+  } {
+    const emitter = new EventEmitter();
+    const stdout = new PassThrough();
+    const child = Object.assign(emitter, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      killed: false,
+      pid: 9001,
+      kill: () => true, // cezar never signals in this block — the death is entirely external
+    }) as unknown as ChildProcessWithoutNullStreams;
+    const exit = (code: number | null, signal: NodeJS.Signals | null) => {
+      Object.assign(child, { exitCode: code, signalCode: signal });
+      stdout.end();
+      emitter.emit('exit', code, signal);
+    };
+    return { child, exit };
+  }
+
+  it('the fake child agrees with the real subprocess above, and names the signal in the message', async () => {
+    const fake = killableChild();
+    spawnHook.override = () => fake.child;
+    try {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it',
+        cwd: process.cwd(),
+      });
+      fake.exit(null, 'SIGKILL');
+      await expect(session.result).rejects.toThrow('claude CLI was killed by signal SIGKILL');
+    } finally {
+      spawnHook.override = null;
+    }
+  });
+
+  it.each([0, 1, 2])('floor: ordinary exit code %i with no signal is untouched by this fix', async (code) => {
+    const fake = killableChild();
+    spawnHook.override = () => fake.child;
+    try {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it',
+        cwd: process.cwd(),
+      });
+      fake.exit(code, null);
+      if (code === 0) {
+        await expect(session.result).resolves.toMatchObject({ text: '' });
+      } else {
+        await expect(session.result).rejects.toThrow(`claude CLI exited with code ${code}`);
+      }
+    } finally {
+      spawnHook.override = null;
+    }
+  });
+
+  it("negative control: cezar's own SIGTERM→SIGKILL escalation is NOT an external-kill failure", async () => {
+    // SIGKILL cannot be trapped, so cezar's own escalation (armed by `end()`, exactly like the
+    // "SIGTERM→SIGKILL escalation" describe above) produces the identical `code: null, signal:
+    // 'SIGKILL'` shape as an external kill — `terminatedByCezar` is the only thing that tells them
+    // apart, and this must resolve exactly as it always did: cleanly, no error, no signal named.
+    const signals: NodeJS.Signals[] = [];
+    const emitter = new EventEmitter();
+    const stdout = new PassThrough();
+    const child = Object.assign(emitter, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      killed: false,
+      pid: 9002,
+      kill: (signal: NodeJS.Signals) => {
+        signals.push(signal);
+        Object.assign(child, { killed: true });
+        if (signal === 'SIGKILL') {
+          Object.assign(child, { exitCode: null, signalCode: 'SIGKILL' });
+          stdout.end();
+          emitter.emit('exit', null, 'SIGKILL');
+        }
+        return true;
+      },
+    }) as unknown as ChildProcessWithoutNullStreams;
+
+    spawnHook.override = () => child;
+    vi.useFakeTimers();
+    try {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it',
+        cwd: process.cwd(),
+      });
+      session.end();
+
+      await vi.advanceTimersByTimeAsync(EOF_TERM_GRACE_MS);
+      expect(signals).toEqual(['SIGTERM']);
+      await vi.advanceTimersByTimeAsync(EOF_KILL_GRACE_MS);
+      expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
+
+      await expect(session.result).resolves.toMatchObject({ text: '' });
+    } finally {
+      vi.useRealTimers();
+      spawnHook.override = null;
+    }
+  });
+});
+
 describe('prependSystemPrompt (codex/opencode delivery)', () => {
   it('prepends the prompt as a leading block of the first user message', () => {
     expect(prependSystemPrompt('Extra rules.', 'do it')).toBe('Extra rules.\n\n---\n\ndo it');

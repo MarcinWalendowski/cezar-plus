@@ -206,6 +206,24 @@ describe('resolveCapabilities — followups (#471)', () => {
     },
   );
 
+  it('cluster is off by default and on only for an exact CEZ_CLUSTER=1', () => {
+    expect(resolveCapabilities({}, undefined).cluster).toBe(false);
+    expect(resolveCapabilities({ CEZ_CLUSTER: '1' }, undefined).cluster).toBe(true);
+    // The negative control that matters: an opt-IN key must not be readable as an opt-OUT one.
+    // Three of the keys in this object are `!== '0'` gates, and a `cluster` written that way would
+    // turn every existing install into a cluster node on upgrade — `@loki-labs/better-cezar` is
+    // published, so that would reach machines this repo does not control (PLAN P8).
+    for (const value of ['0', 'true', 'yes', '', 'on', 'TRUE']) {
+      expect(resolveCapabilities({ CEZ_CLUSTER: value }, undefined).cluster).toBe(false);
+    }
+    // Hosted mode does NOT withhold it, unlike `accountUsage`: the hub is precisely the node that
+    // runs hosted, so withholding here would hide the cluster from the machine most likely to be
+    // one. And it is not AND-ed with `singleProject` either — a single-project cockpit is exactly
+    // the shape a provisioned worker takes.
+    expect(resolveCapabilities({ CEZ_CLUSTER: '1', CEZ_REMOTE: '1' }, '0.0.0.0').cluster).toBe(true);
+    expect(resolveCapabilities({ CEZ_CLUSTER: '1', CEZ_SINGLE_PROJECT: '1' }, undefined).cluster).toBe(true);
+  });
+
   it('is independent of the deployment mode', () => {
     expect(resolveCapabilities({ CEZ_FOLLOWUPS: '1', CEZ_REMOTE: '1' }, '0.0.0.0')).toEqual({
       localHandoff: false,
@@ -229,6 +247,10 @@ describe('resolveCapabilities — followups (#471)', () => {
       // one — it is what forces every new capability to be declared here rather than added
       // silently, and it is why the polarity of a new key cannot slip through unnoticed.
       skills: true,
+      // Opt-IN (`CEZ_CLUSTER=1`, spec 2026-08-22-multi-node-cezar-cluster), and NOT withheld in
+      // hosted mode: the hub is the node that runs hosted, so a capability that vanished under
+      // `CEZ_REMOTE=1` would hide the cluster from the only machine that can be one.
+      cluster: false,
     });
   });
 });

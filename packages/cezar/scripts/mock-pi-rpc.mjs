@@ -24,6 +24,14 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
         pendingMessageCount: 0,
       },
     });
+    // Test-only: reproduces an EXTERNAL untrapped signal death — the kernel OOM killer, a cgroup
+    // MemoryMax breach, or an operator's `kill -9` (mirrors
+    // __fixtures__/claude/stub-suicide-sigkill.mjs). The `get_state` response above is proof the
+    // RPC session is live; nothing cezar did causes what follows, so `terminatedByCezar` must
+    // stay false throughout.
+    if (process.env.MOCK_PI_SUICIDE_SIGKILL === '1') {
+      setTimeout(() => process.kill(process.pid, 'SIGKILL'), 150);
+    }
   } else if (command.type === 'prompt') {
     send({ type: 'response', command: 'prompt', success: true });
     send({ type: 'agent_start' });

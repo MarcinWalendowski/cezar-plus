@@ -191,15 +191,35 @@ ship. **model** is `sonnet` (via `spec-implementer`) or `session` (SOLO).
 | # | package | owns (exact) | deps | verifies | model |
 |---|---|---|---|---|---|
 | **0.0** | **Baseline, SOLO.** Launch 8 real tasks at today's settings on the box. Record concurrent `run-tests`, `memory.peak` per scope, `/proc/pressure/{cpu,memory}` `some avg60` at the worst minute, `journalctl -k` OOM kills, wall time to all-8. Write to `.ai/runs/2026-08-22-multi-node-cezar-cluster/c0-baseline.md`. **If it does not confirm the 3-to-4 ceiling, stop the whole plan** — the premise is wrong. | `c0-baseline.md` (this run dir) | — | **C0** | session |
-| **0.1** | **Phase 0 scaffold, SOLO.** The four additive optional fields on `RunRecord` (`peakCpuPct`, `peakMemoryBytes`, `cpuSeconds`, `resourceKill`), the `heavy?: boolean` on the step definition type, the `maxHeavySteps` key on workspace `resources`, and `.env.example` + README rows for anything new. Types and defaults only — no behaviour. | `runs/store.ts`, `workflows/types.ts`, `workspace/config.ts`, `.env.example`, `README.md` | 0.0 | — | session |
+| **0.1** | **Phase 0 scaffold, SOLO.** The four additive optional fields on `RunRecord` (`peakCpuPct`, `peakMemoryBytes`, `cpuSeconds`, `resourceKill`), the `heavy?: boolean` on the step definition type, the five D14a keys on workspace `resources` (`maxHeavySteps` plus `runMemoryHighMb`, `runMemoryMaxMb`, `runCpuWeight`, `runsSliceMemoryMaxMb` — 0.3 *reads* them and must not be editing `config.ts` concurrently), and `.env.example` + README rows for anything new. **`heavy` cannot land in `workflows/types.ts` alone:** `GET /workflows` serves the cezar-side `WorkflowDef` verbatim and `contract-parity.workflows.test.ts` asserts mutual assignability, so the contract's `workflowStepDefSchema` must mirror it in the same change or tsc fails `route-is-wider`. Found by 0.1 itself, mid-flight. Types and defaults only — no behaviour. | `runs/store.ts`, `workflows/types.ts`, **`packages/contract/src/workflows.ts`**, `workspace/config.ts`, `.env.example`, `README.md` | 0.0 | — | session |
 | **0.2** | Peak CPU beside peak RSS, and on Linux prefer the run's own cgroup (`memory.peak`, `cpu.stat`) over summing `ps` RSS. Degrade to the `ps` path where cgroups are absent, and **report which one it used** — that value is what the node row's `enforcement` field renders later. | `core/process-usage.ts` + its tests | 0.1 | — | sonnet |
 | **0.3** | Resource properties onto the transient scope `broker-isolation` already creates: `MemoryHigh`/`MemoryMax`/`CPUWeight` per run, a ceiling on `cezar-runs.slice`. A kill must surface as `resourceKill` with a reason, **never as a failed test step**. | `core/broker-isolation.ts` + its tests | 0.1 | **C3** | sonnet |
-| **0.4** | The second semaphore: `maxHeavySteps`, taken and released **around a step**, not a run. Default 2. Declared per workflow step via `heavy`, never inferred from a step's name at runtime. | `workspace/semaphore.ts` + its tests | 0.1 | — | sonnet |
+| **0.4** | The second semaphore: `maxHeavySteps`, taken and released **around a step**, not a run. Declared per workflow step via `heavy`, never inferred from a step's name at runtime. **Corrected during Stage 0: the schema default is absent = unbounded, NOT 2.** This row said "default 2" and the spec's Data Models said *absent = unbounded, i.e. today's behaviour*; the spec is right and this row was wrong. `@loki-labs/better-cezar` is published and `run-tests` defaults `heavy: true`, so a schema default of 2 would silently cap every installed user's concurrent test steps on upgrade — experienced as "cezar got slower", with nothing in their config to point at, which is what P8 forbids. The **2 is a config value in this box's own** `config.json` (spec Phase 0 step 3: *"default 2 **on this box**"*), and that is now the one way the gate turns on. **It is an ops precondition, not 0.6's code change** — 0.6 reports that it is required; 0.7 must confirm it is actually written before C1/C2 mean anything, because an unwritten value measures ungated behaviour and reads exactly like a gate that did not help. Anything reading it treats `undefined` as unbounded — never 0, never 1. | `workspace/semaphore.ts` + its tests | 0.1 | — | sonnet |
 | **0.5** | Worker and thread caps: vitest workers, ripgrep threads on the agent search path. This is the largest single contributor to the burst and the cheapest to bound. | `packages/cezar/vitest.config.ts`, the agent search-path module + its tests | 0.1 | — | sonnet |
-| **0.6** | **Wiring, SOLO.** `run.ts` takes the heavy semaphore around heavy steps; `run-tests` defaults `heavy: true`; `maxParallel` default raised to 8 on this box. One file, one commit, after 0.2-0.5 are all green — because this is the change that makes the box behave differently. | `workflows/run.ts` | 0.2, 0.3, 0.4, 0.5 | — | session |
+| **0.6** | **Wiring, SOLO.** `run.ts` takes the heavy semaphore around heavy steps; `run-tests` defaults `heavy: true`. **Corrected during Stage 0, twice over — see “Phase 0 config vs. code” below.** ~~`maxParallel` default raised to 8 on this box~~: raising `.default(2)` in `workspace/config.ts` would not change *this box*, it would quadruple admitted concurrency for every installed `@loki-labs/better-cezar` user on their next upgrade, on hardware nobody here has measured. 8 is a measurement about `prod-host` and belongs in that box's own `config.json`, exactly like `maxHeavySteps: 2`. **Also picked up here:** 0.3's cgroup keys were dead config — `buildBrokerLaunchArgv` accepts `opts.resources` but `claude-cli-runner.ts` never passed it, so no bound reached any scope and `detectResourceKill` could not fire, making C3 unrunnable rather than unverified. 0.6 wires `resources` through `BrokerSessionRequest` so the applied bound and the attribution read the same object. | `workflows/run.ts`, `core/claude-cli-runner.ts` (resources wiring) | 0.2, 0.3, 0.4, 0.5 | — | session |
 | **0.7** | **Measure and decide, SOLO.** Re-run the eight tasks (C1), then the correlated launch (C2), then C4's health-latency-under-load. Write `c1-results.md` next to the baseline and state plainly whether wall time went **down**. Present the Phase-0-is-enough question to the owner. | `c1-results.md` | 0.6 | **C1, C2, C4** | session |
 
 **Barrier:** full gate on the box, one commit, push `origin`. Then **stop and ask.**
+
+#### Phase 0 config vs. code — a defect in this plan, corrected 2026-08-22
+
+Phase 0's step list in the spec mixes two kinds of change and this table copied the mix, so **two
+separate packages arrived at the same conflict independently**: 0.4 with `maxHeavySteps: 2`, 0.6
+with `maxParallel: 8`. Both step texts read as "change the default", both defaults live in
+`workspace/config.ts`, and in both cases changing them there would have been wrong.
+
+The rule, for anything else in this plan phrased as a number:
+
+> cezar is **published** as `@loki-labs/better-cezar`. A `z.…default(N)` in `workspace/config.ts` is
+> a claim about every installed user's machine on their next upgrade — hardware nobody here has
+> seen, cannot measure, and whose failure mode is thrash or "cezar got slower" with nothing in their
+> own config to point at. A number derived from measuring `prod-host` describes
+> `prod-host`. It goes in **that box's** `~/.cezar/config.json`, never in the schema default.
+
+So `resources.maxParallel: 8` and `resources.maxHeavySteps: 2` are both **ops preconditions of
+0.7**, not code changes in 0.6. 0.7 must verify both are actually written on the box before
+reporting C1/C2: an unwritten value measures ungated behaviour, and a gate that was never turned on
+is indistinguishable in the results from a gate that did not help.
 
 ### Stage 1 — Phase 1. Identity and link, inert.
 
@@ -207,7 +227,7 @@ ship. **model** is `sonnet` (via `spec-implementer`) or `session` (SOLO).
 |---|---|---|---|---|---|
 | **1.0** | **Cluster scaffold, SOLO.** `packages/contract/src/cluster.ts` with every wire shape `.strict()` and every frame shape from the spec's API contracts section, exported through the barrel; `server/cluster-routes.ts` as a chained route family with stubbed handlers; `capabilities.ts` gains `cluster: boolean`, always present; the `cez cluster` CLI verb in the `index.ts` switch with subcommands stubbed; `CEZ_CLUSTER` / `CEZ_CLUSTER_HUB` in `.env.example` and the README table **in this commit**. `contract-parity.cluster.test.ts` both directions. The contract stays Node-free — no `node:crypto`. | `packages/contract/src/cluster.ts`, contract barrel, `server/cluster-routes.ts`, `capabilities.ts`, `packages/cezar/src/index.ts`, `.env.example`, `README.md`, `contract-parity.cluster.test.ts` | 0.7 ✅ | **12** (flag-off) | session |
 | **1.1** | `nodeId`, node name, **discovered** labels (`macos`, `imessage`, `browser`, `device-e2e`, cgroup availability) — probed, never configured. `~/.cezar/cluster/node.json` at `0600`, `.passthrough()`, corrupt degrades to defaults with one warning. | `cluster/node-identity.ts` + tests | 1.0 | — | sonnet |
-| **1.2** | Enrollment: mint a short-TTL single-use code stored as a **SHA-256 digest** (`auth/org-claim-token.ts`'s existing contract, verbatim idiom), redeem, revoke-before-use, per-node HMAC secret written `0600`. The four named failure reasons — `access-rejected`, `code-expired`, `code-used`, `hub-unreachable`, `protocol-major` — are values, not prose. | `cluster/enrollment.ts` + tests | 1.0, 1.1 | — | sonnet |
+| **1.2** | Enrollment: mint a short-TTL single-use code stored as a **SHA-256 digest** (`auth/org-claim-token.ts`'s existing contract, verbatim idiom), redeem, revoke-before-use, per-node HMAC secret written `0600`. The named failure reasons are values, not prose. **This row said "four" and then listed five; it is six now.** `code-malformed` was added during implementation because `joinCluster` parses the pasted code before opening a socket, so a typo was answering `hub-unreachable` — a tested-sounding claim about DNS, the tunnel and Access, none of which had been touched. Its own test proved it: the case asserts `fetch` was never called and then asserted the hub was unreachable. The enum splits on **what the operator holding the screen can do next**, which is why a malformed code is its own member and a hub answering HTTP 500 is not. | `cluster/enrollment.ts` + tests | 1.0, 1.1 | — | sonnet |
 | **1.3** | The link, both ends. Spoke: outbound WS, `hello`/`welcome`, resume watermarks, exponential backoff with jitter. Hub: the `/api/v1/cluster/link` upgrade with **its own** auth guard — `server/ws.ts`'s guard admits browser origins and must not admit a node, and a node-authenticated socket must not gain cockpit topics. Frame bounds: ≤ 256 KB, ≤ 500 ops, per-tick send budget. Signed freshness-bounded principal per `supervisor/forwarded-principal.ts`. | `cluster/link-client.ts`, `cluster/link-server.ts` + tests | 1.0, 1.2 | **13** | sonnet |
 | **1.4** | Roster, pairings store, presence: heartbeat, capacity claim, `hostMetrics`, `repoDrift` per paired project (`HEAD` vs `origin/main`, ahead/behind, dirty, **`MERGE_HEAD`**). A spoke exposes only paired projects (D2). | `cluster/peers.ts` + tests | 1.0, 1.1 | — | sonnet |
 | **1.5** | **Activation, SOLO.** One wiring line in `server.ts` beside the existing `providerRuntimeAuth.watch` / `watchTodoAutostart` block; route family chained into the builder; `capabilities.cluster` reflects the flag. Then **E1** for real against `cockpit.example.com`. | `server/server.ts` | 1.1-1.4 | **E1** | session |
@@ -374,3 +394,139 @@ Plan-level, and not in the spec:
 - **Does Stage 2's real reconcile happen in this plan at all, or after it?** 2.5 stops at
   `--dry-run` by P9. Merging 110 rows into the live record is a data change to the thing every
   session reads first, and it deserves the owner present.
+
+## Found during implementation — open items
+
+Written 2026-08-23, from the packages' own reports. Every line here is something a package found
+and **escalated instead of quietly working around**, which is the behaviour that made them
+findable at all. Nothing below is a defect in the package that reported it.
+
+**Corrected in place already** (listed so nobody re-opens them): the `maxParallel`/`maxHeavySteps`
+config-vs-code defect (rows 0.4/0.6 + the section above); `hub-unreachable` for a malformed join
+code, now `code-malformed` (row 1.2 + spec E1b); whole-record ops, now `pendingFields` (spec Data
+Models + Verification 2); relay's reach through `RunStore`'s `private dataDir`, now
+`readHandoffText`; `handoff.test.ts`'s field classification and the `todoItemSchema` extension that
+`placement` needed to be classifiable honestly.
+
+### Blocking — all three CLOSED 2026-08-23
+
+Kept in place rather than deleted, because each was found by a package escalating instead of
+working around, and the table is the evidence that the escalation was the right call. Every row
+below now names the fix, and the whole set is covered by the barrier run described at the end of
+this document.
+
+| what | why it mattered | how it was closed |
+|---|---|---|
+| **`server/ws.ts` destroys the cluster link socket.** Its `'upgrade'` listener destroys any path that is not `WS_PATH`, and Node fires every listener for one event. Verified empirically in both registration orders (close code 1006, nothing logged). | Phase 1.5 wires both onto one `http.Server`. Until this is fixed the link can never connect, and it fails **silently** — there is no error on either side, only an abnormal close a client sees. | `attach` no longer destroys a foreign path; a new exported `attachUpgradeFallback(server, ownedPaths)` destroys only paths **nobody** owns, and `server.ts` calls it unconditionally with `[WS_PATH, CLUSTER_LINK_PATH]`. Order-independent by construction, so a future third upgrade handler cannot reintroduce it by registering first. |
+| **A cgroup kill reports as `done`.** `brokeredExitFailure` reads `code === null` as "ended acceptably", which is exactly an untrapped SIGKILL's shape. | Not a cluster bug at all — it is live in the published package, so an OOM-killed run reports success today. Diagnosis requested before it is written up; if it reproduces on unmodified `main` it wants its own commit and changelog entry, not a line in a cluster spec. | `brokeredExitFailure` now separates "no exit was ever observed" (`code === null` **and** no signal — still not the run's fault) from an untrapped external kill (`code === null` **with** a signal — now an error naming the signal). `reportedResourceKill` adds the attribution, and refuses it when the bound was never applied to this launch. Covered by `broker-external-kill.test.ts` and `broker-resource-kill.test.ts`, both of which pair every positive with its opposite. |
+| **`--role worker` / `--join` are not parseable flags.** 4.5's entire worker role is built and tested but unreachable from a command line. | The plan's own "what is touched" list said "nothing else" for row 4.5, so this is a gap in the plan's accounting rather than one 4.5 introduced. Three additive edits: `server-install/types.ts`, `engine.ts`, `index.ts`. | The three additive edits landed: `--role`/`--join` parse in `index.ts` (only `worker` is recognised; anything else falls through to `undefined` rather than silently selecting a mode), and are threaded through `server-install/types.ts` → `engine.ts`. |
+
+### Real, not yet assigned
+
+| what | why it matters |
+|---|---|
+| **`cez cluster reconcile` has no transport.** There is no request/response primitive for "fetch a peer's todo list": the link is fire-and-forget, and the contract has no route for a todos snapshot. 2.4 gated it behind a named error rather than faking a default. | **E2 — the 110-row reconcile, the thing that motivated this whole design — has no runnable path.** Either build the primitive, or have the CLI construct `resolveLocalDataDir`/`remote` and pass them in. |
+| **`appendLocalTodos` deadlocks on its own lease.** It calls `readTodos()` *inside* `withLease`, and both use `todos.lock`. `readTodos` takes that lease whenever an entry lacks an id, which is the common case for an agent append. | 5s stall, then the throw is swallowed by `.catch(() => undefined)` and the id backfill is skipped **silently**. Worse than the stall: the fallback returns ids `readRaw` minted but never wrote, on the documented assumption that "nothing was written either" — and then `appendLocalTodos`, holding the outer lease, writes them. Root cause is 2.4 having to re-implement the lease locally because `todos.ts` exports no insert-preserving-an-existing-id primitive. **Blocked** until the per-field ops package releases `todos.ts`. |
+| ~~**Field deletions never replicate.**~~ **CLOSED 2026-08-23.** `todoContentFields` built `fields` from present keys and `replica.ts` applied with `Object.assign`, so a removed key was indistinguishable from one never set. Real cases: `updateTodo({archived:false})`, `clearStartedTaskId`, `markStarted`'s `delete autostart`. | Both halves landed. Sending: `partitionTodoFields` splits each key named in `pendingFields` into `fields` (present on the record) or `clearedFields` (absent), one branch per key, and `collapseOwed` evicts from the opposite side on every write so the two stay disjoint at every step of a collapse rather than only in the result. Receiving: `applyOpToRecord` deletes each listed key, **after** the `fields` and `unknown` merges so an explicit clear cannot be undone by a D13 passthrough copy; `diffCorrections` now reads cleared names too, so a clear the local record disagreed with raises a correction instead of passing silently. The package that found this deliberately left the receiving half alone and routed it, and the test it wrote as a demonstration of the gap — asserting the key *wrongly survived* — was rewritten into the end-to-end proof with the two controls that keep it honest. |
+| **`opencode-server-runner.ts` can still report an externally-killed run as `done`, by a DIFFERENT mechanism.** `resolveExit()` discards both the exit code and the signal and gates on neither: success is decided entirely by the SSE session status (`completed`/`error`) plus `this.timedOut`. A kill mid-session with the stream never reporting `error` falls through to an unconditional `{type:'done'}`. | Found while fixing the same *symptom* in `pi` and `codex`, and deliberately not folded in with them: those two were one bug (`waitForExit` dropping the signal) in two places, this is exit-gating that does not exist at all. Fixing it means giving opencode an exit gate, not copying a branch. Its own change, its own changelog entry. |
+| **The knowledge-index budget test (`knowledge/catalog.test.ts`, C18) fails on the production box, and always has.** `bestMs / totalMiB` reads **68.6** against a `< 40` ceiling on `prod-host`. Measured against **pristine HEAD** on the same box, unpacked from `git archive HEAD` with no changes from this work: identical failure. Not new either — the same test was confirmed the same way on 2026-08-22 at **61.37**, so this is a standing red on the box, and a full box gate reading "559 of 560 files passed, 1 failed" is the green result rather than a near-miss. It is a per-core-speed budget calibrated on an M4 Max, with no host normalisation, asserted on the machine cezar actually runs on. | Deliberately NOT fixed here, and the number deliberately NOT raised — that would weaken the ~20 % regression detector the test's own docblock argues for, on every host, to make one host quiet. The principled fix is to express the budget relative to a reference workload measured on the SAME host in the same run, so the guard scales with the machine instead of encoding one. Until then, anyone running the gate on the box should expect exactly this one red and confirm it against HEAD rather than assume it is theirs. |
+| **`startPeriodicReconcile` is wired to nothing.** Named only in `cluster-routes.ts`'s activation docblock. | No stage in this plan claims it. Belongs with 1.5's activation wiring. |
+| **3b.1 invented the corpus doc-body shape and auth headers.** `GET /corpus/*path` → `{path, body}`, `Authorization: Bearer` + `x-cezar-node-id`. No wire auth scheme was specified for the corpus REST family anywhere. | 3b.2 must match these or revise them. Flagged loudly by 3b.1 rather than guessed silently, which is the only reason this is a decision instead of a surprise. |
+| **`stripLocalAffordances` is a denylist on a security boundary.** An allowlist is unavailable: `clusterRelayFrameSchema.events` is an open record and `RunEvent` has an index signature, so nothing enumerates what an event may carry. | Residual is narrower than "any missed key" — `stripDeep` scrubs paths from every string in the tree, so the exposure is an **opaque resume handle** under an unlisted key. Inverting it means `RunEvent` stops being an index signature first. |
+| **`account-at-limit` fires only on a lease conflict.** No configured per-account ceiling exists; Q2a is explicitly unmeasured, so 3.3 declined to invent one. | Possible second unreachable enum member, the same class as the `'cpu'` narrowing and the `unknown-workflow` tripwire. Decide when Q2a is measured, not before. |
+| **The relay has no cockpit run-view wiring.** Row 4.4 lists it; 4.4 owned `relay.ts` only and said so. | Needs `link-client.ts` present, so it lands with or after 1.5. |
+| **`replica.ts`'s local `ClusteredTodoItem` intersection is now redundant** — 2.3 landed the five fields on `todoSchema` verbatim from `clusterTodoFieldsSchema.shape`. | Delete it, don't leave a second spelling of the same type. |
+| **`orgUserProvisioningStep('worker')` renders `org "worker"`** in its UI strings, because they are parameterized by slug rather than by mode. | Cosmetic, and the price of reusing the step rather than duplicating it — which was the right trade. Worth one string change. |
+| **`workflows/workspace-parallel.test.ts` flaked once under a full-suite load on the box**, in "removes the directory, keeps `cez/<id8>`, and leaves no leftover entry on the record". `git status --porcelain` in the fixture project read `?? .ai/` where the test requires `''`, alongside stderr `failed to save runs.json: ENOENT … /.ai/cezar/runs.json.tmp` from two other boot roots — i.e. a store save racing the discard's cleanup, winning in one direction here and losing in the other there. | **Observed once in five full box runs, and not reproduced**: three isolated re-runs of the file passed 3/3, and the next full suite on the identical tree was clean. No `origin/main` control was run, so this is NOT a claim that the flake predates this work — only that it is not reproducible and that nothing in this change touches the file or its subject. Recorded rather than dismissed because the mechanism is real: an asynchronous `runs.json` save outliving the directory it targets. Whoever picks it up should start from the ENOENT, not from the assertion. |
+
+### Ops preconditions of 0.7, not code
+
+`resources.maxParallel: 8`, `resources.maxHeavySteps: 2`, and a memory bound
+(`runMemoryMaxMb`, plus `runMemoryHighMb` / `runCpuWeight` / `runsSliceMemoryMaxMb` for C4) must be
+written into `prod-host`'s own `~/.cezar/config.json` **before C1/C2/C3 are run**. C3 has
+nothing to detect without a memory bound, and the heavy-step gate is inert without `maxHeavySteps`
+by design. The bounds exist only under `scope` isolation — on the Mac cockpit all of it degrades to
+no bound and no attribution, by construction, so the Mac cannot be the host for C3.
+
+### The gate itself was broken for hours, and the fan-out is why nobody saw it
+
+`npm test` — plain `vitest run` — died **in planning with zero tests executed** from the moment
+package 0.5 added `maxWorkers` to `packages/cezar/vitest.config.ts`. Vitest 4 requires projects
+that differ in `maxWorkers` to carry distinct `sequence.groupOrder`, and only `server` had the
+field. Fixed by setting the cap on **every** project from the one derivation in
+`search-parallelism.ts`, which is also what makes the cap real: bounding the burst means one
+`run-tests` step must not claim the whole box, and capping `server` while `web` still forks a
+worker per test file leaves it exactly as unbounded. Projects that agree share one pool, so the
+budget now applies to the gate as a whole. Distinct group orders would have satisfied the validator
+while leaving the cap partial and serialising the groups — slower and still wrong.
+
+**The orchestration lesson, which is the part worth keeping.** P4 tells every package to run only a
+narrow per-project command and never the full gate, for good reasons — twenty concurrent full gates
+would thrash, and here a build would hot-swap two live cockpits. The cost is that **the full gate is
+then run by nobody until the barrier**, so a break in the gate itself is invisible while every
+package truthfully reports green. It surfaced only because one agent tried an unfiltered run on its
+own initiative.
+
+Two amendments to P4, for this plan and the next one of this shape:
+
+1. **Run the unfiltered gate yourself, once, before the fan-out.** A known-good baseline is what
+   makes a barrier failure attributable.
+2. **A change to shared build or test config is an explicit exception to the narrow-command rule.**
+   `vitest.config.ts`, any `tsconfig`, the root scripts: whoever lands one runs the full gate,
+   because those are precisely the changes no narrow command can exercise.
+
+Also note the second-order hazard: a cross-project narrow run (`vitest run <cezar-file>
+<web-file>`) failed the same way and reported **"no tests"**, which is not a shape anyone reads as
+red. Assert on "N tests passed", never on exit code alone and never on absence of output.
+
+### `git stash` in a shared checkout is everyone's WIP, not yours
+
+Disclosed by the package that did it, which is why it is here rather than undiscovered. Mid-
+verification, one agent ran `git stash push --include-untracked` intending to test its five owned
+files against a clean tree, caught the prohibition immediately and ran `git stash pop`. Nothing was
+lost — the stash list is empty, the file counts match, and the whole tree subsequently passed
+`typecheck` / `build` / `test:unit` / `test:package` on the box.
+
+The reason the rule exists is exactly what happened: **`~/loki-labs/cezar` is ONE checkout shared by
+every agent in the fan-out**, so that stash briefly held roughly twenty agents' uncommitted work —
+broker isolation, workflows, server-install, the web routes — not the five files its author owned.
+A pop that failed, or a second agent writing during the window, would have been unrecoverable, and
+`.ai/cezar` is gitignored so parts of it would not even have been in the stash to restore.
+
+`git diff` answers the same question read-only, and is what to reach for. The general form: in a
+shared checkout, **no agent may run a command whose blast radius is the whole working tree** —
+`stash`, `checkout .`, `reset --hard`, `clean -fd`. That includes restoring a mutation test: copy
+the file to the scratchpad first and restore from the copy.
+
+### A green branch gate says nothing about the tree you will actually push
+
+The branch gate on the box read 559 of 560 files green with only the standing C18 red. The merge
+with `origin/main` — 33 commits the box's own agents had pushed while this fan-out ran — then took
+the same tree to **3 failed files, 12 failed tests**, and none of the twelve were in a file the
+merge touched textually. Git had reported two conflicted files and five hunks; it could not report
+this, because nothing conflicted.
+
+What broke: `origin/main`'s dead-twin fix made `instanceId` a **required** field of a fresh broker
+launch (`spawnBroker` now throws `fresh broker launch requires an instance id`), moved the spool to
+`<runId>.spool/<instanceId>`, and made `BrokeredSession` accept an `exit.json` only when its
+`instanceId` matches the launch's. Two test files written earlier in this same fan-out
+(`broker-external-kill.test.ts`, `broker-resource-wiring.test.ts`) constructed broker requests
+without one, because when they were written the runner minted its own. Both were adapted to supply
+an `instanceId` and to stamp it into every exit they write — which makes them *more* faithful to
+`RunManager.brokerFor`, not less. Post-merge on the box: typecheck 0, **562 of 563 files green**,
+the one red still C18.
+
+The rule this yields: **the gate that authorises a push is the gate on the merged tree**, re-run
+after the merge, never the branch gate carried forward. A long fan-out against a moving `main` makes
+that mandatory rather than tidy — the contract a test was written against can be replaced under it
+by a commit that never touches the test's file, and the only thing that detects it is running the
+suite again.
+
+### One methodological note, because it invalidates a whole class of claim
+
+`grep` **silently finds nothing** in a file it classifies as binary, and four `.ts` files in this
+repo are so classified — including `cluster/ops.ts`. They are not corrupt (no control characters,
+they typecheck, and one of the four is untouched in git); the likely cause is the density of
+multi-byte characters in the docblocks. So every "no other callers, confirmed via grep" in a
+package report today had an invisible blind spot. The ones that decisions rested on were re-run
+with `-a` and all held. Use `grep -a` for any audit whose conclusion is a negative.

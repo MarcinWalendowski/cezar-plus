@@ -58,6 +58,19 @@ import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 // HERE — FIX B1 moved its one caller, the local-mode wiring, into `./local-mode-boot.ts`, which
 // imports it directly.)
 import { registerAndAdoptProject, suppressBootRegistration } from './registered-project-roots.ts';
+// The cluster CLI (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`). Every one of these is a
+// filesystem/HTTP call against `~/.cezar/cluster` — no server, no auth wall — which is what lets
+// `cez cluster active` be a read an agent can make from inside a run (D19 rung 4).
+import { CLUSTER_PROTOCOL, type ClusterCorpusSubmitResponse } from '@loki-labs/better-cezar-contract';
+import { createEnrollmentCode, joinCluster, leaveCluster } from './cluster/enrollment.ts';
+import { loadNodeIdentity } from './cluster/node-identity.ts';
+import { disableNode, readPeers } from './cluster/peers.ts';
+import { readRemoteRuns } from './cluster/run-projection.ts';
+import { clusterEnabled } from './server/capabilities.ts';
+import { clusterActiveRunsFrom } from './server/cluster-routes.ts';
+// Aliased: `serverInstallCommand` below already destructures its own `loadServerState` out of a
+// dynamic import, and two bindings of one name in one file is a shadow waiting to be misread.
+import { loadServerState as loadInstalledServerState } from './server-install/state.ts';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -78,11 +91,19 @@ Usage:
   cezar kb                  knowledge base (CEZ_KB=1): search "<query>" · show
                             <id> · roots · reindex · write · proposals — the
                             same commands the agent system prompt tells a run
-                            to use (run "cezar kb" for the full usage)
+                            to use (run "cezar kb" for the full usage). On a
+                            CLUSTER SPOKE, "kb submit <path>" forwards a write to
+                            the hub — the only write direction the mirror has
+
   cezar todo                file (and optionally auto-start) a workspace task:
                             add "<summary>" [--project <id|path>] [--start] ·
                             list — the same command the agent system prompt
                             tells a run to use (run "cezar todo" for the full
+                            usage)
+  cezar cluster             multi-node cluster (CEZ_CLUSTER=1): enroll [--name N]
+                            [--ttl S] · join <code> [--name N] · active [--json] ·
+                            reconcile [--dry-run] [--peer <nodeId>] · revoke
+                            <nodeId> | --self (run "cezar cluster" for the full
                             usage)
   cezar backup              encrypted platform backup (CEZ_BACKUP=1): status ·
                             run · snapshots · verify · gc · restore [--snapshot
@@ -120,6 +141,11 @@ Options:
                               (D4/D10 per-org process isolation) instead of the
                               deployment's one supervisor. Requires the supervisor to
                               already be provisioned on this host — see docs/server-install/hetzner.md.
+      --role worker           server-install --platform hetzner: provision this box as a cluster
+                              spoke (D17) instead of a supervisor/org cockpit — dials OUT to the
+                              hub, no --domain/nginx/TLS. Requires --join.
+      --join <code>           server-install --platform hetzner --role worker: the hub-minted,
+                              single-use enrollment code from the cockpit's "Add node" (D17).
       --external-proxy        server-install (ubuntu-vps): the box ALREADY has a
                               reverse proxy owning :80/:443 (Dokploy/Traefik, Coolify,
                               Caddy, your own nginx). Installs the service only — no
@@ -171,10 +197,33 @@ async function main(): Promise<void> {
   // every install since the knowledge base existed. A green unit suite over a function no entry
   // point calls says nothing about whether the feature is REACHABLE; these lines are what make it
   // so, and `knowledge/cli-wiring.test.ts` is what keeps them.
+  // `kb submit` is intercepted BEFORE the `kb` branch below, and the order is the whole point:
+  // `runKnowledgeCommand` rejects an unknown subcommand, so appending this to the switch inside
+  // `knowledge/cli.ts` would be the only other option — and that file belongs to the knowledge
+  // base, not to the cluster. A spoke's mirror is READ-ONLY (`sources/cezar-hub/provider.ts`), so
+  // this is the affordance that replaces the prohibition: D8's rule only forbids, and a rule that
+  // forbids without offering the path it replaces gets routed around.
+  if (rawArgs[0] === 'kb' && rawArgs[1] === 'submit') {
+    process.exitCode = await runKbSubmitCommand(rawArgs.slice(2));
+    return;
+  }
+
   if (rawArgs[0] === 'kb') {
     const kbCwd = resolve(process.cwd());
     const kbRepoRoot = (await getRepoInfo(kbCwd))?.root ?? kbCwd;
     process.exitCode = await runKnowledgeCommand(rawArgs.slice(1), { repoRoot: kbRepoRoot });
+    return;
+  }
+
+  // `cluster` is routed here for exactly the reason `kb`/`todo`/`runs` above are: it owns its own
+  // flag namespace (`--name`, `--ttl`, `--dry-run`, `--peer`, `--self`, `--json`), every one of
+  // which the strict `parseArgs` below rejects as an unknown option long before the command switch
+  // — and `cluster` is not a `case` there at all, so dispatching from inside the switch would
+  // answer `unknown command: cluster`. Workspace-scoped (`~/.cezar/cluster`), so `--repo` is not
+  // one of its concerns; gated on `CEZ_CLUSTER=1` inside `runClusterCommand` so it stays inert
+  // with the flag off.
+  if (rawArgs[0] === 'cluster') {
+    process.exitCode = await runClusterCommand(rawArgs.slice(1));
     return;
   }
 
@@ -260,6 +309,8 @@ async function main(): Promise<void> {
       platform: { type: 'string' },
       domain: { type: 'string' },
       'org-slug': { type: 'string' },
+      role: { type: 'string' },
+      join: { type: 'string' },
       'bind-host': { type: 'string' },
       'external-proxy': { type: 'boolean', default: false },
       yes: { type: 'boolean', default: false },
@@ -347,6 +398,13 @@ async function main(): Promise<void> {
         reinstall: Boolean(values.reinstall),
         domain: values.domain,
         orgSlug: values['org-slug'],
+        // Only 'worker' is a recognised role (hetzner.ts#isWorkerMode). An unrecognised --role
+        // value is silently treated as absent rather than rejected here: preflight already fails
+        // worker mode without --join, and a bogus role that falls through to supervisor/org mode
+        // fails on ITS own pre-existing checks (e.g. missing --domain) — no second rejection point
+        // to keep in sync with preflight's.
+        role: values.role === 'worker' ? 'worker' : undefined,
+        clusterJoinToken: values.join,
         port: portExplicit ? Number(values.port) : undefined,
         externalProxy: Boolean(values['external-proxy']),
         bindHost: values['bind-host'],
@@ -1062,6 +1120,10 @@ async function serverCommand(
     domain?: string;
     /** `--platform hetzner` only — see `RunOptions#orgSlug` (`server-install/engine.ts`). */
     orgSlug?: string;
+    /** `--role worker` (Phase 4, D17) — see `RunOptions#role` (`server-install/engine.ts`). */
+    role?: 'worker';
+    /** `--join <code>` — see `RunOptions#clusterJoinToken` (`server-install/engine.ts`). */
+    clusterJoinToken?: string;
     port?: number;
     externalProxy?: boolean;
     bindHost?: string;
@@ -1148,6 +1210,8 @@ async function serverCommand(
     instance,
     domain,
     orgSlug: flags.orgSlug,
+    role: flags.role,
+    clusterJoinToken: flags.clusterJoinToken,
     port,
     // Only an install decides proxy mode; deploy/uninstall read it back from
     // the recorded state. Preserve an omitted flag as `undefined`: a flag-less
@@ -1296,6 +1360,353 @@ function ensureDataGitignore(repoRoot: string): void {
 }
 
 /** Own package name — for the npm-registry update check (#368). */
+
+// ---- cluster (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`) ---------------------------
+
+const CLUSTER_USAGE = `usage:
+  cez cluster enroll [--name <node name>] [--ttl <seconds>] [--json]
+                              hub: mint a single-use join code and print the one-liner
+                              a new node runs. The code is shown ONCE — only its
+                              SHA-256 digest is stored — and the command it renders
+                              carries the code and nothing else: never an Access
+                              client id or secret.
+  cez cluster join <code> [--name <node name>] [--json]
+                              spoke: redeem a code against the hub it names. Every
+                              failure is one of five NAMED reasons — access-rejected ·
+                              code-expired · code-used · hub-unreachable ·
+                              protocol-major — because an operator who cannot tell an
+                              Access rejection from a stale code will re-mint codes to
+                              fix a credential problem.
+  cez cluster active [--json]  what is in flight across the cluster: task summary,
+                              node, branch, touched paths. Read this before starting
+                              work in a repo somebody else may already be holding.
+  cez cluster reconcile [--dry-run] [--peer <nodeId>]
+                              full compare against a peer's backlog. Three classes:
+                              one side only · identical · differing-and-neither-saw-
+                              the-hub. The third is REFUSED, never auto-merged: no
+                              fact available says which side is right.
+  cez cluster revoke <nodeId>  hub: disable a node.
+  cez cluster revoke --self    spoke: delete THIS node's credential. Revocation is
+                              two-sided — a hub-side revoke alone does not stop a
+                              spoke from continuing to push.`;
+
+const CLUSTER_OFF_CLI =
+  'cez cluster: clustering is off — set CEZ_CLUSTER=1 (and CEZ_CLUSTER_HUB=<url> to join one as a spoke) and restart cezar';
+
+/**
+ * `cez cluster …`. Filesystem + HTTP only: no server to talk to, no auth wall, exactly like
+ * `cez kb` and `cez todo`, which is what lets `cez cluster active` be a read an agent can make
+ * from inside a run over the `Bash` surface it already has (D19 rung 4).
+ *
+ * Returns the process exit code — 0 on success, 1 on a usage error or a genuine failure.
+ *
+ * Every subcommand is wrapped in one try/catch on purpose. The `cluster/*` modules are landing
+ * package by package, so a subcommand whose module has not been filled in yet throws a NAMED
+ * `not implemented: … package N.N` error; printing that one line beats an unhandled rejection's
+ * stack, and it tells whoever hits it exactly which package they are waiting on.
+ */
+async function runClusterCommand(args: string[]): Promise<number> {
+  const sub = args[0];
+  if (sub === undefined || sub === '--help' || sub === '-h' || sub === 'help') {
+    console.log(CLUSTER_USAGE);
+    return sub === undefined ? 1 : 0;
+  }
+  if (!clusterEnabled(process.env)) {
+    console.error(CLUSTER_OFF_CLI);
+    return 1;
+  }
+
+  let values: Record<string, string | boolean | undefined>;
+  let positionals: string[];
+  try {
+    const parsed = parseArgs({
+      args: args.slice(1),
+      options: {
+        name: { type: 'string' },
+        ttl: { type: 'string' },
+        peer: { type: 'string' },
+        'dry-run': { type: 'boolean', default: false },
+        self: { type: 'boolean', default: false },
+        json: { type: 'boolean', default: false },
+      },
+      allowPositionals: true,
+    });
+    values = parsed.values;
+    positionals = parsed.positionals;
+  } catch (err) {
+    console.error(`cez cluster: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(CLUSTER_USAGE);
+    return 1;
+  }
+
+  const json = values.json === true;
+  const emit = (value: unknown, lines: () => string[]): void => {
+    if (json) console.log(JSON.stringify(value, null, 2));
+    else for (const line of lines()) console.log(line);
+  };
+
+  try {
+    switch (sub) {
+      case 'enroll': {
+        const ttlSeconds = values.ttl === undefined ? undefined : Number(values.ttl);
+        if (ttlSeconds !== undefined && !Number.isFinite(ttlSeconds)) {
+          console.error('cez cluster enroll: --ttl must be a number of seconds');
+          return 1;
+        }
+        const { response } = await createEnrollmentCode({
+          ...(typeof values.name === 'string' ? { nodeName: values.name } : {}),
+          ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
+          hubUrl: clusterHubUrl(),
+          hubVersion: readOwnVersion(),
+        });
+        emit(response, () => [
+          `code:      ${response.code}`,
+          `code id:   ${response.codeId}   (revoke with: DELETE /api/v1/cluster/enroll/${response.codeId})`,
+          `expires:   ${response.expiresAt}`,
+          '',
+          'On the node you are adding, run ONE of:',
+          `  ${response.commands.join}`,
+          `  ${response.commands.provision}`,
+          '',
+          'Single use, and shown once — the hub keeps only a SHA-256 digest and cannot print it again.',
+        ]);
+        return 0;
+      }
+
+      case 'join': {
+        const code = positionals[0];
+        if (!code) {
+          console.error('cez cluster join: pass the code the hub printed — `cez cluster join <code>`');
+          return 1;
+        }
+        // `joinCluster` owns the credential write (`persistNodeCredential`, 0600). The CLI never
+        // touches the secret, so it has exactly one writer, and it is never echoed to a terminal
+        // whose scrollback is somebody's shell history.
+        const result = await joinCluster({
+          code,
+          ...(typeof values.name === 'string' ? { nodeName: values.name } : {}),
+          protocol: CLUSTER_PROTOCOL,
+        });
+        if (!result.ok) {
+          // The REASON is the value; the message is detail nothing branches on.
+          console.error(`cez cluster join: refused — ${result.reason}${result.message ? `: ${result.message}` : ''}`);
+          if (json) console.log(JSON.stringify(result, null, 2));
+          return 1;
+        }
+        emit({ ok: true, nodeId: result.nodeId, hubNodeId: result.hubNodeId, hubUrl: result.hubUrl }, () => [
+          `joined ${result.hubUrl} as ${result.nodeId}`,
+          `hub:    ${result.hubNodeId}`,
+          `protocol ${result.protocol.major}.${result.protocol.minor}`,
+          '',
+          'This node accepts NO dispatched work until you turn it on — Settings → Cluster, or',
+          'PATCH /api/v1/cluster/nodes/<nodeId> {"acceptsDispatch":true}. It replicates either way.',
+        ]);
+        return 0;
+      }
+
+      case 'active': {
+        const runs = clusterActiveRunsFrom(await readRemoteRuns());
+        emit({ runs, asOf: new Date().toISOString() }, () =>
+          runs.length === 0
+            ? ['nothing in flight on any linked node.']
+            : runs.map(
+                (run) =>
+                  `${run.nodeId}  ${run.runId}  ${run.branch ?? '(no branch)'}  ${run.summary ?? ''}`.trim(),
+              ),
+        );
+        return 0;
+      }
+
+      case 'reconcile': {
+        // The verb is wired, the peer resolution is real, and the body is not mine to write.
+        // `reconcileAll` takes a `RemoteReconcileTransport` — `listProjects`/`list`/`backup`/
+        // `apply` against the PEER — and there is no transport to build one from yet: it rides the
+        // node link (`cluster/link-*.ts`, package 1.3), and no HTTP route exposes another node's
+        // todo list. Package **2.4** owns this body and lands both halves together.
+        //
+        // Reachable-and-refusing rather than absent, deliberately: `cez kb search` shipped complete
+        // and wired to nothing for months, answering `unknown command: kb` to the exact command the
+        // agent system prompt told every run to use. A verb that names what it is waiting for
+        // cannot fail that way.
+        const peerNodeId = typeof values.peer === 'string' ? values.peer : await soleClusterPeer();
+        if (!peerNodeId) return 1;
+        console.error(
+          `cez cluster reconcile: not available yet — the peer transport rides the node link, which has not landed (plan packages 1.3 / 2.4). Peer resolved as ${peerNodeId}; nothing was read or written.`,
+        );
+        return 1;
+      }
+
+      case 'revoke': {
+        if (values.self === true) {
+          await leaveCluster();
+          console.log('this node’s cluster credential is deleted. Ask the hub to disable the node too —');
+          console.log('a spoke-side delete stops this node pushing, and a hub-side revoke stops the hub');
+          console.log('answering; revocation is only complete with both.');
+          return 0;
+        }
+        const nodeId = positionals[0];
+        if (!nodeId) {
+          console.error('cez cluster revoke: name the node — `cez cluster revoke <nodeId>` — or `--self` to drop THIS node’s credential');
+          return 1;
+        }
+        const revoked = await disableNode(nodeId);
+        if (!revoked) {
+          console.error(`cez cluster revoke: no node ${nodeId} in the roster`);
+          return 1;
+        }
+        console.log(`${nodeId} is disabled on this hub.`);
+        console.log('Run `cez cluster revoke --self` ON THAT NODE too — a hub-side revoke alone does not stop');
+        console.log('a spoke from continuing to push ops.');
+        return 0;
+      }
+
+      default:
+        console.error(`cez cluster: unknown subcommand "${sub}"`);
+        console.error(CLUSTER_USAGE);
+        return 1;
+    }
+  } catch (err) {
+    console.error(`cez cluster ${sub}: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+}
+
+/** The hub's own URL, for the join command it renders. Discovered before configured, the shape
+ *  `notifications-routes.ts#discoverCockpitUrl` already settled. Loopback is the last resort and is
+ *  useless in a pasted command — which is exactly why an operator who has not set one gets a
+ *  visibly-local URL rather than a plausible wrong one. */
+function clusterHubUrl(): string {
+  const configured = process.env.CEZ_CLUSTER_HUB?.trim() || process.env.CEZ_COCKPIT_URL?.trim();
+  if (configured) return configured;
+  const state = loadInstalledServerState();
+  return state.domain ? `https://${state.domain}` : `http://127.0.0.1:${state.primaryPort}`;
+}
+
+/** `--peer` omitted: fall back to the one other node in the roster, and refuse rather than guess
+ *  when there is none or more than one. Reconciling against the wrong peer writes another repo's
+ *  backlog into this one, so this fails closed. */
+async function soleClusterPeer(): Promise<string | undefined> {
+  const self = await loadNodeIdentity();
+  const peers = await readPeers();
+  const others = peers.nodes.filter((node) => node.nodeId !== self?.nodeId && !node.disabledAt);
+  if (others.length === 1) return others[0]!.nodeId;
+  if (others.length === 0) {
+    console.error('cez cluster reconcile: no other node in the roster to reconcile against');
+    return undefined;
+  }
+  console.error(
+    `cez cluster reconcile: name the peer with --peer <nodeId> — the roster holds ${others.length}: ${others
+      .map((node) => node.nodeId)
+      .join(', ')}`,
+  );
+  return undefined;
+}
+
+// ---- `cez kb submit` — the spoke's one write path to the record ------------------------------
+
+const KB_SUBMIT_USAGE = 'usage: cez kb submit <corpus-path> [--content "..."] [--note "..."] [--json]';
+
+/**
+ * Forwards a knowledge write to the hub (`POST /api/v1/cluster/corpus/submit`) — **the only write
+ * direction the corpus has** (D8/D8a). The path is corpus-relative (`knowledge/foo.md`), and the
+ * body comes from `--content` or stdin, the same two sources `cez kb write` accepts.
+ *
+ * It exists because a prohibition on its own gets routed around: `--add-dir` already grants an
+ * agent write access to the mirror path, so `readOnly: true` on a spoke's root is not sufficient.
+ * The sweep quarantines a diverged file rather than overwriting it, and this is the correct path
+ * that is easier than the wrong one.
+ *
+ * A HUB refuses: there is nothing to forward to, and the corpus is right here — `cez kb write`.
+ */
+async function runKbSubmitCommand(args: string[]): Promise<number> {
+  if (args[0] === '--help' || args[0] === '-h') {
+    console.log(KB_SUBMIT_USAGE);
+    return 0;
+  }
+  if (!clusterEnabled(process.env)) {
+    console.error('cez kb submit: clustering is off — with no hub to forward to, write the corpus directly (`cez kb write`)');
+    return 1;
+  }
+
+  let values: Record<string, string | boolean | undefined>;
+  let positionals: string[];
+  try {
+    const parsed = parseArgs({
+      args,
+      options: {
+        content: { type: 'string' },
+        note: { type: 'string' },
+        json: { type: 'boolean', default: false },
+      },
+      allowPositionals: true,
+    });
+    values = parsed.values;
+    positionals = parsed.positionals;
+  } catch (err) {
+    console.error(`cez kb submit: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(KB_SUBMIT_USAGE);
+    return 1;
+  }
+
+  const path = positionals[0];
+  if (!path) {
+    console.error(KB_SUBMIT_USAGE);
+    return 1;
+  }
+
+  const body = typeof values.content === 'string' ? values.content : await readAllStdin();
+  if (body.trim() === '') {
+    console.error('cez kb submit: no content given; pass --content "..." or pipe it on stdin');
+    return 1;
+  }
+
+  const identity = await loadNodeIdentity();
+  if (!identity) {
+    console.error('cez kb submit: this node has no cluster identity — run `cez cluster join <code>` first');
+    return 1;
+  }
+  if (identity.role !== 'spoke' || !identity.hubUrl) {
+    console.error('cez kb submit: this node IS the hub — the corpus is local here, so write it directly (`cez kb write`)');
+    return 1;
+  }
+
+  try {
+    const response = await fetch(new URL('/api/v1/cluster/corpus/submit', identity.hubUrl), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        path,
+        body,
+        ...(typeof values.note === 'string' ? { note: values.note } : {}),
+      }),
+    });
+    const payload = (await response.json().catch(() => null)) as ClusterCorpusSubmitResponse | { error?: string } | null;
+    if (!response.ok) {
+      const detail = payload && 'error' in payload && payload.error ? payload.error : `HTTP ${response.status}`;
+      console.error(`cez kb submit: the hub refused — ${detail}`);
+      return 1;
+    }
+    if (payload && 'ok' in payload && payload.ok === false) {
+      console.error(`cez kb submit: refused — ${payload.reason}${payload.message ? `: ${payload.message}` : ''}`);
+      return 1;
+    }
+    if (values.json === true) console.log(JSON.stringify(payload, null, 2));
+    else if (payload && 'ok' in payload && payload.ok) console.log(`submitted ${payload.path} (corpus ${payload.corpusVersion})`);
+    return 0;
+  } catch (err) {
+    console.error(`cez kb submit: could not reach the hub at ${identity.hubUrl} — ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+}
+
+/** Stdin, or `''` when nothing is piped — mirrors `knowledge/cli.ts`'s own content fallback. */
+async function readAllStdin(): Promise<string> {
+  if (process.stdin.isTTY) return '';
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 function readOwnName(): string {
   try {
     const here = dirname(fileURLToPath(import.meta.url));

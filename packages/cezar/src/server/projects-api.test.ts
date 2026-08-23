@@ -1612,6 +1612,9 @@ describe('workspace projects API', () => {
         notify: false,
         accountUsage: false,
         skills: true,
+        // Unconditional key, `false` because `CEZ_CLUSTER` is off — see the note on the same
+        // assertion in `health-forge.test.ts`, which is the other place this shape is pinned.
+        cluster: false,
       });
       // New fields: registered projects enumerated, boot project named.
       expect(body.projects.map((p) => p.id).sort()).toEqual([boot.id, other.id].sort());

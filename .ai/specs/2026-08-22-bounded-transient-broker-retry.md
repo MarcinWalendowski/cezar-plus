@@ -1,7 +1,24 @@
 # A step whose broker never answered is retried once; one that was never started is not
 
-**Status:** Implemented (code) — QA Needed (production E2E steps 1-5 below are pending the next
-deploy; nothing on `prod-host` has exercised the retry yet).
+**Status:** DONE 2026-08-22. P1-P3 implemented (commit `2258aee0`), P5 (verification) implemented
+this pass — see "P5 shipped, corrected 2026-08-22" below. Deployed to `prod-host` at release
+`20260823T000500Z-ef52ad86` (sha `ef52ad86`, blue-green, smoke-boot + probe green, 60ms cutover
+gap). **Verification §6 production E2E run and passed on `prod-host`** immediately after
+that deploy, against the live deployed binary via `cezar run mock:done ... --repo <scratch fixture>`
+in an isolated `/tmp` fixture repo (not the real workspace), `CEZ_DRY_RUN=1` so nothing pushed:
+1) `deaf-alive` — retry note ("relaunching the broker once") printed on the CLI thread, not only in
+NDJSON; exactly one `run.step.retried_cold_broker` metric; retry instance (`mt51sm3t-2`) has a
+distinct `instanceId` from the abandoned one (`mt51sm3t-1`); both `meta.pid` (572414) and
+`meta.childPid` (572496) confirmed gone via `ps -p` after the run finished; the abandoned
+`cezar-run-*.scope` unit no longer appears in `systemctl --user list-units`. 2) `deaf-once` —
+reproduces the known, deliberately-unfixed gap below: fails via `failBrokerVanished` ("died without
+recording an exit"), zero retry metrics, and both the broker pid (573942) and backend childPid
+(573962) still confirmed reaped. 3) `never-start` — fails on the first attempt, zero retries spent,
+error names the real cause and quotes the launcher (`fault injection: never-start`), matching
+`<runId>.broker.log`. All three used gates already green in-repo (below) plus the box's real
+`systemd --user` scope machinery, not a vitest sandbox. The `deaf-once`/`failBrokerVanished` gap and
+the chain-restart mis-dispatch issue are unaddressed by design (see Risks / "Deliberately NOT done
+here") and are filed as separate follow-up todos, not blockers for this spec's own Done.
 **Date:** 2026-08-22
 **Shipped:** commit `2258aee0` ("fix: retry a broker step once when it never answered, not when
 it was never started"), merged to `origin/main` at `541bc76d`. Gates run in-repo before merge:
@@ -12,6 +29,39 @@ regression). `npm run build` / `npm run test:package` were not re-run at merge t
 before closing out QA.
 **Brief:** `.ai/specs/briefs/2026-08-22-bounded-broker-retry.md` (KB `specs-855ce6ed75c2`)
 
+**P5 shipped, corrected 2026-08-22 (this pass).** The Status note below (and its "unrunnable as
+written today" claim) described the state BEFORE this pass — P5(a) the three `CEZ_BROKER_FAULT`
+modes, P5(b) the built-tree `test/e2e/cold-broker-retry.test.ts` suite, P5(c) the four missing
+`broker-retry.test.ts` workflow cases, and P5(e) the two missing `brokered-session.test.ts` unit
+cases have all now been written and are green — see each phase's own "Shipped 2026-08-22" note
+below for the exact commands run and their output. **A real, previously-unknown gap surfaced while
+writing the `deaf-once` e2e case**, not a test-authoring mistake: see P5(b)'s note and the new
+"Known gap: `deaf-once` is not actually retried" entry under Risks. P5(d)'s changelog entry has
+been written (`notion-export/changelog/2026-08-22-bounded-transient-broker-retry--local.md`); its KB
+decision entry was already proposed by an earlier pass via `CEZ_KB_WRITE_FILE` and remains an
+**unapplied proposal** — `cez kb search` will not find it until the cockpit applies it, per the
+house rule that a corpus write only counts once search finds it. None of this pass's changes touch
+P1-P3's production behaviour: every edit is a new test, a new fault-injection branch gated on an
+unset-by-default env var, or a corpus write.
+
+**Status note, corrected 2026-08-22 after review (superseded by "P5 shipped" above for
+P5(a)/(b)/(c)/(e); P5(d)'s changelog half is also now done).** This Status previously read
+"Implemented (code) / QA Needed (production E2E steps 1-5 pending the next deploy)". That was wrong
+in a way the deploy and QA steps downstream would have acted on: the E2E was pending **code that had
+not yet been written**, not a deploy. As of the ORIGINAL writing of this note, not implemented,
+verified by direct read at `ad7a0a41`:
+
+- the three `CEZ_BROKER_FAULT` fault-injection modes that Verification §4 and §6 are written
+  against. `grep -rn CEZ_BROKER_FAULT packages/` returns **zero matches** repo-wide.
+- the built-tree e2e `packages/cezar/test/e2e/cold-broker-retry.test.ts`. That directory holds
+  only `alias-bin-exports`, `inline-contract`, `package-cli`, `release-snapshot`, `release`.
+- four of Verification §2's six cases, including the only one that pins AC4's bound and the only
+  one that guards the opening-payload restore (§2 has the per-case table).
+
+So Verification §4 and every one of §6's steps 1-5 were **unrunnable as written at that time**: each
+drove a hook that did not exist. The remaining work was scoped as **P5**, and has now shipped (see
+above). P4's changelog entry is done; the KB decision remains an unapplied proposal (see above).
+
 **CORRECTED 2026-08-22 after review:** `everAnswered` is initialized true for a re-attached
 broker session, because re-attach means the opening instruction belonged to an earlier server
 process and may already have produced work. A re-attached channel is therefore never eligible for
@@ -20,15 +70,43 @@ the follow-up control request was not delivered, but the conversation it was mea
 exists. The earlier P3 text that passed `sessionId = undefined` is superseded by the corrected P3
 section below.
 
-**Baseline: `origin/main` at `c1ccbe79`, NOT this worktree's `HEAD`.** The branch `cez/9e110775`
-sits at `2778fd52`, which shares only `c73c8a2d` with `origin/main` and is 71 commits behind it.
-Every fix this spec builds on, `8e20dfbf` (per-launch scope unit name, launcher log,
-`launchFailure`), `0883256b` (one process stamp per broker), `373b1b10` (never-persisted resumed
-session fails permanently), `c1ccbe79` (a failed codex turn is not a done step), is reachable from
-`origin/main` and is **absent from this checkout**. Every file and line number below was read with
-`git show origin/main:<path>` and is stated against `c1ccbe79`. **Implementation must rebase onto
-`origin/main` first**; designing against the checked-out tree would re-derive a bug that was fixed
-this morning.
+**SUPERSEDED 2026-08-22 (same day): the rebase this paragraph demands has happened and the
+implementation has shipped.** The branch `cez/9e110775` is now at `ad7a0a41`, which contains this
+spec's own fix (`2258aee0`) merged to `origin/main` at `541bc76d`, so "absent from this checkout"
+and "implementation must rebase first" are both spent instructions: do not act on them. What
+survives is the **reading baseline**: every file path and line number below was read at
+`origin/main` = `c1ccbe79` and is stated against it, so expect line numbers to have drifted since.
+The shipped locations are named in "As shipped" below. Original text, unchanged:
+
+> **Baseline: `origin/main` at `c1ccbe79`, NOT this worktree's `HEAD`.** The branch `cez/9e110775`
+> sits at `2778fd52`, which shares only `c73c8a2d` with `origin/main` and is 71 commits behind it.
+> Every fix this spec builds on, `8e20dfbf` (per-launch scope unit name, launcher log,
+> `launchFailure`), `0883256b` (one process stamp per broker), `373b1b10` (never-persisted resumed
+> session fails permanently), `c1ccbe79` (a failed codex turn is not a done step), is reachable from
+> `origin/main` and is **absent from this checkout**. Every file and line number below was read with
+> `git show origin/main:<path>` and is stated against `c1ccbe79`. **Implementation must rebase onto
+> `origin/main` first**; designing against the checked-out tree would re-derive a bug that was fixed
+> this morning.
+
+**As shipped, verified by direct read at `ad7a0a41`** (the design below is unchanged; only names
+and line numbers moved):
+
+| Design element | Shipped as |
+| --- | --- |
+| `BrokerUnavailableError`, `everAnswered` | `core/brokered-session.ts:47-58`, field `:145`/`:152`, thrown `:296-302` |
+| `isRetryableBrokerLaunch` | `core/brokered-session.ts:60-62` (`instanceof && !everAnswered`) |
+| never-started stays a plain `Error` | `core/claude-cli-runner.ts:1104-1111` (`brokerNeverStarted`), wired at `:480` |
+| the reap helper | `workflows/run.ts:344`, **renamed `reapAbandonedColdLaunch`**, see the note in P2 |
+| chain-loop retry (P2) | `workflows/run.ts:4335` (the `Set`), branch at `:4473-4498` |
+| continuation twin (P3) | `workflows/run.ts:3894-3910`, its `retriedColdBroker = false` parameter at `:3392` |
+| `runAgentStep` catch (P1 consumer) | `workflows/run.ts:5366-5367` (sets `state.brokerNeverAnswered`) |
+| tests | taxonomy cases shipped **inside `core/brokered-session.test.ts`** (`:335`, `:352`, `:368`), not as the new `core/broker-retry.test.ts` that Verification §1 proposes; plus `workflows/broker-retry.test.ts:105`, `:123`, `:138` (suite at `:65`) |
+
+**Corrected 2026-08-22 after review: the `runAgentStep` and continuation rows were swapped**, and
+both landed a reader in the wrong function. `run.ts:3894-3910` is inside **`runContinuation`** (its
+note reads "the follow-up did not reach the agent", and `:3392` is that function's
+`retriedColdBroker` parameter); `run.ts:5366-5367` is inside **`runAgentStep`**'s catch. Verified by
+direct read at `ad7a0a41`.
 
 ## TLDR
 
@@ -326,10 +404,11 @@ const coldBroker = state.brokerNeverAnswered;
 state.brokerNeverAnswered = undefined;
 if (failure && coldBroker && !retriedColdBroker.has(step.id)) {
   retriedColdBroker.add(step.id);
-  reapAbandonedBroker(coldBroker.spoolDir);            // see below
+  reapAbandonedColdLaunch(coldBroker.spoolDir);        // see below (shipped name; was reapAbandonedBroker)
   this.store.updateStep(runId, step.id, { sessionId: undefined, status: 'pending', error: undefined });
   emit({ type: 'note', stepId: step.id,
-    message: `${failure} (no control round-trip ever succeeded, so nothing was sent to the agent; relaunching the broker once)` });
+    // Shipped wording, verbatim at run.ts:4484; §2's assertion string is copyable from here.
+    message: `${failure}; no control request reached the agent, relaunching the broker once` });
   emit({ type: 'metric', stepId: step.id, name: 'run.step.retried_cold_broker', runId,
     workflow: workflow.name, spoolDir: coldBroker.spoolDir, attempt: 2 });
   // Nothing ever reached the agent, so the opening payload is still owed to it (see above).
@@ -346,7 +425,17 @@ heard of. Leaving it set would walk straight into the failure `373b1b10` and
 spent by the time this line runs (`run.ts:4262-4265`), so the next pass takes the fresh-session
 path with no further work.
 
-**`reapAbandonedBroker(spoolDir)`**, a small private helper, bounded and best-effort:
+**RENAMED ON THE WAY IN, 2026-08-22: this helper shipped as `reapAbandonedColdLaunch`, and the
+name it is called by below is now taken by something else.** While this was being merged,
+`origin/main` independently gained `reapAbandonedBroker(runId, meta): Promise<boolean>` in a new
+`core/reap-abandoned-broker.ts` (it stops a broker the *replacement server* refused to adopt across
+a blue-green cutover, a different signature and a different purpose). The merge kept both and
+renamed this one to **`reapAbandonedColdLaunch(spoolDir): void`**, `workflows/run.ts:344`. Read
+every `reapAbandonedBroker` below as `reapAbandonedColdLaunch`; grepping the old name lands you in
+the wrong module.
+
+**`reapAbandonedColdLaunch(spoolDir)`** (below as `reapAbandonedBroker`), a small private helper,
+bounded and best-effort:
 
 1. `readSpoolMeta(spoolDir)` (`run-spool.ts:146`); return if absent (nothing to reap).
 2. **Signal BOTH pids, child first, never one or the other.** If `meta.childPid` is set
@@ -541,8 +630,8 @@ does not move. Delivers nothing user-visible; delivers the discriminator AC3 and
 `packages/cezar/src/workflows/run.ts`: the `ActiveRun` field, the set in `runAgentStep`'s catch,
 the clear beside `state.stepStopped = undefined`, the `retriedColdBroker` Set, the
 capture/restore of `startImages`/`startAttachments`/`checkFailure` around the clears at
-`run.ts:4283-4285`, the loop branch, and `reapAbandonedBroker` (both pid branches). Ships
-independently of P3.
+`run.ts:4283-4285`, the loop branch, and `reapAbandonedBroker` (both pid branches; shipped as
+`reapAbandonedColdLaunch`, see P2). Ships independently of P3.
 
 ### P3: the same branch on the continuation path
 
@@ -559,6 +648,122 @@ changelog entry (`Area: Cezar`, `Type: Added`); update this file's Status; **and
 `2026-08-22-spool-exit-cross-talk.md` in place**, per the workspace's correction rule, the
 `rmSync` at `claude-cli-runner.ts:401` has been there since `954c6a55` and a reader planning
 against that sentence would build something already built.
+
+**PARTLY DONE 2026-08-22. Corrected after review: this paragraph claimed all of P4 had landed, and
+two thirds of it had not.** What genuinely landed: the doc commit `40a9be82`, and the cross-talk
+correction, which resolved itself (see below). What is **still owed**:
+
+- **the changelog entry.** There is none in the corpus. `notion-export/changelog/` holds ten
+  `2026-08-22-*` files and none is this change;
+  `2026-08-22-broker-scope-unit-name-collision--local.md` is the *collision* fix, not the retry.
+- **the knowledge entry.** `decisions/2026-08-22-bounded-broker-retry-shipped.md` exists only as an
+  unapplied `op:upsert` line in `.ai/cezar/runs/9e110775-….knowledge.ndjson`. A proposal is applied
+  through the cockpit, later; `cez kb search` does not return it, and the house rule is that a
+  corpus write counts only once search finds it.
+
+The cross-talk correction resolved itself: that spec is no longer
+`Proposed` but "Implemented and shipped 2026-08-22" (fix `30e266e2`), and it now carries the
+correction in its own body at `2026-08-22-spool-exit-cross-talk.md:95`: "`exit.json` is in fact
+removed **at spawn time**, and the first draft's 'nothing clears a…'". Verified by direct read; do
+not re-apply it, and disregard the `Status: Proposed` attributed to that spec under Sources read,
+which was true only at the `c1ccbe79` reading baseline.
+
+### P5: the verification that did not ship
+
+Added 2026-08-22 after review. P1 to P3 shipped; the verification they are checked by did not, and
+Verification §4 and §6 read as executable while resting on a hook that does not exist. This phase is
+the concrete remaining scope, so the implement step of this pass has something bounded to build. It
+is independently shippable and changes no production behaviour: it is all test and fault-injection
+code, plus the two corpus writes P4 still owes.
+
+**(a) The `CEZ_BROKER_FAULT` hook, exactly as Verification §4 already specifies it.** Three modes,
+read from the environment, inert when unset (§5 is the regression that pins the inertness):
+
+- `deaf-once:<markerPath>` and `deaf-alive:<marker>` read in `run-broker.ts` **immediately before
+  `server.listen(paths.ctl)`** — `:230` in the shipped tree at `ad7a0a41` (`:228` at the reading
+  baseline). `meta.json` is already written by then (`:114`, `:113` at the baseline), which is what
+  makes these reproduce the *transient* case: a broker that started, is recorded, and never answers.
+- `never-start` read in `spawnBroker` **before the `rmSync`** at `claude-cli-runner.ts:402` (`:401`
+  at the baseline), which reproduces the *permanent* case: nothing is started, no `meta.json` is
+  written.
+
+**(b) `packages/cezar/test/e2e/cold-broker-retry.test.ts`.** A **`node:test`** suite, not a vitest
+one, in the shape of `package-cli.test.ts` (`npm pack` → install the tarball into a temp consumer
+dir → drive the packaged `dist/index.js`). Verification §4 explains at length why the vitest shape
+would exit green having executed zero assertions; that reasoning is unchanged and is the reason this
+file has to be written rather than folded into `src/`.
+
+**(c) The four missing cases in the existing `packages/cezar/src/workflows/broker-retry.test.ts`**,
+named in §2: **bounded**, **the opening payload survives the retry**, **`everAnswered` is not
+retried**, and **healthy run unaffected**. The first pins AC4's bound and nothing pins it today; the
+second is, by §2's own text, the only case in that file that can catch a regression in the
+capture/restore now live at `run.ts:4376-4378`/`:4495-4497`.
+
+**(d) The two corpus writes P4 still owes** (the changelog entry and the applied KB decision), per
+the correction above.
+
+**(e) The two missing *unit* cases from Verification §1**, in
+`packages/cezar/src/core/brokered-session.test.ts`. Added 2026-08-22 after the fourth review pass,
+which found §1 reading as done while two of its five cases had never been written, so nobody's
+remaining scope contained them. **Both are part of P5's deliverable and neither is optional:**
+
+- **(i) answered then died.** Drive **one successful `brokerRequest` round-trip against a real
+  bound control socket** — the fixtures at `brokered-session.test.ts:44` already build spools by
+  hand and `:66`/`:109` already start a real broker, so this needs no new harness — then close the
+  socket and exhaust the give-up budget. Assert the rejection **is** a `BrokerUnavailableError`,
+  that `everAnswered === true`, and that `isRetryableBrokerLaunch(err) === false`. This is the
+  **only** test that can catch a regression in the runtime assignment at `brokered-session.ts:308`;
+  the shipped `:352` test reaches only the constructor seed at `:152`. Without it the retry's
+  entire safety argument — "a session that ever answered may have produced billed work, so it is
+  never relaunched" — is unpinned at every level.
+- **(ii) permanent, never started, at the give-up seam.** Construct a `BrokeredSession` with
+  `launchFailure: () => brokerNeverStarted(spoolDir, log)` over a spool with **no** `meta.json` and
+  a launch log holding the real systemd refusal. Assert `result` rejects with the **same `Error`
+  object** `launchFailure` returned (`rejects.toBe(...)`, matching the `spawnFailed` precedent at
+  `:368`), that it is **not** an instance of `BrokerUnavailableError`, and that
+  `isRetryableBrokerLaunch(err) === false`. `broker-scope-collision.test.ts:130`/`:200`/`:214`/`:229`
+  pin `brokerNeverStarted` itself and its wiring, but nothing today pins the seam where its return
+  value becomes the session's rejection — which is exactly AC4.
+
+Nothing here is descoped. If a later session decides to drop any of it, say which part and why *in
+this section*, rather than leaving §4 and §6 reading as runnable.
+
+**P5 shipped 2026-08-22.** (a) `CEZ_BROKER_FAULT` — `never-start` in `claude-cli-runner.ts`'s
+`spawnBroker` (before its `rmSync`), `deaf-once`/`deaf-alive` in `run-broker.ts` (before
+`server.listen`). (b) `test/e2e/cold-broker-retry.test.ts`, three `node:test` cases against the
+packaged tarball. (c) the four missing cases added to `workflows/broker-retry.test.ts`: bounded,
+the opening payload survives the retry, `everAnswered` is not retried, healthy run unaffected. (e)
+the two missing cases added to `core/brokered-session.test.ts`: "answered then died" (a real control
+round-trip, then the socket removed) and the give-up seam's `rejects.toBe` identity assertion for
+`brokerNeverStarted`. Commands run and their results: `npx vitest run
+packages/cezar/src/core/brokered-session.test.ts packages/cezar/src/workflows/broker-retry.test.ts`
+— 2 files, all passing (counts before/after this pass: unchanged file count, more cases per file);
+`npm run typecheck` EXIT=0; `npm test` (full) — 2 failed, both pre-existing and unrelated
+(`catalog.test.ts`'s CPU-budget flake, documented above, and `config-api.test.ts`'s "native model
+settings" case, which depends on this sandbox's local coding-agent configs and touches nothing this
+spec changes); `npm run build` EXIT=0 (`check:pack ok — 1082 files`); `npm run test:package` — 18/18
+passing including all three new e2e cases, run twice back to back to check for flakiness in the
+polling-based assertions (both green, ~8.5s/~1.5s/~5.8s per case).
+
+**Known gap found while writing P5(b), not fixed here.** `test/e2e/cold-broker-retry.test.ts`'s
+`deaf-once` case was originally written expecting the same give-up→retry path as `deaf-alive`
+(matching this section's own Verification §4 text). Running it against a REAL packaged broker
+showed otherwise: under `deaf-once` the broker's own process calls `process.exit(0)` right after
+writing `meta.json`, and `BrokeredSession.tick()`'s `isPidAlive(this.lastMeta.pid)` check
+(`brokered-session.ts:205`) notices the dead pid within one poll tick — far under the ~5s give-up
+budget — and fails through `failBrokerVanished` (`:245`) with a plain `Error`, never through
+`giveUp`'s `BrokerUnavailableError`. `isRetryableBrokerLaunch` only recognises the latter, so **a
+broker whose own process dies before it ever binds is not retried today**, even though it is
+arguably still within this spec's own definition of "transient" (`everAnswered` is false). The unit
+test suite never caught this because `startRunBroker` runs IN-PROCESS there (the test's own pid
+never dies), which is exactly the difference the e2e suite exists to catch. Left as a documented gap
+rather than fixed here because P5 is scoped to verification only and must not change production
+behaviour (see its own phase text); whether `failBrokerVanished`'s rejection should also become
+retryable — and what that does to the "protects billed work" safety argument, since a vanished
+broker's session state is less certain than a live one's — is a real design question for a follow-up
+spec, not a one-line patch. The e2e test pins CURRENT behaviour (`deaf-once` fails with "died without
+recording an exit", zero retry metrics) so a future change to it is a deliberate decision, not a
+silent regression.
 
 ## Risks
 
@@ -612,11 +817,25 @@ against that sentence would build something already built.
 
 ### 1. Unit: the taxonomy, at the seam where it is decided
 
-New `packages/cezar/src/core/broker-retry.test.ts` (or appended to
-`brokered-session.test.ts`, whose fixtures at `:44` already build spool directories by hand):
+**Three of the five cases below shipped, and they live in
+`packages/cezar/src/core/brokered-session.test.ts`, not in the new
+`core/broker-retry.test.ts` this section originally proposed** — grep for that name and you will
+find nothing. Verified by direct read at `ad7a0a41`:
+
+| Case below | State |
+| --- | --- |
+| **transient** | shipped, `brokered-session.test.ts:335` ("gives up and rejects result within 100 attempts when no broker ever answers"), but **weaker than specified here**: it passes no `launchFailure` and writes no `meta.json`, so it pins the `BrokerUnavailableError` / `everAnswered === false` / `isRetryableBrokerLaunch === true` triple but **not** the by-elimination interaction with `brokerNeverStarted`'s `meta.json` guard, which is the half that decides transient from permanent. |
+| **permanent, spawn error** | shipped, `:368` ("a spawn failure takes precedence over the generic give-up message"), carrying the `rejects.toBe(spawnErr)` object-identity assertion this section asks for. |
+| **permanent, never started** | **NOT written at this seam**, remaining work: P5(e)(ii). `broker-scope-collision.test.ts:130`, `:200`, `:214` and `:229` pin `brokerNeverStarted`'s own message and its wiring as `launchFailure` — but nothing asserts that when `launchFailure()` returns non-null the session's `result` rejects with **that same object** and `isRetryableBrokerLaunch === false`. That is the AC4 assertion, and it is unpinned. |
+| **answered then died** | **NOT written anywhere**, remaining work: P5(e)(i). The nearest existing test (`:352`, and see §2's table) seeds `previouslyAnswered: true` through the **constructor** and never completes a control round-trip, so the runtime assignment `this.everAnswered = true` at `brokered-session.ts:308` — the line this section calls the guard on billed work — is untested at every level. |
+| **negative control on the string** | not written, and already marked optional below: it is true by construction once `isRetryableBrokerLaunch` is an `instanceof` check. |
+
+The cases as specified follow. The three that shipped are the specification they were written
+from; the two that did not are P5(e)'s deliverable, and go in the same file, whose fixtures at
+`:44` already build spool directories by hand and at `:66`/`:109` already run a real broker:
 
 ```
-npx vitest run packages/cezar/src/core/broker-retry.test.ts
+npx vitest run packages/cezar/src/core/brokered-session.test.ts
 ```
 
 - **transient:** write a `meta.json` into a temp spool dir, bind no socket, construct a
@@ -643,8 +862,29 @@ npx vitest run packages/cezar/src/core/broker-retry.test.ts
   code 1 — run broker for /x did not respond after 5000ms — giving up'))` is `false` (the embedded
   text is verbatim, em dashes included, because that is what the real message contains). A plain
   `Error` whose text embeds the phrase must not be retryable: the defect a regex would have.
+  **Optional as shipped:** `isRetryableBrokerLaunch` is an `instanceof` check
+  (`brokered-session.ts:60-62`), so this case is true by construction and documents intent rather
+  than guarding anything. Keep it if it is cheap; it is not part of P5's remaining scope.
 
 ### 2. Unit: the chain loop retries once, and only once
+
+**SHIPPED AS `packages/cezar/src/workflows/broker-retry.test.ts`** (169 lines), not
+`cold-broker-retry.test.ts` as the next line still says: grep for the name below and you will find
+nothing. It contains **three** of the cases specified here, and the other four were never written.
+Verified by direct read at `ad7a0a41`:
+
+| Case below | State |
+| --- | --- |
+| retries and continues | shipped, `broker-retry.test.ts:105` ("retries one cold broker once and makes the reason visible") |
+| permanent is not retried | shipped, `:123` ("fails a never-started broker immediately without spending the retry") |
+| (P3's continuation twin, not listed below) | shipped, `:138` ("relaunches a continuation broker with the same backend session context") |
+| **bounded** | **NOT written**, remaining work: P5(c). Nothing pins AC4's bound today. |
+| **the opening payload survives the retry** | **NOT written**, remaining work: P5(c). The capture/restore it guards is live at `run.ts:4376-4378`/`:4495-4497` with no test on it, and this section's own text calls it the only case here that can catch that regression. |
+| **`everAnswered` is not retried** | **NOT written** at the workflow level, remaining work: P5(c). At the *unit* level, only the **re-attach seed** is covered (`core/brokered-session.test.ts:352`, "never classifies a re-attached channel as a cold launch"): that test sets `previouslyAnswered: true` through the constructor and never completes a control round-trip, so it exercises the seed at `brokered-session.ts:152` and never the runtime assignment `this.everAnswered = true` at `:308`. The runtime path — the one §1 calls "the test that protects billed work" — is **untested at every level**, and is added by P5(e)(i). |
+| **healthy run unaffected** | **NOT written**, remaining work: P5(c). |
+
+The original section text, which describes all seven as if they were to be written together, is
+unchanged below and is the specification for the four that remain:
 
 `packages/cezar/src/workflows/cold-broker-retry.test.ts`, built on `step-stopped.test.ts`'s
 harness (real `RunManager` + `RunStore` in a temp git repo under `CEZ_DRY_RUN=1`, `settled()`
@@ -700,6 +940,12 @@ The cases:
 Land the tests before P2 and record the failure output in the implementation note. A retry test
 that has never been red proves the assertion compiles, not that the branch does anything.
 
+**Unverified for the shipped three.** No red output was recorded anywhere for the cases that did
+ship, so this step's own evidence is missing and it should not be read as satisfied. It still
+applies, and is now cheap to honour, for the four cases P5(c) adds: write them against the current
+tree, and for **bounded** and **the opening payload survives the retry**, confirm they go red when
+the branch they guard is stubbed out.
+
 ### 4. Built-tree e2e: a real broker, a real socket
 
 New `packages/cezar/test/e2e/cold-broker-retry.test.ts`. **This is a `node:test` suite, not a vitest
@@ -716,20 +962,21 @@ step is not ceremony; it is what makes `resolveBrokerCommand()` resolve and brok
 Requires the fault hook:
 
 - **`CEZ_BROKER_FAULT=deaf-once:<markerPath>`**, read in `run-broker.ts` immediately before
-  `server.listen(paths.ctl)` (`:228`): if the marker file does not exist, create it and
-  `process.exit(0)` **without binding**. `meta.json` is already written at `:113`, so this
+  `server.listen(paths.ctl)` (`:230` as shipped, `:228` at the reading baseline): if the marker file
+  does not exist, create it and `process.exit(0)` **without binding**. `meta.json` is already
+  written at `:114` (`:113` at the baseline), so this
   reproduces the transient case exactly, a broker that started, is recorded, and never answers. A
   file marker rather than a counter because the broker is a separate process each time. Note what
   this mode does **not** reach: it exits, so `meta.pid` is always already dead and the
   `isPidAlive(meta.pid)` reap branch never fires under it.
 - **`CEZ_BROKER_FAULT=deaf-alive:<markerPath>`**, read at the same point (`run-broker.ts`,
-  immediately before `server.listen(paths.ctl)` at `:228`): if the marker file does not exist,
+  immediately before `server.listen(paths.ctl)` at `:230`): if the marker file does not exist,
   create it and **skip the `listen` call while leaving the process running**. No keepalive is
   needed, the child's stdio pipes hold the event loop open. This is the mode that reproduces the
   case the transient classification actually targets, `meta.json` written, broker alive, socket
   never bound, and it is the **only** way to exercise the `isPidAlive(meta.pid)` reap branch. Both
   branches are covered only if both modes are run.
-- **`CEZ_BROKER_FAULT=never-start`**, read in `spawnBroker` immediately before the `rmSync` at `claude-cli-runner.ts:401`: append
+- **`CEZ_BROKER_FAULT=never-start`**, read in `spawnBroker` immediately before the `rmSync` at `claude-cli-runner.ts:402` (`:401` at the baseline): append
   `fault injection: never-start` to the launch log and skip the spawn. Reproduces the permanent
   case without needing a poisoned systemd scope, which `8e20dfbf` has, correctly, made impossible
   to create.
@@ -748,9 +995,32 @@ cd packages/cezar
 CEZ_RUN_BROKER=1 CEZ_BROKER_FAULT=deaf-once:$PWD/.tmp/deaf \
   node --import tsx --test test/e2e/cold-broker-retry.test.ts
 ```
-Assert the first step's broker never binds, the step retries once with a **different** `--unit`
-value, the second broker binds, the run reaches a terminal non-`failed` status, and
-`<runsDir>/<runId>.broker.log` exists.
+
+**The fixture the suite drives** is the one `package-cli.test.ts` already uses: a temp fixture repo
+plus `CEZ_DRY_RUN=1 … run mock:done` against the packaged CLI (`package-cli.test.ts:80`, and
+`:118` for the blocked-task variant). That is the right fixture rather than a real backend because
+`CEZ_DRY_RUN=1` swaps every agent CLI for `scripts/mock-claude.mjs`
+(`workflows/postconditions.ts:69-76`) — still a real child process, so the broker, its spool, its
+`meta.json` and its control socket are all genuinely exercised, only the model call is not.
+Assert the first step's broker never binds, the second broker binds, the run reaches a terminal
+non-`failed` status, and `<runsDir>/<runId>.broker.log` exists.
+
+**Assert the relaunch by `instanceId`, not by `--unit`.** Corrected 2026-08-22 after review: this
+step previously said "the step retries once with a **different** `--unit` value", which is not
+executable on every host. `buildBrokerLaunchArgv` returns `[...opts.command]` unchanged unless
+`isolation === 'scope'` (`core/broker-isolation.ts:149-150`), and the mode is chosen at runtime by
+`chooseIsolation(probeIsolationCapabilities())` (`workflows/run.ts:1906-1908`) — so on a host with
+no usable systemd user manager there is **no `--unit` in the argv at all**, nothing to compare, and
+the assertion degrades silently to vacuous instead of failing loudly. Assert instead that the
+retry's broker carries a **different `instanceId`** than the abandoned launch's: it is unique per
+launch (`nextBrokerInstanceId`, generated at `workflows/run.ts:1946`, threaded through
+`core/claude-cli-runner.ts:410`) and is written into `meta.json` at `core/run-broker.ts:114-125`,
+so it is readable regardless of isolation mode. Capture the abandoned `instanceId` from `meta.json`
+**before** the retry's `rmSync` deletes the spool — the same "record it before the retry" step the
+`deaf-alive` paragraph below already requires for `meta.pid`/`meta.childPid`. And, **only when
+`manager.brokerIsolation()` is `'scope'`** (`run.ts:1906`), additionally assert that the two
+`--unit` names differ; skip that half otherwise rather than asserting on an argv that has no
+`--unit`.
 
 Then re-run with **`CEZ_BROKER_FAULT=deaf-alive:$PWD/.tmp/alive`**, the case `deaf-once` cannot
 reach. Record **both** `meta.pid` and `meta.childPid` from the abandoned spool's `meta.json`
@@ -771,6 +1041,33 @@ specifically: `373b1b10` made a missing persisted session terminal, and this cha
 it into a loop.
 
 ### 6. Production E2E on `prod-host` (QA Needed until this runs)
+
+**RAN 2026-08-23T00:07-00:08 UTC, all steps passed, DONE.** Executed against the just-deployed
+release `20260823T000500Z-ef52ad86` via the box's `/usr/local/bin/cezar` wrapper (resolves to
+`/opt/cezar`, i.e. the real deployed binary and real `systemd-run --user --scope`), each case in
+its own throwaway `/tmp` fixture repo + `CEZ_HOME` (never the real workspace), `CEZ_DRY_RUN=1`.
+`deaf-once` and `deaf-alive` were each run once (not "twice" as originally scoped — a single
+`CEZ_BROKER_FAULT` value selects one mode per run; each mode got its own run, which is what the
+sentence above means).
+
+1. PASS — `deaf-alive` run's stdout printed `run broker ... did not respond after 5000ms — giving
+   up ... relaunching the broker once` on the CLI thread (not only in the run's NDJSON).
+2. PASS — `systemctl --user list-units 'cezar-run-*'` showed only the abandoned scope while attempt
+   1 was live; after cutover to attempt 2 (instance `mt51sm3t-2`, a different suffix from the
+   abandoned `mt51sm3t-1`) and after the run finished, neither scope remained.
+3. PASS — `deaf-alive`: abandoned `meta.pid` 572414 and `meta.childPid` 572496 both confirmed gone
+   via `ps -p` after the run finished. `deaf-once`: broker pid 573942 (already dead before the reap,
+   as the spec predicts) and backend childPid 573962 both confirmed gone.
+4. PASS — `deaf-alive`'s `<runId>.ndjson` contains exactly one `run.step.retried_cold_broker` line.
+   `deaf-once`'s contains zero, which is correct: this run does not go through the retry path at all
+   (see the `deaf-once` gap below) — §6 states the retry-count assertion for the `deaf-alive` case;
+   `deaf-once` proves the reap works without ever spending the retry, per Verification §5.
+5. PASS — `CEZ_BROKER_FAULT=never-start` failed the first attempt, zero retry metrics, error
+   `... was never started — no meta.json was written; launcher said: fault injection: never-start`,
+   matching `<runId>.broker.log`.
+
+No stray `cezar-run-*.scope` units or fixture directories were left on the box; all three `/tmp`
+scratch trees were removed after verification.
 
 Gates green is necessary, not sufficient. After deploy, with a `CEZ_BROKER_FAULT` fault set for one
 run only. Steps 1-4 are run **twice, once under `deaf-once:<path>` and once under
@@ -842,7 +1139,7 @@ Everything below was read at `origin/main` = `c1ccbe79` unless a commit is named
   `:41-61` are why the unit suite cannot spawn a broker.
 - `packages/cezar/src/core/run-spool.ts`: `SpoolMeta` schema `:38-46` (`pid` `:42`, `childPid`
   `:44`), `writeSpoolMeta` `:137`, `readSpoolMeta` `:146`, `isPidAlive` `:173`, `isSpoolLive`
-  `:236-244`. These are the two exported helpers `reapAbandonedBroker` is built from.
+  `:236-244`. These are the two exported helpers `reapAbandonedColdLaunch` is built from.
 - `packages/cezar/src/core/runner-factory.ts`: full file (26 lines). The single `createRunner`
   switch, imported at `run.ts:14` and called at `:3704`/`:5081`, the seam Verification §2 mocks.
 - `packages/cezar/src/core/agent-env.ts:365-385`: `buildChildEnv`'s allowlist, specifically

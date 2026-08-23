@@ -5,6 +5,70 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- ✨ **cezar can run as a cluster: one hub, N spokes, one backlog** — spec
+  `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, behind `CEZ_CLUSTER=1` and **off by
+  default**. Route family, flag-off shape and the WebSocket link are contracted in
+  `BACKWARD_COMPATIBILITY.md`.
+
+  **The problem, measured rather than asserted.** Two cockpits already run against the same
+  workspace and shared a backlog by hand. Five days after the note that told them to mirror,
+  **110 todos existed on the box and in neither Mac file, 10 more disagreed about status, and not
+  one entry existed Mac-only** — the mirror had failed in the only direction it could, and the Mac
+  was a stale read-only window onto work it could not see.
+
+  **Phase 0 bounds the burst on the existing box before any node is added**, because the ceiling
+  is a burst and not a run count: across the 12 largest runs on the box, a run *inside* `run-tests`
+  peaks at 2.2–6.2 GB and 18–50 processes against 0.4–0.6 GB and 1–8 at rest, so `maxParallel` —
+  which counts runs — cannot tell an idle run from one about to fork 50 processes. So: a
+  heavy-step gate that admits at most `maxHeavySteps` runs into a test step at a time; `vitest`
+  workers and `ripgrep` threads capped at the source (`CEZ_VITEST_MAX_WORKERS`,
+  `CEZ_RIPGREP_THREADS`, both documented in `.env.example`); and per-run cgroup bounds
+  (`runMemoryMaxMb`, `runMemoryHighMb`, `runCpuWeight`, `runsSliceMemoryMaxMb`) wired through the
+  broker launch so a kill can be **attributed** rather than guessed — `reportedResourceKill`
+  refuses to blame a bound that was never applied to that launch, which on the Mac (`isolation:
+  'none'`) is always.
+
+  **Writes are hub-linearized, per field.** No CRDT, no hybrid logical clock, no last-write-wins
+  merge: the hub assigns `hubSeq` and that is the order. Ops carry **fields, not records** — two
+  spokes editing different fields of one todo both keep their edit, where whole-record ops would
+  have let the second clobber the first — and the outbox is *derived*: `ops.ndjson` is a cache,
+  the truth is `pendingSince` + `pendingFields` written inside the same `O_EXCL` lease as the
+  value, so a crash between the two is not a lost write. A field DELETION rides in its own
+  `clearedFields` list, because it cannot be expressed as a value: building `fields` from the keys
+  present on a record made a removed key indistinguishable from one that had never been set, so
+  `updateTodo({ archived: false })`, `clearStartedTaskId` and `markStarted`'s `delete autostart`
+  would have replicated as no-ops and left every peer holding the stale value, silently. The
+  receiving side deletes what is listed **after** merging `fields` and the D13 `unknown`
+  passthrough, so an explicit clear cannot be undone by a verbatim copy, and `diffCorrections`
+  reads cleared names too — a clear the local record disagreed with raises a correction instead of
+  passing unseen.
+
+  Around that: enrollment by hub-minted code with a closed failure enum the joiner can act on
+  (including `code-malformed`, decided client-side with **nothing dialled**); a per-node
+  HMAC-authenticated WebSocket link that never consults `Origin` and never joins the cockpit's
+  topic router; a run relay that strips local-machine affordances before a frame leaves the box; a
+  read-only corpus mirror with an explicit submit route; hub-allocated scarce identities (ports and
+  the like) with leases; and label-based placement and opt-in dispatch.
+
+  **QA Needed, and specifically which parts.** Phase 0's own decision gate (C0/C1 — *is Phase 0
+  alone enough?*) has **not been captured**, so the 8-concurrent-task throughput claim is designed
+  for and not measured; C1–C4 additionally require `maxParallel`, `maxHeavySteps` and a memory
+  bound to be written into `prod-host`'s `~/.cezar/config.json` first, and C3 cannot run on
+  the Mac at all because the bounds exist only under `scope` isolation. The cluster has not yet
+  been stood up across two real nodes: `cez cluster reconcile` still has no request/response
+  transport, so E2 — the 110-row reconcile that motivated the whole design — has no runnable path
+  yet. Open items are tracked in `.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`.
+
+  **Gates, run on `prod-host` and on the MERGED tree.** `typecheck` exit 0, `build`,
+  `test:unit` and `test:package` exit 0, and `npm test` at **562 of 563 files green** (10550 tests,
+  342 s). The single red is `knowledge/catalog.test.ts` C18, a CPU-per-MiB budget calibrated on an
+  M4 Max with no host normalisation: it reads 68.6 against a `< 40` ceiling on this box and fails
+  identically at pristine HEAD unpacked from `git archive`, so it is a standing host red and not
+  this work's. The budget was deliberately **not** raised. The gate was run on the box rather than
+  the Mac because the Mac never finished a run — under a ~20-agent fan-out `fseventsd` saturated a
+  core and individual `fs.watch` files took 50–650 s. Re-running after the `origin/main` merge was
+  not ceremony: the merge left 12 tests failing in files it never touched textually (see the PLAN's
+  "A green branch gate says nothing about the tree you will actually push").
 - ✅ **The non-disruptive deploy is now MEASURED, not just shipped** (spec
   `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` § "Status log — 2026-08-21
   (18:31–18:41 UTC)"). Release `20260821T183127Z-be3aab61` is live on `prod-host`, deployed
@@ -452,6 +516,40 @@
   its previous behaviour.
 
 ## 🐛 Fixed
+- 🐛 **A run whose agent was killed by an untrapped signal reported `done`, and the workflow
+  continued past it.** The kernel OOM killer, a cgroup `MemoryMax` breach, or an operator's
+  `kill -9` all produce the same shape: SIGKILL cannot be trapped, so Node reports `code: null`
+  with `signal` set and no exit code at all. Both transports read `code === null` alone as a
+  clean exit — the pipe path's `waitForExit` discarded the signal before any branch could see it,
+  and the brokered path's `brokeredExitFailure`/`emitBrokeredTerminalEvents` had the identical
+  gap — so a killed step went green and the chain advanced to the next step with no work done.
+  `run-tests` carries no post-condition, so nothing downstream caught it either.
+
+  `waitForExit` now returns the signal alongside the exit code, and both paths fail the step with
+  the signal named in the error — unless the kill was cezar's own SIGTERM→SIGKILL escalation
+  (`terminatedByCezar`), which keeps resolving exactly as it did before this fix; a cancel or the
+  inactivity watchdog produces the identical `code: null` shape and must not become a false
+  failure. Regression tests: `core/claude-cli-runner.test.ts` ("an external signal kills the agent
+  process directly"), the new `core/broker-external-kill.test.ts`, and the new
+  `workflows/signal-kill-chain-stop.test.ts` — the last proves the chain actually STOPS at the
+  killed step rather than merely recoloring it red.
+
+  **The same gap existed, unfixed, in the `pi` and `codex` backends** — `pi-runner.ts`'s own
+  `waitForExit` and `codex-app-server-transport.ts`'s `waitForCodexAppServerExit` were both bare
+  `number | null` returns with the identical `exitCode !== 0 && exitCode !== null` gate, so an
+  untrapped signal read as a clean exit there too. Not hypothetical for codex: it went live on
+  `prod-host` on 2026-08-22, so a SIGKILLed codex agent was reporting false success in
+  production. Both now carry `{ code, signal }` like the claude fix, gated on each runner's own
+  `terminatedByCezar` (pi did not track this at all before now — added alongside the fix, mirroring
+  claude's `signalChild`/`hasExited`). Regression tests: `core/pi-runner.test.ts` and
+  `core/codex-app-server-runner.test.ts`, each with a real-subprocess positive case (new
+  `MOCK_PI_SUICIDE_SIGKILL/MOCK_CODEX_SUICIDE_SIGKILL` fixture triggers), an exit-code-0/1/2 floor,
+  and a negative control proving cezar's own teardown still resolves cleanly. `opencode-server-runner.ts`
+  is a different mechanism, not a fourth instance of this defect: its exit handler
+  (`resolveExit()`) discards the code AND the signal outright and never gates on either — success
+  or failure there is decided entirely by the SSE session status. That means an external kill
+  falls through to the same unconditional `done` if the SSE stream ends before reporting `error`,
+  which is worth its own look, but is not this bug and was left unchanged here.
 - 🐛 **A dry run could not satisfy a post-condition its own mock never performed, so every
   dry run died at `commit-push`.** Commit `2e421370`, amending
   `.ai/specs/2026-08-20-steps-green-only-when-verified.md`.
