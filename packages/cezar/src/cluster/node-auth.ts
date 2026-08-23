@@ -154,6 +154,23 @@ export interface SignedNodeRequestInput {
  * captured header pair can be replayed against the same path with DIFFERENT query parameters
  * inside its 120s window, which is why no route in this family may put anything security-relevant
  * in the query string; scope every answer to `getAuthenticatedClusterNode(c).nodeId` instead.
+ *
+ * **That rule already has a live counter-example, and whoever builds the hub side must not honour
+ * it.** `sources/cezar-hub/provider.ts#fetchManifest` requests
+ * `GET /api/v1/cluster/corpus?scope=knowledge,domains,changelog,tasks` — so the one thing this
+ * family currently puts in a query string is *the access-scope decision*, which is the most
+ * security-relevant parameter it has: `CLUSTER_CORPUS_OPT_IN_SCOPE` (`reports`, `raw-input`) is
+ * deliberately off by default because those 196 files carry phone numbers and chat ids that have
+ * no business on a disposable worker. A replayed header pair with `?scope=reports` would defeat
+ * exactly that. Nothing is exploitable today — the corpus routes are unbuilt (package 3b.2) and
+ * answer 409, and this middleware fails closed for every node regardless — but the client exists
+ * and 3b.2 will be written against it. **The hub must derive scope from the enrolled node's own
+ * grant and treat the query parameter as a narrowing hint at most, never as an authorization
+ * input**: a node asking for less than it is entitled to is harmless, a node asking for more must
+ * be refused by the grant, not by the signature. Widening the signature to cover `url.search`
+ * instead is the wrong fix — it would bind the client's request to Hono's `c.req.path`, which
+ * excludes the search string, so every query-carrying request would fail `bad-signature` on
+ * arrival.
  */
 export function signedNodeRequestHeaders(input: SignedNodeRequestInput): {
   readonly headers: Record<string, string>;
