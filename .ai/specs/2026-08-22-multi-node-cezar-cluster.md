@@ -2412,6 +2412,27 @@ invented; these are the names to use when one lands.
 > - Pushed to **`origin/feat/multi-node-cluster`**. Never pushed to `upstream`, and never should be.
 > - Not merged to `main`, and no PR opened — that is the owner's call.
 >
+> ### The deploy path — why merging to `main` is a HARD prerequisite for any E2E
+>
+> Measured on the box 2026-08-23. `/opt/cezar` is a symlink into `/opt/cezar-releases/`, named
+> `<timestamp>-<commit>`; it read `20260823T083733Z-84fb8237` — i.e. the box was running
+> `origin/main`'s merge commit, deployed the same morning. `cezar.service` runs
+> `/opt/cezar/packages/cezar/dist/index.js serve` as `User=cezar` with
+> `WorkingDirectory=/var/lib/cezar/workspace`.
+>
+> **The box tracks `main`, and agents on it self-deploy several times a day.** So nothing on
+> `feat/multi-node-cluster` can reach production — `cez cluster init` included — until that branch
+> is merged to `main`. Sequence it in this order, because each step is useless without the one
+> before:
+>
+> 1. Merge `feat/multi-node-cluster` -> `main` (owner's call; this repo visibly uses PRs).
+> 2. Let the box deploy, or deploy it, and confirm `/opt/cezar` points at a release whose commit
+>    contains the cluster work. **Check the symlink target, not the branch** — the release dir names
+>    the commit, and `dist` mtime is BUILD time, not deploy time.
+> 3. `cez cluster init` on the box, then `CEZ_CLUSTER=1` in the service env, then restart.
+> 4. Confirm the join code carries `https://cockpit.example.com` and not loopback.
+> 5. Only then does the Access service-token policy matter, and only then can the Mac join.
+>
 > ### Where the code stands
 >
 > Landed and green this session: hub-router, spoke-runtime, edge-auth (D23), the auth-wall seam
@@ -2440,10 +2461,11 @@ invented; these are the names to use when one lands.
 > fails identically at pristine HEAD. That IS the green result here. Ownership audit: 0 files not
 > owned by `cezar`.
 >
-> **The merged tree (`3f00d234`) has NOT been gated yet at time of writing** — a run was in flight.
-> Do not treat the number above as covering the merge: a clean textual merge has previously taken
-> this repo from 559/560 to 12 failures in files the merge never touched, because a changed contract
-> landed underneath them. Re-run and cite merged-tree numbers before merging to `main`.
+> **The MERGED tree (`3f00d234`) was then gated too, and is green: 581 test files passed, 1 failed,
+> 2 skipped of 584** — the one failure again C18. typecheck 0, build 0, `test:unit` 0,
+> `test:package` 0. So the merge of `origin/main` is safe; this was worth running rather than
+> assuming, since a clean textual merge has previously taken this repo from 559/560 to 12 failures
+> in files the merge never touched.
 >
 > Also not covered by that run: `cez cluster init` was added after it. Covered instead by typecheck,
 > a real build, its three CLI test files (17/17), and a functional test against the built binary.
