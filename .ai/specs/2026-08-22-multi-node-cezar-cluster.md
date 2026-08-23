@@ -4267,6 +4267,85 @@ invented; these are the names to use when one lands.
 >   its phase order is projection-first because the spoke cannot resolve a `runId` to a `RunStore`
 >   without it, not because polling is a design stage. There is no polling in the plan.
 >
+> - **B22 — B8's six blind sites: FIVE fixed with quoted red-then-green, ONE premise refuted.**
+>   Every fix is test-only except where noted; `ops.ts` and `leases.ts` are **byte-identical to
+>   HEAD**, and no `MUTANT` marker survives anywhere (`grep -a`, all packages). `typecheck:server`
+>   EXIT=0, 0 errors.
+>   - **Sites 1-3 (`spoke-runtime`) — 4/4 killed**, and site 3's mutation reproduced the corruption
+>     verbatim: `expected 'set by hub for b' to be 'original a'` — project B's replicated write
+>     landing on project A's `todos.json`. Site 2's mutation failed differently than predicted (the
+>     wrong project's `dataDir` has no `t_b`, so it silently declines: `expected [] to have a length
+>     of 1`, via timeout) — a different shape, equally wrong, and worth noting because **a silent
+>     decline and a wrong write are both "green suite" outcomes.** The 4th, `heavyActive`, also
+>     killed: `expected +0 to be 1`. In every case exactly the one new test failed and the other 62
+>     stayed green — which is what proves the OLD suite was genuinely blind rather than merely thin.
+>   - **Sites 4-5 (`peers`) — both killed**, and **the agent correctly REJECTED the fixture shape I
+>     prescribed.** I said "three nodes advertising one shared origin". With this greedy 1:1
+>     `claimed`-set matcher, 3 nodes × 1 advert can only ever yield **1 pairing even in correct
+>     code**, so my test would have failed *without* the mutation — **a false negative dressed as a
+>     discriminator.** They used 4 nodes (2 proposals covering all 4). **Lesson about briefing: a
+>     suggested assertion must be checked against the CORRECT code first. "It fails under the
+>     mutation" is worthless if it also fails without it.** Row 5 likewise used `toBe('pk-known')`
+>     rather than `expect.any(String)` — which would pass for a minted UUID, i.e. for the bug.
+>   - **Site 6 (`leases`) — killed**, reusing the existing `options.now` seam (no production change),
+>     with the mirror control so a function returning nothing cannot pass either.
+>   - **`placement` (the unconfirmed one) — CONFIRMED, then fixed.** The `[0]`-only mutation left
+>     **28/28 green**. Production code was already correct (`activeRuns.find(...)` over the whole
+>     array); this was purely a fixture gap. Fixed with the conflicting run placed **second**, plus a
+>     mirror control with it first, plus a widened negative control (two non-overlapping runs) so
+>     "blocks whenever `activeRuns` is non-empty" is also caught.
+>   - **`ops` rows 7-8 — killed**, 3 tests varying each key component **separately** (a combined case
+>     proves only that *something* in the key matters, not which), and 2 sort tests using same-key
+>     collisions — the existing D13 test could not have worked, since its two ops touch disjoint keys
+>     and union is not order-sensitive.
+>
+> - **B23 — WHY `ops.ts` MISCLASSIFIES AS BINARY, root-caused at last.** `opGroupKey`'s template
+>   literal is **NUL-byte-delimited** — `${op.scope}\x00${op.projectKey}…` — not space-delimited as
+>   it renders in a terminal or a file reader. That single `\x00` is what makes `file(1)` call the
+>   whole `.ts` `data`, which is why plain `grep` finds nothing in it **silently**. Two consequences:
+>   the `grep -a` rule has a mechanical cause rather than being folklore, and **a naive
+>   string-replace on that line fails silently too** — so treat any edit near it with the same care
+>   as the grep.
+>
+> - **B24 — `dispatchCorrelation` REQUIRED WAS A FALSE POSITIVE. Closing it, not fixing it.**
+>   I filed this as "make it required; the one production caller omits it". The caller count is
+>   right (exactly 1, `cluster-routes.ts:1165`) and the conclusion was wrong. Applying this branch's
+>   own test — *what does an omitting caller get, one correct value or a plausible wrong one?* —
+>   `[]` **is** the single correct value: there genuinely is no correlation store, and
+>   `hub-router.ts:617` emits a warn that **names both states distinctly** (*"routed to N pending
+>   dispatch record(s)"* vs *"observed only, no hub-side store yet"*). Nothing is conflated, and the
+>   omitted case is already covered by three fail-able tests including a positive/negative pair.
+>   **The decisive evidence is an in-file precedent whose docblock states the argument better than I
+>   did:** `HubReplicationDeps.readTodosFor` (same file, `:110-116`) is optional for the reason
+>   *"this router is built and tested ahead of its wiring, and a required member forces every caller
+>   to fabricate one, which is how a fake becomes the only thing ever exercised."* Making
+>   `dispatchCorrelation` required today would force `cluster-routes.ts` to fabricate a stub — *"the
+>   exact thing that turns 'not implemented' into a fabricated ack"* — or to stand up the whole
+>   run-start trigger, which is deliberately deferred. **Third time today a delegate refuted one of
+>   my filed items; the open-items list decays faster than I re-read it.**
+>
+> - **B25 — the restart-exposure claim, CORRECTED AND SPLIT (do not cite it undifferentiated).**
+>   Re-measured corpus-wide rather than from the single largest run: **mean 1,850 B/event over
+>   175,128 events** (was 2,038 B — one run only, ~10% high), pooled event rate over 15,202 active
+>   seconds p50 4 / p90 5 / **p99 10** / max 39. So the derived figure is **7.4 KB/s at the median
+>   second**, not ~8; eight concurrent watched runs ≈ **59 KB/s** typical against a 25.6 MB/s per-node
+>   ceiling (~44x headroom even if all eight peak together). **Push and poll still cost the same
+>   bytes — the load-bearing claim survives the correction.**
+>   **The new measurement is duty cycle: a run emits in only ~8% of its wall-clock seconds** (median
+>   7.8% over the top 10; e.g. a 20.2 h run with 3,338 active seconds = 4.6%). That splits one vague
+>   hazard into two that scale differently:
+>   - **Transcript loss fires PER RESTART SPANNED, on wall clock, independent of duty cycle** — at
+>     ~30 restarts/day that is **~1.3 per median 61-minute run and ~42 across a 33 h run.**
+>   - **Event loss inside the outage window scales WITH duty cycle** — a ~5 s outage lands on an
+>     emitting second only ~8% of the time.
+>   **So the cheap failure is rare and the expensive one fires every time**, which strengthens the
+>   spool over the ring. Record it split: the undifferentiated *"restarts lose data"* version is the
+>   one a later reader finds overstated and discounts wholesale.
+>   Sample caveats kept deliberately: run durations are **n=79**, not 131, because `runs.json` is
+>   pruned at `MAX_RUNS_KEPT=300` while the NDJSON outlives the records; and the two byte totals 40
+>   minutes apart differ by 1.7%, consistent with a live box growing at ~3.6 MB/h.
+>   Defect evidence, separate from capacity planning: **max line 701,011 B, and 2 lines over 256 KB.**
+>
 > - **B21 — `asOf` is ALREADY FIXED; do not re-plan it.** `clusterActiveAsOfFrom`
 >   (`cluster-routes.ts:326-334`) derives it from roster `lastSeenAt`, the contract is
 >   `asOf: z.string().optional()`, and both call sites branch three ways. Recorded because two
