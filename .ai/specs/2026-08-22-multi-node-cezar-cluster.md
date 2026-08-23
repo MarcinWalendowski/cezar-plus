@@ -2546,6 +2546,24 @@ The ops chain. Nothing in it is connected, though several pieces exist:
 | hub fans out `replica` | — | **not built** |
 | spoke applies `replica` | `cluster/replica.ts#applyReplicaFrame` | exists, **zero callers** |
 
+**The hub-side watermark, designed 2026-08-23 while wiring.** `planReplicaFanout` needs each
+target's `appliedThroughHubSeq`, and **no hub-side store for it exists** — the only watermark
+plumbing today is spoke-side (`ops.ts#ackedThroughHubSeq`, `todos.ts#applyHubReplica`). The spoke
+reports its watermarks on `hello`; `hub-router.ts` currently answers every one of them with "nothing
+to resume" (`resumeFrom: []`).
+
+The design taken: the hub keeps the per-node watermark **in memory**, seeded from that node's
+`hello` and advanced as frames are sent. Deliberately not persisted, and that is safe in one
+direction only — replica application is idempotent and a receiver drops anything at or below its own
+watermark, so **over-sending costs bandwidth while under-sending loses a write**. A hub restart
+forgets everything, the spoke reconnects, its `hello` re-seeds the truth, and the worst case is a
+resend the spoke discards. Persisting it would add a durability problem (a watermark that outlives
+the node's actual state claims the node is caught up when it is not) to buy nothing that `hello`
+does not already provide.
+
+`ClusterLinkServer.send(nodeId, frame)` is the fan-out channel — the router's return value only
+reaches the node that sent the frame, so fan-out cannot ride it and the sender must be injected.
+
 The genuinely missing designs, as opposed to missing wiring, are: **`hubSeq` allocation and
 persistence** (a monotonic per-scope counter that survives a hub restart — the hub blue-green
 deploys ~10×/day, so an in-memory counter is not an option), **per-node watermark tracking** so
