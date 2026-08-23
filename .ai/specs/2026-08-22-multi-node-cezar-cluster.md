@@ -4550,10 +4550,20 @@ both verified in source before being written down here. Read these BEFORE writin
    `reason: 'limit-hold'` plus a `retryAt` (`:136`) and describes it as *"the fleet-wide park"*
    (`:26`). **Nothing is live** — `grantAccount`, `reportAccountLimit` and `releaseAccountGrant`
    all have **zero** production callers today, verified `-a` — so nothing is broken right now. But
-   whoever wires the account-grant surface has to reconcile the two first: a fleet-wide park that
-   holds every node off an account, sitting on top of a per-host default that says never to park,
-   is two policies pulling in opposite directions, and the one that wins would be decided by
-   whichever code path happened to run first.
+   whoever wires the account-grant surface has to reconcile the two first.
+
+   **How they reconcile — and they DO, which is a correction to the first version of this note.**
+   That version said the two were *"two policies pulling in opposite directions, and the one that
+   wins would be decided by whichever code path happened to run first."* That reads as an
+   unresolved conflict and it is not one. The owner of that region put it correctly: **the two
+   claims are not symmetric.** A fleet-wide park is a claim about **one account across many hosts**;
+   "never blocked" is a claim about **one task across many accounts**. They collide only if the park
+   is allowed to be the last word — a node with another open account still honouring a lease on the
+   exhausted one. Ordered the other way they compose without a new policy: **the lease constrains
+   the CHOICE (*don't dispatch to that account*), the per-host default consumes the remaining
+   choices (*so pick another*), and the failure is honest only when there is none.** That is rung 3
+   → rung 4 of the ladder already in this spec. So the wiring task is an ordering, not a decision:
+   the park must narrow the candidate set, never terminate the request.
 
 Neither is hypothetical: (1) shipped as a real production defect, and (2) was hit while building the
 out-of-quota reroute. `run.ts` is otherwise settled — `cf2f0796` is committed, pushed and deployed,
