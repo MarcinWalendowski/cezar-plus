@@ -1,12 +1,36 @@
 # A live task's worktree is deleted out from under it, mid-run, with its uncommitted work
 
-**Status:** implemented, merged to `origin/main`, and **deployed**. Measured 2026-08-22 23:5xZ on
+**Status:** implemented and merged to `origin/main`, **not yet deployed**. **CORRECTED
+2026-08-23T00:31Z (task `b34867ee`, final round):** the paragraph below described an intermediate
+state — `362865ec`/`a3e70792` was live in production for a window on 2026-08-22, but that build still
+had the fail-open gap review pass 7 found (a missing stamp plus `--allow-stale-artifact` skipped B1
+entirely), the `runContinuation` lease gap, and zero automated coverage for gates 5–9b/12. A second
+implement pass fixed all three, added 15 tests (`release-deploy.test.ts` +14 covering A2/B1 end to
+end, `run.test.ts` +1 for the lease-continuation fix), and found and fixed a real latent bug while
+doing it: the Q3 staleness pathspec `packages/*/src` never matched anything recursively (git glob
+does not cross `/`), so the mtime gate could never fire for any source edit — fixed to
+`packages/*/src/**`. That round shipped as `32379c34`, merged to `origin/main` as `1688a407` via PR
+[#4](https://github.com/MarcinWalendowski/cezar/pull/4) at 2026-08-23T00:31Z. `origin/main`'s tip is
+now `1688a407`. **Production has not redeployed since**: the live release is still
+`20260823T001331Z-b885e11b` (unrelated work, activated 00:13:39Z, ~15 minutes *before* `1688a407`
+merged), so the fixes described in this spec are merged but not running. That live sha **is a clean
+ancestor** of `1688a407` (`git merge-base --is-ancestor b885e11b 1688a407` exits 0) — the divergent
+state the paragraph below warned about was specific to the now-superseded `a81a0a30` release and
+does **not** apply to the next deploy attempt; a forward deploy from `origin/main` today is an
+ordinary descendant case, no re-anchor needed. **QA Needed**, for two reasons: the deploy itself
+hasn't happened yet, and even after it does, the runtime E2E (Verification steps 13–19) has never
+run anywhere. Known accepted gap, not blocking: the `git-worktree.ts` `branch -D` argv spy and the
+C1a negative controls have no test DI seam for the internal git runner and remain manual-review-only
+(git-worktree.test.ts:527's `['branch','-D',…]` line is a fixture setup, not the spy).
+
+Original status line, describing the state after the *first* implement pass only, left for the
+paper trail: *"implemented, merged to `origin/main`, and deployed. Measured 2026-08-22 23:5xZ on
 `prod-host`: the live release is `20260822T232351Z-a81a0a30` (activated 23:23:56Z), and its
 `dist/` carries both `leaseDeclineReason` and a valid `.build-stamp.json` — so the gates below are
-not merely merged, they are the code running in production right now. **QA Needed**: the runtime
-E2E (Verification steps 13–19) has still never run anywhere, and, as a direct consequence of B1
-being live, **every forward deploy from this box is currently refused as `divergent`** — see the
-re-anchor precondition at the head of "## Verification" before attempting one. **Date:** 2026-08-22.
+not merely merged, they are the code running in production right now. QA Needed: the runtime E2E
+(Verification steps 13–19) has still never run anywhere, and, as a direct consequence of B1 being
+live, every forward deploy from this box is currently refused as divergent — see the re-anchor
+precondition at the head of "## Verification" before attempting one."* **Date:** 2026-08-22.
 
 **Amended 2026-08-22 (second pass, task `b34867ee`; no separate brief was written for this pass, and
 the earlier draft's citation of one was wrong: the run's only brief is
@@ -1244,6 +1268,22 @@ coverage tabulated above (item 1 of "What is still open", which must be green **
 step, because the gates it covers run on every deploy from this box), and steps 13–19, the runtime
 E2E on `prod-host`, which have **not run anywhere**. That is why the status line says QA
 Needed.
+
+**CORRECTED 2026-08-23T00:31Z (task `b34867ee`, final round, commit `32379c34`).** The table above is
+re-counted against `a3e70792` and is now stale for rows 5–9b: `release-deploy.test.ts` gained 14 new
+`it()`s exercising all five B1 relation rows, the A2 stale/missing/unreadable/mtime-grace refusals,
+the incident replay (row 6), and the stamp-sha-not-HEAD-sha ledger assertion (row 8) — those rows
+move from `none` to `yes`. Row 12 moves from `none` to `partial`: `run.test.ts` gained a regression
+test for the `runContinuation` lease gap (Q6's third amendment, `run.ts:3411-3438`), proving both the
+single-repo and workspace branches now write and arm a lease on a continued run, but "heartbeat keeps
+updating for the life of a run" and "a clean settle removes the lease" are still unproven, so row 12
+is not fully closed. Rows 1/3/3b (the negative controls and the `branch -D` argv spy) are still open
+— no test DI seam exists for the internal git runner — and are the one item carried forward as an
+accepted, non-blocking gap rather than closed. Item 12b (the deferred-sweep timer contract) and the
+mode-000/no-directory lease cases in row 11 were not part of this round either; treat the table's
+`partial`/`none` marks for those as still accurate. `npm run typecheck` and the full `npm test` both
+ran green after this round (modulo confirmed pre-existing host-load flakes in files this diff never
+touched, re-verified green in isolation).
 
 **P0 — unit, `packages/cezar/src/git-worktree.test.ts`**
 
