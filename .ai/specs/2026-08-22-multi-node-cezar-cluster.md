@@ -2425,6 +2425,46 @@ invented; these are the names to use when one lands.
 > > wrong cause** (it says the optional field was what started the todo forever); the commit is pushed
 > > and is not being rewritten, so THIS is the correction of record.
 >
+> ### D48 — THE ACCEPT PATH CANNOT BE CORRELATED. The wire carries `dispatchId` back on a REFUSAL and on nothing else. Found 2026-08-23 building C-f.
+>
+> `dispatchId` appears in exactly **two** places in the whole contract (grepped `-a`,
+> `packages/contract/src/cluster.ts`): the `dispatch` frame (`:1580`) and the OPTIONAL `refused`
+> block inside `freshness` (`:1610`). `clusterFreshnessFrameSchema` (`:1604`) is the repo-freshness
+> fields plus that optional `refused`, `.strict()`. And `offerDispatch`'s accept branch returns
+> `reply: freshnessReport` — the bare frame, no `refused` block. `DispatchOutcome.dispatchId` is
+> handed to the **local caller**, never to the wire.
+>
+> **So on the accept path the hub receives a bare freshness frame for a project and cannot tell it
+> apart from** the acceptance of a concurrent dispatch for the same project, or an ordinary
+> freshness beat. C-f asks for a correlation store; half of what it must correlate is not
+> expressible in the current schema. Building the store without noticing produces a hub that
+> correlates refusals correctly and silently mis-attributes or drops every acceptance — which is
+> worse than not correlating at all, because the refusal half working makes it look right.
+>
+> **The run id never reaches the hub over the link either.** Only `relay` (`:1648`, `:1661`) and the
+> HTTP-only `ClusterActiveRun` (`:536`) carry `runId`. Milestone D's relay streams **by run id**, so
+> without this the hub cannot subscribe to the run it just caused — it would have to poll
+> `GET /cluster/active` and guess by `todoId`, which is not unique per dispatch attempt.
+>
+> **Recommended fix — an optional `accepted: { dispatchId, runId }` on `clusterFreshnessFrameSchema`,
+> symmetric with `refused`.** It is the frame's own stated argument applied to the other branch: the
+> `refused` docblock (`:1599`) says a refusal *"rides here rather than on a frame of its own …
+> so the protocol keeps exactly the ten frames the spec fixes"*, and an acceptance is the same
+> answer with a different verdict attached. No eleventh frame, no new round trip, and it carries the
+> `runId` Milestone D needs anyway. The two blocks are mutually exclusive; the schema should say so.
+>
+> **This forces a sequencing constraint on the spoke (C-b).** To carry a `runId` the accept reply
+> must be sent AFTER `startRun` returns, not before — so the order is check → start → reply, and the
+> reply is the report that the run exists. That is the correct order regardless: replying "accepted"
+> before the run exists is the C-b lie in miniature.
+>
+> **And it exposes a missing refusal reason.** `clusterDispatchRefusalReasonSchema` (`:1423`) has
+> eight values — `dispatch-not-accepted`, `behind`, `dirty`, `merging`, `corpus-stale`,
+> `unpaired-project`, `at-capacity`, `unknown-workflow` — and **every one is a pre-start condition**.
+> If `startRun` throws after all eight pass, the spoke has no truthful frame: it cannot claim
+> accepted, and every available reason misstates why. Needs a ninth (`start-failed`), or the accept
+> reply needs a failure shape. Do not paper over this by reusing `at-capacity`.
+>
 > ### D47 — EVERY NODE REPORTS ITSELF PERMANENTLY IDLE. Found 2026-08-23 while surveying C-e. NOT an owner decision — it is a bug, and Milestone C is what arms it.
 >
 > **`ClusterCapacity.active` and `.heavyActive` are pinned at 0 on every presence beat every node has
