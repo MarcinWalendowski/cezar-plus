@@ -1505,6 +1505,38 @@ export async function continueRun(id: string, opts: ContinueOptions = {}): Promi
   )
 }
 
+/** Which engine to move a PARKED task to (spec `2026-08-23-retarget-task-to-another-engine.md`).
+ *  Every field optional and only the ones the user actually changed are sent — an omitted field
+ *  means "keep what the run has", so a person who touches only the model does not silently also
+ *  re-pin the account they never opened. `agentProfile` is accepted only for a task that has not
+ *  started: a run with a session is tied to the login that created it, and the server answers 409
+ *  rather than dropping the field. */
+export interface RetargetOptions {
+  runner?: Runner
+  agentProfile?: string
+  model?: string
+}
+
+/** Move a queued or scheduled task to another engine (`POST /api/runs/:id/agent`).
+ *
+ *  409 with the reason when the run is not in a state that can move — most usefully when it is
+ *  already running, which is the race a person hits by pressing the button just as a slot opens.
+ *  The caller renders that reason; it is never a silent no-op. */
+export async function retargetRun(id: string, opts: RetargetOptions = {}): Promise<unknown> {
+  const body = {
+    ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
+    ...(opts.agentProfile !== undefined ? { agentProfile: opts.agentProfile } : {}),
+    ...(opts.model !== undefined ? { model: opts.model } : {}),
+  }
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].agent.$post({
+      param: { projectId: queryScope(), id: encodeURIComponent(id) },
+      json: body,
+    }),
+    runPath(id, '/agent'),
+  )
+}
+
 /** Draft PR from the review gate (spec 009): push the branch, `gh pr create --draft`; the run
  *  completes as done with the PR badge. On 409 the ApiError's `manual` carries the
  *  `git merge <branch>` fallback to show copyable. */

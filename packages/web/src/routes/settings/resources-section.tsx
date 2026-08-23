@@ -98,6 +98,20 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
       ),
     },
   )
+  // Shipped OFF, and read as OFF when absent — the mirror image of `autoResume` above and for the
+  // opposite reason: this one OVERRIDES a choice the user made, so a server that predates the key
+  // must not appear to have it on.
+  const accountFallback = config.resources.fallbackAcrossAccountsWhenLimited ?? false
+  const saveAccountFallback = (on: boolean) => save.mutate(
+    { resources: { fallbackAcrossAccountsWhenLimited: on } },
+    {
+      onSuccess: () => toast(
+        on
+          ? 'Tasks will start on any available account when the chosen one is out of quota'
+          : 'Tasks will wait for the account they were given',
+      ),
+    },
+  )
   const memoryNum = memory.trim() === '' ? 0 : Number(memory)
   const memoryInvalid =
     memory.trim() !== '' && (!Number.isInteger(memoryNum) || memoryNum < MEMORY_MIN_MB)
@@ -243,6 +257,26 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
         </select>
         <p className="text-[11px] text-soft-foreground">
           Applies to Claude, Codex and OpenCode — whenever the provider says when the limit lifts.
+        </p>
+      </SettingsField>
+
+      <SettingsField
+        title="Out-of-quota fallback"
+        hint="When the account a task was given is out of quota, start it on any available account instead of waiting. Off (the default) means an account you picked is a requirement, not a preference: the task waits for that account's window. Tasks set to use an account pool already move around a limit either way."
+      >
+        <select
+          aria-label="Out-of-quota fallback"
+          data-slot="resources-account-fallback"
+          value={accountFallback ? 'on' : 'off'}
+          disabled={save.isPending}
+          onChange={(event) => saveAccountFallback(event.target.value === 'on')}
+          className="block w-28 rounded-md border border-input bg-card px-3 py-1.5 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50"
+        >
+          <option value="on">On</option>
+          <option value="off">Off</option>
+        </select>
+        <p className="text-[11px] text-soft-foreground">
+          The task's thread always records which account it actually ran on.
         </p>
       </SettingsField>
 

@@ -81,6 +81,7 @@ import { isHttpUrl } from '@/lib/utils'
 import { Markdown } from './markdown'
 import { useContinuationProvider } from './continuation-provider'
 import { cliTargetResumes, cliTargetRunner, finishTitle, resumeHint, runActionFlags } from './run-actions'
+import { RetargetMenuButton, RetargetMenuItems } from './retarget-menu'
 import { WorkflowSteps } from './step-rail'
 import { useFinishRun } from './use-finish-run'
 
@@ -237,6 +238,9 @@ export function RunHeader({
                 Continue
               </Button>
             ) : null}
+            {/* A PARKED task has no Continue (no session) and no Finish — this is the only action
+                that can make it move, so it sits where a person is already looking for one. */}
+            {flags.retarget ? <RetargetMenuButton run={run} /> : null}
             {/* Terminal is folded into the Open in… menu to save room in the actions row. */}
             <OpenInMenuForRun run={run} canResume={flags.terminal} onResume={() => actions.terminal.mutate()} />
             <Button
@@ -839,6 +843,7 @@ function ActionsKebab({
             <PlayIcon aria-hidden="true" /> Continue
           </DropdownMenuItem>
         ) : null}
+        {flags.retarget ? <RetargetMenuItems run={run} /> : null}
         {flags.terminal ? (
           <DropdownMenuItem onSelect={() => actions.terminal.mutate()}>
             <SquareTerminalIcon aria-hidden="true" /> Terminal

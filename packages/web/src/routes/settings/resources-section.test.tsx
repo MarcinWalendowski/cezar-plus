@@ -40,6 +40,7 @@ function serve(resources: Partial<WorkspaceConfigResponse['resources']> = {}) {
       maxMonitoringSessions: 2,
       monitoringWakeIntervalMinutes: null,
       autoResumeOnUsageLimit: true,
+      fallbackAcrossAccountsWhenLimited: false,
       memoryLimitMb: null,
       worktreeRetentionDefault: 10,
       ...resources,

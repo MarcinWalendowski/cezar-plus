@@ -150,6 +150,22 @@ const resourcesSchema = z
      * it off leaves the run `failed` with its Continue button, exactly as before the feature.
      */
     autoResumeOnUsageLimit: z.boolean().default(true).catch(true),
+    /**
+     * When the account a task NAMED is out of quota, start it on any available account instead of
+     * waiting (spec `2026-08-23-retarget-task-to-another-engine.md`, Phase 4).
+     *
+     * **Default OFF, and that is the product decision, not caution.** Overriding a provider or
+     * login the user explicitly picked is a different act from balancing a pool they asked to be
+     * balanced: someone who chose codex to escape a Claude limit is not helped by being moved back
+     * to Claude, and someone who chose a paid account over a free one has a billing reason cezar
+     * cannot see. A `pool:` route already routes around a limit with this off — that is Phase 1,
+     * and it needs no setting because the user asked for a pool.
+     *
+     * With it ON, an explicit pick becomes a preference rather than a constraint: the task starts
+     * on the best available login and the transcript says which, rather than waiting for a window
+     * that may be days out.
+     */
+    fallbackAcrossAccountsWhenLimited: z.boolean().default(false).catch(false),
     /** Per-task memory ceiling in MiB; null = no limit (matches the file's
      *  literal `"memoryLimitMb": null` in the spec's Data Model). */
     memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().default(null).catch(null),

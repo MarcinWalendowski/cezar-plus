@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
+import { loadAgentAccountUsage, type AccountLimited } from '../workspace/agent-account-usage.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import {
   AUTO_RESUME_GRACE_MS,
@@ -718,4 +719,156 @@ describe('a run stopped by a usage limit resumes itself', () => {
     const events = store.readEvents(record.id);
     expect(events.some((event) => String(event.message ?? '').includes('resuming automatically (1/12)'))).toBe(true);
   }, 40_000);
+});
+
+/**
+ * The limit is WRITTEN DOWN, so the account pool can route around it
+ * (spec `2026-08-23-retarget-task-to-another-engine.md`, Phase 1).
+ *
+ * `selectPoolAccount` has ranked "skip a limited account" as signal 1 since the routing spec
+ * landed on 2026-08-16, and `agent-route-select.test.ts` covers that ranking from three angles.
+ * None of it ran in production: `recordLimited()` had no caller outside its own tests, so
+ * `AccountUsageEntry.limited` was never written and `isLimited()` answered `false` for an account
+ * a provider had just refused.
+ *
+ * **So the ranking tests are not the negative control for this change and cannot be** — the pure
+ * function was never broken, and every one of them is green on both sides of this commit. What
+ * these cases assert is the CALL: that the limit path reaches the store at all, under the right
+ * key, and that a completed turn takes it back off.
+ *
+ * `CEZ_HOME` is pinned per test rather than leaning on the suite-wide sandbox in
+ * `vitest.setup.ts`: that home is one directory per WORKER, so an entry written by one case would
+ * still be there for the next, and "the pool skipped it" would be indistinguishable from "the
+ * previous test left it behind".
+ */
+describe('a usage limit is recorded against the account it was refused on', () => {
+  let repoRoot: string;
+  let home: string;
+  let store: RunStore;
+  let manager: RunManager | undefined;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  const workflow: WorkflowDef = {
+    name: 'quick-task',
+    source: 'built-in',
+    steps: [{ id: 'work', name: 'Work', prompt: '{{task}}' }],
+  };
+
+  async function settle(runId: string): Promise<void> {
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + 20_000;
+    while (!terminal.has(store.getRun(runId)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not finish in time');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  /** The `limited` entry for a key, once the fire-and-forget write has landed. */
+  async function limitedEntry(key: string): Promise<AccountLimited | undefined> {
+    return (await loadAgentAccountUsage()).accounts[key]?.limited;
+  }
+
+  beforeEach(async () => {
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    savedEnv.CEZ_MOCK_LIMIT_RESET_SECONDS = process.env.CEZ_MOCK_LIMIT_RESET_SECONDS;
+    savedEnv.CEZ_HOME = process.env.CEZ_HOME;
+    process.env.CEZ_DRY_RUN = '1';
+    process.env.CEZ_MOCK_LIMIT_RESET_SECONDS = '3600';
+    home = mkdtempSync(join(tmpdir(), 'cez-limit-home-'));
+    process.env.CEZ_HOME = home;
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-limit-record-'));
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+  });
+
+  afterEach(() => {
+    manager?.dispose();
+    manager = undefined;
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('writes `limited` for the refused account, with the provider\'s own reset instant', async () => {
+    manager = new RunManager(store, repoRoot);
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
+    await settle(record.id);
+    const failed = store.getRun(record.id);
+    expect(failed?.status).toBe('failed');
+
+    // The write is fire-and-forget (a JSON write must never delay the failure path), so poll.
+    await expect.poll(() => limitedEntry('claude:default'), { timeout: 10_000 }).toBeDefined();
+    const limited = await limitedEntry('claude:default');
+    expect(limited?.source).toBe('usage-limit');
+    // Not "some future date": the exact instant the provider stated, read back out of the message
+    // it sent. `until` is what `isLimited` gates on, so a value that merely looks plausible is the
+    // one failure this cannot afford — an hour's drift either way silently changes routing.
+    const epochSeconds = Number(/usage limit reached\|(\d+)/.exec(failed?.error ?? '')?.[1]);
+    expect(Number.isFinite(epochSeconds)).toBe(true);
+    expect(Date.parse(limited?.until ?? '')).toBe(epochSeconds * 1_000);
+  }, 30_000);
+
+  it('keys it on the STEP that was refused, not on the run record', async () => {
+    // The same split `accountHolds()` was fixed for on 2026-08-23, applied to the balancer. A run
+    // created on codex whose step ran on claude must limit `claude:default`; keying it off the
+    // record would exclude a healthy codex login from the pool AND leave the closed claude one
+    // eligible — both halves wrong, from one wrong key.
+    manager = new RunManager(store, repoRoot);
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit pinned step', worktree: false });
+
+    // Move only the RUN-level fields, and do it BEFORE the failure lands: this key is computed on
+    // the failure path, so a record mutated afterwards would prove nothing about what was read.
+    store.updateRun(record.id, { runner: 'codex', agentProfile: 'default' });
+    await settle(record.id);
+    expect(store.getRun(record.id)?.steps.find((step) => step.status === 'failed')?.backend).toBe('claude');
+
+    await expect.poll(() => limitedEntry('claude:default'), { timeout: 10_000 }).toBeDefined();
+    expect(await limitedEntry('codex:default')).toBeUndefined();
+  }, 30_000);
+
+  it('records it even when auto-resume is switched off', async () => {
+    // The placement assertion, and the reason this case exists as its own test: whether THIS run
+    // will resume itself and whether THAT account is exhausted are different questions. Every
+    // early return in `scheduleAutoResumeIfLimited` below the record call answers only the first.
+    // Move the call under any of them and this goes red while everything else here stays green.
+    manager = new RunManager(store, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 1, autoResumeOnUsageLimit: false } }),
+    });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
+    await settle(record.id);
+    // The setting is genuinely off — no schedule was made, so this is not a vacuous pass.
+    expect(store.getRun(record.id)?.autoResumeAt).toBeUndefined();
+    await expect.poll(() => limitedEntry('claude:default'), { timeout: 10_000 }).toBeDefined();
+  }, 30_000);
+
+  it('clears it when a later turn on that account completes', async () => {
+    manager = new RunManager(store, repoRoot);
+    const limited = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:limit ship it', worktree: false });
+    await settle(limited.id);
+    await expect.poll(() => limitedEntry('claude:default'), { timeout: 10_000 }).toBeDefined();
+
+    // Retire the per-run HOLD first, or nothing can run on this account to prove anything — the
+    // queue would park the second task behind the first run's `autoResumeAt` and `settle` would
+    // time out. That is the hold working, and it is also the clearest statement of why these are
+    // two mechanisms: the hold is one run's appointment and dies with it, while `limited` is a
+    // fact about the LOGIN that outlives every run on it. Cancelling one must not clear the other.
+    expect(manager.cancelAutoResume(limited.id)).toBe(true);
+    expect(await limitedEntry('claude:default')).toBeDefined();
+
+    // A turn that COMPLETED is the only honest proof the window reopened — `isLimited` would
+    // otherwise keep skipping a working login until the stated reset arrived. This second run goes
+    // through `finishStep`, the workflow-step seam, which is the path every ordinary agent step
+    // takes and the one a continuation-only fix would miss.
+    const ok = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done back to work', worktree: false });
+    await settle(ok.id);
+    expect(store.getRun(ok.id)?.steps.find((step) => step.id === 'work')?.status).toBe('done');
+    await expect.poll(() => limitedEntry('claude:default'), { timeout: 10_000 }).toBeUndefined();
+  }, 60_000);
 });

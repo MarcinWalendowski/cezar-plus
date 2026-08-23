@@ -186,7 +186,10 @@ describe('editable title (#389)', () => {
 
 describe('action bar visibility per status (the legacy rules, rendered)', () => {
   const matrix: Array<{ status: RunStatus; visible: string[] }> = [
-    { status: 'queued', visible: ['Notes', 'Cancel'] },
+    // "Run on…" (spec 2026-08-23-retarget-task-to-another-engine) is offered to the two PARKED
+    // states and to nothing else. `queued` is one; the other is `failed` WITH an `autoResumeAt`,
+    // which this matrix's plain `failed` row deliberately is not — see the case below it.
+    { status: 'queued', visible: ['Run on…', 'Notes', 'Cancel'] },
     { status: 'running', visible: ['Notes', 'Cancel'] },
     { status: 'waiting', visible: ['Finish', 'Notes', 'Cancel'] },
     // Terminal folded into the Open in… menu — it shows whenever the session can be resumed.
@@ -203,6 +206,18 @@ describe('action bar visibility per status (the legacy rules, rendered)', () => 
       .getAllByRole('button')
       .map((el) => el.textContent?.trim())
     expect(names).toEqual(visible)
+  })
+
+  it('a SCHEDULED failed run gains "Run on…", a plain failed run does not', () => {
+    stubFetch()
+    renderHeader(run('failed', { autoResumeAt: '2026-08-26T23:00:30.000Z' }))
+    expect(actionBar().getByRole('button', { name: 'Run on…' })).not.toBeNull()
+    cleanup()
+    // The distinction that matters: a plain failed run already has Continue, whose composer
+    // carries the same pills. Only a run waiting on a clock has no other way to move.
+    stubFetch()
+    renderHeader(run('failed'))
+    expect(actionBar().queryByRole('button', { name: 'Run on…' })).toBeNull()
   })
 
   it('an archived run offers Unarchive instead of Archive', () => {
