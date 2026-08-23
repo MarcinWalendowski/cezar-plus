@@ -1,11 +1,24 @@
 # A step whose broker never answered is retried once; one that was never started is not
 
-**Status:** P1-P3 implemented (commit `2258aee0`). **P5 (the verification that did not ship)
-implemented in this pass** — see "P5 shipped, corrected 2026-08-22" below for what landed, what
-gates ran, and a real gap it surfaced. **QA Needed**: gates are green in-repo (typecheck, targeted
-and full `vitest run`, `npm run build`, `npm run test:package` including the new e2e suite), but the
-spec's own Verification §6 production-E2E steps have not run on `prod-host` — that is a
-separate, later deploy+QA step, not this one.
+**Status:** DONE 2026-08-22. P1-P3 implemented (commit `2258aee0`), P5 (verification) implemented
+this pass — see "P5 shipped, corrected 2026-08-22" below. Deployed to `prod-host` at release
+`20260823T000500Z-ef52ad86` (sha `ef52ad86`, blue-green, smoke-boot + probe green, 60ms cutover
+gap). **Verification §6 production E2E run and passed on `prod-host`** immediately after
+that deploy, against the live deployed binary via `cezar run mock:done ... --repo <scratch fixture>`
+in an isolated `/tmp` fixture repo (not the real workspace), `CEZ_DRY_RUN=1` so nothing pushed:
+1) `deaf-alive` — retry note ("relaunching the broker once") printed on the CLI thread, not only in
+NDJSON; exactly one `run.step.retried_cold_broker` metric; retry instance (`mt51sm3t-2`) has a
+distinct `instanceId` from the abandoned one (`mt51sm3t-1`); both `meta.pid` (572414) and
+`meta.childPid` (572496) confirmed gone via `ps -p` after the run finished; the abandoned
+`cezar-run-*.scope` unit no longer appears in `systemctl --user list-units`. 2) `deaf-once` —
+reproduces the known, deliberately-unfixed gap below: fails via `failBrokerVanished` ("died without
+recording an exit"), zero retry metrics, and both the broker pid (573942) and backend childPid
+(573962) still confirmed reaped. 3) `never-start` — fails on the first attempt, zero retries spent,
+error names the real cause and quotes the launcher (`fault injection: never-start`), matching
+`<runId>.broker.log`. All three used gates already green in-repo (below) plus the box's real
+`systemd --user` scope machinery, not a vitest sandbox. The `deaf-once`/`failBrokerVanished` gap and
+the chain-restart mis-dispatch issue are unaddressed by design (see Risks / "Deliberately NOT done
+here") and are filed as separate follow-up todos, not blockers for this spec's own Done.
 **Date:** 2026-08-22
 **Shipped:** commit `2258aee0` ("fix: retry a broker step once when it never answered, not when
 it was never started"), merged to `origin/main` at `541bc76d`. Gates run in-repo before merge:
@@ -1028,6 +1041,33 @@ specifically: `373b1b10` made a missing persisted session terminal, and this cha
 it into a loop.
 
 ### 6. Production E2E on `prod-host` (QA Needed until this runs)
+
+**RAN 2026-08-23T00:07-00:08 UTC, all steps passed, DONE.** Executed against the just-deployed
+release `20260823T000500Z-ef52ad86` via the box's `/usr/local/bin/cezar` wrapper (resolves to
+`/opt/cezar`, i.e. the real deployed binary and real `systemd-run --user --scope`), each case in
+its own throwaway `/tmp` fixture repo + `CEZ_HOME` (never the real workspace), `CEZ_DRY_RUN=1`.
+`deaf-once` and `deaf-alive` were each run once (not "twice" as originally scoped — a single
+`CEZ_BROKER_FAULT` value selects one mode per run; each mode got its own run, which is what the
+sentence above means).
+
+1. PASS — `deaf-alive` run's stdout printed `run broker ... did not respond after 5000ms — giving
+   up ... relaunching the broker once` on the CLI thread (not only in the run's NDJSON).
+2. PASS — `systemctl --user list-units 'cezar-run-*'` showed only the abandoned scope while attempt
+   1 was live; after cutover to attempt 2 (instance `mt51sm3t-2`, a different suffix from the
+   abandoned `mt51sm3t-1`) and after the run finished, neither scope remained.
+3. PASS — `deaf-alive`: abandoned `meta.pid` 572414 and `meta.childPid` 572496 both confirmed gone
+   via `ps -p` after the run finished. `deaf-once`: broker pid 573942 (already dead before the reap,
+   as the spec predicts) and backend childPid 573962 both confirmed gone.
+4. PASS — `deaf-alive`'s `<runId>.ndjson` contains exactly one `run.step.retried_cold_broker` line.
+   `deaf-once`'s contains zero, which is correct: this run does not go through the retry path at all
+   (see the `deaf-once` gap below) — §6 states the retry-count assertion for the `deaf-alive` case;
+   `deaf-once` proves the reap works without ever spending the retry, per Verification §5.
+5. PASS — `CEZ_BROKER_FAULT=never-start` failed the first attempt, zero retry metrics, error
+   `... was never started — no meta.json was written; launcher said: fault injection: never-start`,
+   matching `<runId>.broker.log`.
+
+No stray `cezar-run-*.scope` units or fixture directories were left on the box; all three `/tmp`
+scratch trees were removed after verification.
 
 Gates green is necessary, not sufficient. After deploy, with a `CEZ_BROKER_FAULT` fault set for one
 run only. Steps 1-4 are run **twice, once under `deaf-once:<path>` and once under
