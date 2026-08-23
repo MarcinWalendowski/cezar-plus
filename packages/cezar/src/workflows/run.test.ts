@@ -2488,6 +2488,80 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
 });
 
 /**
+ * Spec 2026-08-22-live-worktree-reaped-mid-run, "What is still open" #2: `dropActive` deletes a
+ * run's worktree lease at settle, and `runContinuation` used to re-arm one only when the tree had
+ * to be rebuilt from scratch — never when a live tree (the common case) was simply reused. That
+ * left a continued run's live worktree with NO lease at all, indistinguishable from a genuine
+ * orphan to `pruneOrphans`, which is the incident's own shape. This proves the fix: a lease exists
+ * again, freshly heartbeated, once a settled run with a still-live worktree is continued.
+ */
+describe('a continued single-repo run re-arms its worktree lease (2026-08-22)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  let runId: string | undefined;
+  let savedDryRun: string | undefined;
+  const SINGLE_STEP: WorkflowDef = {
+    name: 'quick-task',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Task', prompt: '{{task}}' }],
+  };
+
+  beforeEach(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-lease-continuation-'));
+    savedDryRun = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    runId = undefined;
+  });
+
+  afterEach(() => {
+    manager?.dispose();
+    if (runId) manager.cancel(runId);
+    if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+    else process.env.CEZ_DRY_RUN = savedDryRun;
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const waitFor = async (predicate: () => boolean, ms = 20_000) => {
+    const deadline = Date.now() + ms;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error('condition not met in time');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+
+  const leasePath = (id: string) => join(repoRoot, '.ai/cezar/worktree-leases', `${id}.json`);
+
+  it('writes a fresh lease when a settled run with a live worktree is continued', async () => {
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'do the first thing', worktree: true });
+    runId = record.id;
+    await waitFor(() => store.getRun(record.id)?.status === 'waiting');
+    expect(manager.finish(record.id)).toBe(true);
+    await waitFor(() => ['done', 'review'].includes(store.getRun(record.id)?.status ?? ''));
+
+    // The gap this spec closes: settling clears the lease `armWorktreeLeases` wrote at start, but
+    // the worktree itself is still on disk — nothing currently protects it from a sweep.
+    await waitFor(() => !existsSync(leasePath(runId as string)));
+    const worktreePath = store.getRun(runId)?.worktreePath;
+    expect(worktreePath && existsSync(worktreePath)).toBe(true);
+
+    await expect(manager.continueRun(runId, { text: 'keep going' })).resolves.toEqual({ ok: true });
+    await waitFor(() => existsSync(leasePath(runId as string)));
+
+    const lease = JSON.parse(readFileSync(leasePath(runId), 'utf8')) as { runId: string; heartbeatAt: string };
+    expect(lease.runId).toBe(runId);
+    expect(Date.now() - Date.parse(lease.heartbeatAt)).toBeLessThan(30_000);
+  }, 40_000);
+});
+
+/**
  * P2 of spec 2026-08-20-chain-integrity-restart-and-continuation, driven end-to-end through the
  * mock backend: a continuation's `CEZ:DONE` is a statement about ITS OWN step, not about the run.
  *

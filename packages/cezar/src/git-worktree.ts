@@ -567,20 +567,6 @@ export async function worktreeShortstat(
   return { ...parseShortstat(res.stdout), ...(repointedHead ? { repointed: true } : {}) };
 }
 
-/**
- * Is `ref` fully merged into `ancestorOf` — i.e. does deleting `ref` lose no commit `ancestorOf`
- * doesn't already have? Wraps `git merge-base --is-ancestor <ref> <ancestorOf>`, which exits 0
- * only on a clean "yes". Anything else — the ref doesn't resolve, the git call errors — returns
- * `false`, the fail-SAFE direction for `pruneOrphans`'s branch-delete gate (spec
- * 2026-08-22-cross-project-worktree-orphan-prune-safety, Layer 2): a branch this cannot prove
- * merged is a branch that is kept, never one that is deleted on an unproven "probably fine".
- */
-export async function isAncestorOf(repoRoot: string, ref: string, ancestorOf: string): Promise<boolean> {
-  if (!isSafeGitRef(ref) || !isSafeGitRef(ancestorOf)) return false;
-  const result = await git(repoRoot, ['merge-base', '--is-ancestor', ref, ancestorOf]);
-  return result.ok;
-}
-
 export interface PruneOrphansReport {
   removed: string[];
   declined: { id: string; reason: string }[];
@@ -600,10 +586,6 @@ export interface PruneOrphansOptions {
    *  worktree path? A match means a live workspace run owns it — decline, never delete. See
    *  `runs/worktree-ownership.ts`. */
   findForeignOwner?: (worktreePath: string) => { projectName: string; runId: string } | undefined;
-  /** The repo's own current branch (`getRepoInfo(repoRoot).branch`) — the ancestry check a
-   *  candidate's branch must pass before it is force-deleted (Layer 2). Omitted defaults to the
-   *  SAFE direction: the branch is always kept, never the pre-fix unconditional delete. */
-  trunkRef?: string;
   /** Set by the caller when a foreign source it needed to consult for `findForeignOwner` came back
    *  `unreadable: true` (`worktree-ownership.ts`'s `ForeignRunSource`). An unreadable foreign index
    *  means the ownership signal cannot be trusted for ANY candidate this boot, not just the one
@@ -658,11 +640,15 @@ async function leaseDeclineReason(
  * in another project's (or the workspace boot root's) `runs.json` — this project's own
  * `store.listRuns()` (the source of `validIds`) has no way to know that id exists. Before this
  * project deletes a candidate, `opts.findForeignOwner` gets first say (decline on a match, and log
- * why); a candidate that clears that check still only loses its BRANCH when `opts.trunkRef` proves
- * it fully merged (`isAncestorOf`) — otherwise the directory goes and the branch stays, the same
- * "directory gone, branch kept" contract `runs/retention.ts` already uses for finished-run
- * retention. Omitting `opts` entirely reproduces today's unconditional delete-both behavior
- * byte-for-byte, so every caller not yet updated for Phase 3 stays unaffected by this change.
+ * why), and a fresh worktree lease (`opts.leaseDir`, spec 2026-08-22-live-worktree-reaped-mid-run)
+ * gets the next say, for a candidate no source claims at all.
+ *
+ * A candidate that clears every check is never deleted outright: it is autosaved onto its own
+ * `cez/<id8>` branch first (`autosaveCommit`), and the BRANCH is always kept — there is no
+ * `git branch -D` anywhere on this path any more, unconditionally, regardless of `opts`. When the
+ * autosave itself refuses or fails, the directory is kept too rather than removed uncommitted. See
+ * "Half C" of that spec for the full contract; this is the one destructive path in the file that
+ * now cannot lose an uncommitted byte.
  */
 export async function pruneOrphans(
   repoRoot: string,

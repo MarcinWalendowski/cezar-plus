@@ -49,6 +49,11 @@ export const releaseEntrySchema = z
     builtAt: z.string().optional().catch(undefined),
     dirty: z.boolean().optional().catch(undefined),
     stale: z.literal(true).optional().catch(undefined),
+    /** Set when --allow-unrelated suppressed a divergent / unresolved / unreadable-ledger refusal —
+     *  "this deploy was forced", not "the flag was typed". */
+    unrelated: z.literal(true).optional().catch(undefined),
+    /** The live-only commits `--allow-unrelated` overrode, exactly as printed at force time. */
+    unrelatedLostCommits: z.string().optional().catch(undefined),
     /** Set the moment this release became `current`; absent means "built, never activated". */
     activatedAt: z.string().optional().catch(undefined),
     /** Free text — replaces the hand-written `.deployed-commit` marker no code ever owned. */

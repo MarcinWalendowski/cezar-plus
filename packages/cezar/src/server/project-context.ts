@@ -458,13 +458,16 @@ export class ProjectContexts {
           ...projects,
           ...(bootRoot !== undefined ? [{ id: '__boot__', name: 'workspace boot', root: bootRoot }] : []),
         ].filter((p) => canonicalPath(p.root) !== canonicalPath(project.root));
-        const foreignSources = loadForeignWorkspaceRunSources(project.root, candidates);
-        const unreadableSource = foreignSources.find((s) => s.unreadable);
         const delay = Number(this.env.CEZ_SWEEP_DELAY_MS ?? 5 * 60_000);
         sweepTimer = setTimeout(() => {
+          // Snapshot ownership at FIRE time, not at build() time: build() runs before
+          // manager.recover() has re-claimed this project's own runs, and the sweep fires up to
+          // `delay` later — a snapshot taken here would otherwise be up to 5 minutes staler than
+          // the reality it is judging, on top of the deferral itself.
+          const foreignSources = loadForeignWorkspaceRunSources(project.root, candidates);
+          const unreadableSource = foreignSources.find((s) => s.unreadable);
           void pruneOrphans(project.root, new Set(store.listRuns().map((r) => r.id)), {
             findForeignOwner: (path) => findForeignWorkspaceOwner(project.root, path, foreignSources),
-            trunkRef: repo.branch,
             ownershipCheckUnavailable: unreadableSource
               ? { reason: `project "${unreadableSource.projectName}"'s runs.json could not be read` }
               : undefined,

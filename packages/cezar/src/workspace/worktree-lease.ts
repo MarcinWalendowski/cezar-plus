@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export const LEASE_HEARTBEAT_MS = 90_000;
@@ -48,12 +48,4 @@ export async function touchWorktreeLeases(
 
 export async function removeWorktreeLeases(repoRoots: readonly string[], runId: string): Promise<void> {
   await Promise.all(repoRoots.map((root) => rm(worktreeLeasePath(root, runId), { force: true }).catch(() => undefined)));
-}
-
-export async function readWorktreeLease(repoRoot: string, runId: string): Promise<WorktreeLease | undefined> {
-  try {
-    return JSON.parse(await readFile(worktreeLeasePath(repoRoot, runId), 'utf8')) as WorktreeLease;
-  } catch {
-    return undefined;
-  }
 }
