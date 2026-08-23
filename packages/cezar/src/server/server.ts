@@ -7225,7 +7225,7 @@ export function createApp(deps: ServerDeps) {
   return routed;
 }
 
-export function startServer(deps: ServerDeps, port: number): ServerType {
+export function startServer(deps: ServerDeps, port: number): { server: ServerType; contexts: ProjectContexts } {
   const workspaceEvents = deps.workspaceEvents ?? new WorkspaceEventBus();
   // The subscription hub rides the same HTTP server (one port, zero config):
   // createApp registers the topics, the `upgrade` hook below owns the socket.
@@ -7393,7 +7393,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   // order-independence: it still decides purely from set membership, and the set is fixed here at
   // wiring time rather than from whether some other listener already ran.
   attachUpgradeFallback(server, clusterEnabled() ? [WS_PATH, CLUSTER_LINK_PATH] : [WS_PATH]);
-  return server;
+  return { server, contexts: sharedContexts };
 }
 
 /**

@@ -206,3 +206,162 @@ describe('recover() re-attaches a run whose broker is still alive (P4)', () => {
     expect(existsSync(liveDir)).toBe(true);
   });
 });
+
+/**
+ * A second, independent way to miss the re-attach branch — `.ai/specs/2026-08-22-brokered-run-
+ * survive-bluegreen-cutover.md` Phase 1. `RunStore.updateRun`/`updateStep` schedule a 300ms
+ * DEBOUNCED, `.unref()`'d save; a process that exits before the timer fires loses that mutation
+ * from `runs.json` even though the broker (outside this process entirely) has already moved on.
+ * The next boot's `RunManager.recover()` then reads a STALE record — one whose `run.steps` no
+ * longer names the step the live spool says is open — and, correctly, declines to guess: the
+ * pid is genuinely alive, but the record and the spool disagree about *where* the run is, so
+ * re-attaching would be exactly the "guess between them" `reattachBrokeredRun`'s own comment
+ * warns against. That decline can land the run on either the legacy `interrupted`-and-failed
+ * path or `reenterChain`'s `queued`-for-reentry path (both are "not re-attached"; which one
+ * depends on how many chain steps remain) — this test asserts the shared, load-bearing half:
+ * `recover()` does not re-attach at all while the on-disk record is stale, and does once the
+ * mutation is flushed before the next `RunStore.open()` — the exact ordering
+ * `contexts.disposeAll()` now guarantees at shutdown, before `store.flush()`, for every
+ * non-boot project.
+ */
+describe('recover() re-attach across an unflushed run-record mutation (flush-on-shutdown gap, Phase 1)', () => {
+  let repoRoot: string;
+  let dataDir: string;
+
+  const CHAIN = ['implement', 'run-tests'];
+  const WORKFLOW = {
+    name: 'two-step',
+    description: 'x',
+    source: 'built-in' as const,
+    steps: CHAIN.map((id) => ({ id, name: id, prompt: '{{task}}' })),
+  };
+
+  beforeEach(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-flush-gap-'));
+    dataDir = join(repoRoot, '.ai/cezar');
+    mkdirSync(join(dataDir, 'runs'), { recursive: true });
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+  });
+
+  afterEach(() => {
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  /** The baseline every reader in this test agrees really made it to disk: mid-`implement`,
+   *  flushed immediately — exactly `recover-brokered`'s own `runningRun()`, but on a store the
+   *  test controls so it can choose whether the NEXT mutation gets flushed too. */
+  function seedRunningRun(seedStore: RunStore): string {
+    const { id } = seedStore.createRun({
+      title: 't',
+      workflow: 'two-step',
+      task: 'do the thing',
+      autonomous: true,
+      steps: CHAIN.map((s) => ({ id: s, name: s, kind: 'agent' as const })),
+    });
+    seedStore.updateRun(id, { workflowDef: WORKFLOW, runner: 'claude' });
+    seedStore.updateRun(id, { status: 'running', currentStepId: 'implement' });
+    seedStore.updateStep(id, 'implement', {
+      status: 'running',
+      iterations: 1,
+      sessionId: 'sess-implement-1',
+      backend: 'claude',
+    });
+    seedStore.flush();
+    return id;
+  }
+
+  /** The broker really did move to `run-tests` — this mutates the SAME in-memory `RunStore`, but
+   *  deliberately does not flush it: the 300ms debounce is what a process exit before the timer
+   *  fires loses, which is the gap this test exists to reproduce. */
+  function advanceToRunTests(advanceStore: RunStore, id: string): void {
+    advanceStore.updateStep(id, 'implement', { status: 'done', finishedAt: new Date().toISOString() });
+    advanceStore.updateRun(id, { currentStepId: 'run-tests' });
+    advanceStore.updateStep(id, 'run-tests', {
+      status: 'running',
+      iterations: 1,
+      sessionId: 'sess-run-tests-1',
+      backend: 'claude',
+    });
+  }
+
+  /** A spool whose broker is this very process (`isPidAlive` true by construction), already on
+   *  `run-tests` — matching the in-memory advance above, not whatever is (or isn't) on disk.
+   *  Also records `spoolDir`/`consumedOffset` on the run, exactly as `brokerFor()` does before a
+   *  real spawn (`run.ts:1749`) — this task's own criterion 3 requires both be present. */
+  function liveSpoolForRunTests(spoolStore: RunStore, id: string): string {
+    const dir = spoolDirFor(join(dataDir, 'runs'), id);
+    mkdirSync(dir, { recursive: true });
+    writeSpoolMeta(dir, {
+      schema: 1,
+      protocol: BROKER_PROTOCOL,
+      runId: id,
+      stepId: 'run-tests',
+      backend: 'claude',
+      pid: process.pid,
+      argv: ['claude'],
+      startedAt: new Date().toISOString(),
+    });
+    writeFileSync(join(dir, 'out.ndjson'), '');
+    spoolStore.updateRun(id, { spoolDir: relative(dataDir, dir), consumedOffset: 42 });
+    return dir;
+  }
+
+  const events = (readStore: RunStore, id: string): string[] =>
+    readStore.readEvents(id).map((e) => (typeof e.message === 'string' ? e.message : e.type));
+
+  it('does not re-attach when the advance never made it to disk before the next open', async () => {
+    const store1 = RunStore.open(dataDir, { keepLive: true });
+    const id = seedRunningRun(store1);
+    advanceToRunTests(store1, id); // in-memory only — store1 never flushes again
+    liveSpoolForRunTests(store1, id); // the broker really is alive and really is on `run-tests`
+
+    // "next boot": a fresh RunStore reads only what actually reached `runs.json` — the flushed
+    // baseline (`implement` still open), not the advance above.
+    const store2 = RunStore.open(dataDir, { keepLive: true });
+    const manager2 = new RunManager(store2, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 0 } }),
+    });
+    try {
+      await manager2.recover();
+
+      const record = store2.getRun(id);
+      // The stale record still names `implement`; the live spool says `run-tests`. That
+      // disagreement is real from this process's point of view — recover() cannot see the
+      // in-memory advance store1 made — so it must not guess by re-attaching anyway.
+      expect(record?.status).not.toBe('running');
+      expect(events(store2, id).join('\n')).not.toContain('this run kept going');
+    } finally {
+      manager2.dispose();
+      store2.flush();
+      store1.flush();
+    }
+  });
+
+  it('re-attaches once the advance is flushed before the next open — the fix', async () => {
+    const store1 = RunStore.open(dataDir, { keepLive: true });
+    const id = seedRunningRun(store1);
+    advanceToRunTests(store1, id);
+    liveSpoolForRunTests(store1, id);
+    store1.flush(); // what `contexts.disposeAll()` now guarantees runs before `store.flush()`
+
+    const store2 = RunStore.open(dataDir, { keepLive: true });
+    const manager2 = new RunManager(store2, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 0 } }),
+    });
+    try {
+      await manager2.recover();
+
+      const record = store2.getRun(id);
+      expect(record?.status).toBe('running');
+      expect(record?.error).toBeUndefined();
+      expect(record?.steps.find((s) => s.id === 'run-tests')?.status).toBe('running');
+      expect(events(store2, id).join('\n')).toContain('cezar restarted — this run kept going');
+    } finally {
+      manager2.dispose();
+      store2.flush();
+    }
+  });
+});

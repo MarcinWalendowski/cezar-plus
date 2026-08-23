@@ -861,7 +861,7 @@ async function serveCommand(
     );
   }
 
-  startServer({
+  const { contexts } = startServer({
     repoRoot,
     listenFd,
     // P3: the same controller the signal handlers below drain. Without it the server counts
@@ -918,6 +918,11 @@ async function serveCommand(
       } catch {
         // A drain that throws must never stop us flushing state below.
       }
+      // Flush every NON-BOOT project's RunStore too — `contexts` only holds those (the boot
+      // project's own store is `store` above), and without this a project whose last write landed
+      // inside the 300ms debounce window loses it, which can make a live re-attach look stale on
+      // the next boot (`.ai/specs/2026-08-22-brokered-run-survive-bluegreen-cutover.md` Phase 1).
+      contexts.disposeAll();
       store.flush();
       process.exit(0);
     })();

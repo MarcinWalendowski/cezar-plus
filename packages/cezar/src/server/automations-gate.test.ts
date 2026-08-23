@@ -198,7 +198,7 @@ describe('automations gate (#801)', () => {
     /** Boot on an ephemeral port, wait for `listening` to have run its warm-up, then close. */
     const boot = async (): Promise<void> => {
       const started = vi.spyOn(WorkspaceAutomationScheduler.prototype, 'start');
-      const server = startServer(
+      const { server } = startServer(
         { repoRoot, store, manager: { isActive: () => false } as unknown as RunManager, version: '0.0.0-test' },
         0,
       );
