@@ -29,6 +29,19 @@ import type {
  * An import rather than a parity test, deliberately, and for the same reason `cluster/replay.ts`'s
  * fourth copy of the meta-field set became an import: a parity test DETECTS drift, an import makes it
  * IMPOSSIBLE. Adding a field is now one edit, in one place, or it does not compile.
+ *
+ * **The specific regression this file exists to prevent is a LOCAL RE-IMPLEMENTATION.** Not a wrong
+ * mapping — a second correct one. If you are about to write a `toNodeWire` next to its caller because
+ * importing from `cluster/` feels like reaching across a boundary, that is exactly how the previous
+ * two copies were born, and the reason given at the time (a package boundary) was real when it was
+ * written and stale within the increment. Import it or change it here; do not restate it.
+ *
+ * **And deduplicating only made drift OBSERVABLE — `hub-router.test.ts` is where it is OBSERVED.**
+ * That test seeds every optional and asserts the whole wire object with `toEqual`, verified by a
+ * sweep deleting each of the 14 field lines in turn (14 red, 0 green). It has to seed every optional:
+ * six of these fields are `...(x !== undefined ? { x } : {})`, and a fixture that leaves one absent
+ * cannot pin its line — the field is missing from the output either way. If you add a field here,
+ * add it to that fixture too, or it ships unpinned while the suite stays green.
  */
 
 /** Corpus-relative, always. `.strict()` on the wire means a stored row's `.passthrough()` extras
