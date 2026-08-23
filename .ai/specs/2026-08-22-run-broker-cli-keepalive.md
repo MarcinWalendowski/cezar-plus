@@ -1,5 +1,10 @@
 # The one-shot `cezar run` CLI must not exit while its brokered run is still in flight
 
+**CORRECTED 2026-08-23 by `.ai/specs/2026-08-23-headless-run-drains-event-loop.md`:** the
+step-scoped broker timer fixed one drain window but did not give the headless CLI a run-lifetime
+handle across multi-step hand-offs. The original result remains below as the verified result for
+that narrower mechanism.
+
 **Status: IMPLEMENTED, TESTED and SHIPPED 2026-08-22.** Commit `3e6d1b7e` ("fix: keep a
 one-shot brokered run's interval ref'd so the process outlives the session"), pushed to
 `origin/main` (fast-forward from `6fdbe35e`) on `prod-host`. P1+P2 both landed in

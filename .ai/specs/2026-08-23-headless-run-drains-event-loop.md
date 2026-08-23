@@ -1,6 +1,13 @@
-# The one-shot `cez run` process must be held open by the RUN, not by whichever handle its current step happens to own
+# Headless Run Event Liveness
 
-**Status: SPEC — not implemented.** Written 2026-08-23 for task `eeceb869` against HEAD
+**Status: IMPLEMENTED, VERIFICATION PENDING 2026-08-23.** The pre-implementation resource
+probe confirmed the diagnosis: brokered execution spent 97.4% of 19,991 sampled ms on exactly
+one ref'd handle (54 windows, narrowest 10 ms), while `CEZ_RUN_BROKER=0` spent 0.6% of 16,238
+sampled ms there (6 windows, narrowest 12 ms). Both completed all eight steps and neither trace
+contained an empty transition. P1 through P4 are implemented; gates, post-fix probes, runtime
+repetition, package E2E, and P0 bisect remain pending.
+
+Written 2026-08-23 for task `eeceb869` against HEAD
 `84fb8237`. The diagnosis below is **measured on this box**, not inferred: see Problem
 §"The measurement" for the instrumented run, and Problem §"What this is not" for the five
 candidate mechanisms this session ruled out with citations so the implementation step does

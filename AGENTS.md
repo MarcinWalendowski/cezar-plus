@@ -364,7 +364,11 @@ files.
    above: point `TMPDIR`/`TMP`/`TEMP` at `/tmp`, which is a tmpfs outside every repo here. Note
    CI never sees this — `ubuntu-latest` has a plain `/tmp` — so it is purely a local-agent trap.
 
-5. **`npm run test:package` fails 1/15 under the run broker, and it predates your branch.** Case
+5. **CORRECTED 2026-08-23 by `.ai/specs/2026-08-23-headless-run-drains-event-loop.md`: the
+   package suite now has 18 cases, and the named dry-run workflow case is eighth. The prior
+   broker timer fix closed one step-scoped drain window, but a multi-step headless run still had
+   no run-lifetime handle across hand-offs. The original entry remains below.**
+   **`npm run test:package` fails 1/15 under the run broker, and it predates your branch.** Case
    5 (`packages/cezar/test/e2e/package-cli.test.ts:86`, "the release tarball installs and runs the
    dry-run CLI workflow") stalls at step 1 ("Gather the record") with the run status stuck
    `running` and the CLI exiting 0. Reproduces IDENTICALLY at clean HEAD — this predates any
