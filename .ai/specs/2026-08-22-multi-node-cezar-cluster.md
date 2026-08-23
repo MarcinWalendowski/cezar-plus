@@ -2573,12 +2573,47 @@ invented; these are the names to use when one lands.
 > return a per-op verdict. Check `git status` before writing it; agents on this branch have landed
 > files after being reported as not delivered.
 >
+> **B2a. Nothing ever calls `prune()`, so the 30-day retention policy is currently a no-op.**
+> Measured 2026-08-23: **zero callers** outside `op-history.test.ts`. `OP_HISTORY_RETENTION_MS` is
+> documented, tested at its boundary, and never invoked, so `op-history.json` grows without bound for
+> the life of the hub. Someone has to schedule it — the natural place is alongside whatever else
+> `startClusterRuntime` arms. Note the module's own warning before picking a cadence: pruning too
+> aggressively REOPENS the double-apply bug the store exists to prevent, because a pruned verdict is
+> indistinguishable from an op that was never seen.
+>
+> **B2b. `record()` deliberately does NOT inherit `hub-seq.ts`'s poisoned-key gate, and that is not
+> an oversight.** Written down here because it looks like an inconsistency between two sibling files
+> and a future reader will otherwise "fix" it into consistency. `hub-seq.ts` guards `allocate()` on a
+> poisoned key because computing the next counter requires trusting the old value.
+> `op-history.record()` wholesale-replaces one `opId` with an already-decided verdict and needs no
+> old value at all — so refusing to overwrite a poisoned entry would prolong the corruption forever
+> with no benefit, and would remove the only path short of hand-editing the file that can heal it.
+> Whole-file corruption still refuses `record()`, because merging into unparseable JSON would
+> silently discard every other entry.
+>
 > **B3. Construct the deps in `startClusterRuntime` (`server/cluster-routes.ts`).** This is the wire
 > that makes any of Milestone B real. `allocate` <- `createHubSeqAllocator`; `applyOp` <-
 > `hub-apply.ts`; `findAppliedOp`/`recordAppliedOp` <- `op-history.ts`; `sendTo`/`connectedNodes` <-
 > `ClusterLinkServer`. Until this exists, `deps.replication` is `undefined` everywhere in production
 > and the hub still warns and never acks — i.e. **Milestone B is not shipped no matter how green the
 > unit tests are.**
+>
+> How dead this code currently is, measured rather than estimated (2026-08-23, `grep -arn` with a
+> QUOTED `--include='*.ts'` — an unquoted one is eaten by zsh and reports "no matches" for
+> everything, which reads exactly like a real zero and cost this session one wrong answer):
+>
+> | symbol | callers outside its own file + test |
+> |---|---|
+> | `createOpHistoryStore` | **0** |
+> | `createHubSeqAllocator` | **0** |
+> | `OpHistoryStore.prune` | **0** |
+> | `applyOpsFrame` | 1 — `hub-router.ts` only |
+> | `planReplicaFanout` | 1 — `hub-router.ts` only |
+>
+> So three of the delivered modules have no caller at all, and the two that do are reached only
+> through the `hub-router.ts` branch that nothing enters. Roughly 1,500 lines of tested, unreachable
+> code. That is a fine state to be in mid-milestone — it is NOT a state to describe as "Milestone B
+> is done bar the wiring", because the wiring is the part that has never been executed even once.
 >
 > **B4. Connect-time replay** — `resumeFrom` from `oplog.ts#readOps`. See above for why this is not
 > optional for a real two-machine cluster: without it, any spoke restart or network blip drops writes
