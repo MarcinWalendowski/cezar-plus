@@ -2831,6 +2831,26 @@ invented; these are the names to use when one lands.
 > `task-template.ts:36`'s envelope in `todoTaskText` to `context` / `whatToDo` / `suggestedPrompt`
 > when a todo's origin is external. Cheapest real mitigation available, and it helps today.
 >
+> **CORRECTED 2026-08-23 — that fix is not implementable as written: THERE IS NO SUCH DISCRIMINATOR.**
+> `origin` is `z.enum(['agent','composer'])` (`contract/src/cluster.ts:1157`) and `mintOrReuseTodo`
+> sets `'composer'` — **identical to a human typing at the composer.** The only existing signal is
+> `author.via === 'report-triage'`, and `todoTaskText`'s parameter is a `Pick<TodoItem, …>` that does
+> not include `author`; `via` is also rewritten by `inheritAuthor` and documented as "the door this
+> record came through", so overloading it as a trust flag is the one-concept-two-sources failure this
+> repo keeps hitting.
+>
+> **Apply the envelope at `seedWhatToDo` (`workspace-reports-routes.ts:253`) instead, not at
+> `todoTaskText`.** That site *knows* the text is a report body, so it needs no discriminator; it
+> covers every downstream consumer rather than the prompt build alone; and the envelope is then
+> stored on the record and survives paths nobody has enumerated. Bound the body there too — there is
+> **no bound today**, and `todoSchema.whatToDo`'s `.max(100_000)` is applied only on READ, where a
+> failing entry is `continue`d, so an oversized report currently produces a todo that silently
+> vanishes from the board rather than being truncated.
+>
+> **And `bounded` is NOT exported** (`task-template.ts:107` is a bare `function`), and the envelope
+> is an inline template literal. **There is no helper to reuse today** — extract both into a shared
+> module and rewrite `renderAutomationTask` to call it, or the second copy drifts from the first.
+>
 > **Two independent problems it does NOT fix, both confirmed in source:**
 > 1. **Check steps bypass the allowlist entirely** — `run.ts:6854` spawns `bash -lc` with
 >    `env: process.env`, the whole service environment. Narrowing `CEZ_ENV_PASSTHROUGH` does nothing
@@ -2840,8 +2860,15 @@ invented; these are the names to use when one lands.
 >
 > **Those configuration questions are now ANSWERED — measured on the box 2026-08-23, and both
 > mitigations hold:**
-> - **`CEZ_AGENT_ENV_FULL` is NOT set.** Its only occurrence anywhere in `/etc/cezar/` is a comment
->   warning against setting it. So the agent/check distinction is intact.
+> - ~~**`CEZ_AGENT_ENV_FULL` is NOT set.** Its only occurrence anywhere in `/etc/cezar/` is a comment
+>   warning against setting it. So the agent/check distinction is intact.~~ **CORRECTED 2026-08-23 —
+>   I counted this as a mitigation and it is NOT one.** `CEZ_AGENT_ENV_FULL` does not gate whether an
+>   agent runs; it only widens the child env from the allowlist to all of `process.env`
+>   (`core/agent-env.ts:385`). **With it unset, `core/agent-env.ts:456` still short-circuits on
+>   `CEZ_ENV_PASSTHROUGH` BEFORE the `looksSecret` filter** — and on the box that list carries
+>   `OP_SERVICE_ACCOUNT_TOKEN`, `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. **The blast
+>   radius is fully present with the flag unset.** Counting it overstated the safety margin; the fact
+>   is still true and its consequence was wrong.
 > - **`CEZ_REPORTS_AUTO` is NOT set**, and `config.json` carries no `auto` key. **The human brake is
 >   real**: converting a report to a todo requires a person, and starting it requires a second
 >   deliberate act.
@@ -3447,10 +3474,19 @@ invented; these are the names to use when one lands.
 >   FRESHNESS rather than presence. A watermark read once is exactly as useless as a hardcoded `[]`,
 >   because the number moves precisely while the link is down. Deliberately NOT a fourth
 >   declared-and-unsupplied option.
-> - **IN FLIGHT / OPEN:** **D43 (top of this block — highest priority)** · D37 · D39 · D41 · D42 ·
+> - **IN FLIGHT / OPEN — ~~D43 (top of this block — highest priority)~~ · D37 · D39 · D41 · D42 ·**
+>   **CORRECTED 2026-08-23: three of the items this list named closed later the same day.** D43 is
+>   **FIXED** (its own heading says so; `todo-autostart.ts:88` now takes a required
+>   `cluster: TodoAutostartCluster | typeof CLUSTERING_OFF`, and `server.ts:1639` passes
+>   `CLUSTERING_OFF`), B5 is closed, and B6 is DONE and green. Naming D43 "highest priority" while it
+>   was already fixed was the worst single row in this file — it is the first thing a fresh session
+>   reads in this block. **Still genuinely open: D37 · D39 · D41 · D42**, and three of those four are
+>   owner decisions, not work. The original list read:
 >   B5 (near no-op, see below) · B6 (see below).
 >
-> #### D38 / D39 — two more found while wiring B4, neither fixed
+> #### D38 / D39 — two more found while wiring B4. **D38 is FIXED; D39 is still OPEN.**
+>
+> **CORRECTED 2026-08-23 — "neither fixed" was false for D38 when written, and the file said so in two other places.** D38 is wired end to end across three files: `link-client.ts:111` declares `watermarks?`, `spoke-runtime.ts:985` exposes `currentWatermarks`, `cluster-routes.ts:1169` supplies it. D39 (validating a synthesized op against `clusterOpShape`) exists nowhere in `replay.ts` or `replica-fanout.ts` and is genuinely open.
 >
 > - **D38: `link-client.ts:352-353` — `sendHello` hardcodes `watermarks: []` and `projects: []`**
 >   ("Phase 1 is inert … nothing has replicated yet, so there is nothing to resume from or
@@ -3503,7 +3539,7 @@ invented; these are the names to use when one lands.
 >   `op://Vault/Server/Access Service Token/CF_ACCESS_CLIENT_ID` and
 >   `/CF_ACCESS_CLIENT_SECRET` (exported as `TUNNEL_SERVICE_TOKEN_ID`/`_SECRET` — the names differ,
 >   which costs a session ten minutes every time it is rediscovered).
-> - **~25% of the whole spec. Milestone C and D are at 0%**, and the spec's own estimate is that C is
+> - **~~~25% of the whole spec. Milestone C and D are at 0%~~ — SUPERSEDED 2026-08-23 by the HANDOFF STATE block at the top of this file.** Milestone C landed in `f6a9bad6`: the SPOKE half is wired and live, the HUB half is built with zero production callers. **D is still at 0%.** Left below because the estimate of what C *was* still holds; it is not a statement of what remains. This is the "not built" label sitting over built code, which reads as licence to rebuild it. The original: ~25% of the whole spec, and the spec's own estimate is that C is
 >   *larger than A and B combined*.
 > - **0% verified on real hardware.** Every test runs both ends of the socket inside one process on
 >   the Mac. **Nothing here has ever executed in production, and no two machines have ever paired.**
@@ -3668,7 +3704,9 @@ invented; these are the names to use when one lands.
 > observable is not observed.** Closing a duplicate earns you the ability to write the pinning test;
 > it does not write it. Ask the per-field question explicitly, and answer it with a sweep.
 >
-> #### D36 — EVERY REPLICATED TODO RESENDS FOREVER. Found 2026-08-23 by the two-process E2E.
+> #### ~~D36 — EVERY REPLICATED TODO RESENDS FOREVER~~ — **FIXED 2026-08-23 (`562a3f6f`), root cause fully retired.** Found by the two-process E2E. What follows is the record of what it was, not a live defect.
+>
+> *(Amended 2026-08-23: this heading was the highest-consequence stale entry in the file. Its body's first sentence is "this is the most serious defect on the branch" — and the body also records the fix, 12 lines down. A reader scanning headings carried away the first half and not the second.)*
 >
 > **This is the most serious defect on the branch, and no unit test could see it.** The first real
 > two-process run (hub + spoke, separate OS processes, real socket) reproduced it on the very first
@@ -4204,7 +4242,7 @@ invented; these are the names to use when one lands.
 > specific to the synchronous claim RPC (D9a) and not to the general outbox `ack` frame, which had
 > zero production callers before this change.
 >
-> ### FOUR LIVE DEFECTS ON THE MILESTONE B PATH — D27-D30, found 2026-08-23 while designing B4
+> ### ~~FOUR LIVE DEFECTS ON THE MILESTONE B PATH~~ — D27-D30, found 2026-08-23 while designing B4. **ALL FOUR ARE CLOSED**, the same day they were found — D27/D29 in this section's own body below, D28/D30 in "WHERE THIS STANDS" above. Verified in code 2026-08-23. Kept for the reachability lesson, never as an open list.
 >
 > **All four are in code that is already written and already "green". None was found by a test; all
 > four were found by reading the path end to end.** Each was then re-verified independently by the
@@ -5012,8 +5050,23 @@ where a docblock mention and a same-module self-call are not callers.
 | `placeRun` | `cluster/placement.ts` | **0** |
 | `eligibleCandidates` | `cluster/placement.ts` | **0** — one hit, `placeRun` in the same file |
 | `buildDispatch` | `cluster/dispatch.ts` | **0** |
-| `offerDispatch` | `cluster/dispatch.ts` | **0** — one hit, its own docblock |
-| `applyReplicaFrame` | `cluster/replica.ts` | **0** — one hit, a comment in `spoke-runtime.ts:20` |
+| `offerDispatch` | `cluster/dispatch.ts` | ~~**0** — one hit, its own docblock~~ → **LIVE** (see correction below) |
+| `applyReplicaFrame` | `cluster/replica.ts` | ~~**0** — one hit, a comment in `spoke-runtime.ts:20`~~ → **LIVE** (see correction below) |
+
+**CORRECTED 2026-08-23 — four of the seven rows above are now false, and TWO OF THEM INVERT.** B3's
+wiring and Milestone C (`f6a9bad6`) gave these symbols real production callers. Re-measured at HEAD
+by the same method (non-test, non-`dist`, call sites outside the symbol's own module):
+
+| symbol | re-measured |
+| --- | --- |
+| `offerDispatch` | **LIVE** — called at `cluster/spoke-runtime.ts:810` (imported `:25`), on a runtime wired from `cluster-routes.ts:1172`. **Not dead code.** |
+| `applyReplicaFrame` | **LIVE** — called at `cluster/spoke-runtime.ts:697` (imported `:29`). The original row cited `spoke-runtime.ts:20` as "a comment"; `:20` is an unrelated `todos.ts` import. **Not dead code.** |
+| `placeRun` | **1** — `hub-dispatch.ts:263`. Still transitively unreachable (`hub-dispatch.ts` itself has none). |
+| `buildDispatch` | **1** — `hub-dispatch.ts:285`. Same caveat. |
+| `eligibleCandidates`, `startRelay`, `relayTail`, `watchRunProjection` | **0** — unchanged, still correct. |
+
+**Read the two LIVE rows before treating anything in `replica.ts` or `dispatch.ts` as unreachable.**
+The table above is a measurement taken before B3 and C landed; it reads as current and is not.
 | `startRelay`, `relayTail` | `cluster/relay.ts` | **0** — all hits are its own module docblock |
 | `watchRunProjection` | `cluster/run-projection.ts` | **0** — one hit, a self re-arm at `:110` |
 
