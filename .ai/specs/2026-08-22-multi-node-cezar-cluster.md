@@ -4784,6 +4784,27 @@ This is the argument for the E2E stated as a measurement rather than a principle
 that fails on this bug is a test that sends a real dispatch over a real socket and reads the real
 reply. Write it before declaring Milestone C done, not after.
 
+**WRITTEN AND PASSING 2026-08-23, with its negative controls measured.**
+`server/cluster-link-activation.test.ts` scenario 4, two cases, 8/8 green in that file. The merge
+gate case drives the REAL `createHubDispatcher` -> real `placeRun` -> real socket -> real
+`startClusterRuntime` spoke branch -> real `todos.json` on disk, and asserts the `runId` on the wire
+equals the id the target's own manager minted. The one substitution is `resolveDispatchManager`
+returning a recording fake, because a real `startRun` spawns an agent subprocess.
+
+**Three mutations, all RED, restored from a scratchpad copy and md5-verified
+(`cb15bf5ed663e3a794bb3ebf7e3479af`):**
+
+| mutation | E2E | `tsc --noEmit` |
+| --- | --- | --- |
+| A. `runId: result.run.id` -> `runId: dispatchId` (the swap `DispatchOutcome`'s docblock calls *"silent, and forever"*) | **RED** — `expected '88a74ebb-…' to be 'run-minted-by-the-target-1'` | — |
+| B. reply `accepted` but never call `startTodoRun` (the C-b lie) | **RED** — `expected [] to have a length of 1` | — |
+| C. drop the `accepted` block from the reply (**the bug that actually existed**) | **RED** — `expected undefined to be defined` | **EXIT=0, ZERO LINES** |
+
+Row C is the whole argument in one line: the defect that shipped between the two halves is caught by
+this test and **invisible to the typechecker**, measured, not asserted. Row A matters separately —
+it is what stops the decisive assertion being vacuous, since a test that accepted any non-empty
+string would pass against `dispatchId`.
+
 **What that E2E honestly does NOT prove, and must not be reported as proving.** Hub and spoke share
 one process there, over loopback. It covers the protocol and the wiring; it does not cover the
 systemd/deploy path, Cloudflare Access admitting the link, cross-machine clock and network

@@ -168,7 +168,7 @@ describe('cluster is inert with CEZ_CLUSTER unset (spec verification 12)', () =>
     it('writes nothing under ~/.cezar/cluster or .ai/cezar/cluster, even after every route is hit', async () => {
       const built = app();
       for (const [, path, init] of CLUSTER_ROUTES) await apiRequest(built, path, init);
-      startClusterRuntime({ version: '0.0.0-test', server: fakeUpgradeServer() })();
+      startClusterRuntime({ version: '0.0.0-test', server: fakeUpgradeServer(), resolveDispatchManager: async () => undefined })();
 
       expect(existsSync(join(home, 'cluster'))).toBe(false);
       expect(existsSync(join(dataDir, 'cluster'))).toBe(false);
@@ -183,7 +183,7 @@ describe('cluster is inert with CEZ_CLUSTER unset (spec verification 12)', () =>
     it('arms no timer and says nothing', () => {
       const interval = vi.spyOn(globalThis, 'setInterval');
       const warn = vi.fn();
-      const stop = startClusterRuntime({ version: '0.0.0-test', warn, server: fakeUpgradeServer() });
+      const stop = startClusterRuntime({ version: '0.0.0-test', warn, server: fakeUpgradeServer(), resolveDispatchManager: async () => undefined });
       expect(interval).not.toHaveBeenCalled();
       expect(warn).not.toHaveBeenCalled();
       expect(() => stop()).not.toThrow();
@@ -199,7 +199,7 @@ describe('cluster is inert with CEZ_CLUSTER unset (spec verification 12)', () =>
     it('is reached and gated by the flag, not merely unimplemented', async () => {
       process.env.CEZ_CLUSTER = '1';
       const warn = vi.fn();
-      const stop = startClusterRuntime({ version: '0.0.0-test', warn, server: fakeUpgradeServer() });
+      const stop = startClusterRuntime({ version: '0.0.0-test', warn, server: fakeUpgradeServer(), resolveDispatchManager: async () => undefined });
       await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
       expect(warn.mock.calls[0]?.[0]).toContain('CEZ_CLUSTER=1');
       expect(warn.mock.calls[0]?.[0]).toContain('no cluster identity');

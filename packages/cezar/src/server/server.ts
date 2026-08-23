@@ -7423,7 +7423,38 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   // warns and arms nothing too — see that function's own doc for why that is the honest state
   // rather than an error, and for why the hub/spoke branch is decided from the identity on disk
   // rather than from the environment directly.
-  startClusterRuntime({ version: deps.version, server });
+  //
+  // Milestone C: how the spoke branch resolves a dispatched project's `repoRoot` to the live
+  // `RunManager` that will actually run the work — required on `ClusterRuntimeDeps`
+  // (`SpokeRuntimeDeps#resolveDispatchManager`'s own doc has the full argument for why). Built
+  // on demand rather than a `todoAutostartProject`-style live map: the boot project short-circuits
+  // to `deps.manager` (the exact pattern the automation launcher above already uses for the same
+  // boot/non-boot split), and every other root resolves through `sharedContexts.context()` — the
+  // BUILDING call, not `peek()` — because a dispatch is a headless "run this now" trigger exactly
+  // like an automation firing, and a project this node's cockpit has never opened must still
+  // become dispatchable the moment the hub sends work for it, not stay silently unreachable until
+  // a person happens to open it first.
+  const resolveDispatchManager = async (repoRoot: string): Promise<RunManager | undefined> => {
+    if (repoRoot === deps.repoRoot) return deps.manager;
+    const projects = await listProjects();
+    const match = projects.find((p) => p.root === repoRoot);
+    if (!match) return undefined;
+    if (match.id === (deps.bootProjectId ?? 'default')) return deps.manager;
+    try {
+      return (await sharedContexts.context(match.id)).manager;
+    } catch {
+      return undefined;
+    }
+  };
+  // D47: the same shared `WorkspaceSemaphore` `agentAccountUsageRoutes` above already asks for
+  // in-flight counts, threaded here so the spoke's presence beat can report its OWN live load
+  // (`busy()`/`heavyActive()`) instead of the `{active: 0, heavyActive: 0}` `peers.ts#collectPresence`
+  // has always silently defaulted to absent a caller wiring the real numbers — see
+  // `SpokeRuntimeDeps#semaphore`'s own doc for why that default stopped being an honest "idle"
+  // claim the moment Milestone C let a dispatch actually place work on it. Optional for the same
+  // "legacy callers and tests that build no managers" reason `deps.semaphore` is optional
+  // everywhere else in this file (`:6857`'s own doc).
+  startClusterRuntime({ version: deps.version, server, resolveDispatchManager, semaphore: deps.semaphore });
   // The one listener that destroys an upgrade nobody owns (ws.ts#attachUpgradeFallback).
   //
   // `CLUSTER_LINK_PATH` is listed only when `CEZ_CLUSTER` is on, and that asymmetry is deliberate.

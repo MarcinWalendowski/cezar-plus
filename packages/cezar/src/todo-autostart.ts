@@ -1,7 +1,17 @@
-import type { ClusterNodeId } from '@loki-labs/better-cezar-contract';
-import { isTombstoned, markStarted, onTodosChanged, readTodos, todoTaskText, type TodoItem } from './todos.ts';
+import type { ClusterNodeId, WorkflowDef } from '@loki-labs/better-cezar-contract';
+import {
+  isTombstoned,
+  markStarted,
+  onTodosChanged,
+  readTodos,
+  todoTaskText,
+  type TodoItem,
+  type TodoStartOptions,
+} from './todos.ts';
 import { resolveTodoWorkflow, type RunManager } from './workflows/run.ts';
+import type { RunRecord } from './runs/store.ts';
 import { inheritAuthor } from './runs/task-author.ts';
+import type { TaskAuthorVia } from '@loki-labs/better-cezar-contract';
 import { mayStartWithoutHub } from './cluster/dispatch.ts';
 
 /**
@@ -255,17 +265,73 @@ function reportRefusal(project: TodoAutostartProject, todo: TodoItem, reason: st
   console.warn(`[cez] todo autostart refused for "${todo.summary}" (${todo.id}): ${reason}`);
 }
 
+/** The subset of a project context {@link startTodoRun} needs — matches (a slice of)
+ *  `TodoAutostartProject`, duck-typed so a caller outside this module (Milestone C's dispatch
+ *  executor, `cluster/spoke-runtime.ts`) does not have to build the autostart-specific fields
+ *  (`cluster`, `onRefused`) just to start one run. */
+export interface StartTodoRunProject {
+  repoRoot: string;
+  dataDir: string;
+  manager: RunManager;
+}
+
+export interface StartTodoRunResult {
+  run: RunRecord;
+  /** `false` means the run above EXISTS and is not stamped into the todo record — see
+   *  `markStarted`'s own doc for why that is never retried inside this function. Every caller
+   *  owns what happens next: `startAutostartTodo` remembers the run id and retries the stamp on
+   *  the next reconcile pass (D43); a one-shot caller with no such pass has to decide its own
+   *  fallback and say so, out loud, rather than silently drop a run nothing will ever point at. */
+  stamped: boolean;
+}
+
 /**
- * Turn ONE todo into a run: resolve its workflow the same way `POST /todos/:id/start` does
- * (`resolveTodoWorkflow`), build the exact task text "▶ Run" would (`todoTaskText` — autostart
+ * Turn ONE todo into a run: build the exact task text "▶ Run" would (`todoTaskText` — autostart
  * never carries the route's optional extra `prompt`), start it through THIS project's own
- * manager, then stamp `startedTaskId` and clear `autostart` (`markStarted`).
+ * manager with the author INHERITED from the todo (never re-derived — spec
+ * `2026-08-21-task-author-provenance`; `via` names the door this particular call came through,
+ * `at` stays the moment the todo's own author acted), then stamp `startedTaskId` and clear
+ * `autostart` (`markStarted`).
+ *
+ * **Extracted 2026-08-23 (Milestone C, C-a) so a dispatched run is `startAutostartTodo` with a
+ * remote trigger, not a third reconstruction of the same five lines** — the workflow resolution
+ * step is deliberately NOT folded in here: `startAutostartTodo` resolves it locally, before its
+ * own claim decision, to keep the claim-to-start window as small as possible (see that function's
+ * own comment); a dispatch's workflow instead travels ON THE FRAME, by value, and is resolved by
+ * `cluster/spoke-runtime.ts` before it ever reaches this function. Both callers therefore hand in
+ * an already-resolved `WorkflowDef` rather than this function resolving one itself.
+ *
+ * Does **not** ask permission — `mayAutostartTodo` / `offerDispatch` are the callers' job, decided
+ * exactly once, before this runs. This function only translates and starts.
  *
  * No provider-availability / `agentModelsLocked` pre-check here, unlike the HTTP route: those
- * exist to show an interactive caller a reason before refusing to spawn anything, and autostart
- * has no caller to show one to — a provider that genuinely can't run fails loudly INSIDE the
- * spawned run instead, the same precedent `RunManager.recover()` already sets for a revived run
- * (never re-gated on providers either).
+ * exist to show an interactive caller a reason before refusing to spawn anything, and neither
+ * caller of this function has one to show it to — a provider that genuinely can't run fails loudly
+ * INSIDE the spawned run instead, the same precedent `RunManager.recover()` already sets for a
+ * revived run (never re-gated on providers either).
+ */
+export async function startTodoRun(
+  project: StartTodoRunProject,
+  todo: TodoItem,
+  workflow: WorkflowDef,
+  via: TaskAuthorVia,
+  startOptions?: TodoStartOptions,
+): Promise<StartTodoRunResult> {
+  const run = project.manager.startRun(workflow, {
+    task: todoTaskText(todo),
+    author: inheritAuthor(todo.author, via),
+  });
+  // TODO(analytics): emit `todo.autostarted`/`todo.dispatched` (project, queuedBehindLease) here
+  // once an event sink exists — see `todo-cli.ts`'s matching TODO for `todo.filed`. No such
+  // mechanism exists in this codebase today (grepped for analytics/telemetry/trackEvent — none),
+  // so this is left as a TODO rather than inventing one.
+  const stamped = await markStarted(project.dataDir, todo.id, run.id, startOptions);
+  return { run, stamped };
+}
+
+/**
+ * Turn ONE todo into a run: resolve its workflow the same way `POST /todos/:id/start` does
+ * (`resolveTodoWorkflow`), then hand off to {@link startTodoRun}.
  */
 async function startAutostartTodo(project: TodoAutostartProject, todo: TodoItem): Promise<void> {
   // **D43, before anything else.** A run for this todo already exists and only its stamp is
@@ -310,19 +376,7 @@ async function startAutostartTodo(project: TodoAutostartProject, todo: TodoItem)
     return;
   }
 
-  const run = project.manager.startRun(workflow, {
-    task: todoTaskText(todo),
-    // INHERITED, not re-derived (spec 2026-08-21-task-author-provenance): no human acted here, so
-    // the agent that filed the todo is the author of the run it caused. `via` becomes this door;
-    // `at` stays the moment that agent acted. A legacy todo with no author degrades to `system`,
-    // which is the honest answer rather than a guess.
-    author: inheritAuthor(todo.author, 'todo-autostart'),
-  });
-  // TODO(analytics): emit `todo.autostarted` (project, queuedBehindLease) here once an event sink
-  // exists — see `todo-cli.ts`'s matching TODO for `todo.filed`. No such mechanism exists in this
-  // codebase today (grepped for analytics/telemetry/trackEvent — none), so this is left as a TODO
-  // rather than inventing one.
-  const stamped = await markStarted(project.dataDir, todo.id, run.id);
+  const { run, stamped } = await startTodoRun(project, todo, workflow, 'todo-autostart');
   if (!stamped) {
     // **D43.** The run EXISTS and the record does not know it. Remember that, or the next pass
     // reads a row that still says `autostart: true` with no `startedTaskId` and starts a second

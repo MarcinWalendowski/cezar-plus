@@ -85,7 +85,7 @@ describe('B2a — the op-history prune timer', () => {
     await seedStoreFresh.record('fresh-op', { opId: 'fresh-op', hubSeq: 2, accepted: true });
 
     const warn = vi.fn();
-    const stop = startClusterRuntime({ version: '0.0.0-test', warn, server: fakeUpgradeServer() });
+    const stop = startClusterRuntime({ version: '0.0.0-test', warn, server: fakeUpgradeServer(), resolveDispatchManager: async () => undefined });
     disposers.push(stop);
 
     const readStore = createOpHistoryStore({ env: process.env });
@@ -116,7 +116,7 @@ describe('B2a — the op-history prune timer', () => {
     writeFileSync(opHistoryPath(process.env), 'not valid json {{{', 'utf8');
 
     const warn = vi.fn();
-    const stop = startClusterRuntime({ version: '0.0.0-test', warn, server: fakeUpgradeServer() });
+    const stop = startClusterRuntime({ version: '0.0.0-test', warn, server: fakeUpgradeServer(), resolveDispatchManager: async () => undefined });
     disposers.push(stop);
 
     // The rejection was caught (not an unhandled rejection that would have brought vitest itself

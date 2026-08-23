@@ -1601,6 +1601,41 @@ export class RunManager {
   }
 
   /**
+   * A pure READ of the same two ceilings `pump()` enforces before it dequeues anything — whether a
+   * NEW run may start on this project right now, under BOTH the workspace `maxParallel` and this
+   * project's own per-project cap, plus the non-git in-place degradation rule. Built for Milestone C
+   * (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, C-e): a dispatched run's `capacityAvailable`
+   * has to come from THIS manager — the one that will actually run the work — never from the
+   * `presence` heartbeat's `capacity` claim, which is stamped at `heartbeatMs` cadence and would be
+   * stale by exactly the window that matters.
+   *
+   * **Advances nothing and holds no lock** — unlike the `resolvePoolFor*` family in
+   * `workspace/agent-route-select.ts`: `resolvePoolForDispatch` (`:208`), whose own docblock warns
+   * it "cannot be called speculatively" because it burns a turn of the fairness cursor as a side
+   * effect, and its sibling `resolvePoolForProvider` (`:246`), which advances the identical cursor
+   * through `recordDispatch` (`:273`). Both pick a login/provider by consuming a turn; this is the
+   * account-agnostic structural question one level up ("is there a slot at all"), asked the same
+   * way `pump()` asks it, and it is safe to call speculatively for exactly that reason: the answer
+   * is a snapshot, not a reservation, so a genuine race between this read and the run actually
+   * starting is possible and is left to `pump()`'s own gate — the same race `pump()` already lives
+   * with across its own multiple `await`s.
+   *
+   * Deliberately omits the account-hold check `pump()` also applies (`accountHolds()` / usage-limit
+   * gating): that gate is about which *specific* queued run may take a free slot, not whether a
+   * slot exists, and a dispatched run's account is not chosen until it actually starts.
+   */
+  async hasCapacity(): Promise<boolean> {
+    const repo = await getRepoInfo(this.repoRoot);
+    const maxParallel = this.semaphore.maxParallel();
+    const projectMax = this.semaphore.projectMaxParallel(this.repoRoot);
+    return (
+      this.semaphore.busy() < maxParallel &&
+      this.busySlots() < projectMax &&
+      (repo !== null || this.nonWorkspaceInPlaceBusy() < 1)
+    );
+  }
+
+  /**
    * Start queued runs while parallel slots are free. A run starts only under
    * BOTH ceilings: the WORKSPACE `resources.maxParallel` (default 2, counted
    * across every manager — spec 2026-07-20, step 2.5) AND this project's own

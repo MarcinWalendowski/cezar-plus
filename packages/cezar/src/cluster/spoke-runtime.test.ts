@@ -21,6 +21,9 @@ import {
 } from '@loki-labs/better-cezar-contract';
 import type { ApplyHubReplicaInput, TodoItem } from '../todos.ts';
 import { applyHubReplica as applyHubReplicaFile, readTodos as readTodosFile } from '../todos.ts';
+import { RunStore } from '../runs/store.ts';
+import type { RunManager, StartRunInput } from '../workflows/run.ts';
+import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import type { ReplicaApplyResult } from './replica.ts';
 import { startSpokeRuntime, type OutboxDiscovery, type SpokeLink, type SpokeOutboxProject } from './spoke-runtime.ts';
 
@@ -100,14 +103,21 @@ function makeDispatch(overrides: Partial<ClusterDispatchFrame> = {}): ClusterDis
  *  tests would silently start reading THIS machine's real `~/.cezar` on every `opFlushMs` tick —
  *  harmless (read-only, degrades to "no identity" when absent) but nondeterministic and a real trap
  *  on a machine that happens to have joined a cluster for other reasons this session. */
-const NOOP_OUTBOX = async (): Promise<OutboxDiscovery> => ({ nodeId: undefined, projects: [] });
+const NOOP_OUTBOX = async (): Promise<OutboxDiscovery> => ({ nodeId: undefined, projects: [], acceptsDispatch: false });
+
+/** Milestone C's required `SpokeRuntimeDeps#resolveDispatchManager` — the blanket default for
+ *  every test in this file that is not itself about dispatch acceptance/execution. Always
+ *  `undefined`: a test that needs a real manager (the "downlink dispatch" describe block) passes
+ *  its own override, which — because every `startSpokeRuntime({ resolveDispatchManager:
+ *  NOOP_RESOLVE_MANAGER, ...rest })` call spreads `rest` AFTER this default — always wins. */
+const NOOP_RESOLVE_MANAGER = async (): Promise<undefined> => undefined;
 
 function makeProject(overrides: Partial<SpokeOutboxProject> = {}): SpokeOutboxProject {
-  return { projectKey: 'proj_a', dataDir: '/fake/proj_a/.ai/cezar', ...overrides };
+  return { projectKey: 'proj_a', dataDir: '/fake/proj_a/.ai/cezar', repoRoot: '/fake/proj_a', ...overrides };
 }
 
 function makeDiscovery(overrides: Partial<OutboxDiscovery> = {}): OutboxDiscovery {
-  return { nodeId: 'node_a', projects: [makeProject()], ...overrides };
+  return { nodeId: 'node_a', projects: [makeProject()], acceptsDispatch: true, ...overrides };
 }
 
 function makeTodo(overrides: Partial<TodoItem> = {}): TodoItem {
@@ -117,6 +127,35 @@ function makeTodo(overrides: Partial<TodoItem> = {}): TodoItem {
 function opsFramesOf(sent: readonly ClusterUplinkFrame[]): ClusterOpsFrame[] {
   return sent.filter((f): f is ClusterOpsFrame => f.type === 'ops');
 }
+
+/** Milestone C's dispatch-execution tests run under REAL timers (real fs I/O, a real `O_EXCL`
+ *  todos lease — same reason the "integration — the real todos.ts store API" block below does),
+ *  so `handleDispatch`'s async chain (presence → outbox → manager → offerDispatch → startTodoRun
+ *  → markStarted's disk write) cannot be driven by `vi.advanceTimersByTimeAsync`. Polls instead,
+ *  matching `todo-autostart.test.ts`'s own helper of the same name. */
+async function waitFor(assertion: () => void, timeoutMs = 4000, intervalMs = 25): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      assertion();
+      return;
+    } catch (err) {
+      if (Date.now() >= deadline) throw err;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  }
+}
+
+/** A minimal `WorkflowDef` that clears `workflowDefSchema` — mirrors `dispatch.test.ts`'s own
+ *  E5a fixture. Dispatch tests need a REAL parseable def: `resolveDispatchWorkflow` in
+ *  `spoke-runtime.ts` refuses `{ builtinId }` outright (no builtin catalog exists yet — see this
+ *  file's other tests and the module's own comment), so `makeDispatch`'s default
+ *  `{ builtinId: 'implement' }` cannot reach a start at all. */
+const VALID_WORKFLOW_DEF = {
+  name: 'dispatch-test-workflow',
+  steps: [{ id: 'step-1', prompt: 'do the thing' }],
+  source: 'file' as const,
+};
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -130,7 +169,7 @@ describe('startSpokeRuntime — presence heartbeat', () => {
   it('sends a presence frame immediately on start, without waiting a full interval', async () => {
     const { link, sent } = createFakeLink();
     const collectPresence = vi.fn(async () => makePresence());
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       collectPresence,
@@ -148,7 +187,7 @@ describe('startSpokeRuntime — presence heartbeat', () => {
   it('beats every heartbeatMs', async () => {
     const { link, sent } = createFakeLink();
     const collectPresence = vi.fn(async () => makePresence());
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 1_000,
       collectPresence,
@@ -168,7 +207,7 @@ describe('startSpokeRuntime — presence heartbeat', () => {
   it('negative control: dispose() actually stops the heartbeat, not just "does not throw"', async () => {
     const { link, sent } = createFakeLink();
     const collectPresence = vi.fn(async () => makePresence());
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 1_000,
       collectPresence,
@@ -190,7 +229,7 @@ describe('startSpokeRuntime — presence heartbeat', () => {
   it('dispose() is idempotent', async () => {
     const { link } = createFakeLink();
     const collectPresence = vi.fn(async () => makePresence());
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 1_000,
       collectPresence,
@@ -209,7 +248,7 @@ describe('startSpokeRuntime — presence heartbeat', () => {
     let counter = 0;
     const collectPresence = vi.fn(async () => makePresence({ active: counter++ }));
     setOnline(false);
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 1_000,
       collectPresence,
@@ -239,7 +278,7 @@ describe('startSpokeRuntime — presence heartbeat', () => {
     const collectPresence = vi.fn(async () => makePresence());
     const warn = vi.fn();
     setOnline(false);
-    const dispose = startSpokeRuntime({ link, heartbeatMs: 1_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER, link, heartbeatMs: 1_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
 
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(1_000);
@@ -268,7 +307,7 @@ describe('startSpokeRuntime — presence heartbeat', () => {
       return makePresence();
     });
     const warn = vi.fn();
-    const dispose = startSpokeRuntime({ link, heartbeatMs: 1_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER, link, heartbeatMs: 1_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
 
     await vi.advanceTimersByTimeAsync(0); // fails
     expect(sent).toHaveLength(0);
@@ -285,7 +324,7 @@ describe('startSpokeRuntime — presence heartbeat', () => {
     const collectPresence = vi.fn(async () => makePresence());
     const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
 
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 3_600_000,
       opFlushMs: 3_600_000,
@@ -310,7 +349,7 @@ describe('startSpokeRuntime — downlink dispatch', () => {
     const { link, sent, emit } = createFakeLink();
     const drift = makeDrift();
     const collectPresence = vi.fn(async () => makePresence({ repoDrift: [drift] }));
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       collectPresence,
@@ -326,7 +365,15 @@ describe('startSpokeRuntime — downlink dispatch', () => {
     expect(sent).toHaveLength(1);
     const frame = sent[0] as ClusterFreshnessFrame;
     expect(frame.type).toBe('freshness');
-    expect(frame.refused).toEqual({ dispatchId: 'd42', reason: 'dispatch-not-accepted' });
+    // `detail` is populated by `dispatch.ts#dispatchRefusalDetail` on every refusal (added since
+    // this test was first written) — a sparse expectation here would still pass with the field
+    // silently dropped, so every field the frame actually carries is seeded, not just the ones
+    // this test happens to care about (see this file's own sparse-fixture-trap warnings).
+    expect(frame.refused).toEqual({
+      dispatchId: 'd42',
+      reason: 'dispatch-not-accepted',
+      detail: 'this node has not enabled acceptsDispatch',
+    });
     expect(frame.projectKey).toBe(drift.projectKey);
     expect(frame.headSha).toBe(drift.headSha);
     expect(frame.ahead).toBe(drift.ahead);
@@ -340,7 +387,7 @@ describe('startSpokeRuntime — downlink dispatch', () => {
     const { link, sent, emit } = createFakeLink();
     const collectPresence = vi.fn(async () => makePresence({ repoDrift: [] })); // no drift for any project
     const warn = vi.fn();
-    const dispose = startSpokeRuntime({ link, heartbeatMs: 60_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER, link, heartbeatMs: 60_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
     await vi.advanceTimersByTimeAsync(0);
     sent.length = 0;
 
@@ -353,12 +400,393 @@ describe('startSpokeRuntime — downlink dispatch', () => {
   });
 });
 
+/**
+ * Milestone C step 4 / C-b / C-e — "accept means run": `handleDispatch` no longer hard-codes
+ * `refused: { reason: 'dispatch-not-accepted' }` (`spoke-runtime.ts`'s own CORRECTED-2026-08-23
+ * module doc). These run against the REAL `todos.ts` store API and a real `RunStore` — matching
+ * `todo-autostart.test.ts`'s own capturing-stub pattern and the "integration — the real todos.ts
+ * store API" block below — because the thing under test IS the seam between `offerDispatch`'s
+ * decision and `RunManager.startRun` actually being called; a fake `readTodos`/`markStarted`
+ * would hide exactly the "answers accepted and then does nothing" defect this milestone exists
+ * to close.
+ */
+describe('startSpokeRuntime — downlink dispatch (Milestone C: accept means run)', () => {
+  let repoRoot: string;
+  let dataDir: string;
+  let store: RunStore;
+  let started: StartRunInput[];
+  let createdRunIds: string[];
+  let manager: RunManager;
+
+  beforeEach(async () => {
+    repoRoot = await mkdtemp(join(tmpdir(), 'cez-spoke-dispatch-'));
+    dataDir = join(repoRoot, '.ai/cezar');
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(join(dataDir, 'todos.json'), JSON.stringify([makeTodo()]), 'utf8');
+    store = RunStore.open(dataDir);
+    started = [];
+    createdRunIds = [];
+    manager = {
+      startRun: (_workflow: unknown, input: StartRunInput) => {
+        started.push(input);
+        const run = store.createRun({ author: input.author, title: 't', workflow: '(inbox)', task: input.task, steps: [] });
+        createdRunIds.push(run.id);
+        return run;
+      },
+      hasCapacity: async () => true,
+    } as unknown as RunManager;
+  });
+
+  afterEach(async () => {
+    await rm(repoRoot, { recursive: true, force: true });
+  });
+
+  it('(a) an accepted dispatch actually starts a run, through the resolved RunManager, authored cluster-dispatch', async () => {
+    vi.useRealTimers(); // real fs I/O under a real O_EXCL lease — see the module's own note on why
+    const { link, sent, emit } = createFakeLink();
+    const drift = makeDrift({ projectKey: 'proj_a', behind: 0, dirty: 0, merging: false });
+    const collectPresence = async () => makePresence({ repoDrift: [drift] });
+    const collectOutboxProjects = async (): Promise<OutboxDiscovery> => ({
+      nodeId: 'node_a',
+      projects: [{ projectKey: 'proj_a', dataDir, repoRoot }],
+      acceptsDispatch: true,
+    });
+    const resolveDispatchManager = async (root: string) => (root === repoRoot ? manager : undefined);
+
+    const dispose = startSpokeRuntime({
+      resolveDispatchManager,
+      link,
+      heartbeatMs: 3_600_000,
+      opFlushMs: 3_600_000,
+      collectPresence,
+      collectOutboxProjects,
+      readTodos: readTodosFile,
+      warn: () => {},
+    });
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0)); // the immediate presence beat
+    sent.length = 0;
+
+    emit(makeDispatch({ dispatchId: 'd-start', todoId: 't1', projectKey: 'proj_a', workflow: { def: VALID_WORKFLOW_DEF } }));
+
+    // What this catches: a `handleDispatch` that decides `accepted` and sends the reply but never
+    // calls `manager.startRun` at all — the exact lie C-b forbids ("tells the hub accepted and
+    // then does nothing"). `started` stays empty forever on that defect, so this times out red
+    // rather than passing on an unstarted run.
+    await waitFor(() => expect(started).toHaveLength(1));
+    expect(started[0]!.author.via).toBe('cluster-dispatch');
+    expect(started[0]!.task).toContain('do the thing');
+
+    // D48: the reply is sent AFTER `startRun` returns and carries the run id it produced — the
+    // only field on the wire that lets the hub learn which run this dispatch became. What this
+    // catches: a `handleDispatch` that still forwards `offerDispatch`'s bare pre-start reply
+    // (no `accepted` block at all, or one sent before `startRun` was even called).
+    await waitFor(() => expect(sent).toHaveLength(1));
+    const frame = sent[0] as ClusterFreshnessFrame;
+    expect(frame.accepted).toEqual({ dispatchId: 'd-start', runId: createdRunIds[0] });
+    dispose();
+  });
+
+  it('(b) a refused dispatch starts nothing', async () => {
+    vi.useRealTimers();
+    const { link, sent, emit } = createFakeLink();
+    const drift = makeDrift({ projectKey: 'proj_a', behind: 0, dirty: 0, merging: false });
+    const collectPresence = async () => makePresence({ repoDrift: [drift] });
+    const collectOutboxProjects = async (): Promise<OutboxDiscovery> => ({
+      nodeId: 'node_a',
+      projects: [{ projectKey: 'proj_a', dataDir, repoRoot }],
+      acceptsDispatch: false, // D11 — refused before anything else is read
+    });
+    const resolveDispatchManager = async (root: string) => (root === repoRoot ? manager : undefined);
+
+    const dispose = startSpokeRuntime({
+      resolveDispatchManager,
+      link,
+      heartbeatMs: 3_600_000,
+      opFlushMs: 3_600_000,
+      collectPresence,
+      collectOutboxProjects,
+      readTodos: readTodosFile,
+      warn: () => {},
+    });
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    sent.length = 0;
+
+    emit(makeDispatch({ dispatchId: 'd-refuse', todoId: 't1', projectKey: 'proj_a', workflow: { def: VALID_WORKFLOW_DEF } }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+
+    // What this catches: the inverse of (a) — a `handleDispatch` that starts the run before, or
+    // regardless of, `offerDispatch`'s verdict. Waited past the reply before asserting, so a run
+    // started asynchronously just after the reply went out is not missed by asserting too early.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(started).toHaveLength(0);
+    dispose();
+  });
+
+  it('(c) the reply frame carries the full refusal on refuse, and carries no `refused` key at all on accept', async () => {
+    vi.useRealTimers();
+    const { link, sent, emit } = createFakeLink();
+    const drift = makeDrift({ projectKey: 'proj_a', behind: 0, dirty: 0, merging: false });
+    const collectPresence = async () => makePresence({ repoDrift: [drift] });
+    let acceptsDispatch = false;
+    const collectOutboxProjects = async (): Promise<OutboxDiscovery> => ({
+      nodeId: 'node_a',
+      projects: [{ projectKey: 'proj_a', dataDir, repoRoot }],
+      acceptsDispatch,
+    });
+    const resolveDispatchManager = async (root: string) => (root === repoRoot ? manager : undefined);
+
+    const dispose = startSpokeRuntime({
+      resolveDispatchManager,
+      link,
+      heartbeatMs: 3_600_000,
+      opFlushMs: 3_600_000,
+      collectPresence,
+      collectOutboxProjects,
+      readTodos: readTodosFile,
+      warn: () => {},
+    });
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    sent.length = 0;
+
+    emit(makeDispatch({ dispatchId: 'd-shape-refuse', todoId: 't1', projectKey: 'proj_a', workflow: { def: VALID_WORKFLOW_DEF } }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    const refuseFrame = sent[0] as ClusterFreshnessFrame;
+    // Every field the frame actually carries, seeded — not a subset. This file's own
+    // sparse-fixture-trap: an "exhaustive" `toEqual` over a fixture that leaves optional fields
+    // absent pins nothing about the fields it never set.
+    expect(refuseFrame).toEqual({
+      type: 'freshness',
+      protocol: CLUSTER_PROTOCOL,
+      projectKey: 'proj_a',
+      headSha: drift.headSha,
+      ahead: drift.ahead,
+      behind: drift.behind,
+      dirty: drift.dirty,
+      merging: drift.merging,
+      refused: {
+        dispatchId: 'd-shape-refuse',
+        reason: 'dispatch-not-accepted',
+        detail: 'this node has not enabled acceptsDispatch',
+      },
+    });
+
+    sent.length = 0;
+    acceptsDispatch = true;
+    emit(makeDispatch({ dispatchId: 'd-shape-accept', todoId: 't1', projectKey: 'proj_a', workflow: { def: VALID_WORKFLOW_DEF } }));
+    await waitFor(() => expect(started).toHaveLength(1));
+    expect(sent).toHaveLength(1);
+    const acceptFrame = sent[0] as ClusterFreshnessFrame;
+    // What this catches: `outcome.reply` on the accept branch is a plain `ClusterFreshnessFrame`
+    // with no `refused` field at all (`offerDispatch`'s own accepted-branch doc comment). A caller
+    // that spreads a stale `refused` onto the accept reply, or builds it by mutating the refuse
+    // frame's shape, would leave the key present (even as `undefined`) instead of truly absent —
+    // `toEqual` alone would not catch an explicit `refused: undefined`, so `in` is checked first.
+    // `accepted` is asserted with a real (not fabricated) id — `createdRunIds` is filled by the
+    // SAME fake `startRun` that `started` is, so this is the id the actual run got, not a guess.
+    expect('refused' in acceptFrame).toBe(false);
+    expect(acceptFrame).toEqual({
+      type: 'freshness',
+      protocol: CLUSTER_PROTOCOL,
+      projectKey: 'proj_a',
+      headSha: drift.headSha,
+      ahead: drift.ahead,
+      behind: drift.behind,
+      dirty: drift.dirty,
+      merging: drift.merging,
+      accepted: { dispatchId: 'd-shape-accept', runId: createdRunIds[0] },
+    });
+    dispose();
+  });
+
+  it('(d) D11: acceptsDispatch:false refuses even with override:true and a dirty/behind/merging checkout', async () => {
+    vi.useRealTimers();
+    const { link, sent, emit } = createFakeLink();
+    // Freshness is about as bad as it gets — if `dispatchRefusalReason` checked freshness before
+    // (or instead of) `acceptsDispatch`, or if `override` forgave this node's OWN opt-in the way
+    // it forgives a stale checkout, this would come back `merging`/`behind`/`dirty`, or accepted.
+    const drift = makeDrift({ projectKey: 'proj_a', behind: 5, dirty: 3, merging: true });
+    const collectPresence = async () => makePresence({ repoDrift: [drift] });
+    const collectOutboxProjects = async (): Promise<OutboxDiscovery> => ({
+      nodeId: 'node_a',
+      projects: [{ projectKey: 'proj_a', dataDir, repoRoot }],
+      acceptsDispatch: false,
+    });
+    const resolveDispatchManager = async (root: string) => (root === repoRoot ? manager : undefined);
+
+    const dispose = startSpokeRuntime({
+      resolveDispatchManager,
+      link,
+      heartbeatMs: 3_600_000,
+      opFlushMs: 3_600_000,
+      collectPresence,
+      collectOutboxProjects,
+      readTodos: readTodosFile,
+      warn: () => {},
+    });
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    sent.length = 0;
+
+    emit(
+      makeDispatch({
+        dispatchId: 'd-d11',
+        todoId: 't1',
+        projectKey: 'proj_a',
+        workflow: { def: VALID_WORKFLOW_DEF },
+        override: true,
+      }),
+    );
+    await waitFor(() => expect(sent).toHaveLength(1));
+
+    const frame = sent[0] as ClusterFreshnessFrame;
+    // What this catches: D11 regressing to "the hub's send, or a human's override, wins" — the
+    // one bug this milestone's spoke-enforces-its-own-policy design exists to prevent
+    // (`dispatch.ts`'s own top docblock, quoting `forwarded-principal.ts`'s reasoning). A wrong
+    // precedence order in `dispatchRefusalReason` would name `merging`/`behind`/`dirty` here
+    // instead of `dispatch-not-accepted`, since `override` only ever forgives freshness.
+    expect(frame.refused?.reason).toBe('dispatch-not-accepted');
+    await new Promise((r) => setTimeout(r, 150));
+    expect(started).toHaveLength(0);
+    dispose();
+  });
+
+  it('(e) D48: when RunManager.startRun throws after every pre-start check passed, the single reply is refused start-failed', async () => {
+    vi.useRealTimers();
+    const { link, sent, emit } = createFakeLink();
+    const drift = makeDrift({ projectKey: 'proj_a', behind: 0, dirty: 0, merging: false });
+    const collectPresence = async () => makePresence({ repoDrift: [drift] });
+    const collectOutboxProjects = async (): Promise<OutboxDiscovery> => ({
+      nodeId: 'node_a',
+      projects: [{ projectKey: 'proj_a', dataDir, repoRoot }],
+      acceptsDispatch: true,
+    });
+    // A manager that passes `hasCapacity` (so `offerDispatch` genuinely accepts) but whose
+    // `startRun` throws — the one case none of `dispatchRefusalReason`'s eight pre-start reasons
+    // can honestly name, since every one of them already passed.
+    const throwingManager = {
+      startRun: () => {
+        throw new Error('mock backend unavailable');
+      },
+      hasCapacity: async () => true,
+    } as unknown as RunManager;
+    const resolveDispatchManager = async (root: string) => (root === repoRoot ? throwingManager : undefined);
+
+    const dispose = startSpokeRuntime({
+      resolveDispatchManager,
+      link,
+      heartbeatMs: 3_600_000,
+      opFlushMs: 3_600_000,
+      collectPresence,
+      collectOutboxProjects,
+      readTodos: readTodosFile,
+      warn: () => {},
+    });
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    sent.length = 0;
+
+    emit(makeDispatch({ dispatchId: 'd-start-failed', todoId: 't1', projectKey: 'proj_a', workflow: { def: VALID_WORKFLOW_DEF } }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+
+    // What this catches: a throw from `startRun` falling into a catch-all warn that leaves the
+    // hub with no reply at all (waiting forever on a dispatch that will never be answered), or
+    // misreporting the reason as `at-capacity` (the D48 "lie about why" the brief calls out) —
+    // and, since exactly one frame was sent, that the accept path does NOT send a first frame
+    // before the attempt and a second one after (the two-frame shape this milestone replaced).
+    expect(sent).toHaveLength(1);
+    const frame = sent[0] as ClusterFreshnessFrame;
+    expect(frame.refused).toEqual({
+      dispatchId: 'd-start-failed',
+      reason: 'start-failed',
+      detail: 'mock backend unavailable',
+    });
+    expect('accepted' in frame).toBe(false);
+    dispose();
+  });
+});
+
+/**
+ * D47: `peers.ts#collectPresence` has always silently defaulted an unwired `liveCapacity` to
+ * `{active: 0, heavyActive: 0}` — an honest "idle" claim right up until Milestone C let a
+ * dispatch actually place work on a node reporting it. These drive the REAL, un-overridden
+ * `collectPresence` default (`deps.collectPresence` is deliberately NOT set) so the assertion is
+ * against the actual wiring in `spoke-runtime.ts`, not a re-implementation of it — `env: {
+ * CEZ_HOME }` pins `loadNodeIdentity`/`loadWorkspaceConfig` to an empty temp dir the same way
+ * `kb-submit-signing.test.ts` and `cluster-reconcile-cli-wiring.test.ts` already do, so the real
+ * disk reads degrade to "not enrolled" / default config rather than touching this machine's own
+ * `~/.cezar`.
+ */
+describe('startSpokeRuntime — D47 live capacity in the presence beat', () => {
+  let cezHome: string;
+
+  beforeEach(async () => {
+    cezHome = await mkdtemp(join(tmpdir(), 'cez-home-'));
+  });
+
+  afterEach(async () => {
+    await rm(cezHome, { recursive: true, force: true });
+  });
+
+  it('reports this node\'s real busy() through liveCapacity when a semaphore is wired', async () => {
+    vi.useRealTimers();
+    const { link, sent } = createFakeLink();
+    const semaphore = new WorkspaceSemaphore();
+    // A bare `SemaphoreParticipant` stub — `busySlots()` is the only number this test cares
+    // about; `pump`/`oldestQueuedAt` are required by the interface but never invoked by `busy()`.
+    semaphore.register({ busySlots: () => 2, pump: () => {}, oldestQueuedAt: () => null });
+
+    const dispose = startSpokeRuntime({
+      link,
+      env: { CEZ_HOME: cezHome },
+      heartbeatMs: 3_600_000,
+      opFlushMs: 3_600_000,
+      collectOutboxProjects: NOOP_OUTBOX,
+      resolveDispatchManager: NOOP_RESOLVE_MANAGER,
+      semaphore,
+      warn: () => {},
+    });
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+
+    // What this catches: `deps.semaphore` never reaching `collectClusterPresence`'s
+    // `liveCapacity` option — the frame would report `active: 0` regardless of the real
+    // `busy()` count, which is the exact stale-forever claim D47 exists to close.
+    const frame = sent[0] as ClusterPresenceFrame;
+    expect(frame.type).toBe('presence');
+    expect(frame.capacity.active).toBe(2);
+    expect(frame.capacity.heavyActive).toBe(0);
+    dispose();
+  });
+
+  it('omits liveCapacity — today\'s already-shipped default — when no semaphore is wired', async () => {
+    vi.useRealTimers();
+    const { link, sent } = createFakeLink();
+
+    const dispose = startSpokeRuntime({
+      link,
+      env: { CEZ_HOME: cezHome },
+      heartbeatMs: 3_600_000,
+      opFlushMs: 3_600_000,
+      collectOutboxProjects: NOOP_OUTBOX,
+      resolveDispatchManager: NOOP_RESOLVE_MANAGER,
+      warn: () => {},
+    });
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+
+    // What this catches: an absent semaphore causing a THROW or a fabricated non-zero claim,
+    // instead of falling through to `peers.ts`'s own pre-existing `{active: 0, heavyActive: 0}`
+    // default — the "omission is the honest choice" argument from `SpokeRuntimeDeps#semaphore`'s
+    // own doc, proven rather than asserted.
+    const frame = sent[0] as ClusterPresenceFrame;
+    expect(frame.capacity.active).toBe(0);
+    expect(frame.capacity.heavyActive).toBe(0);
+    dispose();
+  });
+});
+
 describe('startSpokeRuntime — downlink relay / handshake frames', () => {
   it('warns on a relay request — relaying is not built yet', async () => {
     const { link, emit } = createFakeLink();
     const collectPresence = vi.fn(async () => makePresence());
     const warn = vi.fn();
-    const dispose = startSpokeRuntime({ link, heartbeatMs: 60_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER, link, heartbeatMs: 60_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
     await vi.advanceTimersByTimeAsync(0);
 
     const relay: ClusterRelayRequestFrame = {
@@ -377,7 +805,7 @@ describe('startSpokeRuntime — downlink relay / handshake frames', () => {
     const { link, emit } = createFakeLink();
     const collectPresence = vi.fn(async () => makePresence());
     const warn = vi.fn();
-    const dispose = startSpokeRuntime({ link, heartbeatMs: 60_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER, link, heartbeatMs: 60_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
     await vi.advanceTimersByTimeAsync(0);
     warn.mockClear();
 
@@ -392,7 +820,7 @@ describe('startSpokeRuntime — downlink relay / handshake frames', () => {
     const { link, emit } = createFakeLink();
     const collectPresence = vi.fn(async () => makePresence());
     const warn = vi.fn();
-    const dispose = startSpokeRuntime({ link, heartbeatMs: 60_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER, link, heartbeatMs: 60_000, collectPresence, collectOutboxProjects: NOOP_OUTBOX, warn });
     await vi.advanceTimersByTimeAsync(0);
     warn.mockClear();
 
@@ -405,7 +833,7 @@ describe('startSpokeRuntime — downlink relay / handshake frames', () => {
   it('detaches the frame listener on dispose', async () => {
     const { link, listeners } = createFakeLink();
     const collectPresence = vi.fn(async () => makePresence());
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       collectPresence,
@@ -426,7 +854,7 @@ describe('startSpokeRuntime — outbox flush', () => {
     const collectPresence = vi.fn(async () => makePresence());
     const collectOutboxProjects = vi.fn(async () => makeDiscovery());
     const readTodos = vi.fn(async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z', pendingFields: ['summary'] })]);
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -453,7 +881,7 @@ describe('startSpokeRuntime — outbox flush', () => {
     const collectPresence = vi.fn(async () => makePresence());
     const collectOutboxProjects = vi.fn(async () => makeDiscovery());
     const readTodos = vi.fn(async () => [makeTodo()]); // no pendingSince
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -474,7 +902,7 @@ describe('startSpokeRuntime — outbox flush', () => {
     const { link, sent } = createFakeLink();
     const collectPresence = vi.fn(async () => makePresence());
     const readTodos = vi.fn(async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z' })]);
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -498,7 +926,7 @@ describe('startSpokeRuntime — outbox flush', () => {
     const readTodos = vi.fn(async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z' })]);
     const warn = vi.fn();
     setOnline(false);
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -539,7 +967,7 @@ describe('startSpokeRuntime — outbox flush', () => {
           resolveRead = resolve;
         }),
     );
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -570,7 +998,7 @@ describe('startSpokeRuntime — outbox flush', () => {
     const collectPresence = vi.fn(async () => makePresence());
     const collectOutboxProjects = vi.fn(async () => makeDiscovery());
     const readTodos = vi.fn(async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z' })]);
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -597,7 +1025,7 @@ describe('startSpokeRuntime — ack downlink', () => {
     const collectPresence = vi.fn(async () => makePresence());
     const collectOutboxProjects = vi.fn(async () => makeDiscovery());
     const readTodos = vi.fn(async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z', hubSeq: 5 })]);
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -624,7 +1052,7 @@ describe('startSpokeRuntime — ack downlink', () => {
     const collectPresence = vi.fn(async () => makePresence());
     const collectOutboxProjects = vi.fn(async () => makeDiscovery());
     const readTodos = vi.fn(async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z', hubSeq: 5 })]);
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -647,7 +1075,7 @@ describe('startSpokeRuntime — ack downlink', () => {
     const collectPresence = vi.fn(async () => makePresence());
     const collectOutboxProjects = vi.fn(async () => makeDiscovery());
     const readTodos = vi.fn(async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z', hubSeq: 5 })]);
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -692,7 +1120,7 @@ describe('startSpokeRuntime — replica downlink', () => {
     const readTodos = vi.fn(async () => [makeTodo()]);
     const applyResult: ReplicaApplyResult = { todos: [makeTodo({ summary: 'set by the hub' })], corrections: [], appliedThroughHubSeq: 3, skipped: 0 };
     const applyHubReplica = vi.fn(async (_dataDir: string, _input: ApplyHubReplicaInput) => applyResult);
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 60_000,
@@ -727,7 +1155,7 @@ describe('startSpokeRuntime — replica downlink', () => {
       appliedThroughHubSeq: input.appliedThroughHubSeq, // real applyReplica: no changes, watermark unmoved
       skipped: 0,
     }));
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 60_000,
@@ -760,7 +1188,7 @@ describe('startSpokeRuntime — replica downlink', () => {
     const collectOutboxProjects = vi.fn(async () => makeDiscovery());
     const applyHubReplica = vi.fn();
     const warn = vi.fn();
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 60_000,
@@ -786,7 +1214,7 @@ describe('startSpokeRuntime — replica downlink', () => {
     const collectOutboxProjects = vi.fn(async () => makeDiscovery({ projects: [] })); // nothing confirmed
     const applyHubReplica = vi.fn();
     const warn = vi.fn();
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 60_000,
@@ -826,7 +1254,8 @@ describe('startSpokeRuntime — replica downlink', () => {
       const collectPresence = async () => makePresence();
       const collectOutboxProjects = async (): Promise<OutboxDiscovery> => ({
         nodeId: 'node_a',
-        projects: [{ projectKey: 'proj_a', dataDir }],
+        projects: [{ projectKey: 'proj_a', dataDir, repoRoot: join(dataDir, '..', '..') }],
+        acceptsDispatch: true,
       });
 
       let settleApply: () => void;
@@ -839,7 +1268,7 @@ describe('startSpokeRuntime — replica downlink', () => {
         return result;
       };
 
-      const dispose = startSpokeRuntime({
+      const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
         link,
         heartbeatMs: 3_600_000,
         opFlushMs: 3_600_000, // no interfering flush tick — this test drives one replica frame only
@@ -882,7 +1311,7 @@ describe('startSpokeRuntime — outbox flush across many projects (the link-down
    *  order is insertion order and is STABLE across ticks — which is exactly what makes "who is at
    *  the front" a durable property rather than a per-tick coin flip. */
   function fiveProjects(): SpokeOutboxProject[] {
-    return KEYS.map((projectKey) => ({ projectKey, dataDir: `/fake/${projectKey}/.ai/cezar` }));
+    return KEYS.map((projectKey) => ({ projectKey, dataDir: `/fake/${projectKey}/.ai/cezar`, repoRoot: `/fake/${projectKey}` }));
   }
 
   function projectOf(dataDir: string): string {
@@ -917,7 +1346,7 @@ describe('startSpokeRuntime — outbox flush across many projects (the link-down
       return onePendingTodoPerProject()(dataDir);
     });
     const warn = vi.fn();
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -947,7 +1376,7 @@ describe('startSpokeRuntime — outbox flush across many projects (the link-down
       if (dropAtC && projectOf(dataDir) === 'proj_c') setOnline(false);
       return onePendingTodoPerProject()(dataDir);
     });
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -977,7 +1406,7 @@ describe('startSpokeRuntime — outbox flush across many projects (the link-down
 
   it('control: with the link up throughout, every project flushes on every tick, in registry order', async () => {
     const { link, sent } = createFakeLink();
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -1015,7 +1444,7 @@ describe('startSpokeRuntime — outbox flush across many projects (the link-down
     // proj_c owes one record too big for any frame — `packOpsFrame` sends an oversized single op
     // rather than stalling on it (`ops.ts`), and the link then refuses the frame, every tick.
     const readTodos = vi.fn(onePendingTodoPerProject({ proj_c: CLUSTER_FRAME_MAX_BYTES + 1_000 }));
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 3_600_000,
       opFlushMs: 1_000,
@@ -1044,7 +1473,7 @@ describe('startSpokeRuntime — outbox flush across many projects (the link-down
   it('the rotation is bounded, not a queue: a persistent blocker costs the tail a turn, never its place', async () => {
     const { link, sent } = createFrameBoundLink();
     const readTodos = vi.fn(onePendingTodoPerProject({ proj_a: CLUSTER_FRAME_MAX_BYTES + 1_000 }));
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 3_600_000,
       opFlushMs: 1_000,
@@ -1098,7 +1527,7 @@ describe('startSpokeRuntime — the ack’s refusals (D35 / D9a)', () => {
   function startWithWarnCapture(): { emit: (frame: ClusterDownlinkFrame) => void; warns: string[]; dispose: () => void } {
     const { link, emit } = createFakeLink();
     const warns: string[] = [];
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 60_000,
@@ -1248,7 +1677,7 @@ describe('startSpokeRuntime — the ack’s refusals (D35 / D9a)', () => {
     // get a result. `hub-ops.ts`: "a spoke that trusts the watermark alone would then believe the
     // failed op was also durably applied, and drop it."
     const readTodos = vi.fn(async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z', hubSeq: 6 })]);
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -1282,7 +1711,7 @@ describe('startSpokeRuntime — the ack’s refusals (D35 / D9a)', () => {
     // `pendingSince` set, no `hubSeq` on the record — exactly the state a refused op is left in,
     // since a refusal is never fanned back as a `replica` and nothing else clears `pendingSince`.
     const readTodos = vi.fn(async () => [makeTodo({ pendingSince: '2026-08-23T00:00:00.000Z' })]);
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 1_000,
@@ -1336,7 +1765,7 @@ describe('startSpokeRuntime — a replica frame that arrives before `welcome`', 
     const applyResult: ReplicaApplyResult = { todos: [makeTodo()], corrections: [], appliedThroughHubSeq: 3, skipped: 0 };
     const applyHubReplica = vi.fn(async (_dataDir: string, _input: ApplyHubReplicaInput) => applyResult);
     const seen: ClusterDownlinkFrame[] = [];
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 60_000,
@@ -1379,7 +1808,7 @@ describe('startSpokeRuntime — a replica frame that arrives before `welcome`', 
       appliedThroughHubSeq: input.appliedThroughHubSeq,
       skipped: 0,
     }));
-    const dispose = startSpokeRuntime({
+    const dispose = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 60_000,
@@ -1431,7 +1860,7 @@ describe('startSpokeRuntime — a replica frame that arrives before `welcome`', 
 describe('startSpokeRuntime — watermarks() for hello (D38)', () => {
   function startWithProject(overrides: Partial<Parameters<typeof startSpokeRuntime>[0]> = {}) {
     const { link, sent, emit } = createFakeLink();
-    const handle = startSpokeRuntime({
+    const handle = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 60_000,
@@ -1511,7 +1940,7 @@ describe('startSpokeRuntime — watermarks() for hello (D38)', () => {
 
   it('a project that has only ever FLUSHED is omitted, not advertised at zero', async () => {
     const { link, sent, emit } = createFakeLink();
-    const handle = startSpokeRuntime({
+    const handle = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 60_000,
@@ -1539,14 +1968,15 @@ describe('startSpokeRuntime — watermarks() for hello (D38)', () => {
 
   it('reports one entry per project, and only the projects that have a position', async () => {
     const { link, emit } = createFakeLink();
-    const handle = startSpokeRuntime({
+    const handle = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 60_000,
       opFlushMs: 60_000,
       collectPresence: async () => makePresence(),
       collectOutboxProjects: async () => ({
         nodeId: 'node_a' as const,
-        projects: [makeProject(), makeProject({ projectKey: 'proj_b', dataDir: '/fake/proj_b/.ai/cezar' })],
+        projects: [makeProject(), makeProject({ projectKey: 'proj_b', dataDir: '/fake/proj_b/.ai/cezar', repoRoot: '/fake/proj_b' })],
+        acceptsDispatch: true,
       }),
       readTodos: async () => [makeTodo()],
       warn: () => {},
@@ -1588,7 +2018,7 @@ describe('startSpokeRuntime — watermarks() for hello (D38)', () => {
 
   it('the handle is still callable as the plain disposer `cluster-routes.ts` treats it as', async () => {
     const { link, sent } = createFakeLink();
-    const handle = startSpokeRuntime({
+    const handle = startSpokeRuntime({ resolveDispatchManager: NOOP_RESOLVE_MANAGER,
       link,
       heartbeatMs: 1_000,
       opFlushMs: 60_000,

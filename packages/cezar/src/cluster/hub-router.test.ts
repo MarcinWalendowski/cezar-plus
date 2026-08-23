@@ -22,7 +22,7 @@ import {
   type StoredClusterNode,
   type StoredClusterNodeIdentity,
 } from '@loki-labs/better-cezar-contract';
-import { createHubFrameRouter, type HubReplicationDeps } from './hub-router.ts';
+import { createHubFrameRouter, type HubDispatchCorrelationDeps, type HubReplicationDeps } from './hub-router.ts';
 import type { ClusterFrameReplies } from './link-server.ts';
 import type { HubOpOutcome } from './hub-ops.ts';
 import type { TodoItem } from '../todos.ts';
@@ -110,12 +110,19 @@ describe('cluster/hub-router', () => {
    * `.raw` for the cases that need to withhold delivery (D28: the watermark must move only for a
    * frame that actually landed), and `.deliver` drives one raw reply with a chosen delivery verdict.
    */
-  function router(overrides: { warn?: (m: string) => void; replication?: HubReplicationDeps } = {}) {
+  function router(
+    overrides: {
+      warn?: (m: string) => void;
+      replication?: HubReplicationDeps;
+      dispatchCorrelation?: HubDispatchCorrelationDeps;
+    } = {},
+  ) {
     const raw = createHubFrameRouter({
       identity: hubIdentity(),
       env: env(),
       warn: overrides.warn,
       ...(overrides.replication ? { replication: overrides.replication } : {}),
+      ...(overrides.dispatchCorrelation ? { dispatchCorrelation: overrides.dispatchCorrelation } : {}),
     });
     const wrapped = async (nodeId: ClusterNodeId, frame: ClusterUplinkFrame): Promise<ClusterDownlinkFrame[]> =>
       deliverReplies(await raw(nodeId, frame));
@@ -888,6 +895,53 @@ describe('cluster/hub-router', () => {
       await router({ warn })('node-a', frame);
       const message = warn.mock.calls[0]?.[0] as string;
       expect(message).toContain('refused dispatch dsp-1: dirty');
+    });
+
+    // C-f: the case's own docblock used to say, unconditionally, that nothing downstream can read a
+    // freshness claim it received. These two prove that is no longer true ONLY when a caller wires
+    // `dispatchCorrelation` in — and that the pre-Milestone-C behaviour above is unchanged when it
+    // is absent (the two tests above never pass one).
+    it('C-f: routes the reply to `dispatchCorrelation.recordFreshnessReply` when one is wired', async () => {
+      const warn = vi.fn();
+      const recordFreshnessReply = vi.fn().mockReturnValue([{ dispatchId: 'dsp-1', status: 'refused' }]);
+      const frame: ClusterFreshnessFrame = {
+        type: 'freshness',
+        protocol: CLUSTER_PROTOCOL,
+        projectKey: 'pk-1',
+        headSha: 'a'.repeat(40),
+        ahead: 0,
+        behind: 0,
+        dirty: 3,
+        merging: false,
+        refused: { dispatchId: 'dsp-1', reason: 'dirty' },
+      };
+      const replies = await router({ warn, dispatchCorrelation: { recordFreshnessReply } })('node-a', frame);
+
+      expect(recordFreshnessReply).toHaveBeenCalledWith('node-a', frame);
+      expect(replies).toEqual([]); // still nothing on the wire — correlation is hub-local bookkeeping
+      const message = warn.mock.calls[0]?.[0] as string;
+      expect(message).toContain('routed to 1 pending dispatch record(s)');
+      expect(message).not.toContain('no hub-side store yet');
+    });
+
+    it('C-f, negative control: with `dispatchCorrelation` wired but nothing matches, the pre-Milestone-C wording is unchanged', async () => {
+      const warn = vi.fn();
+      const recordFreshnessReply = vi.fn().mockReturnValue([]); // a routine beat, nothing to correlate
+      const frame: ClusterFreshnessFrame = {
+        type: 'freshness',
+        protocol: CLUSTER_PROTOCOL,
+        projectKey: 'pk-1',
+        headSha: 'a'.repeat(40),
+        ahead: 0,
+        behind: 2,
+        dirty: 0,
+        merging: false,
+      };
+      await router({ warn, dispatchCorrelation: { recordFreshnessReply } })('node-a', frame);
+
+      expect(recordFreshnessReply).toHaveBeenCalledWith('node-a', frame);
+      const message = warn.mock.calls[0]?.[0] as string;
+      expect(message).toContain('no hub-side store yet'); // zero matches reads exactly like "unwired"
     });
   });
 

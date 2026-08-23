@@ -185,6 +185,17 @@ function dispatchRefusalDetail(
       return 'no capacity available on this node';
     case 'unknown-workflow':
       return 'workflow definition is not recognised on this node';
+    case 'start-failed':
+      // Unreachable through THIS function's only caller: `dispatchRefusalReason` (this file, this
+      // function's whole reason to exist) is checked "before anything below has any side effect"
+      // (its own doc comment) and never returns `start-failed` — that reason names a run that was
+      // ATTEMPTED and threw, which is a fact `DispatchAcceptanceInput` has no field for. The case
+      // exists only because `ClusterDispatchRefusalReason` (D48) is one type shared with the
+      // post-start failure path, and an unhandled member here would fail typecheck rather than
+      // silently rendering nothing (this function's own doc comment). Whoever constructs the real
+      // `start-failed` reply — after `RunManager.startRun` throws — has the actual thrown error and
+      // writes its message directly; this generic fallback is never what a node on the wire sees.
+      return 'starting the run failed after every pre-start check passed';
   }
 }
 

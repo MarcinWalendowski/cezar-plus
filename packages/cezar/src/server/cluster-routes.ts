@@ -69,6 +69,8 @@ import { loadServerState } from '../server-install/state.ts';
 import { workspaceConfigPath } from '../paths.ts';
 import { backupAndAppendTodosPreservingIds, backupTodos, readTodos, type TodoItem } from '../todos.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
+import type { RunManager } from '../workflows/run.ts';
+import type { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 
 /**
  * The CLUSTER family of `/api/v1` (`CEZ_CLUSTER=1`). See
@@ -857,6 +859,28 @@ export interface ClusterRuntimeDeps {
    * which is why this call lives in `startServer`, not `createApp` (package 1.5).
    */
   server: UpgradeCapableServer;
+  /**
+   * Milestone C: how the SPOKE branch's `startSpokeRuntime` resolves a dispatched project's
+   * `repoRoot` to the live `RunManager` that will actually run the work — threaded straight
+   * through to `SpokeRuntimeDeps#resolveDispatchManager`, whose own doc has the full argument for
+   * why this is required rather than optional. `server/server.ts#startServer` is the only
+   * production caller, wiring it off `sharedContexts` the same way `todoAutostartProject` is built
+   * there (`:1621`). Irrelevant to the hub branch — a hub never calls `startSpokeRuntime` — but
+   * required on this type regardless, for the same reason `server` above is: an optional field a
+   * spoke-only caller forgets to set is a spoke that links up looking healthy and cannot run
+   * anything dispatched to it.
+   */
+  resolveDispatchManager: (repoRoot: string) => Promise<RunManager | undefined>;
+  /**
+   * D47: the shared workspace-wide `WorkspaceSemaphore` — threaded straight through to
+   * `SpokeRuntimeDeps#semaphore`, whose own doc has the full argument for what it fixes. Optional
+   * for the same "legacy callers and tests that build no managers" reason `ServerDeps#semaphore`
+   * is optional (`server.ts:6857`'s own doc) — unlike `server`/`resolveDispatchManager` above,
+   * its absence degrades to today's already-shipped behaviour (an omitted `liveCapacity`, which
+   * `peers.ts#collectPresence` already defaults honestly) rather than to silent unreachability, so
+   * making it required here would be a stricter rule than the rest of this file already keeps.
+   */
+  semaphore?: WorkspaceSemaphore;
 }
 
 function errorMessage(err: unknown): string {
@@ -1145,7 +1169,13 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
       watermarks: () => spokeRuntime?.watermarks() ?? [],
     });
     linkClient.start();
-    const stopHeartbeat = startSpokeRuntime({ link: linkClient, env, warn });
+    const stopHeartbeat = startSpokeRuntime({
+      link: linkClient,
+      env,
+      warn,
+      resolveDispatchManager: deps.resolveDispatchManager,
+      semaphore: deps.semaphore,
+    });
     spokeRuntime = stopHeartbeat;
     teardown = () => {
       stopHeartbeat();

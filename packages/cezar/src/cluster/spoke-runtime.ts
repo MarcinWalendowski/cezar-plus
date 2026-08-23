@@ -1,8 +1,10 @@
 import { join } from 'node:path';
 import {
-  CLUSTER_PROTOCOL,
+  workflowDefSchema,
   type ClusterAckFrame,
   type ClusterAckResult,
+  type ClusterDispatchFrame,
+  type ClusterDispatchWorkflow,
   type ClusterDownlinkFrame,
   type ClusterFreshnessFrame,
   type ClusterNodeId,
@@ -12,10 +14,15 @@ import {
   type ClusterReplicaFrame,
   type ClusterUplinkFrame,
   type ClusterWatermark,
+  type WorkflowDef,
 } from '@loki-labs/better-cezar-contract';
 import { workspaceConfigPath } from '../paths.ts';
 import { applyHubReplica as applyHubReplicaFile, readTodos as readTodosFile, type ApplyHubReplicaInput, type TodoItem } from '../todos.ts';
+import { startTodoRun, type StartTodoRunProject } from '../todo-autostart.ts';
+import type { RunManager } from '../workflows/run.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
+import type { WorkspaceSemaphore } from '../workspace/semaphore.ts';
+import { offerDispatch, type DispatchAcceptanceInput } from './dispatch.ts';
 import { loadNodeIdentity } from './node-identity.ts';
 import { DEFAULT_OP_SEND_BUDGET, deriveTodoOps, packOpsFrame, type OpSendBudget } from './ops.ts';
 import { collectPresence as collectClusterPresence, readPeers } from './peers.ts';
@@ -27,16 +34,37 @@ import { applyReplicaFrame, type ReplicaApplyResult } from './replica.ts';
  * D11 · D12a · D13 · D15).
  *
  * **Presence makes a node LINKED and VISIBLE (Milestone A). This file also makes tier-1 todo state
- * REPLICATE (Milestone B).** Every `heartbeatMs` it reports capacity, host metrics and repo drift
- * (D14/D14a) over `link.send`, and every `opFlushMs` it derives this node's pending todo edits
- * (`cluster/ops.ts#deriveTodoOps`) and sends them as `ops` frames. One thing this module still does
- * NOT do, a later milestone — do not read "handles downlink frames" as it:
+ * REPLICATE (Milestone B), and — since 2026-08-23 — RUNS dispatched work (Milestone C).** Every
+ * `heartbeatMs` it reports capacity, host metrics and repo drift (D14/D14a) over `link.send`, and
+ * every `opFlushMs` it derives this node's pending todo edits (`cluster/ops.ts#deriveTodoOps`) and
+ * sends them as `ops` frames.
  *
- *  - **Dispatched work is refused, not run.** This node cannot execute a foreign `dispatch` yet, so
- *    it answers with a `freshness` frame carrying `refused: { reason: 'dispatch-not-accepted' }`
- *    rather than staying silent — a hub that hears nothing back cannot tell "refused" from "dead
- *    link" from "crashed mid-run" (D12a's whole point: named reasons, never absence). `relay` is
- *    likewise unbuilt (Milestone D).
+ * **CORRECTED 2026-08-23 (Milestone C) — dispatched work is now ACCEPTED and RUN, not only
+ * refused.** This paragraph used to say *"Dispatched work is refused, not run. This node cannot
+ * execute a foreign `dispatch` yet, so it answers with a `freshness` frame carrying `refused: {
+ * reason: 'dispatch-not-accepted' }` rather than staying silent."* `handleDispatch` now builds a
+ * real `DispatchAcceptanceInput` — `acceptsDispatch` from this node's own identity on disk (D11,
+ * never the hub's copy), `capacityAvailable` from the target project's live `RunManager`
+ * (`RunManager#hasCapacity`, never the `presence` snapshot — see that method's own doc for why),
+ * `paired`/`freshness`/`corpus` from the same reads the heartbeat already makes — and calls
+ * `dispatch.ts#offerDispatch`. A refusal still answers with a NAMED reason on the same `freshness`
+ * frame (D12a's whole point survives unchanged: a hub that hears nothing back cannot tell "refused"
+ * from "dead link" from "crashed mid-run"). An acceptance now actually starts the run, through the
+ * same `startTodoRun` (`todo-autostart.ts`) autostart uses, with `via: 'cluster-dispatch'`. `relay`
+ * is still unbuilt (Milestone D).
+ *
+ * **D48 (2026-08-23) — the accept reply is sent AFTER `startRun` returns, never before.**
+ * `offerDispatch`'s `outcome.reply` is built before anything starts; sending it straight through
+ * on the accept branch would be the same lie C-b forbids, just narrower. `handleDispatch` starts
+ * the run first and only then sends one reply — `accepted: { dispatchId, runId }` on success, or
+ * `refused: { reason: 'start-failed', ... }` on the one case none of the eight pre-start reasons
+ * can honestly name: every check passed and the actual attempt threw anyway.
+ *
+ * **D47 (2026-08-23) — the presence beat now reports this node's REAL load.** `peers.ts#collectPresence`
+ * has always defaulted an unwired `liveCapacity` to `{active: 0, heavyActive: 0}`, an honest "idle"
+ * claim right up until Milestone C let a dispatch actually place work on it. `deps.semaphore`
+ * (optional — see `SpokeRuntimeDeps#semaphore`'s own doc) is read into `liveCapacity` on every
+ * beat when present; absent, the call omits the option and keeps today's default unchanged.
  *
  * **The outbox is never a queue this file holds.** `deriveTodoOps` re-derives the owed set from
  * records still marked `pendingSince` on every tick — nothing sent-but-unacked is kept in memory
@@ -133,6 +161,11 @@ export interface SpokeLink {
 export interface SpokeOutboxProject {
   projectKey: ClusterProjectKey;
   dataDir: string;
+  /** The project's checkout root — `dataDir` minus the trailing `.ai/cezar` join. Added for
+   *  Milestone C (D-d): the dispatch executor needs it to resolve this project's live
+   *  `RunManager` via `SpokeRuntimeDeps#resolveDispatchManager`, the same root
+   *  `todoAutostartProject` (`server.ts:1621`) already keys its own registration on. */
+  repoRoot: string;
 }
 
 export interface OutboxDiscovery {
@@ -141,6 +174,16 @@ export interface OutboxDiscovery {
   nodeId: ClusterNodeId | undefined;
   /** This node's CONFIRMED pairings only (D2) — a proposed-but-unconfirmed one replicates nothing. */
   projects: readonly SpokeOutboxProject[];
+  /**
+   * This node's OWN dispatch opt-in (D11), off `loadNodeIdentity`'s `identity.acceptsDispatch` —
+   * folded in here, added Milestone C, rather than a second `loadNodeIdentity` call inside
+   * `handleDispatch`: this function already loads the identity for `nodeId`, so a second read
+   * would be a second disk hit for a value the first read already has, AND a second place for a
+   * test to forget to fixture (this file's own `collectOutboxProjects` test seam already exists
+   * precisely to keep identity reads off real disk in a test run — see `NOOP_OUTBOX`'s comment in
+   * the test file). `false` when `nodeId` is `undefined` (never joined a cluster).
+   */
+  acceptsDispatch: boolean;
 }
 
 /** This node's identity + confirmed project pairings, read fresh from disk — the same three reads
@@ -152,7 +195,7 @@ async function discoverOutboxProjects(
   warn: ((message: string) => void) | undefined,
 ): Promise<OutboxDiscovery> {
   const identity = await loadNodeIdentity({ env, warn });
-  if (!identity) return { nodeId: undefined, projects: [] };
+  if (!identity) return { nodeId: undefined, projects: [], acceptsDispatch: false };
 
   const [peers, config] = await Promise.all([readPeers({ env, warn }), loadWorkspaceConfig(workspaceConfigPath(env))]);
   const byId = new Map(config.projects.map((p) => [p.id, p]));
@@ -163,9 +206,9 @@ async function discoverOutboxProjects(
     if (!member?.confirmedAt) continue; // proposed-but-unconfirmed — never replicates (D2)
     const project = byId.get(member.projectId);
     if (!project) continue; // paired project since deregistered on this node
-    projects.push({ projectKey: pairing.projectKey, dataDir: join(project.root, '.ai/cezar') });
+    projects.push({ projectKey: pairing.projectKey, dataDir: join(project.root, '.ai/cezar'), repoRoot: project.root });
   }
-  return { nodeId: identity.nodeId, projects };
+  return { nodeId: identity.nodeId, projects, acceptsDispatch: identity.acceptsDispatch };
 }
 
 export interface SpokeRuntimeDeps {
@@ -176,6 +219,40 @@ export interface SpokeRuntimeDeps {
   heartbeatMs?: number;
   /** Test hook; defaults to `cluster/peers.ts#collectPresence`. */
   collectPresence?: () => Promise<ClusterPresenceFrame>;
+
+  /**
+   * Milestone C (D-c/D-d): resolve a confirmed-pairing project's `repoRoot` to the live
+   * `RunManager` that actually runs work there — `undefined` when this node has no registered
+   * project at that root (a pairing confirmed here but the project since deregistered locally, or
+   * a corpus/registry mismatch). **Required, not optional** — the reason
+   * `ClusterRuntimeDeps#server` (`server/cluster-routes.ts:850`) already gives for itself: an
+   * optional field here would let a caller forget it and get a spoke that links up looking
+   * healthy and is silently unable to do the one thing dispatch exists for. Wired from
+   * `startClusterRuntime` (`server/cluster-routes.ts`), which gets it from `server.ts` the same
+   * way `todoAutostartProject` is built there (`:1621`): a live map kept current off
+   * `ProjectContexts#onContextBuilt`, not a one-shot snapshot, because a project this node's
+   * cockpit has never opened must still become dispatchable the moment it is.
+   */
+  resolveDispatchManager: (repoRoot: string) => Promise<RunManager | undefined>;
+
+  /**
+   * D47: the shared workspace-wide `WorkspaceSemaphore`, so the presence heartbeat can report
+   * this node's REAL live load instead of the `{active: 0, heavyActive: 0}`
+   * `peers.ts#collectPresence` has always defaulted to when no caller wires the real numbers in.
+   * That default was an honest "idle" claim only while nothing could ever place work on a
+   * dispatch-refusing spoke; Milestone C ends that. Deliberately the workspace-wide
+   * `WorkspaceSemaphore` (`busy()`/`heavyActive()`), never `RunManager` — `RunManager#semaphore`
+   * is private and per-manager besides, whereas this reports THIS NODE's overall load for the
+   * hub's placement fairness (D14), a different question from `resolveDispatchManager`'s per-
+   * project `hasCapacity()` answer (C-e) about whether ONE dispatch may start. The two must not
+   * collapse into one read — see `handleDispatch`'s own note on why.
+   *
+   * Optional, matching `ServerDeps#semaphore`'s own optionality (`server.ts:6857`): a caller with
+   * no semaphore gets exactly today's shipped behaviour (no `liveCapacity` passed, `peers.ts`'s
+   * existing default kicks in) rather than a fabricated capacity claim — omission is the honest
+   * choice here, not a stricter requirement like `resolveDispatchManager` above.
+   */
+  semaphore?: WorkspaceSemaphore;
 
   /** Default 5_000. */
   opFlushMs?: number;
@@ -306,8 +383,20 @@ export function startSpokeRuntime(deps: SpokeRuntimeDeps): SpokeRuntimeHandle {
   const heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   const opFlushMs = deps.opFlushMs ?? DEFAULT_OP_FLUSH_MS;
   const opSendBudget = deps.opSendBudget ?? DEFAULT_OP_SEND_BUDGET;
+  // D47: `liveCapacity` is passed only when this node has a real semaphore to read — an absent
+  // semaphore is left OMITTED, not defaulted to a fabricated `{active: 0, heavyActive: 0}` here;
+  // `peers.ts#collectPresence` already applies that exact default itself when the option is
+  // missing (its own doc), so omitting is today's unchanged behaviour, never a new claim.
   const collectPresence =
-    deps.collectPresence ?? ((): Promise<ClusterPresenceFrame> => collectClusterPresence({ env: deps.env, warn }));
+    deps.collectPresence ??
+    ((): Promise<ClusterPresenceFrame> =>
+      collectClusterPresence({
+        env: deps.env,
+        warn,
+        ...(deps.semaphore
+          ? { liveCapacity: { active: deps.semaphore.busy(), heavyActive: deps.semaphore.heavyActive() } }
+          : {}),
+      }));
   const collectOutboxProjects =
     deps.collectOutboxProjects ?? ((): Promise<OutboxDiscovery> => discoverOutboxProjects(deps.env, warn));
   const readTodosFn = deps.readTodos ?? readTodosFile;
@@ -626,12 +715,29 @@ export function startSpokeRuntime(deps: SpokeRuntimeDeps): SpokeRuntimeHandle {
     }
   }
 
-  const handleDispatch = async (dispatchId: string, projectKey: string): Promise<void> => {
+  /**
+   * `dispatch.ts#offerDispatch` deliberately never decides `unknown-workflow` — its own docblock:
+   * "not decided here … by whichever module actually resolves and runs it." That module is this
+   * one. By VALUE, never by name (D12a): `def` is re-validated against `workflowDefSchema` here,
+   * on arrival, rather than trusted from the wire's loose typing. `builtinId` has no resolver
+   * anywhere in this codebase today (there is no catalog a spoke and a hub both agree on) — refuse
+   * it honestly rather than guessing which workflow a name might mean; wiring one is future work.
+   */
+  function resolveDispatchWorkflow(workflow: ClusterDispatchWorkflow): WorkflowDef | undefined {
+    if (!('def' in workflow)) return undefined; // `builtinId` — no resolver exists yet
+    const parsed = workflowDefSchema.safeParse(workflow.def);
+    return parsed.success ? parsed.data : undefined;
+  }
+
+  const handleDispatch = async (frame: ClusterDispatchFrame): Promise<void> => {
+    const dispatchId = frame.dispatchId;
+    const projectKey = frame.projectKey;
+
     let presence: ClusterPresenceFrame;
     try {
       presence = await collectPresence();
     } catch (err) {
-      warn?.(`cluster spoke: cannot decline dispatch ${dispatchId} — presence collection failed: ${errorMessage(err)}`);
+      warn?.(`cluster spoke: cannot answer dispatch ${dispatchId} — presence collection failed: ${errorMessage(err)}`);
       return;
     }
     if (disposed) return;
@@ -641,26 +747,177 @@ export function startSpokeRuntime(deps: SpokeRuntimeDeps): SpokeRuntimeHandle {
       // dirty, merging) UNCONDITIONALLY — even a plain "not accepted" refusal has to carry them.
       // Without a matching `repoDrift` entry (project not paired/confirmed on this node) there is
       // no truthful value for any of them, and fabricating one puts a lie on the wire. Decline to
-      // answer at all rather than decline falsely.
+      // answer at all rather than answer falsely.
       warn?.(
-        `cluster spoke: cannot decline dispatch ${dispatchId} truthfully — no repo-freshness data for project "${projectKey}" (not paired/confirmed here)`,
+        `cluster spoke: cannot answer dispatch ${dispatchId} truthfully — no repo-freshness data for project "${projectKey}" (not paired/confirmed here)`,
       );
       return;
     }
-    const decline: ClusterFreshnessFrame = {
-      type: 'freshness',
-      protocol: CLUSTER_PROTOCOL,
-      projectKey: drift.projectKey,
-      headSha: drift.headSha,
-      ahead: drift.ahead,
-      behind: drift.behind,
-      dirty: drift.dirty,
-      merging: drift.merging,
-      refused: { dispatchId, reason: 'dispatch-not-accepted' },
+
+    // C-d wiring: this project's live `dataDir`/`repoRoot`, the same lookup
+    // `applyReplicaDownlink` above already does for the same reason (discovery is re-read fresh,
+    // never cached, so a pairing confirmed moments ago is visible immediately). This ALSO carries
+    // `acceptsDispatch` — this node's OWN dispatch opt-in (D11) — off the SAME `loadNodeIdentity`
+    // call `discoverOutboxProjects` already makes for `nodeId`, rather than a second, separate,
+    // not-independently-fixturable disk read here (see `OutboxDiscovery#acceptsDispatch`'s own
+    // doc). The spoke enforces its own policy regardless of what the hub believes; a stale local
+    // read is never fabricated as `true`.
+    const discovery = await collectOutboxProjects();
+    if (disposed) return;
+    const project = discovery.projects.find((p) => p.projectKey === projectKey);
+    // A confirmed `SpokeOutboxProject` IS a confirmed pairing (`discoverOutboxProjects`'s own doc:
+    // "This node's CONFIRMED pairings only") — `drift` existing already means SOME repoDrift entry
+    // named this projectKey, so the ordinary case is that the two agree; disagreeing just means
+    // "not paired" here, exactly like `dispatchRefusalReason`'s own `unpaired-project` check.
+    const paired = project !== undefined;
+
+    // C-e: `capacityAvailable` has to come from the RunManager that would actually run the work —
+    // never from `presence.capacity`, which is a claim stamped at `heartbeatMs` cadence and would
+    // be stale by exactly the window that matters (`RunManager#hasCapacity`'s own doc). Resolved
+    // only when paired: `dispatchRefusalReason` checks `acceptsDispatch` then `paired` BEFORE it
+    // ever reads `capacityAvailable` (its own priority order), so an unpaired project never needs
+    // — and, since there is no project to resolve a manager for, cannot honestly produce — one;
+    // `false` below is a placeholder `offerDispatch` provably never consults on that path, not a
+    // guess it might act on.
+    let capacityAvailable = false;
+    // Hoisted out of the `if (paired)` block below so the ACTUAL start, further down, reuses this
+    // same manager rather than resolving a second one — one resolution, one manager, for the same
+    // reason `dispatch.ts`'s own docblock gives for minting a run id exactly once.
+    let manager: RunManager | undefined;
+    if (paired) {
+      manager = await deps.resolveDispatchManager(project.repoRoot);
+      if (disposed) return;
+      if (!manager) {
+        // A project this node has confirmed but has no live manager for (never opened in this
+        // cockpit, or since deregistered) cannot honestly report capacity — decline to answer, the
+        // same posture as the missing-`drift` case above, rather than default to `false` (a real
+        // "no capacity" claim) or `true` (an optimistic guess `offerDispatch` would act on).
+        warn?.(`cluster spoke: cannot answer dispatch ${dispatchId} — no local run manager for project "${projectKey}" at "${project.repoRoot}"`);
+        return;
+      }
+      capacityAvailable = await manager.hasCapacity();
+      if (disposed) return;
+    }
+
+    const acceptance: DispatchAcceptanceInput = {
+      frame,
+      acceptsDispatch: discovery.acceptsDispatch,
+      paired,
+      freshness: drift,
+      corpus: presence.corpus,
+      capacityAvailable,
     };
-    if (!deps.link.send(decline)) {
+    const outcome = await offerDispatch(acceptance, { warn });
+
+    if (!outcome.accepted) {
+      if (!deps.link.send(outcome.reply)) {
+        warn?.(
+          `cluster spoke: could not deliver the refusal for dispatch ${dispatchId} (link offline) — the next presence beat is the fallback`,
+        );
+      }
+      return;
+    }
+    if (!project || !manager) {
+      // Unreachable in practice: `offerDispatch` cannot accept without `paired: true`
+      // (`dispatchRefusalReason` checks it before `capacityAvailable`), `paired` is only ever
+      // `true` when `project` was found above, and `manager` is only ever left unset when the
+      // `if (!manager) return;` a few lines up already refused the dispatch. Stated anyway rather
+      // than asserted past — the alternative is a bare "possibly undefined" the typechecker would
+      // otherwise have to be silenced on, which is worse than one extra named branch that can
+      // never run.
+      warn?.(`cluster spoke: dispatch ${dispatchId} accepted with no resolved project/manager — refusing to start (unreachable)`);
+      return;
+    }
+
+    // Accepted by every check `offerDispatch` can make. Two more remain that it deliberately does
+    // NOT decide (its own docblock) — workflow validity and whether this node actually holds the
+    // todo yet — and BOTH must be checked before the accept reply goes out, never after: sending
+    // `outcome.reply` and then failing to start is exactly the lie C-b forbids ("tells the hub
+    // accepted and then does nothing"). Checked here, before any reply is sent, so that once the
+    // accept is on the wire, starting the run is a plain `manager.startRun()` call, not a second
+    // place this can still go wrong.
+    const workflow = resolveDispatchWorkflow(frame.workflow);
+    if (!workflow) {
+      const refusal: ClusterFreshnessFrame = {
+        ...outcome.reply,
+        refused: { dispatchId, reason: 'unknown-workflow', detail: 'workflow definition is not recognised on this node' },
+      };
+      if (!deps.link.send(refusal)) {
+        warn?.(
+          `cluster spoke: could not deliver the refusal for dispatch ${dispatchId} (link offline) — the next presence beat is the fallback`,
+        );
+      }
+      return;
+    }
+
+    const todos = await readTodosFn(project.dataDir);
+    if (disposed) return;
+    const todo = todos.find((t) => t.id === frame.todoId);
+    if (!todo) {
+      // Not a wire-enum refusal reason (none fits "this node does not hold that todo yet") and not
+      // a truthful `accepted` either — decline to answer, same posture as the two reads above,
+      // rather than send a refusal reason that would not be true.
       warn?.(
-        `cluster spoke: could not deliver the decline for dispatch ${dispatchId} (link offline) — the next presence beat is the fallback`,
+        `cluster spoke: cannot start dispatch ${dispatchId} — todo "${frame.todoId}" is not present locally for project "${projectKey}" yet`,
+      );
+      return;
+    }
+
+    const executorProject: StartTodoRunProject = { repoRoot: project.repoRoot, dataDir: project.dataDir, manager };
+    // D48: the reply is sent ONCE, AFTER this resolves — never before, and never as a separate
+    // second frame on the happy path. `outcome.reply` is built by `offerDispatch` before anything
+    // starts (that function's own doc: "check, THEN start or refuse"), so forwarding it straight
+    // through here would tell the hub "accepted" while no run exists yet — the C-b lie in
+    // miniature, just narrower, and exactly what this ordering exists to close. Once `startRun`
+    // returns, `accepted: { dispatchId, runId }` is the ONLY field on the wire that lets the hub
+    // learn which run this dispatch became (`clusterFreshnessFrameSchema`'s own doc, D48/C-a2).
+    //
+    // The claim is NOT stamped here, and is not pre-granted by the hub either — `hub-dispatch.ts`
+    // places and sends `dispatch` unconditionally, never writing `startedTaskId` first, so there
+    // is no existing claim this node is merely confirming. `humanIntent: true` below is what lets
+    // `startTodoRun` write the claim OPTIMISTICALLY-PENDING without the usual hub round trip
+    // (`todos.ts:840`'s "the path that can double-start work nobody is watching" is exactly why
+    // that flag defaults `false` everywhere else). Safe here specifically because the write is not
+    // the last word: the ordinary outbox flush carries this pending claim op to the hub on its own
+    // cadence, the hub SERIALIZES it like any other claim op, and a loser — two nodes dispatched
+    // the same todo, D41, a hub-side hole tracked separately — is told `already-started` and rolls
+    // back, never left believing it holds a claim it does not. That is D9a's ordinary claim-loss
+    // handling applied unchanged, not a special case invented for dispatch.
+    let result: Awaited<ReturnType<typeof startTodoRun>>;
+    try {
+      result = await startTodoRun(executorProject, todo, workflow, 'cluster-dispatch', { humanIntent: true });
+    } catch (err) {
+      // Every one of `dispatchRefusalReason`'s eight pre-start reasons
+      // (`clusterDispatchRefusalReasonSchema`'s own doc) is honestly false here — all eight passed
+      // before this attempt was ever made, and `at-capacity` in particular would misreport why
+      // nothing started. `start-failed` (D48) exists for exactly this: handled explicitly, naming
+      // the real thrown message, rather than falling into a catch-all warn that leaves the hub
+      // waiting forever on a dispatch that will never be answered.
+      const message = err instanceof Error ? err.message : String(err);
+      warn?.(`cluster spoke: dispatch ${dispatchId} was accepted but starting the run failed: ${message}`);
+      const failure: ClusterFreshnessFrame = {
+        ...outcome.reply,
+        refused: { dispatchId, reason: 'start-failed', detail: message.slice(0, 200) },
+      };
+      if (!deps.link.send(failure)) {
+        warn?.(
+          `cluster spoke: could not deliver the start-failed report for dispatch ${dispatchId} (link offline) — the next presence beat is the fallback`,
+        );
+      }
+      return;
+    }
+    const accepted: ClusterFreshnessFrame = {
+      ...outcome.reply,
+      accepted: { dispatchId, runId: result.run.id },
+    };
+    if (!deps.link.send(accepted)) {
+      warn?.(
+        `cluster spoke: could not deliver the acceptance for dispatch ${dispatchId} (link offline) — the next presence beat is the fallback`,
+      );
+    }
+    if (!result.stamped) {
+      warn?.(
+        `cluster spoke: dispatch ${dispatchId} started run ${result.run.id} but the local todo record could not be stamped — it will not be retried automatically`,
       );
     }
   };
@@ -669,7 +926,7 @@ export function startSpokeRuntime(deps: SpokeRuntimeDeps): SpokeRuntimeHandle {
     if (disposed) return;
     switch (frame.type) {
       case 'dispatch':
-        handleDispatch(frame.dispatchId, frame.projectKey).catch((err: unknown) => {
+        handleDispatch(frame).catch((err: unknown) => {
           warn?.(`cluster spoke: dispatch handling threw for ${frame.dispatchId}: ${errorMessage(err)}`);
         });
         break;

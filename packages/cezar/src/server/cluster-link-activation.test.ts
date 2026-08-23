@@ -8,6 +8,7 @@ import {
   CLUSTER_PROTOCOL,
   type ClusterAckFrame,
   type ClusterDownlinkFrame,
+  type ClusterFreshnessFrame,
   type ClusterHelloFrame,
   type ClusterOp,
   type ClusterPresenceFrame,
@@ -17,13 +18,15 @@ import {
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { persistNodeCredential } from '../cluster/enrollment.ts';
+import { createHubDispatcher } from '../cluster/hub-dispatch.ts';
 import { createHubFrameRouter } from '../cluster/hub-router.ts';
 import { ClusterLinkClient } from '../cluster/link-client.ts';
 import { ClusterLinkServer } from '../cluster/link-server.ts';
-import { ensureNodeIdentity } from '../cluster/node-identity.ts';
+import { ensureNodeIdentity, setAcceptsDispatch } from '../cluster/node-identity.ts';
 import { storeNodeSecret } from '../cluster/node-secrets.ts';
 import { applyPairingAction, readPeers, upsertNode } from '../cluster/peers.ts';
-import { readTodos } from '../todos.ts';
+import type { PlacementCandidate } from '../cluster/placement.ts';
+import { createTodo, readTodos } from '../todos.ts';
 import { workspaceConfigPath } from '../paths.ts';
 import { atomicWriteJsonSync, defaultWorkspaceConfig } from '../workspace/config.ts';
 import { startClusterRuntime } from './cluster-routes.ts';
@@ -393,7 +396,7 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
       process.env.CEZ_CLUSTER = '1';
       process.env.CEZ_CLUSTER_HUB = hubUrl; // must agree with the persisted identity's hubUrl
 
-      const stop = startClusterRuntime({ version: '0.0.0-test', server: fakeUpgradeServer() });
+      const stop = startClusterRuntime({ version: '0.0.0-test', server: fakeUpgradeServer(), resolveDispatchManager: async () => undefined });
       disposers.push(stop);
 
       await vi.waitFor(() => expect(hubServer.connectedNodes()).toEqual(['spoke-1']), { timeout: 5_000 });
@@ -485,7 +488,7 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
 
       // The real production path: `startClusterRuntime`'s spoke branch, which is the ONLY place the
       // provider is supplied.
-      const stop = startClusterRuntime({ version: '0.0.0-test', server: fakeUpgradeServer() });
+      const stop = startClusterRuntime({ version: '0.0.0-test', server: fakeUpgradeServer(), resolveDispatchManager: async () => undefined });
       disposers.push(stop);
 
       await vi.waitFor(() => expect(hubServer.connectedNodes()).toEqual(['spoke-1']), { timeout: 5_000 });
@@ -642,7 +645,7 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
       process.env.CEZ_CLUSTER = '1';
       process.env.CEZ_CLUSTER_HUB = hubUrl;
 
-      const stop = startClusterRuntime({ version: '0.0.0-test', server: fakeUpgradeServer() });
+      const stop = startClusterRuntime({ version: '0.0.0-test', server: fakeUpgradeServer(), resolveDispatchManager: async () => undefined });
       // Synchronous — `loadNodeIdentity`'s `readFile` has not resolved yet; there has been no
       // `await` of any kind since `startClusterRuntime` returned.
       stop();
@@ -652,6 +655,237 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
       await new Promise((resolve) => setTimeout(resolve, 500));
       expect(hubServer.connectedNodes()).toEqual([]);
     });
+  });
+
+  /**
+   * MILESTONE C, END TO END — the merge gate, and the one test that can see the seam.
+   *
+   * Milestone C was built as two halves in parallel, meeting at `clusterFreshnessFrameSchema`: the
+   * hub places/emits/correlates (`cluster/hub-dispatch.ts`), the spoke decides and runs
+   * (`cluster/spoke-runtime.ts`). Each half is separately and thoroughly unit-tested, and **neither
+   * suite can prove they are connected**, for a structural reason: the spoke's tests assert what the
+   * spoke SENDS, and the hub's tests construct the frames the hub WANTS TO CONSUME. Both supply
+   * their own fake for the other side.
+   *
+   * That is not hypothetical here. While this milestone was being built the hub half added the D48
+   * `accepted: { dispatchId, runId }` block and consumed it, and **the spoke half never sent it** —
+   * it kept replying with the bare freshness frame. `tsc --noEmit` was EXIT=0 with zero output across
+   * both packages, because `accepted` is OPTIONAL and omitting an optional field is not a type error.
+   * An optional field at a seam between two owners is the defect that survives every gate either
+   * owner can run. This test is what fails on it.
+   *
+   * **The decisive assertion is not "a reply came back" and not "the reply has an `accepted` block".**
+   * It is that the `runId` on the wire equals the id of the run the target's OWN manager minted —
+   * which is exactly the confusion `DispatchOutcome.dispatchId`'s docblock calls "silent, and
+   * forever": handing a consumer that keys on run id an attempt id instead subscribes it to a run
+   * that never existed. A test that accepted any non-empty string would pass against `dispatchId`.
+   *
+   * **The one substitution, stated rather than buried:** `resolveDispatchManager` returns a recording
+   * fake, not a live `RunManager`, because a real `startRun` spawns an agent subprocess and a test
+   * must not. Everything else is real — a real socket on a real `node:http` server, the real
+   * `startClusterRuntime` spoke branch, the real `createHubDispatcher`, real `placeRun`, a real
+   * `todos.json` on disk. So this proves the protocol and the wiring end to end; it does not prove
+   * the deploy path, Cloudflare Access admitting the link, or cross-machine behaviour. Those remain
+   * ops-gated and must not be reported as covered by this file.
+   */
+  describe('4. Milestone C — a real dispatch is accepted and a real run starts', () => {
+    const C_PROJECT_KEY = 'project-milestone-c';
+    const WORKFLOW_DEF = { name: 'dispatch-e2e-workflow', steps: [{ id: 'step-1', prompt: 'do the thing' }], source: 'file' as const };
+
+    interface StartedRun {
+      workflow: unknown;
+      input: { task: string; author: { via?: string } };
+    }
+
+    /** Stands up the whole cluster on loopback: a directly-built hub whose `ClusterLinkServer` this
+     *  test owns (so it can dispatch and observe replies straight off the instance, scenario 2's
+     *  reason) plus a real spoke through the real `startClusterRuntime` activation path. */
+    async function bootCluster(options: { acceptsDispatch: boolean }): Promise<{
+      hubServer: ClusterLinkServer;
+      dispatcher: ReturnType<typeof createHubDispatcher>;
+      replies: ClusterFreshnessFrame[];
+      started: StartedRun[];
+      todoId: string;
+      todoSummary: string;
+      mintedRunIds: string[];
+    }> {
+      const spokeHome = tempDir('cez-cluster-c-home-');
+      const spokeRepoRoot = tempDir('cez-cluster-c-repo-');
+      const spokeDataDir = join(spokeRepoRoot, '.ai/cezar');
+      mkdirSync(spokeDataDir, { recursive: true });
+
+      const hubIdentity: StoredClusterNodeIdentity = {
+        nodeId: 'hub-c',
+        nodeName: 'hub-c',
+        createdAt: new Date().toISOString(),
+        role: 'hub',
+        acceptsDispatch: false,
+        labels: [],
+      };
+      const router = createHubFrameRouter({ identity: hubIdentity });
+      const replies: ClusterFreshnessFrame[] = [];
+      let dispatcher!: ReturnType<typeof createHubDispatcher>;
+      const hubServer = new ClusterLinkServer({
+        identity: hubIdentity,
+        onFrame: async (nodeId: string, frame: ClusterUplinkFrame) => {
+          // Observed off the WIRE, on the hub, never off the object the spoke built — the only
+          // reading that can tell a real send from a well-typed no-op.
+          if (frame.type === 'freshness') {
+            replies.push(frame);
+            dispatcher.recordFreshnessReply(nodeId, frame);
+          }
+          return router(nodeId, frame);
+        },
+        lookupSecret: async (nodeId) => (nodeId === 'spoke-1' ? NODE_SECRET : undefined),
+      });
+      dispatcher = createHubDispatcher({ hubNodeId: hubIdentity.nodeId, linkServer: () => hubServer });
+
+      const httpServer = createServer();
+      await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
+      booted.push(httpServer);
+      hubServer.attach(httpServer);
+      disposers.push(() => void hubServer.close());
+      const hubUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
+
+      process.env.CEZ_HOME = spokeHome;
+      process.env.CEZ_CLUSTER = '1';
+      process.env.CEZ_CLUSTER_HUB = hubUrl;
+      await persistNodeCredential({ nodeId: 'spoke-1', hubUrl, secret: NODE_SECRET }, { env: { CEZ_HOME: spokeHome } });
+      // D11 — the spoke enforces its OWN opt-in regardless of what the hub believes, so this is the
+      // switch the refusal case below flips, and nothing on the hub side can substitute for it.
+      await setAcceptsDispatch(options.acceptsDispatch, { env: process.env });
+
+      atomicWriteJsonSync(workspaceConfigPath(process.env), {
+        ...defaultWorkspaceConfig(),
+        projects: [{ id: 'proj-c', root: spokeRepoRoot, name: '', addedAt: '', lastOpenedAt: '', source: 'local' as const }],
+      });
+      await applyPairingAction(C_PROJECT_KEY, { action: 'confirm', nodeId: 'spoke-1', projectId: 'proj-c' });
+
+      // A REAL todo on the spoke's own disk. The spoke resolves the dispatch's `todoId` against this
+      // file and refuses to answer at all if it is not there, so a dispatch for a todo this node has
+      // never replicated is a different (also correct) path — not the one under test.
+      const todoSummary = 'the dispatched piece of work';
+      const todo = await createTodo(spokeDataDir, { summary: todoSummary, status: 'todo' }, { kind: 'user', id: 'local', via: 'cli-todo-add', at: new Date().toISOString() });
+
+      const started: StartedRun[] = [];
+      const mintedRunIds: string[] = [];
+      let next = 1;
+      const fakeManager = {
+        hasCapacity: async () => true,
+        startRun: (workflow: unknown, input: { task: string; author: { via?: string } }) => {
+          // A distinctive id that could not be confused with a `dispatchId` (a UUID) if the two were
+          // ever swapped — the swap this test exists to catch would otherwise still look plausible.
+          const id = `run-minted-by-the-target-${next++}`;
+          mintedRunIds.push(id);
+          started.push({ workflow, input });
+          return { id };
+        },
+      } as unknown as RunManager;
+
+      const stop = startClusterRuntime({
+        version: '0.0.0-test',
+        server: fakeUpgradeServer(),
+        resolveDispatchManager: async (repoRoot: string) => (repoRoot === spokeRepoRoot ? fakeManager : undefined),
+      });
+      disposers.push(stop);
+      await vi.waitFor(() => expect(hubServer.connectedNodes()).toEqual(['spoke-1']), { timeout: 5_000 });
+
+      return { hubServer, dispatcher, replies, started, todoId: todo.id, todoSummary, mintedRunIds };
+    }
+
+    function candidate(acceptsDispatch: boolean): PlacementCandidate {
+      return {
+        nodeId: 'spoke-1',
+        labels: [],
+        acceptsDispatch,
+        online: true,
+        capacity: { maxParallel: 4, active: 0, heavyActive: 0, enforcement: 'none' },
+        holdsProject: true,
+      };
+    }
+
+    it('THE MERGE GATE: hub dispatches → spoke accepts → a real run starts → the run id comes back and the hub correlates it', async () => {
+      const cluster = await bootCluster({ acceptsDispatch: true });
+
+      const attempt = await cluster.dispatcher.dispatch({
+        todoId: cluster.todoId,
+        request: { projectKey: C_PROJECT_KEY, projectHasOrigin: true },
+        candidates: [candidate(true)],
+        workflow: { def: WORKFLOW_DEF },
+      });
+
+      // (1) The hub placed it REMOTELY and actually put a frame on the wire — `sent: true` is the
+      // hub's own report that `ClusterLinkServer.send` found a live socket for that node.
+      expect(attempt.placement).toEqual({ status: 'placed', nodeId: 'spoke-1' });
+      expect(attempt.dispatch?.sent).toBe(true);
+      const dispatchId = attempt.dispatch!.dispatchId;
+
+      // (2) The spoke actually started a run — through the manager THIS project resolves to, with the
+      // task text built from the real todo and the author `via` naming the door it came through.
+      // What this catches: a `handleDispatch` that answers `accepted` and never calls `startRun`,
+      // which is the C-b lie and is invisible to any assertion about the reply alone.
+      await vi.waitFor(() => expect(cluster.started).toHaveLength(1), { timeout: 5_000 });
+      expect(cluster.started[0]!.input.task).toContain(cluster.todoSummary);
+      expect(cluster.started[0]!.input.author.via).toBe('cluster-dispatch');
+
+      // (3) THE SEAM. The reply carries an `accepted` block, and its `runId` is the id the TARGET'S
+      // OWN manager minted — not the dispatch id, not any non-empty string. This is the assertion
+      // that fails when the spoke replies with the bare frame, which is exactly what it did until
+      // this test existed.
+      const reply = await vi.waitFor(
+        () => {
+          const found = cluster.replies.find((f) => f.accepted?.dispatchId === dispatchId);
+          expect(found).toBeDefined();
+          return found!;
+        },
+        { timeout: 5_000 },
+      );
+      expect(reply.accepted?.runId).toBe(cluster.mintedRunIds[0]);
+      expect(reply.accepted?.runId).not.toBe(dispatchId);
+      expect(reply.refused).toBeUndefined();
+
+      // (4) And the hub's correlation store resolved that attempt, carrying the same run id — C-f's
+      // whole point: before this, an accept and a refusal were indistinguishable above the router.
+      const record = cluster.dispatcher.get(dispatchId);
+      expect(record?.status).toBe('accepted');
+      expect(record?.runId).toBe(cluster.mintedRunIds[0]);
+      expect(cluster.dispatcher.listPending()).toEqual([]);
+    }, 20_000);
+
+    it('D11: a spoke with acceptsDispatch off refuses over the real wire, starts nothing, and the hub records the named reason', async () => {
+      const cluster = await bootCluster({ acceptsDispatch: false });
+
+      // The hub is told the node accepts dispatch — deliberately disagreeing with the spoke's own
+      // stored opt-in. D11 says the SPOKE is the boundary that enforces, so the hub's belief must not
+      // be what decides. Passing `false` here would prove nothing: `placeRun` would filter the node
+      // out and no frame would ever reach the spoke, so the spoke's own gate would go unexercised.
+      const attempt = await cluster.dispatcher.dispatch({
+        todoId: cluster.todoId,
+        request: { projectKey: C_PROJECT_KEY, projectHasOrigin: true },
+        candidates: [candidate(true)],
+        workflow: { def: WORKFLOW_DEF },
+      });
+      const dispatchId = attempt.dispatch!.dispatchId;
+
+      const reply = await vi.waitFor(
+        () => {
+          const found = cluster.replies.find((f) => f.refused?.dispatchId === dispatchId);
+          expect(found).toBeDefined();
+          return found!;
+        },
+        { timeout: 5_000 },
+      );
+      expect(reply.refused?.reason).toBe('dispatch-not-accepted');
+      expect(reply.accepted).toBeUndefined();
+      // The refusal still carries truthful repo-freshness fields — a refusal is the same answer with
+      // a reason attached, never a different frame (`clusterFreshnessFrameSchema`'s own doc).
+      expect(typeof reply.headSha).toBe('string');
+      expect(cluster.started).toEqual([]);
+
+      const record = cluster.dispatcher.get(dispatchId);
+      expect(record?.status).toBe('refused');
+      expect(record?.refusal?.reason).toBe('dispatch-not-accepted');
+    }, 20_000);
   });
 });
 

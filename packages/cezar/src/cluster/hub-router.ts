@@ -1,6 +1,7 @@
 import {
   CLUSTER_PROTOCOL,
   type ClusterDownlinkFrame,
+  type ClusterFreshnessFrame,
   type ClusterNodeId,
   type ClusterAckResult,
   type ClusterOp,
@@ -127,11 +128,30 @@ export interface HubReplicationDeps {
   ) => Promise<readonly TodoItem[] | undefined>;
 }
 
+/**
+ * Everything the `freshness` case needs to route a reply into Milestone C's dispatch correlation
+ * store (`cluster/hub-dispatch.ts#createHubDispatcher`, decision C-f), and why it is OPTIONAL
+ * rather than required: a hub built before that package existed is a legitimate state, and the
+ * honest behaviour there is the pre-existing one — observe, warn, never persist. Injected as a
+ * narrow interface rather than importing `hub-dispatch.ts` directly, for the same reason
+ * `HubReplicationDeps` is (see that interface's own docblock): the two packages are built and
+ * tested independently, and this file should not gain a dependency on placement/dispatch-building
+ * it has no use for beyond the one method this case calls.
+ */
+export interface HubDispatchCorrelationDeps {
+  /** `HubDispatcher#recordFreshnessReply`. Resolves a pending dispatch this hub sent, or is a
+   *  no-op (returns `[]`) for a routine freshness beat unrelated to any dispatch. Never throws. */
+  readonly recordFreshnessReply: (nodeId: ClusterNodeId, frame: ClusterFreshnessFrame) => readonly unknown[];
+}
+
 export interface HubFrameRouterDeps {
   /** The hub's own identity — `hubNodeId` on every `welcome`. */
   identity: StoredClusterNodeIdentity;
   /** Omit to keep the pre-replication behaviour: observe, warn, never ack. See `HubReplicationDeps`. */
   replication?: HubReplicationDeps;
+  /** Omit to keep the pre-Milestone-C `freshness` behaviour: observe, warn, never persist. See
+   *  `HubDispatchCorrelationDeps`. */
+  dispatchCorrelation?: HubDispatchCorrelationDeps;
   env?: NodeJS.ProcessEnv;
   warn?: (message: string) => void;
 }
@@ -585,14 +605,23 @@ export function createHubFrameRouter(
               frame.refused.detail ? ` (${frame.refused.detail})` : ''
             }`
           : '';
-        // OBSERVED AND LOGGED, NOT PERSISTED. There is no hub-side freshness store in this
-        // increment: nothing here writes `frame` anywhere, and nothing downstream (dispatch,
-        // placement, the cockpit) can read a freshness claim this handler received. Do not read
-        // "the router handles freshness" as "the hub remembers it".
+        // **CORRECTED 2026-08-23 (C-f) — no longer true unconditionally.** This case used to say
+        // "OBSERVED AND LOGGED, NOT PERSISTED: nothing here writes `frame` anywhere, and nothing
+        // downstream (dispatch, placement, the cockpit) can read a freshness claim this handler
+        // received." That is still exactly true when `deps.dispatchCorrelation` is absent — the
+        // pre-Milestone-C posture, and still the production default until a run-start trigger
+        // wires one in (see `hub-dispatch.ts`'s own module docblock for what remains undone). When
+        // it IS wired, the reply is routed to `HubDispatcher#recordFreshnessReply`, which is where
+        // `dispatchId` — minted in `buildDispatch` "precisely to correlate an attempt that never
+        // became a run" — finally has somewhere to land.
+        const correlated = deps.dispatchCorrelation?.recordFreshnessReply(nodeId, frame) ?? [];
         deps.warn?.(
           `cluster hub: freshness from "${nodeId}" for project "${frame.projectKey}" ` +
             `(headSha ${frame.headSha}, ahead ${frame.ahead}, behind ${frame.behind}, dirty ${frame.dirty}, merging ${frame.merging})` +
-            `${refusedDetail} — observed only, no hub-side store yet`,
+            `${refusedDetail}` +
+            (correlated.length > 0
+              ? ` — routed to ${correlated.length} pending dispatch record(s)`
+              : ' — observed only, no hub-side store yet'),
         );
         return { frames: [] };
       }

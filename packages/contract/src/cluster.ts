@@ -1419,6 +1419,14 @@ export type ClusterAccountGrantDecision = z.infer<typeof clusterAccountGrantDeci
  * `corpus-stale` is D8a's: a knowledge read has no natural error, so a mirror behind its bound
  * refuses with the corpus NAMED rather than running against a five-day-old record and reporting
  * success.
+ *
+ * **`start-failed` (D48) is the one member that is not a pre-start condition.** Every other value
+ * is decided BEFORE any side effect — `dispatch.ts#dispatchRefusalReason`'s own docblock is
+ * explicit that it "is checked before anything below has any side effect". `start-failed` is what
+ * the target sends when every one of those eight checks passed and it attempted the run anyway,
+ * and `RunManager.startRun` (or whatever underneath it) threw. There is no pre-start reason to
+ * name in that case — the checks were honest — so this exists rather than forcing a lie onto one
+ * of the other eight (`at-capacity` in particular would misreport WHY nothing started).
  */
 export const clusterDispatchRefusalReasonSchema = z.enum([
   'dispatch-not-accepted',
@@ -1429,6 +1437,7 @@ export const clusterDispatchRefusalReasonSchema = z.enum([
   'unpaired-project',
   'at-capacity',
   'unknown-workflow',
+  'start-failed',
 ]);
 export type ClusterDispatchRefusalReason = z.infer<typeof clusterDispatchRefusalReasonSchema>;
 
@@ -1600,6 +1609,40 @@ export type ClusterDispatchFrame = z.infer<typeof clusterDispatchFrameSchema>;
  * answer "can this target take work", so a refusal is the same answer with its reason attached, and
  * the protocol keeps exactly the ten frames the spec fixes. Without it the hub can render only
  * "nothing happened", which is the failure the four named reasons exist to prevent.
+ *
+ * **`accepted` (D48) is that same argument applied to the other verdict, and it is load-bearing
+ * beyond correlation.** The hub's dispatch correlation store (`cluster/hub-dispatch.ts`) can match
+ * WHICH pending dispatch a bare accept reply belongs to by `(nodeId, projectKey)` alone — but only
+ * when exactly one is in flight to that node for that project. Two non-overlapping dispatches to
+ * one node's one project can be in flight at once (D19 rung 3's overlap check keys on touched
+ * paths, not on project identity), so an accepted reply had to carry its own `dispatchId` for the
+ * ambiguous case to be resolvable at all, the same way `refused` already does.
+ *
+ * **`runId` is not a correlation nicety — it is how the hub learns which run its dispatch produced,
+ * without polling `GET /cluster/active` and guessing by `todoId` (C-a2, corrected by C-a3).** An
+ * earlier version of this docblock said the hub stamps the dispatched todo once its correlation
+ * store resolves this block — that is not implementable: a claim IS `startedTaskId`
+ * (`hub-apply.ts#claimFields`), and the run id does not exist until the spoke's `startRun` mints
+ * it, so the hub has nothing to claim with at dispatch time. What actually stamps the todo: the
+ * spoke itself, optimistically and with `humanIntent: true` (the confirmed start of a run it just
+ * caused, not the scheduler-denied escape hatch `todos.ts:840` guards against), the moment
+ * `startRun` returns — the ordinary outbox flush carries that claim op to the hub, where
+ * `applyOpAtHub` serializes it against any other claim the normal way. So `runId` here is not a
+ * write trigger; it is the only place a dispatched run's id is ever visible to the hub at all, and
+ * it is what Milestone D's relay (which streams events BY run id) needs to subscribe to the run
+ * this dispatch produced.
+ *
+ * **Sent only after the run actually exists**, not merely after the pre-start checks pass — the
+ * target waits for its own `startRun` to return before answering, so this frame is never sent
+ * carrying a `runId` nothing yet backs. A `startRun` that throws AFTER those checks pass answers
+ * with `refused: { reason: 'start-failed' }` instead (see that reason's own docblock) — never with
+ * `accepted` and never by silently reusing one of the eight pre-start reasons, both of which would
+ * misreport why nothing started.
+ *
+ * **Mutually exclusive with `refused` by construction** (the `.refine` below): one verdict, one
+ * reply, matching every other decide-then-answer function in this codebase (`dispatch.ts#offerDispatch`'s
+ * own doc comment: "Check, THEN start or refuse — every refusal reason is decided before anything
+ * below has any side effect").
  */
 export const clusterFreshnessFrameSchema = clusterRepoFreshnessSchema
   .extend({
@@ -1614,8 +1657,23 @@ export const clusterFreshnessFrameSchema = clusterRepoFreshnessSchema
       })
       .strict()
       .optional(),
+    /** D48/C-a2 — see this schema's own docblock. Present only on the reply to a dispatch this
+     *  target just started, after `startRun` returned. */
+    accepted: z
+      .object({
+        dispatchId: z.string().min(1).max(64),
+        /** The run this dispatch produced — what Milestone D's relay keys on, and the only way
+         *  the hub learns which run a dispatch became. Same bound as `ClusterActiveRun.runId` /
+         *  `ClusterRelayRequestFrame.runId`. */
+        runId: z.string().min(1).max(120),
+      })
+      .strict()
+      .optional(),
   })
-  .strict();
+  .strict()
+  .refine((frame) => !(frame.refused && frame.accepted), {
+    message: 'a freshness reply carries `refused` or `accepted`, never both',
+  });
 export type ClusterFreshnessFrame = z.infer<typeof clusterFreshnessFrameSchema>;
 
 /** → spoke to hub: the heartbeat the scheduler places from. Capacity is a CLAIM; the hub stamps it
