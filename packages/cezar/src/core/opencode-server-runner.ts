@@ -326,6 +326,17 @@ class OpencodeSession implements AgentSession {
     });
   }
 
+  /**
+   * OpenCode does NOT have the codex resume-poisoning problem
+   * (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`, Phase 3). This method always issues
+   * a fresh `POST /session` — it never reads `spec.sessionId`/`spec.resume`, so there is no
+   * transport-level "resume" at all, and therefore no persisted per-session model to inherit.
+   * Every `prompt()` call re-sends `body.model` explicitly (below), so a dropped pin simply means
+   * no `model` key on THAT call, exactly like a fresh session — there is no separate resume path
+   * whose omission would mean something different, the way it does for codex's `thread/resume`.
+   * `isMissingSessionRejection` records the same fact for the same reason
+   * (`core/agent-runner.ts:126-128`).
+   */
   private async bootstrap(): Promise<void> {
     const created = await this.http('POST', '/session', { title: 'cezar task' });
     this.sessionId = stringField(created, 'id');

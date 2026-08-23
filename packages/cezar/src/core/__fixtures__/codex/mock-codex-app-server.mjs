@@ -12,10 +12,25 @@
 // `MOCK_CODEX_IGNORE_SIGTERM=1` is the signal-classification twin: also deaf to EOF, but
 // SWALLOWS SIGTERM instead of trapping it into an exit — the shape cezar's own SIGTERM→SIGKILL
 // escalation has to punch all the way through, so only the untrappable SIGKILL ends this process.
+//
+// `MOCK_CODEX_PERSISTED_MODEL=<id>` — the model this mock "created the thread with"
+// (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`, Phase 1b). On `thread/resume`, the
+// EFFECTIVE model is `msg.params.model ?? MOCK_CODEX_PERSISTED_MODEL` — reproducing real codex's
+// behaviour of falling back to persisted `thread_settings.model` when the caller sends no
+// override. If that effective model isn't one this mock can serve (anything not matching
+// `/^gpt-/`), the first `turn/start` after the resume replies with the real captured rejection
+// shape (the same one `mock:provider-rejected` below scripts), naming whichever model was
+// actually in play instead of a hard-coded `sonnet`.
 import { createInterface } from 'node:readline';
 
 const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 const rl = createInterface({ input: process.stdin });
+/** The model `thread/resume` is in effect for right now — `undefined` after a fresh
+ *  `thread/start`, where there is nothing persisted to inherit. */
+let resumedEffectiveModel;
+/** True only for the first `turn/start` immediately following a `thread/resume` — the window a
+ *  real codex rejection over a poisoned `thread_settings.model` would land in. */
+let firstTurnAfterResume = false;
 
 const ignoreEof = process.env.MOCK_CODEX_IGNORE_EOF === '1';
 const ignoreSigterm = process.env.MOCK_CODEX_IGNORE_SIGTERM === '1';
@@ -44,7 +59,18 @@ rl.on('line', (line) => {
       : { method: 'turn/failed', params: { turn: { id: 'turn_mock_1', status: 'failed' }, error: { message: 'bad answer' } } });
   } else if (msg.method === 'initialize') {
     emit({ id: msg.id, result: { userAgent: 'mock-codex/0.0.0' } });
+  } else if (msg.method === 'model/list') {
+    // A minimal, always-servable catalog so the default `resolveCodexResumeModel` discovery
+    // path (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`) resolves fast instead of
+    // idling out to `DEFAULT_DISCOVERY_TIMEOUT_MS` in every test that resumes without injecting
+    // its own `resumeModel` — one page, `nextCursor: null`, done.
+    emit({ id: msg.id, result: { data: [
+      { model: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol', description: '' },
+    ], nextCursor: null } });
   } else if (msg.method === 'thread/start' || msg.method === 'thread/resume') {
+    // Every start/resume request is echoed to stderr so a test can assert on the REQUEST, not
+    // only on the outcome (Phase 1b).
+    process.stderr.write(`MOCK_RPC ${msg.method} ${JSON.stringify(msg.params)}\n`);
     const expectedSandbox = process.env.CEZ_CODEX_NETWORK === '0' ? 'workspace-write' : 'danger-full-access';
     if (msg.params?.sandbox !== expectedSandbox || msg.params?.approvalPolicy !== 'never') {
       emit({ id: msg.id, error: { code: -32602, message: `expected ${expectedSandbox} auto permissions` } });
@@ -55,17 +81,37 @@ rl.on('line', (line) => {
       return;
     }
     if (msg.method === 'thread/start') {
+      resumedEffectiveModel = undefined;
       emit({ method: 'thread/started', params: { thread: { id: 'th_mock_1' } } });
       emit({ id: msg.id, result: { thread: { id: 'th_mock_1' } } });
     } else if (process.env.MOCK_CODEX_REJECT_RESUME === '1') {
       emit({ id: msg.id, error: { code: -32603, message: `no rollout found for thread id ${msg.params?.threadId ?? ''}` } });
       rl.close();
     } else {
+      resumedEffectiveModel = msg.params?.model ?? process.env.MOCK_CODEX_PERSISTED_MODEL;
+      firstTurnAfterResume = true;
       emit({ id: msg.id, result: { thread: { id: msg.params?.threadId } } });
     }
   } else if (msg.method === 'turn/start') {
+    const isFirstTurnAfterResume = firstTurnAfterResume;
+    firstTurnAfterResume = false;
     emit({ id: msg.id, result: { turn: { id: 'turn_mock_1' } } });
     emit({ method: 'turn/started', params: { turn: { id: 'turn_mock_1', status: 'inProgress', items: [] } } });
+    // codex resuming a thread with a model it cannot serve — reproduced here instead of only in
+    // prose, so the negative control (Phase 1b) exercises the real wire shape. Reuses the exact
+    // rejection captured off prod-host 2026-08-22 (see `mock:provider-rejected` below),
+    // naming whichever model was actually in effect rather than a hard-coded `sonnet`.
+    if (isFirstTurnAfterResume && resumedEffectiveModel && !/^gpt-/.test(resumedEffectiveModel)) {
+      const detail = JSON.stringify({
+        type: 'error',
+        status: 400,
+        error: { type: 'invalid_request_error', message: `The '${resumedEffectiveModel}' model is not supported when using Codex with a ChatGPT account.` },
+      });
+      emit({ method: 'warning', params: { threadId: 'th_mock_1', message: `Model metadata for \`${resumedEffectiveModel}\` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.` } });
+      emit({ method: 'error', params: { threadId: 'th_mock_1', turnId: 'turn_mock_1', willRetry: false, error: { message: detail, codexErrorInfo: 'other' } } });
+      emit({ method: 'turn/completed', params: { turn: { id: 'turn_mock_1', status: 'failed', error: { message: detail, codexErrorInfo: 'other' } } } });
+      return;
+    }
     // An EXTERNAL untrapped signal death mid-turn — the kernel OOM killer, a cgroup MemoryMax
     // breach, or an operator's `kill -9`. The bootstrap handshake above already completed for
     // real, so this fires only once the runner is doing genuine work; nothing cezar did causes

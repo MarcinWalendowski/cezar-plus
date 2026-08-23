@@ -1,4 +1,6 @@
 import type { RunnerId } from './agent-runner.ts';
+import { discoverCodexModels } from './codex-model-catalog.ts';
+import { discoverOpencodeModels } from './opencode-model-catalog.ts';
 
 export interface ModelOption {
   id: string;
@@ -99,4 +101,25 @@ export class RunnerModelCatalog {
 function unavailableReason(runner: RunnerId): string {
   const name = runner === 'codex' ? 'Codex' : runner === 'claude' ? 'Claude' : 'OpenCode';
   return `${name} model discovery is temporarily unavailable`;
+}
+
+let shared: RunnerModelCatalog | undefined;
+
+/**
+ * Lazily-constructed, process-wide singleton — the front door `CodexAppServerRunner`'s
+ * `thread/resume` path shares with the server's own `GET /api/models` route
+ * (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`, "Wiring the catalog to the runner"),
+ * so a host has one 5-minute discovery cache rather than two. Mirrors the adapters
+ * `server/server.ts`'s own `RunnerModelCatalog` registers today — dropping the opencode adapter
+ * here would silently break `GET /api/models?runner=opencode` the moment `server.ts` is
+ * repointed at this function instead of constructing its own.
+ */
+export function sharedRunnerModelCatalog(): RunnerModelCatalog {
+  shared ??= new RunnerModelCatalog({
+    adapters: {
+      codex: { discover: () => discoverCodexModels({ cwd: process.cwd() }) },
+      opencode: { discover: () => discoverOpencodeModels({ cwd: process.cwd() }) },
+    },
+  });
+  return shared;
 }

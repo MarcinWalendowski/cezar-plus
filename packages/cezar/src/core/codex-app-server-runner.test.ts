@@ -6,19 +6,50 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from './agent-runner.js';
 import { KILL_GRACE_MS } from './claude-cli-runner.js';
 import { CodexAppServerRunner } from './codex-app-server-runner.js';
+import type { CodexResumeModel } from './codex-resume-model.js';
 
 /** Only the escalation tests below swap the child out; every other test in this
  *  file keeps spawning the real mock app-server through the untouched `spawn`. */
 const spawnHook = vi.hoisted(() => ({ override: null as null | (() => unknown) }));
+/** Tees a spawned child's stderr into an array when set — the mock fixture echoes every
+ *  `thread/start`/`thread/resume` request as `MOCK_RPC <method> <json>` (Phase 1b), and this is
+ *  how a test reads the actual REQUEST rather than only the turn's outcome (spec Verification
+ *  V3: "a passing turn does not prove the key was absent"). A tee, not a replacement — the
+ *  runner's own stderr listener keeps working unmodified. */
+const stderrHook = vi.hoisted(() => ({ capture: null as null | string[] }));
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    spawn: (...args: Parameters<typeof actual.spawn>) =>
-      spawnHook.override ? spawnHook.override() : actual.spawn(...args),
+    spawn: (...args: Parameters<typeof actual.spawn>) => {
+      const child = (spawnHook.override ? spawnHook.override() : actual.spawn(...args)) as ChildProcessWithoutNullStreams;
+      if (stderrHook.capture) {
+        const target = stderrHook.capture;
+        child.stderr?.on('data', (chunk: Buffer | string) => target.push(chunk.toString()));
+      }
+      return child;
+    },
   };
 });
+
+/** Starts capturing `MOCK_RPC` lines for the duration of one test; `stop()` returns the parsed
+ *  `thread/start`/`thread/resume` requests seen so far, in order. */
+function captureMockRpc(): { calls: () => Array<{ method: string; params: Record<string, unknown> }>; stop: () => void } {
+  const chunks: string[] = [];
+  stderrHook.capture = chunks;
+  const parse = (): Array<{ method: string; params: Record<string, unknown> }> =>
+    chunks
+      .join('')
+      .split('\n')
+      .filter((line) => line.startsWith('MOCK_RPC '))
+      .map((line) => {
+        const rest = line.slice('MOCK_RPC '.length);
+        const spaceIdx = rest.indexOf(' ');
+        return { method: rest.slice(0, spaceIdx), params: JSON.parse(rest.slice(spaceIdx + 1)) };
+      });
+  return { calls: parse, stop: () => { stderrHook.capture = null; } };
+}
 
 /**
  * #703 backend parity — `claude-cli-runner.test.ts` proves the Claude half;
@@ -339,4 +370,243 @@ describe('an external signal kills the agent process directly (OOM killer / oper
     expect(events.some((e) => e.type === 'error')).toBe(false);
     expect(events.at(-1)).toEqual({ type: 'done' });
   }, 20_000);
+});
+
+/**
+ * `.ai/specs/2026-08-23-codex-resume-explicit-model.md`, Phase 1/1b/2 — a resumed thread must
+ * state an explicit model rather than silently inheriting whatever codex persisted into
+ * `thread_settings.model` when the thread was first created. Phase 1b taught the mock fixture to
+ * reproduce that persisted-model fallback for real (`MOCK_CODEX_PERSISTED_MODEL`), so these tests
+ * exercise the actual wire behaviour rather than asserting on prose.
+ */
+describe('thread/resume states an explicit model (codex resume poisoning)', () => {
+  const mockBin = fileURLToPath(
+    new URL('./__fixtures__/codex/mock-codex-app-server.mjs', import.meta.url),
+  );
+
+  it('negative control: resume sends an explicit model even when the pin was dropped', async () => {
+    const rpc = captureMockRpc();
+    const runner = new CodexAppServerRunner({
+      bin: mockBin,
+      timeoutMs: 0,
+      resumeModel: async () => ({ model: 'gpt-5.6-sol', source: 'catalog' }),
+    });
+    const session = runner.startSession(
+      { userPrompt: 'continue', cwd: process.cwd(), resume: true, sessionId: 'th_mock_1' },
+      undefined,
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+    rpc.stop();
+
+    const resume = rpc.calls().find((call) => call.method === 'thread/resume');
+    expect(resume?.params.model).toBe('gpt-5.6-sol');
+  }, 15_000);
+
+  it('sends a live pin verbatim on resume, untouched by the resolver', async () => {
+    const rpc = captureMockRpc();
+    const runner = new CodexAppServerRunner({
+      bin: mockBin,
+      timeoutMs: 0,
+      resumeModel: async (pinned) => ({ model: pinned, source: 'pinned' }),
+    });
+    const session = runner.startSession(
+      {
+        userPrompt: 'continue',
+        cwd: process.cwd(),
+        resume: true,
+        sessionId: 'th_mock_1',
+        model: 'gpt-5.6-terra',
+      },
+      undefined,
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+    rpc.stop();
+
+    const resume = rpc.calls().find((call) => call.method === 'thread/resume');
+    expect(resume?.params.model).toBe('gpt-5.6-terra');
+  }, 15_000);
+
+  it('regression control: thread/start still sends no model key when the pin was dropped', async () => {
+    const rpc = captureMockRpc();
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
+    const session = runner.startSession(
+      { userPrompt: 'check the working tree', cwd: process.cwd() },
+      undefined,
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+    rpc.stop();
+
+    const start = rpc.calls().find((call) => call.method === 'thread/start');
+    expect(start).toBeDefined();
+    // Asserted on the RECORDED REQUEST, not the turn's outcome — a passing turn does not prove
+    // the key was absent (spec Verification V3).
+    expect('model' in (start?.params ?? {})).toBe(false);
+  }, 15_000);
+
+  it('omits the model and emits the unavailable note when the resolver cannot resolve one', async () => {
+    const rpc = captureMockRpc();
+    const runner = new CodexAppServerRunner({
+      bin: mockBin,
+      timeoutMs: 0,
+      resumeModel: async () => ({ source: 'unavailable' }),
+    });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      { userPrompt: 'continue', cwd: process.cwd(), resume: true, sessionId: 'th_mock_1' },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+    rpc.stop();
+
+    const resume = rpc.calls().find((call) => call.method === 'thread/resume');
+    expect('model' in (resume?.params ?? {})).toBe(false);
+    expect(
+      events.some(
+        (e) => e.type === 'note' && e.message.includes("could not read codex's model catalog"),
+      ),
+    ).toBe(true);
+  }, 15_000);
+
+  it('emits a note naming the source of the model it resumed on', async () => {
+    const runner = new CodexAppServerRunner({
+      bin: mockBin,
+      timeoutMs: 0,
+      resumeModel: async () => ({ model: 'gpt-5.6-sol', source: 'catalog' }),
+    });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      { userPrompt: 'continue', cwd: process.cwd(), resume: true, sessionId: 'th_mock_1' },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+
+    expect(
+      events.some(
+        (e) => e.type === 'note' && e.message === "resuming on gpt-5.6-sol (codex's current default)",
+      ),
+    ).toBe(true);
+  }, 15_000);
+
+  /**
+   * Fixture control (Phase 1b): proves the mock's persisted-model fallback is real — a resume
+   * that omits `model` inherits `MOCK_CODEX_PERSISTED_MODEL` and rejects, exactly like a real
+   * poisoned `thread_settings.model` would. Without this, the remediation test below would prove
+   * nothing: it would pass even if `model` were never sent.
+   */
+  it('fixture control: an omitted model resumes on the persisted one and fails', async () => {
+    const runner = new CodexAppServerRunner({
+      bin: mockBin,
+      timeoutMs: 0,
+      resumeModel: async () => ({ source: 'unavailable' }),
+    });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      {
+        userPrompt: 'continue',
+        cwd: process.cwd(),
+        resume: true,
+        sessionId: 'th_mock_1',
+        env: { MOCK_CODEX_PERSISTED_MODEL: 'sonnet' },
+      },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+
+    const errors = events.filter((e) => e.type === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      message: expect.stringContaining('is not supported when using Codex'),
+    });
+  }, 15_000);
+
+  it('remediates a thread poisoned with an unservable persisted model', async () => {
+    const runner = new CodexAppServerRunner({
+      bin: mockBin,
+      timeoutMs: 0,
+      resumeModel: async () => ({ model: 'gpt-5.6-sol', source: 'catalog' }),
+    });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      {
+        userPrompt: 'continue',
+        cwd: process.cwd(),
+        resume: true,
+        sessionId: 'th_mock_1',
+        // The exact persisted poison the incident's real threads carried — an explicit model
+        // from the resolver overrides it, where an absent key (the control above) would not.
+        env: { MOCK_CODEX_PERSISTED_MODEL: 'sonnet' },
+      },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+
+    expect(events.filter((e) => e.type === 'error')).toEqual([]);
+  }, 15_000);
+
+  /** Phase 2 — the failure message names the model cezar actually sent, readable next to the
+   *  Phase 1 note without cross-referencing it. */
+  it('Phase 2 — names the model cezar sent when the first turn of a resume is rejected', async () => {
+    const runner = new CodexAppServerRunner({
+      bin: mockBin,
+      timeoutMs: 0,
+      resumeModel: async () => ({ model: 'not-a-real-model', source: 'pinned' }),
+    });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      { userPrompt: 'continue', cwd: process.cwd(), resume: true, sessionId: 'th_mock_1' },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+
+    const errors = events.filter((e) => e.type === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain('resume sent model: not-a-real-model');
+  }, 15_000);
+
+  /** The annotation is scoped to the FIRST turn of a resume — a later turn's failure must not
+   *  carry a stale "resume sent model" suffix naming a model that has nothing to do with it. */
+  it('Phase 2 — a second, later turn failure carries no resume-model annotation', async () => {
+    const runner = new CodexAppServerRunner({
+      bin: mockBin,
+      timeoutMs: 0,
+      resumeModel: async () => ({ model: 'gpt-5.6-sol', source: 'catalog' }),
+    });
+    const events: AgentEvent[] = [];
+    let turnEnds = 0;
+    let resolveFirstTurnEnd: () => void = () => {};
+    const firstTurnEnd = new Promise<void>((resolve) => { resolveFirstTurnEnd = resolve; });
+    let resolveSecondTurnEnd: () => void = () => {};
+    const secondTurnEnd = new Promise<void>((resolve) => { resolveSecondTurnEnd = resolve; });
+    const session = runner.startSession(
+      // The FIRST turn ('continue') succeeds — effective model 'gpt-5.6-sol' is servable — which
+      // is what closes the resume window before the second turn is sent.
+      { userPrompt: 'continue', cwd: process.cwd(), resume: true, sessionId: 'th_mock_1' },
+      (event) => {
+        events.push(event);
+        if (event.type === 'turn-end') {
+          turnEnds += 1;
+          if (turnEnds === 1) resolveFirstTurnEnd();
+          if (turnEnds === 2) resolveSecondTurnEnd();
+        }
+      },
+      { autoEndAfterFirstTurn: false },
+    );
+    await firstTurnEnd;
+    session.sendMessage([{ type: 'text', text: 'mock:turn-failed' }]);
+    await secondTurnEnd;
+    session.end();
+    await session.result.catch(() => undefined);
+
+    const errors = events.filter((e) => e.type === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toEqual({ type: 'error', message: 'model unavailable' });
+  }, 15_000);
 });
