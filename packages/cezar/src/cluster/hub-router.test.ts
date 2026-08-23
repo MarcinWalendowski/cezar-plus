@@ -305,6 +305,48 @@ describe('cluster/hub-router', () => {
       expect(welcome.proposals).toBeUndefined();
     });
 
+    it('the welcome roster is the FULL mapped wire shape, not just ids — and drops stored-only extras', async () => {
+      /*
+       * **Added 2026-08-23 (B5), and found by mutation rather than by reading.** `welcome.pairings`
+       * was already asserted exhaustively with `toEqual` above, but `roster` was only ever checked
+       * for `nodeId` — so every other field `toNodeWire` maps was unpinned ON THIS SIDE. Proof it
+       * was a real gap and not a theoretical one: deleting `version:` from the shared mapper left
+       * this entire file green, and reddened only `server/cluster-link-activation.test.ts`. The hub
+       * half of the same mapping had no field-level coverage at all.
+       *
+       * `toEqual` rather than `objectContaining` is the point: it fails BOTH ways — on a field the
+       * mapper stops emitting, AND on a stored-only key that leaks onto the wire. The second is why
+       * `secretHash` is seeded below. `storedClusterNodeSchema` is `.passthrough()`, so an unknown
+       * key really does survive `upsertNode`'s parse into peers.json, while `clusterNodeSchema` is
+       * `.strict()` — and the ONLY thing standing between them is `toNodeWire` rebuilding the object
+       * field-by-field. Nothing else would catch a spread creeping in.
+       */
+      await upsertNode(
+        {
+          ...makeStoredNode({ nodeId: 'node-a', disabledAt: '2026-08-23T00:00:00.000Z' }),
+          secretHash: 'stored-only — must never reach the wire',
+        } as StoredClusterNode,
+        { env: env() },
+      );
+
+      const replies = await router()('node-a', helloFrame({ nodeId: 'node-a' }));
+      const welcome = replies[0];
+      if (welcome?.type !== 'welcome') throw new Error(`expected welcome, got ${JSON.stringify(welcome)}`);
+
+      expect(welcome.roster).toEqual([
+        {
+          nodeId: 'node-a',
+          nodeName: 'Node A',
+          role: 'spoke',
+          labels: [],
+          acceptsDispatch: false,
+          protocol: CLUSTER_PROTOCOL,
+          version: '0.10.0',
+          disabledAt: '2026-08-23T00:00:00.000Z',
+        },
+      ]);
+    });
+
     it('does not itself gate on a roster row with disabledAt set — the UPGRADE already refused before onFrame could run (D22)', async () => {
       await upsertNode(makeStoredNode({ nodeId: 'node-a', disabledAt: new Date().toISOString() }), { env: env() });
       const replies = await router()('node-a', helloFrame({ nodeId: 'node-a' }));

@@ -1,9 +1,7 @@
 import {
   CLUSTER_PROTOCOL,
   type ClusterDownlinkFrame,
-  type ClusterNode,
   type ClusterNodeId,
-  type ClusterPairing,
   type ClusterAckResult,
   type ClusterOp,
   type ClusterOpScope,
@@ -11,12 +9,11 @@ import {
   type ClusterReplicaFrame,
   type ClusterUplinkFrame,
   type ClusterWatermark,
-  type StoredClusterNode,
   type StoredClusterNodeIdentity,
-  type StoredClusterPairing,
 } from '@loki-labs/better-cezar-contract';
 import type { TodoItem } from '../todos.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';
+import { toNodeWire, toPairingWire } from './wire.ts';
 import { markNodeSeen, readPeers } from './peers.ts';
 import { applyOpsFrame, type HubOpAllocation, type HubOpOutcome } from './hub-ops.ts';
 import { planReplicaFanout } from './replica-fanout.ts';
@@ -139,31 +136,6 @@ export interface HubFrameRouterDeps {
   warn?: (message: string) => void;
 }
 
-/**
- * `.strict()` on the wire means a stored row's `.passthrough()` extras must be dropped by an
- * explicit mapping rather than spread through — the same reasoning, and the same field list, as
- * `server/cluster-routes.ts`'s own `toNodeWire`. Not imported from there: this file may only touch
- * `cluster/hub-router.ts` and `cluster/hub-router.test.ts` (package boundary for this increment),
- * and the mapping is straight field-copying, not an abstraction worth a cross-file dependency for.
- */
-function toNodeWire(node: StoredClusterNode): ClusterNode {
-  return {
-    nodeId: node.nodeId,
-    nodeName: node.nodeName,
-    role: node.role,
-    labels: node.labels,
-    acceptsDispatch: node.acceptsDispatch,
-    protocol: node.protocol,
-    version: node.version,
-    ...(node.lastSeenAt !== undefined ? { lastSeenAt: node.lastSeenAt } : {}),
-    ...(node.capacity !== undefined ? { capacity: node.capacity } : {}),
-    ...(node.capacityAt !== undefined ? { capacityAt: node.capacityAt } : {}),
-    ...(node.hostMetrics !== undefined ? { hostMetrics: node.hostMetrics } : {}),
-    ...(node.repoDrift !== undefined ? { repoDrift: node.repoDrift } : {}),
-    ...(node.corpus !== undefined ? { corpus: node.corpus } : {}),
-    ...(node.disabledAt !== undefined ? { disabledAt: node.disabledAt } : {}),
-  };
-}
 
 /** A bounded, deterministic sample for a warning that could otherwise name hundreds of records —
  *  see the REPLAY-UNORDERED warning's own comment for why "all of them" is not an option there. The
@@ -173,19 +145,6 @@ function sampleIds(ids: readonly string[], limit = 5): string {
   return ids.length > limit ? `${shown}, … (+${ids.length - limit} more)` : shown;
 }
 
-/** Same reasoning as `toNodeWire` — `clusterPairingSchema` is `.strict()`, so each member is
- *  rebuilt field-by-field rather than spread from the stored (`.passthrough()`) shape. */
-function toPairingWire(pairing: StoredClusterPairing): ClusterPairing {
-  const byNode: ClusterPairing['byNode'] = {};
-  for (const [nodeId, member] of Object.entries(pairing.byNode)) {
-    byNode[nodeId] = {
-      nodeId: member.nodeId,
-      projectId: member.projectId,
-      ...(member.confirmedAt !== undefined ? { confirmedAt: member.confirmedAt } : {}),
-    };
-  }
-  return { projectKey: pairing.projectKey, byNode };
-}
 
 export function createHubFrameRouter(
   deps: HubFrameRouterDeps,

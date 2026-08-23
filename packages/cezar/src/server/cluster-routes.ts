@@ -17,7 +17,6 @@ import {
   type ClusterNodeRevokeResponse,
   type ClusterOp,
   type ClusterOverviewResponse,
-  type ClusterPairing,
   type ClusterPairingProposal,
   type ClusterPairingsResponse,
   type ClusterProjectKey,
@@ -40,9 +39,7 @@ import {
   clusterPairingActionSchema,
   clusterProjectKeyParamSchema,
   clusterTodosAppendRequestSchema,
-  type StoredClusterNode,
   type StoredClusterNodeIdentity,
-  type StoredClusterPairing,
 } from '@loki-labs/better-cezar-contract';
 import { clusterEnabled } from './capabilities.ts';
 import { jsonZodValidator, paramZodValidator } from './validators.ts';
@@ -59,6 +56,7 @@ import type { HubOpOutcome } from '../cluster/hub-ops.ts';
 import { createHubSeqAllocator } from '../cluster/hub-seq.ts';
 import { acquireLease, releaseLease } from '../cluster/leases.ts';
 import { ClusterLinkClient } from '../cluster/link-client.ts';
+import { toNodeWire, toPairingWire } from '../cluster/wire.ts';
 import { ClusterLinkServer, type UpgradeCapableServer } from '../cluster/link-server.ts';
 import { createNodeAuthMiddleware, getAuthenticatedClusterNode } from '../cluster/node-auth.ts';
 import { clusterModeFromEnv, loadNodeIdentity, nodeIdentityPath } from '../cluster/node-identity.ts';
@@ -300,39 +298,6 @@ export function clusterActiveRunsFrom(remote: readonly ClusterRemoteRun[]): Clus
     }));
 }
 
-/** Corpus-relative, always. `.strict()` on the wire means a stored row's `.passthrough()` extras
- *  must be dropped by an explicit mapping rather than spread through — the omission is the
- *  mechanism that keeps an unexpected on-disk key off the wire. */
-function toNodeWire(node: StoredClusterNode): ClusterNode {
-  return {
-    nodeId: node.nodeId,
-    nodeName: node.nodeName,
-    role: node.role,
-    labels: node.labels,
-    acceptsDispatch: node.acceptsDispatch,
-    protocol: node.protocol,
-    version: node.version,
-    ...(node.lastSeenAt !== undefined ? { lastSeenAt: node.lastSeenAt } : {}),
-    ...(node.capacity !== undefined ? { capacity: node.capacity } : {}),
-    ...(node.capacityAt !== undefined ? { capacityAt: node.capacityAt } : {}),
-    ...(node.hostMetrics !== undefined ? { hostMetrics: node.hostMetrics } : {}),
-    ...(node.repoDrift !== undefined ? { repoDrift: node.repoDrift } : {}),
-    ...(node.corpus !== undefined ? { corpus: node.corpus } : {}),
-    ...(node.disabledAt !== undefined ? { disabledAt: node.disabledAt } : {}),
-  };
-}
-
-function toPairingWire(pairing: StoredClusterPairing): ClusterPairing {
-  const byNode: ClusterPairing['byNode'] = {};
-  for (const [nodeId, member] of Object.entries(pairing.byNode)) {
-    byNode[nodeId] = {
-      nodeId: member.nodeId,
-      projectId: member.projectId,
-      ...(member.confirmedAt !== undefined ? { confirmedAt: member.confirmedAt } : {}),
-    };
-  }
-  return { projectKey: pairing.projectKey, byNode };
-}
 
 /**
  * Discovered before configured, the shape `notifications-routes.ts#discoverCockpitUrl` already

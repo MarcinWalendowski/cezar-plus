@@ -2880,8 +2880,32 @@ invented; these are the names to use when one lands.
 >    direction at all.
 >  - **Fix: one shared mapper in `cluster/`, imported by both** — same reasoning as D36's fourth copy
 >    above, and the same choice of construction over detection.
->  - **BLOCKED ON COORDINATION, not on difficulty.** `hub-router.ts` is HUB's file and HUB is live in
->    it for D40. Do not edit it concurrently; schedule this the moment D40 lands.
+>  - ~~**BLOCKED ON COORDINATION**~~ — **DONE 2026-08-23, once D40 landed and HUB went idle.**
+>    `cluster/wire.ts` now exports both; `hub-router.ts` and `cluster-routes.ts` import them and their
+>    local copies are gone, along with four now-dead type imports and the stale ownership sentence.
+>    **B5 is closed.**
+>
+> **The mutation found a real coverage gap, which is the actual value of this item.** Dropping
+> `version:` from the shared mapper reddened **only `server/cluster-link-activation.test.ts`** — the
+> hub half stayed entirely green. Cause: `hub-router.test.ts` asserted `welcome.pairings` exhaustively
+> with `toEqual` but checked `welcome.roster` only via `.map((n) => n.nodeId)`, so **every other field
+> `toNodeWire` maps was unpinned on the hub side.** Both call sites were verified intact first
+> (`hub-router.ts:528-529`, six uses in `cluster-routes.ts`), so this was a missing assertion and not
+> a dropped call.
+>
+> Closed with an exhaustive `toEqual` on the roster entry, seeded with a stored-only `secretHash` —
+> `storedClusterNodeSchema` is `.passthrough()` so an unknown key really does survive into peers.json,
+> while `clusterNodeSchema` is `.strict()`, and the only thing between them is the field-by-field
+> rebuild. **Mutation-proven in BOTH directions**, each failing only the new test (1 failed / 40
+> passed): dropping `version` → red; spreading the stored row through so extras leak → red. Restored,
+> md5 `881bb29326006527fe5272c21fc0b619`.
+>
+> **Gate on the box:** `tsc` EXIT=0 · **7093 passed / 1 failed / 4 skipped (7098)** — +1 test, the
+> single red still C18. Ownership audit 0.
+>
+> **Worth generalising: `toEqual` over `objectContaining` for anything crossing a `.passthrough()` →
+> `.strict()` boundary.** It fails both ways — on a field the mapper stops emitting AND on a
+> stored-only key that leaks onto the wire. An id-only assertion looks like coverage and is not.
 >
 > #### D36 — EVERY REPLICATED TODO RESENDS FOREVER. Found 2026-08-23 by the two-process E2E.
 >
