@@ -617,7 +617,7 @@ describe('pruneOrphans (real git)', () => {
     const branch = branchFor(runId);
     expect(await branchExists(repo, branch)).toBe(true);
 
-    const report = await pruneOrphans(repo, new Set(), { trunkRef: 'main' });
+    const report = await pruneOrphans(repo, new Set(), { findForeignOwner: () => undefined });
 
     expect(report.removed).toEqual([runId]);
     expect(report.declined).toEqual([]);
@@ -634,7 +634,7 @@ describe('pruneOrphans (real git)', () => {
     await run('git', [...GIT_ID, 'commit', '-q', '-m', 'unique to this branch'], { cwd: wt.path });
     const branch = branchFor(runId);
 
-    const report = await pruneOrphans(repo, new Set(), { trunkRef: 'main' });
+    const report = await pruneOrphans(repo, new Set(), { findForeignOwner: () => undefined });
 
     expect(report.removed).toEqual([runId]);
     expect(existsSync(wt.path)).toBe(false);
@@ -648,7 +648,6 @@ describe('pruneOrphans (real git)', () => {
     const branch = branchFor(runId);
 
     const report = await pruneOrphans(repo, new Set(), {
-      trunkRef: 'main',
       findForeignOwner: () => ({ projectName: 'workspace boot', runId: 'foreign-run-id' }),
     });
 
@@ -667,7 +666,6 @@ describe('pruneOrphans (real git)', () => {
     const findForeignOwner = () => undefined;
 
     const report = await pruneOrphans(repo, new Set(), {
-      trunkRef: 'main',
       findForeignOwner,
       ownershipCheckUnavailable: { reason: "project \"boot\"'s runs.json could not be read" },
     });
@@ -695,7 +693,7 @@ describe('pruneOrphans (real git)', () => {
     expect(await branchExists(repo, branch)).toBe(true);
   });
 
-  it('opts supplied but trunkRef omitted defaults to the SAFE direction: branch always kept', async () => {
+  it('opts supplied with no branch-retention signal at all: branch is always kept, unconditionally', async () => {
     const repo = await fixtureRepo('cez-prune-no-trunkref-');
     const runId = '99999999-9999-4999-8999-999999999999';
     const wt = await createWorktree(repo, runId, 'main');

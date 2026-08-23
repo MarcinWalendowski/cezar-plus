@@ -3435,7 +3435,17 @@ export class RunManager {
           this.repoRoot,
         );
         this.store.updateRun(runId, { workspaceWorktrees: worktrees });
+        await touchWorktreeLeases(worktrees.map((worktree) => worktree.root), runId, this.repoRoot);
         this.armWorktreeLeases(state, runId, worktrees.map((worktree) => worktree.root));
+      } else {
+        // Spec 2026-08-22-live-worktree-reaped-mid-run, "What is still open" #2: `dropActive`
+        // deletes every lease this run held when it last settled, and reusing an EXISTING live
+        // tree here used to arm nothing at all — the most common resume path left a live workspace
+        // worktree with no lease, the incident's exact shape. Write and arm unconditionally,
+        // whether the trees were rebuilt above or reused here.
+        const roots = live.map((worktree) => worktree.root);
+        await touchWorktreeLeases(roots, runId, this.repoRoot);
+        this.armWorktreeLeases(state, runId, roots);
       }
     }
     if (state.cwd === this.repoRoot && !workspaceRun) {
@@ -3462,6 +3472,14 @@ export class RunManager {
       }
     }
     this.armAutosave(state);
+    if (!workspaceRun && cwd !== this.repoRoot) {
+      // Spec 2026-08-22-live-worktree-reaped-mid-run, "What is still open" #2: `dropActive`
+      // deletes this run's lease at its last settle, and reusing `record.worktreePath` here used
+      // to arm nothing at all — a continued single-repo run occupied a live worktree with no
+      // lease, the incident's exact shape, on the most common way work resumes on this box.
+      await writeWorktreeLease(this.repoRoot, runId, this.repoRoot);
+      this.armWorktreeLeases(state, runId, [this.repoRoot]);
+    }
     if (record) seedHandoffFile(this.dataDir, record); // idempotent — normally already there
     // Registry snapshot for `/skill` expansion. `execute` loads this for the workflow's own
     // sessions; a continuation builds its OWN ActiveRun, and without this the resumed session

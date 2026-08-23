@@ -1,6 +1,24 @@
 # A live task's worktree is deleted out from under it, mid-run, with its uncommitted work
 
-**Status:** implemented, QA needed. **Date:** 2026-08-22.
+**Status:** implemented, merged to `origin/main`, and **deployed**. Measured 2026-08-22 23:5xZ on
+`prod-host`: the live release is `20260822T232351Z-a81a0a30` (activated 23:23:56Z), and its
+`dist/` carries both `leaseDeclineReason` and a valid `.build-stamp.json` — so the gates below are
+not merely merged, they are the code running in production right now. **QA Needed**: the runtime
+E2E (Verification steps 13–19) has still never run anywhere, and, as a direct consequence of B1
+being live, **every forward deploy from this box is currently refused as `divergent`** — see the
+re-anchor precondition at the head of "## Verification" before attempting one. **Date:** 2026-08-22.
+
+**Amended 2026-08-22 (second pass, task `b34867ee`; no separate brief was written for this pass, and
+the earlier draft's citation of one was wrong: the run's only brief is
+`.ai/specs/briefs/2026-08-22-stale-artifact-live-prune.md`, cited in the first amendment below, and
+this pass re-read the merged tree directly rather than a brief):** the code this spec
+describes has since been **written, gate-tested and merged**: commit `362865ec`, merged to
+`origin/main` as `a3e70792`. See **"As shipped"** below for what landed per phase (re-verified by
+reading the merged tree, not by trusting the commit message), the two corrections applied *after*
+the last review pass, and the three residues that re-read turned up. Nothing in the diagnosis or the
+design below changed; what changed is that this is no longer a proposal, so the reader's job is now
+to verify and finish it, not to build it.
+
 **Amended 2026-08-22** (task `b34867ee`, brief `.ai/specs/briefs/2026-08-22-stale-artifact-live-prune.md`):
 re-read against `origin/main` at `c1ccbe79`, citations corrected to the shipped source, and the nine
 open design questions the first draft left open are now **settled** in "Decisions settled" below.
@@ -17,6 +35,13 @@ therefore still shows the pre-incident code):
 `.../server-install/releases.ts` (256), `.../server/runtime-info.ts` (81),
 `.../runs/worktree-ownership.ts`, `package.json`, `packages/cezar/package.json`,
 `packages/web/vite.config.ts`, `.ai/deploy-targets.json`.
+
+**Which means every line number in Problem / Solution / Decisions settled is a PRE-implementation
+citation** — it points at the code as it was before `362865ec`, which is correct for reading the
+diagnosis and wrong for finding the code today. The **post**-implementation citations, re-read at
+`a3e70792` (`git-worktree.ts` now 722 lines, `release-deploy.ts` 613, `project-context.ts` 552,
+`releases.ts` 258, `runtime-info.ts` 127), are collected in "As shipped" below and are the ones to
+follow when you are looking for the shipped mechanism rather than the bug it replaced.
 
 **Extends:** `.ai/specs/2026-08-22-cross-project-worktree-orphan-prune-safety.md` (Layers 1 and 2,
 shipped `5ffa383c` 07:58:54Z today). That spec closed the *cross-project blindness* in
@@ -163,9 +188,15 @@ weaker than it looks:
    `unreadable` is handled; *absent* is not, and the two are the same evidentially. The safe default
    for an irreversible sweep is the opposite.
 2. **It cannot see a different boot root.** A second cezar server reaches the same real project
-   roots with its own boot root. There is one alive on the box right now:
+   roots with its own boot root. **Historical observation, at the 13:12Z incident:** one was alive
+   on the box then —
    `node packages/cezar/dist/index.js --port 43037 --repo /var/lib/cezar/loki-labs/cezar/.ai/cezar/worktrees/fd1f214d-…`,
-   up since 2026-08-21 21:40. Its ownership view can never include production's boot root.
+   up since 2026-08-21 21:40. Its ownership view could never include production's boot root.
+   **That process is gone as of 2026-08-22 23:5xZ**: `ps -eo pid,lstart,args | grep
+   cezar/dist/index.js` now shows exactly one cezar, pid 373697, started 23:23:55, running
+   `/opt/cezar/packages/cezar/dist/index.js serve`. The structural weakness is unchanged — nothing
+   *prevents* a second `--repo <worktree>` server, and P3's lease is the only guard that would
+   survive one — but do not read this bullet as a claim about the box's current process list.
 3. **It ignores the filesystem's own evidence.** `eb9f65aa`'s tree had three live `vitest` processes
    running inside it when it was swept. A directory a process is standing in is not an orphan, and
    nothing asks.
@@ -298,10 +329,44 @@ for *both* "ahead" and "sideways", so a single-probe gate cannot see it. The ref
 would be lost:
 
 ```
-refusing: <incoming> has diverged from the live sha <live>.
+refusing: <incoming> is divergent from the live sha <live>.
 live has commits this tree does not: <git log --oneline <incoming>..<live>>
-deploy from a tree that merged origin/main, or pass --allow-unrelated.
+merge the live sha <live> — it is in this repo's object db even when it is not on
+origin/main — or pass --allow-unrelated.
 ```
+
+**CORRECTED 2026-08-22 (review pass 5): the last line used to read *"deploy from a tree that merged
+`origin/main`, or pass `--allow-unrelated`"*, and that advice is false on this box.** It is also the
+line an agent will act on, so it is the one part of this section that can itself cause a bad deploy.
+Measured 23:5xZ: the live sha `a81a0a30` is a merge commit on `cez/f28edef5`, and **neither**
+`git merge-base --is-ancestor a81a0a30 origin/main` nor `git merge-base --is-ancestor origin/main
+a81a0a30` exits 0. A tree that merges `origin/main` therefore stays `divergent` from live, because
+live never landed on `main` under that sha; merging `origin/main` cannot make a tree a descendant
+of a commit that is not on `origin/main`. The correct instruction names the **live sha itself** as
+the merge target — releases here are deployed from `cez/<id8>` tips, and those tips are pushed, so
+the live commit is reachable in this repo's object db even though no branch on `main` contains it.
+**The shipped string at `release-deploy.ts:430` still carries the old wording and must be updated to
+match this block** (it is a one-line template change; the `divergent`/`unresolved` logic around it
+is correct as shipped).
+
+**The steady state this produces, which is a property of the concurrency model and not a bug in
+B1.** Every task self-deploys from its own `cez/<id8>` tip. When that tip is the live sha and the
+same work later lands on `main` as a *different* commit — a squash, a rebase, or (as here) a merge
+commit that only ever existed on the task branch — then **every other task's forward deploy is
+`divergent` until one deploy re-anchors `live` onto a commit that is reachable from `main`.** So the
+gate does not fail once; it fails for every concurrent task, in a fleet where ten deploys a day is
+normal. That is the cost of the gate being correct, and it is paid until someone re-anchors.
+Re-anchoring is a deliberate operator act, not an automatic one: either merge the live sha into the
+deploying tree (which makes the next deploy an honest `descendant`) or deploy once with
+`--allow-unrelated`, having read the live-only commit list the refusal prints.
+
+**The `spec-to-deploy` deploy step must NOT pass `--allow-unrelated` on its own.** Decided here so
+the next implementer does not "fix" a red deploy step by adding the flag: an agent that force-
+deploys past a divergence discards, unreviewed, exactly the commits the refusal just listed, which
+is the harm P3 names. The deploy step's correct behaviour on `divergent` is to **refuse, surface the
+live-only commit list, and stop**, leaving the re-anchor to a human decision recorded per the
+procedure in "## Verification". Passing the flag is reserved for that explicit act, and per the Data
+models section below it now leaves a trace on the ledger.
 
 Overrides, and they are not interchangeable: **`--allow-unrelated`** forces through a divergent or
 an unresolvable-sha deploy; **`--rollback`** (already `ReleaseDeployOptions.rollback`,
@@ -384,7 +449,12 @@ go, and the call becomes `removeWorktree(repoRoot, worktreePath)` exactly as
 `workspace-worktrees.ts:315` already does. A branch is bytes; it is the only thing a continuation
 can re-materialize from. Deliberate branch deletion stays with retention.
 
-`isAncestorOf` itself is **kept** (B1 uses it), but it stops being reachable from a sweep.
+**CORRECTED 2026-08-22:** an earlier draft of this paragraph said `isAncestorOf` is **kept**, because
+B1 uses it. It does not. B1 shipped as its own five-valued `gitRelation`
+(`release-deploy.ts:120-128`), which calls `git merge-base --is-ancestor` directly, and
+`grep -rn isAncestorOf packages/*/src` at `a3e70792` returns only its own definition
+(`git-worktree.ts:578`) and one stale doc comment (`:662`). It therefore has **no caller at all**
+and is deleted — see *What is still open* #3.
 
 **C3. Liveness lease, next to the thing it protects.** The owning server writes
 `<repoRoot>/.ai/cezar/worktree-leases/<runId>.json` when it materializes a worktree, and re-stamps
@@ -506,10 +576,20 @@ source-derived identity.
 In order:
 
 1. `loadLedger(releasesDir).releases.find(r => r.id === ledger.current)?.sha`.
-2. If that entry exists but carries no `sha` (the schema makes it optional at `releases.ts:46`, for
+2. ~~If that entry exists but carries no `sha` (the schema makes it optional at `releases.ts:46`, for
    hand-staged trees), read the **live artifact's own stamp** through the symlink:
    `<linkPath>/packages/cezar/dist/.build-stamp.json`. Same principle as the rest of the spec: ask
-   the artifact.
+   the artifact.~~ **CORRECTED 2026-08-22 (review pass 5): step 2 was never shipped, and it is
+   hereby dropped rather than left standing as unbuilt work that reads as built.** `liveSha`
+   (`release-deploy.ts:129-142`) returns `{ error: '<path> does not identify the live artifact
+   sha' }` for exactly this case and B1 refuses on it. The shipped behaviour is therefore
+   fail-closed, which is the safe direction and is consistent with every other unresolvable-sha
+   path in the gate. Deciding it *as shipped* rather than implementing the fallback: a ledger entry
+   with no `sha` means a hand-staged release, i.e. a tree that already bypassed the build path, and
+   inferring its provenance from a stamp inside it would let a hand-staged artifact silently
+   re-acquire the authority the stamp exists to confer. The operator who hand-staged it is the
+   right person to type `--allow-unrelated`, and after the Data models change above that override
+   is now recorded on the ledger. **Do not implement step 2.**
 3. Otherwise **refuse**, with `--allow-unrelated` as the named way through.
 
 **The trap:** `loadLedger` degrades a missing *and* an unreadable ledger to `freshLedger()`
@@ -527,7 +607,9 @@ refuse. `loadLedger` itself is not changed; a second, narrower read is added bes
   on disk" and "record written" is where the previous incident lived
   (`.ai/specs/2026-08-22-cross-project-worktree-orphan-prune-safety.md`), so the lease inherits that
   ordering guarantee instead of inventing a second one. Ordinary single-repo task worktrees get a
-  lease from `createWorktree` (`git-worktree.ts:139`) on the same terms.
+  lease from `createWorktree` (`git-worktree.ts:139`) on the same terms. *(As shipped the lease for
+  an ordinary task worktree is written by the caller immediately after that call, at `run.ts:4189`,
+  not inside `createWorktree` — same ordering guarantee, one frame out.)*
 - **Heartbeat:** its own timer at `LEASE_HEARTBEAT_MS = 90_000`, matching `AUTOSAVE_INTERVAL_MS`
   (`workflows/run.ts:204`) for cadence but **not** sharing its arming. The periodic autosave is
   opt-in behind `CEZ_AUTOSAVE=1` (`run.ts:211`); a lease that only exists when autosave is enabled
@@ -549,9 +631,21 @@ refuse. `loadLedger` itself is not changed; a second, narrower read is added bes
 - **Deletion:** on clean settle, beside `discardWorkspaceWorktrees` (`run.ts:5666`) and wherever a
   run's worktrees are applied and released. A leaked lease is *not* a leak forever: it expires after
   `LEASE_STALE_MS`, and that expiry is the bounded route to genuine-orphan reclamation.
-- **Across a restart:** `manager.recover()` re-arms the heartbeat for every resumed run. Between
-  process death and recovery the lease is present but ageing, which declines the sweep, the safe
-  side, for at most `LEASE_STALE_MS`.
+- **Across a restart. CORRECTED 2026-08-22 (third amendment): this holds only for the resume paths
+  that funnel through `execute()`, and NOT for a continuation.** As shipped, `reviveQueuedRun`,
+  `reenterChain` and `reattachBrokeredRun` (`run.ts:2012` → `execute` at `:4021`) do re-materialize
+  and re-arm — `armWorktreeLeases` at `:4125` for the workspace case, lease written at `:4189` and
+  armed at `:4204` for the single-repo case. But **`runContinuation` (`run.ts:3370`) does not**: its
+  single-repo branch (`:3411-3414`) reuses `record.worktreePath` with no `writeWorktreeLease` and no
+  `armWorktreeLeases` anywhere in the method, and its workspace branch arms only inside
+  `if (live.length === 0)` (`:3424`, arming at `:3438`), i.e. only when the trees had to be rebuilt.
+  Since `dropActive` (`run.ts:2297-2299`) **deletes** the lease files when a run settles, a continued
+  run — the most common way work resumes on this box — occupies a live worktree with **no lease at
+  all**, which leaves the fail-open `findForeignOwner` snapshot as the only guard and reproduces the
+  incident's own shape. The fix and its coverage are item 2 of "What is still open". Original text,
+  left unchanged: *"`manager.recover()` re-arms the heartbeat for every resumed run. Between process
+  death and recovery the lease is present but ageing, which declines the sweep, the safe side, for
+  at most `LEASE_STALE_MS`."*
 
 ### Q7: how the deferred sweep is scheduled
 
@@ -657,7 +751,9 @@ the sweep's decision depends on; the rest are diagnostic (Q6).
 ```
 
 **`<repoRoot>/.ai/cezar/worktree-reaps.jsonl`** (C4/Q8, new). Append-only, one JSON object per line,
-never read by the runtime.
+never read by the runtime. *(In the shipped code the path is spelled `join(dataDir,
+'worktree-reaps.jsonl')` with `dataDir = join(project.root, '.ai/cezar')` (`project-context.ts:425,
+473`) — the same path as written here, but do not go looking for a literal `repoRoot` join.)*
 
 ```ts
 { at: string, runId: string, repoRoot: string,
@@ -665,10 +761,42 @@ never read by the runtime.
   autosave?: 'committed' | 'nothing-to-do' | 'refused' | 'failed', branchKept: true }
 ```
 
+**As actually shipped the record carries one more field than this.** `project-context.ts:473` builds
+it as `{ at, runId: outcome.id, repoRoot, ...outcome }`, and the spread lands **after** `runId`, so
+every line also carries the outcome's own `id` — the same value under a second name. Harmless (the
+file is append-only and never read by the runtime), but a reader writing a parser against this
+schema will not expect it. Either drop `runId` and let the spread supply `id`, or spread first and
+keep `runId` as the single name; do not leave both.
+
 **`ReleaseEntry`** (`releases.ts:41-59`), `builtAt` stops being deploy time and becomes
-`stamp.builtAt`; `dirty?: boolean` and `stale?: true` are added. The schema is `.passthrough()` with
-per-field `.catch(undefined)`, so older cezars round-trip the new fields unharmed, the
-cross-version-state rule that schema already documents.
+`stamp.builtAt`; `dirty?: boolean`, `stale?: true` and `unrelated?: true` are added. The schema is
+`.passthrough()` with per-field `.catch(undefined)`, so older cezars round-trip the new fields
+unharmed, the cross-version-state rule that schema already documents.
+
+**`unrelated?: true` is not shipped yet and must be, and this is a gap the review pass found rather
+than a design note.** As of `a3e70792` the *only* override recorded on a ledger row is
+`stale: z.literal(true).optional()` (`releases.ts:51`), written at `release-deploy.ts:528` from
+`options.allowStaleArtifact`. `--allow-unrelated` writes **nothing anywhere**: it suppresses the
+refusal at `:423` and `:427-430` and leaves no trace in `deploy.json`, in the release directory, or
+in the journal beyond the transient log line. For a gate whose entire purpose is preventing the
+*silent* loss of commits that are live, a forced override that is itself silent reproduces the
+defect one layer up — six months from now nobody can tell which release was force-activated over a
+divergence. So:
+
+```ts
+/** Set when --allow-unrelated suppressed a divergent / unresolved / unreadable-ledger refusal. */
+unrelated: z.literal(true).optional().catch(undefined),
+/** The live-only commits that were overridden, exactly as printed at force time. */
+unrelatedLostCommits: z.string().optional().catch(undefined),
+```
+
+written in the same `entry` literal that already carries `...(options.allowStaleArtifact ? { stale:
+true } : {})` (`release-deploy.ts:525-530`), whenever `options.allowUnrelated` suppressed a
+`divergent`, an `unresolved`, or a `live.error` refusal — and **not** when the flag was passed but
+no refusal fired, so the field means "this deploy was forced", not "the operator typed a flag".
+`unrelatedLostCommits` holds the `git log --oneline <incoming>..<live>` output the refusal computes
+at `:428`, which is otherwise discarded. Mirrored in the P2 row of "## Phases" and asserted in item
+1 of "### What is still open".
 
 **`PruneOrphansOptions`** (`git-worktree.ts:589-604`) gains `leaseDir?: string`,
 `leaseStaleMs?: number`, `now?: () => number` (test seam), and `onOutcome?: (o) => void` (the C4
@@ -714,7 +842,7 @@ reads as E2E step 15's exit-0 no-op assertion.
 |---|---|---|---|---|
 | **P0, stop the loss** | C1 autosave-before-delete + `kept` outcome, **C1a worktree-root proof before any autosave**, C2 drop the branch argument, C4 log `removed` from `project-context.ts` and append `worktree-reaps.jsonl` (+ its rsync exclude) | `git-worktree.ts`, `server/project-context.ts`, `index.ts`, `server-install/release-deploy.ts` (exclude only) | nothing | **yes, ship first** |
 | **P1, honest artifact** | A1 stamp writer + build-script wiring + partial-build invalidation, A2 the five refusals, A3 release id / ledger `sha` / `builtAt` from the stamp | `scripts/write-build-stamp.mjs` (new), root `package.json`, `packages/cezar/package.json`, `server-install/release-cli.ts`, `server-install/release-deploy.ts`, `server-install/releases.ts` | nothing | yes |
-| **P2, no rollback by accident** | B1's four-valued relation gate (descendant/equal proceed, strict ancestor no-ops, divergent and unresolved refuse) with `--allow-unrelated`, B2 the messages, the non-empty-`deploy.json` probe from Q5 | `server-install/release-deploy.ts`, `server-install/releases.ts` | P1's stamp | no |
+| **P2, no rollback by accident** | B1's four-valued relation gate (descendant/equal proceed, strict ancestor no-ops, divergent and unresolved refuse) with `--allow-unrelated`, B2 the messages **naming the live sha as the merge target, not `origin/main`**, the non-empty-`deploy.json` probe from Q5, and `ReleaseEntry.unrelated?: true` + `unrelatedLostCommits` recorded whenever `--allow-unrelated` suppressed a refusal | `server-install/release-deploy.ts`, `server-install/releases.ts` | P1's stamp | no |
 | **P3, fail-closed sweep** | C3 lease write/heartbeat/expiry/delete, the prune-side lease read, C5 deferred sweep on an owned `unref`'d timer | `workspace/worktree-lease.ts` (new), `workspace/workspace-worktrees.ts`, `git-worktree.ts`, `workflows/run.ts`, `server/project-context.ts`, `index.ts` | P0 (shares the report shape) | yes |
 | **P4, visibility** | in-band `builtAt`/`dirty` on `/ready` and `/health`, reap run events published to the cockpit | `server/runtime-info.ts`, `server/project-context.ts` | P0, P1 | yes |
 
@@ -722,6 +850,248 @@ reads as E2E step 15's exit-0 no-op assertion.
 recoverable inconvenience, touches four files (`git-worktree.ts`, `server/project-context.ts`,
 `index.ts`, and `server-install/release-deploy.ts` for the rsync exclude alone), and depends on
 nothing, including on P1, which is the half that takes longer to get right.
+
+## As shipped
+
+Added 2026-08-22 (second amendment). Everything in this section was verified by **reading the merged
+tree at `a3e70792`**, not by trusting `362865ec`'s commit message or the prior step's handoff. Line
+numbers here are current; line numbers everywhere else in this spec are pre-implementation.
+
+**The commit.** `362865ec`, *"fix: pruneOrphans autosaves before removing, releases carry a build
+stamp, and worktree leases stop live-tree reaping"*, 20 files, +1328/−185, merged to `origin/main`
+as `a3e70792`. It ships P0, P1, P2, P3 and the `/ready` half of P4 together; the phase table above
+kept them separable and they were not in the end shipped separately.
+
+| Phase | Landed? | Where it is now |
+|---|---|---|
+| **P0** | yes | `git-worktree.ts:667` `pruneOrphans`; worktree-root proof at `:708` (`rev-parse --show-toplevel`, canonicalised, and `!== repoRoot`); `autosaveCommit(worktreePath, 'run finalize')` at `:709`; `refused`/`failed` → `outcome: 'kept'`, directory left on disk, `:710-715`. **No `git branch -D` on any path**: every outcome literal carries `branchKept: true` (`:687`, `:694`, `:703`, `:713`, `:719`). Reap log: `project-context.ts:471-473` appends `worktree-reaps.jsonl`; staging excludes it at `release-deploy.ts:230`. |
+| **P1** | yes | `scripts/write-build-stamp.mjs` (18 lines) writes `packages/cezar/dist/.build-stamp.json` `{stampVersion:1, sha, builtAt, dirty, version}` via tmp+`rename`. Root `package.json:17-19`: `build` = `build:server && build:web && check:pack && build:stamp` (`:17`), and `build:server`/`build:web` (`:18-19`) each `rm -f` the stamp **first**, which is Q1's partial-build invalidation, shipped. Gates at `release-deploy.ts:402-441`, helpers `readBuildStamp:90-104`, `staleSource:106-118`. Release id from `stamp?.sha` at `:444-446`; ledger row writes `sha`/`version`/`builtAt`/`dirty` (+`stale`) at `:527-528`, schema `releases.ts:44-52`. |
+| **P2** | yes, with the documented ancestor deviation and two named deviations | `gitRelation` at `release-deploy.ts:120-128` returns `equal`/`descendant`/`ancestor`/`divergent`/`unresolved`. Strict ancestor → `ancestorNoop`, **exit 0, no flip** (`:426`, `:437-440`). `divergent`/`unresolved` → refused unless `--allow-unrelated` (`:427-430`). Unparseable/absent-but-present `deploy.json` → `live.error` → refused (`:423`), i.e. Q5's fail-open trap is closed — **but Q5's step 2 (fall back to the live artifact's own stamp when the ledger row carries no `sha`) was NOT shipped**: `liveSha` (`:129-142`) returns `does not identify the live artifact sha` and B1 refuses. That deviation is now decided as permanent and step 2 is dropped (see Q5). Second deviation: **`--allow-unrelated` writes no ledger trace** — `stale` (`releases.ts:51`, set at `:528`) is the only override field — which "## Data models" now closes with `unrelated?: true`. |
+| **P3** | **yes, with one gap** | `workspace/worktree-lease.ts` (59 lines), `LEASE_HEARTBEAT_MS = 90_000`, atomic tmp+`rename`. Written at `workspace-worktrees.ts:132` and `run.ts:4189`; heartbeat interval `run.ts:6091-6096` (`unref`'d); removed on settle/dispose via `clearWorktreeLeases` (`run.ts:6099-6104`, called at `:1094` and `:2299`). Prune side reads it itself in `leaseDeclineReason` (`git-worktree.ts:622-646`): fresh heartbeat **or** malformed/unparseable lease both decline; `DEFAULT_LEASE_STALE_MS = 15 min` (`:620`) with `CEZ_LEASE_STALE_MS` override. Deferred sweep: `project-context.ts:463-481` and `index.ts:737-751`, both `setTimeout(…, CEZ_SWEEP_DELAY_MS ?? 5 min)` and `unref`'d; the project-scoped timer is cancelled by `teardown` (`project-context.ts:512-513`). Docs: `.env.example:264,266`, `README.md:553-554`. **The gap:** a *continued* run holds no lease. `dropActive` (`run.ts:2297-2299`) deletes the lease at settle and `runContinuation` (`run.ts:3370`) never writes it back — the single-repo branch (`:3411-3414`) reuses `record.worktreePath` with no write and no arm, and the workspace branch arms only inside `if (live.length === 0)` (`:3424`), i.e. only when the trees were absent and had to be rebuilt, never when a live tree is reused. So on the most common resume path C3's guard is simply not there. Fix and coverage: item 2 of "What is still open"; the Q6 lifecycle bullet is corrected in place. |
+| **P4** | **half** | `/ready` half landed: `DeployInfo` gained `builtAt`/`dirty` (`runtime-info.ts:64-70`), populated from the ledger entry at `:118-121`. **Not landed:** "reap run events published to the cockpit": the only sink for a reap outcome is `worktree-reaps.jsonl`. P4 remains open work, not shipped work. |
+
+### Two corrections applied after the last review pass
+
+Both were made during the earlier chain's `run-tests` step, i.e. **after** the third `review-spec`
+pass signed off, so they were never themselves reviewed as spec. Re-read and confirmed correct here:
+
+1. **Gate ordering.** The reviewed draft put the new P1/P2 gates at the very top of
+   `runReleaseDeploy`. That broke the pre-existing "install path is a directory, not a release
+   symlink" structural check and produced the wrong error when both conditions held. The symlink
+   check now runs **first and unconditionally**, ahead of `if (!rollback)` (`release-deploy.ts:391-398`),
+   with the reason stated in-comment. Rollback remains fully exempt from the forward gates
+   (`:401-405`), which is the correction review pass 3 demanded.
+2. **Test timing.** `project-context.test.ts`'s two AC4 tests asserted on `pruneOrphans`'s effect
+   immediately after `context()` + `disposeAll()`. P3 made that sweep deferred, and `disposeAll()`
+   cancels a still-pending timer, so the assertions raced. They now set `CEZ_SWEEP_DELAY_MS: '0'`
+   and wait for the sweep's own `worktree-reaps.jsonl` record before disposing.
+
+### Three residues this re-read turned up
+
+Named here rather than silently fixed, because this step writes the spec and does not touch code.
+
+1. **`trunkRef` is now dead, and its documentation is now false.** `PruneOrphansOptions.trunkRef`
+   (`git-worktree.ts:606`) is still passed by both call sites (`index.ts:742`,
+   `project-context.ts:467`) and `pruneOrphans` never reads it, because C2 removed the `branch -D` it
+   gated. `isAncestorOf` (`:578`) has **no production caller left**. The doc comments at `:604-607`
+   and `:661-662` still describe a candidate that "only loses its BRANCH when `opts.trunkRef` proves
+   it fully merged", which is no longer what the function does. Per this workspace's correct-in-place
+   rule that comment is exactly the kind of stale entry the next session reads first: either delete
+   the option and its two call sites, or mark the comments superseded, pointing at C2.
+2. **The boot-root sweep writes no durable reap record.** `onOutcome` (and therefore
+   `worktree-reaps.jsonl`) is wired only in `project-context.ts:471-473`. The boot-root sweep in
+   `index.ts:737-751` still logs to the console alone. That is the asymmetry with the worst possible
+   placement: the incident's ownership claim lived in the **boot root's** `runs.json`, so the one
+   sweep with no forensic trail is the sweep over the workspace root. Acceptance criterion P0 asked
+   for project-context to log removals "the way `index.ts:740` does"; it was read literally and
+   satisfied, and it left the boot root behind. Closing it is ~6 lines in `index.ts`: an `onOutcome`
+   mirroring `project-context.ts:471-473`, plus the `appendFileSync` import that `index.ts:5` does
+   not currently have.
+3. **`readWorktreeLease` has no caller at all.** `worktree-lease.ts:53-58` is exported and never
+   called: re-verified at `a3e70792`, neither production code nor any test file references it.
+   `pruneOrphans` deliberately reads the lease itself so it can tell *unreadable*
+   from *absent*, a distinction `readWorktreeLease`'s catch-all `return undefined` erases, and the
+   one the "unreadable lease also declines" criterion turns on. Keep it only if a caller needs the
+   lossy read; otherwise it is a trap for whoever reaches for it next.
+
+### What is still open
+
+This is the whole instruction set for the implement step, and every choice the residues above left
+open is decided here. Nothing below needs a further judgement call.
+
+1. **The automated coverage for the deploy gates and the lease lifecycle does not exist, and it must
+   be green BEFORE the deploy step.** Right now the only proof that A2 and B1 behave is a human
+   reading the code, and those gates run on **every** deploy from this box. See the inventory table
+   in "## Verification" for what is missing and what merely looks covered. Write, in the existing
+   suites — do not start parallel files:
+
+   - `packages/cezar/src/server-install/release-deploy.test.ts` (steps 5–9b): stamp sha ≠ source HEAD
+     refuses and the message names **both** shas; stamp sha == HEAD proceeds (the control that proves
+     the gate is not always-refuse); stamp missing refuses; truncated/unparseable stamp refuses; a
+     tracked file under `packages/*/src` touched to `builtAt + 5 s` refuses and to `builtAt − 5 s`
+     proceeds; under `--allow-stale-artifact`, `deploy.json.sha` **and** `deploy.json.builtAt` come
+     from the stamp, not from source HEAD and not from the deploy time; all five `gitRelation` rows —
+     `descendant` and `equal` proceed, strict `ancestor` exits 0 with **no flip, no restart and no
+     ledger row**, `divergent` refused and then forced through by `--allow-unrelated`, `unresolved`
+     the same; a forced divergent deploy (`--allow-unrelated`) writes **`unrelated: true` on the
+     ledger row** together with `unrelatedLostCommits`, and a deploy that passes the flag while no
+     refusal fires writes **neither** (the field means "forced", not "flag typed");
+     `deploy.json` absent → allowed, `deploy.json` present but unparseable → refused; a ledger row
+     whose `sha` is absent → refused, per Q5's now-dropped step 2; the divergent refusal message
+     names **the live sha** as the merge target and does **not** say `origin/main`; and
+     `--rollback` still activates an older release **with no stamp present**. Note that the two
+     existing fixture helpers (`:92`, `:104`) hard-code `builtAt: '2099-01-01T00:00:00.000Z'`, so a
+     staleness test must write its own stamp rather than reuse them.
+   - `packages/cezar/src/git-worktree.test.ts`: the `['branch','-D',…]` argv spy (step 3), and the
+     stubbed-C1 and stubbed-C1a negative controls (steps 1 and 3b), without which those two tests
+     could pass against the pre-fix behaviour.
+   - `packages/cezar/src/server/project-context.test.ts`: step 12b's three assertions — with
+     `CEZ_SWEEP_DELAY_MS` unset, `build()` performs no prune inline; after the timer, it does; after
+     `dispose()`, it never does.
+   - A lease-lifecycle test for step 12 (heartbeat keeps updating, lease removed on clean settle,
+     resumed run re-arms it). This is the coverage whose absence let item 2 below ship unnoticed, so
+     it is the one to write first.
+
+2. **`runContinuation` adopts a live worktree without a lease. Fix it, and cover it.** Verified at
+   `a3e70792`: `dropActive` (`run.ts:2297-2299`) calls `clearWorktreeLeases`, which **deletes** the
+   lease files when a run settles, and `runContinuation` (`run.ts:3370`) — the path every user
+   "continue" and every restart-continuation takes — never writes them back. Its single-repo branch
+   (`:3411-3414`) simply sets `cwd = record.worktreePath`, with no `writeWorktreeLease` and no
+   `armWorktreeLeases` anywhere in the method; its workspace branch arms leases only inside
+   `if (live.length === 0)` (`:3424`, arming at `:3438`), i.e. only in the case where the worktrees
+   were **absent** and had to be re-materialized, never in the case where a live tree is reused. Net
+   effect: **a continued run occupies a live worktree with no lease at all.** For the most common
+   way work resumes on this box, the fail-open `findForeignOwner` snapshot is again the only thing
+   between a continued run and the sweep — the incident's exact shape. (This item no longer leans on
+   P6.2's second `--repo <worktree>` server, which was alive at the 13:12Z incident and is **gone**
+   as of 23:5xZ; the gap stands on its own, because `findForeignOwner` is fail-open for an *absent*
+   claim regardless of how many boot roots exist.) The fix:
+
+   - single-repo case: `writeWorktreeLease` for the repo root owning `record.worktreePath`, then
+     `armWorktreeLeases(state, runId, [<that root>])`;
+   - workspace case: the same for **every** entry of `record.workspaceWorktrees` that still exists on
+     disk, unconditionally — not only when `live.length === 0`.
+
+   Write the lease explicitly rather than relying on `armWorktreeLeases` alone. `touchWorktreeLeases`
+   (`worktree-lease.ts:40-46`) does create the file, since it calls `writeWorktreeLease` — but not
+   until the first `LEASE_HEARTBEAT_MS` tick 90 s later, and a sweep can land inside that window.
+
+   Then a regression test that a continued run's lease file is present and heartbeated. **And an E2E
+   consequence:** verification step 13's three concurrent runs must include at least one *continued*
+   run, or the E2E goes green having never exercised this path.
+
+3. **The runtime E2E (steps 13–19) has not run anywhere.** This is the acceptance criterion the
+   whole spec turns on, and it needs the box. Nothing else in this list substitutes for it.
+
+4. **Close residue 2: wire `onOutcome` into the boot-root sweep.** ~6 lines: an `onOutcome` added to
+   the `pruneOrphans` options at `index.ts:740-746`, mirroring `project-context.ts:471-473` with the
+   boot root as `repoRoot`, plus the `appendFileSync` import that `index.ts:5` does not yet have. **This is a prerequisite for Verification step 14b** whenever the boot
+   root is one of the repos under test, because without it that assertion has nothing to read.
+
+5. **Close residue 1 by DELETING the dead option, not by re-documenting it.** Concretely:
+   - remove `PruneOrphansOptions.trunkRef` and its doc comment (`git-worktree.ts:603-606`);
+   - remove the two call sites that still pass it, `index.ts:742` and `project-context.ts:467`;
+   - remove `isAncestorOf` (`git-worktree.ts:578-582`), which has no production caller and no test
+     caller. Its `isSafeGitRef` import stays used by six other call sites in the same file
+     (`:69, :154, :473, :496, :555`), so nothing else in the import block changes;
+   - rewrite the `pruneOrphans` doc paragraph at `git-worktree.ts:656-665` so it no longer claims a
+     branch-delete path that C2 removed. Two sentences there are now false, not one: the
+     "only loses its BRANCH when `opts.trunkRef` proves it fully merged" claim at `:661-662`, and
+     the "omitting `opts` entirely reproduces today's unconditional delete-both behavior
+     byte-for-byte" claim at `:664-665`, which P0's autosave also invalidated. Say instead that the
+     branch is **always** kept and that a removal is always preceded by an autosave, and point at
+     this spec's Half C.
+
+   Deleting beats a `SUPERSEDED` lead-in in this one case because the comment documents an option
+   that is itself going away, so there is no surviving mechanism to redirect a reader to. Test
+   fallout is known and small: `git-worktree.test.ts:620, 637, 651, 670` pass `trunkRef: 'main'`
+   (drop the property, the assertions are unaffected because the branch is kept either way), and
+   `:698`'s *"opts supplied but `trunkRef` omitted defaults to the SAFE direction: branch always
+   kept"* case is subsumed by C2. Keep that test and rename it to state the now-unconditional
+   contract rather than deleting the coverage.
+
+6. **Close residue 3 by deleting `readWorktreeLease`** (`worktree-lease.ts:53-58`). It has **no
+   caller anywhere**, production or test (re-verified at `a3e70792`). `leaseDeclineReason`
+   (`git-worktree.ts:622-646`) reads the lease file itself precisely because this helper's catch-all
+   `return undefined` erases *unreadable* from *absent*, which is the distinction the "unreadable
+   lease also declines" acceptance criterion turns on. Leaving it exported is therefore a trap for
+   whoever reaches for it next, not a convenience.
+
+7. **P4's cockpit reap events are explicitly OUT OF SCOPE for this spec.** Q8 names the cockpit as
+   sink 2 in one sentence of prose and nothing else: there is no event type, no payload shape, no
+   publisher, "## API contracts" adds no route for it, and "## Verification" has no step that would
+   prove it works. Specifying it properly is a design task of its own, and attaching an unverified
+   event to a spec whose only remaining work is a runtime E2E would dilute that E2E rather than
+   strengthen it. The durable sink that the incident's forensics actually needed
+   (`worktree-reaps.jsonl`, sink 1) is shipped. File the cockpit half as its own task. **It is not
+   filed as of this amendment**; the command is:
+
+   ```bash
+   cezar todo add "Publish worktree reap outcomes as cockpit run events (P4 sink 2)" \
+     --context "Spec .ai/specs/2026-08-22-live-worktree-reaped-mid-run.md Q8 names the cockpit as sink 2 for a reap outcome but never specifies it: no event type, no payload, no publisher, no verification step. Today the only sink is <repoRoot>/.ai/cezar/worktree-reaps.jsonl, written from project-context.ts:471-473." \
+     --acceptance "an event type and payload shape are specified, and the publisher named, before any code" \
+     --acceptance "a reap outcome for a directory whose id matches a known run reaches that run's cockpit timeline" \
+     --acceptance "a reap outcome for a directory no run owns still lands in worktree-reaps.jsonl and is not silently dropped" \
+     --priority low
+   ```
+
+   Until that task lands, the P4 row in the table above stays **half**, and that is the honest
+   state of it.
+
+8. **Apply the three unmade in-place corrections that "Prior decisions this spec amends" demands.**
+   That section lists seven entries; only one of them has actually been marked. Checked at
+   `a3e70792`, so the next reader neither redoes done work nor skips undone work:
+
+   - **#3 is already applied.** The `CORRECTED 2026-08-22 by 2026-08-22-live-worktree-reaped-mid-run.md`
+     banner sits at the top of `.ai/specs/2026-08-22-cross-project-worktree-orphan-prune-safety.md`,
+     landed in `362865ec`. Do not write it again.
+   - **#4, #5 and #7 need no file edit.** #4 and #5 record that a prior decision's *shape* is
+     unchanged (blue-green release identity; the ledger's permissive missing `sha`), so nothing in
+     either file became false. #7 is upheld explicitly, and `.ai/deploy-targets.json` must **not** be
+     touched.
+
+   The remaining three are unmade, and the code session that was supposed to carry them is over, so
+   nothing downstream makes them unless this list does:
+
+   a. **#2 — `.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md:91`, row W7.** The cell still
+      reads *"Orphans are reclaimed by the existing per-project prune on next boot of that project's
+      manager"*, which is now false in three ways at once. Add a
+      `**CORRECTED 2026-08-22 by 2026-08-22-live-worktree-reaped-mid-run.md:**` lead-in to that cell,
+      leaving the original sentence below it unchanged, stating that the prune now (i) autosaves the
+      tree onto its `cez/<id8>` branch before removing anything and keeps the directory when that
+      autosave refuses or fails, (ii) **always** keeps the branch — there is no `branch -D` on this
+      path any more — and (iii) runs on a deferred timer roughly 5 minutes after context build, not
+      inline at boot. W7 is the entry that made this sweep a routine operation rather than an
+      exceptional one, so it is the one a reader is most likely to act on.
+   b. **#6 — `AGENTS.md:13`**, the sentence *"**Build first** — `stage` is an rsync, not a build, so
+      a stale `dist/` ships old bytes under a new label"*, inside the
+      `CORRECTED 2026-08-21 — on prod-host` bullet. The prose stays true and stops being
+      load-bearing: append that since `362865ec` it is **enforced**, not merely asked for — `npm run
+      build` writes `packages/cezar/dist/.build-stamp.json` (`package.json:17-19`) and
+      `server-deploy` refuses to stage when that stamp is missing, unreadable, older than
+      `packages/*/src`, or names a sha that disagrees with the source checkout's HEAD
+      (`release-deploy.ts:90-128`, gated at `:391-405`). Without that note the next reader assumes
+      the instruction is still the only thing between them and a stale ship, which is exactly the
+      assumption the incident falsified.
+   c. **#1 — the corpus doc**
+      `/var/lib/cezar/loki-labs/notion-export/knowledge/sections/324-2026-08-22-blue-green-source-sha-is-a-label-not-a-checkout.md`.
+      Its diagnosis is correct and stands; its prescribed *workaround* — "build from an isolated
+      worktree checked out at the exact target sha" — is superseded by A1/A3, under which the stamp
+      is the machine authority and `--sha` is a cross-check (Q4). **This one must NOT be edited in
+      place.** It is a mounted KB document, and this workspace's rule is that a mounted doc is
+      corrected through a reviewed proposal, never by writing to the mount. Append a single NDJSON
+      line to `CEZ_KB_WRITE_FILE` instead — `{"op":"supersede", "target":
+      "324-2026-08-22-blue-green-source-sha-is-a-label-not-a-checkout", "by":
+      "2026-08-22-live-worktree-reaped-mid-run", "date":"2026-08-22", "note": "<what replaced the
+      workaround>"}` — as **`seq: 1`, not `seq: 0`**: the run's `CEZ_KB_WRITE_FILE` already holds one
+      line, a `seq: 0` `upsert` of `knowledge/2026-08-22-live-worktree-prune-implementation.md` whose
+      `supersedes` array already names `notion-8d2aa351272c`, the same corpus document. Two claims on
+      one target from one run is how a proposal review stalls, so make the new line a `supersede` op
+      that continues the sequence rather than a second, competing assertion — carrying its own `seq`
+      (counting up across every line appended to that file
+      this run; read the file first if earlier turns already wrote to it), `runId` and `createdAt`,
+      and let it land via `cez kb proposals`. A proposal is reviewed and applied later, so this step
+      ends with the line appended, not with the corpus changed.
 
 ## Risks
 
@@ -731,10 +1101,15 @@ nothing, including on P1, which is the half that takes longer to get right.
 - **Leases are a new write path.** One small file per repo per live run, rewritten on a heartbeat.
   Bounded by concurrent runs × granted repos (10 × 10 today). A leaked lease only ever *delays* a
   reclaim by `LEASE_STALE_MS`.
-- **P3 does not bind processes that predate it.** The long-lived `--repo <worktree>` server on the
-  box today will not write or honour leases until it is restarted. P3 must ship with a sweep of
-  stray `cezar serve` processes, and the runbook should say that a cockpit booted from a worktree
-  prunes the real project roots.
+- **P3 does not bind processes that predate it.** A `cezar serve` started before P3 will neither
+  write nor honour leases until it is restarted, and it prunes the real project roots regardless of
+  which boot root it was launched from. **The specific long-lived `--repo <worktree>` server this
+  bullet used to name is gone** — measured 2026-08-22 23:5xZ, `ps -eo pid,lstart,args | grep
+  cezar/dist/index.js` returns exactly one process, pid 373697, started 23:23:55, on
+  `/opt/cezar/…`. The risk is structural, not a claim about the current process list, and it is now
+  discharged as an **executable precondition on Verification step 13** rather than as an
+  instruction. The runbook should still say that a cockpit booted from a worktree prunes the real
+  project roots.
 - **C5 leaves orphans on disk ~5 minutes longer.** Disk is the cheap resource in this trade; the
   predecessor spec already established "directory gone, branch kept" as the reclaim contract.
 - **C1 costs a commit on the prune path.** `autosaveCommit` already refuses mid-merge and
@@ -773,7 +1148,56 @@ Gates, as `AGENTS.md` → **Validation** actually defines them: `npm run typeche
 touched, `npm run build` followed by `npm run test:package`, which packs the tarball and therefore
 needs a completed `npm run build`. **There is no `lint` script**: neither the root
 `package.json` nor any of the four workspace packages defines one, and the repo carries no
-eslint/biome/oxlint config, so `npm run lint` exits `Missing script: lint`. Narrow a run with
+eslint/biome/oxlint config, so `npm run lint` exits `Missing script: lint`.
+
+**Run them in this order, because P1 can be tripped procedurally.** Anything that ends in a deploy
+goes `npm ci` → `npm run typecheck` → `npm test` → **`npm run build`** → `server-deploy`, with the
+build last. The reason is P1's own invalidation rule pointed back at the operator: root
+`package.json:36` is `"pretypecheck": "npm run build:server"`, and `build:server` and `build:web`
+each begin with `rm -f packages/cezar/dist/.build-stamp.json` (`package.json:18-19`). So a
+`typecheck` run *after* a `build` deletes the stamp that build just wrote, and the very next
+`server-deploy` is refused with
+`<source>/packages/cezar/dist/.build-stamp.json is absent, run npm run build first`
+(`release-deploy.ts:92`). That is a procedural miss whose message is indistinguishable at a glance
+from step 16's genuine stale-artifact refusal, so it gets debugged as a bug in the gate.
+**A `build` that precedes a `typecheck` must be repeated after it.**
+
+**And there is a second precondition, ahead of `npm run build`, that B1 itself created: re-anchor
+the tree onto the live sha, or the deploy is refused before it ever reads the stamp.** This is not
+hypothetical. Measured 2026-08-22 23:5xZ, with the gates live as `20260822T232351Z-a81a0a30`:
+
+```bash
+LIVE=$(jq -r --arg c "$(jq -r .current /opt/cezar-releases/deploy.json)" \
+  '.releases[]|select(.id==$c)|.sha' /opt/cezar-releases/deploy.json)
+git merge-base --is-ancestor "$LIVE" HEAD    # exit 0 ⇒ forward deploy will pass B1
+```
+
+`$LIVE` is `a81a0a30`, a **merge commit on `cez/f28edef5`**. Both
+`git merge-base --is-ancestor a81a0a30 origin/main` and
+`git merge-base --is-ancestor origin/main a81a0a30` exit **1**, so `gitRelation(incoming=origin/main,
+live=a81a0a30)` is `divergent` and `release-deploy.ts:427-430` refuses. Four commits are live-only
+against this checkout's `HEAD`.
+
+So, when that probe exits non-zero: **`git merge origin/main` is NOT sufficient**, because the live
+sha is not on `origin/main` and merging `origin/main` cannot make the tree a descendant of a commit
+that `origin/main` does not contain. Either
+
+- **merge the live sha itself** — `git merge "$LIVE"` — which works because releases here are
+  deployed from pushed `cez/<id8>` tips, so the live commit is in this repo's object db even with
+  no `main` branch containing it; this is the default, and it makes the next deploy an honest
+  `descendant`; or
+- **deploy once with `--allow-unrelated`**, having first read the live-only commit list the refusal
+  prints, to re-anchor `live` onto a commit reachable from `main`. This is an operator decision, not
+  the deploy step's (see "### Half B"), and after the Data models change it is recorded on the
+  ledger as `unrelated: true`.
+
+**That merge moves `HEAD`, and therefore invalidates the build stamp exactly the way a post-build
+`typecheck` does.** So the full mandatory order is: re-anchor probe → merge (if needed) →
+`npm ci` → `npm run typecheck` → `npm test` → **`npm run build`** → `server-deploy`. **E2E steps 14
+and 16 take this same precondition**, and step 15's ancestor fixture must be built relative to the
+re-anchored live sha, not to `origin/main`.
+
+Narrow a run with
 `npm test -- <path>`; `AGENTS.md` explicitly forbids `npx vitest`, which reaches past the pinned
 devDependency and fetches a different version. The existing suites these extend are
 `packages/cezar/src/git-worktree.test.ts` (which already has a `pruneOrphans (real git)` describe at
@@ -783,13 +1207,49 @@ devDependency and fetches a different version. The existing suites these extend 
 `:258`), and `packages/cezar/src/server-install/{release-deploy,release-cli,deploy-strategy}.test.ts`.
 Extend those files; do not start parallel ones.
 
-**Gates green is necessary and not sufficient here.** Steps 13–18 are the authoritative gate, and
+**Gates green is necessary and not sufficient here.** Steps 13–19 are the authoritative gate, and
 until they have actually run on the box this ships as **QA Needed**, not Done.
+
+**Status of this section as of the third amendment (2026-08-22).** The previous draft of this
+paragraph claimed "Steps 1–12b exist as code and were exercised". **That was false**, and it was the
+most load-bearing false sentence in the spec: it told an implementer that only the runtime E2E
+remained, which would ship a deploy gate that now stands between every task on this box and
+production with **no** automated proof that it refuses anything. A gate that over-refuses bricks
+every deploy from here; a gate that under-refuses is the original hole, still open. Re-counted
+against `a3e70792`:
+
+| Step | Code? | Where it is, or why it is not |
+|---|---|---|
+| 1 | **partial** | The autosave-then-remove case is `git-worktree.test.ts:562`. The negative control this spec demands — stub C1 out and assert the test fails — does **not** exist, so the test cannot yet prove it would catch the pre-fix behaviour. |
+| 2 | yes | Mid-merge tree → `kept`, nothing committed. |
+| 3 | **partial** | `git-worktree.test.ts:562` asserts the branch **still exists**, which this spec itself says proves nothing (a merged-branch path satisfies it for the wrong reason). The `['branch','-D',…]` argv spy is not implemented. |
+| 3b | **partial** | The C1a fixture exists; the "stub the C1a guard out and assert a parent-repo commit appears" negative control does not. |
+| 4 | yes | `project-context.test.ts` removal-log assertions, with the zero-candidate control. |
+| 5, 6, 7, 8, 9, 9b | **none at all** | `server-install/release-deploy.test.ts` has 17 `it()`s and **not one tests the new gates**. `build-stamp` appears in that file exactly twice (`:92`, `:104`), in the two fixture helpers, both writing `builtAt: '2099-01-01T00:00:00.000Z'` — i.e. the fixtures exist so the *pre-existing* tests survive the gate, and that far-future `builtAt` means `staleSource` can never fire in any of them. `grep -rn 'allowUnrelated\|allowStaleArtifact\|refuseDirty\|sourceHead\|already live' --include='*.test.ts'` over the whole repo returns **nothing**. |
+| 10 | yes | Fresh lease declines with `validIds` empty and `findForeignOwner` returning `undefined`. |
+| 11 | **partial** | Staleness and corrupt-JSON declines are covered; the mode-000 unreadable case and the "lease directory does not exist at all" case are not separately asserted. |
+| 12 | **none** | No lease-lifecycle test anywhere. `git-worktree.test.ts` is the only test file that mentions leases at all, and it covers only the prune-side decline of steps 10/11. Nothing asserts that the heartbeat keeps updating, that a clean settle removes the lease, or that a resumed run re-arms it — which is precisely how the `runContinuation` gap (item 2 of "What is still open") shipped unnoticed. |
+| 12b | **none** | Nothing asserts that `build()` performs no prune inline, that the deferred timer fires, or that `dispose()` cancels it. C5's whole contract is unexercised. |
+
+`npm ci`, `npm run typecheck` and `npm test` were run **by an earlier step, not by this amendment**,
+and reported `Test Files 5 failed | 528 passed (533)`, with all five failures individually
+re-checked in isolation and attributed to two `AGENTS.md`-documented pre-existing host issues plus
+host load (measured 25–31, several concurrent tasks each running a full suite on this shared box),
+reproduced against a clean control worktree at the same base and not reproduced by this diff in
+isolation. **That is second-hand here**: this amendment re-read the code, it did not re-run the
+gates.
+
+So **two** things stand between this spec and Done, not one: the missing unit and integration
+coverage tabulated above (item 1 of "What is still open", which must be green **before** the deploy
+step, because the gates it covers run on every deploy from this box), and steps 13–19, the runtime
+E2E on `prod-host`, which have **not run anywhere**. That is why the status line says QA
+Needed.
 
 **P0 — unit, `packages/cezar/src/git-worktree.test.ts`**
 
 1. Create a real repo + `cez/<id8>` worktree, write an **untracked** file into it, call
-   `pruneOrphans(repo, new Set(), { trunkRef: 'main' })`. Assert: directory gone, branch present,
+   `pruneOrphans(repo, new Set(), { findForeignOwner: () => undefined })`. Assert: directory gone,
+   branch present,
    and `git show cez/<id8>:<file>` returns the file's content. *Negative control:* the same
    assertion must fail when C1 is stubbed out — add the stub as an explicit test seam and assert
    the failure, so the test cannot pass against the pre-fix behaviour. Per Q9, the call deliberately
@@ -859,14 +1319,46 @@ until they have actually run on the box this ships as **QA Needed**, not Done.
 
 **Runtime E2E on `prod-host` — the authoritative gate**
 
-13. Start 3 concurrent workspace runs across ≥2 repos. Snapshot before:
+12c. **Precondition on the box, before step 13: no cezar process is running pre-P3 code.** A server
+    that predates P3 neither writes nor honours leases, and it sweeps the real project roots
+    whatever boot root it was launched from — so one stray process makes the whole E2E prove
+    nothing while going green. Assert it, do not eyeball it:
+
+    ```bash
+    ps -eo pid,args | grep -E '[c]ezar.*(dist/index\.js|serve)' | while read -r pid args; do
+      exe=$(printf '%s\n' "$args" | grep -oE '(/[^ ]*)/packages/cezar/dist/index\.js')
+      root=${exe%/packages/cezar/dist/index.js}
+      if grep -q leaseDeclineReason "$root/packages/cezar/dist/git-worktree.js" 2>/dev/null
+        then echo "ok   $pid $root"
+        else echo "STALE $pid $root"; fi
+    done
+    ```
+
+    Every line must read `ok`; restart or kill anything that reads `STALE` before proceeding.
+    Measured 2026-08-22 23:5xZ this passes with a single process (pid 373697, `/opt/cezar`, whose
+    `dist/git-worktree.js` contains `leaseDeclineReason`), but that is a snapshot — re-run it, it is
+    cheap and the whole E2E depends on it.
+
+13. Start 3 concurrent workspace runs across ≥2 repos, **at least one of them a *continued* run** —
+    settled and then resumed, so it enters through `runContinuation` and reuses an existing tree
+    rather than re-materializing one. Without that, the unleased-continuation path named in item 2 of
+    "What is still open" is never exercised and this step goes green while the most common way work
+    resumes on this box stays unguarded. Snapshot before:
 
     ```bash
     find /var/lib/cezar/loki-labs/*/.ai/cezar/worktrees -maxdepth 1 -mindepth 1 | sort > /tmp/wt.before
     for r in /var/lib/cezar/loki-labs/*/; do git -C "$r" for-each-ref --format="$r %(refname)" refs/heads/cez 2>/dev/null; done | sort > /tmp/br.before
     ```
 
-14. Deploy forward once (`npm run server-deploy -- --strategy=blue-green --source=<checkout>`),
+14. **Two preconditions, both from the gates paragraph above, and this step cannot pass without
+    them.** First, **re-anchor**: `git merge-base --is-ancestor "$LIVE" HEAD` must exit 0, where
+    `$LIVE` is the live release's `sha` out of `deploy.json`; if it does not, merge `$LIVE` itself
+    (merging `origin/main` does **not** help when the live sha never landed on `main` — measured
+    today, it has not). Second, **`npm run build` immediately after that merge and after the last
+    `npm run typecheck` of the session**: `pretypecheck` runs `build:server`, which deletes the
+    stamp, and the merge moves `HEAD` past the stamp's sha, so either one leaves this step refusing
+    for a procedural reason whose message reads exactly like step 16's.
+    Then deploy forward once (`npm run server-deploy -- --strategy=blue-green --source=<checkout>`),
     then **prove a sweep actually ran before diffing anything**. Once C5 ships, the post-restart
     sweep is deferred by `SWEEP_DELAY_MS` (5 min), so a snapshot taken immediately after the deploy
     proves only that no sweep has happened yet — it would pass for the wrong reason, and this is the
@@ -874,10 +1366,25 @@ until they have actually run on the box this ships as **QA Needed**, not Done.
 
     a. Shorten or wait out the delay: either export `CEZ_SWEEP_DELAY_MS=0` on the restarted service
        for the duration of the test, or wait past `SWEEP_DELAY_MS`.
-    b. Confirm the sweep ran: `journalctl -u cezar.service --since "<deploy time>"` shows a
-       per-project prune line for each granted repo, **and** `<repoRoot>/.ai/cezar/worktree-reaps.jsonl`
-       has at least one `outcome: "declined"` row naming each of the three live run ids. If neither
-       appears, the step is inconclusive, not green — go back to (a).
+    b. Confirm the sweep ran, and expect a reap row only where the shipped code can actually emit
+       one. The primary evidence is the journal: `journalctl -u cezar.service --since "<deploy
+       time>"` must show a per-project prune line for each granted repo, which is emitted on every
+       sweep. The `<repoRoot>/.ai/cezar/worktree-reaps.jsonl` expectation is narrower than it looks,
+       for two shipped reasons:
+
+       - `pruneOrphans` skips any directory whose id is in `validIds` with `continue` **before** it
+         calls `onOutcome` (`git-worktree.ts:683`). A live run sweeping in **its own** project is
+         therefore not a candidate at all, and correctly produces **no row**. A `declined` row
+         appears only in a repo that is *not* the owning store for that run id, where the id is a
+         candidate and the lease or ownership check turns it away.
+       - The **boot root emits no rows on any path**: its sweep at `index.ts:737-751` passes no
+         `onOutcome` (residue 2 above).
+
+       So assert, per live run id, a `outcome: "declined"` row in each granted repo that does not own
+       it, and **no** row in the one that does. If the boot root is one of the repos under test,
+       either close residue 2 first (the `onOutcome` wiring named in "What is still open") or fall
+       back to the journal line alone for that repo and record that fallback in the result. If the
+       journal shows no prune line at all, the step is inconclusive, not green: go back to (a).
     c. Only then re-snapshot into `/tmp/wt.after` / `/tmp/br.after` and `diff` each: **zero**
        worktrees or branches belonging to a live run removed. `diff` exiting 0 is the assertion;
        eyeballing is not.
@@ -887,12 +1394,27 @@ until they have actually run on the box this ships as **QA Needed**, not Done.
     `jq '.releases[-1].id' /opt/cezar-releases/deploy.json`. A non-zero exit here is a **failure of
     this step**, not a pass: refusing this case is what would push an agent toward `--rollback`.
 15b. Attempt a **divergent** deploy, from a `cez/<id8>` tip that has its own commit and has not
-    merged the commit that is live → must be **refused**, non-zero, message naming the live-only
-    commits, with `readlink /opt/cezar` unchanged. Then re-run with `--allow-unrelated` and confirm
-    it proceeds, so the override is proved to exist rather than assumed.
-16. Attempt a deploy from a checkout that merged `origin/main` **without rebuilding** → must be
-    refused with the stale-artifact reason. This is the exact failure that caused the incident, and
-    it is the one E2E step that cannot be simulated in a unit test convincingly.
+    merged the commit that is live → must be **refused**: non-zero exit, a message naming the
+    live-only commits, `readlink /opt/cezar` byte-identical before and after, and
+    `jq -r '.releases[-1].id' /opt/cezar-releases/deploy.json` unchanged.
+
+    **The step stops at the refusal.** The `--allow-unrelated` override is proved by step 9, which
+    forces a divergent deploy through at the integration level in `release-deploy.test.ts`, and it
+    is deliberately **not** exercised against the live `/opt/cezar-releases`. Doing so would mean
+    activating a tree *known* to be missing commits that are live, on the production box, with no
+    restore step anywhere in steps 16–19 — the precise harm this spec exists to prevent, performed
+    by its own authoritative gate, for coverage it already has. If the override must be seen on the
+    box at all, run it against a scratch ledger: `--releases-dir=/tmp/e2e-releases` is a real flag
+    (parsed at `index.ts:278`, wired into both deploy paths at `:372` and `:400`, and forwarded to a
+    re-exec'd child at `release-deploy.ts:561`), so the live symlink and `deploy.json` are never
+    touched.
+16. Attempt a deploy from a checkout that merged **without rebuilding** → must be refused with the
+    **stale-artifact** reason. This is the exact failure that caused the incident, and it is the one
+    E2E step that cannot be simulated in a unit test convincingly. **It takes step 14's re-anchor
+    precondition, and here it is load-bearing rather than incidental:** if the tree is still
+    `divergent` from live, B1 refuses *first* and the step goes green on the wrong refusal, proving
+    nothing about A2. So merge the **live sha** (not `origin/main`) to make the tree a `descendant`,
+    do **not** rebuild, and assert the message names the stamp/HEAD mismatch and not the relation.
 17. Create a genuinely orphaned worktree directory (no run, no lease) and confirm the next sweep
     removes it, logs it to the journal, **and** appends a line to
     `<repoRoot>/.ai/cezar/worktree-reaps.jsonl`. This step carries step 14's timing dependency
@@ -954,9 +1476,16 @@ by leaving the stale entry standing next to a newer one.
    the deploy step toward `--rollback` for a case whose correct action is to do nothing. Nothing in
    `.ai/deploy-targets.json` needs editing.
 
-**Not found, stated rather than invented:** `cezar todo list` returned no open todo for this work,
-and nothing in `git log --all` implements build stamps, ancestry refusal, worktree leases,
-autosave-before-prune or a deferred sweep. This spec starts from zero implementation.
+**SUPERSEDED 2026-08-22 by `362865ec` (merged `a3e70792`); see "As shipped".** The paragraph below
+was true when written and is now false in its conclusion: build stamps, the ancestry gate, worktree
+leases, autosave-before-prune and the deferred sweep are all implemented and merged. It is kept
+because its *method* still holds: the todo check and the `git log --all` search were real, and
+re-running them is how the next reader confirms there is still no second, competing implementation.
+Original text, unchanged:
+
+> **Not found, stated rather than invented:** `cezar todo list` returned no open todo for this work,
+> and nothing in `git log --all` implements build stamps, ancestry refusal, worktree leases,
+> autosave-before-prune or a deferred sweep. This spec starts from zero implementation.
 
 ---
 

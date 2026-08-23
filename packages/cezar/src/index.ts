@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectEnvironment } from './core/backend-detect.ts';
@@ -737,12 +737,16 @@ async function serveCommand(
     const sweepTimer = setTimeout(() => {
       const foreignSources = loadForeignWorkspaceRunSources(repoRoot, registeredProjects);
       const unreadableSource = foreignSources.find((s) => s.unreadable);
+      const dataDir = join(repoRoot, '.ai/cezar');
       void pruneOrphans(repoRoot, new Set(store.listRuns().map((r) => r.id)), {
         findForeignOwner: (path) => findForeignWorkspaceOwner(repoRoot, path, foreignSources),
-        trunkRef: repo.branch,
         ownershipCheckUnavailable: unreadableSource
           ? { reason: `project "${unreadableSource.projectName}"'s runs.json could not be read` }
           : undefined,
+        onOutcome: (outcome) => {
+          mkdirSync(dataDir, { recursive: true });
+          appendFileSync(join(dataDir, 'worktree-reaps.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), runId: outcome.id, repoRoot, ...outcome })}\n`);
+        },
       }).then((orphans) => {
         if (orphans.removed.length > 0) console.log(`  cleaned ${orphans.removed.length} orphaned worktree(s): ${orphans.removed.map((id) => id.slice(0, 8)).join(', ')}`);
         if (orphans.kept.length > 0) console.log(`  kept ${orphans.kept.length} unsafe-to-reclaim worktree(s): ${orphans.kept.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
