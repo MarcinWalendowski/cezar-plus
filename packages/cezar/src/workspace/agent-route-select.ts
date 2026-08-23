@@ -216,3 +216,64 @@ export async function resolvePoolForDispatch(options: {
     return undefined;
   }
 }
+
+/**
+ * The account for a provider a STEP pinned, when that provider's stored selection is a pool.
+ *
+ * `resolvePoolForDispatch` above answers for the RUN, once, at dispatch. A workflow step may then
+ * override the provider — `spec-to-deploy` pins `runner: 'claude'` on `spec` and `review-spec` so
+ * that "always opus" survives a codex run — and until this existed, that pin changed the provider
+ * and nothing re-resolved the account. Resolution fell through to `selectProfile`, which cannot
+ * parse a pool (`store.accounts.find(a => a.id === 'pool:*')` never matches) and degrades to the
+ * provider's DEFAULT profile. So the step landed on `claude:default` however exhausted it was,
+ * with a healthy `claude:secondary` sitting unused — measured in production on run `da0119ec`,
+ * 2026-08-23. Spec: `.ai/specs/2026-08-23-step-runner-account-resolution.md`.
+ *
+ * **Forces the candidate set to `provider`, even on the wildcard `pool:*`.** The caller has already
+ * pinned the provider; letting a wildcard cross back to another one would undo the very pin that
+ * reached this function. That is deliberately narrower than `resolvePoolForDispatch`, which honours
+ * the wildcard because the run made no such promise.
+ *
+ * **This does NOT decide todo `81ab4ebd`.** That question is whether a *run's* explicit runner
+ * should constrain a wildcard pool, and it stays open. The narrowing here is scoped to a step whose
+ * provider is already fixed by its own pin, which is a different claim.
+ *
+ * **`undefined` for a non-pool route**, meaning "leave the existing resolution alone" — an
+ * explicitly stored account is already honoured by `selectProfile`, and overriding it here would be
+ * a second, invisible routing rule. Never throws, matching its sibling: an unreadable home degrades
+ * to the behaviour that predates this function.
+ */
+export async function resolvePoolForProvider(options: {
+  /** The provider the step pinned. Candidates are confined to it. */
+  provider: ProviderId;
+  repoRoot: string;
+  /** Workspace-wide, keyed by `accountUsageKey`. */
+  inflight?: Record<string, number>;
+  now?: number;
+}): Promise<PoolChoice | undefined> {
+  try {
+    const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
+    const route = parseAgentRoute(selectionFor(accounts, options.repoRoot, options.provider));
+    if (route.kind !== 'pool') return undefined;
+    const chosen = selectPoolAccount({
+      // `provider` from the caller, never `route.provider` — that is the narrowing, and reading it
+      // off the route would reintroduce the wildcard's provider hop.
+      candidates: poolCandidates(
+        { kind: 'pool', provider: options.provider },
+        listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS),
+      ),
+      store: usage,
+      ...(options.inflight ? { inflight: options.inflight } : {}),
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
+    if (!chosen) return undefined;
+    // A genuine SECOND dispatch, to a different provider than the run resolved, so the cursor
+    // should move. The hazard is double-counting ONE dispatch; this is not that.
+    await mergeWriteAgentAccountUsage((store) =>
+      recordDispatch(store, accountUsageKey(chosen.provider, chosen.accountId)),
+    );
+    return chosen;
+  } catch {
+    return undefined;
+  }
+}

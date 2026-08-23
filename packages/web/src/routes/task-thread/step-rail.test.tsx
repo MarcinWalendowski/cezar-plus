@@ -158,6 +158,48 @@ describe('per-step model chip', () => {
     expect(chip.getAttribute('title')).toMatch(/planned/i)
   })
 
+  it("does not plan a model the run's backend cannot serve", () => {
+    // Reported from production 2026-08-23 on run `da0119ec`: `spec-to-deploy` pins `sonnet`, a
+    // Claude alias, on its six construction steps. Moved to codex, the engine drops the pin at
+    // dispatch and says so on the transcript — while the rail went on rendering `sonnet`, so the
+    // two surfaces disagreed and the rail is the one a reader scans.
+    render(
+      <StepRail steps={[step('implement', 'pending')]} planned={[{ id: 'implement', model: 'sonnet' }]} runRunner="codex" />,
+    )
+    const chip = document.querySelector('[data-slot="step-model"]')!
+    expect(chip.textContent).toBe('auto')
+    expect(chip.getAttribute('data-source')).toBe('planned-dropped')
+    // The plan is still a true fact about the WORKFLOW, so it is named rather than swallowed.
+    expect(chip.getAttribute('title')).toMatch(/sonnet/)
+  })
+
+  it("keeps a planned model the STEP's own runner pin can serve", () => {
+    // The negative control, and the whole reason this keys on the step rather than the run: a fix
+    // that blanked every pin on a codex run would pass the case above and destroy this one.
+    // `spec-to-deploy` pins `runner: claude` on `spec`/`review-spec` precisely so `opus` survives a
+    // codex run — that chip is TRUE and must stay.
+    render(
+      <StepRail
+        steps={[step('review-spec', 'pending')]}
+        planned={[{ id: 'review-spec', model: 'opus', runner: 'claude' }]}
+        runRunner="codex"
+      />,
+    )
+    const chip = document.querySelector('[data-slot="step-model"]')!
+    expect(chip.textContent).toBe('opus')
+    expect(chip.getAttribute('data-source')).toBe('planned')
+  })
+
+  it('a planned model on a matching runner is untouched', () => {
+    // The pre-existing behaviour, pinned so the new branch cannot swallow the ordinary case.
+    render(
+      <StepRail steps={[step('implement', 'pending')]} planned={[{ id: 'implement', model: 'sonnet' }]} runRunner="claude" />,
+    )
+    const chip = document.querySelector('[data-slot="step-model"]')!
+    expect(chip.textContent).toBe('sonnet')
+    expect(chip.getAttribute('data-source')).toBe('planned')
+  })
+
   it('the executed model wins over the planned one — the def is only a stand-in', () => {
     render(<StepRail steps={[step('s', 'done', { model: 'opus' })]} planned={[{ id: 's', model: 'sonnet' }]} />)
     const chip = document.querySelector('[data-slot="step-model"]')!
