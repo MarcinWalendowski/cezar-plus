@@ -66,12 +66,12 @@ import { CLUSTER_PROTOCOL, type ClusterCorpusSubmitResponse } from '@loki-labs/b
 import { createEnrollmentCode, joinCluster, leaveCluster } from './cluster/enrollment.ts';
 import { ensureNodeIdentity, loadNodeIdentity, nodeIdentityPath } from './cluster/node-identity.ts';
 import { signedNodeRequestHeaders } from './cluster/node-auth.ts';
-import { disableNode } from './cluster/peers.ts';
+import { disableNode, readPeers } from './cluster/peers.ts';
 import { resolveSpokeReconcileWiring } from './cluster/reconcile-wiring.ts';
 import { reconcileAll } from './cluster/reconcile.ts';
 import { readRemoteRuns } from './cluster/run-projection.ts';
 import { clusterEnabled } from './server/capabilities.ts';
-import { clusterActiveRunsFrom } from './server/cluster-routes.ts';
+import { clusterActiveAsOfFrom, clusterActiveRunsFrom } from './server/cluster-routes.ts';
 // Aliased: `serverInstallCommand` below already destructures its own `loadServerState` out of a
 // dynamic import, and two bindings of one name in one file is a shadow waiting to be misread.
 import { loadServerState as loadInstalledServerState } from './server-install/state.ts';
@@ -1383,8 +1383,11 @@ const CLUSTER_USAGE = `usage:
                               Access rejection from a stale code will re-mint codes to
                               fix a credential problem.
   cez cluster active [--json]  what is in flight across the cluster: task summary,
-                              node, branch, touched paths. Read this before starting
-                              work in a repo somebody else may already be holding.
+                              node, branch, and when each linked node last reported.
+                              NOT yet a collision check: touched paths are not
+                              populated (package 4.3), and an empty answer can mean
+                              nothing is running OR that nobody has reported — see
+                              \`asOf\`, absent in the second case.
   cez cluster reconcile [--apply] [--dry-run] [--peer <nodeId>]
                               spoke → hub only: full compare against the hub's
                               backlog for every project this node has confirmed
@@ -1565,15 +1568,23 @@ async function runClusterCommand(args: string[]): Promise<number> {
       }
 
       case 'active': {
-        const runs = clusterActiveRunsFrom(await readRemoteRuns());
-        emit({ runs, asOf: new Date().toISOString() }, () =>
-          runs.length === 0
+        const [runs, peers] = await Promise.all([
+          readRemoteRuns().then(clusterActiveRunsFrom),
+          readPeers(),
+        ]);
+        const linked = peers.nodes.filter((node) => node.disabledAt === undefined);
+        const asOf = clusterActiveAsOfFrom(linked);
+        emit({ runs, ...(asOf !== undefined ? { asOf } : {}) }, () => {
+          if (linked.length === 0) return ['no linked nodes — nothing is being tracked.'];
+          if (asOf === undefined)
+            return [`${linked.length} linked node(s), none has reported — cannot tell what is in flight.`];
+          return runs.length === 0
             ? ['nothing in flight on any linked node.']
             : runs.map(
                 (run) =>
                   `${run.nodeId}  ${run.runId}  ${run.branch ?? '(no branch)'}  ${run.summary ?? ''}`.trim(),
-              ),
-        );
+              );
+        });
         return 0;
       }
 

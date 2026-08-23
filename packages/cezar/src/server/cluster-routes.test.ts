@@ -1,8 +1,8 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CLUSTER_PROTOCOL, type StoredClusterNode } from '@loki-labs/better-cezar-contract';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CLUSTER_PROTOCOL, type ClusterRemoteRun, type StoredClusterNode } from '@loki-labs/better-cezar-contract';
 import { readAllocations } from '../cluster/allocate.ts';
 import { readLeases } from '../cluster/leases.ts';
 import {
@@ -16,6 +16,7 @@ import {
 import { ensureNodeIdentity } from '../cluster/node-identity.ts';
 import { storeNodeSecret } from '../cluster/node-secrets.ts';
 import { applyPairingAction, upsertNode } from '../cluster/peers.ts';
+import { applyRemoteRuns } from '../cluster/run-projection.ts';
 import { workspaceConfigPath } from '../paths.ts';
 import { atomicWriteJsonSync, defaultWorkspaceConfig } from '../workspace/config.ts';
 import { createClusterRoutes, type ClusterRouteDeps } from './cluster-routes.ts';
@@ -684,5 +685,111 @@ describe('cluster-routes.ts wires D20 node-auth onto the right paths', () => {
       expect(appendRes.status).toBe(404);
       expect(((await appendRes.json()) as { reason: string }).reason).toBe('unpaired-project');
     });
+  });
+});
+
+/**
+ * `GET /cluster/active`'s `asOf` — the field `clusterActiveResponseSchema` carries specifically
+ * "so a caller can tell 'nothing is running' from 'nobody has reported recently'". Before this
+ * suite, no test read this route's BODY at all with the flag on (`cluster-routes.test.ts:216-218`
+ * above asserts only `status === 200`), so the lie this proves was never caught by anything.
+ *
+ * An UNTRACKED cluster (no roster, no projection) and a TRACKED-BUT-IDLE one (a roster node that
+ * has reported, holding only a FINISHED run) both correctly answer `runs: []` — a finished run is
+ * not "in flight" either way. But they are not the same situation, and a caller who cannot tell
+ * them apart has no way to know whether an empty `runs` means anything. The two responses must
+ * differ, and not by clock jitter: the real clock is frozen for the whole test (`vi.useFakeTimers`)
+ * so that two back-to-back `new Date()` reads — which is what the pre-fix handler made, one per
+ * request — return the IDENTICAL instant. Under a frozen clock, pre-fix code produces two
+ * byte-identical bodies (`{runs: [], asOf: <the one frozen instant>}` both times), so
+ * `.not.toEqual` below is what actually goes red against it — not a coin flip on timing.
+ */
+describe('GET /cluster/active — asOf is evidence, not a request-time stamp', () => {
+  let home: string;
+  let env: NodeJS.ProcessEnv;
+  const FROZEN = new Date('2026-08-23T12:00:00.000Z');
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'cez-cluster-active-honesty-'));
+    env = { CEZ_CLUSTER: '1', CEZ_HOME: home };
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  // `now` is passed for the same reason every other D20 test in this file passes it (the hook is
+  // `cluster-routes.ts:233`) even though this particular route does not consume it post-fix — see
+  // this suite's own module doc for what actually pins the pre-fix jitter (`vi.useFakeTimers`).
+  const routes = () => createClusterRoutes({ version: '0.0.0-test', env, now: () => FROZEN });
+
+  function finishedRemoteRun(overrides: Partial<ClusterRemoteRun> = {}): ClusterRemoteRun {
+    return {
+      projectId: 'proj-1',
+      nodeId: NODE_ID,
+      id: 'run-done-1',
+      title: 'a finished run',
+      status: 'done',
+      createdAt: '2026-08-20T00:00:00.000Z',
+      archived: false,
+      workflow: 'w',
+      ...overrides,
+    };
+  }
+
+  it('an untracked cluster and a tracked-but-idle one are not the same response', async () => {
+    // This freezes the REAL clock the PRE-FIX handler reads (a bare `new Date()`, no injected
+    // seam) — without it, the two requests' timestamps differ by real elapsed milliseconds and
+    // `.not.toEqual` below passes on that jitter instead of on the fix actually being honest.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(FROZEN);
+    try {
+      // Scenario A: nothing tracked — no roster, no projection. Nothing has ever been written to
+      // this fresh CEZ_HOME, so `readPeers`/`readRemoteRuns` both degrade to their empty defaults.
+      const untrackedRes = await apiRequest(routes(), '/cluster/active');
+      expect(untrackedRes.status).toBe(200);
+      const untracked = (await untrackedRes.json()) as { runs: unknown[]; asOf?: string };
+
+      // Scenario B: tracked and genuinely idle — a roster node that HAS reported (`lastSeenAt`
+      // set, the field `markNodeSeen` maintains for real), holding only a run whose status is
+      // terminal, never in `IN_FLIGHT_STATUSES`.
+      await upsertNode(
+        {
+          nodeId: NODE_ID,
+          nodeName: 'node a',
+          role: 'spoke',
+          labels: [],
+          acceptsDispatch: false,
+          protocol: CLUSTER_PROTOCOL,
+          version: '0.0.0-test',
+          lastSeenAt: '2026-08-23T11:59:00.000Z',
+        },
+        { env },
+      );
+      await applyRemoteRuns(NODE_ID, [finishedRemoteRun()], { env });
+
+      const idleRes = await apiRequest(routes(), '/cluster/active');
+      expect(idleRes.status).toBe(200);
+      const idle = (await idleRes.json()) as { runs: unknown[]; asOf?: string };
+
+      // Correct in BOTH cases — a finished run is not in flight either way. This is the assertion
+      // that must NOT be the only one: it passes identically before and after the fix, so on its
+      // own it is not evidence of anything.
+      expect(untracked.runs).toEqual([]);
+      expect(idle.runs).toEqual([]);
+
+      // Not the same situation, and the response has to say so — this is the assertion that is
+      // RED before the fix (both bodies are `{runs: [], asOf: '2026-08-23T12:00:00.000Z'}` under
+      // the frozen clock) and GREEN after.
+      expect(untracked).not.toEqual(idle);
+
+      // Pinned per case, not just "different": untracked carries no `asOf` at all (nothing to
+      // report), idle carries the roster's OWN `lastSeenAt` — never the frozen "now" above, which
+      // is exactly the distinction the fix makes.
+      expect(untracked.asOf).toBeUndefined();
+      expect(idle.asOf).toBe('2026-08-23T11:59:00.000Z');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

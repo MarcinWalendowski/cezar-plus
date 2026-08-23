@@ -25,6 +25,7 @@ import {
   type ClusterTodosAppendResponse,
   type ClusterTodosBackupResponse,
   type ClusterTodosSnapshotResponse,
+  type StoredClusterNode,
   clusterAllocateKindParamSchema,
   clusterAllocateRequestSchema,
   clusterCodeIdParamSchema,
@@ -171,6 +172,16 @@ import type { WorkspaceSemaphore } from '../workspace/semaphore.ts';
  * an operator action taken at the hub's own cockpit. None of those is a node authenticating itself
  * to another node, so node-auth is not on them.
  *
+ * **`GET /cluster/active`'s "locally-mirrored state" is real but, as things stand, permanently
+ * empty in production — that is a defect in what feeds it, not in this claim.** `run-projection.ts`'s
+ * writers (`applyRemoteRuns`, `markNodeUnreachable`) have zero production callers, so
+ * `runs-remote.json` is never written and this route always answers `runs: []`. Wiring that writer
+ * is Milestone D (weeks, ops-gated) and out of this package's scope. Until it lands, this route —
+ * like `linkHealth()` below — reports what is true rather than fabricating activity: an empty
+ * mirror answers `runs: []`, and `asOf` (`clusterActiveResponseSchema`'s own doc) is `undefined`
+ * whenever nothing has ever reported, rather than the wall-clock-now that used to paper over the
+ * gap and make an empty answer read as a checked, current fact.
+ *
  * `POST /cluster/join` is excluded on purpose and would be a lockout bug if it weren't: it is the
  * enrollment handshake ITSELF, and a joining node has no secret yet to sign with.
  *
@@ -298,6 +309,29 @@ export function clusterActiveRunsFrom(remote: readonly ClusterRemoteRun[]): Clus
       paths: [],
       startedAt: run.startedAt ?? run.createdAt,
     }));
+}
+
+/**
+ * `asOf` for `GET /cluster/active` and `cez cluster active` (`clusterActiveResponseSchema`'s own
+ * doc) — the most recent `StoredClusterNode#lastSeenAt` among this hub's LINKED (non-`disabledAt`)
+ * roster nodes, or `undefined` if none of them has ever reported. Reads `lastSeenAt` and nothing
+ * else — no wall clock — because `lastSeenAt` (stamped for real by `markNodeSeen` on every
+ * presence heartbeat, `hub-router.ts`'s `presence` case) is the one signal this hub actually has
+ * for "when did I last hear from this node"; a value derived from request time instead would make
+ * that question impossible to ever answer honestly, which is the exact defect this function
+ * replaces — both call sites used to hardcode `new Date().toISOString()` here.
+ *
+ * Exported for the same reason `clusterActiveRunsFrom` above is: `cez cluster active` in
+ * `../index.ts` answers the same question from the same file, and two spellings of "when did we
+ * last hear from the cluster" must not be free to disagree.
+ */
+export function clusterActiveAsOfFrom(nodes: readonly StoredClusterNode[]): string | undefined {
+  let latest: string | undefined;
+  for (const node of nodes) {
+    if (node.disabledAt !== undefined || node.lastSeenAt === undefined) continue;
+    if (latest === undefined || node.lastSeenAt > latest) latest = node.lastSeenAt;
+  }
+  return latest;
 }
 
 
@@ -768,11 +802,16 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
       // ---- what else is in flight (D19 rung 4) -----------------------------------------------
       /** Backs `cezar cluster active` — a read an agent can already make over the `Bash` + `cez`
        *  surface it has, with no MCP server involved. Both spellings share
-       *  `clusterActiveRunsFrom` above; see its doc for the injection rule `summary` carries and
-       *  for why `paths` is empty until package 4.3. */
+       *  `clusterActiveRunsFrom` and `clusterActiveAsOfFrom` above; see their docs for the
+       *  injection rule `summary` carries, for why `paths` is empty until package 4.3, and for why
+       *  `asOf` is roster-derived rather than a request-time clock. */
       .get('/cluster/active', async (c) => {
-        const runs = clusterActiveRunsFrom(await readRemoteRuns({ env }));
-        const body: ClusterActiveResponse = { runs, asOf: new Date().toISOString() };
+        const [runs, peers] = await Promise.all([
+          readRemoteRuns({ env }).then(clusterActiveRunsFrom),
+          readPeers({ env }),
+        ]);
+        const asOf = clusterActiveAsOfFrom(peers.nodes);
+        const body: ClusterActiveResponse = { runs, ...(asOf !== undefined ? { asOf } : {}) };
         return c.json(body);
       })
 
@@ -881,6 +920,20 @@ export interface ClusterRuntimeDeps {
    * making it required here would be a stricter rule than the rest of this file already keeps.
    */
   semaphore?: WorkspaceSemaphore;
+  /**
+   * Test-only timing knob — threaded straight through to `SpokeRuntimeDeps#heartbeatMs`, whose own
+   * doc gives the production default (`DEFAULT_HEARTBEAT_MS`, 30_000, matching the hub's expected
+   * presence cadence). Optional, same shape as `ClusterRouteDeps#now` above (a D20 test hook that
+   * pins the clock): a production caller has no reason to override a cadence chosen to match the
+   * hub, and an absent value here degrades to the exact same 30s beat this file has always shipped
+   * — never to a wrong-but-plausible number a caller forgot to set, which is what would make this
+   * required instead (the `server`/`resolveDispatchManager` reasoning above does not apply: their
+   * absence makes a node look healthy while being silently unreachable/undispatchable; this field's
+   * absence makes it beat at the same cadence it always has). Exists so
+   * `cluster-link-activation.test.ts`'s Milestone C scenario can drive a real presence beat carrying
+   * a real `WorkspaceSemaphore`'s load in milliseconds, not by waiting out a real 30s tick.
+   */
+  heartbeatMs?: number;
 }
 
 function errorMessage(err: unknown): string {
@@ -1175,6 +1228,7 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
       warn,
       resolveDispatchManager: deps.resolveDispatchManager,
       semaphore: deps.semaphore,
+      heartbeatMs: deps.heartbeatMs,
     });
     spokeRuntime = stopHeartbeat;
     teardown = () => {

@@ -260,7 +260,29 @@ export function createHubDispatcher(deps: HubDispatcherDeps): HubDispatcher {
       return { declined: { reason: 'already-dispatched', existing: outstanding } };
     }
 
-    const placement = placeRun(input.request, input.candidates);
+    // The placement hot-spot (spec "6. The placement hot-spot is CONFIRMED"): a beat only
+    // updates on its own ~30s cadence (D47), so between two beats every candidate looks exactly
+    // as loaded as it did for the PREVIOUS placement this hub made — `records` already holds
+    // what the beat cannot yet reflect: this hub's own dispatches still `'pending'`. Folding
+    // that into `active` before ranking is what makes placement 2..N see a busier node-a than
+    // placement 1 did. Self-reconciling, no new state: a record leaves `'pending'` (accepted,
+    // refused, or swept to `'unanswered'`) by the time the target's own beat would have counted
+    // the run anyway, so this adjustment never needs to be undone explicitly.
+    const pendingByNode = new Map<ClusterNodeId, number>();
+    for (const record of records.values()) {
+      if (record.status !== 'pending') continue;
+      pendingByNode.set(record.nodeId, (pendingByNode.get(record.nodeId) ?? 0) + 1);
+    }
+    const candidates = pendingByNode.size === 0
+      ? input.candidates
+      : input.candidates.map((c) => {
+          const pending = pendingByNode.get(c.nodeId);
+          return pending
+            ? { ...c, capacity: { ...c.capacity, active: c.capacity.active + pending } }
+            : c;
+        });
+
+    const placement = placeRun(input.request, candidates);
     if (placement.status !== 'placed') return { placement };
 
     if (placement.nodeId === deps.hubNodeId) {

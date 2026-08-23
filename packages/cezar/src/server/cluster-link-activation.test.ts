@@ -29,6 +29,7 @@ import type { PlacementCandidate } from '../cluster/placement.ts';
 import { createTodo, readTodos } from '../todos.ts';
 import { workspaceConfigPath } from '../paths.ts';
 import { atomicWriteJsonSync, defaultWorkspaceConfig } from '../workspace/config.ts';
+import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { startClusterRuntime } from './cluster-routes.ts';
 import { startServer } from './server.ts';
 
@@ -691,6 +692,16 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
   describe('4. Milestone C — a real dispatch is accepted and a real run starts', () => {
     const C_PROJECT_KEY = 'project-milestone-c';
     const WORKFLOW_DEF = { name: 'dispatch-e2e-workflow', steps: [{ id: 'step-1', prompt: 'do the thing' }], source: 'file' as const };
+    // D47: real slots held on a real `WorkspaceSemaphore`, registered below — non-zero and
+    // distinctive so the beat's `capacity.active` cannot be confused with `peers.ts#collectPresence`'s
+    // own `{active: 0, heavyActive: 0}` default for a caller that wires nothing in.
+    const SEMAPHORE_HELD_SLOTS = 3;
+    // `ClusterRuntimeDeps#heartbeatMs` (test-only knob, see its own doc) — this suite does not need
+    // to wait out a real 30s production tick to see a second beat; it only needs to see ANY beat
+    // sent after the link is actually up, which the first (fire-immediately) beat usually is not
+    // (it races the WS handshake — see the assertion below). Short and non-zero, never the
+    // production default.
+    const TEST_HEARTBEAT_MS = 50;
 
     interface StartedRun {
       workflow: unknown;
@@ -704,6 +715,7 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
       hubServer: ClusterLinkServer;
       dispatcher: ReturnType<typeof createHubDispatcher>;
       replies: ClusterFreshnessFrame[];
+      presences: ClusterPresenceFrame[];
       started: StartedRun[];
       todoId: string;
       todoSummary: string;
@@ -724,6 +736,10 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
       };
       const router = createHubFrameRouter({ identity: hubIdentity });
       const replies: ClusterFreshnessFrame[] = [];
+      // D47: every `presence` frame this hub actually received on the wire — the only reading
+      // that can tell a real beat carrying the spoke's real semaphore load from a well-typed
+      // no-op (see the assertion below).
+      const presences: ClusterPresenceFrame[] = [];
       let dispatcher!: ReturnType<typeof createHubDispatcher>;
       const hubServer = new ClusterLinkServer({
         identity: hubIdentity,
@@ -734,6 +750,7 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
             replies.push(frame);
             dispatcher.recordFreshnessReply(nodeId, frame);
           }
+          if (frame.type === 'presence') presences.push(frame);
           return router(nodeId, frame);
         },
         lookupSecret: async (nodeId) => (nodeId === 'spoke-1' ? NODE_SECRET : undefined),
@@ -782,15 +799,26 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
         },
       } as unknown as RunManager;
 
+      // D47: a REAL `WorkspaceSemaphore` holding a REAL, non-zero slot count — through
+      // `register()`, the same seam a production `RunManager` uses — never a fabricated frame.
+      // `spoke-runtime.test.ts` already proves `startSpokeRuntime` itself reads `deps.semaphore`
+      // correctly in isolation; wiring one in HERE, through the real `startClusterRuntime`, is
+      // what proves the one hop that unit test cannot reach — `cluster-routes.ts`'s own
+      // `semaphore: deps.semaphore` pass-through into that call.
+      const semaphore = new WorkspaceSemaphore();
+      semaphore.register({ busySlots: () => SEMAPHORE_HELD_SLOTS, pump: () => {}, oldestQueuedAt: () => null });
+
       const stop = startClusterRuntime({
         version: '0.0.0-test',
         server: fakeUpgradeServer(),
         resolveDispatchManager: async (repoRoot: string) => (repoRoot === spokeRepoRoot ? fakeManager : undefined),
+        semaphore,
+        heartbeatMs: TEST_HEARTBEAT_MS,
       });
       disposers.push(stop);
       await vi.waitFor(() => expect(hubServer.connectedNodes()).toEqual(['spoke-1']), { timeout: 5_000 });
 
-      return { hubServer, dispatcher, replies, started, todoId: todo.id, todoSummary, mintedRunIds };
+      return { hubServer, dispatcher, replies, presences, started, todoId: todo.id, todoSummary, mintedRunIds };
     }
 
     function candidate(acceptsDispatch: boolean): PlacementCandidate {
@@ -806,6 +834,24 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
 
     it('THE MERGE GATE: hub dispatches → spoke accepts → a real run starts → the run id comes back and the hub correlates it', async () => {
       const cluster = await bootCluster({ acceptsDispatch: true });
+
+      // (0) D47's pass-through, proved through the REAL `startClusterRuntime` rather than by
+      // calling `startSpokeRuntime` directly (`spoke-runtime.test.ts` already proves THAT hop in
+      // isolation). This is the one hop that unit test cannot reach — `cluster-routes.ts`'s own
+      // `semaphore: deps.semaphore` line handing `ClusterRuntimeDeps#semaphore` down to it.
+      //
+      // `bootCluster` drives the beat on `TEST_HEARTBEAT_MS` (`ClusterRuntimeDeps#heartbeatMs`,
+      // its own doc), not the real 30s production cadence: `startSpokeRuntime`'s FIRST beat fires
+      // immediately, synchronously after `link.start()`, which is before the WebSocket handshake
+      // has completed — `deps.link.send()` returns `false` for a not-yet-open socket and that beat
+      // is silently dropped (`spoke-runtime.ts`'s own "never queues a missed beat" doc), so this
+      // waits out ONE fast interval tick after the link is actually up, never a fabricated
+      // shortcut. Polled (never a one-shot read of `presences[0]`) so an early, unrelated beat
+      // cannot make this flake.
+      await vi.waitFor(
+        () => expect(cluster.presences.some((p) => p.capacity.active === SEMAPHORE_HELD_SLOTS)).toBe(true),
+        { timeout: 2_000 },
+      );
 
       const attempt = await cluster.dispatcher.dispatch({
         todoId: cluster.todoId,

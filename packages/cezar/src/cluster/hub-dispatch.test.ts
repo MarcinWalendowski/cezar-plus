@@ -196,6 +196,68 @@ describe('createHubDispatcher — dispatch, non-placed outcomes', () => {
   });
 });
 
+// ---- dispatch — in-flight accounting between presence beats (placement hot-spot, spec "6. The
+// placement hot-spot is CONFIRMED") --------------------------------------------------------------
+//
+// `placement.test.ts` cannot express this defect: `placeRun` is pure and stateless, so it has no
+// way to see a hub's own PRIOR dispatches. It can only be proven here, at the dispatcher level,
+// across multiple `dispatch()` calls sharing one `records` map.
+
+describe('createHubDispatcher — dispatch, in-flight accounting between presence beats', () => {
+  it('spreads six distinct todos across two candidates with DIFFERENT loads held constant for the whole window (no beat between dispatches)', async () => {
+    const link = fakeLinkServer();
+    const dispatcher = createHubDispatcher(makeDeps({ linkServer: () => link.server }));
+
+    // node-a starts strictly less loaded than node-b — load-bearing (see this describe block's
+    // comment): with both at `active: 0` the tiebreak alone would legitimately pin node-a, and
+    // the assertions below would be asserting the wrong thing for the wrong reason.
+    const candidates: PlacementCandidate[] = [
+      candidate({ nodeId: 'node-a', capacity: capacity({ maxParallel: 8, active: 0 }) }),
+      candidate({ nodeId: 'node-b', capacity: capacity({ maxParallel: 8, active: 1 }) }),
+    ];
+
+    const byNode: Record<string, number> = {};
+    for (let i = 0; i < 6; i++) {
+      const result = await dispatcher.dispatch({
+        todoId: `todo-${i}`,
+        request: request(),
+        candidates, // the SAME candidates, unchanged — one presence window, no beat in between
+        workflow: { builtinId: 'quick-task' },
+      });
+      expect(result.placement?.status).toBe('placed');
+      const nodeId = result.dispatch!.nodeId;
+      byNode[nodeId] = (byNode[nodeId] ?? 0) + 1;
+    }
+
+    // Pre-fix this is `{"node-a": 6}` — every placement after the first sees the same
+    // byte-identical candidates as the first, because nothing folds this hub's own pending
+    // dispatches back into `active`.
+    expect(byNode['node-b'] ?? 0).toBeGreaterThanOrEqual(1);
+    expect(Object.values(byNode).some((count) => count === 6)).toBe(false);
+  });
+
+  it('mirror control: a SINGLE todo against the same roster still lands on node-a, the genuinely less-loaded candidate', async () => {
+    const link = fakeLinkServer();
+    const dispatcher = createHubDispatcher(makeDeps({ linkServer: () => link.server }));
+
+    const candidates: PlacementCandidate[] = [
+      candidate({ nodeId: 'node-a', capacity: capacity({ maxParallel: 8, active: 0 }) }),
+      candidate({ nodeId: 'node-b', capacity: capacity({ maxParallel: 8, active: 1 }) }),
+    ];
+
+    const result = await dispatcher.dispatch({
+      todoId: 'todo-only',
+      request: request(),
+      candidates,
+      workflow: { builtinId: 'quick-task' },
+    });
+
+    // Proves the spread above comes from in-flight accounting, not from a broken ranking: with
+    // nothing yet pending, the genuinely less-loaded node still wins outright.
+    expect(result.dispatch?.nodeId).toBe('node-a');
+  });
+});
+
 // ---- recordFreshnessReply — refusal path (Verification c) --------------------------------------
 
 describe('createHubDispatcher — recordFreshnessReply, refusal', () => {

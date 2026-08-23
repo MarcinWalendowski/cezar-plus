@@ -550,9 +550,22 @@ export type ClusterActiveRun = z.infer<typeof clusterActiveRunSchema>;
 export const clusterActiveResponseSchema = z
   .object({
     runs: z.array(clusterActiveRunSchema),
-    /** When the hub last heard from every node, so a caller can tell "nothing is running" from
-     *  "nobody has reported recently". */
-    asOf: z.string(),
+    /**
+     * The most recent time this hub heard from any of its linked roster nodes
+     * (`StoredClusterNode#lastSeenAt`, stamped for real by `markNodeSeen` on every presence
+     * heartbeat) — **absent when no linked node has ever reported, including an empty roster.**
+     * Exists so a caller can tell "nothing is running" from "nobody has reported recently": an
+     * absent `asOf` means `runs` is not evidence of anything, whatever it contains.
+     *
+     * **CORRECTED 2026-08-23 — this used to be `z.string()`, unconditionally filled by both call
+     * sites (`cluster-routes.ts`, `index.ts`) with `new Date().toISOString()`.** That is
+     * wall-clock-now, not a fact about any node, so the one field this type carries specifically
+     * to expose staleness was permanently fresh regardless of whether anything had ever reported
+     * — an untracked cluster and a tracked-but-idle one were byte-identical. Optionality is the
+     * fix: absence IS the "nothing tracked" signal, so there is no need for a second discriminator
+     * field alongside it.
+     */
+    asOf: z.string().optional(),
   })
   .strict();
 export type ClusterActiveResponse = z.infer<typeof clusterActiveResponseSchema>;
