@@ -2902,7 +2902,50 @@ invented; these are the names to use when one lands.
 > to flush *to*, and its op must enter the SAME `applyOpAtHub` + fan-out path a spoke's op takes or
 > the two directions will diverge. That is a design decision, and this spec is the place for it.
 >
-> #### D40 — A MALFORMED `hello` LEAVES A LINK SILENTLY HALF-DEAD, AND D30's FIX CREATED IT
+> #### D40b — A FORGED `hello` SKIPS THE WATERMARK RESEED AND LEAVES THE SOCKET OPEN. D30 REOPENED.
+>
+> **Found 2026-08-23 by HUB while investigating D40a; it is a separate defect and is the more serious
+> of the two.** `helloReceived` means *"a frame of type `hello` parsed"* but is used as if it meant
+> *"this node completed a handshake"*. Those come apart in BOTH directions — D40a is one way, this is
+> the other.
+>
+> A `hello` that PARSES but is forged (body claims a different `nodeId` than the socket authenticated
+> as) sets `helloReceived = true`, and `hub-router.ts:285` returns a `refuse` **frame**. Two
+> consequences, both measured:
+>  1. **The socket is never closed.** `link-server.refuse()` is not called — the frame goes out
+>     through the ordinary write loop — so the node is never removed from `this.nodes`. **A peer that
+>     ignores the refusal stays connected and stays a fan-out target.** Security-adjacent, not merely
+>     a correctness bug.
+>  2. **The identity guard returns at `:285`, and `watermarks.delete(nodeId)` is at `:340` — so a
+>     forged hello skips the reseed entirely.** This is **D30 root cause 1, reopened**: a spoke that
+>     restarts holds an applied position of 0, and if its hello is forged (a bug in a `nodeId` field,
+>     or malice) the hub keeps the PREVIOUS session's watermark and every op at or below it is never
+>     sent. Silent, permanent, and only a legitimate hello corrects it.
+>
+> Measured with a control, reading out via a retransmit of the same `opId` (idempotence returns the
+> same hubSeq, so whether node-a is pushed is a DIRECT observation of the watermark the hub holds,
+> not a proxy):
+> ```
+> AFTER A FORGED HELLO  -> op-1 re-sent to node-a? false   <-- stale watermark survives
+> AFTER A LEGIT  HELLO  -> op-1 re-sent to node-a? true    <-- reset to 0, correct
+> ```
+> Probe: `<scratchpad>/probe-d40-forged.mts`.
+>
+> **`link-server.ts:301` asserts this cannot happen** — *"it does not reopen D30's race, because a
+> socket that has attempted ANY hello has already run `seedWatermark` for this authenticated
+> nodeId synchronously"* — while naming the forged-hello case as *"a pre-existing, separate gap … not
+> this fix's concern"*. It is false for exactly that branch, and asserting a safety property the named
+> exception breaks is worse than silence: the next reader takes the assertion and stops looking. HUB
+> owns it and is correcting it in place.
+>
+> **Fix (approved 2026-08-23):** extend `ClusterFrameReplies` — HUB's own type, no contract-package
+> change — with `closeAfterWrite?: ClusterLinkRefuseReason`. The router returns
+> `{ frames: [refuse], closeAfterWrite: 'unknown-node' }`; `link-server` writes, then closes and
+> removes the node. This keeps `link-server`'s stated ignorance intact (it obeys a transport
+> instruction rather than inspecting what a frame MEANS) and closes the socket leak and the stale
+> watermark in one move.
+>
+> #### D40a — A MALFORMED `hello` LEAVES A LINK SILENTLY HALF-DEAD, AND D30's FIX CREATED IT
 >
 > **OWNED BY HUB from 2026-08-23** (`link-server.ts` / `hub-router.ts`, which it already owns).
 > Investigating before building, because the honest fix may change link-refusal behaviour.
@@ -2934,6 +2977,31 @@ invented; these are the names to use when one lands.
 >     current semantic gives: a **bounded-attempt** refusal (refuse, allow retry, and after N
 >     identical refusals stop and surface it). It may be what this case wants, but it is a new
 >     client-side behaviour and therefore a decision, not a fix.
+>
+> **RESOLVED 2026-08-23 — `handshake-timeout` is being added to `clusterLinkRefuseReasonSchema`, and
+> the compatibility worry that made it look like an owner call is provably empty.** Verified, not
+> reasoned about:
+>  - **`npm view @loki-labs/better-cezar` → 404. Never published.** That is this repo's ONLY
+>    non-private package (`packages/cezar`); `packages/contract`, `api-client` and `web` are all
+>    `"private": true`. Our fork has shipped nothing, so there is no released consumer of that enum.
+>  - `@open-mercato/cezar` 0.10.0 IS on npm, but that is UPSTREAM's lineage — nothing in this repo
+>    names `open-mercato`, and the standing rule is that we never push to `upstream`, so it is not
+>    downstream of us. This is the trap worth remembering: "the project is published" was true of the
+>    upstream name and false of our artifact.
+>  - `CEZ_CLUSTER` is unset everywhere on prod-host (verified during D43), so no spoke is
+>    running to receive an unknown reason.
+>
+> **Revisit this the moment either becomes false:** we publish `@loki-labs/better-cezar`, or
+> `CEZ_CLUSTER` is set on a box before a matching spoke rollout.
+>
+> **A latent D40 in the enum itself, flagged for follow-up.** `clusterLinkRefuseReasonSchema` is a
+> `z.enum`, so a spoke meeting an unknown reason drops the whole `refuse` frame and sees a bare
+> close — **a refusal carrying no stated reason, which is exactly the silent failure D40 exists to
+> fix.** Free today (no old spokes), but it makes EVERY future reason a latent D40 for any spoke
+> older than it. Fix the shape once: have the spoke parse leniently (known-value union with an
+> `unknown` fallback) so an unrecognized reason surfaces as "refused, reason not understood" rather
+> than as silence. That is `link-client.ts`, load-bearing for D38/D44 — flag before touching, and it
+> is fine as a separate follow-up rather than blocking D40.
 >
 > `link-client.ts` carries the D38 watermark wiring and is load-bearing for D44 — flag before
 > touching it.
