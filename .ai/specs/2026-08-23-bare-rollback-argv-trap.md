@@ -9,10 +9,12 @@ correction: `AGENTS.md:13`, `BACKWARD_COMPATIBILITY.md` section 1, this corpus n
 [#10](https://github.com/MarcinWalendowski/cezar/pull/10)). Verification §4's full gate suite has
 since run to completion (see Status log): `npm run typecheck`, `npm run test:unit` (44/44), `npm
 run build`, and `npm run test:package` (18/18) all EXIT=0; `npm test` EXIT=1 with three failures,
-all independently confirmed pre-existing and unrelated to this diff. Verification section 5, the
-runtime E2E on a scratch `systemd --user` install proving a real rollback moves the symlink on both
-the inline and detached paths, has NOT been run, so this stays
-QA Needed rather than Done pending that step. Originally written 2026-08-23 against `HEAD` =
+all independently confirmed pre-existing and unrelated to this diff. **Deployed to production
+2026-08-23T11:16:42Z** on `prod-host` as release `20260823T111632Z-902be14a` (see Status
+log) — verified live via `GET /api/v1/ready` and the deployed CLI's own bare `--rollback
+--dry-run`. Verification section 5, the runtime E2E on a scratch `systemd --user` install proving
+a real rollback moves the symlink on both the inline and detached paths, has still NOT been run,
+so this stays QA Needed rather than Done pending that step. Originally written 2026-08-23 against `HEAD` =
 `84fb8237` (branch
 `cez/e4faf470`, worktree `e4faf470-0b38-42ec-8335-5c9b6da5c8c7`). Every file and line cited below was
 re-opened at that commit for this document, and every claim about `node:util`'s `parseArgs` was
@@ -602,3 +604,23 @@ On landing, and in the same session as the code change, per the workspace rules:
   made in this step; only this Status line/log and the cross-references below. **What remains:**
   Verification §5's runtime E2E (real rollback on a scratch `systemd --user` install, both inline
   and detached paths) — the only thing standing between QA Needed and Done.
+
+- 2026-08-23 (deploy step): pulled `origin/main` fast-forward into the main checkout
+  (`84fb8237..902be14a`), ran `npm run build` (green, `check:pack ok — 1158 files`), then deployed
+  via this box's documented rootless blue-green path (`AGENTS.md` §"Always self-deploy", the
+  **user** `systemd-run --user` re-exec, never a system unit): `systemd-run --user
+  --unit=cez-deploy-902be14a --collect --property=Type=oneshot
+  --working-directory=/var/lib/cezar/loki-labs/cezar
+  --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/node
+  packages/cezar/dist/index.js server-deploy --strategy=blue-green
+  --source=/var/lib/cezar/loki-labs/cezar --sha=902be14afb8bd7e99f76d723d6a99775cb886e4f`. Result:
+  release `20260823T111632Z-902be14a` activated at `2026-08-23T11:16:42.819Z`, ledger-marked
+  `healthy: true`, `previous` retained as `20260823T083733Z-84fb8237` for `--rollback`. Verified:
+  `GET /api/v1/ready` reports `deploy.sha` = `902be14afb8bd7e99f76d723d6a99775cb886e4f`;
+  `/opt/cezar` symlink points at the new release directory. Then ran the spec's own Verification
+  §6 read-only check against the **deployed** CLI: `node
+  /opt/cezar/packages/cezar/dist/index.js server-deploy --rollback --dry-run` — no argv error,
+  prints the rollback plan (`current: 20260823T111632Z-902be14a`, `previous:
+  20260823T083733Z-84fb8237`), EXIT=0. This is the fix working on the live box. **Not run in this
+  step:** Verification §5's destructive runtime E2E (a real rollback on a *scratch* install, not
+  the live box) — still open, and still what keeps this spec at QA Needed rather than Done.
