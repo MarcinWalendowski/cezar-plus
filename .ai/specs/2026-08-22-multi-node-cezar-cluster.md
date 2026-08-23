@@ -2359,7 +2359,72 @@ invented; these are the names to use when one lands.
 > **The rule this proves, and the reason it is kept at the top rather than deleted:** *generate the
 > wiring or make the field required; never document that a caller ought to set it.* This branch
 > produced that same failure three times (D24, D43, and the `readTodosFor` near-miss) before the fix
-> changed the type instead of the docs. Original diagnosis kept below, unchanged.
+> changed the type instead of the docs.
+>
+> > **CORRECTED 2026-08-23 — THE DIAGNOSIS BELOW NAMES THE WRONG CAUSE. MEASURED, NOT ARGUED.**
+> > The original entry (kept unchanged below) says the missing `cluster` field on `server.ts:1601` is
+> > what makes the todo restart forever. **It is not.** Wiring that field correctly leaves the loop
+> > running, three reconcile passes each, real `markStarted`, nothing mocked:
+> >
+> > | | runs | `startedTaskId` | `autostart` |
+> > | --- | --- | --- | --- |
+> > | BEFORE — no `cluster` field (the "bug") | 3 | — | true |
+> > | WIRED — gate wired, `authoredHere=true`, hub DOWN | **3** | — | true |
+> > | WIRED — gate wired, `authoredHere=false`, hub DOWN | 0 | — | true |
+> > | WIRED — gate wired, **hub UP, claim ACCEPTED** | **3** | — | true |
+> >
+> > A *perfect* hub that accepts every claim still loops, because `todo-autostart.ts` calls
+> > `markStarted(dataDir, id, run.id)` **with no options**, so `todos.ts` re-reads `CEZ_CLUSTER` from
+> > the environment, finds no `confirmStart`, refuses `hub-unconfirmed`, and writes nothing. **The
+> > read-side gate and the write-side gate consult different things and neither knows about the
+> > other.** Only the replicated-todo-with-hub-down case is saved by the gate.
+> >
+> > **So the whole of the loop fix is the half that was thought independent:** `:284` keys on
+> > `startedTaskId`, the very stamp the refusal withholds. Fixed by capturing `markStarted`'s verdict
+> > and recording `dataDir todoId -> run.id` in a process-local `pendingStamp` map, so the next pass
+> > **re-stamps the run that already exists** rather than starting a second one — before resolving a
+> > workflow and before claiming. In-process is the correct scope: the runaway is driven by this
+> > process's own `fs.watch`, so a restart costs one further attempt, bounded; persisting it would put
+> > a second source of truth about run existence onto a replicated record. Every `runs=3` becomes
+> > `runs=1`, and it converges — once the write side can confirm, the record gets the REAL run's id.
+> >
+> > Clustering-off behaviour is unchanged and was *proved*, not asserted: `markStarted`'s `!clustered`
+> > branch always returns `true`, so the new path is unreachable when off. **6 mutations, all RED**,
+> > restored to md5 `aac2ad1ce97dc383a506526247b42c8d`. Two of them exist because the author checked
+> > their own control instead of assuming it: mutations A-D never made the CONTROL test fail — only
+> > the two new loop tests — so CONTROL was **unverified** at that point. P-F (the stamp names a run
+> > id that does not exist) is the mutation CONTROL actually catches, so it now counts. Making the
+> > switch required also made the typechecker find the same omission in **two more places**
+> > (`todo-autostart.test.ts:66` and `:192`) — the suite had been constructing the object without the
+> > field and passing.
+> >
+> > Landed in `b5ba78ab`, merged-tree gate green. **Note the commit message for `b5ba78ab` repeats the
+> > wrong cause** (it says the optional field was what started the todo forever); the commit is pushed
+> > and is not being rewritten, so THIS is the correction of record.
+>
+> ### D46 — CLUSTERED AUTOSTART STILL DOES NOT WORK. Bounded now, not correct. OWNER DECISION.
+>
+> D43's fix makes the loop converge; it does not make clustered autostart function. In the wired,
+> hub-up case the run **exists and the record does not know it**: one real run doing real work that
+> the todo board shows as unstarted. Strictly better than unbounded duplicates, still wrong.
+>
+> The cause is the same split D43 exposed — `mayAutostartTodo` obtains the hub's acknowledgement via
+> `claimStart`, then `markStarted` independently asks again via `confirmStart`, which nothing
+> supplies. Options:
+>  1. **Leave it.** `CLUSTERING_OFF` everywhere, autostart stays single-node, and now *says so* rather
+>     than pretending. Zero risk. This is the honest default until Milestone C needs otherwise.
+>  2. **Pass a `confirmStart` through the `cluster` seam** so one hub round trip serves both gates.
+>     Needs a production `TodoAutostartCluster`, which exists nowhere outside tests — a build, not a
+>     wiring change.
+>  3. **Pass `humanIntent: true` from autostart** so it writes optimistically as pending.
+>     **Recommended against**, and not marginally: `todos.ts:840` sets that default to `false`
+>     precisely so the rule fails closed, and names autostart *"the path that can double-start work
+>     nobody is watching"*. Option 3 is that comment's stated worst case.
+>
+> Both 2 and 3 terminate in `todos.ts`, the second clustering source — so this is also the decision
+> about whether that second source stays.
+>
+> Original D43 diagnosis, unchanged, below.
 >
 > **Latent, not armed — verified 2026-08-23: `CEZ_CLUSTER` is absent from `/etc/cezar/`, from the
 > systemd unit and dropins, and from the live server process env on `prod-host`.** So nothing
