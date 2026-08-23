@@ -5,6 +5,63 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- 🔐 **The cluster HTTP family authenticates the NODE now — and the hub turns out to have nothing
+  to authenticate it against** (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, **D20**,
+  still behind `CEZ_CLUSTER=1` and off by default).
+
+  `/api/v1/cluster/*` had exactly two gates: is clustering on, and is this node the hub. Neither
+  says **who is asking**. That was harmless while the family carried only control operations, and
+  stops being harmless the moment a route returns content — which is why the corpus routes have
+  been parked at 409 rather than serving. New `cluster/node-auth.ts` extends the link's own
+  **signed, freshness-bounded principal** (`supervisor/forwarded-principal.ts`) to HTTP, keyed on
+  the per-node HMAC secret enrollment already mints, and is registered by **explicit path** so a
+  route joins the authenticated set by where it lives rather than by someone remembering a helper.
+  This supersedes the `Authorization: Bearer` shape an earlier package had invented and flagged: a
+  bearer secret with no replay window was the weaker half of a choice nobody actually made.
+
+  **The finding underneath it is the important part. The hub never persists a node's secret.**
+  `redeemEnrollmentCode` generates it, hands it to the joining spoke, and stores it **nowhere** —
+  `cluster/peers.ts` contains the string `secret` zero times, and the contract's served node shape
+  says outright that it has no `secret` field. The consequence is bigger than D20: `verifyClusterFrame`
+  needs that same secret, so **the link's own per-frame authentication has no receiving end either**.
+  Enrollment reads as complete and is not — a node can join, land in the roster, and hold a
+  credential nothing on the other side can check. `node-auth`'s lookup therefore **fails closed**,
+  which is the honest posture and is also why the reconcile routes below were held back.
+
+  Where the secret should live is a real security decision, not a line of code: `peers.json` is the
+  wrong home unless nothing renders it, and `GET /api/v1/cluster` serves the roster. It is the next
+  package, and it is recorded as the top open item in the run plan.
+
+- 🧭 **Decided, deliberately not built: how `cez cluster reconcile` gets its data** (**D21**). The
+  gap turned out to be **one method, not four** — `apply` is an ops frame, `backup` is a local
+  write on the receiver, `listProjects` is the confirmed-pairings list; only "give me your full todo
+  list" had no rail. So one new read, `GET /api/v1/cluster/todos/:projectKey`, scoped to a confirmed
+  pairing, with reconcile running **from the spoke against the hub** — the direction E2 needs and
+  the only addressable one, since a spoke dials out and has no inbound address. The routes are not
+  wired yet, on purpose: behind a fail-closed gate they could only ever answer 401, and a route that
+  reads as "built" in every list that counts routes while refusing every caller is worse than its
+  absence.
+
+- 🛠 **`appendTodosPreservingIds`** — `todos.ts` had no insert that preserves an existing id
+  (`createTodo` always mints a fresh one), which is what forced `cluster/reconcile.ts` to
+  re-implement this file's own `O_EXCL` lease. That re-implementation then called `readTodos` from
+  **inside** its own lease, and `readTodos` takes the same non-reentrant lease on its id-backfill
+  path: every reconcile append stalled for the full 5 s timeout, the throw was swallowed, and the
+  ids that got written were ones `readRaw` had minted and never persisted — violating the exact
+  invariant `readTodos`'s 2026-08-22 correction exists to protect. One lease now, in the file that
+  owns it, and reconcile's duplicate is deleted.
+
+## 🩹 Fixed
+- 🩹 **An externally-killed `opencode` run reported `done` and the workflow carried on past it.**
+  Same symptom as the `claude`/`pi`/`codex` fix, **different mechanism**: there, `waitForExit`
+  dropped the signal; here there was no exit gate at all — both the `'exit'` and `'close'`
+  handlers discarded `code` and `signal`, and success was decided entirely by the SSE session
+  status. A kill whose stream never reported `error` fell straight through to `done`. The gate is
+  keyed on `terminatedByCezar` rather than on the exit alone, which is the part that matters for
+  this runner: cezar killing the child is the **normal** case here (it tears the server down after
+  every healthy session), so a naive "non-zero or signal ⇒ fail" would have turned every successful
+  run red.
+
 - ✨ **cezar can run as a cluster: one hub, N spokes, one backlog** — spec
   `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, behind `CEZ_CLUSTER=1` and **off by
   default**. Route family, flag-off shape and the WebSocket link are contracted in
