@@ -2872,6 +2872,61 @@ invented; these are the names to use when one lands.
 > >   live-only** — it never has history to miss. Same fixture blindness that hid the placement
 > >   hot-spot: the fixture excludes the very condition the defect needs.
 > >
+> > **29. `/cluster/active` HONESTY FIX — LANDED (uncommitted), with a correct divergence from my own
+> > instruction.** `asOf` is now `z.string().optional()`, **absent meaning no linked node has ever
+> > reported**, computed by a new pure `clusterActiveAsOfFrom(nodes)` — the max `lastSeenAt` across
+> > non-disabled roster rows. The CLI branches three ways (no linked nodes / linked but none reported
+> > / reported), the help text no longer tells operators to use the answer as a collision-safety
+> > check, and the false "touched paths" promise is gone. `BACKWARD_COMPATIBILITY.md` updated;
+> > `bc-route-inventory.test.ts` did **not** redden (11/11).
+> >
+> > **The divergence, and it is an improvement on what I asked for.** I instructed the implementer to
+> > take the clock from the D20 `deps.now` hook. It verified that `ClusterRouteDeps.now`
+> > (`cluster-routes.ts:233`) is consumed **only** by `createNodeAuthMiddleware` and nothing in this
+> > handler reads it — and then made the better call: **the fixed `asOf` reads no clock at all**,
+> > because it is computed purely from stored `lastSeenAt`. There was nothing left to route. Test
+> > determinism came instead from `vi.useFakeTimers({ toFake: ['Date'] })`, which freezes the
+> > `new Date()` calls the **pre-fix** handler makes — which is precisely what the "trap inside the
+> > trap" required. My instruction named a mechanism; the right answer was to delete the need for one.
+> >
+> > **The RED is the honest one**, and its shape is worth keeping as a template:
+> >
+> > ```
+> > AssertionError: expected { runs: [], …(1) } to not deeply equal { runs: [], …(1) }
+> > Compared values have no visual difference.
+> >   expect(untracked).not.toEqual(idle);
+> > ```
+> >
+> > Both responses were `{runs: [], asOf: '2026-08-23T12:00:00.000Z'}` — byte-identical because the
+> > frozen clock made both `new Date()` calls return the same instant. **Unfrozen, this test would
+> > have passed pre-fix on a one-millisecond difference** — green for jitter, not for honesty.
+> >
+> > **What it does NOT fix, stated plainly:** the projection is still never populated in production,
+> > so `runs` is still always `[]`. This makes the SHAPE of the answer honest about that gap
+> > (`asOf` absent = do not trust this), not the answer real. **Status: QA Needed** — gates green,
+> > no runtime pass. **Known gap:** the CLI's new three-way branch has no automated test;
+> > `runClusterCommand`'s `active` case is not exported and no CLI harness exists. The `asOf`/`linked`
+> > VALUES are proven by the route test through the shared helper, but the message selection itself
+> > is covered only by typecheck and reading.
+> >
+> > **30. A SHARED-TREE HAZARD THAT COST REAL WORK, and my own standing instruction caused it.**
+> > Three agents were dispatched onto `cluster-routes.ts` concurrently — my error. One agent's
+> > whole-file write **silently clobbered another's four landed edits**: not a merge conflict, no
+> > error, last writer wins. A third agent's mutation (`MUTANT M10`, `return []` at the top of
+> > `clusterActiveRunsFrom`) was stranded live in the tree by the same collision and had to be removed
+> > by hand.
+> >
+> > **The instruction that caused it was mine, and it is now corrected.** I had been telling every
+> > agent *"restore mutations from a scratchpad copy, never `git checkout`"*. That is right about
+> > `git checkout` and **wrong about the restore**: in a concurrently-edited file, writing back a
+> > whole-file backup wipes every edit that landed after the backup was taken. The rules now are:
+> > **restore only the mutated HUNK** (replace the exact mutated text with the exact original,
+> > asserting it matched once); **never write a contended file whole-file**; and **`grep -rn
+> > "MUTANT\|MUTATION M"` before reporting any result from it**, because a green run taken against
+> > someone else's live mutation is not your result. Note the corollary: after a hunk-restore your
+> > md5 will correctly FAIL to match the original file, because the file has legitimately moved —
+> > **verify the hunk, not the file.**
+> >
 > > *(Both 5 and 6 are latent: `createHubDispatcher` still has zero production callers. They become
 > > real the moment Milestone C's hub half is wired, which makes them prerequisites for that work,
 > > not follow-ups to it.)*
