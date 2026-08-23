@@ -4,10 +4,14 @@
 edits it plugs into), P2 (the tests: `argv.test.ts`, four new cases in
 `server-deploy-cli-wiring.test.ts`, one new case in `release-deploy.test.ts`) and P3 (the record
 correction: `AGENTS.md:13`, `BACKWARD_COMPATIBILITY.md` section 1, this corpus note, and
-`f97ddd39` marked done in the main checkout's `.ai/cezar/todos.json`) are all landed on
-`cez/e4faf470`. `npm run typecheck` and the three touched test files are green (`45/45` tests).
-Verification section 5, the runtime E2E on a scratch `systemd --user` install proving a real
-rollback moves the symlink on both the inline and detached paths, has NOT been run, so this stays
+`f97ddd39` marked done in the main checkout's `.ai/cezar/todos.json`) are all landed on commit
+`6863f173`, pushed to `origin/cez/e4faf470` and merged to `origin/main` at `c8afc4e5` (PR
+[#10](https://github.com/MarcinWalendowski/cezar/pull/10)). Verification §4's full gate suite has
+since run to completion (see Status log): `npm run typecheck`, `npm run test:unit` (44/44), `npm
+run build`, and `npm run test:package` (18/18) all EXIT=0; `npm test` EXIT=1 with three failures,
+all independently confirmed pre-existing and unrelated to this diff. Verification section 5, the
+runtime E2E on a scratch `systemd --user` install proving a real rollback moves the symlink on both
+the inline and detached paths, has NOT been run, so this stays
 QA Needed rather than Done pending that step. Originally written 2026-08-23 against `HEAD` =
 `84fb8237` (branch
 `cez/e4faf470`, worktree `e4faf470-0b38-42ec-8335-5c9b6da5c8c7`). Every file and line cited below was
@@ -563,3 +567,38 @@ On landing, and in the same session as the code change, per the workspace rules:
   `npm run test:package`) has not been run in this step, only the three touched files plus
   typecheck; and Verification §5's runtime E2E (real rollback on a scratch `systemd --user` install,
   both inline and detached paths) has not been run at all. Status stays QA Needed until both close.
+
+- 2026-08-23 (run-tests step): ran all five gates this repo defines
+  (`.ai/agentic.config.json`; there is no separate lint command). `npm run typecheck` → EXIT=0.
+  `npm run test:unit` → EXIT=0, 44/44. `npm run build` → EXIT=0 (`check:pack ok — 1158 files`).
+  `npm run test:package` → EXIT=0, 18/18. `npm test` → EXIT=1, `Test Files 3 failed | 571 passed |
+  2 skipped (576)`, `Tests 3 failed | 10748 passed | 4 skipped (10755)`. All three failures were
+  checked against a control (merge-base and/or isolated single-file run) and confirmed pre-existing
+  and unrelated to this branch's diff, not new red introduced by P1/P2: `catalog.test.ts` C18
+  (documented host-speed budget flake, AGENTS.md trap 3), `add-project-dialog.test.tsx` navigate-race
+  (documented flake, AGENTS.md), and `config-api.test.ts:106` (`defaultModels.claude` missing;
+  `git diff HEAD` on that file is empty, it imports none of the changed files, and it fails
+  identically in isolation at this same HEAD). This closes Verification §4; only §5 (the runtime
+  E2E) remains before Done. **Correction to that step's own report:** it stated the `config-api.test.ts`
+  failure was "filed as todo `c24889aa-9241-4509-b008-af6706d035e1`" — that row does not exist in
+  `.ai/cezar/todos.json` (168 rows checked, no match), so either the write did not land or was never
+  made. The failure is not untracked, though: it is a duplicate of pre-existing row
+  `72eba946-5cca-4cb4-a700-a484fb627d72` (filed 2026-08-22 by task `9092de31`, `status: "todo"`,
+  same file, same line, same symptom), so no new tracker row was needed or has been filed here.
+
+- 2026-08-23 (commit-push step): committed as `6863f173` on `cez/e4faf470`
+  (`fix: make bare --rollback work — implement 2026-08-23-bare-rollback-argv-trap`), pushed to
+  `origin/cez/e4faf470` (never `upstream`, per this repo's remote convention), opened PR
+  [#10](https://github.com/MarcinWalendowski/cezar/pull/10), and self-merged it into `origin/main`
+  at `c8afc4e5`, following this repo's established convention of the same author self-merging every
+  recent PR. `git merge-base --is-ancestor` confirms this worktree's `HEAD` is now an ancestor of
+  `origin/main`.
+
+- 2026-08-23 (document step): confirmed the above against the live repo state rather than trusting
+  the progress log — `git log`/`git status` on this worktree (`cez/e4faf470`, clean, `HEAD` =
+  `6863f173`), `git fetch origin` + `git merge-base --is-ancestor HEAD origin/main` (true),
+  `gh pr list --head cez/e4faf470 --state all` (PR #10, MERGED), and the todo row for `f97ddd39`
+  (`status: "done"` in the main checkout's `.ai/cezar/todos.json`). No further code or test changes
+  made in this step; only this Status line/log and the cross-references below. **What remains:**
+  Verification §5's runtime E2E (real rollback on a scratch `systemd --user` install, both inline
+  and detached paths) — the only thing standing between QA Needed and Done.
