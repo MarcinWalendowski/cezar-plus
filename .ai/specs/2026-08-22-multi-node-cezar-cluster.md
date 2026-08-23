@@ -2511,6 +2511,40 @@ invented; these are the names to use when one lands.
 > use it. And when you replace a sampler with an observer, mutation-test the NEW failure mode (late
 > subscribe), not only the old one.
 >
+> ### B6 — MERGED-TREE GATE: DONE 2026-08-23. GREEN, and the harness bug it exposed matters more.
+>
+> Merged `origin/main` (`7eba4ac3`) into `feat/multi-node-cluster` at `b5ba78ab` — **clean, no
+> conflicts** (the branch was 13 ahead / 9 behind; the merge brought in the peer session's
+> retarget/account-pool work). Merged-tree gate on the box:
+>
+> **`tsc --noEmit` EXIT=0 · vitest 7077 passed / 2 failed / 4 skipped (7083), 408 files passed / 2
+> failed / 2 skipped (412).** Both failures are known and neither is this branch's:
+>  - `catalog.test.ts` C18 — the standing calibration red on this box.
+>  - `workspace-parallel.test.ts` — the peer's pre-existing flake (their todo `ffc3f805`). Measured in
+>    isolation here: **2 pass / 1 fail in 3 runs**, so it is genuinely flaky rather than merge-broken.
+>
+> **THE HARNESS BUG, which invalidated an earlier "clean" number and would have kept doing so.**
+> The first merged run reported a THIRD failure — `bc-route-inventory.test.ts`, "these `/api/v1/*`
+> routes are registered but missing from the §2 inventory", naming `/api/v1/runs/:p/agent`. That was
+> **my gate harness, not a defect**: the sync was `rsync … ./packages/ → box:…/packages/`, but that
+> test reads `BACKWARD_COMPATIBILITY.md` from **`REPO_ROOT` (`../../../..`)**, which the sync never
+> touched. So it compared the merged `server.ts` against a **stale repo-root doc** left from whenever
+> the gate dir was last fully populated (box `ca3dc623…` vs Mac `81de685c…`). Syncing the whole tree
+> made it pass. **Three test files read repo-root paths** — `bc-route-inventory.test.ts`,
+> `core/vitest-config.test.ts`, `runs/task-author-coverage.test.ts` — so a `packages/`-only sync
+> silently mis-tests all three, and the earlier 7027/1 number was computed against a stale root too.
+>
+> Two process points, both of which cost real time here and are the reusable part:
+>  - **Sync the whole tree** (excluding `node_modules/ dist/ .turbo/ .git/ .ai/cezar/ *.log`), then
+>    prove it: `md5` the root doc on both sides, not just the manifests.
+>  - **Proving a claim beat inferring it, twice in ten minutes.** I first reasoned the route inventory
+>    failure was pre-existing on `origin/main`, because the route is in main's `server.ts` and a grep
+>    for it in main's `BACKWARD_COMPATIBILITY.md` returned 0. Both halves were right and the
+>    conclusion was wrong: the guard **normalizes params to `:p`** while the doc spells the real name
+>    (`:id`), so that grep could only ever return 0. Running the test against pristine `origin/main`
+>    files returned **11 passed**, which is what forced the real diagnosis. Never grep for the
+>    normalized form in the un-normalized source.
+>
 > ### GATE — 2026-08-23, on the box, clean tree
 >
 > `/var/lib/cezar/gate-cluster` (rsync `--delete` mirror of `packages/`, manifests md5-identical to the
