@@ -2635,6 +2635,50 @@ invented; these are the names to use when one lands.
 > > is: *a foreign run appears on the board with its status, and a finished one can be read back;
 > > nothing streams live.*
 > >
+> > **16. D47 IS HALF-FIXED: `heavyActive` still reports a fabricated zero.** Verified — both halves
+> > of the D47 pair assert the same value: `spoke-runtime.test.ts:754` (semaphore wired) and `:779`
+> > (no semaphore) each `expect(frame.capacity.heavyActive).toBe(0)`. Hardcoding
+> > `heavyActive: deps.semaphore.heavyActive()` → `heavyActive: 0` at the wiring site passes
+> > **60/60**. So the exact defect D47 exists to close — a permanent honest-looking idle claim — is
+> > still live for the heavy dimension, and `maxHeavySteps − heavyActive` is the heavy-headroom input
+> > to placement. **Fix:** a stub whose `heavyActive()` returns a value distinct from `busy()` (e.g.
+> > `busy()=2, heavyActive()=1`), so one constant cannot satisfy both. *Two assertions of the same
+> > zero are one proof counted twice.*
+> >
+> > **17. THERE IS A SECOND STANDING RED ON THE MAC, and gate reports have been treating it as one.**
+> > `server/cluster-flag-off.test.ts` → *"floor: a path nothing has ever owned is destroyed under both
+> > flag states"* (`:391`) fails `Test timed out in 5000ms` on a **clean tree**, verified with the
+> > tree restored. So the known-red list is `knowledge/catalog.test.ts` C18 **plus this**, on top of
+> > the rotating timing-flake pool. Anyone reading "N-1 of N is green" against a single expected red
+> > will mis-attribute this one.
+> >
+> > **18. EIGHT CLUSTER TESTS CANNOT FAIL — mutation-measured, ranked by what could hide.** Every row
+> > below is a mutation applied to production code that left the suite GREEN. Restores were verified
+> > by md5 against scratchpad copies.
+> >
+> > | # | what is unpinned | mutation that stayed green |
+> > | --- | --- | --- |
+> > | 1 | `projectRun`'s projection — **24 of 25 optional fields** | deleted 24 field carries; 18/18 pass. Negative control (deleting only `author`, the one optional the fixture DOES populate) also green, so the suite genuinely cannot see it. `clusterRemoteRunSchema.parse()`, which the test's own comment presents as the safety net, cannot object to a missing `.optional()` |
+> > | 2 | `markNodeSeen`'s carry of `hostMetrics` / `repoDrift` / `corpus` | deleted all three; **183/183 pass**. These are the heartbeat's payload — sever them and per-node host metrics, repo drift and corpus freshness go permanently blank with no error |
+> > | 3 | the refusal PRIORITY order in `dispatch.ts` | promoted `at-capacity` from last to first; `dispatch.test.ts` 38/38 pass. No fixture ever sets two faults at once, so the ordering the module's docblock argues for at length is pinned by a single compound case — and caught only *accidentally*, by a test in another file |
+> > | 4 | the fencing token's **value** (`leases.ts:265`) | dropped `existing.fencingToken === request.fencingToken`; 12/12 pass. Every test supplies the CORRECT token, so no assertion separates "checked" from "ignored". In production a holder presenting a STALE token would be renewed in the current epoch instead of falling through to a fresh grant — which is the fencing property itself |
+> > | 5 | `LINK_PRINCIPAL_MAX_AGE_MS` (120s) in 2 of its 3 suites | widened to 1 hour. `enrollment.test.ts` computes its stale/fresh timestamps **from the constant**, and `link-server.test.ts` passes `maxAgeMs: 120_000` explicitly — both are tautological. Only `node-auth.test.ts`, which uses literals, goes red. Every captured principal replayable for an hour, invisible to two suites |
+> > | 6 | D47's `heavyActive` | see item 16 |
+> > | 7 | the semaphore reaching the spoke through the REAL hops | deleted `semaphore: deps.semaphore` from the middle hop; green. *(Closed later the same day — see the activation-test work below.)* |
+> > | 8 | `allocate.ts`'s `count` clamp | deleted `Math.min(Math.max(Math.trunc(count ?? 1), 1), 50)` entirely; 15/15 pass. The upper bound is the only thing stopping one call burning an arbitrary block of spec numbers |
+> >
+> > **The most useful contrast in the exercise:** rows 1, 2 and `toNodeWire` are the SAME code shape —
+> > a projection built from `...(x !== undefined ? {k: x} : {})` spreads. Two are pinned by nothing;
+> > `toNodeWire` is pinned completely, and deleting its seven carries goes red immediately. The
+> > difference is not the assertion style and not the schema — **it is entirely whether the fixture
+> > populates the optional fields.** One `hub-router.test.ts` test that builds a fully-populated node
+> > and `toEqual`s the result does more work than the other two files combined. That is the template
+> > for fixing rows 1 and 2.
+> >
+> > **And note the asymmetry rows 1-2 expose:** the CONSUMER of these fields is exhaustively pinned,
+> > the PRODUCER is not pinned at all. A `toEqual` is total over the value produced, never over the
+> > shape the code can produce.
+> >
 > > *(Both 5 and 6 are latent: `createHubDispatcher` still has zero production callers. They become
 > > real the moment Milestone C's hub half is wired, which makes them prerequisites for that work,
 > > not follow-ups to it.)*
