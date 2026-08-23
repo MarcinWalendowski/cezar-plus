@@ -4040,6 +4040,162 @@ invented; these are the names to use when one lands.
 >   ranking, filtering or dedupe code, **mutate the discriminator to a constant and run the suite.
 >   Every suite that stays green is blind by construction.** That is cheaper than reasoning about
 >   whether a fixture is adequate, and it localises immediately.
+>
+> - **B9 — REVOKE DID NOT CLOSE THE LIVE LINK. Confirmed, fixed, and the bug was WRITTEN DOWN as a
+>   justification.** The credential half was already sound (`peers.ts#disableNode` calls
+>   `removeNodeSecret` **unconditionally** — D22's `if (found)` hole is fixed on this branch,
+>   re-verified in the code rather than from its docblock). The live-link half **did not exist at
+>   all**: a link authenticates exactly once, at HTTP upgrade; no uplink frame on an established
+>   socket carries a signature, and nothing re-read the credential afterwards. A revoked node stayed
+>   in `connectedNodes()`, kept receiving replica fan-out, and kept being served.
+>
+>   **The tell that should have been caught by reading, and the transferable lesson:**
+>   `hub-router.ts:293` explicitly *declined* to gate on `disabledAt`, and said why —
+>   *"`authenticateLinkUpgrade` already refuses the UPGRADE before a socket exists to carry a
+>   `hello` on."* **That sentence is TRUE of a new connection and FALSE of a live one.** The defect
+>   was not an oversight; it was a documented justification that answered a different question than
+>   the one that mattered. A comment explaining why a guard is unnecessary deserves more suspicion
+>   than one explaining why a guard exists.
+>
+>   **Second tell, and it is greppable: a reason enum member with ZERO production emitters.**
+>   `node-disabled` and `ClusterLinkServer.refuse()` both already existed. `grep -a` across the
+>   workspace found the enum member (`contract/src/cluster.ts:858`), one docblock sentence, and one
+>   test line — nothing raised it. **The vocabulary for the mechanism shipped; the mechanism did
+>   not.** Any `reason`/`status`/`errorCode` union member with no producer is an unimplemented path
+>   advertising itself as a built one.
+>
+>   **The fix is a PULL, not a PUSH, and the reason generalises.** `reap()` now runs
+>   `sweepRevoked()`: re-read each connected node's credential, and if the secret is gone,
+>   `refuse(node, 'node-disabled')` + close 1008. A push from `disableNode` **cannot** work for the
+>   primary path — `cez cluster revoke <nodeId>` runs in a **separate CLI process** where no
+>   `ClusterLinkServer` exists, the socket living in the hub process. It would also be conditional
+>   on every revoke path remembering to call it, which is the same shape as the original `if
+>   (found)` bug. **Unconditional by construction beats unconditional by discipline.**
+>   Two design details worth keeping: the sweep is keyed on **identity, not id**, so a re-enrolled
+>   node's new socket is not cut on behalf of the revoked one; and a credential lookup that
+>   **throws** is skipped rather than treated as revocation, because cutting every link on one
+>   unreadable file is a self-DoS that could never heal (the upgrade path reads the same store).
+>
+>   **Honest limitation, recorded not buried:** the window is bounded by the reap cadence
+>   (`HEARTBEAT_MS` = 30s), not closed instantly. `refuse` is already public, so wiring
+>   `DELETE /cluster/nodes/:nodeId` to it for an immediate cut is a **one-line addition in
+>   `cluster-routes.ts` — still OPEN, deliberately not done**, because that file was held.
+>
+>   **Proof: RED first, and the negative control asserts the OLD LINK IS REJECTED** — not that a
+>   record is absent, which is the assertion the historical version of this bug passed with.
+>   `× a node whose secret is removed WHILE CONNECTED is refused node-disabled…` /
+>   `× cuts a revoked socket that never sent a hello…` / `Tests 3 failed | 1 passed`. **The single
+>   passing test was a deliberate control** — a re-dial with the revoked credential was *already*
+>   refused `401 unknown-node` — which is what proves the two mechanisms are genuinely different and
+>   isolates the defect to the live link. GREEN after: 34/34, and 84/84 across `link-server`,
+>   `cluster-link-activation`, `link-client`, `node-secrets`, **run twice** so nothing is attributed
+>   to the flake pool. `tsc` exits 0.
+>
+> - **B10 — D47 was WRONG ABOUT THE MECHANISM and right that something is broken.** The record said
+>   `heavyActive` "still fabricates zero". It does not: it is a **computed** value on a
+>   fully-wired path — `index.ts:770` → `startServer` → `startClusterRuntime` →
+>   `startSpokeRuntime` → `spoke-runtime.ts:397`, the same `WorkspaceSemaphore` instance that gates
+>   heavy steps. The `?? { active: 0, heavyActive: 0 }` fallback in `peers.ts:555` is genuinely
+>   unreached in the running server.
+>
+>   **The real defect is that it is unpinned in BOTH directions, and the proof is the cheapest kind
+>   available: a positive control on the ADJACENT FIELD OF THE SAME OBJECT LITERAL.**
+>   | mutation at `spoke-runtime.ts:397` | result |
+>   |---|---|
+>   | `heavyActive: …heavyActive()` → `0` | **63/63 green** (846/847 across cluster+semaphore) |
+>   | `active: …busy()` → `0` *(control)* | **RED**, "expected +0 to be 2" |
+>   Same line, same literal, same commit. `active` is pinned because a fixture sets
+>   `busySlots: () => 2`; `heavyActive` was never given a nonzero fixture, so both existing
+>   assertions are `toBe(0)` in a world where no heavy step runs — **the right number for a
+>   mechanism that never occurs.** When two fields are built side by side, mutating the one you
+>   believe IS covered is a free, decisive check that the harness reaches the line at all.
+>
+>   **Urgency correctly downgraded rather than inflated:** `headroom()` (the only reader of
+>   `capacity.heavyActive`) has zero production callers, and `createHubDispatcher` has zero
+>   production call sites, so the load-concentration mechanism is real in design and **unreachable
+>   today**. The one live reader is the cockpit's "N/M heavy" node card
+>   (`web/src/routes/settings/cluster-section.tsx:447`). So today it is a reporting bug — and it
+>   becomes load-bearing the moment the hub half is wired, which is the next thing planned.
+>   Latent, filed not fixed: `hub-dispatch.ts:281` folds pending dispatches into `active` but leaves
+>   `heavyActive` untouched, so the heavy tiebreak is stale-by-one-beat in exactly the window that
+>   adjustment exists to close.
+>
+>   **Measured aside that corrects a standing note:** the binary-misclassified file count is **4**
+>   today (`cluster/ops.ts`, `todo-autostart.ts`, `notifications/decider.ts`, one web test), not 3.
+>   The count moves; `grep -a` every negative rather than quoting a number.
+>
+> - **B11 — "THE HUB HALF IS BUILT AND ONLY NEEDS WIRING" IS FALSE. Correcting my own framing.**
+>   I briefed this as three symbols needing import lines. A production-call-expression census
+>   (controls proving the method does not produce false zeros: `readPeers` 14, `collectPresence` 4,
+>   `startSpokeRuntime` 2, `placeRun` 1) says otherwise:
+>   - `createHubDispatcher` **0** production calls (1 definition, 1 docblock mention).
+>   - `sweepUnanswered` **0** — all six grep lines are inside its own module.
+>   - `dispatchCorrelation` has one call expression (`hub-router.ts:617`) but the dep is optional and
+>     **never supplied**: the single production `createHubFrameRouter` call (`cluster-routes.ts:1165`)
+>     passes `{ identity, env, warn, replication }`.
+>   - **`PlacementCandidate`/`PlacementRequest` are constructed by NOTHING in production.** Every
+>     non-test occurrence is a type annotation. There is no roster→candidates function anywhere; the
+>     E2E hand-writes `candidate()` as an object literal.
+>   - **There is no dispatch TRIGGER of any kind** — no route (20 `/cluster/*` routes, none
+>     dispatches), no CLI path (the dispatcher is closed over `linkServer` in the server process), no
+>     timer, no autostart hook (`server.ts:1638` hardcodes `cluster: CLUSTERING_OFF`, and
+>     `TodoAutostartCluster` has no production implementation).
+>
+>   So Milestone C step 1 — *"a caller that picks a node when a run starts"* — **is unwritten**; only
+>   its pure core exists. The work is **one new module plus one route**, not three imports. This is
+>   the branch's own signature failure applied to my planning: a half-built feature read as evidence
+>   that the built half is the right half.
+>
+> - **B12 — THE GATE IS ON THE TRIGGER, NOT THE SWEEPER. My hazard ordering was one step off.**
+>   I told two agents that wiring `sweepUnanswered` would make a wedged node a steady-state black
+>   hole. That is true **only in combination with a re-dispatch trigger, and no trigger exists.**
+>   The loop needs: dispatch → no answer → 90s → `unanswered` (terminal, and `hub-dispatch.test.ts:820`
+>   *deliberately* asserts re-dispatch is then allowed) → **something re-dispatches**. Remove the
+>   sweeper and you get **permanent stranding** instead (`outstandingFor` blocks forever on
+>   `pending`); remove the trigger and both are inert. **Phases 1-3 may land against a
+>   wedge-vulnerable spoke with no behavioural consequence whatever.**
+>
+>   **A second re-dispatch source nobody had named: `records` is IN-MEMORY, and this hub blue-greens
+>   ~10x/day.** A restart forgets every `pending` record, `outstandingFor` lapses, and the trigger
+>   re-dispatches — so the black hole forms at **~10 bursts/day even with the sweeper unwired**, once
+>   a trigger exists. The wedge fix gates the TRIGGER. Preconditions before any trigger lands:
+>   (1) a `timeout` on `peers.ts#runGit` **and** a warn/watchdog on the skipped-beat path, since a
+>   timeout alone leaves the latch reachable through any other never-settling await in
+>   `collectPresence`; (2) the `capacityAgeMs` de-rank, so a frozen claim loses its ranking advantage.
+>
+> - **B13 — D19 rung 3 (cross-node overlap) will be silently OFF the moment `placeRun` goes live.**
+>   `PlacementRequest.activeRuns` can only come from `readRemoteRuns()`, and `runs-remote.json` has
+>   **no writer in the repo** (`applyRemoteRuns`, `markNodeUnreachable`, `watchRunProjection` all 0
+>   production callers — that is Milestone D). So `activeRuns` is `undefined`, `overlappingRun`
+>   returns `undefined`, `blockedBy` is never set, and **two runs on the same project touching the
+>   same paths on two nodes are both dispatched.** `placement.ts:137` is honest about it internally
+>   (*absent "means the check cannot run and must not pretend it did"*) — and that honesty is
+>   **invisible at the call site**, where a caller reads `status: 'placed'` and cannot tell "no
+>   collision" from "the collision check did not run". **A module being honest with itself is not the
+>   same as a surface being honest with its caller.**
+>
+> - **B14 — the Milestone D harness bug is WORSE than item 11 recorded: scenario 4 has it too.**
+>   `cluster-link-activation.test.ts:737` builds the hub router with **no `env`**, then sets
+>   `process.env.CEZ_HOME = spokeHome` at `:767`. The hub's `markNodeSeen` therefore writes into the
+>   **spoke's** home, and every hub-side assertion in that scenario is one `CEZ_HOME` away from being
+>   about the wrong process. **Any candidate-builder assertion written against that harness as-is is
+>   vacuous** — the hub would read a `peers.json` the spoke wrote. Fix it with a negative half: assert
+>   the hub's `peers.json` does **not** appear under `spokeHome`. Without that, a pass is a coincidence.
+>
+> - **B15 — what becomes reachable FOR THE FIRST TIME on the first placed dispatch** (this is where
+>   the next defect will be, and the list is the deliverable):
+>   `placeRun` → `eligibleCandidates` → `rankByHeadroom` → `headroom` (all 0 production callers
+>   today) · `buildDispatch`, and the first `dispatch`-type frame ever put on a downlink — **no size
+>   guard covers that path** (`link-server.ts`'s size assertions cover `replica` and `relay` only) ·
+>   on the spoke, `handleDispatch` → `collectPresence` (**the wedge site, on the dispatch path too**)
+>   → `offerDispatch` → `dispatchRefusalReason` → `isCorpusStale` · `resolveDispatchManager` →
+>   `sharedContexts.context(match.id)` — the **BUILDING** call, not `peek()`, so **a remote hub can
+>   cause this node to construct a project context for any registered project the cockpit has never
+>   opened**; widest blast radius on the list, gated by nothing but `acceptsDispatch` ·
+>   `markStartedWithClaim` under `CEZ_CLUSTER=1`, where `spoke-runtime.ts:918-923` **sends `accepted`
+>   before checking `result.stamped`**, so a todo with `autostart: true` can have the spoke's own
+>   reconcile start a SECOND run · `resolvePoolForDispatch`/`resolvePoolForProvider`, which
+>   **advance the fairness cursor as a side effect** — use `selectPoolAccount` for speculative queries.
 > - **~~~25% of the whole spec. Milestone C and D are at 0%~~ — SUPERSEDED 2026-08-23 by the HANDOFF STATE block at the top of this file.** Milestone C landed in `f6a9bad6`: the SPOKE half is wired and live, the HUB half is built with zero production callers. **D is still at 0%.** Left below because the estimate of what C *was* still holds; it is not a statement of what remains. This is the "not built" label sitting over built code, which reads as licence to rebuild it. The original: ~25% of the whole spec, and the spec's own estimate is that C is
 >   *larger than A and B combined*.
 > - **0% verified on real hardware.** Every test runs both ends of the socket inside one process on
