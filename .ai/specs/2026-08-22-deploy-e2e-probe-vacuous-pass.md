@@ -1,6 +1,17 @@
 # The deploy E2E probe must not report PASS on what it never observed
 
-**Status:** Draft — spec only, not yet implemented.
+**Status:** **Implemented — QA Needed.** P1 (vacuous-pass guard), P2 (hard 401/403 failure) and P3's
+documentation half shipped 2026-08-23 in commit `83ddbdd2`, pushed to `origin/main` (worktree
+`29c070f0`; unrelated to this same-day commit's own subject line, which is an autosave message from
+the implementing session). Gates green: `npm run typecheck` (0 errors), `npm run test:unit`
+(53/53, including 9 new cases in `packages/cezar/test/unit/deploy-e2e-probe.test.ts`), `npm test`
+(516/518, 2 pre-existing unrelated flakes in `src/knowledge/catalog.test.ts` and
+`src/components/add-project-dialog.test.tsx`). **Not yet done:** P3's live half — this spec's own
+Verification section, "The live, credentialed run on `prod-host`" — has not been executed in
+this task's chain, so acceptance criterion 3 ("records real seq continuity across a cutover on the
+hosted box") is unmet, and the parent spec's in-place correction (Verification step 6, below) is
+correctly still deferred. Todo `8dc8bf3a` tracks the remainder.
+
 **Date:** 2026-08-22
 **Owner ask (task context):** "deploy-e2e-probe reports a false PASS when it observed nothing."
 **Extends:** `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` (KB `specs-594acc539b36`) —
