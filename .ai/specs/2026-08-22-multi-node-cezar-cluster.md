@@ -2679,6 +2679,51 @@ invented; these are the names to use when one lands.
 > > the PRODUCER is not pinned at all. A `toEqual` is total over the value produced, never over the
 > > shape the code can produce.
 > >
+> > **19. MERGE SAFETY RE-VERIFIED ON THE CURRENT TREE — adversarially, and the claim survived.**
+> > The earlier "it is dark" verification was done days ago against a tree that has since moved, so
+> > it was re-run as a refutation attempt. Result: **INERT**, with one named exception below.
+> > `CEZ_CLUSTER` is read in three places, all **exact-string `'1'`** — unset / `''` / `'0'` /
+> > `'false'` / **`'true'`** all read as OFF, and that is pinned by a test. Measured on
+> > `prod-host` today against the RUNNING process's `/proc/<pid>/environ`: `CEZ_CLUSTER` is
+> > absent — not in the unit, any of the four drop-ins, `/etc/cezar/*.env`, `/etc/profile.d/`,
+> > `CEZ_ENV_PASSTHROUGH`, or `config.json`. The authoritative route inventory was dumped from the
+> > real `app.routes` — **18 routes, all 18 answer 409** naming the flag — and the two surfaces I was
+> > most worried about are both refuted: `cez cluster active` is gated at `index.ts:1425` *before*
+> > the subcommand switch, and `GET /cluster/active` sits behind a `requireCluster` `.use()`
+> > registered first in the chain. Mutating `clusterEnabled()` → `true` reddens 19 tests and
+> > neutering `requireCluster` reddens 17 — **different failure sets, so two separable proofs rather
+> > than one counted twice.**
+> >
+> > **THE ONE REAL CHANGE MERGING MAKES, and it is not gated on the flag:** `server.ts:1914`'s
+> > `isNodeAuthenticatedClusterRequest` exemption inside the `/api/*` cockpit auth wall. Measured on
+> > both sides: `/api/v1/cluster/corpus` answers **401 on the live box today** and **409 on this
+> > branch** with the flag off. So merging changes the answer on four prefixes —
+> > `/api/v1/cluster/{corpus,todos,allocate,leases}` and below — from `401 unauthenticated` to
+> > `409 clustering is disabled` for unauthenticated callers. **No data, no state change** (
+> > `requireCluster` answers first), and 409 is the documented contract. The cost is one bit of
+> > disclosure, and thinner defence in depth: with the flag off, `requireCluster` becomes the ONLY
+> > thing between an unauthenticated caller and those handlers. **Verdict: safe to merge, with that
+> > change expected rather than discovered.**
+> >
+> > **20. The second standing red is NOT a broken assertion — it is a progressive `startServer()`
+> > slowdown.** Reproduced standalone: all four assertions in `cluster-flag-off.test.ts:391` produce
+> > the **correct** values. The test boots twice, and repeated `startServer()` calls in one process
+> > take **31ms, then 11.7s, then 19.4s, then 9.4s** — so it blows a 5s budget on wall-clock, not on
+> > logic. It failed at `--testTimeout=30000` too. **This is a leak-shaped finding that belongs to
+> > the whole suite, not to the cluster branch**, and it plausibly explains part of the rotating
+> > timing-flake pool as well: every file that boots a server pays a cost that grows with how many
+> > booted before it. Being investigated separately.
+> >
+> > **21. `cluster-flag-off.test.ts`'s route list is hand-maintained and has ALREADY fallen behind.**
+> > `CLUSTER_ROUTES` (`:51`) lists **15**; the app registers **18**. The missing three are the D21
+> > trio (`GET /cluster/todos/:projectKey`, `POST …/backup`, `POST …/append`) — all three were probed
+> > directly and *do* answer 409, so this is a coverage gap rather than a hole. But **no floor ties
+> > the list to `app.routes`**, so it can silently fall further behind, and an exhaustive-looking
+> > `it.each` over a hand-list reads as total coverage while being a sample. Derive the list from
+> > `app.routes` and assert a count floor. *(Second weakness, minor: the "arms no timer and says
+> > nothing" case checks `warn` synchronously while the warn lands a tick later — a sibling test uses
+> > `vi.waitFor` for exactly that reason. It stayed green under a mutation the disk test caught.)*
+> >
 > > *(Both 5 and 6 are latent: `createHubDispatcher` still has zero production callers. They become
 > > real the moment Milestone C's hub half is wired, which makes them prerequisites for that work,
 > > not follow-ups to it.)*
