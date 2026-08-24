@@ -2348,8 +2348,109 @@ invented; these are the names to use when one lands.
 > and every test proven red-then-green. 19 files, +3141/−90. Staged by explicit path (a peer
 > session is live in this checkout); the peer's provider-login work was left untouched. Verified
 > before commit: repo-wide typecheck 0 errors, 871 tests green across 36 files (all of
-> `src/cluster/` plus `cluster-link-activation` and `cluster-routes`). **The BOX gate is still
-> pending and no two-process E2E has ever run — do not read this commit as merge-ready.**
+> `src/cluster/` plus `cluster-link-activation` and `cluster-routes`). ~~**The BOX gate is still
+> pending and no two-process E2E has ever run — do not read this commit as merge-ready.**~~
+> **CORRECTED 2026-08-24 — both halves of that sentence are now false; see item 45.** The box gate
+> has run THREE times on a hash-verified identical tree, and the first two-process E2E on this
+> branch was built and passed. It is still not merge-ready, but for a different and larger reason:
+> **the hub never dispatches**, so "tasks distributed across nodes" has never happened once.
+>
+> ### **SUPERSEDED 2026-08-24 (later, same day) by items 47-51 — THE GOAL IS MET.** Work now distributes in BOTH directions on a live 2-node cluster.
+>
+> ~~the hub never dispatches, so "tasks distributed across nodes" has never happened once~~ was true
+> when written and is **false now**. The hub places work, a worker executes it, and the hub stamps the
+> worker's run id back onto its own todo row. Measured on a running cluster, not designed for.
+> **Read items 47-51 before anything else in this block.**
+>
+> ---
+>
+> ### 47. THE GOAL IS MET — measured 2026-08-24 ~07:59 UTC on a live 2-node cluster.
+>
+> **Topology, read from the hub's own `GET /api/v1/cluster` (not from config):**
+> - **master/hub** `61502b95` "box-hub" on `prod-host` — `role=hub`, `acceptsDispatch=true`,
+>   labels `[cgroup, claude, codex]`.
+> - **worker/spoke** `8fbc0aeb` "mac-spoke" (this Mac) — `role=spoke`, `acceptsDispatch=true`,
+>   labels `[macos, imessage, device-e2e, browser, claude, codex]`,
+>   capacity `{maxParallel:2, active:0, heavyActive:0, enforcement:"process-tree"}`,
+>   `lastSeenAt=2026-08-24T07:59:52Z` — seconds before the query, i.e. genuinely live.
+> - Also on the roster: `25f88f10` "lab-spoke" (a second, box-local spoke) and `8b0c4e1f`
+>   "throwaway-probe" (`lastSeenAt=null` — it never connected; useful as a negative control that the
+>   roster is not simply echoing everything it has ever been told).
+>
+> **Direction 1 — WORKER to MASTER.** A todo authored on the Mac worker replicated to the master
+> (`hubSeq=1`) and **the master executed it**: run `72a76913-a56e-4e63-8bb2-fc310a05f0f0`, author
+> `{kind:"api", id:"local", via:"todo-autostart"}`, 46 KB of ndjson.
+>
+> **Direction 2 — MASTER to WORKER.** Two `requires:["macos"]` todos were **placed by the master**
+> onto `8fbc0aeb` and **the worker executed them**:
+> - `5f56cc32-27b1-4db2-b3b5-158b050e889b` — "cluster lab: must run on macOS"
+> - `098e8327-3896-41a8-a0f8-f40d91d14c04` — "cluster lab: macOS run, clean checkout"
+>
+> Both carry author `{kind:"api", id:"local", via:"cluster-dispatch"}`. **`via` is the discriminator**
+> that separates a dispatched run from a locally-started one; without it the two are indistinguishable
+> in the record. Each produced 46,339 bytes of ndjson, 8 steps, and 16 worktrees — real execution, not
+> an accepted frame. The hub logged the decision verbatim:
+> `[cez] todo autostart placed "cluster lab: macOS run, clean checkout" (d1d1540c-...) on node
+> 8fbc0aeb-... as dispatch a9a666e2-... — not starting it here`.
+>
+> **THE CORRELATION SEAM CLOSES, and this is the strongest single artifact.** The **master's own**
+> `todos.json` carries `startedTaskId=5f56cc32` and `startedTaskId=098e8327` — run ids that were
+> **minted on the worker**. That proves the `accepted:{dispatchId, runId}` reply travelled back and
+> `dispatchCorrelation` stamped it. Without the `dispatchCorrelation` wiring added this session,
+> `hub-router.ts:617`'s `?? []` would have swallowed the reply and **every accepted run would have
+> read as lost** while the work was in fact running fine.
+>
+> ### 48. Why it had never happened: the gap was 3-part, and any one part alone was fatal.
+> (1) the `HubDispatcher` was never constructed; (2) `dispatchCorrelation` was never supplied to the
+> frame router, so replies had nowhere to land; (3) **nothing ever called `dispatch()`** — the seam
+> existed and no caller reached it. Fixing only (1) and (2) would still have distributed nothing, and
+> fixing only (3) would have distributed work and then lost every acknowledgement. This is why the
+> "half-built feature" reading was a trap: the built half was real and the missing half was invisible.
+>
+> ### 49. THREE new defects found while proving it — none of which a green suite would ever show.
+>
+> **49a. `linkHealth()` is a HARDCODED STUB (`cluster-routes.ts` ~:377, `return { state: "offline" };`).**
+> The spoke's `GET /api/v1/cluster` reports `link: {"state":"offline"}` **while the link is
+> demonstrably live**. This cost several steps chasing a phantom outage. *A hardcoded stub is
+> indistinguishable from a measurement* — the constant is exactly what a real offline link returns.
+> The trustworthy evidence is the hub's `lastSeenAt`, which is computed. Read the computed field,
+> never the placeholder.
+>
+> **49b. A hub-authored todo can NEVER replicate to a worker.** `hubSeq` is allocated *only* by the
+> hub's inbound apply path, so a record the hub itself authors never receives one and is therefore
+> never eligible to replicate outward. Confirmed by the hub's own log, verbatim: *"REPLAY-UNORDERED —
+> 2 of 2 record(s) in project \"lab-proj\" carry no hubSeq... A record only gets a hubSeq by passing
+> through this hub's own apply path... these rows need a first write, not a replay. Entities: t-mac,
+> t-any"*. Direction 2 worked **only** because those todos reached the hub from the worker first.
+>
+> **49c. A hub-LOCAL start cannot be stamped.** Observed: `[cez] todo autostart refused ... run
+> 72a76913 started but the record could not be stamped`. The hub has no ack path for itself, so
+> `todos.ts:925-960` refuses with `hub-unconfirmed` — which blocks **the stamp, not the run**. The
+> master's run is real; its own todo row does not know it exists. Same shape as D43 and it will cause
+> the same repeat-start on the next reconcile pass.
+>
+> ### 50. The tests DID land, and they BITE — mutation-verified, not assumed.
+> The delegated TRIGGER-TESTS agent **never reported** but had already written its files. *(Third time
+> on this branch: `git status` before rebuilding anything the record calls missing.)* Delivered:
+> `cluster/autostart-seam.test.ts` (5 tests), `cluster/hub-autostart-dispatch.test.ts` (5), and a
+> `placement dispatch — Milestone C activation` block in `todo-autostart.test.ts` (5, **including a
+> negative control** that `DISPATCH_LOCAL` is byte-identical to pre-Milestone-C behaviour).
+> **45/45 green, exit 0.**
+>
+> **That green was then tested rather than trusted.** Mutation **M-A** — delete the early `return` on
+> `outcome.start === "remote"`, i.e. inject the exact double-start defect — **killed "THE LOAD-BEARING
+> ONE" in 4 ms**. Restored from a scratchpad copy (never `git checkout`: shared tree, uncommitted
+> code), md5 `f710438d0d61878922db5d171580d9bb` before and after. The second failure under M-A
+> (`re-subscribing the same dataDir`, 10,544 ms) is the **known Mac `fs.watch` flake pool**, not the
+> mutation — it is slow, load-sensitive, and unrelated to the mutated line.
+>
+> ### 51. `server.ts` is ENTANGLED with the peer session and MUST NOT be committed wholesale.
+> A live peer session (`reconnect-claude-provider-ui`) has its `provider-login-session` work in the
+> **same file** as this branch's cluster wiring: 172 changed lines, of which mine are only the
+> `autostart-seam` import and the two-line factory tail (`cluster: currentClusterAutostart,
+> dispatch: currentAutostartDispatch`). Committing by explicit **path** is therefore *not sufficient
+> here* — path granularity does not separate two owners inside one file. Stage the hunks
+> (`git apply --cached` with a hand-built patch), never `git add packages/cezar/src/server/server.ts`.
 >
 > **NEWEST FIRST: items 31-36 in the nested list below are the most recent and correct two of my
 > own earlier claims.** Item 31 closes the second standing red as pre-existing; item 32 lists what
@@ -3327,6 +3428,158 @@ invented; these are the names to use when one lands.
 > > `checkout .`, `reset --hard`, or `clean`. Gate on the box, not the Mac; expect exactly one
 > > standing red (`catalog.test.ts` C18) plus a known ROTATING flake pool — run the gate twice
 > > before attributing a red to anything.
+>
+> > ---
+> >
+> > **45. THE GOAL CHANGED, AND IT NAMES THE ONE THING THIS BRANCH HAS NEVER DONE.** 2026-08-24 the
+> > owner set a standing goal: *"continue until cluster is working, VPS is master, this mac is
+> > connected as additional worker and tasks are distributed across master/workers."* Read that
+> > against the status above: A and B are closed, C is half-wired, and **the half that is missing is
+> > exactly the half the goal is about.** Enrollment, the link, presence, replication and the SPOKE's
+> > ability to accept a dispatch all work. Nothing has ever *sent* one.
+> >
+> > **45a. Gate attribution is COMPLETE — three runs, one hash-verified tree.** Run 1: 1 red
+> > (`catalog.test.ts` C18). Run 2: 2 reds (C18 + `workspace-parallel.test.ts`). Run 3: 1 red, with
+> > `CANON_BEFORE == CANON_AFTER == 4ed00cbae9898798378b9fb2c1eec64c`, typecheck 0, build 0,
+> > 606 files passed / 1 failed / 2 skipped. **C18 is the single deterministic standing red;
+> > `workspace-parallel.test.ts` is the load-sensitive flake pool.** A red that MOVES across runs on
+> > a byte-identical tree is a flake by construction — that is what three runs bought, and it is why
+> > one run can never attribute a red.
+> >
+> > **45b. THE PRECISE GAP, traced rather than assumed.** `createHubDispatcher` has **zero production
+> > callers** — only its own definition and its own tests. `placeRun` is called only from
+> > `hub-dispatch.ts:285`. The hub branch of `startClusterRuntime` (`cluster-routes.ts:1118-1170`)
+> > builds `buildHubReplication`, the op-history store and its prune timer, and the
+> > `ClusterLinkServer` — and stops there. Three things were missing, not one:
+> > 1. the dispatcher was never constructed;
+> > 2. `createHubFrameRouter` was never given `dispatchCorrelation`, so a spoke's `accepted`/`refused`
+> >    reply hit `hub-router.ts:617`'s `?? []` and resolved nothing — **every accepted run would have
+> >    looked lost**;
+> > 3. nothing calls `dispatch()` at all.
+> >
+> > **45c. (1) and (2) are LANDED; (3) is the real work and is NOT done.** `cluster-routes.ts` now
+> > constructs the dispatcher, passes it as `dispatchCorrelation`, and arms a
+> > `DISPATCH_SWEEP_INTERVAL_MS = 30_000` sweep. Repo typecheck exit 0. **Be honest about what this
+> > buys: with no caller for `dispatch()`, it changes NOTHING observable.** Constructing a
+> > `HubDispatcher` has no side effect by its own docblock's design. Do not count 45c as progress
+> > toward the goal — it is the foundation the trigger needs, nothing more. The sweep deliberately
+> > **labels and does not re-dispatch** (spec item 10: re-dispatching a lost accept is two live runs).
+> >
+> > **45d. THE TRIGGER'S SEAM WAS ANTICIPATED IN THE DESIGN — do not invent a new one.**
+> > `startTodoRun` (`todo-autostart.ts:313`) carries: *"Extracted 2026-08-23 (Milestone C, C-a) so a
+> > dispatched run is `startAutostartTodo` with a remote trigger"*, and *"Does not ask permission —
+> > `mayAutostartTodo` / `offerDispatch` are the callers' job, decided exactly once, before this
+> > runs."* The insertion point is inside `startAutostartTodo`, after `resolveTodoWorkflow` and after
+> > `mayAutostartTodo` allows, before `startTodoRun`.
+> >
+> > **45e. AN ORDERING PROBLEM THE NEXT SESSION WILL HIT.** `watchTodoAutostart` is wired in
+> > `createApp` (`server.ts:1665`); the dispatcher is born in `startServer` → `startClusterRuntime`.
+> > **The dispatcher does not exist when the autostart project is built.** Whatever binds them must
+> > be late-bound. Note the D43 precedent before reaching for an optional field: `TodoAutostartProject
+> > .cluster` was made REQUIRED with an explicit `CLUSTERING_OFF` sentinel precisely because
+> > "absent means off" was itself the bug — the whole guard was dead code while `todos.ts` refused
+> > the write, so one todo started on every reconcile pass forever.
+> >
+> > **45f. FOUR QUESTIONS ARE OPEN AND EACH CAN INVALIDATE THE DESIGN.** Delegated 2026-08-24, all
+> > read-only. Do not build the trigger before reading their answers:
+> > - **PLACE-RANK** — `buildPlacementCandidates` pushes the hub FIRST, unconditionally, with
+> >   `online: true` and `capacityAgeMs: 0`, while a spoke's capacity comes from a ~30s beat. **If
+> >   `placeRun` prefers the hub on a tie, every task stays on the VPS and "distributed" silently
+> >   never happens, with a green suite** (see the known blindness: 31 of `hub-dispatch.test.ts`'s
+> >   `candidates:` arrays are single-element, and a one-element collection cannot distinguish any
+> >   selection rule from any other).
+> > - **SPOKE-REAL** — has an inbound dispatch frame EVER started a real run, or is every test
+> >   against a fake `RunManager`? Does the `accepted` reply carry a real minted `runId`?
+> > - **DOUBLE-START** — the hazard that worries me most. On a spoke, `cluster: CLUSTERING_OFF` makes
+> >   `mayAutostartTodo` allow on its FIRST LINE. If a replicated todo arrives still carrying
+> >   `autostart: true`, the spoke's own reconcile pass starts it locally **while the hub dispatches
+> >   it** — two runs, two machines, one todo. This is D41's shape and it decides whether the trigger
+> >   also needs a production `claimStart` (which `server.ts:1664` states does not exist anywhere
+> >   outside tests).
+> > - **BOX-HUB** — standing a hub up on `prod-host` as an ISOLATED lab process
+> >   (`/opt/cluster-lab`, port 4599, its own `CEZ_HOME`), touching neither `/opt/cezar` nor
+> >   `cezar.service` nor the corpus. **This is how the goal is reached WITHOUT merging PR #9** — the
+> >   constraint and the goal are not actually in conflict, because a second process on a spare port
+> >   needs no deploy. The Mac reaches it over an `ssh -L` forward, so no public ingress and no
+> >   tunnel-config change either.
+>
+> > ---
+> >
+> > **46. THE TRIGGER IS BUILT. Repo typecheck 0; the two-process E2E still passes 5/5.** Four files:
+> > `cluster-routes.ts` (dispatcher + `dispatchCorrelation` + sweep + arming both branches),
+> > `todo-autostart.ts` (the `dispatch` seam and the placement call), and two new modules
+> > `cluster/autostart-seam.ts` and `cluster/hub-autostart-dispatch.ts`. **Not yet proven to
+> > distribute anything** — see 46e.
+> >
+> > **46a. PLACEMENT DOES NOT FAVOUR THE HUB — measured from the code, and this was the question
+> > that could have invalidated the whole design.** `rankByHeadroom` sorts `headroom.parallel` DESC →
+> > `heavy` DESC → **`nodeId` ASCENDING**. Array order carries no weight, so
+> > `buildPlacementCandidates` pushing the hub first is genuinely inert. `capacityAgeMs` and
+> > `corpusStalenessMs` are **not ranking inputs at all**. So a spoke can win, and a bigger spoke
+> > wins on headroom, which is the behaviour the goal needs.
+> >
+> > **46b. THE TWO GATES THAT WILL MAKE A CORRECT CLUSTER LOOK BROKEN.** Both are silent:
+> > 1. **`acceptsDispatch` defaults to `false`** (`node-identity.ts:150`), and `eligibleCandidates`
+> >    filters on it FIRST. A cluster where nobody opted in queues every task forever. There is **no
+> >    CLI for it** — `cez cluster` has only init/enroll/join/active/reconcile/revoke; it is an HTTP
+> >    PATCH (`index.ts:1571`).
+> > 2. **A project with no git `origin` pins placement to whoever `holdsProject`** — so a local-only
+> >    repo can never leave the node it lives on, reported as `project-has-no-origin`.
+> > Add a third: a dispatch needs `pairings[].byNode[hubNodeId].confirmedAt`, so an unpaired project
+> > is never dispatchable — which this build answers with `{start:'local'}`, deliberately, so that
+> > turning clustering on does not strand ordinary todos.
+> >
+> > **46c. TWO IDLE NODES TIE, AND THE TIEBREAK IS DETERMINISTIC.** With both idle, every SEQUENTIAL
+> > task lands on the lexicographically-smaller `nodeId`. That is correct least-loaded behaviour, but
+> > it means **"all tasks landed on one node" is NOT evidence of a broken cluster** — and equally,
+> > a demo that runs one task at a time can never show spreading. To observe distribution you need
+> > concurrent dispatches (the dispatcher inflates a node's `active` for its own pending records) or
+> > different `maxParallel`. Do not "fix" the tiebreak on the strength of a sequential demo.
+> >
+> > **46d. THE DOUBLE-START WAS REAL, AND `todos.ts` DOES NOT PREVENT IT.** Confirmed by reading
+> > `todos.ts:940-946`: the `hub-unconfirmed` refusal withholds the **stamp**, and `startTodoRun` has
+> > already started the agent by the time it runs. So a spoke left on `CLUSTERING_OFF` starts every
+> > replicated `autostart` todo locally while the hub dispatches the same todo — two agents, two
+> > machines, one todo. The spoke branch now arms `createSpokeAutostartCluster`, whose `claimStart`
+> > **refuses**: a worker executes what it is dispatched and self-starts nothing. That needed no hub
+> > round trip and no eleventh frame type, which is why `server.ts:1664`'s "there is no production
+> > `claimStart`" blocker dissolved rather than being solved.
+> > **Stated policy, not an oversight:** `authoredHere` is wired to `() => false`. There is NO
+> > authorship field on a replicated todo (`clusterTodoFieldsSchema` carries `pendingSince`,
+> > `pendingFields`, `hubSeq`, `tombstone`, `placement`, `startedOn` — none says who wrote it), so it
+> > cannot be derived from the record. `false` is the fail-closed direction; the cost is that a
+> > PARTITIONED worker autostarts nothing, visibly. Do not "improve" it to a
+> > `pendingSince`/`hubSeq` heuristic — that has false POSITIVES (a local edit to a replicated row
+> > sets `pendingSince` too).
+> >
+> > **46e. WHAT IS NOT PROVEN, AND DO NOT LET THE GREEN NUMBERS SAY OTHERWISE.** No dispatch frame
+> > has ever been sent by production code. The E2E's 5 passing assertions cover enrollment, link and
+> > presence — *not* placement. `hub-dispatch.test.ts` is 31/31 single-element `candidates:` arrays,
+> > which cannot distinguish any selection rule from any other. **The claim "tasks are distributed"
+> > is currently unsupported by any test or run.**
+> >
+> > **46g. THE DISPATCH FRAME DOES NOT CARRY THE TODO — the spoke must already hold it.**
+> > `spoke-runtime.ts:1095-1106` reads its OWN `todos.json` and looks the id up; a miss returns
+> > **without sending anything at all** — not a refusal, silence. So a hub that dispatches on the
+> > same reconcile pass that first sees a new todo races replication: the spoke drops the frame, the
+> > hub's record sits `pending`, and the 90s sweep labels it `unanswered`. It self-heals on the next
+> > pass, but slowly and confusingly. Any test or demo must wait for the todo to appear in the
+> > SPOKE's `todos.json` before expecting a dispatch to succeed — or write the todo first and flip
+> > `autostart` afterwards, which removes the race outright.
+> >
+> > **46h. THE SPOKE'S ACCEPT IS HONEST, so hub-side correlation is sound.** `startTodoRun(..., 
+> > 'cluster-dispatch', { humanIntent: true })` runs against the REAL `RunManager`, and the reply is
+> > sent only AFTER `startRun` returns, carrying `accepted: { dispatchId, runId }` with the real
+> > minted id. `humanIntent: true` is what lets the spoke stamp `startedTaskId` optimistically
+> > without a hub round trip, and the ordinary outbox flush carries that claim back. **So the
+> > strongest available end-to-end assertion is not "a frame was sent" but "the HUB's copy of the
+> > todo gained `startedOn: <spoke>` and a `startedTaskId`"** — that proves the loop closed.
+> >
+> > **46f. A MAC-LOCAL FLAKE POOL, characterised so nobody re-debugs it.** `todo-autostart.test.ts`'s
+> > `watchTodoAutostart` `fs.watch` tests failed on run 1 (test A), run 2 (test B), then passed
+> > **30/30** on run 3 — same tree, four agents running concurrently. A deterministic regression
+> > cannot pass 30/30. Same class as the box's `workspace-parallel.test.ts`. **Run it three times
+> > before attributing a red**, and prefer the box.
 >
 > ---
 >

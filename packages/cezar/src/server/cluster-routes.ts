@@ -53,6 +53,14 @@ import {
 } from '../cluster/enrollment.ts';
 import { applyOpAtHub } from '../cluster/hub-apply.ts';
 import { createHubFrameRouter, type HubReplicationDeps } from '../cluster/hub-router.ts';
+import { createHubDispatcher, type HubDispatcher } from '../cluster/hub-dispatch.ts';
+import { createHubAutostartDispatch } from '../cluster/hub-autostart-dispatch.ts';
+import {
+  armClusterAutostart,
+  createHubAutostartCluster,
+  createSpokeAutostartCluster,
+} from '../cluster/autostart-seam.ts';
+import { DISPATCH_LOCAL } from '../todo-autostart.ts';
 import type { HubOpOutcome } from '../cluster/hub-ops.ts';
 import { createHubSeqAllocator } from '../cluster/hub-seq.ts';
 import { acquireLease, releaseLease } from '../cluster/leases.ts';
@@ -280,6 +288,17 @@ const NO_AUTHENTICATED_NODE_ON_GATED_ROUTE = 'internal: no authenticated cluster
  * about a **finished** run not blocking, which `done`/`failed`/`cancelled` covers.
  */
 const IN_FLIGHT_STATUSES = new Set(['queued', 'running', 'waiting', 'review']);
+
+/**
+ * How often the hub sweeps its own unanswered dispatches (`HubDispatcher#sweepUnanswered`).
+ *
+ * Deliberately well under `DEFAULT_DISPATCH_TIMEOUT_MS` (90s) rather than equal to it: the sweep
+ * decides *when a record older than the timeout is noticed*, not what the timeout is, so a cadence
+ * equal to the timeout would let a record sit up to 180s before being labelled. It is also NOT the
+ * op-history cadence — that one prunes a durable file and is sized for a hub that restarts ~10x a
+ * day; this one only walks a small in-memory map.
+ */
+const DISPATCH_SWEEP_INTERVAL_MS = 30_000;
 
 /**
  * The projection → `ClusterActiveRun[]` map, exported because `cez cluster active` in
@@ -1160,14 +1179,109 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
       // the thing holding the event loop alive — same reason as `spoke-runtime.ts`'s own timers.
       pruneTimer.unref?.();
 
+      // **Milestone C activation.** The dispatcher is what turns a placement into a frame on the
+      // wire and correlates the spoke's answer back. Constructed here, and NOT inside
+      // `createHubFrameRouter`, because the router must be able to route a reply INTO it — so the
+      // dispatcher has to exist first, and the router receives it as `dispatchCorrelation`.
+      //
+      // `() => linkServer` closes over the same forward-declared `let` `buildHubReplication` above
+      // already does, and is safe for the identical reason documented there: nothing can call
+      // `send` before a socket has authenticated and delivered a frame, which is strictly later
+      // than the synchronous assignment three statements down.
+      //
+      // Constructing it has NO side effect (`HubDispatcher#sweepUnanswered`'s docblock: "nothing
+      // here starts one itself"), so this line alone changes no behaviour — a hub with no dispatch
+      // caller behaves exactly as it did before. What it DOES change is that a `freshness` reply
+      // carrying `accepted`/`refused` now resolves the dispatch it answers, instead of being
+      // observed and dropped (`hub-router.ts:617`, the `?? []` branch).
+      const dispatcher: HubDispatcher = createHubDispatcher({
+        hubNodeId: identity.nodeId,
+        linkServer: () => linkServer,
+        env,
+        warn,
+      });
+
+      // A `'pending'` record inflates its target's `active` in every subsequent placement this hub
+      // makes (`dispatch()`'s "placement hot-spot" adjustment), so a dispatch that is never
+      // answered does not merely sit in a list — it makes its node look permanently busier than it
+      // is, and eventually unplaceable. The sweep is what bounds that, by moving it to the named
+      // terminal state `'unanswered'`.
+      //
+      // **This sweep LABELS; it does not re-dispatch.** Re-dispatching from here would convert a
+      // lost accept into two live runs on two machines (spec item 10) — the sweep deliberately
+      // stops at the label, and a fresh attempt can only come from the todo's next reconcile pass,
+      // by which time an accepted run's own claim op has normally stamped `startedTaskId` and the
+      // pass skips it. That residual window (spoke started, claim op still in the outbox, dispatch
+      // already swept) is D41 and is NOT closed here.
+      const dispatchSweepTimer = setInterval(() => {
+        const swept = dispatcher.sweepUnanswered();
+        for (const record of swept) {
+          warn(
+            `cluster hub: dispatch "${record.dispatchId}" for todo "${record.todoId}" to ` +
+              `"${record.nodeId}" was never answered — marking unanswered (not re-dispatching)`,
+          );
+        }
+      }, DISPATCH_SWEEP_INTERVAL_MS);
+      // Same reason as `pruneTimer` above: a maintenance sweep must never hold the event loop open.
+      dispatchSweepTimer.unref?.();
+
       linkServer = new ClusterLinkServer({
         identity,
-        onFrame: createHubFrameRouter({ identity, env, warn, replication }),
+        onFrame: createHubFrameRouter({
+          identity,
+          env,
+          warn,
+          replication,
+          // Without this the hub sends dispatches and never learns their fate: `hub-router.ts`'s
+          // `freshness` case falls through to `?? []` and the record stays `'pending'` until the
+          // sweep above mislabels it `'unanswered'` — i.e. every accepted run would look lost.
+          dispatchCorrelation: dispatcher,
+        }),
         warn,
       });
       linkServer.attach(deps.server);
+
+      // **This is the line that makes work distribute.** Everything above builds the machinery;
+      // `todo-autostart.ts` is what actually turns an `autostart: true` todo into a run, and until
+      // this arms, it has no placement to consult and starts everything locally — which is how a
+      // fully built dispatch stack sat with zero production callers.
+      let disarmAutostart: () => void = () => {};
+      if (deps.semaphore) {
+        disarmAutostart = armClusterAutostart(
+          {
+            // NOT `CLUSTERING_OFF` — see `createHubAutostartCluster`. A hub does not ask itself for
+            // permission, but it must still read `startedTaskId`/`startedOn` off the record, which
+            // `CLUSTERING_OFF` would skip on the first line. That read is the only thing that stops
+            // a RESTARTED hub re-dispatching work a spoke is already running, because the
+            // dispatcher's own duplicate guard is in-memory and does not survive the restart.
+            cluster: createHubAutostartCluster(identity.nodeId),
+            dispatch: createHubAutostartDispatch({
+              dispatcher,
+              identity,
+              semaphore: deps.semaphore,
+              connectedNodeIds: () => linkServer?.connectedNodes() ?? [],
+              env,
+              warn,
+            }),
+          },
+          warn,
+        );
+      } else {
+        // Honest refusal rather than a fabricated capacity. `buildPlacementCandidates` measures
+        // this hub's own headroom off the live semaphore; with none threaded through there is no
+        // way to report it, and synthesising one would make the hub look either permanently idle
+        // or permanently full. Autostart stays local-only on such a process.
+        warn(
+          'cluster hub: no workspace semaphore was threaded into startClusterRuntime, so this hub ' +
+            'cannot measure its own capacity — arming the link but NOT placement; autostart todos ' +
+            'will start locally rather than being distributed',
+        );
+      }
+
       teardown = () => {
         clearInterval(pruneTimer);
+        clearInterval(dispatchSweepTimer);
+        disarmAutostart();
         void linkServer?.close();
       };
       return;
@@ -1231,8 +1345,34 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
       heartbeatMs: deps.heartbeatMs,
     });
     spokeRuntime = stopHeartbeat;
+
+    // **The spoke half of the same activation, and it is a GUARD rather than a feature.** Without
+    // it this node runs `CLUSTERING_OFF`, under which `mayAutostartTodo` allows on its first line —
+    // so a todo replicated down from the hub would be started locally by this node's own reconcile
+    // pass AT THE SAME TIME as the hub dispatches it. Two agents, two worktrees, one todo. Note
+    // that `todos.ts`'s `hub-unconfirmed` refusal does NOT prevent that: it withholds the STAMP,
+    // and by the time it runs `startTodoRun` has already started the agent.
+    const disarmAutostart = armClusterAutostart(
+      {
+        cluster: createSpokeAutostartCluster({
+          nodeId: identity.nodeId,
+          // `online` is the only state in which the hub can actually answer. `connecting` is not
+          // reachable-yet, and treating it as reachable would send a claim into a socket that does
+          // not exist.
+          hubReachable: () => linkClient.health().state === 'online',
+          // A worker self-starts nothing — see `createSpokeAutostartCluster#authoredHere` for why
+          // this is a stated policy and not a missing implementation.
+          authoredHere: () => false,
+        }),
+        // A worker never PLACES work; it executes what it is dispatched.
+        dispatch: DISPATCH_LOCAL,
+      },
+      warn,
+    );
+
     teardown = () => {
       stopHeartbeat();
+      disarmAutostart();
       void linkClient.stop();
     };
   })().catch((err: unknown) => {

@@ -9,13 +9,16 @@ import type { WorkflowDef } from './workflows/types.ts';
 import { readTodos, todosPath, type TodoItem } from './todos.ts';
 import {
   CLUSTERING_OFF,
+  DISPATCH_LOCAL,
   mayAutostartTodo,
   reconcileAutostartTodos,
   watchTodoAutostart,
   type AutostartRefusal,
   type TodoAutostartCluster,
+  type TodoAutostartDispatch,
   type TodoAutostartProject,
   type TodoClaimResult,
+  type TodoDispatchOutcome,
 } from './todo-autostart.ts';
 import { mayStartWithoutHub } from './cluster/dispatch.ts';
 import { localCliAuthor } from './runs/task-author.ts';
@@ -64,7 +67,7 @@ describe('reconcileAutostartTodos', () => {
         return store.createRun({ author: input.author, title: 't', workflow: '(inbox)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
-    project = { repoRoot, dataDir, manager, cluster: CLUSTERING_OFF };
+    project = { repoRoot, dataDir, manager, cluster: () => CLUSTERING_OFF, dispatch: () => DISPATCH_LOCAL };
   });
 
   afterEach(() => {
@@ -190,7 +193,7 @@ describe('watchTodoAutostart', () => {
         return store.createRun({ author: input.author, title: 't', workflow: '(inbox)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
-    return { repoRoot, dataDir, manager, cluster: CLUSTERING_OFF };
+    return { repoRoot, dataDir, manager, cluster: () => CLUSTERING_OFF, dispatch: () => DISPATCH_LOCAL };
   };
 
   it('the boot pass starts an autostart todo already sitting in the file at subscribe time', async () => {
@@ -310,6 +313,9 @@ describe('cluster autostart guard — hub-confirmed claims (spec 2026-08-22-mult
       /** Clustering OFF — no port at all, which is the whole of the switch. */
       clustered?: boolean;
       onStart?: (node: FakeNode) => void;
+      /** `TodoAutostartProject#dispatch`'s answer. Defaults to `DISPATCH_LOCAL`, the pre-Milestone-C
+       *  behaviour every existing test in this describe still exercises unchanged. */
+      dispatch?: TodoAutostartDispatch | typeof DISPATCH_LOCAL;
     } = {},
   ): FakeNode => {
     const repoRoot = mkdtempSync(join(tmpdir(), `cez-cluster-autostart-${nodeId}-`));
@@ -348,7 +354,10 @@ describe('cluster autostart guard — hub-confirmed claims (spec 2026-08-22-mult
       onRefused: (r) => refusals.push(r),
       // D43: the unclustered branch STATES it. It used to spread `{}` — an absence that read as a
       // deliberate choice and was the exact shape of the production bug this suite never caught.
-      cluster: clustered
+      // Both fields became FUNCTIONS on 2026-08-24 (Milestone C activation): the real wiring cannot
+      // capture a value, because the cluster runtime is armed after `watchTodoAutostart` is wired.
+      dispatch: () => options.dispatch ?? DISPATCH_LOCAL,
+      cluster: () => clustered
         ? ({
             nodeId,
             hubReachable: () => options.hubReachable ?? true,
@@ -610,12 +619,11 @@ describe('cluster autostart guard — hub-confirmed claims (spec 2026-08-22-mult
       // authored-here entry starts and the replicated one refuses, in the same reconcile.
       const hub = new FakeHub();
       const node = makeNode('node-mixed', { hub, hubReachable: false, authoredHere: false });
+      const baseCluster = node.project.cluster();
+      if (baseCluster === CLUSTERING_OFF) throw new Error('expected a clustered seam for this case');
       node.project = {
         ...node.project,
-        cluster: {
-          ...(node.project.cluster as TodoAutostartCluster),
-          authoredHere: (todo) => todo.id === 'mine',
-        },
+        cluster: () => ({ ...baseCluster, authoredHere: (todo: TodoItem) => todo.id === 'mine' }),
       };
       node.write([
         { id: 'mine', summary: 'Filed here', autostart: true },
@@ -658,6 +666,88 @@ describe('cluster autostart guard — hub-confirmed claims (spec 2026-08-22-mult
 
     expect(b.started.map((s) => s.task)).toEqual(['Still wanted']);
     expect(hub.claimCalls).toEqual([{ nodeId: 'node-b', todoId: 'alive' }]);
+  });
+
+  // ---- placement dispatch — TodoAutostartProject#dispatch (Milestone C activation) -------------
+
+  describe('placement dispatch — TodoAutostartProject#dispatch (Milestone C activation)', () => {
+    /** Fakes the placement seam the same way `FakeHub` above fakes the claim seam: records every
+     *  `place()` call (so "never called" is provable, not assumed) and returns a canned outcome. */
+    function fakeDispatch(outcome: TodoDispatchOutcome): TodoAutostartDispatch & { calls: TodoItem[] } {
+      const calls: TodoItem[] = [];
+      return {
+        calls,
+        place: (input) => {
+          calls.push(input.todo);
+          return Promise.resolve(outcome);
+        },
+      };
+    }
+
+    it('THE LOAD-BEARING ONE: a {start: "remote"} outcome starts NO local run and leaves the record untouched', async () => {
+      const dispatch = fakeDispatch({ start: 'remote', nodeId: 'node-b', dispatchId: 'disp-1' });
+      const node = makeNode('node-a', { clustered: false, dispatch });
+      node.write([{ id: 't1', summary: 'Ship it', autostart: true }]);
+
+      await reconcileAutostartTodos(node.project);
+
+      expect(node.started).toHaveLength(0);
+      expect(dispatch.calls).toHaveLength(1);
+      const [after] = await readTodos(node.dataDir);
+      expect(after?.startedTaskId).toBeUndefined();
+      expect(after?.autostart).toBe(true);
+    });
+
+    it('a {start: "local"} outcome starts exactly one run — the same path DISPATCH_LOCAL takes', async () => {
+      const dispatch = fakeDispatch({ start: 'local' });
+      const node = makeNode('node-a', { clustered: false, dispatch });
+      node.write([{ id: 't1', summary: 'Ship it', autostart: true }]);
+
+      await reconcileAutostartTodos(node.project);
+
+      expect(node.started).toHaveLength(1);
+      expect(dispatch.calls).toHaveLength(1);
+      const [after] = await readTodos(node.dataDir);
+      expect(after?.startedTaskId).toBeTruthy();
+      expect(after?.autostart).toBeUndefined();
+    });
+
+    it('a {start: "none", reason} outcome starts nothing and RENDERS the reason (D15a: never a silent skip)', async () => {
+      const dispatch = fakeDispatch({ start: 'none', reason: 'blocked by run r1 on node node-c' });
+      const node = makeNode('node-a', { clustered: false, dispatch });
+      node.write([{ id: 't1', summary: 'Ship it', autostart: true }]);
+
+      await reconcileAutostartTodos(node.project);
+
+      expect(node.started).toHaveLength(0);
+      expect(node.refusals).toHaveLength(1);
+      expect(node.refusals[0]?.todoId).toBe('t1');
+      expect(node.refusals[0]?.reason).toBe('blocked by run r1 on node node-c');
+    });
+
+    it('ordering: place() is never called once mayAutostartTodo has already refused the claim', async () => {
+      const dispatch = fakeDispatch({ start: 'local' });
+      const node = makeNode('node-a', { clustered: true, dispatch });
+      node.write([{ id: 't1', summary: 'Ship it', autostart: true, startedOn: 'some-other-node' }]);
+
+      await reconcileAutostartTodos(node.project);
+
+      expect(dispatch.calls).toHaveLength(0);
+      expect(node.started).toHaveLength(0);
+      expect(node.refusals[0]?.reason).toBe('already claimed by node some-other-node');
+    });
+
+    it('negative control: with dispatch left at DISPATCH_LOCAL, behaviour is byte-identical to before Milestone C', async () => {
+      const node = makeNode('node-a', { clustered: false }); // dispatch defaults to DISPATCH_LOCAL
+      node.write([{ id: 't1', summary: 'Ship it', autostart: true }]);
+
+      await reconcileAutostartTodos(node.project);
+
+      expect(node.started).toHaveLength(1);
+      const [after] = await readTodos(node.dataDir);
+      expect(after?.startedTaskId).toBeTruthy();
+      expect(after?.autostart).toBeUndefined();
+    });
   });
 });
 
@@ -705,7 +795,7 @@ describe('todo autostart — a refused stamp must not restart the run (D43)', ()
         return run;
       },
     } as unknown as RunManager;
-    project = { repoRoot, dataDir, manager, cluster: CLUSTERING_OFF };
+    project = { repoRoot, dataDir, manager, cluster: () => CLUSTERING_OFF, dispatch: () => DISPATCH_LOCAL };
     writeTodos([{ id: 't1', summary: 'do the thing', autostart: true } as TodoItem]);
   });
 

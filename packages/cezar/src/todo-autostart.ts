@@ -55,6 +55,34 @@ import { mayStartWithoutHub } from './cluster/dispatch.ts';
  */
 export const CLUSTERING_OFF = 'clustering-off' as const;
 
+/** The single-node answer to "where does this run": here, exactly as it always has. The twin of
+ *  {@link CLUSTERING_OFF}, and required at the same call site for the same D43 reason. */
+export const DISPATCH_LOCAL = 'dispatch-local' as const;
+
+export type TodoDispatchOutcome =
+  /** Run it here — either there is no cluster, or the hub placed the work on itself. */
+  | { start: 'local' }
+  /** Handed to another node. MUST NOT start here, and nothing local is written: the node that
+   *  accepts stamps `startedTaskId` itself and its claim op carries that back to the hub. */
+  | { start: 'remote'; nodeId: ClusterNodeId; dispatchId: string }
+  /** Started nowhere this pass, with a named reason — a blocked or queued placement, or a dispatch
+   *  for this todo already outstanding. Rendered as a refusal (D15a: never a silent skip), because
+   *  "this pass did not start it, and here is why" is exactly what a refusal is. */
+  | { start: 'none'; reason: string };
+
+/** The placement seam. Consulted only on a node that arms one — today, only a hub. */
+export interface TodoAutostartDispatch {
+  place(input: {
+    todo: TodoItem;
+    /** Resolved LOCALLY before this call and passed BY VALUE (D12a) — a dispatch frame carries the
+     *  definition, never a name the target would have to resolve against its own, possibly
+     *  different, workflow set. */
+    workflow: WorkflowDef;
+    repoRoot: string;
+    dataDir: string;
+  }): Promise<TodoDispatchOutcome>;
+}
+
 /** The subset of a project context this module needs — matches (a slice of)
  *  `server/project-context.ts`'s `ProjectContext`, duck-typed so this module carries no
  *  dependency on the server layer. */
@@ -85,7 +113,24 @@ export interface TodoAutostartProject {
    * stamp, the local act-then-stamp order untouched — so this change moves no behaviour. It only
    * makes the choice visible and greppable at the call site.
    */
-  cluster: TodoAutostartCluster | typeof CLUSTERING_OFF;
+  /**
+   * **A FUNCTION, not a value — changed 2026-08-24 (Milestone C activation), and not for taste.**
+   * `watchTodoAutostart` is wired in `createApp`; the cluster runtime that knows this node's role
+   * is armed later, in `startServer`. A value captured here would therefore be captured BEFORE the
+   * answer exists, and would be `CLUSTERING_OFF` forever on every node — the same "wired to a
+   * constant" failure D43 records below, arriving by a different route. Asked per decision, the
+   * answer is always the live one. See `cluster/autostart-seam.ts`.
+   */
+  cluster: () => TodoAutostartCluster | typeof CLUSTERING_OFF;
+  /**
+   * **Where the work should RUN, as opposed to whether it may start.** Two different questions
+   * with two different owners: `cluster` is the claim guard (may I?), this is placement (where?).
+   * A hub answers both; a spoke arms only the first and leaves this `DISPATCH_LOCAL`, because a
+   * worker never places work — it executes what it is dispatched.
+   *
+   * Required, and a function, for the two reasons directly above.
+   */
+  dispatch: () => TodoAutostartDispatch | typeof DISPATCH_LOCAL;
   /**
    * Where a refusal is RENDERED. D15a: *"the refusal is a stated, rendered state — never a silent
    * skip"*, so a refused autostart has to reach a surface, not only a log line. Optional because
@@ -177,7 +222,19 @@ export async function mayAutostartTodo(
   project: TodoAutostartProject,
   todo: TodoItem,
 ): Promise<AutostartDecision> {
-  const cluster = project.cluster;
+  // **The seam became a FUNCTION on 2026-08-24, so the D43 "state it out loud" guard has to run
+  // one step earlier than it used to.** A caller that omits the field now fails on `.cluster()`
+  // with `project.cluster is not a function` — a TypeError that names the property and not the
+  // decision, which is precisely the unnamed failure D43 replaced. Checked here so the message
+  // still says what is actually wrong and what to write instead.
+  if (typeof project.cluster !== 'function' || typeof project.dispatch !== 'function') {
+    throw new Error(
+      `todo autostart: project ${project.dataDir} has no cluster seam and did not say CLUSTERING_OFF / ` +
+        'DISPATCH_LOCAL — both fields are required, and are functions so the answer is read at ' +
+        'decision time rather than captured before the cluster runtime has armed (D43)',
+    );
+  }
+  const cluster = project.cluster();
   if (cluster === CLUSTERING_OFF) return { allowed: true };
   // Unreachable from TypeScript — `cluster` is required and this module is internal (it is not
   // re-exported from `index.ts`, and the package exports only `.` and `./app-type`), so every
@@ -374,6 +431,46 @@ async function startAutostartTodo(project: TodoAutostartProject, todo: TodoItem)
   if (!decision.allowed) {
     reportRefusal(project, todo, decision.reason);
     return;
+  }
+
+  // **(c) PLACEMENT — Milestone C's activation, 2026-08-24.** The claim guard above answered
+  // *may this start*; this answers *where*. Deliberately AFTER the guard and not folded into it:
+  // a todo another node already claimed must never reach a placement decision at all, and
+  // `mayAutostartTodo` is the one place that fact is known.
+  //
+  // With `DISPATCH_LOCAL` this is the pre-Milestone-C path exactly — one comparison, then the same
+  // `startTodoRun` that has always run here.
+  const dispatch = project.dispatch();
+  if (dispatch !== DISPATCH_LOCAL) {
+    const outcome = await dispatch.place({
+      todo,
+      workflow,
+      repoRoot: project.repoRoot,
+      dataDir: project.dataDir,
+    });
+    if (outcome.start === 'remote') {
+      // Nothing is written locally, deliberately. The accepting node stamps `startedTaskId`
+      // itself the moment its own `startRun` returns, and the ordinary outbox flush carries that
+      // claim back here — so a stamp written here would be a SECOND source of truth for the same
+      // fact, and the hub has no run id to write anyway (`HubDispatcherDeps#onAccepted`: "the run
+      // id does not exist until the spoke's `startRun` mints it").
+      //
+      // Until that claim arrives this todo still reads `autostart: true` with no `startedTaskId`,
+      // so the next reconcile pass will look at it again — and `HubDispatcher#dispatch`'s C-a3
+      // guard is what stops that becoming a second dispatch, returning `already-dispatched`, which
+      // arrives below as `start: 'none'`.
+      console.log(
+        `[cez] todo autostart placed "${todo.summary}" (${todo.id}) on node ${outcome.nodeId} ` +
+          `as dispatch ${outcome.dispatchId} — not starting it here`,
+      );
+      return;
+    }
+    if (outcome.start === 'none') {
+      reportRefusal(project, todo, outcome.reason);
+      return;
+    }
+    // `start: 'local'` — the hub placed the work on itself. Falls through to exactly the same
+    // start the single-node path takes; a local placement builds and sends no frame at all.
   }
 
   const { run, stamped } = await startTodoRun(project, todo, workflow, 'todo-autostart');

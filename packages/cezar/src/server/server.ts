@@ -121,7 +121,8 @@ import {
   updateTodo,
   type TodoItem,
 } from '../todos.ts';
-import { CLUSTERING_OFF, watchTodoAutostart, type TodoAutostartProject } from '../todo-autostart.ts';
+import { watchTodoAutostart, type TodoAutostartProject } from '../todo-autostart.ts';
+import { currentAutostartDispatch, currentClusterAutostart } from '../cluster/autostart-seam.ts';
 import { watchReopenRequests, type ReopenWatchProject } from '../reopen-watch.ts';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.ts';
 import {
@@ -1628,15 +1629,37 @@ export function createApp(deps: ServerDeps) {
     // `CLUSTERING_OFF` is the SAME behaviour that absence had — it changes nothing today — but it
     // is now a decision this file makes out loud, and omitting it is a typecheck error.
     //
-    // **Deliberately not `clusterModeFromEnv` yet, and this is not an oversight.** Handing this a
+    // ~~**Deliberately not `clusterModeFromEnv` yet, and this is not an oversight.** Handing this a
     // live seam requires a production `claimStart` — a hub round trip for the claim — and there is
     // none: `TodoAutostartCluster` has no implementation anywhere outside tests. Wiring the flag
     // through without one does not enable the feature, it only moves the same failure: measured,
     // an autostart todo authored on this node still starts unboundedly (the read-side guard allows
     // via `mayStartWithoutHub`, the write side still refuses `hub-unconfirmed`). Switching this on
     // is a behavioural decision with production consequences and belongs to the owner, not to this
-    // wiring line. See D43 in `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`.
-    cluster: CLUSTERING_OFF,
+    // wiring line.~~
+    //
+    // **SUPERSEDED 2026-08-24 (Milestone C activation) — the owner made that decision** ("VPS is
+    // master, this mac is connected as additional worker and tasks are distributed across
+    // master/workers"), and the production `claimStart` this comment said did not exist now does:
+    // `cluster/autostart-seam.ts#createSpokeAutostartCluster`. It needs no hub round trip and no
+    // new frame type, because a worker's honest answer to *"may I self-start the master's work"* is
+    // a REFUSAL, not a request. The scope is the part that matters and it is unchanged from D15a:
+    // with the hub unreachable `mayAutostartTodo` never reaches `claimStart` at all, so a
+    // disconnected worker still runs what it authored.
+    //
+    // The failure this comment measured is closed rather than moved: it was the READ side allowing
+    // while the WRITE side refused `hub-unconfirmed`, one concept with two disagreeing sources.
+    // Both sides now answer from the same armed policy.
+    //
+    // **Both fields are FUNCTIONS, and that is load-bearing.** This object is built in `createApp`;
+    // the cluster runtime that knows this node's role is armed later, in `startServer`. A value
+    // read here would be read BEFORE the answer exists and would pin every node to
+    // `CLUSTERING_OFF` forever — D43's exact failure arriving by a different route. These two
+    // named functions read the armed policy at DECISION time. With `CEZ_CLUSTER` unset nothing is
+    // ever armed and they return `CLUSTERING_OFF` / `DISPATCH_LOCAL`: the single-node path,
+    // untouched. See D43 and item 45 in `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`.
+    cluster: currentClusterAutostart,
+    dispatch: currentAutostartDispatch,
   });
   watchTodoAutostart(todoAutostartProject(bootContext));
   for (const id of contexts.ids()) {
