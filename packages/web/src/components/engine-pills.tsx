@@ -1,4 +1,11 @@
-import { useAgentProfiles, useConfig, useProviderStatus, useRepo, useRunnerModels } from '@/api/queries'
+import {
+  useAgentProfiles,
+  useConfig,
+  useEngineAdvisory,
+  useProviderStatus,
+  useRepo,
+  useRunnerModels,
+} from '@/api/queries'
 import type { CreateRunInput, Runner } from '@loki-labs/better-cezar-api-client'
 import { PickerPill, RunnerPill, type RunnerAccountChoice } from '@/components/picker-pill'
 import { usableRunners } from '@/lib/provider-status'
@@ -178,6 +185,7 @@ export function EnginePills({
 }) {
   const resolved = useResolvedEngine(pick)
   const { runner, model, runners, canRun, modelsLocked } = resolved
+  const advisory = useEngineAdvisory()
   const config = useConfig()
   const catalog = useRunnerModels(runner)
   const models = modelsForRunner(runner, catalog.data, [pick.model, config.data?.defaultModels?.[runner]])
@@ -198,6 +206,7 @@ export function EnginePills({
           accounts={accountChoices}
           account={accounts ? resolved.account : null}
           repoAccount={accounts ? resolved.repoAccount : undefined}
+          advisory={advisory}
           disabled={unavailable}
           // Changing the AGENT drops the model pick: the presets are per-runner, so a kept model
           // would be a preset the new runner does not have (composer rule). Changing only the

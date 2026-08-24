@@ -140,7 +140,7 @@ const DEFAULT_LIMITS: WorkspaceResourceLimits = {
   maxMonitoringSessions: 2,
   monitoringWakeIntervalMinutes: DEFAULT_MONITORING_WAKE_MINUTES,
   autoResumeOnUsageLimit: true,
-  fallbackAcrossAccountsWhenLimited: false,
+  fallbackAcrossAccountsWhenLimited: true,
   memoryLimitMb: null,
 };
 
@@ -311,10 +311,15 @@ export class WorkspaceSemaphore {
     return this.limits.autoResumeOnUsageLimit ?? true;
   }
 
-  /** Absent reads as OFF — an older `load` stub, or a config predating the key, must behave
-   *  exactly like today's cezar and never silently start overriding explicit account picks. */
+  /** Absent reads as ON, since `.ai/specs/2026-08-23-never-block-a-task.md` — the owner's ruling
+   *  that a task is never blocked by a limit, so availability outranks an explicit account pick.
+   *  It read as OFF when the setting shipped (2026-08-23, earlier the same day), on the reasoning
+   *  that overriding a named account is a product decision rather than a bug fix; that decision
+   *  has since been made. Must stay in step with `resourcesSchema`'s `.default(true).catch(true)`
+   *  and with the settings UI's `?? true`: a stub `load` reaching a different answer from the
+   *  parsed config is a switch that lies about what the engine will do. */
   fallbackAcrossAccountsWhenLimited(): boolean {
-    return this.limits.fallbackAcrossAccountsWhenLimited ?? false;
+    return this.limits.fallbackAcrossAccountsWhenLimited ?? true;
   }
 
   /** Cached per-task memory ceiling (MiB), or null for no limit. */

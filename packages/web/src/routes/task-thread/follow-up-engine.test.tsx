@@ -10,6 +10,7 @@ import type {
   ProviderStatusResponse,
   StepState,
 } from '@loki-labs/better-cezar-api-client'
+import { ADVISORY_NOTE } from '@/components/picker-pill'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
 import { Link } from '@/lib/project-router'
 
@@ -83,6 +84,10 @@ function serve(
   providerStatus: ProviderStatusResponse | { error: string } = providersForHealth(health),
   providerStatusCode = 200,
   modelsLocked = false,
+  /** `resources.fallbackAcrossAccountsWhenLimited` on the WORKSPACE config — what makes the engine
+   *  picker advisory (`2026-08-23-never-block-a-task.md`). Defaults to absent, i.e. the shape this
+   *  file served before the setting existed. */
+  accountFallback: boolean | undefined = undefined,
 ) {
   requests = []
   const json = (payload: unknown, status = 200) =>
@@ -107,6 +112,15 @@ function serve(
           maxParallel: 1,
           memoryLimitMb: null,
         })
+      if (url === '/api/v1/workspace/config' && method === 'GET')
+        // `resources` OMITTED in the default case, not served empty. That is the shape an older
+        // server sends and the shape most of this repo's fetch stubs return, and it is what broke:
+        // `data?.resources.x` throws from inside the hook and takes the whole React tree with it.
+        return json(
+          accountFallback === undefined
+            ? {}
+            : { resources: { fallbackAcrossAccountsWhenLimited: accountFallback } },
+        )
       if (url === '/api/v1/runs' && method === 'GET') return json([])
       if (url.endsWith('/continue') && method === 'POST') return json({ continued: true })
       return json({}, 200)
@@ -393,5 +407,41 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
       expect.arrayContaining([expect.stringContaining('claude'), expect.stringContaining('opencode')]),
     )
     expect(options.some((option) => option.textContent?.includes('codex'))).toBe(false)
+  })
+
+  /**
+   * The wiring, at a real surface. `advisory` is an OPTIONAL prop that defaults to `false`, so a
+   * call site that forgets it is silently wrong and the pill's own unit tests stay green — this is
+   * the check that the workspace setting actually reaches this picker. Todo `81ab4ebd` asked for
+   * exactly this ("and the UI says so"), and the person it protects is standing in front of this
+   * menu picking codex to dodge a Claude limit.
+   */
+  it('the runner menu says the pick is advisory when the workspace fallback is on', async () => {
+    serve(HEALTH_MULTI, {}, providersForHealth(HEALTH_MULTI), 200, false, true)
+    renderAction(makeRun())
+
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Runner' }))
+    expect(await screen.findByText(ADVISORY_NOTE)).not.toBeNull()
+  })
+
+  it('survives a workspace config with no `resources` at all', async () => {
+    // The regression. `resources` is required by the response TYPE and optional in fact, so the
+    // typechecker cannot see this; the box gate did, as 125 failures across 7 files that have
+    // nothing to do with this setting. Rendering at all is the assertion.
+    serve()
+    renderAction(makeRun())
+
+    expect(await screen.findByRole('button', { name: 'Runner' })).not.toBeNull()
+    expect(screen.queryByText(ADVISORY_NOTE)).toBeNull()
+  })
+
+  it('and says nothing when the host has turned it off', async () => {
+    // The control. Off, an explicit pick really is a requirement, so the claim would be false.
+    serve(HEALTH_MULTI, {}, providersForHealth(HEALTH_MULTI), 200, false, false)
+    renderAction(makeRun())
+
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Runner' }))
+    await screen.findAllByRole('menuitemradio')
+    expect(screen.queryByText(ADVISORY_NOTE)).toBeNull()
   })
 })

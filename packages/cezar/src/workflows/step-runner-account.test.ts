@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -10,7 +10,9 @@ import { localCliAuthor } from '../runs/task-author.ts';
 import {
   accountUsageKey,
   defaultAgentAccountUsageStore,
+  recordDispatch,
   recordLimited,
+  type AgentAccountUsageStore,
 } from '../workspace/agent-account-usage.ts';
 import { RunManager } from './run.ts';
 import type { WorkflowDef } from './types.ts';
@@ -62,23 +64,65 @@ describe('a step pinning its own runner', () => {
   }
 
   function limitClaudeDefault(): void {
+    limitAccounts(accountUsageKey('claude'));
+  }
+
+  /** Called ON TOP of `limitClaudeDefault`, so that "every claude account" is literally true —
+   *  the two stored logins on this fixture are `default` and `secondary`. */
+  function limitClaudeSecondary(): void {
+    limitAccounts(accountUsageKey('claude'), accountUsageKey('claude', 'secondary'));
+  }
+
+  /** Rewrites the whole file each time: `defaultAgentAccountUsageStore()` starts empty, so the
+   *  second call must re-record the first key or it would silently un-limit it. */
+  function limitAccounts(...keys: string[]): void {
     const usage = defaultAgentAccountUsageStore();
-    recordLimited(usage, accountUsageKey('claude'), {
-      source: 'usage-limit',
-      until: '2026-08-26T23:00:00.000Z',
-    });
+    for (const key of keys) {
+      recordLimited(usage, key, { source: 'usage-limit', until: '2026-08-26T23:00:00.000Z' });
+    }
     writeFileSync(agentAccountUsagePath(), JSON.stringify(usage), 'utf8');
   }
 
-  /** `pinned` overrides the provider; `plain` follows the run's own. */
+  /** Stamp a just-now dispatch on one account, MERGING into whatever is on disk — this runs after
+   *  `limitAccounts`, so re-minting the store here would drop the limit it depends on. */
+  function dispatchOn(key: string): void {
+    const usage = JSON.parse(readFileSync(agentAccountUsagePath(), 'utf8')) as AgentAccountUsageStore;
+    recordDispatch(usage, key);
+    writeFileSync(agentAccountUsagePath(), JSON.stringify(usage), 'utf8');
+  }
+
+  /**
+   * `pinned` overrides the provider; `plain` follows the run's own.
+   *
+   * `model: 'opus'` mirrors `spec-to-deploy`'s real `spec`/`review-spec` pins, and it is the only
+   * OBSERVABLE difference between "the record says codex" and "codex is what ran". `opus` is a
+   * Claude alias, so `modelConflictsWithRunner` drops it on a codex step and the transcript says
+   * `model: auto`; a resolution that still thought the step was claude keeps it and normalises to
+   * `model: anthropic/opus`. Everything downstream of the backend binding — `modelForBackend`,
+   * `normalizeModelForBackend`, `agentEnvForStep`, `createRunner` — hangs off that one value.
+   */
   const workflow: WorkflowDef = {
     name: 'mixed-runners',
     source: 'built-in',
     steps: [
-      { id: 'pinned', name: 'Pinned', prompt: '{{task}}', runner: 'claude' },
+      { id: 'pinned', name: 'Pinned', prompt: '{{task}}', runner: 'claude', model: 'opus' },
       { id: 'plain', name: 'Plain', prompt: 'go' },
     ],
   };
+
+  /** The transcript's `model: <x>` line for the run, once it has been written. */
+  async function modelNote(runId: string): Promise<string | undefined> {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      const note = store
+        .readEvents(runId)
+        .map((e) => String(e.message ?? ''))
+        .find((m) => m.startsWith('model: '));
+      if (note !== undefined) return note;
+      if (Date.now() > deadline) return undefined;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
 
   const stepOf = (runId: string, id: string) => store.getRun(runId)?.steps.find((s) => s.id === id);
 
@@ -168,6 +212,89 @@ describe('a step pinning its own runner', () => {
     await dispatched(record.id, 'plain');
 
     expect(stepOf(record.id, 'plain')?.backend).toBe('codex');
+  }, 30_000);
+
+  /**
+   * The pin has NOWHERE to go — never blocked (`.ai/specs/2026-08-23-never-block-a-task.md`).
+   *
+   * Distinct from every case above, and the distinction is the whole point: those move WITHIN the
+   * pinned provider, which keeps the pin's promise. This one breaks it, on the owner's ruling that
+   * availability outranks a quality pin — `spec-to-deploy` pins `claude` + `opus` on `spec` and
+   * `review-spec` from "writing spec + spec review should be by opus always", and before this that
+   * step simply died when Claude was out of quota.
+   *
+   * So the transcript note is asserted, not decorative. The mitigation for silently delivering a
+   * lower-quality turn is that it is announced; a downgrade that happens quietly is the failure,
+   * not the fallback.
+   */
+  it('downgrades the pinned provider when EVERY one of its accounts is out of quota', async () => {
+    writeAccounts({ claude: 'pool:*' });
+    limitClaudeDefault();
+    limitClaudeSecondary();
+    manager = new RunManager(store, repoRoot);
+
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'ship it',
+      runner: 'codex',
+      worktree: false,
+    });
+    await dispatched(record.id, 'pinned');
+
+    expect(stepOf(record.id, 'pinned')?.backend).toBe('codex');
+    // The record is only half of it, and it is the half a record-only bug agrees with. `backend`
+    // was stamped correctly here while `createRunner()` still spawned CLAUDE, because the backend
+    // expression was evaluated a second time further down and the second copy had not learned
+    // about the downgrade. This assertion reads the resolution that actually feeds the spawn:
+    // `opus` is a Claude alias, so a codex step must drop it.
+    expect(await modelNote(record.id)).toBe('model: auto');
+    const note = store
+      .readEvents(record.id)
+      .map((e) => String(e.message ?? ''))
+      .find((m) => m.includes('every claude account is out of quota'));
+    // Both ends named — what was asked for and what it actually ran on. A note that says only
+    // "downgraded" leaves the reader unable to check the decision, which is the same failure the
+    // reroute note in `account-fallback.test.ts` guards against.
+    expect(note).toContain('asks for opus on claude');
+    expect(note).toContain('codex:default');
+  }, 30_000);
+
+  it('keeps the pin while ONE account of that provider is still open', async () => {
+    // The negative control, and the one that separates this feature from "downgrade whenever the
+    // named login is limited". `claude:default` is out of quota and `claude:secondary` is not, so
+    // the correct answer is to stay on claude and move within it — throwing away a working Claude
+    // account to satisfy a rule about availability would be the opposite of what the rule is for.
+    //
+    // It fails against the obvious wrong implementation (keying the downgrade on the account the
+    // step would have used rather than on every account of the provider), which the test above
+    // cannot distinguish.
+    //
+    // `claude:secondary` is given a fresh dispatch, and that is load-bearing rather than colour.
+    // Without it, `selectPoolAccount` ranks `claude:secondary` above `codex:default` anyway, and
+    // the LATER guard (`choice.provider === pinned`) keeps the pin — so deleting the guard this
+    // test is about changed nothing and the control passed against the mutation. Measured, not
+    // assumed. A recent dispatch pushes claude to the back of "least recently dispatched", which
+    // makes codex the ranked winner and the two guards observably different.
+    writeAccounts({ claude: 'pool:*' });
+    limitClaudeDefault();
+    dispatchOn(accountUsageKey('claude', 'secondary'));
+    manager = new RunManager(store, repoRoot);
+
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'ship it',
+      runner: 'codex',
+      worktree: false,
+    });
+    await dispatched(record.id, 'pinned');
+
+    expect(stepOf(record.id, 'pinned')?.backend).toBe('claude');
+    // And the model pin survives with it — the point of staying on claude. `model: auto` here
+    // would mean the step had been moved off claude somewhere downstream of the record.
+    expect(await modelNote(record.id)).toBe('model: anthropic/opus');
+    expect(
+      store.readEvents(record.id).map((e) => String(e.message ?? '')).some((m) => m.includes('out of quota')),
+    ).toBe(false);
   }, 30_000);
 
   it('does not reroute when the provider is not on a pool', async () => {

@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 
 import { retargetRun } from '@/api/client'
-import { queryKeys, useConfig, useRunnerModels } from '@/api/queries'
+import { queryKeys, useConfig, useEngineAdvisory, useRunnerModels } from '@/api/queries'
 import type { ApiRun, Runner } from '@loki-labs/better-cezar-api-client'
 import { PickerPill, RunnerPill } from '@/components/picker-pill'
 import { modelsForRunner, modelCatalogStatus, resolveModel } from '@/routes/new-task-form'
@@ -56,6 +56,7 @@ export function useRetargetAction(run: ApiRun): RetargetAction {
   const queryClient = useQueryClient()
   const available = runActionFlags(run).retarget
   const config = useConfig()
+  const advisory = useEngineAdvisory()
   // null = "not touched". An untouched pill is NOT sent, so the server keeps what the run has —
   // a person who opens this to change the runner does not silently also re-pin a model they never
   // looked at.
@@ -101,6 +102,7 @@ export function useRetargetAction(run: ApiRun): RetargetAction {
           <RunnerPill
             runners={runners}
             value={runner}
+            advisory={advisory}
             onPick={(next) => {
               setPickedRunner(next)
               setPickedModel(null) // a runner switch invalidates the previous model pick

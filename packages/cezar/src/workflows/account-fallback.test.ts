@@ -22,9 +22,13 @@ const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
  * Out-of-quota fallback (spec `2026-08-23-retarget-task-to-another-engine.md`, Phase 4) — when the
  * account a task NAMED is limited, start it somewhere else rather than waiting.
  *
- * The load-bearing case in this file is the **default-off** one. A setting that ships off is only
- * off if something asserts it, and the failure it guards against is invisible: overriding a
- * provider the user deliberately picked would look like the feature working.
+ * CORRECTED 2026-08-23 the same day, by `2026-08-23-never-block-a-task.md`: this said "the
+ * load-bearing case in this file is the **default-off** one". The default is now ON. What was
+ * load-bearing about it survives the flip, and is why those two cases were inverted rather than
+ * deleted — nobody writes this key, so what they assert is what every host actually does, in
+ * whichever direction. The failure they guard against is still the invisible one: a default that
+ * has quietly drifted from the schema's, the semaphore stub's, or the settings pane's looks
+ * exactly like the feature working.
  */
 describe('out-of-quota fallback', () => {
   let repoRoot: string;
@@ -80,17 +84,25 @@ describe('out-of-quota fallback', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('is OFF by default — an explicit account pick is a requirement, not a preference', () => {
+  // FLIPPED 2026-08-23 by `.ai/specs/2026-08-23-never-block-a-task.md`. These two read `false`
+  // when the setting shipped that morning; the owner's ruling that afternoon — "task should never
+  // be blocked ... always automatically proceed on next available provider & model" — made ON the
+  // product default. They are kept rather than deleted because the DEFAULT is the whole behaviour
+  // here: nobody sets this key, so whatever these assert is what every host does.
+  it('is ON by default — an explicit account pick is a preference, not a requirement', () => {
     const plain = new RunManager(store, repoRoot);
     manager = plain;
     expect(
       (plain as unknown as { semaphore: WorkspaceSemaphore }).semaphore.fallbackAcrossAccountsWhenLimited(),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it('reads absent as OFF, so a config predating the key does not start overriding picks', () => {
+  // The stub `load` path, which is a DIFFERENT default from the parsed config's: `resourcesSchema`
+  // fills the key in, this constructor is handed a partial object that never had it. They must
+  // agree, or the engine and the settings screen answer differently on the same host.
+  it('reads absent as ON, so a config predating the key still never blocks a task', () => {
     const semaphore = new WorkspaceSemaphore({ initial: { maxParallel: 2, memoryLimitMb: null } });
-    expect(semaphore.fallbackAcrossAccountsWhenLimited()).toBe(false);
+    expect(semaphore.fallbackAcrossAccountsWhenLimited()).toBe(true);
   });
 
   it('with it OFF, the run does not start — it waits for the account it was given', async () => {
@@ -168,8 +180,12 @@ describe('out-of-quota fallback', () => {
   it('admission stops holding when the setting is on', () => {
     // The gate half. With the setting off a held account keeps a queued run out of the queue; with
     // it on, admission answers "nothing is holding this" so the run reaches dispatch, which is the
-    // only place allowed to resolve an account. If dispatch finds nowhere better the spawn gate
-    // parks it again, so admitting it costs at most one dequeue.
+    // only place allowed to resolve an account.
+    //
+    // CORRECTED 2026-08-23 (`2026-08-23-never-block-a-task.md`): this used to end "If dispatch
+    // finds nowhere better the spawn gate parks it again, so admitting it costs at most one
+    // dequeue." The spawn gate no longer parks under this setting — see the pair below, which is
+    // the test that made the sentence false.
     const on = managerWith(true);
     manager = on;
     const record = on.startRun(workflow, { author: localCliAuthor(), task: 'mock:done ship it', worktree: false });
@@ -195,6 +211,130 @@ describe('out-of-quota fallback', () => {
       'claude',
     );
     expect(held).toBe('claude:default');
+  }, 30_000);
+
+  /**
+   * The SPAWN gate, which is where the fallback used to lose the run it had just saved.
+   *
+   * Admission (`heldAccountFor`) and this gate ask about DIFFERENT accounts on purpose, and this
+   * one rebuilt its key from the run RECORD. `rerouteExplicitAccountIfLimited` stamps its choice
+   * on the pending INPUT and deliberately leaves the record saying what the user asked for — so a
+   * run just moved `claude:default` -> `codex:default` arrived here, was measured against
+   * `claude:default`, and was parked on the very key it had moved off. Admission would then let it
+   * straight back through, which is the bounce shape this file's sibling spec measured at eleven
+   * round trips a second in production.
+   *
+   * The fix is that dispatch's resolved account is PASSED IN, so the gate measures where the work
+   * is actually going. **Note what that makes these two cases: they no longer turn on the setting
+   * at all.** The first version keyed them on `fallbackAcrossAccountsWhenLimited` and simply
+   * skipped the gate when it was on — which reddened 23 tests in `auto-resume.test.ts`, correctly,
+   * because it disabled the account hold outright on a default host. Never-blocked is not
+   * never-waits: when nothing is open anywhere, an appointment is the honest answer.
+   *
+   * Called directly rather than through a live run because the two cases must differ in ONE thing.
+   * Driving it through `startRun` would also vary which account the reroute picked, when the pump
+   * swept, and whether a step had begun — and then "did not park" could be true for a reason that
+   * has nothing to do with what is under test.
+   */
+  function holdClaudeDefault(): void {
+    // What `accountHolds()` reads as a deadline hold: a `failed` run with a live `autoResumeAt`,
+    // whose refused account resolves to `claude:default`. Created straight on the store so the
+    // manager never pumps it — this record is scenery, not a run under test.
+    const blocker = store.createRun({
+      title: 'blocker',
+      workflow: 'quick-task',
+      task: 'mock:done blocked',
+      runner: 'claude',
+      worktree: false,
+      steps: [{ id: 'work', name: 'Work', kind: 'agent' }],
+      author: localCliAuthor(),
+    });
+    store.updateRun(blocker.id, {
+      status: 'failed',
+      autoResumeAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+  }
+
+  function spawnGate(
+    mgr: RunManager,
+    runId: string,
+    resolved?: { provider: string; accountId: string },
+  ): boolean {
+    return (mgr as unknown as {
+      requeueWhileHeld: (
+        id: string,
+        wf: WorkflowDef,
+        input: unknown,
+        runner: string,
+        state?: unknown,
+        resolved?: unknown,
+      ) => boolean;
+    }).requeueWhileHeld(
+      runId,
+      workflow,
+      { author: localCliAuthor(), task: 'mock:done ship it', runner: 'claude', worktree: false },
+      'claude',
+      undefined,
+      resolved,
+    );
+  }
+
+  function runUnderTest(): string {
+    const record = store.createRun({
+      title: 'work',
+      workflow: 'quick-task',
+      task: 'mock:done ship it',
+      runner: 'claude',
+      worktree: false,
+      steps: [{ id: 'work', name: 'Work', kind: 'agent' }],
+      author: localCliAuthor(),
+    });
+    // `running` so that being parked is VISIBLE: `createRun` mints a record already `queued`, and
+    // asserting "it is queued" on a record that was born queued would pass with the gate deleted.
+    store.updateRun(record.id, { status: 'running' });
+    return record.id;
+  }
+
+  it('does not park a run dispatch has already moved to an open account', () => {
+    const on = managerWith(true);
+    manager = on;
+    holdClaudeDefault();
+    const runId = runUnderTest();
+    // `claude:default` is held; dispatch resolved `codex:default`, which is not. The record still
+    // says claude — that is the point, and it is why the gate has to be TOLD.
+    expect(spawnGate(on, runId, { provider: 'codex', accountId: 'default' })).toBe(false);
+    expect(store.getRun(runId)?.status).toBe('running');
+    expect(
+      store.readEvents(runId).map((e) => String(e.message ?? '')).some((m) => m.includes('held')),
+    ).toBe(false);
+  }, 30_000);
+
+  it('still parks when dispatch resolved nothing — the negative control for the gate above', () => {
+    // Identical fixture, identical call, `resolved` omitted. Without this the test above passes
+    // just as well against a hold that was never established, which is the more likely mistake:
+    // `accountHolds()` reads a record shape, and a fixture that got the shape wrong holds nothing.
+    // It also pins the half of the ladder that is easiest to lose — nowhere open means wait.
+    const on = managerWith(true);
+    manager = on;
+    holdClaudeDefault();
+    const runId = runUnderTest();
+    expect(spawnGate(on, runId)).toBe(true);
+    expect(store.getRun(runId)?.status).toBe('queued');
+    expect(
+      store.readEvents(runId).map((e) => String(e.message ?? '')).some((m) => m.includes('held')),
+    ).toBe(true);
+  }, 30_000);
+
+  it('parks a run dispatch moved to an account that is ALSO held', () => {
+    // The third case, and the one a "was `resolved` passed?" implementation gets wrong: being
+    // rerouted is not itself a licence to start. The gate asks about the account, whichever way it
+    // arrived. Here the reroute landed back on the held key, so the answer is still wait.
+    const on = managerWith(true);
+    manager = on;
+    holdClaudeDefault();
+    const runId = runUnderTest();
+    expect(spawnGate(on, runId, { provider: 'claude', accountId: 'default' })).toBe(true);
+    expect(store.getRun(runId)?.status).toBe('queued');
   }, 30_000);
 
   it('leaves the usage store alone when it does not reroute', async () => {

@@ -229,11 +229,15 @@ export async function migrateReleasesCommand(opts: MigrateReleasesOptions): Prom
   }
 
   const systemdDir = opts.systemdDir ?? '/etc/systemd/system';
+  const runAsUid = resolveRunAsUid(systemdDir, unit);
   const units: Array<{ path: string; body: string }> = [
     { path: join(systemdDir, socketUnitName(unit)), body: cezarSocketUnit({ bindHost, port, serviceUnit: unit }) },
     // A numbered drop-in, never a unit rewrite: `10-cloudflare.conf`, `20-onepassword.conf` and
     // `30-agent-passthrough.conf` already live in this directory and hold real credentials.
-    { path: join(systemdDir, `${unit}.d`, '40-non-disruptive.conf'), body: nonDisruptiveDropIn({ socketUnit: socketUnitName(unit) }) },
+    {
+      path: join(systemdDir, `${unit}.d`, '40-non-disruptive.conf'),
+      body: nonDisruptiveDropIn({ socketUnit: socketUnitName(unit), ...(runAsUid !== undefined ? { runAsUid } : {}) }),
+    },
     { path: join(systemdDir, 'cezar-runs.slice'), body: cezarRunsSlice() },
   ];
   for (const file of units) {
@@ -343,6 +347,39 @@ function readDeployedCommit(linkPath: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The uid `cezar.service` runs as, for `nonDisruptiveDropIn`'s `[Unit]` ordering hardening
+ * (Phase 0.3, `.ai/specs/2026-08-22-broker-scope-isolation-full-stop-survival.md`). Read from the
+ * base unit's own `User=` line — same `id -u` shell-out `provision-user.ts`'s
+ * `createOrgUserCommand` already uses elsewhere in this codebase — rather than guessed, since a
+ * wrong uid (`user@0.service`) is worse than no ordering at all. Best-effort: a missing/unreadable
+ * base unit, a unit with no `User=` line (the systemd default, i.e. root), or a lookup failure all
+ * skip the `[Unit]` section rather than failing the migrate command over a hardening step.
+ */
+function resolveRunAsUid(systemdDir: string, unit: string): number | undefined {
+  const unitPath = join(systemdDir, unit);
+  let text: string;
+  try {
+    text = readFileSync(unitPath, 'utf8');
+  } catch {
+    console.log(`  (could not read ${unitPath} — skipping the user@<uid>.service ordering hardening)`);
+    return undefined;
+  }
+  const match = /^User=(.+)$/m.exec(text);
+  if (!match?.[1]) {
+    console.log(`  (${unit} has no User= line — skipping the user@<uid>.service ordering hardening)`);
+    return undefined;
+  }
+  const username = match[1].trim();
+  const result = spawnSync('id', ['-u', username], { encoding: 'utf8' });
+  const uid = result.status === 0 ? Number.parseInt(result.stdout.trim(), 10) : NaN;
+  if (!Number.isFinite(uid)) {
+    console.log(`  (could not resolve a uid for ${username} — skipping the user@<uid>.service ordering hardening)`);
+    return undefined;
+  }
+  return uid;
 }
 
 function fileHas(path: string, body: string): boolean {

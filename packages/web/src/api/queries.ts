@@ -1499,6 +1499,26 @@ export function useWorkspaceConfig() {
 }
 
 /**
+ * Is the engine picker advisory right now? — i.e. will availability be allowed to override the
+ * agent the user named (spec 2026-08-23-never-block-a-task).
+ *
+ * Reads the WORKSPACE config, not the project one: the setting governs the machine's accounts, so
+ * a per-project answer would be a different fact. Pending resolves to `false` on purpose — the
+ * omission is honest while the answer is unknown, whereas asserting the default would state a
+ * policy the host may have switched off.
+ *
+ * **Both `?.`s are load-bearing.** `resources` is required by the response type and optional in
+ * fact: an older server, an error-shaped 200, or any test stubbing `/api/v1/workspace/config` with
+ * `{}` gives a defined `data` with no `resources`, and `data?.resources.x` throws through the whole
+ * React tree from inside a hook. Measured: 125 tests across 7 files, none of them about this
+ * setting, and none of them reachable by running the suites the change touched.
+ */
+export function useEngineAdvisory(): boolean {
+  const config = useWorkspaceConfig()
+  return config.data?.resources?.fallbackAcrossAccountsWhenLimited === true
+}
+
+/**
  * Every agent account on this machine (spec 2026-07-29-agent-profiles).
  *
  * Read by three surfaces — the Accounts settings section, the per-project picker in Settings →

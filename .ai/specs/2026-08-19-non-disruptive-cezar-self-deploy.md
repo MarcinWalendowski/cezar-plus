@@ -48,7 +48,7 @@ re-measured on 2026-08-21 ~18:20 UTC rather than copied forward.
 | P1 atomic release + ledger | `/opt/cezar` → `/opt/cezar-releases/20260821T181100Z-ad0b5f17` (a symlink, no longer a directory); `/opt/cezar-releases/deploy.json` holds `current`, `previous`, and `healthy: true` |
 | P3 socket activation | `cezar.socket` active; `runtime.socketActivated: true` |
 | P3 drain-capable unit config | `systemctl show cezar.service` → `KillMode=process`, `Delegate=yes`, `TimeoutStopUSec=30s` (drop-in `40-non-disruptive.conf`, plus `cezar-runs.slice`) |
-| P4 run broker | `runtime.brokerAvailable: true`, `brokeredBackends: ["claude"]`, `runBrokerIsolation: "delegated"` — **not** `"none"` |
+| P4 run broker | `runtime.brokerAvailable: true`, `brokeredBackends: ["claude"]`, **CORRECTED 2026-08-22: `runBrokerIsolation: "scope"`** since 2026-08-21T20:48Z — the `probeUserScope`/`userScopeEnv` fix (`fde2dae8`, `cf334d89`) closed the `XDG_RUNTIME_DIR` gap that produced the value below; live evidence and the disjoint-cgroup proof are in `.ai/specs/2026-08-22-broker-scope-isolation-full-stop-survival.md`. Original text, kept unchanged: ~~`runBrokerIsolation: "delegated"` — **not** `"none"`~~ |
 | P5 readiness gate | `GET /api/v1/ready` → 200 |
 | Deploy identity in-band | `health.deploy` = `{releaseId, version 0.10.0, sha ad0b5f17…, activatedAt}` |
 
