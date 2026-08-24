@@ -20,6 +20,22 @@ was also not executed in this task's chain. The sibling verification branch and 
 carry the production evidence; this file remains the canonical main-branch spec for the shipped
 change.
 
+**Corrected 2026-08-24 (later the same day) — the `cez/3ee1ebf0` branch cited above is still
+unmerged, and `.ai/specs/2026-08-22-deploy-e2e-probe-measured-assertions.md` is now added to
+`origin/main` (documentation only, its code is not).** The branch remains stuck: rebasing it onto
+current `origin/main` surfaced an unrelated typecheck break in `packages/web/src/api/client.ts`,
+filed as todo `96a25516` ("Blocks task `3ee1ebf0`"). Until that lands and the branch is rebased and
+merged, the **shipped** probe (this file's `83ddbdd2`) has no `--project` flag and cannot reach a
+run's SSE stream on this box at all (it boots in workspace mode; runs live at
+`/api/v1/p/<project>/runs/:id`, not the unscoped path the shipped probe still calls) — so it
+correctly reports `NOT_MEASURED` rather than a vacuous `PASS` (this file's own fix working as
+designed), but it cannot repeat the non-vacuous `sse.events = 2164` measurement on real production
+data. That measurement is real and already happened — see the status line above and the parent
+spec's `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` "Status log — 2026-08-23" — but
+it was taken against a version of the code deployed directly to `prod-host` for that one run,
+not against what `origin/main` ships today. Whoever lands `96a25516` should rebase and merge
+`cez/3ee1ebf0` next; only then does this gap close for good.
+
 **Date:** 2026-08-22
 **Owner ask (task context):** "deploy-e2e-probe reports a false PASS when it observed nothing."
 **Extends:** `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` (KB `specs-594acc539b36`) —
