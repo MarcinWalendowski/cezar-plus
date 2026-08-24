@@ -27,6 +27,40 @@ export const workflowStepDefSchema = z
     prompt: z.string().optional(),
     skill: z.string().optional(),
     model: z.string().optional(),
+    /**
+     * A reasoning-depth ceiling. Mirrors `effort` in `src/workflows/types.ts`.
+     *
+     * **Added here 2026-08-24, and it should have been here since 2026-08-21** — the same silent
+     * gap {@link workflowStepDefSchema}'s `heavy` comment below describes at length: the parity
+     * guard is a MUTUAL ASSIGNABILITY check, so a server-only optional property typechecks green
+     * in both directions and the guard says nothing. `GET /workflows` serves the server's own
+     * `WorkflowDef` verbatim, so `effort` was already on the wire with no name here; the first
+     * consumer to rebuild a step field-by-field from this type would drop it on the way back
+     * through `POST /workflows`. Latent while `effort` was Claude-only and set on one built-in
+     * step; live now that it carries half of the codex model policy
+     * (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`).
+     */
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    /**
+     * Per-runner overrides of `model` and `effort` for this step. Mirrors `byRunner` in
+     * `src/workflows/types.ts` (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D1).
+     *
+     * Declared here for the round-trip reason above, and the consequence is concrete rather than
+     * theoretical: `spec-to-deploy` carries a codex model AND effort on six of its eight steps, so
+     * a step rebuilt from a contract type that did not know this key would save the built-in
+     * workflow back with its whole codex policy silently gone.
+     */
+    byRunner: z
+      .partialRecord(
+        runnerSchema,
+        z
+          .object({
+            model: z.string().optional(),
+            effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+          })
+          .strict(),
+      )
+      .optional(),
     /** Per-step agent backend override (falls back to the task / config default). */
     runner: runnerSchema.optional(),
     allowedTools: z.array(z.string()).optional(),
@@ -39,6 +73,21 @@ export const workflowStepDefSchema = z
         max: z.number().int().positive().default(2),
       })
       .optional(),
+    /**
+     * This step must hold a slot in the `resources.maxHeavySteps` semaphore for its turn — spec
+     * `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D14. Mirrors `heavy` in
+     * `src/workflows/types.ts`; absent = not heavy.
+     *
+     * Mirrored here even though the parity guard does not force it. `contract-parity.workflows.
+     * test.ts` compares the two shapes with a MUTUAL assignability check, and an added OPTIONAL
+     * property stays assignable in both directions — so a `heavy` on the server side alone
+     * typechecks green and the guard says nothing. That silence is the hazard: `GET /workflows`
+     * serves the server's own `WorkflowDef` verbatim, so the flag is already on the wire, and the
+     * first consumer to rebuild a step object field-by-field from THIS type would drop it on the
+     * way back through `POST /workflows` — a workflow that silently stops being heavy on its next
+     * save. Declared here so the round-trip is closed before anything edits a step.
+     */
+    heavy: z.boolean().optional(),
     /** Post-condition — what must be TRUE for the step to be green. Mirrors `verify` in
      *  `src/workflows/types.ts`, `max` default included; the run record persists a workflow def,
      *  and `contract-parity.workflows.test.ts` fails the typecheck if the two drift. */

@@ -17,6 +17,8 @@ import {
 } from './claude-cli-runner.ts';
 import { parseAskRequest, type AskQuestion } from './ask.ts';
 import { readNdjson } from './ndjson.ts';
+import { resolveCodexResumeModel, type CodexResumeModel } from './codex-resume-model.ts';
+import { sharedRunnerModelCatalog } from './runner-model-catalog.ts';
 import { V1TextCoalescer } from './v1-text-coalescer.ts';
 import {
   CodexAppServerRpc,
@@ -29,6 +31,7 @@ import {
 } from './codex-app-server-transport.ts';
 import {
   codexSessionStarted,
+  codexTurnFailure,
   createCodexUiState,
   mapCodexNotification,
   type CodexUiMapping,
@@ -40,6 +43,21 @@ export interface CodexRunnerOptions {
   bin?: string;
   /** Wall-clock timeout for a run (ms); per-spec `timeoutMs` still wins. */
   timeoutMs?: number;
+  /**
+   * Resolves the model a `thread/resume` must state explicitly, so a resumed thread can never
+   * inherit a model cezar did not choose (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`).
+   * Injected in tests; defaults to {@link resolveCodexResumeModel} over
+   * `sharedRunnerModelCatalog().get('codex')`. Never consulted on `thread/start`.
+   */
+  resumeModel?: (pinned: string | undefined, cwd: string) => Promise<CodexResumeModel>;
+}
+
+async function defaultResumeModel(pinned: string | undefined, cwd: string): Promise<CodexResumeModel> {
+  return resolveCodexResumeModel({
+    pinned,
+    repoRoot: cwd,
+    discover: async () => (await sharedRunnerModelCatalog().get('codex')).models,
+  });
 }
 
 /**
@@ -62,11 +80,13 @@ export class CodexAppServerRunner implements AgentRunner {
 
   private readonly bin: string;
   private readonly timeoutMs: number;
+  private readonly resumeModel: (pinned: string | undefined, cwd: string) => Promise<CodexResumeModel>;
   private lastSession: CodexSession | null = null;
 
   constructor(opts: CodexRunnerOptions = {}) {
     this.bin = resolveCodexExecutable(opts.bin);
     this.timeoutMs = opts.timeoutMs ?? defaultIdleTimeoutMs();
+    this.resumeModel = opts.resumeModel ?? defaultResumeModel;
   }
 
   run(spec: AgentRunSpec, onEvent?: (event: AgentEvent) => void): Promise<AgentRunResult> {
@@ -82,7 +102,7 @@ export class CodexAppServerRunner implements AgentRunner {
     onEvent?: (event: AgentEvent) => void,
     opts: SessionOptions = {},
   ): AgentSession {
-    const session = new CodexSession(this.bin, this.timeoutMs, spec, onEvent, opts);
+    const session = new CodexSession(this.bin, this.timeoutMs, spec, onEvent, opts, this.resumeModel);
     this.lastSession = session;
     return session;
   }
@@ -124,6 +144,15 @@ class CodexSession implements AgentSession {
    *  codex handles the signal and exits 143, so without this the runner reads
    *  its own teardown as a codex failure (#703). */
   private terminatedByCezar = false;
+
+  /**
+   * The failure message already reported for the turn now in flight, so the two channels codex
+   * states it on — the standalone `error` notification and the `turn/completed` that follows with
+   * `turn.status: "failed"` — surface it ONCE. Both are read (either can arrive without the
+   * other), and the pair carries the identical string, so without this every codex failure would
+   * read as two failures on the thread. Cleared at each turn boundary.
+   */
+  private reportedTurnError: string | undefined;
   /** "Has the app-server really terminated?" — the question `child.killed`
    *  does not answer: it flips on signal delivery, so the SIGTERM this runner
    *  sends would otherwise veto its own SIGKILL escalation (#844). */
@@ -133,12 +162,24 @@ class CodexSession implements AgentSession {
    *  lands in R2 step 2.1). */
   private uiState: CodexUiMapperState = createCodexUiState();
 
+  /** Phase 2 — true from `thread/resume` until this session's first `turn/completed` or
+   *  `turn/failed`; a rejection in that window is annotated with the model Phase 1 sent, so the
+   *  failure message names it without cross-referencing the note
+   *  (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`). Turn-boundary state, not an
+   *  RPC-round-trip count — the same granularity every other lifecycle decision in this file
+   *  already uses. Always false on a fresh `thread/start`. */
+  private firstResumedTurnPending = false;
+  /** The model Phase 1 told codex to resume on (`undefined` when it could not resolve one —
+   *  source `unavailable`), read by {@link annotateFirstResumedTurnFailure}. */
+  private resumeModelSent: string | undefined;
+
   constructor(
     private readonly bin: string,
     timeoutMs: number,
     private readonly spec: AgentRunSpec,
     private readonly onEvent: ((event: AgentEvent) => void) | undefined,
     private readonly opts: SessionOptions,
+    private readonly resumeModel: (pinned: string | undefined, cwd: string) => Promise<CodexResumeModel>,
   ) {
     try {
       this.child = spawnCodexAppServer(bin, spec.cwd, spec.env);
@@ -225,7 +266,7 @@ class CodexSession implements AgentSession {
         this.stdinOpen = false;
       }
 
-      const exitCode = await waitForCodexAppServerExit(this.child);
+      const { code: exitCode, signal: exitSignal } = await waitForCodexAppServerExit(this.child);
       if (this.eofTermTimer) clearTimeout(this.eofTermTimer);
       if (this.eofKillTimer) clearTimeout(this.eofKillTimer);
       this.rpc.rejectPending();
@@ -259,6 +300,21 @@ class CodexSession implements AgentSession {
         });
         this.emit({ type: 'done' });
         return base;
+      }
+
+      // An external signal death — an operator's `kill -9`, the kernel OOM killer, anything cezar
+      // did not send. SIGKILL (and most other signals) cannot be trapped, so Node reports these as
+      // `code: null` with `signal` set, which used to fall straight through the check below
+      // (`exitCode !== null` is false) and read exactly like a clean exit. `terminatedByCezar` is
+      // what tells this apart from cezar's OWN teardown reaching an untrapped death, handled
+      // identically to before this check existed — see the branch above (the codex twin of
+      // claude-cli-runner.ts's identical check, #703).
+      if (exitSignal && !this.terminatedByCezar) {
+        const stderr = stderrChunks.join('').trim();
+        const detail = stderr ? ` — ${stderr.split('\n').slice(-3).join(' | ')}` : '';
+        const message = `codex app-server was killed by signal ${exitSignal}${detail}`;
+        this.emit({ type: 'error', message });
+        throw new Error(message);
       }
 
       if (exitCode !== 0 && exitCode !== null) {
@@ -356,7 +412,22 @@ class CodexSession implements AgentSession {
       approvalPolicy: 'never',
     };
     if (this.spec.resume && this.spec.sessionId) {
-      await this.rpc.request('thread/resume', { threadId: this.spec.sessionId, ...clean(overrides) });
+      // `thread/resume` must NEVER omit `model`: an absent key means codex resumes the thread
+      // with whatever it wrote into `thread_settings` when the thread was FIRST created, which
+      // can be a model this session's own dispatch guard (`modelForBackend`) already decided not
+      // to send — a thread born that way 400s on every reopen, forever
+      // (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`). `thread/start` below keeps
+      // sending no key when the pin was dropped: a fresh thread has no persisted state to
+      // inherit, so an absent key there is exactly right. Do not collapse these back into one
+      // `clean(overrides)` — that is the defect this split exists to prevent.
+      const resolved = await this.resumeModel(this.spec.model, this.spec.cwd);
+      this.emit({ type: 'note', message: resumeModelNote(resolved) });
+      this.firstResumedTurnPending = true;
+      this.resumeModelSent = resolved.model;
+      await this.rpc.request('thread/resume', {
+        threadId: this.spec.sessionId,
+        ...clean({ ...overrides, model: resolved.model }),
+      });
       this.threadId = this.spec.sessionId;
     } else {
       const res = await this.rpc.request('thread/start', clean(overrides));
@@ -392,10 +463,27 @@ class CodexSession implements AgentSession {
     // with its default (no summary), so the reasoning thread stays empty even
     // though the mapper and UI can render it. The override persists for this
     // turn and every subsequent turn, so seeding it on turn/start is enough.
+    //
+    // `effort` rides in the SAME object, and this is the only place it can
+    // (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D3). Read off the app-server's own
+    // `generate-json-schema` output — `v2/TurnStartParams.json` documents it as *"Override the
+    // reasoning effort for this turn and subsequent turns"*. `thread/start` is the trap: it
+    // ACCEPTS `effort`, `reasoningEffort`, `modelReasoningEffort`, `model_reasoning_effort` and
+    // `reasoning_effort` without error and applies none of them (measured 2026-08-24 — the thread
+    // comes back `reasoningEffort: null` every time, because unknown params are tolerated), so a
+    // change made there looks exactly like a change that worked.
+    //
+    // Because the override is per turn, resume needs nothing extra: every turn goes through here,
+    // including the first turn after a `thread/resume`. That is deliberately unlike `model`, which
+    // `thread/resume` must restate because a thread PERSISTS the model it was born with.
+    //
+    // Key omitted, never sent as null, when no effort was resolved — the overwhelmingly common
+    // case, and it must leave the model on its own default rather than pin it to one.
     const res = await this.rpc.request('turn/start', {
       threadId: this.threadId,
       input,
       summary: reasoningSummary(),
+      ...(this.spec.effort ? { effort: this.spec.effort } : {}),
     });
     this.activeTurnId = turnIdOf(res) ?? this.activeTurnId;
   }
@@ -451,6 +539,36 @@ class CodexSession implements AgentSession {
       case 'turn/started': {
         if (this.isForeignThreadTurn(params)) break; // sub-agent child thread — not our turn (#600)
         this.activeTurnId = turnIdOf(params) ?? this.activeTurnId;
+        this.reportedTurnError = undefined;
+        break;
+      }
+      // Codex's out-of-band failure channel, previously dropped on the floor by `default`. It
+      // arrives BEFORE `turn/completed` and carries the provider's verbatim message, which is the
+      // only place the real cause is ever stated (the turn's own error repeats it, but a turn that
+      // never completes would otherwise say nothing at all). `willRetry` marks a failure codex
+      // will handle itself — a note, not an error, so a retried blip never fails a step.
+      case 'error': {
+        if (this.isForeignThreadTurn(params)) break;
+        const message = errorMessage(params.error) ?? 'codex reported an error';
+        if (params.willRetry === true) {
+          this.emit({ type: 'note', message: `codex retrying — ${message}` });
+        } else if (!this.terminatedByCezar) {
+          // `reportedTurnError` stays the RAW message — it's compared against `failure.message`
+          // below (also raw) to dedupe the two channels codex states a failure on; only the
+          // EMITTED copy gets the resume-model suffix.
+          this.reportedTurnError = message;
+          this.emit({ type: 'error', message: this.annotateFirstResumedTurnFailure(message) });
+        }
+        break;
+      }
+      // Not fatal, but load-bearing evidence: `Model metadata for <id> not found` preceded every
+      // one of the 47 failed turns on 2026-08-22 and names the bad model id, which the 400 that
+      // follows does too but only after the step has already spawned. Surfaced as a note so it is
+      // on the thread when someone reads back.
+      case 'warning': {
+        if (this.isForeignThreadTurn(params)) break;
+        const message = stringField(params, 'message');
+        if (message) this.emit({ type: 'note', message: `codex: ${message}` });
         break;
       }
       case 'item/agentMessage/delta': {
@@ -503,11 +621,19 @@ class CodexSession implements AgentSession {
         // An interrupted/failed item never sees item/completed — surface its
         // partial prose before the turn boundary (run.ts reads markers there).
         this.textCoalescer.flush();
-        if (method === 'turn/failed' && !this.terminatedByCezar) {
-          const error = params.error as Record<string, unknown> | undefined;
-          const message = stringField(error ?? {}, 'message') ?? 'codex turn failed';
-          this.emit({ type: 'error', message });
+        // Read failure off the TURN, not off the method — see {@link codexTurnFailure}. This is
+        // the line that decides whether a workflow step is `done` or `failed`, and reading only
+        // the method is why five production runs reported eight green steps having done nothing
+        // (`.ai/specs/2026-08-22-failed-turn-reads-as-done.md`).
+        const failure = codexTurnFailure(method, params);
+        const alreadyReported = failure !== undefined && failure.message === this.reportedTurnError;
+        this.reportedTurnError = undefined; // turn boundary — the next turn reports afresh
+        if (failure && !alreadyReported && !this.terminatedByCezar) {
+          // No `reason`, so the run manager treats it as a genuine agent failure and ends the
+          // chain, rather than parking the run at `review` the way a cezar-initiated stop does.
+          this.emit({ type: 'error', message: this.annotateFirstResumedTurnFailure(failure.message) });
         }
+        this.firstResumedTurnPending = false; // turn boundary — no longer "the first turn" (Phase 2)
         this.emit({ type: 'turn-end' });
         if (this.opts.autoEndAfterFirstTurn && this.stdinOpen && !this.autoEndTimer) {
           this.autoEndTimer = setTimeout(() => this.end(), AUTO_END_DELAY_MS);
@@ -522,6 +648,15 @@ class CodexSession implements AgentSession {
 
   private emit(event: AgentEvent): void {
     this.onEvent?.(event);
+  }
+
+  /** Phase 2 — names the model Phase 1 sent on a first-turn-of-resume rejection, so the failure
+   *  is readable next to the note without cross-referencing it. No-op once the first turn boundary
+   *  has passed, or when Phase 1 could not resolve a model at all (source `unavailable`). */
+  private annotateFirstResumedTurnFailure(message: string): string {
+    return this.firstResumedTurnPending && this.resumeModelSent
+      ? `${message} (resume sent model: ${this.resumeModelSent})`
+      : message;
   }
 
   /** The mapper never throws, but a defect in it must still never disturb
@@ -610,6 +745,26 @@ function textOf(content: ContentBlock[]): string {
     .trim();
 }
 
+/**
+ * Phase 1's note describing what `thread/resume` sent and why — the only case where the
+ * guarantee ("a resume never inherits a model cezar did not choose") is not delivered is
+ * `unavailable`, so a run that fails afterwards must have said so beforehand
+ * (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`).
+ */
+function resumeModelNote(resolved: CodexResumeModel): string {
+  switch (resolved.source) {
+    case 'pinned':
+      return `resuming on ${resolved.model} (pinned)`;
+    case 'config':
+      return `resuming on ${resolved.model} (codex config default)`;
+    case 'catalog':
+      return `resuming on ${resolved.model} (codex's current default)`;
+    case 'unavailable':
+      return "could not read codex's model catalog — resuming on whatever model this thread was "
+        + 'created with, which may be one codex cannot serve';
+  }
+}
+
 /** Drop undefined values so we never send `"model": null` to the server. */
 function clean<T extends Record<string, unknown>>(obj: T): Partial<T> {
   const out: Partial<T> = {};
@@ -622,6 +777,15 @@ function clean<T extends Record<string, unknown>>(obj: T): Partial<T> {
 function stringField(obj: Record<string, unknown>, key: string): string | undefined {
   const v = obj[key];
   return typeof v === 'string' ? v : undefined;
+}
+
+/** Codex spells an error either as a bare string or as `{ message }`; both appear on the wire. */
+function errorMessage(error: unknown): string | undefined {
+  if (typeof error === 'string') return error.trim() || undefined;
+  if (error && typeof error === 'object' && !Array.isArray(error)) {
+    return stringField(error as Record<string, unknown>, 'message');
+  }
+  return undefined;
 }
 
 function threadIdOf(res: Record<string, unknown>): string | undefined {

@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { migrateReleasesCommand, releaseDeployCommand, socketUnitName, unexpectedEntries } from './release-cli.ts';
-import type { ReleaseDeployHost } from './release-deploy.ts';
-import { loadLedger } from './releases.ts';
+import { activate, freshLedger, loadLedger, recordBuilt, saveLedger } from './releases.ts';
 import type { ProbeResult } from './deploy-strategy.ts';
+import type { ReleaseDeployHost } from './release-deploy.ts';
 
 /**
  * `cezar server-migrate-releases` — the one-shot that turns a hand-provisioned box into the
@@ -128,6 +128,38 @@ describe('server-migrate-releases', () => {
     const code = await migrateReleasesCommand({ linkPath: join(root, 'nope'), releasesDir, apply: true });
     expect(code).toBe(1);
   });
+
+  describe('runAsUid ordering hardening (Phase 0.3 of the broker-scope-isolation spec)', () => {
+    // Real uid 0 (root) always resolves — no useradd/id fixture needed to exercise the happy path.
+    it('reads the base unit\'s User= line and orders the drop-in after that user manager', async () => {
+      mkdirSync(etc, { recursive: true });
+      writeFileSync(join(etc, 'cezar.service'), '[Unit]\nDescription=x\n\n[Service]\nUser=root\nExecStart=/bin/true\n');
+      await migrate(true);
+      const dropIn = readFileSync(join(etc, 'cezar.service.d', '40-non-disruptive.conf'), 'utf8');
+      expect(dropIn).toContain('[Unit]');
+      expect(dropIn).toContain('After=user@0.service');
+      expect(dropIn).toContain('Wants=user@0.service');
+    });
+
+    it('skips the [Unit] section, without failing, when the base unit has no User= line', async () => {
+      mkdirSync(etc, { recursive: true });
+      writeFileSync(join(etc, 'cezar.service'), '[Unit]\nDescription=x\n\n[Service]\nExecStart=/bin/true\n');
+      const code = await migrate(true);
+      expect(code).toBe(0);
+      const dropIn = readFileSync(join(etc, 'cezar.service.d', '40-non-disruptive.conf'), 'utf8');
+      expect(dropIn).not.toContain('[Unit]');
+      expect(logs.join('\n')).toContain('no User= line');
+    });
+
+    it('skips the [Unit] section, without failing, when the base unit does not exist', async () => {
+      // `etc` is created lazily by the migration itself, so the base unit genuinely isn't there yet.
+      const code = await migrate(true);
+      expect(code).toBe(0);
+      const dropIn = readFileSync(join(etc, 'cezar.service.d', '40-non-disruptive.conf'), 'utf8');
+      expect(dropIn).not.toContain('[Unit]');
+      expect(logs.join('\n')).toContain('could not read');
+    });
+  });
 });
 
 describe('server-deploy (releaseDeployCommand) --dry-run', () => {
@@ -179,6 +211,9 @@ describe('server-deploy (releaseDeployCommand) --dry-run', () => {
         throw new Error('a dry run must never restart');
       },
       async probeReady(): Promise<ProbeResult> {
+        throw new Error('a dry run must never probe');
+      },
+      async waitReady(): Promise<ProbeResult> {
         throw new Error('a dry run must never probe');
       },
       freeBytes: () => Number.POSITIVE_INFINITY,
@@ -283,5 +318,84 @@ describe('unexpectedEntries — derived from the source checkout (corrected 2026
     };
     expect(() => unexpectedEntries('/opt/cezar', boom, '/src')).not.toThrow();
     expect(unexpectedEntries('/opt/cezar', boom, '/src')).toContain('AGENT_PROTOCOL.md');
+  });
+});
+
+describe('releaseDeployCommand rollback', () => {
+  let root: string;
+  let linkPath: string;
+  let releasesDir: string;
+  let source: string;
+  const output: string[] = [];
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'cez-rollback-cli-'));
+    releasesDir = join(root, 'releases');
+    linkPath = join(root, 'cezar');
+    source = join(root, 'source');
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, 'package.json'), '{"version":"0.0.0"}');
+    for (const id of ['r1', 'r2']) mkdirSync(join(releasesDir, id), { recursive: true });
+    let ledger = recordBuilt(freshLedger(), { id: 'r1', builtAt: '2026-08-22T00:00:00.000Z', healthy: true });
+    ledger = activate(ledger, 'r1', '2026-08-22T00:00:01.000Z');
+    ledger = recordBuilt(ledger, { id: 'r2', builtAt: '2026-08-22T00:00:02.000Z', healthy: true });
+    ledger = activate(ledger, 'r2', '2026-08-22T00:00:03.000Z');
+    saveLedger(releasesDir, ledger);
+    symlinkSync(join(releasesDir, 'r2'), linkPath);
+    output.length = 0;
+    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => output.push(args.join(' ')));
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => output.push(args.join(' ')));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function host(results: ProbeResult[]): ReleaseDeployHost {
+    let probe = 0;
+    return {
+      async stage() {},
+      async smokeBoot() { return { ok: true }; },
+      async restart() {},
+      async probeReady() { return { ok: true }; },
+      async waitReady() { return results[probe++] ?? { ok: true }; },
+      freeBytes: () => Number.POSITIVE_INFINITY,
+      now: () => '2026-08-22T00:00:04.000Z',
+      spawnDetached() {},
+      systemdRunAvailable: () => false,
+      cgroup: () => '0::/user.slice/cezar-runs.slice',
+      killMode: () => 'process',
+    };
+  }
+
+  const runRollbackCli = (results: ProbeResult[]) => releaseDeployCommand({
+    strategy: 'blue-green',
+    rollback: '',
+    source,
+    linkPath,
+    releasesDir,
+    sha: 'abcdef0',
+  }, host(results));
+
+  it('reports a proven rollback without the generic deploy-complete claim', async () => {
+    expect(await runRollbackCli([{ ok: true }])).toBe(0);
+    expect(output.join('\n')).toContain('Rolled back to r1: /api/v1/ready passed.');
+    expect(output.join('\n')).not.toContain('Deploy complete.');
+  });
+
+  it('reports a dead rollback target distinctly and never claims the previous release is serving', async () => {
+    const ledger = loadLedger(releasesDir);
+    saveLedger(releasesDir, { ...ledger, releases: ledger.releases.map((release) => release.id === 'r2' ? { ...release, healthy: false } : release) });
+
+    expect(await runRollbackCli([{ ok: false, detail: 'probe boom' }])).toBe(1);
+    expect(output.join('\n')).toContain('Rollback FAILED: r1 did not become ready: probe boom');
+    expect(output.join('\n')).not.toContain('the previous release is serving');
+  });
+
+  it('reports a failed target and the prior release restored and proven ready', async () => {
+    expect(await runRollbackCli([{ ok: false, detail: 'r1 dead' }, { ok: true }])).toBe(1);
+    expect(output.join('\n')).toContain('Rollback FAILED: r1 did not become ready: r1 dead');
+    expect(output.join('\n')).toContain('Restored r2, which probed ready');
   });
 });

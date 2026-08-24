@@ -18,6 +18,7 @@ import { jsonZodValidator, queryZodValidator } from './validators.ts';
 import { resolveCapabilities } from './capabilities.ts';
 import { NoteStore } from '../notes/store.ts';
 import type { NotePipeline } from '../notes/pipeline.ts';
+import { authorOf } from './request-author.ts';
 import type { StoredNote } from '../notes/types.ts';
 
 /**
@@ -239,7 +240,11 @@ export function createNotesRoutes(deps: NotesRouteDeps = {}) {
     .post('/workspace/notes/:noteId/approve', jsonZodValidator(approveNoteInputSchema), async (c) => {
       if (!enabled()) return c.json({ error: NOTES_OFF }, 409);
       if (!deps.pipeline) return c.json({ error: NO_PIPELINE }, 409);
-      const result = await deps.pipeline.approve(c.req.param('noteId'), c.req.valid('json'));
+      const result = await deps.pipeline.approve(
+        c.req.param('noteId'),
+        c.req.valid('json'),
+        authorOf(c, 'note-approval'),
+      );
       if (!result.ok) return c.json({ error: result.error }, result.status);
       const body: ApproveNoteResponse = result.body;
       return c.json(body);

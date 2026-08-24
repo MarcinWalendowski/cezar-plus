@@ -34,6 +34,7 @@ import {
   type SessionResolver,
   type UpdateProjectResponse,
 } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Multi-project workspace API (spec 2026-07-20-multi-project-workspace, step
@@ -1307,7 +1308,7 @@ describe('workspace projects API', () => {
       await contexts.context(other.id);
       const ctx = contexts.peek(other.id);
       expect(ctx).toBeDefined();
-      const run = ctx!.store.createRun({
+      const run = ctx!.store.createRun({ author: localCliAuthor(),
         title: 'live',
         workflow: 'quick-task',
         task: 'x',
@@ -1610,7 +1611,11 @@ describe('workspace projects API', () => {
         workspaceViews: true,
         notify: false,
         accountUsage: false,
+        autoAccounts: false,
         skills: true,
+        // Unconditional key, `false` because `CEZ_CLUSTER` is off — see the note on the same
+        // assertion in `health-forge.test.ts`, which is the other place this shape is pinned.
+        cluster: false,
       });
       // New fields: registered projects enumerated, boot project named.
       expect(body.projects.map((p) => p.id).sort()).toEqual([boot.id, other.id].sort());

@@ -245,6 +245,34 @@ export interface UiTurnStartedEvent {
 }
 
 /**
+ * Occurrence counts of raw Anthropic content-block types seen this turn, before mapping or
+ * discarding — claude only, absent for other backends and for any turn recorded before this
+ * field existed. Free to compute (no tokenizer): answers "did extended thinking happen, was it
+ * visible or withheld, did opaque billing happen at all" without persisting content that
+ * Anthropic itself never reveals (`redacted_thinking`'s `data` field is intentionally not
+ * captured here or anywhere else). MAIN-AGENT FRAMES ONLY — see
+ * {@link UiTurnCompletedEvent.childBlockCounts} for a sub-agent's own tally.
+ * Spec `.ai/specs/2026-08-21-output-token-attribution.md`, Phase 1.
+ */
+export interface ClaudeBlockCounts {
+  text: number;
+  /** NON-BLANK `thinking` blocks only — split from `thinkingWithheld`. A non-blank block means
+   *  the mapper minted a `reasoning` item for it (`claude-ui-mapper.ts`'s `mapAssistant`), and
+   *  its text is directly measurable. Model-specific: blank (withheld) on claude-opus-5/
+   *  opus-4-8/sonnet-5; non-blank (visible) on claude-haiku-4-5. */
+  thinking: number;
+  /** BLANK `thinking` blocks (`thinking: ""` + a populated `signature`) — Anthropic's documented
+   *  shape for real, billed, permanently-withheld reasoning. Must not be conflated with "no
+   *  thinking happened": a run that emits only withheld thinking (the common case on
+   *  opus/sonnet) must read differently from a run that requests no thinking at all. */
+  thinkingWithheld: number;
+  toolUse: number;
+  redactedThinking: number;
+  serverToolUse: number;
+  other: number;
+}
+
+/**
  * A turn finished.
  * claude: `result` (usage + `total_cost_usd`); codex: `turn/completed` /
  * `turn/failed`; opencode: `session.idle`.
@@ -266,6 +294,16 @@ export interface UiTurnCompletedEvent {
    * falls back to `usage`, whose per-call meaning holds for those backends.
    */
   contextTokens?: number;
+  /** NEW. Main-agent frames only — see {@link childBlockCounts}. */
+  blockCounts?: ClaudeBlockCounts;
+  /**
+   * NEW. Tally of the SAME shape, but over frames carrying `parent_tool_use_id` — a dispatched
+   * sub-agent's own blocks, on the SAME `turn.completed` event as a `usage.output` that never
+   * bills them. Reported separately rather than merged into `blockCounts` (the "billed a child's
+   * calls to the parent" bug class `runs/stats.ts` documents twice) or silently dropped.
+   * `undefined` for a turn that dispatched nothing — not a fake zero-filled object.
+   */
+  childBlockCounts?: ClaudeBlockCounts;
 }
 
 /** An item entered the stream (tools usually with status pending/running). */

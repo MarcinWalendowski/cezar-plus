@@ -27,8 +27,8 @@ import { Link, useNavigate } from '@/lib/project-router'
 
 import { archiveFinished, markAllRunsSeen, patchRun } from '@/api/client'
 import { useRunUsage } from '@/api/global-events'
-import { queryKeys, useHealth, useReferenceProjectId, useRuns } from '@/api/queries'
-import type { RunRecord } from '@loki-labs/better-cezar-api-client'
+import { queryKeys, useHealth, useProjectRepoBase, useReferenceProjectId, useRuns } from '@/api/queries'
+import type { RunRecord, Runner } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { DiffStatLabel } from '@/components/diff-stat'
 import { HostUsageStat } from '@/components/host-usage-stat'
@@ -54,6 +54,7 @@ import {
   type TaskColumnIcon,
   type TaskColumnId,
 } from '@/lib/task-columns'
+import { queueHold, usageLimitHolds } from '@/lib/account-hold'
 import { listCounts, queuePositions, runTitle, sortRuns, type ListView } from '@/lib/task-groups'
 import {
   compareGroups,
@@ -101,6 +102,8 @@ export function TasksOverview({
   onToggleColumn = () => undefined,
   columnsPending = false,
   hostUsage = null,
+  repoBase,
+  defaultRunner,
 }: {
   /** Undefined while `/api/runs` has not answered: the header renders, the body stays empty —
    *  an empty state before we know there are no runs would be a lie. */
@@ -135,6 +138,15 @@ export function TasksOverview({
    *  presentational discipline as `showWorkspaceSwitch`: `TasksOverviewRoute` has query access
    *  and passes `<HostUsageStat />`; a direct render leaves it absent. */
   hostUsage?: React.ReactNode
+  /** The on-screen project's repo (`useProjectRepoBase()`, read once by `TasksOverviewRoute`) —
+   *  the only authority a numeric-only PR/Issue chip may synthesize a link against (#526). A
+   *  prop, not a hook read here, for the same presentational-component reason as
+   *  `showWorkspaceSwitch`. */
+  repoBase?: string
+  /** The workspace's configured default runner, for naming the account a queued task will take
+   *  when its own record does not (`queueHold`). A prop, not a hook read here — the same
+   *  presentational discipline as `showWorkspaceSwitch`. */
+  defaultRunner?: Runner
 }) {
   const [query, setQuery] = React.useState('')
   const all = runs ?? []
@@ -143,6 +155,9 @@ export function TasksOverview({
   // Positions come from the full list, never the filtered one: a search must not renumber the
   // queue the engine is actually going to drain.
   const positions = queuePositions(all)
+  // Same reasoning as `positions`: derived from the FULL list, because the account a limit closed
+  // may belong to a run the current filter hides — and the hold applies regardless.
+  const holds = usageLimitHolds(all)
   const strips = compareGroups(filterRuns(all, query), view)
   const finished = finishedRunCount(all)
   const columns = taskColumnsForCapabilities({ tokens: showTokens, cost: showCost })
@@ -289,10 +304,12 @@ export function TasksOverview({
                         key={run.id}
                         run={run}
                         queuePosition={run.status === 'queued' ? (positions.get(run.id) ?? null) : null}
+                        hold={queueHold(run, holds, defaultRunner)}
                         onRename={onRename}
                         now={now}
                         columns={columns}
                         expandedColumns={expandedColumns}
+                        repoBase={repoBase}
                       />
                     ))}
                   </tbody>
@@ -307,9 +324,11 @@ export function TasksOverview({
                   key={run.id}
                   run={run}
                   queuePosition={run.status === 'queued' ? (positions.get(run.id) ?? null) : null}
+                  hold={queueHold(run, holds, defaultRunner)}
                   now={now}
                   showTokens={showTokens}
                   showCost={showCost}
+                  repoBase={repoBase}
                 />
               ))}
             </div>
@@ -559,24 +578,30 @@ const TD_BASE = 'h-11 border-b border-border px-2.5 whitespace-nowrap first:pl-4
 function TableRow({
   run,
   queuePosition,
+  hold,
   onRename,
   now,
   columns,
   expandedColumns,
+  repoBase,
 }: {
   run: RunRecord
   queuePosition: number | null
+  /** Why this queued run is not starting, when the answer is a held agent account. */
+  hold: ReturnType<typeof queueHold>
   onRename: (id: string, title: string) => void
   now: number
   columns: readonly TaskColumnDefinition[]
   expandedColumns: NormalizedExpandedColumns
+  /** The row's own project's repo — see `TasksOverview`'s doc comment on the prop. */
+  repoBase?: string
 }) {
   const navigate = useNavigate()
   const attention = deriveAttention(run)
   const scheduled = scheduledResume(run)
   const to = `/tasks/${run.id}`
   const cost = formatCost(run.costUsd)
-  const reference = taskReference(run)
+  const reference = taskReference(run, repoBase)
 
   return (
     <tr
@@ -598,8 +623,11 @@ function TableRow({
               data-column-id="cpu-memory"
               colSpan={2}
               className={cn(TD_BASE, 'text-right font-mono text-[11.5px] text-soft-foreground')}
+              title={hold?.title}
             >
-              #{queuePosition} in queue
+              {/* `#1 in queue` alone reads as "next to start". When the account is held it is not
+                  next, and saying so here is the difference between a queue and a wedge. */}
+              #{queuePosition} {hold ? 'held' : 'in queue'}
             </td>
           ) : (
             <UsageTds
@@ -618,6 +646,7 @@ function TableRow({
             run={run}
             attention={attention}
             scheduled={scheduled}
+            hold={hold}
             reference={reference}
             cost={cost}
             to={to}
@@ -636,6 +665,7 @@ function TaskTableCell({
   run,
   attention,
   scheduled,
+  hold,
   reference,
   cost,
   to,
@@ -647,6 +677,7 @@ function TaskTableCell({
   run: RunRecord
   attention: ReturnType<typeof deriveAttention>
   scheduled: ReturnType<typeof scheduledResume>
+  hold: ReturnType<typeof queueHold>
   reference: ReturnType<typeof taskReference>
   cost: string
   to: string
@@ -661,9 +692,10 @@ function TaskTableCell({
         <td data-column-id={column.id} className={TD_BASE}>
           {/* A scheduled run wears its appointment in the pill, the way a queued one wears its
               queue position — the row's whole answer to "what is this waiting for?". */}
-          <Pill dot={attention.tone} pulse={attention.pulse} title={scheduled?.title}>
+          <Pill dot={attention.tone} pulse={attention.pulse} title={scheduled?.title ?? hold?.title}>
             {attention.label}
             {scheduled ? <span className="tabular-nums">{scheduled.label}</span> : null}
+            {hold ? <span className="tabular-nums">held {hold.label}</span> : null}
           </Pill>
         </td>
       )
@@ -879,21 +911,27 @@ function UsageTd({ column, cell }: { column: 'cpu' | 'memory'; cell: UsageCell }
 function TaskCard({
   run,
   queuePosition,
+  hold,
   now,
   showTokens,
   showCost,
+  repoBase,
 }: {
   run: RunRecord
   queuePosition: number | null
+  /** Why this queued run is not starting — see `TableRow`. */
+  hold: ReturnType<typeof queueHold>
   now: number
   showTokens: boolean
   showCost: boolean
+  /** The card's own project's repo — see `TasksOverview`'s doc comment on the prop. */
+  repoBase?: string
 }) {
   const navigate = useNavigate()
   const attention = deriveAttention(run)
   const scheduled = scheduledResume(run)
   const to = `/tasks/${run.id}`
-  const reference = taskReference(run)
+  const reference = taskReference(run, repoBase)
   // Read/unread (#unread-done-items) — the same promote-unread / dim-read treatment as the row.
   const unread = isUnread(run)
   const readDone = isReadDoneItem(run)
@@ -912,9 +950,10 @@ function TaskCard({
       className="cursor-pointer rounded-lg border border-border bg-card px-3.5 py-3 shadow-xs"
     >
       <div className="flex items-start gap-2.5">
-        <Pill dot={attention.tone} pulse={attention.pulse} className="mt-px shrink-0" title={scheduled?.title}>
+        <Pill dot={attention.tone} pulse={attention.pulse} className="mt-px shrink-0" title={scheduled?.title ?? hold?.title}>
           {attention.label}
           {scheduled ? <span className="tabular-nums">{scheduled.label}</span> : null}
+          {hold ? <span className="tabular-nums">held {hold.label}</span> : null}
         </Pill>
         <Link
           to={to}
@@ -944,7 +983,9 @@ function TaskCard({
         {queuePosition !== null ? (
           <>
             <Sep />
-            <span data-slot="queue-note">#{queuePosition} in queue</span>
+            <span data-slot="queue-note" title={hold?.title}>
+              #{queuePosition} {hold ? 'held' : 'in queue'}
+            </span>
           </>
         ) : (
           <>
@@ -1057,6 +1098,10 @@ export function TasksOverviewRoute() {
   // provider wraps it instead, so the chips deep in the table and the cards read their status
   // from context and nothing in between has to relay it.
   const projectId = useReferenceProjectId()
+  // Called ONCE here, in the container's body — never inside the `flatMap` callback below, which
+  // is not a component and may not call hooks (multi-project spec Phase 5). The row/card
+  // components below receive the result as a prop instead of resolving it themselves.
+  const repoBase = useProjectRepoBase()
   const referenceRequests = React.useMemo(
     () =>
       // `taskReference`, singular: this table paints exactly one chip per row (the strongest
@@ -1064,10 +1109,10 @@ export function TasksOverviewRoute() {
       projectId === undefined
         ? []
         : (runs.data ?? []).flatMap((run) => {
-            const reference = taskReference(run)
+            const reference = taskReference(run, repoBase)
             return reference ? [{ projectId, kind: reference.kind, number: reference.number }] : []
           }),
-    [runs.data, projectId],
+    [runs.data, projectId, repoBase],
   )
 
   return (
@@ -1087,6 +1132,8 @@ export function TasksOverviewRoute() {
         onToggleColumn={taskTableColumns.toggleColumn}
         columnsPending={taskTableColumns.isPending}
         hostUsage={<HostUsageStat />}
+        repoBase={repoBase}
+        defaultRunner={health.data?.defaultRunner}
       />
     </ReferenceStatusProvider>
   )

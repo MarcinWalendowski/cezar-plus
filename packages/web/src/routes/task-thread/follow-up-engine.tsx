@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 
 import { continueRun } from '@/api/client'
-import { queryKeys, useConfig, useRunnerModels } from '@/api/queries'
+import { queryKeys, useConfig, useEngineAdvisory, useRunnerModels } from '@/api/queries'
 import type { ApiRun, ContinueResponse, ImageInput, Runner } from '@loki-labs/better-cezar-api-client'
 import { PickerPill, RunnerPill } from '@/components/picker-pill'
 import {
@@ -49,6 +49,7 @@ export function useContinueAction(run: ApiRun): ContinueAction {
   const queryClient = useQueryClient()
   const available = runActionFlags(run).continueRun
   const config = useConfig()
+  const advisory = useEngineAdvisory()
   // null = "not touched": the pills fall back to the run's current backend/model, so an
   // untouched Continue behaves exactly as before this feature existed.
   const [pickedRunner, setPickedRunner] = useState<Runner | null>(null)
@@ -104,6 +105,7 @@ export function useContinueAction(run: ApiRun): ContinueAction {
           <RunnerPill
             runners={runners}
             value={runner}
+            advisory={advisory}
             onPick={(next) => {
               setPickedRunner(next)
               setPickedModel(null) // a runner switch invalidates the previous model pick

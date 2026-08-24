@@ -9,6 +9,7 @@ import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from './run.ts';
 import { BROKER_PROTOCOL, spoolDirFor, writeSpoolExit, writeSpoolMeta } from '../core/run-spool.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -56,6 +57,7 @@ describe('recover() re-attaches a run whose broker is still alive (P4)', () => {
     // maxParallel 0 so nothing actually spawns: this tests the recovery DECISION.
     manager = new RunManager(store, repoRoot, {
       semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 0 } }),
+      reapBroker: async () => true,
     });
   });
 
@@ -67,7 +69,7 @@ describe('recover() re-attaches a run whose broker is still alive (P4)', () => {
 
   /** A run interrupted mid-`implement`, exactly as a restart leaves it. */
   function runningRun(): string {
-    const { id } = store.createRun({
+    const { id } = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'two-step',
       task: 'do the thing',
@@ -87,7 +89,7 @@ describe('recover() re-attaches a run whose broker is still alive (P4)', () => {
 
   /** A spool whose broker is this very process, so `isPidAlive` is true by construction. */
   function liveSpool(runId: string, opts: { stepId?: string; pid?: number; protocol?: number } = {}): string {
-    const dir = spoolDirFor(join(dataDir, 'runs'), runId);
+    const dir = spoolDirFor(join(dataDir, 'runs'), runId, 'test-instance');
     mkdirSync(dir, { recursive: true });
     writeSpoolMeta(dir, {
       schema: 1,
@@ -98,6 +100,7 @@ describe('recover() re-attaches a run whose broker is still alive (P4)', () => {
       pid: opts.pid ?? process.pid,
       argv: ['claude'],
       startedAt: new Date().toISOString(),
+      instanceId: 'test-instance',
     });
     writeFileSync(join(dir, 'out.ndjson'), '');
     store.updateRun(runId, { spoolDir: relative(dataDir, dir), consumedOffset: 0 });
@@ -139,7 +142,7 @@ describe('recover() re-attaches a run whose broker is still alive (P4)', () => {
   it('falls through when the broker recorded an EXIT — the agent finished while we were gone', async () => {
     const id = runningRun();
     const dir = liveSpool(id);
-    writeSpoolExit(dir, { code: 0, signal: null, exitedAt: new Date().toISOString() });
+    writeSpoolExit(dir, { code: 0, signal: null, exitedAt: new Date().toISOString(), instanceId: 'test-instance' });
 
     await manager.recover();
 
@@ -179,8 +182,21 @@ describe('recover() re-attaches a run whose broker is still alive (P4)', () => {
   it('sweeps spools whose runs are over, and never a live one', async () => {
     const liveId = runningRun();
     const liveDir = liveSpool(liveId);
-    const doneDir = spoolDirFor(join(dataDir, 'runs'), 'a-finished-run');
+    const doneDir = spoolDirFor(join(dataDir, 'runs'), 'a-finished-run', 'done-instance');
     mkdirSync(doneDir, { recursive: true });
+    // A finished run's spool always has its meta.json — only a broker mid-launch (still within
+    // SPOOL_ORPHAN_GRACE_MS) lacks one, which is the race the sweep's grace period protects.
+    writeSpoolMeta(doneDir, {
+      schema: 1,
+      protocol: BROKER_PROTOCOL,
+      runId: 'a-finished-run',
+      stepId: 'implement',
+      backend: 'claude',
+      pid: 999_999_999,
+      argv: ['claude'],
+      startedAt: new Date().toISOString(),
+      instanceId: 'done-instance',
+    });
     writeFileSync(join(doneDir, 'out.ndjson'), 'x\n');
 
     await manager.recover();

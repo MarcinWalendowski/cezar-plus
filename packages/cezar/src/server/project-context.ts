@@ -1,14 +1,16 @@
 import { join } from 'node:path';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { AutomationStore } from '../automations/store.ts';
 import { reconcileAutomationReceipts } from '../automations/task-template.ts';
 import { DEFAULT_WORKTREE_RETENTION, resolveWorktreeRetention } from '../config.ts';
-import { pruneOrphans } from '../git-worktree.ts';
+import { canonicalPath, pruneOrphans } from '../git-worktree.ts';
 import { KnowledgeStore } from '../knowledge/store.ts';
 import { NotificationOutbox, notificationsDataDir } from '../notifications/outbox.ts';
 import { NotificationRegistry } from '../notifications/registry.ts';
 import { NotificationSender } from '../notifications/sender.ts';
 import { reclaimWorktrees } from '../runs/retention.ts';
 import { RunStore } from '../runs/store.ts';
+import { findForeignWorkspaceOwner, loadForeignWorkspaceRunSources } from '../runs/worktree-ownership.ts';
 import { SourceStore } from '../sources/store.ts';
 import { normalizeRoot } from '../workspace/projects.ts';
 import { WorkspaceRunIndex, type WorkspaceRunProjectSource } from '../workspace/run-index.ts';
@@ -140,6 +142,7 @@ export interface ProjectContext {
   sourceStore?: SourceStore;
   /** Bookmarklet auto-start secret (spec 011), ensured at context build. */
   launchKey: string;
+  sweepTimer?: NodeJS.Timeout;
 }
 
 /** Minimal registry shape the context map needs — matches
@@ -437,15 +440,48 @@ export class ProjectContexts {
       bindHost: this.deps.bindHost,
     });
 
+    let sweepTimer: NodeJS.Timeout | undefined;
     try {
       const launchKey = ensureLaunchKey(dataDir);
       // Startup reconcile (spec 006) + count-based retention (#483) — the same
       // best-effort sweeps serveCommand runs for the boot project, gated on the
       // root actually being a git repo.
-      if (await getRepoInfo(project.root)) {
-        await pruneOrphans(project.root, new Set(store.listRuns().map((r) => r.id))).catch(
-          () => [] as string[],
-        );
+      const repo = await getRepoInfo(project.root);
+      if (repo) {
+        // Cross-project ownership check (spec 2026-08-22-cross-project-worktree-orphan-prune-
+        // safety, Layer 1): candidates are every OTHER registered project PLUS the workspace boot
+        // root (never a `listProjects()` row itself — `suppressBootRegistration` — so it must be
+        // added explicitly; this is the call site that actually failed in the 232ad6d4 incident,
+        // since `cezar` IS a registered project but its owning run's record lived only at the boot
+        // root). `bootRoot` was already resolved above for the boot-root-duplication guard.
+        const candidates = [
+          ...projects,
+          ...(bootRoot !== undefined ? [{ id: '__boot__', name: 'workspace boot', root: bootRoot }] : []),
+        ].filter((p) => canonicalPath(p.root) !== canonicalPath(project.root));
+        const delay = Number(this.env.CEZ_SWEEP_DELAY_MS ?? 5 * 60_000);
+        sweepTimer = setTimeout(() => {
+          // Snapshot ownership at FIRE time, not at build() time: build() runs before
+          // manager.recover() has re-claimed this project's own runs, and the sweep fires up to
+          // `delay` later — a snapshot taken here would otherwise be up to 5 minutes staler than
+          // the reality it is judging, on top of the deferral itself.
+          const foreignSources = loadForeignWorkspaceRunSources(project.root, candidates);
+          const unreadableSource = foreignSources.find((s) => s.unreadable);
+          void pruneOrphans(project.root, new Set(store.listRuns().map((r) => r.id)), {
+            findForeignOwner: (path) => findForeignWorkspaceOwner(project.root, path, foreignSources),
+            ownershipCheckUnavailable: unreadableSource
+              ? { reason: `project "${unreadableSource.projectName}"'s runs.json could not be read` }
+              : undefined,
+            onOutcome: (outcome) => {
+              mkdirSync(dataDir, { recursive: true });
+              appendFileSync(join(dataDir, 'worktree-reaps.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), runId: outcome.id, repoRoot: project.root, ...outcome })}\n`);
+            },
+          }).then((orphans) => {
+            if (orphans.removed.length > 0) console.log(`[cez] project "${project.id}": cleaned ${orphans.removed.length} orphaned worktree(s): ${orphans.removed.map((id) => id.slice(0, 8)).join(', ')}`);
+            if (orphans.kept.length > 0) console.log(`[cez] project "${project.id}": kept ${orphans.kept.length} unsafe-to-reclaim worktree(s): ${orphans.kept.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
+            if (orphans.declined.length > 0) console.log(`[cez] project "${project.id}": declined to reclaim ${orphans.declined.length} worktree(s): ${orphans.declined.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
+          }).catch(() => undefined);
+        }, Math.max(0, delay));
+        sweepTimer.unref?.();
         const keep = await resolveWorktreeRetention(project.root).catch(
           () => DEFAULT_WORKTREE_RETENTION,
         );
@@ -462,6 +498,7 @@ export class ProjectContexts {
         knowledgeStore,
         sourceStore,
         launchKey,
+        ...(typeof sweepTimer !== 'undefined' ? { sweepTimer } : {}),
       };
     } catch (err) {
       // A failed build must not leak the half-built context's subscriptions.
@@ -475,7 +512,8 @@ export class ProjectContexts {
  *  never on for this project; `dispose()`'s own optional chaining is the whole gate. `sourceStore`
  *  needs no teardown call: it holds no live resource beyond its own explicitly-acquired-and-released
  *  `SourceLease`, unlike `KnowledgeStore`'s fs.watch handles and debounce timers. */
-function teardown(ctx: { store: RunStore; manager: RunManager; knowledgeStore?: KnowledgeStore }): void {
+function teardown(ctx: { store: RunStore; manager: RunManager; knowledgeStore?: KnowledgeStore; sweepTimer?: NodeJS.Timeout }): void {
+  if (ctx.sweepTimer) clearTimeout(ctx.sweepTimer);
   ctx.manager.dispose();
   ctx.store.flush();
   ctx.store.removeAllListeners();

@@ -443,6 +443,83 @@ describe('taskIssueUrl', () => {
   })
 })
 
+// Foreign-number guard (design ported, read-only, from `open-mercato/cezar` #840/#864 — see
+// `.ai/specs/2026-08-22-github-issue-pr-links-multi-project.md`). This repo's own persisted
+// `runs.json` genuinely holds a run whose `issueNumber: 475` names `open-mercato/cezar`'s #475,
+// not this repo's own (nonexistent) #475 — the fixture below mirrors that live case.
+describe('the foreign-number guard (namesNumberElsewhere, via taskIssueUrl/taskReferences)', () => {
+  const OWN_REPO = 'https://github.com/MarcinWalendowski/cezar'
+  const FOREIGN_ISSUE = 'https://github.com/open-mercato/cezar/issues/475'
+  const FOREIGN_PR = 'https://github.com/open-mercato/cezar/pull/475'
+
+  it('drops a candidate-proven foreign issue number', () => {
+    const r = run({ issueNumber: 475, referencedIssueCandidates: [FOREIGN_ISSUE] })
+    expect(taskIssueUrl(r, OWN_REPO)).toBeUndefined()
+    expect(taskReferences(r, OWN_REPO)).toEqual([])
+  })
+
+  it('keeps a number whose candidates prove OTHER numbers foreign, not this one', () => {
+    const r = run({ issueNumber: 475, referencedIssueCandidates: ['https://github.com/open-mercato/cezar/issues/999'] })
+    expect(taskIssueUrl(r, OWN_REPO)).toBe(`${OWN_REPO}/issues/475`)
+    expect(taskReferences(r, OWN_REPO)).toEqual([{ kind: 'Issue', number: 475, url: `${OWN_REPO}/issues/475` }])
+  })
+
+  it('stays inert with no known repo — the guard has nothing to compare against', () => {
+    const r = run({ issueNumber: 475, referencedIssueCandidates: [FOREIGN_ISSUE] })
+    expect(taskIssueUrl(r)).toBeUndefined()
+    // No repo to link against OR to prove foreign — the number still renders, just as text.
+    expect(taskReferences(r)).toEqual([{ kind: 'Issue', number: 475 }])
+  })
+
+  it('matches case-insensitively — a same-repo candidate spelled in another case is not foreign', () => {
+    const r = run({
+      issueNumber: 475,
+      referencedIssueCandidates: [`${OWN_REPO.toUpperCase()}/issues/475`],
+    })
+    expect(taskIssueUrl(r, OWN_REPO)).toBe(`${OWN_REPO}/issues/475`)
+  })
+
+  it('rejects a same-string-prefix DIFFERENT repo as proof of "names this repo"', () => {
+    // "https://github.com/owner/repo" is a literal string-prefix of ".../repo-fork/issues/475" —
+    // a bare `startsWith(repoBase)` would misread this as the SAME repo and let the number
+    // through. It is a different repo and must still count as foreign evidence.
+    const repoBase = 'https://github.com/owner/repo'
+    const r = run({
+      issueNumber: 475,
+      referencedIssueCandidates: ['https://github.com/owner/repo-fork/issues/475'],
+    })
+    expect(taskIssueUrl(r, repoBase)).toBeUndefined()
+  })
+
+  it('suppresses a foreign-numbered CEZ:ISSUE marker too, not just a bare issueNumber', () => {
+    const r = run({ markerRefs: { issue: 475 }, referencedIssueCandidates: [FOREIGN_ISSUE] })
+    expect(taskIssueUrl(r, OWN_REPO)).toBeUndefined()
+    expect(taskReferences(r, OWN_REPO)).toEqual([])
+  })
+
+  it('PR twin: drops a candidate-proven foreign PR number', () => {
+    const r = run({ prNumber: 475, referencedPrCandidates: [FOREIGN_PR] })
+    expect(taskReferences(r, OWN_REPO)).toEqual([])
+  })
+
+  it('PR twin: keeps a PR number whose candidates prove OTHER numbers foreign', () => {
+    const r = run({ prNumber: 475, referencedPrCandidates: ['https://github.com/open-mercato/cezar/pull/999'] })
+    expect(taskReferences(r, OWN_REPO)).toEqual([{ kind: 'PR', number: 475, url: `${OWN_REPO}/pull/475` }])
+  })
+
+  it('PR twin: stays inert with no known repo', () => {
+    const r = run({ prNumber: 475, referencedPrCandidates: [FOREIGN_PR] })
+    expect(taskReferences(r)).toEqual([{ kind: 'PR', number: 475 }])
+  })
+
+  it('PR twin: keeps a real discovered PR URL even when candidates prove the number foreign', () => {
+    // `referencedPullRequestUrl` is a real, scraped URL — not a synthesized one — so the guard
+    // (which only refuses SYNTHESIS from a bare number) does not touch it.
+    const r = run({ referencedPullRequestUrl: FOREIGN_PR, referencedPrCandidates: [FOREIGN_PR] })
+    expect(taskReferences(r, OWN_REPO)).toEqual([{ kind: 'PR', number: 475, url: FOREIGN_PR }])
+  })
+})
+
 describe('githubRepoBase', () => {
   it.each([
     ['https://github.com/open-mercato/cezar.git', 'https://github.com/open-mercato/cezar'],

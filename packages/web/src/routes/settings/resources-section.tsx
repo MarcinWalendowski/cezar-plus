@@ -98,6 +98,23 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
       ),
     },
   )
+  // Shipped ON, and read as ON when absent (spec 2026-08-23-never-block-a-task, on the owner's
+  // decision: "task should never be blocked ... it should always automatically proceed on next
+  // available provider & model"). It was OFF when introduced, because overriding an account the
+  // user named is a product decision — that decision has now been made, so the absent key reads
+  // as ON to match the engine, whose own default is `?? true`. The two must agree: a UI reading
+  // absent-as-OFF over an engine reading absent-as-ON shows a switch that lies.
+  const accountFallback = config.resources.fallbackAcrossAccountsWhenLimited ?? true
+  const saveAccountFallback = (on: boolean) => save.mutate(
+    { resources: { fallbackAcrossAccountsWhenLimited: on } },
+    {
+      onSuccess: () => toast(
+        on
+          ? 'Tasks will start on any available account when the chosen one is out of quota'
+          : 'Tasks will wait for the account they were given',
+      ),
+    },
+  )
   const memoryNum = memory.trim() === '' ? 0 : Number(memory)
   const memoryInvalid =
     memory.trim() !== '' && (!Number.isInteger(memoryNum) || memoryNum < MEMORY_MIN_MB)
@@ -243,6 +260,27 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
         </select>
         <p className="text-[11px] text-soft-foreground">
           Applies to Claude, Codex and OpenCode — whenever the provider says when the limit lifts.
+        </p>
+      </SettingsField>
+
+      <SettingsField
+        title="Out-of-quota fallback"
+        hint="When the account a task was given is out of quota, start it on any available account — another login, or another agent — instead of waiting. On is the default: a task is never blocked by a limit. Off makes an account you picked a requirement rather than a preference, and the task waits for that account's window. Tasks set to use an account pool move around a limit either way."
+      >
+        <select
+          aria-label="Out-of-quota fallback"
+          data-slot="resources-account-fallback"
+          value={accountFallback ? 'on' : 'off'}
+          disabled={save.isPending}
+          onChange={(event) => saveAccountFallback(event.target.value === 'on')}
+          className="block w-28 rounded-md border border-input bg-card px-3 py-1.5 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50"
+        >
+          <option value="on">On</option>
+          <option value="off">Off</option>
+        </select>
+        <p className="text-[11px] text-soft-foreground">
+          The task's thread always records which account it actually ran on, and the engine picker
+          says the choice is a preference while this is on.
         </p>
       </SettingsField>
 

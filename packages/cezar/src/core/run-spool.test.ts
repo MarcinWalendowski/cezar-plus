@@ -7,12 +7,14 @@ import {
   BROKER_PROTOCOL,
   type SpoolMeta,
   ensureSpoolDir,
+  exitBelongsTo,
   isPidAlive,
   isSpoolLive,
   readSpoolExit,
   readSpoolFrom,
   readSpoolMeta,
   spoolDirFor,
+  legacySpoolDirFor,
   spoolPaths,
   writeSpoolExit,
   writeSpoolMeta,
@@ -46,17 +48,42 @@ function meta(over: Partial<SpoolMeta> = {}): SpoolMeta {
     pid: process.pid,
     argv: ['claude', '--print'],
     startedAt: '2026-08-20T09:00:00.000Z',
+    instanceId: 'i1',
     ...over,
   } as SpoolMeta;
 }
 
 describe('spool layout', () => {
   it('names one spool per run under the runs dir', () => {
-    expect(spoolDirFor('/d/runs', 'abc')).toBe('/d/runs/abc.spool');
+    expect(spoolDirFor('/d/runs', 'abc', 'i1')).toBe('/d/runs/abc.spool/i1');
+    expect(legacySpoolDirFor('/d/runs', 'abc')).toBe('/d/runs/abc.spool');
     const p = spoolPaths('/d/runs/abc.spool');
     expect(p.out).toBe('/d/runs/abc.spool/out.ndjson');
     expect(p.ctl).toBe('/d/runs/abc.spool/ctl.sock');
     expect(p.exit).toBe('/d/runs/abc.spool/exit.json');
+  });
+
+  it('clears a stale exit when preparing a retry', () => {
+    const dir = scratch();
+    ensureSpoolDir(dir);
+    writeSpoolExit(dir, { code: 143, signal: null });
+    ensureSpoolDir(dir);
+    expect(readSpoolExit(dir)).toBeNull();
+  });
+});
+
+describe('exit ownership', () => {
+  it('uses instance identity before pid identity', () => {
+    expect(exitBelongsTo(meta({ pid: 10 }), { code: 0, signal: null, instanceId: 'i1', brokerPid: 11 })).toBe(true);
+    expect(exitBelongsTo(meta(), { code: 0, signal: null, instanceId: 'i2', brokerPid: process.pid })).toBe(false);
+  });
+
+  it('supports pid-owned and anonymous protocol-1 exits conservatively', () => {
+    const legacy = meta({ protocol: 1, instanceId: undefined, pid: 10 });
+    expect(exitBelongsTo(legacy, { code: 0, signal: null, brokerPid: 10 })).toBe(true);
+    expect(exitBelongsTo(legacy, { code: 0, signal: null }, () => true)).toBe(false);
+    expect(exitBelongsTo(legacy, { code: 0, signal: null }, () => false)).toBe(true);
+    expect(exitBelongsTo(null, { code: 0, signal: null }, () => false)).toBe(false);
   });
 });
 
@@ -196,7 +223,7 @@ describe('isSpoolLive — every false routes the caller to the legacy interrupte
     const dir = scratch();
     ensureSpoolDir(dir);
     writeSpoolMeta(dir, meta());
-    writeSpoolExit(dir, { code: 0, signal: null });
+    writeSpoolExit(dir, { code: 0, signal: null, instanceId: 'i1' });
     expect(isSpoolLive(dir)).toBe(false);
   });
 

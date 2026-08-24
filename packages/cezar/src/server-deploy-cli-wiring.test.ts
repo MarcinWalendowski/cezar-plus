@@ -72,3 +72,59 @@ describe('`server-deploy --dry-run` is wired into the CLI entry point', () => {
     expect(block).toContain('--dry-run');
   });
 });
+
+/**
+ * Is bare `cezar server-deploy --rollback` (no `=value`) REACHABLE? — `.ai/specs/
+ * 2026-08-23-bare-rollback-argv-trap.md`. node's `parseArgs` has no optional-value option type, so
+ * `rollback: { type: 'string' }` made the bare flag throw `argument missing` (end of argv) or
+ * `argument is ambiguous` (followed by another flag) before `case 'server-deploy'` was ever
+ * reached — the exact shape an operator types under pressure during a rollback. All cases run with
+ * `--dry-run` so none can flip a symlink or restart a unit.
+ */
+describe('bare `--rollback` (no value) is wired into the CLI entry point', () => {
+  it(
+    'accepts --rollback followed by another flag (the "ambiguous" shape)',
+    { timeout: 60_000 },
+    async () => {
+      const { stdout, stderr, code } = await cli(['server-deploy', '--rollback', '--dry-run']);
+      const output = `${stdout}${stderr}`;
+      expect(output).not.toMatch(/argument missing|ambiguous|unknown option/i);
+      expect(code).toBe(0);
+    },
+  );
+
+  it(
+    'accepts --rollback at the end of argv (the "argument missing" shape)',
+    { timeout: 60_000 },
+    async () => {
+      const { stdout, stderr, code } = await cli(['server-deploy', '--dry-run', '--rollback']);
+      const output = `${stdout}${stderr}`;
+      expect(output).not.toMatch(/argument missing|ambiguous|unknown option/i);
+      expect(code).toBe(0);
+    },
+  );
+
+  it(
+    'control: --rollback= (already-working explicit-empty form) keeps working',
+    { timeout: 60_000 },
+    async () => {
+      const { stdout, stderr, code } = await cli(['server-deploy', '--rollback=', '--dry-run']);
+      const output = `${stdout}${stderr}`;
+      expect(output).not.toMatch(/argument missing|ambiguous|unknown option/i);
+      expect(code).toBe(0);
+    },
+  );
+
+  it(
+    '--rollback r1 (space separated) still names r1, not the previous release',
+    { timeout: 60_000 },
+    async () => {
+      const { stdout, stderr, code } = await cli(['server-deploy', '--rollback', 'r1', '--dry-run']);
+      const output = `${stdout}${stderr}`;
+      expect(output).not.toMatch(/argument missing|ambiguous|unknown option/i);
+      expect(code).toBe(0);
+      expect(output).toContain('r1');
+      expect(output).not.toContain('the previous release');
+    },
+  );
+});

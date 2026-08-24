@@ -39,6 +39,7 @@ function profile(provider: 'claude' | 'codex', id: string): ResolvedAgentProfile
 const CLAUDE_A = profile('claude', 'default');
 const CLAUDE_B = profile('claude', 'work');
 const CODEX = profile('codex', 'default');
+const CODEX_B = profile('codex', 'secondary');
 
 const keyOf = (p: ResolvedAgentProfile) => accountUsageKey(p.provider, p.isDefault ? undefined : p.id);
 
@@ -108,6 +109,94 @@ describe('signal 1 — skip a limited account', () => {
       recordDispatch(x, keyOf(CLAUDE_B), new Date(NOW - 1_000));
     });
     expect(pick([CLAUDE_A, CLAUDE_B], s, { [keyOf(CLAUDE_B)]: 5 })?.accountId).toBe('work');
+  });
+});
+
+describe('signal 2 is confined to one provider (spec 2026-08-24, D2)', () => {
+  const window = (usedPercent: number, minutes = 10_080) => ({
+    usedPercent,
+    windowMinutes: minutes,
+    resetsAt: Math.floor(NOW / 1000) + 3600,
+  });
+  const quota = (...windows: ReturnType<typeof window>[]) => ({
+    takenAt: new Date(NOW).toISOString(),
+    windows,
+  });
+
+  it('still steers between two logins of the SAME provider', () => {
+    // The partition must not be a way of switching signal 2 off. An unmeasured codex account is in
+    // the pool — under the old whole-set rule that alone disabled banding for everyone — and the
+    // two Claude logins must still prefer the emptier one.
+    // Mutation: compute `byBand` over the whole pool again and this comes back as 'default'.
+    const s = store((x) => {
+      x.accounts[keyOf(CLAUDE_A)] = { quota: quota(window(74)) };
+      x.accounts[keyOf(CLAUDE_B)] = { quota: quota(window(4)) };
+    });
+    expect(pick([CLAUDE_A, CLAUDE_B, CODEX], s)?.accountId).toBe('work');
+  });
+
+  it('never lets a codex band out-rank a claude account', () => {
+    // THE test for D2, and the production case: codex reported 0% while it was five days into a
+    // weekly refusal, so it sorted band 0 against Claude's band 7 and won every comparison. This
+    // asserts the rule even when the codex reading is REAL — the point is not that codex lies, it
+    // is that two subscriptions' percentages are not the same quantity.
+    //
+    // Codex is given the more recent dispatch so signal 4 decides against it; under the old
+    // cross-provider band it wins anyway, which is what makes this mutation-sensitive.
+    const s = store((x) => {
+      x.accounts[keyOf(CLAUDE_A)] = { quota: quota(window(94)) };
+      x.accounts[keyOf(CODEX)] = { quota: quota(window(0, 300)) };
+      recordDispatch(x, keyOf(CODEX), new Date(NOW - 1_000));
+    });
+    expect(pick([CLAUDE_A, CODEX], s)).toEqual({ provider: 'claude', accountId: 'default' });
+  });
+
+  it('alternates two unmeasured codex logins — the case the second account was added for', () => {
+    // Neither codex account can report a band on a ChatGPT Plus plan (see `looksUnpopulated` in
+    // `core/agent-account-probe.ts`), so the pool has only signals 3 and 4 to work with. Strict
+    // alternation is what those two produce, and it is the whole balancing guarantee available
+    // between two codex logins.
+    const s = store();
+    const picked: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const choice = selectPoolAccount({ candidates: [CODEX, CODEX_B], store: s, now: NOW + i });
+      picked.push(choice!.accountId);
+      recordDispatch(s, accountUsageKey('codex', choice!.accountId), new Date(NOW + i));
+    }
+    expect(picked).toEqual(['default', 'secondary', 'default', 'secondary']);
+  });
+
+  it('alternates across providers once each provider has its winner', () => {
+    // Level 2 compares the per-provider winners on in-flight then the dispatch cursor, so a mixed
+    // `pool:*` spreads across providers instead of pinning to whichever one reports a number.
+    // Claude's own winner is still chosen by band: `work` at 4% beats `default` at 74%, and it is
+    // the id that must appear here — not `default`.
+    const s = store((x) => {
+      x.accounts[keyOf(CLAUDE_A)] = { quota: quota(window(74)) };
+      x.accounts[keyOf(CLAUDE_B)] = { quota: quota(window(4)) };
+    });
+    const picked: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const choice = selectPoolAccount({ candidates: [CLAUDE_A, CLAUDE_B, CODEX], store: s, now: NOW + i });
+      picked.push(`${choice!.provider}:${choice!.accountId}`);
+      recordDispatch(s, accountUsageKey(choice!.provider, choice!.accountId), new Date(NOW + i));
+    }
+    expect(picked).toEqual(['claude:work', 'codex:default', 'claude:work', 'codex:default']);
+  });
+
+  it('does not depend on the order the candidates arrive in', () => {
+    // The reason D2 is two levels rather than a "same provider?" clause inside `compare`: that
+    // clause is intransitive (A beats B, B ties C, C ties A), and an intransitive comparator makes
+    // `reduce` return whatever sorts first in the input. Same set, reversed — same answer.
+    const s = store((x) => {
+      x.accounts[keyOf(CLAUDE_A)] = { quota: quota(window(90)) };
+      x.accounts[keyOf(CLAUDE_B)] = { quota: quota(window(10)) };
+      recordDispatch(x, keyOf(CODEX), new Date(NOW - 1_000));
+    });
+    const forwards = pick([CLAUDE_A, CLAUDE_B, CODEX], s);
+    const backwards = pick([CODEX, CLAUDE_B, CLAUDE_A], s);
+    expect(forwards).toEqual(backwards);
+    expect(forwards).toEqual({ provider: 'claude', accountId: 'work' });
   });
 });
 

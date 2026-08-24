@@ -7,6 +7,7 @@ import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { createApp, type ServerDeps } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Deployment modes + forge seam (cockpit-ui redesign spec): `/api/v1/health`
@@ -30,6 +31,7 @@ interface HealthBody {
     tokenMetrics: boolean;
     tokenUsageMetrics: boolean;
     costMetrics: boolean;
+    cluster: boolean;
   };
 }
 
@@ -120,7 +122,18 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
+      // Added 2026-08-23 with `CEZ_CLUSTER`. It is `false` here because the flag is off, and it is
+      // PRESENT because the key is unconditional — `capabilities.cluster` ships in every health
+      // body, on or off, so the cockpit can hide the Cluster nav item without a second request.
+      //
+      // Worth a line, because this file is the SECOND place the capability shape is pinned:
+      // `capabilities.test.ts` is the first, it was updated when the key landed, and these seven
+      // `toEqual`s were not. Seven tests went red at the barrier for a change that was correct.
+      // That is the exact-shape assertion doing its job — a `toMatchObject` here would have
+      // stayed green and let a key appear in the bookmarklet contract with nothing noticing.
+      cluster: false,
     });
   });
 
@@ -176,7 +189,9 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
+      cluster: false,
     });
   });
 
@@ -211,7 +226,9 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
+      cluster: false,
     });
   });
 
@@ -231,7 +248,9 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
+      cluster: false,
     });
   });
 
@@ -263,7 +282,9 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
+      cluster: false,
     });
   });
 
@@ -289,7 +310,9 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
+      cluster: false,
     });
   });
 
@@ -309,7 +332,9 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
+      cluster: false,
     });
   });
 
@@ -339,7 +364,7 @@ describe('POST /api/v1/runs/:id/open-in-cli — hosted-mode defense in depth', (
   beforeEach(() => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-handoff-'));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
-    runId = store.createRun({ title: 't', workflow: 'quick-task', task: 'do it', steps: [] }).id;
+    runId = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 'do it', steps: [] }).id;
     delete process.env.CEZ_REMOTE;
   });
 

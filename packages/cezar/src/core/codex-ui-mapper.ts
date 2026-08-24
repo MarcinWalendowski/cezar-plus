@@ -159,10 +159,12 @@ export function mapCodexNotification(frame: unknown, state: CodexUiMapperState):
       return codexSessionStarted(threadIdOf(params) ?? '', state);
     case 'turn/started':
       return mapTurnStarted(params, state);
+    // `failed` comes from the TURN, not from which of these two methods carried it — see
+    // {@link codexTurnFailure}. `turn/completed` with `turn.status: "failed"` is codex's real
+    // shape for a provider error, and hardcoding `false` here is what made it read as success.
     case 'turn/completed':
-      return mapTurnEnd(params, state, /* failed */ false);
     case 'turn/failed':
-      return mapTurnEnd(params, state, /* failed */ true);
+      return mapTurnEnd(params, state, codexTurnFailure(frame.method, params) !== undefined);
     case 'turn/plan/updated':
       return mapTurnPlanUpdated(params, state);
     case 'item/started':
@@ -257,6 +259,40 @@ function mapTurnEnd(
   };
 }
 
+/**
+ * Whether a turn-lifecycle frame describes a FAILED turn, and with what message.
+ *
+ * **The method is not the signal.** Codex reports a turn that died on a provider error as
+ * `turn/completed` carrying `turn.status: "failed"` and a populated `turn.error` — measured on
+ * `prod-host` 2026-08-22 against the real app-server (`.ai/specs/2026-08-22-failed-turn-
+ * reads-as-done.md`). Keying failure off `method === 'turn/failed'`, as both channels did, turned
+ * a hard HTTP 400 into `stopReason: end_turn`, and every one of eight workflow steps read `done`
+ * having done nothing at all. Five production runs shipped that way before anyone noticed.
+ *
+ * So the turn's own `status`/`error` are the authority and the method is only one more input.
+ * Deliberately general: it names no model, no status code and no provider, so it catches the next
+ * codex-side failure too, which is the point of the fix rather than a side effect of it.
+ *
+ * `turn.error` present alongside `status: "completed"` is not a shape codex has been observed to
+ * emit; treating it as failure anyway is a chosen over-trigger. A false positive costs a visible
+ * failure, a false negative costs a silently green run that did nothing.
+ *
+ * Exported so `codex-app-server-runner.ts` (the v1 event stream) and `mapCodexNotification` (the
+ * v2 UI stream) decide this in ONE place. They disagreed before, and a step's fate rides on it.
+ */
+export function codexTurnFailure(
+  method: string,
+  params: Record<string, unknown>,
+): { message: string } | undefined {
+  const turn = isRecord(params.turn) ? params.turn : {};
+  const failed = method === 'turn/failed' || turn.status === 'failed' || turn.error != null;
+  if (!failed) return undefined;
+  // `turn/failed` carries the error at the top level; `turn/completed` nests it on the turn.
+  const message =
+    errorMessage(params.error) ?? errorMessage(turn.error) ?? 'codex turn failed';
+  return { message };
+}
+
 /** §7.1: turn/completed→end_turn, turn/failed→error — except an interrupted
  *  turn (turn.status `interrupted`, or an interrupt-shaped error message,
  *  the only wire signals codex gives us) → cancelled. */
@@ -264,7 +300,9 @@ function turnStopReason(params: Record<string, unknown>, failed: boolean): StopR
   const turn = isRecord(params.turn) ? params.turn : {};
   if (turn.status === 'interrupted') return 'cancelled';
   if (!failed) return 'end_turn';
-  return /interrupt/i.test(errorMessage(params.error) ?? '') ? 'cancelled' : 'error';
+  // Both error positions, for the same reason `codexTurnFailure` reads both.
+  const message = errorMessage(params.error) ?? errorMessage(turn.error) ?? '';
+  return /interrupt/i.test(message) ? 'cancelled' : 'error';
 }
 
 // ---- plan -------------------------------------------------------------------

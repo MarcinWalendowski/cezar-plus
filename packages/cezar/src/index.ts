@@ -2,9 +2,10 @@
 import { parseArgs } from 'node:util';
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withOptionalFlagValues } from './argv.ts';
 import { detectEnvironment } from './core/backend-detect.ts';
 import { runBrokerCommand } from './core/run-broker-cli.ts';
 import { migrateReleasesCommand, releaseDeployCommand } from './server-install/release-cli.ts';
@@ -15,11 +16,12 @@ import {
   providerAuthChecksDisabled,
 } from './core/provider-auth.ts';
 import { applyProviderEnablement } from './core/provider-availability.ts';
-import { pruneOrphans } from './git-worktree.ts';
+import { canonicalPath, pruneOrphans } from './git-worktree.ts';
 import { getRepoInfo } from './server/git.ts';
 import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveWorktreeRetention } from './config.ts';
 import { reclaimWorktrees } from './runs/retention.ts';
 import { RunStore } from './runs/store.ts';
+import { findForeignWorkspaceOwner, loadForeignWorkspaceRunSources } from './runs/worktree-ownership.ts';
 import { runRunStatsCommand } from './runs/stats-cli.ts';
 import { runRunsCommand } from './runs/reopen-cli.ts';
 import { RunManager } from './workflows/run.ts';
@@ -46,6 +48,7 @@ import { runProjectsCommand } from './workspace/projects-cli.ts';
 import { runBackupCommand } from './backup/cli.ts';
 import { runKnowledgeCommand } from './knowledge/cli.ts';
 import { runTodoCommand } from './todo-cli.ts';
+import { localCliAuthor } from './runs/task-author.ts';
 import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 // FIX 6 (D13 repair pass 1): the production `listRegisteredProjectRoots` supplier lives in
 // `./registered-project-roots.ts` for the same reason `./auth-boot-gate.ts` was extracted from this
@@ -56,6 +59,27 @@ import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 // HERE — FIX B1 moved its one caller, the local-mode wiring, into `./local-mode-boot.ts`, which
 // imports it directly.)
 import { registerAndAdoptProject, suppressBootRegistration } from './registered-project-roots.ts';
+// The cluster CLI (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`). Every one of these is a
+// filesystem/HTTP call against `~/.cezar/cluster` — no server, no auth wall — which is what lets
+// `cez cluster active` be a read an agent can make from inside a run (D19 rung 4).
+import { CLUSTER_PROTOCOL, type ClusterCorpusSubmitResponse } from '@loki-labs/better-cezar-contract';
+import { createEnrollmentCode, joinCluster, leaveCluster } from './cluster/enrollment.ts';
+import {
+  ensureNodeIdentity,
+  loadNodeIdentity,
+  nodeIdentityPath,
+  setAcceptsDispatch,
+} from './cluster/node-identity.ts';
+import { signedNodeRequestHeaders } from './cluster/node-auth.ts';
+import { disableNode, readPeers } from './cluster/peers.ts';
+import { resolveSpokeReconcileWiring } from './cluster/reconcile-wiring.ts';
+import { reconcileAll } from './cluster/reconcile.ts';
+import { readRemoteRuns } from './cluster/run-projection.ts';
+import { clusterEnabled } from './server/capabilities.ts';
+import { clusterActiveAsOfFrom, clusterActiveRunsFrom } from './server/cluster-routes.ts';
+// Aliased: `serverInstallCommand` below already destructures its own `loadServerState` out of a
+// dynamic import, and two bindings of one name in one file is a shadow waiting to be misread.
+import { loadServerState as loadInstalledServerState } from './server-install/state.ts';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -76,12 +100,20 @@ Usage:
   cezar kb                  knowledge base (CEZ_KB=1): search "<query>" · show
                             <id> · roots · reindex · write · proposals — the
                             same commands the agent system prompt tells a run
-                            to use (run "cezar kb" for the full usage)
+                            to use (run "cezar kb" for the full usage). On a
+                            CLUSTER SPOKE, "kb submit <path>" forwards a write to
+                            the hub — the only write direction the mirror has
+
   cezar todo                file (and optionally auto-start) a workspace task:
                             add "<summary>" [--project <id|path>] [--start] ·
                             list — the same command the agent system prompt
                             tells a run to use (run "cezar todo" for the full
                             usage)
+  cezar cluster             multi-node cluster (CEZ_CLUSTER=1): enroll [--name N]
+                            [--ttl S] · join <code> [--name N] · active [--json] ·
+                            reconcile [--apply] [--peer <nodeId>] (dry run by
+                            default) · revoke <nodeId> | --self (run
+                            "cezar cluster" for the full usage)
   cezar backup              encrypted platform backup (CEZ_BACKUP=1): status ·
                             run · snapshots · verify · gc · restore [--snapshot
                             <id>] [--force]
@@ -118,6 +150,11 @@ Options:
                               (D4/D10 per-org process isolation) instead of the
                               deployment's one supervisor. Requires the supervisor to
                               already be provisioned on this host — see docs/server-install/hetzner.md.
+      --role worker           server-install --platform hetzner: provision this box as a cluster
+                              spoke (D17) instead of a supervisor/org cockpit — dials OUT to the
+                              hub, no --domain/nginx/TLS. Requires --join.
+      --join <code>           server-install --platform hetzner --role worker: the hub-minted,
+                              single-use enrollment code from the cockpit's "Add node" (D17).
       --external-proxy        server-install (ubuntu-vps): the box ALREADY has a
                               reverse proxy owning :80/:443 (Dokploy/Traefik, Coolify,
                               Caddy, your own nginx). Installs the service only — no
@@ -169,10 +206,33 @@ async function main(): Promise<void> {
   // every install since the knowledge base existed. A green unit suite over a function no entry
   // point calls says nothing about whether the feature is REACHABLE; these lines are what make it
   // so, and `knowledge/cli-wiring.test.ts` is what keeps them.
+  // `kb submit` is intercepted BEFORE the `kb` branch below, and the order is the whole point:
+  // `runKnowledgeCommand` rejects an unknown subcommand, so appending this to the switch inside
+  // `knowledge/cli.ts` would be the only other option — and that file belongs to the knowledge
+  // base, not to the cluster. A spoke's mirror is READ-ONLY (`sources/cezar-hub/provider.ts`), so
+  // this is the affordance that replaces the prohibition: D8's rule only forbids, and a rule that
+  // forbids without offering the path it replaces gets routed around.
+  if (rawArgs[0] === 'kb' && rawArgs[1] === 'submit') {
+    process.exitCode = await runKbSubmitCommand(rawArgs.slice(2));
+    return;
+  }
+
   if (rawArgs[0] === 'kb') {
     const kbCwd = resolve(process.cwd());
     const kbRepoRoot = (await getRepoInfo(kbCwd))?.root ?? kbCwd;
     process.exitCode = await runKnowledgeCommand(rawArgs.slice(1), { repoRoot: kbRepoRoot });
+    return;
+  }
+
+  // `cluster` is routed here for exactly the reason `kb`/`todo`/`runs` above are: it owns its own
+  // flag namespace (`--name`, `--ttl`, `--dry-run`, `--peer`, `--self`, `--json`), every one of
+  // which the strict `parseArgs` below rejects as an unknown option long before the command switch
+  // — and `cluster` is not a `case` there at all, so dispatching from inside the switch would
+  // answer `unknown command: cluster`. Workspace-scoped (`~/.cezar/cluster`), so `--repo` is not
+  // one of its concerns; gated on `CEZ_CLUSTER=1` inside `runClusterCommand` so it stays inert
+  // with the flag off.
+  if (rawArgs[0] === 'cluster') {
+    process.exitCode = await runClusterCommand(rawArgs.slice(1));
     return;
   }
 
@@ -249,6 +309,7 @@ async function main(): Promise<void> {
   }
 
   const { values, positionals } = parseArgs({
+    args: withOptionalFlagValues(rawArgs),
     options: {
       port: { type: 'string', short: 'p', default: '4321' },
       repo: { type: 'string' },
@@ -258,6 +319,8 @@ async function main(): Promise<void> {
       platform: { type: 'string' },
       domain: { type: 'string' },
       'org-slug': { type: 'string' },
+      role: { type: 'string' },
+      join: { type: 'string' },
       'bind-host': { type: 'string' },
       'external-proxy': { type: 'boolean', default: false },
       yes: { type: 'boolean', default: false },
@@ -278,6 +341,9 @@ async function main(): Promise<void> {
       unit: { type: 'string' },
       sha: { type: 'string' },
       note: { type: 'string' },
+      'allow-stale-artifact': { type: 'boolean', default: false },
+      'refuse-dirty': { type: 'boolean', default: false },
+      'allow-unrelated': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -342,6 +408,13 @@ async function main(): Promise<void> {
         reinstall: Boolean(values.reinstall),
         domain: values.domain,
         orgSlug: values['org-slug'],
+        // Only 'worker' is a recognised role (hetzner.ts#isWorkerMode). An unrecognised --role
+        // value is silently treated as absent rather than rejected here: preflight already fails
+        // worker mode without --join, and a bogus role that falls through to supervisor/org mode
+        // fails on ITS own pre-existing checks (e.g. missing --domain) — no second rejection point
+        // to keep in sync with preflight's.
+        role: values.role === 'worker' ? 'worker' : undefined,
+        clusterJoinToken: values.join,
         port: portExplicit ? Number(values.port) : undefined,
         externalProxy: Boolean(values['external-proxy']),
         bindHost: values['bind-host'],
@@ -371,6 +444,9 @@ async function main(): Promise<void> {
           sha: values.sha,
           note: values.note,
           dryRun,
+          allowStaleArtifact: Boolean(values['allow-stale-artifact']),
+          refuseDirty: Boolean(values['refuse-dirty']),
+          allowUnrelated: Boolean(values['allow-unrelated']),
         });
         return;
       }
@@ -717,12 +793,35 @@ async function serveCommand(
 
   // Startup reconcile (spec 006): sweep worktrees whose run no longer exists.
   if (repo) {
-    const orphans = await pruneOrphans(repoRoot, new Set(store.listRuns().map((r) => r.id))).catch(
-      () => [] as string[],
+    // Cross-project ownership check (spec 2026-08-22-cross-project-worktree-orphan-prune-safety,
+    // Layer 1): this process IS the boot root, so its own candidate list is every OTHER registered
+    // project (no separate boot-root entry needed — the `!= repoRoot` filter would drop it anyway).
+    // `loadWorkspaceConfig()` is the cheap raw registry read — `listProjects()` additionally shells
+    // out a git status/branch probe per project, unneeded cost on the hot boot path.
+    const registeredProjects = (await loadWorkspaceConfig()).projects.filter(
+      (p) => canonicalPath(p.root) !== canonicalPath(repoRoot),
     );
-    if (orphans.length > 0) {
-      console.log(`  cleaned ${orphans.length} orphaned worktree(s): ${orphans.map((id) => id.slice(0, 8)).join(', ')}`);
-    }
+    const delay = Number(process.env.CEZ_SWEEP_DELAY_MS ?? 5 * 60_000);
+    const sweepTimer = setTimeout(() => {
+      const foreignSources = loadForeignWorkspaceRunSources(repoRoot, registeredProjects);
+      const unreadableSource = foreignSources.find((s) => s.unreadable);
+      const dataDir = join(repoRoot, '.ai/cezar');
+      void pruneOrphans(repoRoot, new Set(store.listRuns().map((r) => r.id)), {
+        findForeignOwner: (path) => findForeignWorkspaceOwner(repoRoot, path, foreignSources),
+        ownershipCheckUnavailable: unreadableSource
+          ? { reason: `project "${unreadableSource.projectName}"'s runs.json could not be read` }
+          : undefined,
+        onOutcome: (outcome) => {
+          mkdirSync(dataDir, { recursive: true });
+          appendFileSync(join(dataDir, 'worktree-reaps.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), runId: outcome.id, repoRoot, ...outcome })}\n`);
+        },
+      }).then((orphans) => {
+        if (orphans.removed.length > 0) console.log(`  cleaned ${orphans.removed.length} orphaned worktree(s): ${orphans.removed.map((id) => id.slice(0, 8)).join(', ')}`);
+        if (orphans.kept.length > 0) console.log(`  kept ${orphans.kept.length} unsafe-to-reclaim worktree(s): ${orphans.kept.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
+        if (orphans.declined.length > 0) console.log(`  declined to reclaim ${orphans.declined.length} worktree(s): ${orphans.declined.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
+      }).catch(() => undefined);
+    }, Math.max(0, delay));
+    sweepTimer.unref?.();
     // Count-based worktree retention (#483): reclaim finished worktrees beyond
     // the keep-limit (directory only — `cez/<id8>` branch kept, so recoverable).
     // Best-effort; never blocks boot.
@@ -976,7 +1075,9 @@ async function runCommand(
     }
   });
 
-  const run = manager.startRun(workflow, { task, model });
+  // A person typing at a terminal is a `user` with id `local` — the `approverOf` rule
+  // (spec 2026-08-21-task-author-provenance). There is no session and no request here.
+  const run = manager.startRun(workflow, { task, model, author: localCliAuthor('cli-run') });
   // `review` is terminal here too (spec 009) — headless runs must not hang on
   // the GUI's review gate; the diff waits on the task branch/cockpit instead.
   const final = await new Promise<string>((resolveStatus) => {
@@ -1029,6 +1130,10 @@ async function serverCommand(
     domain?: string;
     /** `--platform hetzner` only — see `RunOptions#orgSlug` (`server-install/engine.ts`). */
     orgSlug?: string;
+    /** `--role worker` (Phase 4, D17) — see `RunOptions#role` (`server-install/engine.ts`). */
+    role?: 'worker';
+    /** `--join <code>` — see `RunOptions#clusterJoinToken` (`server-install/engine.ts`). */
+    clusterJoinToken?: string;
     port?: number;
     externalProxy?: boolean;
     bindHost?: string;
@@ -1115,6 +1220,8 @@ async function serverCommand(
     instance,
     domain,
     orgSlug: flags.orgSlug,
+    role: flags.role,
+    clusterJoinToken: flags.clusterJoinToken,
     port,
     // Only an install decides proxy mode; deploy/uninstall read it back from
     // the recorded state. Preserve an omitted flag as `undefined`: a flag-less
@@ -1263,6 +1370,554 @@ function ensureDataGitignore(repoRoot: string): void {
 }
 
 /** Own package name — for the npm-registry update check (#368). */
+
+// ---- cluster (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`) ---------------------------
+
+const CLUSTER_USAGE = `usage:
+  cez cluster enroll [--name <node name>] [--ttl <seconds>] [--json]
+                              hub: mint a single-use join code and print the one-liner
+                              a new node runs. The code is shown ONCE — only its
+                              SHA-256 digest is stored — and the command it renders
+                              carries the code and nothing else: never an Access
+                              client id or secret.
+  cez cluster join <code> [--name <node name>] [--json]
+                              spoke: redeem a code against the hub it names. Every
+                              failure is one of five NAMED reasons — access-rejected ·
+                              code-expired · code-used · hub-unreachable ·
+                              protocol-major — because an operator who cannot tell an
+                              Access rejection from a stale code will re-mint codes to
+                              fix a credential problem.
+  cez cluster accept-dispatch --on | --off [--json]
+                              opt THIS node in or out of running work the hub places on it.
+                              D11 defaults to OFF, so a freshly clustered node runs nothing
+                              until this is set — and the queue then reads
+                              \`no-node-accepts-dispatch\`, not a capacity problem. On a SPOKE
+                              the hub must also permit it (\`PATCH /cluster/nodes/:nodeId\`);
+                              the command prints that second half.
+  cez cluster active [--json]  what is in flight across the cluster: task summary,
+                              node, branch, and when each linked node last reported.
+                              NOT yet a collision check: touched paths are not
+                              populated (package 4.3), and an empty answer can mean
+                              nothing is running OR that nobody has reported — see
+                              \`asOf\`, absent in the second case.
+  cez cluster reconcile [--apply] [--dry-run] [--peer <nodeId>]
+                              spoke → hub only: full compare against the hub's
+                              backlog for every project this node has confirmed
+                              paired with it. Three classes: one side only ·
+                              identical · differing-and-neither-saw-the-hub. The
+                              third is REFUSED, never auto-merged: no fact
+                              available says which side is right. DRY RUN IS THE
+                              DEFAULT — nothing is written unless you pass
+                              --apply. --dry-run forces a dry run even alongside
+                              --apply, for a script that wants to force the safe
+                              path regardless of its own flags.
+  cez cluster revoke <nodeId>  hub: disable a node.
+  cez cluster revoke --self    spoke: delete THIS node's credential. Revocation is
+                              two-sided — a hub-side revoke alone does not stop a
+                              spoke from continuing to push.`;
+
+const CLUSTER_OFF_CLI =
+  'cez cluster: clustering is off — set CEZ_CLUSTER=1 (and CEZ_CLUSTER_HUB=<url> to join one as a spoke) and restart cezar';
+
+/**
+ * `cez cluster …`. Filesystem + HTTP only: no server to talk to, no auth wall, exactly like
+ * `cez kb` and `cez todo`, which is what lets `cez cluster active` be a read an agent can make
+ * from inside a run over the `Bash` surface it already has (D19 rung 4).
+ *
+ * Returns the process exit code — 0 on success, 1 on a usage error or a genuine failure.
+ *
+ * Every subcommand is wrapped in one try/catch on purpose. The `cluster/*` modules are landing
+ * package by package, so a subcommand whose module has not been filled in yet throws a NAMED
+ * `not implemented: … package N.N` error; printing that one line beats an unhandled rejection's
+ * stack, and it tells whoever hits it exactly which package they are waiting on.
+ */
+async function runClusterCommand(args: string[]): Promise<number> {
+  const sub = args[0];
+  if (sub === undefined || sub === '--help' || sub === '-h' || sub === 'help') {
+    console.log(CLUSTER_USAGE);
+    return sub === undefined ? 1 : 0;
+  }
+  if (!clusterEnabled(process.env)) {
+    console.error(CLUSTER_OFF_CLI);
+    return 1;
+  }
+
+  let values: Record<string, string | boolean | undefined>;
+  let positionals: string[];
+  try {
+    const parsed = parseArgs({
+      args: args.slice(1),
+      options: {
+        name: { type: 'string' },
+        ttl: { type: 'string' },
+        peer: { type: 'string' },
+        // `reconcile`'s own pair — see the case body for why the default is DRY RUN despite
+        // both flags themselves defaulting to `false` (there is no `--no-x` negation in
+        // `node:util`'s `parseArgs`, so "dry run unless told otherwise" has to be computed from
+        // the ABSENCE of `--apply`, not from either flag's own default).
+        'dry-run': { type: 'boolean', default: false },
+        apply: { type: 'boolean', default: false },
+        self: { type: 'boolean', default: false },
+        // `accept-dispatch`'s pair. Two explicit booleans rather than one `--on` whose absence
+        // means off: this writes a consent bit that decides whether a machine runs other
+        // people's work, and a bare `cez cluster accept-dispatch` that silently meant OFF is
+        // exactly the kind of default nobody reads twice.
+        on: { type: 'boolean', default: false },
+        off: { type: 'boolean', default: false },
+        json: { type: 'boolean', default: false },
+      },
+      allowPositionals: true,
+    });
+    values = parsed.values;
+    positionals = parsed.positionals;
+  } catch (err) {
+    console.error(`cez cluster: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(CLUSTER_USAGE);
+    return 1;
+  }
+
+  const json = values.json === true;
+  const emit = (value: unknown, lines: () => string[]): void => {
+    if (json) console.log(JSON.stringify(value, null, 2));
+    else for (const line of lines()) console.log(line);
+  };
+
+  try {
+    switch (sub) {
+      /**
+       * Mints THIS machine's hub identity — the step with no home before 2026-08-23, and the reason
+       * a real hub could never activate.
+       *
+       * `startClusterRuntime` refuses to arm anything without an identity on disk, deliberately: a
+       * server that self-mints on boot turns "someone restarted the process" into "this box is now a
+       * hub", and two boxes doing that quietly become two hubs with no shared roster. `enroll` does
+       * not mint one either — it writes a join CODE, and a code is not an identity. So on a fresh
+       * box every path led to the same "no cluster identity" warning with nothing to do about it:
+       * `ensureNodeIdentity({ role: 'hub' })` existed but was called only from tests, which is why
+       * a fully green loopback E2E proved nothing about a real hub starting.
+       *
+       * Making it an explicit operator command matches `enroll`/`join`: becoming a hub is a
+       * decision someone makes once, not a side effect of a restart.
+       *
+       * Idempotent, because `ensureNodeIdentity` reuses an existing `nodeId` — re-running this is
+       * safe and reports the same id. It refuses a ROLE CHANGE outright: a node already joined to a
+       * hub as a spoke holds that hub's URL and a secret the hub knows it by, and silently
+       * overwriting the role would strand both sides. Leave the cluster first.
+       */
+      case 'init': {
+        const existing = await loadNodeIdentity();
+        if (existing && existing.role !== 'hub') {
+          console.error(
+            `cez cluster init: this node is already a ${existing.role} of ${existing.hubUrl ?? 'a hub'}.`,
+          );
+          console.error('Run `cez cluster revoke --self` first if you really mean to make it a hub.');
+          return 1;
+        }
+        const identity = await ensureNodeIdentity({
+          role: 'hub',
+          ...(typeof values.name === 'string' ? { nodeName: values.name } : {}),
+        });
+        emit({ ok: true, nodeId: identity.nodeId, nodeName: identity.nodeName, role: identity.role }, () => [
+          `${existing ? 'already a hub' : 'hub identity created'}: ${identity.nodeId}`,
+          `name:     ${identity.nodeName}`,
+          `identity: ${nodeIdentityPath()}`,
+          '',
+          'Set CEZ_CLUSTER=1 and restart cezar so the link server attaches,',
+          'then run `cez cluster enroll` to mint a join code for the first node.',
+        ]);
+        return 0;
+      }
+
+      case 'enroll': {
+        const ttlSeconds = values.ttl === undefined ? undefined : Number(values.ttl);
+        if (ttlSeconds !== undefined && !Number.isFinite(ttlSeconds)) {
+          console.error('cez cluster enroll: --ttl must be a number of seconds');
+          return 1;
+        }
+        const { response } = await createEnrollmentCode({
+          ...(typeof values.name === 'string' ? { nodeName: values.name } : {}),
+          ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
+          hubUrl: clusterHubUrl(),
+          hubVersion: readOwnVersion(),
+        });
+        emit(response, () => [
+          `code:      ${response.code}`,
+          `code id:   ${response.codeId}   (revoke with: DELETE /api/v1/cluster/enroll/${response.codeId})`,
+          `expires:   ${response.expiresAt}`,
+          '',
+          'On the node you are adding, run ONE of:',
+          `  ${response.commands.join}`,
+          `  ${response.commands.provision}`,
+          '',
+          'Single use, and shown once — the hub keeps only a SHA-256 digest and cannot print it again.',
+        ]);
+        return 0;
+      }
+
+      case 'join': {
+        const code = positionals[0];
+        if (!code) {
+          console.error('cez cluster join: pass the code the hub printed — `cez cluster join <code>`');
+          return 1;
+        }
+        // `joinCluster` owns the credential write (`persistNodeCredential`, 0600). The CLI never
+        // touches the secret, so it has exactly one writer, and it is never echoed to a terminal
+        // whose scrollback is somebody's shell history.
+        const result = await joinCluster({
+          code,
+          ...(typeof values.name === 'string' ? { nodeName: values.name } : {}),
+          protocol: CLUSTER_PROTOCOL,
+        });
+        if (!result.ok) {
+          // The REASON is the value; the message is detail nothing branches on.
+          console.error(`cez cluster join: refused — ${result.reason}${result.message ? `: ${result.message}` : ''}`);
+          if (json) console.log(JSON.stringify(result, null, 2));
+          return 1;
+        }
+        emit({ ok: true, nodeId: result.nodeId, hubNodeId: result.hubNodeId, hubUrl: result.hubUrl }, () => [
+          `joined ${result.hubUrl} as ${result.nodeId}`,
+          `hub:    ${result.hubNodeId}`,
+          `protocol ${result.protocol.major}.${result.protocol.minor}`,
+          '',
+          'This node accepts NO dispatched work until you turn it on — Settings → Cluster, or',
+          'PATCH /api/v1/cluster/nodes/<nodeId> {"acceptsDispatch":true}. It replicates either way.',
+        ]);
+        return 0;
+      }
+
+      case 'active': {
+        const [runs, peers] = await Promise.all([
+          readRemoteRuns().then(clusterActiveRunsFrom),
+          readPeers(),
+        ]);
+        const linked = peers.nodes.filter((node) => node.disabledAt === undefined);
+        const asOf = clusterActiveAsOfFrom(linked);
+        emit({ runs, ...(asOf !== undefined ? { asOf } : {}) }, () => {
+          if (linked.length === 0) return ['no linked nodes — nothing is being tracked.'];
+          if (asOf === undefined)
+            return [`${linked.length} linked node(s), none has reported — cannot tell what is in flight.`];
+          return runs.length === 0
+            ? ['nothing in flight on any linked node.']
+            : runs.map(
+                (run) =>
+                  `${run.nodeId}  ${run.runId}  ${run.branch ?? '(no branch)'}  ${run.summary ?? ''}`.trim(),
+              );
+        });
+        return 0;
+      }
+
+      case 'reconcile': {
+        // D21 (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`): reads over HTTP (the ONE new
+        // route, `GET /cluster/todos/:projectKey`) and writes over the same family's `/backup` +
+        // `/append` — `cluster/reconcile-transport.ts#createHttpReconcileTransport`, signed with
+        // D20's node principal. Runs FROM a spoke AGAINST its hub — the only direction addressable
+        // at all (a spoke has no inbound address, Problem §7) — so this refuses outright on a hub
+        // and on a `--peer` that does not resolve to THIS node's own hub. The actual resolution
+        // (peer, identity, the three refusals, the hub check, `resolveLocalDataDir`, the HTTP
+        // transport) lives in `cluster/reconcile-wiring.ts#resolveSpokeReconcileWiring` — shared
+        // with the periodic reconcile the cluster runtime arms on server start, so the CLI and the
+        // timer can never disagree about which projects reconcile or which refusals apply.
+        const wiring = await resolveSpokeReconcileWiring({
+          peerNodeId: typeof values.peer === 'string' ? values.peer : undefined,
+        });
+        if (!wiring.ok) {
+          console.error(wiring.message);
+          return 1;
+        }
+        const { peerNodeId } = wiring.options;
+
+        // DRY RUN IS THE DEFAULT (D21: "the real merge is owner-gated … `--dry-run` is the default
+        // posture"). `--apply` is the one way to opt into writing; `--dry-run` always forces a dry
+        // run even alongside `--apply`, so a script combining both stays on the safe side rather
+        // than depending on flag ORDER.
+        const dryRun = values['dry-run'] === true || values.apply !== true;
+
+        const reports = await reconcileAll({ dryRun, ...wiring.options });
+
+        emit({ dryRun, peer: peerNodeId, reports }, () => {
+          if (reports.length === 0) {
+            return [`no confirmed, paired project reconciled against ${peerNodeId} — nothing to do.`];
+          }
+          const lines: string[] = [];
+          for (const report of reports) {
+            const { counts } = report;
+            lines.push(
+              `${report.projectKey}: local-only ${counts['local-only']}  remote-only ${counts['remote-only']}  ` +
+                `identical ${counts.identical}  divergent-unclocked ${counts['divergent-unclocked']}` +
+                (report.backupPaths.length > 0 ? `  (backed up: ${report.backupPaths.join(', ')})` : ''),
+            );
+            if (counts['divergent-unclocked'] > 0) {
+              lines.push(
+                `  ${counts['divergent-unclocked']} row(s) diverge with neither side ever seen by the hub — REFUSED, not merged; resolve by hand.`,
+              );
+            }
+          }
+          lines.push(
+            dryRun
+              ? '(dry run — nothing was written; re-run with --apply to write.)'
+              : '(written.)',
+          );
+          return lines;
+        });
+        return 0;
+      }
+
+      case 'revoke': {
+        if (values.self === true) {
+          await leaveCluster();
+          console.log('this node’s cluster credential is deleted. Ask the hub to disable the node too —');
+          console.log('a spoke-side delete stops this node pushing, and a hub-side revoke stops the hub');
+          console.log('answering; revocation is only complete with both.');
+          return 0;
+        }
+        const nodeId = positionals[0];
+        if (!nodeId) {
+          console.error('cez cluster revoke: name the node — `cez cluster revoke <nodeId>` — or `--self` to drop THIS node’s credential');
+          return 1;
+        }
+        const revoked = await disableNode(nodeId);
+        if (!revoked) {
+          console.error(`cez cluster revoke: no node ${nodeId} in the roster`);
+          return 1;
+        }
+        console.log(`${nodeId} is disabled on this hub.`);
+        console.log('Run `cez cluster revoke --self` ON THAT NODE too — a hub-side revoke alone does not stop');
+        console.log('a spoke from continuing to push ops.');
+        return 0;
+      }
+
+      /**
+       * **D11's missing writer.** `setAcceptsDispatch` shipped exported, tested, and with ZERO
+       * production callers, so a node's own consent bit had no way to be set by anything an
+       * operator could run — and since D11 defaults it OFF, a correctly clustered pair placed
+       * nothing and reported `all-eligible-at-capacity` while completely idle. Measured
+       * 2026-08-24: the only way to make a real two-node dispatch happen was to hand-write
+       * `node.json`, which is not a procedure that can be shipped.
+       *
+       * **This is one of TWO keys, and it is deliberately not both.** A node runs dispatched work
+       * only when its OWN identity says yes (this command — the copy `offerDispatch` re-enforces
+       * when the frame lands) AND the hub's roster row says yes (`PATCH /cluster/nodes/:nodeId`,
+       * the operator's policy about that node, which `eligibleCandidates` filters on). Neither
+       * implies the other and BOTH failures are silent, so this prints the other half rather than
+       * letting an operator believe one command finished the job. On a hub the two collapse: the
+       * hub's candidate is built from its own identity, so there is no roster row to also set.
+       */
+      case 'accept-dispatch': {
+        if (values.on === true && values.off === true) {
+          console.error('cez cluster accept-dispatch: pass --on or --off, not both');
+          return 1;
+        }
+        if (values.on !== true && values.off !== true) {
+          console.error(
+            'cez cluster accept-dispatch: say which — `--on` to accept dispatched work on this node, `--off` to stop',
+          );
+          return 1;
+        }
+        const accepts = values.on === true;
+        const identity = await setAcceptsDispatch(accepts);
+        const isHub = identity.role === 'hub';
+        emit(
+          { nodeId: identity.nodeId, role: identity.role, acceptsDispatch: identity.acceptsDispatch },
+          () => [
+            `${identity.nodeId} (${identity.role}) now ${accepts ? 'ACCEPTS' : 'refuses'} dispatched work.`,
+            ...(accepts && isHub
+              ? ['', 'This is a hub: placement reads its own identity, so nothing further is needed here.']
+              : accepts
+                ? [
+                    '',
+                    'That is the NODE half. The hub must also permit this node, or placement filters it out:',
+                    `  PATCH /api/v1/cluster/nodes/${identity.nodeId}   {"acceptsDispatch": true}`,
+                    'Both are required, and neither failure says anything — a node the hub has not',
+                    'permitted is never a candidate, and a node that has not opted in refuses the frame.',
+                  ]
+                : ['', 'Runs already dispatched here are unaffected; this refuses NEW frames.']),
+          ],
+        );
+        return 0;
+      }
+
+      default:
+        console.error(`cez cluster: unknown subcommand "${sub}"`);
+        console.error('known: init, enroll, join, accept-dispatch, active, reconcile, revoke');
+        console.error(CLUSTER_USAGE);
+        return 1;
+    }
+  } catch (err) {
+    console.error(`cez cluster ${sub}: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+}
+
+/** The hub's own URL, for the join command it renders. Discovered before configured, the shape
+ *  `notifications-routes.ts#discoverCockpitUrl` already settled. Loopback is the last resort and is
+ *  useless in a pasted command — which is exactly why an operator who has not set one gets a
+ *  visibly-local URL rather than a plausible wrong one. */
+function clusterHubUrl(): string {
+  const configured = process.env.CEZ_CLUSTER_HUB?.trim() || process.env.CEZ_COCKPIT_URL?.trim();
+  if (configured) return configured;
+  const state = loadInstalledServerState();
+  return state.domain ? `https://${state.domain}` : `http://127.0.0.1:${state.primaryPort}`;
+}
+
+
+// ---- `cez kb submit` — the spoke's one write path to the record ------------------------------
+
+const KB_SUBMIT_USAGE = 'usage: cez kb submit <corpus-path> [--content "..."] [--note "..."] [--json]';
+
+/**
+ * Forwards a knowledge write to the hub (`POST /api/v1/cluster/corpus/submit`) — **the only write
+ * direction the corpus has** (D8/D8a). The path is corpus-relative (`knowledge/foo.md`), and the
+ * body comes from `--content` or stdin, the same two sources `cez kb write` accepts.
+ *
+ * It exists because a prohibition on its own gets routed around: `--add-dir` already grants an
+ * agent write access to the mirror path, so `readOnly: true` on a spoke's root is not sufficient.
+ * The sweep quarantines a diverged file rather than overwriting it, and this is the correct path
+ * that is easier than the wrong one.
+ *
+ * A HUB refuses: there is nothing to forward to, and the corpus is right here — `cez kb write`.
+ *
+ * **Signed with `cluster/node-auth.ts` (D20).** This used to POST with no auth headers at all —
+ * D20 gated the route behind node auth without updating this, its own caller. The body string is
+ * built once and reused for both the signature's `bodyHash` and the actual request body, and
+ * `path`/`method` are read off the same `URL` the request is sent to, so the principal is signed
+ * over exactly what goes over the wire (node-auth.ts's own docblock on why that binding matters).
+ * The hub cannot verify any of this yet — nothing persists a node's secret hub-side (see
+ * `node-auth.ts`'s module header) — so every submit fails closed with 401 `unknown-node` until
+ * that store lands; `describeHubRefusal` below names that gap explicitly rather than reporting a
+ * bare HTTP status, without adding any fallback that would sign as though it might not matter.
+ *
+ * Not exported: this module runs `main()` at load, so importing it from a test executes the CLI.
+ * `kb-submit-signing.test.ts` (repo root of this package's `src/`) drives this command the correct
+ * way instead — a SUBPROCESS through the real entry point, against a real local HTTP hub, checked
+ * with the real `verifyNodeHttpPrincipal` — and is what proves this specific caller (not just
+ * `signedNodeRequestHeaders` in isolation, covered generically in `cluster/node-auth.test.ts`)
+ * actually signs with the node's real identity, refuses closed with no secret on file, and turns a
+ * 401 `unknown-node` into `describeHubRefusal`'s message below rather than a bare HTTP status.
+ */
+async function runKbSubmitCommand(args: string[]): Promise<number> {
+  if (args[0] === '--help' || args[0] === '-h') {
+    console.log(KB_SUBMIT_USAGE);
+    return 0;
+  }
+  if (!clusterEnabled(process.env)) {
+    console.error('cez kb submit: clustering is off — with no hub to forward to, write the corpus directly (`cez kb write`)');
+    return 1;
+  }
+
+  let values: Record<string, string | boolean | undefined>;
+  let positionals: string[];
+  try {
+    const parsed = parseArgs({
+      args,
+      options: {
+        content: { type: 'string' },
+        note: { type: 'string' },
+        json: { type: 'boolean', default: false },
+      },
+      allowPositionals: true,
+    });
+    values = parsed.values;
+    positionals = parsed.positionals;
+  } catch (err) {
+    console.error(`cez kb submit: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(KB_SUBMIT_USAGE);
+    return 1;
+  }
+
+  const path = positionals[0];
+  if (!path) {
+    console.error(KB_SUBMIT_USAGE);
+    return 1;
+  }
+
+  const body = typeof values.content === 'string' ? values.content : await readAllStdin();
+  if (body.trim() === '') {
+    console.error('cez kb submit: no content given; pass --content "..." or pipe it on stdin');
+    return 1;
+  }
+
+  const identity = await loadNodeIdentity();
+  if (!identity) {
+    console.error('cez kb submit: this node has no cluster identity — run `cez cluster join <code>` first');
+    return 1;
+  }
+  if (identity.role !== 'spoke' || !identity.hubUrl) {
+    console.error('cez kb submit: this node IS the hub — the corpus is local here, so write it directly (`cez kb write`)');
+    return 1;
+  }
+  if (!identity.secret) {
+    console.error(
+      'cez kb submit: this node has no cluster secret on file — re-run `cez cluster join <code>` to re-enroll',
+    );
+    return 1;
+  }
+
+  try {
+    const url = new URL('/api/v1/cluster/corpus/submit', identity.hubUrl);
+    const signed = signedNodeRequestHeaders({
+      nodeId: identity.nodeId,
+      secret: identity.secret,
+      method: 'POST',
+      url,
+      bodyText: JSON.stringify({
+        path,
+        body,
+        ...(typeof values.note === 'string' ? { note: values.note } : {}),
+      }),
+    });
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...signed.headers },
+      body: signed.body,
+    });
+    const payload = (await response.json().catch(() => null)) as ClusterCorpusSubmitResponse | { error?: string; reason?: string } | null;
+    if (!response.ok) {
+      console.error(`cez kb submit: ${describeHubRefusal(response.status, payload)}`);
+      return 1;
+    }
+    if (payload && 'ok' in payload && payload.ok === false) {
+      console.error(`cez kb submit: refused — ${payload.reason}${payload.message ? `: ${payload.message}` : ''}`);
+      return 1;
+    }
+    if (values.json === true) console.log(JSON.stringify(payload, null, 2));
+    else if (payload && 'ok' in payload && payload.ok) console.log(`submitted ${payload.path} (corpus ${payload.corpusVersion})`);
+    return 0;
+  } catch (err) {
+    console.error(`cez kb submit: could not reach the hub at ${identity.hubUrl} — ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+}
+
+/**
+ * Turns a non-2xx `/cluster/corpus/submit` response into the message an operator reads. A plain
+ * `${detail}` fallback would show `unknown-node`'s own wording verbatim — "this node is not known
+ * to the hub — enroll it first" — which is actively wrong advice right now: the request WAS
+ * signed by an enrolled node, the hub just has nowhere to look its secret up (node-auth.ts's
+ * module header, D20's known gap). Only that one reason gets renamed; every other 401
+ * (`bad-signature`, `stale-principal`, `no-credentials`) already carries an accurate, actionable
+ * message from `NODE_AUTH_MESSAGE` and is passed through unchanged.
+ */
+function describeHubRefusal(status: number, payload: unknown): string {
+  const record = payload && typeof payload === 'object' ? (payload as { error?: unknown; reason?: unknown }) : {};
+  if (status === 401 && record.reason === 'unknown-node') {
+    return (
+      'the hub rejected this signed request as unknown (401 unknown-node) — the hub does not yet ' +
+      "persist per-node secrets, so every signed write fails this way until that store lands; this " +
+      "is the known D20 gap, not a problem with this node's enrollment or this write"
+    );
+  }
+  const detail = typeof record.error === 'string' && record.error ? record.error : `HTTP ${status}`;
+  return `the hub refused — ${detail}`;
+}
+
+/** Stdin, or `''` when nothing is piped — mirrors `knowledge/cli.ts`'s own content fallback. */
+async function readAllStdin(): Promise<string> {
+  if (process.stdin.isTTY) return '';
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 function readOwnName(): string {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
@@ -1315,7 +1970,59 @@ function firstLine(s: string): string {
   return line.length > 120 ? `${line.slice(0, 117)}…` : line;
 }
 
-main().catch((err: unknown) => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+// This module runs `main()` at load, unconditionally — so importing `index.ts` (e.g. to reach a
+// module-scope helper from a test) has always meant executing the real CLI dispatch against
+// whatever `process.argv` the importer happens to be running under.
+//
+// Deliberately NOT the usual `import.meta.url === pathToFileURL(process.argv[1]).href` "am I the
+// entry point" idiom: this binary ships THREE bin names (`cezar`/`cez`/`cezar-cli`, package.json
+// `bin`) that npm/npx install as symlinks into `node_modules/.bin` pointing at this same
+// `dist/index.js` — verified live in this repo (`node_modules/.bin/cezar` resolves to a real
+// symlink onto this package's own `dist/index.js`) — and a naive comparison FAILS for exactly
+// that shape: Node resolves `import.meta.url` through the symlink's realpath, but
+// `process.argv[1]` is the symlink path the OS was actually invoked with, so the two URLs never
+// match unless the entry is realpath-resolved first. Confirmed with a throwaway symlinked entry
+// point: the naive comparison reads `false` for a real symlinked invocation and `true` only after
+// `fs.realpathSync` on `argv[1]`. Even the corrected, realpath-based form still carries a
+// documented, unverified-here edge case on Windows — `import.meta.url` and a
+// `pathToFileURL(argv[1])` built independently can disagree on drive-letter casing — that a path
+// comparison can't fully rule out on every platform this package ships to.
+//
+// So the guard below is an explicit env opt-out instead — but NOT a `CEZ_*`-prefixed one, and
+// gated on two conditions, not one. Both choices exist because `CEZ_*` is not an inert namespace
+// in this codebase: `core/agent-env.ts#buildChildEnv` forwards every non-secret-shaped `CEZ_*`
+// host var into every spawned agent child by design (see that file's own doc comment — it is what
+// lets `CEZ_HOME`/`CEZ_KB`/etc. reach the tools that need them). A `CEZ_*`-prefixed test flag left
+// set in a shell, CI job, or service environment would therefore silently ride into every nested
+// `cez` invocation that process tree ever spawns, turning each into a successful-looking no-op —
+// exit 0, no output, nothing done. `CEZAR_TEST_SKIP_MAIN` deliberately does not start with `CEZ_`
+// (checked against `buildChildEnv`'s allowlist: neither its `CEZ_` prefix check nor any entry in
+// `BASE_ALLOW_NAMES`/`BASE_ALLOW_PREFIXES` matches it), so it is invisible to that passthrough
+// unless a caller explicitly lists it in `CEZ_ENV_PASSTHROUGH` — nobody would.
+//
+// The second condition, `process.env.VITEST`, is this repo's own existing signal for "this
+// process is a test run" (`paths.ts#assertCezarHomeWriteIsSandboxed`,
+// `server/open-in-terminal.ts#refuseSpawnUnderTest` both key off it the same way) — set
+// automatically by the test runner on every worker, never by a real install of this binary.
+// Requiring it too means an accidentally-exported `CEZAR_TEST_SKIP_MAIN=1` sitting in some
+// shell's rc file still does nothing outside an actual vitest process: both conditions holding at
+// once, outside a real test run, is not a realistic accident.
+//
+// Suppression is never silent even so: it writes a one-line notice to stderr naming the variable,
+// so a script or a human can never read "nothing happened, exit 0" as an ordinary successful run.
+// It deliberately leaves `process.exitCode` untouched rather than forcing it non-zero — the whole
+// point of this escape hatch is a side-effect-free import for a test, and forcing a failing exit
+// code would make every LEGITIMATE use of it (a test importing this module) look like the whole
+// worker failed unless that test remembered to reset `process.exitCode` afterward. The stderr
+// line alone already does the job this needs to do: turn a misuse of the flag from "silently
+// looks fine" into "visibly wrong" — not make it fail a check nothing is expected to run.
+if (process.env.VITEST && process.env.CEZAR_TEST_SKIP_MAIN === '1') {
+  console.error(
+    '[cez] main() skipped: CEZAR_TEST_SKIP_MAIN is set — test-only escape hatch, must never be set outside a test process',
+  );
+} else {
+  main().catch((err: unknown) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

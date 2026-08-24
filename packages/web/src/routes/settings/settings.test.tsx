@@ -109,6 +109,7 @@ const WORKSPACE_CONFIG = {
     maxMonitoringSessions: 2,
     monitoringWakeIntervalMinutes: null,
     autoResumeOnUsageLimit: true,
+    fallbackAcrossAccountsWhenLimited: false,
     memoryLimitMb: null,
     worktreeRetentionDefault: 10,
   },
@@ -127,7 +128,7 @@ function gateSeededClient(singleProject = false) {
   const client = createQueryClient()
   client.setQueryData(queryKeys.health, {
     bootProject: 'boot',
-    capabilities: { localHandoff: true, followups: true, singleProject },
+    capabilities: { cluster: false, localHandoff: true, followups: true, singleProject },
   })
   client.setQueryData(workspaceQueryKeys.projects, {
     projects: PROJECTS,
@@ -216,12 +217,26 @@ describe('the section registry', () => {
   it('is ONE list — no scope argument, nothing filtered out by area', () => {
     expect(visibleSettingsSections().map((s) => s.id)).toEqual(ALL_SECTIONS)
     // `sources` is capability-gated, not area-gated: it appears exactly when `CEZ_SOURCES=1` does.
-    expect(visibleSettingsSections({ singleProject: false, sources: true }).map((s) => s.id)).toContain(
-      'sources',
-    )
-    expect(visibleSettingsSections({ singleProject: false, sources: false }).map((s) => s.id)).toEqual(
-      ALL_SECTIONS,
-    )
+    expect(
+      visibleSettingsSections({ singleProject: false, sources: true, cluster: false }).map((s) => s.id),
+    ).toContain('sources')
+    expect(
+      visibleSettingsSections({ singleProject: false, sources: false, cluster: false }).map((s) => s.id),
+    ).toEqual(ALL_SECTIONS)
+    // `cluster` the same way (`CEZ_CLUSTER=1`,
+    // `.ai/specs/2026-08-22-multi-node-cezar-cluster.md` Verification 12). Both directions, because
+    // the gate drops the ROUTE as well as the nav entry: `visibleSettingsSections` is what the
+    // shell builds its route table from, so a section missing here is a 404 at
+    // `/settings/cluster` — and asserting only the nav would pass against a reachable orphan
+    // route.
+    expect(
+      visibleSettingsSections({ singleProject: false, sources: false, cluster: true }).map((s) => s.id),
+    ).toContain('cluster')
+    expect(
+      visibleSettingsSections({ singleProject: false, sources: false, cluster: false }).map((s) => s.id),
+    ).not.toContain('cluster')
+    // Unknown health reads as off, like every other gate here.
+    expect(visibleSettingsSections().map((s) => s.id)).not.toContain('cluster')
   })
 
   it('marks scope as a FIELD: appliesTo, not a routing area', () => {
@@ -242,9 +257,9 @@ describe('the section registry', () => {
     // Accounts, Teams and Account all survive: a single-project cockpit still runs on ONE of
     // possibly several logins in an org with more than one team, and can still have a session to
     // sign out of — none of that is "how many projects".
-    expect(visibleSettingsSections({ singleProject: true, sources: false }).map((s) => s.id)).toEqual(
-      ALL_SECTIONS.filter((id) => id !== 'projects'),
-    )
+    expect(
+      visibleSettingsSections({ singleProject: true, sources: false, cluster: false }).map((s) => s.id),
+    ).toEqual(ALL_SECTIONS.filter((id) => id !== 'projects'))
   })
 })
 

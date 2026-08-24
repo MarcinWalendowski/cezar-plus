@@ -1,7 +1,18 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { readFileSync, rmSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve as resolvePath } from 'node:path';
+import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 import type {
   AgentEvent,
   AgentRunResult,
@@ -21,9 +32,14 @@ import { costWeightedTokens, type RawUsage } from './usage.ts';
 import { readNdjson } from './ndjson.ts';
 import type { UiEvent } from './ui-events.ts';
 import { BrokeredSession } from './brokered-session.ts';
-import { brokerArgs, resolveBrokerCommand, type BrokerSessionRequest } from './broker-launch.ts';
-import { buildBrokerLaunchArgv, userScopeEnv } from './broker-isolation.ts';
-import { spoolPaths, type SpoolExit } from './run-spool.ts';
+import {
+  brokerArgs,
+  resolveBrokerCommand,
+  type BrokerSessionRequest,
+  type ResourceKillReport,
+} from './broker-launch.ts';
+import { buildBrokerLaunchArgv, detectResourceKill, userScopeEnv } from './broker-isolation.ts';
+import { readSpoolMeta, spoolPaths, type SpoolExit } from './run-spool.ts';
 import {
   claudeTurnStarted,
   createClaudeUiState,
@@ -293,7 +309,7 @@ export class ClaudeCliRunner implements AgentRunner {
         stdinOpen = false;
       }
 
-      const exitCode = await waitForExit(child);
+      const { code: exitCode, signal: exitSignal } = await waitForExit(child);
       if (eofTermTimer) clearTimeout(eofTermTimer);
       if (eofKillTimer) clearTimeout(eofKillTimer);
 
@@ -321,10 +337,20 @@ export class ClaudeCliRunner implements AgentRunner {
         return { text, toolCalls, tokensUsed, sessionId: spec.sessionId };
       }
 
+      // An external signal death — an operator's `kill -9`, the kernel OOM killer, anything cezar
+      // did not send. SIGKILL (and most other signals) cannot be trapped, so Node reports these as
+      // `code: null` with `signal` set, which used to fall straight through the check below
+      // (`exitCode !== null` is false) and read exactly like a clean exit. `terminatedByCezar` is
+      // what tells this apart from our OWN escalation reaching SIGKILL, handled identically to
+      // before this check existed — see the branch above.
+      if (exitSignal && !terminatedByCezar) {
+        const msg = `claude CLI was killed by signal ${exitSignal}${stderrDetail(stderrChunks)}`;
+        onEvent?.({ type: 'error', message: msg });
+        throw new Error(msg);
+      }
+
       if (exitCode !== 0 && exitCode !== null) {
-        const stderr = stderrChunks.join('').trim();
-        const detail = stderr ? ` — ${stderr.split('\n').slice(-3).join(' | ')}` : '';
-        const msg = `claude CLI exited with code ${exitCode}${detail}`;
+        const msg = `claude CLI exited with code ${exitCode}${stderrDetail(stderrChunks)}`;
         onEvent?.({ type: 'error', message: msg });
         throw new Error(msg);
       }
@@ -385,6 +411,11 @@ export class ClaudeCliRunner implements AgentRunner {
       // the whole point of `brokerAvailable()` is that the caller decides that BEFORE spawning.
       throw new Error('run broker requested but this cezar has no built entry point to re-exec');
     }
+    if (!request.instanceId) throw new Error('fresh broker launch requires an instance id');
+    // Fault injection for `.ai/specs/2026-08-22-bounded-transient-broker-retry.md` Verification
+    // §4/§6 only: reproduces the permanent "nothing was ever started" case without a poisoned
+    // systemd scope. Inert unless the variable is set (Verification §5).
+    const neverStart = process.env.CEZ_BROKER_FAULT === 'never-start';
     // A previous session's spool must never be mistaken for this one's. Removing it before the
     // broker writes `meta.json` also means `isSpoolLive` can never observe a half-replaced spool:
     // it either sees the old complete one, or nothing, or the new complete one.
@@ -393,11 +424,25 @@ export class ClaudeCliRunner implements AgentRunner {
     const argv = buildBrokerLaunchArgv({
       isolation: request.isolation ?? 'none',
       runId: request.runId,
+      // Unique per LAUNCH, not per run — a run spawns one broker per step, and a scope unit name
+      // reused while the previous scope is still alive makes `systemd-run` exit 1 without starting
+      // anything (`brokerScopeUnitName`).
+      // Supplied by the caller since the dead-twin fix — the id has to be the one the spool was
+      // opened under, so minting a fresh one here would re-introduce the mismatch that let one
+      // launch read another's exit record.
+      instanceId: request.instanceId,
+      // D14a's bounds actually reaching the scope. Without this line `MemoryHigh`/`MemoryMax`/
+      // `CPUWeight` and the `cezar-runs.slice` ceiling are config that governs nothing, and
+      // `attachBroker`'s kill attribution below would be describing a bound that is not there.
+      // `buildBrokerLaunchArgv` drops it outside `scope` isolation — there is no cgroup of the
+      // launch's own to put a property on — which is the same condition the attribution uses.
+      ...(request.resources ? { resources: request.resources } : {}),
       command: [
         ...brokerCommand,
         ...brokerArgs({
           spoolDir: request.spoolDir,
           runId: request.runId,
+          instanceId: request.instanceId,
           stepId: request.stepId,
           backend: this.backend,
           cwd: spec.cwd,
@@ -408,37 +453,70 @@ export class ClaudeCliRunner implements AgentRunner {
 
     let spawnFailed: Error | null = null;
     const [bin, ...rest] = argv;
-    try {
-      const proc = nodeSpawn(bin as string, rest, {
-        cwd: spec.cwd,
-        // The agent's environment, not ours: the broker execs the backend with its OWN
-        // `process.env`, so `buildChildEnv`'s allowlist has to be applied here or the agent would
-        // inherit the server's environment wholesale — the exact least-privilege regression #427
-        // closed.
-        // `buildChildEnv` is an ALLOWLIST, so it drops XDG_RUNTIME_DIR — and without that,
-        // `systemd-run --user` cannot find the user bus, so the scope launch fails even where a
-        // lingering user manager exists. Added only in `scope` mode, and only when the variable is
-        // genuinely absent, so the allowlist stays as narrow as #427 made it.
-        env: {
-          ...buildChildEnv({ backend: this.backend, extraEnv: spec.env }),
-          ...(request.isolation === 'scope' ? userScopeEnv() : {}),
-        },
-        // Detached + no stdio: the broker must not hold a pipe whose read end dies with us. That
-        // pipe is the thing this entire phase exists to remove.
-        detached: true,
-        stdio: 'ignore',
-      });
-      proc.on('error', (err: NodeJS.ErrnoException) => {
-        spawnFailed = wrapSpawnError(err, bin as string);
-      });
-      proc.unref();
-    } catch (err) {
-      throw wrapSpawnError(err, bin as string);
+    const launchLog = brokerLaunchLogPath(request.spoolDir);
+    if (neverStart) {
+      // Nothing spawned, so `meta.json` is never written — the launch log line is the only trace,
+      // exactly like a launcher that refused on the way out.
+      try {
+        appendFileSync(launchLog, 'fault injection: never-start\n');
+      } catch {
+        // Diagnostics must never block a run.
+      }
+    } else {
+      const launchLogFd = openLaunchLog(launchLog);
+      try {
+        const proc = nodeSpawn(bin as string, rest, {
+          cwd: spec.cwd,
+          // The agent's environment, not ours: the broker execs the backend with its OWN
+          // `process.env`, so `buildChildEnv`'s allowlist has to be applied here or the agent would
+          // inherit the server's environment wholesale — the exact least-privilege regression #427
+          // closed.
+          // `buildChildEnv` is an ALLOWLIST, so it drops XDG_RUNTIME_DIR — and without that,
+          // `systemd-run --user` cannot find the user bus, so the scope launch fails even where a
+          // lingering user manager exists. Added only in `scope` mode, and only when the variable is
+          // genuinely absent, so the allowlist stays as narrow as #427 made it.
+          env: {
+            ...buildChildEnv({ backend: this.backend, extraEnv: spec.env }),
+            ...(request.isolation === 'scope' ? userScopeEnv() : {}),
+          },
+          // Detached, and stdio that is never a PIPE: the broker must not hold a pipe whose read end
+          // dies with us. That pipe is the thing this entire phase exists to remove.
+          //
+          // It used to be `stdio: 'ignore'` outright, which also threw away the LAUNCHER's diagnostics
+          // — and when `systemd-run` refuses to start a scope it says so on stderr and exits 1, which
+          // is not a spawn `error` event, so `spawnFailed` stays null and nothing is recorded
+          // anywhere on the box. A run then failed with "run broker did not respond after 5000ms",
+          // naming a process that was never created. A FILE fd keeps the no-pipe property intact
+          // while making that class of failure legible
+          // (`.ai/specs/2026-08-22-broker-scope-unit-name-collision.md`).
+          detached: true,
+          stdio: ['ignore', launchLogFd ?? 'ignore', launchLogFd ?? 'ignore'],
+        });
+        proc.on('error', (err: NodeJS.ErrnoException) => {
+          spawnFailed = wrapSpawnError(err, bin as string);
+        });
+        proc.unref();
+      } catch (err) {
+        throw wrapSpawnError(err, bin as string);
+      } finally {
+        // Ours to close either way: the child has its own duplicate of the descriptor, so closing
+        // here neither truncates its output nor leaks an fd per step in a long-running server.
+        if (launchLogFd !== null) {
+          try {
+            closeSync(launchLogFd);
+          } catch {
+            // Already gone (spawn failure paths can close it for us) — nothing to recover.
+          }
+        }
+      }
     }
 
     return this.attachBroker(spec, onEvent, opts, { ...request, startOffset: 0 }, {
       seed: true,
       spawnFailed: () => spawnFailed,
+      // Only `giveUp` reads this, and that is the whole point — "no meta.json" is meaningless at
+      // t=0 and conclusive at t=5s. See `BrokeredSessionOptions.launchFailure`.
+      launchFailure: () => brokerNeverStarted(request.spoolDir, launchLog),
     });
   }
 
@@ -451,11 +529,14 @@ export class ClaudeCliRunner implements AgentRunner {
     onEvent: ((event: AgentEvent) => void) | undefined,
     opts: SessionOptions,
     request: BrokerSessionRequest,
-    mode: { seed: boolean; spawnFailed?: () => Error | null },
+    mode: { seed: boolean; spawnFailed?: () => Error | null; launchFailure?: () => Error | null },
   ): AgentSession {
     let terminatedByCezar = false;
     let timedOut = false;
     let deadline: NodeJS.Timeout | undefined;
+    /** Set by `onExit` when this launch's cgroup bound killed the tree — read by `buildResult` so
+     *  the failure a step reports names the bound instead of only the signal (C3). */
+    let resourceKill: ResourceKillReport | undefined;
 
     const consumer = createClaudeConsumer({
       spec,
@@ -490,27 +571,50 @@ export class ClaudeCliRunner implements AgentRunner {
 
     const session: BrokeredSession = new BrokeredSession({
       spoolDir: request.spoolDir,
+      owner: request.instanceId
+        ? { instanceId: request.instanceId }
+        : (() => {
+            const meta = readSpoolMeta(request.spoolDir);
+            return meta ? { instanceId: meta.instanceId, brokerPid: meta.pid } : undefined;
+          })(),
       startOffset: request.startOffset ?? 0,
+      // A re-attach may follow a complete earlier turn. Never classify its next failed control
+      // request as a cold launch whose agent did no work.
+      previouslyAnswered: !mode.seed,
       onLine: (line) => consumer.handleLine(line),
       onOffset: request.onOffset,
       encodeSend: (content) => encodeClaudeUserMessage(content, spec.sessionId),
       spawnFailed: mode.spawnFailed,
+      launchFailure: mode.launchFailure,
       onExit: (exit) => {
         if (deadline) clearTimeout(deadline);
+        // THE moment of observation, and the only place that holds all three facts at once: the
+        // exit, the bounds this launch was actually created with, and whether the stop was ours.
+        resourceKill = reportedResourceKill(exit, request, { cezarInitiated: terminatedByCezar });
+        if (resourceKill) request.onResourceKill?.(resourceKill);
         emitBrokeredTerminalEvents({
           exit,
           onEvent,
           timedOut,
           limitMs,
           terminatedByCezar,
+          resourceKill,
           sawUsage: consumer.sawUsage(),
         });
       },
-      buildResult: () => {
+      buildResult: (exit) => {
         const failed = mode.spawnFailed?.();
         if (failed) throw failed;
         const totals = consumer.buildResult();
-        const failure = brokeredExitFailure(request.spoolDir, timedOut, terminatedByCezar);
+        const failure = brokeredExitFailure(exit, request.spoolDir, timedOut, terminatedByCezar);
+        // Ahead of `failure`, not folded into it. `brokeredExitFailure` now answers correctly for
+        // an untrapped kill, but it can only say "killed by signal SIGKILL" — it does not know
+        // whether a bound this launch actually carried explains that signal. `resourceKill` does,
+        // and a run whose agent was killed by its own memory ceiling must say so, because the
+        // alternative is the run's agent "fixing" a test that was never broken. Set only when a
+        // configured bound was genuinely applied to THIS launch, so it cannot recolour an
+        // ordinary exit.
+        if (resourceKill) throw resourceKillFailure(failure, resourceKill);
         if (failure) throw failure;
         return totals;
       },
@@ -755,6 +859,65 @@ function truncate(s: string, max = 200): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
+/**
+ * The FAST-PATH guess at Claude Code's own `cwd` → project-directory slug: `/` and `.` both become
+ * `-`, everything else is left alone. Pinned against two measured examples (spec
+ * 2026-08-22-resume-fresh-session-fallback): a dot-free cwd (`/var/lib/cezar/workspace` →
+ * `-var-lib-cezar-workspace`) and a dotted worktree cwd, where `/.ai` produces a doubled dash. Not
+ * a guarantee for every possible cwd — `claudeSessionTranscriptExists` falls back to a directory
+ * scan on a miss, which is what existence correctness actually rests on.
+ */
+export function claudeProjectDirSlug(cwd: string): string {
+  return cwd.replace(/[/.]/g, '-');
+}
+
+/**
+ * Whether a Claude resume target's transcript actually exists on disk, so a doomed `--resume`
+ * never reaches the CLI (spec 2026-08-22-resume-fresh-session-fallback — run `232ad6d4`'s
+ * `commit-push` iteration 1 died before writing one at all).
+ *
+ * Existence is answered by a SCAN of `<claudeHome>/projects`, not by trusting the slug:
+ * `claudeProjectDirSlug(cwd)` is tried first as a cheap fast path, and a miss there falls through
+ * to a scan of every project subdirectory for `<sessionId>.jsonl` — because a false "exists" here
+ * reproduces exactly the bug this check exists to catch.
+ *
+ * The two failure directions are NOT symmetric (see that spec's Architecture/Risks). A false
+ * POSITIVE ("no transcript" for a session that exists) only costs one downgrade to a fresh session
+ * that wasn't needed — harmless. A false NEGATIVE ("transcript exists" — including "the check
+ * could not tell") lets a doomed `--resume` through, which is today's bug reproducing itself. So
+ * any resolution failure — `claudeHome/projects` missing or unreadable — FAILS OPEN: this returns
+ * `true` (unverified, proceed with the resume as today) rather than `false`.
+ */
+export async function claudeSessionTranscriptExists(
+  claudeHome: string,
+  cwd: string,
+  sessionId: string,
+): Promise<boolean> {
+  const projectsDir = join(claudeHome, 'projects');
+  try {
+    await stat(join(projectsDir, claudeProjectDirSlug(cwd), `${sessionId}.jsonl`));
+    return true;
+  } catch {
+    // The slug guess missed — not proof the transcript doesn't exist. Fall through to the scan.
+  }
+  let entries: string[];
+  try {
+    entries = await readdir(projectsDir);
+  } catch {
+    // `claudeHome/projects` couldn't be resolved at all (permissions, missing dir, …) — fail open.
+    return true;
+  }
+  for (const entry of entries) {
+    try {
+      await stat(join(projectsDir, entry, `${sessionId}.jsonl`));
+      return true;
+    } catch {
+      // not in this project dir — keep scanning
+    }
+  }
+  return false;
+}
+
 /** Path to the bundled mock (`scripts/mock-claude.mjs`), for CEZ_DRY_RUN=1. */
 function mockClaudePath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -877,6 +1040,8 @@ function emitBrokeredTerminalEvents(ctx: {
   timedOut: boolean;
   limitMs: number;
   terminatedByCezar: boolean;
+  /** Set when this launch's own cgroup bound killed the tree — see `reportedResourceKill`. */
+  resourceKill?: ResourceKillReport;
   sawUsage: boolean;
 }): void {
   const { onEvent } = ctx;
@@ -887,6 +1052,14 @@ function emitBrokeredTerminalEvents(ctx: {
     onEvent?.({ type: 'done' });
     return;
   }
+  if (ctx.resourceKill) {
+    // `error` and NOT `done`, and deliberately no `reason`: `AgentStopReason` is a published union
+    // and a cgroup kill is not a cezar-initiated stop, so widening it would be lying about who
+    // stopped the run. The step fails, its message names the bound, and `resourceKill` on the
+    // record is the machine-readable half.
+    onEvent?.({ type: 'error', message: resourceKillFailure(null, ctx.resourceKill).message });
+    return;
+  }
   const code = ctx.exit?.code ?? null;
   if (ctx.terminatedByCezar && isSignalTerminationExit(code)) {
     onEvent?.({
@@ -894,6 +1067,16 @@ function emitBrokeredTerminalEvents(ctx: {
       message: `claude CLI did not exit on its own after close; terminated by cezar (code ${code})`,
     });
     onEvent?.({ type: 'done' });
+    return;
+  }
+  // An external signal death — see the identical check in the pipe path's result handling
+  // (`startSession`) for why `code === null` alone used to read as a clean exit. `terminatedByCezar`
+  // is what tells this apart from OUR OWN escalation reaching SIGKILL, which is `code === null` too
+  // and is handled unchanged by the branch above (`isSignalTerminationExit` covers only the
+  // 128+signal shape a CLI that traps the signal reports; a bare untrapped SIGKILL has no code to
+  // match, so cezar's own escalation falls through both checks exactly as it always did).
+  if (ctx.exit?.signal && !ctx.terminatedByCezar) {
+    onEvent?.({ type: 'error', message: brokeredExitMessage(code, ctx.exit) });
     return;
   }
   if (code !== 0 && code !== null) {
@@ -906,29 +1089,85 @@ function emitBrokeredTerminalEvents(ctx: {
   onEvent?.({ type: 'done' });
 }
 
+/**
+ * Whether this launch's own cgroup bound is what killed it, stamped with the instant it was
+ * observed — the caller `detectResourceKill` was written to expect (spec D14a, verification C3).
+ *
+ * Three narrowings, in order, and each one is a way this could otherwise fabricate a cause:
+ *
+ *  1. **`scope` isolation only.** `buildBrokerLaunchArgv` drops `resources` on the `delegated` and
+ *     `none` paths — there is no cgroup of the launch's own to bound — so on those hosts a
+ *     configured `runMemoryMaxMb` governs nothing. Consulting it anyway would attribute every
+ *     stray SIGKILL on a Mac to a limit that has never existed on that machine.
+ *  2. **`detectResourceKill`'s own two tests**: not a cezar-initiated stop, and a memory bound was
+ *     genuinely configured for this launch.
+ *  3. **`at` comes from the broker's `exitedAt` when it has one.** The broker writes `exit.json`
+ *     the moment the child dies; this function runs when the tail next notices the file, and after
+ *     a server restart that can be far later. The earlier of the two is the observation, so a
+ *     re-attach does not stamp a kill with the time cezar came back. A non-ISO `exitedAt` (the
+ *     spool schema checks that it is a string, not that it is a date) falls back to now rather
+ *     than putting an unparseable instant on the record.
+ */
+export function reportedResourceKill(
+  exit: SpoolExit | null,
+  request: Pick<BrokerSessionRequest, 'isolation' | 'resources'>,
+  opts: { cezarInitiated: boolean; now?: () => Date },
+): ResourceKillReport | undefined {
+  if (!exit) return undefined;
+  if (request.isolation !== 'scope') return undefined;
+  const detected = detectResourceKill(
+    { code: exit.code, signal: exit.signal as NodeJS.Signals | null },
+    request.resources ?? {},
+    { cezarInitiated: opts.cezarInitiated },
+  );
+  if (!detected) return undefined;
+  const observed = exit.exitedAt;
+  const at =
+    observed !== undefined && !Number.isNaN(Date.parse(observed))
+      ? observed
+      : (opts.now?.() ?? new Date()).toISOString();
+  return { limit: detected.limit, at, detail: detected.detail };
+}
+
+/** One message for a kill, whether or not the exit ALSO produced an ordinary failure to append to
+ *  (it usually does not — a bare `signal: 'SIGKILL'` carries no exit code at all). */
+function resourceKillFailure(failure: Error | null, kill: ResourceKillReport): Error {
+  return new Error(
+    failure ? `${failure.message} — ${kill.detail}` : `claude CLI was killed by a resource bound — ${kill.detail}`,
+  );
+}
+
 /** The `Error` a brokered run rejects with, or null when it ended acceptably. */
-function brokeredExitFailure(spoolDir: string, timedOut: boolean, terminatedByCezar: boolean): Error | null {
+function brokeredExitFailure(exit: SpoolExit | null, spoolDir: string, timedOut: boolean, terminatedByCezar: boolean): Error | null {
   if (timedOut) return null;
-  const exit = readSpoolExitSafe(spoolDir);
   const code = exit?.code ?? null;
-  if (code === 0 || code === null) return null;
-  if (terminatedByCezar && isSignalTerminationExit(code)) return null;
+  if (code === 0) return null;
+  if (terminatedByCezar) {
+    // Our own teardown (EOF watchdog, cancel) reports back however the platform reports a signal
+    // death: 128+signal if the CLI traps it (`isSignalTerminationExit`), or a bare `code: null`
+    // when nothing does — SIGKILL cannot be trapped, so cezar's own SIGTERM→SIGKILL escalation
+    // lands here too. Unchanged from before this fix: both settle on the normal path.
+    if (code === null || isSignalTerminationExit(code)) return null;
+    return new Error(brokeredExitMessage(code, exit, spoolDir));
+  }
+  // Not our doing. `code === null` with no signal recorded means no exit was ever observed (the
+  // broker never wrote exit.json) — nothing to blame the run for. `code === null` WITH a signal is
+  // an external kill — an operator's `kill -9`, the kernel OOM killer, anything untrapped — and
+  // used to read exactly like a clean exit, because an untrapped signal carries no exit code at
+  // all (see the identical `exitSignal` check on the pipe path).
+  if (code === null && !exit?.signal) return null;
   return new Error(brokeredExitMessage(code, exit, spoolDir));
 }
 
-function brokeredExitMessage(code: number, exit: SpoolExit | null, spoolDir?: string): string {
+function brokeredExitMessage(code: number | null, exit: SpoolExit | null, spoolDir?: string): string {
   const stderr = spoolDir ? spooledStderrTail(spoolDir) : '';
   const detail = stderr ? ` — ${stderr}` : '';
-  const signal = exit?.signal ? ` (signal ${exit.signal})` : '';
-  return `claude CLI exited with code ${code}${signal}${detail}`;
-}
-
-function readSpoolExitSafe(spoolDir: string): SpoolExit | null {
-  try {
-    return JSON.parse(readFileSync(spoolPaths(spoolDir).exit, 'utf8')) as SpoolExit;
-  } catch {
-    return null;
-  }
+  const signal = exit?.signal ?? null;
+  const summary =
+    code === null
+      ? `claude CLI was killed by signal ${signal ?? 'unknown'}`
+      : `claude CLI exited with code ${code}${signal ? ` (signal ${signal})` : ''}`;
+  return `${summary}${detail}`;
 }
 
 /** The last three lines of the broker's `err.log` — the brokered twin of the pipe path's
@@ -943,28 +1182,111 @@ function spooledStderrTail(spoolDir: string): string {
 
 // ---- subprocess plumbing --------------------------------------------------
 
-function waitForExit(child: ChildProcessWithoutNullStreams): Promise<number | null> {
-  if (child.exitCode != null) return Promise.resolve(child.exitCode);
+interface ChildExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+/**
+ * A child killed by an untrapped signal (SIGKILL, or any signal nothing installed a handler for)
+ * reports `code: null` — the signal is the only fact Node records about how it died. The old
+ * shape here returned the bare code and threw the signal away before any caller could see it,
+ * which is how an external `kill -9` (an operator, the kernel OOM killer) came to read exactly
+ * like a clean exit — see the `exitSignal` check in `startSession`'s result handling.
+ */
+function waitForExit(child: ChildProcessWithoutNullStreams): Promise<ChildExit> {
+  if (child.exitCode != null || child.signalCode != null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
   return new Promise((resolve) => {
     let done = false;
-    const fin = (code: number | null) => {
+    const fin = (code: number | null, signal: NodeJS.Signals | null) => {
       if (done) return;
       done = true;
       clearTimeout(safety);
-      resolve(code);
+      resolve({ code, signal });
     };
-    child.once('close', (code) => fin(code));
-    child.once('exit', (code) => fin(code));
+    child.once('close', (code, signal) => fin(code, signal));
+    child.once('exit', (code, signal) => fin(code, signal));
     // Don't swallow a late error as a clean null exit — fall back to the
     // child's own exit code (which is non-null/non-zero on failure).
-    child.once('error', () => fin(child.exitCode ?? null));
+    child.once('error', () => fin(child.exitCode ?? null, child.signalCode ?? null));
     // A SIGKILLed process may never emit 'close' through some edge cases.
     const safety = setTimeout(
-      () => fin(child.exitCode ?? null),
+      () => fin(child.exitCode ?? null, child.signalCode ?? null),
       EOF_TERM_GRACE_MS + EOF_KILL_GRACE_MS + KILL_GRACE_MS + 5_000,
     );
     safety.unref?.();
   });
+}
+
+/** The last few lines of the pipe path's own captured stderr, formatted as an error suffix — the
+ *  in-process twin of the brokered path's `spooledStderrTail`. */
+function stderrDetail(stderrChunks: string[]): string {
+  const stderr = stderrChunks.join('').trim();
+  return stderr ? ` — ${stderr.split('\n').slice(-3).join(' | ')}` : '';
+}
+
+/**
+ * Where a broker LAUNCHER's own output goes.
+ *
+ * Beside the run's spool tree, never inside an instance directory, so
+ * a log written in there would be erased by the next step — exactly the step whose failure we are
+ * trying to explain. One file per run, appended across its steps.
+ */
+export function brokerLaunchLogPath(spoolDir: string): string {
+  const runSpoolDir = dirname(spoolDir);
+  return resolvePath(dirname(runSpoolDir), `${basename(runSpoolDir).replace(/\.spool$/, '')}.broker.log`);
+}
+
+/** Open the launch log for append, or `null` if we cannot — diagnostics must never block a run. */
+function openLaunchLog(path: string): number | null {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    return openSync(path, 'a');
+  } catch {
+    return null;
+  }
+}
+
+/** Bytes to quote back from the launch log. Enough for systemd's refusal plus context, short
+ *  enough that a chatty launcher cannot flood a step's error message. */
+const LAUNCH_LOG_TAIL_BYTES = 2000;
+
+/**
+ * Why the control channel never came up, when the broker itself was never started.
+ *
+ * Consulted only once `BrokeredSession` has exhausted its retry budget. `meta.json` is the proof:
+ * the broker writes it before binding, so its ABSENCE after five seconds means no broker ever ran —
+ * and "did not respond" is then a false description of a process that does not exist. If the
+ * launcher said anything on the way out (a refused `systemd-run` scope says a great deal), that is
+ * the actual cause and it goes in the message.
+ */
+export function brokerNeverStarted(spoolDir: string, launchLog: string): Error | null {
+  if (readSpoolMeta(spoolDir)) return null;
+  const detail = readLaunchLogTail(launchLog);
+  return new Error(
+    `run broker for ${spoolDir} was never started — no meta.json was written` +
+      (detail ? `; launcher said: ${detail}` : ''),
+  );
+}
+
+function readLaunchLogTail(path: string): string {
+  try {
+    if (!existsSync(path)) return '';
+    const size = statSync(path).size;
+    const fd = openSync(path, 'r');
+    try {
+      const start = Math.max(0, size - LAUNCH_LOG_TAIL_BYTES);
+      const buf = Buffer.alloc(Math.min(size, LAUNCH_LOG_TAIL_BYTES));
+      readSync(fd, buf, 0, buf.length, start);
+      return buf.toString('utf8').trim().split('\n').slice(-5).join(' | ');
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
 }
 
 function wrapSpawnError(err: unknown, bin: string): Error {

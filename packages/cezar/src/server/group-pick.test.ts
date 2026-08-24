@@ -8,6 +8,7 @@ import { RunStore, type RunRecord } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { createApp } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Group-pick winner-park under the optional review gate (#489). The
@@ -61,7 +62,7 @@ describe('POST /api/v1/groups/:groupId/pick — review gate', () => {
 
   /** A finished (`done`) group winner whose worktree holds a real diff vs base. */
   function winnerRun(autonomous?: boolean): RunRecord {
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', autonomous, steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', autonomous, steps: [] });
     store.updateRun(run.id, {
       groupId: 'g1',
       variant: 'A',

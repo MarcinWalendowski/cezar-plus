@@ -1,5 +1,9 @@
+import { readFileSync, statSync } from 'node:fs';
+import { dirname } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 import { buildChildEnv, looksSecret } from './agent-env.ts';
+import { halfParallelism } from './search-parallelism.ts';
 
 /**
  * #427: the spawned backend must NOT inherit the full host environment. It
@@ -340,6 +344,86 @@ describe('agent-profile config dirs reach the child', () => {
       source: { PATH: '/usr/bin', CEZ_AGENT_ENV_FULL: '1', CLAUDE_CONFIG_DIR: '/home/u/.claude' },
     });
     expect(env.CLAUDE_CONFIG_DIR).toBe('/home/u/.claude-klaudiusz');
+  });
+});
+
+/**
+ * Package 0.5, D14a: the OTHER half of the burst bound, alongside `vitest.config.ts`'s
+ * `maxWorkers`. `RIPGREP_CONFIG_PATH` is the mechanism (see the docblock above
+ * `ripgrepConfigPath` in `agent-env.ts` for how it was verified against the real `claude`/`codex`
+ * binaries) — these pin cezar's own default, the override, and that an explicit choice wins.
+ */
+describe('buildChildEnv — ripgrep thread cap (package 0.5, D14a)', () => {
+  it('sets RIPGREP_CONFIG_PATH to a file capping threads to the derived default', () => {
+    const env = buildChildEnv({ backend: 'claude', source: { PATH: '/usr/bin' } });
+    expect(env.RIPGREP_CONFIG_PATH).toBeDefined();
+    const contents = readFileSync(env.RIPGREP_CONFIG_PATH as string, 'utf8');
+    expect(contents.trim()).toBe(`--threads=${halfParallelism()}`);
+  });
+
+  it('CEZ_RIPGREP_THREADS overrides the default', () => {
+    const env = buildChildEnv({
+      backend: 'claude',
+      source: { PATH: '/usr/bin', CEZ_RIPGREP_THREADS: '3' },
+    });
+    const contents = readFileSync(env.RIPGREP_CONFIG_PATH as string, 'utf8');
+    expect(contents.trim()).toBe('--threads=3');
+  });
+
+  it('an invalid CEZ_RIPGREP_THREADS (0) falls back to the derived default, not to 0', () => {
+    // 0 threads is not "unbounded" for ripgrep, it is "never searches" — `positiveIntEnvOr`
+    // treats it as unset, same as an empty string or NaN.
+    const env = buildChildEnv({
+      backend: 'claude',
+      source: { PATH: '/usr/bin', CEZ_RIPGREP_THREADS: '0' },
+    });
+    const contents = readFileSync(env.RIPGREP_CONFIG_PATH as string, 'utf8');
+    expect(contents.trim()).toBe(`--threads=${halfParallelism()}`);
+  });
+
+  it('an explicit RIPGREP_CONFIG_PATH (per-run extraEnv) is never overridden — a real choice wins', () => {
+    const env = buildChildEnv({
+      backend: 'claude',
+      extraEnv: { RIPGREP_CONFIG_PATH: '/home/dev/.ripgreprc' },
+      source: { PATH: '/usr/bin' },
+    });
+    expect(env.RIPGREP_CONFIG_PATH).toBe('/home/dev/.ripgreprc');
+  });
+
+  it('applies to every backend, not only claude/codex', () => {
+    for (const backend of ['claude', 'codex', 'opencode', 'pi'] as const) {
+      const env = buildChildEnv({ backend, source: { PATH: '/usr/bin' } });
+      expect(env.RIPGREP_CONFIG_PATH).toBeDefined();
+    }
+  });
+
+  it('the config file lives in a PRIVATE directory, not at a guessable path in a shared /tmp', () => {
+    // Not a style preference. A ripgrep config file accepts any ripgrep flag, and `--pre=<cmd>`
+    // makes ripgrep run that command for every file it searches. The first version of this wrote
+    // `${tmpdir()}/cezar-ripgrep-threads-${n}.conf` — a fully predictable name another local user
+    // on a shared box can create first (writeFileSync follows symlinks), then rewrite after cezar
+    // has written it, since the path is cached and reused for the life of the process. That is
+    // arbitrary command execution as the cezar user, from a feature whose entire job is to lower a
+    // thread count.
+    const env = buildChildEnv({ backend: 'claude', source: { PATH: '/usr/bin' } });
+    const file = env.RIPGREP_CONFIG_PATH as string;
+    const dir = dirname(file);
+    // 0700 on the directory is what makes the random name matter: nobody else may enter it even
+    // if they learn it. (`mode & 0o777` — the type bits are not part of the claim.)
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    // And the name is not derivable from the thread count, which is the whole point.
+    expect(file).not.toContain(`threads-${halfParallelism()}`);
+  });
+
+  it('the CEZ_AGENT_ENV_FULL escape hatch stays untouched — no ripgrep cap injected', () => {
+    // The hatch's whole point is byte-for-byte legacy behavior; cezar's own defaults (this one
+    // included) must not sneak back in under it.
+    const env = buildChildEnv({
+      backend: 'claude',
+      source: { PATH: '/usr/bin', CEZ_AGENT_ENV_FULL: '1' },
+    });
+    expect(env.RIPGREP_CONFIG_PATH).toBeUndefined();
   });
 });
 

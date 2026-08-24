@@ -1,11 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { defaultHost, runReleaseDeploy, type ReleaseDeployHost } from './release-deploy.ts';
 import { DETACHED_ENV } from './self-safe-deploy.ts';
-import { loadLedger } from './releases.ts';
+import { loadLedger, saveLedger } from './releases.ts';
 import type { ProbeResult } from './deploy-strategy.ts';
 
 /**
@@ -19,6 +20,7 @@ import type { ProbeResult } from './deploy-strategy.ts';
  */
 describe('runReleaseDeploy', () => {
   const dirs: string[] = [];
+  let nowTick = 0;
   afterEach(() => {
     while (dirs.length) rmSync(dirs.pop() as string, { recursive: true, force: true });
   });
@@ -33,11 +35,12 @@ describe('runReleaseDeploy', () => {
     host: ReleaseDeployHost;
     staged: string[];
     restarts: number;
+    probes: number;
     detached: string[][];
   }
 
   function recorder(overrides: Partial<ReleaseDeployHost> = {}): Recorder {
-    const rec: Recorder = { staged: [], restarts: 0, detached: [], host: {} as ReleaseDeployHost };
+    const rec: Recorder = { staged: [], restarts: 0, probes: 0, detached: [], host: {} as ReleaseDeployHost };
     rec.host = {
       async stage(_source, target) {
         mkdirSync(target, { recursive: true });
@@ -55,8 +58,12 @@ describe('runReleaseDeploy', () => {
       async probeReady(): Promise<ProbeResult> {
         return { ok: true };
       },
+      async waitReady(): Promise<ProbeResult> {
+        rec.probes += 1;
+        return { ok: true };
+      },
       freeBytes: () => Number.POSITIVE_INFINITY,
-      now: () => '2026-08-21T09:00:00.000Z',
+      now: () => new Date(Date.parse('2026-08-21T09:00:00.000Z') + nowTick++ * 1_000).toISOString(),
       spawnDetached: (argv) => rec.detached.push(argv),
       systemdRunAvailable: () => false,
       cgroup: () => '0::/user.slice/session-1.scope',
@@ -74,8 +81,29 @@ describe('runReleaseDeploy', () => {
     const linkPath = join(root, 'cezar');
     symlinkSync(seed, linkPath);
     const source = join(root, 'src');
-    mkdirSync(source, { recursive: true });
+    mkdirSync(join(source, 'packages/cezar/dist'), { recursive: true });
+    mkdirSync(join(source, 'packages/cezar/src'), { recursive: true });
+    writeFileSync(join(source, 'packages/cezar/package.json'), '{"version":"0.10.0"}\n');
+    writeFileSync(join(source, 'packages/cezar/src/index.ts'), 'export {};\n');
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: source });
+    execFileSync('git', ['add', '-A'], { cwd: source });
+    execFileSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@local', 'commit', '-q', '-m', 'source'], { cwd: source });
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8' }).trim();
+    writeFileSync(join(source, 'packages/cezar/dist/.build-stamp.json'), JSON.stringify({ stampVersion: 1, sha, builtAt: '2099-01-01T00:00:00.000Z', dirty: false, version: '0.10.0' }));
     return { linkPath, releasesDir, source };
+  }
+
+  /** A second real commit + matching build stamp, so a second deploy produces a genuinely
+   *  distinct release id rather than tripping the `--sha` gate with a fabricated one. */
+  function advanceSource(source: string, marker: string): void {
+    writeFileSync(join(source, 'packages/cezar/src/index.ts'), `export const marker = '${marker}';\n`);
+    execFileSync('git', ['add', '-A'], { cwd: source });
+    execFileSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@local', 'commit', '-q', '-m', marker], { cwd: source });
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8' }).trim();
+    writeFileSync(
+      join(source, 'packages/cezar/dist/.build-stamp.json'),
+      JSON.stringify({ stampVersion: 1, sha, builtAt: '2099-01-01T00:00:00.000Z', dirty: false, version: '0.10.0' }),
+    );
   }
 
   it('hands the deploy to a transient unit when it is inside the cgroup it is about to restart', async () => {
@@ -137,11 +165,11 @@ describe('runReleaseDeploy', () => {
     const box = migratedBox();
     // Seed a `current` so there is somewhere to roll back TO.
     const rec = recorder({ probeReady: async () => ({ ok: false, detail: '/api/v1/ready answered 500' }) });
-    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const firstCurrent = loadLedger(box.releasesDir).current;
     expect(firstCurrent).toBeTruthy();
 
-    const result = await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, rec.host);
+    const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
 
     expect(result.ok).toBe(false);
     expect(result.outcome?.failedAt).toBe('readiness');
@@ -169,6 +197,40 @@ describe('runReleaseDeploy', () => {
     expect(rec.staged).toEqual([]);
   });
 
+  it('reports a failed rollback readiness probe without rebuilding', async () => {
+    const box = migratedBox();
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+    advanceSource(box.source, 'second');
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+    const rec = recorder({ waitReady: async () => ({ ok: false, detail: 'boom' }) });
+
+    const result = await runReleaseDeploy({ ...box, env: {}, rollbackTo: '' }, rec.host);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('boom');
+    expect(result.outcome?.failedAt).toBe('readiness');
+    expect(rec.staged).toEqual([]);
+  });
+
+  it('restores and probes the pre-rollback release when the target is dead', async () => {
+    const box = migratedBox();
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+    advanceSource(box.source, 'second');
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+    const before = loadLedger(box.releasesDir).current;
+    let probes = 0;
+    const rec = recorder({
+      waitReady: async () => (++probes === 1 ? { ok: false, detail: 'dead target' } : { ok: true }),
+    });
+
+    const result = await runReleaseDeploy({ ...box, env: {}, rollbackTo: '' }, rec.host);
+
+    expect(result.ok).toBe(false);
+    expect(rec.restarts).toBe(2);
+    expect(loadLedger(box.releasesDir).current).toBe(before);
+    expect(result.outcome?.serving).toEqual({ releaseId: before, ready: true });
+  });
+
   it('refuses to stage when the disk is nearly full, before touching anything', async () => {
     const box = migratedBox();
     const rec = recorder({ freeBytes: () => 100 * 1024 * 1024 });
@@ -180,9 +242,9 @@ describe('runReleaseDeploy', () => {
 
   it('rolls back to the previous release on request, with one restart', async () => {
     const box = migratedBox();
-    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const first = loadLedger(box.releasesDir).current;
-    await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     expect(loadLedger(box.releasesDir).current).not.toBe(first);
 
     const rec = recorder();
@@ -191,6 +253,7 @@ describe('runReleaseDeploy', () => {
     expect(result.ok).toBe(true);
     expect(loadLedger(box.releasesDir).current).toBe(first);
     expect(rec.restarts).toBe(1);
+    expect(rec.probes).toBe(1);
     // A rollback rebuilds nothing — it is a symlink rename, which is what makes it seconds.
     expect(rec.staged).toEqual([]);
   });
@@ -206,9 +269,9 @@ describe('runReleaseDeploy', () => {
 
   it('a rollback dry run does not flip the symlink or restart — regression for the gap where --rollback --dry-run performed a real rollback', async () => {
     const box = migratedBox();
-    await runReleaseDeploy({ ...box, env: {}, sha: 'aaaaaaa' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const first = loadLedger(box.releasesDir).current;
-    await runReleaseDeploy({ ...box, env: {}, sha: 'bbbbbbb' }, recorder().host);
+    await runReleaseDeploy({ ...box, env: {} }, recorder().host);
     const second = loadLedger(box.releasesDir).current;
     expect(second).not.toBe(first);
 
@@ -284,6 +347,22 @@ describe('runReleaseDeploy', () => {
       // Vitest does not run as root, so this exercises the real branch.
       if ((process.getuid?.() ?? 0) !== 0) expect(argv).toContain('--user');
     });
+
+    it('emits `--rollback=`, never a bare `--rollback`, in the transient unit argv for an empty rollback (`.ai/specs/2026-08-23-bare-rollback-argv-trap.md`)', async () => {
+      // Before the fix, `reExecCommand` pushed the literal bare `--rollback` token here, followed
+      // unconditionally by `--release-id=…` — an argv the child's own `parseArgs` cannot accept
+      // (`argument is ambiguous`), so the detached rollback died silently while the parent reported
+      // `{ ok: true, detachedUnit }` and exited 0. This is the fail-OPEN half of the bug.
+      const box = migratedBox();
+      const rec = recorder({ killMode: () => 'control-group', cgroup: () => INSIDE, systemdRunAvailable: () => true });
+      const result = await runReleaseDeploy({ ...box, env: {}, rollbackTo: '' }, rec.host);
+
+      expect(result.detachedUnit).toBeTruthy();
+      expect(rec.detached).toHaveLength(1);
+      const argv = rec.detached[0] ?? [];
+      expect(argv).toContain('--rollback=');
+      expect(argv).not.toContain('--rollback');
+    });
   });
 
   describe('defaultHost(log).stage — the real rsync, not a mock (2026-08-22)', () => {
@@ -314,6 +393,283 @@ describe('runReleaseDeploy', () => {
       expect(existsSync(join(target, '.ai/cezar/runs'))).toBe(false);
       expect(existsSync(join(target, '.ai/cezar/worktrees'))).toBe(false);
       expect(existsSync(join(target, '.ai/cezar/tmp'))).toBe(false);
+    });
+  });
+
+  /**
+   * A2 (the build-stamp gate) and B1 (the live-sha relation gate), spec
+   * `.ai/specs/2026-08-22-live-worktree-reaped-mid-run.md`. Before this describe block neither gate
+   * had a single test: the incident that motivated them (a stale `dist/` shipped under a fresh sha)
+   * would have sailed through every pre-existing `it()` in this file, because `migratedBox()`'s
+   * fixture stamp always agrees with source HEAD. Per that spec's Q9, a naive "the branch still
+   * exists"-style assertion proves nothing here — these assert on the REFUSAL and on what the
+   * ledger records, which is the only thing that would have caught `504ce87f`.
+   */
+  describe('artifact + ancestry gates (A2/B1, 2026-08-22)', () => {
+    /** A real, resolvable-but-wrong sha: same shape as a real one, cannot possibly equal HEAD. */
+    const WRONG_SHA = 'a'.repeat(40);
+    const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
+
+    /** A second worktree of `source`'s own repo, detached at `sha`, with its own dist + stamp —
+     *  i.e. a second checkout that is genuinely BEHIND (or beside) `source`'s current HEAD, which
+     *  `advanceSource` cannot produce because it only ever moves one tree forward. */
+    function checkoutAt(source: string, sha: string, stampSha = sha): string {
+      // `git worktree add` refuses a target path that already exists, even empty — so the leaf
+      // itself must not be pre-created the way `scratch()`'s `mkdtemp` does.
+      const dir = join(scratch(), 'wt');
+      execFileSync('git', ['worktree', 'add', '-q', '--detach', dir, sha], { cwd: source });
+      mkdirSync(join(dir, 'packages/cezar/dist'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/cezar/dist/.build-stamp.json'),
+        JSON.stringify({ stampVersion: 1, sha: stampSha, builtAt: '2099-01-01T00:00:00.000Z', dirty: false, version: '0.10.0' }),
+      );
+      return dir;
+    }
+
+    /** A worktree that commits ONE MORE change on top of `sha`, independently of whatever `source`
+     *  itself later did from that same point — the shape of two tasks branching off a shared base,
+     *  which is what makes B1's divergent case (neither side is an ancestor of the other). */
+    function divergeFrom(source: string, sha: string, marker: string): { dir: string; sha: string } {
+      const dir = checkoutAt(source, sha);
+      writeFileSync(join(dir, 'packages/cezar/src/index.ts'), `export const marker = '${marker}';\n`);
+      execFileSync('git', ['add', '-A'], { cwd: dir });
+      execFileSync('git', [...GIT_ID, 'commit', '-q', '-m', marker], { cwd: dir });
+      const newSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+      writeFileSync(
+        join(dir, 'packages/cezar/dist/.build-stamp.json'),
+        JSON.stringify({ stampVersion: 1, sha: newSha, builtAt: '2099-01-01T00:00:00.000Z', dirty: false, version: '0.10.0' }),
+      );
+      return { dir, sha: newSha };
+    }
+
+    function currentEntry(releasesDir: string) {
+      const ledger = loadLedger(releasesDir);
+      return ledger.releases.find((r) => r.id === ledger.current);
+    }
+
+    it('stamp sha disagreeing with source HEAD refuses and names both shas', async () => {
+      const box = migratedBox();
+      const headSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: box.source, encoding: 'utf8' }).trim();
+      writeFileSync(
+        join(box.source, 'packages/cezar/dist/.build-stamp.json'),
+        JSON.stringify({ stampVersion: 1, sha: WRONG_SHA, builtAt: '2099-01-01T00:00:00.000Z', dirty: false, version: '0.10.0' }),
+      );
+      const rec = recorder();
+      const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain(WRONG_SHA);
+      expect(result.error).toContain(headSha);
+      expect(rec.staged).toEqual([]);
+    });
+
+    it('stamp sha equal to source HEAD proceeds — the control that proves the gate is not always-refuse', async () => {
+      const box = migratedBox();
+      const rec = recorder();
+      const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
+      expect(result.ok).toBe(true);
+      expect(rec.staged).toHaveLength(1);
+    });
+
+    it('replays the incident: a dist stamp built before the commit it ships under is refused', async () => {
+      // 20260822T131126Z-504ce87f: dist/ built 07:48:29Z, ten minutes before the commit at HEAD
+      // (07:58:54Z) that the stamp claims to have been built from.
+      const box = migratedBox();
+      const staleStamp = readFileSync(join(box.source, 'packages/cezar/dist/.build-stamp.json'), 'utf8');
+      advanceSource(box.source, 'fix-lands'); // moves HEAD forward and rewrites the stamp to match
+      writeFileSync(join(box.source, 'packages/cezar/dist/.build-stamp.json'), staleStamp); // ...put the OLD one back
+      const rec = recorder();
+      const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('disagrees with source HEAD');
+      expect(rec.staged).toEqual([]);
+    });
+
+    it('a missing stamp refuses, naming the command that fixes it', async () => {
+      const box = migratedBox();
+      rmSync(join(box.source, 'packages/cezar/dist/.build-stamp.json'));
+      const rec = recorder();
+      const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('run npm run build first');
+      expect(rec.staged).toEqual([]);
+    });
+
+    it('a truncated/unparseable stamp refuses rather than assuming HEAD', async () => {
+      const box = migratedBox();
+      writeFileSync(join(box.source, 'packages/cezar/dist/.build-stamp.json'), '{"stampVersion":1,"sha":"a');
+      const rec = recorder();
+      const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('unreadable');
+      expect(rec.staged).toEqual([]);
+    });
+
+    it("a tracked source file touched after the stamp's builtAt refuses; touched before it proceeds", async () => {
+      const box = migratedBox();
+      const stamp = JSON.parse(readFileSync(join(box.source, 'packages/cezar/dist/.build-stamp.json'), 'utf8')) as { builtAt: string };
+      const builtAtMs = Date.parse(stamp.builtAt);
+      const target = join(box.source, 'packages/cezar/src/index.ts');
+
+      const after = new Date(builtAtMs + 5_000);
+      utimesSync(target, after, after);
+      const refused = await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+      expect(refused.ok).toBe(false);
+      expect(refused.error).toContain('newer than the build stamp');
+
+      const before = new Date(builtAtMs - 5_000);
+      utimesSync(target, before, before);
+      const proceeded = await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+      expect(proceeded.ok).toBe(true);
+    });
+
+    it('--allow-stale-artifact ships anyway, and the ledger records the STAMP sha/builtAt — not source HEAD or deploy time', async () => {
+      const box = migratedBox();
+      const stamp = JSON.parse(readFileSync(join(box.source, 'packages/cezar/dist/.build-stamp.json'), 'utf8')) as { sha: string; builtAt: string };
+      advanceSource(box.source, 'after-build'); // moves HEAD (and rewrites the stamp) past what was "built"
+      writeFileSync(join(box.source, 'packages/cezar/dist/.build-stamp.json'), JSON.stringify(stamp)); // restore the stale one
+      const rec = recorder();
+      const result = await runReleaseDeploy({ ...box, env: {}, allowStaleArtifact: true }, rec.host);
+      expect(result.ok).toBe(true);
+      const entry = currentEntry(box.releasesDir);
+      expect(entry?.sha).toBe(stamp.sha);
+      expect(entry?.builtAt).toBe(stamp.builtAt);
+      expect(entry?.stale).toBe(true);
+    });
+
+    it('deploy.json absent is a first deploy — allowed', async () => {
+      const box = migratedBox();
+      expect(existsSync(join(box.releasesDir, 'deploy.json'))).toBe(false);
+      const result = await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+      expect(result.ok).toBe(true);
+    });
+
+    it('deploy.json present but unparseable refuses — the fail-open trap loadLedger alone would wave through', async () => {
+      const box = migratedBox();
+      mkdirSync(box.releasesDir, { recursive: true });
+      writeFileSync(join(box.releasesDir, 'deploy.json'), '{not json');
+      const result = await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('--allow-unrelated');
+    });
+
+    it('a ledger row whose sha is absent refuses forward activation (Q5: the dropped stamp-fallback path)', async () => {
+      const box = migratedBox();
+      await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+      const ledger = loadLedger(box.releasesDir);
+      const id = ledger.current as string;
+      saveLedger(box.releasesDir, {
+        ...ledger,
+        releases: ledger.releases.map((r) => (r.id === id ? { ...r, sha: undefined } : r)),
+      });
+      advanceSource(box.source, 'second');
+      const result = await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('--allow-unrelated');
+    });
+
+    describe("B1 — the five-valued relation to live, and it must tell 'behind' from 'sideways'", () => {
+      it('equal: re-deploying the exact live sha proceeds (flips, restarts)', async () => {
+        const box = migratedBox();
+        await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+        const rec = recorder();
+        const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
+        expect(result.ok).toBe(true);
+        expect(rec.restarts).toBe(1);
+      });
+
+      it('descendant: a forward commit proceeds normally', async () => {
+        const box = migratedBox();
+        await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+        advanceSource(box.source, 'forward');
+        const rec = recorder();
+        const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
+        expect(result.ok).toBe(true);
+        expect(rec.staged).toHaveLength(1);
+      });
+
+      it('strict ancestor of live: exits 0 as a no-op — no flip, no restart, no new ledger row, and never mentions --rollback', async () => {
+        const box = migratedBox();
+        const firstSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: box.source, encoding: 'utf8' }).trim();
+        await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+        advanceSource(box.source, 'forward');
+        await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+        const before = loadLedger(box.releasesDir);
+
+        const ancestorSource = checkoutAt(box.source, firstSha);
+        const lines: string[] = [];
+        const rec = recorder();
+        const result = await runReleaseDeploy({ ...box, source: ancestorSource, releasesDir: box.releasesDir, linkPath: box.linkPath, env: {}, log: (l) => lines.push(l) }, rec.host);
+
+        expect(result.ok).toBe(true);
+        expect(rec.staged).toEqual([]);
+        expect(rec.restarts).toBe(0);
+        expect(loadLedger(box.releasesDir)).toEqual(before);
+        expect(lines.some((l) => l.includes('already live'))).toBe(true);
+        expect(lines.some((l) => l.includes('--rollback'))).toBe(false);
+      });
+
+      it('divergent from live: refused, names the live-only commits, and --allow-unrelated forces it through leaving a ledger trace', async () => {
+        const box = migratedBox();
+        const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: box.source, encoding: 'utf8' }).trim();
+        await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+        advanceSource(box.source, 'landed-on-live'); // this becomes the live sha
+        await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+        const liveSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: box.source, encoding: 'utf8' }).trim();
+
+        const { dir: sideDir } = divergeFrom(box.source, baseSha, 'sideways-task');
+        const readlinkBefore = existsSync(box.linkPath) ? readlinkSync(box.linkPath) : null;
+
+        const refused = await runReleaseDeploy({ ...box, source: sideDir, releasesDir: box.releasesDir, linkPath: box.linkPath, env: {} }, recorder().host);
+        expect(refused.ok).toBe(false);
+        expect(refused.error).toContain('divergent');
+        expect(refused.error).toContain(liveSha ?? '');
+        // Review pass 7's defect 2: the refusal must name the LIVE SHA as the merge target, never
+        // tell an agent to merge origin/main — merging origin/main cannot fix a divergence from a
+        // live sha that never landed there (a `cez/<id8>` tip deployed directly).
+        expect(refused.error).toContain(`merge the live sha ${liveSha}`);
+        expect(readlinkSync(box.linkPath)).toBe(readlinkBefore);
+
+        const rec = recorder();
+        const forced = await runReleaseDeploy({ ...box, source: sideDir, releasesDir: box.releasesDir, linkPath: box.linkPath, env: {}, allowUnrelated: true }, rec.host);
+        expect(forced.ok).toBe(true);
+        const entry = currentEntry(box.releasesDir);
+        expect(entry?.unrelated).toBe(true);
+        expect(entry?.unrelatedLostCommits).toBeTruthy();
+      });
+
+      it('unresolvable live sha: refused, and --allow-unrelated forces it through recording unrelated with no commit list', async () => {
+        const box = migratedBox();
+        await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+        const ledger = loadLedger(box.releasesDir);
+        const id = ledger.current as string;
+        saveLedger(box.releasesDir, {
+          ...ledger,
+          releases: ledger.releases.map((r) => (r.id === id ? { ...r, sha: WRONG_SHA } : r)),
+        });
+        advanceSource(box.source, 'second');
+
+        const refused = await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+        expect(refused.ok).toBe(false);
+        expect(refused.error).toContain('--allow-unrelated');
+
+        const rec = recorder();
+        const forced = await runReleaseDeploy({ ...box, env: {}, allowUnrelated: true }, rec.host);
+        expect(forced.ok).toBe(true);
+        const entry = currentEntry(box.releasesDir);
+        expect(entry?.unrelated).toBe(true);
+        expect(entry?.unrelatedLostCommits).toBeFalsy();
+      });
+
+      it('--allow-unrelated passed on an ordinary forward deploy writes no trace at all — the field means "forced", not "flag typed"', async () => {
+        const box = migratedBox();
+        await runReleaseDeploy({ ...box, env: {} }, recorder().host);
+        advanceSource(box.source, 'forward');
+        const result = await runReleaseDeploy({ ...box, env: {}, allowUnrelated: true }, recorder().host);
+        expect(result.ok).toBe(true);
+        const entry = currentEntry(box.releasesDir);
+        expect(entry?.unrelated).toBeUndefined();
+        expect(entry?.unrelatedLostCommits).toBeUndefined();
+      });
     });
   });
 });

@@ -20,7 +20,24 @@
  *   node deploy-e2e-probe.mjs --base http://127.0.0.1:4321 --run <runId> --seconds 120 \
  *        [--out artifacts/deploy-e2e.json] [--header 'cf-access-token: …']
  *
- * Exit code is the verdict: 0 = every assertion held, 1 = at least one did not.
+ *   For a hosted box (CEZ_AUTH=oidc), --run's /runs and /events calls need a session credential:
+ *   sign in at https://<host>/ in a browser, open devtools → Application/Storage → Cookies →
+ *   <host>, copy the `cez_session` value, then pass:
+ *     --header 'cookie: cez_session=<value>'
+ *   The cookie is HttpOnly (packages/cezar/src/auth/session.ts) — browser JS (document.cookie)
+ *   cannot read it, only the browser's own cookie inspector or a captured Set-Cookie response
+ *   header can. That is a constraint on browser script, not on this script: an operator with
+ *   disk access to CEZ_HOME on the same box (e.g. an agent task running on prod-host
+ *   itself) can instead read an unexpired session id straight out of
+ *   <CEZ_HOME>/identity/identity.json (IdentityStore keeps no in-memory cache, so a session
+ *   written or read this way is honoured by the running server on its next lookup —
+ *   packages/cezar/src/auth/identity-store.ts:169,300-301), or mint a dedicated short-TTL one
+ *   via SessionService.createSession(userId, ttlMs) (session.ts:239) and destroy it afterward,
+ *   which avoids borrowing a real user's session. There is still no bearer-token/service-account
+ *   HTTP auth path — the only way a request authenticates is this one cookie.
+ *
+ * Exit code is the verdict: 0 = every assertion held, 1 = at least one did not (including any
+ * assertion that could not be measured at all — see NOT_MEASURED below).
  */
 
 import { writeFileSync, mkdirSync } from 'node:fs';
@@ -43,6 +60,19 @@ for (let i = 0; i < process.argv.length; i++) {
   if (key && rest.length) headers[key.trim()] = rest.join(':').trim();
 }
 
+// Validate the operator-supplied window before any request is made. A malformed value (a unit
+// typo like `2m`, or the flag given with no following value) drives `deadline` to NaN, `while
+// (Date.now() < deadline)` is false on its very first check, and every observation-dependent
+// assertion would otherwise read as a vacuous PASS having issued zero requests.
+if (!Number.isFinite(SECONDS) || SECONDS <= 0) {
+  console.error(`deploy-e2e-probe: --seconds must be a finite positive number, got ${JSON.stringify(arg('seconds', '120'))}`);
+  process.exit(1);
+}
+if (!Number.isFinite(POLL_HZ) || POLL_HZ <= 0) {
+  console.error(`deploy-e2e-probe: --hz must be a finite positive number, got ${JSON.stringify(arg('hz', '10'))}`);
+  process.exit(1);
+}
+
 const started = Date.now();
 const deadline = started + SECONDS * 1000;
 
@@ -54,6 +84,10 @@ const sse = { seqs: [], reconnects: 0, reloadFrames: 0, errors: [] };
 const runStatuses = new Set();
 let sawInterrupted = false;
 let sawKeptGoing = false;
+/** A 401/403 on `/runs` or `/events` is a deterministic policy decision, not a flaky condition —
+ * recorded once each so the retry loop can stop instead of burning the whole `--seconds` window. */
+const authErrors = { events: null, runs: null };
+let runsAuthFailed = false;
 
 async function pollOnce() {
   const at = Date.now();
@@ -77,9 +111,18 @@ async function pollOnce() {
 
 /** Sample the run record, so (a) is measured continuously rather than only before and after. */
 async function sampleRun() {
-  if (!RUN_ID) return;
+  if (!RUN_ID || runsAuthFailed) return;
   try {
     const response = await fetch(`${BASE}/api/v1/runs/${RUN_ID}`, { headers, signal: AbortSignal.timeout(10_000) });
+    if (response.status === 401 || response.status === 403) {
+      // A policy decision that will not change tick-to-tick — stop hitting it for the rest of
+      // the run instead of firing ~once a second against a 401 until `deadline`.
+      runsAuthFailed = true;
+      if (!authErrors.runs) {
+        authErrors.runs = { status: response.status, atMs: Date.now() - started, path: `/api/v1/runs/${RUN_ID}` };
+      }
+      return;
+    }
     if (!response.ok) return;
     const run = await response.json();
     if (run?.status) runStatuses.add(run.status);
@@ -103,6 +146,15 @@ async function subscribe() {
       const response = await fetch(`${BASE}/api/v1/runs/${RUN_ID}/events`, {
         headers: { ...headers, accept: 'text/event-stream', ...(lastSeq ? { 'Last-Event-ID': String(lastSeq) } : {}) },
       });
+      if (response.status === 401 || response.status === 403) {
+        // Same reasoning as sampleRun(): a deterministic policy decision, not a transient drop.
+        // Stop and return instead of sleeping 100ms and reconnecting until `deadline` (up to
+        // ~1200 attempts in a default 120s run).
+        if (!authErrors.events) {
+          authErrors.events = { status: response.status, atMs: Date.now() - started, path: `/api/v1/runs/${RUN_ID}/events` };
+        }
+        return;
+      }
       if (!response.ok || !response.body) throw new Error(`events answered ${response.status}`);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -196,18 +248,34 @@ async function main() {
   const latencies = poll.latencies.slice().sort((a, b) => a - b);
   const p = (q) => latencies[Math.min(latencies.length - 1, Math.floor(latencies.length * q))] ?? 0;
 
+  // An assertion computed from zero observations is NOT_MEASURED, never a vacuous PASS — an
+  // empty array/set satisfies `.every(...)` and `.length === 0` trivially, and this script was
+  // measured printing `passed: true` on exactly that basis (see the spec this implements).
+  const pollObserved = poll.total > 0;
+  const sseObserved = sse.seqs.length > 0;
+  const runObserved = runStatuses.size > 0;
+
   const assertions = {
     // (b) the definition of "gap = 0" the spec commits to.
-    'b: zero failed HTTP requests': poll.nonOk.length === 0,
-    'b: zero refused connections': poll.connectErrors.length === 0,
-    // (c) no lost or duplicated events across the reconnect.
-    'c: no seq gaps': gaps.length === 0,
-    'c: no seq duplicates': duplicates.length === 0,
+    'b: zero failed HTTP requests': !pollObserved ? 'NOT_MEASURED' : poll.nonOk.length === 0 ? 'PASS' : 'FAIL',
+    'b: zero refused connections': !pollObserved ? 'NOT_MEASURED' : poll.connectErrors.length === 0 ? 'PASS' : 'FAIL',
   };
   if (RUN_ID) {
+    // Whether the two authenticated endpoints were even reachable — a 401/403 is a hard failure,
+    // not a silently-ignored error entry.
+    assertions['auth: /runs/:id reachable'] = authErrors.runs ? 'FAIL' : 'PASS';
+    assertions['auth: /runs/:id/events reachable'] = authErrors.events ? 'FAIL' : 'PASS';
+    // (c) no lost or duplicated events across the reconnect. Only meaningful once `--run` is
+    // supplied — `sse.seqs` can only be non-empty when RUN_ID is set.
+    assertions['c: no seq gaps'] = !sseObserved ? 'NOT_MEASURED' : gaps.length === 0 ? 'PASS' : 'FAIL';
+    assertions['c: no seq duplicates'] = !sseObserved ? 'NOT_MEASURED' : duplicates.length === 0 ? 'PASS' : 'FAIL';
     // (a) the run never leaves `running`, and is not force-continued.
-    assertions['a: run never left running'] = [...runStatuses].every((s) => s === 'running');
-    assertions['a: no interrupted event'] = !sawInterrupted;
+    assertions['a: run never left running'] = !runObserved
+      ? 'NOT_MEASURED'
+      : [...runStatuses].every((s) => s === 'running')
+        ? 'PASS'
+        : 'FAIL';
+    assertions['a: no interrupted event'] = !runObserved ? 'NOT_MEASURED' : !sawInterrupted ? 'PASS' : 'FAIL';
   }
 
   const report = {
@@ -232,11 +300,14 @@ async function main() {
       reloadFrames: sse.reloadFrames,
       gaps,
       duplicates,
+      // 401/403 on `/events` exits subscribe() before it would repeat, so this array holds only
+      // the transient (non-auth) errors the retry loop rode out.
       errors: sse.errors.slice(0, 20),
     },
     run: { statuses: [...runStatuses], sawInterrupted, sawKeptGoing },
+    auth: { events: authErrors.events, runs: authErrors.runs },
     assertions,
-    passed: Object.values(assertions).every(Boolean),
+    passed: Object.values(assertions).every((state) => state === 'PASS'),
   };
 
   const text = JSON.stringify(report, null, 2);
@@ -245,7 +316,16 @@ async function main() {
     writeFileSync(OUT, `${text}\n`);
   }
   console.log(text);
-  for (const [name, ok] of Object.entries(assertions)) console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`);
+  for (const [name, state] of Object.entries(assertions)) {
+    console.log(`${state.padEnd(12)}  ${name}`);
+    if (state === 'FAIL' && name.startsWith('auth:')) {
+      const detail = name.includes('events') ? report.auth.events : report.auth.runs;
+      console.log(
+        `      → ${detail.status} unauthenticated at t=${detail.atMs}ms. Supply credentials: --header 'cookie: cez_session=<value>'`,
+      );
+      console.log(`        (see script usage comment / README "CEZ_AUTH=oidc" for how to obtain one)`);
+    }
+  }
   process.exit(report.passed ? 0 : 1);
 }
 

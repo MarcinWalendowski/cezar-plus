@@ -10,7 +10,7 @@ This applies to **developing cezar**; it does not change what cezar does for the
 
 - **Gates first, fail closed.** Never commit/push/deploy a red build. Typecheck + lint + tests green is the precondition for the commit-push step, and the deploy step must gate on a real readiness probe and never ship a broken build. **Since 2026-08-20 (`57fc8807`) this is enforced, not just asked for:** the `commit-push`, `document` and `deploy` steps of `spec-to-deploy` carry `verify` post-conditions (`packages/cezar/src/workflows/postconditions.ts`) and are green only when a machine-checkable condition holds afterwards — nothing uncommitted and nothing unpushed for the first two, and for `deploy`, **every** probe in `.ai/deploy-targets.json` exiting 0. cezar is TWO services and that file declares both, so shipping the UI without the backend now fails the step instead of ending it green. A repo with no `.ai/deploy-targets.json` gets a RED deploy step by design; write the file. **One deliberate carve-out, since `2e421370` (2026-08-20): under `CEZ_DRY_RUN=1` every post-condition short-circuits green with a `simulated, not verified` verdict.** A dry-run agent is a mock that commits and deploys nothing, so evaluating its post-conditions for real killed every dry run at `commit-push` and broke `npm run test:package` and `npm run test:e2e` on every branch. The unknown-builtin-id check still runs first, so a workflow naming a post-condition that does not exist still fails in a dry run — but a dry run proves the SHAPE of a workflow, never its post-conditions, and a green dry run is not evidence that anything was committed or deployed. See `.ai/specs/2026-08-20-steps-green-only-when-verified.md`.
 - **Always self-deploy — including from inside a running cockpit session.** *(Owner instruction 2026-08-20. The earlier rule that withheld self-deploy until the non-disruptive path landed is WITHDRAWN — it is no longer a caveat, a gate, or a thing to wait for.)* Every change ships the moment its gates are green — no quiet window, no handing the restart to a human, no waiting on `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`. On the prod host — **⚠ SUPERSEDED 2026-08-21 on `prod-host`: this whole prod path is no longer how you deploy here; read the nested bullet below FIRST** — `cezar server-deploy`'s `systemctl restart` needs sudo the service user does not have, so the working path is: build → **readiness-probe the DEPLOYED tree before touching the service** (`await import()` its server module graph, so a broken build is still one `mv` from rollback) → back up and swap `dist` / `web/dist` into `/opt/cezar` → `git rev-parse HEAD > /opt/cezar/.deployed-commit` (a bare sha, nothing else — the `all-services-deployed` post-condition string-compares it) → `kill -9` the unit's MainPID (`Restart=on-failure` brings it back in ~5s). A **web-only** change skips the restart entirely: the server reads web assets per request, so the swap is live on the next one. A **backend** change does need the restart, and that restart SIGKILLs the deploying session's own process group — this is **expected and survivable**, not a reason to defer: restart-continuation (`.ai/specs/2026-08-20-chain-integrity-restart-and-continuation.md`) resumes the run, which then verifies its own deploy, and resumes any foreign run that was in flight too. Verified unattended end-to-end on 2026-08-20 (`8a34f20d`, ~5s outage). One thing that is correctness rather than caution: if the delta changes `package.json` / `package-lock.json`, a `dist`-only swap is NOT sufficient — install into `/opt/cezar` as well.
-  - **CORRECTED 2026-08-21 — on `prod-host` the deploy path above is superseded: deploys are rootless blue-green now, and the `dist`-swap + `kill -9` recipe would corrupt a release.** The box was provisioned at 18:08–18:11 UTC (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` § "Status log — 2026-08-21"; corpus note `cezar-prod-rootless-deploy-provisioning`). Three things the paragraph above now gets wrong here, each re-measured 2026-08-21 ~18:20 UTC: (1) **`systemctl restart` no longer needs sudo** — a scoped polkit rule grants the `cezar` user `manage-units` on `cezar.service` and `cezar.socket` only (verified by negative control: `systemctl start cezar.socket` → exit 0, `systemctl start cloudflared.service` → "Access denied"); (2) **`/opt/cezar` is a symlink**, not a directory (`→ /opt/cezar-releases/20260821T181100Z-ad0b5f17`), so swapping `dist` / `web/dist` "into `/opt/cezar`" mutates the live release in place and destroys the property rollback depends on; (3) **`.deployed-commit` is dead** — `/opt/cezar-releases/deploy.json` is the ledger, and `GET /api/v1/health`'s `deploy` field reports `releaseId`/`sha`/`activatedAt` in-band. **The path on this box is `cezar server-deploy --strategy=blue-green` (`--rollback[=<id>]` to flip back, `--follow` to tail it).** `--strategy=restart` is still the default everywhere, so no existing invocation changed meaning. One trap, and its solution — **CORRECTED 2026-08-21 (same day), because "still fails" was wrong**: a deploy driven from *inside* an agent task fails **only if it reaches for a *system* `systemd-run` transient unit**, which `cezar` is correctly denied (that unit runs as root — do not "fix" this with a polkit grant). It succeeds from a **user** transient unit, because this box has `Linger=yes` and a live `user@999.service`: `export XDG_RUNTIME_DIR=/run/user/999 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/999/bus` then `systemd-run --user --unit=cez-deploy-<sha> --collect --property=Type=oneshot --working-directory=/var/lib/cezar/loki-labs/cezar --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/node packages/cezar/dist/index.js server-deploy --strategy=blue-green --source=/var/lib/cezar/loki-labs/cezar --sha=<sha>`. That cgroup is `/user.slice/…`, so `decideReExec` reports "not inside cezar.service's cgroup" and runs the deploy inline. The `be3aab61` cutover was driven exactly this way from inside an agent task. **Build first** — `stage` is an rsync, not a build, so a stale `dist/` ships old bytes under a new label. Two flag traps: bare `--rollback` dies in argv parsing, use `--rollback=` (todo `f97ddd39`), and a rollback never probes readiness (todo `6497f002`). Everything above still applies to any box that has NOT been provisioned this way.
+  - **CORRECTED 2026-08-21 — on `prod-host` the deploy path above is superseded: deploys are rootless blue-green now, and the `dist`-swap + `kill -9` recipe would corrupt a release.** The box was provisioned at 18:08–18:11 UTC (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` § "Status log — 2026-08-21"; corpus note `cezar-prod-rootless-deploy-provisioning`). Three things the paragraph above now gets wrong here, each re-measured 2026-08-21 ~18:20 UTC: (1) **`systemctl restart` no longer needs sudo** — a scoped polkit rule grants the `cezar` user `manage-units` on `cezar.service` and `cezar.socket` only (verified by negative control: `systemctl start cezar.socket` → exit 0, `systemctl start cloudflared.service` → "Access denied"); (2) **`/opt/cezar` is a symlink**, not a directory (`→ /opt/cezar-releases/20260821T181100Z-ad0b5f17`), so swapping `dist` / `web/dist` "into `/opt/cezar`" mutates the live release in place and destroys the property rollback depends on; (3) **`.deployed-commit` is dead** — `/opt/cezar-releases/deploy.json` is the ledger, and `GET /api/v1/health`'s `deploy` field reports `releaseId`/`sha`/`activatedAt` in-band. **The path on this box is `cezar server-deploy --strategy=blue-green` (`--rollback[=<id>]` to flip back, `--follow` to tail it).** `--strategy=restart` is still the default everywhere, so no existing invocation changed meaning. One trap, and its solution — **CORRECTED 2026-08-21 (same day), because "still fails" was wrong**: a deploy driven from *inside* an agent task fails **only if it reaches for a *system* `systemd-run` transient unit**, which `cezar` is correctly denied (that unit runs as root — do not "fix" this with a polkit grant). It succeeds from a **user** transient unit, because this box has `Linger=yes` and a live `user@999.service`: `export XDG_RUNTIME_DIR=/run/user/999 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/999/bus` then `systemd-run --user --unit=cez-deploy-<sha> --collect --property=Type=oneshot --working-directory=/var/lib/cezar/loki-labs/cezar --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/node packages/cezar/dist/index.js server-deploy --strategy=blue-green --source=/var/lib/cezar/loki-labs/cezar --sha=<sha>`. That cgroup is `/user.slice/…`, so `decideReExec` reports "not inside cezar.service's cgroup" and runs the deploy inline. The `be3aab61` cutover was driven exactly this way from inside an agent task. **Build first** — `stage` is an rsync, not a build, so a stale `dist/` ships old bytes under a new label. **CORRECTED 2026-08-22 by `2026-08-22-live-worktree-reaped-mid-run.md`: this is now enforced, not merely asked for.** Since commit `362865ec`, `npm run build` writes `packages/cezar/dist/.build-stamp.json` (`package.json:17-19`) and `server-deploy` refuses to stage when that stamp is missing, unreadable, older than `packages/*/src`, or names a sha that disagrees with the source checkout's HEAD (`release-deploy.ts:90-128`, gated at `:391-405`). Do not assume the instruction above is still the only thing standing between an agent and a stale ship — the incident that motivated it happened with the instruction already written down. Two flag traps: bare `--rollback` dies in argv parsing, use `--rollback=` (todo `f97ddd39`), and a rollback never probes readiness (todo `6497f002`) — **CORRECTED 2026-08-22: `6497f002` is fixed.** `runRollback` now probes `/api/v1/ready` after the restart and reports failure distinctly (commit `2f91de4b`, `.ai/specs/2026-08-22-rollback-readiness-gate.md`, IMPLEMENTED/QA Needed pending that spec's own runtime E2E). `f97ddd39` (the bare `--rollback` argv trap) is still open. **CORRECTED 2026-08-23: `f97ddd39` is fixed too.** `cezar server-deploy --rollback`, with no `=value`, now works: an argv rewrite in front of the top-level `parseArgs` call (`packages/cezar/src/argv.ts`) turns a lone `--rollback` token into `--rollback=` before the strict parser sees it, and `reExecCommand` (`server-install/release-deploy.ts:605`) now emits `--rollback=` rather than the bare token for its own detached child, closing the fail-**open** re-exec path along with the fail-closed inline one (`.ai/specs/2026-08-23-bare-rollback-argv-trap.md`, IMPLEMENTED/QA Needed pending that spec's own runtime E2E). `--rollback=` still works exactly as before; it is no longer the only spelling that does. Everything above still applies to any box that has NOT been provisioned this way.
 
 ## Zero config
 
@@ -465,6 +465,168 @@ network), reuses an already-healthy instance instead of double-booting, and writ
 | non-zero | `TEST_E2E_STATUS=failed`  | a spec failed, or the env could not boot                                                                          |
 
 `CEZ_DRY_RUN=1 npm run dev` still exercises the whole cockpit offline for manual verification.
+
+## Headless browser on prod-host
+
+`prod-host` has a real, working headless browser: **Playwright 1.62.1** (CLI at
+`/usr/bin/playwright`, package in `/usr/lib/node_modules`) with Chromium, its headless-shell
+variant, ffmpeg, Firefox and WebKit cached in `$HOME/.cache/ms-playwright` (~1.2G). Only Chromium
+has actually been driven against live URLs. Ubuntu 26.04 ships no usable `chromium` in apt — the
+candidate is a snap shim — which is why this is Playwright's own build. OS deps are installed
+(`playwright install-deps`), `xvfb` included, so headed-under-Xvfb is possible too.
+
+**An agent step MAY reach for it directly, without asking first** — checking that a deployed URL
+actually renders, scraping a page a spec cites, reading docs that only exist behind JS. That is a
+deliberate repo-level exception to the global "ask before running anything" default, in the same
+spirit as § Shipping cezar itself.
+
+Two invocations work verbatim, from any cwd:
+
+```bash
+node -e "
+const { chromium } = require('playwright');
+(async () => {
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  await page.goto('https://example.com');
+  console.log(await page.title());
+  await browser.close();
+})();
+"
+
+playwright screenshot https://example.com /tmp/example.png
+```
+
+Always `browser.close()`. A leaked Chrome under concurrent runs is exactly the memory pressure
+that pushes you to the fallback below.
+
+**Resolution is CommonJS-only.** The bare `require('playwright')` above works from any cwd because
+`$HOME/.node_modules/{playwright,playwright-core}` symlink into `/usr/lib/node_modules`, and Node
+consults `$HOME/.node_modules` through its global-folder lookup. That lookup **does not apply to
+ESM**, and this repo is `"type": "module"` — so `import { chromium } from 'playwright'` in a
+`.mjs`, or in a `.js` inside this repo, fails with `ERR_MODULE_NOT_FOUND`. Use `node -e`, a `.cjs`
+file, or `createRequire`:
+
+```js
+import { createRequire } from 'node:module';
+const { chromium } = createRequire(import.meta.url)('playwright');
+```
+
+**The one trap that will silently break this: never set `PLAYWRIGHT_BROWSERS_PATH` on the host
+alone.** `packages/cezar/src/core/agent-env.ts`'s `buildChildEnv()` gives every agent an
+*allowlisted* environment, and `PLAYWRIGHT_` appears in neither `BASE_ALLOW_NAMES` nor
+`BASE_ALLOW_PREFIXES` (`grep -n "PLAYWRIGHT" packages/cezar/src/core/agent-env.ts` returns
+nothing). So if someone "tidies" the browsers into `/opt` and exports `PLAYWRIGHT_BROWSERS_PATH`
+on the host, the variable is dropped before any agent's child process starts: Playwright falls
+back to its own compiled-in default, finds no browsers, and every launch fails with nothing in the
+agent's environment pointing at the cause. The browsers therefore sit at Playwright's **default**
+`$HOME/.cache/ms-playwright`, which needs no env var at all because `HOME` is allowlisted. A moved
+install *can* be made to work — set the variable in the service env **and** name it in
+`CEZ_ENV_PASSTHROUGH` (`/etc/cezar/agent-env.env`), the same two-step the Cloudflare credentials
+went through — but skipping the second step fails exactly as silently as skipping both. Don't take
+that path: leave the browsers at the default, per § Zero config's "never trade a working default
+for a knob."
+
+The `$HOME/.node_modules` symlink is the same philosophy, but note the reason is *not* the
+allowlist: `NODE_PATH` would in fact survive it (`NODE_` **is** an allowed prefix, and `NODE_PATH`
+is not credential-shaped). It is avoided because it is a knob where a working default exists —
+the symlink needs no env var on any path.
+
+Two consequences worth knowing: the cache is `$HOME`-scoped, so a non-interactive
+`ssh root@prod-host '<cmd>'` (whose `$HOME` is `/root`) finds no browsers, while an
+interactive session or an agent run does; and this is a **fact about this box only** — nothing
+guarantees a laptop or CI runner has these browsers cached, unlike `agent-browser` below.
+
+**This is separate from `agent-browser`** (§ Validation, above). `agent-browser` is a portable,
+self-provisioning CLI contract (`snapshot`/`interact`/`assert`/`screenshot`) that works on any
+machine cezar runs on, including one with no Playwright install — reach for it when driving or
+inspecting a UI through its fixed verb set. Reach for raw Playwright when you need Node-API-level
+control (`page.evaluate()`, scripting inside a larger program) or the zero-code
+`playwright screenshot` one-liner.
+
+### Fallback: Cloudflare Browser Run
+
+If local headless proves unreliable under concurrent agent runs (memory pressure, zombie Chrome,
+bot detection on the target), fall back to **Cloudflare Browser Run** — renamed from **Browser
+Rendering**, which is still the name in the API paths and the docs URL. **Verified working from
+this box on 2026-08-22 with the credentials already here** — no new token, nothing to wire:
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com"}' \
+  "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/browser-rendering/content"
+```
+
+It comes in two shapes, and picking the wrong one wastes an afternoon:
+
+- **Quick Actions** — REST endpoints under `.../browser-rendering/{content,screenshot,pdf,markdown,snapshot,scrape,json,links,crawl}`. One HTTP request, stateless, no code deployment. This is *not* a Playwright API; it is the fastest path for "give me the rendered HTML / a screenshot / a PDF."
+- **Browser Sessions over CDP** — this is the **Puppeteer/Playwright-compatible** route, and it works from an external server like this box: connect a WebSocket to the `/devtools/browser` endpoint and drive it with `chromium.connectOverCDP()`, so existing Playwright code changes minimally.
+
+Do **not** reach for `@cloudflare/playwright` from this box: it is a Workers-only fork requiring a
+`browser` binding in `wrangler.jsonc` and `nodejs_compat`. From here the routes are CDP or REST.
+
+Credentials are `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in `/etc/cezar/cloudflare.env`
+(0640 root:cezar). Like `PLAYWRIGHT_`, the `CLOUDFLARE_` prefix is **not** in the agent-env
+allowlist — these two reach an agent only because both names are listed in `CEZ_ENV_PASSTHROUGH`
+in `/etc/cezar/agent-env.env` (since 2026-08-19), which `allow()` checks before the `looksSecret`
+filter. That is already done, so an agent has them today; a *third* `CLOUDFLARE_*` name would not.
+
+One trap when checking that token: `GET /client/v4/user/tokens/verify` returns
+`401 Invalid API Token` for it, while the Browser Run call above returns `200` — it is
+account-scoped, not user-scoped. Probe the capability you actually need, never the token's
+identity papers (the same rule SPEC-403 wrote down for `wrangler whoami`).
+
+## Verifying a cockpit UI change — boot a throwaway cezar on a spare port
+
+**You cannot drive the production cockpit, and you must not try.** `cockpit.example.com` is behind
+Cloudflare Access, and the loopback origin is not a way around it: a browser sent to
+`http://127.0.0.1:4321/tasks` is redirected to `example.cloudflareaccess.com` (the SPA
+follows its own auth), and `GET /api/v1/workspace/runs-index` on loopback answers **401**. Only
+`/api/v1/ready` and the static `/` are open, which is exactly why the two `.ai/deploy-targets.json`
+probes use those and nothing else. Do not reach for credentials, a service token, or
+`CEZ_ALLOW_UNAUTHENTICATED=1` on the prod box to get past this.
+
+**Boot your own instance instead.** It is fast, it needs no secrets, and it renders the SAME built
+bundle you just deployed. Four things have to be true or it will not come up:
+
+1. **A scratch `HOME`.** The project registry lives in `~/.cezar/config.json` and is shared by
+   every cezar on the machine — registering a fixture project into the real one would edit what
+   every other run sees. `HOME=/var/tmp/<scratch>/home` isolates it.
+2. **Scrub the hosted-mode env.** An agent inherits the service's `CEZ_*` namespace, and
+   `CEZ_PUBLIC_URL` alone is enough to put a fresh instance into hosted mode, where it refuses to
+   boot without auth (*"cezar refuses to boot: hosted mode with no authentication exposes shell
+   execution…"*). That message is not an invitation to set `CEZ_ALLOW_UNAUTHENTICATED=1` — unset
+   the inherited vars and it boots as an ordinary local cockpit. This is also why
+   `npm run test:e2e` fails on this box rather than skipping.
+3. **Seed the states you need.** Write `<proj>/.ai/cezar/runs.json` and `todos.json` directly. A
+   feature is only verified if the fixture covers the states that can render — for the Author
+   column that meant user / agent / api / absent in one board, and the absent one is the case a
+   happy-path fixture always forgets.
+4. **Walk the first-run wizard.** The gate is `probe.kind === 'ready' && !probe.hasProjects`, and
+   `hasProjects` counts projects *adopted into an org*, not registry entries — so a registered
+   project still lands you on `/onboarding`. Fill `[data-slot="onboarding-org-name"]`, click
+   `[data-slot="onboarding-org-submit"]`, then navigate to the page under test.
+
+```bash
+B=/var/tmp/uiverify; rm -rf $B; mkdir -p $B/home $B/proj/.ai/cezar
+cd $B/proj && git init -q . && git commit -q --allow-empty -m scratch
+# seed $B/proj/.ai/cezar/runs.json here
+env -u CEZ_PUBLIC_URL -u CEZ_REMOTE -u CEZ_OIDC_ISSUER -u CEZ_OIDC_CLIENT_ID -u CEZ_AUTH \
+    -u CEZ_TODOS_FILE -u CEZ_HANDOFF_FILE -u CEZ_KB_WRITE_FILE -u CEZ_PROJECTS_DIR -u NODE_ENV \
+    HOME=$B/home nohup node /opt/cezar/packages/cezar/dist/index.js \
+    --port 4399 --no-open --repo $B/proj > $B/server.log 2>&1 &
+until [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4399/api/v1/ready)" = 200 ]; do sleep 2; done
+env HOME=$B/home node /opt/cezar/packages/cezar/dist/index.js projects add $B/proj
+```
+
+Then drive it with Playwright (§ Headless browser above), asserting on `data-slot` /
+`data-*` attributes rather than on text or CSS classes — those are the stable contract, and
+several components already carry them for exactly this reason. **Kill the instance and delete the
+directory when done**; a stray cockpit on a spare port holds memory and keeps a worktree lease.
+
+Running against `/opt/cezar/...` verifies the DEPLOYED bytes. Point it at a local `dist/` instead
+when you want to check a build you have not shipped yet.
 
 ## How an agent step should spend its tool calls
 

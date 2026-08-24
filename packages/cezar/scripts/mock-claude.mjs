@@ -22,9 +22,25 @@ if (process.env.CEZ_MOCK_ARGS_FILE) {
   }
 }
 
+// Testability hook: MOCK_CLAUDE_REJECT_RESUME=1 rejects a `--resume <id>` exactly the way the
+// real CLI does when the target session was never created on its side (spec
+// 2026-08-22-resume-fresh-session-fallback, run 232ad6d4's `commit-push` iteration 2) —
+// mirrors MOCK_CODEX_REJECT_RESUME in mock-codex-app-server.mjs. Checked before anything else
+// is emitted: the real CLI fails on the resume target before any turn starts.
+{
+  const resumeIdx = process.argv.indexOf('--resume');
+  const resumeSessionId = resumeIdx >= 0 ? process.argv[resumeIdx + 1] : undefined;
+  if (resumeSessionId && process.env.MOCK_CLAUDE_REJECT_RESUME === '1') {
+    process.stderr.write(`No conversation found with session ID: ${resumeSessionId}\n`);
+    process.exit(1);
+  }
+}
+
 emit({ type: 'system', subtype: 'init' });
 
 let turn = 0;
+let askOnNudgeArmed = false;
+let questionArmed = false;
 
 // A tiny generated PNG (320x200) standing in for a browser screenshot.
 const MOCK_SCREENSHOT_B64 =
@@ -77,6 +93,9 @@ function writeHandoffAndTodo() {
 async function respond(userText, imageCount) {
   turn += 1;
   await sleep(250);
+  if (userText.includes('mock:ask-on-nudge')) askOnNudgeArmed = true;
+  if (userText.includes('mock:question')) questionArmed = true;
+  const isAskStructureNudge = userText.includes('You ended that turn with no marker');
   // `mock:done` anywhere in the message → the reply ends with the CEZ:DONE
   // completion marker (#347), so the auto-close path is testable dry.
   const doneMarker = userText.includes('mock:done') ? '\n\nCEZ:DONE' : '';
@@ -112,7 +131,7 @@ async function respond(userText, imageCount) {
               },
             ],
           })
-      : userText.includes('mock:ask')
+      : /(?:^|\s)mock:ask(?:\s|$)/.test(userText) || (askOnNudgeArmed && isAskStructureNudge)
       ? '\n\nCEZ:ASK ' +
         JSON.stringify({
           questions: [
@@ -131,6 +150,10 @@ async function respond(userText, imageCount) {
   // (spec 2026-07-18-task-ref-markers), so the declaration path is testable dry.
   const refsMarkers = userText.includes('mock:refs')
     ? '\nCEZ:PR=4242\nCEZ:ISSUE=17\nCEZ:TITLE=implementing marker refs'
+    : '';
+  const forceReport = userText.includes('mock:report');
+  const questionSuffix = !forceReport && questionArmed
+    ? '\n\nSo: merge and deploy now, or hold for review?'
     : '';
 
   // `mock:hang` in the message, or CEZ_MOCK_HANG=1 in the env → never answer this turn: the
@@ -497,7 +520,7 @@ async function respond(userText, imageCount) {
       type: 'assistant',
       message: {
         role: 'assistant',
-        content: [{ type: 'text', text: `Done with the first pass — opened a draft PR: https://github.com/open-mercato/demo/pull/123. Anything to adjust? (dry-run mock)${refsMarkers}${doneMarker}${monitoringMarker}${askMarker}` }],
+        content: [{ type: 'text', text: `Done with the first pass. Opened a draft PR: https://github.com/open-mercato/demo/pull/123. (dry-run mock)${questionSuffix}${refsMarkers}${doneMarker}${monitoringMarker}${askMarker}` }],
         usage: { input_tokens: 300, output_tokens: 90 },
       },
     });
@@ -517,7 +540,7 @@ async function respond(userText, imageCount) {
     type: 'assistant',
     message: {
       role: 'assistant',
-      content: [{ type: 'text', text: `Follow-up #${turn - 1} received: "${userText.slice(0, 100)}".${imgNote} Applied (dry run).${refsMarkers}${doneMarker}${monitoringMarker}${askMarker}` }],
+      content: [{ type: 'text', text: `Follow-up #${turn - 1} received: "${userText.slice(0, 100)}".${imgNote} Applied (dry run).${questionSuffix}${refsMarkers}${doneMarker}${monitoringMarker}${askMarker}` }],
       usage: { input_tokens: 200, output_tokens: 60 },
     },
   });

@@ -57,11 +57,17 @@ export interface AgentRunSpec {
    *  e.g. CEZ_HANDOFF_FILE / CEZ_TODOS_FILE / CEZ_TASK_ID (spec 007). */
   env?: Record<string, string>;
   model?: string;
-  /** claude CLI's own `--effort` (low|medium|high|xhigh|max). Claude-only — the codex and
-   *  opencode runners never read this field, same as bashAllowlist is decorative for them.
-   *  No env-side mirror: the CLI does not read `CLAUDE_EFFORT` as input (measured — see
-   *  .ai/specs/2026-08-21-run-tests-reasoning-ceiling.md, Revision note), so the flag is the
-   *  only signal. */
+  /** A reasoning-depth ceiling (low|medium|high|xhigh|max).
+   *
+   *  **CORRECTED 2026-08-24 — no longer Claude-only.** This said *"Claude-only — the codex and
+   *  opencode runners never read this field, same as bashAllowlist is decorative for them"*, which
+   *  is now true of opencode alone: the codex runner sends it as `turn/start`'s `effort`
+   *  (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D3). It is still the claude CLI's own
+   *  `--effort` on that side.
+   *
+   *  No env-side mirror on either backend: the claude CLI does not read `CLAUDE_EFFORT` as input
+   *  (measured — see .ai/specs/2026-08-21-run-tests-reasoning-ceiling.md, Revision note), and codex
+   *  takes it as an RPC param, so the flag and the param are the only signals. */
   effort?: string;
   /** Wall-clock kill switch for the run (ms). */
   timeoutMs?: number;
@@ -111,6 +117,25 @@ export function prependSystemPrompt(systemPrompt: string | undefined, userPrompt
  */
 export function isSignalTerminationExit(exitCode: number | null): boolean {
   return exitCode === 130 || exitCode === 137 || exitCode === 143;
+}
+
+/**
+ * Recognizes a resume rejected because the backend never actually created the conversation being
+ * resumed — a session id cezar minted and persisted before any confirmation it existed on the
+ * backend's side (spec 2026-08-22-resume-fresh-session-fallback). String-matched because neither
+ * surface exposes a machine-readable code for this distinction (checked against neither CLI/RPC
+ * docs in that pass): `claude`'s rejection is free-text CLI stderr, `codex`'s is a JSON-RPC error
+ * message. A future release could reword either and silently disable the fallback keyed on this —
+ * the failure mode of a wrong guess is the bug resurfacing exactly as measured, not a new one.
+ *
+ * `opencode` never resumes by session id at the transport level (`opencode-server-runner.ts`'s
+ * bootstrap always issues `POST /session` unconditionally), so it cannot hit this failure mode and
+ * always answers `false`.
+ */
+export function isMissingSessionRejection(backend: RunnerId, message: string): boolean {
+  if (backend === 'claude') return /No conversation found with session ID/i.test(message);
+  if (backend === 'codex') return /no rollout found for thread id/i.test(message);
+  return false;
 }
 
 /** The slice of `ChildProcess` a termination tracker needs — keeps the helper

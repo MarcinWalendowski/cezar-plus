@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
-import { DEFAULT_AGENT_ACCOUNT_ID } from '@loki-labs/better-cezar-contract';
+import { accountUsageKey } from '@loki-labs/better-cezar-contract';
 import type { ProviderId } from '../core/provider-auth.ts';
 import { agentAccountUsagePath } from '../paths.ts';
 import { atomicWriteJsonSync } from './config.ts';
@@ -170,19 +170,13 @@ export type AgentAccountUsageStore = z.infer<typeof storeSchema>;
 /**
  * The key everything in this file is stored under: **provider AND account id**, never the id alone.
  *
- * The discovered account is the reserved id `"default"` for EVERY provider (see
- * `DEFAULT_AGENT_ACCOUNT_ID`), so `"default"` on its own names Claude's discovered login and
- * Codex's discovered login at the same time. Keying on it alone would pool two different
- * subscriptions into one bucket: their in-flight counts would add up, one's rate-limit would
- * exclude the other from routing, and Codex's quota bar would be drawn against a Claude row.
- *
- * Stored accounts have unique ids and would survive the shorter key, which is exactly what makes
- * this worth stating — the bug would only ever appear on the zero-config setup, the one most
- * people run.
+ * MOVED 2026-08-23 to `@loki-labs/better-cezar-contract` (`usage-hold.ts`) and re-exported here, so
+ * every importer in this package keeps its import. It had to leave: the cockpit now renders which
+ * account a queued task is held on, and the browser cannot import this file — it reads
+ * `node:fs/promises` at the top. A second spelling in the web package would have been a key that
+ * drifts silently, matching nothing and reporting no error. The reasoning below moved with it.
  */
-export function accountUsageKey(provider: ProviderId, accountId?: string | null): string {
-  return `${provider}:${accountId || DEFAULT_AGENT_ACCOUNT_ID}`;
-}
+export { accountUsageKey };
 
 /** The in-memory default — what a missing file behaves like, and the zero-config state. */
 export function defaultAgentAccountUsageStore(): AgentAccountUsageStore {

@@ -43,6 +43,9 @@ export interface ReleaseDeployCliOptions {
   sha?: string;
   note?: string;
   dryRun?: boolean;
+  allowStaleArtifact?: boolean;
+  refuseDirty?: boolean;
+  allowUnrelated?: boolean;
 }
 
 const STRATEGIES = new Set(['restart', 'blue-green']);
@@ -69,7 +72,11 @@ export async function releaseDeployCommand(opts: ReleaseDeployCliOptions, host?:
       ...(opts.port ? { port: opts.port } : {}),
       strategy: opts.strategy as DeployStrategy,
       ...(opts.rollback !== undefined ? { rollbackTo: opts.rollback } : {}),
-      ...(opts.sha ? { sha: opts.sha } : { sha: gitSha(opts.source) }),
+      ...(opts.sha ? { sha: opts.sha } : {}),
+      sourceHead: gitSha(opts.source),
+      allowStaleArtifact: opts.allowStaleArtifact,
+      refuseDirty: opts.refuseDirty,
+      allowUnrelated: opts.allowUnrelated,
       ...(opts.note ? { note: opts.note } : {}),
       ...(opts.dryRun ? { dryRun: true } : {}),
       version: packageVersion(opts.source),
@@ -82,6 +89,27 @@ export async function releaseDeployCommand(opts: ReleaseDeployCliOptions, host?:
     if (opts.follow) return followDeploy(result.detachedUnit);
     console.log(`  Follow it with: cezar server-deploy --follow --release-id ${result.detachedUnit}\n`);
     return 0;
+  }
+  const rollback = result.outcome?.operation === 'rollback' || opts.rollback !== undefined;
+  if (!result.ok && rollback && result.outcome?.failedAt === 'readiness' && result.outcome.serving) {
+    const outcome = result.outcome;
+    const serving = outcome.serving!;
+    console.error(`\n  Rollback FAILED: ${outcome.releaseId} did not become ready: ${outcome.detail ?? 'readiness probe failed'}`);
+    if (serving.releaseId === outcome.releaseId) {
+      const restoring = serving.detail?.match(/; restoring (.+) failed: (.+)$/);
+      if (restoring) {
+        console.error(`  Restored ${restoring[1]}, but the restart itself failed: ${restoring[2]}. NOTHING is serving a proven release.`);
+      } else {
+        console.error(`  ${linkPath} still points at ${outcome.releaseId}, and it is NOT serving.`);
+        console.error('  Pick another release: cezar server-deploy --rollback=<other-id>');
+      }
+    } else if (serving.ready) {
+      console.error(`  Restored ${serving.releaseId}, which probed ready. The box is serving again, on the release you tried to leave.`);
+    } else {
+      console.error(`  Restored ${serving.releaseId}; it is NOT ready either: ${serving.detail ?? 'readiness probe failed'}`);
+      console.error('  NOTHING is serving a proven release. Intervene by hand.');
+    }
+    return 1;
   }
   if (!result.ok) {
     console.error(`\n  Deploy failed: ${result.error ?? 'unknown'}`);
@@ -98,7 +126,11 @@ export async function releaseDeployCommand(opts: ReleaseDeployCliOptions, host?:
     console.log('');
     return 0;
   }
-  console.log('\n  Deploy complete.');
+  if (rollback && result.outcome?.serving?.ready) {
+    console.log(`\n  Rolled back to ${result.outcome.serving.releaseId}: /api/v1/ready passed.`);
+  } else {
+    console.log('\n  Deploy complete.');
+  }
   for (const line of describeReleases(releasesDir, linkPath)) console.log(`  ${line}`);
   console.log('');
   return 0;
@@ -197,11 +229,15 @@ export async function migrateReleasesCommand(opts: MigrateReleasesOptions): Prom
   }
 
   const systemdDir = opts.systemdDir ?? '/etc/systemd/system';
+  const runAsUid = resolveRunAsUid(systemdDir, unit);
   const units: Array<{ path: string; body: string }> = [
     { path: join(systemdDir, socketUnitName(unit)), body: cezarSocketUnit({ bindHost, port, serviceUnit: unit }) },
     // A numbered drop-in, never a unit rewrite: `10-cloudflare.conf`, `20-onepassword.conf` and
     // `30-agent-passthrough.conf` already live in this directory and hold real credentials.
-    { path: join(systemdDir, `${unit}.d`, '40-non-disruptive.conf'), body: nonDisruptiveDropIn({ socketUnit: socketUnitName(unit) }) },
+    {
+      path: join(systemdDir, `${unit}.d`, '40-non-disruptive.conf'),
+      body: nonDisruptiveDropIn({ socketUnit: socketUnitName(unit), ...(runAsUid !== undefined ? { runAsUid } : {}) }),
+    },
     { path: join(systemdDir, 'cezar-runs.slice'), body: cezarRunsSlice() },
   ];
   for (const file of units) {
@@ -311,6 +347,39 @@ function readDeployedCommit(linkPath: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The uid `cezar.service` runs as, for `nonDisruptiveDropIn`'s `[Unit]` ordering hardening
+ * (Phase 0.3, `.ai/specs/2026-08-22-broker-scope-isolation-full-stop-survival.md`). Read from the
+ * base unit's own `User=` line — same `id -u` shell-out `provision-user.ts`'s
+ * `createOrgUserCommand` already uses elsewhere in this codebase — rather than guessed, since a
+ * wrong uid (`user@0.service`) is worse than no ordering at all. Best-effort: a missing/unreadable
+ * base unit, a unit with no `User=` line (the systemd default, i.e. root), or a lookup failure all
+ * skip the `[Unit]` section rather than failing the migrate command over a hardening step.
+ */
+function resolveRunAsUid(systemdDir: string, unit: string): number | undefined {
+  const unitPath = join(systemdDir, unit);
+  let text: string;
+  try {
+    text = readFileSync(unitPath, 'utf8');
+  } catch {
+    console.log(`  (could not read ${unitPath} — skipping the user@<uid>.service ordering hardening)`);
+    return undefined;
+  }
+  const match = /^User=(.+)$/m.exec(text);
+  if (!match?.[1]) {
+    console.log(`  (${unit} has no User= line — skipping the user@<uid>.service ordering hardening)`);
+    return undefined;
+  }
+  const username = match[1].trim();
+  const result = spawnSync('id', ['-u', username], { encoding: 'utf8' });
+  const uid = result.status === 0 ? Number.parseInt(result.stdout.trim(), 10) : NaN;
+  if (!Number.isFinite(uid)) {
+    console.log(`  (could not resolve a uid for ${username} — skipping the user@<uid>.service ordering hardening)`);
+    return undefined;
+  }
+  return uid;
 }
 
 function fileHas(path: string, body: string): boolean {

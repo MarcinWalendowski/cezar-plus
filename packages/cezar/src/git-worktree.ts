@@ -116,8 +116,11 @@ function worktreeInfo(path: string, branch: string, baseBranch: string): Worktre
   return { path, branch, baseBranch };
 }
 
-/** Git canonicalizes symlinked path prefixes (macOS `/var` → `/private/var`). */
-function canonicalPath(path: string): string {
+/** Git canonicalizes symlinked path prefixes (macOS `/var` → `/private/var`). Exported (was
+ *  private) for `runs/worktree-ownership.ts`, which canonicalizes a foreign project's root and a
+ *  candidate worktree path the same way before comparing them (spec
+ *  2026-08-22-cross-project-worktree-orphan-prune-safety). */
+export function canonicalPath(path: string): string {
   try {
     return realpathSync(path);
   } catch {
@@ -564,27 +567,142 @@ export async function worktreeShortstat(
   return { ...parseShortstat(res.stdout), ...(repointedHead ? { repointed: true } : {}) };
 }
 
+export interface PruneOrphansReport {
+  removed: string[];
+  declined: { id: string; reason: string }[];
+  kept: { id: string; reason: string }[];
+}
+
+export interface PruneOrphanOutcome {
+  id: string;
+  outcome: 'removed' | 'kept' | 'declined';
+  reason?: string;
+  autosave?: AutosaveResult;
+  branchKept: true;
+}
+
+export interface PruneOrphansOptions {
+  /** Does some OTHER project's (or the workspace boot root's) `runs.json` still claim this exact
+   *  worktree path? A match means a live workspace run owns it — decline, never delete. See
+   *  `runs/worktree-ownership.ts`. */
+  findForeignOwner?: (worktreePath: string) => { projectName: string; runId: string } | undefined;
+  /** Set by the caller when a foreign source it needed to consult for `findForeignOwner` came back
+   *  `unreadable: true` (`worktree-ownership.ts`'s `ForeignRunSource`). An unreadable foreign index
+   *  means the ownership signal cannot be trusted for ANY candidate this boot, not just the one
+   *  whose owner happened to be behind the bad file — so every candidate is declined outright,
+   *  without evaluating `findForeignOwner` or the branch-ancestry check at all. */
+  ownershipCheckUnavailable?: { reason: string };
+  /** Test seam only. Omitted always means the repo-local lease directory. */
+  leaseDir?: string;
+  leaseStaleMs?: number;
+  now?: () => number;
+  onOutcome?: (outcome: PruneOrphanOutcome) => void;
+}
+
+const DEFAULT_LEASE_STALE_MS = 15 * 60_000;
+
+async function leaseDeclineReason(
+  repoRoot: string,
+  runId: string,
+  opts: PruneOrphansOptions | undefined,
+): Promise<string | undefined> {
+  const leaseDir = opts?.leaseDir ?? join(repoRoot, '.ai/cezar/worktree-leases');
+  if (!existsSync(leaseDir)) return undefined;
+  const path = join(leaseDir, `${runId}.json`);
+  if (!existsSync(path)) return undefined;
+  try {
+    const raw: unknown = JSON.parse(await readFile(path, 'utf8'));
+    if (
+      typeof raw !== 'object' || raw === null ||
+      (raw as { leaseVersion?: unknown }).leaseVersion !== 1 ||
+      (raw as { runId?: unknown }).runId !== runId ||
+      typeof (raw as { heartbeatAt?: unknown }).heartbeatAt !== 'string'
+    ) return 'worktree lease is unreadable';
+    const heartbeat = Date.parse((raw as { heartbeatAt: string }).heartbeatAt);
+    if (!Number.isFinite(heartbeat)) return 'worktree lease is unreadable';
+    const now = opts?.now?.() ?? Date.now();
+    const configuredStaleMs = Number(process.env.CEZ_LEASE_STALE_MS);
+    const staleMs = opts?.leaseStaleMs ?? (Number.isFinite(configuredStaleMs) && configuredStaleMs > 0 ? configuredStaleMs : DEFAULT_LEASE_STALE_MS);
+    if (now - heartbeat <= staleMs) return 'worktree lease heartbeat is fresh';
+    return undefined;
+  } catch {
+    return 'worktree lease is unreadable';
+  }
+}
+
 /**
- * Startup reconcile: `git worktree prune` + remove every directory under
- * `.ai/cezar/worktrees/` whose run id is no longer in the store (and its
- * branch). Returns the removed run ids for the boot log. Never throws.
+ * Startup reconcile: `git worktree prune` + remove every directory under `.ai/cezar/worktrees/`
+ * whose run id is no longer in THIS project's own store. Returns the removed and declined run ids
+ * for the boot log. Never throws.
+ *
+ * Extended by spec 2026-08-22-cross-project-worktree-orphan-prune-safety to close a cross-project
+ * data-loss bug: a candidate here can belong to a WORKSPACE run whose worktree record lives only
+ * in another project's (or the workspace boot root's) `runs.json` — this project's own
+ * `store.listRuns()` (the source of `validIds`) has no way to know that id exists. Before this
+ * project deletes a candidate, `opts.findForeignOwner` gets first say (decline on a match, and log
+ * why), and a fresh worktree lease (`opts.leaseDir`, spec 2026-08-22-live-worktree-reaped-mid-run)
+ * gets the next say, for a candidate no source claims at all.
+ *
+ * A candidate that clears every check is never deleted outright: it is autosaved onto its own
+ * `cez/<id8>` branch first (`autosaveCommit`), and the BRANCH is always kept — there is no
+ * `git branch -D` anywhere on this path any more, unconditionally, regardless of `opts`. When the
+ * autosave itself refuses or fails, the directory is kept too rather than removed uncommitted. See
+ * "Half C" of that spec for the full contract; this is the one destructive path in the file that
+ * now cannot lose an uncommitted byte.
  */
 export async function pruneOrphans(
   repoRoot: string,
   validIds: ReadonlySet<string>,
-): Promise<string[]> {
+  opts?: PruneOrphansOptions,
+): Promise<PruneOrphansReport> {
   await git(repoRoot, ['worktree', 'prune']);
   let entries: Dirent[];
   try {
     entries = await readdir(join(repoRoot, WORKTREES_DIR), { withFileTypes: true });
   } catch {
-    return []; // no worktrees dir yet
+    return { removed: [], declined: [], kept: [] }; // no worktrees dir yet
   }
   const removed: string[] = [];
+  const declined: { id: string; reason: string }[] = [];
+  const kept: { id: string; reason: string }[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || validIds.has(entry.name)) continue;
-    await removeWorktree(repoRoot, worktreePathFor(repoRoot, entry.name), branchFor(entry.name));
+    const worktreePath = worktreePathFor(repoRoot, entry.name);
+    const leaseReason = await leaseDeclineReason(repoRoot, entry.name, opts);
+    if (leaseReason) {
+      const outcome = { id: entry.name, outcome: 'declined' as const, reason: leaseReason, branchKept: true as const };
+      declined.push({ id: entry.name, reason: leaseReason });
+      opts?.onOutcome?.(outcome);
+      continue;
+    }
+    if (opts?.ownershipCheckUnavailable) {
+      declined.push({ id: entry.name, reason: `ownership check unavailable: ${opts.ownershipCheckUnavailable.reason}` });
+      opts.onOutcome?.({ id: entry.name, outcome: 'declined', reason: `ownership check unavailable: ${opts.ownershipCheckUnavailable.reason}`, branchKept: true });
+      continue;
+    }
+    const owner = opts?.findForeignOwner?.(worktreePath);
+    if (owner) {
+      declined.push({
+        id: entry.name,
+        reason: `still owned by workspace run ${owner.runId.slice(0, 8)} in project "${owner.projectName}"`,
+      });
+      opts?.onOutcome?.({ id: entry.name, outcome: 'declined', reason: `still owned by workspace run ${owner.runId.slice(0, 8)} in project "${owner.projectName}"`, branchKept: true });
+      continue;
+    }
+    let autosave: AutosaveResult = 'nothing-to-do';
+    const top = await git(worktreePath, ['rev-parse', '--show-toplevel']);
+    if (top.ok && canonicalPath(top.stdout.trim()) === canonicalPath(worktreePath) && canonicalPath(worktreePath) !== canonicalPath(repoRoot)) {
+      autosave = await autosaveCommit(worktreePath, 'run finalize');
+      if (autosave === 'refused' || autosave === 'failed') {
+        const reason = `autosave ${autosave}; directory kept`;
+        kept.push({ id: entry.name, reason });
+        opts?.onOutcome?.({ id: entry.name, outcome: 'kept', reason, autosave, branchKept: true });
+        continue;
+      }
+    }
+    await removeWorktree(repoRoot, worktreePath);
     removed.push(entry.name);
+    opts?.onOutcome?.({ id: entry.name, outcome: 'removed', autosave, branchKept: true });
   }
-  return removed;
+  return { removed, declined, kept };
 }

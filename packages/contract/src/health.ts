@@ -118,6 +118,30 @@ export const capabilitiesSchema = z.object({
   /** `CEZ_NOTIFY=1` (F4, outbound notification transports). */
   notify: z.boolean(),
   /**
+   * `CEZ_CLUSTER=1` (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D1) — this server takes
+   * part in a cluster, as the hub (flag alone) or as a spoke (flag + `CEZ_CLUSTER_HUB`). One key
+   * for both roles: which one it is comes from `GET /api/v1/cluster`, not from a second flag that
+   * could contradict this one.
+   *
+   * **Always present, `false` when off**, like every key above — and unlike `authProvider`, whose
+   * own note explains why it stayed out. That exemption does not extend here: the spec's
+   * Architecture section addresses this key by name and says not to re-assert the "flag-off health
+   * body is byte-identical" claim, because it was measured false and corrected in place in this
+   * file. This key makes the body grow by one more pair, knowingly.
+   *
+   * What the flag buys is behavioural, not cosmetic: no index, no watcher, no timer, no nav item,
+   * no prompt bytes — and `/api/v1/cluster*` answering **409** with a stated reason, the same shape
+   * `requireAutomations` uses for the other family that has no settings section when it is off.
+   * (CORRECTED 2026-08-22 during implementation: this said ~~"**no route** — `/api/v1/cluster*`
+   * answers 404"~~. 404 is already `UNKNOWN_CONNECTION` in `sources-routes.ts`, so a flag-off 404
+   * could not be told apart from an unknown node id on the same route. The full history is in
+   * `./cluster.ts`'s module header and in spec Verification 12.)
+   *
+   * This key is what makes the 409 acceptable rather than merely correct: a cockpit that reads
+   * `cluster: false` here never issues the request at all.
+   */
+  cluster: z.boolean(),
+  /**
    * `CEZ_ACCOUNT_USAGE=1` (`.ai/specs/2026-08-16-agent-account-usage-routing.md`) — the sidebar
    * panel showing what each agent account is doing and how close it is to its limit.
    *
@@ -133,6 +157,24 @@ export const capabilitiesSchema = z.object({
    * set it keeps this field `false`, exactly as before.
    */
   accountUsage: z.boolean(),
+
+  /**
+   * `CEZ_AUTO_ACCOUNTS=1` (`.ai/specs/2026-08-24-second-codex-account-balancing.md`, D5) — this
+   * server registers the agent logins it finds on its own machine, instead of only offering them
+   * in the Add-account pane.
+   *
+   * Reported because it is the one capability here that WRITES state nobody clicked for: an
+   * account row appearing in `agent-accounts.json` has two possible explanations, and this is what
+   * tells them apart. It is also the only way to confirm the setting on a hosted box, where the
+   * whole agent-profiles family is withheld and the pane cannot show anything at all.
+   *
+   * NOT AND-ed with `localHandoff`, unlike `accountUsage` above. That flag gates a DISCLOSURE — who
+   * the operator is — and hosted mode is the audience question. This one gates a server-side write
+   * that discloses nothing; gating it on hosted mode would switch the feature off on exactly the
+   * machines whose operators cannot use the UI instead. The boolean itself says nothing about any
+   * account: it says whether cezar will look.
+   */
+  autoAccounts: z.boolean(),
   /** The Skills surface. **Opt-OUT, and the only capability here that is** — `CEZ_SKILLS=0`
    *  hides it; every other value, including unset, leaves it on. Inverted deliberately: every
    *  flag above gates a feature that did not exist before it, so absent-means-off is the honest
@@ -166,6 +208,10 @@ export const runtimeInfoSchema = z.object({
   brokeredBackends: z.array(z.string()),
   /** False when this build has no broker entry point to re-exec (a source checkout). */
   brokerAvailable: z.boolean(),
+  runBrokers: z.object({
+    live: z.number().int().nonnegative(),
+    runsWithMultipleBrokers: z.array(z.string()),
+  }).optional(),
 });
 export type RuntimeInfo = z.infer<typeof runtimeInfoSchema>;
 

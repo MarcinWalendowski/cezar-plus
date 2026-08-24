@@ -7,6 +7,7 @@ import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { createApp } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Anti-buffering contract for both SSE endpoints (#424): `no-transform` +
@@ -46,7 +47,7 @@ describe('SSE responses defeat intermediary buffering', () => {
   });
 
   it('per-run /api/v1/runs/:id/events carries the same contract', async () => {
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
     const headers = await headersOf(`/api/v1/runs/${run.id}/events`);
     expect(headers.get('cache-control')).toBe('no-cache, no-transform');
     expect(headers.get('x-accel-buffering')).toBe('no');

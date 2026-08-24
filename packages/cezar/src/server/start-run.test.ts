@@ -9,6 +9,7 @@ import type { WorkflowDef } from '../workflows/types.ts';
 import { createApp } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * `POST /api/v1/runs` `systemPrompt` (R2 2.3) — the programmatic per-run
@@ -34,7 +35,7 @@ describe('POST /api/v1/runs systemPrompt', () => {
     const manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
         captured = input;
-        return store.createRun({ title: 't', workflow: '(planned)', task: input.task, steps: [] });
+        return store.createRun({ author: localCliAuthor(), title: 't', workflow: '(planned)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
     app = createApp({
@@ -150,7 +151,7 @@ describe('POST /api/v1/runs generateFollowups — the CEZ_FOLLOWUPS ceiling (#47
     const manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
         captured = input;
-        return store.createRun({ title: 't', workflow: '(planned)', task: input.task, steps: [] });
+        return store.createRun({ author: localCliAuthor(), title: 't', workflow: '(planned)', task: input.task, steps: [] });
       },
     } as unknown as RunManager;
     app = createApp({

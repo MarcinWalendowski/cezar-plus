@@ -48,7 +48,7 @@ re-measured on 2026-08-21 ~18:20 UTC rather than copied forward.
 | P1 atomic release + ledger | `/opt/cezar` → `/opt/cezar-releases/20260821T181100Z-ad0b5f17` (a symlink, no longer a directory); `/opt/cezar-releases/deploy.json` holds `current`, `previous`, and `healthy: true` |
 | P3 socket activation | `cezar.socket` active; `runtime.socketActivated: true` |
 | P3 drain-capable unit config | `systemctl show cezar.service` → `KillMode=process`, `Delegate=yes`, `TimeoutStopUSec=30s` (drop-in `40-non-disruptive.conf`, plus `cezar-runs.slice`) |
-| P4 run broker | `runtime.brokerAvailable: true`, `brokeredBackends: ["claude"]`, `runBrokerIsolation: "delegated"` — **not** `"none"` |
+| P4 run broker | `runtime.brokerAvailable: true`, `brokeredBackends: ["claude"]`, **CORRECTED 2026-08-22: `runBrokerIsolation: "scope"`** since 2026-08-21T20:48Z — the `probeUserScope`/`userScopeEnv` fix (`fde2dae8`, `cf334d89`) closed the `XDG_RUNTIME_DIR` gap that produced the value below; live evidence and the disjoint-cgroup proof are in `.ai/specs/2026-08-22-broker-scope-isolation-full-stop-survival.md`. Original text, kept unchanged: ~~`runBrokerIsolation: "delegated"` — **not** `"none"`~~ |
 | P5 readiness gate | `GET /api/v1/ready` → 200 |
 | Deploy identity in-band | `health.deploy` = `{releaseId, version 0.10.0, sha ad0b5f17…, activatedAt}` |
 
@@ -170,6 +170,12 @@ Three defects, all filed, none fixed in the deploy step: **`f97ddd39`** — bare
 `parseArgs` though the help advertises `--rollback[=<id>]` (use `--rollback=`); **`6497f002`** —
 `runRollback` flips and restarts but never probes readiness, so a rollback onto a dead release
 prints "Deploy complete"; **`6c89af7c`** — the keep-alive race and cutover latency above.
+
+**CORRECTED 2026-08-22 — `6497f002` is fixed, `f97ddd39` and `6c89af7c` are not.** `runRollback`
+now probes `/api/v1/ready` after the restart and reports failure distinctly (commit `2f91de4b`,
+merged to `origin/main` at `c31af208`; spec `.ai/specs/2026-08-22-rollback-readiness-gate.md`,
+status IMPLEMENTED QA Needed — its own runtime E2E, §5, has not run yet). The other two defects in
+this paragraph are unaffected and still open.
 
 Two traps worth carrying: `gapMs` in the deploy log (55 ms here) is the **deployer's own** restart
 window, not the client-visible gap; and `deploy.drained` is only a terminal event name at the end of
@@ -1077,6 +1083,10 @@ process doing the observing. `KillMode=process` plus the spool is what makes it 
   fails readiness. Fabricating one on the production box was judged not worth the risk at this
   stage; it remains the one claim in P5 with no live evidence, and `6497f002` (runRollback never
   probes readiness) is a known defect on that same path.
+  **CORRECTED 2026-08-22 — `6497f002` is fixed** (`runRollback` now probes readiness; see the
+  correction under "What the acceptance run exposed" above). This bullet's own claim, "boot-then-fail
+  auto-rollback unproven", is unaffected — it is about `runGatedDeploy`'s P5 gate, not `runRollback`,
+  and still has no live evidence.
 
 ## Criterion 1 was reopened by a controlled re-measurement (2026-08-21 19:05 UTC)
 

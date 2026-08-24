@@ -1,10 +1,12 @@
 import { createServer, type Server } from 'node:http';
 import type { IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { Duplex } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import WebSocket from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 import { verifyWsUpgrade } from './server.ts';
 import {
+  attachUpgradeFallback,
   createSocketHub,
   WS_PATH,
   type SocketHub,
@@ -195,9 +197,56 @@ describe('createSocketHub', () => {
     expect(status).toBe(403);
   });
 
-  it('destroys upgrades on any other path', async () => {
+  it('leaves upgrades on any other path alone (attach alone no longer destroys them)', async () => {
+    // `attach` used to destroy any non-WS_PATH upgrade itself. It no longer does — that duty moved
+    // to `attachUpgradeFallback` (below) so a second listener on the same `http.Server` (the
+    // cluster link) gets a chance to own its own path first. With no fallback attached here and
+    // nothing else on this server owning `/api/v1/other`, the handshake never completes — so
+    // unlike the fallback tests below, we cannot wait for `open`; we only assert it was NOT
+    // destroyed within the window, past the synchronous dispatch tick (a same-tick check can't
+    // tell "not destroyed" from "not yet" — that is exactly how the old bug hid).
     const { publisher } = makeTopic();
     const { base } = await boot(publisher);
+    // Capture the raw upgrade socket purely so this test can clean it up itself — with nothing
+    // completing the handshake and nothing destroying it either, it would otherwise sit open and
+    // stall `afterEach`'s `server.close()`.
+    let rawSocket: Duplex | undefined;
+    servers[servers.length - 1]?.on('upgrade', (_req, socket) => {
+      rawSocket = socket;
+    });
+
+    const ws = new WebSocket(`${base}/api/v1/other`);
+    let closed: number | undefined;
+    let erred = false;
+    ws.on('close', (code) => {
+      closed = code;
+    });
+    ws.on('error', () => {
+      erred = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(closed).toBeUndefined();
+    expect(erred).toBe(false);
+    ws.terminate();
+    rawSocket?.destroy();
+  });
+
+  it('attachUpgradeFallback destroys an upgrade on a path nothing owns', async () => {
+    // Built directly (not via `boot`) so the fallback attaches to a server whose reference we
+    // still hold, naming only WS_PATH as owned — `/api/v1/other` is left to nobody and must die.
+    const server = createServer((_req, res) => {
+      res.statusCode = 404;
+      res.end();
+    });
+    const hub = createSocketHub();
+    hub.registerTopic('ticker', makeTopic().publisher);
+    hub.attach(server, () => ({ trusted: true }));
+    attachUpgradeFallback(server, [WS_PATH]);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    servers.push(server);
+    hubs.push(hub);
+    const { port } = server.address() as AddressInfo;
+    const base = `ws://127.0.0.1:${port}`;
 
     const ws = new WebSocket(`${base}/api/v1/other`);
     await new Promise<void>((resolve, reject) => {
@@ -480,3 +529,105 @@ describe('verifyWsUpgrade', () => {
     });
   });
 });
+
+/**
+ * The composition bug this file exists to guard: two `'upgrade'` listeners on ONE `http.Server` —
+ * this hub's and, in production, `cluster/link-server.ts`'s. Node dispatches every registered
+ * `'upgrade'` listener for a single event, synchronously, with no `stopPropagation`, so before
+ * `attachUpgradeFallback` existed the hub's own `attach` destroyed a `CLUSTER_LINK_PATH` upgrade in
+ * the same tick as the cluster listener accepted it — in EITHER registration order (verified against
+ * pre-fix `ws.ts`: close code 1006, both orders). These tests wire a hand-rolled stand-in for the
+ * cluster link (not `ClusterLinkServer` itself — that needs credentials and belongs to another
+ * package) to prove the fix holds regardless of which listener registers first.
+ */
+describe('upgrade composition: ws hub + a second path owner + attachUpgradeFallback', () => {
+  // Mirrors the real path from @loki-labs/better-cezar-contract without importing the cluster
+  // package — this file owns no cluster code.
+  const CLUSTER_LINK_PATH = '/api/v1/cluster/link';
+
+  /** Hand-rolled stand-in for `cluster/link-server.ts#attach`'s real shape: acts only on
+   *  `CLUSTER_LINK_PATH`, returns without destroying for every other path. */
+  function attachClusterStandIn(server: Server, onAccepted: () => void): void {
+    const wss = new WebSocketServer({ noServer: true });
+    server.on('upgrade', (req, socket, head) => {
+      const pathname = new URL(req.url ?? '', 'http://localhost').pathname;
+      if (pathname !== CLUSTER_LINK_PATH) return; // not ours — leave it for another listener
+      wss.handleUpgrade(req, socket, head, () => onAccepted());
+    });
+  }
+
+  async function bootComposed(order: 'ws-first' | 'cluster-first') {
+    const server = createServer((_req, res) => {
+      res.statusCode = 404;
+      res.end();
+    });
+    const hub = createSocketHub();
+    const { publisher } = makeTopic();
+    hub.registerTopic('ticker', publisher);
+    let accepted = 0;
+
+    if (order === 'ws-first') {
+      hub.attach(server, () => ({ trusted: true }));
+      attachClusterStandIn(server, () => {
+        accepted += 1;
+      });
+    } else {
+      attachClusterStandIn(server, () => {
+        accepted += 1;
+      });
+      hub.attach(server, () => ({ trusted: true }));
+    }
+    // Same wiring shape as server.ts: the fallback is attached last, after every owner.
+    attachUpgradeFallback(server, [WS_PATH, CLUSTER_LINK_PATH]);
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    servers.push(server);
+    hubs.push(hub);
+    const { port } = server.address() as AddressInfo;
+    return { base: `ws://127.0.0.1:${port}`, accepted: () => accepted };
+  }
+
+  for (const order of ['ws-first', 'cluster-first'] as const) {
+    it(`a CLUSTER_LINK_PATH upgrade survives — registration order: ${order}`, async () => {
+      const { base, accepted } = await bootComposed(order);
+      const ws = new WebSocket(`${base}${CLUSTER_LINK_PATH}`);
+      let closed: number | undefined;
+      let erred = false;
+      ws.on('close', (code) => {
+        closed = code;
+      });
+      ws.on('error', () => {
+        erred = true;
+      });
+      await new Promise<void>((resolve, reject) => {
+        ws.on('open', () => resolve());
+        // `open` already fired above once, but if the handshake itself fails this still surfaces it.
+        setTimeout(() => reject(new Error('no open within 1s')), 1_000).unref();
+      });
+      // The bug destroys the socket in the SAME tick as the accept — a synchronous readyState
+      // check right after `open` can pass against broken code. Wait past the dispatch tick, then
+      // prove the pipe is genuinely still live by writing on it.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(closed).toBeUndefined();
+      expect(erred).toBe(false);
+      ws.send('ping'); // the stand-in never reads this; only proves the socket still accepts writes
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(accepted()).toBe(1);
+      expect(closed).toBeUndefined();
+      expect(erred).toBe(false);
+      ws.terminate();
+    });
+  }
+
+  // Negative control: without this, "the fallback destroys nothing" would still pass every
+  // assertion above.
+  it('an upgrade on a path nothing owns is still destroyed', async () => {
+    const { base } = await bootComposed('ws-first');
+    const ws = new WebSocket(`${base}/api/v1/nope`);
+    await new Promise<void>((resolve, reject) => {
+      ws.on('error', () => resolve());
+      ws.on('open', () => reject(new Error('handshake must not succeed')));
+    });
+  });
+});
+

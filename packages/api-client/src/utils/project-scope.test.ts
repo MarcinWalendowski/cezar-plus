@@ -6,7 +6,9 @@ import {
   apiPath,
   getApiBaseUrl,
   getApiScope,
+  ownsApiScope,
   queryScope,
+  releaseApiScope,
   resolveApiUrl,
   setApiBaseUrl,
   setApiScope,
@@ -84,6 +86,16 @@ describe('apiPath — scoped', () => {
     setApiScope('cezar')
     // `/healthcheck` is not `/health`; the exemption matches whole segments only.
     expect(apiPath('/healthcheck')).toBe('/api/v1/p/cezar/healthcheck')
+  })
+
+  it('leaves cluster routes unscoped too — a cezar is one node of a cluster, not a project', () => {
+    setApiScope('cezar')
+    expect(apiPath('/cluster')).toBe('/api/v1/cluster')
+    expect(apiPath('/cluster/nodes/abc')).toBe('/api/v1/cluster/nodes/abc')
+    // Negative control: a genuinely project-scoped route must still take the `/p/<id>` prefix
+    // under this same active scope — without this, the test would also pass against a change
+    // that made every route workspace-level, not just `/cluster`.
+    expect(apiPath('/runs')).toBe('/api/v1/p/cezar/runs')
   })
 
   it('versions whatever route it is given — callers pass routes, never URLs', () => {
@@ -211,5 +223,71 @@ describe('setApiBaseUrl — the service on another origin', () => {
   it('leaves a foreign absolute URL alone', () => {
     setApiBaseUrl('https://cezar.example.com')
     expect(resolveApiUrl('https://github.com/o/r/pull/7')).toBe('https://github.com/o/r/pull/7')
+  })
+})
+
+/**
+ * Ownership (`.ai/specs/2026-08-22-api-scope-ownership-token.md`).
+ *
+ * The scope is one module slot, and before this it had no writer identity: the DEPARTING
+ * `ProjectScopeProvider` of an instance swap reset it after the ARRIVING one had already claimed
+ * it, so every later request went out unscoped and hit the boot project — a 404 the cockpit
+ * renders as "Task not found" over a task that is running.
+ */
+describe('scope ownership', () => {
+  it('a release by the owner that still holds the slot resets it', () => {
+    const owner = {}
+    setApiScope('cezar', owner)
+    expect(getApiScope()).toBe('cezar')
+    releaseApiScope(owner)
+    expect(getApiScope()).toBeNull()
+    expect(queryScope()).toBe('default')
+  })
+
+  it('a release by a SUPERSEDED owner does nothing — the production failure, at this layer', () => {
+    const departing = {}
+    const arriving = {}
+    setApiScope('cezar', departing)
+    // The arriving provider renders (and so claims) before React commits the departing one's
+    // cleanup. Same project id: the value alone cannot tell the two apart, only the owner can.
+    setApiScope('cezar', arriving)
+
+    releaseApiScope(departing)
+
+    expect(getApiScope()).toBe('cezar')
+    expect(apiPath('/runs/r1')).toBe('/api/v1/p/cezar/runs/r1')
+    expect(queryScope()).toBe('cezar')
+  })
+
+  it('reports whose claim is standing', () => {
+    const a = {}
+    const b = {}
+    setApiScope('cezar', a)
+    expect(ownsApiScope(a)).toBe(true)
+    expect(ownsApiScope(b)).toBe(false)
+    setApiScope('cezar', b)
+    expect(ownsApiScope(a)).toBe(false)
+    expect(ownsApiScope(b)).toBe(true)
+  })
+
+  it('keeps the ownerless call working — a test or an embedder setting the scope by hand', () => {
+    setApiScope('cezar')
+    expect(getApiScope()).toBe('cezar')
+    // Nobody else may release what an explicit ownerless write claimed.
+    releaseApiScope({})
+    expect(getApiScope()).toBe('cezar')
+    releaseApiScope(null)
+    expect(getApiScope()).toBeNull()
+  })
+
+  it('a fresh claim after a release starts clean', () => {
+    const a = {}
+    setApiScope('cezar', a)
+    releaseApiScope(a)
+    // The released owner must not be able to reset the NEXT claim either.
+    const b = {}
+    setApiScope('chat', b)
+    releaseApiScope(a)
+    expect(getApiScope()).toBe('chat')
   })
 })

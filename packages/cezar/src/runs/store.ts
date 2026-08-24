@@ -9,7 +9,8 @@ import { workflowDefSchema } from '../workflows/types.ts';
 import { pendingApprovalSchema } from '@loki-labs/better-cezar-contract';
 
 import { RUNNER_IDS } from '../core/agent-runner.ts';
-import { contextWindowForModel } from '../core/context-window.ts';
+import { resolveContextWindow } from '../core/context-window.ts';
+import { taskAuthorSchema, type TaskAuthor } from './task-author.ts';
 
 import type { RunnerId } from '../core/agent-runner.ts';
 // Type-only, so no runtime edge is added from the store to the contract package — one definition
@@ -74,6 +75,11 @@ const stepStateSchema = z.object({
    *  each turn — see the contract's `stepStateSchema` (spec
    *  2026-08-19-context-usage-in-tasks-table). */
   contextTokens: usageCounterSchema.optional(),
+  /** This step's own context-window max (spec 2026-08-22-context-window-denominator-per-step):
+   *  a real backend-reported figure when one exists (codex today), else the model-string
+   *  guess, else absent the moment this step's own `contextTokens` disproves that guess.
+   *  Resolved once per `updateStep` patch by `resolveContextWindow` — see below. */
+  contextWindow: usageCounterSchema.optional(),
   usageInvocationsStarted: usageCounterSchema.optional(),
   usageInvocationsObserved: usageCounterSchema.optional(),
   usageTurnsStarted: usageCounterSchema.optional(),
@@ -87,6 +93,16 @@ const stepStateSchema = z.object({
   /** Backend that owns `sessionId`. Optional so pre-affinity runs.json files still parse;
    *  `storedRunnerSchema` so a legacy `claude-cli` folds to `claude` instead of failing (#547). */
   backend: storedRunnerSchema.optional(),
+  /** Free-text model this step's LATEST attempt actually asked for (`step.model ?? input.model`
+   *  on a spawn, the run-level `model` on a continuation) — `undefined` when `agentModelsLocked`
+   *  voided it or nothing was asked. The per-step twin of `RunRecord.model`, written where the
+   *  model is RESOLVED rather than where it was planned (spec 2026-08-22-per-step-model-display). */
+  model: z.string().optional(),
+  /** Canonical `provider/model` this step's latest attempt resolved to (`core/model-identity.ts`).
+   *  The per-step twin of `RunRecord.modelIdentity` — which the NEXT step overwrites, so the
+   *  run-level field only ever names the last one. This one is never clobbered, which is the whole
+   *  point: a chain running `review-spec` on opus and the rest on sonnet keeps both answers. */
+  modelIdentity: z.string().optional(),
   /** Agent profile (account) this step actually spawned under — `default`, or a stored profile
    *  id (spec 2026-07-29-agent-profiles). Recorded rather than re-derived because a session id
    *  only means something inside the config dir that created it: `sessionId` and `profileId` are
@@ -101,6 +117,12 @@ const stepStateSchema = z.object({
    *  pre-existing record and on every genuine failure, which keeps `runs.json` parseable both
    *  ways. Cleared implicitly when the step is re-entered and succeeds. */
   stopReason: z.enum(['inactivity']).optional(),
+  /** Which writer named this step (spec 2026-08-22-continue-step-naming): `'step'` when Phase 2
+   *  names a new `continue-N` after the real step it's retrying, `'prompt'` when Phase 1 names one
+   *  from the user's own text, `'marker'` when Phase 3 later patches it from a `CEZ:TITLE=`
+   *  declaration. Absent on every pre-existing record and on any step this naming logic never
+   *  touches. */
+  nameOrigin: z.enum(['step', 'prompt', 'marker']).optional(),
 });
 
 /** One prompt message stacked onto a run while it waits for a free agent slot
@@ -220,6 +242,21 @@ export const runRecordSchema = z.object({
       githubUrl: z.string().url(),
     })
     .optional(),
+  /**
+   * Who created this task, stamped at creation and never rewritten (spec
+   * `.ai/specs/2026-08-21-task-author-provenance.md`). The wire twin is
+   * `contract/src/runs.ts`'s field of the same name.
+   *
+   * OPTIONAL here for the same reason `diffStat` is: `runs.json` is `safeParse`d as ONE array, so
+   * a required addition would silently drop every pre-existing run. What makes the field present
+   * on everything written since is `createRun`'s INPUT type below, where it is required — a
+   * creation path that names no author does not compile. No default, no `?? 'unknown'`: a default
+   * is precisely what would let a real path ship unattributed while still looking attributed.
+   *
+   * Written ONCE, in the record literal. `updateRun` never sets it, so an author cannot be edited
+   * after the fact — which is the property that makes it worth reading at all.
+   */
+  author: taskAuthorSchema.optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
   /**
    * Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —
@@ -296,6 +333,21 @@ export const runRecordSchema = z.object({
    *  `monitoring` while the agent is still working on its own downstream work.
    *  Optional/absent on old runs; cleared when the run resumes or ends. */
   activity: z.enum(['monitoring']).optional(),
+  /**
+   * Why this run is parked at `waiting`, when it parked with NO turn-end marker
+   * (spec 2026-08-23-plain-end-structured-question). `'question'` = the agent's
+   * last turn ends on something addressed to the user; `'report'` = it does not.
+   * Classified by `detectTrailingQuestion`, never by a model. Absent on every run
+   * recorded before this shipped, and on every marked ending (`CEZ:ASK` owns its
+   * own event). Cleared exactly where `activity` is.
+   */
+  waitingReason: z.enum(['question', 'report']).optional(),
+  /**
+   * The agent's OWN trailing sentence, verbatim and clipped to 280 chars — what
+   * the dock and the `run.needs-you` body show. Never generated: absent whenever
+   * `waitingReason !== 'question'`.
+   */
+  waitingQuestion: z.string().max(280).optional().catch(undefined),
   /** Exact server-computed deadline for the next automatic monitoring check. */
   monitoringWakeAt: z.string().datetime().optional().catch(undefined),
   /** True only for the live epoch that exhausted all automatic monitoring checks. */
@@ -319,7 +371,10 @@ export const runRecordSchema = z.object({
   outputTokens: usageCounterSchema.optional(),
   /** Current context occupancy (latest agent step's `contextTokens`) and the model's max
    *  window — see the contract's `runRecordSchema` (spec
-   *  2026-08-19-context-usage-in-tasks-table). Recomputed on every step update. */
+   *  2026-08-19-context-usage-in-tasks-table). Superseded 2026-08-22 by
+   *  2026-08-22-context-window-denominator-per-step: `contextWindow` is now copied from that
+   *  same step's own `StepState.contextWindow`, not recomputed independently on every
+   *  update. */
   contextTokens: usageCounterSchema.optional(),
   contextWindow: usageCounterSchema.optional(),
   costUsd: z.number().optional(),
@@ -414,6 +469,73 @@ export const runRecordSchema = z.object({
    *  Optional: old runs.json files and `ps`-less platforms have neither. */
   peakRssBytes: z.number().optional(),
   peakProcCount: z.number().optional(),
+  /**
+   * What the run actually COST the host (spec
+   * `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, Phase 0 step 1). The spec's premise is a
+   * capacity claim, and the resource it is about — CPU — is the one resource nothing recorded:
+   * `core/process-usage.ts` samples CPU on every tick and keeps a high-water mark for RSS only,
+   * so the sampled figure died with the process tree and no finished run could say what it took.
+   *
+   * `peakMemoryBytes` is deliberately NOT a second spelling of `peakRssBytes` above. That one is
+   * a sum of `ps` RSS across the process tree, which double-counts shared pages and is the
+   * number the kernel did not use when deciding to kill anything. This one is the run's own
+   * cgroup `memory.peak` where a cgroup exists (Linux), which is the figure the bound in
+   * `resources.runMemoryMaxMb` is actually enforced against. Both are kept, because a
+   * before/after comparison across the Phase 0 change needs the old series to stay readable.
+   * `cpuSeconds` is cgroup `cpu.stat` `usage_usec`, converted once at the source.
+   *
+   * All three optional: `runs.json` is `safeParse`d as ONE array, so a required addition drops
+   * every pre-existing run; and a cgroup-less host (macOS, a container without the controller
+   * delegated) legitimately has no answer. Absent means NOT MEASURED, which is not zero — a
+   * reader must print an em dash rather than claim a measurement that never happened, exactly as
+   * `costUsd` does.
+   */
+  peakCpuPct: z.number().optional(),
+  peakMemoryBytes: z.number().optional(),
+  cpuSeconds: z.number().optional(),
+  /**
+   * A cgroup bound fired and the kernel (or systemd) killed this run's processes — spec D14a,
+   * verification **C3**.
+   *
+   * A new optional FIELD, never a new `RunStatus` member, and for the same reason `stopReason`
+   * above is one: cezar is published as `@loki-labs/better-cezar` and `RunStatus` is a wire enum
+   * every consumer switches over exhaustively, so widening it breaks installs this repo does not
+   * control. `status` stays whatever it was; this field carries the one fact `status` cannot.
+   *
+   * **`limit` is the point of the field, not decoration.** C3's whole acceptance is that a
+   * memory kill is reported AS a resource kill WITH a reason — because a bound whose failure mode
+   * is indistinguishable from a failed test step gets blamed on the test, and the run's own agent
+   * then "fixes" code that was never broken. So a writer must always be able to name which limit
+   * it hit; there is no unnamed spelling of this field.
+   *
+   * `limit` is an enum rather than free text because the set is closed by the bounds that exist
+   * and a closed set is what lets the cockpit and the node health panel branch on it.
+   *
+   * **Narrowed to `'memory'` alone during implementation (2026-08-22).** This said the set was
+   * `runMemoryHighMb`/`runMemoryMaxMb` → `'memory'` and ~~`runCpuWeight` → `'cpu'`~~, and the
+   * second half was false: `CPUWeight` is a *relative scheduling weight*, not a ceiling, so
+   * nothing it governs can ever be breached and no writer in this design can produce a `'cpu'`
+   * kill. D14a chose weight over quota deliberately. A member no writer can emit is not
+   * forward-compatibility, it is decoration — the next reader takes it as evidence that CPU kills
+   * are handled somewhere, and they are not. Re-adding `'cpu'` means first adding a hard
+   * `CPUQuota`, and it is additive when that day comes. It sits inside an object,
+   * not on the record, so a later bound can add `detail` without a second top-level key — and so
+   * the whole fact is present or absent together.
+   *
+   * Optional and additive, so an older cezar reading a newer `runs.json` round-trips it untouched
+   * and an older cockpit renders an unremarkable run.
+   */
+  resourceKill: z
+    .object({
+      limit: z.enum(['memory']),
+      /** ISO time the kill was observed. */
+      at: z.string(),
+      /** Free-text detail for a human — the bound's value, the killer, the scope name. Never
+       *  parsed; `limit` is what code branches on. */
+      detail: z.string().optional(),
+    })
+    .optional()
+    .catch(undefined),
   archived: z.boolean().default(false),
   archivedAt: z.string().optional(),
   /** Read receipt (#unread-done-items): the ISO time the cockpit last opened this
@@ -615,6 +737,8 @@ export function reconcileLoadedRun(run: RunRecord, opts?: { keepLive?: boolean }
   if (!['running', 'waiting', 'queued'].includes(run.status)) {
     run.activity = undefined;
     run.monitoringWakeAt = undefined;
+    run.waitingReason = undefined;
+    run.waitingQuestion = undefined;
   }
   // A pending usage-limit resume survives the restart on purpose (the wait can be
   // hours) — `RunManager.recover()` re-arms it from this field. It can only mean
@@ -688,6 +812,15 @@ export class RunStore extends EventEmitter {
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
+    /**
+     * Who created this task (spec 2026-08-21-task-author-provenance). REQUIRED, and required HERE
+     * rather than defaulted, because this is the ONLY place a `RunRecord` comes into being — so a
+     * required argument on this one object is a complete guarantee for runs, and `npm run
+     * typecheck` fails for the ninth creation path exactly as it did for the first eight.
+     *
+     * Build it with one of the constructors in `./task-author.ts`; never with a literal.
+     */
+    author: TaskAuthor;
   }): RunRecord {
     const run: RunRecord = {
       id: randomUUID(),
@@ -710,6 +843,8 @@ export class RunStore extends EventEmitter {
       workspaceProjects: input.workspaceProjects,
       groupId: input.groupId,
       variant: input.variant,
+      // Stamped once, at the only mint point, and never rewritten — see the schema field above.
+      author: input.author,
       status: 'queued',
       createdAt: new Date().toISOString(),
       tokensUsed: 0,
@@ -739,10 +874,25 @@ export class RunStore extends EventEmitter {
       delete run.referencedIssueNumberSeeded;
     }
     const normalized = { ...patch };
+    // A parked prose question describes one park. Moving to a different status starts a new
+    // state, so do not carry the old question into it. A same-status write is deliberately
+    // exempt because the idle-session reap rewrites `waiting` over the same park, and the park
+    // itself is exempt because it supplies its new reason in this patch (spec
+    // 2026-08-23-plain-end-structured-question, P2 step 2b).
+    if (
+      normalized.status &&
+      normalized.status !== run.status &&
+      !Object.prototype.hasOwnProperty.call(patch, 'waitingReason')
+    ) {
+      normalized.waitingReason = undefined;
+      normalized.waitingQuestion = undefined;
+    }
     if (normalized.status && !['running', 'waiting', 'queued'].includes(normalized.status)) {
       normalized.activity = undefined;
       normalized.monitoringWakeAt = undefined;
       normalized.monitoringWakeCapReached = undefined;
+      normalized.waitingReason = undefined;
+      normalized.waitingQuestion = undefined;
     }
     // …and the mirror image for the usage-limit resume (spec
     // 2026-08-03-auto-resume-after-usage-limit): it is a promise made ABOUT a failed run, so a
@@ -796,7 +946,10 @@ export class RunStore extends EventEmitter {
   }
 
   /** Append a step to an existing run (used by "Continue" — spec 003). */
-  addStep(runId: string, step: Pick<StepState, 'id' | 'name' | 'kind'>): void {
+  addStep(
+    runId: string,
+    step: Pick<StepState, 'id' | 'name' | 'kind'> & { nameOrigin?: StepState['nameOrigin'] },
+  ): void {
     const run = this.runs.get(runId);
     if (!run || run.steps.some((s) => s.id === step.id)) return;
     run.steps.push({ ...step, status: 'pending', iterations: 0, tokensUsed: 0 });
@@ -807,7 +960,22 @@ export class RunStore extends EventEmitter {
     const run = this.runs.get(runId);
     const step = run?.steps.find((s) => s.id === stepId);
     if (!run || !step) return;
+    // Captured BEFORE the merge below: once `Object.assign` runs, `step.contextWindow` holds
+    // either the value this same patch just wrote or a previously-stored guess, and re-reading
+    // it as `reportedWindow` would let a stale guess masquerade as a report and permanently
+    // short-circuit `resolveContextWindow`'s clamp. Only a value present on THIS call's own
+    // patch counts as a report (spec 2026-08-22-context-window-denominator-per-step).
+    const reportedWindow = patch.contextWindow;
+    const touchesContext = 'contextTokens' in patch || 'contextWindow' in patch;
     Object.assign(step, this.redactStepPatch(patch));
+    if (touchesContext) {
+      step.contextWindow = resolveContextWindow({
+        model: run.model,
+        modelIdentity: run.modelIdentity,
+        reportedWindow,
+        observedTokens: step.contextTokens,
+      });
+    }
     run.tokensUsed = run.steps.reduce((sum, s) => sum + s.tokensUsed, 0);
     const startedAgentSteps = run.steps.filter((candidate) => candidate.kind === 'agent' && candidate.iterations > 0);
     const directionalComplete =
@@ -839,10 +1007,19 @@ export class RunStore extends EventEmitter {
       .reverse()
       .find((candidate) => candidate.contextTokens !== undefined);
     run.contextTokens = latestContextStep?.contextTokens;
-    // The max window is a property of the model, recomputed here so an `auto` run picks it up
-    // once `modelIdentity` resolves. Absent for a model we do not size — the cell then shows
-    // only the current figure rather than dividing by an invented max.
-    run.contextWindow = contextWindowForModel(run.model, run.modelIdentity);
+    // Sourced from that SAME step's own resolved `contextWindow` — never a fresh, independent
+    // guess — so numerator and denominator are always the one step's own pair (spec
+    // 2026-08-22-context-window-denominator-per-step, Defect B). The `?? resolveContextWindow`
+    // fallback exists only for step records persisted before `StepState.contextWindow`
+    // existed; it goes inert the first time that step is patched again under this code.
+    run.contextWindow =
+      latestContextStep?.contextWindow ??
+      resolveContextWindow({
+        model: run.model,
+        modelIdentity: run.modelIdentity,
+        reportedWindow: undefined,
+        observedTokens: latestContextStep?.contextTokens,
+      });
     const cost = run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
     run.costUsd = cost > 0 ? cost : undefined;
     this.touch(run);
@@ -1153,6 +1330,32 @@ export class RunStore extends EventEmitter {
         .filter((e): e is RunEvent => e !== null);
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * The run's handoff journal, `''` when there is none. Same bytes `handoff.ts#readHandoff` returns
+   * for this run, reached without the caller having to know where the store keeps its files.
+   *
+   * **Added 2026-08-22 because a caller was recovering `dataDir` through the `private` modifier.**
+   * `cluster/relay.ts` needs this text for a run tail and could not get it: the constructor field is
+   * `private`, TypeScript's `private` is compile-time only, and a `store as unknown as { dataDir }`
+   * cast worked. The cast was defended on the grounds that it would "break loudly" if the field were
+   * ever renamed, which is the opposite of what happens — `readHandoff` swallows a bad path and
+   * returns `''`, so the journal would vanish from every relayed tail with no error anywhere, on the
+   * remote side of a link, for whoever was watching a foreign run. A silent fallback that is
+   * indistinguishable from "this run has no journal".
+   *
+   * Deliberately not a `dataDir` getter: this hands out the one file the caller wanted, not the
+   * directory every file lives in. The store already owns this path's whole lifecycle (it deletes
+   * the file with the run), so reading it adds no coupling that was not already here, and the
+   * plain `readFileSync` keeps the no-upward-imports rule `handoffPath()` below is written for.
+   */
+  readHandoffText(runId: string): string {
+    try {
+      return readFileSync(this.handoffPath(runId), 'utf8');
+    } catch {
+      return '';
     }
   }
 

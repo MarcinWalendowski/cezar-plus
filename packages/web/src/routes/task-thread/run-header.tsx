@@ -33,6 +33,7 @@ import {
   useRuns,
 } from '@/api/queries'
 import { DEFAULT_AGENT_ACCOUNT_ID, type ApiRun, type OpenTarget } from '@loki-labs/better-cezar-api-client'
+import { AuthorCell } from '@/components/author-cell'
 import { DiffStatLabel } from '@/components/diff-stat'
 import { LiveDuration } from '@/components/live-duration'
 import { TitleEditInput, useTitleEditor } from '@/components/editable-title'
@@ -80,6 +81,7 @@ import { isHttpUrl } from '@/lib/utils'
 import { Markdown } from './markdown'
 import { useContinuationProvider } from './continuation-provider'
 import { cliTargetResumes, cliTargetRunner, finishTitle, resumeHint, runActionFlags } from './run-actions'
+import { RetargetMenuButton, RetargetMenuItems } from './retarget-menu'
 import { WorkflowSteps } from './step-rail'
 import { useFinishRun } from './use-finish-run'
 
@@ -236,6 +238,9 @@ export function RunHeader({
                 Continue
               </Button>
             ) : null}
+            {/* A PARKED task has no Continue (no session) and no Finish — this is the only action
+                that can make it move, so it sits where a person is already looking for one. */}
+            {flags.retarget ? <RetargetMenuButton run={run} /> : null}
             {/* Terminal is folded into the Open in… menu to save room in the actions row. */}
             <OpenInMenuForRun run={run} canResume={flags.terminal} onResume={() => actions.terminal.mutate()} />
             <Button
@@ -283,7 +288,9 @@ export function RunHeader({
 
         {run.steps.length > 0 ? (
           <div className="border-t border-border pt-2 pb-1">
-            <WorkflowSteps runId={run.id} steps={run.steps} />
+            {/* The run's OWN frozen def, not the current template: a workflow edited since this
+                run started must not restate this run's plan (spec 2026-08-22-per-step-model-display). */}
+            <WorkflowSteps runId={run.id} steps={run.steps} planned={run.workflowDef?.steps} runRunner={run.runner} />
           </div>
         ) : null}
 
@@ -589,6 +596,12 @@ function MetaRow({
     )
   }
   if (run.diffStat) parts.push(<DiffStatLabel key="diff" stat={run.diffStat} />)
+  if (run.author) {
+    // Provenance, on the one surface that has room for the whole sentence rather than a cell.
+    // `parentTo` is left to the provider: the thread is project-scoped, but a workspace run's
+    // parent may live in another project, so guessing the scope here would mint a 404.
+    parts.push(<AuthorCell key="author" author={run.author} />)
+  }
   if (run.automation) {
     // Provenance is history and is always shown; only the LINK is gated. Following it with the
     // capability off would land on the disabled `/automations` state, which says nothing about
@@ -830,6 +843,7 @@ function ActionsKebab({
             <PlayIcon aria-hidden="true" /> Continue
           </DropdownMenuItem>
         ) : null}
+        {flags.retarget ? <RetargetMenuItems run={run} /> : null}
         {flags.terminal ? (
           <DropdownMenuItem onSelect={() => actions.terminal.mutate()}>
             <SquareTerminalIcon aria-hidden="true" /> Terminal

@@ -142,15 +142,48 @@ async function readClaudeIdentity(configDir: string): Promise<AccountIdentity> {
  * The signature is NOT verified, and that is correct here: this is a local file the user's own CLI
  * wrote, read to display who they are — not a token cezar is accepting as proof of anything.
  */
-async function readCodexIdentity(configDir: string): Promise<AccountIdentity> {
-  const auth = await readJsonCapped(join(configDir, 'auth.json'));
-  if (auth === null) return { available: false, reason: NOT_SIGNED_IN, fields: [] };
+/** What `auth.json` says, split into the three facts a caller may act on and nothing else.
+ *  `present` distinguishes "no such file" from "signed in by a means with no claims", which read
+ *  identically if you only look at `claims`. */
+export interface CodexAuthRead {
+  /** An `auth.json` exists and parsed. */
+  present: boolean;
+  /** The `id_token`'s payload claims, or `null` for an API-key login or an unreadable token. */
+  claims: Record<string, unknown> | null;
+  /** A non-empty `OPENAI_API_KEY` is present. The VALUE never leaves this module. */
+  apiKeyLogin: boolean;
+}
+
+/**
+ * Codex's own record of which account a config dir belongs to — `<dir>/auth.json`'s `id_token`
+ * claims. The codex counterpart of `readClaudeOauthAccount` above, and exported for the same
+ * reason: discovery (`workspace/agent-account-identity.ts`) needs the same record in a different
+ * shape, and a second reader of this file elsewhere is how two readers of one upstream drift apart.
+ *
+ * **The three credentials in that file are never returned.** `OPENAI_API_KEY` is reduced to a
+ * boolean here; `access_token` and `refresh_token` are not read at all. Callers pick claim fields
+ * BY NAME (rule 1 at the top of this file), and the claims record itself carries no credential —
+ * it is an identity assertion the CLI already wrote to disk in plaintext.
+ */
+export async function readCodexAuthClaims(configDir: string): Promise<CodexAuthRead> {
+  const auth = await readJsonCapped(join(expandTilde(configDir), 'auth.json'));
+  if (auth === null) return { present: false, claims: null, apiKeyLogin: false };
   const tokens = auth.tokens;
   const idToken = tokens && typeof tokens === 'object'
     ? (tokens as Record<string, unknown>).id_token
     : undefined;
+  return {
+    present: true,
+    claims: typeof idToken === 'string' ? decodeJwtClaims(idToken) : null,
+    apiKeyLogin: typeof auth.OPENAI_API_KEY === 'string' && auth.OPENAI_API_KEY !== '',
+  };
+}
+
+async function readCodexIdentity(configDir: string): Promise<AccountIdentity> {
+  const auth = await readCodexAuthClaims(configDir);
+  if (!auth.present) return { available: false, reason: NOT_SIGNED_IN, fields: [] };
   const fields: AccountIdentityField[] = [];
-  const claims = typeof idToken === 'string' ? decodeJwtClaims(idToken) : null;
+  const claims = auth.claims;
   if (claims !== null) {
     push(fields, 'Email', claims.email);
     push(fields, 'Name', claims.name);
@@ -161,7 +194,7 @@ async function readCodexIdentity(configDir: string): Promise<AccountIdentity> {
   }
   // An API-key login has no id_token at all — say which kind of login this is rather than
   // reporting "not signed in" for an account that is perfectly usable.
-  if (fields.length === 0 && typeof auth.OPENAI_API_KEY === 'string' && auth.OPENAI_API_KEY !== '') {
+  if (fields.length === 0 && auth.apiKeyLogin) {
     return { available: true, fields: [{ label: 'Login', value: 'API key' }] };
   }
   return fields.length > 0

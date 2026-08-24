@@ -5,6 +5,329 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- 🧭 **A model router for codex: the owner's task→model table, applied per step of `spec-to-deploy`**
+  (spec `.ai/specs/2026-08-24-codex-step-model-and-effort.md`).
+
+  `spec-to-deploy` has expressed a per-step model policy since 2026-08-21 — `spec`/`review-spec` on
+  `opus`, the other six on `sonnet`. **On a codex run it expressed nothing.** Every one of those
+  pins is a Claude alias, `modelForBackend` drops it as another runner's id, and the step falls
+  through to codex's own default. Measured on `prod-host`, that default is **`gpt-5.6-sol`
+  with `reasoningEffort: null`**: the most expensive model in the catalog at its *shallowest*
+  reasoning level, for `Commit & push` and `Deploy` alike. Nobody chose it; it is the absence of a
+  choice.
+
+  A step can now name a model **and a reasoning effort per runner** (`byRunner`), so one step says
+  `sonnet` for Claude and `gpt-5.6-luna`/`xhigh` for codex instead of naming one and losing the
+  other. The pair is one field rather than two parallel maps, because the table has rows that
+  differ *only* in effort (Luna Medium vs Luna XHigh), and a half-applied override lands on a row
+  nobody chose.
+
+  | step | codex | effort |
+  | --- | --- | --- |
+  | Gather the record | `gpt-5.6-terra` | medium |
+  | Write / Review the spec | *(unchanged — pinned opus-on-Claude)* | — |
+  | Implement the spec | `gpt-5.6-luna` | xhigh |
+  | Run the tests · Commit & push · Deploy | `gpt-5.6-luna` | medium |
+  | Document the decision | `gpt-5.6-luna` | high |
+
+  `implement` is Luna XHigh and not Sol even for an auth or migration task: by the time it runs the
+  architecture decision has been made and reviewed on opus two steps earlier. The table's Sol row is
+  about *deciding*, and that is what `spec`/`review-spec` are.
+
+- ⚙️ **Reasoning effort reaches codex** (same spec, D3). `step.effort` was Claude-only — the schema
+  said so in its own docblock — which made four of the table's six rows inexpressible, since they
+  differ from another row only by effort. It now rides on `turn/start`, in the same params object
+  cezar already sends `summary` in. Read off the app-server's own `generate-json-schema` output
+  rather than guessed: `v2/TurnStartParams.json` documents `effort` as *"Override the reasoning
+  effort for this turn and subsequent turns."*
+
+  **`thread/start` is the trap, and it was measured.** It accepts `effort`, `reasoningEffort`,
+  `modelReasoningEffort`, `model_reasoning_effort` **and** `reasoning_effort` without error and
+  applies none of them — the thread comes back `reasoningEffort: null` every time, because unknown
+  params are tolerated. A change made there looks exactly like a change that worked, which is why
+  the test asserts the `turn/start` payload cezar writes rather than the turn's outcome.
+
+- ⬆️ **Escalation, exactly where the table puts it** (same spec, D4). A step that fails on
+  `terra`/`medium` or `sol`/`medium` retries on `sol`/`high`, then `sol`/`max`. Luna rows do **not**
+  climb — a failing tiny task must not end up on the most expensive model, which is precisely what
+  the table declines to do — and `ultra` is never reached, because it is the one level the `effort`
+  enum omits.
+
+- 🔀 **A second Codex account, detected by itself — and a pool that can actually balance one**
+  (spec `.ai/specs/2026-08-24-second-codex-account-balancing.md`).
+
+  Three findings, measured on a production box running one Codex login that had been
+  rate-limited for a day:
+
+  **Codex's quota reading was invented while the app-server held no snapshot.**
+  `account/rateLimits/read` answered `usedPercent: 0` twice, 21 s apart, with `resetsAt` moving with
+  the clock — always exactly `now + 7 days`. That is the app-server's *empty default*, not a
+  measurement. cezar stored the fake 0 % anyway, which put a cold Codex account in **band 0** — the
+  most-favoured value — while it could not run a thing. `parseWindow` now drops a window that is
+  indistinguishable from an unpopulated snapshot, restoring the rule this module already stated:
+  *"Never invents … Zero is a claim."*
+
+  **Narrowed the same day, before this shipped as Done.** The first reading of this said codex
+  *cannot* report on a ChatGPT Plus plan, from a rollout snapshot carrying
+  `{"limit_id":"premium","primary":null,"secondary":null}`. Four probes over three minutes after
+  the deploy disprove it: `limitId: "codex"`, `resetsAt` **anchored** (identical while `takenAt`
+  advanced 180 s), and `usedPercent` climbing 1 → 2 → 4 → 5 on the account in use. The guard is
+  unchanged, because it keys on **rolling vs anchored** rather than on the plan — and it keeps both
+  of those real windows. What changed is the conclusion: codex rows are not permanently unmeasured,
+  which makes the per-provider band split below load-bearing on every dispatch rather than only
+  while codex says nothing.
+
+  **A usage band cannot be compared across providers, and `pool:*` was comparing them.** A Claude
+  Max week at 70 % and a Codex Plus week at 0 % are fractions of two differently-sized allowances.
+  `selectPoolAccount` now picks each provider's winner on the band and chooses **between** providers
+  on in-flight and dispatch order only — two levels, so every comparison stays between like rows and
+  the result no longer depends on the order candidates arrive in. A single-provider pool
+  (`pool:claude`, `pool:codex`) is unchanged.
+
+  **Discovery was Claude-only on an argument that had already been overtaken.** It refused Codex
+  because identity lives in `auth.json` beside a live API key — while `readAccountIdentity` had been
+  reading that file's `id_token` claims for the "Show details" route since 2026-07-29. The
+  credentials are separable at the reader, not at the caller: `readCodexAuthClaims` returns the JWT
+  payload and a boolean, never the API key or either token. `~/.codex*` homes are discovered now,
+  each carrying its email and plan, and each provider's card offers its own.
+
+- ⚙️ **`CEZ_AUTO_ACCOUNTS=1` — register detected logins instead of only offering them** (same spec,
+  D5; opt-in, exact `'1'`, off by default). This reverses the 2026-08-14 decision that discovery
+  must never write, and only where it is switched on. The case it exists for is a hosted box:
+  `CEZ_REMOTE=1` withholds the accounts listing and 409s the POST, so there is no UI path at all
+  there and a second account has to be added by hand-editing JSON over ssh. A boot hook and a
+  5-minute sweep append any config dir that carries its CLI's markers **and** records an account it
+  is signed in as — never a dir the CLI merely created, which would put a login that cannot run into
+  the rotation. Append-only: no existing row is relabelled, repointed or removed. Reported as
+  `capabilities.autoAccounts`, deliberately not withheld in hosted mode, because it says whether the
+  server will write rather than who the operator is.
+
+- 🔐 **The cluster HTTP family authenticates the NODE now — and the hub turns out to have nothing
+  to authenticate it against** (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, **D20**,
+  still behind `CEZ_CLUSTER=1` and off by default).
+
+  `/api/v1/cluster/*` had exactly two gates: is clustering on, and is this node the hub. Neither
+  says **who is asking**. That was harmless while the family carried only control operations, and
+  stops being harmless the moment a route returns content — which is why the corpus routes have
+  been parked at 409 rather than serving. New `cluster/node-auth.ts` extends the link's own
+  **signed, freshness-bounded principal** (`supervisor/forwarded-principal.ts`) to HTTP, keyed on
+  the per-node HMAC secret enrollment already mints, and is registered by **explicit path** so a
+  route joins the authenticated set by where it lives rather than by someone remembering a helper.
+  This supersedes the `Authorization: Bearer` shape an earlier package had invented and flagged: a
+  bearer secret with no replay window was the weaker half of a choice nobody actually made.
+
+  **The finding underneath it is the important part. The hub never persists a node's secret.**
+  `redeemEnrollmentCode` generates it, hands it to the joining spoke, and stores it **nowhere** —
+  `cluster/peers.ts` contains the string `secret` zero times, and the contract's served node shape
+  says outright that it has no `secret` field. The consequence is bigger than D20: `verifyClusterFrame`
+  needs that same secret, so **the link's own per-frame authentication has no receiving end either**.
+  Enrollment reads as complete and is not — a node can join, land in the roster, and hold a
+  credential nothing on the other side can check. `node-auth`'s lookup therefore **fails closed**,
+  which is the honest posture and is also why the reconcile routes below were held back.
+
+  Where the secret should live is a real security decision, not a line of code: `peers.json` is the
+  wrong home unless nothing renders it, and `GET /api/v1/cluster` serves the roster. It is the next
+  package, and it is recorded as the top open item in the run plan.
+
+- 🔏 **…and its own two callers now sign, which they did not when the gate landed.** D20 gated the
+  route family in one package and left the only two clients unable to pass it: `cez kb submit`
+  posted to `/cluster/corpus/submit` with a `content-type` header and **nothing else**, and the
+  `cezar-hub` source provider still sent the bearer pair D20 supersedes. Both run on a *spoke*,
+  which does hold the secret, so both were fixable the same day even though the hub still cannot
+  verify anything.
+
+  They sign through one new helper, `signedNodeRequestHeaders`, and it exists for a specific
+  reason rather than for tidiness. The way to get a request-bound signature wrong is to hash one
+  body and send another — `JSON.stringify` called twice on the same object is not guaranteed to
+  agree across engine versions or after an innocuous refactor — and that mistake surfaces as
+  `bad-signature`, the one reason of the four that reads as *tampering*. The helper takes the body
+  as a string and **returns it alongside the headers**, so the signed bytes and the sent bytes are
+  the same value by construction and there is nothing left for a test to enforce. Both files are
+  verified against the real `verifyNodeHttpPrincipal` on the **captured outgoing request**, never a
+  re-derivation with the helper that produced it, with negative controls for a changed path,
+  method, body, freshness window and secret.
+
+  `cez kb submit` also stops repeating the hub's own words back at the operator. Every signed
+  write gets `401 unknown-node` today, whose message is "this node is not known to the hub — enroll
+  it first" — advice that is precisely wrong: the node *is* enrolled, the hub just has nowhere to
+  look its secret up. That one reason is renamed at the call site to name the real gap; the other
+  three pass through unchanged, because they are accurate.
+
+- 🔑 **The hub stores node secrets now, so cluster authentication has a receiving end for the first
+  time** (spec **D22**). Enrollment minted a per-node HMAC secret, handed it to the joining spoke,
+  and persisted it nowhere — so `lookupNodeSecret` answered `undefined` for everyone, every
+  node-authenticated route refused by construction, and `verifyClusterFrame` had no receiving end
+  either. New `cluster/node-secrets.ts`: `<clusterHomeDir>/node-secrets.json`, `0600`, keyed by node
+  id, with one read that returns a single node's secret and deliberately no list-all accessor.
+
+  Three of its four decisions are the kind that look arbitrary and are not. **Its own file, not
+  `peers.json`** — that roster is served to every spoke, so a secret stored beside it is one
+  `readPeers()` from handing each node every other node's credential. **Plaintext at rest** —
+  enrollment codes are digest-at-rest because redemption only needs an equality check, and applying
+  the same reasoning here would fail every signature, since HMAC verification needs the key itself;
+  the docblock says so, because the next reader will otherwise "fix" it. **Written before the code
+  is marked redeemed**, inside the same lease: two files, one lock, and the failure between them is
+  asymmetric — redeem-first strands a node holding a credential the hub never stored *and* a code it
+  can never redeem again, secret-first strands an inert orphan that the next redemption overwrites.
+  Fourth: `disableNode` now drops the secret, which closes a live hole nobody had noticed — it was a
+  roster edit only, so a disabled node's signatures kept verifying.
+
+  Found and fixed during review, before it shipped: the store asked for a `0700` directory via
+  `mkdirSync`'s `mode` option, which does nothing to a directory that already exists — and every
+  other writer of that directory (`ensureNodeIdentity`, `writeEnrollCodes`, the enroll-codes lock)
+  creates it with no mode at all, and all of them run first. So the real directory would have been
+  whatever the umask gave, typically `0755`, while the docblock claimed the opposite. The test could
+  not have caught it: it stored into a fresh home, the one ordering that never happens in production.
+  Now an explicit `chmodSync`, with a control that pre-creates the directory loose and proves it gets
+  tightened. Every file in there is `0600` regardless, so the exposure was listing rather than
+  reading — but D22's whole premise is that file mode *is* the protection, so a claim about it has to
+  be true.
+
+- 🧭 **~~Decided, deliberately not built:~~ BUILT 2026-08-23, same day — how `cez cluster reconcile`
+  gets its data** (**D21**). *The heading below said "not built" and was true for a few hours: the
+  routes were held back only because the hub could not verify a signature, and **D22 removed that
+  blocker the same day** by giving the hub a secret store. What follows is the decision as it was
+  taken; the entry after it is what actually shipped.* The
+  gap turned out to be **one method, not four** — `apply` is an ops frame, `backup` is a local
+  write on the receiver, `listProjects` is the confirmed-pairings list; only "give me your full todo
+  list" had no rail. So one new read, `GET /api/v1/cluster/todos/:projectKey`, scoped to a confirmed
+  pairing, with reconcile running **from the spoke against the hub** — the direction E2 needs and
+  the only addressable one, since a spoke dials out and has no inbound address. The routes are not
+  wired yet, on purpose: behind a fail-closed gate they could only ever answer 401, and a route that
+  reads as "built" in every list that counts routes while refusing every caller is worse than its
+  absence.
+
+- 🔁 **`cez cluster reconcile` runs — reads over HTTP, writes over the same signed family, and a
+  dry run is what you get unless you ask otherwise** (**D21**, `CEZ_CLUSTER=1`). The verb had been
+  reachable-and-refusing since package 2.4, naming the transport it was waiting for. It exists now:
+  `cluster/reconcile-transport.ts` dials the hub with D20's signed principal on every request —
+  there is no unsigned fallback, since a route family that refuses `no-credentials` by construction
+  could only ever make one dead code that looks like a feature. Three routes on the hub:
+  `GET /cluster/todos/:projectKey`, and `POST .../backup` + `.../append`, each scoped to a
+  **confirmed pairing** (an unpaired project is refused `unpaired-project`, on all three, not only
+  the read).
+
+  **`/append` takes its own backup inside its own lease**, rather than trusting a `/backup` call
+  from a round trip ago. Composed as two calls they are two lease acquisitions, and a concurrent
+  local write landing between them is picked up correctly by the append and is **absent from the
+  backup** — so restoring would silently roll back a write the backup never saw. A stale backup is
+  worse than none precisely because it is trusted. `/backup` remains its own route because the
+  transport's contract calls it before the first mutation of a pass *whether or not* that peer
+  receives any adds; the zero-adds case has no append to ride along with.
+
+  **Dry run is the default posture** — `--apply` is the only way to write, and `--dry-run` wins
+  even when both are passed, so a script combining them stays on the safe side rather than
+  depending on flag order. Verified end to end through the real CLI entry as a subprocess, against
+  a real HTTP hub with both sides seeded so the "wrote nothing" assertions have a floor: a bare
+  invocation leaves both `todos.json` files byte-identical and creates no `.bak` at all.
+
+  **D13's tolerance is preserved across the wire, and this took a correction.** The wire record was
+  first written `.strict()` to satisfy a typing problem, which silently traded away the one property
+  the path exists for: a row a *newer* node wrote failed the whole snapshot response and 400'd
+  `/append` — on a lossless cross-node backfill. The fix is a passthrough **twin** rather than a
+  wider response schema, because `contract-parity.cluster.test.ts` compares the response schema
+  against Hono's `InferResponseType`, which cannot carry an index signature: the plain schema stays
+  the type and the parity check, the `stored*` twin is what the transport actually parses with. Four
+  tests assert the unknown field's **value** survives — through the route and through the transport,
+  in the reply and on disk — and each was mutation-checked to confirm it goes red when its own guard
+  is removed.
+
+- 🛠 **`appendTodosPreservingIds`** — `todos.ts` had no insert that preserves an existing id
+  (`createTodo` always mints a fresh one), which is what forced `cluster/reconcile.ts` to
+  re-implement this file's own `O_EXCL` lease. That re-implementation then called `readTodos` from
+  **inside** its own lease, and `readTodos` takes the same non-reentrant lease on its id-backfill
+  path: every reconcile append stalled for the full 5 s timeout, the throw was swallowed, and the
+  ids that got written were ones `readRaw` had minted and never persisted — violating the exact
+  invariant `readTodos`'s 2026-08-22 correction exists to protect. One lease now, in the file that
+  owns it, and reconcile's duplicate is deleted.
+
+## 🩹 Fixed
+- 🩹 **An externally-killed `opencode` run reported `done` and the workflow carried on past it.**
+  Same symptom as the `claude`/`pi`/`codex` fix, **different mechanism**: there, `waitForExit`
+  dropped the signal; here there was no exit gate at all — both the `'exit'` and `'close'`
+  handlers discarded `code` and `signal`, and success was decided entirely by the SSE session
+  status. A kill whose stream never reported `error` fell straight through to `done`. The gate is
+  keyed on `terminatedByCezar` rather than on the exit alone, which is the part that matters for
+  this runner: cezar killing the child is the **normal** case here (it tears the server down after
+  every healthy session), so a naive "non-zero or signal ⇒ fail" would have turned every successful
+  run red.
+
+- ✨ **cezar can run as a cluster: one hub, N spokes, one backlog** — spec
+  `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, behind `CEZ_CLUSTER=1` and **off by
+  default**. Route family, flag-off shape and the WebSocket link are contracted in
+  `BACKWARD_COMPATIBILITY.md`.
+
+  **The problem, measured rather than asserted.** Two cockpits already run against the same
+  workspace and shared a backlog by hand. Five days after the note that told them to mirror,
+  **110 todos existed on the box and in neither Mac file, 10 more disagreed about status, and not
+  one entry existed Mac-only** — the mirror had failed in the only direction it could, and the Mac
+  was a stale read-only window onto work it could not see.
+
+  **Phase 0 bounds the burst on the existing box before any node is added**, because the ceiling
+  is a burst and not a run count: across the 12 largest runs on the box, a run *inside* `run-tests`
+  peaks at 2.2–6.2 GB and 18–50 processes against 0.4–0.6 GB and 1–8 at rest, so `maxParallel` —
+  which counts runs — cannot tell an idle run from one about to fork 50 processes. So: a
+  heavy-step gate that admits at most `maxHeavySteps` runs into a test step at a time; `vitest`
+  workers and `ripgrep` threads capped at the source (`CEZ_VITEST_MAX_WORKERS`,
+  `CEZ_RIPGREP_THREADS`, both documented in `.env.example`); and per-run cgroup bounds
+  (`runMemoryMaxMb`, `runMemoryHighMb`, `runCpuWeight`, `runsSliceMemoryMaxMb`) wired through the
+  broker launch so a kill can be **attributed** rather than guessed — `reportedResourceKill`
+  refuses to blame a bound that was never applied to that launch, which on the Mac (`isolation:
+  'none'`) is always.
+
+  **Writes are hub-linearized, per field.** No CRDT, no hybrid logical clock, no last-write-wins
+  merge: the hub assigns `hubSeq` and that is the order. Ops carry **fields, not records** — two
+  spokes editing different fields of one todo both keep their edit, where whole-record ops would
+  have let the second clobber the first — and the outbox is *derived*: `ops.ndjson` is a cache,
+  the truth is `pendingSince` + `pendingFields` written inside the same `O_EXCL` lease as the
+  value, so a crash between the two is not a lost write. A field DELETION rides in its own
+  `clearedFields` list, because it cannot be expressed as a value: building `fields` from the keys
+  present on a record made a removed key indistinguishable from one that had never been set, so
+  `updateTodo({ archived: false })`, `clearStartedTaskId` and `markStarted`'s `delete autostart`
+  would have replicated as no-ops and left every peer holding the stale value, silently. The
+  receiving side deletes what is listed **after** merging `fields` and the D13 `unknown`
+  passthrough, so an explicit clear cannot be undone by a verbatim copy, and `diffCorrections`
+  reads cleared names too — a clear the local record disagreed with raises a correction instead of
+  passing unseen.
+
+  Around that: enrollment by hub-minted code with a closed failure enum the joiner can act on
+  (including `code-malformed`, decided client-side with **nothing dialled**); a per-node
+  HMAC-authenticated WebSocket link that never consults `Origin` and never joins the cockpit's
+  topic router; a run relay that strips local-machine affordances before a frame leaves the box; a
+  read-only corpus mirror with an explicit submit route; hub-allocated scarce identities (ports and
+  the like) with leases; and label-based placement and opt-in dispatch.
+
+  **QA Needed, and specifically which parts.** Phase 0's own decision gate (C0/C1 — *is Phase 0
+  alone enough?*) has **not been captured**, so the 8-concurrent-task throughput claim is designed
+  for and not measured; C1–C4 additionally require `maxParallel`, `maxHeavySteps` and a memory
+  bound to be written into `prod-host`'s `~/.cezar/config.json` first, and C3 cannot run on
+  the Mac at all because the bounds exist only under `scope` isolation. The cluster has not yet
+  been stood up across two real nodes. **CORRECTED 2026-08-23 — this said `cez cluster reconcile`
+  "still has no request/response transport, so E2 has no runnable path yet"; D21 landed that
+  transport the same day.** E2 (the 110-row reconcile that motivated the whole design) now has a
+  runnable path and a default-safe dry run, but remains **unrun**: it needs two real nodes, and the
+  real merge stays owner-gated by P9. Open items are tracked in `.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`.
+
+  **Gates, run on `prod-host` and on the MERGED tree.** `typecheck` exit 0, `build`,
+  `test:unit` and `test:package` exit 0, and `npm test` at **566 of 567 files green** (10650 tests,
+  337 s) on the final tree; **562 of 563** when the cluster work first landed, before the
+  caller-signing increment added its own files. The single red is `knowledge/catalog.test.ts` C18, a CPU-per-MiB budget calibrated on an
+  M4 Max with no host normalisation: it reads 68.6 against a `< 40` ceiling on this box and fails
+  identically at pristine HEAD unpacked from `git archive`, so it is a standing host red and not
+  this work's. The budget was deliberately **not** raised. The gate was run on the box rather than
+  the Mac because the Mac never finished a run — under a ~20-agent fan-out `fseventsd` saturated a
+  core and individual `fs.watch` files took 50–650 s. Re-running after the `origin/main` merge was
+  not ceremony: the merge left 12 tests failing in files it never touched textually (see the PLAN's
+  "A green branch gate says nothing about the tree you will actually push").
+
+  One test is **not** claimed clean: `workflows/workspace-parallel.test.ts` has failed twice on this
+  box under full-suite load, always the same assertion (`git status --porcelain` in the fixture
+  checkout reads `?? .ai/` where it must be empty), and passes 3/3 in isolation. The final gate above
+  and a pristine-`origin/main` control run on the same host both passed it, which is one green
+  control — weak evidence, and deliberately not written up as "pre-existing". Nothing in this change
+  touches `workflows/`, `runs/` or worktree code; the plausible coupling is load rather than
+  semantics, since added test files change scheduling under a 3-worker cap. Tallied honestly in the
+  PLAN's open items, with the note that repeated control runs are what would settle it.
 - ✅ **The non-disruptive deploy is now MEASURED, not just shipped** (spec
   `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` § "Status log — 2026-08-21
   (18:31–18:41 UTC)"). Release `20260821T183127Z-be3aab61` is live on `prod-host`, deployed
@@ -452,6 +775,40 @@
   its previous behaviour.
 
 ## 🐛 Fixed
+- 🐛 **A run whose agent was killed by an untrapped signal reported `done`, and the workflow
+  continued past it.** The kernel OOM killer, a cgroup `MemoryMax` breach, or an operator's
+  `kill -9` all produce the same shape: SIGKILL cannot be trapped, so Node reports `code: null`
+  with `signal` set and no exit code at all. Both transports read `code === null` alone as a
+  clean exit — the pipe path's `waitForExit` discarded the signal before any branch could see it,
+  and the brokered path's `brokeredExitFailure`/`emitBrokeredTerminalEvents` had the identical
+  gap — so a killed step went green and the chain advanced to the next step with no work done.
+  `run-tests` carries no post-condition, so nothing downstream caught it either.
+
+  `waitForExit` now returns the signal alongside the exit code, and both paths fail the step with
+  the signal named in the error — unless the kill was cezar's own SIGTERM→SIGKILL escalation
+  (`terminatedByCezar`), which keeps resolving exactly as it did before this fix; a cancel or the
+  inactivity watchdog produces the identical `code: null` shape and must not become a false
+  failure. Regression tests: `core/claude-cli-runner.test.ts` ("an external signal kills the agent
+  process directly"), the new `core/broker-external-kill.test.ts`, and the new
+  `workflows/signal-kill-chain-stop.test.ts` — the last proves the chain actually STOPS at the
+  killed step rather than merely recoloring it red.
+
+  **The same gap existed, unfixed, in the `pi` and `codex` backends** — `pi-runner.ts`'s own
+  `waitForExit` and `codex-app-server-transport.ts`'s `waitForCodexAppServerExit` were both bare
+  `number | null` returns with the identical `exitCode !== 0 && exitCode !== null` gate, so an
+  untrapped signal read as a clean exit there too. Not hypothetical for codex: it went live on
+  `prod-host` on 2026-08-22, so a SIGKILLed codex agent was reporting false success in
+  production. Both now carry `{ code, signal }` like the claude fix, gated on each runner's own
+  `terminatedByCezar` (pi did not track this at all before now — added alongside the fix, mirroring
+  claude's `signalChild`/`hasExited`). Regression tests: `core/pi-runner.test.ts` and
+  `core/codex-app-server-runner.test.ts`, each with a real-subprocess positive case (new
+  `MOCK_PI_SUICIDE_SIGKILL/MOCK_CODEX_SUICIDE_SIGKILL` fixture triggers), an exit-code-0/1/2 floor,
+  and a negative control proving cezar's own teardown still resolves cleanly. `opencode-server-runner.ts`
+  is a different mechanism, not a fourth instance of this defect: its exit handler
+  (`resolveExit()`) discards the code AND the signal outright and never gates on either — success
+  or failure there is decided entirely by the SSE session status. That means an external kill
+  falls through to the same unconditional `done` if the SSE stream ends before reporting `error`,
+  which is worth its own look, but is not this bug and was left unchanged here.
 - 🐛 **A dry run could not satisfy a post-condition its own mock never performed, so every
   dry run died at `commit-push`.** Commit `2e421370`, amending
   `.ai/specs/2026-08-20-steps-green-only-when-verified.md`.

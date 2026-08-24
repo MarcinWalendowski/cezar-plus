@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import {
   parseAskMarkerResult,
@@ -8,7 +8,8 @@ import {
   type AskMarkerParseResult,
   type AskRequest,
 } from '../core/ask.ts';
-import { type AgentSession } from '../core/claude-cli-runner.ts';
+import { claudeSessionTranscriptExists, type AgentSession } from '../core/claude-cli-runner.ts';
+import { detectTrailingQuestion, type TrailingQuestion } from '../core/turn-question.ts';
 import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.ts';
 import { parseUsageLimit } from '../core/usage-limit.ts';
 import { createRunner } from '../core/runner-factory.ts';
@@ -16,10 +17,20 @@ import {
   BROKERED_BACKENDS,
   brokerAvailable,
   type BrokerSessionRequest,
+  type ResourceKillReport,
 } from '../core/broker-launch.ts';
-import { chooseIsolation, probeIsolationCapabilities, type BrokerIsolation } from '../core/broker-isolation.ts';
-import { isSpoolLive, readSpoolMeta, spoolDirFor } from '../core/run-spool.ts';
-import type { RunnerId } from '../core/agent-runner.ts';
+import {
+  chooseIsolation,
+  nextBrokerInstanceId,
+  probeIsolationCapabilities,
+  type BrokerIsolation,
+  type BrokerResourceLimits,
+} from '../core/broker-isolation.ts';
+import { isPidAlive, isSpoolLive, legacySpoolDirFor, readSpoolMeta, SPOOL_ORPHAN_GRACE_MS, spoolDirFor, type SpoolMeta } from '../core/run-spool.ts';
+import { isRetryableBrokerLaunch } from '../core/brokered-session.ts';
+import { reapAbandonedBroker } from '../core/reap-abandoned-broker.ts';
+import { isMissingSessionRejection, type RunnerId } from '../core/agent-runner.ts';
+import { agentHomePaths } from '../paths.ts';
 import { modelConflictsWithRunner } from '../core/model-presets.ts';
 import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
 import {
@@ -45,10 +56,12 @@ import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
 import { readAgentModelProvider } from '../agent-config/models.ts';
 import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.ts';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.ts';
+import { LEASE_HEARTBEAT_MS, removeWorktreeLeases, touchWorktreeLeases, writeWorktreeLease } from '../workspace/worktree-lease.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 import { loadWorkflows } from './load.ts';
 import { evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
 import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/store.ts';
+import type { TaskAuthor } from '../runs/task-author.ts';
 import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.ts';
 import {
   AgentTempDirError,
@@ -58,13 +71,43 @@ import {
 } from '../runs/agent-tmpdir.ts';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.ts';
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.ts';
-import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidateTitle } from '../runs/auto-name.ts';
+import {
+  autoNamingActive,
+  generateRunName,
+  liveTitleUpdatesEnabled,
+  postValidateTitle,
+  TITLE_MAX,
+} from '../runs/auto-name.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { approvalsSatisfied, minApprovers } from '../runs/approvals.ts';
 import { defDescribesRun, firstUnfinishedStep, pendingChainSteps, stepTerminal } from '../runs/chain.ts';
 import { resolveProfileEnvForRoot } from '../workspace/agent-profiles.ts';
-import { accountUsageKey, countInflight, type InflightStep } from '../workspace/agent-account-usage.ts';
-import { resolvePoolForDispatch } from '../workspace/agent-route-select.ts';
+import {
+  clearLimited,
+  countInflight,
+  isLimited,
+  loadAgentAccountUsage,
+  mergeWriteAgentAccountUsage,
+  recordDispatch,
+  recordLimited,
+  usageEntry,
+  type InflightStep,
+} from '../workspace/agent-account-usage.ts';
+import { loadAgentAccounts } from '../workspace/agent-accounts.ts';
+import { listAgentProfiles } from '../workspace/agent-profiles.ts';
+import { PROFILE_CAPABLE_PROVIDERS } from '../core/agent-profiles.ts';
+import {
+  accountUsageKey,
+  DEFAULT_AGENT_ACCOUNT_ID,
+  runAccountKey,
+  usageHoldAccountKey,
+} from '@loki-labs/better-cezar-contract';
+import {
+  resolvePoolForDispatch,
+  resolvePoolForProvider,
+  selectPoolAccount,
+  type PoolChoice,
+} from '../workspace/agent-route-select.ts';
 import type { ProviderId } from '../core/provider-auth.ts';
 import {
   buildWorkspaceGrant,
@@ -80,6 +123,7 @@ import {
 } from '../workspace/workspace-worktrees.ts';
 import type { PendingApproval, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
+import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { UiEventSink } from '../runs/ui-event-sink.ts';
 import type { UiEvent } from '../core/ui-events.ts';
 import {
@@ -88,6 +132,7 @@ import {
   DEFAULT_WORKFLOW,
   DEFAULT_WORKFLOW_NAME,
   parseReviewVerdict,
+  resolveStepModel,
   stepKind,
   type ReviewVerdict,
   type WorkflowDef,
@@ -239,7 +284,12 @@ interface ActiveRun {
   monitoringWakeTimer?: NodeJS.Timeout;
   monitoringWakeIntervalMinutes?: number;
   monitoringWakeups?: number;
+  /** Bounded re-emit nudges spent on this run (cap `MAX_ASK_STRUCTURE_NUDGES`).
+   *  Process-local by design, like `monitoringWakeups`: a restart is a fresh epoch. */
+  askStructureNudges?: number;
   autosaveTimer?: NodeJS.Timeout;
+  leaseTimer?: NodeJS.Timeout;
+  leaseRoots?: string[];
   /* The screenshot counter lives on `RunManager.queuedImageSeq` (#472), keyed by
    * run id — a queued run persists attachments with no `ActiveRun` at all. */
   /** Has a session EVER opened on this run (#472)? `session` alone cannot answer
@@ -294,6 +344,8 @@ interface ActiveRun {
    * consumed by the step loop.
    */
   stepStopped?: AgentStopReason;
+  /** A newly launched broker exhausted its control-channel budget before any request succeeded. */
+  brokerNeverAnswered?: { spoolDir: string; message: string };
   /** Registry snapshot used to expand `/skill` follow-ups before a backend can
    *  mistake them for its own slash commands (#676). */
   skills?: Skill[];
@@ -309,6 +361,12 @@ interface ActiveRun {
     observed: boolean;
     startedTurns: Set<string>;
     recordedTurns: Set<string>;
+    /** A real backend-reported context-window max for THIS invocation (today: codex's
+     *  `usage.updated`), scoped to the invocation because a fresh backend process may report a
+     *  different figure next time. Threaded as `reportedWindow` into every subsequent
+     *  `contextTokens`-bearing patch so it wins over the model-string guess (spec
+     *  2026-08-22-context-window-denominator-per-step). */
+    reportedContextWindow?: number;
   };
 }
 
@@ -318,6 +376,31 @@ const AUTONOMOUS_NUDGE =
   'Continue working autonomously until the task is fully complete. Do not ask me for confirmation or clarification — make reasonable assumptions and proceed. When everything is done, end the session with your done signal.';
 const MONITORING_WAKE_NUDGE =
   'Re-check the downstream work you were monitoring. Continue toward the task goal; emit CEZ:MONITORING again only if it is still pending.';
+/** One nudge per run (spec 2026-08-23-plain-end-structured-question, D6): an agent that declined
+ *  once has answered the question, and a cap of one cannot loop by construction. */
+const MAX_ASK_STRUCTURE_NUDGES = 1;
+/** The sentinel substring (`You ended that turn with no marker`) is matched literally by the
+ *  bundled dry-run mock's `mock:ask-on-nudge` verb — the mock is a separate process and never
+ *  imports this constant. */
+const ASK_STRUCTURE_NUDGE =
+  'You ended that turn with no marker, which parks the task and tells the user to reply — but the cockpit has nothing for them to tap. If you were asking them something, send it again now as a single CEZ:ASK <json> line with 2–4 concrete options. If you were NOT asking anything, end plainly again, or with CEZ:DONE if the goal is achieved — do not invent a question.';
+
+/** Stop both halves of a broker launch before its spool is replaced by a retry. Best effort.
+ *  Distinct from `reapAbandonedBroker` (`../core/reap-abandoned-broker.ts`), which stops a
+ *  broker the replacement server refused to adopt across a blue-green cutover — different
+ *  trigger, different signature (spool dir here vs. run id + meta there). */
+export function reapAbandonedColdLaunch(spoolDir: string): void {
+  const meta = readSpoolMeta(spoolDir);
+  if (!meta) return;
+  for (const pid of [meta.childPid, meta.pid]) {
+    if (pid === undefined || !isPidAlive(pid)) continue;
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // Already exited or not signalable. Reaping must not turn a retryable step into a failure.
+    }
+  }
+}
 
 /**
  * Auto-resume after a provider usage limit (spec 2026-08-03-auto-resume-after-usage-limit).
@@ -369,42 +452,41 @@ const NO_HOLDS: AccountHolds = { deadline: new Set(), inFlight: new Set() };
  *  - an `inFlight` hold means a resume is testing the window right now and nothing is proven, so
  *    it blocks fresh work but not other resumes. Blocking those deadlocked a live workspace.
  */
-function accountHeldFor(
-  run: Pick<RunRecord, 'runner' | 'agentProfile' | 'status' | 'autoResumeAttempts'>,
+function accountHeldOn(
+  key: string,
+  run: Pick<RunRecord, 'status' | 'autoResumeAttempts'>,
   holds: AccountHolds,
-  fallbackRunner: RunnerId,
 ): boolean {
-  const key = runAccountKey(run, fallbackRunner);
   if (holds.deadline.has(key)) return true;
   return holds.inFlight.has(key) && !resumeInFlight(run);
 }
 
 /**
- * Which agent ACCOUNT a run's work runs on — the thing a provider usage limit actually closes
- * (spec 2026-08-03-auto-resume-after-usage-limit).
+ * The same question about the account the RUN RECORD names — admission's default reading.
  *
- * Backend plus agent account, because those are the two axes a limit is scoped to: a Claude
- * limit must never stall a Codex task, and a second Claude login is a second budget. A record
- * that names no runner has not started yet and will take the configured default, which is what
- * `fallbackRunner` carries; a run that HAS started always carries its resolved runner (execute
- * persists it), and only started runs can be holding.
- *
- * Spelled through `accountUsageKey` rather than re-composed here. It is the same key the usage
- * registry, the sidebar panel and the pool balancer are all keyed on, and two `${a}:${b}` templates
- * for one concept is a drift waiting to happen — the moment either side changes how it spells the
- * discovered account, holds stop matching usage and neither reports an error.
- *
- * A run still carrying a `pool:` route has not been resolved yet, so it names no account; the pool
- * string becomes its own key, which can only ever match another unresolved run on the same pool.
- * That is the conservative reading — `execute()` overwrites `agentProfile` with the concrete login
- * before the run can hold anything.
+ * The key is a parameter above rather than derived here because the queue has to ask about TWO
+ * accounts, not one: this one, and the account the spawn gate has already refused this run on.
+ * See `heldAccountFor`, and the production busy-loop that forced the split.
  */
-export function runAccountKey(
-  run: Pick<RunRecord, 'runner' | 'agentProfile'>,
+function accountHeldFor(
+  run: Pick<RunRecord, 'runner' | 'agentProfile' | 'status' | 'autoResumeAttempts'>,
+  holds: AccountHolds,
   fallbackRunner: RunnerId,
-): string {
-  return accountUsageKey((run.runner ?? fallbackRunner) as ProviderId, run.agentProfile);
+): boolean {
+  return accountHeldOn(runAccountKey(run, fallbackRunner), run, holds);
 }
+
+// `runAccountKey` — which agent ACCOUNT a run's work runs on (spec
+// 2026-08-03-auto-resume-after-usage-limit) — MOVED 2026-08-23 to
+// `@loki-labs/better-cezar-contract` (`usage-hold.ts`), and SPLIT IN TWO there (spec
+// 2026-08-23-usage-limit-hold-account). The single function that used to sit here answered the
+// admission question ("where will this run's work go?") and was then also used for the hold
+// question ("which account did a provider refuse?"), which are not the same question whenever a
+// workflow step pins its own runner or the pool routes two steps to two logins. `runAccountKey`
+// keeps the first; `usageHoldAccountKey` answers the second off the STEP that actually ran.
+// Measured cost of conflating them: a codex task held for hours by a Claude weekly limit, while a
+// claude task would not have been held at all. It also had to leave this module so the browser
+// could import it — see the contract file's own docblock.
 
 /**
  * Is this run an automatic resume that has not completed a turn yet?
@@ -436,7 +518,17 @@ function formatWakeInstant(at: Date): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'long' }).format(at);
 }
 
-export interface StartRunInput {
+/**
+ * What EXECUTING a run needs — everything `execute()` reads, and nothing about who asked for it.
+ *
+ * Split out from `StartRunInput` below (spec 2026-08-21-task-author-provenance) for a reason that
+ * is load-bearing rather than cosmetic: `pendingJobs` holds one of these, and the two RECOVERY
+ * paths (`reviveQueuedRun`, chain re-entry) rebuild one from a record for a run that ALREADY
+ * EXISTS. Authorship is a fact of the record at that point, stamped once and never rewritten, so
+ * a recovered job has nothing to say about it — and requiring a value there would have forced
+ * exactly the invented `system` placeholder the required field exists to prevent.
+ */
+export interface ExecuteRunInput {
   task: string;
   model?: string;
   /** Agent backend chosen for this task (GUI). Unset = the config default. */
@@ -480,6 +572,24 @@ export interface StartRunInput {
    *  and make the task bubble render the stack's images as its own. In-memory
    *  only: rebuilt from the record on every hydration, never persisted. */
   stackedImages?: ContentBlock[];
+}
+
+/**
+ * What CREATING a run needs: everything execution needs, plus WHO created it.
+ *
+ * `author` is REQUIRED (spec `.ai/specs/2026-08-21-task-author-provenance.md`), and required here
+ * rather than only on `RunStore.createRun`, because three of the creation paths — `cezar run` and
+ * the two notes triggers — never touch the store directly. Requiring it at both boundaries is what
+ * makes `npm run typecheck` fail for the ninth creation path exactly as it did for the first
+ * eight; there is deliberately no default and no fallback, since a default is precisely what
+ * would let a real path ship unattributed.
+ *
+ * Build it with one of the constructors in `../runs/task-author.ts` (`authorFromRequest` /
+ * `authorFromAgentEnv` / `inheritAuthor` / `agentAuthor` / `automationAuthor` / `localCliAuthor` /
+ * `systemAuthor`), never with a literal — the `kind`/`id` pairing is decided there, once.
+ */
+export interface StartRunInput extends ExecuteRunInput {
+  author: TaskAuthor;
 }
 
 /**
@@ -680,6 +790,37 @@ const RESTART_CONTINUATION_PROMPT =
   'The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.';
 
 /**
+ * cezar's own synthetic continuation prompts (spec 2026-08-22-continue-step-naming) — excluded
+ * from Phase 1's "name the step from what the user typed" naming so a restart/auto-resume
+ * continuation does not mint a step titled after its own boilerplate prompt text
+ * ("the cezar process restarted while you wer…"). A human-authored prompt, even one that also
+ * happens to defer for capacity (`reopen-watch.ts`'s reopen sweep), is never in this set.
+ */
+const SYNTHETIC_CONTINUE_PROMPTS: ReadonlySet<string> = new Set([
+  RESTART_CONTINUATION_PROMPT,
+  AUTO_RESUME_PROMPT,
+]);
+
+/** Suffix Phase 2 (spec 2026-08-22-continue-step-naming) appends when naming a new `continue-N`
+ *  step after the real step it's retrying. */
+const CONTINUED_STEP_SUFFIX = ' — continued';
+
+/**
+ * `` `${sessionStep.name} — continued` `` — but clamping `sessionStep.name` itself first, using
+ * the same code-point slicing and ellipsis-on-overflow `postValidateTitle` uses. Deliberately NOT
+ * `postValidateTitle` on the composed string: that would lowercase the first character (turning
+ * "Deploy — continued" into "deploy — continued") and clamp the WHOLE composed string to
+ * `TITLE_MAX`, which truncates the suffix away entirely on a step name over ~27 characters.
+ */
+function continuedStepName(sessionStepName: string): string {
+  const limit = TITLE_MAX - CONTINUED_STEP_SUFFIX.length;
+  const chars = [...sessionStepName];
+  const clamped =
+    chars.length > limit ? `${chars.slice(0, limit - 1).join('').trimEnd()}…` : sessionStepName;
+  return `${clamped}${CONTINUED_STEP_SUFFIX}`;
+}
+
+/**
  * The prompt a step gets when it is re-entered after CEZAR stopped it for inactivity.
  *
  * It resumes the SAME session, so the work so far is already in context. What the agent does not
@@ -762,8 +903,17 @@ export function specRevisionFeedback(report: string, specPath?: string): string 
 interface ChainResumePoint {
   /** Index into the revived `WorkflowDef.steps`. */
   index: number;
-  /** Present only when that step already had a session this process may reattach to. */
-  resume?: { sessionId: string; profileId?: string; prompt: string };
+  /** Present only when that step already had a session this process may reattach to.
+   *  `verifyTranscript` marks it (spec 2026-08-22-resume-fresh-session-fallback, Phase 1): every
+   *  handle built here is a session id recorded by an EARLIER process invocation, of ambiguous
+   *  confirmation status — never a session this same process just observed running, the way a
+   *  cezar-initiated stop's own retry (`stopResume`, `execute()`'s chain loop) is. `runAgentStep`
+   *  reads it to decide whether the Claude-only proactive existence check applies; a `stopResume`
+   *  handle deliberately does not set it, or the check would downgrade a session that was
+   *  confirmed alive moments ago whenever the dev box's real `~/.claude/projects` (or a test's
+   *  unrelated `CLAUDE_CONFIG_DIR`) happens not to carry its transcript — losing the in-progress
+   *  work the stop-retry exists to preserve, and reproducing the stop as a second, terminal one. */
+  resume?: { sessionId: string; profileId?: string; prompt: string; verifyTranscript?: true };
   /**
    * Why the chain is re-entering here, in the words the resumed step should act on. Seeded into
    * `checkFailure`, the channel that appends explanatory text to a retried agent's prompt.
@@ -782,6 +932,12 @@ interface PendingContinuation {
   backend: RunnerId;
   prompt: string;
   images: ContentBlock[];
+  /** The step's computed title (spec 2026-08-22-continue-step-naming), carried through a deferred
+   *  continuation so its eventual `step-start` event and `StepState.name` agree with what was
+   *  computed at `continueRun` time, not a re-derived (and possibly synthetic-prompt-derived)
+   *  value at dequeue. */
+  name: string;
+  nameOrigin: 'step' | 'prompt';
 }
 
 interface PersistedImages {
@@ -820,7 +976,7 @@ export class RunManager {
   private readonly monitoring = new Set<string>();
   private readonly pendingJobs = new Map<
     string,
-    { workflow: WorkflowDef; input: StartRunInput; resumeAt?: ChainResumePoint }
+    { workflow: WorkflowDef; input: ExecuteRunInput; resumeAt?: ChainResumePoint }
   >();
   /** Steps left in the chain at this run's last hand-back (spec 2026-08-20, R4). A re-entry that
    *  does not strictly reduce it is a loop, not progress, and fails the run loudly instead of
@@ -840,9 +996,18 @@ export class RunManager {
   /** Last `consumedOffset` written per run, so the tail's 50 ms cadence does not become a 50 ms
    *  write cadence on `runs.json`. */
   private readonly offsetWrites = new Map<string, { offset: number; written: number; at: number }>();
-  /** Cached once: probing the host's cgroup privileges per run would be pure waste, and the answer
-   *  cannot change without the process being restarted anyway. */
+  /** Cached once `'scope'` is seen, but re-probed on every call until then.
+   *  CORRECTED 2026-08-22: this used to say the answer "cannot change without the process being
+   *  restarted anyway" and cache unconditionally — false whenever `cezar.service` starts before
+   *  `user@<uid>.service` has finished booting, which pins the probe to a non-`'scope'` result for
+   *  the rest of the process's life (`.ai/specs/2026-08-22-broker-scope-isolation-full-stop-survival.md`,
+   *  Phase 0.3). `'scope'` is the only outcome that cannot regress on its own, so it is the only one
+   *  worth caching. */
   private brokerIsolationCache?: BrokerIsolation;
+  /** Last non-`'scope'` value already warned about, so `brokerIsolation()` logs once per distinct
+   *  degraded result rather than once per call — it is consulted per health/ready poll
+   *  (`server.ts`'s `describeRuntime`), not only per run-start. */
+  private brokerIsolationWarnedFor?: BrokerIsolation;
   /** Interrupted agent turns recovered after a process restart. Unlike an
    *  explicit user Continue, these are bulk scheduler work and must re-enter
    *  through `pump()` so both workspace and per-project caps are honored. */
@@ -878,6 +1043,20 @@ export class RunManager {
   /** Runs currently being paused by the memory guard — dedupes the ~2 s samples so one breach
    *  triggers one pause, not a burst. Cleared in dropActive when the run leaves the registry. */
   private readonly memoryPausing = new Set<string>();
+
+  /** Queued runs that have already been TOLD, on their own transcript, which account they are
+   *  waiting on — keyed run id -> that account, so a hold that moves to a different account
+   *  speaks again while a long one stays quiet. `pump()` runs on every lifecycle event, so an
+   *  un-deduped note would bury the thread it is meant to explain. */
+  private readonly heldNotified = new Map<string, string>();
+
+  /** Queued runs the SPAWN gate has refused, keyed run id -> the account it refused them on.
+   *  `pump()` admits on the account the run RECORD names while `execute()` refuses on the account
+   *  DISPATCH resolves, and when those disagree the run is dequeued, bounced and re-queued at
+   *  loop speed. This memo is what makes admission ask the spawn's question too. Every read
+   *  re-checks the account against the live holds, so the memo can only ever delay a start that
+   *  the spawn gate was going to refuse anyway. */
+  private readonly heldAtSpawn = new Map<string, string>();
 
   /** Unsubscribe handle for the constructor's `onUsage` subscription — released
    *  by dispose() so a torn-down manager stops receiving sampler ticks. */
@@ -917,6 +1096,7 @@ export class RunManager {
   /** The registry read behind change C. A seam so the adoption is testable without a workspace
    *  registry on disk — the production default is the same read the sidebar performs. */
   private readonly loadGrant: () => Promise<WorkspaceGrant>;
+  private readonly reapBroker: (runId: string, meta: SpoolMeta) => Promise<boolean>;
 
   constructor(
     private readonly store: RunStore,
@@ -925,11 +1105,13 @@ export class RunManager {
       semaphore?: WorkspaceSemaphore;
       bootScratchRoot?: boolean;
       loadGrant?: () => Promise<WorkspaceGrant>;
+      reapBroker?: (runId: string, meta: SpoolMeta) => Promise<boolean>;
     } = {},
   ) {
     this.dataDir = join(repoRoot, '.ai/cezar');
     this.bootScratchRoot = options.bootScratchRoot === true;
     this.loadGrant = options.loadGrant ?? (() => loadWorkspaceGrant());
+    this.reapBroker = options.reapBroker ?? reapAbandonedBroker;
     this.semaphore = options.semaphore ?? new WorkspaceSemaphore();
     this.offSemaphore = this.semaphore.register({
       busySlots: () => this.busySlots(),
@@ -976,6 +1158,7 @@ export class RunManager {
       this.clearIdleTimer(state);
       this.clearMonitoringWakeTimer(state, runId);
       this.clearAutosaveTimer(state);
+      this.clearWorktreeLeases(state, runId);
       state.releaseRepoRoot?.();
       state.releaseRepoRoot = undefined;
     }
@@ -1125,14 +1308,83 @@ export class RunManager {
    * spawning a CLI. Never throws: an unreadable home degrades to the default profile, which is
    * exactly the behaviour that predates profiles.
    */
+  /**
+   * The model pin to hand `backend`, with a pin that backend cannot serve DROPPED rather than
+   * forwarded (`.ai/specs/2026-08-22-failed-turn-reads-as-done.md`).
+   *
+   * `modelConflictsWithRunner` already existed and already answered this — it is applied on the
+   * continuation path (`postMessage`) with a comment naming this exact hazard, "an inherited
+   * `opus` would survive a switch to codex". The per-step model policy that landed 2026-08-21
+   * (`.ai/specs/2026-08-21-per-step-model-policy.md`) pins `sonnet` on seven steps and `opus` on
+   * `review-spec`, and never routed through it. When codex went live the next day, every step of
+   * every codex run handed codex a Claude alias, and codex answered 400 on all 47 turns.
+   *
+   * **Dropped, not substituted.** The obvious alternative is to swap in that backend's equivalent
+   * id, and it was rejected on measurement: all three ids in `KNOWN_PRESETS_BY_RUNNER.codex`
+   * (`gpt-5.1-codex`, `gpt-5.1-codex-mini`, `gpt-5-codex`) are themselves dead on the production
+   * account — probed 2026-08-22, each one `Model metadata not found` then the same 400. A pinned
+   * vendor id is a thing that goes stale, so substituting one trades today's wrong model for
+   * tomorrow's. Dropping falls through to the backend's own current default, which does not rot.
+   *
+   * The drop is announced on the thread. A model pin silently ignored is its own small lie, and
+   * this whole spec exists because cezar told the owner something untrue about a run.
+   */
+  private modelForBackend(
+    runId: string,
+    stepId: string,
+    backend: RunnerId,
+    model: string | undefined,
+  ): string | undefined {
+    if (!model || !modelConflictsWithRunner(model, backend)) return model;
+    this.store.appendEvent(runId, {
+      type: 'note',
+      stepId,
+      message: `model "${model}" is not a ${backend} model — running on ${backend}'s default instead`,
+    });
+    return undefined;
+  }
+
   private async agentEnvForStep(
     runId: string,
     backend: RunnerId,
-    options: { generateFollowups?: boolean; recordedProfileId?: string } = {},
+    options: {
+      generateFollowups?: boolean;
+      recordedProfileId?: string;
+      /**
+       * WHICH AGENT SESSION this env belongs to (spec 2026-08-21-task-author-provenance, Phase 2).
+       *
+       * `CEZ_TASK_ID` (set by `agentEnv`, per RUN) answers "which task"; a task filed from inside
+       * a run also has to name the session that filed it, and a session id is a STEP-level fact.
+       * These two are the halves that were unreachable from a child process before.
+       *
+       * `stepId` is the authoritative one: it is stable across resumes, restarts and session
+       * re-mints. `sessionId` is best-effort BY CONSTRUCTION — Codex/OpenCode overwrite the id
+       * cezar minted with their own when the backend reports one, which happens after this env is
+       * already built — so on those backends it records cezar's pre-mint id and `stepId` is what
+       * always resolves. On the Claude backend, the default and the overwhelming majority, it is
+       * exact.
+       */
+      stepId?: string;
+      sessionId?: string;
+    } = {},
   ): Promise<{ env: Record<string, string>; profileId: string; knowledgeSummary: KnowledgePromptSummary | undefined }> {
     const run = this.store.getRun(runId);
+    const runRunner = run?.runner ?? 'claude';
+    // A step that pins its OWN runner overrides the provider, and until 2026-08-23 nothing
+    // re-resolved the account for it: `profileId` fell through to `undefined`, `selectProfile`
+    // could not parse the pool route stored for that provider, and it degraded to that provider's
+    // DEFAULT login however exhausted that login was. Resolve the pool for the step's provider
+    // instead — limited-skip and the rest of the ranking come free from `selectPoolAccount`.
+    // Spec: `.ai/specs/2026-08-23-step-runner-account-resolution.md`.
+    const steppedProfile = options.recordedProfileId === undefined && backend !== runRunner
+      ? (await resolvePoolForProvider({
+          provider: backend as ProviderId,
+          repoRoot: this.repoRoot,
+          inflight: this.semaphore.accountInflight(),
+        }))?.accountId
+      : undefined;
     const profileId = options.recordedProfileId
-      ?? (backend === (run?.runner ?? 'claude') ? run?.agentProfile : undefined);
+      ?? (backend === runRunner ? run?.agentProfile : steppedProfile);
     // Zero I/O when off (D4) — `loadKnowledgeSummary` itself re-checks the flag, this short-circuit
     // just avoids the Promise.all overhead in the (overwhelmingly common, today) off case.
     const kbEnabled = process.env.CEZ_KB === '1';
@@ -1143,6 +1395,13 @@ export class RunManager {
     return {
       env: {
         ...this.agentEnv(runId, options.generateFollowups ?? true, { enabled: kbEnabled, summary: knowledgeSummary }),
+        // Always PRESENT, empty when unknown — the `CEZ_TODOS_FILE` spelling above, for the same
+        // reason: a nested cezar inherits its parent's `process.env` wholesale, so omitting the
+        // key would let the PARENT run's session id shine through and a task filed by the child
+        // would name the wrong session. Empty reads as absent everywhere
+        // (`authorFromAgentEnv` trims), which is honest; a stale id would not be.
+        CEZ_STEP_ID: options.stepId ?? '',
+        CEZ_SESSION_ID: options.sessionId ?? '',
         ...resolved.env,
       },
       profileId: resolved.profile.id,
@@ -1173,6 +1432,10 @@ export class RunManager {
       // at the HTTP route because `cezar run`, the inbox's own "▶ Run" and variants all reach
       // startRun directly — a route-level gate would leave those writing todos.json.
       generateFollowups: followupsEnabled() ? input.generateFollowups : false,
+      // Who asked for this task, stamped at creation and never rewritten (spec
+      // 2026-08-21-task-author-provenance). Passed straight through: `startRun` decides nothing
+      // about authorship — the caller that KNOWS who acted is the only one that can.
+      author: input.author,
       // Persist autonomy on the record (#489) so the terminal review gate
       // (`settleSuccess`) and the group-pick winner-park can honor it — mid-run
       // auto-nudge reads `input.autonomous` (`execute`), but the record is the
@@ -1360,6 +1623,41 @@ export class RunManager {
   }
 
   /**
+   * A pure READ of the same two ceilings `pump()` enforces before it dequeues anything — whether a
+   * NEW run may start on this project right now, under BOTH the workspace `maxParallel` and this
+   * project's own per-project cap, plus the non-git in-place degradation rule. Built for Milestone C
+   * (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, C-e): a dispatched run's `capacityAvailable`
+   * has to come from THIS manager — the one that will actually run the work — never from the
+   * `presence` heartbeat's `capacity` claim, which is stamped at `heartbeatMs` cadence and would be
+   * stale by exactly the window that matters.
+   *
+   * **Advances nothing and holds no lock** — unlike the `resolvePoolFor*` family in
+   * `workspace/agent-route-select.ts`: `resolvePoolForDispatch` (`:208`), whose own docblock warns
+   * it "cannot be called speculatively" because it burns a turn of the fairness cursor as a side
+   * effect, and its sibling `resolvePoolForProvider` (`:246`), which advances the identical cursor
+   * through `recordDispatch` (`:273`). Both pick a login/provider by consuming a turn; this is the
+   * account-agnostic structural question one level up ("is there a slot at all"), asked the same
+   * way `pump()` asks it, and it is safe to call speculatively for exactly that reason: the answer
+   * is a snapshot, not a reservation, so a genuine race between this read and the run actually
+   * starting is possible and is left to `pump()`'s own gate — the same race `pump()` already lives
+   * with across its own multiple `await`s.
+   *
+   * Deliberately omits the account-hold check `pump()` also applies (`accountHolds()` / usage-limit
+   * gating): that gate is about which *specific* queued run may take a free slot, not whether a
+   * slot exists, and a dispatched run's account is not chosen until it actually starts.
+   */
+  async hasCapacity(): Promise<boolean> {
+    const repo = await getRepoInfo(this.repoRoot);
+    const maxParallel = this.semaphore.maxParallel();
+    const projectMax = this.semaphore.projectMaxParallel(this.repoRoot);
+    return (
+      this.semaphore.busy() < maxParallel &&
+      this.busySlots() < projectMax &&
+      (repo !== null || this.nonWorkspaceInPlaceBusy() < 1)
+    );
+  }
+
+  /**
    * Start queued runs while parallel slots are free. A run starts only under
    * BOTH ceilings: the WORKSPACE `resources.maxParallel` (default 2, counted
    * across every manager — spec 2026-07-20, step 2.5) AND this project's own
@@ -1422,6 +1720,25 @@ export class RunManager {
         // Only pay for the config read when something is actually held: a queued record may name
         // no runner, and then the account it would use is the configured default.
         const defaultRunner = anyHold ? (await loadConfig(this.repoRoot)).defaultRunner : undefined;
+        // Say so on the transcript before deciding anything (spec 2026-08-23-usage-limit-hold-
+        // account). A held run is otherwise indistinguishable from an ordinary queued one — it
+        // wears `queued`, it wears `#1 in queue`, and it does not move for hours. The queue was
+        // right and the cockpit was silent, which reads as a wedged workspace.
+        //
+        // A FORCED sweep is skipped entirely: it reads `NO_HOLDS` by construction, which is an
+        // instruction to ignore the holds, never evidence that none exist. Letting it run here
+        // cleared the dedupe state on every watchdog tick, so the next ordinary sweep said
+        // everything again — two notes per hold on a quiet queue, and a note per round trip on a
+        // bouncing one.
+        if (!forced) {
+          if (anyHold) {
+            this.noteHeldRuns(holds, (defaultRunner ?? 'claude') as RunnerId);
+          } else {
+            // Nothing is held anywhere, so every memo and every spent note is stale.
+            this.heldNotified.clear();
+            this.heldAtSpawn.clear();
+          }
+        }
         while (this.queue.length > 0 && capacity()) {
           // FIFO among the runs that CAN start; a held one keeps its place in the queue rather
           // than being dequeued and re-queued (which would churn its position and its record).
@@ -1429,11 +1746,13 @@ export class RunManager {
             ? 0
             : this.queue.findIndex((id) => {
                 const queued = this.store.getRun(id);
-                return !queued || !accountHeldFor(queued, holds, defaultRunner ?? 'claude');
+                return !queued || !this.heldAccountFor(queued, holds, defaultRunner ?? 'claude');
               });
           if (next === -1) break; // everything queued is waiting on a held account
           const runId = this.queue.splice(next, 1)[0];
           if (!runId) break;
+          this.heldNotified.delete(runId);
+          this.heldAtSpawn.delete(runId);
           // A forced sweep has to reach the spawn: the gate inside `execute` asks the same
           // question and would send this run straight back to the queue.
           if (forced) this.forceStarted.add(runId);
@@ -1448,6 +1767,7 @@ export class RunManager {
             void this.runContinuation(
               runId,
               hydrated.stepId,
+              hydrated.name,
               hydrated.sessionId,
               hydrated.backend,
               hydrated.prompt,
@@ -1495,6 +1815,277 @@ export class RunManager {
   }
 
   /**
+   * Tell each held queued run, once, which account it is waiting on and until when.
+   *
+   * The hold itself is correct and deliberate — starting a task on an account that is out of
+   * window just burns a CLI spawn on a doomed run. What was missing is that the refusal left no
+   * trace anywhere a person looks: the record stays plain `queued`, the row still counts it `#1
+   * in queue`, and the only other note of this kind (`requeueWhileHeld`) fires on the SPAWN path,
+   * which a run held at dequeue never reaches. Measured 2026-08-23: a task sat queued behind an
+   * eleven-hour hold with nothing in its transcript, its row, or the log saying so.
+   *
+   * Deduped per account rather than per run: a run whose hold moves to a different account is
+   * waiting on something new and should say so, while a run parked on one account for hours
+   * should not repeat itself on every sweep.
+   */
+  private noteHeldRuns(holds: AccountHolds, defaultRunner: RunnerId): void {
+    // Self-pruning: a run can leave the queue by paths that never reach the dequeue below (a
+    // cancel, most obviously), and this map must not outlive the queue it describes.
+    for (const runId of this.heldNotified.keys()) {
+      if (!this.queue.includes(runId)) this.heldNotified.delete(runId);
+    }
+    for (const runId of this.heldAtSpawn.keys()) {
+      if (!this.queue.includes(runId)) this.heldAtSpawn.delete(runId);
+    }
+    for (const runId of this.queue) {
+      const queued = this.store.getRun(runId);
+      if (!queued) continue;
+      // Whichever account is actually holding it — its own, or the one the spawn gate refused.
+      // Naming the run's own account for a run bounced on a step's account would print a sentence
+      // about an account that is wide open, which is worse than the silence this replaced.
+      const account = this.heldAccountFor(queued, holds, defaultRunner);
+      if (!account) {
+        this.heldNotified.delete(runId);
+        continue;
+      }
+      this.noteHeld(runId, account);
+    }
+  }
+
+  /**
+   * Which account is holding this queued run right now, or undefined when nothing is.
+   *
+   * TWO keys, because the two gates ask about different accounts and a run BOUNCES forever when
+   * they disagree. `pump()` admits on the account the run RECORD names; `execute()` refuses on
+   * the account DISPATCH resolves, and those differ for two independent reasons: a `pool:` route
+   * picks the PROVIDER as well as the login (`resolvePoolForDispatch`), and a workflow step may
+   * pin its own runner. The measured cause was the first — the box's `defaults` are `pool:*` for
+   * both providers, so a task created on codex resolved to a claude account. Its record said
+   * codex, so the queue admitted it; dispatch said claude, which was held, so the spawn handed it
+   * back; repeat. Measured on `prod-host` on 2026-08-23 at roughly eleven round trips a
+   * second, each one appending a transcript note, 2626 of them in four minutes.
+   *
+   * So the spawn gate's verdict is remembered (`heldAtSpawn`) and consulted at admission. It is a
+   * MEMO, not a second source of truth: the remembered account must still be held right now for
+   * it to count, and a stale one is dropped on read. The worst case is that a hold moves to a
+   * different account and the run bounces once more, which records the new account and settles
+   * again — bounded by the number of accounts, not by time.
+   *
+   * The memo cannot wedge a queue. It only ever holds back a run the spawn gate would refuse a
+   * millisecond later, and the watchdog's forced sweep bypasses this predicate entirely.
+   */
+  private heldAccountFor(run: RunRecord, holds: AccountHolds, defaultRunner: RunnerId): string | undefined {
+    // Out-of-quota fallback (spec 2026-08-23-retarget-task-to-another-engine, Phase 4): with the
+    // setting on, "the account the RECORD names is limited" stops being a reason to WAIT, so
+    // admission does not hold on it and the run goes through to dispatch, which is the only place
+    // allowed to resolve an account. If dispatch finds nowhere better, `requeueWhileHeld` parks it
+    // exactly as before — so the worst case of admitting it is one dequeue, not a start on a
+    // closed login.
+    //
+    // **The SPAWN MEMO is exempt from that bypass, and it has to be.** CORRECTED 2026-08-23 by
+    // `.ai/specs/2026-08-23-never-block-a-task.md`: the setting's first version returned here
+    // unconditionally, which threw away the memo as well as the record's hold. That is the brake.
+    // Without it the queue ran hot — dequeue, resolve, park, release, pump, dequeue — and because
+    // `noteHeldRuns` reads THIS predicate to decide whether the thread has already spoken, an
+    // `undefined` answer deleted the dedupe memo on every sweep too. **Measured on a genuinely
+    // stuck run: 37 identical "held in the queue" notes in 1.5 seconds**, the same shape as the
+    // 2626-note write storm rolled back earlier the same day.
+    //
+    // The memo is safe to honour under the fallback because it is not the record's guess: it is
+    // what dispatch ACTUALLY refused, after the full resolve. Re-dequeuing a millisecond later can
+    // only refuse again — the inputs (`limited`, holds) move on a timescale of minutes. It still
+    // self-clears the moment that account stops being held, `retargetQueuedRun` drops it outright,
+    // and the watchdog's forced sweep bypasses this predicate entirely, so it cannot wedge.
+    //
+    // Deliberately NOT "resolve the alternative here and compare". This predicate is synchronous
+    // and runs on every pump sweep, while choosing an account means reading two JSON files; worse,
+    // the obvious helper (`resolvePoolForDispatch`) advances the round-robin cursor as a side
+    // effect, so asking it per sweep would corrupt the balancer it is asking.
+    const own = runAccountKey(run, defaultRunner);
+    if (!this.semaphore.fallbackAcrossAccountsWhenLimited() && accountHeldOn(own, run, holds)) {
+      return own;
+    }
+    const atSpawn = this.heldAtSpawn.get(run.id);
+    if (atSpawn === undefined) return undefined;
+    if (accountHeldOn(atSpawn, run, holds)) return atSpawn;
+    this.heldAtSpawn.delete(run.id);
+    return undefined;
+  }
+
+  /** One held run, one line, once per account it is held on. Shared by the dequeue-time sweep
+   *  above and the spawn-time gate (`requeueWhileHeld`) so a run that is refused at both does not
+   *  say the same thing twice, and so both spell the account the same way. */
+  private noteHeld(runId: string, account: string): void {
+    if (this.heldNotified.get(runId) === account) return;
+    this.heldNotified.set(runId, account);
+    const until = this.holdReopensAt(account);
+    this.store.appendEvent(runId, {
+      type: 'note',
+      // No em dash in the cockpit-visible half of this line (owner's standing rule for product
+      // copy); the surrounding comments keep the file's own style.
+      message: until
+        ? `held in the queue: the ${account} agent account is waiting out a usage limit until ${formatWakeInstant(until)}`
+        : `held in the queue: the ${account} agent account is waiting out a usage limit`,
+    });
+  }
+
+  /** When the named account's earliest scheduled resume fires, or null when the hold is an
+   *  in-flight resume with no published instant behind it. */
+  private holdReopensAt(account: string): Date | null {
+    let soonest: number | undefined;
+    for (const run of this.store.listRuns()) {
+      if (run.status !== 'failed' || !run.autoResumeAt) continue;
+      if (usageHoldAccountKey(run, run.runner ?? 'claude') !== account) continue;
+      const at = Date.parse(run.autoResumeAt);
+      if (!Number.isFinite(at) || at <= Date.now()) continue;
+      if (soonest === undefined || at < soonest) soonest = at;
+    }
+    return soonest === undefined ? null : new Date(soonest);
+  }
+
+  /**
+   * Move a QUEUED run to a different engine before it has started anything
+   * (`.ai/specs/2026-08-23-retarget-task-to-another-engine.md`, Phase 2).
+   *
+   * The parked-task counterpart to `continueRun`'s `{runner, model}` override, which cannot serve
+   * this case: it requires a session to resume, and a queued run has none. Everything here happens
+   * before a single agent turn, so there is nothing to migrate — no session, no worktree, no cost.
+   *
+   * ## Why the pending input must be rewritten, not just the record
+   *
+   * `execute()` reads `input.runner` / `input.agentProfile` / `input.model`, never the record. A
+   * retarget that updated only the record would show the new engine everywhere a human looks and
+   * dispatch to the old one — the most expensive shape of wrong, because it looks like it worked.
+   * The record is updated too, and must be: `pump()`'s admission gate keys on `runAccountKey(run)`
+   * off the RECORD, so leaving it stale would have admission and dispatch disagreeing about the
+   * account, which is the exact ping-pong `2026-08-23-usage-limit-hold-account.md` had to fix.
+   *
+   * ## The memo has to go
+   *
+   * `heldAtSpawn` remembers the account a spawn refused this run on, and it is stale the instant
+   * the target changes — it would otherwise keep the run out of the queue on the strength of a
+   * verdict about a DIFFERENT account, so the retarget would appear to do nothing until the old
+   * account's hold expired. `heldNotified` goes with it so the thread speaks again for the new
+   * account rather than staying quiet on a dedupe key that no longer applies.
+   *
+   * ## Refusals
+   *
+   * A run with no pending work item is the wedge `reviveQueuedRun` exists to repair — a queued
+   * record that `pump()` cannot see. Retargeting it would write a new engine onto a record that
+   * still has nothing to execute, which reads as success and changes nothing. Refused instead; the
+   * queue watchdog revives it within a sweep and the retarget then works.
+   */
+  async retargetQueuedRun(
+    runId: string,
+    target: { runner?: RunnerId; agentProfile?: string; model?: string },
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (agentModelsLocked(this.repoRoot) && target.model?.trim()) {
+      return { ok: false, error: AGENT_MODELS_LOCKED_ERROR };
+    }
+    const run = this.store.getRun(runId);
+    if (!run) return { ok: false, error: 'not found' };
+    if (run.status !== 'queued') return { ok: false, error: `cannot retarget a ${run.status} run` };
+
+    const job = this.pendingJobs.get(runId);
+    const continuation = this.pendingContinuations.get(runId);
+    if (!job && !continuation) {
+      return { ok: false, error: 'this task has no queued work item yet, try again in a moment' };
+    }
+
+    const targetRunner = target.runner ?? run.runner ?? 'claude';
+    // The same pairing guard `continueRun` applies, for the same reason and with the same words:
+    // a model that is recognizably another runner's preset would corrupt the run. Free-form and
+    // custom ids pass untouched.
+    if (target.model && modelConflictsWithRunner(target.model, targetRunner)) {
+      return { ok: false, error: `model '${target.model}' is not a ${targetRunner} model` };
+    }
+    // A runner switch carrying NO explicit model must not leave the previous backend's pin behind
+    // — the guard above only sees `target.model`. Cleared, never substituted: dropping falls
+    // through to the new backend's own current default, whereas swapping in "the equivalent id"
+    // trades today's wrong model for tomorrow's stale one
+    // (`.ai/specs/2026-08-22-failed-turn-reads-as-done.md`, and `modelForBackend` below).
+    const inheritedPinIsForeign =
+      target.model === undefined && run.model !== undefined && modelConflictsWithRunner(run.model, targetRunner);
+    const model = target.model === undefined ? (inheritedPinIsForeign ? undefined : run.model) : target.model || undefined;
+    const agentProfile = target.agentProfile === undefined ? run.agentProfile : target.agentProfile || undefined;
+
+    this.store.updateRun(runId, {
+      runner: targetRunner,
+      model,
+      agentProfile,
+      // A retarget is a decision to run this task somewhere else NOW. Any pending usage-limit
+      // appointment was made about the old engine and is meaningless for the new one.
+      autoResumeAt: undefined,
+    });
+
+    if (job) {
+      this.pendingJobs.set(runId, {
+        ...job,
+        input: { ...job.input, runner: targetRunner, agentProfile, model },
+      });
+    }
+    if (continuation) {
+      // A session id is provider-owned. Sending the new backend the old one's handle is the
+      // failure `reviveQueuedRun` already guards against on its own path, so a continuation whose
+      // engine changed starts a fresh session instead of resuming a thread the target cannot read.
+      const sessionSurvives = continuation.backend === targetRunner;
+      this.pendingContinuations.set(runId, {
+        ...continuation,
+        backend: targetRunner,
+        sessionId: sessionSurvives ? continuation.sessionId : undefined,
+      });
+    }
+
+    this.heldAtSpawn.delete(runId);
+    this.heldNotified.delete(runId);
+    this.chainReentries.delete(runId);
+
+    const where = agentProfile ? `${targetRunner} (${agentProfile})` : targetRunner;
+    this.store.appendEvent(runId, {
+      type: 'lifecycle',
+      message: `moved to ${where}${model ? ` on ${model}` : ''}, waiting for a slot`,
+    });
+    void this.pump();
+    return { ok: true };
+  }
+
+  /**
+   * The executable input for a run going BACK into the queue, rebuilt from its record.
+   *
+   * Three callers had this same object spelled out inline — `reviveQueuedRun` (boot recovery and
+   * the queue watchdog), `reattachBrokeredRun` (a live spool survived a restart) and
+   * `reenterChain` (a chain hands itself back) — and **all three dropped `agentProfile`**, which is
+   * what this helper exists to make impossible to repeat. `execute()` resolves the account from
+   * `input.agentProfile`, never from the record, so every one of those paths silently downgraded
+   * an explicit account pick back to the project's own selection. The record kept the value the
+   * whole time, which is exactly what hid it: the cockpit went on showing the account the user
+   * chose while the dispatch used a different one.
+   *
+   * It matters more now than it did: `retargetQueuedRun` writes the user's new engine onto both
+   * the record and the pending input, and any path that rebuilds the input from the record would
+   * otherwise undo the retarget at the next restart, hand-back or re-attach.
+   *
+   * `generateFollowups` stays a parameter rather than being read here, because the callers do not
+   * agree on it: `reviveQueuedRun` normalizes the value onto the record first (#471) and the other
+   * two compute it inline. Folding that decision in would change behaviour in one of the three.
+   */
+  private queuedInputFromRecord(run: RunRecord, generateFollowups: boolean | undefined): ExecuteRunInput {
+    return this.hydrateQueuedInput(run.id, {
+      task: run.task,
+      model: run.model,
+      runner: run.runner,
+      agentProfile: run.agentProfile,
+      generateFollowups,
+      // Re-thread autonomy (#489): the rebuilt input feeds `execute`, whose mid-run auto-nudge
+      // reads `input.autonomous`. Without this a recovered autonomous run would run
+      // non-autonomously and later wrongly park at `review`.
+      autonomous: run.autonomous,
+      // Preserve an explicit worktree opt-out across a queued restart.
+      worktree: run.worktree,
+    });
+  }
+
+  /**
    * Make one `queued` RECORD executable again — the engine half a queued run needs but does not
    * persist (`pendingJobs` / `pendingContinuations` are process-local, the record is not).
    *
@@ -1525,6 +2116,16 @@ export class RunManager {
         backend,
         prompt: RESTART_CONTINUATION_PROMPT,
         images: [],
+        // Read off the already-persisted `continue-N` step, not re-derived from the restart
+        // prompt above — otherwise every restart would relabel the step "the cezar process
+        // restarted…" instead of preserving its real title (spec 2026-08-22-continue-step-naming).
+        // `PendingContinuation.nameOrigin` has no `'marker'` member — a step Phase 3 already
+        // refined is, like a Phase 1 prompt-derived one, still eligible for further refinement (it
+        // is only `'step'` that must never be overwritten), so a persisted `'marker'` folds to
+        // `'prompt'` here rather than widening this type for a distinction that doesn't matter to
+        // this path.
+        name: queuedContinuation.name,
+        nameOrigin: queuedContinuation.nameOrigin === 'step' ? 'step' : 'prompt',
       });
       this.queue.push(run.id);
       this.store.appendEvent(run.id, {
@@ -1559,18 +2160,7 @@ export class RunManager {
       // Folded through the same helper `pump()` uses (#472) so a restart carries the stack.
       // Idempotent: hydration always composes from `run.task` + the stack, never from an
       // already-folded `input.task`, so re-hydrating at dequeue yields the same string.
-      input: this.hydrateQueuedInput(run.id, {
-        task: run.task,
-        model: run.model,
-        runner: run.runner,
-        generateFollowups,
-        // Re-thread autonomy (#489): the rebuilt input feeds `execute`, whose mid-run auto-nudge
-        // reads `input.autonomous`. Without this a recovered autonomous run would run
-        // non-autonomously and later wrongly park at `review`.
-        autonomous: run.autonomous,
-        // Preserve an explicit worktree opt-out across a queued restart.
-        worktree: run.worktree,
-      }),
+      input: this.queuedInputFromRecord(run, generateFollowups),
     });
     this.queue.push(run.id);
     this.store.appendEvent(run.id, { type: 'lifecycle', message: `${reason} — task re-queued` });
@@ -1625,7 +2215,10 @@ export class RunManager {
         // to plain `done` here silently drops the "needs you" signal, so a restart made a task
         // with an open question look finished. Detect that before the steps are settled and keep
         // it in the attention-bearing `review` gate instead (the ask card still resumes it).
+        /** An explicit unanswered marker is strong enough to outrank chain re-entry. */
         const pendingAsk = this.runHasPendingAsk(run.id);
+        /** A heuristic prose verdict may preserve attention, but must never withhold queued work. */
+        const pendingAttention = pendingAsk || run.waitingReason === 'question';
         // The turn was over and the ball was in the user's court, so the open step really is
         // finished — but the CHAIN may not be (spec 2026-08-20, P2). Settle the step first, then
         // ask: if later steps are still pending, re-enter at the next one instead of calling
@@ -1641,11 +2234,11 @@ export class RunManager {
         if (!pendingAsk && (await this.reenterChain(settled, 'cezar restarted'))) continue;
         this.store.appendEvent(run.id, {
           type: 'lifecycle',
-          message: pendingAsk
+          message: pendingAttention
             ? 'cezar restarted — the open session was settled; your answer is still needed'
             : 'cezar restarted — the open session was settled',
         });
-        await this.settleSuccess(run.id, { pendingAsk });
+        await this.settleSuccess(run.id, { pendingAsk: pendingAttention });
         continue;
       }
       // `running`: FIRST ask whether the agent is even dead (P4 of
@@ -1684,7 +2277,7 @@ export class RunManager {
         finishedAt,
         currentStepId: undefined,
       });
-      const resumed = this.continueRun(
+      const resumed = await this.continueRun(
         run.id,
         {
           text: RESTART_CONTINUATION_PROMPT,
@@ -1706,6 +2299,65 @@ export class RunManager {
     void this.pump();
   }
 
+  // ---- the second admission gate (D14) ----------------------------------------------------
+
+  /**
+   * Run one step's work while holding a heavy-step slot — but ONLY when the step's own definition
+   * says it is heavy (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D14).
+   *
+   * `maxParallel` bounds how many runs are admitted at all; this bounds how many of them may be
+   * inside a CPU/memory-heavy step at the same time. Two numbers, because one count cannot express
+   * a workload that sits near 0.5 GB for most of a run and wants several GB inside `run-tests`.
+   *
+   * **`step.heavy === true` is the whole test, and it is read from the DEFINITION.** Never the
+   * step's id, name, command or prompt: a name-match would be a second, invisible definition of
+   * "heavy" that drifts the moment somebody names a step `tests`, and it could not be turned off
+   * for a chain that genuinely wants an unbounded step. `heavy` is absent on every step of every
+   * existing workflow except the catalog's `run-tests`, so this is a no-op for everything else.
+   *
+   * **A step that is not heavy is never gated, at any occupancy** — it does not pass through the
+   * semaphore at all, so a saturated heavy gate cannot delay a `commit-push` or a check step.
+   *
+   * `runHeavyStep` releases in a `finally`, so a step that throws still frees its slot; that is
+   * why this wraps rather than exposing acquire/release. And when `maxHeavySteps` is absent the
+   * gate is `Infinity` — an install nobody opted in stays exactly as it is today, which is the
+   * whole reason the config key has no schema default (`workspace/config.ts`).
+   *
+   * Two stated limits, both deliberate rather than overlooked:
+   *
+   *  - an INTERACTIVE last step holds its slot while it is parked waiting for a follow-up, because
+   *    the slot's lifetime is the step's turn and an interactive turn ends at finish/idle/cancel.
+   *    No built-in workflow marks such a step heavy (`run-tests` always has steps after it), so
+   *    this costs nothing today — but a chain that marks its final step heavy would hold a heavy
+   *    slot while idle, which is the #347 exemption's problem in a second place.
+   *  - a **Continue** (`runContinuation`) and a message into an open session are NOT gated. The
+   *    chain's own re-entries come back through this loop and are; those two are a person acting on
+   *    one run by hand, and D15a's rule for exactly this shape is that a human asserting intent on
+   *    this host proceeds. Making the owner's Continue queue behind two other runs' test steps
+   *    would be the gate deciding something it was not built to decide.
+   */
+  private async withHeavyStep<T>(
+    step: WorkflowStepDef,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (step.heavy !== true) return fn();
+    const max = this.semaphore.maxHeavySteps();
+    const active = this.semaphore.heavyActive();
+    // Queueing at this gate is expected and correct — thrashing is what it prevents — but a step
+    // that sits `running` while it is actually waiting is a state the cockpit cannot read. Same
+    // reasoning as the repository-root lease's "waiting for exclusive access" note. Advisory only:
+    // the gate is `runHeavyStep`, and this line never decides anything.
+    if (active >= max) {
+      emit({
+        type: 'note',
+        stepId: step.id,
+        message: `waiting for a heavy-step slot — ${active}/${max} heavy steps running across the workspace`,
+      });
+    }
+    return this.semaphore.runHeavyStep(fn);
+  }
+
   // ---- run brokering (P4) ---------------------------------------------------------------
   //
   // `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`. The seam is deliberately tiny:
@@ -1713,9 +2365,21 @@ export class RunManager {
   // above the runner learns that a run moved out of process, which is what makes this tractable
   // against a file this size.
 
-  /** Which cgroup escape this host actually supports, probed once. */
+  /** Which cgroup escape this host actually supports. Re-probed until a `'scope'` result is
+   *  observed, then cached for the process's lifetime — see the field's own doc comment for why
+   *  a non-`'scope'` result must never be cached unconditionally. */
   brokerIsolation(): BrokerIsolation {
-    this.brokerIsolationCache ??= chooseIsolation(probeIsolationCapabilities());
+    if (this.brokerIsolationCache !== 'scope') {
+      this.brokerIsolationCache = chooseIsolation(probeIsolationCapabilities());
+    }
+    if (this.brokerIsolationCache !== 'scope' && this.brokerIsolationWarnedFor !== this.brokerIsolationCache) {
+      this.brokerIsolationWarnedFor = this.brokerIsolationCache;
+      console.warn(
+        `[cez] run broker isolation is '${this.brokerIsolationCache}', not 'scope' — brokered runs will`
+        + ` survive a 'systemctl restart' of this service but NOT a full 'systemctl stop' + 'start'.`
+        + ` See .ai/specs/2026-08-22-broker-scope-isolation-full-stop-survival.md.`,
+      );
+    }
     return this.brokerIsolationCache;
   }
 
@@ -1740,7 +2404,7 @@ export class RunManager {
 
   /** Absolute spool dir for a run, from the record's relative path or the default layout. */
   private spoolDirOf(run: RunRecord): string {
-    return run.spoolDir ? join(this.dataDir, run.spoolDir) : spoolDirFor(join(this.dataDir, 'runs'), run.id);
+    return run.spoolDir ? join(this.dataDir, run.spoolDir) : legacySpoolDirFor(join(this.dataDir, 'runs'), run.id);
   }
 
   /**
@@ -1751,10 +2415,15 @@ export class RunManager {
    * must have a built entry point to re-exec as the broker, and the run must not already be
    * re-attaching to a live spool for this very step.
    */
-  private brokerFor(runId: string, stepId: string, backend: RunnerId): BrokerSessionRequest | undefined {
+  private async brokerFor(
+    runId: string,
+    stepId: string,
+    backend: RunnerId,
+  ): Promise<BrokerSessionRequest | undefined> {
     if (!(BROKERED_BACKENDS as readonly string[]).includes(backend)) return undefined;
     if (!brokerAvailable()) return undefined;
-    const spoolDir = spoolDirFor(join(this.dataDir, 'runs'), runId);
+    const instanceId = nextBrokerInstanceId();
+    const spoolDir = spoolDirFor(join(this.dataDir, 'runs'), runId, instanceId);
     // Recorded BEFORE the spawn: a crash in the same millisecond must still leave the next process
     // a path to probe. Written relative to `dataDir` — see the field's own note in `store.ts`.
     this.store.updateRun(runId, { spoolDir: relative(this.dataDir, spoolDir), consumedOffset: 0 });
@@ -1762,10 +2431,73 @@ export class RunManager {
     return {
       spoolDir,
       runId,
+      instanceId,
       stepId,
       isolation: this.brokerIsolation(),
+      resources: await this.runResourceLimits(),
+      onResourceKill: (kill) => this.recordResourceKill(runId, stepId, kill),
       onOffset: (offset) => this.persistConsumedOffset(runId, offset),
     };
+  }
+
+  /**
+   * The D14a cgroup bounds one broker launch is created with, read from workspace `resources`.
+   *
+   * Read from the FILE here rather than from `WorkspaceSemaphore`'s cache, because the semaphore
+   * caches only the two admission numbers and the process-tree memory guard — these four keys are
+   * not in its snapshot, and widening that snapshot is `workspace/semaphore.ts`'s call, not this
+   * file's. The read is once per broker launch (once per step), never per tick, which is the
+   * invariant the semaphore's own docblock defends: it exists because the memory guard samples
+   * every ~2 s per manager, not because reading the config is expensive.
+   *
+   * An unreadable config degrades to no bounds — which is exactly today's behaviour, and the right
+   * direction to fail: an unbounded run is what cezar has always shipped, whereas guessing a
+   * ceiling from a file we could not read would kill work for a number nobody chose.
+   */
+  private async runResourceLimits(): Promise<BrokerResourceLimits> {
+    try {
+      const { resources } = await loadWorkspaceConfig();
+      return {
+        runMemoryHighMb: resources.runMemoryHighMb,
+        runMemoryMaxMb: resources.runMemoryMaxMb,
+        runCpuWeight: resources.runCpuWeight,
+        runsSliceMemoryMaxMb: resources.runsSliceMemoryMaxMb,
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * A cgroup bound killed this run's processes (C3).
+   *
+   * Written on the RUN, not the step, because that is where the field lives (`runs/store.ts`) and
+   * because the fact outlives the step: a chain re-entry re-runs the step, and the record must
+   * still be able to answer "was this run ever killed by a bound?" afterwards. The step's own
+   * failure message names the bound too — `claude-cli-runner.ts` appends the detail — so the two
+   * surfaces agree.
+   *
+   * The note is not decoration. It is the sentence a person (and the run's own next agent) reads
+   * instead of concluding that the tests broke: "a bound whose failure mode is indistinguishable
+   * from a code failure will be blamed on the code."
+   */
+  private recordResourceKill(runId: string, stepId: string | undefined, kill: ResourceKillReport): void {
+    this.store.updateRun(runId, { resourceKill: kill });
+    this.store.appendEvent(runId, {
+      type: 'note',
+      ...(stepId ? { stepId } : {}),
+      message: `run killed by a resource bound — ${kill.detail}. This is NOT a test or code failure; the step was stopped by the host.`,
+    });
+    // Named now so "how often does a bound actually fire, and on which step?" has an answer next
+    // time instead of a grep — the same reason `run.step.stopped` is emitted.
+    this.store.appendEvent(runId, {
+      type: 'metric',
+      ...(stepId ? { stepId } : {}),
+      name: 'run.resource_kill',
+      runId,
+      limit: kill.limit,
+      at: kill.at,
+    });
   }
 
   /**
@@ -1818,19 +2550,28 @@ export class RunManager {
     const backend = run.runner ?? 'claude';
     if (!(BROKERED_BACKENDS as readonly string[]).includes(backend)) return false;
     const spoolDir = this.spoolDirOf(run);
-    if (!isSpoolLive(spoolDir)) return false;
     const meta = readSpoolMeta(spoolDir);
-    if (!meta || meta.runId !== run.id || !meta.stepId) return false;
+    const refuse = async (): Promise<false> => {
+      if (meta && await this.reapBroker(run.id, meta)) {
+        this.store.appendEvent(run.id, {
+          type: 'lifecycle',
+          message: `adopted-out agent stopped: broker ${meta.pid}`,
+        });
+      }
+      return false;
+    };
+    if (!isSpoolLive(spoolDir)) return refuse();
+    if (!meta || meta.runId !== run.id || !meta.stepId) return refuse();
     const openStep = run.steps.find((s) => s.id === meta.stepId);
-    if (!openStep || stepTerminal(openStep.status)) return false;
+    if (!openStep || stepTerminal(openStep.status)) return refuse();
 
     const workflow = await this.reviveWorkflow(run);
-    if (!workflow) return false;
+    if (!workflow) return refuse();
     const resumeAt = this.chainResumeAt(run, workflow);
     // The spool must hold the step the chain is about to run. A mismatch means the record and the
     // spool disagree about where this run is, and guessing between them is precisely how a run
     // ends up with two live agents.
-    if (!resumeAt || workflow.steps[resumeAt.index]?.id !== meta.stepId) return false;
+    if (!resumeAt || workflow.steps[resumeAt.index]?.id !== meta.stepId) return refuse();
 
     this.pendingReattach.set(run.id, {
       stepId: meta.stepId,
@@ -1842,14 +2583,7 @@ export class RunManager {
       message: 'cezar restarted — this run kept going',
     });
     this.starting.add(run.id);
-    const input = this.hydrateQueuedInput(run.id, {
-      task: run.task,
-      model: run.model,
-      runner: run.runner,
-      generateFollowups: followupsEnabled() ? run.generateFollowups : false,
-      autonomous: run.autonomous,
-      worktree: run.worktree,
-    });
+    const input = this.queuedInputFromRecord(run, followupsEnabled() ? run.generateFollowups : false);
     void this.execute(run.id, workflow, input, resumeAt).catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       this.pendingReattach.delete(run.id);
@@ -1882,8 +2616,36 @@ export class RunManager {
     }
     for (const entry of entries) {
       if (!entry.endsWith('.spool')) continue;
-      if (live.has(entry.slice(0, -'.spool'.length))) continue;
-      rmSync(join(runsDir, entry), { recursive: true, force: true });
+      const parent = join(runsDir, entry);
+      const runId = entry.slice(0, -'.spool'.length);
+      let children: string[];
+      try {
+        children = readdirSync(parent);
+      } catch {
+        continue;
+      }
+      // A flat protocol-1 spool has files directly in the parent. Keep it only while its run is live.
+      if (children.some((child) => child === 'meta.json')) {
+        if (!live.has(runId) && !isSpoolLive(parent)) rmSync(parent, { recursive: true, force: true });
+        continue;
+      }
+      for (const child of children) {
+        const instanceDir = join(parent, child);
+        if (isSpoolLive(instanceDir)) continue;
+        if (!readSpoolMeta(instanceDir)) {
+          try {
+            if (Date.now() - statSync(instanceDir).mtimeMs <= SPOOL_ORPHAN_GRACE_MS) continue;
+          } catch {
+            continue;
+          }
+        }
+        rmSync(instanceDir, { recursive: true, force: true });
+      }
+      try {
+        if (readdirSync(parent).length === 0) rmSync(parent, { recursive: true, force: true });
+      } catch {
+        // Concurrent broker launch or cleanup, leave it for the next sweep.
+      }
     }
   }
 
@@ -1916,6 +2678,17 @@ export class RunManager {
     // corrupts the run, so a mismatch simply starts the step fresh. Same affinity rule
     // `continueRun` applies — new records carry explicit affinity, legacy ones fall back to the
     // run's current runner as the conservative owner.
+    //
+    // A step-level pin can be DOWNGRADED at dispatch when its provider is wholly out of quota
+    // (`downgradePinnedRunner`, `2026-08-23-never-block-a-task.md`), so `def.runner` and
+    // `record.backend` can now legitimately differ on a step that ran perfectly well. That reads
+    // here as a mismatch and starts the step fresh — **safe in both directions** (a codex session
+    // is never handed to claude, or the reverse) and **lossy in one**: after a restart with the
+    // pinned provider still exhausted, the step re-runs instead of resuming its downgraded
+    // session. Deliberately left lossy. Resolving it properly means re-asking the downgrade
+    // question, which is async and reads two JSON files, from a synchronous predicate that runs on
+    // every recovery sweep — and getting that wrong reattaches a session to the wrong provider,
+    // which corrupts the run rather than costing a turn.
     const stepBackend = def.runner ?? run.runner ?? 'claude';
     const sessionBackend = record?.backend ?? run.runner ?? 'claude';
     // `pending` means the step never opened a session in the first place — any `sessionId` on it
@@ -1933,6 +2706,8 @@ export class RunManager {
         // config dir finds no session and silently starts a fresh one instead.
         ...(record.profileId ? { profileId: record.profileId } : {}),
         prompt: restartContinuationPrompt({ position, total }),
+        // This id was recorded by an earlier process invocation — see `ChainResumePoint.resume`.
+        verifyTranscript: true,
       },
     };
   }
@@ -2025,14 +2800,7 @@ export class RunManager {
     const generateFollowups = followupsEnabled() ? run.generateFollowups : false;
     this.pendingJobs.set(run.id, {
       workflow,
-      input: this.hydrateQueuedInput(run.id, {
-        task: run.task,
-        model: run.model,
-        runner: run.runner,
-        generateFollowups,
-        autonomous: run.autonomous,
-        worktree: run.worktree,
-      }),
+      input: this.queuedInputFromRecord(run, generateFollowups),
       resumeAt,
     });
     // Steps about to re-run go back to `pending` so the GUI rail reads top-to-bottom truthfully
@@ -2062,6 +2830,7 @@ export class RunManager {
   /** Remove a run from the live registries — keeps `waiting ⊆ active`. */
   private dropActive(runId: string): void {
     const state = this.active.get(runId);
+    if (state) this.clearWorktreeLeases(state, runId);
     state?.releaseRepoRoot?.();
     if (state) state.releaseRepoRoot = undefined;
     this.waiting.delete(runId);
@@ -2117,6 +2886,13 @@ export class RunManager {
     if (run.archived) return;
     const limit = parseUsageLimit(run.error);
     if (!limit) return;
+    // Write the limit down BEFORE any of the refusals below. Whether THIS run will resume itself
+    // is a different question from whether THAT account is exhausted, and every early return under
+    // this line answers only the first: the setting being off, the run having no session to resume,
+    // and the resume cap being spent are all reasons not to re-run this task, and none of them is
+    // evidence the provider's window reopened. Recording under them would leave the pool routing
+    // onto a login that just said no, which is the production failure this closes.
+    this.recordAccountLimit(run, limit.resetAt);
     if (!this.semaphore.autoResumeOnUsageLimit()) return;
     // No session to resume = nothing this feature can do; `continueRun` would refuse anyway.
     if (!run.steps.some((step) => step.sessionId)) return;
@@ -2136,10 +2912,186 @@ export class RunManager {
     });
   }
 
+  /**
+   * Tell the account balancer that a provider just refused this run's account
+   * (`.ai/specs/2026-08-23-retarget-task-to-another-engine.md`, Phase 1).
+   *
+   * `selectPoolAccount` has ranked "skip a limited account" as signal 1 since
+   * `2026-08-16-agent-account-usage-routing.md` — the stated reason pools exist at all. It was
+   * dead code in production for a week: `recordLimited()` had no caller outside its own tests, so
+   * `AccountUsageEntry.limited` was never written, `isLimited()` answered `false` for an account
+   * that had just said no, and the pool routed straight back onto it. What masked the gap is the
+   * queue hold, which stops the work a different way — but the hold is per-run and per-account,
+   * and it parks the task instead of moving it, which is exactly what the reporter hit.
+   *
+   * **Keyed with `usageHoldAccountKey`, not `runAccountKey`.** The account that was refused is on
+   * the STEP that ran, not on the run record: `spec-to-deploy` pins `spec` and `review-spec` to
+   * claude whatever the task was started on, and a `pool:` route may put two steps of one run on
+   * two logins. Keying off the record is the bug `2026-08-23-usage-limit-hold-account.md` was
+   * filed for, and repeating it here would poison the balancer in both directions at once —
+   * excluding a healthy login while leaving the closed one eligible.
+   *
+   * `until` is the provider's own stated reset, passed through only because `parseUsageLimit`
+   * extracted it from the provider's own words. An absent one would fall to
+   * `ASSUMED_LIMIT_COOLDOWN_MS`; here there is always one, because a `limit` is what got us here.
+   *
+   * Fire-and-forget, like every other write to this store: `mergeWriteAgentAccountUsage` never
+   * throws (a read-only home degrades to in-memory state), and a lost write costs one dispatch's
+   * fairness, never a run. Blocking the failure path on a JSON write would be the worse trade.
+   */
+  private recordAccountLimit(run: RunRecord, resetAt: Date): void {
+    const account = usageHoldAccountKey(run, run.runner ?? 'claude');
+    void mergeWriteAgentAccountUsage((store) =>
+      recordLimited(store, account, { source: 'usage-limit', until: resetAt.toISOString() }),
+    );
+  }
+
+  /**
+   * The account a task NAMED is out of quota — move it to one that is not
+   * (`.ai/specs/2026-08-23-retarget-task-to-another-engine.md`, Phase 4). `undefined` means "leave
+   * the run where it is", which is also every answer when the setting is off.
+   *
+   * **Only for an explicit pick.** A `pool:` route is resolved by `resolvePoolForDispatch` before
+   * this is reached and already skips limited logins as its first signal — that is Phase 1, and it
+   * needs no setting because a pool is the user asking to be balanced. This is the other case: a
+   * user who named `codex`, or a specific login, and whose choice cezar would otherwise honour by
+   * making them wait.
+   *
+   * **This is the one place the override may live.** The admission gate is synchronous and runs
+   * per pump sweep; resolving an account there would mean two JSON reads per sweep, and doing it
+   * through `resolvePoolForDispatch` would advance the fairness cursor as a side effect. So
+   * admission simply stops holding when the setting is on (`heldAccountFor`) and the real decision
+   * happens here, once, at the moment the run stops being a plan and becomes work.
+   *
+   * `selectPoolAccount` is reused rather than reimplemented: "best available login" is the same
+   * question a pool asks, and a second ranking would drift from the first the moment either
+   * changed. It is pure, so unlike `resolvePoolForDispatch` it moves no cursor — `recordDispatch`
+   * below is written explicitly, so the account this run takes still counts toward fairness.
+   */
+  private async rerouteExplicitAccountIfLimited(
+    runId: string,
+    input: ExecuteRunInput,
+    defaultRunner: RunnerId,
+  ): Promise<PoolChoice | undefined> {
+    if (!this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
+    try {
+      const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
+      const provider = (input.runner ?? defaultRunner) as ProviderId;
+      const current = accountUsageKey(provider, input.agentProfile);
+      // Nothing to route around. The common case, and the cheap exit.
+      if (!isLimited(usageEntry(usage, current).limited)) return undefined;
+
+      const candidates = listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS).filter(
+        (profile) => !isLimited(usageEntry(usage, accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id)).limited),
+      );
+      // Every login limited: `selectPoolAccount` would still answer (by design — see its docblock),
+      // and its answer would be another closed account. Filtering FIRST and refusing an empty set
+      // is what keeps this from quietly moving the run somewhere no better, which would burn a turn
+      // and lose the account the user actually chose.
+      const choice = candidates.length > 0
+        ? selectPoolAccount({ candidates, store: usage, inflight: this.semaphore.accountInflight() })
+        : undefined;
+      if (!choice) return undefined;
+      if (choice.provider === provider && choice.accountId === (input.agentProfile || DEFAULT_AGENT_ACCOUNT_ID)) {
+        return undefined;
+      }
+
+      await mergeWriteAgentAccountUsage((store) =>
+        recordDispatch(store, accountUsageKey(choice.provider, choice.accountId)),
+      );
+      // Say so, always. Overriding a choice the user made in silence is the failure this whole
+      // setting is a decision about — the note is what makes it a fallback rather than cezar
+      // ignoring the picker, which is the bug this spec was filed for in the first place.
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message:
+          `${current} is out of quota, so this task starts on ${accountUsageKey(choice.provider, choice.accountId)} instead ` +
+          '(Settings, Resources, "Out-of-quota fallback")',
+      });
+      return choice;
+    } catch {
+      // An unreadable home must never fail a run: fall through to the account the task named and
+      // let the ordinary hold park it, which is exactly the behaviour with this setting off.
+      return undefined;
+    }
+  }
+
+  /**
+   * A step pins a provider that is WHOLLY out of quota — return where to run it instead.
+   *
+   * `undefined` means "keep the pin", which is every ordinary case: the setting is off, the step
+   * pins nothing, or at least one account of the pinned provider is still open. Only when the
+   * pinned provider has no usable login anywhere does this answer, and then it answers with the
+   * best available account on another provider.
+   *
+   * **Keyed on EVERY account of the provider being limited, never on one.** One exhausted login is
+   * `resolvePoolForProvider`'s job — it moves within the provider and keeps the pin's promise
+   * intact. Downgrading there would throw away a working Claude account to satisfy a rule about
+   * availability, which is the opposite of what the rule is for.
+   *
+   * Never throws: an unreadable home keeps the pin, which is the behaviour that predates this.
+   */
+  private async downgradePinnedRunner(
+    runId: string,
+    step: { id: string; model?: string | undefined },
+    pinned: RunnerId,
+  ): Promise<RunnerId | undefined> {
+    if (!this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
+    try {
+      const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
+      const all = listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS);
+      const open = all.filter(
+        (profile) =>
+          !isLimited(
+            usageEntry(usage, accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id)).limited,
+          ),
+      );
+      // Still somewhere to go on the pinned provider — not this function's problem.
+      if (open.some((profile) => profile.provider === pinned)) return undefined;
+      const choice = open.length > 0
+        ? selectPoolAccount({ candidates: open, store: usage, inflight: this.semaphore.accountInflight() })
+        : undefined;
+      // Nothing open anywhere. Keep the pin and let the turn fail honestly rather than moving the
+      // work somewhere no better — rung 4 of the ladder, and the bottom of "never blocked".
+      if (!choice || choice.provider === pinned) return undefined;
+
+      this.store.appendEvent(runId, {
+        type: 'note',
+        stepId: step.id,
+        message:
+          `this step asks for ${step.model ? `${step.model} on ` : ''}${pinned}, and every ${pinned} account is out of quota — ` +
+          `running on ${accountUsageKey(choice.provider, choice.accountId)} instead`,
+      });
+      return choice.provider as RunnerId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * A turn on this account completed, so the window is open — drop any recorded limit on it.
+   *
+   * **A completed turn is the only honest proof.** The stored `until` is a provider's prediction,
+   * and `isLimited` already expires it on time; this covers the other direction, where the window
+   * reopened earlier than stated or the limit was recorded against the wrong window. Without it a
+   * pool would keep avoiding a working login until the clock caught up.
+   *
+   * Reads the STEP's own `backend`/`profileId` — the account that actually served the turn, which
+   * for a pooled run is not the one the record names. A step with no `backend` (a `check` step, or
+   * one from before backend affinity) is not evidence about any account, so it clears nothing:
+   * guessing here would clear a limit on a login that never ran.
+   */
+  private clearAccountLimit(runId: string, stepId: string): void {
+    const step = this.store.getRun(runId)?.steps.find((candidate) => candidate.id === stepId);
+    if (!step?.backend) return;
+    const account = accountUsageKey(step.backend, step.profileId);
+    void mergeWriteAgentAccountUsage((store) => clearLimited(store, account));
+  }
+
   /** Publish the deadline on the record (the cockpit's only source) and arm the timer for it. */
   private armAutoResume(runId: string, deadline: number): void {
     this.store.updateRun(runId, { autoResumeAt: new Date(deadline).toISOString() });
-    const timer = setTimeout(() => this.fireAutoResume(runId), Math.max(0, deadline - Date.now()));
+    const timer = setTimeout(() => void this.fireAutoResume(runId), Math.max(0, deadline - Date.now()));
     timer.unref?.();
     this.autoResumeTimers.set(runId, timer);
   }
@@ -2149,7 +3101,7 @@ export class RunManager {
    * user may have continued, deleted or cancelled the run in them — then hand the resume to the
    * ordinary queued-continuation path so it obeys both concurrency caps like any other work.
    */
-  private fireAutoResume(runId: string): void {
+  private async fireAutoResume(runId: string): Promise<void> {
     this.autoResumeTimers.delete(runId);
     const run = this.store.getRun(runId);
     if (!run || run.status !== 'failed' || !run.autoResumeAt) return;
@@ -2162,7 +3114,7 @@ export class RunManager {
     const attempts = (run.autoResumeAttempts ?? 0) + 1;
     // `continueRun` retires the pending resume (timer + record fields) on the way in — this is a
     // resume, not a user turn, so the counter is put back straight after.
-    const resumed = this.continueRun(runId, { text: AUTO_RESUME_PROMPT }, true);
+    const resumed = await this.continueRun(runId, { text: AUTO_RESUME_PROMPT }, true);
     if (!resumed.ok) {
       // Refusals happen before `continueRun` retires anything, so the deadline is still on the
       // record — and a deadline in the past is a promise the cockpit keeps displaying and the
@@ -2269,9 +3221,12 @@ export class RunManager {
   private requeueWhileHeld(
     runId: string,
     workflow: WorkflowDef,
-    input: StartRunInput,
+    input: ExecuteRunInput,
     runner: RunnerId,
     state?: ActiveRun,
+    /** What dispatch resolved for this run, when it resolved anything — a pool choice or an
+     *  out-of-quota reroute. The record does not carry it; see the comment on `account` below. */
+    resolved?: PoolChoice,
   ): boolean {
     const run = this.store.getRun(runId);
     if (!run || run.status === 'cancelled' || state?.cancelled) return false;
@@ -2281,16 +3236,37 @@ export class RunManager {
     // hand an in-place run straight back, re-wedging the queue the rescue had just freed.
     // `dropActive` retires the entry on every terminal path, so the set still cleans itself up.
     if (this.forceStarted.has(runId)) return false;
-    if (!accountHeldFor({ ...run, runner }, this.semaphore.accountHolds(), runner)) return false;
+    // The account THIS SPAWN would use.
+    //
+    // `resolved` when dispatch has already chosen one — a `pool:` route, or the out-of-quota
+    // reroute (`.ai/specs/2026-08-23-never-block-a-task.md`). Taking it is not an optimisation, it
+    // is the correctness fix: the reroute stamps its choice on the INPUT and deliberately leaves
+    // the record saying what the user asked for, so rebuilding the key from the record parked runs
+    // on the very account they had just been moved off — admission let them through, this gate
+    // handed them straight back.
+    //
+    // Falling back to the record is right when dispatch resolved nothing: then the run really is
+    // going to the account the record names, and a hold on it still means wait. **Deliberately not
+    // "skip the hold whenever the never-block setting is on".** That was the first attempt and it
+    // was too blunt — it disabled the hold outright on a default host, including the herd control
+    // that keeps a dozen queued runs from all walking into one closed window, which the ruling
+    // never asked for. The ruling is that a task proceeds on the next AVAILABLE provider; when
+    // there is none, a visible appointment with a real `autoResumeAt` is the honest answer and
+    // costs no quota. Measured: the blunt version reddened 23 tests in `auto-resume.test.ts`, and
+    // they were right.
+    const account = resolved
+      ? accountUsageKey(resolved.provider, resolved.accountId)
+      : runAccountKey({ ...run, runner }, runner);
+    if (!accountHeldOn(account, run, this.semaphore.accountHolds())) return false;
     state?.releaseRepoRoot?.();
     if (state) state.releaseRepoRoot = undefined;
     this.pendingJobs.set(runId, { workflow, input });
     this.queue.push(runId);
     this.store.updateRun(runId, { status: 'queued', startedAt: undefined, currentStepId: undefined });
-    this.store.appendEvent(runId, {
-      type: 'note',
-      message: 'held in the queue — this agent account is waiting out a usage limit',
-    });
+    // Tell admission what was refused here, or it re-admits this run immediately and the two
+    // gates trade it back and forth for as long as the hold lasts.
+    this.heldAtSpawn.set(runId, account);
+    this.noteHeld(runId, account);
     this.dropActive(runId);
     return true;
   }
@@ -2421,9 +3397,12 @@ export class RunManager {
     const deadline = new Set<string>();
     const inFlight = new Set<string>();
     for (const run of this.store.listRuns()) {
-      // A holding run always carries the runner it actually ran on, so the fallback is unused
-      // here — it is spelled out rather than `!` so a future record shape degrades, not throws.
-      const key = () => runAccountKey(run, run.runner ?? 'claude');
+      // The account a provider actually refused, read off the STEP that ran — NOT off the run
+      // (spec 2026-08-23-usage-limit-hold-account). A run's steps do not all run on the run's own
+      // backend: `spec-to-deploy` pins two steps to claude, and the pool may route two steps of
+      // one run to two logins. The fallback is unused for a run that has started a step; it is
+      // spelled out rather than `!` so a future record shape degrades, not throws.
+      const key = () => usageHoldAccountKey(run, run.runner ?? 'claude');
       if (run.status === 'failed' && run.autoResumeAt) {
         const at = Date.parse(run.autoResumeAt);
         if (Number.isFinite(at) && at > now) deadline.add(key());
@@ -2593,7 +3572,7 @@ export class RunManager {
    * back would re-append the whole stack on every recovery and compound without
    * bound — asserted directly by a test.
    */
-  private hydrateQueuedInput(runId: string, input: StartRunInput): StartRunInput {
+  private hydrateQueuedInput(runId: string, input: ExecuteRunInput): ExecuteRunInput {
     const run = this.store.getRun(runId);
     if (!run) return input;
     const stack = run.queuedMessages ?? [];
@@ -2922,8 +3901,15 @@ export class RunManager {
       this.waiting.delete(runId); // resumed — the run counts against slots again
       this.monitoring.delete(runId);
       // Clear any `monitoring` activity — the agent is actively working again
-      // (spec 2026-07-18-subagent-monitoring-status, #490).
-      this.store.updateRun(runId, { status: 'running', activity: undefined });
+      // (spec 2026-07-18-subagent-monitoring-status, #490). Also clears a markerless park's
+      // `waitingReason`/`waitingQuestion` (spec 2026-08-23-plain-end-structured-question) — a
+      // stale prose question must not survive a reply and sit beside a fresh turn's own outcome.
+      this.store.updateRun(runId, {
+        status: 'running',
+        activity: undefined,
+        waitingReason: undefined,
+        waitingQuestion: undefined,
+      });
       if (state.currentStepId) {
         this.store.updateStep(runId, state.currentStepId, { status: 'running' });
       }
@@ -2971,13 +3957,13 @@ export class RunManager {
    * behaves exactly like an interactive step: `waiting` after each turn,
    * messages via sendMessage, closed by finish/idle/cancel.
    */
-  continueRun(
+  async continueRun(
     runId: string,
     opts: { text?: string; images?: ContentBlock[]; runner?: RunnerId; model?: string } = {},
     /** Restart recovery may discover several interrupted tasks at once. Those
      *  continuations are queued; an explicit user Continue remains immediate. */
     deferForCapacity = false,
-  ): { ok: boolean; error?: string } {
+  ): Promise<{ ok: boolean; error?: string }> {
     if (agentModelsLocked(this.repoRoot) && opts.model?.trim()) {
       return { ok: false, error: AGENT_MODELS_LOCKED_ERROR };
     }
@@ -3041,9 +4027,54 @@ export class RunManager {
     // bound UNATTENDED resumes.
     this.clearAutoResume(runId);
 
+    // Phase 4 (spec 2026-08-22-continue-step-naming): a follow-up on a budget-stopped review may
+    // land right where the chain has real, untouched work waiting — re-enter the chain instead of
+    // opening a disconnected continue-N chat. Resolve the target FIRST — needed for the
+    // user-message event below, and `reenterChain` does not return it — duplicating its own
+    // internal resolution rather than widening its return type for its four other callers.
+    const budgetReentryEligible =
+      run.status === 'review' &&
+      run.stopReason === 'budget' &&
+      !run.pendingApproval &&
+      !opts.images?.length;
+    const workflow = budgetReentryEligible ? await this.reviveWorkflow(run) : undefined;
+    const resumeAt = workflow ? this.chainResumeAt(run, workflow) : undefined;
+    if (workflow && resumeAt) {
+      const handled = await this.reenterChain(run, 'follow-up continues the chain', {
+        feedback: opts.text,
+      });
+      if (handled) {
+        // `reenterChain` only appends a `lifecycle` event — without this the text the user just
+        // typed never reaches the rendered thread (it flows only into `resumeAt.feedback`, a
+        // retry-explanation channel `checkFailure` reads, not the transcript).
+        this.store.appendEvent(runId, {
+          type: 'user-message',
+          stepId: workflow.steps[resumeAt.index]?.id,
+          text: opts.text ?? '',
+          imageCount: 0,
+        });
+        // `reenterChain` ends with `queue.push` and deliberately does not pump itself — without
+        // this the re-queued run would sit at `queued` for up to `QUEUE_WATCHDOG_MS` before the
+        // sweep picks it up.
+        void this.pump();
+        return { ok: true };
+      }
+    }
+
+    // Naming (Phases 1 & 2, spec 2026-08-22-continue-step-naming): the new step is named after the
+    // real step it's retrying when one exists, or from the user's own text when there is none.
+    const retryingContinuation = sessionStep.id.startsWith('continue-');
+    const authored = opts.text?.trim();
+    const name = retryingContinuation
+      ? authored && !SYNTHETIC_CONTINUE_PROMPTS.has(authored)
+        ? postValidateTitle(authored)
+        : 'Continue'
+      : continuedStepName(sessionStep.name);
+    const nameOrigin: 'step' | 'prompt' = retryingContinuation ? 'prompt' : 'step';
+
     const continuations = run.steps.filter((s) => s.id.startsWith('continue-')).length;
     const stepId = `continue-${continuations + 1}`;
-    this.store.addStep(runId, { id: stepId, name: 'Continue', kind: 'agent' });
+    this.store.addStep(runId, { id: stepId, name, kind: 'agent', nameOrigin });
     const prompt = opts.text?.trim() || 'Continue.';
     const images = opts.images ?? [];
     if (deferForCapacity) {
@@ -3053,6 +4084,8 @@ export class RunManager {
         backend: targetRunner,
         prompt,
         images,
+        name,
+        nameOrigin,
       });
       this.queue.push(runId);
       this.store.updateRun(runId, {
@@ -3066,6 +4099,7 @@ export class RunManager {
     void this.runContinuation(
       runId,
       stepId,
+      name,
       resume ? sessionStep.sessionId : undefined,
       targetRunner,
       prompt,
@@ -3087,6 +4121,11 @@ export class RunManager {
   private async runContinuation(
     runId: string,
     stepId: string,
+    /** Computed once by the caller (spec 2026-08-22-continue-step-naming) — required, not
+     *  defaulted, so a call site that forgets it fails to typecheck rather than silently minting
+     *  a blank rail row. Threaded through so `StepState.name` and the `step-start` event's `name`
+     *  always agree (previously two independent `'Continue'` literals). */
+    name: string,
     sessionId: string | undefined,
     backend: RunnerId,
     prompt: string,
@@ -3099,6 +4138,14 @@ export class RunManager {
      *  opening a recovered continuation does not persist duplicate files. */
     persistedImages: ContentBlock[] = [],
     persistedAttachments: PersistedAttachment[] = [],
+    /** Set only by this method's own reactive fallback (spec 2026-08-22-resume-fresh-session-
+     *  fallback, Phase 3) when it re-invokes itself with a fresh session after a resume was
+     *  rejected as targeting a conversation the backend never created — guards the one retry
+     *  against retrying a SECOND rejection in a row, which is a real failure, not a loop. Every
+     *  ordinary caller omits it. */
+    retriedMissingSession = false,
+    /** Bounds a fresh-broker retry while preserving this continuation's backend conversation. */
+    retriedColdBroker = false,
   ): Promise<void> {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
@@ -3130,8 +4177,26 @@ export class RunManager {
           runId,
           record?.workspaceProjects ?? [],
           (m) => this.store.appendEvent(runId, { type: 'note', message: m }),
+          // Same write-ordering fix as the initial materialize above — this resume path is the one
+          // that actually mattered for the 232ad6d4 incident's SECOND reclaim, which came after an
+          // interrupt-and-resume, not through the initial materialize.
+          (snapshot) => {
+            this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
+          },
+          this.repoRoot,
         );
         this.store.updateRun(runId, { workspaceWorktrees: worktrees });
+        await touchWorktreeLeases(worktrees.map((worktree) => worktree.root), runId, this.repoRoot);
+        this.armWorktreeLeases(state, runId, worktrees.map((worktree) => worktree.root));
+      } else {
+        // Spec 2026-08-22-live-worktree-reaped-mid-run, "What is still open" #2: `dropActive`
+        // deletes every lease this run held when it last settled, and reusing an EXISTING live
+        // tree here used to arm nothing at all — the most common resume path left a live workspace
+        // worktree with no lease, the incident's exact shape. Write and arm unconditionally,
+        // whether the trees were rebuilt above or reused here.
+        const roots = live.map((worktree) => worktree.root);
+        await touchWorktreeLeases(roots, runId, this.repoRoot);
+        this.armWorktreeLeases(state, runId, roots);
       }
     }
     if (state.cwd === this.repoRoot && !workspaceRun) {
@@ -3158,6 +4223,14 @@ export class RunManager {
       }
     }
     this.armAutosave(state);
+    if (!workspaceRun && cwd !== this.repoRoot) {
+      // Spec 2026-08-22-live-worktree-reaped-mid-run, "What is still open" #2: `dropActive`
+      // deletes this run's lease at its last settle, and reusing `record.worktreePath` here used
+      // to arm nothing at all — a continued single-repo run occupied a live worktree with no
+      // lease, the incident's exact shape, on the most common way work resumes on this box.
+      await writeWorktreeLease(this.repoRoot, runId, this.repoRoot);
+      this.armWorktreeLeases(state, runId, [this.repoRoot]);
+    }
     if (record) seedHandoffFile(this.dataDir, record); // idempotent — normally already there
     // Registry snapshot for `/skill` expansion. `execute` loads this for the workflow's own
     // sessions; a continuation builds its OWN ActiveRun, and without this the resumed session
@@ -3175,6 +4248,10 @@ export class RunManager {
       // one is a fresh attempt, so the stale reason must not survive into whatever this attempt
       // finishes as (PLAN D27 Phase 1; `stopReason` is only ever valid alongside `status: 'review'`).
       stopReason: undefined,
+      // A prose question from the run this continuation resumes must not survive into this fresh
+      // turn (spec 2026-08-23-plain-end-structured-question) — same reasoning as `activity` above.
+      waitingReason: undefined,
+      waitingQuestion: undefined,
     });
     this.store.updateStep(runId, stepId, {
       status: 'running',
@@ -3183,7 +4260,7 @@ export class RunManager {
       sessionId,
       backend,
     });
-    this.store.appendEvent(runId, { type: 'step-start', stepId, name: 'Continue', kind: 'agent', iteration: 1 });
+    this.store.appendEvent(runId, { type: 'step-start', stepId, name, kind: 'agent', iteration: 1 });
     // Attachments pasted into the follow-up composer, on the same terms as a live-session
     // message (#357): persisted to the run's own image store so the thread renders the bubble's
     // images rather than a bare count, and handed to the agent BOTH as base64 blocks (so it can
@@ -3213,7 +4290,14 @@ export class RunManager {
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
         const saved = this.persistImage(runId, event.mediaType, event.data);
-        if (saved) this.store.appendEvent(runId, { type: 'image', stepId, ...saved });
+        // Explicit `name`/`url` projection, not `...saved` — `PersistedAttachment.path` is an
+        // absolute LOCAL filesystem path (`join(this.dataDir, 'runs', ...)`), which a relay to
+        // another cluster node must never carry (cluster/relay.ts, spec D9a). Verified (grep -a,
+        // since 4 .ts files in this repo misclassify as binary) that no dashboard/web consumer
+        // reads the wire event's `path` — only `url`. This also closes the leak class at the
+        // producer: an open spread would silently relay whatever `PersistedAttachment` grows
+        // next, an explicit projection cannot.
+        if (saved) this.store.appendEvent(runId, { type: 'image', stepId, name: saved.name, url: saved.url });
         return;
       }
       if (event.type === 'text') {
@@ -3254,6 +4338,10 @@ export class RunManager {
         const askRejection = askResult ? askMarkerRejection(askResult) : undefined;
         const monitoring =
           sessionOpen && !done && !ask && MONITORING_MARKER_RE.test(turnText.trimEnd());
+        // A plain end — none of the three markers fired (spec
+        // 2026-08-23-plain-end-structured-question). Classified HERE, before `turnText` resets
+        // below — the same reason twin A (`runAgentStep`) hoists it at its own marker site.
+        const trailingQuestion = !done && !ask && !monitoring ? detectTrailingQuestion(turnText) : null;
         turnText = '';
         // The step budget (PLAN D27 Phase 1): this turn just happened, so it is spent
         // unconditionally — including the `done` turn, harmlessly, since nothing spends after it.
@@ -3280,6 +4368,9 @@ export class RunManager {
           return;
         }
         const budgetJustExceeded = sessionOpen && this.budgetSpent(runId, config);
+        // Did a plain end spend a bounded nudge instead of parking (P4)? Stays false on every
+        // marked ending, on an autonomous continuation, and when the session is not open.
+        let nudged = false;
         if (budgetJustExceeded) {
           // The bound (PLAN D27 Phase 1): an open session would otherwise self-continue
           // (autonomous nudge) or park (`waiting`/`monitoring`) for another turn — stop it here,
@@ -3311,27 +4402,50 @@ export class RunManager {
               return true;
             })();
           if (!autoContinued) {
-            // `CEZ:ASK` → park `waiting` (attention) AND surface the structured
-            // question as an ask card (#473). `CEZ:MONITORING` → non-attention
-            // `running`/`activity:'monitoring'` (#490). Both share the waiting
-            // lifecycle (free the slot, keep the idle timer); the autonomous
-            // nudge above still wins over either.
-            if (ask) emitAskRequested(sink, ask);
+            // `CEZ:ASK` → park `waiting` (attention) AND surface the structured question as an
+            // ask card (#473). `CEZ:MONITORING` → non-attention `running`/`activity:'monitoring'`
+            // (#490). A plain end is classified by `parkPlainEnd`, which may spend a bounded nudge
+            // instead of parking at all (spec 2026-08-23-plain-end-structured-question). All three
+            // share the waiting lifecycle otherwise (free the slot, keep the idle timer); the
+            // autonomous nudge above still wins over any of them.
             if (monitoring) {
-              this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
+              this.store.updateRun(runId, {
+                status: 'running',
+                activity: 'monitoring',
+                waitingReason: undefined,
+                waitingQuestion: undefined,
+              });
               this.store.updateStep(runId, stepId, { status: 'running' });
               this.monitoring.add(runId);
               this.clearIdleTimer(state);
               this.armMonitoringWakeTimer(runId, state);
-            } else {
-              this.store.updateRun(runId, { status: 'waiting', activity: undefined });
+              this.waiting.add(runId);
+              this.releaseSlot();
+            } else if (ask) {
+              emitAskRequested(sink, ask);
+              this.store.updateRun(runId, {
+                status: 'waiting',
+                activity: undefined,
+                waitingReason: undefined,
+                waitingQuestion: undefined,
+              });
               this.store.updateStep(runId, stepId, { status: 'waiting' });
               this.monitoring.delete(runId);
               this.clearMonitoringWakeTimer(state, runId);
+              this.waiting.add(runId);
+              this.armIdleTimer(runId, state);
+              this.releaseSlot();
+            } else {
+              nudged = this.parkPlainEnd(runId, stepId, trailingQuestion, state);
+              if (!nudged) {
+                this.store.updateStep(runId, stepId, { status: 'waiting' });
+                this.monitoring.delete(runId);
+                this.clearMonitoringWakeTimer(state, runId);
+                this.waiting.add(runId);
+                this.armIdleTimer(runId, state);
+                this.releaseSlot();
+              }
             }
-            this.waiting.add(runId);
-            if (!monitoring) this.armIdleTimer(runId, state);
-            this.releaseSlot();
           }
         }
         // A turn that completed is the ONLY evidence the provider's window actually reopened, so
@@ -3342,10 +4456,11 @@ export class RunManager {
         if (this.store.getRun(runId)?.autoResumeAttempts !== undefined) {
           this.store.updateRun(runId, { autoResumeAttempts: undefined });
         }
+        // A nudge turn is still `running`, not `waiting` — see P4 step 3.
         appendHandoffHeartbeat(
           this.dataDir,
           runId,
-          `turn complete — status=${monitoring ? 'monitoring' : sessionOpen ? 'waiting' : 'running'}`,
+          `turn complete — status=${monitoring ? 'monitoring' : nudged ? 'running' : sessionOpen ? 'waiting' : 'running'}`,
         );
       }
     };
@@ -3382,15 +4497,31 @@ export class RunManager {
     // in the un-normalised wire form the first step already converted away (`anthropic/opus`
     // instead of `opus`). Fail loud here too rather than let the backend pick a default.
     let continueModel: string | undefined;
+    // Hoisted for the same reason as `stepRawModel` in `runAgentStep`: the mapper and the record
+    // must read one expression, not two copies of it.
+    const continueRawModel = agentModelsLocked(this.repoRoot) ? undefined : record?.model;
     try {
-      const normalized = normalizeModelForBackend(
-        continueBackend,
-        agentModelsLocked(this.repoRoot) ? undefined : record?.model,
-        { configuredProvider: await configuredModelProvider(continueBackend, state.cwd) },
-      );
+      const normalized = normalizeModelForBackend(continueBackend, continueRawModel, {
+        configuredProvider: await configuredModelProvider(continueBackend, state.cwd),
+      });
       continueModel = normalized?.backendModel;
+      const continueModelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
       this.store.updateRun(runId, {
-        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+        modelIdentity: continueModelIdentity,
+      });
+      // The step half of the same write (spec 2026-08-22-per-step-model-display). Without it, a
+      // follow-up that switches model (#401) — or any resume, which re-resolves from the RUN-level
+      // `record.model` rather than the step's own — would move the run-level identity on and leave
+      // the step's frozen at its spawn-time value, reintroducing at step level the exact "the
+      // record asserts a model that is not what ran" defect #405 removed at run level.
+      this.store.updateStep(runId, stepId, {
+        model: continueRawModel,
+        modelIdentity: continueModelIdentity,
+      });
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: `model: ${continueModelIdentity ?? continueRawModel ?? 'auto'}`,
+        stepId,
       });
     } catch (err) {
       if (!(err instanceof ModelIdentityError)) throw err;
@@ -3415,6 +4546,8 @@ export class RunManager {
       continueProfile = await this.agentEnvForStep(runId, continueBackend, {
         generateFollowups,
         recordedProfileId: resumedProfileId,
+        stepId,
+        ...(sessionId === undefined ? {} : { sessionId }),
       });
     } catch (err) {
       if (!(err instanceof AgentTempDirError)) throw err;
@@ -3422,6 +4555,32 @@ export class RunManager {
       return;
     }
     this.store.updateStep(runId, stepId, { profileId: continueProfile.profileId });
+
+    // Proactive Claude-only check (spec 2026-08-22-resume-fresh-session-fallback, Phase 1) — the
+    // twin of `runAgentStep`'s own check. `sessionId` here is a hint persisted before the backend
+    // ever confirmed the conversation exists (the `updateStep` above at the top of this method);
+    // verify a transcript actually exists before handing it to `--resume`. Unlike `runAgentStep`,
+    // no `userPrompt` rebuild is needed on a miss: `prompt` is the caller's own opening message
+    // either way, not a restart-continuation prompt tied to an assumption the session already
+    // holds context (see spec Phase 1, "Phase 3 is unaffected for a different reason").
+    let resumeDowngraded = false;
+    if (continueBackend === 'claude' && sessionId !== undefined) {
+      const claudeHome = agentHomePaths({ ...process.env, ...continueProfile.env }).claude;
+      const exists = await claudeSessionTranscriptExists(claudeHome, state.cwd, sessionId);
+      if (!exists) {
+        resumeDowngraded = true;
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId,
+          message: 'no transcript for the recorded session — starting fresh',
+        });
+      }
+    }
+    // A downgrade mints a NEW id rather than retrying the dead one — Claude never emits a
+    // `session` event to correct the record later the way Codex/OpenCode do, so the fresh id
+    // must be persisted here or the record keeps pointing at the dead one forever.
+    const spawnSessionId = resumeDowngraded ? randomUUID() : sessionId;
+    if (resumeDowngraded) this.store.updateStep(runId, stepId, { sessionId: spawnSessionId });
 
     // From the RECORD, not the registry — see `workspaceGrantOf`.
     const continueGrant = workspaceGrantOf(record);
@@ -3433,7 +4592,7 @@ export class RunManager {
     // live path applies (#811). Delivery-only: the `user-message` event above already
     // persisted the user's original text, and the transcript must keep showing that.
     const openingPrompt = expandRegistrySlashSkillText(prompt, state.skills ?? []);
-    const continueBroker = this.brokerFor(runId, stepId, continueBackend);
+    const continueBroker = await this.brokerFor(runId, stepId, continueBackend);
     const session = runner.startSession(
       {
         // The Continue step is a fresh agent session on the same run — the
@@ -3465,8 +4624,8 @@ export class RunManager {
         ],
         env: continueProfile.env,
         model: continueModel,
-        sessionId,
-        resume: sessionId !== undefined,
+        sessionId: spawnSessionId,
+        resume: resumeDowngraded ? false : sessionId !== undefined,
         timeoutMs: 0,
       },
       onEvent,
@@ -3485,6 +4644,13 @@ export class RunManager {
     /** Set by the success branch below when the chain must take the run back — acted on in
      *  `finally`, once this run has left the live registries. */
     let handBack: RunRecord | null = null;
+    /** Set by the catch branch below (spec 2026-08-22-resume-fresh-session-fallback, Phase 3)
+     *  when the failure is a recognized "unknown session" rejection and this is the first time —
+     *  acted on in `finally`, once this run has left the live registries, same reasoning as
+     *  `handBack`: re-invoking while still `active` lets a concurrent `pump()` race this method. */
+    let missingSessionRetry = false;
+    /** Re-enter after teardown with a new broker but the same backend session id. */
+    let coldBrokerRetry = false;
     try {
       await session.result;
       if (sessionError) throw new Error(sessionError);
@@ -3500,6 +4666,7 @@ export class RunManager {
         // same precedence `execute()`'s own terminal block gives budget over a plain finish. The
         // step itself completed its turn; only the RUN is stopped from taking another.
         this.store.updateStep(runId, stepId, { status: 'done', finishedAt: finishedAt() });
+        this.clearAccountLimit(runId, stepId);
         this.store.appendEvent(runId, { type: 'step-end', stepId, status: 'done' });
         this.store.updateRun(runId, {
           status: 'review',
@@ -3525,6 +4692,7 @@ export class RunManager {
         appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" parked — status=waiting (idle)`);
       } else {
         this.store.updateStep(runId, stepId, { status: 'done', finishedAt: finishedAt() });
+        this.clearAccountLimit(runId, stepId);
         this.store.appendEvent(runId, { type: 'step-end', stepId, status: 'done' });
         // The continuation step is done either way; whether the RUN is depends on the chain
         // (spec 2026-08-20, P2). With steps still pending, hand back to the chain instead of
@@ -3543,16 +4711,53 @@ export class RunManager {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      sink.sessionEnded('error', message);
-      this.store.updateStep(runId, stepId, { status: 'failed', error: message, finishedAt: finishedAt() });
-      appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=failed`);
-      this.store.updateRun(runId, {
-        status: 'failed',
-        error: `continue failed: ${message}`,
-        finishedAt: finishedAt(),
-        currentStepId: undefined,
-      });
-      this.store.appendEvent(runId, { type: 'lifecycle', message: `continue failed — ${message}` });
+      if (!retriedColdBroker && isRetryableBrokerLaunch(err)) {
+        coldBrokerRetry = true;
+        reapAbandonedColdLaunch(err.spoolDir);
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId,
+          message: `${message}; the follow-up did not reach the agent, relaunching the broker once`,
+        });
+        this.store.appendEvent(runId, {
+          type: 'metric',
+          stepId,
+          name: 'run.step.retried_cold_broker',
+          runId,
+          workflow: this.store.getRun(runId)?.workflow,
+          spoolDir: err.spoolDir,
+          attempt: 2,
+        });
+      // Reactive fallback (spec 2026-08-22-resume-fresh-session-fallback, Phase 3) — the
+      // continuation-path twin of the chain loop's Phase 2 branch, and what
+      // `recover-session-failure.test.ts` exercises. `sessionId !== undefined` means this attempt
+      // actually resumed a session; `!retriedMissingSession` bounds it to one retry.
+      } else if (!retriedMissingSession && sessionId !== undefined && isMissingSessionRejection(backend, message)) {
+        missingSessionRetry = true;
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId,
+          message: `${message} — the session was never confirmed to exist; retrying with a fresh session`,
+        });
+        this.store.appendEvent(runId, {
+          type: 'metric',
+          stepId,
+          name: 'run.step.resumed_after_missing_session',
+          runId,
+          backend,
+        });
+      } else {
+        sink.sessionEnded('error', message);
+        this.store.updateStep(runId, stepId, { status: 'failed', error: message, finishedAt: finishedAt() });
+        appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=failed`);
+        this.store.updateRun(runId, {
+          status: 'failed',
+          error: `continue failed: ${message}`,
+          finishedAt: finishedAt(),
+          currentStepId: undefined,
+        });
+        this.store.appendEvent(runId, { type: 'lifecycle', message: `continue failed — ${message}` });
+      }
     } finally {
       this.recordUsagePeaks(runId);
       this.clearIdleTimer(state);
@@ -3562,7 +4767,56 @@ export class RunManager {
       // failed drops its worktree directories and keeps the branches (spec 2026-08-20, X3).
       await this.discardWorkspaceRun(runId);
       this.dropActive(runId);
-      if (handBack) {
+      if (coldBrokerRetry) {
+        void this.runContinuation(
+          runId,
+          stepId,
+          name,
+          sessionId,
+          backend,
+          prompt,
+          images,
+          persistedImages,
+          persistedAttachments,
+          retriedMissingSession,
+          true,
+        ).catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.store.updateRun(runId, {
+            status: 'failed',
+            error: `continue crashed: ${message}`,
+            finishedAt: new Date().toISOString(),
+          });
+          this.dropActive(runId);
+        });
+      } else if (missingSessionRetry) {
+        // Same shape as `handBack` below: re-invoke only after this run has left the live
+        // registries, so a concurrent `pump()` cannot race the new `ActiveRun` this creates.
+        // Re-entering `runContinuation` itself (rather than the chain loop) re-sets `status:
+        // 'running'`, `iterations: 1` and re-appends `step-start`/`user-message` unconditionally
+        // (above), so the record ends up looking like a step that took two iterations — the same
+        // shape the chain-loop fallback produces.
+        void this.runContinuation(
+          runId,
+          stepId,
+          name,
+          undefined,
+          backend,
+          prompt,
+          images,
+          persistedImages,
+          persistedAttachments,
+          true,
+        ).catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.store.updateRun(runId, {
+            status: 'failed',
+            error: `continue crashed: ${message}`,
+            finishedAt: new Date().toISOString(),
+          });
+          this.dropActive(runId);
+        });
+      } else if (handBack) {
         // Now that the run holds no slot and no `ActiveRun`, put it back in the queue at its next
         // pending step. `dropActive`'s own `releaseSlot()` pumped a queue this run was not in
         // yet, so pump once more — otherwise the re-queued run waits for an unrelated wakeup.
@@ -3580,7 +4834,7 @@ export class RunManager {
   private async execute(
     runId: string,
     workflow: WorkflowDef,
-    input: StartRunInput,
+    input: ExecuteRunInput,
     /** Chain re-entry (spec 2026-08-20, P1): start the loop at this step instead of the top, and
      *  reattach its interrupted session when one survived. Absent on every ordinary start. */
     resumeAt?: ChainResumePoint,
@@ -3613,12 +4867,18 @@ export class RunManager {
       // included, which no project-context map can see. See `SemaphoreParticipant.accountInflight`.
       inflight: this.semaphore.accountInflight(),
     });
-    const taskBackend: RunnerId = pooled?.provider ?? input.runner ?? config.defaultRunner;
+    // Out-of-quota fallback (spec 2026-08-23-retarget-task-to-another-engine, Phase 4). Only for
+    // an EXPLICIT pick — `pooled` being set means the user asked for a pool, which already routed
+    // around the limit on its own (Phase 1) and needs no override. **ON by default** since
+    // `2026-08-23-never-block-a-task.md` (this comment said "Off by default" until then).
+    const rerouted = pooled ?? (await this.rerouteExplicitAccountIfLimited(runId, input, config.defaultRunner));
+    const chosen = pooled ?? rerouted;
+    const taskBackend: RunnerId = chosen?.provider ?? input.runner ?? config.defaultRunner;
     // The account may have gone into a usage-limit hold since this run was dequeued — the queue
     // gate cannot be the only one, because dequeue is not the moment of no return. Nothing has
     // happened yet here, so the run goes back to the queue untouched (spec
     // 2026-08-03-auto-resume-after-usage-limit).
-    if (this.requeueWhileHeld(runId, workflow, input, taskBackend)) return;
+    if (this.requeueWhileHeld(runId, workflow, input, taskBackend, undefined, chosen)) return;
     // Extra system prompt (R2 2.3): POST override > config default; echoed on
     // the record so the UI/API can show what the run actually used.
     const extraSystemPrompt = resolveExtraSystemPrompt(input.systemPrompt, config.systemPrompt);
@@ -3648,7 +4908,11 @@ export class RunManager {
       // reads the account that actually ran, the thread header keeps meaning what it means, and
       // "which account spent this" stays answerable after the fact. A record that stayed `pool:…`
       // would re-balance on every resume and could answer differently each time.
-      ...(pooled ? { agentProfile: pooled.accountId } : {}),
+      // `chosen`, not `pooled`: an out-of-quota reroute (Phase 4) resolves a concrete login for
+      // the same reason a pool does, and leaving the record naming the limited account the user
+      // originally picked would make the thread header, the resume and "which account spent this"
+      // all answer with an account that ran nothing.
+      ...(chosen ? { agentProfile: chosen.accountId } : {}),
     });
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
@@ -3667,10 +4931,21 @@ export class RunManager {
     const isWorkspaceRun = (this.store.getRun(runId)?.workspaceProjects?.length ?? 0) > 0;
     if (isWorkspaceRun) {
       const projects = this.store.getRun(runId)?.workspaceProjects ?? [];
-      const worktrees = await materializeWorkspaceWorktrees(runId, projects, (m) =>
-        emit({ type: 'note', message: m }),
+      const worktrees = await materializeWorkspaceWorktrees(
+        runId,
+        projects,
+        (m) => emit({ type: 'note', message: m }),
+        // Persist a snapshot after EVERY worktree, not just at the end (spec
+        // 2026-08-22-cross-project-worktree-orphan-prune-safety) — otherwise the first project's
+        // worktree sits on disk, unrecorded anywhere a target project's own boot-time prune can
+        // see, for as long as the rest of this loop takes.
+        (snapshot) => {
+          this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
+        },
+        this.repoRoot,
       );
       this.store.updateRun(runId, { workspaceWorktrees: worktrees });
+      this.armWorktreeLeases(state, runId, worktrees.map((worktree) => worktree.root));
       emit({
         type: 'note',
         message:
@@ -3734,6 +5009,7 @@ export class RunManager {
       }
       try {
         const wt = await createWorktree(this.repoRoot, runId, base);
+        await writeWorktreeLease(this.repoRoot, runId, this.repoRoot);
         state.cwd = wt.path;
         this.store.updateRun(runId, {
           worktreePath: wt.path,
@@ -3748,6 +5024,7 @@ export class RunManager {
           emit({ type: 'note', message: `seeded personal agent config: ${seededConfig.join(', ')}` });
         }
         this.armAutosave(state);
+        this.armWorktreeLeases(state, runId, [this.repoRoot]);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const error = `worktree creation failed: ${message}`;
@@ -3794,7 +5071,7 @@ export class RunManager {
       // is a spawn, and hand the run back to the queue if the account closed meanwhile. This
       // check also covers the explicit lock-bypass path, where the account may close while the
       // run is preparing its first step.
-      if (this.requeueWhileHeld(runId, workflow, input, taskBackend, state)) return;
+      if (this.requeueWhileHeld(runId, workflow, input, taskBackend, state, chosen)) return;
     }
 
     // Handoff journal (spec 007) — seeded after the worktree exists so the
@@ -3883,6 +5160,13 @@ export class RunManager {
     /** Steps already re-entered once after a cezar-initiated stop. One retry per step: a second
      *  stop is terminal for the run rather than a loop. */
     const resumedAfterStop = new Set<string>();
+    /** Steps already re-entered once after a resume rejected because the backend never actually
+     *  created the conversation being resumed (spec 2026-08-22-resume-fresh-session-fallback,
+     *  Phase 2). One retry per step, same reasoning as `resumedAfterStop`: a second miss in a row
+     *  is a real failure, not a loop to keep retrying. */
+    const resumedAfterMissingSession = new Set<string>();
+    /** Steps already relaunched once after a new broker never answered its first control request. */
+    const retriedColdBroker = new Set<string>();
     /** The resume handle a re-entry hands to the step it is re-running. Distinct from
      *  `resumeFrom`, which belongs to a RESTART re-entry and is spent on `resumeIdx` only. */
     let stopResume: { sessionId: string; profileId?: string; prompt: string } | undefined;
@@ -3922,21 +5206,40 @@ export class RunManager {
         stopResume = undefined;
         resumeFrom = undefined;
         state.stepStopped = undefined;
-        const failure = await this.runAgentStep(
-          runId,
-          state,
-          step,
-          input,
-          skills,
-          checkFailure,
-          interactive,
-          emit,
-          startImages,
-          taskBackend,
-          extraSystemPrompt,
-          chainStepNote(workflow.steps, i, { resumed: stepResume !== undefined }),
-          startAttachments,
-          stepResume,
+        state.brokerNeverAnswered = undefined;
+        // These three snapshots serve two purposes at once, and both need the value AS SENT.
+        // Theirs: a broker that never answered is retried once, and the retry restores exactly
+        // what this attempt was given (see `coldBroker` below). Ours: `withHeavyStep` may not call
+        // `fn` until a heavy slot frees, and `startImages`/`startAttachments`/`checkFailure` are
+        // one-shot — they belong to the step entering now, not to whatever the loop is doing when
+        // it resumes. Passing the snapshots rather than the live variables makes the call
+        // independent of when it actually runs.
+        const sentImages = startImages;
+        const sentAttachments = startAttachments;
+        const sentCheckFailure = checkFailure;
+        const stepChainNote = chainStepNote(workflow.steps, i, { resumed: stepResume !== undefined });
+        const failure = await this.withHeavyStep(step, emit, () =>
+          this.runAgentStep(
+            runId,
+            state,
+            step,
+            input,
+            skills,
+            sentCheckFailure,
+            interactive,
+            emit,
+            sentImages,
+            taskBackend,
+            extraSystemPrompt,
+            stepChainNote,
+            sentAttachments,
+            stepResume,
+            // The POST-CONDITION ledger, not `retriesUsed`: the table's escalation row is about a
+            // step that ran and did not meet its goal, which is exactly what `verifyRetries`
+            // counts. `retriesUsed` counts a CHECK step looping back to an earlier step — a
+            // different event, and one that can re-enter a step that never failed.
+            { priorFailures: verifyRetries.get(step.id) ?? 0 },
+          ),
         );
         startImages = undefined;
         startAttachments = [];
@@ -3984,6 +5287,74 @@ export class RunManager {
           this.finishStep(runId, step.id, 'failed', failure, emit, stopped);
           stopReason = stopped;
           break;
+        }
+        // Reactive fallback (spec 2026-08-22-resume-fresh-session-fallback, Phase 2) — the exact
+        // path run `232ad6d4` hit: `stepResume !== undefined` means this attempt actually resumed
+        // a session, and the predicate recognizes the backend's "never created that conversation"
+        // rejection. One retry per step, mirroring `resumedAfterStop` just above.
+        // From the RECORD, not `step.runner ?? taskBackend`. A step-level pin can be DOWNGRADED at
+        // dispatch when its provider is wholly out of quota (`downgradePinnedRunner`,
+        // `2026-08-23-never-block-a-task.md`), so the definition and the thing that ran no longer
+        // always agree — and this classifies one provider's rejection strings while reporting a
+        // metric about another. `runAgentStep` stamps `backend` before it spawns, so the record is
+        // the one place both facts are the same.
+        const ranOn =
+          this.store.getRun(runId)?.steps.find((s) => s.id === step.id)?.backend
+          ?? step.runner
+          ?? taskBackend;
+        if (
+          failure &&
+          stepResume !== undefined &&
+          !resumedAfterMissingSession.has(step.id) &&
+          isMissingSessionRejection(ranOn, failure)
+        ) {
+          resumedAfterMissingSession.add(step.id);
+          this.store.updateStep(runId, step.id, { sessionId: undefined, status: 'pending', error: undefined });
+          emit({
+            type: 'note',
+            stepId: step.id,
+            message: `${failure} — the session was never confirmed to exist; retrying with a fresh session`,
+          });
+          emit({
+            type: 'metric',
+            stepId: step.id,
+            name: 'run.step.resumed_after_missing_session',
+            runId,
+            workflow: workflow.name,
+            backend: ranOn,
+          });
+          continue; // same `i` — resumeFrom/stopResume are already spent, so the next pass mints a fresh id
+        }
+        // The session callback can set this while `runSingleAgentStep` is awaiting. TypeScript's
+        // local control-flow analysis cannot observe that asynchronous mutation.
+        const coldBroker = state.brokerNeverAnswered as ActiveRun['brokerNeverAnswered'];
+        state.brokerNeverAnswered = undefined;
+        if (failure && coldBroker && !retriedColdBroker.has(step.id)) {
+          retriedColdBroker.add(step.id);
+          reapAbandonedColdLaunch(coldBroker.spoolDir);
+          this.store.updateStep(runId, step.id, {
+            sessionId: undefined,
+            status: 'pending',
+            error: undefined,
+          });
+          emit({
+            type: 'note',
+            stepId: step.id,
+            message: `${failure}; no control request reached the agent, relaunching the broker once`,
+          });
+          emit({
+            type: 'metric',
+            stepId: step.id,
+            name: 'run.step.retried_cold_broker',
+            runId,
+            workflow: workflow.name,
+            spoolDir: coldBroker.spoolDir,
+            attempt: 2,
+          });
+          startImages = sentImages;
+          startAttachments = sentAttachments;
+          checkFailure = sentCheckFailure;
+          continue;
         }
         if (failure) {
           this.finishStep(runId, step.id, 'failed', failure, emit);
@@ -4077,7 +5448,7 @@ export class RunManager {
         continue;
       }
 
-      const { ok, output } = await this.runCheckStep(state, step, emit);
+      const { ok, output } = await this.withHeavyStep(step, emit, () => this.runCheckStep(state, step, emit));
       this.spendBudgetUnit(runId); // a check attempt is one unit, same as an agent turn
       if (state.cancelled) break;
       if (ok) {
@@ -4408,7 +5779,7 @@ export class RunManager {
     runId: string,
     state: ActiveRun,
     step: WorkflowStepDef,
-    input: StartRunInput,
+    input: ExecuteRunInput,
     skills: Skill[],
     checkFailure: string | null,
     interactive: boolean,
@@ -4425,8 +5796,19 @@ export class RunManager {
     attachments: PersistedAttachment[] = [],
     /** Chain re-entry (spec 2026-08-20, P1): reattach the session this step was already running
      *  when the process died, and open it with the restart prompt instead of the step's own
-     *  template — the session already holds everything the template would have said. */
-    resumeFrom?: { sessionId: string; profileId?: string; prompt: string },
+     *  template — the session already holds everything the template would have said. Also the
+     *  vehicle for a stop-retry's own resume handle (`execute()`'s `stopResume`), which is why
+     *  `verifyTranscript` (spec 2026-08-22-resume-fresh-session-fallback) is a separate flag
+     *  rather than "resumeFrom is set" — see `ChainResumePoint.resume`. */
+    resumeFrom?: { sessionId: string; profileId?: string; prompt: string; verifyTranscript?: true },
+    /** How many times this step's post-condition has already sent it back — 0 on the first
+     *  attempt. Drives the codex escalation ladder
+     *  (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D4).
+     *
+     *  An object rather than a bare `number` deliberately: this parameter list is fifteen long and
+     *  ends in two optionals, and a lone trailing number is the shape that swaps with a neighbour
+     *  and still typechecks. */
+    escalation: { priorFailures: number } = { priorFailures: 0 },
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -4479,7 +5861,17 @@ export class RunManager {
 
     // A resumed step keeps the session id it already owns — that id IS the work done so far.
     const sessionId = resumeFrom?.sessionId ?? randomUUID();
-    const backend = step.runner ?? taskBackend;
+    // Never blocked (`.ai/specs/2026-08-23-never-block-a-task.md`). A step may pin its own runner,
+    // and `spec-to-deploy` pins `runner: claude` + `opus` on `spec`/`review-spec` from the owner's
+    // 2026-08-22 "writing spec + spec review should be by opus always". When EVERY account of that
+    // provider is out of quota, that pin has nowhere to go and the step used to die there.
+    //
+    // The owner's 2026-08-23 ruling is that availability outranks the pin: proceed on whatever is
+    // available and say so. So the quality pin is now a preference with a fallback, not a
+    // guarantee — a real reduction in what the workflow promises, mitigated by announcement rather
+    // than prevention, which is why the note below is asserted by a test rather than decorative.
+    const pinned = step.runner ?? undefined;
+    const backend = (pinned ? await this.downgradePinnedRunner(runId, step, pinned) : undefined) ?? step.runner ?? taskBackend;
     this.store.updateStep(runId, step.id, { sessionId, backend });
 
     // Loaded once, closed over by `onEvent` below — the step budget (PLAN D27 Phase 1) is
@@ -4494,7 +5886,9 @@ export class RunManager {
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
         const saved = this.persistImage(runId, event.mediaType, event.data);
-        if (saved) emit({ type: 'image', stepId: step.id, ...saved });
+        // Explicit `name`/`url` projection, not `...saved` — see the twin site above for why
+        // (`PersistedAttachment.path` is an absolute local path a relay must never carry).
+        if (saved) emit({ type: 'image', stepId: step.id, name: saved.name, url: saved.url });
         return;
       }
       if (event.type === 'text') {
@@ -4557,6 +5951,10 @@ export class RunManager {
           !done &&
           !ask &&
           MONITORING_MARKER_RE.test(turnText.trimEnd());
+        // A plain end — none of the three markers fired (spec
+        // 2026-08-23-plain-end-structured-question). Classified HERE, before `turnText` resets
+        // below: the park block downstream sees only the empty string.
+        const trailingQuestion = !done && !ask && !monitoring ? detectTrailingQuestion(turnText) : null;
         turnText = '';
         // The step budget (PLAN D27 Phase 1): this turn just happened, so it is spent
         // unconditionally — including the `done` turn, harmlessly, since nothing spends after it.
@@ -4572,6 +5970,9 @@ export class RunManager {
         }
         const waiting = interactive && sessionOpen;
         const budgetJustExceeded = waiting && this.budgetSpent(runId, config);
+        // Did a plain end spend a bounded nudge instead of parking (P4)? Only meaningful when
+        // `waiting` is true; stays false on every marked ending and every non-interactive step.
+        let nudged = false;
         if (budgetJustExceeded) {
           // The bound (PLAN D27 Phase 1): an open session would otherwise park (`waiting` /
           // `monitoring`) for another turn — stop it here instead of granting one. `state`
@@ -4585,63 +5986,127 @@ export class RunManager {
           this.waiting.delete(runId);
           this.releaseSlot();
         } else if (waiting) {
-          // Turn over, session open. Either the ball is in the user's court
-          // (`waiting`) — optionally with a structured `CEZ:ASK` question the
-          // cockpit renders as an ask card (#473) — or the agent declared it is
-          // still working on its own downstream work with `CEZ:MONITORING`, which
-          // parks as `running`/`activity:'monitoring'`, a non-attention state,
-          // instead of raising "needs you" (#490). Lifecycle is identical: the
-          // run frees its slot and keeps the idle timer.
-          if (ask) emitAskRequested(sink, ask);
+          // Turn over, session open. The ball is in the user's court — with a structured
+          // `CEZ:ASK` question the cockpit renders as an ask card (#473), with the agent's own
+          // `CEZ:MONITORING` declaration that it is still working on its own downstream work
+          // (parks as `running`/`activity:'monitoring'`, a non-attention state, instead of raising
+          // "needs you", #490), or with a plain end, in which case `parkPlainEnd` classifies it
+          // (spec 2026-08-23-plain-end-structured-question) and may spend a bounded nudge instead
+          // of parking at all.
           if (monitoring) {
-            this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
+            this.store.updateRun(runId, {
+              status: 'running',
+              activity: 'monitoring',
+              waitingReason: undefined,
+              waitingQuestion: undefined,
+            });
             this.store.updateStep(runId, step.id, { status: 'running' });
             this.monitoring.add(runId);
             this.clearIdleTimer(state);
             this.armMonitoringWakeTimer(runId, state);
-          } else {
-            this.store.updateRun(runId, { status: 'waiting', activity: undefined });
+            this.waiting.add(runId);
+            this.releaseSlot();
+          } else if (ask) {
+            emitAskRequested(sink, ask);
+            this.store.updateRun(runId, {
+              status: 'waiting',
+              activity: undefined,
+              waitingReason: undefined,
+              waitingQuestion: undefined,
+            });
             this.store.updateStep(runId, step.id, { status: 'waiting' });
             this.monitoring.delete(runId);
             this.clearMonitoringWakeTimer(state, runId);
+            this.waiting.add(runId);
+            this.armIdleTimer(runId, state);
+            this.releaseSlot(); // the freed slot can start a queued run right away — in any project
+          } else {
+            nudged = this.parkPlainEnd(runId, step.id, trailingQuestion, state);
+            if (!nudged) {
+              this.store.updateStep(runId, step.id, { status: 'waiting' });
+              this.monitoring.delete(runId);
+              this.clearMonitoringWakeTimer(state, runId);
+              this.waiting.add(runId);
+              this.armIdleTimer(runId, state);
+              this.releaseSlot();
+            }
           }
-          this.waiting.add(runId);
-          if (!monitoring) this.armIdleTimer(runId, state);
-          this.releaseSlot(); // the freed slot can start a queued run right away — in any project
         }
         // The window is proven open — see the twin in `runContinuation`.
         if (this.store.getRun(runId)?.autoResumeAttempts !== undefined) {
           this.store.updateRun(runId, { autoResumeAttempts: undefined });
         }
         // Cez's own heartbeat — the handoff stays current even when the
-        // agent forgets to write (spec 007).
+        // agent forgets to write (spec 007). A nudge turn is still `running`, not `waiting` — see
+        // P4 step 3.
         appendHandoffHeartbeat(
           this.dataDir,
           runId,
-          `turn complete — status=${monitoring ? 'monitoring' : waiting ? 'waiting' : 'running'}`,
+          `turn complete — status=${monitoring ? 'monitoring' : nudged ? 'running' : waiting ? 'waiting' : 'running'}`,
         );
       }
     };
 
-    const stepBackend = step.runner ?? taskBackend;
+    // The SAME value stamped on the record ~140 lines up, not a second evaluation of
+    // `step.runner ?? taskBackend`. It read that way until 2026-08-23, when
+    // `downgradePinnedRunner` made the two expressions able to disagree: the record said codex
+    // while `createRunner(stepBackend)` below still spawned claude, so the downgrade recorded a
+    // lie instead of changing anything. Caught because the test asserted the RECORD — which is
+    // the half a record-only bug agrees with. Everything downstream reads this one binding:
+    // `modelForBackend`, `normalizeModelForBackend`, `agentEnvForStep`, `createRunner`,
+    // `brokerFor`, and the claude-only transcript verification.
+    const stepBackend = backend;
     // Normalise the selected model to canonical `provider/model` and back to the
     // backend's own wire form via the ONE shared mapper (#405). Fail-loud: an
     // unresolvable model (e.g. a bare id on opencode) returns the step error
     // instead of letting the backend silently substitute its default.
     let backendModel: string | undefined;
+    // Resolved ONCE, for the backend that will actually run this step, and both halves from the
+    // same source (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D1). Before this, the
+    // model came from `step.model ?? input.model` and the effort from `step.effort` at the spawn
+    // site 180 lines below — two independent reads that a per-runner override would have pulled
+    // apart, applying codex's model with Claude's ceiling.
+    const stepChoice = resolveStepModel(step, stepBackend, input.model, escalation.priorFailures);
+    // Hoisted rather than inlined into the call below, because it is now read TWICE — once by the
+    // mapper and once by the record. Two copies of the same expression is exactly how the thing
+    // that ran and the thing the record claims ran drift apart.
+    // `modelForBackend` is applied HERE, before the hoist, so the dropped-pin case cannot make the
+    // record lie. `stepRawModel` is persisted onto the step as what ran (spec
+    // 2026-08-22-per-step-model-display); if a `sonnet` pin is dropped for a codex step and the
+    // drop happened only on the way to the runner, the step rail would keep displaying `sonnet`
+    // for a step that ran on codex's default. Same reason the hoist exists at all.
+    const stepRawModel = agentModelsLocked(this.repoRoot)
+      ? undefined
+      : this.modelForBackend(runId, step.id, stepBackend, stepChoice.model);
     try {
-      const normalized = normalizeModelForBackend(
-        stepBackend,
-        agentModelsLocked(this.repoRoot) ? undefined : step.model ?? input.model,
-        { configuredProvider: await configuredModelProvider(stepBackend, state.cwd) },
-      );
+      const normalized = normalizeModelForBackend(stepBackend, stepRawModel, {
+        configuredProvider: await configuredModelProvider(stepBackend, state.cwd),
+      });
       backendModel = normalized?.backendModel;
+      const stepModelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
       // Persist the identity of what ACTUALLY runs (#405, review M1). The run-start echo
       // (line ~993) is best-effort from `taskBackend`/`input.model`; a per-step `runner`/`model`
       // override makes it assert a model that never ran. Re-write it here, from the resolved
       // step identity, so the record — the product of this PR — is always one that ran.
       this.store.updateRun(runId, {
-        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+        modelIdentity: stepModelIdentity,
+      });
+      // ...and on the STEP, where the next step's resolution cannot overwrite it (spec
+      // 2026-08-22-per-step-model-display). The run-level field above is a single slot rewritten
+      // by every step, so a `spec-to-deploy` chain that runs `review-spec` on opus and its other
+      // seven steps on sonnet finishes asserting only sonnet, with every earlier step's real model
+      // discarded. The step rail reads this pair instead. Written beside `sessionId`/`backend`, the
+      // per-step execution facts that already live here, and at the same moment: before the spawn,
+      // so a running step already says what it is running on.
+      this.store.updateStep(runId, step.id, { model: stepRawModel, modelIdentity: stepModelIdentity });
+      // The same fact for `cez run`'s stdout and the web transcript, through the generic `note`
+      // channel both already render — no new event type and no handler change on either side. The
+      // CLI's `── step:` header is printed before this point in the control flow (the model is not
+      // resolved yet there), which is why the headless surface had no model line at all.
+      emit({
+        type: 'note',
+        stepId: step.id,
+        message: `model: ${stepModelIdentity ?? stepRawModel ?? 'auto'}`,
       });
     } catch (err) {
       if (err instanceof ModelIdentityError) return err.message;
@@ -4664,6 +6129,10 @@ export class RunManager {
         // run under the account that created it — not whatever the project has been switched to
         // since. Same rule `runContinuation` applies to a resumed continuation.
         ...(resumeFrom?.profileId ? { recordedProfileId: resumeFrom.profileId } : {}),
+        // The session this step is about to run under, minted (or resumed) just above — see the
+        // option's own doc comment for why `stepId` is the authoritative half of the pair.
+        stepId: step.id,
+        sessionId,
       });
     } catch (err) {
       if (err instanceof AgentTempDirError) return err.message;
@@ -4689,9 +6158,64 @@ export class RunManager {
           stepId: step.id,
           startOffset: reattach.startOffset,
           isolation: this.brokerIsolation(),
+          // A re-attach spawns nothing, so these bounds are never APPLIED here — the surviving
+          // scope already carries whatever it was created with. They are passed for attribution
+          // only, and they are read from the config as it is NOW: nothing records what a scope was
+          // created with, and the run this path exists for survived a self-deploy that happens
+          // ~10x a day on the box. So the trade is stated rather than hidden — a bound changed
+          // between the spawn and the kill makes the reported detail name the current value. The
+          // alternative, attributing nothing across every deploy, would silently drop C3's
+          // reporting for a large share of real runs, and `detectResourceKill` is documented as a
+          // detection rather than a proof for exactly this class of reason.
+          resources: await this.runResourceLimits(),
+          onResourceKill: (kill: ResourceKillReport) => this.recordResourceKill(runId, step.id, kill),
           onOffset: (offset: number) => this.persistConsumedOffset(runId, offset),
         }
-      : this.brokerFor(runId, step.id, stepBackend);
+      : await this.brokerFor(runId, step.id, stepBackend);
+
+    // Proactive Claude-only check (spec 2026-08-22-resume-fresh-session-fallback, Phase 1): a
+    // resume target is a HINT cezar minted and persisted before any confirmation the backend
+    // ever created the conversation — verify a transcript actually exists before handing it to
+    // `--resume`, so a session that died before writing one (run 232ad6d4's `commit-push`
+    // iteration 1) never reaches the CLI at all. Skipped for a P4 broker reattach: that path
+    // never spawns a new `claude` process or sends `--resume`, so there is nothing to verify.
+    // Gated on `resumeFrom.verifyTranscript`, NOT merely `resumeFrom !== undefined` — this same
+    // parameter also carries a cezar-initiated stop's own retry handle (`stopResume`, a session
+    // this very process observed running seconds ago), which `verifyTranscript` deliberately
+    // leaves unset. Without the gate this check would downgrade a stop-retry whenever the box's
+    // `~/.claude/projects` (or a test's unrelated `CLAUDE_CONFIG_DIR`) doesn't carry that
+    // session's transcript yet, discarding the in-progress work the stop-retry exists to
+    // preserve and turning one stop into two (the second being terminal).
+    let resumeDowngraded = false;
+    if (stepBackend === 'claude' && resumeFrom?.verifyTranscript === true && !reattach) {
+      const claudeHome = agentHomePaths({ ...process.env, ...stepProfile.env }).claude;
+      const exists = await claudeSessionTranscriptExists(claudeHome, state.cwd, resumeFrom.sessionId);
+      if (!exists) {
+        // The check fires AFTER `userPrompt` was frozen above (resumeFrom.prompt — the restart-
+        // continuation prompt), which assumes the session already holds everything the step's own
+        // template would have said. A downgrade falsifies that assumption by construction, so
+        // `userPrompt` must be rebuilt from the step's own template — not just the session id —
+        // or the fresh session runs contextless. Re-run exactly the three lines that built it the
+        // first time, with `resumeFrom` treated as absent.
+        userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task);
+        if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
+        if (checkFailure) {
+          userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
+        }
+        resumeDowngraded = true;
+        emit({
+          type: 'note',
+          stepId: step.id,
+          message: 'no transcript for the recorded session — starting fresh',
+        });
+      }
+    }
+    // A downgrade mints a NEW id rather than retrying the dead one — nothing to reattach to, and
+    // Claude never emits a `session` event to correct the record later the way Codex/OpenCode do,
+    // so the fresh id must be persisted here or the record keeps pointing at the dead one forever.
+    const spawnSessionId = resumeDowngraded ? randomUUID() : sessionId;
+    if (resumeDowngraded) this.store.updateStep(runId, step.id, { sessionId: spawnSessionId });
+
     try {
       const openSession = reattach && runner.reattachSession
         ? runner.reattachSession.bind(runner)
@@ -4736,9 +6260,11 @@ export class RunManager {
           ],
           env: stepProfile.env,
           model: backendModel,
-          effort: step.effort,
-          sessionId,
-          resume: resumeFrom !== undefined,
+          // `stepChoice.effort`, not `step.effort`: a `byRunner` entry carries the pair, and
+          // reading the step's own effort here would apply the other backend's ceiling.
+          effort: stepChoice.effort,
+          sessionId: spawnSessionId,
+          resume: resumeDowngraded ? false : resumeFrom !== undefined,
           // Interactive sessions have no wall clock — the idle timer rules.
           timeoutMs: interactive ? 0 : undefined,
         },
@@ -4773,6 +6299,9 @@ export class RunManager {
       return null;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (isRetryableBrokerLaunch(err)) {
+        state.brokerNeverAnswered = { spoolDir: err.spoolDir, message };
+      }
       sink.sessionEnded('error', message); // alongside v1's fatal `error`
       return message;
     } finally {
@@ -4865,13 +6394,31 @@ export class RunManager {
       return;
     }
 
+    // A real backend-reported context-window max (today: codex's `thread/tokenUsage/updated`,
+    // mapped to `usage.contextWindow`) — persist it immediately so the record is current
+    // before the next tick, and cache it on the invocation so every later patch this
+    // invocation makes keeps carrying the real number instead of reverting to a guess (spec
+    // 2026-08-22-context-window-denominator-per-step).
+    if (event.type === 'usage.updated') {
+      if (Number.isFinite(event.usage.contextWindow) && (event.usage.contextWindow ?? 0) > 0) {
+        invocation.reportedContextWindow = event.usage.contextWindow;
+        this.persistUsageCheckpoint(runId, invocation.stepId, { contextWindow: event.usage.contextWindow });
+      }
+      return;
+    }
+
     // Live occupancy (per round-trip): overwrite the step's `contextTokens` as each model call
     // reports its prompt size, so the Context column climbs DURING a long turn rather than
     // jumping only at `turn.completed`. Overwrite-only — never touches the turn's token totals,
     // which `turn.completed` still owns (spec 2026-08-19, live-refresh follow-up).
     if (event.type === 'context.updated') {
       if (Number.isFinite(event.contextTokens) && event.contextTokens >= 0) {
-        this.persistUsageCheckpoint(runId, invocation.stepId, { contextTokens: event.contextTokens });
+        this.persistUsageCheckpoint(runId, invocation.stepId, {
+          contextTokens: event.contextTokens,
+          ...(invocation.reportedContextWindow !== undefined
+            ? { contextWindow: invocation.reportedContextWindow }
+            : {}),
+        });
       }
       return;
     }
@@ -4905,6 +6452,9 @@ export class RunManager {
       inputTokens: (step.inputTokens ?? 0) + input,
       outputTokens: (step.outputTokens ?? 0) + output,
       contextTokens,
+      ...(invocation.reportedContextWindow !== undefined
+        ? { contextWindow: invocation.reportedContextWindow }
+        : {}),
       usageTurnsRecorded: (step.usageTurnsRecorded ?? 0) + 1,
     });
   }
@@ -5031,6 +6581,22 @@ export class RunManager {
       // nothing (or to a bare number prefix) must not blank the title.
       if (validated && validated !== `${refNumber}:`) {
         this.store.updateRun(runId, { titleSummary: validated, titleOrigin: 'marker' });
+      }
+      // Phase 3 (spec 2026-08-22-continue-step-naming): the same declaration also refines the
+      // active continuation step's own name — but never a Phase 2 "<step> — continued" title,
+      // which is what `nameOrigin !== 'step'` excludes. No `refNumber` here: a step name must not
+      // carry the run title's PR-number prefix.
+      if (run.currentStepId?.startsWith('continue-')) {
+        const step = current?.steps.find((s) => s.id === run.currentStepId);
+        if (step && step.nameOrigin !== 'step') {
+          const validatedStepName = postValidateTitle(markers.title);
+          if (validatedStepName) {
+            this.store.updateStep(runId, run.currentStepId, {
+              name: validatedStepName,
+              nameOrigin: 'marker',
+            });
+          }
+        }
       }
     }
     if (markers.specPath) {
@@ -5267,8 +6833,9 @@ export class RunManager {
   /**
    * Does this run's transcript end on an UNANSWERED `CEZ:ASK`? True when its latest
    * `ask.requested` event has no later `user-message` (the event a resume/answer appends to
-   * resolve the card). Used by restart recovery to keep a task that asked the user a question
-   * in an attention state rather than settling it to plain `done`.
+   * resolve the card). Used by restart recovery where an explicit ask may outrank chain re-entry.
+   * A heuristically detected prose question is handled beside this predicate: it may preserve
+   * attention, but may not stall queued chain work (spec 2026-08-23, P5).
    */
   private runHasPendingAsk(runId: string): boolean {
     let lastAsk = -1;
@@ -5426,6 +6993,52 @@ export class RunManager {
     if (runId) this.store.updateRun(runId, { monitoringWakeAt: undefined });
   }
 
+  /**
+   * Shared by BOTH turn-end twins (`runAgentStep`, `runContinuation`) — the same lesson
+   * `specs-172ddd891dd0` (chain-integrity) left behind: one method called from both sites, not two
+   * copies that drift (spec 2026-08-23-plain-end-structured-question, R3).
+   *
+   * `trailingQuestion` is the VERDICT already computed at the marker site, before `turnText` was
+   * reset — this method never sees the raw turn text. Called ONLY on a genuine plain end (no
+   * `CEZ:DONE` / `CEZ:ASK` / `CEZ:MONITORING`).
+   *
+   * Returns `true` when a bounded `ASK_STRUCTURE_NUDGE` was sent instead of parking — the caller
+   * must then skip ONLY the park/slot-release block, not the trailing `autoResumeAttempts` /
+   * handoff-heartbeat statements that still run on every turn (P4 step 3).
+   */
+  private parkPlainEnd(
+    runId: string,
+    stepId: string,
+    trailingQuestion: TrailingQuestion | null,
+    state: ActiveRun,
+  ): boolean {
+    if (
+      trailingQuestion !== null &&
+      (state.askStructureNudges ?? 0) < MAX_ASK_STRUCTURE_NUDGES &&
+      !state.cancelled &&
+      !state.autonomous &&
+      state.session?.open
+    ) {
+      const sent = this.deliverMessage(runId, [{ type: 'text', text: ASK_STRUCTURE_NUDGE }], false);
+      if (sent) {
+        state.askStructureNudges = (state.askStructureNudges ?? 0) + 1;
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId,
+          message: `nudged to re-send a prose question as CEZ:ASK (${state.askStructureNudges}/${MAX_ASK_STRUCTURE_NUDGES})`,
+        });
+        return true;
+      }
+    }
+    this.store.updateRun(runId, {
+      status: 'waiting',
+      activity: undefined,
+      waitingReason: trailingQuestion !== null ? 'question' : 'report',
+      waitingQuestion: trailingQuestion?.text,
+    });
+    return false;
+  }
+
   /** Autosave-commit the worktree every 90 s while the run lives (spec 006).
    *  Opt-in via CEZ_AUTOSAVE=1 (#471) — see periodicAutosaveEnabled. */
   private armAutosave(state: ActiveRun): void {
@@ -5442,6 +7055,25 @@ export class RunManager {
       clearInterval(state.autosaveTimer);
       state.autosaveTimer = undefined;
     }
+  }
+
+  private armWorktreeLeases(state: ActiveRun, runId: string, roots: string[]): void {
+    const unique = [...new Set(roots)];
+    if (unique.length === 0) return;
+    state.leaseRoots = unique;
+    if (state.leaseTimer) clearInterval(state.leaseTimer);
+    state.leaseTimer = setInterval(() => {
+      void touchWorktreeLeases(unique, runId, this.repoRoot);
+    }, LEASE_HEARTBEAT_MS);
+    state.leaseTimer.unref?.();
+  }
+
+  private clearWorktreeLeases(state: ActiveRun, runId: string): void {
+    if (state.leaseTimer) clearInterval(state.leaseTimer);
+    state.leaseTimer = undefined;
+    const roots = state.leaseRoots ?? [];
+    state.leaseRoots = undefined;
+    if (roots.length > 0) void removeWorktreeLeases(roots, runId);
   }
 
   private runCheckStep(
@@ -5571,6 +7203,11 @@ export class RunManager {
       ...(stopReason ? { stopReason } : {}),
       finishedAt: new Date().toISOString(),
     });
+    // The WORKFLOW-step half of the limit clear (the continuation half is in `runContinuation`).
+    // Every ordinary agent step lands here, so this is the seam that matters most: a `spec` or
+    // `review-spec` turn completing is the commonest proof a provider's window reopened. A `check`
+    // step carries no `backend` and is skipped inside the helper rather than guarded here.
+    if (status === 'done') this.clearAccountLimit(runId, stepId);
     emit({
       type: 'step-end',
       stepId,

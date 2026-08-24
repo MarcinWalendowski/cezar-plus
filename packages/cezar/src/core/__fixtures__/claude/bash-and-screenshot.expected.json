@@ -148,7 +148,16 @@
       "total": 1455
     },
     "costUsd": 0.0342,
-    "contextTokens": 300
+    "contextTokens": 300,
+    "blockCounts": {
+      "text": 2,
+      "thinking": 0,
+      "thinkingWithheld": 0,
+      "toolUse": 2,
+      "redactedThinking": 0,
+      "serverToolUse": 0,
+      "other": 0
+    }
   },
   {
     "type": "usage.updated",

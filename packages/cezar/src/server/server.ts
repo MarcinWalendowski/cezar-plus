@@ -27,13 +27,19 @@ import { currentRelease, runtimeInfo, type RuntimeInfo } from './runtime-info.ts
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
+import {
+  createClusterRoutes,
+  isCodeAuthenticatedClusterPath,
+  isNodeAuthenticatedClusterPath,
+  startClusterRuntime,
+} from './cluster-routes.ts';
 import { createWorkspaceReportsRoutes } from './workspace-reports-routes.ts';
 import { createNotesRoutes } from './notes-routes.ts';
 import {
   createAgentAccountUsageRoutes,
   type AgentAccountUsageRouteDeps,
 } from './agent-account-usage-routes.ts';
-import { isAgentPoolId } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_LINK_PATH, isAgentPoolId } from '@loki-labs/better-cezar-contract';
 import { inflightFromRuns } from '../workspace/agent-account-usage.ts';
 import { NoteStore } from '../notes/store.ts';
 import { NoteCoordinator } from '../notes/coordinator.ts';
@@ -49,6 +55,7 @@ import { createBackupRoutes } from './backup-routes.ts';
 import { BackupScheduler } from '../backup/scheduler.ts';
 import { loadBackupConfig } from '../backup/config.ts';
 import { createWorkspaceRunRoutes } from './workspace-run-routes.ts';
+import { authorOf } from './request-author.ts';
 import { createNotificationsRoutes } from './notifications-routes.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -81,8 +88,6 @@ import { detectEnvironment } from '../core/backend-detect.ts';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 import type { ContentBlock, RunnerId } from '../core/agent-runner.ts';
 import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
-import { discoverCodexModels } from '../core/codex-model-catalog.ts';
-import { discoverOpencodeModels } from '../core/opencode-model-catalog.ts';
 import {
   PROVIDER_IDS,
   ProviderAuthService,
@@ -91,7 +96,7 @@ import {
   type ProviderStatusResponse,
 } from '../core/provider-auth.ts';
 import { applyProviderEnablement } from '../core/provider-availability.ts';
-import { RunnerModelCatalog } from '../core/runner-model-catalog.ts';
+import { RunnerModelCatalog, sharedRunnerModelCatalog } from '../core/runner-model-catalog.ts';
 import { currentUsage, onUsage } from '../core/process-usage.ts';
 import { currentHostMetrics } from '../core/host-metrics.ts';
 import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.ts';
@@ -111,6 +116,7 @@ import { discoverSkills } from '../skills.ts';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.ts';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.ts';
 import {
+  clearStartedTaskId,
   createTodo,
   markStarted,
   onTodosChanged,
@@ -121,6 +127,7 @@ import {
   type TodoItem,
 } from '../todos.ts';
 import { watchTodoAutostart, type TodoAutostartProject } from '../todo-autostart.ts';
+import { currentAutostartDispatch, currentClusterAutostart } from '../cluster/autostart-seam.ts';
 import { watchReopenRequests, type ReopenWatchProject } from '../reopen-watch.ts';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.ts';
 import {
@@ -202,7 +209,8 @@ import {
   shouldRegisterProject,
   type ProjectListEntry,
 } from '../workspace/projects.ts';
-import { discoverClaudeAccounts } from '../workspace/agent-account-identity.ts';
+import { discoverAgentAccounts } from '../workspace/agent-account-identity.ts';
+import { autoAccountsEnabled, autoRegisterDiscoveredAccounts } from '../workspace/agent-accounts-auto.ts';
 import { enrichNestedRepos, scanNestedRepos } from '../workspace/nested-repos.ts';
 import { initGitRepo, preflightGitInit } from '../workspace/git-init.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
@@ -218,7 +226,7 @@ import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { MAX_APPROVERS } from '../runs/approvals.ts';
 import { readUiState, uiStatePath } from '../ui-state.ts';
 import { agentHomePaths, expandTilde } from '../paths.ts';
-import { backupEnabled, isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCapabilities } from './capabilities.ts';
+import { backupEnabled, clusterEnabled, isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCapabilities } from './capabilities.ts';
 // D3's single construction of "who is this request". Imported STATICALLY, unlike most other
 // `../auth/*` modules (which `src/index.ts` reaches only through a `CEZ_AUTH`-gated dynamic
 // `import()`), and that asymmetry is deliberate: `auth/principal.ts` has no runtime imports of
@@ -254,7 +262,7 @@ import { localSessionResolver } from '../auth/local-gates.ts';
 // `./project-team-registry.ts`'s own doc comment. `registered-project-roots.ts` imports the
 // identical `openProjectTeamRegistry` for its non-HTTP `cezar projects remove` caller.
 import { openProjectTeamRegistry, type ProjectTeamRegistry } from './project-team-registry.ts';
-import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
+import { attachUpgradeFallback, createSocketHub, WS_PATH, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import {
   browseDirectory,
   isInsideBrowseRoot,
@@ -637,6 +645,11 @@ const selectAgentProfileSchema = z.object({
   profileId: z.string().max(64).nullable(),
 }).strict();
 
+/** How often the auto-register sweep re-reads the home directory. A `readdir` and a few small JSON
+ *  reads; the fact it watches for (`codex login` in a shell) changes at human pace, so a tighter
+ *  loop would buy nothing and a looser one would leave a new login out of the pool for too long. */
+const AUTO_ACCOUNTS_SWEEP_MS = 5 * 60_000;
+
 /** The hosted-mode refusal, worded like the agent-config one it mirrors. */
 const hostedProfileRefusal = {
   error: 'agent accounts are managed from the machine that owns the checkout (this cockpit runs in hosted mode)',
@@ -811,6 +824,7 @@ export interface WorkspaceConfigResponse {
     maxMonitoringSessions: number;
     monitoringWakeIntervalMinutes: number | null;
     autoResumeOnUsageLimit: boolean;
+    fallbackAcrossAccountsWhenLimited: boolean;
     memoryLimitMb: number | null;
     worktreeRetentionDefault: number;
   };
@@ -1197,6 +1211,22 @@ const continueSchema = z.object({
   model: z.string().max(200).optional(),
 });
 
+// "Run on…" body (spec 2026-08-23-retarget-task-to-another-engine): move a PARKED task to a
+// different engine. A sibling of `continueSchema` rather than a reuse of it — this is not a
+// continuation and carries no `text` or `images`, and a body that accepted them would imply the
+// task can be spoken to while it is queued, which it cannot. `agentProfile` is here and not on
+// `continueSchema` because the account is exactly what a person retargets around: the reported
+// case was a task on a `pool:*` route that resolved onto an exhausted claude login.
+//
+// Kept in this file, beside `continueSchema`, deliberately. Two near-identical request bodies
+// split across packages drift, and the contract package holds the shapes BOTH sides need — the
+// cockpit posts this one and reads nothing back from it.
+const retargetRunSchema = z.object({
+  runner: z.enum(RUNNER_IDS).optional(),
+  agentProfile: z.string().max(200).optional(),
+  model: z.string().max(200).optional(),
+});
+
 // Inbox "▶ Run" body (spec 007 / #401 / #413): every field optional, and the whole body is
 // optional too, so an empty POST — every client before the pills and the composer — starts on
 // the host's `defaultRunner` with no extra instructions, exactly as before. This is a START
@@ -1399,12 +1429,9 @@ export function createApp(deps: ServerDeps) {
   // turns into a compile error instead.
   const bootRoot = deps.repoRoot;
   const bootDataDir = join(bootRoot, '.ai/cezar');
-  const modelCatalog = deps.modelCatalog ?? new RunnerModelCatalog({
-    adapters: {
-      codex: { discover: () => discoverCodexModels({ cwd: bootRoot }) },
-      opencode: { discover: () => discoverOpencodeModels({ cwd: bootRoot }) },
-    },
-  });
+  // Shared with `CodexAppServerRunner`'s `thread/resume` path (`core/codex-resume-model.ts`) so
+  // the host has one 5-minute discovery cache, not two (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`).
+  const modelCatalog = deps.modelCatalog ?? sharedRunnerModelCatalog();
   const providerAuth = deps.providerAuth ?? new ProviderAuthService();
   const workspaceConfig = deps.workspaceConfig ?? {
     load: loadWorkspaceConfig,
@@ -1604,6 +1631,46 @@ export function createApp(deps: ServerDeps) {
     repoRoot: ctx.root,
     dataDir: ctx.dataDir,
     manager: ctx.manager,
+    // **D43, 2026-08-23 — stated, not omitted.** This object used to end at `manager`, and
+    // `TodoAutostartProject#cluster` was optional with "absent means clustering is off" as its
+    // contract. The result was that the whole D9a autostart guard was dead code while `todos.ts`
+    // read `CEZ_CLUSTER` from the environment and refused the write, so setting that flag started
+    // one todo on every reconcile pass, forever, and never stamped it.
+    //
+    // `CLUSTERING_OFF` is the SAME behaviour that absence had — it changes nothing today — but it
+    // is now a decision this file makes out loud, and omitting it is a typecheck error.
+    //
+    // ~~**Deliberately not `clusterModeFromEnv` yet, and this is not an oversight.** Handing this a
+    // live seam requires a production `claimStart` — a hub round trip for the claim — and there is
+    // none: `TodoAutostartCluster` has no implementation anywhere outside tests. Wiring the flag
+    // through without one does not enable the feature, it only moves the same failure: measured,
+    // an autostart todo authored on this node still starts unboundedly (the read-side guard allows
+    // via `mayStartWithoutHub`, the write side still refuses `hub-unconfirmed`). Switching this on
+    // is a behavioural decision with production consequences and belongs to the owner, not to this
+    // wiring line.~~
+    //
+    // **SUPERSEDED 2026-08-24 (Milestone C activation) — the owner made that decision** ("VPS is
+    // master, this mac is connected as additional worker and tasks are distributed across
+    // master/workers"), and the production `claimStart` this comment said did not exist now does:
+    // `cluster/autostart-seam.ts#createSpokeAutostartCluster`. It needs no hub round trip and no
+    // new frame type, because a worker's honest answer to *"may I self-start the master's work"* is
+    // a REFUSAL, not a request. The scope is the part that matters and it is unchanged from D15a:
+    // with the hub unreachable `mayAutostartTodo` never reaches `claimStart` at all, so a
+    // disconnected worker still runs what it authored.
+    //
+    // The failure this comment measured is closed rather than moved: it was the READ side allowing
+    // while the WRITE side refused `hub-unconfirmed`, one concept with two disagreeing sources.
+    // Both sides now answer from the same armed policy.
+    //
+    // **Both fields are FUNCTIONS, and that is load-bearing.** This object is built in `createApp`;
+    // the cluster runtime that knows this node's role is armed later, in `startServer`. A value
+    // read here would be read BEFORE the answer exists and would pin every node to
+    // `CLUSTERING_OFF` forever — D43's exact failure arriving by a different route. These two
+    // named functions read the armed policy at DECISION time. With `CEZ_CLUSTER` unset nothing is
+    // ever armed and they return `CLUSTERING_OFF` / `DISPATCH_LOCAL`: the single-node path,
+    // untouched. See D43 and item 45 in `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`.
+    cluster: currentClusterAutostart,
+    dispatch: currentAutostartDispatch,
   });
   watchTodoAutostart(todoAutostartProject(bootContext));
   for (const id of contexts.ids()) {
@@ -1627,6 +1694,9 @@ export function createApp(deps: ServerDeps) {
     if (ctx) watchReopenRequests(reopenWatchProject(ctx));
   }
   contexts.onContextBuilt((ctx) => watchReopenRequests(reopenWatchProject(ctx)));
+
+  // The cluster's one wiring line moved to `startServer` below (PLAN 1.5's activation) — it needs
+  // the real `http.Server` to attach the node link to, which does not exist yet here in `createApp`.
 
   const app = new Hono();
 
@@ -1838,6 +1908,30 @@ export function createApp(deps: ServerDeps) {
   // stays the deliberate trade: one cast per reader against breaking ~30 callers' annotations.
   // (This comment previously said "No handler reads `c.get('principal')` yet"; corrected
   // 2026-08-07 at the repair stage, since four handlers below now do.)
+  //
+  // D20 exemption (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`): a request under
+  // `${V1_PREFIX}/cluster/*` on one of `cluster-routes.ts`'s node-authenticated prefixes carries
+  // no cockpit session — it is a SPOKE authenticating itself to the hub, and a spoke has no
+  // cockpit session to have. Left ungated, this middleware answered 401 before `requireNodeAuth`
+  // in `createClusterRoutes` ever ran, which meant the D20 mechanism could never fire in any real
+  // deployment (every one sets `CEZ_AUTH`) — measured on production: `GET /api/v1/cluster`
+  // answered 401 identically to an ordinary authed route, with no distinguishing reason. This
+  // check reads `isNodeAuthenticatedClusterPath`, the SAME function `createClusterRoutes` derives
+  // its `.use(base, requireNodeAuth)` registrations from — see that array's own doc in
+  // `cluster-routes.ts` for why the two cannot drift apart. It is deliberately narrower than
+  // `/cluster/*`: the roster (`GET /cluster`), `/cluster/enroll*` (mints enrollment codes) and
+  // `/cluster/join` stay behind THIS wall, cockpit-session-only — they are operator actions taken
+  // at a human's own browser, and admitting them here would expose enrollment-code minting to the
+  // open internet with no session required at all.
+  function isNodeAuthenticatedClusterRequest(path: string): boolean {
+    if (!path.startsWith(V1_PREFIX)) return false;
+    return isNodeAuthenticatedClusterPath(path.slice(V1_PREFIX.length));
+  }
+  /** The join-code family — see `isCodeAuthenticatedClusterPath`'s doc in `cluster-routes.ts`. */
+  function isCodeAuthenticatedClusterRequest(path: string): boolean {
+    if (!path.startsWith(V1_PREFIX)) return false;
+    return isCodeAuthenticatedClusterPath(path.slice(V1_PREFIX.length));
+  }
   app.use('/api/*', async (c, next) => {
     if (c.req.path === `${V1_PREFIX}/health`) return next();
     // `/ready` joins the exemption for a concrete operational reason (P5 of
@@ -1851,6 +1945,21 @@ export function createApp(deps: ServerDeps) {
     // release id and a list of booleans, which is the shape `/health` already publishes to the
     // whole internet.
     if (c.req.path === `${V1_PREFIX}/ready`) return next();
+    // See the doc comment above this middleware's registration for what this is and why it is
+    // safe to let past with no cockpit principal: `requireNodeAuth` (D20), wired onto the
+    // identical path set in `createClusterRoutes`, is what actually authenticates the request
+    // from here — this branch only decides which requests get handed to it instead of the
+    // cockpit's own 401.
+    if (isNodeAuthenticatedClusterRequest(c.req.path)) return next();
+    // `POST /cluster/join` carries its own credential — the single-use, TTL-bounded join code,
+    // matched against a stored SHA-256 digest in constant time. It CANNOT be node-authenticated:
+    // the caller is a machine acquiring its first credential, and it has no cockpit session either
+    // (`cez cluster join` runs on the node being added, not in the hub operator's browser). Behind
+    // this wall the route answered 401 on every deployment that sets `CEZ_AUTH`, which is every
+    // real one — measured on `prod-host`, where the CLI then reported `access-rejected` and
+    // named Cloudflare Access for cezar's own refusal. Exact-match and this path only:
+    // `/cluster/enroll*` MINTS codes and stays session-only, as does the `GET /cluster` roster.
+    if (isCodeAuthenticatedClusterRequest(c.req.path)) return next();
     const principalContext = c as unknown as Context<{ Variables: { principal: Principal } }>;
     // `resolveAuthProvider`, not `resolveCapabilities(...).auth`: which provider a deployment
     // requires is a server-side policy, not a capability the cockpit is told about, and it is
@@ -2006,6 +2115,7 @@ export function createApp(deps: ServerDeps) {
   const describeRuntime = () =>
     runtimeInfo({
       socketActivated: deps.listenFd !== undefined,
+      dataDir: bootDataDir,
       // Probed defensively, because health is not allowed to be the thing that breaks. `deps` is
       // a hand-built object at every call site that is not `src/index.ts` — the test suite's
       // manager stubs, and any embedder assembling `ServerDeps` itself — so a manager without
@@ -2276,10 +2386,44 @@ export function createApp(deps: ServerDeps) {
         .catch(() => {});
     }
   };
+  /**
+   * Register the logins already on this machine (`CEZ_AUTO_ACCOUNTS=1`, spec
+   * `.ai/specs/2026-08-24-second-codex-account-balancing.md`, D5). Off, this is one `=== '1'` and a
+   * return.
+   *
+   * At boot AND on an interval, because the fact it reacts to is created outside cezar: someone
+   * runs `codex login` in a shell, and nothing tells the server. Boot alone would mean a restart
+   * per account — tolerable on a machine that redeploys hourly, and useless on one that does not.
+   *
+   * **It runs before the warm below**, not after: a newly registered account is exactly the one
+   * whose auth status nothing has ever probed, and warming the store as it was a moment ago would
+   * leave that row cold until the next boot.
+   *
+   * The interval is `unref`'d like the health timer, so it never holds the process open, and the
+   * sweep swallows its own failures — a machine whose home directory is unreadable registers
+   * nothing, which is the same outcome as the flag being off.
+   */
+  const autoAccountsSweep = async (): Promise<void> => {
+    const { added } = await autoRegisterDiscoveredAccounts();
+    for (const account of added) {
+      // Announced, never silent: this is state the operator did not click for, so the one place it
+      // can be accounted for is the server's own log. `console.warn` is what the rest of this file
+      // and the accounts store use — there is no logger threaded into `createApp`.
+      console.warn(
+        `[cezar] registered detected ${account.provider} login "${account.label}" (${account.configDir}) — CEZ_AUTO_ACCOUNTS=1`,
+      );
+    }
+  };
   // Same gate as `refreshHealth`, same reason (startServer injects the hub; a bare app in tests does
   // not, so tests never spawn probes here). Fire-and-forget: a probe that fails leaves that row
   // cold, which is exactly the state every reader already handles.
-  if (deps.socketHub) void warmAgentKnowledge();
+  if (deps.socketHub) {
+    void autoAccountsSweep().finally(() => void warmAgentKnowledge());
+    if (autoAccountsEnabled()) {
+      const timer = setInterval(() => void autoAccountsSweep(), AUTO_ACCOUNTS_SWEEP_MS);
+      timer.unref?.();
+    }
+  }
 
   // ---- chained family: host model catalog (workspace-level) ----
   const modelsRoutes = new Hono<ProjectApiEnv>()
@@ -2707,9 +2851,11 @@ export function createApp(deps: ServerDeps) {
     })
 
     /**
-     * The Claude logins that exist on this machine (spec
-     * `.ai/specs/2026-08-14-claude-subscription-autodetect.md`) — `~/.claude` plus any
-     * `~/.claude*` sibling the CLI actually wrote, each with the account it is signed in as.
+     * The agent logins that exist on this machine (spec
+     * `.ai/specs/2026-08-14-claude-subscription-autodetect.md`, widened to codex by
+     * `.ai/specs/2026-08-24-second-codex-account-balancing.md`) — `~/.claude` and `~/.codex` plus
+     * any `~/.claude*` / `~/.codex*` sibling the CLI actually wrote, each with the account it is
+     * signed in as.
      *
      * A READ, and a proposal: adding one is still `POST …/agent-profiles` with the dir it names,
      * through the same duplicate and path guards a hand-typed dir goes through. Discovery that
@@ -2732,13 +2878,16 @@ export function createApp(deps: ServerDeps) {
         // POST still refuses a duplicate, so the cost is a refused click rather than a second
         // account silently sharing one session store.
       }
-      const discovered = await discoverClaudeAccounts();
+      const discovered = await discoverAgentAccounts();
       const accounts = await Promise.all(
         discovered.map(async (found) => ({
           provider: found.provider,
           configDir: found.path,
           ...(found.identity ? { identity: found.identity } : {}),
-          added: (await conflictingProfile(stored, 'claude', found.path)) !== null,
+          // `found.provider`, never the literal `'claude'` it was before: `conflictingProfile`
+          // compares dirs WITHIN one provider, so asking it about the wrong one would report a
+          // codex home as un-added while a stored row for it already existed.
+          added: (await conflictingProfile(stored, found.provider, found.path)) !== null,
         })),
       );
       return c.json({ accounts } satisfies DiscoveredAgentAccountsResponse);
@@ -4084,6 +4233,7 @@ export function createApp(deps: ServerDeps) {
       maxMonitoringSessions: config.resources.maxMonitoringSessions,
       monitoringWakeIntervalMinutes: config.resources.monitoringWakeIntervalMinutes,
       autoResumeOnUsageLimit: config.resources.autoResumeOnUsageLimit,
+      fallbackAcrossAccountsWhenLimited: config.resources.fallbackAcrossAccountsWhenLimited,
       memoryLimitMb: config.resources.memoryLimitMb,
       worktreeRetentionDefault: config.resources.worktreeRetentionDefault,
     },
@@ -4162,6 +4312,9 @@ export function createApp(deps: ServerDeps) {
           }
           if (resources?.autoResumeOnUsageLimit !== undefined) {
             config.resources.autoResumeOnUsageLimit = resources.autoResumeOnUsageLimit;
+          }
+          if (resources?.fallbackAcrossAccountsWhenLimited !== undefined) {
+            config.resources.fallbackAcrossAccountsWhenLimited = resources.fallbackAcrossAccountsWhenLimited;
           }
           if (resources?.memoryLimitMb !== undefined) config.resources.memoryLimitMb = resources.memoryLimitMb;
           if (resources?.worktreeRetentionDefault !== undefined) {
@@ -4254,6 +4407,7 @@ export function createApp(deps: ServerDeps) {
         maxMonitoringSessions: z.number().int().min(0).max(16).optional(),
         monitoringWakeIntervalMinutes: z.number().int().min(1).max(60).nullable().optional(),
         autoResumeOnUsageLimit: z.boolean().optional(),
+        fallbackAcrossAccountsWhenLimited: z.boolean().optional(),
         memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().optional(),
         worktreeRetentionDefault: z.number().int().min(0).max(1000).optional(),
       })
@@ -4869,6 +5023,10 @@ export function createApp(deps: ServerDeps) {
         // One decision here feeds the run record, the system prompt and
         // CEZ_TODOS_FILE alike (RunManager.agentEnv).
         generateFollowups: capabilities().followups ? parsed.data.generateFollowups : false,
+        // Who asked (spec 2026-08-21-task-author-provenance). Derived from the REQUEST, never
+        // read off the body — `startRunSchema` does not carry an `author` key, so a client
+        // cannot name one, which is what makes this worth reading later.
+        author: authorOf(c, 'composer'),
       };
       const variants = parsed.data.variants ?? 1;
       if (variants > 1) {
@@ -4972,11 +5130,21 @@ export function createApp(deps: ServerDeps) {
       return c.json(store.getRun(id));
     })
 
-    .post('/runs/:id/cancel', (c) => {
-      const { store, manager } = c.get('project');
+    .post('/runs/:id/cancel', async (c) => {
+      const { store, manager, dataDir } = c.get('project');
       const id = c.req.param('id');
       if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
       const cancelled = manager.cancel(id);
+      if (cancelled) {
+        // Best-effort, same shape as `noteTodoStarted` on the start side: un-hiding the
+        // originating todo (2026-08-22-run-cancel-restores-todo.md) must never cost the user the
+        // cancel itself.
+        try {
+          await clearStartedTaskId(dataDir, id);
+        } catch (err) {
+          console.warn(`[cezar] could not clear started-todo link for cancelled run ${id}: ${String(err)}`);
+        }
+      }
       return c.json({ cancelled });
     })
 
@@ -5048,7 +5216,7 @@ export function createApp(deps: ServerDeps) {
           .map((b) => b.text)
           .join('\n');
         const images = content.filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image');
-        const resumed = manager.continueRun(id, { text, images });
+        const resumed = await manager.continueRun(id, { text, images });
         if (resumed.ok) return c.json({ continued: true });
         return c.json({ error: resumed.error ?? 'session closed' }, 409);
       }
@@ -5168,7 +5336,7 @@ export function createApp(deps: ServerDeps) {
       }
       const blocked = await providerActionError([providerForExistingRun(run, parsed.data.runner)]);
       if (blocked) return c.json({ error: blocked }, 409);
-      const result = manager.continueRun(id, {
+      const result = await manager.continueRun(id, {
         text: parsed.data.text,
         images: parsed.data.images?.map((img): ContentBlock => ({
           type: 'image',
@@ -5179,6 +5347,64 @@ export function createApp(deps: ServerDeps) {
       });
       if (!result.ok) return c.json({ error: result.error }, 409);
       return c.json({ continued: true });
+    })
+
+    /**
+     * "Run on…" — move a PARKED task to another engine
+     * (spec 2026-08-23-retarget-task-to-another-engine, Phase 3).
+     *
+     * One route for the two states a person actually finds a task parked in, because from the
+     * thread they look the same — nothing is happening and nothing will happen soon — and asking
+     * the cockpit to know which engine call to make would put the engine's internals in the UI:
+     *
+     *  - `queued` behind an account hold → `retargetQueuedRun`, which rewrites the pending work
+     *    item as well as the record (the record alone would not change where it dispatches).
+     *  - `failed` with a session (the scheduled/auto-resume state) → `continueRun`, which already
+     *    reopens on a named engine from the last completed step. No new engine code for this half.
+     *
+     * Anything else is a 409 that says the status, never a silent 200: a button that reports
+     * success and moves nothing is worse than one that refuses.
+     */
+    .post('/runs/:id/agent', jsonZodValidator(retargetRunSchema, { absent: ({}) }), async (c) => {
+      const { root: repoRoot, store, manager } = c.get('project');
+      const id = c.req.param('id');
+      const run = store.getRun(id);
+      if (!run) return c.json({ error: 'not found' }, 404);
+      const target = c.req.valid('json');
+      if (agentModelsLocked(repoRoot) && target.model?.trim()) {
+        return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
+      }
+      // The provider being moved TO is the one that has to be usable — `providerForExistingRun`
+      // falls back to the run's own when no override was sent, which is the right question for a
+      // retarget that only changes the account or the model.
+      const blocked = await providerActionError([providerForExistingRun(run, target.runner)]);
+      if (blocked) return c.json({ error: blocked }, 409);
+
+      if (run.status === 'queued') {
+        const result = await manager.retargetQueuedRun(id, target);
+        if (!result.ok) return c.json({ error: result.error }, 409);
+        return c.json({ run: store.getRun(id) });
+      }
+      // The scheduled state is a `failed` record with a live `autoResumeAt`. `continueRun` retires
+      // that appointment on the way in, so pressing this is also the answer to "stop waiting until
+      // Tuesday and run it now".
+      if (run.status === 'failed') {
+        // `continueRun` takes no account, and that is not an oversight to paper over here: a
+        // resume reattaches to a session, and `sessionId`/`profileId` are a PAIR — the session
+        // belongs to the login that created it, so "same thread, different account" is not a
+        // thing a provider can do. Refuse it plainly rather than accepting the field and dropping
+        // it, which would report success and change nothing about where the work runs.
+        if (target.agentProfile !== undefined) {
+          return c.json(
+            { error: 'this task already has a session, so it can move to another engine but not to another account' },
+            409,
+          );
+        }
+        const result = await manager.continueRun(id, { runner: target.runner, model: target.model });
+        if (!result.ok) return c.json({ error: result.error }, 409);
+        return c.json({ run: store.getRun(id) });
+      }
+      return c.json({ error: `cannot move a ${run.status} run to another engine` }, 409);
     })
 
     // "Open in terminal" (spec 003): hand the session off to a real terminal —
@@ -5813,7 +6039,9 @@ export function createApp(deps: ServerDeps) {
     // separate inbox feature happens to be on.
     .post('/todos', jsonZodValidator(() => createTodoInputSchema), async (c) => {
       const { dataDir } = c.get('project');
-      const todo = await createTodo(dataDir, c.req.valid('json'));
+      // `author` is a separate argument, never a body key: `createTodoInputSchema` omits it for
+      // the same reason it omits `archivedAt`. See `runs/task-author.ts`.
+      const todo = await createTodo(dataDir, c.req.valid('json'), authorOf(c, 'todo-create-route'));
       const body: CreateTodoResponse = { todo };
       return c.json(body, 201);
     })
@@ -5882,6 +6110,11 @@ export function createApp(deps: ServerDeps) {
           task,
           runner: parsed.data?.runner,
           model: parsed.data?.model,
+          // A PERSON clicked ▶ Run, so the RUN's author is that person — not the agent that filed
+          // the todo, which keeps its own author on its own record. `todo.startedTaskId` already
+          // joins the two, so both facts stay recoverable and neither overwrites the other. The
+          // autostart path (`todo-autostart.ts`) is the opposite case and inherits instead.
+          author: authorOf(c, 'todo-start'),
         });
         await markStarted(dataDir, id, run.id);
         return c.json({ run }, 201);
@@ -6648,6 +6881,14 @@ export function createApp(deps: ServerDeps) {
   const knowledgeRoutes = createKnowledgeRoutes();
   const sourcesRoutes = createSourcesRoutes();
 
+  // The CLUSTER family (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, `CEZ_CLUSTER=1`), on
+  // the same terms as the two above: its own file, built by a factory, chained into
+  // `workspaceV1` below. Workspace-level and single-mount — a cluster answers for the whole
+  // machine, so there is no project-scoped spelling to mirror. With the flag unset every route in
+  // it answers 404 from its own gate (spec Verification 12), which is why it is constructed
+  // unconditionally: the routes must stay in `AppType` either way, or the typed client loses them.
+  const clusterRoutes = createClusterRoutes({ version: deps.version });
+
   // ---- the notes pipeline (P2.2/P2.3) --------------------------------------
   // ONE store, shared by the routes and the pipeline. `NoteStore` caches the inbox in memory
   // after its first read, so two instances over one `notes.json` would each hold a stale half of
@@ -6711,7 +6952,7 @@ export function createApp(deps: ServerDeps) {
     store: noteStore,
     pipeline: {
       process: (noteId) => noteProcessor.process(noteId),
-      approve: (noteId, input) => noteApprover.approve(noteId, input),
+      approve: (noteId, input, author) => noteApprover.approve(noteId, input, author),
     },
   });
   // The autonomous implementation continuation trigger (PLAN D27 Phase 3, `.ai/specs/2026-08-15-
@@ -6884,6 +7125,8 @@ export function createApp(deps: ServerDeps) {
     ...(run.titleOrigin !== undefined ? { titleOrigin: run.titleOrigin } : {}),
     status: run.status,
     ...(run.activity !== undefined ? { activity: run.activity } : {}),
+    ...(run.waitingReason !== undefined ? { waitingReason: run.waitingReason } : {}),
+    ...(run.waitingQuestion !== undefined ? { waitingQuestion: run.waitingQuestion } : {}),
     ...(run.stopReason !== undefined ? { stopReason: run.stopReason } : {}),
     createdAt: run.createdAt,
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
@@ -6893,6 +7136,10 @@ export function createApp(deps: ServerDeps) {
     workflow: run.workflow,
     ...(run.branch !== undefined ? { branch: run.branch } : {}),
     ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
+    // Provenance for the global board's Author column (2026-08-21-task-author-provenance). Sent
+    // whole rather than pre-rendered: the cross-project board is the one surface that can turn an
+    // agent author's parent id into a link, because it alone holds every project's rows.
+    ...(run.author !== undefined ? { author: run.author } : {}),
     // The tracker-reference inputs, verbatim — the cockpit's `taskReference()` owns the rule
     // that picks between them (see the schema's note).
     ...(run.pullRequestUrl !== undefined ? { pullRequestUrl: run.pullRequestUrl } : {}),
@@ -6903,6 +7150,12 @@ export function createApp(deps: ServerDeps) {
     ...(run.issueNumber !== undefined ? { issueNumber: run.issueNumber } : {}),
     ...(run.referencedIssueUrl !== undefined ? { referencedIssueUrl: run.referencedIssueUrl } : {}),
     ...(run.markerRefs !== undefined ? { markerRefs: run.markerRefs } : {}),
+    ...(run.referencedPrCandidates !== undefined
+      ? { referencedPrCandidates: run.referencedPrCandidates }
+      : {}),
+    ...(run.referencedIssueCandidates !== undefined
+      ? { referencedIssueCandidates: run.referencedIssueCandidates }
+      : {}),
     ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
     ...(run.contextTokens !== undefined ? { contextTokens: run.contextTokens } : {}),
     ...(run.contextWindow !== undefined ? { contextWindow: run.contextWindow } : {}),
@@ -7041,7 +7294,8 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceTodosRoutes)
     .route('/', workspaceRunRoutes)
     .route('/', notificationsRoutes)
-    .route('/', backupRoutes);
+    .route('/', backupRoutes)
+    .route('/', clusterRoutes);
 
   // ---- mount ---------------------------------------------------------------
   // Scoped first, then the unscoped alias bound to the boot project. The paths are disjoint (no
@@ -7113,6 +7367,15 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     listProjects,
     semaphore: deps.semaphore,
     automationStore: (projectId, root) => automationCoordinator.store(projectId, root)!,
+    // Spec 2026-08-22-cross-project-worktree-orphan-prune-safety, Phase 3 prerequisite: without
+    // this, `deps.bootRoot` never reaches `ProjectContexts` in production (`createApp`'s own
+    // `bootRoot`-carrying `ProjectContexts` construction below is dead code — `deps.contexts` is
+    // already non-undefined by the time it gets there), so the cross-project ownership check's
+    // boot-root candidate is silently empty and the 232ad6d4 incident's exact failure mode — the
+    // boot root's OWN workspace-run records being invisible to a `listProjects()`-only check —
+    // stays open. Also activates the pre-existing `boot-root-conflict` guard (409) for any
+    // registered project whose root equals `deps.repoRoot`; see that spec's Risks.
+    bootRoot: deps.repoRoot,
   });
   // #801: GitHub automations are opt-in. Off, the flag must remove the BEHAVIOR and not merely
   // the UI — no scheduler, no GitHub polling, no launched runs — so every entry point into the
@@ -7239,6 +7502,66 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   });
   server.once('close', () => { unsubscribe(); automationScheduler.stop(); backupScheduler.stop(); });
   socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost, deps.sessionResolver));
+  // The cluster's one wiring line (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, PLAN 1.5).
+  // Lives here, not in `createApp`, because `ClusterLinkServer.attach()` needs the real, listening
+  // `http.Server` this function just built — `createApp` has none to give. Everything this arms —
+  // the node link, hub or spoke — lives behind `startClusterRuntime` in `server/cluster-routes.ts`
+  // so the package that fills it in edits a file it owns rather than this one (PLAN P3). With
+  // `CEZ_CLUSTER` unset it returns immediately having armed nothing: no timer, no socket, no file
+  // under `~/.cezar/cluster` (spec Verification 12). With it set but this node never enrolled, it
+  // warns and arms nothing too — see that function's own doc for why that is the honest state
+  // rather than an error, and for why the hub/spoke branch is decided from the identity on disk
+  // rather than from the environment directly.
+  //
+  // Milestone C: how the spoke branch resolves a dispatched project's `repoRoot` to the live
+  // `RunManager` that will actually run the work — required on `ClusterRuntimeDeps`
+  // (`SpokeRuntimeDeps#resolveDispatchManager`'s own doc has the full argument for why). Built
+  // on demand rather than a `todoAutostartProject`-style live map: the boot project short-circuits
+  // to `deps.manager` (the exact pattern the automation launcher above already uses for the same
+  // boot/non-boot split), and every other root resolves through `sharedContexts.context()` — the
+  // BUILDING call, not `peek()` — because a dispatch is a headless "run this now" trigger exactly
+  // like an automation firing, and a project this node's cockpit has never opened must still
+  // become dispatchable the moment the hub sends work for it, not stay silently unreachable until
+  // a person happens to open it first.
+  const resolveDispatchManager = async (repoRoot: string): Promise<RunManager | undefined> => {
+    if (repoRoot === deps.repoRoot) return deps.manager;
+    const projects = await listProjects();
+    const match = projects.find((p) => p.root === repoRoot);
+    if (!match) return undefined;
+    if (match.id === (deps.bootProjectId ?? 'default')) return deps.manager;
+    try {
+      return (await sharedContexts.context(match.id)).manager;
+    } catch {
+      return undefined;
+    }
+  };
+  // D47: the same shared `WorkspaceSemaphore` `agentAccountUsageRoutes` above already asks for
+  // in-flight counts, threaded here so the spoke's presence beat can report its OWN live load
+  // (`busy()`/`heavyActive()`) instead of the `{active: 0, heavyActive: 0}` `peers.ts#collectPresence`
+  // has always silently defaulted to absent a caller wiring the real numbers — see
+  // `SpokeRuntimeDeps#semaphore`'s own doc for why that default stopped being an honest "idle"
+  // claim the moment Milestone C let a dispatch actually place work on it. Optional for the same
+  // "legacy callers and tests that build no managers" reason `deps.semaphore` is optional
+  // everywhere else in this file (`:6857`'s own doc).
+  startClusterRuntime({ version: deps.version, server, resolveDispatchManager, semaphore: deps.semaphore });
+  // The one listener that destroys an upgrade nobody owns (ws.ts#attachUpgradeFallback).
+  //
+  // `CLUSTER_LINK_PATH` is listed only when `CEZ_CLUSTER` is on, and that asymmetry is deliberate.
+  // An earlier version listed it unconditionally, reasoning that a listed-but-unattached path only
+  // "hangs instead of being killed, which is strictly safer". It is not: with the flag off nothing
+  // in this process will ever handle that upgrade, so every request to it parks a socket that is
+  // never answered and never closed — an unbounded fd leak on a path that is supposed to be
+  // switched off, reachable by anyone who can reach the port. Destroying it is both correct and
+  // the honest answer (`1006` immediately, rather than a stall).
+  //
+  // With the flag ON the path stays listed even before `cluster-routes.ts`'s activation attaches
+  // the link server, because there the hang IS the safer error: a node dialling a hub that is
+  // still booting should stall and retry, not be told the endpoint does not exist. Both branches
+  // read the same `clusterEnabled(env)` the routes do, so there is one spelling of the flag and no
+  // way for the two to disagree. This does not weaken `attachUpgradeFallback`'s
+  // order-independence: it still decides purely from set membership, and the set is fixed here at
+  // wiring time rather than from whether some other listener already ran.
+  attachUpgradeFallback(server, clusterEnabled() ? [WS_PATH, CLUSTER_LINK_PATH] : [WS_PATH]);
   return server;
 }
 

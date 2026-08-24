@@ -25,6 +25,7 @@ import { isSubmitShortcut } from '@/lib/use-submit-shortcut'
 import { isHttpUrl } from '@/lib/utils'
 
 import { finishTitle } from './run-actions'
+import { readTaskDraft, writeTaskDraft } from './task-drafts'
 import { useContinuationProvider } from './continuation-provider'
 import { useFinishRun } from './use-finish-run'
 
@@ -123,7 +124,15 @@ export function ReviewPanel({ run }: { run: ApiRun }) {
 function ReviewActions({ run }: { run: ApiRun }) {
   const queryClient = useQueryClient()
   const notesRef = useRef<HTMLTextAreaElement>(null)
-  const [notes, setNotes] = useState('')
+  // Read at mount — `ReviewPanel` is keyed by run id, so this is a real mount per task and the
+  // first frame already carries the right notes. State and store are two statements here (unlike
+  // the composer, whose single `onValueChange` carries both), so ONE helper writes the pair and
+  // they cannot drift — that is the `hand-to-agent.tsx` trap, and here it is real.
+  const [notes, setNotes] = useState(() => readTaskDraft('reviewNotes', run.id))
+  const updateNotes = (next: string) => {
+    setNotes(next)
+    writeTaskDraft('reviewNotes', run.id, next)
+  }
   const [manual, setManual] = useState<string | null>(null)
   const finish = useFinishRun(run.id)
   const continuation = useContinuationProvider(run)
@@ -142,7 +151,9 @@ function ReviewActions({ run }: { run: ApiRun }) {
     },
     onSuccess: (result) => {
       if (result === null) return
-      setNotes('')
+      // Spent: clear the box AND the store. A REJECTED send-back deliberately keeps both — nothing
+      // the user typed is lost to a server error (the composer's rule, same reason).
+      updateNotes('')
       invalidate()
     },
     onError: (error: Error) => toast(error.message, { tone: 'danger' }),
@@ -180,7 +191,7 @@ function ReviewActions({ run }: { run: ApiRun }) {
         placeholder="Notes for the agent — what should change?"
         rows={2}
         value={notes}
-        onChange={(event) => setNotes(event.target.value)}
+        onChange={(event) => updateNotes(event.target.value)}
         onKeyDown={(event) => {
           // The spec's cross-surface chord: ⌘↵ / Ctrl+↵ submit review notes. Unlike the
           // composer, plain Enter stays a newline — notes are multi-line prose, and this box

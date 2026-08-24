@@ -1,8 +1,8 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AgentProfile } from '@loki-labs/better-cezar-api-client'
 import { agentPickerRows } from './default-agent-picker'
-import { RunnerPill, parseChoiceValue } from './picker-pill'
+import { ADVISORY_NOTE, RunnerPill, parseChoiceValue } from './picker-pill'
 
 /**
  * The two pool surfaces (`.ai/specs/2026-08-16-agent-account-usage-routing.md`, Phase C).
@@ -31,6 +31,12 @@ const ONE_EACH = [profile('claude', 'default', true), profile('codex', 'default'
 
 const poolValues = (rows: ReturnType<typeof agentPickerRows>) =>
   rows.filter((row) => row.pool).map((row) => row.account)
+
+// Explicit, because this package runs vitest WITHOUT `globals`, so `@testing-library/react` never
+// registers its own auto-cleanup: every `render` accumulates in one `document` for the whole file.
+// The pill queries are document-wide (`screen.getByRole('button', { name: 'Runner' })`), so the
+// second render of a pill in this file is what turns them into "found multiple elements".
+afterEach(cleanup)
 
 describe('settings rows — agentPickerRows', () => {
   it('offers no pools at all with the capability off', () => {
@@ -112,6 +118,56 @@ describe('composer rows — RunnerPill', () => {
     )
     fireEvent.click(balance!)
     expect(onPick).toHaveBeenCalledWith('claude', 'pool:claude')
+  })
+})
+
+/**
+ * The picker says, in the menu, that it is a preference (`2026-08-23-never-block-a-task.md`).
+ *
+ * This is the UI half of todo `81ab4ebd` — "the per-task picker is documented as advisory whenever
+ * a wildcard pool is configured (and the UI says so)". Recording the decision in the corpus or a
+ * docblock satisfies neither half of that: the person who picks codex to dodge a Claude limit is
+ * standing in front of this menu, and the disclosure has to be here or it does not reach them.
+ */
+describe('advisory disclosure — RunnerPill', () => {
+  const openMenu = () => fireEvent.pointerDown(screen.getByRole('button', { name: 'Runner' }))
+  const accounts = [
+    { provider: 'claude' as const, id: 'default', label: 'Default', configDir: '~/.claude' },
+    { provider: 'codex' as const, id: 'default', label: 'Default', configDir: '~/.codex' },
+  ]
+
+  it('says so inside the menu when the fallback is on', async () => {
+    render(
+      <RunnerPill runners={['claude', 'codex']} value="claude" accounts={accounts} advisory onPick={() => {}} />,
+    )
+    openMenu()
+    expect(await screen.findByText(ADVISORY_NOTE)).not.toBeNull()
+  })
+
+  it('says nothing when the fallback is off — the pick really is a pin then', async () => {
+    // The control, and it is the honest half: with the setting off an explicit pick IS a
+    // requirement, so a menu that claimed otherwise would be the same lie in the other direction.
+    render(
+      <RunnerPill runners={['claude', 'codex']} value="claude" accounts={accounts} onPick={() => {}} />,
+    )
+    openMenu()
+    await screen.findAllByRole('menuitemradio')
+    expect(screen.queryByText(ADVISORY_NOTE)).toBeNull()
+  })
+
+  it('does not swallow a row — the note is a footer, not an option', async () => {
+    // It rides `PickerPill`'s `status` slot, which renders a DISABLED menu item. If it ever became
+    // a selectable row, picking it would call `onPick` with the note's text as a runner id.
+    const onPick = vi.fn()
+    render(
+      <RunnerPill runners={['claude', 'codex']} value="claude" accounts={accounts} advisory onPick={onPick} />,
+    )
+    openMenu()
+    const rows = await screen.findAllByRole('menuitemradio')
+    // Two agents, two selectable rows — the note is not a third.
+    expect(rows).toHaveLength(2)
+    expect(rows.some((row) => row.textContent?.includes(ADVISORY_NOTE))).toBe(false)
+    expect(onPick).not.toHaveBeenCalled()
   })
 })
 

@@ -8,6 +8,7 @@ import type { RunManager, StartRunInput } from '../workflows/run.ts';
 import type { WorkflowDef } from '../workflows/types.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
 import { createApp } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * Request-origin guard (#426). The server executes agents with shell access,
@@ -32,7 +33,7 @@ describe('request-origin guard (#426)', () => {
     // the handler, so a real run only needs to prove the request got through.
     const manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) =>
-        store.createRun({ title: 't', workflow: '(planned)', task: input.task, steps: [] }),
+        store.createRun({ author: localCliAuthor(), title: 't', workflow: '(planned)', task: input.task, steps: [] }),
     } as unknown as RunManager;
     app = createApp({
       repoRoot,
@@ -305,7 +306,7 @@ describe('request-origin guard — hosted mode (#426)', () => {
     process.env.CEZ_REMOTE = '1';
     const manager = {
       startRun: (_workflow: WorkflowDef, input: StartRunInput) =>
-        store.createRun({ title: 't', workflow: '(planned)', task: input.task, steps: [] }),
+        store.createRun({ author: localCliAuthor(), title: 't', workflow: '(planned)', task: input.task, steps: [] }),
     } as unknown as RunManager;
     app = createApp({
       repoRoot,

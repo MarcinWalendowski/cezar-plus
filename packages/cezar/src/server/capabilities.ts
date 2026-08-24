@@ -49,6 +49,13 @@
  * - **`/api/v1/health`: NOT byte-identical.** The five keys below are emitted unconditionally, so
  *   the flag-off body grows by `"knowledge":false,"sources":false,"notes":false,
  *   "workspaceViews":false,"notify":false` (933 → 1019 bytes on an otherwise identical fixture).
+ *   **AMENDED 2026-08-22 — it is six keys now, not five.** `cluster` (`CEZ_CLUSTER`) joined them
+ *   on the same terms, adding `"cluster":false`. The byte-identity claim was already false and
+ *   stays false; the count in the sentence above is what changed, and it is left in place because
+ *   the measurement it records (933 → 1019 for the original five) is still the evidence. The spec
+ *   that added the sixth says so outright: "Do not re-assert the flag-off byte-identity claim: it
+ *   was measured false and corrected in place in that file, and this key makes the body grow by
+ *   one more pair."
  *
  * That is a deliberate shape, not a slip, and it is why the claim had to be corrected rather than
  * the code: `capabilitiesSchema` (`packages/contract/src/health.ts`) declares all five as required
@@ -76,6 +83,7 @@
  */
 
 import { followupsEnabled } from '../handoff.ts';
+import { autoAccountsEnabled } from '../workspace/agent-accounts-auto.ts';
 import type { AuthProvider, Capabilities } from '@loki-labs/better-cezar-contract';
 
 /** Every IPv4 address in 127.0.0.0/8, anchored. Anchoring is load-bearing: a
@@ -202,6 +210,36 @@ export function backupEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.CEZ_BACKUP === '1';
 }
 
+/**
+ * `CEZ_CLUSTER=1` (exact string) ⇒ this cezar is part of a cluster — hub if that is all that is
+ * set, spoke when `CEZ_CLUSTER_HUB=<url>` names one (D1 of
+ * `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`; hub-ness is DERIVED, never a second knob, so
+ * it cannot be configured into a contradiction). Unset — or any other spelling — is off: no node
+ * identity minted, no link dialled, no timer armed, no file under `~/.cezar/cluster` or
+ * `.ai/cezar/cluster`, and every `/api/v1/cluster*` route answers **409** with a stated reason —
+ * `automations`' shape, not `sources`' 200-with-an-empty-payload and not a 404 (spec Verification
+ * 12, corrected during implementation: 404 already means "unknown node id" on
+ * `DELETE /cluster/nodes/:nodeId`, so a flag-off 404 would be indistinguishable from it on the same
+ * route).
+ *
+ * **Unlike `backupEnabled` above, this one IS also a member of `resolveCapabilities` below**, and
+ * the difference is deliberate rather than an inconsistency. Backup keeps itself out of the health
+ * payload to preserve a byte-identical flag-off body; that claim was already measured false for the
+ * five central-hub keys and corrected in this file's header, and the cluster's Settings section is
+ * gated by the registry's `capability` field — a synchronous signal the cockpit must have before it
+ * renders a nav, which a per-panel probe (backup's answer) cannot supply. Spec → Architecture:
+ * "`cluster: boolean`, **always present** and `false` when off, like every other capability key.
+ * Do not re-assert the flag-off byte-identity claim."
+ *
+ * Read as its own function, not inlined, so the gate has exactly one spelling: `cluster-routes.ts`'s
+ * `requireCluster` middleware and `startClusterRuntime` both call THIS rather than re-deriving the
+ * test, and neither depends on `cluster/node-identity.ts#clusterModeFromEnv` — a request-path gate
+ * that throws would answer 500 where the spec requires a stated 409.
+ */
+export function clusterEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CEZ_CLUSTER === '1';
+}
+
 /** `CEZ_REMOTE=1` or a non-loopback bind host ⇒ hosted mode (no local handoff).
  *  `CEZ_FOLLOWUPS=1` ⇒ the follow-up inbox exists (#471).
  *  `CEZ_AUTOMATIONS=1` ⇒ GitHub automations exist (#801).
@@ -245,6 +283,12 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
     // behaviour. Still false under `singleProject` — see the module docblock.
     workspaceViews: env.CEZ_WORKSPACE_VIEWS !== '0' && !singleProject,
     notify: env.CEZ_NOTIFY === '1',
+    // Always present, `false` when off — see `clusterEnabled` above for why this key is in the
+    // payload while `backup`'s deliberately is not. Not AND-ed with `singleProject`: a
+    // single-project cockpit can still be one node of a cluster (that is the worker role's whole
+    // shape), so unlike `notes`/`workspaceViews` there is nothing here that needs a workspace to
+    // aggregate.
+    cluster: clusterEnabled(env),
     // AND-ed with `localHandoff`, not just the flag: this panel names each login's email, org and
     // plan, and the rest of the agent-profiles family is already withheld in hosted mode for the
     // weaker reason that it echoes host paths. See the field's doc in `contract/health.ts`.
@@ -258,6 +302,10 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
     // by `isLocalOrgModeActive`, the boot gate and the workspace-browse confinement, none of which
     // should be swayed by a decision that is specific to this one panel.
     accountUsage: env.CEZ_ACCOUNT_USAGE === '1' && (localHandoff || env.CEZ_ACCOUNT_USAGE_HOSTED === '1'),
+    // NOT AND-ed with `localHandoff` — see the field's doc in `contract/health.ts`. Read through
+    // `autoAccountsEnabled` so the flag has one spelling: the sweep itself re-checks it, and two
+    // copies of `=== '1'` is how a capability comes to report a feature that is not running.
+    autoAccounts: autoAccountsEnabled(env),
     // Inverted, like `workspaceViews` above — `=== '1'` everywhere else, `!== '0'` in these two.
     // (This comment used to claim it was "the one INVERTED gate in this object"; corrected
     // 2026-08-16 when `workspaceViews` joined it, for a different reason: skills predates the

@@ -225,7 +225,13 @@ are real buttons (keyboard/enter, focus ring `--ring`), the card has
   The feature never makes the current behavior worse.
 - **Multiple `CEZ:ASK` markers in one turn** → the first valid one wins; extras
   are ignored (documented; agents are instructed to ask once).
-- **Agent ignores the marker and asks in prose** → unchanged: `waiting`, no card,
+- **SUPERSEDED IN PART 2026-08-24 by
+  `.ai/specs/2026-08-23-plain-end-structured-question.md` (`d811d34c`):** a markerless prose
+  question is now classified, persisted and shown beside the composer, then receives at most one
+  bounded nudge asking the agent to re-emit `CEZ:ASK`. A markerless report still parks without an
+  invented question. The original fallback decision remains below as historical context.
+
+  **Agent ignores the marker and asks in prose** → unchanged: `waiting`, no card,
   composer works.
 - **User types instead of clicking** → normal message; card resolves.
 - **`CEZ:DONE` and `CEZ:ASK` both present** → `DONE` wins (no dangling card).

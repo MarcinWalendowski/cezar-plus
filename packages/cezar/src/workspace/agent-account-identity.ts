@@ -2,8 +2,9 @@ import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { agentHomePaths } from '../paths.ts';
-import { readClaudeOauthAccount } from '../agent-config/account-identity.ts';
+import { readClaudeOauthAccount, readCodexAuthClaims } from '../agent-config/account-identity.ts';
 import { looksLikeProfileDir } from '../core/agent-profiles.ts';
+import type { ProviderId } from '../core/provider-auth.ts';
 
 /**
  * Which Claude subscription a config dir is signed in to — and which ones exist on this machine.
@@ -15,15 +16,34 @@ import { looksLikeProfileDir } from '../core/agent-profiles.ts';
  * "owner@example.com · Max 20x", and makes the machine's other logins discoverable
  * instead of something you have to remember the path of.
  *
- * ## Claude only, deliberately
+ * ## Both profile-capable providers
  *
- * `PROFILE_CAPABLE_PROVIDERS` is `['claude', 'codex']`, and this covers only the first. Codex keeps
- * its identity in `<CODEX_HOME>/auth.json`, which is a live CREDENTIAL file — on this machine it
- * holds `OPENAI_API_KEY`, an `access_token` and a `refresh_token` alongside the account id. Reading
- * a token file to build a display label is a real risk taken for a cosmetic gain, and the risk is
- * not "we might print it": it is that a value like that, once in a route's hands, has a way of
- * ending up in a log line or an error body later. Claude's `.claude.json` has no credential in it
- * at all (the OAuth tokens live in the macOS Keychain), which is what makes it safe to read here.
+ * **CORRECTED 2026-08-24 by `.ai/specs/2026-08-24-second-codex-account-balancing.md` (D3). This
+ * section read "Claude only, deliberately" and is quoted below unchanged**, because the risk it
+ * names is real and the code still honours it — what was wrong is the conclusion that the risk
+ * could not be separated from the fact.
+ *
+ * ~~`PROFILE_CAPABLE_PROVIDERS` is `['claude', 'codex']`, and this covers only the first. Codex
+ * keeps its identity in `<CODEX_HOME>/auth.json`, which is a live CREDENTIAL file — on this machine
+ * it holds `OPENAI_API_KEY`, an `access_token` and a `refresh_token` alongside the account id.
+ * Reading a token file to build a display label is a real risk taken for a cosmetic gain, and the
+ * risk is not "we might print it": it is that a value like that, once in a route's hands, has a way
+ * of ending up in a log line or an error body later. Claude's `.claude.json` has no credential in
+ * it at all (the OAuth tokens live in the macOS Keychain), which is what makes it safe to read
+ * here.~~
+ *
+ * Two things settled it. First, `agent-config/account-identity.ts` has read codex's `id_token`
+ * claims for the "Show details" route since `2026-07-29-agent-profiles.md` — the exclusion here was
+ * not protecting a file the repo otherwise leaves alone, it was leaving discovery blind to a fact
+ * cezar already displays. Second, the credentials are separable at the READER rather than at the
+ * caller: `readCodexAuthClaims` returns the JWT payload and a boolean, and never the API key, the
+ * access token or the refresh token — so no value that must not reach a log line is ever in a
+ * route's hands to begin with. That is the guarantee the original paragraph wanted; it just had to
+ * be built rather than avoided.
+ *
+ * The claims are also, unlike the tokens beside them, exactly the same class of fact as Claude's
+ * `oauthAccount`: an email, a plan name, an organization. And they are equally non-authoritative —
+ * see the next section.
  *
  * ## Nothing here is authoritative about auth
  *
@@ -101,52 +121,115 @@ export async function readClaudeAccountIdentity(
   return Object.keys(identity).length > 0 ? identity : null;
 }
 
-/** One Claude config dir found on this machine, with whatever it says about itself. */
+/** One config dir found on this machine, with whatever it says about itself. */
 export interface DiscoveredAgentAccount {
-  provider: 'claude';
+  provider: ProviderId;
   /** Absolute path of the config dir. */
   path: string;
   identity: AgentAccountIdentity | null;
 }
 
 /**
- * Every Claude config dir on this machine: the discovered default plus any `~/.claude*` sibling
- * that carries the CLI's own marker files.
+ * What a Codex config dir says about itself, from `auth.json`'s `id_token` claims. `null` when it
+ * says nothing — an API-key login, an unreadable token, or a dir the CLI made but never signed in.
  *
- * The `~/.claude*` prefix is the convention the feature itself established — `CLAUDE_CONFIG_DIR`
- * takes any absolute path, so a dir somewhere else is perfectly legal and simply will not be
- * discovered. That is the honest boundary of an autodetect: it offers what it can recognize, and
- * the "Add account" folder picker still exists for everything else. Widening the search to the
- * whole home directory would turn opening a settings pane into a filesystem crawl.
+ * Never throws, and never sees a credential: `readCodexAuthClaims` reduces `OPENAI_API_KEY` to a
+ * boolean and does not read the access or refresh token at all.
+ *
+ * The plan is `chatgpt_plan_type` title-cased — the vendor's own word (`plus` → `Plus`), on the
+ * same rule `planLabel` follows for Claude: show what the vendor said, never a name we invented.
+ * The organization is dropped when it is the personal default, matching Claude's rule that an org
+ * which merely restates the account is not an organization.
+ */
+export async function readCodexAccountIdentity(configDir: string): Promise<AgentAccountIdentity | null> {
+  const auth = await readCodexAuthClaims(configDir);
+  const claims = auth.claims;
+  if (claims === null) return null;
+  const email = typeof claims.email === 'string' ? claims.email : undefined;
+  const openai = claims['https://api.openai.com/auth'];
+  const scoped = openai && typeof openai === 'object' ? (openai as Record<string, unknown>) : {};
+  const planType = typeof scoped.chatgpt_plan_type === 'string' ? scoped.chatgpt_plan_type : '';
+  const plan = planType ? planType.replace(/^\w/, (ch) => ch.toUpperCase()) : undefined;
+  const orgs = Array.isArray(scoped.organizations) ? scoped.organizations : [];
+  const primary = orgs.find((org) => org && typeof org === 'object') as Record<string, unknown> | undefined;
+  const title = typeof primary?.title === 'string' ? primary.title : undefined;
+  const identity: AgentAccountIdentity = {
+    ...(email ? { email } : {}),
+    ...(plan ? { plan } : {}),
+    ...(title && title !== 'Personal' ? { organization: title } : {}),
+  };
+  return Object.keys(identity).length > 0 ? identity : null;
+}
+
+/** Where each profile-capable provider's extra homes are conventionally kept, relative to `$HOME`.
+ *  A prefix, not a pattern: `CLAUDE_CONFIG_DIR`/`CODEX_HOME` take any absolute path, so a dir
+ *  somewhere else is perfectly legal and simply will not be discovered. */
+const HOME_DIR_PREFIX: Record<'claude' | 'codex', string> = { claude: '.claude', codex: '.codex' };
+
+/**
+ * Every Claude and Codex config dir on this machine: each provider's discovered default, plus any
+ * `~/.claude*` / `~/.codex*` sibling that carries that CLI's own marker files.
+ *
+ * The prefixes are the convention the feature itself established, and they are the honest boundary
+ * of an autodetect: it offers what it can recognize, and the "Add account" folder picker still
+ * exists for everything else. Widening the search to the whole home directory would turn opening a
+ * settings pane into a filesystem crawl.
  *
  * `looksLikeProfileDir` is the recognizer, so this cannot invent a second definition of "a Claude
- * home" — an empty `~/.claude-notes` folder is not offered as a login.
+ * home" — an empty `~/.claude-notes` folder is not offered as a login, and `~/.codex-old-notes` is
+ * not offered either unless it holds an `auth.json` or a `config.toml`.
  *
- * Ordering is stable (default first, then alphabetical) so the pane does not reshuffle between
- * reads, and identity failures degrade per row: one unreadable dir costs its own label, never the
- * list.
+ * Ordering is stable (each provider's default first, then alphabetical, claude before codex) so the
+ * pane does not reshuffle between reads, and identity failures degrade per row: one unreadable dir
+ * costs its own label, never the list.
+ *
+ * **Keyed by path across providers, not per provider.** One dir cannot be two providers' homes, and
+ * the marker sets do not overlap — but a shared `Map` also means a machine where someone pointed
+ * `CODEX_HOME` at `~/.claude` reports it once rather than twice under two names.
+ */
+export async function discoverAgentAccounts(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<DiscoveredAgentAccount[]> {
+  const home = env.HOME || env.USERPROFILE || homedir();
+  const homes = agentHomePaths(env);
+  const found = new Map<string, DiscoveredAgentAccount>();
+  const siblings = await readdir(home, { withFileTypes: true }).catch(() => null);
+
+  const consider = async (provider: 'claude' | 'codex', path: string): Promise<void> => {
+    if (found.has(path)) return;
+    const entries = await readdir(path).catch(() => null);
+    if (entries === null || !looksLikeProfileDir(provider, entries)) return;
+    // The SAME env the dirs were resolved against — `claudeStateFilePath` reads `~/.claude`'s
+    // state from a SIBLING file and an overridden dir's from inside it, so resolving against one
+    // env and reading against another would look up the default dir under the override rule.
+    const identity =
+      provider === 'claude'
+        ? await readClaudeAccountIdentity(path, env)
+        : await readCodexAccountIdentity(path);
+    found.set(path, { provider, path, identity });
+  };
+
+  for (const provider of ['claude', 'codex'] as const) {
+    // The default first, whatever it is: with `CLAUDE_CONFIG_DIR`/`CODEX_HOME` set on the cezar
+    // process itself it is not `~/.claude` at all, and the pane must name the dir cezar actually
+    // spawns agents with.
+    await consider(provider, provider === 'claude' ? homes.claude : homes.codex);
+    const prefix = HOME_DIR_PREFIX[provider];
+    const dirs = (siblings ?? [])
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of dirs) await consider(provider, join(home, entry.name));
+  }
+  return [...found.values()];
+}
+
+/**
+ * **SUPERSEDED 2026-08-24 by `discoverAgentAccounts` above**, which covers codex as well. Kept as a
+ * Claude-only filter over it so an out-of-tree caller keeps the answer it had; nothing in this repo
+ * calls it.
  */
 export async function discoverClaudeAccounts(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<DiscoveredAgentAccount[]> {
-  const home = env.HOME || env.USERPROFILE || homedir();
-  const found = new Map<string, DiscoveredAgentAccount>();
-  const consider = async (path: string): Promise<void> => {
-    if (found.has(path)) return;
-    const entries = await readdir(path).catch(() => null);
-    if (entries === null || !looksLikeProfileDir('claude', entries)) return;
-    // The SAME env the dirs were resolved against — `claudeStateFilePath` reads `~/.claude`'s
-    // state from a SIBLING file and an overridden dir's from inside it, so resolving against one
-    // env and reading against another would look up the default dir under the override rule.
-    found.set(path, { provider: 'claude', path, identity: await readClaudeAccountIdentity(path, env) });
-  };
-
-  // The default first, whatever it is: with `CLAUDE_CONFIG_DIR` set on the cezar process itself it
-  // is not `~/.claude` at all, and the pane must name the dir cezar actually spawns agents with.
-  await consider(agentHomePaths(env).claude);
-  const siblings = await readdir(home, { withFileTypes: true }).catch(() => null);
-  for (const entry of (siblings ?? []).filter((e) => e.isDirectory() && e.name.startsWith('.claude')).sort((a, b) => a.name.localeCompare(b.name))) {
-    await consider(join(home, entry.name));
-  }
-  return [...found.values()];
+  return (await discoverAgentAccounts(env)).filter((account) => account.provider === 'claude');
 }

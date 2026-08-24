@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { resolveSourceProvider, SOURCE_PROVIDERS } from './registry.ts';
 import { sourceCapabilitiesSchema } from './provider-types.ts';
 import { NOTION_SOURCE_KIND } from './notion/provider.ts';
+import { CEZAR_HUB_SOURCE_KIND } from './cezar-hub/provider.ts';
 
 /**
  * `registry.ts` - the seam's dispatch table (F2, W2.2). See
@@ -33,7 +34,33 @@ describe('resolveSourceProvider', () => {
   });
 
   it('SOURCE_PROVIDERS is keyed by kind string, not a literal union', () => {
-    expect(Object.keys(SOURCE_PROVIDERS)).toEqual(['notion']);
+    // `cezar-hub` joined 2026-08-22 (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D8a) —
+    // the FIRST provider added from outside the package that built this seam, and therefore the
+    // first real test of its docblock's promise that a second provider costs one new file plus one
+    // row. It cost exactly that. `toEqual` on an ordered list is kept rather than relaxed to a
+    // `toContain`: an exhaustive assertion is what makes a THIRD provider a deliberate edit here
+    // instead of one that lands silently, which is the property this case exists for.
+    expect(Object.keys(SOURCE_PROVIDERS)).toEqual(['notion', CEZAR_HUB_SOURCE_KIND]);
+  });
+
+  it('resolves the cezar-hub provider, and its detect() never throws', async () => {
+    const provider = resolveSourceProvider({
+      kind: CEZAR_HUB_SOURCE_KIND,
+      id: 'conn-hub',
+      revision: 1,
+      name: 'hub corpus',
+      collections: [],
+      createdAt: '2026-08-22T00:00:00.000Z',
+      updatedAt: '2026-08-22T00:00:00.000Z',
+    });
+    expect(provider).not.toBeNull();
+    expect(provider?.kind).toBe(CEZAR_HUB_SOURCE_KIND);
+    // The half that matters for the ROW, as opposed to the provider: `GET /api/v1/sources/providers`
+    // constructs one instance per kind and awaits `detect()` for each, so a factory or a probe that
+    // threw would turn this row into a 500 on a route that has nothing to do with clustering.
+    // `provider-types.ts` states the contract — no CLI, no remote, offline all resolve to
+    // `{available:false, reason}` — and this is the assertion that keeps it true for this kind.
+    await expect(provider!.detect()).resolves.toMatchObject({ available: expect.any(Boolean) });
   });
 });
 

@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import type { AgentEvent } from './agent-runner.ts';
-import type { UiEvent } from './ui-events.ts';
+import type { ClaudeBlockCounts, UiEvent } from './ui-events.ts';
 import {
   claudeTurnStarted,
   createClaudeUiState,
@@ -238,7 +238,12 @@ describe('mapClaudeMessage edge cases', () => {
     expect(mapped.events).toEqual([
       { type: 'item.started', item: { kind: 'message', id: 'item_1', role: 'assistant', text: 'The whole reply.' } },
       { type: 'item.completed', item: { kind: 'message', id: 'item_1', role: 'assistant', text: 'The whole reply.' } },
-      { type: 'turn.completed', turnId: 'turn_1', stopReason: 'end_turn' },
+      {
+        type: 'turn.completed',
+        turnId: 'turn_1',
+        stopReason: 'end_turn',
+        blockCounts: { text: 0, thinking: 0, thinkingWithheld: 0, toolUse: 0, redactedThinking: 0, serverToolUse: 0, other: 0 },
+      },
     ]);
   });
 
@@ -789,5 +794,162 @@ describe('claude blank thinking blocks (#528)', () => {
     const events = reasoningItems(assistant('Checking the auth path.'));
     expect(events).toHaveLength(2); // started + completed
     expect(events.every((e) => 'item' in e && e.item.kind === 'reasoning' && e.item.text === 'Checking the auth path.')).toBe(true);
+  });
+});
+
+/**
+ * `blockCounts` / `childBlockCounts` — Phase 1 of
+ * `.ai/specs/2026-08-21-output-token-attribution.md`. The raw content-block tally `mapAssistant`
+ * accumulates (branching on `parent_tool_use_id`, D2) and `mapResult` flushes onto
+ * `turn.completed`. `thinking` splits into `thinking` (non-blank/visible) and `thinkingWithheld`
+ * (blank/billed-but-invisible) — two counters, not one (D1).
+ */
+describe('claude block-type tally (blockCounts / childBlockCounts)', () => {
+  /** Drive a sequence of raw stream-json messages and return every `turn.completed` seen, in order. */
+  function turnsCompleted(messages: unknown[]): Array<Extract<UiEvent, { type: 'turn.completed' }>> {
+    let state = createClaudeUiState();
+    const turns: Array<Extract<UiEvent, { type: 'turn.completed' }>> = [];
+    for (const msg of messages) {
+      const mapped = mapClaudeMessage(msg, state);
+      state = mapped.state;
+      for (const e of mapped.events) if (e.type === 'turn.completed') turns.push(e);
+    }
+    return turns;
+  }
+
+  const ZERO: ClaudeBlockCounts = {
+    text: 0,
+    thinking: 0,
+    thinkingWithheld: 0,
+    toolUse: 0,
+    redactedThinking: 0,
+    serverToolUse: 0,
+    other: 0,
+  };
+
+  function assistant(content: unknown[], parentToolUseId?: string): unknown {
+    const msg: Record<string, unknown> = { type: 'assistant', message: { role: 'assistant', content } };
+    if (parentToolUseId !== undefined) msg.parent_tool_use_id = parentToolUseId;
+    return msg;
+  }
+
+  const result = { type: 'result', subtype: 'success', result: 'done' };
+
+  it('tallies every raw block type in one assistant frame — including blocks that mint no item', () => {
+    const [turn] = turnsCompleted([
+      assistant([
+        { type: 'thinking', thinking: '' }, // blank — mints no reasoning item (#528), tallies thinkingWithheld
+        { type: 'thinking', thinking: 'Real reasoning.' }, // non-blank — tallies thinking
+        { type: 'text', text: 'Hello.' },
+        { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls' } },
+        { type: 'tool_use' }, // missing id/name — mints no item, still tallied as tool_use
+        { type: 'redacted_thinking', data: 'x' },
+        { type: 'server_tool_use', id: 'srv_1', name: 'web_search' },
+        { type: 'some_future_block_type' },
+      ]),
+      result,
+    ]);
+    expect(turn?.blockCounts).toEqual({
+      text: 1,
+      thinking: 1,
+      thinkingWithheld: 1,
+      toolUse: 2,
+      redactedThinking: 1,
+      serverToolUse: 1,
+      other: 1,
+    });
+    expect(turn?.childBlockCounts).toBeUndefined(); // nothing dispatched — undefined, not a fake zero
+  });
+
+  it('the real wire shape — several single-block frames per turn (70f19253: histogram {1: 628})', () => {
+    const [turn] = turnsCompleted([
+      assistant([{ type: 'thinking', thinking: '' }]),
+      assistant([{ type: 'text', text: "I'll fix the bug." }]),
+      assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls' } }]),
+      result,
+    ]);
+    expect(turn?.blockCounts).toEqual({ ...ZERO, text: 1, thinkingWithheld: 1, toolUse: 1 });
+  });
+
+  it('a frame carrying parent_tool_use_id tallies into childBlockCounts, never blockCounts', () => {
+    const [turn] = turnsCompleted([
+      assistant([{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: {} }]), // main agent dispatches
+      assistant([{ type: 'text', text: 'Scanning.' }], 'toolu_task'), // sub-agent frame
+      assistant([{ type: 'thinking', thinking: 'Wrapping up.' }], 'toolu_task'), // sub-agent frame
+      assistant([{ type: 'thinking', thinking: 'Main agent wraps up.' }]), // main agent again
+      result,
+    ]);
+    // Disjoint: blockCounts reads exactly as if the sub-agent frames never occurred.
+    expect(turn?.blockCounts).toEqual({ ...ZERO, toolUse: 1, thinking: 1 });
+    expect(turn?.childBlockCounts).toEqual({ ...ZERO, text: 1, thinking: 1 });
+  });
+
+  it('accumulates across multiple main-agent frames in one turn', () => {
+    const [turn] = turnsCompleted([
+      assistant([{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: {} }]),
+      assistant([{ type: 'thinking', thinking: 'Wrapping up.' }]),
+      result,
+    ]);
+    expect(turn?.blockCounts).toEqual({ ...ZERO, thinking: 1, toolUse: 1 });
+  });
+
+  it('resets to zero at the next turn — blockCounts AND childBlockCounts', () => {
+    // Two full turns, `claudeTurnStarted` driving the boundary between them exactly as the
+    // runner does — the defensive reset this pins lives in BOTH `claudeTurnStarted` and
+    // `mapResult`, so going through the real turn boundary (rather than only `mapResult`)
+    // exercises the one `mapResult`'s own reset alone would not.
+    let state = createClaudeUiState();
+    const push = (msg: unknown): Array<Extract<UiEvent, { type: 'turn.completed' }>> => {
+      const mapped = mapClaudeMessage(msg, state);
+      state = mapped.state;
+      return mapped.events.filter((e): e is Extract<UiEvent, { type: 'turn.completed' }> => e.type === 'turn.completed');
+    };
+    push(assistant([{ type: 'thinking', thinking: 'First turn only.' }]));
+    push(assistant([{ type: 'text', text: 'Sub note.' }], 'toolu_x'));
+    const [turn1] = push(result);
+    state = claudeTurnStarted(state).state;
+    push(assistant([{ type: 'text', text: 'Second turn.' }]));
+    const [turn2] = push(result);
+
+    expect(turn1?.blockCounts).toEqual({ ...ZERO, thinking: 1 });
+    expect(turn1?.childBlockCounts).toEqual({ ...ZERO, text: 1 });
+    expect(turn2?.blockCounts).toEqual({ ...ZERO, text: 1 });
+    expect(turn2?.childBlockCounts).toBeUndefined();
+  });
+
+  it('a main-agent frame with only unknown/malformed blocks still updates the tally though it mints no events', () => {
+    const first = mapClaudeMessage(assistant([{ type: 'redacted_thinking', data: 'x' }]), createClaudeUiState());
+    expect(first.events).toEqual([]); // no item minted — but the tally must have moved regardless
+    const done = mapClaudeMessage(result, first.state);
+    const turnEvent = done.events.find((e): e is Extract<UiEvent, { type: 'turn.completed' }> => e.type === 'turn.completed');
+    expect(turnEvent?.blockCounts).toEqual({ ...ZERO, redactedThinking: 1 });
+  });
+
+  /**
+   * N3 — the `events.length === 0` early-return path. A frame whose ONLY block is blank
+   * `thinking` mints no item (blank thinking mints nothing, #528), so the block loop produces
+   * zero `UiEvent`s and `mapAssistant` takes the early return that today only preserves
+   * `lastMainAgentPromptTokens`. Both the main-agent and sub-agent shape must still tally.
+   */
+  it('the events.length===0 early return still threads the tally, main-agent AND sub-agent', () => {
+    const blankThinking = [{ type: 'thinking', thinking: '' }];
+    let state = createClaudeUiState();
+
+    const mainOnly = mapClaudeMessage(assistant(blankThinking), state);
+    expect(mainOnly.events).toEqual([]);
+    state = mainOnly.state;
+    expect(state.blockCounts.thinkingWithheld).toBe(1);
+
+    const subAgent = mapClaudeMessage(assistant(blankThinking, 'toolu_sub'), state);
+    expect(subAgent.events).toEqual([]);
+    state = subAgent.state;
+    // The main-agent count must not have moved — this frame was a child's.
+    expect(state.blockCounts.thinkingWithheld).toBe(1);
+    expect(state.childBlockCounts.thinkingWithheld).toBe(1);
+
+    const done = mapClaudeMessage(result, state);
+    const turnEvent = done.events.find((e): e is Extract<UiEvent, { type: 'turn.completed' }> => e.type === 'turn.completed');
+    expect(turnEvent?.blockCounts).toEqual({ ...ZERO, thinkingWithheld: 1 });
+    expect(turnEvent?.childBlockCounts).toEqual({ ...ZERO, thinkingWithheld: 1 });
   });
 });

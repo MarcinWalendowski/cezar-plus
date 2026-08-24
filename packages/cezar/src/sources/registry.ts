@@ -1,3 +1,4 @@
+import { CEZAR_HUB_SOURCE_KIND, createCezarHubSourceProvider } from './cezar-hub/provider.ts';
 import { createNotionSourceProvider, NOTION_SOURCE_KIND } from './notion/provider.ts';
 import type { SourceProvider, SourceProviderDeps, SourceProviderFactory } from './provider-types.ts';
 import type { SourceConnection } from './types.ts';
@@ -16,6 +17,13 @@ import type { SourceConnection } from './types.ts';
 
 export const SOURCE_PROVIDERS: Record<string, SourceProviderFactory> = {
   [NOTION_SOURCE_KIND]: createNotionSourceProvider,
+  // The hub's own corpus, mirrored down to a node that must be able to READ the record without
+  // being where it lives (D8a of `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`). This row is
+  // the first OUTSIDE test of the promise the docblock above makes — one new file plus one row,
+  // with no contract, route or UI change — and it held: `cezar-hub` needed neither. Its provider
+  // is a typed stub whose `detect()` honestly reports unavailable until package 3b.1 lands the
+  // body, which is what keeps `GET /api/v1/sources/providers` answering rather than throwing.
+  [CEZAR_HUB_SOURCE_KIND]: createCezarHubSourceProvider,
 };
 
 /**

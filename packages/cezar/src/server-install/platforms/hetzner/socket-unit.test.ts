@@ -74,6 +74,37 @@ describe('nonDisruptiveDropIn', () => {
   });
 });
 
+describe('nonDisruptiveDropIn — runAsUid ordering hardening (Phase 0.3 of the broker-scope-isolation spec)', () => {
+  it('adds no [Unit] section when the uid is unknown', () => {
+    const dropIn = nonDisruptiveDropIn({ socketUnit: 'cezar.socket' });
+    expect(dropIn).not.toContain('[Unit]');
+    expect(dropIn).not.toContain('user@');
+  });
+
+  it('orders after and wants user@<uid>.service when the uid is given', () => {
+    const dropIn = nonDisruptiveDropIn({ socketUnit: 'cezar.socket', runAsUid: 999 });
+    expect(dropIn).toContain('[Unit]');
+    expect(dropIn).toContain('After=user@999.service');
+    expect(dropIn).toContain('Wants=user@999.service');
+  });
+
+  it('still carries every [Service] directive when [Unit] is present', () => {
+    const dropIn = nonDisruptiveDropIn({ socketUnit: 'cezar.socket', runAsUid: 999 });
+    expect(dropIn).toContain('[Service]');
+    expect(dropIn).toContain('Sockets=cezar.socket');
+    expect(dropIn).toContain('KillMode=process');
+    expect(dropIn).toContain('Delegate=yes');
+  });
+
+  it('the generator trusts its caller — resolveRunAsUid (release-cli.ts) is what refuses to guess 0', () => {
+    // The generator itself has no opinion on which uid is "wrong"; release-cli.test.ts covers the
+    // actual guard (a base unit with no User= line, or an unreadable one, resolves to undefined,
+    // never 0).
+    const dropIn = nonDisruptiveDropIn({ socketUnit: 'cezar.socket', runAsUid: 0 });
+    expect(dropIn).toContain('user@0.service');
+  });
+});
+
 describe('cezarRunsSlice', () => {
   it('is a slice unit', () => {
     expect(cezarRunsSlice()).toContain('[Slice]');

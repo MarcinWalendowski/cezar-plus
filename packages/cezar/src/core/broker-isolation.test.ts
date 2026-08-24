@@ -5,8 +5,11 @@ import {
   RUNS_SLICE,
   brokerScopeUnitName,
   buildBrokerLaunchArgv,
+  buildRunScopeProperties,
+  buildRunsSliceProperties,
   chooseIsolation,
   describeIsolation,
+  detectResourceKill,
   survivesRestart,
   defaultRuntimeDir,
   probeUserScope,
@@ -72,6 +75,131 @@ describe('buildBrokerLaunchArgv', () => {
     const argv = buildBrokerLaunchArgv({ isolation: 'none', runId: 'r', command });
     argv.push('mutated');
     expect(command).not.toContain('mutated');
+  });
+
+  it('is byte-for-byte the pre-D14a argv when resources is omitted — no properties appear unasked', () => {
+    const before = buildBrokerLaunchArgv({ isolation: 'scope', runId: 'run-1', command });
+    const after = buildBrokerLaunchArgv({
+      isolation: 'scope',
+      runId: 'run-1',
+      command,
+      resources: { runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null, runsSliceMemoryMaxMb: null },
+    });
+    expect(after).toEqual(before);
+    expect(before.some((a) => a.startsWith('--property=') || a.startsWith('--slice-property='))).toBe(false);
+  });
+
+  it('wires configured resource bounds in before the `--` command separator', () => {
+    const argv = buildBrokerLaunchArgv({
+      isolation: 'scope',
+      runId: 'run-1',
+      command,
+      resources: { runMemoryHighMb: 3000, runMemoryMaxMb: 4096, runCpuWeight: 50, runsSliceMemoryMaxMb: 12000 },
+    });
+    const sep = argv.indexOf('--');
+    const flags = argv.slice(0, sep);
+    expect(flags).toContain('--property=MemoryHigh=3000M');
+    expect(flags).toContain('--property=MemoryMax=4096M');
+    expect(flags).toContain('--property=CPUWeight=50');
+    expect(flags).toContain('--slice-property=MemoryMax=12000M');
+    expect(argv.slice(sep + 1)).toEqual(command);
+  });
+
+  it('never emits resource flags for delegated or none, even when resources is set', () => {
+    const resources = { runMemoryMaxMb: 4096 };
+    expect(buildBrokerLaunchArgv({ isolation: 'delegated', runId: 'r', command, resources })).toEqual(command);
+    expect(buildBrokerLaunchArgv({ isolation: 'none', runId: 'r', command, resources })).toEqual(command);
+  });
+});
+
+describe('buildRunScopeProperties / buildRunsSliceProperties (D14a)', () => {
+  it('emits nothing when every bound is null — the default, and the safe published state', () => {
+    expect(
+      buildRunScopeProperties({ runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null }),
+    ).toEqual([]);
+    expect(buildRunsSliceProperties({ runsSliceMemoryMaxMb: null })).toEqual([]);
+  });
+
+  it('emits nothing when the object is empty (fields simply absent)', () => {
+    expect(buildRunScopeProperties({})).toEqual([]);
+    expect(buildRunsSliceProperties({})).toEqual([]);
+  });
+
+  it('emits exactly one --property= per configured scope bound, none for the ones left null', () => {
+    expect(buildRunScopeProperties({ runMemoryHighMb: 2048, runMemoryMaxMb: null, runCpuWeight: null })).toEqual([
+      '--property=MemoryHigh=2048M',
+    ]);
+    expect(buildRunScopeProperties({ runMemoryHighMb: null, runMemoryMaxMb: 4096, runCpuWeight: null })).toEqual([
+      '--property=MemoryMax=4096M',
+    ]);
+    expect(buildRunScopeProperties({ runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: 25 })).toEqual([
+      '--property=CPUWeight=25',
+    ]);
+  });
+
+  it('emits all three together, in a stable order', () => {
+    expect(buildRunScopeProperties({ runMemoryHighMb: 1000, runMemoryMaxMb: 2000, runCpuWeight: 10 })).toEqual([
+      '--property=MemoryHigh=1000M',
+      '--property=MemoryMax=2000M',
+      '--property=CPUWeight=10',
+    ]);
+  });
+
+  it('the slice ceiling only fires on its own field', () => {
+    expect(buildRunsSliceProperties({ runsSliceMemoryMaxMb: 12000 })).toEqual(['--slice-property=MemoryMax=12000M']);
+    // A run-scope bound must never leak onto the slice flag.
+    expect(buildRunsSliceProperties({ runMemoryMaxMb: 4096 })).toEqual([]);
+  });
+
+  it('treats 0 as a real configured value, not as absence — only null/undefined mean "off"', () => {
+    expect(buildRunScopeProperties({ runMemoryHighMb: 0 })).toEqual(['--property=MemoryHigh=0M']);
+  });
+});
+
+describe('detectResourceKill (D14a, C3: never a bare failed step)', () => {
+  const cezarInitiated = { cezarInitiated: false };
+
+  it('negative control: no bound configured — a SIGKILL is NOT attributed to a resource kill', () => {
+    expect(
+      detectResourceKill({ code: null, signal: 'SIGKILL' }, { runMemoryMaxMb: null, runsSliceMemoryMaxMb: null }, cezarInitiated),
+    ).toBeUndefined();
+  });
+
+  it('negative control: bound configured, but the exit was not a SIGKILL — an ordinary test failure stays a failure', () => {
+    expect(detectResourceKill({ code: 1, signal: null }, { runMemoryMaxMb: 4096 }, cezarInitiated)).toBeUndefined();
+    expect(detectResourceKill({ code: 0, signal: null }, { runMemoryMaxMb: 4096 }, cezarInitiated)).toBeUndefined();
+  });
+
+  it('negative control: bound configured and SIGKILLed, but cezar sent the kill itself (its own timeout/interrupt escalation)', () => {
+    expect(
+      detectResourceKill({ code: null, signal: 'SIGKILL' }, { runMemoryMaxMb: 4096 }, { cezarInitiated: true }),
+    ).toBeUndefined();
+  });
+
+  it('reports a named resource kill when a scope MemoryMax was configured and the kill was not ours', () => {
+    const result = detectResourceKill({ code: null, signal: 'SIGKILL' }, { runMemoryMaxMb: 4096 }, cezarInitiated);
+    expect(result).toEqual({ limit: 'memory', detail: expect.stringContaining('MemoryMax=4096M on the run scope') });
+  });
+
+  it('also detects the self-reported form (exit code 137) — a CLI that traps and re-reports SIGKILL', () => {
+    const result = detectResourceKill({ code: 137, signal: null }, { runMemoryMaxMb: 4096 }, cezarInitiated);
+    expect(result?.limit).toBe('memory');
+  });
+
+  it('attributes to the slice ceiling when only the slice bound was configured', () => {
+    const result = detectResourceKill(
+      { code: null, signal: 'SIGKILL' },
+      { runMemoryMaxMb: null, runsSliceMemoryMaxMb: 12000 },
+      cezarInitiated,
+    );
+    expect(result?.detail).toContain(`MemoryMax=12000M on ${RUNS_SLICE}`);
+  });
+
+  it('never returns a `cpu` kill — CPUWeight is a scheduling weight, not a hard cap that can fire one', () => {
+    // Even with only runCpuWeight configured (no memory bound at all), a SIGKILL is unattributed.
+    expect(
+      detectResourceKill({ code: null, signal: 'SIGKILL' }, { runCpuWeight: 10 }, cezarInitiated),
+    ).toBeUndefined();
   });
 });
 

@@ -47,6 +47,7 @@ const HEALTH_ON: HealthResponse = {
   checks: [],
   forge: null,
   capabilities: {
+    cluster: false,
     localHandoff: true,
     tokenMetrics: true,
     tokenUsageMetrics: true,
@@ -60,6 +61,7 @@ const HEALTH_ON: HealthResponse = {
     workspaceViews: false,
     notify: false,
     accountUsage: false,
+    autoAccounts: false,
     skills: true,
   },
   projects: [

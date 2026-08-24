@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
@@ -28,7 +28,8 @@ import { z } from 'zod';
 
 /** Bumped when the on-disk spool contract changes in a way a running broker/server pair cannot
  *  straddle. A server re-attaching to a spool with a different major refuses and falls back. */
-export const BROKER_PROTOCOL = 1;
+export const BROKER_PROTOCOL = 2;
+export const SPOOL_ORPHAN_GRACE_MS = 30 * 60_000;
 
 export const spoolMetaSchema = z
   .object({
@@ -45,6 +46,8 @@ export const spoolMetaSchema = z
     argv: z.array(z.string()).default([]).catch([]),
     cwd: z.string().optional().catch(undefined),
     startedAt: z.string().optional().catch(undefined),
+    /** Unique identity of this broker launch. Absent only on protocol-1 spools. */
+    instanceId: z.string().min(1).optional().catch(undefined),
   })
   .passthrough();
 export type SpoolMeta = z.infer<typeof spoolMetaSchema>;
@@ -54,6 +57,8 @@ export const spoolExitSchema = z
     code: z.number().int().nullable().catch(null),
     signal: z.string().nullable().catch(null),
     exitedAt: z.string().optional().catch(undefined),
+    brokerPid: z.number().int().positive().optional().catch(undefined),
+    instanceId: z.string().min(1).optional().catch(undefined),
   })
   .passthrough();
 export type SpoolExit = z.infer<typeof spoolExitSchema>;
@@ -124,14 +129,25 @@ export function controlSocketPath(spoolDir: string, tmp: string = tmpdir()): str
   return join(tmp, name);
 }
 
-/** `<dataDir>/runs/<runId>.spool` — one per agent session. */
-export function spoolDirFor(runsDir: string, runId: string): string {
+/** `<dataDir>/runs/<runId>.spool/<instanceId>`: one directory per broker launch. */
+export function spoolDirFor(runsDir: string, runId: string, instanceId: string): string {
+  return join(legacySpoolDirFor(runsDir, runId), instanceId);
+}
+
+/** The protocol-1 flat spool path, retained only for recovery and migration. */
+export function legacySpoolDirFor(runsDir: string, runId: string): string {
   return join(runsDir, `${runId}.spool`);
 }
 
 export function ensureSpoolDir(spoolDir: string): SpoolPaths {
   mkdirSync(spoolDir, { recursive: true, mode: 0o700 });
-  return spoolPaths(spoolDir);
+  const paths = spoolPaths(spoolDir);
+  try {
+    unlinkSync(paths.exit);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  return paths;
 }
 
 export function writeSpoolMeta(spoolDir: string, meta: SpoolMeta): void {
@@ -178,6 +194,19 @@ export function isPidAlive(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+/** Whether an exit can be attributed to the broker described by meta. */
+export function exitBelongsTo(
+  meta: SpoolMeta | null,
+  exit: SpoolExit,
+  alive: (pid: number) => boolean = isPidAlive,
+): boolean {
+  if (!meta) return false;
+  if (meta.instanceId && exit.instanceId) return meta.instanceId === exit.instanceId;
+  if (exit.brokerPid !== undefined) return exit.brokerPid === meta.pid;
+  if (meta.instanceId) return false;
+  return !alive(meta.pid);
 }
 
 export interface SpoolReadResult {
@@ -233,13 +262,13 @@ export function readSpoolFrom(outPath: string, offset: number): SpoolReadResult 
   return { lines, nextOffset: from + consumed, size };
 }
 
-/** True when a spool looks re-attachable: meta parses, protocol matches, broker pid is alive and
- *  it has not recorded an exit. Every `false` here routes the caller to the legacy path. */
+/** True when a spool looks re-attachable: its broker is alive and has not recorded its own exit. */
 export function isSpoolLive(spoolDir: string): boolean {
   if (!existsSync(spoolDir)) return false;
   const meta = readSpoolMeta(spoolDir);
   if (!meta) return false;
   if (meta.protocol !== BROKER_PROTOCOL) return false;
-  if (readSpoolExit(spoolDir)) return false;
+  const exit = readSpoolExit(spoolDir);
+  if (exit && exitBelongsTo(meta, exit)) return false;
   return isPidAlive(meta.pid);
 }

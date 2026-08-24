@@ -83,6 +83,31 @@ function stepById(ctx: InstallContext, id: string) {
   return s;
 }
 
+/**
+ * Mirrors hetzner.ts's own (unexported) `WorkerExtraState` — see that file's module docblock,
+ * "Worker role", for why `role`/`clusterJoinToken`/etc. aren't (yet) part of `ServerState` itself.
+ * `serverStateSchema` is `.passthrough()`, so these survive `ctxWith`'s spread onto a real
+ * `ServerState` object exactly the way they'd survive a real load+save round-trip.
+ */
+type WorkerState = Partial<ServerState> & {
+  role?: 'worker';
+  clusterJoinToken?: string;
+  workerRepoUrls?: string[];
+  workerEnvPassthrough?: string;
+  workerLoginsConfirmed?: boolean;
+};
+
+function ctxWithWorker(over: {
+  ui?: Ui;
+  runner?: Runner;
+  dryRun?: boolean;
+  assumeYes?: boolean;
+  state?: WorkerState;
+}): InstallContext {
+  const state: WorkerState = { role: 'worker', ...over.state };
+  return ctxWith({ ...over, state });
+}
+
 /** `findSupervisorInstance()` (private to hetzner.ts) scans every `server-install` record under
  *  `CEZ_HOME` for a `platform: 'hetzner'` record with no `orgSlug` — seed one on disk exactly the
  *  way a real supervisor install would leave it, in a sandboxed temp `CEZ_HOME` (never the real
@@ -952,6 +977,346 @@ describe('hetzner redeploy', () => {
       },
     };
     const ctx = ctxWith({ runner, state: { domain: 'login.cezar.example.com' } });
+    await expect(hetzner.redeploy!(ctx)).rejects.toBeInstanceOf(StepAborted);
+  });
+});
+
+describe('hetzner preflight — worker role (Phase 4, spec 2026-08-22-multi-node-cezar-cluster)', () => {
+  it('needs no --domain — a worker dials out, it terminates no inbound HTTP', async () => {
+    await expect(
+      hetzner.preflight(ctxWithWorker({ dryRun: true, state: { clusterJoinToken: 'cezj_abc' } })),
+    ).resolves.toBeUndefined();
+  });
+
+  it('requires --join — refuses with a clear message, not a later silent failure', async () => {
+    await expect(hetzner.preflight(ctxWithWorker({ dryRun: true }))).rejects.toThrow(/--join/);
+  });
+
+  it('a blank/whitespace-only join token is treated as absent', async () => {
+    await expect(
+      hetzner.preflight(ctxWithWorker({ dryRun: true, state: { clusterJoinToken: '   ' } })),
+    ).rejects.toThrow(/--join/);
+  });
+
+  it('dry-run skips every OS check', async () => {
+    await expect(hetzner.preflight(ctxWithWorker({ dryRun: true }))).rejects.toThrow(/--join/);
+    // (still validated: dry-run only skips OS probes, not the join-token requirement above)
+  });
+
+  it('refuses non-Linux, same as supervisor/org mode', async () => {
+    await expect(
+      hetzner.preflight(
+        ctxWithWorker({
+          runner: preflightOkRunner({ uname: { code: 0, stdout: 'Darwin\n', stderr: '' } }),
+          state: { clusterJoinToken: 'cezj_abc' },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(PreflightError);
+  });
+
+  it('does NOT refuse root — D17\'s minted one-liner runs as root on a bare VPS, unlike supervisor/org mode', async () => {
+    await expect(
+      hetzner.preflight(
+        ctxWithWorker({
+          runner: preflightOkRunner({ id: { code: 0, stdout: '0\n', stderr: '' } }),
+          state: { clusterJoinToken: 'cezj_abc' },
+        }),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('passes with a real join token and a Linux+apt+non-root runner', async () => {
+    await expect(
+      hetzner.preflight(ctxWithWorker({ runner: preflightOkRunner(), state: { clusterJoinToken: 'cezj_abc' } })),
+    ).resolves.toBeUndefined();
+  });
+
+  it('"worker" is a reserved --org-slug — it would collide with the worker pseudo-slug\'s own unix user', async () => {
+    await expect(
+      hetzner.preflight(ctxWith({ dryRun: true, state: { domain: 'acme.cezar.example.com', orgSlug: 'worker' } })),
+    ).rejects.toThrow(/reserved/);
+  });
+});
+
+describe('hetzner steps() — the worker role is a THIRD target, and does not disturb the other two', () => {
+  it('worker mode: deps, org-user (reused, worker pseudo-slug), checkouts, resources, systemd, login, enroll, verify — no nginx/TLS', () => {
+    const ids = hetzner.steps(ctxWithWorker({ state: { clusterJoinToken: 'cezj_abc' } })).map((s) => s.id);
+    expect(ids).toEqual([
+      'deps',
+      'org-user',
+      'worker-checkouts',
+      'worker-resources',
+      'worker-systemd',
+      'worker-login',
+      'worker-enroll',
+      'worker-verify',
+    ]);
+    expect(ids).not.toContain('nginx');
+    expect(ids).not.toContain('tls');
+  });
+
+  // The control that actually matters (team brief): a change that only ever gets exercised
+  // through the NEW branch could still silently break the other two by, e.g., mis-widening
+  // isSupervisorMode. Re-assert both pre-existing lists verbatim.
+  it('does NOT change supervisor mode\'s step list', () => {
+    const ids = hetzner.steps(ctxWith({ state: { domain: 'login.cezar.example.com' } })).map((s) => s.id);
+    expect(ids).toEqual(['supervisor-user', 'supervisor-systemd', 'nginx', 'tls', 'identity']);
+  });
+
+  it('does NOT change org mode\'s step list', () => {
+    const ids = hetzner
+      .steps(ctxWith({ state: { domain: 'acme.cezar.example.com', orgSlug: 'acme' } }))
+      .map((s) => s.id);
+    expect(ids).toEqual(['deps', 'org-create', 'org-user', 'org-systemd', 'org-register', 'nginx', 'tls', 'identity']);
+  });
+
+  it('the worker\'s "org-user" step derives the reserved worker pseudo-slug\'s unix user, not an org\'s', async () => {
+    const ctx = ctxWithWorker({ dryRun: true, state: { clusterJoinToken: 'cezj_abc' } });
+    const created = await stepById(ctx, 'org-user').run(ctx);
+    const artifact = created?.artifacts.find((a) => a.type === 'unix-user');
+    expect(artifact?.name).toBe('cez-worker');
+  });
+});
+
+describe('hetzner worker-checkouts step', () => {
+  it('blank answer skips cloning — repos are registered later through the cockpit, same as an org\'s workspace', async () => {
+    const ui = createAutoUi({ 'Repos this worker should check out now (comma-separated git remote URLs; blank = register them later through the cockpit)': '' });
+    const ctx = ctxWithWorker({ ui, state: { clusterJoinToken: 'cezj_abc' } });
+    const created = await stepById(ctx, 'worker-checkouts').run(ctx);
+    expect(created?.artifacts ?? []).toEqual([]);
+    expect((ctx.state as WorkerState).workerRepoUrls).toEqual([]);
+  });
+
+  it('a comma-separated answer clones each repo as the worker user, and records the list', async () => {
+    // sudoStep's actual privileged execution goes through `interactive('sudo', ['bash','-lc',
+    // command])`, never `capture` — `capture` is only the hasPasswordlessSudo probe and verify().
+    const commands: string[] = [];
+    const runner: Runner = {
+      interactive: async (program, args) => {
+        if (program === 'sudo') commands.push(String(args[2] ?? ''));
+        return 0;
+      },
+      capture: async () => ({ code: 0, stdout: '', stderr: '' }),
+    };
+    const ui = createAutoUi({
+      'Repos this worker should check out now (comma-separated git remote URLs; blank = register them later through the cockpit)':
+        'git@github.com:org/chat.git, git@github.com:org/cezar.git',
+    });
+    // assumeYes: passwordless sudo (capture() returns code 0 above) routes sudoStep through the
+    // 'sudo' branch automatically, so the command actually runs (vs. delegate mode, which never
+    // touches the runner at all and would make this assertion vacuous).
+    const ctx = ctxWithWorker({ ui, runner, assumeYes: true, state: { clusterJoinToken: 'cezj_abc' } });
+    const created = await stepById(ctx, 'worker-checkouts').run(ctx);
+    expect((ctx.state as WorkerState).workerRepoUrls).toEqual([
+      'git@github.com:org/chat.git',
+      'git@github.com:org/cezar.git',
+    ]);
+    const paths = (created?.artifacts ?? []).map((a) => a.path);
+    expect(paths).toEqual(['/home/cez-worker/workspace/chat', '/home/cez-worker/workspace/cezar']);
+    // The clone command itself must run AS the worker user, never as root (same nesting
+    // trustProjectRootCommand uses in provision-user.ts).
+    expect(commands.some((c) => c.includes('sudo -u cez-worker -H git clone'))).toBe(true);
+  });
+
+  it('check() is false until every recorded repo has a .git dir at its expected path', async () => {
+    const runner: Runner = {
+      interactive: async () => 0,
+      capture: async () => ({ code: 1, stdout: '', stderr: '' }), // "test -d" fails ⇒ not cloned yet
+    };
+    const ctx = ctxWithWorker({ runner, state: { clusterJoinToken: 'cezj_abc', workerRepoUrls: ['https://example.com/org/repo.git'] } });
+    expect(await stepById(ctx, 'worker-checkouts').check(ctx)).toBe(false);
+  });
+
+  it('undo lists rm -rf for each checkout — never deletes (uncommitted work may live there)', async () => {
+    const notes: string[] = [];
+    const ui = { ...createAutoUi(), note: (m: string) => notes.push(m) } as Ui;
+    const ctx = ctxWithWorker({ dryRun: true, ui, state: { clusterJoinToken: 'cezj_abc' } });
+    await stepById(ctx, 'worker-checkouts').undo(ctx, {
+      artifacts: [{ kind: 'owned', type: 'checkout', name: 'chat', path: '/home/cez-worker/workspace/chat' }],
+    });
+    expect(notes.some((m) => m.includes('rm -rf /home/cez-worker/workspace/chat'))).toBe(true);
+  });
+});
+
+describe('hetzner worker-resources step (D14: maxParallel 8 / maxHeavySteps 2)', () => {
+  it('writes config.json under the worker\'s CEZ_HOME with the D14 caps, as the worker user', async () => {
+    // Same fix as worker-checkouts above: the privileged command text lives in the `interactive`
+    // call's third arg, not anything `capture` ever sees.
+    const writes: string[] = [];
+    const runner: Runner = {
+      interactive: async (program, args) => {
+        if (program === 'sudo') writes.push(String(args[2] ?? ''));
+        return 0;
+      },
+      capture: async () => ({ code: 0, stdout: '', stderr: '' }),
+    };
+    const ctx = ctxWithWorker({ runner, state: { clusterJoinToken: 'cezj_abc' } });
+    const created = await stepById(ctx, 'worker-resources').run(ctx);
+    expect(created?.artifacts[0]?.path).toBe('/home/cez-worker/.cezar/config.json');
+    const decoded = Buffer.from(
+      writes.flatMap((w) => w.match(/printf %s '([^']+)' \| base64 --decode/)?.[1] ?? []).join(''),
+      'base64',
+    ).toString('utf8');
+    expect(JSON.parse(decoded)).toEqual({ resources: { maxParallel: 8, maxHeavySteps: 2 } });
+    expect(writes.some((w) => w.includes('sudo -u cez-worker -H tee'))).toBe(true);
+  });
+
+  it('check() is satisfied once config.json exists — a re-run never clobbers operator changes', async () => {
+    const ctx = ctxWithWorker({ runner: okRunner, state: { clusterJoinToken: 'cezj_abc' } });
+    expect(await stepById(ctx, 'worker-resources').check(ctx)).toBe(true);
+  });
+});
+
+describe('hetzner worker-systemd step (CEZ_CLUSTER=1, CEZ_ENV_PASSTHROUGH)', () => {
+  it('writes a unit with CEZ_CLUSTER=1 and no CEZ_AUTH — a worker terminates no auth of its own', async () => {
+    let unitBody = '';
+    const runner: Runner = {
+      interactive: async (program, args) => {
+        if (program !== 'sudo') return 0;
+        const m = String(args[2] ?? '').match(/printf %s '([^']+)' \| base64 --decode/);
+        if (m) {
+          const decoded = Buffer.from(m[1] as string, 'base64').toString('utf8');
+          if (decoded.includes('[Unit]')) unitBody = decoded;
+        }
+        return 0;
+      },
+      capture: async (program) => (program === 'curl' ? { code: 0, stdout: '200', stderr: '' } : { code: 0, stdout: '', stderr: '' }),
+    };
+    const ui = createAutoUi({
+      "Host env var NAMES to forward into this worker's agent runs (comma-separated; blank = none — see CEZ_ENV_PASSTHROUGH)":
+        'CEZ_FOO,CEZ_BAR',
+    });
+    const ctx = ctxWithWorker({ ui, runner, state: { clusterJoinToken: 'cezj_abc', primaryPort: 4321 } });
+    await stepById(ctx, 'worker-systemd').run(ctx);
+    expect(unitBody).toContain('Environment=CEZ_CLUSTER=1');
+    expect(unitBody).toContain('Environment=CEZ_ENV_PASSTHROUGH=CEZ_FOO,CEZ_BAR');
+    expect(unitBody).not.toContain('CEZ_AUTH');
+    expect(unitBody).toContain('User=cez-worker');
+  });
+
+  it('a blank passthrough answer omits the CEZ_ENV_PASSTHROUGH line entirely', async () => {
+    let unitBody = '';
+    const runner: Runner = {
+      interactive: async (program, args) => {
+        if (program !== 'sudo') return 0;
+        const m = String(args[2] ?? '').match(/printf %s '([^']+)' \| base64 --decode/);
+        if (m) {
+          const decoded = Buffer.from(m[1] as string, 'base64').toString('utf8');
+          if (decoded.includes('[Unit]')) unitBody = decoded;
+        }
+        return 0;
+      },
+      capture: async (program) => (program === 'curl' ? { code: 0, stdout: '200', stderr: '' } : { code: 0, stdout: '', stderr: '' }),
+    };
+    const ctx = ctxWithWorker({ runner, state: { clusterJoinToken: 'cezj_abc', primaryPort: 4321 } });
+    await stepById(ctx, 'worker-systemd').run(ctx);
+    expect(unitBody).not.toContain('CEZ_ENV_PASSTHROUGH');
+  });
+});
+
+describe('hetzner worker-login step — the interactive gate that must stop', () => {
+  it('--yes always throws StepAborted — it cannot supply a human at a login prompt', async () => {
+    const ctx = ctxWithWorker({ assumeYes: true, state: { clusterJoinToken: 'cezj_abc' } });
+    await expect(stepById(ctx, 'worker-login').run(ctx)).rejects.toBeInstanceOf(StepAborted);
+  });
+
+  it('interactive + confirmed: records workerLoginsConfirmed and does not throw', async () => {
+    const ui = createAutoUi({ 'Have you completed the login(s) above?': true });
+    const ctx = ctxWithWorker({ ui, assumeYes: false, state: { clusterJoinToken: 'cezj_abc' } });
+    await stepById(ctx, 'worker-login').run(ctx);
+    expect((ctx.state as WorkerState).workerLoginsConfirmed).toBe(true);
+  });
+
+  it('interactive + NOT confirmed: throws StepAborted, never records the flag', async () => {
+    const ui = createAutoUi({ 'Have you completed the login(s) above?': false });
+    const ctx = ctxWithWorker({ ui, assumeYes: false, state: { clusterJoinToken: 'cezj_abc' } });
+    await expect(stepById(ctx, 'worker-login').run(ctx)).rejects.toBeInstanceOf(StepAborted);
+    expect((ctx.state as WorkerState).workerLoginsConfirmed).toBeUndefined();
+  });
+
+  it('check() resumes past this step once the flag is recorded', async () => {
+    const ctx = ctxWithWorker({ state: { clusterJoinToken: 'cezj_abc', workerLoginsConfirmed: true } });
+    expect(await stepById(ctx, 'worker-login').check(ctx)).toBe(true);
+  });
+});
+
+describe('hetzner worker-enroll step (D17)', () => {
+  it('aborts loudly when no join token is recorded — never runs `cluster join` with nothing to redeem', async () => {
+    const ctx = ctxWithWorker({ state: {} });
+    await expect(stepById(ctx, 'worker-enroll').run(ctx)).rejects.toBeInstanceOf(StepAborted);
+  });
+
+  it('runs `cezar cluster join <token>` as the worker user, never printing the token itself outside the command', async () => {
+    const commands: string[] = [];
+    const runner: Runner = {
+      interactive: async (program, args) => {
+        if (program === 'sudo') commands.push(String(args[2] ?? ''));
+        return 0;
+      },
+      capture: async () => ({ code: 0, stdout: '', stderr: '' }),
+    };
+    const ctx = ctxWithWorker({ runner, state: { clusterJoinToken: 'cezj_supersecret' } });
+    await stepById(ctx, 'worker-enroll').run(ctx);
+    expect(
+      commands.some((c) => c.includes('cluster join') && c.includes('cezj_supersecret') && c.includes('sudo -u cez-worker -H')),
+    ).toBe(true);
+  });
+
+  it('check() is satisfied once cluster/node.json exists — "already enrolled"', async () => {
+    const ctx = ctxWithWorker({ runner: okRunner, state: { clusterJoinToken: 'cezj_abc' } });
+    expect(await stepById(ctx, 'worker-enroll').check(ctx)).toBe(true);
+  });
+
+  it('dry-run never executes and never throws for a missing token', async () => {
+    const ctx = ctxWithWorker({ dryRun: true, state: {} });
+    await expect(stepById(ctx, 'worker-enroll').run(ctx)).rejects.toBeInstanceOf(StepAborted);
+  });
+});
+
+describe('hetzner worker-verify step', () => {
+  it('fails loudly when nothing is listening on the loopback port', async () => {
+    const runner: Runner = {
+      interactive: async () => 0,
+      capture: async (program) => (program === 'curl' ? { code: 0, stdout: '000', stderr: '' } : { code: 0, stdout: '', stderr: '' }),
+    };
+    const ctx = ctxWithWorker({ runner, state: { clusterJoinToken: 'cezj_abc', primaryPort: 4321 } });
+    await expect(stepById(ctx, 'worker-verify').run(ctx)).rejects.toBeInstanceOf(StepAborted);
+  });
+
+  it('passes when the loopback port answers', async () => {
+    const runner: Runner = {
+      interactive: async () => 0,
+      capture: async (program) => (program === 'curl' ? { code: 0, stdout: '200', stderr: '' } : { code: 0, stdout: '', stderr: '' }),
+    };
+    const ctx = ctxWithWorker({ runner, state: { clusterJoinToken: 'cezj_abc', primaryPort: 4321 } });
+    await expect(stepById(ctx, 'worker-verify').run(ctx)).resolves.toBeDefined();
+  });
+});
+
+describe('hetzner redeploy — worker mode', () => {
+  it('re-verifies via workerVerifyStep, not the nginx/TLS verifyStep', async () => {
+    const runner: Runner = {
+      interactive: async () => 0,
+      capture: async (program, args) => {
+        if (args.includes('ExecStart')) return { code: 0, stdout: '/usr/bin/node /srv/cezar/dist/index.js serve --no-open --port 4321', stderr: '' };
+        if (program === 'curl') return { code: 0, stdout: '200', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    };
+    const ctx = ctxWithWorker({ runner, state: { clusterJoinToken: 'cezj_abc' } });
+    await expect(hetzner.redeploy!(ctx)).resolves.toBeUndefined();
+  });
+
+  it('throws StepAborted when nothing answers after the restart, same as the other modes', async () => {
+    const runner: Runner = {
+      interactive: async () => 0,
+      capture: async (program, args) => {
+        if (args.includes('ExecStart')) return { code: 0, stdout: '/usr/bin/node /srv/cezar/dist/index.js serve --no-open --port 4321', stderr: '' };
+        if (program === 'curl') return { code: 0, stdout: '000', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    };
+    const ctx = ctxWithWorker({ runner, state: { clusterJoinToken: 'cezj_abc' } });
     await expect(hetzner.redeploy!(ctx)).rejects.toBeInstanceOf(StepAborted);
   });
 });

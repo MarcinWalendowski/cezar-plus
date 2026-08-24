@@ -1,6 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -10,6 +10,8 @@ import type { AgentEvent } from './agent-runner.ts';
 import { isSignalTerminationExit, prependSystemPrompt } from './agent-runner.ts';
 import {
   buildClaudeArgs,
+  claudeProjectDirSlug,
+  claudeSessionTranscriptExists,
   ClaudeCliRunner,
   EOF_KILL_GRACE_MS,
   EOF_TERM_GRACE_MS,
@@ -187,6 +189,15 @@ describe('a teardown cezar initiated', () => {
       type: 'turn.completed',
       turnId: 'turn_1',
       stopReason: 'end_turn',
+      blockCounts: {
+        text: 1,
+        thinking: 0,
+        thinkingWithheld: 0,
+        toolUse: 0,
+        redactedThinking: 0,
+        serverToolUse: 0,
+        other: 0,
+      },
     });
     expect(events.at(-1)).toEqual({ type: 'done' });
     expect(
@@ -379,6 +390,144 @@ describe('SIGTERM→SIGKILL escalation for a CLI that survives SIGTERM', () => {
       vi.advanceTimersByTime(EOF_KILL_GRACE_MS);
       expect(fake.signals).toEqual(['SIGTERM']);
     });
+  });
+});
+
+/**
+ * A run whose agent was killed by an untrapped signal used to report `done`, and the workflow
+ * continued as though the step had succeeded. Two shapes were already handled — a TRAPPED signal
+ * death (128+signal, `isSignalTerminationExit`, the "teardown cezar initiated" describe above) and
+ * cezar's own SIGTERM→SIGKILL escalation surviving to a real exit (the describe above this one).
+ * What fell through was the bare `code: null, signal: '...'` shape an UNTRAPPED signal produces —
+ * exactly what SIGKILL always is, and what any signal becomes once nothing installs a handler for
+ * it. `waitForExit` discarded the signal before any branch could see it, so `code === null` alone
+ * read as a clean exit no matter who sent the signal or why — the kernel OOM killer, a cgroup
+ * bound, or an operator's `kill -9` all produced a silent "done".
+ */
+describe('an external signal kills the agent process directly (OOM killer / operator kill -9)', () => {
+  it('a real subprocess killed by an untrapped SIGKILL fails the run and names the signal', async () => {
+    const bin = fileURLToPath(new URL('./__fixtures__/claude/stub-suicide-sigkill.mjs', import.meta.url));
+    const events: AgentEvent[] = [];
+    const session = new ClaudeCliRunner({ bin, timeoutMs: 0 }).startSession(
+      { userPrompt: 'do it', cwd: process.cwd() },
+      (event) => events.push(event),
+    );
+
+    await expect(session.result).rejects.toThrow(/SIGKILL/);
+    expect(events.some((e) => e.type === 'error' && e.message.includes('SIGKILL'))).toBe(true);
+    // The damaging property of the bug: a `done` landing right after the signal, which is what let
+    // the run manager treat the step as finished.
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+  }, 15_000);
+
+  /** A fake child whose only source of truth is what the test tells it — used for the exit-code
+   *  floor and to pin the exact rejection message, which a real subprocess's stderr noise would
+   *  make brittle to assert on directly. */
+  function killableChild(): {
+    child: ChildProcessWithoutNullStreams;
+    exit: (code: number | null, signal: NodeJS.Signals | null) => void;
+  } {
+    const emitter = new EventEmitter();
+    const stdout = new PassThrough();
+    const child = Object.assign(emitter, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      killed: false,
+      pid: 9001,
+      kill: () => true, // cezar never signals in this block — the death is entirely external
+    }) as unknown as ChildProcessWithoutNullStreams;
+    const exit = (code: number | null, signal: NodeJS.Signals | null) => {
+      Object.assign(child, { exitCode: code, signalCode: signal });
+      stdout.end();
+      emitter.emit('exit', code, signal);
+    };
+    return { child, exit };
+  }
+
+  it('the fake child agrees with the real subprocess above, and names the signal in the message', async () => {
+    const fake = killableChild();
+    spawnHook.override = () => fake.child;
+    try {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it',
+        cwd: process.cwd(),
+      });
+      fake.exit(null, 'SIGKILL');
+      await expect(session.result).rejects.toThrow('claude CLI was killed by signal SIGKILL');
+    } finally {
+      spawnHook.override = null;
+    }
+  });
+
+  it.each([0, 1, 2])('floor: ordinary exit code %i with no signal is untouched by this fix', async (code) => {
+    const fake = killableChild();
+    spawnHook.override = () => fake.child;
+    try {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it',
+        cwd: process.cwd(),
+      });
+      fake.exit(code, null);
+      if (code === 0) {
+        await expect(session.result).resolves.toMatchObject({ text: '' });
+      } else {
+        await expect(session.result).rejects.toThrow(`claude CLI exited with code ${code}`);
+      }
+    } finally {
+      spawnHook.override = null;
+    }
+  });
+
+  it("negative control: cezar's own SIGTERM→SIGKILL escalation is NOT an external-kill failure", async () => {
+    // SIGKILL cannot be trapped, so cezar's own escalation (armed by `end()`, exactly like the
+    // "SIGTERM→SIGKILL escalation" describe above) produces the identical `code: null, signal:
+    // 'SIGKILL'` shape as an external kill — `terminatedByCezar` is the only thing that tells them
+    // apart, and this must resolve exactly as it always did: cleanly, no error, no signal named.
+    const signals: NodeJS.Signals[] = [];
+    const emitter = new EventEmitter();
+    const stdout = new PassThrough();
+    const child = Object.assign(emitter, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      killed: false,
+      pid: 9002,
+      kill: (signal: NodeJS.Signals) => {
+        signals.push(signal);
+        Object.assign(child, { killed: true });
+        if (signal === 'SIGKILL') {
+          Object.assign(child, { exitCode: null, signalCode: 'SIGKILL' });
+          stdout.end();
+          emitter.emit('exit', null, 'SIGKILL');
+        }
+        return true;
+      },
+    }) as unknown as ChildProcessWithoutNullStreams;
+
+    spawnHook.override = () => child;
+    vi.useFakeTimers();
+    try {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it',
+        cwd: process.cwd(),
+      });
+      session.end();
+
+      await vi.advanceTimersByTimeAsync(EOF_TERM_GRACE_MS);
+      expect(signals).toEqual(['SIGTERM']);
+      await vi.advanceTimersByTimeAsync(EOF_KILL_GRACE_MS);
+      expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
+
+      await expect(session.result).resolves.toMatchObject({ text: '' });
+    } finally {
+      vi.useRealTimers();
+      spawnHook.override = null;
+    }
   });
 });
 
@@ -577,5 +726,122 @@ describe('a stopped session keeps draining until the stream really ends', () => 
       const result = await session.result;
       expect(result.text).toContain('working 107');
     });
+  });
+});
+
+/**
+ * spec 2026-08-22-resume-fresh-session-fallback, Phase 1 — the FAST-PATH slug `claudeCode`
+ * itself uses for `<projects>/<slug>`. Pinned against the two shapes measured while root-causing
+ * the spec: a dot-free cwd, and a dotted worktree cwd where a `/.ai/...` segment produces a
+ * doubled dash (the second example is a stand-in for the measured path, which is not reproduced
+ * verbatim here — see the "upstream purity" gate, spec Verification #10 — but keeps its exact
+ * shape: a dotted directory segment sitting between two ordinary ones).
+ * `claudeSessionTranscriptExists` falls back to a directory scan on a slug miss — this test only
+ * pins the fast path, not existence correctness (that rests on the scan).
+ */
+describe('claudeProjectDirSlug', () => {
+  it('turns / and . into - (dot-free cwd)', () => {
+    expect(claudeProjectDirSlug('/var/lib/cezar/workspace')).toBe('-var-lib-cezar-workspace');
+  });
+
+  it('produces a doubled dash where a dotted segment (e.g. /.ai) sits', () => {
+    expect(
+      claudeProjectDirSlug(
+        '/var/lib/example/some-org/project/.ai/cezar/worktrees/3dbf68c1-83d7-4b19-9b16-62a9eaa152c2',
+      ),
+    ).toBe(
+      '-var-lib-example-some-org-project--ai-cezar-worktrees-3dbf68c1-83d7-4b19-9b16-62a9eaa152c2',
+    );
+  });
+});
+
+/**
+ * spec 2026-08-22-resume-fresh-session-fallback, Phase 1/4 — the proactive check itself, and the
+ * runner-level proof that a caller which downgrades on a miss (exactly what `run.ts` now does)
+ * never lets `--resume` reach the CLI for a session id with no transcript. This test cannot reach
+ * `run.ts`'s own wiring (that's `resume-missing-session.test.ts`) — it proves the primitive
+ * (`claudeSessionTranscriptExists`) and the contract a caller must honor with its answer.
+ */
+describe('claudeSessionTranscriptExists / the proactive resume check', () => {
+  it('fails open (answers true) when claudeHome/projects cannot be resolved at all', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cez-claude-transcript-'));
+    try {
+      // `claudeHome` exists but has no `projects/` subdirectory — an unreadable/missing dir must
+      // not read as "confirmed gone", or the check would silently discard a live session.
+      const exists = await claudeSessionTranscriptExists(root, '/some/cwd', 'never-checked');
+      expect(exists).toBe(true);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('answers false for a session id with no transcript anywhere under projects/', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cez-claude-transcript-'));
+    try {
+      mkdirSync(join(root, 'projects', claudeProjectDirSlug('/some/cwd')), { recursive: true });
+      const exists = await claudeSessionTranscriptExists(root, '/some/cwd', 'never-created-id');
+      expect(exists).toBe(false);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('finds the transcript via the directory SCAN even when the slug guess misses', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cez-claude-transcript-'));
+    try {
+      // A project dir that does NOT match `claudeProjectDirSlug(cwd)` — existence must still be
+      // found by the scan, which is what correctness actually rests on (spec Architecture).
+      const wrongSlugDir = join(root, 'projects', 'some-other-project-dir');
+      mkdirSync(wrongSlugDir, { recursive: true });
+      writeFileSync(join(wrongSlugDir, 'a-real-session.jsonl'), '{}\n');
+      const exists = await claudeSessionTranscriptExists(root, '/some/cwd', 'a-real-session');
+      expect(exists).toBe(true);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('a caller that downgrades on a miss never lets --resume reach the CLI for the dead id', async () => {
+    const mockBin = fileURLToPath(new URL('../../scripts/mock-claude.mjs', import.meta.url));
+    const root = mkdtempSync(join(tmpdir(), 'cez-claude-resume-check-'));
+    const cwd = join(root, 'cwd');
+    const claudeHome = join(root, 'claude-home');
+    mkdirSync(cwd, { recursive: true });
+    // An empty `projects/` dir — resolvable, but no transcript anywhere under it — so the check
+    // genuinely answers "does not exist" rather than failing open on an unreadable directory.
+    mkdirSync(join(claudeHome, 'projects'), { recursive: true });
+    const argsFile = join(root, 'args.ndjson');
+    const staleSessionId = 'dead-session-id';
+    const freshSessionId = 'fresh-session-id';
+
+    try {
+      const exists = await claudeSessionTranscriptExists(claudeHome, cwd, staleSessionId);
+      expect(exists).toBe(false);
+
+      // Exactly the substitution `runAgentStep`/`runContinuation` make on a miss: a fresh id,
+      // `resume: false` — never the recorded (dead) session id with `resume: true`.
+      const runner = new ClaudeCliRunner({ bin: mockBin, timeoutMs: 60_000 });
+      const result = await runner.run({
+        userPrompt: 'do it',
+        cwd,
+        env: { CEZ_MOCK_ARGS_FILE: argsFile, CEZ_HANDOFF_FILE: '', CEZ_TODOS_FILE: '' },
+        sessionId: freshSessionId,
+        resume: false,
+      });
+
+      expect(result.sessionId).toBe(freshSessionId);
+      const argv: string[][] = readFileSync(argsFile, 'utf8')
+        .split('\n')
+        .filter((line) => line.trim())
+        .map((line) => JSON.parse(line) as string[]);
+      expect(argv).toHaveLength(1);
+      expect(argv[0]).not.toContain('--resume');
+      expect(argv[0]).not.toContain(staleSessionId);
+      const idIdx = argv[0]?.indexOf('--session-id') ?? -1;
+      expect(idIdx).toBeGreaterThanOrEqual(0);
+      expect(argv[0]?.[idIdx + 1]).toBe(freshSessionId);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 });

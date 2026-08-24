@@ -46,7 +46,7 @@ async function applyReopenRequest(project: ReopenWatchProject, request: ReopenRe
   // reverse. A crash between the two leaves the row pending, so the next pass continues the run a
   // second time (a visible `continue-2` step on a run that is already reopened); stamping first
   // would instead lose the reopen silently, which is the failure this whole sweep exists to stop.
-  const result = project.manager.continueRun(request.runId, { text: request.prompt }, true);
+  const result = await project.manager.continueRun(request.runId, { text: request.prompt }, true);
   if (result.ok) {
     // TODO(analytics): emit `run.reopened` (project, source, queuedDepth) here once an event sink
     // exists — see `todo-autostart.ts`'s matching TODO for `todo.autostarted`. No analytics /

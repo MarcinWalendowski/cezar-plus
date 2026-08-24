@@ -1,7 +1,7 @@
 import { brokerRequest } from './broker-client.ts';
 import type { BrokerRequest } from './run-broker.ts';
 import type { AgentRunResult, AgentSession, ContentBlock } from './agent-runner.ts';
-import { readSpoolExit, readSpoolFrom, readSpoolMeta, spoolPaths, type SpoolExit } from './run-spool.ts';
+import { exitBelongsTo, isPidAlive, readSpoolExit, readSpoolFrom, readSpoolMeta, spoolPaths, type SpoolExit, type SpoolMeta } from './run-spool.ts';
 
 /**
  * `AgentSession` over a run broker (P4 of
@@ -34,13 +34,41 @@ export const SPOOL_POLL_MS = 50;
  * At `SPOOL_POLL_MS` this is a ~5 s window, which is generous for "the broker has been spawned but
  * has not bound its socket yet" and short enough that a broker that never came up does not leave
  * the cockpit believing a message is still on its way.
+ *
+ * MEASURED 2026-08-22 on prod-host at load average 7.68, spawning brokers exactly as
+ * `spawnBroker` does: socket accepts at p50 621 ms, max 716 ms over 10 rounds, 0 over 5 s. The
+ * budget is ~8x the observed worst case on a loaded box. Recorded because a morning of runs died
+ * with this timeout message and "raise the timeout" was the obvious wrong fix — the brokers had
+ * never been STARTED (`brokerScopeUnitName`), and no budget reaches a process that does not exist.
  */
 export const PENDING_MAX_ATTEMPTS = 100;
 
+/** A broker process wrote its metadata but its control channel exhausted the startup budget. */
+export class BrokerUnavailableError extends Error {
+  override readonly name = 'BrokerUnavailableError';
+  readonly everAnswered: boolean;
+  readonly spoolDir: string;
+
+  constructor(message: string, opts: { everAnswered: boolean; spoolDir: string }) {
+    super(message);
+    this.everAnswered = opts.everAnswered;
+    this.spoolDir = opts.spoolDir;
+  }
+}
+
+/** Only a newly launched broker whose control channel never answered is safe to retry. */
+export function isRetryableBrokerLaunch(err: unknown): err is BrokerUnavailableError {
+  return err instanceof BrokerUnavailableError && !err.everAnswered;
+}
+
 export interface BrokeredSessionOptions {
   spoolDir: string;
+  /** Immutable identity supplied by the launcher, or seeded from meta on re-attach. */
+  owner?: { instanceId?: string; brokerPid?: number };
   /** Byte offset to resume from — 0 for a fresh run, the persisted value when re-attaching. */
   startOffset?: number;
+  /** Re-attached sessions may already have delivered work before this reader existed. */
+  previouslyAnswered?: boolean;
   /** Called for each complete NDJSON line, in order, exactly once. */
   onLine: (line: string) => void;
   /** Called when the backend has exited and the spool is fully drained. */
@@ -56,7 +84,7 @@ export interface BrokeredSessionOptions {
    * exact drift `AGENT_PROTOCOL.md`'s one-seam rule exists to prevent. The runner accumulates
    * while handling `onLine`, and this callback hands the totals back.
    */
-  buildResult?: () => AgentRunResult;
+  buildResult?: (exit: SpoolExit | null) => AgentRunResult;
   pollMs?: number;
   /**
    * Turn a user message into the exact line the backend expects on stdin.
@@ -72,11 +100,32 @@ export interface BrokeredSessionOptions {
   encodeSend?: (content: ContentBlock[]) => string;
   /**
    * The broker child's own OS-level spawn error, if any (`proc.on('error', …)` in `spawnBroker`).
-   * Consulted only when the control channel gives up after `PENDING_MAX_ATTEMPTS` — lets a
-   * broker that failed to spawn at all surface its real cause instead of the generic
-   * "did not respond" message that's all the connect-retry loop can see on its own.
+   * Consulted when the control channel gives up after `PENDING_MAX_ATTEMPTS` — lets a broker that
+   * failed to spawn at all surface its real cause instead of the generic "did not respond" message
+   * that's all the connect-retry loop can see on its own.
+   *
+   * **Kept narrow deliberately.** `attachBroker`'s `buildResult` also consults this, on EVERY
+   * terminal path including a graceful `detach()`, so anything reported here becomes a thrown run
+   * failure. A wider "why is there no broker?" answer belongs in `launchFailure`, which only
+   * `giveUp` reads — an earlier cut of the 2026-08-22 fix widened this one instead and turned every
+   * clean detach-before-first-line into a failed step. The test that caught it is
+   * `broker-scope-collision.test.ts`.
    */
   spawnFailed?: () => Error | null;
+  /**
+   * Why no broker exists, asked ONLY once the control channel has given up.
+   *
+   * Separate from `spawnFailed` because it is allowed to be expensive and, more importantly,
+   * allowed to be WRONG early: "no `meta.json` yet" means nothing at t=0 and means the launcher
+   * never started a broker at t=5s. Reading it only at the give-up point is what makes that
+   * inference sound.
+   *
+   * The case it exists for: `systemd-run` refusing a scope unit name that is still taken. It exits
+   * 1, which is not a spawn `error` event, so `spawnFailed` is null and the session would otherwise
+   * report that a broker "did not respond" when no broker was ever created
+   * (`.ai/specs/2026-08-22-broker-scope-unit-name-collision.md`).
+   */
+  launchFailure?: () => Error | null;
 }
 
 export class BrokeredSession implements AgentSession {
@@ -93,11 +142,14 @@ export class BrokeredSession implements AgentSession {
   private readonly pending: BrokerRequest[] = [];
   private sending = false;
   private attempts = 0;
+  private everAnswered: boolean;
+  private lastMeta: SpoolMeta | null = null;
 
   constructor(opts: BrokeredSessionOptions) {
     this.opts = opts;
     this.spoolDir = opts.spoolDir;
     this.offset = opts.startOffset ?? 0;
+    this.everAnswered = opts.previouslyAnswered ?? false;
     this.result = new Promise<AgentRunResult>((resolve, reject) => {
       this.settle = resolve;
       this.failWith = reject;
@@ -146,8 +198,16 @@ export class BrokeredSession implements AgentSession {
     // Before reading: a queued opening message is the reason there is anything to read at all.
     void this.pumpPending();
     this.drain();
+    const meta = readSpoolMeta(this.spoolDir);
+    if (meta) this.lastMeta = meta;
     const exit = readSpoolExit(this.spoolDir);
-    if (!exit) return;
+    if (!exit) {
+      if (this.lastMeta && !isPidAlive(this.lastMeta.pid)) {
+        this.failBrokerVanished(this.lastMeta);
+      }
+      return;
+    }
+    if (!this.exitBelongsToOwner(exit, meta)) return;
     // The broker writes exit.json strictly AFTER flushing its tees, so one final drain here is
     // guaranteed to see the whole transcript rather than racing the tail.
     this.drain();
@@ -165,10 +225,35 @@ export class BrokeredSession implements AgentSession {
       // A consumer defect in the terminal callback must not strand `result` unsettled.
     }
     try {
-      this.settle(this.opts.buildResult?.() ?? { text: '', toolCalls: [], tokensUsed: 0 });
+      this.settle(this.opts.buildResult?.(exit) ?? { text: '', toolCalls: [], tokensUsed: 0 });
     } catch (err) {
       this.failWith(err);
     }
+  }
+
+  private exitBelongsToOwner(exit: SpoolExit, meta: SpoolMeta | null): boolean {
+    const owner = this.opts.owner;
+    if (!owner) return true;
+    if (owner?.instanceId) return exit.instanceId === owner.instanceId;
+    if (owner?.brokerPid !== undefined) {
+      if (exit.brokerPid !== undefined) return exit.brokerPid === owner.brokerPid;
+      return meta !== null && meta.pid === owner.brokerPid && !isPidAlive(owner.brokerPid);
+    }
+    return exitBelongsTo(meta, exit);
+  }
+
+  private failBrokerVanished(meta: SpoolMeta): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.stdinOpen = false;
+    if (this.timer) clearInterval(this.timer);
+    try {
+      this.opts.onExit?.(null);
+    } catch {
+      // Terminal reporting must not mask the broker failure.
+    }
+    const instance = meta.instanceId ? ` (instance ${meta.instanceId})` : '';
+    this.failWith(new Error(`run broker ${meta.pid} died without recording an exit${instance}`));
   }
 
   /**
@@ -210,12 +295,17 @@ export class BrokeredSession implements AgentSession {
             const waitedMs = this.attempts * (this.opts.pollMs ?? SPOOL_POLL_MS);
             this.giveUp(
               this.opts.spawnFailed?.() ??
-                new Error(`run broker for ${this.spoolDir} did not respond after ${waitedMs}ms — giving up`),
+                this.opts.launchFailure?.() ??
+                new BrokerUnavailableError(
+                  `run broker for ${this.spoolDir} did not respond after ${waitedMs}ms — giving up`,
+                  { everAnswered: this.everAnswered, spoolDir: this.spoolDir },
+                ),
             );
           }
           return;
         }
         this.attempts = 0;
+        this.everAnswered = true;
         this.pending.shift();
       }
     } finally {
@@ -262,6 +352,6 @@ export class BrokeredSession implements AgentSession {
     if (this.closed) return;
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
-    this.settle(this.opts.buildResult?.() ?? { text: '', toolCalls: [], tokensUsed: 0 });
+    this.settle(this.opts.buildResult?.(null) ?? { text: '', toolCalls: [], tokensUsed: 0 });
   }
 }

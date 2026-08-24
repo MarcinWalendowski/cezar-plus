@@ -20,6 +20,7 @@ import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { parseTaskMarkers } from '../runs/task-markers.ts';
 import { appendTurnText, RunManager } from './run.ts';
 import type { WorkflowDef } from './types.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 type UsageAccountingHarness = {
   beginUsageInvocation(runId: string, state: Record<string, unknown>, stepId: string): void;
@@ -85,7 +86,7 @@ describe('RunManager directional usage accounting', () => {
   });
 
   function fixture() {
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'usage',
       workflow: 'quick-task',
       task: 'usage',
@@ -162,6 +163,38 @@ describe('RunManager directional usage accounting', () => {
     expect(store.getRun(run.id)?.contextTokens).toBe(54_000);
     // No turn.completed has fired — token totals stay unrecorded; only occupancy moved.
     expect(store.getRun(run.id)?.steps[0]?.inputTokens).toBeUndefined();
+  });
+
+  it('persists a real reported contextWindow from usage.updated and keeps carrying it (spec 2026-08-22)', () => {
+    const { run, state, sink } = fixture();
+    internal.beginUsageInvocation(run.id, state, 'work');
+    internal.handleRunnerUiEvent(run.id, state, sink, {
+      type: 'usage.updated',
+      usage: { input: 0, output: 0, total: 0, contextWindow: 272_000 },
+    });
+    expect(store.getRun(run.id)?.steps[0]?.contextWindow).toBe(272_000);
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'turn.started', turnId: 'turn_1' });
+    // context.updated keeps carrying the same real window rather than reverting to a guess.
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'context.updated', contextTokens: 260_000 });
+    expect(store.getRun(run.id)?.steps[0]).toMatchObject({ contextTokens: 260_000, contextWindow: 272_000 });
+    internal.handleRunnerUiEvent(run.id, state, sink, {
+      type: 'turn.completed',
+      turnId: 'turn_1',
+      stopReason: 'end_turn',
+      usage: { input: 260_000, output: 500, total: 260_500 },
+      contextTokens: 260_000,
+    });
+    expect(store.getRun(run.id)?.steps[0]).toMatchObject({ contextTokens: 260_000, contextWindow: 272_000 });
+
+    // A fresh invocation resets the cached report: a new backend process may report a
+    // different figure, so nothing is carried over from the last one. This fixture's run has
+    // no `model` set, so with the report gone the patch falls through to an unmodelled guess
+    // (undefined) rather than keeping the stale 272_000.
+    internal.beginUsageInvocation(run.id, state, 'work');
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'turn.started', turnId: 'turn_2' });
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'context.updated', contextTokens: 10_000 });
+    expect(store.getRun(run.id)?.steps[0]).toMatchObject({ contextTokens: 10_000 });
+    expect(store.getRun(run.id)?.steps[0]?.contextWindow).toBeUndefined();
   });
 
   it('falls back to the usage prompt sum for contextTokens when the event omits it', () => {
@@ -277,7 +310,7 @@ it('parallel variants ignore a worktree opt-out and retain isolated mode', () =>
         source: 'built-in',
         steps: [{ id: 'work', name: 'Work', prompt: '{{task}}' }],
       },
-      { task: 'compare approaches', worktree: false },
+      { author: localCliAuthor(), task: 'compare approaches', worktree: false },
       2,
     );
 
@@ -286,6 +319,129 @@ it('parallel variants ignore a worktree opt-out and retain isolated mode', () =>
     store.flush();
     rmSync(repoRoot, { recursive: true, force: true });
   }
+});
+
+/**
+ * Milestone C, D-e (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`): `hasCapacity()` is the
+ * honest reader `cluster/spoke-runtime.ts#handleDispatch` calls before answering a dispatch offer
+ * — it has to read the SAME semaphore state that actually admits a queued run, not a separate or
+ * stale snapshot. These construct a `RunManager` directly against `WorkspaceSemaphore` fixtures
+ * already trusted elsewhere in this file (line ~72-73's `maxParallel: 0` no-capacity fixture) and
+ * call `hasCapacity()` with nothing else going on, so a mutation that stubbed the read (e.g.
+ * hardcoding `true`, or reading `presence`-shaped data that does not exist on `RunManager` at all)
+ * fails here without needing a real agent run.
+ */
+describe('RunManager#hasCapacity (Milestone C, D-e)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+
+  afterEach(() => {
+    manager?.dispose();
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('is true for a fresh manager under the default (unbounded) semaphore', async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-has-capacity-open-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+
+    await expect(manager.hasCapacity()).resolves.toBe(true);
+  });
+
+  it('is false when the workspace semaphore reports maxParallel: 0 — the real gate, not a stub', async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-has-capacity-closed-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 0 } }),
+    });
+
+    await expect(manager.hasCapacity()).resolves.toBe(false);
+  });
+});
+
+/**
+ * D-e follow-up: `hasCapacity()`'s own docblock names `pump()`'s inline gate (`:1670-1676`) as the
+ * same three-condition check, duplicated rather than shared because `pump()`'s cached `repo` and
+ * synchronous loop are load-bearing (this file's owning session declined to restructure it for
+ * that reason). One concept enforced at two sites drifts silently — each has its own passing
+ * tests that cannot see the other move out of step. This asserts BOTH answers from the SAME
+ * fixture rather than trusting them to agree: it goes red the day a fourth condition is added to
+ * one side and not the other.
+ */
+describe('RunManager#hasCapacity agrees with pump() (Milestone C, D-e follow-up)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  const WORKFLOW: WorkflowDef = {
+    name: '(planned)',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Do the task', prompt: '{{task}}' }],
+  };
+
+  afterEach(() => {
+    manager?.dispose();
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store?.flush();
+    if (repoRoot) rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('hasCapacity(): false ⇒ pump() leaves the run queued, never starts it', async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-capacity-agree-closed-'));
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 0 } }),
+    });
+
+    await expect(manager.hasCapacity()).resolves.toBe(false);
+
+    const created = manager.startRun(WORKFLOW, {
+      author: localCliAuthor(),
+      task: 'mock:done should stay queued',
+      worktree: false,
+    });
+    // `maxParallel: 0` makes admission structurally impossible — no amount of waiting changes the
+    // outcome, so a short settle (rather than a long poll to a deadline) is enough to catch a
+    // `pump()` that disagreed with the read and started it anyway.
+    await new Promise((r) => setTimeout(r, 200));
+    expect(store.getRun(created.id)?.status).toBe('queued');
+  });
+
+  it('hasCapacity(): true ⇒ pump() actually starts the run', async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-capacity-agree-open-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+
+    await expect(manager.hasCapacity()).resolves.toBe(true);
+
+    const created = manager.startRun(WORKFLOW, {
+      author: localCliAuthor(),
+      task: 'mock:done should actually start',
+      worktree: false,
+    });
+    const deadline = Date.now() + 20_000;
+    while (store.getRun(created.id)?.status === 'queued') {
+      if (Date.now() > deadline) {
+        throw new Error('run never left queued — pump() disagreed with hasCapacity()');
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(store.getRun(created.id)?.status).not.toBe('queued');
+  });
 });
 
 /**
@@ -331,7 +487,7 @@ describe('RunManager.recordTurnEnd', () => {
 
   /** A run with a real worktree forked off main, holding an edit + a new file. */
   async function makeWorktreeRun(): Promise<RunRecord> {
-    const record = store.createRun({ title: 'fix the login bug', workflow: 'quick-task', task: 'fix the login bug', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 'fix the login bug', workflow: 'quick-task', task: 'fix the login bug', steps: [] });
     const wt = await createWorktree(repoRoot, record.id, 'main');
     store.updateRun(record.id, { worktreePath: wt.path, branch: wt.branch, baseBranch: wt.baseBranch });
     writeFileSync(join(wt.path, 'a.txt'), 'one\nTWO\nthree\n'); // 1 add, 1 del
@@ -412,7 +568,7 @@ describe('RunManager.recordTurnEnd', () => {
   });
 
   it('skips diffStat for a worktree-less run, and never throws', async () => {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'do the thing', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'do the thing', steps: [] });
     await expect(manager.recordTurnEnd(record.id, TURN_TEXT)).resolves.toBeUndefined();
     const after = store.getRun(record.id);
     expect(after?.titleSummary).toBeUndefined();
@@ -424,7 +580,7 @@ describe('RunManager.recordTurnEnd', () => {
   });
 
   it('applies in-band CEZ markers from the turn text (spec 2026-07-18-task-ref-markers)', async () => {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'implement comment threads', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'implement comment threads', steps: [] });
     await manager.recordTurnEnd(
       record.id,
       'Progress so far.\nCEZ:PR=500\nCEZ:ISSUE=433\nCEZ:TITLE=implementing comment threads\nMore to come.',
@@ -439,7 +595,7 @@ describe('RunManager.recordTurnEnd', () => {
   });
 
   it('a marker title never overwrites a user rename — but the numbers still land', async () => {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(record.id, { title: 'My name', titleSummary: 'My name', titleOrigin: 'user' });
     await manager.recordTurnEnd(record.id, 'CEZ:PR=500\nCEZ:TITLE=implementing comment threads');
     const after = store.getRun(record.id);
@@ -449,7 +605,7 @@ describe('RunManager.recordTurnEnd', () => {
   });
 
   it('a junk CEZ:TITLE never blanks the title', async () => {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     await manager.recordTurnEnd(record.id, 'CEZ:PR=500\nCEZ:TITLE=...');
     const after = store.getRun(record.id);
     expect(after?.titleSummary).toBeUndefined();
@@ -458,7 +614,7 @@ describe('RunManager.recordTurnEnd', () => {
   });
 
   it('prose that merely mentions a marker changes nothing', async () => {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     await manager.recordTurnEnd(record.id, 'I will emit CEZ:PR=442 once the PR exists.');
     const after = store.getRun(record.id);
     expect(after?.markerRefs).toBeUndefined();
@@ -500,7 +656,7 @@ describe('RunManager.continueRun override', () => {
 
   /** A finished run with a resumable session on the `claude`/`sonnet` backend. */
   function resumableRun(): string {
-    const record = store.createRun({
+    const record = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 't',
@@ -513,27 +669,27 @@ describe('RunManager.continueRun override', () => {
     return record.id;
   }
 
-  it('persists a runner + model override as the run current backend', () => {
+  it('persists a runner + model override as the run current backend', async () => {
     const id = resumableRun();
-    expect(manager.continueRun(id, { runner: 'codex', model: 'gpt-5.1-codex' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { runner: 'codex', model: 'gpt-5.6-terra' })).resolves.toEqual({ ok: true });
     const after = store.getRun(id);
     expect(after?.runner).toBe('codex');
-    expect(after?.model).toBe('gpt-5.1-codex');
+    expect(after?.model).toBe('gpt-5.6-terra');
   });
 
-  it('starts fresh when Continue switches to a backend that does not own the session', () => {
+  it('starts fresh when Continue switches to a backend that does not own the session', async () => {
     const id = resumableRun();
     const calls: unknown[][] = [];
     (manager as unknown as { runContinuation: (...args: unknown[]) => Promise<void> }).runContinuation = async (...args) => {
       calls.push(args);
     };
 
-    expect(manager.continueRun(id, { runner: 'codex' })).toEqual({ ok: true });
-    expect(calls[0]?.[2]).toBeUndefined();
-    expect(calls[0]?.[3]).toBe('codex');
+    await expect(manager.continueRun(id, { runner: 'codex' })).resolves.toEqual({ ok: true });
+    expect(calls[0]?.[3]).toBeUndefined();
+    expect(calls[0]?.[4]).toBe('codex');
   });
 
-  it('resumes when Continue stays on the backend that owns the session', () => {
+  it('resumes when Continue stays on the backend that owns the session', async () => {
     const id = resumableRun();
     store.updateStep(id, 's1', { backend: 'claude' });
     const calls: unknown[][] = [];
@@ -541,9 +697,9 @@ describe('RunManager.continueRun override', () => {
       calls.push(args);
     };
 
-    expect(manager.continueRun(id, { runner: 'claude' })).toEqual({ ok: true });
-    expect(calls[0]?.[2]).toBe('sess-1');
-    expect(calls[0]?.[3]).toBe('claude');
+    await expect(manager.continueRun(id, { runner: 'claude' })).resolves.toEqual({ ok: true });
+    expect(calls[0]?.[3]).toBe('sess-1');
+    expect(calls[0]?.[4]).toBe('claude');
   });
 
   /** An idle-PARKED interactive wait (spec 2026-08-20-inactive-sessions-stay-in-progress): the
@@ -551,7 +707,7 @@ describe('RunManager.continueRun override', () => {
    *  `status: 'waiting'` (in-progress / needs-you) instead of settling `done`, and its session is
    *  still resumable. NOT in the active map — that is what makes it a park, not a live wait. */
   function parkedWaitingRun(): string {
-    const record = store.createRun({
+    const record = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 't',
@@ -564,11 +720,11 @@ describe('RunManager.continueRun override', () => {
     return record.id;
   }
 
-  it('Continue resumes an idle-parked waiting run (spec 2026-08-20)', () => {
+  it('Continue resumes an idle-parked waiting run (spec 2026-08-20)', async () => {
     const id = parkedWaitingRun();
     // Before this change continueRun rejected every `waiting` run; a PARKED wait (not active) is
     // now resumable via --resume, which is the whole point of parking instead of finishing.
-    expect(manager.continueRun(id, { text: 'carry on' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: 'carry on' })).resolves.toEqual({ ok: true });
   });
 
   it('Cancel settles an idle-parked waiting run instead of 409', () => {
@@ -589,44 +745,44 @@ describe('RunManager.continueRun override', () => {
     expect(store.getRun(id)?.status).toBe('done');
   });
 
-  it('an omitted override preserves the run current backend/model (backward compat)', () => {
+  it('an omitted override preserves the run current backend/model (backward compat)', async () => {
     const id = resumableRun();
-    expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: 'keep going' })).resolves.toEqual({ ok: true });
     const after = store.getRun(id);
     expect(after?.runner).toBe('claude');
     expect(after?.model).toBe('sonnet');
   });
 
-  it("an empty model clears the pin so the runner picks the model (auto)", () => {
+  it("an empty model clears the pin so the runner picks the model (auto)", async () => {
     const id = resumableRun();
-    manager.continueRun(id, { model: '' });
+    await manager.continueRun(id, { model: '' });
     expect(store.getRun(id)?.model).toBeUndefined();
     // Runner untouched → the run keeps its backend.
     expect(store.getRun(id)?.runner).toBe('claude');
   });
 
-  it("rejects a model that is recognizably another runner's preset (no corruption persisted)", () => {
+  it("rejects a model that is recognizably another runner's preset (no corruption persisted)", async () => {
     const id = resumableRun();
     // The review's corruption case (#401): a codex preset landing on a claude continuation.
-    const result = manager.continueRun(id, { model: 'gpt-5.1-codex' });
-    expect(result).toEqual({ ok: false, error: "model 'gpt-5.1-codex' is not a claude model" });
+    const result = await manager.continueRun(id, { model: 'gpt-5.6-terra' });
+    expect(result).toEqual({ ok: false, error: "model 'gpt-5.6-terra' is not a claude model" });
     expect(store.getRun(id)?.model).toBe('sonnet');
     expect(store.getRun(id)?.runner).toBe('claude');
   });
 
-  it('a runner-only switch clears the previous backend model pin instead of carrying it over', () => {
+  it('a runner-only switch clears the previous backend model pin instead of carrying it over', async () => {
     const id = resumableRun(); // claude/sonnet
     // The composer sends only `runner` when the user switches backend without touching the
     // model pill (it displays `auto` at that point). The inherited `sonnet` pin belongs to
     // claude and must not reach the codex runner via `runContinuation`'s `model: record.model`.
-    expect(manager.continueRun(id, { runner: 'codex' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { runner: 'codex' })).resolves.toEqual({ ok: true });
     const after = store.getRun(id);
     expect(after?.runner).toBe('codex');
     expect(after?.model).toBeUndefined();
   });
 
-  it('a runner-only switch keeps a free-form model id — only known foreign presets are cleared', () => {
-    const record = store.createRun({
+  it('a runner-only switch keeps a free-form model id — only known foreign presets are cleared', async () => {
+    const record = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 't',
@@ -636,35 +792,35 @@ describe('RunManager.continueRun override', () => {
     });
     store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
     store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
-    expect(manager.continueRun(record.id, { runner: 'codex' })).toEqual({ ok: true });
+    await expect(manager.continueRun(record.id, { runner: 'codex' })).resolves.toEqual({ ok: true });
     expect(store.getRun(record.id)?.model).toBe('my-org/custom-tune');
   });
 
-  it('a runner-only continue on the SAME backend keeps the pin (no spurious clear)', () => {
+  it('a runner-only continue on the SAME backend keeps the pin (no spurious clear)', async () => {
     const id = resumableRun(); // claude/sonnet
-    expect(manager.continueRun(id, { runner: 'claude' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { runner: 'claude' })).resolves.toEqual({ ok: true });
     expect(store.getRun(id)?.model).toBe('sonnet');
   });
 
-  it('guards legacy records too — no persisted runner resolves to claude, like runContinuation', () => {
-    const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [{ id: 's1', name: 'Work', kind: 'agent' }] });
+  it('guards legacy records too — no persisted runner resolves to claude, like runContinuation', async () => {
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', steps: [{ id: 's1', name: 'Work', kind: 'agent' }] });
     store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
     store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
-    const result = manager.continueRun(record.id, { model: 'gpt-5.1-codex' });
+    const result = await manager.continueRun(record.id, { model: 'gpt-5.6-terra' });
     expect(result.ok).toBe(false);
     expect(store.getRun(record.id)?.model).toBeUndefined();
   });
 
-  it('keeps free-form model ids working — only cross-runner presets are rejected', () => {
+  it('keeps free-form model ids working — only cross-runner presets are rejected', async () => {
     const id = resumableRun();
-    expect(manager.continueRun(id, { model: 'my-custom-alias' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { model: 'my-custom-alias' })).resolves.toEqual({ ok: true });
     expect(store.getRun(id)?.model).toBe('my-custom-alias');
   });
 
-  it('refuses to continue a run with no resumable session (no override persisted)', () => {
-    const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', runner: 'claude', steps: [] });
+  it('refuses to continue a run with no resumable session (no override persisted)', async () => {
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', runner: 'claude', steps: [] });
     store.updateRun(record.id, { status: 'done' });
-    const result = manager.continueRun(record.id, { runner: 'codex' });
+    const result = await manager.continueRun(record.id, { runner: 'codex' });
     expect(result.ok).toBe(false);
     expect(store.getRun(record.id)?.runner).toBe('claude');
   });
@@ -718,7 +874,7 @@ describe('RunManager.settleSuccess — optional review gate', () => {
 
   /** A fresh run + worktree holding a real diff (edit + new file) vs main. */
   async function changedRun(autonomous?: boolean): Promise<RunRecord> {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', autonomous, steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', autonomous, steps: [] });
     const wt = await createWorktree(repoRoot, record.id, 'main');
     store.updateRun(record.id, { worktreePath: wt.path, branch: wt.branch, baseBranch: wt.baseBranch });
     writeFileSync(join(wt.path, 'a.txt'), 'one\nTWO\nthree\n');
@@ -728,7 +884,7 @@ describe('RunManager.settleSuccess — optional review gate', () => {
 
   /** A fresh run + worktree with no changes vs main (empty diff). */
   async function cleanRun(): Promise<RunRecord> {
-    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     const wt = await createWorktree(repoRoot, record.id, 'main');
     store.updateRun(record.id, { worktreePath: wt.path, branch: wt.branch, baseBranch: wt.baseBranch });
     return store.getRun(record.id) as RunRecord;
@@ -830,7 +986,7 @@ describe('a chain of 2 selected skills runs BOTH steps, in order (#410)', () => 
     // `mock:done` makes the mock's turn end with CEZ:DONE — needed so the
     // last (interactive) step closes itself and the run reaches a terminal
     // status instead of parking at `waiting` for a real reply.
-    const record = manager.startRun(workflow, { task: 'mock:done fix the PR', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done fix the PR', worktree: false });
 
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 20_000;
@@ -920,7 +1076,7 @@ describe('a single agent step plus a check step gets NO chain note (#410)', () =
         { id: 'verify', command: 'true', onFail: { retry: 'implement', max: 2 } },
       ],
     };
-    const record = manager.startRun(workflow, { task: 'mock:done fix the login bug', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done fix the login bug', worktree: false });
 
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 20_000;
@@ -1010,7 +1166,7 @@ describe('step budget (PLAN D27 Phase 1)', () => {
     // Mutation that must turn this red: land the budget stop in `done` instead of `review`
     // (`workflows/run.ts`'s `budgetExceeded` branch) — confirmed red, then reverted.
     const manager = managerWithBudget(2);
-    const record = manager.startRun(checkWorkflow(['s1', 's2', 's3']), { task: 'do it', worktree: false });
+    const record = manager.startRun(checkWorkflow(['s1', 's2', 's3']), { author: localCliAuthor(), task: 'do it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -1029,7 +1185,7 @@ describe('step budget (PLAN D27 Phase 1)', () => {
     // Mutation that must turn this red: set `stopReason: 'budget'` unconditionally on every
     // finish, not only on the budget branch — confirmed red, then reverted.
     const manager = managerWithBudget(0); // unlimited — the shipped default
-    const record = manager.startRun(checkWorkflow(['s1', 's2']), { task: 'do it', worktree: false });
+    const record = manager.startRun(checkWorkflow(['s1', 's2']), { author: localCliAuthor(), task: 'do it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -1045,7 +1201,7 @@ describe('step budget (PLAN D27 Phase 1)', () => {
     // `stepsExecuted >= config.stepBudget` to `stepsExecuted > config.stepBudget` (or the
     // reverse) — confirmed red, then reverted.
     const manager = managerWithBudget(2);
-    const record = manager.startRun(checkWorkflow(['s1', 's2']), { task: 'do it', worktree: false });
+    const record = manager.startRun(checkWorkflow(['s1', 's2']), { author: localCliAuthor(), task: 'do it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -1063,7 +1219,7 @@ describe('step budget (PLAN D27 Phase 1)', () => {
       source: 'file',
       steps: [{ id: 's1', command: 'false' }],
     };
-    const record = manager.startRun(workflow, { task: 'do it', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'do it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -1081,7 +1237,7 @@ describe('step budget (PLAN D27 Phase 1)', () => {
     // Mutation that must turn this red: read only `config.stepBudget` in `effectiveStepBudget()`,
     // ignoring `run.stepBudgetOverride` entirely — confirmed red, then reverted.
     const manager = managerWithBudget(0); // repo-wide: unlimited
-    const record = manager.startRun(checkWorkflow(['s1', 's2', 's3']), {
+    const record = manager.startRun(checkWorkflow(['s1', 's2', 's3']), { author: localCliAuthor(),
       task: 'do it',
       worktree: false,
       stepBudgetOverride: 2,
@@ -1158,7 +1314,7 @@ describe('step budget bounds an open session self-continuing, not only fresh wor
     // turn-end check in `runAgentStep`'s onEvent). A single-step, single-agent-step workflow never
     // re-enters that loop once its one step starts, so with only the loop-top check the run would
     // keep parking as `monitoring` forever instead of ever stopping. Confirmed red, then reverted.
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring turn 1', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring turn 1', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring'); // turn 1: spends 1/3, parks
     expect(store.getRun(record.id)?.status).toBe('running');
@@ -1249,7 +1405,7 @@ describe('a stepBudgetOverride bounds a self-continuing single-step run even whe
     // ignore `run.stepBudgetOverride`. Either way the run keeps parking as `monitoring` past turn
     // 2 instead of stopping, because `config.stepBudget` here is 0 — reachably unbounded. Confirmed
     // red, then reverted.
-    const record = manager.startRun(SINGLE_STEP, {
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(),
       task: 'mock:monitoring turn 1',
       worktree: false,
       autonomous: true,
@@ -1324,7 +1480,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
   };
 
   it('a CEZ:MONITORING turn-end parks the run as running/monitoring', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring');
     const parked = store.getRun(record.id);
@@ -1341,7 +1497,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
    * the run at `waiting`, not `done`: an unanswered handoff is never recorded as finished.
    */
   it('an idle-parked ordinary wait stays `waiting`, never settles `done`', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:hello', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:hello', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const state = (
@@ -1372,7 +1528,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
    * therefore publish a wake deadline: the run has to be able to resume itself.
    */
   it('a parked monitor schedules its own re-check under the zero-config default (#810)', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring');
     await waitFor(record.id, (r) => Boolean(r?.monitoringWakeAt));
@@ -1392,7 +1548,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
     manager = new RunManager(store, repoRoot, {
       semaphore: new WorkspaceSemaphore({ initial: { monitoringWakeIntervalMinutes: null } }),
     });
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring');
     expect(store.getRun(record.id)?.monitoringWakeAt).toBeUndefined();
@@ -1406,7 +1562,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
     manager.dispose();
     const semaphore = new WorkspaceSemaphore({ initial: { monitoringWakeIntervalMinutes: 0.001 } });
     manager = new RunManager(store, repoRoot, { semaphore });
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, () => {
       const path = join(repoRoot, '.ai/cezar/runs', `${record.id}.ndjson`);
@@ -1421,14 +1577,72 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
   }, 30_000);
 
   it('a markerless turn-end still parks as waiting with no activity', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'just do the thing', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:report just do the thing', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     expect(store.getRun(record.id)?.activity).toBeUndefined();
+    expect(store.getRun(record.id)?.waitingReason).toBe('report');
+    expect(store.getRun(record.id)?.waitingQuestion).toBeUndefined();
+  }, 30_000);
+
+  it('nudges a prose question once, then parks with the question visible', async () => {
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:question ship it?', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    expect(store.getRun(record.id)).toMatchObject({
+      waitingReason: 'question',
+      waitingQuestion: 'So: merge and deploy now, or hold for review?',
+    });
+    let events = store.readEvents(record.id);
+    expect(events.filter((event) => event.type === 'note' && String(event.message).includes('nudged to re-send')).length).toBe(1);
+    expect(events.some((event) => event.type === 'user-message')).toBe(false);
+
+    expect(manager.sendMessage(record.id, [{ type: 'text', text: 'mock:question and now?' }])).toBe(true);
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    events = store.readEvents(record.id);
+    expect(events.filter((event) => event.type === 'note' && String(event.message).includes('nudged to re-send')).length).toBe(1);
+  }, 30_000);
+
+  it('classifies a prose question on the continuation twin too', async () => {
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:report first turn', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+
+    expect(manager.sendMessage(record.id, [{ type: 'text', text: 'mock:question and now?' }])).toBe(true);
+    await waitFor(record.id, (r) => r?.status === 'waiting' && r.waitingReason === 'question');
+    expect(store.getRun(record.id)?.waitingQuestion).toBe('So: merge and deploy now, or hold for review?');
+  }, 30_000);
+
+  it('upgrades a prose question to a structured ask when the agent accepts the nudge', async () => {
+    const record = manager.startRun(SINGLE_STEP, {
+      author: localCliAuthor(),
+      task: 'mock:ask-on-nudge mock:question ship it?',
+      worktree: false,
+    });
+    currentId = record.id;
+    await waitFor(record.id, () => store.readEvents(record.id).some((event) => event.type === 'ask.requested'));
+    expect(store.readEvents(record.id).some((event) => event.type === 'ask.requested')).toBe(true);
+    expect(store.getRun(record.id)?.waitingReason).toBeUndefined();
+    expect(store.getRun(record.id)?.waitingQuestion).toBeUndefined();
+  }, 30_000);
+
+  it('records but never nudges an autonomous prose question', async () => {
+    const record = manager.startRun(SINGLE_STEP, {
+      author: localCliAuthor(),
+      task: 'mock:question ship it?',
+      autonomous: true,
+      worktree: false,
+    });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    expect(store.getRun(record.id)?.waitingReason).toBe('question');
+    expect(store.readEvents(record.id).filter((event) =>
+      event.type === 'note' && String(event.message).includes('nudged to re-send')
+    )).toHaveLength(0);
   }, 30_000);
 
   it('strips the CEZ:MONITORING marker from server-emitted v1 text events', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring');
     // v1 `text` events are stripped server-side (like CEZ:DONE); v2 message items carry
@@ -1444,7 +1658,7 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
   }, 30_000);
 
   it('resuming a monitoring run clears the activity', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.activity === 'monitoring');
     // A user reply (no marker) resumes the run: the follow-up turn re-parks as
@@ -1517,7 +1731,7 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
       .map((l) => JSON.parse(l));
 
   it('a CEZ:ASK turn-end parks the run as waiting (attention) and emits ask.requested', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask which library?', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:ask which library?', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const parked = store.getRun(record.id);
@@ -1532,7 +1746,7 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
   }, 30_000);
 
   it('strips the CEZ:ASK marker from server-emitted v1 text events', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask pick one', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:ask pick one', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const v1Text = readEvents(record.id).filter((e) => e.type === 'text');
@@ -1541,7 +1755,7 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
   }, 30_000);
 
   it('normalizes a near-valid presentation-only marker into exactly one ask card', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask-near choose', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:ask-near choose', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const events = readEvents(record.id);
@@ -1557,14 +1771,14 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
   }, 30_000);
 
   it('a markerless turn-end raises no ask.requested', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'just do the thing', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'just do the thing', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     expect(readEvents(record.id).some((e) => e.type === 'ask.requested')).toBe(false);
   }, 30_000);
 
   it('a malformed CEZ:ASK degrades gracefully: parks waiting, no ask card', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask-bad choose', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:ask-bad choose', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const parked = store.getRun(record.id);
@@ -1581,7 +1795,7 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
   // to answer. An invalid marker must survive as raw text (degraded but
   // answerable) and still park the run `waiting`.
   it('a schema-invalid CEZ:ASK stays visible in v1 text — no card will ever render it', async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask-invalid choose', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:ask-invalid choose', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     const events = readEvents(record.id);
@@ -1691,7 +1905,7 @@ describe('RunManager queued-stack mutators (#472)', () => {
 
   /** Seed a run that the engine still holds as queued. */
   const seedQueued = (task = 'ship it') => {
-    const record = store.createRun({ title: 't', workflow: 'w', task, steps: [] });
+    const record = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task, steps: [] });
     (
       manager as unknown as {
         pendingJobs: Map<string, { workflow: WorkflowDef; input: { task: string } }>;
@@ -1738,7 +1952,7 @@ describe('RunManager queued-stack mutators (#472)', () => {
   });
 
   it('hydrates edits and stacked messages into a queued restart continuation', async () => {
-    const r = store.createRun({
+    const r = store.createRun({ author: localCliAuthor(),
       title: 'interrupted task',
       workflow: 'quick-task',
       task: 'original recovery goal',
@@ -1752,6 +1966,8 @@ describe('RunManager queued-stack mutators (#472)', () => {
       backend: 'claude';
       prompt: string;
       images: ContentBlock[];
+      name: string;
+      nameOrigin: 'step' | 'prompt';
     };
     const internals = manager as unknown as {
       pendingContinuations: Map<string, PendingContinuation>;
@@ -1760,6 +1976,7 @@ describe('RunManager queued-stack mutators (#472)', () => {
       runContinuation(
         runId: string,
         stepId: string,
+        name: string,
         sessionId: string | undefined,
         backend: 'claude',
         prompt: string,
@@ -1774,6 +1991,8 @@ describe('RunManager queued-stack mutators (#472)', () => {
       backend: 'claude',
       prompt: 'restart recovery',
       images: [],
+      name: 'Continue',
+      nameOrigin: 'prompt',
     });
     internals.queue.push(r.id);
 
@@ -1793,6 +2012,7 @@ describe('RunManager queued-stack mutators (#472)', () => {
     internals.runContinuation = async (
       _runId,
       _stepId,
+      _name,
       _sessionId,
       _backend,
       prompt,
@@ -2034,7 +2254,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
   });
 
   it('folds the task and every stacked message, in order, blank-line joined', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'build the thing', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'build the thing', steps: [] });
     stack(r.id, { text: 'also update the changelog' }, { text: 'and bump the version' });
 
     expect(hydrate(r.id, r.task).task).toBe(
@@ -2043,7 +2263,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
   });
 
   it('leaves the input untouched when nothing is stacked', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'build the thing', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'build the thing', steps: [] });
     expect(hydrate(r.id, r.task).task).toBe('build the thing');
   });
 
@@ -2053,7 +2273,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
    * this rule every recovery would grow the prompt without bound.
    */
   it('never writes the folded prompt back to the record, and is idempotent', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'build the thing', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'build the thing', steps: [] });
     stack(r.id, { text: 'also update the changelog' });
 
     const once = hydrate(r.id, r.task).task;
@@ -2070,7 +2290,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
   });
 
   it('re-encodes stacked attachments from disk into stackedImages', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'look at this', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'look at this', steps: [] });
     const dir = join(repoRoot, '.ai/cezar', 'runs', `${r.id}-images`);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'pasted-1.png'), 'the-bytes');
@@ -2085,7 +2305,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
   });
 
   it('re-encodes initial task images from disk after a queued-run restart (#612)', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'look at this', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'look at this', steps: [] });
     const dir = join(repoRoot, '.ai/cezar', 'runs', `${r.id}-images`);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'pasted-1.png'), 'the-task-bytes');
@@ -2105,7 +2325,7 @@ describe('RunManager.hydrateQueuedInput (#472)', () => {
 
   /** Degrade, never fail the boot (AGENTS.md). */
   it('skips an unreadable attachment, notes it, and still starts', () => {
-    const r = store.createRun({ title: 't', workflow: 'w', task: 'look at this', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'look at this', steps: [] });
     stack(r.id, { text: 'see the mock', images: [`/api/v1/runs/${r.id}/images/gone-1.png`] });
 
     const hydrated = hydrate(r.id, r.task);
@@ -2163,8 +2383,8 @@ describe('queued stacking reaches the backend (#472)', () => {
   });
 
   it('delivers the task plus every stacked message, with the edit applied', async () => {
-    const first = manager.startRun(WORKFLOW, { task: 'mock:done occupy the slot', worktree: false });
-    const second = manager.startRun(WORKFLOW, { task: 'mock:done original prompt', worktree: false });
+    const first = manager.startRun(WORKFLOW, { author: localCliAuthor(), task: 'mock:done occupy the slot', worktree: false });
+    const second = manager.startRun(WORKFLOW, { author: localCliAuthor(), task: 'mock:done original prompt', worktree: false });
 
     // The second run is holding in the queue — amend it there.
     expect(store.getRun(second.id)?.status).toBe('queued');
@@ -2226,7 +2446,7 @@ describe('recover() carries the queued stack exactly once (#472)', () => {
   });
 
   it('folds once across repeated recoveries', async () => {
-    const r = store.createRun({ title: 't', workflow: '(planned)', task: 'the original task', steps: [] });
+    const r = store.createRun({ author: localCliAuthor(), title: 't', workflow: '(planned)', task: 'the original task', steps: [] });
     store.updateRun(r.id, {
       status: 'queued',
       workflowDef: WORKFLOW,
@@ -2304,7 +2524,7 @@ describe('native Codex requestUserInput parks and resumes the run (#565)', () =>
   };
 
   it('persists the ask, parks immediately, then routes the answer to the pending RPC', async () => {
-    const record = manager.startRun(workflow, {
+    const record = manager.startRun(workflow, { author: localCliAuthor(),
       task: 'mock:native-codex-ask choose a library', runner: 'codex', worktree: false,
     });
     runId = record.id;
@@ -2393,7 +2613,7 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
    *  it is what a user pressing Finish does, and `continueRun` only accepts a run that
    *  reached a terminal status. */
   const finishedRun = async () => {
-    const record = manager.startRun(SINGLE_STEP, { task: 'do the first thing', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'do the first thing', worktree: false });
     runId = record.id;
     await waitFor(() => store.getRun(record.id)?.status === 'waiting');
     expect(manager.finish(record.id)).toBe(true);
@@ -2403,7 +2623,7 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
 
   it("expands the continuation's OPENING prompt before it becomes the session userPrompt", async () => {
     const id = await finishedRun();
-    expect(manager.continueRun(id, { text: '/demo-review look at the diff' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: '/demo-review look at the diff' })).resolves.toEqual({ ok: true });
     await waitFor(() =>
       eventsOf(id).some((e) => e.stepId === 'continue-1' && e.type === 'text' && e.text?.includes('looking into')),
     );
@@ -2423,7 +2643,7 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
 
   it('expands a FOLLOW-UP delivered into the reopened continuation session', async () => {
     const id = await finishedRun();
-    expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: 'keep going' })).resolves.toEqual({ ok: true });
     await waitFor(() => store.getRun(id)?.status === 'waiting');
 
     expect(manager.sendMessage(id, [{ type: 'text', text: '/demo-review now review it' }])).toBe(true);
@@ -2437,7 +2657,7 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
 
   it('leaves an unknown slash command untouched so backend-native commands still work', async () => {
     const id = await finishedRun();
-    expect(manager.continueRun(id, { text: '/compact please' })).toEqual({ ok: true });
+    await expect(manager.continueRun(id, { text: '/compact please' })).resolves.toEqual({ ok: true });
     await waitFor(() =>
       eventsOf(id).some((e) => e.stepId === 'continue-1' && e.type === 'text' && e.text?.includes('looking into')),
     );
@@ -2445,6 +2665,80 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
       (e) => e.stepId === 'continue-1' && e.type === 'text' && e.text?.includes('looking into'),
     );
     expect(echoed?.text).toContain('/compact please');
+  }, 40_000);
+});
+
+/**
+ * Spec 2026-08-22-live-worktree-reaped-mid-run, "What is still open" #2: `dropActive` deletes a
+ * run's worktree lease at settle, and `runContinuation` used to re-arm one only when the tree had
+ * to be rebuilt from scratch — never when a live tree (the common case) was simply reused. That
+ * left a continued run's live worktree with NO lease at all, indistinguishable from a genuine
+ * orphan to `pruneOrphans`, which is the incident's own shape. This proves the fix: a lease exists
+ * again, freshly heartbeated, once a settled run with a still-live worktree is continued.
+ */
+describe('a continued single-repo run re-arms its worktree lease (2026-08-22)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  let runId: string | undefined;
+  let savedDryRun: string | undefined;
+  const SINGLE_STEP: WorkflowDef = {
+    name: 'quick-task',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Task', prompt: '{{task}}' }],
+  };
+
+  beforeEach(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-lease-continuation-'));
+    savedDryRun = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    runId = undefined;
+  });
+
+  afterEach(() => {
+    manager?.dispose();
+    if (runId) manager.cancel(runId);
+    if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+    else process.env.CEZ_DRY_RUN = savedDryRun;
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const waitFor = async (predicate: () => boolean, ms = 20_000) => {
+    const deadline = Date.now() + ms;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error('condition not met in time');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+
+  const leasePath = (id: string) => join(repoRoot, '.ai/cezar/worktree-leases', `${id}.json`);
+
+  it('writes a fresh lease when a settled run with a live worktree is continued', async () => {
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'do the first thing', worktree: true });
+    runId = record.id;
+    await waitFor(() => store.getRun(record.id)?.status === 'waiting');
+    expect(manager.finish(record.id)).toBe(true);
+    await waitFor(() => ['done', 'review'].includes(store.getRun(record.id)?.status ?? ''));
+
+    // The gap this spec closes: settling clears the lease `armWorktreeLeases` wrote at start, but
+    // the worktree itself is still on disk — nothing currently protects it from a sweep.
+    await waitFor(() => !existsSync(leasePath(runId as string)));
+    const worktreePath = store.getRun(runId)?.worktreePath;
+    expect(worktreePath && existsSync(worktreePath)).toBe(true);
+
+    await expect(manager.continueRun(runId, { text: 'keep going' })).resolves.toEqual({ ok: true });
+    await waitFor(() => existsSync(leasePath(runId as string)));
+
+    const lease = JSON.parse(readFileSync(leasePath(runId), 'utf8')) as { runId: string; heartbeatAt: string };
+    expect(lease.runId).toBe(runId);
+    expect(Date.now() - Date.parse(lease.heartbeatAt)).toBeLessThan(30_000);
   }, 40_000);
 });
 
@@ -2504,7 +2798,7 @@ describe('a continuation cannot finish an unfinished chain (P2)', () => {
       ],
     };
     // `mock:done` makes every mock turn end with CEZ:DONE.
-    const record = manager.startRun(workflow, { task: 'mock:done do the thing', worktree: false });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'mock:done do the thing', worktree: false });
     await settled(record.id);
     expect(store.getRun(record.id)?.status).toBe('done');
 
@@ -2513,7 +2807,7 @@ describe('a continuation cannot finish an unfinished chain (P2)', () => {
     store.updateStep(record.id, 'two', { status: 'pending', finishedAt: undefined });
     // `mock:done` again: this continuation ends its turn claiming ITS goal is achieved — the
     // exact signal that used to finish the whole run.
-    expect(manager.continueRun(record.id, { text: 'mock:done carry on' })).toEqual({ ok: true });
+    await expect(manager.continueRun(record.id, { text: 'mock:done carry on' })).resolves.toEqual({ ok: true });
 
     // `worktree: false` serializes on the repo-root lease, so the continuation's session opens a
     // beat after the call returns — wait for it to actually START before waiting for the end.
@@ -2611,7 +2905,7 @@ describe('a step is green only when its post-condition holds', () => {
         { id: 'after', command: 'true' },
       ],
     };
-    const record = manager().startRun(workflow, { task: 'ship it', worktree: false });
+    const record = manager().startRun(workflow, { author: localCliAuthor(), task: 'ship it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -2639,7 +2933,7 @@ describe('a step is green only when its post-condition holds', () => {
         },
       ],
     };
-    const record = manager().startRun(workflow, { task: 'ship it', worktree: false });
+    const record = manager().startRun(workflow, { author: localCliAuthor(), task: 'ship it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -2657,7 +2951,7 @@ describe('a step is green only when its post-condition holds', () => {
       source: 'file',
       steps: [{ id: 'ship', command: 'true', verify: { command: 'false', max: 2 } }],
     };
-    const record = manager().startRun(workflow, { task: 'ship it', worktree: false });
+    const record = manager().startRun(workflow, { author: localCliAuthor(), task: 'ship it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -2674,7 +2968,7 @@ describe('a step is green only when its post-condition holds', () => {
       source: 'file',
       steps: [{ id: 's1', command: 'true' }, { id: 's2', command: 'true' }],
     };
-    const record = manager().startRun(workflow, { task: 'do it', worktree: false });
+    const record = manager().startRun(workflow, { author: localCliAuthor(), task: 'do it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);
@@ -2691,7 +2985,7 @@ describe('a step is green only when its post-condition holds', () => {
       source: 'file',
       steps: [{ id: 'deploy', command: 'true', verify: { builtin: 'all-services-deployed', max: 0 } }],
     };
-    const record = manager().startRun(workflow, { task: 'deploy it', worktree: false });
+    const record = manager().startRun(workflow, { author: localCliAuthor(), task: 'deploy it', worktree: false });
     await waitForTerminal(record.id);
 
     const run = store.getRun(record.id);

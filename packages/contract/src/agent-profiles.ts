@@ -157,13 +157,17 @@ export const agentProfilesResponseSchema = z.object({
 });
 export type AgentProfilesResponse = z.infer<typeof agentProfilesResponseSchema>;
 
-/** One Claude config dir found on this machine that is NOT yet an account here (spec
+/** One agent config dir found on this machine that is NOT yet an account here (spec
  *  `.ai/specs/2026-08-14-claude-subscription-autodetect.md`). A proposal for the Add-account
- *  dialog to prefill — discovery never writes the account store. */
+ *  dialog to prefill — discovery itself never writes the account store. (`CEZ_AUTO_ACCOUNTS=1`
+ *  does, from a server-side reconcile that does not answer this route; spec
+ *  `.ai/specs/2026-08-24-second-codex-account-balancing.md`.) */
 export const discoveredAgentAccountSchema = z.object({
-  /** Claude only. Codex keeps its identity in a live credential file; see the discovery module's
-   *  own doc comment for why that is not read. */
-  provider: z.literal('claude'),
+  /** **WIDENED 2026-08-24 from `z.literal('claude')`** — codex homes are discovered too, now that
+   *  their identity comes from a reader that returns claims and never a credential. Typed as the
+   *  full provider id so this cannot drift from `PROFILE_CAPABLE_PROVIDERS`; the server only ever
+   *  emits a profile-capable one. */
+  provider: providerIdSchema,
   /** Absolute config dir — what `CLAUDE_CONFIG_DIR` would be set to. */
   configDir: z.string(),
   identity: agentAccountIdentitySchema.optional(),
@@ -174,8 +178,8 @@ export const discoveredAgentAccountSchema = z.object({
 });
 export type DiscoveredAgentAccount = z.infer<typeof discoveredAgentAccountSchema>;
 
-/** `GET /api/v1/workspace/agent-profiles/discovered` — the machine's Claude logins. Empty in
- *  hosted mode, where this whole family is withheld (the paths are the host disclosure). */
+/** `GET /api/v1/workspace/agent-profiles/discovered` — the machine's Claude and Codex logins.
+ *  Empty in hosted mode, where this whole family is withheld (the paths are the host disclosure). */
 export const discoveredAgentAccountsResponseSchema = z.object({
   accounts: z.array(discoveredAgentAccountSchema),
 });

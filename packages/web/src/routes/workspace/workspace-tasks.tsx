@@ -4,9 +4,9 @@ import * as React from 'react'
 import { Link as RouterLink, useSearchParams } from 'react-router'
 
 import { putWorkspaceUiState } from '@/api/client'
-import { useHealth, useWorkspaceRuns, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
+import { useHealth, useProjects, useWorkspaceRuns, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
 import { workspaceViewsOffSubtitle } from '@/lib/capability-copy'
-import type { RunRecord, WorkspaceRunSummary } from '@loki-labs/better-cezar-api-client'
+import type { RunRecord, Runner, WorkspaceRunSummary } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { DiffStatLabel } from '@/components/diff-stat'
 import { HostUsageStat } from '@/components/host-usage-stat'
@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button'
 import { deriveAttention } from '@/lib/attention'
 import { shortAge } from '@/lib/format'
 import { isReadDoneItem, isUnread } from '@/lib/read-state'
+import { queueHold, usageLimitHolds } from '@/lib/account-hold'
 import { queuePositions, runTitle, sortRuns } from '@/lib/task-groups'
 import { filterRuns, formatCost, scheduledResume, taskReference, workflowLabel } from '@/lib/tasks-table'
 import { useNow } from '@/lib/use-now'
@@ -37,11 +38,16 @@ import {
  *
  * Workspace-level — mounted OUTSIDE `ProjectScopeRoute` (`routes.tsx`), reached from the
  * `[ This project | All projects ]` switch `tasks-overview.tsx` renders in its header
- * (scaffold-owned, PLAN D22c). **This file reads only `useHealth`, `useWorkspaceRuns`,
- * `useWorkspaceUiState` and `putWorkspaceUiState` — never a scope-led query or client function**
- * (the "scope trap": with no `ProjectScopeRoute` above it, `queryScope()` silently resolves to
- * the boot project's `'default'` sentinel, so a project-local call here would read data for the
- * wrong repo with no error). `workspace-tasks.test.tsx` asserts this by request log.
+ * (scaffold-owned, PLAN D22c). **This file reads only `useHealth`, `useProjects`,
+ * `useWorkspaceRuns`, `useWorkspaceUiState` and `putWorkspaceUiState` — never a scope-led query or
+ * client function** (the "scope trap": with no `ProjectScopeRoute` above it, `queryScope()`
+ * silently resolves to the boot project's `'default'` sentinel, so a project-local call here would
+ * read data for the wrong repo with no error). `useProjects()` (`GET /api/v1/projects`) is safe
+ * here despite the rule: it is workspace-level by construction, "one registry no matter which
+ * project is active" (its own doc comment), so it never touches `queryScope()` either — it is
+ * added (multi-project spec, foreign-number guard phase) so each cross-project ROW can resolve
+ * its OWN project's `repoUrl`, never the boot project's. `workspace-tasks.test.tsx` asserts the
+ * scope-led rule by request log (no `/api/v1/p/*` request), which this does not violate.
  *
  * **Divergence from the spec's literal wording, recorded here because the spec's "UI/UX" section
  * says "Reuses TasksOverview" and separately describes a row-href edit "inside the component":**
@@ -132,6 +138,17 @@ export function WorkspaceTasksRoute() {
   const { filter, setFilter } = useWorkspaceTasksFilter(registry?.map((p) => p.id))
   const projectsQuery = filter.projects === undefined ? undefined : filter.projects.join(',')
   const runsQuery = useWorkspaceRuns({ projects: projectsQuery, view: filter.view })
+  // Called ONCE here, in the route's body — never per-row. Each row resolves ITS OWN project's
+  // repo out of this map (multi-project spec Phase 5): unlike a project-scoped page, this board
+  // has no single on-screen project, so `useProjectRepoBase()` does not apply here.
+  const projects = useProjects()
+  const repoByProject = React.useMemo(() => {
+    const map = new Map<string, string>()
+    for (const project of projects.data?.projects ?? []) {
+      if (project.repoUrl) map.set(project.id, project.repoUrl)
+    }
+    return map
+  }, [projects.data])
 
   return (
     <div data-route="workspace-tasks" className="flex min-h-full flex-col">
@@ -175,6 +192,8 @@ export function WorkspaceTasksRoute() {
             filter={filter}
             onClearFilter={() => setFilter({ projects: undefined, view: filter.view })}
             runsQuery={runsQuery}
+            repoByProject={repoByProject}
+            defaultRunner={health.data?.defaultRunner}
           />
         )}
       </div>
@@ -213,10 +232,19 @@ function WorkspaceTasksBoard({
   filter,
   onClearFilter,
   runsQuery,
+  repoByProject,
+  defaultRunner,
 }: {
   filter: WorkspaceTasksFilter
   onClearFilter: () => void
   runsQuery: ReturnType<typeof useWorkspaceRuns>
+  /** Registered project id -> its own repo, from `useProjects()` (read once by
+   *  `WorkspaceTasksRoute`) — the only authority a row's numeric-only PR/Issue chip may
+   *  synthesize a link against (#526), and it must be THAT row's project, never the boot one. */
+  repoByProject: ReadonlyMap<string, string>
+  /** The workspace's configured default runner — names the account a queued task will take when
+   *  its own record does not. See `queueHold`. */
+  defaultRunner?: Runner
 }) {
   const [query, setQuery] = React.useState('')
   const now = useNow(30_000)
@@ -265,6 +293,9 @@ function WorkspaceTasksBoard({
   const visible =
     runs === undefined ? undefined : (filterRuns(sortRuns(runs, filter.view), query) as WorkspaceRunRow[])
   const positions = runs === undefined ? undefined : queuePositions(runs)
+  // A usage limit closes an ACCOUNT, and one account drives tasks in several projects at once —
+  // so this is derived from the whole aggregate, exactly like the engine's workspace-scoped hold.
+  const holds = usageLimitHolds(runs ?? [])
   const projectNames = new Map((data?.projects ?? []).map((p) => [p.id, p.name] as const))
 
   return (
@@ -332,7 +363,9 @@ function WorkspaceTasksBoard({
                     run={run}
                     projectName={projectNames.get(run.project)}
                     queuePosition={run.status === 'queued' ? (positions?.get(run.id) ?? null) : null}
+                    hold={queueHold(run, holds, defaultRunner)}
                     now={now}
+                    repoBase={repoByProject.get(run.project)}
                   />
                 ))}
               </tbody>
@@ -345,7 +378,9 @@ function WorkspaceTasksBoard({
                 key={`${run.project}/${run.id}`}
                 run={run}
                 projectName={projectNames.get(run.project)}
+                hold={queueHold(run, holds, defaultRunner)}
                 now={now}
+                repoBase={repoByProject.get(run.project)}
               />
             ))}
           </div>
@@ -417,18 +452,25 @@ function WorkspaceTaskRow({
   run,
   projectName,
   queuePosition,
+  hold,
   now,
+  repoBase,
 }: {
   run: WorkspaceRunRow
   projectName: string | undefined
   queuePosition: number | null
+  /** Why this queued run is not starting, when the answer is a held agent account. */
+  hold: ReturnType<typeof queueHold>
   now: number
+  /** This row's OWN project's repo, resolved by the board from `run.project` — see
+   *  `WorkspaceTasksBoard`'s doc comment on `repoByProject`. */
+  repoBase: string | undefined
 }) {
   const attention = deriveAttention(run)
   const scheduled = scheduledResume(run)
   const to = `/p/${run.project}/tasks/${run.id}`
   const cost = formatCost(run.costUsd)
-  const reference = taskReference(run)
+  const reference = taskReference(run, repoBase)
   const unread = isUnread(run)
   const readDone = isReadDoneItem(run)
   const title = runTitle(run)
@@ -436,9 +478,10 @@ function WorkspaceTaskRow({
   return (
     <tr data-slot="workspace-task-row" data-run-id={run.id} data-project={run.project} className="hover:bg-muted">
       <td className={TD_BASE}>
-        <Pill dot={attention.tone} pulse={attention.pulse} title={scheduled?.title}>
+        <Pill dot={attention.tone} pulse={attention.pulse} title={scheduled?.title ?? hold?.title}>
           {attention.label}
           {scheduled ? <span className="tabular-nums">{scheduled.label}</span> : null}
+          {hold ? <span className="tabular-nums">held {hold.label}</span> : null}
         </Pill>
       </td>
       <td className={cn(TD_BASE, 'w-[28%] max-w-0')}>
@@ -475,8 +518,13 @@ function WorkspaceTaskRow({
       <td className={TD_BASE}>{run.diffStat ? <DiffStatLabel stat={run.diffStat} /> : <Dash />}</td>
       <td className={TD_BASE}>{reference ? <ReferenceChip reference={reference} taskTitle={title} /> : <Dash />}</td>
       {queuePosition !== null ? (
-        <td data-slot="queue-note" className={cn(TD_BASE, 'text-right font-mono text-[11.5px] text-soft-foreground')}>
-          #{queuePosition} in queue
+        <td
+          data-slot="queue-note"
+          className={cn(TD_BASE, 'text-right font-mono text-[11.5px] text-soft-foreground')}
+          title={hold?.title}
+        >
+          {/* `#1 in queue` alone reads as "next to start", which a held run is not. */}
+          #{queuePosition} {hold ? 'held' : 'in queue'}
         </td>
       ) : (
         <td className={cn(TD_BASE, 'text-right font-mono text-xs text-muted-foreground tabular-nums')}>
@@ -493,16 +541,22 @@ function WorkspaceTaskRow({
 function WorkspaceTaskCard({
   run,
   projectName,
+  hold,
   now,
+  repoBase,
 }: {
   run: WorkspaceRunRow
   projectName: string | undefined
+  /** Why this queued run is not starting — see `WorkspaceTaskRow`. */
+  hold: ReturnType<typeof queueHold>
   now: number
+  /** This card's OWN project's repo — see `WorkspaceTaskRow`'s doc comment on the prop. */
+  repoBase: string | undefined
 }) {
   const attention = deriveAttention(run)
   const scheduled = scheduledResume(run)
   const to = `/p/${run.project}/tasks/${run.id}`
-  const reference = taskReference(run)
+  const reference = taskReference(run, repoBase)
   const unread = isUnread(run)
   const readDone = isReadDoneItem(run)
   const cost = formatCost(run.costUsd)
@@ -516,9 +570,10 @@ function WorkspaceTaskCard({
       className="rounded-lg border border-border bg-card px-3.5 py-3 shadow-xs"
     >
       <div className="flex items-start gap-2.5">
-        <Pill dot={attention.tone} pulse={attention.pulse} className="mt-px shrink-0" title={scheduled?.title}>
+        <Pill dot={attention.tone} pulse={attention.pulse} className="mt-px shrink-0" title={scheduled?.title ?? hold?.title}>
           {attention.label}
           {scheduled ? <span className="tabular-nums">{scheduled.label}</span> : null}
+          {hold ? <span className="tabular-nums">held {hold.label}</span> : null}
         </Pill>
         <RouterLink
           to={to}

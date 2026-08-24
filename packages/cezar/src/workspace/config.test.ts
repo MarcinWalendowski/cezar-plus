@@ -63,7 +63,7 @@ describe('workspace config', () => {
     expect(config.schemaVersion).toBe(0);
     expect(config.browseRoot).toBe('~/');
     expect(config.projectsDir).toBe('~/cezar/projects');
-    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, memoryLimitMb: null, worktreeRetentionDefault: 1000 });
+    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, fallbackAcrossAccountsWhenLimited: true, memoryLimitMb: null, runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null, runsSliceMemoryMaxMb: null, worktreeRetentionDefault: 1000 });
     expect(config.composerDefaults).toEqual({});
     expect(config.projects).toEqual([]);
     expect(warn).not.toHaveBeenCalled();
@@ -229,14 +229,14 @@ describe('workspace config', () => {
       schemaVersion: 'two',
       browseRoot: 42,
       projectsDir: 42,
-      resources: { maxParallel: 99, maxMonitoringSessions: 99, monitoringWakeIntervalMinutes: 0, memoryLimitMb: 'lots', worktreeRetentionDefault: -1 },
+      resources: { maxParallel: 99, maxHeavySteps: 0, maxMonitoringSessions: 99, monitoringWakeIntervalMinutes: 0, memoryLimitMb: 'lots', runMemoryHighMb: 'plenty', runMemoryMaxMb: -1, runCpuWeight: 0, runsSliceMemoryMaxMb: 99_999_999, worktreeRetentionDefault: -1 },
       projects: [project('good')],
     });
     const config = await loadWorkspaceConfig();
     expect(config.schemaVersion).toBe(0);
     expect(config.browseRoot).toBe('~/');
     expect(config.projectsDir).toBe('~/cezar/projects');
-    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, memoryLimitMb: null, worktreeRetentionDefault: 1000 });
+    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, fallbackAcrossAccountsWhenLimited: true, memoryLimitMb: null, runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null, runsSliceMemoryMaxMb: null, worktreeRetentionDefault: 1000 });
     expect(config.projects).toEqual([project('good')]);
   });
 
@@ -308,6 +308,88 @@ describe('workspace config', () => {
     expect((await loadWorkspaceConfig()).resources.memoryLimitMb).toBeNull();
     write({ resources: { memoryLimitMb: 2048 } });
     expect((await loadWorkspaceConfig()).resources.memoryLimitMb).toBe(2048);
+  });
+
+  /**
+   * D14 / D14a of `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`: the second admission
+   * number, and the cgroup bounds that decide how big one heavy step may get. Types and
+   * defaults only at this stage — nothing reads them yet.
+   */
+  describe('resources — the Phase 0 capacity knobs', () => {
+    it('maxHeavySteps is ABSENT when nothing set it — an upgrade must not gate an installed user', async () => {
+      // The load-bearing assertion of this whole key. cezar is published and installed by `npx`
+      // on machines this repo does not control, and `run-tests` declares `heavy: true` — so a
+      // schema default here would silently cap every existing user's concurrent heavy steps on
+      // upgrade, felt as "cezar got slower" with nothing in their config to point at (plan P8).
+      // Absent means UNBOUNDED, which is exactly today's behaviour.
+      write({ resources: { maxParallel: 8 } });
+      expect((await loadWorkspaceConfig()).resources.maxHeavySteps).toBeUndefined();
+      // Zero-config too, not just a config that mentions other keys.
+      expect(defaultWorkspaceConfig().resources.maxHeavySteps).toBeUndefined();
+    });
+
+    it('keeps an explicit maxHeavySteps a user set — opting IN is the only way the gate turns on', async () => {
+      write({ resources: { maxHeavySteps: 8 } });
+      expect((await loadWorkspaceConfig()).resources.maxHeavySteps).toBe(8);
+      // 2 is the value the spec puts in `prod-host`'s own config.json (D14). It is a
+      // written value, never something that arrives by upgrading — this is what that looks like.
+      write({ resources: { maxHeavySteps: 2 } });
+      expect((await loadWorkspaceConfig()).resources.maxHeavySteps).toBe(2);
+    });
+
+    it('degrades an out-of-range maxHeavySteps to absent rather than to a gate nobody asked for', async () => {
+      // 0 is not a spelling of "unbounded" — it is a gate nothing can ever pass, i.e. a deadlock.
+      // `min(1)` is what stops it parsing; the `.catch(undefined)` is what turns it into "not
+      // set" instead of some invented number.
+      write({ resources: { maxHeavySteps: 0 } });
+      expect((await loadWorkspaceConfig()).resources.maxHeavySteps).toBeUndefined();
+      write({ resources: { maxHeavySteps: 999 } });
+      expect((await loadWorkspaceConfig()).resources.maxHeavySteps).toBeUndefined();
+      write({ resources: { maxHeavySteps: 'two' } });
+      expect((await loadWorkspaceConfig()).resources.maxHeavySteps).toBeUndefined();
+    });
+
+    it('the type says absent is possible, so a consumer cannot read it as a plain number', async () => {
+      // The compile-time half of "absent = unbounded". `maxParallel` is a plain `number` and
+      // `maxHeavySteps` must NOT be — if it ever became one, `?? Infinity` would look redundant
+      // and somebody would delete it, turning absent into whatever the default happened to be.
+      const { resources } = await loadWorkspaceConfig();
+      const heavy: number | undefined = resources.maxHeavySteps;
+      const parallel: number = resources.maxParallel;
+      expect([heavy, typeof parallel]).toEqual([undefined, 'number']);
+    });
+
+    it('the cgroup bounds default to null — absent means "leave the property off the scope", i.e. today\'s behaviour', async () => {
+      const { resources } = await loadWorkspaceConfig();
+      expect([
+        resources.runMemoryHighMb,
+        resources.runMemoryMaxMb,
+        resources.runCpuWeight,
+        resources.runsSliceMemoryMaxMb,
+      ]).toEqual([null, null, null, null]);
+    });
+
+    it('keeps real cgroup bounds, and degrades out-of-range ones per key without evicting the others', async () => {
+      write({
+        resources: {
+          runMemoryHighMb: 4096,
+          runMemoryMaxMb: 6144,
+          runCpuWeight: 100,
+          runsSliceMemoryMaxMb: 12_288,
+        },
+      });
+      const kept = (await loadWorkspaceConfig()).resources;
+      expect([kept.runMemoryHighMb, kept.runMemoryMaxMb, kept.runCpuWeight, kept.runsSliceMemoryMaxMb]).toEqual([
+        4096, 6144, 100, 12_288,
+      ]);
+
+      // Negative control on the per-key salvage: one bad key must not take the good ones with
+      // it. `runCpuWeight: 0` is below systemd's own 1-10000 range.
+      write({ resources: { runMemoryHighMb: 4096, runCpuWeight: 0 } });
+      const degraded = (await loadWorkspaceConfig()).resources;
+      expect(degraded.runCpuWeight).toBeNull();
+      expect(degraded.runMemoryHighMb).toBe(4096);
+    });
   });
 
   it('mergeWriteWorkspaceConfig accepts a returned replacement config', async () => {

@@ -101,6 +101,8 @@ function toRunSnapshot(
     title: run.title,
     status: run.status,
     ...(run.activity !== undefined ? { activity: run.activity } : {}),
+    ...(run.waitingReason !== undefined ? { waitingReason: run.waitingReason } : {}),
+    ...(run.waitingQuestion !== undefined ? { waitingQuestion: run.waitingQuestion } : {}),
     ...(run.autoResumeAt ? { autoResumeAt: run.autoResumeAt } : {}),
     ...(run.pullRequestUrl ? { pullRequestUrl: run.pullRequestUrl } : {}),
     ...(askText !== undefined ? { askText } : {}),

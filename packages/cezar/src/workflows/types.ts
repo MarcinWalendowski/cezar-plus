@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RUNNER_IDS } from '../core/agent-runner.ts';
+import { RUNNER_IDS, type RunnerId } from '../core/agent-runner.ts';
 import { POSTCONDITION_IDS } from './postconditions.ts';
 
 /**
@@ -19,12 +19,50 @@ export const workflowStepSchema = z
     prompt: z.string().optional(),
     skill: z.string().optional(),
     model: z.string().optional(),
-    /** claude CLI's own `--effort` (low|medium|high|xhigh|max) — a mechanical reasoning-depth
-     *  ceiling, mirroring `model` above. No normalization table: unlike `model`, `effort` is not
-     *  a per-backend alias, it is a fixed five-value enum the claude CLI defines directly.
-     *  Claude-only (`.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`) — the codex and
-     *  opencode runners never read it. */
+    /** A mechanical reasoning-depth ceiling, mirroring `model` above. No normalization table:
+     *  unlike `model`, `effort` is not a per-backend alias, it is a fixed five-value enum.
+     *
+     *  **CORRECTED 2026-08-24 — no longer Claude-only.** This read *"Claude-only
+     *  (`.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`) — the codex and opencode runners
+     *  never read it"*, which was true of both runners when it was written and is now true of
+     *  opencode alone. The codex app-server takes an `effort` on `turn/start` — *"Override the
+     *  reasoning effort for this turn and subsequent turns"*, read off its own
+     *  `generate-json-schema` output rather than guessed — and the codex runner sends it since
+     *  `.ai/specs/2026-08-24-codex-step-model-and-effort.md`.
+     *
+     *  `ultra` is deliberately absent even though sol and terra advertise it: this enum is what a
+     *  user AUTHORS, and the owner's instruction for that level is "basically never", so leaving
+     *  it unauthorable is the cheapest enforcement there is. It also tops out the escalation
+     *  ladder at `max` by construction rather than by a comment. */
     effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    /**
+     * Per-runner overrides of `model` and `effort` for THIS step
+     * (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D1).
+     *
+     * `byRunner[backend]` wins over the plain `model`/`effort` above; a runner not named here
+     * takes them unchanged, so every existing step and every authored workflow behaves exactly as
+     * it did. The problem it solves: `spec-to-deploy` names `sonnet` on six steps, and on a codex
+     * run `modelForBackend` drops all six as another runner's model, leaving those steps on
+     * codex's own default — measured on `prod-host` as `gpt-5.6-sol` with
+     * `reasoningEffort: null`, i.e. the most expensive model in the catalog at its shallowest
+     * setting, for `Commit & push` and `Deploy` alike.
+     *
+     * **One field carrying the pair, not two parallel maps.** The owner's task→model table pairs a
+     * model WITH an effort (Luna Medium vs Luna XHigh differ only in the second half), so a
+     * `modelByRunner` and an `effortByRunner` that could be set independently would let a step
+     * name codex's model beside Claude's effort and still typecheck.
+     */
+    byRunner: z
+      .partialRecord(
+        z.enum(RUNNER_IDS),
+        z
+          .object({
+            model: z.string().optional(),
+            effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+          })
+          .strict(),
+      )
+      .optional(),
     /** Per-step agent backend override (falls back to the task / config default).
      *
      *  Deliberately NOT widened to the legacy `claude-cli` the way the run store's
@@ -72,6 +110,29 @@ export const workflowStepSchema = z
      * (see `parseReviewVerdict`), which works at the shipped default.
      */
     requiresApproval: z.boolean().optional(),
+    /**
+     * This step is CPU/memory-heavy, so it must hold a slot in the second semaphore
+     * (`resources.maxHeavySteps`) for the duration of its turn — spec
+     * `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, D14.
+     *
+     * `maxParallel` alone cannot express a bimodal workload: a run sits near 0.5 GB for most of
+     * its life and spikes into multiple GB inside `run-tests`. Set the one cap for the spike and
+     * the box idles; set it for the median and three runs hit the spike together and thrash. So
+     * admission is two numbers — how many runs are admitted at all, and how many may be inside a
+     * heavy step at once — and this flag is what tells the second one which steps count.
+     *
+     * **DECLARED, never inferred from the step's name at runtime.** A name-match would be a
+     * second, invisible definition of "heavy" that drifts the moment somebody names a step
+     * `tests` or `verify-build`, and it cannot be turned off for a chain that genuinely wants an
+     * unbounded step. The catalog's `run-tests` opts in explicitly; anything else that is heavy
+     * says so in its own YAML.
+     *
+     * Absent = not heavy, which is today's behaviour for every step and every existing workflow
+     * file. Optional and additive so a persisted `workflowDef` written by an older cezar still
+     * parses — see `runs/store.ts`'s `workflowDef` note on why a NARROWING here silently eats
+     * queued runs, and why a widening like this one is safe.
+     */
+    heavy: z.boolean().optional(),
     verify: z
       .object({
         builtin: z.enum(POSTCONDITION_IDS).optional(),
@@ -162,7 +223,12 @@ export function skillStackOf(steps: WorkflowStepDef[]): string[] | null {
     if (stepKind(s) !== 'agent' || !s.skill) return null;
     if (s.prompt !== undefined && s.prompt !== '{{task}}') return null;
     if (s.name !== undefined && s.name !== s.skill) return null;
-    if (s.model || s.runner || s.allowedTools || s.bashAllowlist || s.onFail || s.verify) return null;
+    // `byRunner` belongs on this list for the same reason `model` does: a step carrying one is
+    // not a plain apply-this-skill step, and round-tripping it through the compact skill form
+    // would silently discard the per-runner pair.
+    if (s.model || s.effort || s.byRunner || s.runner || s.allowedTools || s.bashAllowlist || s.onFail || s.verify) {
+      return null;
+    }
     skills.push(s.skill);
   }
   return skills.length ? skills : null;
@@ -170,6 +236,76 @@ export function skillStackOf(steps: WorkflowStepDef[]): string[] | null {
 
 export function stepKind(step: WorkflowStepDef): 'agent' | 'check' {
   return step.command ? 'check' : 'agent';
+}
+
+/** What a step asks the model layer for, once the backend running it is known. */
+export interface StepModelChoice {
+  model: string | undefined;
+  effort: WorkflowStepDef['effort'];
+}
+
+/**
+ * Resolve a step's model and reasoning effort FOR THE BACKEND THAT WILL RUN IT
+ * (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D1).
+ *
+ * The pair is resolved together and from ONE source: a `byRunner` entry supplies both halves or
+ * neither. Mixing them — taking the model from `byRunner` and the effort from the step — is the
+ * failure this shape exists to prevent, because the owner's table has rows that differ only in
+ * effort, so a half-applied override lands on a row nobody chose.
+ *
+ * `fallbackModel` is the run-level model (`input.model`), which applies only when neither the
+ * override nor the step names one. It is deliberately NOT consulted for effort: there is no
+ * run-level effort, and inventing one here would give every step of every run a ceiling.
+ */
+export function resolveStepModel(
+  step: WorkflowStepDef,
+  backend: RunnerId,
+  fallbackModel?: string,
+  priorFailures = 0,
+): StepModelChoice {
+  const override = step.byRunner?.[backend];
+  const chosen: StepModelChoice =
+    override && (override.model !== undefined || override.effort !== undefined)
+      ? { model: override.model ?? step.model ?? fallbackModel, effort: override.effort }
+      : { model: step.model ?? fallbackModel, effort: step.effort };
+  return escalate(chosen, priorFailures);
+}
+
+/**
+ * The escalation ladder, exactly where the owner's table puts it: *"Terra/Sol Medium failed → Sol
+ * High/Max"* (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D4).
+ *
+ * Deliberately NOT a general "climb one level on any failure". A failing tiny task must not end up
+ * on the most expensive model in the catalog, and the table declines to send it there — so the
+ * Luna rows do not climb at all, and a step that names no model is left alone rather than given
+ * one it never asked for.
+ *
+ * It tops out at `max`. `ultra` is never reached, because *"Sol Ultra: basically never"* — and it
+ * could not be spelled anyway, since it is the one level the `effort` enum omits.
+ */
+const CODEX_ESCALATION: readonly StepModelChoice[] = [
+  { model: 'gpt-5.6-sol', effort: 'high' },
+  { model: 'gpt-5.6-sol', effort: 'max' },
+];
+
+/** The two rungs the table names as escalating: terra or sol, at `medium`. */
+function escalatable(choice: StepModelChoice): boolean {
+  if (choice.effort !== 'medium') return false;
+  return choice.model === 'gpt-5.6-terra' || choice.model === 'gpt-5.6-sol';
+}
+
+function escalate(choice: StepModelChoice, priorFailures: number): StepModelChoice {
+  // ONE guard on the attempt count, not two. This read `priorFailures <= 0 || !escalatable(...)`
+  // with a `?? choice` on the lookup below, and a mutation removing the `<= 0` half survived the
+  // whole suite: the `??` absorbed the out-of-range index and produced identical behaviour. Two
+  // mechanisms enforcing one property means neither is provably the one that works.
+  if (priorFailures <= 0 || !escalatable(choice)) return choice;
+  const rung = CODEX_ESCALATION[Math.min(priorFailures, CODEX_ESCALATION.length) - 1];
+  // `priorFailures >= 1` above and `Math.min` below bound the index to 0..length-1, so this is
+  // total. The throw is unreachable and says so — it exists to keep the type honest without a
+  // fallback that would silently re-absorb a guard someone deletes later.
+  if (!rung) throw new Error(`unreachable: escalation rung ${priorFailures} out of range`);
+  return rung;
 }
 
 /**
@@ -585,8 +721,35 @@ export const BRIEFS_DIR = '.ai/specs/briefs';
  */
 const SPEC_TO_DEPLOY_STEP_MODEL = 'sonnet';
 
-/** The one exception above — see {@link SPEC_TO_DEPLOY_STEP_MODEL}. */
-const SPEC_REVIEW_MODEL = 'opus';
+/**
+ * The two judgement steps — see {@link SPEC_TO_DEPLOY_STEP_MODEL} and
+ * {@link SPEC_AUTHORING_RUNNER}.
+ *
+ * **Amended 2026-08-22** (owner: *"writing spec + spec review should be by opus always, the rest
+ * can be load balanced by codex or claude sonnet"*). `spec` joins `review-spec` on opus; it ran on
+ * sonnet under the 2026-08-21 policy. Writing the spec and reviewing it are the two places where
+ * the judgement IS the deliverable, and everything downstream is construction against whatever
+ * they produce.
+ */
+const SPEC_AUTHORING_MODEL = 'opus';
+
+/**
+ * `spec` and `review-spec` pin the RUNNER as well as the model, and the runner pin is what makes
+ * "always opus" true rather than aspirational.
+ *
+ * `opus` is a Claude alias. On a run started on codex, the model pin alone is dropped by
+ * `RunManager.modelForBackend` (it names no model codex serves) and the step would quietly fall
+ * back to codex's default — the opposite of always. Naming the runner keeps both halves of the
+ * instruction: these two steps are opus, on Claude, whatever the rest of the chain runs on.
+ *
+ * The other six steps carry no runner, so they follow the run's own — which is what leaves room
+ * for the balancing half of the instruction ("the rest can be load balanced by codex or claude
+ * sonnet"). Today that balance is per-run and chosen by hand: cezar has no cross-runner routing,
+ * because `pool:*` balances ACCOUNTS WITHIN a provider and the backend is already fixed before the
+ * pool is consulted. Filed as its own task, with making this whole table configurable in global
+ * settings. Spec: `.ai/specs/2026-08-22-failed-turn-reads-as-done.md`.
+ */
+const SPEC_AUTHORING_RUNNER = 'claude' as const;
 
 /**
  * `run-tests`'s reasoning-depth ceiling (`.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`,
@@ -597,6 +760,57 @@ const SPEC_REVIEW_MODEL = 'opus';
  * root-causing that step's job never asked for.
  */
 const RUN_TESTS_STEP_EFFORT = 'medium';
+
+/**
+ * The codex half of the per-step policy — the owner's task→model table of 2026-08-24, applied to
+ * this workflow (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D2):
+ *
+ * | Task | Model |
+ * | --- | --- |
+ * | Commits, renaming, spacing, tiny UI changes | Luna Medium/High |
+ * | Normal bug fix or a clearly scoped feature | Luna XHigh |
+ * | Unclear task that requires exploring several parts of the repo | Terra Medium |
+ * | Complex bug, architecture, auth, payments, migrations | Sol Medium |
+ * | Terra/Sol Medium failed | Sol High/Max |
+ * | Sol Ultra | Basically never |
+ *
+ * **Why this is needed at all.** Every step below pins a CLAUDE model, and on a codex run
+ * `modelForBackend` drops all six as another runner's id — leaving them on codex's own default,
+ * measured on `prod-host` as **`gpt-5.6-sol` with `reasoningEffort: null`**, i.e. the most
+ * expensive model in the catalog at its shallowest reasoning level, for `Commit & push` and
+ * `Deploy` alike. Nobody chose that; it is the absence of a choice.
+ *
+ * **`implement` is Luna XHigh and not Sol, even for an auth or migration task.** By the time it
+ * runs, the architecture decision has been made and reviewed on opus two steps earlier. The
+ * table's Sol row is about DECIDING, and `spec`/`review-spec` are where deciding happens — the
+ * same judgement-vs-construction split {@link SPEC_TO_DEPLOY_STEP_MODEL} already encodes for
+ * Claude.
+ *
+ * **`gpt-5.4` is not used**, though the table offers it for the tiny-changes row. The 2026-08-22
+ * owner instruction *"in codex use only 5.6"* is why `KNOWN_PRESETS_BY_RUNNER.codex` lists the 5.6
+ * family only, and the two instructions genuinely disagree. Nothing here BLOCKS it — an id absent
+ * from every runner's preset list fails open — so typing it still works; the built-in workflow
+ * simply does not name it. Flagged for the owner rather than resolved quietly.
+ *
+ * Every effort here is one all three 5.6 models advertise (`supported_reasoning_levels`, measured
+ * from `models_cache.json` on both production accounts: sol and terra `low…ultra`, luna
+ * `low…max`), so no catalog check stands between these values and the wire. That is a property of
+ * the enum, not luck — `ultra` is the only level the enum omits and the only one luna lacks.
+ */
+const CODEX_EXPLORE = { model: 'gpt-5.6-terra', effort: 'medium' } as const;
+
+/** Construction against a spec that already exists — the table's "clearly scoped feature" row. */
+const CODEX_BUILD = { model: 'gpt-5.6-luna', effort: 'xhigh' } as const;
+
+/** Commits, test runs and deploys — the table's "commits … tiny changes" row, lower half.
+ *  `run-tests` lands here rather than on {@link CODEX_BUILD} for the reason
+ *  {@link RUN_TESTS_STEP_EFFORT} already gives, which is runner-independent. */
+const CODEX_MECHANICAL = { model: 'gpt-5.6-luna', effort: 'medium' } as const;
+
+/** Writing the decision up. The same row as the mechanical steps, upper half: it is prose about
+ *  what just happened rather than an edit, and `high` is the half of "Medium/High" that suits
+ *  something a human will read as the record. */
+const CODEX_WRITE = { model: 'gpt-5.6-luna', effort: 'high' } as const;
 
 /**
  * The owner's standard operating pipeline as ONE selectable chain (spec
@@ -646,6 +860,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       id: 'context',
       name: 'Gather the record',
       model: SPEC_TO_DEPLOY_STEP_MODEL,
+      byRunner: { codex: CODEX_EXPLORE },
       // SPLIT OUT of the old combined `spec` step (owner ask 2026-08-20: "seperate gathering
       // knoweldge/context from writing a spec"; spec
       // `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`, P1).
@@ -709,7 +924,8 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'spec',
       name: 'Write the spec',
-      model: SPEC_TO_DEPLOY_STEP_MODEL,
+      model: SPEC_AUTHORING_MODEL,
+      runner: SPEC_AUTHORING_RUNNER,
       // Narrowed by the P1 split: the record sweep moved to `context`, so this step's window holds
       // the brief and the code it names rather than the raw search output. `Task` is deliberately
       // NOT granted here — the writing is the one job that must not be delegated, for the reason
@@ -753,7 +969,8 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'review-spec',
       name: 'Review the spec',
-      model: SPEC_REVIEW_MODEL,
+      model: SPEC_AUTHORING_MODEL,
+      runner: SPEC_AUTHORING_RUNNER,
       // P2 of `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`.
       //
       // READ-ONLY BY CONSTRUCTION — no `Write`, no `Edit`. A reviewer that can edit what it
@@ -818,6 +1035,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       id: 'implement',
       name: 'Implement the spec',
       model: SPEC_TO_DEPLOY_STEP_MODEL,
+      byRunner: { codex: CODEX_BUILD },
       allowedTools: DEFAULT_ALLOWED_TOOLS,
       // Reuse the autonomous workflow's guarded allowlist verbatim so the two never drift:
       // installs + gate-shaped runner subcommands only, git add/commit but never `git push`.
@@ -849,6 +1067,14 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       name: 'Run the tests',
       model: SPEC_TO_DEPLOY_STEP_MODEL,
       effort: RUN_TESTS_STEP_EFFORT,
+      byRunner: { codex: CODEX_MECHANICAL },
+      // THE step the second admission gate exists for (D14). Declared here, on the definition,
+      // and never inferred from the id at runtime — see `heavy`'s own doc comment on the step
+      // schema above. Measured: a run sits near 0.5 GB for most of its life and spikes into
+      // multiple GB inside this step, at a 12.9 % duty cycle. It is also the ONLY built-in step
+      // that carries the flag; the gate is otherwise inert, and stays inert for every installed
+      // user until they set `resources.maxHeavySteps` themselves.
+      heavy: true,
       allowedTools: DEFAULT_ALLOWED_TOOLS,
       // Same guarded allowlist as `implement`, by reference: it can install, run every gate, and
       // edit code to fix a failure — but it cannot reach the remote. `commit-push` does that next.
@@ -915,6 +1141,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       id: 'commit-push',
       name: 'Commit & push / merge',
       model: SPEC_TO_DEPLOY_STEP_MODEL,
+      byRunner: { codex: CODEX_MECHANICAL },
       // The step is green only if the tree is CLEAN and (where a remote is reachable) nothing is
       // unpushed — owner instruction 2026-08-20 on run `23221162`, which reported `status=done`
       // leaving 7 modified and 5 untracked files and no commit: "everything must be committed in
@@ -967,6 +1194,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       id: 'document',
       name: 'Document the decision',
       model: SPEC_TO_DEPLOY_STEP_MODEL,
+      byRunner: { codex: CODEX_WRITE },
       // This step COMMITS too (spec status, KB, tracker), so it inherits the same post-condition:
       // a record written into an uncommitted file is a record the next session never reads.
       verify: { builtin: 'everything-committed', max: 1 },
@@ -1043,6 +1271,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       id: 'deploy',
       name: 'Deploy',
       model: SPEC_TO_DEPLOY_STEP_MODEL,
+      byRunner: { codex: CODEX_MECHANICAL },
       // Green only when EVERY service in `.ai/deploy-targets.json` probes live — the whole
       // ask: cezar is the UI tree AND the backend service, and shipping one alone used to end this
       // step green. A repo that declares no targets file is RED, not green: "nobody said what this

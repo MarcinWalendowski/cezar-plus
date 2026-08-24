@@ -91,6 +91,9 @@ class OpencodeSession implements AgentSession {
   private ready!: Promise<void>;
   private resolveExit!: () => void;
   private exited!: Promise<void>;
+  /** code/signal from whichever of 'exit'/'close' fires first. The exit gate's only source of
+   *  truth for how the child actually died, read against `terminatedByCezar` below. */
+  private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   private readonly sse = new AbortController();
   private readonly toolCalls: AgentToolCallRecord[] = [];
   private readonly textChunks: string[] = [];
@@ -125,6 +128,13 @@ class OpencodeSession implements AgentSession {
   private bumpIdle: () => void = () => undefined;
   /** One teardown per session — see `terminate()`. */
   private signalled = false;
+  /** True once CEZAR itself has initiated the child's teardown — set inside `terminate()`, at
+   *  the moment it actually sends a signal (never merely requested). Distinguishes a session
+   *  cezar tore down — the NORMAL case here, see the note above `finally` in the constructor —
+   *  from an untrapped external kill or a crash the child suffered entirely on its own. Mirrors
+   *  claude-cli-runner's `terminatedByCezar` (#703/#858 lineage) for this runner's single-process
+   *  shape, where there is no broker to report the distinction instead. */
+  private terminatedByCezar = false;
 
   constructor(
     private readonly bin: string,
@@ -145,15 +155,27 @@ class OpencodeSession implements AgentSession {
     }
     this.hasExited = trackChildExit(this.child);
 
-    this.child.on('error', (err: NodeJS.ErrnoException) => {
-      this.spawnFailed = wrapSpawnError(err, bin);
-    });
-
     this.exited = new Promise<void>((resolve) => {
       this.resolveExit = resolve;
     });
-    this.child.once('exit', () => this.resolveExit());
-    this.child.once('close', () => this.resolveExit());
+    const captureExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (this.exitInfo === undefined) this.exitInfo = { code, signal };
+      this.resolveExit();
+    };
+    this.child.once('exit', captureExit);
+    this.child.once('close', captureExit);
+
+    this.child.on('error', (err: NodeJS.ErrnoException) => {
+      this.spawnFailed = wrapSpawnError(err, bin);
+      // Node makes no promise that 'error' is followed by 'exit' — a post-fork spawn failure
+      // (EACCES, an exec that dies before the OS even assigns it a pid) can leave captureExit
+      // unreached forever. Without this, every `await this.exited` below — the result's own
+      // wait, and any teardown path that awaits it — hangs permanently instead of surfacing
+      // `spawnFailed`: a hang, not a wrong answer, and invisible in a way a bad result is not.
+      // Mirrors claude-cli-runner's/pi-runner's `waitForExit`, which resolves from 'error' the
+      // same way, falling back to whatever the child's own exitCode/signalCode already carry.
+      captureExit(this.child.exitCode ?? null, this.child.signalCode ?? null);
+    });
 
     const stderrChunks: string[] = [];
     this.child.stderr.setEncoding('utf8');
@@ -187,7 +209,14 @@ class OpencodeSession implements AgentSession {
         // Live for the whole session; the SSE loop runs until end()/interrupt.
         await this.exited;
       } catch (err) {
-        if (!this.timedOut) {
+        // `this.ready` (bootstrap()) can reject because CEZAR itself tore the child down while
+        // its first-turn POST was still in flight — end()/interrupt() racing bootstrap()'s
+        // unguarded `await this.prompt(first)` turns the connection breaking under the request
+        // into a generic fetch rejection here. `terminate()` sets `terminatedByCezar` the moment
+        // it sends a signal, synchronously and before any await, so by the time that rejection
+        // reaches this catch it reliably tells "cezar did this" apart from a genuine bootstrap
+        // failure — a shutdown cezar asked for must not surface as a run error.
+        if (!this.timedOut && !this.terminatedByCezar) {
           const message = err instanceof Error ? err.message : String(err);
           this.emit({ type: 'error', message: `opencode: ${message}` });
         }
@@ -216,7 +245,32 @@ class OpencodeSession implements AgentSession {
       if (this.timedOut) {
         // Not an agent failure — `reason` routes it to `review` + `stopReason` in the run manager.
         this.emit({ type: 'error', message: stopMessage('inactivity', limitMs), reason: 'inactivity' });
+        this.emit({ type: 'done' });
+        return base;
       }
+
+      // Exit gate: once cezar has initiated teardown (`terminate()`, reached from end()/
+      // interrupt()/the `finally` above), the exit that follows — whatever code or signal the OS
+      // reports back — is the ordinary consequence of that and stays `done`; that is the common
+      // case for this runner (see the note above `terminate()`). This only fires for the other
+      // case: the child died — an untrapped signal, or a non-zero exit — while cezar had not yet
+      // initiated any teardown. The SSE stream cannot be trusted to catch that on its own: a kill
+      // mid-session never produces a `session.error` frame, so without this the run fell through
+      // to `done` with whatever prose had streamed so far.
+      if (!this.terminatedByCezar) {
+        const exit = this.exitInfo;
+        if (exit?.signal) {
+          const msg = `opencode serve was killed by signal ${exit.signal}`;
+          this.emit({ type: 'error', message: msg });
+          throw new Error(msg);
+        }
+        if (exit && exit.code !== null && exit.code !== 0) {
+          const msg = `opencode serve exited with code ${exit.code}`;
+          this.emit({ type: 'error', message: msg });
+          throw new Error(msg);
+        }
+      }
+
       this.emit({ type: 'done' });
       return base;
     })();
@@ -281,10 +335,15 @@ class OpencodeSession implements AgentSession {
    * once SIGTERM is out with SIGKILL armed there is nothing a second pass adds.
    * The old `!child.killed` test deduplicated this as a side effect of being
    * wrong; `signalled` keeps that property on purpose.
+   *
+   * Also the one place `terminatedByCezar` is set, on the same `hasExited()` guard: a call that
+   * arrives after the child already died on its own leaves it false, so the exit gate in
+   * `result` can tell "we tore it down" apart from "it was already gone."
    */
   private terminate(): void {
     if (this.signalled || this.hasExited()) return;
     this.signalled = true;
+    this.terminatedByCezar = true;
     this.child.kill('SIGTERM');
     setTimeout(() => {
       if (this.hasExited()) return;
@@ -326,6 +385,17 @@ class OpencodeSession implements AgentSession {
     });
   }
 
+  /**
+   * OpenCode does NOT have the codex resume-poisoning problem
+   * (`.ai/specs/2026-08-23-codex-resume-explicit-model.md`, Phase 3). This method always issues
+   * a fresh `POST /session` — it never reads `spec.sessionId`/`spec.resume`, so there is no
+   * transport-level "resume" at all, and therefore no persisted per-session model to inherit.
+   * Every `prompt()` call re-sends `body.model` explicitly (below), so a dropped pin simply means
+   * no `model` key on THAT call, exactly like a fresh session — there is no separate resume path
+   * whose omission would mean something different, the way it does for codex's `thread/resume`.
+   * `isMissingSessionRejection` records the same fact for the same reason
+   * (`core/agent-runner.ts:126-128`).
+   */
   private async bootstrap(): Promise<void> {
     const created = await this.http('POST', '/session', { title: 'cezar task' });
     this.sessionId = stringField(created, 'id');

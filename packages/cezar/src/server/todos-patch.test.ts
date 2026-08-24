@@ -130,6 +130,31 @@ describe('PATCH /api/v1/todos/:id', () => {
 
   // ---- validation -------------------------------------------------------------------------------
 
+  /**
+   * `summary` is reachable from `updateTodo` (maintenance scripts correcting a wrong-diagnosis
+   * todo) and must NOT be reachable from the wire. The guard is zod stripping unknown keys on a
+   * non-passthrough object — which is a DEFAULT, not a written rule, so it is exactly the kind of
+   * protection that disappears silently the day someone adds `.passthrough()` to the schema.
+   */
+  it('ignores a summary in the body — the wire schema strips it, the entry keeps its identity', async () => {
+    writeTodos([{ id: 't1', summary: 'Ship it' }]);
+    const res = await patch('t1', { status: 'done', summary: 'renamed from the outside' });
+    expect(res.status).toBe(200);
+    const { todo } = await updated(res);
+    expect(todo.summary).toBe('Ship it');
+    expect(todo.status).toBe('done');
+    const stored = await readStoredTodos();
+    expect(stored[0]?.summary).toBe('Ship it');
+  });
+
+  it('400s a body carrying ONLY a summary — stripped to empty, and empty is refused', async () => {
+    writeTodos([{ id: 't1', summary: 'Ship it' }]);
+    const res = await patch('t1', { summary: 'renamed from the outside' });
+    expect(res.status).toBe(400);
+    const stored = await readStoredTodos();
+    expect(stored[0]?.summary).toBe('Ship it');
+  });
+
   it('400s an empty body — at least one key required', async () => {
     writeTodos([{ id: 't1', summary: 'Ship it' }]);
     const res = await patch('t1', {});

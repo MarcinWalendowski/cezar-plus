@@ -10,6 +10,7 @@ import { WORKFLOWS_DIR } from '../workflows/load.ts';
 import { createApp } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * `POST /api/v1/runs` — "at most one of workflow/steps" (spec
@@ -36,7 +37,7 @@ describe('POST /api/v1/runs — neither workflow nor steps resolves to the defau
       startRun: (workflow: WorkflowDef, input: StartRunInput) => {
         capturedWorkflow = workflow;
         capturedInput = input;
-        return store.createRun({ title: 't', workflow: workflow.name, task: input.task, steps: [] });
+        return store.createRun({ author: localCliAuthor(), title: 't', workflow: workflow.name, task: input.task, steps: [] });
       },
     } as unknown as RunManager;
     app = createApp({

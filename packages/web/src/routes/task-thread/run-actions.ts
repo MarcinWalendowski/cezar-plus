@@ -101,6 +101,25 @@ export interface RunActionFlags {
   cancel: boolean
   /** Remove the run, its transcript, worktree and branch. Terminal runs only. */
   deleteRun: boolean
+  /**
+   * "Run on…" — move a PARKED task to another engine
+   * (spec `2026-08-23-retarget-task-to-another-engine.md`, Phase 5).
+   *
+   * The two states a task is parked in, and only those:
+   *  - `queued`, which includes a run held behind an account's usage limit — the reported case,
+   *    where the task is `#1 in queue` and will not move for days;
+   *  - `failed` with an `autoResumeAt`, the SCHEDULED state, where cezar has promised to retry at
+   *    an instant that may be a long way off.
+   *
+   * A plain `failed` run with no appointment is deliberately excluded even though the server would
+   * accept it: that run already offers **Continue**, whose composer carries the same engine pills.
+   * Two buttons doing one thing on the same header is worse than one, and the parked states are
+   * exactly the ones where Continue is absent or misleading.
+   *
+   * Never while `running` — there is a live agent turn, and moving it is not a thing the engine
+   * can do.
+   */
+  retarget: boolean
 }
 
 export function runActionFlags(run: RunRecord): RunActionFlags {
@@ -115,6 +134,7 @@ export function runActionFlags(run: RunRecord): RunActionFlags {
     markUnread: canBeUnread(run) && !isUnread(run),
     cancel: active,
     deleteRun: !active,
+    retarget: run.status === 'queued' || (run.status === 'failed' && run.autoResumeAt !== undefined),
   }
 }
 

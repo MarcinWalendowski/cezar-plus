@@ -266,8 +266,16 @@ export function agentCredentialLoginCommands(username: string): AgentLoginInstru
  * Throws `StepAborted` synchronously (via `orgUnixUsername`) if `orgSlug` is
  * invalid — see that function's doc comment for why the caller should invoke
  * this from `preflight()`, or otherwise before any step is shown.
+ *
+ * `label` is the noun phrase this step's own strings use to say whose user this is — defaults to
+ * `org "<orgSlug>"`, so every existing call site (which passes only `orgSlug`) renders exactly as
+ * before. `hetzner.ts` also reuses this ONE step, unmodified, for its cluster worker's identity
+ * under the reserved `WORKER_PSEUDO_SLUG` — a real slug, but not a real org, so the default label
+ * reads as `org "worker"` there, which is wrong. Pass an explicit `label` (e.g. `'this worker'`)
+ * for a caller whose slug is not actually an org name; the commands run and the artifact produced
+ * are identical either way — only the words describing them change.
  */
-export function orgUserProvisioningStep(orgSlug: string): InstallStep {
+export function orgUserProvisioningStep(orgSlug: string, label: string = `org "${orgSlug}"`): InstallStep {
   const username = orgUnixUsername(orgSlug);
   const home = orgHomeDir(username);
   const cezHome = orgCezHome(username);
@@ -275,7 +283,7 @@ export function orgUserProvisioningStep(orgSlug: string): InstallStep {
 
   return {
     id: 'org-user',
-    title: `Dedicated unix user + CEZ_HOME + project root for org "${orgSlug}" (D4 process isolation)`,
+    title: `Dedicated unix user + CEZ_HOME + project root for ${label} (D4 process isolation)`,
     async check(ctx) {
       if (ctx.dryRun) return false;
       const userExists = await verifyCommand(ctx, 'id', ['-u', username]);
@@ -287,7 +295,7 @@ export function orgUserProvisioningStep(orgSlug: string): InstallStep {
     async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
       await sudoStep(ctx, {
         description:
-          `Create the dedicated unix user "${username}" for org "${orgSlug}" and lock its home to 0700 — ` +
+          `Create the dedicated unix user "${username}" for ${label} and lock its home to 0700 — ` +
           `this uid boundary is what makes cross-org reads impossible at the filesystem level, not merely inconvenient (D4).`,
         command: createOrgUserCommand(username, orgSlug),
         verify: (c) => isLockedTo(c, home, username),
@@ -332,9 +340,9 @@ export function orgUserProvisioningStep(orgSlug: string): InstallStep {
           ...logins.map((l) => `  ${l.command}`),
           '',
           `Remember D4's other half: everyone who can run code as ${username} can act as every other`,
-          `member of org "${orgSlug}". Invite accordingly.`,
+          `member of ${label}. Invite accordingly.`,
         ].join('\n'),
-        `Agent credentials for org "${orgSlug}"`,
+        `Agent credentials for ${label}`,
       );
 
       const artifacts: StepArtifact[] = [

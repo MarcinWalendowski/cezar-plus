@@ -19,6 +19,7 @@ import { startRunBroker } from './run-broker.ts';
 export interface ParsedBrokerArgv {
   spoolDir: string;
   runId: string;
+  instanceId?: string;
   backend: string;
   stepId?: string;
   cwd?: string;
@@ -62,6 +63,7 @@ export function parseBrokerArgv(argv: string[]): ParsedBrokerArgv {
   return {
     spoolDir,
     runId,
+    instanceId: read('--instance'),
     backend: read('--backend') ?? 'claude',
     stepId: read('--step'),
     cwd: read('--cwd'),
@@ -90,6 +92,7 @@ export async function runBrokerCommand(argv: string[]): Promise<number> {
   const broker = startRunBroker({
     spoolDir: parsed.spoolDir,
     runId: parsed.runId,
+    instanceId: parsed.instanceId,
     stepId: parsed.stepId,
     backend: parsed.backend,
     command: parsed.command,

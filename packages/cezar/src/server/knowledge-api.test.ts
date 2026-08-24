@@ -12,6 +12,7 @@ import type { RunManager } from '../workflows/run.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import type { ProjectApiEnv, ProjectContext } from './server.ts';
+import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
  * `knowledge-routes.ts` (W4.1). See `.ai/specs/2026-08-06-knowledge-base-mounts-search.md`
@@ -423,7 +424,7 @@ describe('knowledge routes — proposals (routes 7/8)', () => {
 
   it('POST /knowledge/proposals/apply never fakes success: applied stays empty, refused carries a reason', async () => {
     const { project, dataDir, runStore } = await buildProject();
-    const run = runStore.createRun({ title: 'a run', workflow: 'w', task: 't', steps: [] });
+    const run = runStore.createRun({ author: localCliAuthor(), title: 'a run', workflow: 'w', task: 't', steps: [] });
     const runsDir = join(dataDir, 'runs');
     await mkdir(runsDir, { recursive: true });
     await writeFile(

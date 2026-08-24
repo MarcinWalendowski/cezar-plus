@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runStatusSchema as contractRunStatusSchema } from '@loki-labs/better-cezar-contract';
 import { RunStore, runRecordSchema } from './store.ts';
+import { localCliAuthor } from './task-author.ts';
 
 /** A minimal pre-#389 record, exactly as an old runs.json holds it — no
  *  titleSummary, no diffStat. Loading it must keep working (additive proof). */
@@ -32,7 +33,7 @@ describe('RunStore — directional usage persistence', () => {
 
   it('round-trips step checkpoints and complete run aggregates through runs.json', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'metered task',
       workflow: 'quick-task',
       task: 'metered task',
@@ -69,7 +70,7 @@ describe('RunStore — directional usage persistence', () => {
     expect(RunStore.open(dataDir).getRun(LEGACY_RUN.id)?.inputTokens).toBeUndefined();
 
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'partial task',
       workflow: 'quick-task',
       task: 'partial task',
@@ -103,7 +104,7 @@ describe('RunStore — context occupancy roll-up (spec 2026-08-19-context-usage-
 
   it('mirrors the LATEST turn (overwrite), never a sum, and sizes the window from the model', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'metered task',
       workflow: 'quick-task',
       task: 'metered task',
@@ -124,7 +125,7 @@ describe('RunStore — context occupancy roll-up (spec 2026-08-19-context-usage-
 
   it('leaves the window absent for an unmodelled model rather than inventing one', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'codex task',
       workflow: 'quick-task',
       task: 'codex task',
@@ -134,6 +135,74 @@ describe('RunStore — context occupancy roll-up (spec 2026-08-19-context-usage-
     store.updateStep(run.id, 'task', { iterations: 1, contextTokens: 12_000 });
     expect(store.getRun(run.id)?.contextTokens).toBe(12_000);
     expect(store.getRun(run.id)?.contextWindow).toBeUndefined();
+  });
+});
+
+describe('RunStore — context window denominator (spec 2026-08-22-context-window-denominator-per-step)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('withdraws the guessed window once observed tokens exceed it, instead of showing 245k / 200k', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      author: localCliAuthor(),
+      title: 'metered task',
+      workflow: 'quick-task',
+      task: 'metered task',
+      model: 'opus',
+      steps: [{ id: 'review-spec', name: 'Review spec', kind: 'agent' }],
+    });
+    store.updateStep(run.id, 'review-spec', { iterations: 1, contextTokens: 245_000 });
+    expect(store.getRun(run.id)?.contextTokens).toBe(245_000);
+    expect(store.getRun(run.id)?.contextWindow).toBeUndefined();
+    expect(store.getRun(run.id)?.steps[0]?.contextWindow).toBeUndefined();
+  });
+
+  it('pairs the run-level window with the LATEST context step, never a newer step\'s different model', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      author: localCliAuthor(),
+      title: 'two-step task',
+      workflow: 'quick-task',
+      task: 'two-step task',
+      model: 'opus',
+      steps: [
+        { id: 'step-a', name: 'Step A', kind: 'agent' },
+        { id: 'step-b', name: 'Step B', kind: 'agent' },
+      ],
+    });
+    // Step A (opus) reports occupancy comfortably under its guessed window.
+    store.updateStep(run.id, 'step-a', { iterations: 1, contextTokens: 40_000 });
+    expect(store.getRun(run.id)).toMatchObject({ contextTokens: 40_000, contextWindow: 200_000 });
+    // Step B starts (a different model, via a fresh modelIdentity) but has not yet reported
+    // any contextTokens of its own.
+    store.updateRun(run.id, { modelIdentity: 'openai/gpt-5' });
+    store.updateStep(run.id, 'step-b', { iterations: 1 });
+    // The roll-up must still pair with step A's own window, not a fresh guess from step B's
+    // (unmodelled) identity — regression test for Defect B.
+    expect(store.getRun(run.id)).toMatchObject({ contextTokens: 40_000, contextWindow: 200_000 });
+  });
+
+  it('stores and returns an explicit contextWindow patch verbatim, even against the guess', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      author: localCliAuthor(),
+      title: 'codex task',
+      workflow: 'quick-task',
+      task: 'codex task',
+      model: 'gpt-5',
+      steps: [{ id: 'task', name: 'Do the task', kind: 'agent' }],
+    });
+    store.updateStep(run.id, 'task', { iterations: 1, contextTokens: 300_000, contextWindow: 400_000 });
+    expect(store.getRun(run.id)).toMatchObject({ contextTokens: 300_000, contextWindow: 400_000 });
+    expect(store.getRun(run.id)?.steps[0]).toMatchObject({ contextTokens: 300_000, contextWindow: 400_000 });
   });
 });
 
@@ -150,7 +219,7 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('round-trips the new fields through runs.json', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'fix the login bug',
       workflow: 'quick-task',
       task: 'fix the login bug',
@@ -170,8 +239,8 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('round-trips the repointed flag, and keeps it absent when it was never set (#751)', () => {
     const store = RunStore.open(dataDir);
-    const narrowed = store.createRun({ title: 'review pr 694', workflow: 'quick-task', task: 'review', steps: [] });
-    const normal = store.createRun({ title: 'fix the login bug', workflow: 'quick-task', task: 'fix', steps: [] });
+    const narrowed = store.createRun({ author: localCliAuthor(), title: 'review pr 694', workflow: 'quick-task', task: 'review', steps: [] });
+    const normal = store.createRun({ author: localCliAuthor(), title: 'fix the login bug', workflow: 'quick-task', task: 'fix', steps: [] });
     store.updateRun(narrowed.id, { diffStat: { adds: 1, dels: 0, files: 1, repointed: true } });
     store.updateRun(normal.id, { diffStat: { adds: 10, dels: 2, files: 3 } });
     store.flush();
@@ -210,7 +279,7 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('round-trips worktreeReclaimedAt and lets updateRun clear it (retention #483)', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(run.id, { worktreeReclaimedAt: '2026-07-18T00:00:00.000Z' });
     store.flush();
 
@@ -224,7 +293,7 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it("round-trips activity:'monitoring' and lets updateRun clear it (#490)", () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     // A fresh record has no activity (additive/optional).
     expect(run.activity).toBeUndefined();
     store.updateRun(run.id, { status: 'running', activity: 'monitoring' });
@@ -238,9 +307,69 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
     expect(RunStore.open(dataDir, { keepLive: true }).getRun(run.id)?.activity).toBeUndefined();
   });
 
+  it('round-trips a markerless waiting question and clears it on terminal writes', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.updateRun(run.id, {
+      status: 'waiting',
+      waitingReason: 'question',
+      waitingQuestion: 'Merge and deploy now, or hold?',
+    });
+    store.flush();
+    expect(RunStore.open(dataDir, { keepLive: true }).getRun(run.id)).toMatchObject({
+      waitingReason: 'question',
+      waitingQuestion: 'Merge and deploy now, or hold?',
+    });
+    store.updateRun(run.id, { status: 'done' });
+    expect(store.getRun(run.id)?.waitingReason).toBeUndefined();
+    expect(store.getRun(run.id)?.waitingQuestion).toBeUndefined();
+  });
+
+  it('clears a parked prose question on transitions but keeps the same park and explicit replacements', () => {
+    const store = RunStore.open(dataDir);
+    const freshPark = () => {
+      const run = store.createRun({ author: localCliAuthor(), title: 'park', workflow: 'quick-task', task: 'park', steps: [] });
+      store.updateRun(run.id, {
+        status: 'waiting',
+        waitingReason: 'question',
+        waitingQuestion: 'Merge or hold?',
+      });
+      return run.id;
+    };
+
+    for (const status of ['queued', 'running', 'done'] as const) {
+      const id = freshPark();
+      store.updateRun(id, { status });
+      expect(store.getRun(id)?.waitingReason).toBeUndefined();
+      expect(store.getRun(id)?.waitingQuestion).toBeUndefined();
+    }
+
+    const nativeAskId = freshPark();
+    store.updateRun(nativeAskId, { status: 'running' });
+    store.updateRun(nativeAskId, { status: 'waiting' });
+    expect(store.getRun(nativeAskId)?.waitingReason).toBeUndefined();
+    expect(store.getRun(nativeAskId)?.waitingQuestion).toBeUndefined();
+
+    const idleParkId = freshPark();
+    store.updateRun(idleParkId, { status: 'waiting', activity: undefined, currentStepId: undefined });
+    store.updateRun(idleParkId, { autoResumeAttempts: undefined });
+    expect(store.getRun(idleParkId)).toMatchObject({
+      waitingReason: 'question',
+      waitingQuestion: 'Merge or hold?',
+    });
+
+    store.updateRun(idleParkId, {
+      status: 'waiting',
+      waitingReason: 'report',
+      waitingQuestion: undefined,
+    });
+    expect(store.getRun(idleParkId)?.waitingReason).toBe('report');
+    expect(store.getRun(idleParkId)?.waitingQuestion).toBeUndefined();
+  });
+
   it('round-trips the monitoring deadline and clears monitoring state on terminal writes', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 'monitor', task: 'monitor', workflow: 'quick-task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 'monitor', task: 'monitor', workflow: 'quick-task', steps: [] });
     const deadline = '2026-07-25T10:15:00.000Z';
     store.updateRun(run.id, { status: 'running', activity: 'monitoring', monitoringWakeAt: deadline });
     expect(store.getRun(run.id)?.monitoringWakeAt).toBe(deadline);
@@ -252,7 +381,7 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('clears process-local wake-cap display state when records reopen', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 'monitor', task: 'monitor', workflow: 'quick-task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 'monitor', task: 'monitor', workflow: 'quick-task', steps: [] });
     store.updateRun(run.id, { status: 'running', activity: 'monitoring', monitoringWakeCapReached: true });
     store.flush();
     const reopened = RunStore.open(dataDir, { keepLive: true }).getRun(run.id);
@@ -292,14 +421,14 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('persists an explicit follow-up opt-out while omission stays compatible', () => {
     const store = RunStore.open(dataDir);
-    const disabled = store.createRun({
+    const disabled = store.createRun({ author: localCliAuthor(),
       title: 'quiet task',
       workflow: 'quick-task',
       task: 'quiet task',
       generateFollowups: false,
       steps: [],
     });
-    const defaulted = store.createRun({
+    const defaulted = store.createRun({ author: localCliAuthor(),
       title: 'default task',
       workflow: 'quick-task',
       task: 'default task',
@@ -314,14 +443,14 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('round-trips the autonomous flag while omission stays compatible (#489)', () => {
     const store = RunStore.open(dataDir);
-    const autonomous = store.createRun({
+    const autonomous = store.createRun({ author: localCliAuthor(),
       title: 'autonomous task',
       workflow: 'quick-task',
       task: 'autonomous task',
       autonomous: true,
       steps: [],
     });
-    const interactive = store.createRun({
+    const interactive = store.createRun({ author: localCliAuthor(),
       title: 'interactive task',
       workflow: 'quick-task',
       task: 'interactive task',
@@ -337,7 +466,7 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
 
   it('updateRun fans the new fields out on the run channel (the SSE feed)', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     const seen: Array<{ titleSummary?: string }> = [];
     store.on('run', (r: { titleSummary?: string }) => seen.push({ titleSummary: r.titleSummary }));
     store.updateRun(run.id, { titleSummary: 'A real summary of the turn' });
@@ -356,7 +485,7 @@ describe('RunStore — PR auto-link only on real creation (#fake-pr)', () => {
 
   const freshRun = () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     return { store, run };
   };
 
@@ -447,7 +576,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.appendEvent(run.id, {
       type: 'tool-result',
       result: 'printenv output: GITHUB_TOKEN=gho_thisisarealsecrettoken123456',
@@ -460,7 +589,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
   it('scrubs a token shape even when it never lived in cezar’s env', () => {
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.appendEvent(run.id, {
       type: 'tool-result',
       result: 'cat ~/.aws: AKIAIOSFODNN7EXAMPLE and sk-ant-api03-abcdefghijklmnopqrst',
@@ -473,7 +602,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     process.env.CEZ_REDACT_SECRETS = '0';
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.appendEvent(run.id, {
       type: 'tool-result',
       result: 'GITHUB_TOKEN=gho_thisisarealsecrettoken123456',
@@ -491,7 +620,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(run.id, {
       titleSummary: 'Set GITHUB_TOKEN=gho_thisisarealsecrettoken123456 in CI',
       error: 'auth failed for gho_thisisarealsecrettoken123456',
@@ -510,7 +639,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
   it('scrubs a token shape from a user-supplied title too', () => {
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(run.id, { title: 'rotate ghp_0123456789abcdefghijABCDEFGHIJ0123' });
     expect(store.getRun(run.id)?.title).toBe('rotate [REDACTED]');
   });
@@ -518,7 +647,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
   it('leaves ordinary record fields alone', () => {
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(run.id, {
       titleSummary: 'Catch AuthError in the login handler',
       status: 'done',
@@ -541,7 +670,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'task',
@@ -566,7 +695,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'task',
@@ -584,7 +713,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     process.env.CEZ_REDACT_SECRETS = '0';
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 't',
       workflow: 'quick-task',
       task: 'task',
@@ -599,7 +728,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'rotate gho_thisisarealsecrettoken123456',
       workflow: 'w',
       task: 'task',
@@ -619,7 +748,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'deploy the thing', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'deploy the thing', steps: [] });
     expect(store.getRun(run.id)?.task).toBe('deploy the thing');
   });
 
@@ -627,7 +756,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     process.env.CEZ_REDACT_SECRETS = '0';
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.updateRun(run.id, { titleSummary: 'gho_thisisarealsecrettoken123456' });
     expect(store.getRun(run.id)?.titleSummary).toBe('gho_thisisarealsecrettoken123456');
   });
@@ -635,7 +764,7 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
   it('does not disturb a PR URL (redaction leaves non-secrets intact)', () => {
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
     store.appendEvent(run.id, {
       type: 'result',
       result: 'Opened a draft pull request: https://github.com/open-mercato/cezar/pull/42',
@@ -655,7 +784,7 @@ describe('RunStore — referenced-PR discovery (#407, spec 2026-07-16-pr-autodis
 
   const freshRun = (task = 'task') => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task, steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task, steps: [] });
     return { store, run };
   };
 
@@ -805,7 +934,7 @@ describe('RunStore — agent-declared marker refs (spec 2026-07-18-task-ref-mark
 
   const freshRun = (task = 'task') => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task, steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task, steps: [] });
     return { store, run };
   };
 
@@ -908,7 +1037,7 @@ describe('RunStore — referenced-issue discovery (spec 2026-07-21-report-ref-di
 
   const freshRun = (task = 'task') => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task, steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task, steps: [] });
     return { store, run };
   };
 
@@ -1053,7 +1182,7 @@ describe('RunStore — seq survives a restart (#424 symptom class)', () => {
 
   it('continues numbering above the NDJSON max after reopen, so replayed clients keep receiving', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
     store.appendEvent(run.id, { type: 'note', message: 'one' });
     store.appendEvent(run.id, { type: 'note', message: 'two' });
     store.flush();
@@ -1069,7 +1198,7 @@ describe('RunStore — seq survives a restart (#424 symptom class)', () => {
 
   it('starts at 1 for a run with no event file', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
     expect(store.appendEvent(run.id, { type: 'note', message: 'first' }).seq).toBe(1);
   });
 });
@@ -1087,7 +1216,7 @@ describe('RunStore — provider authorization callouts', () => {
 
   it('persists the structured provider-auth-required event without vendor error text', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 't', steps: [] });
 
     store.appendEvent(run.id, {
       type: 'provider-auth-required',
@@ -1133,7 +1262,7 @@ describe('RunStore — queuedMessages (#472)', () => {
 
   it('round-trips a record carrying the stack', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'ship it', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'ship it', steps: [] });
     store.updateRun(run.id, {
       queuedMessages: [
         { id: 'm1', text: 'and update the changelog', createdAt: '2026-07-21T10:00:00.000Z' },
@@ -1164,7 +1293,7 @@ describe('RunStore — queuedMessages (#472)', () => {
     process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
     delete process.env.CEZ_REDACT_SECRETS;
     const store = RunStore.open(dataDir);
-    const run = store.createRun({ title: 't', workflow: 'w', task: 'deploy', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'deploy', steps: [] });
     store.updateRun(run.id, {
       queuedMessages: [
         { id: 'm1', text: 'use gho_thisisarealsecrettoken123456', createdAt: '2026-07-21T10:00:00.000Z' },
@@ -1193,7 +1322,7 @@ describe('RunStore — read receipts (#unread-done-items)', () => {
    *  future `finishedAt` would make a just-read run compare as still-unread. */
   const FINISHED_AT = '2020-01-01T00:00:00.000Z';
   function finishedRun(store: RunStore, status: 'done' | 'failed' | 'cancelled'): string {
-    const run = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [] });
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', steps: [] });
     store.updateRun(run.id, { status, finishedAt: FINISHED_AT });
     return run.id;
   }
@@ -1269,7 +1398,7 @@ describe('RunStore — read receipts (#unread-done-items)', () => {
     const cancelled = finishedRun(store, 'cancelled');
     const alreadyRead = finishedRun(store, 'done');
     store.setRead(alreadyRead);
-    const running = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [] }).id;
+    const running = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'quick-task', task: 't', steps: [] }).id;
 
     expect(store.markAllRead()).toBe(2);
     expect(store.getRun(doneUnread)?.seenAt).toBeDefined();
@@ -1500,7 +1629,7 @@ describe('RunStore — stopReason (PLAN D27 Phase 1, step budget)', () => {
 
   it('is absent on an ordinary run, and round-trips through runs.json once set', () => {
     const store = RunStore.open(dataDir);
-    const run = store.createRun({
+    const run = store.createRun({ author: localCliAuthor(),
       title: 'budget stop',
       workflow: 'quick-task',
       task: 'do it',
@@ -1543,5 +1672,165 @@ describe('RunStatus is not widened for the step budget (PLAN D27 Phase 1)', () =
 
   it('the wire (contract) schema agrees, member for member', () => {
     expect(contractRunStatusSchema.options).toEqual(runRecordSchema.shape.status.options);
+  });
+});
+
+/**
+ * Phase 0 of `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`: what a run actually cost the
+ * host, and whether a cgroup bound killed it. The spec is a capacity claim, and CPU — the
+ * resource it is about — was the one resource nothing persisted: `core/process-usage.ts` samples
+ * it every tick and keeps a high-water mark for RSS only.
+ *
+ * Schema only here. The writers live in `../core/process-usage.ts` (the peaks) and
+ * `../core/broker-isolation.ts` (the kill); their own tests cover the measuring.
+ */
+describe('RunStore — resource accounting (Phase 0: peaks, cpuSeconds, resourceKill)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-resources-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  const newRun = (store: RunStore) =>
+    store.createRun({
+      author: localCliAuthor(),
+      title: 'heavy run',
+      workflow: 'quick-task',
+      task: 'run the gates',
+      steps: [{ id: 'run-tests', name: 'Run tests', kind: 'check' }],
+    });
+
+  it('the three cost fields are absent on a new run and round-trip through runs.json once set', () => {
+    const store = RunStore.open(dataDir);
+    const run = newRun(store);
+    expect([run.peakCpuPct, run.peakMemoryBytes, run.cpuSeconds]).toEqual([undefined, undefined, undefined]);
+
+    store.updateRun(run.id, { peakCpuPct: 412.5, peakMemoryBytes: 5_368_709_120, cpuSeconds: 934.21 });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir).getRun(run.id);
+    expect(reopened?.peakCpuPct).toBe(412.5);
+    expect(reopened?.peakMemoryBytes).toBe(5_368_709_120);
+    expect(reopened?.cpuSeconds).toBe(934.21);
+  });
+
+  it('peakMemoryBytes is a SECOND field, not a rename of peakRssBytes — both survive on one record', () => {
+    // They are different measurements: `peakRssBytes` sums `ps` RSS across the tree (shared
+    // pages double-counted, and not what the kernel used to decide anything), `peakMemoryBytes`
+    // is the run's own cgroup `memory.peak` — the figure `runMemoryMaxMb` is enforced against.
+    // Collapsing them would make the before/after comparison Phase 0 exists to run unreadable.
+    const store = RunStore.open(dataDir);
+    const run = newRun(store);
+    store.updateRun(run.id, { peakRssBytes: 7_000_000_000, peakMemoryBytes: 5_368_709_120 });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir).getRun(run.id);
+    expect(reopened?.peakRssBytes).toBe(7_000_000_000);
+    expect(reopened?.peakMemoryBytes).toBe(5_368_709_120);
+  });
+
+  it('stays absent for a record that predates the fields (additive proof)', () => {
+    writeFileSync(join(dataDir, 'runs.json'), JSON.stringify([LEGACY_RUN]), 'utf8');
+    const legacy = RunStore.open(dataDir).getRun(LEGACY_RUN.id);
+    // The whole array is `safeParse`d as one unit, so a required addition would have dropped
+    // this record entirely rather than leaving the keys undefined.
+    expect(legacy).toBeDefined();
+    expect([legacy?.peakCpuPct, legacy?.peakMemoryBytes, legacy?.cpuSeconds, legacy?.resourceKill]).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it('resourceKill carries a named limit, which is the whole point of the field (C3)', () => {
+    // C3: a cgroup kill must be reported AS a resource kill WITH a reason, never as a bare
+    // failed test step. A bound whose failure mode is indistinguishable from a code failure gets
+    // blamed on the code, and the run's own agent then "fixes" a test that was never broken.
+    const store = RunStore.open(dataDir);
+    const run = newRun(store);
+    expect(run.resourceKill).toBeUndefined();
+
+    store.updateRun(run.id, {
+      status: 'failed',
+      resourceKill: { limit: 'memory', at: '2026-08-22T12:00:00.000Z', detail: 'MemoryMax=2048M' },
+    });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir).getRun(run.id);
+    expect(reopened?.resourceKill).toEqual({
+      limit: 'memory',
+      at: '2026-08-22T12:00:00.000Z',
+      detail: 'MemoryMax=2048M',
+    });
+  });
+
+  it('there is no unnamed spelling of a resource kill — a limit is required, and it is a closed set', () => {
+    // The negative control on C3. If `limit` were optional, or free text, a writer could record
+    // "something killed it" and the reason C3 demands would be exactly what went missing.
+    //
+    // Asserted on the parsed VALUE, not on `.success`: the field carries `.catch(undefined)` for
+    // per-entry salvage, so `safeParse` reports success on every input it is ever given and a
+    // `.success` assertion here could not fail by construction — it passed against a `limit` that
+    // was optional. What discriminates is what comes back: a reason-less kill must degrade to
+    // absent (nothing recorded) rather than parse into a kill with no reason.
+    const parse = (v: unknown) => runRecordSchema.shape.resourceKill.parse(v);
+    expect(parse({ at: '2026-08-22T12:00:00.000Z' })).toBeUndefined();
+    expect(parse({ limit: 'disk', at: '2026-08-22T12:00:00.000Z' })).toBeUndefined();
+    // `detail` is the only optional part: a writer that knows nothing beyond the limit can still
+    // record the fact. This half is what keeps the two above honest — it proves the schema is
+    // capable of accepting a kill at all, so their `undefined` is the missing reason and not a
+    // field that rejects everything.
+    expect(parse({ limit: 'memory', at: '2026-08-22T12:00:00.000Z' })).toEqual({
+      limit: 'memory',
+      at: '2026-08-22T12:00:00.000Z',
+    });
+    // And the narrowing itself: `'cpu'` is NOT a member. `CPUWeight` is a relative scheduling
+    // weight with no ceiling to breach, so no writer in this design can emit a cpu kill — a
+    // member nothing can produce reads to the next person as "cpu kills are handled".
+    expect(parse({ limit: 'cpu', at: '2026-08-22T12:00:00.000Z' })).toBeUndefined();
+  });
+
+  it('a corrupt resourceKill degrades that one key instead of dropping the whole run', () => {
+    // House rule: per-entry salvage. `runs.json` is one `safeParse`d array, so a value that
+    // failed hard here would evict every run in the file, not just this key.
+    writeFileSync(
+      join(dataDir, 'runs.json'),
+      JSON.stringify([{ ...LEGACY_RUN, resourceKill: 'the oom killer got it' }]),
+      'utf8',
+    );
+    const salvaged = RunStore.open(dataDir).getRun(LEGACY_RUN.id);
+    expect(salvaged).toBeDefined();
+    expect(salvaged?.resourceKill).toBeUndefined();
+  });
+
+  it('RunStatus and StepStatus are NOT widened by the resource kill', () => {
+    // P8 of the plan: `resourceKill` is a new optional FIELD precisely so neither published wire
+    // enum grows a member. Value-level, like the step-budget assertions above — a source edit
+    // that widens either union compiles fine, so only a runtime check on the parsed enum catches
+    // it. Mutation: add `'killed'` to either schema — must fail.
+    expect(runRecordSchema.shape.status.options).toEqual([
+      'queued',
+      'running',
+      'waiting',
+      'review',
+      'done',
+      'failed',
+      'cancelled',
+    ]);
+    expect(runRecordSchema.shape.steps.element.shape.status.options).toEqual([
+      'pending',
+      'running',
+      'waiting',
+      'review',
+      'done',
+      'failed',
+      'cancelled',
+      'skipped',
+    ]);
   });
 });

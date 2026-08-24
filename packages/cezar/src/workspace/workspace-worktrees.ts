@@ -6,6 +6,7 @@ import { join, sep } from 'node:path';
 import type { WorkspaceGrantProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { autosaveCommit, createWorktree, removeWorktree, resolveBaseRef } from '../git-worktree.ts';
 import { getRepoInfo } from '../server/git.ts';
+import { writeWorktreeLease } from './worktree-lease.ts';
 
 /**
  * Per-project worktrees for a PARALLEL WORKSPACE RUN
@@ -60,6 +61,14 @@ export function failureDetail(result: GitResult, fallback: string): string {
 /** Note sink — `emit` in `run.ts`; a no-op default keeps the module usable from a test. */
 export type Note = (message: string) => void;
 
+/**
+ * Called after each `createWorktree` succeeds inside `materializeWorkspaceWorktrees`'s loop, with
+ * a SNAPSHOT of the current deduped entry set (never a per-iteration append — see that function's
+ * own doc comment on why). A no-op default keeps every existing caller and test byte-identical to
+ * before this hook existed.
+ */
+export type PersistWorktrees = (snapshot: readonly WorkspaceWorktree[]) => void | Promise<void>;
+
 /** Is `child` the same path as `parent`, or inside it? Segment-wise, never a bare `startsWith`:
  *  `/a/bc` is not inside `/a/b`. */
 function contains(parent: string, child: string): boolean {
@@ -79,14 +88,31 @@ function contains(parent: string, child: string): boolean {
  * a path of its own and the repo root itself stays granted.
  *
  * Idempotent through `createWorktree`: a resume that still has its worktrees reuses them.
+ *
+ * `persist` (spec 2026-08-22-cross-project-worktree-orphan-prune-safety, Solution/Layer 1's
+ * write-ordering fix) closes the window where the FIRST worktree created in a multi-project grant
+ * sits on disk, fully created, with no `workspaceWorktrees` record anywhere yet — the loop below
+ * creates every project's worktree before this function returns, and both production callers
+ * (`run.ts`) persist the whole array in ONE `store.updateRun(...)` only after that. A boot-time
+ * `pruneOrphans` in the target project firing inside that window finds an unrecorded, unowned-
+ * looking directory whose branch (being brand new) also has no unique commits yet — so the
+ * branch-reachability net can't save it either. `persist` is called after each `createWorktree`
+ * succeeds with a SNAPSHOT of the CURRENT deduped entry set (`[...byWorktreePath.values()].map(v
+ * => v.entry)` — the same expression this function's own `return` uses), never a per-iteration
+ * append: several registry entries can collapse onto one worktree path, and a later iteration can
+ * retroactively rewrite an already-emitted entry's `root`, so appending would write duplicate rows
+ * and leave a stale `root` on the incumbent.
  */
 export async function materializeWorkspaceWorktrees(
   runId: string,
   projects: readonly WorkspaceGrantProject[],
   note: Note = () => undefined,
+  persist: PersistWorktrees = () => undefined,
+  ownerBootRoot?: string,
 ): Promise<WorkspaceWorktree[]> {
   /** worktree path → the entry we keep, plus every registry entry that resolved to it. */
   const byWorktreePath = new Map<string, { entry: WorkspaceWorktree; members: string[] }>();
+  const snapshot = (): WorkspaceWorktree[] => [...byWorktreePath.values()].map((v) => v.entry);
   for (const project of projects) {
     if (project.status === 'missing') continue;
     const repo = await getRepoInfo(project.root);
@@ -103,6 +129,7 @@ export async function materializeWorkspaceWorktrees(
     const base = (await resolveBaseRef(repoRoot, repo.branch)) ?? repo.branch;
     try {
       const wt = await createWorktree(repoRoot, runId, base);
+      if (ownerBootRoot) await writeWorktreeLease(repoRoot, runId, ownerBootRoot);
       const collapsed = byWorktreePath.get(wt.path);
       if (collapsed) {
         collapsed.members.push(project.name || project.id);
@@ -111,12 +138,13 @@ export async function materializeWorkspaceWorktrees(
         if (contains(repoRoot, collapsed.entry.root) && repoRoot !== collapsed.entry.root) {
           collapsed.entry = { ...collapsed.entry, root: repoRoot };
         }
-        continue;
+      } else {
+        byWorktreePath.set(wt.path, {
+          entry: { root: repoRoot, worktreePath: wt.path, branch: wt.branch, baseBranch: wt.baseBranch },
+          members: [project.name || project.id],
+        });
       }
-      byWorktreePath.set(wt.path, {
-        entry: { root: repoRoot, worktreePath: wt.path, branch: wt.branch, baseBranch: wt.baseBranch },
-        members: [project.name || project.id],
-      });
+      await persist(snapshot());
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       note(`${project.name || project.id}: worktree failed (${message}) — granted in place`);
@@ -130,7 +158,7 @@ export async function materializeWorkspaceWorktrees(
       }; each project is its own subdirectory inside it`,
     );
   }
-  return [...byWorktreePath.values()].map((v) => v.entry);
+  return snapshot();
 }
 
 /**

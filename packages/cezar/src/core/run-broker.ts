@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createWriteStream, rmSync, type WriteStream } from 'node:fs';
+import { closeSync, createWriteStream, existsSync, openSync, rmSync, type WriteStream } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { z } from 'zod';
 
@@ -63,6 +63,7 @@ export const ORPHAN_TIMEOUT_MS = 30 * 60_000;
 export interface RunBrokerOptions {
   spoolDir: string;
   runId: string;
+  instanceId?: string;
   stepId?: string;
   backend: string;
   /** The backend CLI argv — `[bin, ...args]`. */
@@ -72,6 +73,26 @@ export interface RunBrokerOptions {
   orphanTimeoutMs?: number;
   /** Injectable for tests. */
   now?: () => string;
+}
+
+/**
+ * Fault injection for `.ai/specs/2026-08-22-bounded-transient-broker-retry.md` Verification
+ * §4/§6 only. `CEZ_BROKER_FAULT=deaf-once:<markerPath>` or `deaf-alive:<markerPath>` reproduces the
+ * transient case — a broker that started, is recorded in `meta.json`, and never answers — without
+ * needing a real stalled process. Inert (returns `null`) whenever the variable is unset or holds an
+ * unrelated value such as `never-start`, which is read elsewhere (`claude-cli-runner.ts`).
+ */
+function readDeafFault(): { mode: 'deaf-once' | 'deaf-alive'; markerPath: string } | null {
+  const raw = process.env.CEZ_BROKER_FAULT;
+  if (!raw) return null;
+  const sep = raw.indexOf(':');
+  if (sep < 0) return null;
+  const mode = raw.slice(0, sep);
+  const markerPath = raw.slice(sep + 1);
+  if ((mode === 'deaf-once' || mode === 'deaf-alive') && markerPath) {
+    return { mode, markerPath };
+  }
+  return null;
 }
 
 export interface RunBrokerHandle {
@@ -112,7 +133,7 @@ export function startRunBroker(opts: RunBrokerOptions): RunBrokerHandle {
 
   writeSpoolMeta(opts.spoolDir, {
     schema: 1,
-    protocol: BROKER_PROTOCOL,
+    protocol: opts.instanceId ? BROKER_PROTOCOL : 1,
     runId: opts.runId,
     stepId: opts.stepId,
     backend: opts.backend,
@@ -121,6 +142,7 @@ export function startRunBroker(opts: RunBrokerOptions): RunBrokerHandle {
     argv: opts.command,
     cwd: opts.cwd,
     startedAt: now(),
+    instanceId: opts.instanceId,
   });
 
   // The spool is append-only and never re-read by the broker, so a plain pipe is correct and
@@ -225,7 +247,29 @@ export function startRunBroker(opts: RunBrokerOptions): RunBrokerHandle {
   // A stale socket from a broker that died without cleaning up would make bind fail; the spool is
   // per-run and single-owner, so removing it is safe rather than a race.
   rmSync(paths.ctl, { force: true });
-  server.listen(paths.ctl);
+  const deafFault = readDeafFault();
+  // A file marker rather than a counter: the broker is a separate process each launch, so nothing
+  // in-process can remember "this is the second attempt." The marker's absence means this is the
+  // first launch under the fault; its presence (left by that first launch) means a retry, which
+  // must behave like a healthy broker so the run can actually recover.
+  let markerWritten = false;
+  if (deafFault && !existsSync(deafFault.markerPath)) {
+    try {
+      closeSync(openSync(deafFault.markerPath, 'w'));
+      markerWritten = true;
+    } catch {
+      // Diagnostics must never wedge the broker: if the marker cannot be written, fail open into a
+      // normal listen rather than silently never binding.
+    }
+  }
+  if (deafFault && markerWritten && deafFault.mode === 'deaf-once') {
+    process.exit(0);
+  } else if (deafFault && markerWritten && deafFault.mode === 'deaf-alive') {
+    // Skip the listen call and leave the process running — never bind, but stay alive. No
+    // keepalive needed: the child's own stdio pipes hold the event loop open.
+  } else {
+    server.listen(paths.ctl);
+  }
 
   const orphanMs = opts.orphanTimeoutMs ?? ORPHAN_TIMEOUT_MS;
   const watchdog = setInterval(() => {
@@ -243,7 +287,13 @@ export function startRunBroker(opts: RunBrokerOptions): RunBrokerHandle {
       // Flush the tees before recording the exit: a server watching for `exit.json` must never
       // see it while output is still in flight, or it would stop reading early and lose the tail.
       const settle = (): void => {
-        writeSpoolExit(opts.spoolDir, { code, signal, exitedAt: now() });
+        writeSpoolExit(opts.spoolDir, {
+          code,
+          signal,
+          exitedAt: now(),
+          brokerPid: process.pid,
+          instanceId: opts.instanceId,
+        });
         server.close();
         rmSync(paths.ctl, { force: true });
         resolve({ code, signal });

@@ -65,6 +65,22 @@ const liveResponse = JSON.parse(
 ) as unknown;
 
 /**
+ * Captured from `codex app-server` 0.147.0 on `prod-host`, 2026-08-24T11:40:19Z, against a
+ * ChatGPT Plus account that was rate-limited at that moment — the app-server's EMPTY DEFAULT.
+ *
+ * Its `resetsAt` is `_capturedAt + windowDurationMins*60` to the second, which is why the takenAt
+ * below is the capture instant and not a round number: this fixture only means what it means when
+ * it is parsed as of when it was taken.
+ */
+const liveUnpopulatedResponse = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL('__fixtures__/codex/account-rate-limits-unpopulated.json', import.meta.url)),
+    'utf8',
+  ),
+) as unknown;
+const UNPOPULATED_TAKEN_AT = new Date(1_787_571_619 * 1000);
+
+/**
  * Captured from a live `claude -p "/usage" --output-format json` on 2.1.224 — TWO accounts, and
  * the second is not redundant. The default account's windows all carry a reset clause; the idle
  * account's 0% windows omit it entirely, which is the case a hand-written fixture would never have
@@ -92,6 +108,52 @@ describe('parseCodexQuota', () => {
     expect(quota?.planType).toBe('free');
     expect(quota?.windows).toHaveLength(1);
     expect(quota?.windows[0]).toEqual({ usedPercent: 0, windowMinutes: 43_200, resetsAt: 1_789_482_577 });
+  });
+
+  describe('the app-server\'s empty default is not a measurement (spec 2026-08-24, D1)', () => {
+    it('drops the live unpopulated window rather than storing 0%', () => {
+      // THE test for D1, and like its sibling above it runs on bytes off the wire rather than on a
+      // shape this parser was written against.
+      expect(parseCodexQuota(liveUnpopulatedResponse, UNPOPULATED_TAKEN_AT)).toBeUndefined();
+    });
+
+    it('keeps the same window once anything has been spent in it', () => {
+      // Negative control #1. Without it, the assertion above passes against a parser that returns
+      // `undefined` for every input — which is exactly what the ORIGINAL codex parser bug looked
+      // like, and it shipped.
+      const spent = structuredClone(liveUnpopulatedResponse) as { rateLimits: { primary: { usedPercent: number } } };
+      spent.rateLimits.primary.usedPercent = 12;
+      expect(parseCodexQuota(spent, UNPOPULATED_TAKEN_AT)?.windows).toEqual([
+        { usedPercent: 12, windowMinutes: 10_080, resetsAt: 1_788_176_419 },
+      ]);
+    });
+
+    it('keeps a 0% window whose reset is not a whole window away', () => {
+      // Negative control #2, and the one that pins the rule to the SHAPE rather than to `usedPercent
+      // === 0`. A window ten minutes into its life, still unspent, is a real reading.
+      const started = structuredClone(liveUnpopulatedResponse) as { rateLimits: { primary: { resetsAt: number } } };
+      started.rateLimits.primary.resetsAt -= 600;
+      expect(parseCodexQuota(started, UNPOPULATED_TAKEN_AT)?.windows).toHaveLength(1);
+    });
+
+    it('allows the RPC round trip — a few seconds of skew still reads as unpopulated', () => {
+      // The epsilon is not decoration: `takenAt` is stamped after the child has spawned, initialized
+      // and answered, so the server's `now + duration` is always a little behind ours. Measured at
+      // ~0.3 s on the box; the bound is 120 s, and this asserts the tolerance exists in the right
+      // direction rather than trusting the constant.
+      expect(
+        parseCodexQuota(liveUnpopulatedResponse, new Date(UNPOPULATED_TAKEN_AT.getTime() + 90_000)),
+      ).toBeUndefined();
+    });
+
+    it('reads the 0.143.0 fixture as unpopulated too, at ITS capture instant', () => {
+      // The older fixture is the same empty default — `resetsAt - windowDurationMins*60` puts its
+      // capture at 2026-08-16T14:29:37Z, and the test above it passes only because `TAKEN_AT` is a
+      // rounded 12:00 that day. Stated here so the two tests cannot be read as disagreeing: one
+      // pins the WIRE SPELLING (which is why it must keep parsing to a window), this one pins what
+      // the bytes actually meant.
+      expect(parseCodexQuota(liveResponse, new Date(1_786_890_577 * 1000))).toBeUndefined();
+    });
   });
 
   it('reads the snapshot out of `rateLimits`', () => {
