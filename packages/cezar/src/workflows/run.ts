@@ -3054,7 +3054,22 @@ export class RunManager {
     try {
       const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
       const provider = (input.runner ?? defaultRunner) as ProviderId;
-      const current = accountUsageKey(provider, input.agentProfile);
+      // A dangling `agentProfile` — one that names no stored account for this provider (a since-
+      // removed account, or a value written before the account existed) — resolves to the provider's
+      // DEFAULT login downstream (`selectProfile`'s own fallback, `workspace/agent-profiles.ts`).
+      // Checking the raw id here reads as "not limited" for an id that never had a usage entry in
+      // the first place, so this returned early forever while the DEFAULT account it silently fell
+      // back to sat held: measured on `prod-host`, a run pinned to `codex:secondary` — no such
+      // account exists — kept resolving to (and failing on) the held `codex:default`, while a real,
+      // unlimited `codex:second-example-com` sat idle. Resolve against the same rule
+      // `selectProfile` uses so this checks the hold on the account that will actually run.
+      const resolvedAgentProfile =
+        input.agentProfile !== undefined &&
+        input.agentProfile !== DEFAULT_AGENT_ACCOUNT_ID &&
+        accounts.accounts.some((account) => account.provider === provider && account.id === input.agentProfile)
+          ? input.agentProfile
+          : undefined;
+      const current = accountUsageKey(provider, resolvedAgentProfile);
       // Nothing to route around. The common case, and the cheap exit.
       if (!isLimited(usageEntry(usage, current).limited)) return undefined;
 
@@ -3069,7 +3084,7 @@ export class RunManager {
         ? selectPoolAccount({ candidates, store: usage, inflight: this.semaphore.accountInflight() })
         : undefined;
       if (!choice) return undefined;
-      if (choice.provider === provider && choice.accountId === (input.agentProfile || DEFAULT_AGENT_ACCOUNT_ID)) {
+      if (choice.provider === provider && choice.accountId === (resolvedAgentProfile ?? DEFAULT_AGENT_ACCOUNT_ID)) {
         return undefined;
       }
 

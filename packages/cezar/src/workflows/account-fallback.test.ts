@@ -157,6 +157,34 @@ describe('out-of-quota fallback', () => {
     await expect.poll(() => store.getRun(record.id)?.runner, { timeout: 15_000 }).toBe('codex');
   }, 40_000);
 
+  it('a dangling agentProfile that names no stored account is checked against the DEFAULT login, not the phantom id', async () => {
+    // No account named 'ghost-secondary' exists for claude in this fixture — `loadAgentAccounts()`
+    // returns no stored accounts here, only each provider's discovered default (the file-level
+    // `beforeEach` above already limits `claude:default`, which is the whole point: a task pinned to
+    // 'ghost-secondary' resolves to `claude:default` downstream, `selectProfile`'s own fallback, so
+    // the hold that matters is `claude:default`'s, not a key nothing was ever recorded under).
+    manager = managerWith(true);
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      runner: 'claude',
+      agentProfile: 'ghost-secondary',
+      worktree: false,
+    });
+    await expect
+      .poll(
+        () => store.readEvents(record.id).map((e) => String(e.message ?? '')).some((m) => m.includes('out of quota, so this task starts on')),
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+    const note = store.readEvents(record.id).map((e) => String(e.message ?? '')).find((m) => m.includes('out of quota'));
+    // Before the fix, `accountUsageKey('claude', 'ghost-secondary')` had no usage entry, read as
+    // "not limited", and this returned before ever building a note — so this line is the actual
+    // regression check, not just documentation.
+    expect(note).toContain('claude:default');
+    await expect.poll(() => store.getRun(record.id)?.runner, { timeout: 15_000 }).toBe('codex');
+  }, 40_000);
+
   it('with EVERY candidate limited, does not move it — a closed account is no better than waiting', async () => {
     // `selectPoolAccount` deliberately still answers when every candidate is limited (its docblock
     // explains why for the pool case). Reusing it without filtering first would therefore move the
