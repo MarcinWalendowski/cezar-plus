@@ -2,6 +2,11 @@
 
 Brief: `.ai/specs/briefs/2026-08-22-agent-profile-wiring-cez-kb-env-leak.md`
 
+**Status: IMPLEMENTED 2026-08-24.** Shipped in commit `878708f5` and pushed to `origin/main`.
+The targeted baseline passed 7 of 7 tests before the change, then 8 of 8 tests passed after the
+local isolation and flag-on contract case landed. This was a confirm-and-harden change, not a
+production `run.ts` defect.
+
 ## TLDR
 
 The task that opened this spec claims `agent-profile-wiring.test.ts:82` fails on HEAD because
@@ -408,6 +413,23 @@ npm test -- packages/cezar/src/workflows/agent-profile-wiring.test.ts
   not required by its acceptance criteria (which name the `CEZ_KB_*` question, not this one), so
   not fixed here (this step changes no file other than this spec) — flagged as a one-line
   follow-up for whoever next touches `run.ts:1042-1075`.
+
+## Implementation record
+
+- Commit `878708f5` is on `origin/main`. The feature diff saves, clears, and restores
+  `process.env.CEZ_KB` in `agent-profile-wiring.test.ts`, and adds the flag-on exact-key case.
+- Production `run.ts` was intentionally unchanged. `CEZ_KB_ROOTS` and `CEZ_KB_WRITE_FILE`
+  remain absent when `CEZ_KB` is off, preserving the zero-config environment contract.
+- Before the feature diff, the targeted file passed 7 of 7 tests. After the diff it passed 8 of
+  8 tests. The ambient `CEZ_KB=1` smoke run also passed 8 of 8 tests, confirming the global
+  scrub still holds.
+- `npm run typecheck` passed across all workspaces. `npm run lint` was not applicable because
+  this repository has no lint script. The full `npm test` run did not produce a conclusive final
+  exit in the recorded run: its first attempt timed out after two minutes and showed the already
+  documented host-speed `knowledge/catalog.test.ts` C18 failure. No runtime E2E was required for
+  this test-only change.
+- No tracker todo exists for this run (`sourceTodoId` is null), so there was no separate todo
+  state to update. Workflow state remains engine-managed.
 
 ## Verification
 
