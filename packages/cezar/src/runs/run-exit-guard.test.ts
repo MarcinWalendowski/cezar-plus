@@ -118,4 +118,64 @@ describe('runWedgeTick', () => {
     expect(clearKeepAlive).toHaveBeenCalledOnce();
     expect(updateRun).not.toHaveBeenCalled();
   });
+
+  it('settles failed after three missing-record ticks without trying to write a row', () => {
+    const updateRun = vi.fn();
+    const settle = vi.fn();
+    const clearKeepAlive = vi.fn();
+    const state = { misses: 0 };
+    const store: RunExitGuardStore = {
+      getRun: () => undefined,
+      updateRun,
+      flush: vi.fn(),
+    };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.exitCode = undefined;
+
+    for (let tick = 0; tick < RUN_WEDGE_TICKS; tick += 1) {
+      runWedgeTick({
+        store,
+        runId: 'missing-run',
+        state,
+        liveness: () => ({ live: false, reason: 'irrelevant' }),
+        settle,
+        clearKeepAlive,
+      });
+    }
+
+    expect(updateRun).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith('failed');
+    expect(clearKeepAlive).toHaveBeenCalledOnce();
+    expect(process.exitCode).toBe(1);
+    expect(error).toHaveBeenCalledWith(
+      'cezar exited before the run finished: its run record is missing from the store (missing-run)',
+    );
+  });
+
+  it('resets consecutive misses after a live tick', () => {
+    const { store, updateRun } = fixture('running');
+    const state = { misses: 0 };
+    const settle = vi.fn();
+    const clearKeepAlive = vi.fn();
+    const tick = (live: boolean): void => runWedgeTick({
+      store,
+      runId: 'run-1',
+      state,
+      liveness: () => ({ live, reason: live ? 'active' : 'not registered' }),
+      settle,
+      clearKeepAlive,
+    });
+
+    tick(false);
+    tick(false);
+    tick(true);
+    tick(false);
+    tick(false);
+
+    expect(state.misses).toBe(2);
+    expect(updateRun).not.toHaveBeenCalled();
+    expect(settle).not.toHaveBeenCalled();
+    expect(clearKeepAlive).not.toHaveBeenCalled();
+  });
 });

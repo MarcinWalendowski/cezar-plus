@@ -70,7 +70,20 @@ export function runWedgeTick(options: {
   clearKeepAlive: () => void;
 }): void {
   const record = options.store.getRun(options.runId);
-  if (!record) return;
+  if (!record) {
+    options.state.misses += 1;
+    const rawDebug = (process as unknown as { _rawDebug?: (msg: string) => void })._rawDebug;
+    if (process.env.CEZ_RUN_WEDGE_DEBUG === '1') {
+      rawDebug?.(`[wedge] miss ${options.state.misses}: record missing`);
+    }
+    if (options.state.misses < RUN_WEDGE_TICKS) return;
+
+    console.error(`cezar exited before the run finished: its run record is missing from the store (${options.runId})`);
+    process.exitCode = 1;
+    options.settle('failed');
+    options.clearKeepAlive();
+    return;
+  }
 
   if (TERMINAL_STATUSES.has(record.status)) {
     options.settle(record.status);
@@ -85,6 +98,12 @@ export function runWedgeTick(options: {
   }
 
   options.state.misses += 1;
+  // `_rawDebug` is synchronous and refs nothing, so diagnostics cannot perturb the
+  // event-loop liveness measurement they serve. Node's public types do not declare it.
+  const rawDebug = (process as unknown as { _rawDebug?: (msg: string) => void })._rawDebug;
+  if (process.env.CEZ_RUN_WEDGE_DEBUG === '1') {
+    rawDebug?.(`[wedge] miss ${options.state.misses}: ${liveness.reason}`);
+  }
   if (options.state.misses < RUN_WEDGE_TICKS) return;
 
   failNonTerminalRun(options.store, options.runId, record.status, liveness.reason);
