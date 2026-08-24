@@ -1,6 +1,89 @@
 # Headless Run Event Liveness
 
-**Status: IMPLEMENTED, VERIFICATION PENDING 2026-08-23.** The pre-implementation resource
+**REVISED 2026-08-24 (spec step of the re-run, against HEAD `7a19ca72`).** Read this block
+first: it re-anchors the two below, which are correct about mechanism and stale about line
+numbers and git position.
+
+- **What is now true in source, re-read line by line at `7a19ca72` and not taken from the
+  previous block's word:** P1 through P5-step-2/3 are all present. `run-exit-guard.ts` is
+  **112** lines (was 93), the missing-record path counts a miss and fails closed at three
+  (`:72-86`) instead of returning silently, both miss paths carry the `CEZ_RUN_WEDGE_DEBUG=1`
+  refs-free diagnostic (`:75-78`, `:101-106`), and **both** previously-missing unit cases are
+  written: "settles failed after three missing-record ticks without trying to write a row"
+  (`src/runs/run-exit-guard.test.ts:122`) and "resets consecutive misses after a live tick"
+  (`:156`). `.env.example` documents `CEZ_RUN_FAULT` at `:405` and `CEZ_RUN_WEDGE_DEBUG` at
+  `:407`.
+- **AC1 is answered, and the answer is cleaner than either prior said.** `a7510b2f` and
+  `5e388ccf` are **siblings, not a predecessor and a successor**: both have parent `67e93cca`
+  (`git merge-base --is-ancestor` is false in both directions), both are autosaves from
+  2026-08-20 (07:16 and 10:00 UTC), and `git diff a7510b2f 5e388ccf -- packages/cezar/src/index.ts`
+  is **empty**: the identical 5-line change, committed twice on parallel history and later
+  joined by a merge. `67e93cca` has `workflowName ?? 'quick-task'`; both children have
+  `workflowName ?? DEFAULT_WORKFLOW_NAME`. So the flip is exactly at the `67e93cca` boundary,
+  the `good` endpoint is now *measured* rather than assumed (§6's honesty note is thereby
+  discharged, not merely repeated), and the first bad commit on the specified ancestry is
+  `a7510b2f`, the earlier of the two. The handoff's `097d1b15` hypothesis is refuted: it does
+  not touch `index.ts`.
+- **What is still stale and must be redone: the merge.** `main` has moved again, from
+  `b2c3aa79` to `8790d334`. The branch is **14 behind, 3 ahead**, merge-base `b2c3aa79`.
+  `main`'s own drift since that merge-base touches `src/workflows/run.ts` (+204) and
+  `src/runs/store.ts` (+32) and **does not touch `src/index.ts` at all**, and it adds no
+  `new Map<`/`new Set<`/`private readonly` run-state registry, so `runLiveness` stays complete.
+  `git merge-tree --write-tree HEAD main` exits **1**, with exactly one conflicted path and it
+  is a document: `.ai/specs/briefs/2026-08-23-headless-run-exits-mid-workflow.md` (add/add).
+  `run.ts` auto-merges. Verification §0 runs again with these numbers.
+- **Still nothing has been executed.** No `npm run typecheck`, no `npm test`, no
+  `npm run test:unit`, no `npm run build`, no `npm run test:package`, no resource probe, no
+  `CEZ_RUN_FAULT` run, no load-based secondary bisect. AC2 and AC3 remain open. The one
+  pre-flight that *was* measured: this worktree now has a real root `node_modules` (317 entries,
+  28 `.bin`, `vitest`/`tsx`/`typescript` all present), while `packages/cezar/node_modules` is
+  empty, which is the normal hoisted-workspace shape, not the `AGENTS.md` resolve-upward trap.
+- **New obligation this revision discovered, not in any prior block:** `main` carries a
+  conflicting duplicate-closure record. See "Prior decisions this touches".
+
+**CORRECTED 2026-08-24 during implementation:** P5 source work is complete on the task branch
+after integrating `main` at `b2c3aa79`. The missing-record path now fails closed after three
+ticks without attempting a store write, both miss paths expose refs-free diagnostics behind
+`CEZ_RUN_WEDGE_DEBUG=1`, and the missing-record and consecutive-miss-reset unit cases exist.
+The build-free primary bisect was executed and named `a7510b2f` as the first bad commit on the
+selected ancestry. That autosave changes `runCommand` from the one-step `quick-task` fallback
+to `DEFAULT_WORKFLOW_NAME`. The earlier `5e388ccf` prior below names a parallel-history commit
+with the same five-line change, but it is not the commit reached first by the specified
+`e9d77657` to `67e93cca` bisect. No build, test, package gate, runtime probe, or load-based
+secondary bisect was run in this implementation step, so runtime verification and AC2 remain
+pending for the separate gate step.
+
+**Status 2026-08-24, revised for this run against HEAD `03371871`: CODE LANDED ON THE TASK
+BRANCH, NOTHING VERIFIED.** P1 through P4 exist as source on `cez/eeceb869`
+(`packages/cezar/src/runs/run-exit-guard.ts` new, 93 lines; `src/index.ts:1082-1145`;
+`src/workflows/run.ts:3487-3501` and `:5093-5097`; two new test files; `.env.example:405`;
+`AGENTS.md:367-370`; a `CORRECTED` lead-in on `.ai/specs/2026-08-22-run-broker-cli-keepalive.md`).
+Against that: **no gate and no runtime step has been executed since the diff landed.** Not
+`npm run typecheck`, not `npm test`, not `npm run test:unit`, not `npm run build`, not
+`npm run test:package`, no resource probe, no `CEZ_RUN_FAULT` run, no bisect. This spec claims
+no green anywhere, and the three acceptance criteria all stand open.
+
+Two facts discovered while re-reading the code for this revision, both of which change the
+verification plan and neither of which was true when the 2026-08-23 draft was written.
+**Both are SUPERSEDED 2026-08-24 by the REVISED block at the top of this file**: fact 1's
+numbers by the `b2c3aa79` merge and `main`'s subsequent move to `8790d334`, fact 2 by P5 step 2
+and step 3 landing. They are kept below unchanged as the record of what the `03371871` reading
+found, because the verification plan they created is the one still being executed:
+
+1. **The task branch is 79 commits behind `main`** (merge-base `9c65f9e9`, `main` at
+   `d01fc102`), and `main` has since rewritten the two files this change edits:
+   `packages/cezar/src/index.ts` (295 changed lines) and `packages/cezar/src/workflows/run.ts`
+   (77), 273 insertions and 99 deletions between them. Gates run on the un-integrated branch
+   would measure a tree nobody will ship. Verification §0 is therefore the new first step.
+2. **All seven designed unit cases were written; two cases this revision discovered were not,
+   and one of the gaps is a live hang path.** `runWedgeTick` returns early on a missing record
+   (`run-exit-guard.ts:72-73`) without counting a miss, so with the keep-alive armed a run whose
+   store row is absent or unreadable holds the process open forever with `beforeExit`
+   unreachable. See §"As built at HEAD `03371871`" for the full delta list.
+
+**Status 2026-08-23 (kept below as the record of what the implementation session measured; its
+"IMPLEMENTED" claim is about source existing, not about anything passing):** The
+pre-implementation resource
 probe confirmed the diagnosis: brokered execution spent 97.4% of 19,991 sampled ms on exactly
 one ref'd handle (54 windows, narrowest 10 ms), while `CEZ_RUN_BROKER=0` spent 0.6% of 16,238
 sampled ms there (6 windows, narrowest 12 ms). Both completed all eight steps and neither trace
@@ -84,6 +167,16 @@ worktree ready
 
 Proven pre-existing at clean `a5f04b0f` and clean `387ba439` with no diff applied and a full
 `CEZ_*` env scrub, so it is not caused by task `737eba99`'s change.
+
+**The record reads as deterministic and this spec does not; that is not a contradiction, and
+the next session should not read it as one.** Root `AGENTS.md:374` says the failure "Reproduces
+IDENTICALLY at clean HEAD", written from a gate run on a loaded box. Three deliberate attempts
+on a *quiet* box across 2026-08-23 and 2026-08-24 did not reproduce it. Both observations are
+believed: the diagnosis below is a hand-off race whose window is measured in single-digit
+milliseconds (§"The measurement"), so a box with eight busy cores hits it reliably and an idle
+one essentially never does. The `AGENTS.md` entry is not being contradicted, it is being
+explained, which is why Verification §4 and §5 each run twice, idle **and** under load, and why
+P0's bisect predicate is deterministic rather than load-based (§6).
 
 The e2e that catches it asserts `run.stdout` matches `/run (done|review)/`
 (`test/e2e/package-cli.test.ts:86`) and that the single `runs.json` row is `done`/`review`.
@@ -478,9 +571,151 @@ must not read the filesystem.
 Unchanged: exit codes for the existing terminal statuses (`src/index.ts:1087`), stdout format,
 `review` messaging, and every non-`run` subcommand.
 
+## As built at HEAD `7a19ca72`
+
+Everything above this section is the design. This section is the **code that actually exists on
+`cez/eeceb869`**, re-read line by line at HEAD `7a19ca72` on 2026-08-24 (it was written against
+`03371871`, before the `b2c3aa79` merge and P5 steps 2-3; every anchor below has moved and every
+one has been re-verified), so that the verification below anchors on the tree rather than on the
+plan. Where the two differ, the code is what runs.
+
+**Where each piece landed.**
+
+| design | as built | anchor at `7a19ca72` |
+| --- | --- | --- |
+| P1 `beforeExit` guard | `runExitGuard(store, runId, state)`, one-shot via `state.handled`, no-op on a terminal or missing record | `src/runs/run-exit-guard.ts:48-58`, wired at `src/index.ts:1103-1106` |
+| P2 run-lifetime keep-alive | `setInterval(..., RUN_KEEPALIVE_MS)` armed **before** `manager.startRun` and cleared in `.finally()` on the awaited promise | `src/index.ts:1107-1117` (arm), `:1119` (`startRun`), `:1133-1136` (clear + both listener removals) |
+| P3 `runLiveness` | seven-source predicate, comment explaining why it is not `isActive()` | `src/workflows/run.ts:3548-3557`; `isActive` unchanged at `:3540` |
+| P3 wedge tick | `runWedgeTick({store, runId, state, liveness, settle, clearKeepAlive})`, `RUN_KEEPALIVE_MS = 1_000` (`:3`), `RUN_WEDGE_TICKS = 3` (`:4`) | `src/runs/run-exit-guard.ts:64-112` |
+| P4 fault injector | `CEZ_RUN_FAULT=stall-step[:<stepId>]`, immediately after the `step-start` emit | `src/workflows/run.ts:5155` (emit), `:5157-5161` (fault) |
+| P4 e2e re-timing | inner `execFile` timeout 120s (`:85`), test timeout 240s (`:14`), with the 20.6s measurement in the comment at `:80-84` | `test/e2e/package-cli.test.ts:14,80-85` |
+| P5 missing-record close (delta 4 below) | counts a miss, fails closed on the third with stderr + `exitCode = 1` + `settle('failed')` + `clearKeepAlive()` and **no** store write | `src/runs/run-exit-guard.ts:72-86` |
+| P5 wedge diagnostics | `CEZ_RUN_WEDGE_DEBUG=1` gated `process._rawDebug` through a local typed view, on **both** miss paths | `src/runs/run-exit-guard.ts:75-78` (record missing) and `:101-106` (not live) |
+| env contract | `CEZ_RUN_FAULT` and `CEZ_RUN_WEDGE_DEBUG` documented under the testing/internal block | `.env.example:405` and `:407` |
+| in-place corrections | `AGENTS.md:367` trap 5, and the `CORRECTED 2026-08-23` lead-in on `.ai/specs/2026-08-22-run-broker-cli-keepalive.md:3-6` | both landed, re-verified at `7a19ca72` |
+
+**Deltas from the design, each deliberate or harmless but none of them written down before now.**
+
+1. **The error string uses a colon, not an em dash, and carries the liveness reason instead of
+   the designed parenthetical:** `cezar exited before the run finished: the process ran out of
+   work while the run was still <status>[: <reason>]` (`run-exit-guard.ts:25-28`). The wedge path
+   passes `liveness.reason`; the `beforeExit` path passes none. Better than designed, and it
+   respects the workspace no-em-dash rule.
+2. **The settle path is stronger than designed.** `runCommand` now owns a shared one-shot
+   `settle()` (`src/index.ts:1091-1099`) used by both the `store.on('run')` listener and the
+   wedge tick, plus a `pendingFinal` stash and a synchronous re-read of the record inside the
+   promise executor (`:1127-1132`). That closes the "a terminal status emitted before the
+   listener is registered goes into a void" window that P3 could only describe, not fix.
+3. **The fault injector fires on the first `agent`-kind step, not on a named default.** The
+   guard is `faultName === 'stall-step' && kind === 'agent' && (!faultStepId || faultStepId ===
+   step.id)` (`run.ts:5159`), so `CEZ_RUN_FAULT=stall-step` stalls whichever agent step executes
+   first, which for `spec-to-deploy` is step 1. Same observable behaviour; state it plainly so
+   nobody reads "the first agent step" as a hard-coded id.
+4. **CLOSED 2026-08-24 by P5 step 2, re-verified in source at `7a19ca72`. A missing run record
+   was an unbounded hang, and it was not designed.** The original finding is kept below
+   unchanged; what replaced it is `run-exit-guard.ts:72-86`, which now increments
+   `state.misses`, emits the gated `record missing` diagnostic, returns while
+   `misses < RUN_WEDGE_TICKS`, and on the third tick prints
+   `cezar exited before the run finished: its run record is missing from the store (<runId>)`
+   to stderr (`:81`), sets `process.exitCode = 1` (`:82`), calls `settle('failed')` (`:83`) and
+   `clearKeepAlive()` (`:84`), **with no store write**, because there is no row to write.
+   `runExitGuard`'s `!record` no-op (`:55-56`) is deliberately left alone. The unit case is
+   `run-exit-guard.test.ts:122`. What remains open is that none of it has been executed: this is
+   a source reading, not a test result.
+   ~~`runWedgeTick` opens `const record = options.store.getRun(options.runId); if (!record) return;`
+   (`run-exit-guard.ts:72-73`) **without counting a miss and without clearing the keep-alive**,
+   and `runExitGuard` likewise no-ops on `!record` (`:55-56`). So a run id whose store row is
+   absent, deleted mid-run, or unreadable leaves the ref'd interval armed forever with
+   `beforeExit` unreachable: exactly the hang this spec promised P3 would never buy. It is the
+   same shape as the terminal-branch hazard P3 already argues about, on the one input P3 did not
+   enumerate. Fix is one line (treat a missing record as a miss, and fail the run on the third),
+   and Verification §3 case 8 covers it.~~
+
+**Test coverage as built, re-counted at `7a19ca72`: all nine cases now exist.** The two rows
+this section previously marked **NO** were written by P5 step 3. `run-exit-guard.test.ts` is 181
+lines with six `it` blocks under two `describe`s; `run-liveness.test.ts` is 79 lines with two.
+Written is not passing: no test runner has been invoked on this tree (Verification §3, §7).
+
+| designed case (Verification §3) | written? | where at `7a19ca72` |
+| --- | --- | --- |
+| 1. seven liveness sources, each with its `reason` | yes, `it.each` over all seven | `src/workflows/run-liveness.test.ts:35` |
+| 2. `live: false` for unknown / unregistered id | yes | `run-liveness.test.ts:49` (one `it` block, shared with case 3) |
+| 3. predicate mutates nothing | yes, size snapshot before/after | `run-liveness.test.ts:49` (same block) |
+| 4. terminal record, guard is a no-op | yes | `src/runs/run-exit-guard.test.ts:52` |
+| 5. non-terminal, fails once, one-shot | yes | `run-exit-guard.test.ts:60` |
+| 6. two misses do nothing, the third fails | yes | `run-exit-guard.test.ts:77` |
+| 7. terminal-branch totality (tick settles, clears keep-alive, does not rewrite the record) | yes, `it.each<RunStatus>(['done', 'failed'])` | `run-exit-guard.test.ts:101` |
+| 8. missing record does not hang, per delta 4 | **yes, added by P5 step 3** | `run-exit-guard.test.ts:122` ("settles failed after three missing-record ticks without trying to write a row") |
+| 9. misses reset to 0 when liveness returns live | **yes, added by P5 step 3** | `run-exit-guard.test.ts:156` ("resets consecutive misses after a live tick") |
+
+**Corrected in this revision: case 7 is written, and an earlier draft of this section said it
+was not.** It is `it.each<RunStatus>(['done', 'failed'])('settles terminal %s records and clears
+the keep-alive')` at `run-exit-guard.test.ts:101-120`, asserting `settle` called with the
+record's own status, `clearKeepAlive` exactly once, and `updateRun` **not** called, with a
+comment naming the missed-store-event hazard, which is exactly what the design asked for. The
+one half of the designed assertion it does not make is the exit code (`done` → 0, `failed` → 1),
+and that half is **not unit-testable** under this section's own rule against importing
+`src/index.ts`: the status-to-exit-code mapping lives at `src/index.ts:1138`, inside
+`runCommand`. It is covered at runtime instead, by Verification §2 and §5.
+
+**Both "(new)" rows are now written** (P5 step 3, 2026-08-24): the misses reset at
+`run-exit-guard.test.ts:156`, and the missing-record hang from delta 4 at `:122`. Nothing in the
+unit layer is outstanding. What is outstanding is execution: see Phases and Verification §7.
+
 ## Phases
 
 Each phase is independently shippable and independently verifiable.
+
+**Where this stands on 2026-08-24, re-read at HEAD `7a19ca72`:** P1 through P4 plus P5 steps 1
+to 3 are **written and still unverified** on `cez/eeceb869` (see §"As built at HEAD `7a19ca72`").
+P0's primary, build-free bisect **has run** and named `a7510b2f`. What remains is the whole of
+P5 step 4 (re-integrate the `main` that has moved since, `b2c3aa79` → `8790d334`, then execute
+every gate and every runtime step in Verification §0 to §7), plus P0's load-based secondary and
+the record corrections in "Prior decisions this touches". P1 to P4 stay below unchanged as the
+record of what was designed and why.
+
+| phase | state at HEAD `7a19ca72` |
+| --- | --- |
+| P1 `beforeExit` guard | code landed, **unverified**, 2 of 2 designed unit cases written |
+| P2 keep-alive | code landed, **unverified**, no probe re-run, no healthy-path repetition |
+| P3 `runLiveness` + wedge | code landed, **unverified**; all 9 unit cases written; missing-record hang closed in source (`run-exit-guard.ts:72-86`) |
+| P4 fault + e2e re-timing | code landed, **unverified**; `CEZ_RUN_FAULT` still never executed |
+| P5 step 1 integrate `main` | done once at `b2c3aa79`; **must run again**, `main` is now `8790d334` (14 ahead, merge-base `b2c3aa79`) |
+| P5 steps 2-3 close hang + test gaps | **done in source**, re-verified line by line at `7a19ca72`, never executed |
+| **P5 step 4 gates + runtime** | **not started. This is the entire remaining critical path** |
+| P0 bisect (AC1) | **primary done**: build-free static predicate named `a7510b2f`. Load-based secondary not started |
+
+### P5: integrate, close the missing-record hang and the two test gaps, run every gate
+
+The phase that converts "written" into "done". In order, because each step invalidates the
+previous one's measurements if taken out of order:
+
+1. **DONE once, and must be done again.** Bring `main` into the task branch and re-anchor every
+   line citation in this spec afterwards. It was done at `main = b2c3aa79`, and §"As built at
+   HEAD `7a19ca72`" is the re-anchoring. `main` has since moved to `8790d334` (14 commits; the
+   branch is 3 ahead), so repeat it with the §0 numbers as they stand on the day you run it, not
+   as they are written here.
+2. **DONE, unexecuted.** The missing-record hang is closed in source at
+   `run-exit-guard.ts:72-86` exactly as specified: count a missing record as a miss; on the
+   third, write **no** store record (there is no row to write and no status to name, see
+   Verification §3 case 8 for why), print the missing-record message to stderr, set
+   `process.exitCode = 1`, `settle('failed')`, `clearKeepAlive()`, and leave `runExitGuard`'s
+   `!record` no-op alone. Do not redo it; verify it.
+3. **DONE, unexecuted.** Both unit cases exist (`run-exit-guard.test.ts:122` and `:156`), the
+   `CEZ_RUN_WEDGE_DEBUG` miss line is on **both** miss paths (`:75-78`, `:101-106`) through the
+   local typed view Verification §4 mandates, and `.env.example` documents `CEZ_RUN_FAULT`
+   (`:405`) and `CEZ_RUN_WEDGE_DEBUG` (`:407`). Do not write case 7 or either new case a second
+   time.
+4. **NOT STARTED, and it is the entire remaining critical path.** Run the gates and the runtime
+   verification below, in the order §0 to §7 gives. Nothing in steps 1 to 3 has ever been
+   compiled, linted or executed: not `tsc`, not `vitest`, not `node --test`, not the packaged
+   CLI. Treat every "done" above as a source reading.
+5. **Correct the record, in place, once step 4 is green**, including the conflicting
+   duplicate-closure spec that arrives with the `main` merge. See "Prior decisions this
+   touches"; it is not optional and it is not covered by any other step.
+
+Only after 1 to 5 may this spec's status say anything is verified. A gate run taken before
+step 1 measures a tree that will never ship.
 
 **Order: P1 → P2 → P3 → P4, then P0 last.** P0 is numbered 0 because it answers AC1 and owns no
 code, not because it runs first. It is scheduled last deliberately: its load-based form is the
@@ -541,16 +776,35 @@ static predicate with no race in it:
 ```bash
 git bisect start e9d77657 5e388ccf^
 git bisect run sh -c '
-  npm run build --workspace @loki-labs/better-cezar >/dev/null 2>&1 || exit 125
-  node -e "…assert: cez run <task> with no --workflow selects a workflow with >1 step…"
+  grep -qE "workflowName \?\? .quick-task." packages/cezar/src/index.ts && exit 0   # good: 1-step default
+  grep -qE "workflowName \?\? DEFAULT_WORKFLOW_NAME" packages/cezar/src/index.ts && exit 1  # bad: multi-step default
+  exit 125   # neither form present: this commit cannot answer the question
 '
 git bisect log > /tmp/bisect-primary.log && git bisect reset
 ```
 
-The assertion targets `src/index.ts:1003` (`const name = workflowName ?? DEFAULT_WORKFLOW_NAME`)
-resolved against `loadWorkflows()`, so it is testable without running a run at all. `exit 125`
-skips a commit that will not build. This terminates on a named commit **every time**, and it is
-the honest answer to AC1: the commit that made the failure reachable.
+**No build runs, and none is needed.** The predicate is a static read of the checked-out tree,
+so it costs one `grep` per candidate instead of a full `npm run build`, and it cannot be
+perturbed by dependency drift across 79+ commits of history. That matters beyond speed: a
+per-candidate build with `|| exit 125` would mark a candidate `skip` every time an unrelated
+build broke, which is precisely the "terminates on noise" failure this phase is scheduled last
+to avoid. Run it from the **repo root**, because the path in the predicate is repo-relative.
+
+Both endpoint forms are verified present, so the predicate is not hypothetical:
+`git show 67e93cca:packages/cezar/src/index.ts` contains
+`const name = workflowName ?? 'quick-task';` (the good end, a one-step default) and
+`git show e9d77657:packages/cezar/src/index.ts` contains
+`const name = workflowName ?? DEFAULT_WORKFLOW_NAME;` (the bad end, whose default resolves to
+the eight-step `spec-to-deploy`).
+
+**`exit 125` here means "the fallback expression is in neither known form", not "the build
+broke".** If any candidate returns 125, the bisect must not be allowed to skip past it: stop and
+read that commit's `runCommand` by hand to see what the default resolves to, then answer the
+candidate manually with `git bisect good` / `git bisect bad`. A skipped candidate in a range this
+narrow is the difference between naming a commit and naming a neighbourhood.
+
+This terminates on a named commit **every time**, and it is the honest answer to AC1: the commit
+that made the failure reachable.
 
 **Secondary — load-based confirmation, TIME-BOXED to 30 minutes.** Only after the primary has
 named a commit, and only as corroboration. Script `bisect-probe.sh`: at each candidate,
@@ -575,10 +829,14 @@ plausible commit.
 | **P3 false-positives and kills a healthy run.** A run momentarily in none of the seven sets gets failed. | high — worse than the bug | The predicate unions seven sources covering every state the engine models **except one named window**: the chain hand-back's `dropActive` (`run.ts:4107`) to `pendingJobs.set` (`run.ts:2393`) span, crossed 7× per default run and bounded by a single `reviveWorkflow` fs read (see P3, which states this rather than claiming completeness). `RUN_WEDGE_TICKS = 3` (about 3 s) is sized against that window specifically. Verification §4 runs a full healthy 8-step dry run 5× with the detector armed and asserts zero misses: that run is the evidence the window really is sub-tick in practice, and if it is not, P3 does not ship as written. |
 | **P2 turns a genuine engine wedge into an indefinite hang** where today it exits (wrongly) fast. | medium | Accepted and documented (P4). A hang is loud (CI timeout, visible terminal, Ctrl-C) where exit 0 is silent; the whole point of AC3 is that a false success is the worst outcome. P3 catches every wedge the manager can see. |
 | **P1's `beforeExit` handler re-fires or does async work**, either looping or resurrecting the loop. | medium | One-shot flag; handler body is strictly synchronous (`store.updateRun` and `store.flush` both are — `runs/store.ts`). Unit-tested. |
-| **A ref'd 1 s interval delays exit** after the run settles. | low | Cleared in a `finally` on the same tick the `final` promise resolves, before the summary line is printed. Verification §4 measures total wall clock before/after. |
+| **A ref'd 1 s interval delays exit** after the run settles. | low | Cleared in a `finally` on the same tick the `final` promise resolves, before the summary line is printed. Verification §4 measures the **exit latency** after the `run done` summary line (it explicitly withdraws the earlier total-wall-clock bound, which did not measure this risk); §4 is authoritative on the assertion. |
 | **The bisect (P0) is inconclusive** because the race is load-sensitive, and burns the session's time getting there. | medium — it is an acceptance criterion | P0's **primary** predicate is deterministic (does a no-`--workflow` run select a multi-step workflow?), so it names a commit every time regardless of whether the race reproduces. The load-based predicate is secondary, time-boxed to 30 minutes, and P0 runs **after** P1-P4 so an inconclusive race cannot consume the phases that must land. If the secondary never goes red, that is recorded as the finding rather than dressed up as confirmation. Flagged to the reviewer now, not at the end. |
 | **`CEZ_RUN_FAULT` leaks into a real run.** | low | Same shape as the existing `CEZ_BROKER_FAULT` (`claude-cli-runner.ts:418`): inert unless the exact string is set, and never set outside a test. |
 | **The heavy-step gate wedge** (`semaphore.ts:269-281`) is a second, independent instance of this class that P2 covers only because P2 is generic. | low | Called out explicitly in Problem §"What this is not"; a narrower fix (e.g. ref'ing one more timer) must be rejected in review for exactly this reason. |
+| **CLOSED IN SOURCE 2026-08-24, still unexecuted: a missing run record hung the CLI forever.** The fix is at `run-exit-guard.ts:72-86` and its unit case at `run-exit-guard.test.ts:122`; the original row is kept below unchanged. The residual risk is now the ordinary one: this path has never been run. | was high, now pending execution | Verification §3 case 8 and §7. Do not close the task on the source reading alone. |
+| ~~**Added 2026-08-24: a missing run record hangs the CLI forever.**~~ `runWedgeTick` returns on `!record` without counting a miss or clearing the keep-alive (`run-exit-guard.ts:72-73`), and `runExitGuard` no-ops on the same input (`:55-56`). With P2 armed this is an unbounded hang on a deleted, truncated or unreadable `runs.json` row: the exact trade this spec says it will not make, realised on the one input P3 never enumerated. | high, it is shipped code today | P5 step 2 counts a missing record as a miss and, on the third, settles `failed` with `exitCode = 1` and a stderr line **without writing the store**: there is no row to write (`RunStore.updateRun` no-ops on an absent id, `src/runs/store.ts:853-855`) and no status to name (`failNonTerminalRun` takes one). Verification §3 case 8 states the contract and is the proof. Do not close this task with the source unchanged. |
+| **Added 2026-08-24, re-measured the same day after the merge: `main` keeps moving under this branch.** The 79-commit gap was closed by merging at `b2c3aa79`; `main` is now `8790d334`, **14** ahead of a `b2c3aa79` merge-base, with the branch 3 ahead. `main`'s own drift since that merge-base is `src/workflows/run.ts` (+204) and `src/runs/store.ts` (+32) and **zero lines of `src/index.ts`**, so `runCommand`, which is where all of P1 and P2 live, is untouched by `main` for a second time. `git merge-tree --write-tree HEAD main` now exits **1**, but the single conflicted path is a document (`.ai/specs/briefs/2026-08-23-headless-run-exits-mid-workflow.md`, add/add) and `run.ts` auto-merges; resolve the brief by keeping both readings, and do not let a document conflict be read as a code conflict. `main` adds no `new Map<` / `new Set<` / `private readonly` run-state registry, so `runLiveness` stays complete. | low, and it will move again | Re-run §0's five commands on the day you merge rather than trusting these numbers; that is what §0 instructs and it is why this row is worth keeping despite going stale on a schedule. |
+| ~~**Added 2026-08-24: the branch is 79 commits behind `main`**, which has rewritten 295 lines of `src/index.ts` and 77 of `src/workflows/run.ts` since the merge-base.~~ | superseded by the row above | Verification §0 integrates before any gate runs. The merge is **clean today**: `git merge-tree --write-tree HEAD main` exits 0 and writes a tree, because `main` touched `index.ts` only at the import block and from `runClusterCommand` down, never inside `runCommand`. So this is a re-anchoring risk, not a conflict-resolution one; re-check with `merge-tree` before merging in case `main` has moved, and only if it has moved into `runCommand` does the keep-both-intents rule apply. **Citations in this spec are anchored in two places on purpose:** the design body (Problem, Solution, Architecture) is against `84fb8237`, and §"As built at HEAD `03371871`" is against `03371871`. §0 re-anchors both in one pass after the merge, and do not re-anchor the design body twice. Known drift `84fb8237` → `03371871`, verified: `runCommand` `index.ts:989` → `:998`, `startRun` `:1073` → `:1114`, the awaited promise `:1076-1080` → `:1122-1126`, `process.exitCode` `:1087` → `:1138`, `main()` `:1914` → `:1965`; the seven registries `run.ts:927/931/932/938/940/941/982` → `:950/954/955/961/963/964/1005`; `isActive` `:2944` → `:3483`; the `step-start` emit `:4525` → `:5091`. |
 
 ## Verification
 
@@ -588,6 +846,86 @@ reader must make: `<fixture>` / `<fresh git fixture>` is a throwaway repo built 
 `README.md`, `user.name`/`user.email` supplied inline), and `dist/index.js` assumes
 `npm run build` has been run. §7 is the exception and runs from the **repo root**, for the
 reason given there.
+
+**Added 2026-08-24: §0 runs first, and nothing below it is meaningful until it has.**
+
+### 0. Integrate `main`, then re-anchor: the prerequisite
+
+**Re-measured 2026-08-24 at HEAD `7a19ca72`, superseding the 79-commit numbers below.** The
+79-commit gap was closed by the `b2c3aa79` merge. `main` has since moved to `8790d334`:
+
+```bash
+git -C <repo> merge-base HEAD main                                 # b2c3aa79
+git -C <repo> rev-list --count HEAD..main                          # 14
+git -C <repo> rev-list --count main..HEAD                          # 3
+git -C <repo> diff --stat b2c3aa79 main -- \
+  packages/cezar/src/index.ts packages/cezar/src/workflows/run.ts \
+  packages/cezar/src/runs/store.ts
+# run.ts +204, store.ts +32, index.ts ABSENT from the output: main did not touch it.
+git -C <repo> merge-tree --write-tree HEAD main; echo $?
+# 1, and the ONLY conflicted path is
+# .ai/specs/briefs/2026-08-23-headless-run-exits-mid-workflow.md (add/add, a document).
+# packages/cezar/src/workflows/run.ts auto-merges. Resolve the brief by keeping both readings.
+git -C <repo> diff b2c3aa79 main -- packages/cezar/src/workflows/run.ts \
+  | grep '^+' | grep -E 'new Map<|new Set<|private readonly'
+# empty: main adds no eighth run-state registry, so runLiveness is still complete.
+```
+
+Run all five again on the day you merge. These numbers are true on 2026-08-24 and `main` moves
+daily; the point of the section is the procedure, not the integers.
+
+Every gate below, run before integration, measures a tree that will never ship. **The numbers
+in the rest of this section are the pre-`b2c3aa79` reading** and are kept because the reasoning
+(why the merge was expected to be clean, and what would make it not be) is what a reader needs;
+the commands are still the right commands, with `9c65f9e9`/`d01fc102` replaced by
+`b2c3aa79`/`8790d334`.
+
+**But the merge itself is clean, measured, not assumed.** An earlier draft of this section said
+a `runCommand` conflict was "likely rather than hypothetical". That is false and is checkable in
+one command:
+
+```bash
+git merge-tree --write-tree HEAD main   # exit 0, prints a tree oid, no conflict markers
+```
+
+`main`'s hunks in `src/index.ts` sit at the import block (`:64`) and at `runClusterCommand` and
+below (`:1382`, `:1443`, `:1463`, `:1521`, `:1539`, `:1590`, `:1661`, `:1683`, `:1913`,
+merge-base numbering). `runCommand` (~`:996-1095`) is untouched by `main`. So §0 is about
+re-anchoring and re-gating on the shipping tree, not about resolving conflicts. **Re-run
+`merge-tree` immediately before merging** in case `main` has moved since; only if it has moved
+into `runCommand` does the resolve-by-keeping-both-intents rule apply, and a wholesale take of
+either side would then silently drop P1/P2 or drop 79 commits of unrelated work.
+
+**The finding that actually matters for P3, and it lands in this spec's favour.** `main`'s five
+hunks in `src/workflows/run.ts` are: two `brokerIsolation` cache/warn fields (`:983`), a new
+read-only `hasCapacity()` (`:1600`), the `brokerIsolation()` re-probe and degraded-mode warning
+(`:2305`), and two `image`-event `name`/`url` projections (`:4207`, `:5752`). **None of them
+adds a run-state registry**, so `runLiveness`'s seven sources are still complete after the
+merge, which was the single largest unknown hanging over P3's integration. Confirm it after
+merging rather than trusting this paragraph:
+
+```bash
+grep -nE 'private readonly (active|queue|starting|waiting|monitoring|pendingJobs|autoResumeTimers)[ :=]' \
+  packages/cezar/src/workflows/run.ts
+# expect exactly 7 hits. Re-measured at HEAD 7a19ca72: :951 active, :955 queue, :956 starting,
+# :962 waiting, :964 monitoring, :965 pendingJobs, :1015 autoResumeTimers. (The pre-merge
+# reading was :950/954/955/961/963/964/1005 in merge-base numbering.) An eighth run-state
+# registry means runLiveness is no longer complete.
+```
+
+The trailing `[ :=]` is load-bearing: the unanchored form of this pattern returns **9** hits and
+the anchored form **7**, at `03371871` and again at `7a19ca72`, because `queue` prefix-matches
+`queuedImageSeq` (`run.ts:1006` at `7a19ca72`, `:996` before the merge) and `queueWatchdog`
+(`:1054`, was `:1044`), neither of which is a run-state registry. Verified against `main`
+`8790d334` too: the same two decoys, at `:1018` and `:1066`, and no new registry.
+
+Then merge or rebase `main` in, re-run
+`grep -n "keepAlive = setInterval\|process.on('beforeExit'\|manager.startRun(workflow"
+packages/cezar/src/index.ts` to re-anchor, and correct this spec's line citations in place: the
+design body's (against `84fb8237`) and §"As built"'s (against `03371871`) in the same pass, per
+the Risks row that lists the known drift.
+
+Then, and only then, §1 onward.
 
 ### 1. Prove the mechanism, not the symptom — the resource probe
 
@@ -625,7 +963,14 @@ CEZ_DRY_RUN=1 CEZ_HOME=$(mktemp -d) node --import file:///tmp/probe.mjs \
 
 ### 1a. Confirm the theory before building on it — the `CEZ_RUN_BROKER` A/B
 
-**Run this before P2.** Root `AGENTS.md:371-372` records the decisive control from the original
+**Already run, on 2026-08-23, and it confirmed the prediction; do not re-run it.** Brokered
+spent **97.4%** of 19,991 sampled ms on exactly one ref'd handle (54 windows, narrowest 10 ms);
+`CEZ_RUN_BROKER=0` spent **0.6%** of 16,238 sampled ms there (6 windows, narrowest 12 ms). Both
+completed all eight steps. That is the falsifiable gap the table below predicts, so §1a is
+**closed** and P1/P2 build on a confirmed mechanism. The procedure stays below as the record of
+what was measured and how to repeat it if the diagnosis is ever reopened.
+
+Root `AGENTS.md:371-372` records the decisive control from the original
 investigation: `CEZ_RUN_BROKER=0` makes the identical run finish while the default brokered path
 stalls. Probe the same 8-step dry run both ways, with the §1 probe attached:
 
@@ -677,10 +1022,14 @@ cat <fixture>/.ai/cezar/runs.json
 - **On unfixed code:** `exit=0`, record `status: "running"`, no error — i.e. the report,
   reproduced on demand, on a quiet box.
 - **After P1:** `exit=1`, record `status: "failed"` with the `cezar exited before the run
-  finished` error, message on stderr.
-- **After P2:** the process no longer exits; the run parks. Bound it with `timeout 30` and
-  assert only `exit != 0` (`timeout` yields 124) — see P4's stated limitation for why this
-  case is a hang and not a 1.
+  finished` error, message on stderr. **Not observable on the integrated tree**: P2 is already
+  landed (§"As built"), and it turns this case into the bounded hang described next. Kept as the
+  design's intermediate state; do not treat its absence as a failure.
+- **After P2, the only bullet here that is executable today:** the process no longer exits; the
+  run parks, and P3's wedge tick fails it after `RUN_WEDGE_TICKS`. Bound it with `timeout 30`
+  and assert `exit != 0` (`timeout` yields 124 if P3 has not fired, 1 if it has) plus a record
+  of `status: "failed"` carrying the liveness reason, see P4's stated limitation for why this
+  case can be a hang rather than a clean 1.
 
 ### 3. Unit tests
 
@@ -723,17 +1072,162 @@ line therefore does not cover these cases on its own: `npm test` must be run alo
 already says. Do not place them in `test/unit/` to "make the gate cover them", because that
 directory is node:test with a different assertion API.
 
+**Landed 2026-08-24, and what is still missing.** Cases 1 to 7 exist, in the two files this
+section names, under vitest as predicted (`src/workflows/run-liveness.test.ts:35-77`,
+`src/runs/run-exit-guard.test.ts:52-120`); the module extraction happened as designed, and no
+test imports `src/index.ts`. Case 7 is `run-exit-guard.test.ts:101-120`, so do **not** write it
+again; its exit-code half is covered at runtime by §2 and §5 rather than as a unit assertion,
+for the reason §"As built" gives. **Two** cases must still be written, and neither is polish:
+
+8. **Missing record must not hang.** `runWedgeTick` with a store whose `getRun` returns
+   `undefined` currently returns at `run-exit-guard.ts:72-73` without counting a miss or
+   clearing the keep-alive, so the process would run forever.
+
+   **The fix cannot be "fail the run", and the exact contract matters**: an earlier draft said
+   "count it as a miss so the third one fails the run", which is not implementable as written.
+   `failNonTerminalRun` (`run-exit-guard.ts:30-45`) takes a `status: RunStatus` read off the
+   record, and `RunStore.updateRun` returns `undefined` and writes nothing when the id is absent
+   (`src/runs/store.ts:853-855`). With no record there is no status to name and no row to fail.
+   The contract is therefore: on a `!record` tick, increment `state.misses`; below
+   `RUN_WEDGE_TICKS`, return; on the third, write **no** store record, print to stderr
+   `cezar exited before the run finished: its run record is missing from the store (<runId>)`,
+   set `process.exitCode = 1`, call `settle('failed')`, and call `clearKeepAlive()`.
+
+   `runExitGuard`'s own `!record` no-op (`:56`) deliberately **stays** a no-op. AC3 speaks only
+   to a record that is still non-terminal, and there is nothing to write; the hang, not the exit
+   code, was the defect.
+
+   The test asserts exactly that: three consecutive missing-record ticks call `settle('failed')`
+   once, `clearKeepAlive()` once, set `process.exitCode = 1`, and call `updateRun` **zero**
+   times. Do not assert a store write here: it would fail against a real store. Fix the source
+   first (P5 step 2); this case is the proof of it.
+9. **Misses reset.** Two misses, then a `live: true` tick, then two more misses: the record is
+   untouched, because `state.misses` returned to 0 (`run-exit-guard.ts:82-85`). Without this,
+   a detector that counted cumulative rather than consecutive misses would pass cases 6 and 8
+   and still kill healthy long runs.
+
+Run them with `npm test` (vitest) from `packages/cezar`, then again from the repo root as §7
+requires, and quote vitest's own pass/fail line.
+
 ### 4. Healthy-path regression — the detector must not fire
 
-Full 8-step dry run with P2+P3 armed and a debug counter exposed:
+Full 8-step dry run with P2+P3 armed. **There is no wedge counter to read yet, so expose one
+first.** `state.misses` is a plain field on the object literal created at `src/index.ts:1096`;
+`runWedgeTick` logs nothing at all until it actually fails the run
+(`src/runs/run-exit-guard.ts:87-92`); and there is no `CEZ_DEBUG` / `CEZ_LOG` convention
+anywhere in `packages/cezar/src` to hook into (grepped at HEAD `03371871`: zero hits). Left as
+it was, the "zero misses" assertion below is not executable, and the likely outcome is that it
+gets silently downgraded to "the run said `done`", which is exactly the weaker evidence this
+section exists to reject.
 
-```bash
-CEZ_DRY_RUN=1 CEZ_HOME=$(mktemp -d) node dist/index.js run 'mock:done' --repo <fixture>
+**The mechanism, added as P5 work.** On the increment path in `runWedgeTick`
+(`src/runs/run-exit-guard.ts:87`, immediately after `options.state.misses += 1`):
+
+```ts
+// `_rawDebug` is a Node internal: synchronous, and it refs nothing, so it cannot hold the
+// event loop open and perturb the measurement it serves. @types/node (20.19.43) does not
+// declare it and this package is `strict`, so name it through a local typed view rather
+// than reaching for `console.error`, which writes through a `process.stderr` that refs a
+// handle when stderr is a pipe.
+const rawDebug = (process as unknown as { _rawDebug?: (msg: string) => void })._rawDebug;
+if (process.env.CEZ_RUN_WEDGE_DEBUG === '1') {
+  rawDebug?.(`[wedge] miss ${options.state.misses}: ${liveness.reason}`);
+}
 ```
 
-Assert: `run done`, `runs.json` → `done`, **zero** wedge misses recorded across all 8 steps,
-and total wall clock within +1 s of the 20.6 s baseline. Repeat 5× — a detector that fires
-once in five healthy runs is not shippable.
+**The cast is load-bearing, not stylistic, and it applies to both call sites.** Written bare as
+`process._rawDebug(...)`, the line does not compile: `_rawDebug` is undocumented and absent from
+the resolved `@types/node` (20.19.43 at `node_modules/@types/node`; `grep -rn '_rawDebug'` over
+it returns nothing), while `packages/cezar/tsconfig.json` sets `strict: true` and
+`types: ["node"]`. Reproduced with the repo's own `tsc` on an equivalent config:
+`error TS2339: Property '_rawDebug' does not exist on type 'Process'`, exit 1. So the bare form
+turns §7's own `npm run typecheck` gate red on this spec's mandated code, and the cheapest
+workaround is deleting the line, which is what makes the zero-miss assertion below unexecutable.
+Use the same typed escape on the **second** call site this section mandates below (the
+missing-record increment path added by P5 step 2, with the literal reason `record missing`), so
+both go in cast rather than one of them reddening the gate anyway. Do **not** substitute
+`console.error` or `process.stderr.write`: that contradicts the refs-nothing rationale above.
+The probe script in §1 uses `process._rawDebug` bare, and correctly so, because it is a
+standalone `.mjs` loaded with `--import` and never reaches `tsc`.
+
+The count and the reason are separated by a colon rather than an em dash, per the workspace
+no-em-dash rule; the assertions below key only on the `[wedge] miss` prefix, so the separator is
+immaterial to them.
+
+**After P5 step 2 there are two increment paths, and this line instruments only one.** The
+missing-record path added by that step has no `liveness` object to read a reason from, so give it
+its own literal reason string (`record missing`) behind the same `CEZ_RUN_WEDGE_DEBUG` gate,
+emitting the same `[wedge] miss <n>: <reason>` shape, rather than leaving it silent. In practice a healthy run can never
+take that path (`store.getRun` reads an in-memory map that `startRun` populates synchronously),
+so the zero-miss greps below would pass either way; instrument it anyway so nobody reads a zero
+count as covering both paths when it only ever exercised one.
+
+**This line ships; it is not reverted before the commit.** It is inert unless
+`CEZ_RUN_WEDGE_DEBUG=1` is set, which is the same shape as the existing `CEZ_RUN_FAULT`
+injector, and a debug hook removed at commit time means the next person who doubts the detector
+has to re-derive and re-add it before they can measure anything. Because it ships, add it to the
+environment contract next to `CEZ_RUN_FAULT` (`.env.example:404-405`), in the same
+`# ---- testing / internal ----` block and commented out by default.
+
+Then five idle repetitions:
+
+```bash
+for i in 1 2 3 4 5; do
+  CEZ_RUN_WEDGE_DEBUG=1 CEZ_DRY_RUN=1 CEZ_HOME=$(mktemp -d) \
+    node dist/index.js run 'mock:done' --repo <fixture> 2>/tmp/wedge-idle-$i.log
+  grep -c '\[wedge\] miss' /tmp/wedge-idle-$i.log || true   # expect 0 on every i
+done
+```
+
+Assert on all five: `run done`, `runs.json` → `done`, `grep -c '\[wedge\] miss'` is **`0`**, and
+the process **exits within 1 s of printing its `run done` summary line**. Measure that directly:
+stamp `ts=$(date +%s%3N)` immediately after the `node dist/index.js run …` invocation returns and
+compare it to the timestamp of the summary line, or at minimum confirm the command returns
+promptly rather than lingering for a multiple of `RUN_KEEPALIVE_MS`. That is the assertion that
+actually measures the Risks row "a ref'd 1 s interval delays exit"; the risk is about **exit
+latency**, not total runtime. A detector that fires once in five healthy runs is not shippable.
+(`grep -c` exits 1 when the count is 0, which is the passing case here, hence the `|| true`; do
+not let a `set -e` harness read the pass as a failure.)
+
+**Total wall clock is recorded for information only, with no bound.** The earlier draft asserted
+"+1 s of the 20.6 s baseline", and that assertion is withdrawn: 20.6 s was measured at
+`84fb8237`, pre-P2 and pre-merge, on the tree §0 itself says nobody will ship. After integrating
+79 commits it is not a valid comparand, so holding it would produce a red for reasons unrelated
+to this change and force the implementer to adjudicate it mid-verification. Write the five
+numbers down as the new baseline for whoever measures next; do not gate on them.
+
+**Then repeat the same five runs under load, and treat those as the real evidence.** Five idle
+repetitions are the weaker half: this spec's own thesis is that the drain window widens under
+load, and `RUN_WEDGE_TICKS = 3` buys only about 3 s of margin against a `reviveWorkflow` fs read
+that is fast precisely because the box is quiet. Use §5's portable load harness:
+
+```bash
+for i in $(seq "$(nproc)"); do (while :; do :; done) & done
+trap 'kill $(jobs -p)' EXIT
+for i in 1 2 3 4 5; do
+  CEZ_RUN_WEDGE_DEBUG=1 CEZ_DRY_RUN=1 CEZ_HOME=$(mktemp -d) \
+    node dist/index.js run 'mock:done' --repo <fixture> 2>/tmp/wedge-load-$i.log
+  grep -c '\[wedge\] miss' /tmp/wedge-load-$i.log || true   # expect 0 on every i
+done
+```
+
+Assert the same two things on all five: `grep -c '\[wedge\] miss' /tmp/wedge-load-$i.log` is
+**`0`**, and `runs.json` → `done`. Do
+**not** carry the +1 s wall-clock bound over to the loaded repetitions: eight busy loops on
+eight cores will blow it for reasons unrelated to this change, and a failure there is noise, not
+signal.
+
+**Stop-ship:** *any* wedge-caused failure of a healthy run, idle or loaded, means P3 does not
+ship as written. **This, and not the zero-miss count, is the decision rule.** The zero-miss
+assertion is the diagnostic: a single transient miss that never reaches `RUN_WEDGE_TICKS` fails
+that assertion without failing the run, so record its count and its reason and read it as
+evidence that the tick margin is thinner than assumed, rather than as an automatic stop-ship. A
+wedge-caused **failure** is what blocks the ship. Two ways out, in order of preference: raise `RUN_WEDGE_TICKS` and re-measure
+the loaded five, or make the tick treat the `dropActive` → `pendingJobs.set` window as live
+**explicitly** (a flag set at `dropActive` and cleared at `pendingJobs.set`), which removes the
+guess instead of widening it. Shipping a detector known to fire on healthy runs is not an
+option: it trades a silent wrong success for a loud wrong failure, which is better and still
+wrong.
 
 ### 5. AC2 — the actual gate
 
@@ -769,6 +1263,43 @@ you run this on. Quote both results, with their counts, in the status line.
 
 ### 6. AC1 — the bisect
 
+**RESULT 2026-08-24, primary predicate executed: the first bad commit is `a7510b2f`.** The
+build-free static predicate was run over the specified `e9d77657` … `67e93cca` ancestry and
+named `a7510b2f` (2026-08-20 07:16 UTC, "cezar autosave (run finalize)"), which changes
+`runCommand`'s fallback from `workflowName ?? 'quick-task'` to
+`workflowName ?? DEFAULT_WORKFLOW_NAME`. That is AC1 answered.
+
+**And the `5e388ccf` prior below is not wrong so much as half the picture, which this revision
+measured rather than assumed.** `a7510b2f` and `5e388ccf` are **siblings**, not successive:
+
+```bash
+git log -1 --format='%h %P %ci' a7510b2f   # parent 67e93cca, 2026-08-20 07:16:44 +0000
+git log -1 --format='%h %P %ci' 5e388ccf   # parent 67e93cca, 2026-08-20 10:00:24 +0000
+git merge-base --is-ancestor a7510b2f 5e388ccf; echo $?   # 1
+git merge-base --is-ancestor 5e388ccf a7510b2f; echo $?   # 1
+git diff a7510b2f 5e388ccf -- packages/cezar/src/index.ts | wc -l   # 0
+git diff --stat 67e93cca a7510b2f -- packages/cezar/src/index.ts    # 5 lines, 3 ins 2 del
+git diff --stat 67e93cca 5e388ccf -- packages/cezar/src/index.ts    # identical
+```
+
+Two autosaves of the same five-line change, committed on parallel history within three hours and
+later joined by a merge; both are ancestors of HEAD. So the flip sits exactly on the `67e93cca`
+boundary, `a7510b2f` is simply the earlier of the two and therefore what a bisect over that
+ancestry reaches first, and the handoff's `097d1b15` hypothesis is refuted (it does not touch
+`index.ts`; it broadened an already-default to other unattended paths).
+
+**This also discharges the honesty note below rather than repeating it.** That note warns that
+the `good` endpoint was *chosen from the prior* and never measured, so the bisect could only
+confirm what it was pointed at. It has now been measured directly:
+`git show 67e93cca:packages/cezar/src/index.ts | grep -n 'workflowName ??'` gives
+`700:  const name = workflowName ?? 'quick-task';`, and the same grep at `a7510b2f`, at
+`5e388ccf` and at `e9d77657` gives `DEFAULT_WORKFLOW_NAME`, while `a7510b2f^` and `5e388ccf^`
+(both `67e93cca`) give `'quick-task'`. The endpoint is correct on evidence, not on assumption.
+What is still **not** done is the load-based secondary, which is the only thing that would show
+the red *reproducing* at `a7510b2f` rather than the default *flipping* there. Report it that way.
+
+Original instruction, unchanged, for the secondary and the reporting discipline:
+
 Per P0, and **after** P1-P4 have landed. Run the deterministic primary predicate
 (`git bisect start e9d77657 5e388ccf^`, asserting that a no-`--workflow` `cez run` selects a
 workflow with more than one step) — it names a commit every time. Then the load-based secondary,
@@ -786,7 +1317,23 @@ report it as "confirmed and dated `5e388ccf`", never as "bisect independently fo
 
 ### 7. Gates
 
-**Run these from the repo ROOT, not from `packages/cezar`.** The root `typecheck` fans out to
+**Pre-flight, before any gate, because a worktree's gates lie when it is missing.** Root
+`AGENTS.md` documents the trap: Node resolves upward out of a worktree into the parent
+checkout's `node_modules`, so a gate in an uninstalled worktree "starts, prints a normal vitest
+banner and returns a real-looking result" while testing the wrong tree.
+
+```bash
+ls node_modules/.bin | wc -l    # from the worktree root
+```
+
+**Measured 2026-08-24 in this worktree: root `node_modules` has 317 entries and 28 in `.bin`,
+with `vitest`, `tsx` and `tsc` all present, while `packages/cezar/node_modules` is empty.** That
+is the normal hoisted-workspace shape and it is *not* the trap: the trap is an **empty or absent
+root `node_modules`**, which is what the sibling spec hit. If the count is 0 or the directory is
+absent, run `npm install` from the worktree root first and say so in the status line. Do not
+read the empty `packages/cezar/node_modules` as a failed install.
+
+**Run the gates from the repo ROOT, not from `packages/cezar`.** The root `typecheck` fans out to
 four workspaces (`typecheck:contract`, `:client`, `:server`, `:web` — root `package.json`), and
 `packages/cezar`'s own `typecheck` is only the `:server` quarter of that. Running the gate from
 the package therefore skips the contract, api-client and web checks entirely, which is exactly
@@ -816,6 +1363,9 @@ if it is still the only red there, say so rather than claiming a clean sweep.
   dated `CORRECTED 2026-08-2x` lead-in to that spec's status line** pointing here, leaving the
   original text below it — per the workspace rule that a correction marks what it invalidates
   in place. Do not delete or rewrite its claim.
+  **Done 2026-08-23, verified in place 2026-08-24:** the lead-in is at
+  `.ai/specs/2026-08-22-run-broker-cli-keepalive.md:3-7`, above the original status line, which
+  is unchanged. Nothing further is owed here unless P5 changes the conclusion.
 - **Root `AGENTS.md` → `### Five environment traps that make the gates LIE` (`AGENTS.md:250`),
   item 5 (`:367-383`).** There is no section called "sharp edges" in that file; this is the real
   anchor. Item 5 already carries a 2026-08-22 correction (`:379-383`) saying that if this red
@@ -827,9 +1377,41 @@ if it is still the only red there, say so rather than claiming a clean sweep.
   above — the count is now 18 and the ordinal is 8 (Verification §5). Item 5 is also where the
   `CEZ_RUN_BROKER=0` control lives (`:371-372`), which Problem §"What this is not" now uses as
   positive evidence and Verification §1a turns into a test.
-- **`5e388ccf`** (CLI default → `spec-to-deploy`) is not reverted and should not be: the
-  default is a product decision (`.ai/specs/2026-08-19-spec-to-deploy-default-workflow.md`).
-  It only made an existing latent defect eight times more likely to be hit.
+  **Done 2026-08-23, verified in place 2026-08-24:** the correction is at `AGENTS.md:367-370`
+  and points here, records the 18-case count and the eighth ordinal, and leaves the original
+  "fails 1/15 … Case 5" text intact below it (`:371` onward), which is what the in-place rule
+  asks for. One thing it does **not** yet say, and should once P5 finishes: whether the case is
+  green. Until then the entry correctly reads as an open trap.
+- **`a7510b2f` / `5e388ccf`** (CLI default → `spec-to-deploy`; the same five-line change on two
+  parallel autosaves, see Verification §6) is not reverted and should not be: the default is a
+  product decision (`.ai/specs/2026-08-19-spec-to-deploy-default-workflow.md`). It only made an
+  existing latent defect eight times more likely to be hit.
+
+- **ADDED 2026-08-24, and it is the one record obligation nothing else covers:
+  `.ai/specs/2026-08-22-headless-run-exit0-bisect-and-verify.md`, which arrives with the `main`
+  merge (commit `a2a74f43`, "docs: record headless run duplicate status", 452 lines).** It is a
+  sibling task's (`9bf5030d`) documentation-only closure of *this same defect*, and it concludes
+  that the runtime bug "is implemented, tested, and shipped by the sibling task's commit
+  `3e6d1b7e`" with "no application code change belongs to this task". **That conclusion does not
+  hold for the multi-step hand-off race**, for exactly the reason this spec's "Why `3e6d1b7e`
+  did not close this" section gives: a step-scoped broker timer is not run-lifetime liveness.
+  Read alongside this spec it produces a direct contradiction (one document says the class is
+  closed with no code owed, the other says P1 to P5 are code that had to be written), and a
+  reader who greps the spec directory hits the alphabetically earlier, more confident one first.
+
+  So, **once P5 step 4 is green**, add a dated `SUPERSEDED 2026-08-2x by
+  .ai/specs/2026-08-23-headless-run-drains-event-loop.md` lead-in to *its* status line, leaving
+  its original text below unchanged, saying that its `3e6d1b7e`-closes-it conclusion holds only
+  for broker startup and per-session polling and that the run-lifetime invariant is here. Do not
+  delete it and do not merely append a note to this spec: appending leaves the stale document
+  reading as current, which is the failure mode the workspace rule exists for.
+
+  Two things in it are **correct and must survive the correction**: its independent finding that
+  `097d1b15` is not the trigger (this spec's §6 reaches the same answer by a different route),
+  and its `node_modules` pre-flight warning, which named the resolve-upward trap that makes a
+  worktree's gates lie. Its own AC1 remains unanswered on its terms; this spec's §6 answers it
+  with `a7510b2f`, so the correction should point there rather than leaving two open bisects on
+  the record.
 
 ## Sources read
 
@@ -874,6 +1456,34 @@ Measured for this spec, on this box: the `getActiveResourcesInfo` trace summaris
 §"The measurement" (raw log `/tmp/cez-drainprobe-IYIQ/probe.log`, 122 transitions over
 20 113 ms; that path is scratch and will not survive a reboot — the numbers are quoted here
 because of it).
+
+Read directly at HEAD `03371871` for the 2026-08-24 revision (this run's spec step), on top of
+step 1's brief `.ai/specs/briefs/2026-08-23-headless-run-exits-mid-workflow.md` (which exists in
+this worktree at that path, unlike the 2026-08-23 brief):
+
+- `packages/cezar/src/runs/run-exit-guard.ts:1-93`, the whole new module, read line by line;
+  the `!record` early returns at `:55-56` and `:72-73` are where delta 4 comes from
+- `packages/cezar/src/index.ts:998-1012` (`runCommand` head, `DEFAULT_WORKFLOW_NAME` at `:1012`),
+  `:1082-1145` (settle, guard, keep-alive, `startRun`, the awaited promise and its `finally`),
+  `:1965` (`main()` at module scope; the "zero exports" claim still holds)
+- `packages/cezar/src/workflows/run.ts:950-1005` (the state sets `runLiveness` reads),
+  `:3483-3501` (`isActive` and the new predicate), `:5090-5097` (`step-start` and the fault)
+- `packages/cezar/src/runs/run-exit-guard.test.ts:1-121` and
+  `src/workflows/run-liveness.test.ts:1-79`, counted the landed cases against §3's list
+- `packages/cezar/src/runs/store.ts:742,776,853,1348`: `RunStore extends EventEmitter`, plus the
+  `getRun`/`updateRun`/`flush` signatures the guard's structural `RunExitGuardStore` must match
+- `packages/contract/src/runs.ts:39`: `RunStatus` is exported, which the inline
+  `import('@loki-labs/better-cezar-contract').RunStatus` annotations in `index.ts` depend on
+- `packages/cezar/package.json:35-42` and root `package.json` scripts, `vitest.config.ts`
+  (`include: ['src/**/*.test.ts']`), `.ai/agentic.config.json:8-16` (five validation commands,
+  no `lint`), and `grep -c '^test(' test/e2e/*.test.ts` → 18, `package-cli` 1: all four of the
+  2026-08-23 gate facts re-verified, all still true
+- `git rev-list --count 9c65f9e9..main` → 79; `git diff --stat 9c65f9e9..main` over the two
+  edited source files → 295 and 77 changed lines. This is the new §0.
+
+**Not verified in the 2026-08-24 revision, and deliberately not claimed:** nothing was built,
+run or tested in this step either. The three acceptance criteria are exactly as open as they
+were on 2026-08-23; what changed is that the code to test now exists and its gaps are named.
 
 **Not found / not done in this step:** no runtime reproduction of the *failure* itself (it did
 not trigger on a quiet box, twice now — once in step 1's Explore run, once here); the bisect
