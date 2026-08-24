@@ -82,4 +82,54 @@ describe('recover() and a task parked on an unanswered question', () => {
 
     expect(store.getRun(id)?.status).toBe('done');
   });
+
+  it('keeps a single-step prose question in `review` after a restart', async () => {
+    const id = waitingRun();
+    store.updateRun(id, {
+      waitingReason: 'question',
+      waitingQuestion: 'Merge and deploy, or hold?',
+    });
+
+    await new RunManager(store, repoRoot, { semaphore: frozen() }).recover();
+
+    expect(store.getRun(id)?.status).toBe('review');
+  });
+
+  it('does not let a heuristic prose question stall later chain steps', async () => {
+    const workflowDef = {
+      name: 'two-step',
+      description: 'two steps',
+      source: 'built-in' as const,
+      steps: [
+        { id: 'first', name: 'First', prompt: '{{task}}' },
+        { id: 'second', name: 'Second', prompt: '{{task}}' },
+      ],
+    };
+    const { id } = store.createRun({ author: localCliAuthor(),
+      title: 'chain',
+      workflow: workflowDef.name,
+      task: 'do it',
+      steps: [
+        { id: 'first', name: 'First', kind: 'agent' },
+        { id: 'second', name: 'Second', kind: 'agent' },
+      ],
+    });
+    store.updateRun(id, { workflowDef });
+    store.updateStep(id, 'first', { status: 'waiting', sessionId: 'sess-1' });
+    store.updateRun(id, {
+      status: 'waiting',
+      currentStepId: 'first',
+      waitingReason: 'question',
+      waitingQuestion: 'Should I continue?',
+    });
+
+    await new RunManager(store, repoRoot, { semaphore: frozen() }).recover();
+
+    const recovered = store.getRun(id);
+    expect(recovered?.status).toBe('queued');
+    expect(recovered?.steps.find((step) => step.id === 'second')?.status).toBe('pending');
+    expect(store.readEvents(id).some((event) =>
+      event.type === 'lifecycle' && String(event.message).includes('chain re-queued at step "second"')
+    )).toBe(true);
+  });
 });

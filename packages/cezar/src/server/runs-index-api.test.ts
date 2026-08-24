@@ -432,6 +432,39 @@ describe('workspace runs index API', () => {
     expect(Object.keys(ordinaryRow!)).not.toContain('stopReason');
   });
 
+  it('carries the parked prose question and omits it from ordinary rows', async () => {
+    await registerProject(repoRoot);
+    const question = store.createRun({
+      author: localCliAuthor(),
+      title: 'Needs a decision',
+      workflow: 'build',
+      task: 'do the thing',
+      steps: [],
+    });
+    store.updateRun(question.id, {
+      status: 'waiting',
+      waitingReason: 'question',
+      waitingQuestion: 'Merge and deploy, or hold?',
+    });
+    const ordinary = store.createRun({
+      author: localCliAuthor(),
+      title: 'Plain report',
+      workflow: 'build',
+      task: 'do the thing',
+      steps: [],
+    });
+    store.updateRun(ordinary.id, { status: 'waiting' });
+
+    const body = await getIndex();
+    expect(body.runs.find((run) => run.id === question.id)).toMatchObject({
+      waitingReason: 'question',
+      waitingQuestion: 'Merge and deploy, or hold?',
+    });
+    const ordinaryRow = body.runs.find((run) => run.id === ordinary.id);
+    expect(Object.keys(ordinaryRow!)).not.toContain('waitingReason');
+    expect(Object.keys(ordinaryRow!)).not.toContain('waitingQuestion');
+  });
+
   it('reads a crashed process’s `running` row as interrupted, exactly as opening it would', async () => {
     await registerProject(repoRoot);
     await registerProject(otherRoot);

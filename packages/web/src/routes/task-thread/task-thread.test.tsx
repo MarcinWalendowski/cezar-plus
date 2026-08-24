@@ -236,6 +236,24 @@ describe('ThreadView', () => {
     expect(textarea.placeholder).toBe('Reply — / for skills, @ for files…')
   })
 
+  it('waiting on a prose question shows what the user needs to answer', () => {
+    renderView(<ThreadView run={run('waiting', {
+      waitingReason: 'question',
+      waitingQuestion: 'Merge and deploy now, or hold for review?',
+    })} thread={reduceThread(EVENTS)} />)
+    const hint = document.querySelector('[data-slot="paused-hint"]')
+    expect(hint?.querySelector('[data-slot="waiting-question"]')?.textContent)
+      .toBe('Merge and deploy now, or hold for review?')
+    expect(hint?.className).toContain('items-start')
+    expect((screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement).disabled).toBe(false)
+  })
+
+  it('a plain report park does not invent a question', () => {
+    renderView(<ThreadView run={run('waiting', { waitingReason: 'report' })} thread={reduceThread(EVENTS)} />)
+    expect(document.querySelector('[data-slot="waiting-question"]')).toBeNull()
+    expect(document.querySelector('[data-slot="paused-hint"]')?.className).toContain('items-center')
+  })
+
   it('failed by a usage limit → the dock says when it resumes itself, and links the setting', () => {
     renderView(
       <ThreadView

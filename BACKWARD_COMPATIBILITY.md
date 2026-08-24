@@ -203,10 +203,18 @@ Breaking: removing or renaming a v1 `AgentEvent` type or a v2 `UiEvent` `type`/`
 ## 8. In-band agent marker vocabulary (`packages/cezar/src/handoff.ts`, `packages/cezar/src/runs/task-markers.ts`)
 
 The plain-text markers the handoff contract asks every agent to emit and the engine parses from
-turn text: `CEZ:DONE` (#347), `CEZ:MONITORING` (#490), and the task-reference markers
-`CEZ:PR=<n>` / `CEZ:ISSUE=<n>` / `CEZ:TITLE=<phrase>` (spec 2026-07-18-task-ref-markers). These
-are an agent-facing contract: skills, prompts, and running agents rely on an emitted marker
-meaning what it meant when their session started.
+turn text: `CEZ:DONE` (#347), `CEZ:MONITORING` (#490), `CEZ:ASK <json>` (#473, structured
+question with tappable options), and the task-reference markers `CEZ:PR=<n>` / `CEZ:ISSUE=<n>` /
+`CEZ:TITLE=<phrase>` (spec 2026-07-18-task-ref-markers). These are an agent-facing contract:
+skills, prompts, and running agents rely on an emitted marker meaning what it meant when their
+session started.
+
+A turn can also end with none of these markers at all ("the plain end") — that ending is part of
+the same vocabulary, not an absence of one, and it is paired by rule with `CEZ:ASK` (spec
+2026-08-23-plain-end-structured-question): a plain end is for a turn the user only reads, and a
+turn that needs an answer from the user ends with `CEZ:ASK` instead of prose. A plain end that
+contains a question is a defect the engine detects and nudges the agent to fix by re-emitting it
+as `CEZ:ASK`, once per run — it never fabricates the question or the marker itself.
 
 Breaking: removing or renaming a marker, or changing what an emitted marker does (e.g. making
 `CEZ:PR` gate an action instead of steering display). Additive is fine — a new `CEZ:*` marker is

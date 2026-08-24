@@ -168,6 +168,14 @@ describe('handoff contract markers', () => {
     // It rides in the combined contract every agent step receives.
     expect(HANDOFF_INSTRUCTIONS).toContain('CEZ:ASK');
   });
+
+  it('pairs the plain end with CEZ:ASK as a rule, not a bare sanction (2026-08-23)', () => {
+    expect(HANDOFF_ONLY_INSTRUCTIONS).not.toContain('just end your message normally');
+    expect(HANDOFF_ONLY_INSTRUCTIONS).toContain('A turn that needs an answer from the user ends with CEZ:ASK');
+    expect(HANDOFF_ONLY_INSTRUCTIONS).toContain('a plain end that contains a question is a defect the engine will nudge you to fix');
+    expect(HANDOFF_INSTRUCTIONS).not.toContain('just end your message normally');
+    expect(HANDOFF_INSTRUCTIONS).toContain('A turn that needs an answer from the user ends with CEZ:ASK');
+  });
 });
 
 describe('skill-aware task naming (#432)', () => {

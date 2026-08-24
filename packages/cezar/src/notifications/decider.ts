@@ -54,6 +54,8 @@ export interface RunSnapshot {
   title: string;
   status: RunStatus;
   activity?: 'monitoring';
+  waitingReason?: 'question' | 'report';
+  waitingQuestion?: string;
   autoResumeAt?: string;
   pullRequestUrl?: string;
   /** The last `ask.requested` text. */
@@ -118,7 +120,13 @@ function buildRunNotification(run: RunSnapshot, mapped: MappedEvent, now: number
   };
   switch (mapped.event) {
     case 'run.needs-you':
-      return { ...base, body: run.askText ?? 'Waiting on you.' };
+      return {
+        ...base,
+        body:
+          (run.waitingReason === 'question' ? run.waitingQuestion : undefined) ??
+          run.askText ??
+          'Waiting on you.',
+      };
     case 'run.review':
       return {
         ...base,

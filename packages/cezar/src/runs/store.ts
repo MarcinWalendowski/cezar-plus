@@ -333,6 +333,21 @@ export const runRecordSchema = z.object({
    *  `monitoring` while the agent is still working on its own downstream work.
    *  Optional/absent on old runs; cleared when the run resumes or ends. */
   activity: z.enum(['monitoring']).optional(),
+  /**
+   * Why this run is parked at `waiting`, when it parked with NO turn-end marker
+   * (spec 2026-08-23-plain-end-structured-question). `'question'` = the agent's
+   * last turn ends on something addressed to the user; `'report'` = it does not.
+   * Classified by `detectTrailingQuestion`, never by a model. Absent on every run
+   * recorded before this shipped, and on every marked ending (`CEZ:ASK` owns its
+   * own event). Cleared exactly where `activity` is.
+   */
+  waitingReason: z.enum(['question', 'report']).optional(),
+  /**
+   * The agent's OWN trailing sentence, verbatim and clipped to 280 chars — what
+   * the dock and the `run.needs-you` body show. Never generated: absent whenever
+   * `waitingReason !== 'question'`.
+   */
+  waitingQuestion: z.string().max(280).optional().catch(undefined),
   /** Exact server-computed deadline for the next automatic monitoring check. */
   monitoringWakeAt: z.string().datetime().optional().catch(undefined),
   /** True only for the live epoch that exhausted all automatic monitoring checks. */
@@ -722,6 +737,8 @@ export function reconcileLoadedRun(run: RunRecord, opts?: { keepLive?: boolean }
   if (!['running', 'waiting', 'queued'].includes(run.status)) {
     run.activity = undefined;
     run.monitoringWakeAt = undefined;
+    run.waitingReason = undefined;
+    run.waitingQuestion = undefined;
   }
   // A pending usage-limit resume survives the restart on purpose (the wait can be
   // hours) — `RunManager.recover()` re-arms it from this field. It can only mean
@@ -857,10 +874,25 @@ export class RunStore extends EventEmitter {
       delete run.referencedIssueNumberSeeded;
     }
     const normalized = { ...patch };
+    // A parked prose question describes one park. Moving to a different status starts a new
+    // state, so do not carry the old question into it. A same-status write is deliberately
+    // exempt because the idle-session reap rewrites `waiting` over the same park, and the park
+    // itself is exempt because it supplies its new reason in this patch (spec
+    // 2026-08-23-plain-end-structured-question, P2 step 2b).
+    if (
+      normalized.status &&
+      normalized.status !== run.status &&
+      !Object.prototype.hasOwnProperty.call(patch, 'waitingReason')
+    ) {
+      normalized.waitingReason = undefined;
+      normalized.waitingQuestion = undefined;
+    }
     if (normalized.status && !['running', 'waiting', 'queued'].includes(normalized.status)) {
       normalized.activity = undefined;
       normalized.monitoringWakeAt = undefined;
       normalized.monitoringWakeCapReached = undefined;
+      normalized.waitingReason = undefined;
+      normalized.waitingQuestion = undefined;
     }
     // …and the mirror image for the usage-limit resume (spec
     // 2026-08-03-auto-resume-after-usage-limit): it is a promise made ABOUT a failed run, so a

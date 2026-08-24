@@ -323,6 +323,10 @@ export const runRecordSchema = z.object({
   /** `monitoring` while `status === 'running'` and the agent is working on downstream work.
    *  Absent on old runs; cleared on resume/end. */
   activity: runActivitySchema.optional(),
+  /** Why an unmarked interactive turn is parked. Additive so older records and clients remain valid. */
+  waitingReason: z.enum(['question', 'report']).optional(),
+  /** Verbatim trailing question detected in the agent's prose, never synthesized by cezar. */
+  waitingQuestion: z.string().max(280).optional().catch(undefined),
   /** Exact ISO-8601 deadline for the next automatic monitoring check. */
   monitoringWakeAt: z.string().optional(),
   /** The current live monitoring epoch exhausted its 40 automatic checks. */
@@ -515,6 +519,10 @@ export const runIndexEntrySchema = z.object({
   titleOrigin: z.enum(['user', 'auto', 'marker']).optional(),
   status: runStatusSchema,
   activity: runActivitySchema.optional(),
+  /** Why an unmarked interactive turn is parked. */
+  waitingReason: z.enum(['question', 'report']).optional(),
+  /** Verbatim trailing question detected in the agent's prose. */
+  waitingQuestion: z.string().max(280).optional().catch(undefined),
   /** Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —
    *  PLAN D27, Phase 1/3. Mirrors `RunRecord.stopReason` (see its own doc comment there); carried
    *  here because `deriveAttention` reads it to tell a budget stop apart from an ordinary review
