@@ -1,8 +1,20 @@
 # Headless `cez run` exit-0-mid-workflow (task 9bf5030d): bisect the regression and close the duplicate
 
-**Status: PARTIAL, documentation-only duplicate closure as of 2026-08-24.** The runtime defect is
-implemented, tested, and shipped by the sibling task's commit `3e6d1b7e`, but this task's separate
-formal-bisect and authoritative current-main rerun acceptance criteria remain unverified. No
+**Status: AC1 and AC3 VERIFIED, AC2 FAILS ON CURRENT MAIN FOR A NEW AND UNRELATED DEFECT
+(measured 2026-08-24).** The runtime defect this task was filed for is implemented, tested and
+shipped by the sibling task's commit `3e6d1b7e`, and is confirmed fixed on current `origin/main`
+by direct measurement (AC3). The formal `git bisect` this task owed has now been run and names
+`954c6a55` (AC1). AC2 (`test:package` green on main) is **not** satisfied, and cannot be satisfied
+by this task without a code change that is out of its scope: the same e2e case is still red on
+`origin/main` (`c328ec06`), but for a different reason — under `CEZ_DRY_RUN=1` the `spec-to-deploy`
+workflow now routes its `review-spec` step to **codex**, which the dry-run mock does not cover, so
+the packaged release e2e reaches a **real, paid codex account**. See "Authoritative verification"
+below.
+
+**Superseded 2026-08-24 by the measurements below** (kept so the reasoning that led here stays
+readable): ~~PARTIAL, documentation-only duplicate closure. The runtime defect is implemented,
+tested, and shipped by the sibling task's commit `3e6d1b7e`, but this task's separate formal-bisect
+and authoritative current-main rerun acceptance criteria remain unverified.~~ No
 application code change belongs to this task. The defect task
 9bf5030d's handoff describes was already fixed, on this same branch, by commit `3e6d1b7e`
 ("fix: keep a one-shot brokered run's interval ref'd so the process outlives the session"),
@@ -45,7 +57,7 @@ these numbers were treated as an AC record.
   the exhausted-retry branch calls `giveUp()`, which (`:233-239`) rejects `result` instead of
   going silent.
 
-**AC2 and AC3 read as true against this indicative run, but the record is not yet established**:
+**CORRECTED 2026-08-24 — AC3 is now confirmed true by measurement, but AC2 is FALSE on current `origin/main`; the sentence below was written before either was measured.** ~~AC2 and AC3 read as true against this indicative run, but the record is not yet established~~:
 it needs a re-run after a real in-tree install and, for AC2, a measurement taken on `main` after
 merging `origin/main` (Phase 2 gives the exact recipe) before either acceptance criterion can be
 marked satisfied. What is left is that re-run, AC1 (a literal bisect result), and closing the loop
@@ -132,24 +144,69 @@ pending that confirming re-run.
 
 What remains is closing task 9bf5030d's own three acceptance criteria honestly:
 
-- **AC1** ("git bisect names the commit that turned test:package case 5 red") — not yet satisfied
-  by anything either task has done; the keepalive spec root-caused by reading, not bisecting.
-  Answered above by direct commit-diff (a de facto one-step bisect, since the candidate range
-  collapsed to a single atomic wiring change) and formalized as an actual `git bisect run` in
-  Phase 1.
-- **AC2** ("npm run test:package is 15/15 green on main") — reads green on this step's indicative
-  run, but not yet established as the record: `HEAD`/`main` (`c73c8a2d`) is 14 commits behind
-  `origin/main`, and the run resolved into the parent checkout's `node_modules` rather than a real
-  in-worktree install (see TLDR). Phase 2 below gives the scrubbed, in-tree, post-merge recipe (the
-  `build:server && build:web` requirement is not obvious from `test:package`'s own script and
-  tripped this step up once) that produces the authoritative number.
-- **AC3** ("headless `cez run` never exits 0 while its run record is still 'running'") — reads as
-  satisfied by the already-shipped P1 (ref'd timer, `brokered-session.ts:106-110`) + P2 (`giveUp`,
-  `:208-215`/`:233-239`) mechanism against this step's indicative test run; pending the same
-  authoritative re-run as AC2. As literally written, AC3 is in fact fully closed by the ref'd timer
-  alone — a session with nothing ever queued can now only *hang*, not exit 0 — which is why the
-  Risks section's `reattachSession`/unseeded-session gap is correctly left out of scope rather than
-  treated as a live AC3 gap.
+**Measured 2026-08-24 (this step). These are the authoritative numbers.** Every measurement below
+was taken in a dedicated worktree with its own `npm ci` (exit 0) and a full `npm run build`
+(exit 0) — never resolving upward into a parent checkout's `node_modules` — under a predicate that
+scrubs `GIT_*` and `CEZ_*` and *asserts the scrub held* (`GIT_*=0 CEZ_*=0`, printed at the head of
+every probe log). The `GIT_*` scrub is not decoration: `git bisect run` exports Git context, the
+e2e `git init`s a fixture repo and commits inside it, and on 2026-08-24T17:56 that inheritance
+rewrote the bisect checkout's own `HEAD` to `test fixture` and left `README.md` dirty, invalidating
+an entire earlier bisect attempt.
+
+- **AC1 — SATISFIED.** `git bisect` names **`954c6a55`** ("feat: a run now outlives the cockpit
+  that started it") as the first bad commit. Range `bad=387ba439 good=3f4e9c33`, 29 commits, 5
+  automated probes plus both endpoints measured by hand first (`git bisect` never tests its own
+  endpoints, so an unmeasured endpoint silently poisons the whole walk). Full transcript and the
+  per-probe verdict table are in Verification below. This **confirms** the direct-diff answer this
+  spec already argued, and **refutes** the handoff's `097d1b15` hypothesis by measurement rather
+  than by reading.
+- **AC2 — NOT SATISFIED on current `origin/main` (`c328ec06`), and not because of this task's
+  defect.** Authoritative run: `npm ci` exit 0, `npm run build` exit 0, `npm run test:package`
+  **17 pass / 1 fail, exit 1**. Two things the acceptance criterion's own wording did not
+  anticipate: the suite is **18 tests now, not 15** (so "15/15" is stale as a target), and the one
+  red case is still "the release tarball installs and runs the dry-run CLI workflow" but **fails
+  for a different reason than the bug this task was filed for**. Under `CEZ_DRY_RUN=1` steps 1-2
+  run on the mock (`anthropic/sonnet`, `anthropic/opus`) and step 3, "Review the spec", is routed
+  by the codex model router to `openai/gpt-5.6-sol` — which the dry-run mock does **not** cover, so
+  the packaged release e2e shells out to a **real codex account** and dies on that account's live
+  usage limit. The repo already records the gap in prose without connecting it to this consequence:
+  `task-classifier.ts:36` — "the `CEZ_DRY_RUN` mock only exists for claude and pi". Disabling codex
+  does not rescue it either: the run then refuses to start at all ("Codex is disabled. Enable it in
+  Settings → Agents → Providers.", exit 1, **no run record created**), because the default
+  `spec-to-deploy` workflow now hard-depends on codex. So case 8 is unreachable-green on any
+  machine without a healthy, paid codex quota, and green only at the cost of spending real credits
+  on every release e2e. Closing AC2 therefore requires a **code** change to provider dispatch under
+  dry run, which is a different defect from this task's and is called out as such rather than
+  smuggled into a verification task.
+- **AC3 — SATISFIED, measured on current `origin/main` (`c328ec06`).** A headless dry run now
+  exits **1** and leaves its record at `"status": "failed"` with the failing step named on it
+  (`run failed — step "review-spec" failed: …`). It does **not** exit 0 with the record still at
+  `running`, which is exactly and literally what AC3 forbids. Note the shape of this evidence: the
+  run that proves AC3 is the same run that fails AC2 — the provider blew up mid-workflow, which is
+  precisely the circumstance the original defect turned into a silent exit-0, and the fixed build
+  reports it loudly instead. That makes it a stronger AC3 proof than a clean pass would have been.
+
+**Superseded pre-measurement assessment, kept for the record** (this was the honest reading before
+anything was measured; AC1's and AC3's guesses held, AC2's did not):
+
+> - **AC1** ("git bisect names the commit that turned test:package case 5 red") — not yet satisfied
+>   by anything either task has done; the keepalive spec root-caused by reading, not bisecting.
+>   Answered above by direct commit-diff (a de facto one-step bisect, since the candidate range
+>   collapsed to a single atomic wiring change) and formalized as an actual `git bisect run` in
+>   Phase 1.
+> - **AC2** ("npm run test:package is 15/15 green on main") — reads green on this step's indicative
+>   run, but not yet established as the record: `HEAD`/`main` (`c73c8a2d`) is 14 commits behind
+>   `origin/main`, and the run resolved into the parent checkout's `node_modules` rather than a real
+>   in-worktree install (see TLDR). Phase 2 below gives the scrubbed, in-tree, post-merge recipe (the
+>   `build:server && build:web` requirement is not obvious from `test:package`'s own script and
+>   tripped this step up once) that produces the authoritative number.
+> - **AC3** ("headless `cez run` never exits 0 while its run record is still 'running'") — reads as
+>   satisfied by the already-shipped P1 (ref'd timer, `brokered-session.ts:106-110`) + P2 (`giveUp`,
+>   `:208-215`/`:233-239`) mechanism against this step's indicative test run; pending the same
+>   authoritative re-run as AC2. As literally written, AC3 is in fact fully closed by the ref'd timer
+>   alone — a session with nothing ever queued can now only *hang*, not exit 0 — which is why the
+>   Risks section's `reattachSession`/unseeded-session gap is correctly left out of scope rather than
+>   treated as a live AC3 gap.
 
 ## Solution
 
@@ -374,6 +431,82 @@ since `origin/main` carries harness-affecting commits (`1c225e7e`, `18707bf1`) n
   acceptance criteria describe the seeded-first-send path only, which is fully closed.
 
 ## Verification
+
+### Executed 2026-08-24 — results, not instructions
+
+Everything in this subsection was run. The subsections after it are the original *plan*, kept
+because the recipes are still the right ones.
+
+**AC1 — the bisect transcript.** Predicate: `/tmp/cezar-bisect-predicate.sh` — scrubs `GIT_*` and
+`CEZ_*`, builds (`npm run build:server && npm run build:web`; a server-only build fails case 8 on a
+`web/dist/index.html` assertion that looks nothing like this bug), then runs **only**
+`packages/cezar/test/e2e/package-cli.test.ts`, so an unrelated red in one of the other four e2e
+files can never be recorded as "bad" for the wrong reason. Exit 125 (skip) is reserved for a build
+failure, so an untestable commit is never silently scored. A single `npm ci` is valid across the
+whole range: `package-lock.json` and every `package.json` are **unchanged** across all 29 commits
+(`git log --oneline 3f4e9c33..387ba439 -- package-lock.json` → empty).
+
+```
+git bisect start '387ba439' '3f4e9c33'
+git bisect bad  fde2dae84a592f8464bc011780f4e45dd29b151b
+git bisect bad  ad0b5f175b6a814dbbe89fce28ad34cb72c6e69e
+git bisect good 479f54b5fe0b4f5f0e58d0fa3f84fa27d45a27e0
+git bisect bad  954c6a550971784ce59f323045dba96b3fad3e3b
+git bisect good 04be7d0bde4d543d6d33e7a3e6dd56d8704b8e83
+# first bad commit: [954c6a550971784ce59f323045dba96b3fad3e3b]
+#   feat: a run now outlives the cockpit that started it
+```
+
+Per-probe record (`rc=1` is a failing case 8; the scrub assertion is printed by the predicate
+itself at the head of every probe log, so a leaked variable would be visible in the record rather
+than inferred):
+
+| commit | scrub | rc | subject |
+| --- | --- | --- | --- |
+| `387ba439` | `GIT_*=0 CEZ_*=0` | 1 | fix: only one of the two deploy probes was taught to say why it failed *(bad endpoint, measured)* |
+| `3f4e9c33` | `GIT_*=0 CEZ_*=0` | 0 | feat: the machinery for a deploy that does not kill what it is deploying *(good endpoint, measured)* |
+| `fde2dae8` | `GIT_*=0 CEZ_*=0` | 1 | fix: run isolation fell back to the weaker mode … |
+| `ad0b5f17` | `GIT_*=0 CEZ_*=0` | 1 | fix: the migration refused a healthy install … |
+| `479f54b5` | `GIT_*=0 CEZ_*=0` | 0 | merge: origin/main (c47e1d36) — the approval gate and the safe-deploy machinery |
+| `954c6a55` | `GIT_*=0 CEZ_*=0` | 1 | **feat: a run now outlives the cockpit that started it** ← first bad |
+| `04be7d0b` | `GIT_*=0 CEZ_*=0` | 0 | docs: record the one Settings area … *(= `954c6a55^`)* |
+
+The bad endpoint reproduced the reported symptom exactly, which is what makes the range meaningful
+rather than merely red: the packaged CLI **exited 0** with stdout ending at `── step: Gather the
+record`, so `assert.match(run.stdout, /run (done|review)/)` failed at `package-cli.test.ts:86`.
+
+**AC2 — the authoritative current-main number.** Worktree `/tmp/cezar-main-gate-9bf5030d` detached
+at `origin/main` = `c328ec06`, its own `npm ci` (`NPM_CI_EXIT=0`), full `npm run build`
+(`BUILD_EXIT=0`), then `npm run test:package`: **`# tests 18` / `# pass 17` / `# fail 1`,
+`TEST_PACKAGE_EXIT=1`**. The failing case is `not ok 8 - the release tarball installs and runs the
+dry-run CLI workflow`, and its error is a live provider refusal, not a stall:
+
+```
+✗ You've hit your usage limit. Upgrade to Pro … or try again at Aug 31st, 2026 12:32 PM.
+```
+
+**AC3 — the run record, on current main.** Reproduced by hand against the built CLI from that same
+worktree, with `CEZ_HOME` pinned to a throwaway dir and a throwaway fixture repo, so nothing real
+was touched:
+
+```
+── step: Gather the record      · model: anthropic/sonnet      (mock)
+── step: Write the spec         · model: anthropic/opus        (mock)
+── step: Review the spec        · model: openai/gpt-5.6-sol    ✗ usage limit  ← escapes the mock
+  · run failed — step "review-spec" failed: You've hit your usage limit …
+EXIT_CODE=1        runs.json → "status": "failed"
+```
+
+Exit **1**, record **`failed`** — AC3's forbidden state (exit 0 with the record still `running`) does
+not occur. Control, same build, `disabledProviders: ["codex"]`: `Codex is disabled. Enable it in
+Settings → Agents → Providers.`, exit 1, and **no run record is created at all** — which is how we
+know the workflow hard-depends on codex rather than merely preferring it.
+
+**What this does not establish.** Case 8 was never observed green on current main, so there is no
+positive proof that the *rest* of the workflow (steps 4-9, `commit-push`, the postconditions) still
+completes end to end on `c328ec06`; the provider wall is hit at step 3 and everything past it is
+unmeasured. That is a gap in AC2's coverage, not a suspicion of a second defect.
+
 
 1. **AC1** — `git bisect` transcript (Phase 1) names `954c6a55` as first-bad. Cross-check against
    this spec's direct-diff proof (`git show 954c6a55^:packages/cezar/src/core/claude-cli-runner.ts
