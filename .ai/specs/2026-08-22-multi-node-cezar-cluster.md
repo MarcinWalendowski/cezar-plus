@@ -2608,7 +2608,11 @@ invented; these are the names to use when one lands.
 > > assert the row under `hubHome`, **and** assert `existsSync(remoteRunsPath({CEZ_HOME: spokeHome}))`
 > > is false. The negative half is what makes it a test rather than a coincidence.
 > >
-> > **12. NO TWO-PROCESS E2E HAS EVER RUN ON THIS BRANCH, and the harness to do it does not exist.**
+> > **12. ~~NO TWO-PROCESS E2E HAS EVER RUN ON THIS BRANCH, and the harness to do it does not
+> > exist.~~ SUPERSEDED 2026-08-24 by items 40-41 — the harness now exists
+> > (`.ai/scripts/cluster-two-node-e2e.mjs`) and passes on the box. The survey below of WHAT such a
+> > harness alone can cover is still correct and still worth reading; only its premise that none
+> > existed is dead. Note the estimate was right about size — it was roughly a Milestone-D phase.**
 > > `.ai/scripts/test-env-up.sh` boots exactly one server, one port, with `CEZ_HOME` pinned to a
 > > single `.ai/qa/cez-home`; `packages/cezar/test/e2e/` is packaging/release tests only. **Do not
 > > write "verified by the two-process E2E" into any phase's exit criteria.** Building that harness
@@ -3168,6 +3172,71 @@ invented; these are the names to use when one lands.
 > > structurally incapable of seeing this defect.** That is the whole argument for why a second test was
 > > needed rather than an extension of the first. Full cluster suite after restore: 830/830 across 35
 > > files.
+> >
+> > **39. THE BOX GATE IS GREEN — first authoritative gate on this branch since the merge, and the
+> > standing-red count is back to ONE.** Tree identity proven both directions before and after
+> > (`CANON_BEFORE == CANON_AFTER == 4ed00cbae9898798378b9fb2c1eec64c`), so this is not a moving-tree
+> > number.
+> >
+> > | step | result |
+> > | --- | --- |
+> > | `npm run typecheck` | **0 errors** |
+> > | `npm run build` | **0 errors** |
+> > | `npm test` | **606 files passed, 2 skipped, 1 failed (609)** |
+> >
+> > The one failure is `catalog.test.ts` **C18** — *"index build cost stays within budget, expressed as
+> > a ratio"*, `expected 67.07 to be less than 40` at `:324`. That is the documented standing red, and
+> > **no member of the rotating flake pool fired at all this run**. So: typecheck, build and the whole
+> > suite are clean apart from one pre-existing perf-budget assertion, and nothing on this branch
+> > moved it.
+> >
+> > **A correction to my own gate script, caught live.** Its "FAILING TESTS" section printed EMPTY
+> > while `TEST_EXIT=1`. The log carries ANSI colour codes, so `grep -E "^ *×"` cannot match — the
+> > escape sequence sits between the leading spaces and the `×`. **A gate that reports its own failures
+> > by grepping coloured output will report zero failures forever.** `TEST_EXIT` is what caught it, which
+> > is the whole argument for judging a gate by its exit code and treating the grep as a convenience.
+> > Every extraction here now pipes through `sed -e "s/\x1b\[[0-9;]*m//g"` first.
+> >
+> > **40. A TWO-PROCESS E2E NOW EXISTS AND PASSES — item 12 is closed.** Item 12 said no two-process
+> > E2E had ever run on this branch and the harness to do it did not exist. Both halves are now false:
+> > `.ai/scripts/cluster-two-node-e2e.mjs` boots a real hub server and a real spoke server as separate
+> > OS processes, with separate `CEZ_HOME` dirs and separate ports, links them over a real WebSocket,
+> > and drives the **production** enrollment path (`cez cluster init` → `cez cluster enroll --json` →
+> > `cez cluster join <code> --json`) rather than the in-process `persistNodeCredential` +
+> > `lookupSecret` shortcut. `CEZ_DRY_RUN=1` keeps it off the network and needs no `claude` login.
+> >
+> > Four assertions, each chosen because a single-process test cannot make it: the hub stamps presence
+> > into the HUB's home; it does NOT stamp into the SPOKE's home; the spoke's own home holds its
+> > credential; and **a separate CLI process reads what the SERVER process wrote** (`cez cluster active`
+> > returning a real `asOf`). All four pass.
+> >
+> > **It is proven non-vacuous by observation, not by a synthetic mutation.** The first run failed
+> > assertions 1 and 4 for a real reason and the fix turned them green — see item 41.
+> >
+> > **41. THE E2E'S FIRST RUN FOUND A REAL BEHAVIOURAL FACT NO IN-PROCESS TEST CAN SEE: an ABSENT
+> > `CEZ_CLUSTER_HUB` is a positive claim, not "unspecified".** I had deliberately omitted it from the
+> > spoke, reasoning that `join` persists `hubUrl` into the spoke's own `cluster/node.json` so the
+> > stored credential should suffice. The spoke refused to arm and said exactly why:
+> >
+> > > *"this node was enrolled as a spoke of "http://127.0.0.1:39839", but the environment says this
+> > > node is the hub — refusing to guess which is right; arming nothing until they agree."*
+> >
+> > So absence is read as **"this node is the hub"**, and against a credential saying otherwise the
+> > runtime fails closed and explains itself rather than picking a side. That is good defensive
+> > behaviour and worth keeping. **The point is that it is structurally invisible in-process:** hub and
+> > spoke there share ONE mutable `process.env`, so the environment's claim and the credential's claim
+> > can never disagree. This is the first concrete answer to "what does two processes buy that one
+> > cannot" that came from running it rather than from arguing about it.
+> >
+> > **And the harness's own negative control was passing for the wrong reason.** On that first run,
+> > *"the hub did NOT stamp into the SPOKE's home"* PASSED — because nothing was stamped anywhere. That
+> > is "not arrived yet" wearing the clothes of "not there". It now reports **INCONCLUSIVE and counts as
+> > a failure** unless the positive assertion established that a beat was stamped at all.
+> >
+> > **What the E2E still does NOT cover**, stated in the script itself so a pass is never read as more
+> > than it is: real link loss as opposed to a clean shutdown, event volume against the frame budget,
+> > and the WebSocket upgrade through Cloudflare Access (a 302 on an upgrade is a failure mode no
+> > localhost test produces).
 > >
 > > **Standing constraints, unchanged:** push to `origin` only, never `upstream`, never a bare
 > > `git push`. Do NOT merge PR #9 (it auto-deploys to `prod-host`, where the owner's agents
