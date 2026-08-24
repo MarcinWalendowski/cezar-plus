@@ -11,12 +11,17 @@ import {
   XIcon,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useParams, useSearchParams, Link as WorkspaceLink } from 'react-router'
+import {
+  useNavigate as useRouterNavigate,
+  useParams,
+  useSearchParams,
+  Link as WorkspaceLink,
+} from 'react-router'
 
 import { isAgentPoolId } from '@loki-labs/better-cezar-api-client'
 import { Link, scopeTo, useNavigate } from '@/lib/project-router'
 
-import { createRun, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
+import { createRun, createTodo, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
 import { useProjectScope } from '@/api/project-scope-context'
 import {
   queryKeys,
@@ -131,6 +136,7 @@ import { PlanReview } from './plan-review'
 export function NewTaskRoute() {
   const [search] = useSearchParams()
   const navigate = useNavigate()
+  const routerNavigate = useRouterNavigate()
   const queryClient = useQueryClient()
 
   // The composer's project (multi-project spec, step 3.4). TWO ids, deliberately:
@@ -349,7 +355,9 @@ export function NewTaskRoute() {
   const runMode = resolveComposerRunMode({
     hasGit,
     variants,
-    planFirst: draft.planFirst,
+    // ComposerRunModeInput still models the autonomous constraint as a boolean; the draft's
+    // similarly named runMode is the three-way submit choice.
+    planFirst: draft.runMode === 'plan',
     explicitAutonomous: draft.autonomous,
     explicitWorktree: draft.worktree,
     interactive: selectedSkill?.interactive,
@@ -524,6 +532,16 @@ export function NewTaskRoute() {
       navigate(scopeTo(started.project, `/tasks/${started.run.id}`))
       return
     }
+    if (draft.runMode === 'backlog') {
+      // One submit files exactly one task in the current project. Do not fan this out across the
+      // workspace: that product shape was explicitly rejected in 2026-08-15's composer work.
+      const { todo } = await createTodo({ summary: text, origin: 'composer' })
+      clearDraftText(draftProjectId)
+      void queryClient.invalidateQueries({ predicate: (query) => query.queryKey[1] === 'todos' })
+      toast(`Filed "${todo.summary}" to the backlog.`)
+      routerNavigate('/tasks')
+      return
+    }
     if (!providersReady || runner === null) {
       throw new Error(
         providers.isPending
@@ -537,7 +555,7 @@ export function NewTaskRoute() {
       // Rejection restores the draft — nothing typed is lost to a race with the pickers.
       throw new Error('Still loading workflows and skills — try again in a second.')
     }
-    if (draft.planFirst) {
+    if (draft.runMode === 'plan') {
       // Plan mode: submit means PLAN. A rejection propagates — the composer toasts and
       // restores the draft; a success restores the text ourselves (the composer already
       // cleared optimistically) so Discard hands back exactly what was typed. The review
@@ -692,14 +710,24 @@ export function NewTaskRoute() {
           autoFocus
           placeholder="Describe a task for the agent — / for skills…"
           ariaLabel="Describe a task for the agent"
-          sendAriaLabel={draft.planFirst && !workspaceActive ? 'Plan task' : 'Start task'}
-          // One gate for both paths now. The fan-out this replaces was deliberately EXEMPT from
-          // the provider check because it started nothing — a workspace run spawns an agent like
-          // any other run, so exempting it would only move the failure to a spawn that cannot
-          // happen. `workspaceRun.isPending` closes the double-submit the old path left open.
-          disabled={!providersReady || starting || workspaceRun.isPending}
+          sendAriaLabel={
+            draft.runMode === 'plan' && !workspaceActive
+              ? 'Plan task'
+              : draft.runMode === 'backlog' && !workspaceActive
+                ? 'File task'
+                : 'Start task'
+          }
+          // Filing starts no agent, so provider readiness gates only the effective run paths.
+          // `workspaceRun.isPending` still closes the workspace double-submit path.
+          disabled={
+            starting ||
+            workspaceRun.isPending ||
+            ((draft.runMode !== 'backlog' || workspaceActive) && !providersReady)
+          }
           disabledReason={
-            providers.isPending
+            draft.runMode === 'backlog' && !workspaceActive
+              ? undefined
+              : providers.isPending
               ? 'Checking agent providers…'
               : providers.isError
                 ? 'Provider authentication could not be verified.'
@@ -818,7 +846,7 @@ export function NewTaskRoute() {
               ) : null}
               <AutonomousToggle
                 on={autonomousOn}
-                disabled={draft.planFirst}
+                disabled={draft.runMode === 'plan'}
                 onChange={(on) => update({ autonomous: on })}
               />
               {selectedSkill?.interactive && (draft.autonomous === null || draft.worktree === null) ? (
@@ -846,9 +874,10 @@ export function NewTaskRoute() {
                 </WorkspaceLink>
               ) : null}
               <ModeSegment
-                planFirst={draft.planFirst}
+                mode={workspaceActive && draft.runMode === 'backlog' ? 'start' : draft.runMode}
                 planning={planning}
-                onModeChange={(planFirst) => update({ planFirst })}
+                showBacklog={!workspaceActive}
+                onModeChange={(runMode) => update({ runMode })}
               />
               <kbd
                 aria-hidden="true"
@@ -1433,13 +1462,15 @@ function BaseBranchPill({ repo }: { repo: RepoResponse }) {
  *  contrast fill + focus ring (`.seg .plan-active`) — plan mode must never be ambient. The
  *  active plan segment doubles as the busy indicator while `POST /api/plan` is in flight. */
 function ModeSegment({
-  planFirst,
+  mode,
   planning,
+  showBacklog,
   onModeChange,
 }: {
-  planFirst: boolean
+  mode: NewTaskDraft['runMode']
   planning: boolean
-  onModeChange: (planFirst: boolean) => void
+  showBacklog: boolean
+  onModeChange: (mode: NewTaskDraft['runMode']) => void
 }) {
   return (
     <div
@@ -1451,11 +1482,11 @@ function ModeSegment({
       <button
         type="button"
         role="radio"
-        aria-checked={!planFirst}
-        onClick={() => onModeChange(false)}
+        aria-checked={mode === 'start'}
+        onClick={() => onModeChange('start')}
         className={cn(
           'h-6 rounded-md px-2 text-xs transition-colors',
-          !planFirst
+          mode === 'start'
             ? 'bg-card font-semibold text-foreground shadow-xs'
             : 'font-medium text-muted-foreground hover:text-foreground',
         )}
@@ -1465,13 +1496,13 @@ function ModeSegment({
       <button
         type="button"
         role="radio"
-        aria-checked={planFirst}
+        aria-checked={mode === 'plan'}
         aria-busy={planning || undefined}
         data-slot="mode-plan"
-        onClick={() => onModeChange(true)}
+        onClick={() => onModeChange('plan')}
         className={cn(
           'h-6 rounded-md px-2 text-xs transition-colors',
-          planFirst
+          mode === 'plan'
             ? 'bg-contrast font-semibold text-contrast-foreground ring-2 ring-ring/55'
             : 'font-medium text-muted-foreground hover:text-foreground',
           planning && 'animate-pulse',
@@ -1479,6 +1510,22 @@ function ModeSegment({
       >
         {planning ? 'Planning…' : 'Plan first'}
       </button>
+      {showBacklog ? (
+        <button
+          type="button"
+          role="radio"
+          aria-checked={mode === 'backlog'}
+          onClick={() => onModeChange('backlog')}
+          className={cn(
+            'h-6 rounded-md px-2 text-xs transition-colors',
+            mode === 'backlog'
+              ? 'bg-card font-semibold text-foreground shadow-xs'
+              : 'font-medium text-muted-foreground hover:text-foreground',
+          )}
+        >
+          Backlog
+        </button>
+      ) : null}
     </div>
   )
 }

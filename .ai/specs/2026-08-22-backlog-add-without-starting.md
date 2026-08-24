@@ -1,9 +1,8 @@
-# A "Backlog" mode: file a task without starting it, from the composer a human already uses
+# Backlog Task Composer
 
-**Status:** proposed — not yet implemented.
+**Status:** partial. Implementation and focused tests are complete in the task worktree, but the feature is unshipped and QA Needed. The root gate remains red on catalog C18, and browser runtime E2E was skipped.
 **Date:** 2026-08-22
 **Owner ask:** "allow to add new tasks to backlog without starting it"
-**Brief:** `.ai/specs/briefs/2026-08-22-backlog-add-without-starting.md`
 
 ## TLDR
 
@@ -19,7 +18,7 @@ One composer, one submit, one todo — no second page, no per-project fan-out.
 
 ## Problem
 
-Confirmed by direct reading, not just the brief's grep:
+Confirmed by direct reading:
 
 - **`/new`** (`packages/web/src/routes/new-task.tsx`) has exactly one mode control, the `Start |
   Plan first` `ModeSegment` (`new-task.tsx:1435-1481`, rendered at `:848-852`, wired to
@@ -116,7 +115,7 @@ neither, and running ahead of the `if (draft.planFirst)` check (which becomes
 
 ```ts
 if (draft.runMode === 'backlog') {
-  const { todo } = await createTodo({ summary: text })
+  const { todo } = await createTodo({ summary: text, origin: 'composer' })
   clearDraftText(draftProjectId)
   // A predicate, not a key: `queryKeys.todos` is `[queryScope(), 'todos']`, so it cannot also
   // name the Filed board's `['workspace','todos']` aggregate — and that board carries the global
@@ -125,15 +124,18 @@ if (draft.runMode === 'backlog') {
   // CORRECTED 2026-08-19; this reuses that fix rather than reintroducing it.
   void queryClient.invalidateQueries({ predicate: (q) => q.queryKey[1] === 'todos' })
   toast(`Filed "${todo.summary}" to the backlog.`)
-  navigate('/tasks')
+  routerNavigate('/tasks')
   return
 }
 ```
 
-- **`navigate('/tasks')`** — `/tasks` (`routes.tsx:454`) takes no `tab` search param; its URL
+- **`routerNavigate('/tasks')`** — this must use React Router's global navigator (imported under
+  an explicit alias), not `@/lib/project-router`'s scoped `navigate`: the latter prefixes an
+  active scope and would produce the nonexistent `/p/:projectId/tasks` route. `/tasks`
+  (`packages/web/src/routes.tsx:454`) takes no `tab` search param; its URL
   state is `GlobalTasksUrlState` (`lib/global-tasks.ts:449-460`: `filters`, `groupBy`, `view`
   Active/Archived, `filedFilters`, `filedSort`). The Filed section renders on **both** views
-  (`global-tasks.tsx:528-531, 696-698`), so a bare `navigate('/tasks')` already lands the user on
+  (`global-tasks.tsx:528-531, 696-698`), so a bare `routerNavigate('/tasks')` already lands the user on
   a page showing it — no param needed.
 - **Workspace-run guard reused, not duplicated.** The existing `workspaceActive` branch
   (`:495-527`) already special-cases the workspace-wide composer before any run-mode check runs.
@@ -160,9 +162,19 @@ if (draft.runMode === 'backlog') {
   resolved: no extra fields at creation, `context`/`acceptanceCriteria`/etc. stay agent-only until
   a future request asks for them). This mirrors how Plan-first already ignores irrelevant picker
   state.
+- **The composer remains editable without a provider in Backlog mode.** `Composer.disabled`
+  disables the textarea as well as submit, so the current unconditional `!providersReady` term
+  cannot remain. Define the effective backlog path as
+  `draft.runMode === 'backlog' && !workspaceActive`; disable for provider readiness only when that
+  expression is false, while `starting` and `workspaceRun.isPending` continue to disable every
+  path. Apply the same condition to `disabledReason`. This keeps a sticky Backlog selection under
+  `workspaceActive` on the existing Start semantics, including its provider gate.
 - **`origin: 'composer'`** is sent explicitly in the `createTodo` call body (the schema's
-  already-reserved value, `packages/contract/src/skills.ts:106`) — the only field this spec adds
-  meaning to that the server didn't already define.
+  already-reserved value, `packages/contract/src/skills.ts:106`). It is storage provenance, not a
+  unique analytics discriminator: `workspace-reports-routes.ts:322-324` already writes the same
+  origin. For later analytics, this UI path is identified by the route-authored
+  `todo.author.via === 'todo-create-route'`; the CLI remains `cli-todo-add`, and server-side report
+  ingestion has its own author path.
 
 ### The API client function (the actual missing piece)
 
@@ -228,7 +240,9 @@ already exercised by `cezar todo add`.
   { todo: TodoItem }
   ```
 - **No schema change.** `origin: 'composer'` already exists in `todoItemSchema`
-  (`packages/contract/src/skills.ts:106`); this spec is the first caller to use it.
+  (`packages/contract/src/skills.ts:106`) and is already sent by
+  `packages/cezar/src/server/workspace-reports-routes.ts:322-324`. This feature reuses that value;
+  `todo.author.via === 'todo-create-route'` identifies todos created through the HTTP route.
 
 ## Phases (independently shippable)
 
@@ -240,7 +254,8 @@ already exercised by `cezar todo add`.
    `runMode === 'plan'`), **no new UI yet** — `ModeSegment` still renders two options, mapped onto
    the new field. Shippable alone: behavior is byte-identical to today. **Not** verified by the
    existing suite passing unmodified — it does not, as written: `new-task-draft.test.ts:224-229`,
-   `:250-261`, and `:265-277` construct full `NewTaskDraft` literals containing `planFirst: false`,
+   `:250-261`, and `:265-277` construct full `NewTaskDraft` literals containing `planFirst: false`;
+   the existing `toMatchObject` at `:207-217` also asserts `planFirst: true`,
    and `new-task.test.tsx:37-40`, `:483`, `:848` do the same, so dropping the field breaks both
    typecheck and the exhaustive `toEqual`s. Verification is instead: those six literals are
    updated mechanically to `runMode: 'start'`, the suite is green after that mechanical change,
@@ -257,7 +272,7 @@ already exercised by `cezar todo add`.
    2026-08-19 spec was deferred: ship the core mechanism first, add a second entry point only if
    asked for.
 
-## Open questions this spec settles (from the brief)
+## Open questions this spec settles
 
 1. **Where does the control live?** The `/new` composer's `ModeSegment`, third option. Resolved
    above — no second page, no Filed-board control in the initial ship (Phase 4 defers that).
@@ -266,11 +281,11 @@ already exercised by `cezar todo add`.
 3. **Per-project only, or also workspace-level?** Per-project only. `POST /todos` is
    project-scoped; the Backlog segment is disabled/hidden while `workspaceActive`. `/workspace/new`
    is explicitly out of scope (its note→triage pipeline has no "file only" state to hook).
-4. **Naming/analytics.** Reuse `todo.filed` (`origin`, `project`, `hasSpec`) from the 2026-08-19
-   spec, with `origin: 'composer'` for this path (the value the schema already reserved) vs.
-   `'agent'` for the CLI. Same `TODO(analytics)` status as that spec — no telemetry sink exists in
-   the codebase yet, confirmed by reading `handoff.ts`'s existing markers; this spec does not add
-   one.
+4. **Naming/analytics.** Reuse `todo.filed` (`origin`, `project`, `hasSpec`, `author.via`) from the
+   2026-08-19 spec. `origin: 'composer'` is not unique to this path — workspace report ingestion
+   already uses it — so `author.via: 'todo-create-route'` distinguishes a todo filed through the
+   HTTP creation route from `cli-todo-add` and other server-side writers. Same `TODO(analytics)`
+   status as that spec — no telemetry sink exists in the codebase yet; this spec does not add one.
 
 ## Risks
 
@@ -303,19 +318,28 @@ already exercised by `cezar todo add`.
     `postPlan`; asserted the way the file's existing mutation-table tests already assert which
     calls did/did not fire for Start vs. Plan-first.
   - After a successful Backlog submit: the draft text clears (`clearDraftText`), the `todos` query
-    key is invalidated, and navigation lands on the Filed view.
+    predicate is invalidated, and global navigation lands on the Filed view without a project
+    prefix.
+  - With no provider connected, the Backlog option and textarea remain usable while Start and
+    Plan-first remain gated; a sticky Backlog choice under `workspaceActive` remains provider-gated.
   - While `workspaceActive`, the `Backlog` option does not render (or renders disabled) — the
     per-project-only constraint holds at the UI layer, not just the server's.
 - **Integration (existing pattern, `todos` route tests):** confirm `POST /todos` with
   `origin: 'composer'` behaves identically to `origin: 'agent'` today (it already does — this is a
   regression check, not new server behavior) and the resulting entry appears in `GET
   /workspace/todos` and the Filed board with `status: 'todo'`, no `startedTaskId`.
-- **E2E (the acceptance test):** in the real cockpit, open `/new` for a project, type a task
-  summary, select **Backlog**, submit. Assert: no run starts (no new row under Runs), a new row
-  appears on the Filed board with the typed summary and `status: todo`, and clicking **Start** on
-  that row later starts it exactly as an already-filed CLI todo would.
-- Gates: typecheck / lint / test green, per this repo's standing rule (no exception requested or
-  needed here — this is a small, additive UI change).
+- **Focused Vitest:** run the repository's pinned test command:
+  `npm test -- packages/web/src/api/client.test.ts packages/web/src/routes/new-task-draft.test.ts packages/web/src/routes/new-task.test.tsx`
+  before the full gates.
+- **E2E (the acceptance test):** run `npm run test:e2e`, then use the real cockpit to open `/new`
+  for a project, type a task summary, select **Backlog**, and submit. Assert: no run starts (no new
+  row under Runs), a new row appears on the Filed board with the typed summary and `status: todo`,
+  and clicking **Start** on that row later starts it exactly as an already-filed CLI todo would.
+  Record the cockpit walkthrough and retain both a screenshot of the Filed row and the full video
+  under the run's `.ai/qa/artifacts/` directory. A skipped browser run or missing screenshot/video
+  leaves the feature at **QA Needed**.
+- **Full repository gates, in order:** `npm run typecheck`, `npm test`, `npm run test:unit`,
+  `npm run build`, and `npm run test:package`.
 
 ## Out of scope
 

@@ -36,7 +36,7 @@ import { NewTaskRoute } from './new-task'
 function pickSource(source: { source: 'skill' | 'workflow'; ref: string } | null): void {
   writeDraft({
     text: '', source, runner: null, agentProfile: null, model: null, variants: 1,
-    planFirst: false, worktree: null, autonomous: null, generateFollowups: null,
+    runMode: 'start', worktree: null, autonomous: null, generateFollowups: null,
   })
 }
 
@@ -240,12 +240,14 @@ function serve(overrides: {
   skills?: Skill[]
   workflows?: WorkflowsResponse
   repo?: RepoResponse
+  projects?: unknown
   uiState?: Record<string, unknown>
   /** Non-2xx `GET /api/v1/ui-state` answers (the query-errored path: `data` stays undefined). */
   uiStateStatus?: number
   createRun?: unknown
   /** Non-2xx `POST /api/v1/runs` answers (the auto-start failure path). */
   createRunStatus?: number
+  createTodo?: unknown
   /** What `GET /api/v1/launch-key` answers — the bookmarklet auto-start secret. */
   launchKey?: string
   /** `POST /api/v1/plan` — a payload, or a handler for delayed/failing answers. */
@@ -265,10 +267,14 @@ function serve(overrides: {
     skills: SKILLS,
     workflows: WORKFLOWS,
     repo: REPO,
+    projects: { projects: [], bootProject: 'default', projectsDir: '/repos' },
     uiState: {},
     uiStateStatus: 200,
     createRun: { id: 'r1' },
     createRunStatus: 201,
+    createTodo: {
+      todo: { id: 'todo-1', ts: new Date(0).toISOString(), summary: 'Filed task', origin: 'composer', status: 'todo' },
+    },
     launchKey: 'k-real',
     plan: PLAN,
     saveWorkflow: [{ status: 201, body: { path: '.ai/cezar/workflows/my-chain.yaml', name: 'my chain' } }],
@@ -305,10 +311,12 @@ function serve(overrides: {
         return typeof data.plan === 'function' ? (data.plan as () => Promise<Response>)() : json(data.plan)
       }
       if (url === '/api/v1/repo') return json(data.repo)
+      if (url === '/api/v1/projects') return json(data.projects)
       if (url === '/api/v1/launch-key') return json({ key: data.launchKey })
       if (url === '/api/v1/ui-state' && method === 'GET') return json(data.uiState, data.uiStateStatus)
       if (url === '/api/v1/ui-state' && method === 'PUT') return json(body ?? {})
       if (url === '/api/v1/runs' && method === 'POST') return json(data.createRun, data.createRunStatus)
+      if (url.endsWith('/todos') && method === 'POST') return json(data.createTodo, 201)
       if (url === '/api/v1/config' && method === 'GET')
         return typeof data.config === 'function'
           ? data.config()
@@ -480,7 +488,7 @@ describe('picker data flows', () => {
   it('drops a persisted model preset that belongs to another runner', async () => {
     writeDraft({
       text: '', source: null, runner: 'codex', agentProfile: null, model: 'claude-opus-4-8', variants: 1,
-      planFirst: false, worktree: null, autonomous: null, generateFollowups: null,
+      runMode: 'start', worktree: null, autonomous: null, generateFollowups: null,
     })
     serve({ health: HEALTH_MULTI, providerStatus: PROVIDERS_MULTI })
     renderNewTask()
@@ -700,6 +708,11 @@ describe('provider authentication gate', () => {
     expect(screen.getByRole('link', { name: 'Configure providers' }).getAttribute('href')).toBe(
       '/settings/providers',
     )
+
+    fireEvent.click(backlogToggle())
+    expect(textarea().disabled).toBe(false)
+    fireEvent.change(textarea(), { target: { value: 'File without a provider' } })
+    expect((screen.getByRole('button', { name: 'File task' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('disables submission with verification-failed copy and setup guidance on a status error', async () => {
@@ -845,7 +858,7 @@ describe('submit', () => {
     // lands in its errored state immediately and the test stays deterministic.
     writeDraft({
       text: '', source: { source: 'skill', ref: 'om-fix' }, runner: null, agentProfile: null, model: null,
-      variants: 1, planFirst: false, worktree: null, autonomous: null, generateFollowups: null,
+      variants: 1, runMode: 'start', worktree: null, autonomous: null, generateFollowups: null,
     })
     serve({ createRun: { id: 'run-9' }, uiStateStatus: 404 })
     renderNewTask()
@@ -1557,6 +1570,7 @@ describe('bookmarklet auto-start', () => {
 
 const planToggle = () => screen.getByRole('radio', { name: /Plan first|Planning…/ })
 const startToggle = () => screen.getByRole('radio', { name: 'Start' })
+const backlogToggle = () => screen.getByRole('radio', { name: 'Backlog' })
 const stepIds = () =>
   [...document.querySelectorAll('[data-slot="plan-step"]')].map((el) =>
     el.getAttribute('data-step-id'),
@@ -1571,7 +1585,7 @@ async function planTask(text = 'Tighten the flaky suite') {
   await screen.findByText('Proposed chain')
 }
 
-describe('the Start | Plan first toggle', () => {
+describe('the Start | Plan first | Backlog control', () => {
   it('flips the selected state (#383): aria-checked moves, the submit becomes "Plan task"', async () => {
     serve()
     renderNewTask()
@@ -1617,6 +1631,50 @@ describe('the Start | Plan first toggle', () => {
     renderNewTask()
     await pillReady()
     expect(planToggle().getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('hides Backlog for a workspace run so a sticky project choice cannot silently change semantics', async () => {
+    writeDraft({
+      text: '', source: null, runner: null, agentProfile: null, model: null, variants: 1,
+      runMode: 'backlog', worktree: null, autonomous: null, generateFollowups: null,
+    })
+    serve({
+      providerStatus: PROVIDERS_NONE,
+      projects: {
+        projects: [{ id: 'default', name: 'Cezar' }, { id: 'chat', name: 'Chat' }],
+        bootProject: 'default',
+        projectsDir: '/repos',
+      },
+    })
+    renderNewTask('/p/default/new?scope=auto')
+    await waitFor(() => expect(screen.queryByRole('radio', { name: 'Backlog' })).toBeNull())
+    expect(screen.getByRole('radio', { name: 'Start' }).getAttribute('aria-checked')).toBe('true')
+    expect(textarea().disabled).toBe(true)
+  })
+
+  it('files one task without starting or planning, invalidates every todo board, and navigates globally', async () => {
+    serve({
+      createTodo: {
+        todo: { id: 'todo-1', ts: new Date(0).toISOString(), summary: 'Save this for later', origin: 'composer', status: 'todo' },
+      },
+    })
+    const { client } = renderNewTask('/p/acme/new')
+    client.setQueryData(workspaceQueryKeys.workspaceTodos, [])
+    await pillReady()
+
+    fireEvent.click(backlogToggle())
+    fireEvent.change(textarea(), { target: { value: 'Save this for later' } })
+    fireEvent.click(screen.getByRole('button', { name: 'File task' }))
+
+    await waitFor(() => expect(location()).toBe('/tasks'))
+    expect(requests.find((request) => request.method === 'POST' && request.url.endsWith('/todos'))?.body).toEqual({
+      summary: 'Save this for later',
+      origin: 'composer',
+    })
+    expect(requests.some((request) => request.url === '/api/v1/runs')).toBe(false)
+    expect(requests.some((request) => request.url === '/api/v1/plan')).toBe(false)
+    expect(client.getQueryState(workspaceQueryKeys.workspaceTodos)?.isInvalidated).toBe(true)
+    expect(readDraft().text).toBe('')
   })
 })
 

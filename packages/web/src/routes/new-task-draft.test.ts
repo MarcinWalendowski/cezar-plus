@@ -70,7 +70,7 @@ describe('the new-task draft store', () => {
       agentProfile: null,
       model: null,
       variants: 1,
-      planFirst: false,
+      runMode: 'start',
       worktree: null,
       autonomous: null,
       generateFollowups: null,
@@ -85,7 +85,7 @@ describe('the new-task draft store', () => {
       agentProfile: null,
       model: 'gpt-5-codex',
       variants: 2,
-      planFirst: false,
+      runMode: 'start',
       worktree: false,
       autonomous: null,
       generateFollowups: false,
@@ -106,7 +106,7 @@ describe('the new-task draft store', () => {
       agentProfile: null,
       model: 'opus',
       variants: 3,
-      planFirst: true,
+      runMode: 'plan',
       worktree: null,
       autonomous: null,
       generateFollowups: true,
@@ -119,7 +119,7 @@ describe('the new-task draft store', () => {
       agentProfile: null,
       model: 'opus',
       variants: 3,
-      planFirst: true,
+      runMode: 'plan',
       worktree: null,
       autonomous: null,
       generateFollowups: true,
@@ -134,7 +134,7 @@ describe('the new-task draft store', () => {
       agentProfile: null,
       model: 'sonnet',
       variants: 2,
-      planFirst: true,
+      runMode: 'plan',
       worktree: false,
       autonomous: null,
       generateFollowups: false,
@@ -148,7 +148,7 @@ describe('the new-task draft store', () => {
       worktree: false,
       autonomous: null,
       generateFollowups: false,
-      planFirst: true,
+      runMode: 'plan',
     })
   })
 
@@ -160,7 +160,7 @@ describe('the new-task draft store', () => {
       agentProfile: null,
       model: null,
       variants: 1,
-      planFirst: false,
+      runMode: 'start',
       worktree: null,
       autonomous: null,
       generateFollowups: null,
@@ -174,6 +174,24 @@ describe('the new-task draft store', () => {
     resetDraft()
     localStorage.setItem('cez-new-task-draft', raw)
     expect(readDraft().source).toBeNull()
+  })
+
+  it('migrates legacy planFirst drafts and preserves a fresh backlog choice', () => {
+    resetDraft()
+    localStorage.setItem('cez-new-task-draft', JSON.stringify({ text: 'legacy', planFirst: true, v: 2 }))
+    expect(readDraft().runMode).toBe('plan')
+
+    resetDraft()
+    localStorage.setItem('cez-new-task-draft', JSON.stringify({ text: 'legacy', planFirst: false, v: 2 }))
+    expect(readDraft().runMode).toBe('start')
+
+    resetDraft()
+    localStorage.setItem('cez-new-task-draft', JSON.stringify({ text: 'legacy', v: 2 }))
+    expect(readDraft().runMode).toBe('start')
+
+    resetDraft()
+    localStorage.setItem('cez-new-task-draft', JSON.stringify({ text: 'file me', runMode: 'backlog', v: 2 }))
+    expect(readDraft().runMode).toBe('backlog')
   })
 
   /**
@@ -210,7 +228,7 @@ describe('the new-task draft store', () => {
         agentProfile: 'work',
         model: 'opus',
         variants: 2,
-        planFirst: true,
+        runMode: 'plan',
         worktree: false,
         autonomous: true,
         generateFollowups: false,
@@ -225,7 +243,7 @@ describe('the new-task draft store', () => {
         text: 'half a task',
         source: { source: 'workflow', ref: 'quick-task' },
         runner: null, agentProfile: null, model: null, variants: 1,
-        planFirst: false, worktree: null, autonomous: null, generateFollowups: null,
+        runMode: 'start', worktree: null, autonomous: null, generateFollowups: null,
       })
       const stored = localStorage.getItem('cez-new-task-draft') as string
       resetDraft()
@@ -254,7 +272,7 @@ describe('the new-task draft store', () => {
       agentProfile: null,
       model: null,
       variants: 1,
-      planFirst: false,
+      runMode: 'start',
       worktree: null,
       autonomous: null,
       generateFollowups: null,
@@ -270,7 +288,7 @@ describe('the new-task draft store', () => {
       agentProfile: null,
       model: null,
       variants: 1,
-      planFirst: false,
+      runMode: 'start',
       worktree: null,
       autonomous: null,
       generateFollowups: null,
