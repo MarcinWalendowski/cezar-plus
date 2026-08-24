@@ -326,6 +326,28 @@ instruction rather than silently.
   behavior wholesale, which is what the "keep the old spelling for a minor release" rule exists to
   provide.
 
+## `CEZ_AUTO_ACCOUNTS=1` — cezar registers the logins it finds (2026-08-24)
+
+Spec `.ai/specs/2026-08-24-second-codex-account-balancing.md`, D5. **Additive and inert unless the
+flag is set to exactly `1`.**
+
+- **Additive on health**: `capabilities.autoAccounts` is a new required boolean on the CORS-open
+  `GET /api/v1/health`, on the same terms as `automations` and `cluster` before it. Every
+  pre-existing field stays byte-identical. Unlike `accountUsage` it is **not** withheld in hosted
+  mode: it reports whether the server will WRITE, not who the operator is.
+- **Off (the default, every existing install)**: nothing on disk is read or written that was not
+  read or written before. `GET …/agent-profiles/discovered` keeps proposing without registering,
+  which is the 2026-08-14 behaviour it was designed with.
+- **On**: at boot and every 5 minutes, a config dir under `~/.claude*` / `~/.codex*` that carries
+  its CLI's marker files AND records an account it is signed in as is appended to
+  `~/.cezar/agent-accounts.json`. **Append-only** — no existing row is relabelled, repointed or
+  removed — so the file stays hand-editable, which is the promise this document exists to keep.
+- **The known asymmetry, stated rather than hidden**: the sweep cannot see a deliberate deletion,
+  so an auto-registered account that is removed comes back. Turning the flag off is the way to stop
+  that; the accounts themselves are ordinary rows and survive the flag being turned off.
+- **Non-destructive rollback**: unset the flag and restart. Nothing is migrated or deleted, and the
+  rows already written stay exactly as they are.
+
 ## When in doubt
 
 If a change might break any surface above, say so in the PR description, label the PR `risk-high`, and route it through the review + QA gates in `SDLC.md`. A silent break found in review is a blocker per `CODE_REVIEW.md`.

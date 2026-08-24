@@ -211,7 +211,7 @@ export function parseCodexQuota(raw: unknown, takenAt: Date): AccountQuota | und
   const windows: QuotaWindow[] = [];
   for (const candidate of [snapshot.data.primary, snapshot.data.secondary]) {
     if (windows.length >= MAX_QUOTA_WINDOWS) break;
-    const window = parseWindow(candidate);
+    const window = parseWindow(candidate, takenAt.getTime());
     if (window) windows.push(window);
   }
   if (windows.length === 0) return undefined;
@@ -223,19 +223,80 @@ export function parseCodexQuota(raw: unknown, takenAt: Date): AccountQuota | und
 
 /** One window, or nothing. A missing length or reset time drops it — a window that cannot say when
  *  it refills cannot be rendered honestly, and `freshQuota` has nothing to expire it by. A `null`
- *  `secondary` (a plan with one window) lands here and is dropped, which is the correct reading. */
-function parseWindow(candidate: unknown): QuotaWindow | undefined {
+ *  `secondary` (a plan with one window) lands here and is dropped, which is the correct reading.
+ *
+ *  `takenAtMs` is here only for `looksUnpopulated` below, which needs to know when the answer was
+ *  asked for in order to recognize one that was computed rather than measured. */
+function parseWindow(candidate: unknown, takenAtMs: number): QuotaWindow | undefined {
   const parsed = rawWindowSchema.safeParse(candidate);
   if (!parsed.success) return undefined;
   const { usedPercent, windowDurationMins, resetsAt } = parsed.data;
   if (!Number.isFinite(windowDurationMins) || windowDurationMins <= 0) return undefined;
   if (!Number.isFinite(resetsAt) || resetsAt < 0) return undefined;
   if (!Number.isFinite(usedPercent) || usedPercent < 0) return undefined;
+  if (looksUnpopulated({ usedPercent, windowDurationMins, resetsAt }, takenAtMs)) return undefined;
   return {
     usedPercent,
     windowMinutes: Math.round(windowDurationMins),
     resetsAt: Math.round(resetsAt),
   };
+}
+
+/**
+ * How close `resetsAt` may sit to "a whole window from now" and still be believed. Wide enough to
+ * absorb the app-server's startup and the RPC round trip, far narrower than any real window.
+ */
+const UNPOPULATED_RESET_EPSILON_S = 120;
+
+/**
+ * Is this window the app-server's EMPTY DEFAULT rather than a measurement
+ * (`.ai/specs/2026-08-24-second-codex-account-balancing.md`, D1)?
+ *
+ * ## What was measured
+ *
+ * `account/rateLimits/read` on `prod-host`, twice, 21 s apart on 2026-08-24:
+ *
+ * ```
+ * 11:39:15.981Z  {"usedPercent":0,"windowMinutes":10080,"resetsAt":1788176355}
+ * 11:39:37.257Z  {"usedPercent":0,"windowMinutes":10080,"resetsAt":1788176377}
+ * ```
+ *
+ * `resetsAt` advanced by exactly the gap between the calls: it is `now + windowDurationMins`,
+ * recomputed per call. The account it describes was `limited` at the time, five days into a weekly
+ * refusal. Nothing there is a fact about usage — the app-server had no snapshot and answered with
+ * a fresh, full window. The real snapshot on that plan, captured from a live request in a session
+ * rollout, is `{"limit_id":"premium","primary":null,"secondary":null}`: on ChatGPT Plus the
+ * windows that matter are `null` and the allowance is announced only in the refusal text.
+ *
+ * ## Why this must be dropped rather than stored
+ *
+ * The module's own rule, three doc comments above this one: *"Never invents. A field that is absent
+ * or unparseable drops the window; it never contributes a zero. Zero is a claim ('nothing used'),
+ * and it is the wrong one."* Storing it broke that rule in the most expensive direction —
+ * `usageBand` reads `floor(0/10) = 0`, the BEST band, so a codex account that could not run at all
+ * presented to the pool as the least-used login on the machine.
+ *
+ * ## Why the shape is enough, without a second probe
+ *
+ * A real window is `windowStart + duration`, where `windowStart` is the first request inside it, so
+ * it coincides with `now + duration` only in the instant a window opens — and in that instant
+ * something has just been spent, so `usedPercent` is no longer 0. Both conditions at once are the
+ * unpopulated default. Probing twice and comparing would be the direct test, but it costs a second
+ * CLI child on every refresh round to learn what one response already says.
+ *
+ * ## The cost of being wrong
+ *
+ * A genuinely idle account reads as unmeasured for as long as it stays idle. `selectPoolAccount`
+ * then ranks it on in-flight and dispatch order rather than on its band — one dispatch's worth of
+ * fairness. The opposite error puts every run on a login that is out of quota.
+ */
+function looksUnpopulated(
+  window: { usedPercent: number; windowDurationMins: number; resetsAt: number },
+  takenAtMs: number,
+): boolean {
+  if (window.usedPercent !== 0) return false;
+  const openedNow = takenAtMs / 1000 + window.windowDurationMins * 60;
+  return Math.abs(window.resetsAt - openedNow) <= UNPOPULATED_RESET_EPSILON_S;
 }
 
 /** What `claude auth status --json` is willing to say about one login. No usage — there is none. */

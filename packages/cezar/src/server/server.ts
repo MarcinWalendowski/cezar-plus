@@ -209,7 +209,8 @@ import {
   shouldRegisterProject,
   type ProjectListEntry,
 } from '../workspace/projects.ts';
-import { discoverClaudeAccounts } from '../workspace/agent-account-identity.ts';
+import { discoverAgentAccounts } from '../workspace/agent-account-identity.ts';
+import { autoAccountsEnabled, autoRegisterDiscoveredAccounts } from '../workspace/agent-accounts-auto.ts';
 import { enrichNestedRepos, scanNestedRepos } from '../workspace/nested-repos.ts';
 import { initGitRepo, preflightGitInit } from '../workspace/git-init.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
@@ -643,6 +644,11 @@ const selectAgentProfileSchema = z.object({
   provider: z.enum(PROVIDER_IDS),
   profileId: z.string().max(64).nullable(),
 }).strict();
+
+/** How often the auto-register sweep re-reads the home directory. A `readdir` and a few small JSON
+ *  reads; the fact it watches for (`codex login` in a shell) changes at human pace, so a tighter
+ *  loop would buy nothing and a looser one would leave a new login out of the pool for too long. */
+const AUTO_ACCOUNTS_SWEEP_MS = 5 * 60_000;
 
 /** The hosted-mode refusal, worded like the agent-config one it mirrors. */
 const hostedProfileRefusal = {
@@ -2380,10 +2386,44 @@ export function createApp(deps: ServerDeps) {
         .catch(() => {});
     }
   };
+  /**
+   * Register the logins already on this machine (`CEZ_AUTO_ACCOUNTS=1`, spec
+   * `.ai/specs/2026-08-24-second-codex-account-balancing.md`, D5). Off, this is one `=== '1'` and a
+   * return.
+   *
+   * At boot AND on an interval, because the fact it reacts to is created outside cezar: someone
+   * runs `codex login` in a shell, and nothing tells the server. Boot alone would mean a restart
+   * per account — tolerable on a machine that redeploys hourly, and useless on one that does not.
+   *
+   * **It runs before the warm below**, not after: a newly registered account is exactly the one
+   * whose auth status nothing has ever probed, and warming the store as it was a moment ago would
+   * leave that row cold until the next boot.
+   *
+   * The interval is `unref`'d like the health timer, so it never holds the process open, and the
+   * sweep swallows its own failures — a machine whose home directory is unreadable registers
+   * nothing, which is the same outcome as the flag being off.
+   */
+  const autoAccountsSweep = async (): Promise<void> => {
+    const { added } = await autoRegisterDiscoveredAccounts();
+    for (const account of added) {
+      // Announced, never silent: this is state the operator did not click for, so the one place it
+      // can be accounted for is the server's own log. `console.warn` is what the rest of this file
+      // and the accounts store use — there is no logger threaded into `createApp`.
+      console.warn(
+        `[cezar] registered detected ${account.provider} login "${account.label}" (${account.configDir}) — CEZ_AUTO_ACCOUNTS=1`,
+      );
+    }
+  };
   // Same gate as `refreshHealth`, same reason (startServer injects the hub; a bare app in tests does
   // not, so tests never spawn probes here). Fire-and-forget: a probe that fails leaves that row
   // cold, which is exactly the state every reader already handles.
-  if (deps.socketHub) void warmAgentKnowledge();
+  if (deps.socketHub) {
+    void autoAccountsSweep().finally(() => void warmAgentKnowledge());
+    if (autoAccountsEnabled()) {
+      const timer = setInterval(() => void autoAccountsSweep(), AUTO_ACCOUNTS_SWEEP_MS);
+      timer.unref?.();
+    }
+  }
 
   // ---- chained family: host model catalog (workspace-level) ----
   const modelsRoutes = new Hono<ProjectApiEnv>()
@@ -2811,9 +2851,11 @@ export function createApp(deps: ServerDeps) {
     })
 
     /**
-     * The Claude logins that exist on this machine (spec
-     * `.ai/specs/2026-08-14-claude-subscription-autodetect.md`) — `~/.claude` plus any
-     * `~/.claude*` sibling the CLI actually wrote, each with the account it is signed in as.
+     * The agent logins that exist on this machine (spec
+     * `.ai/specs/2026-08-14-claude-subscription-autodetect.md`, widened to codex by
+     * `.ai/specs/2026-08-24-second-codex-account-balancing.md`) — `~/.claude` and `~/.codex` plus
+     * any `~/.claude*` / `~/.codex*` sibling the CLI actually wrote, each with the account it is
+     * signed in as.
      *
      * A READ, and a proposal: adding one is still `POST …/agent-profiles` with the dir it names,
      * through the same duplicate and path guards a hand-typed dir goes through. Discovery that
@@ -2836,13 +2878,16 @@ export function createApp(deps: ServerDeps) {
         // POST still refuses a duplicate, so the cost is a refused click rather than a second
         // account silently sharing one session store.
       }
-      const discovered = await discoverClaudeAccounts();
+      const discovered = await discoverAgentAccounts();
       const accounts = await Promise.all(
         discovered.map(async (found) => ({
           provider: found.provider,
           configDir: found.path,
           ...(found.identity ? { identity: found.identity } : {}),
-          added: (await conflictingProfile(stored, 'claude', found.path)) !== null,
+          // `found.provider`, never the literal `'claude'` it was before: `conflictingProfile`
+          // compares dirs WITHIN one provider, so asking it about the wrong one would report a
+          // codex home as un-added while a stored row for it already existed.
+          added: (await conflictingProfile(stored, found.provider, found.path)) !== null,
         })),
       );
       return c.json({ accounts } satisfies DiscoveredAgentAccountsResponse);

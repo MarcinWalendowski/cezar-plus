@@ -5,6 +5,46 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- 🔀 **A second Codex account, detected by itself — and a pool that can actually balance one**
+  (spec `.ai/specs/2026-08-24-second-codex-account-balancing.md`).
+
+  Three findings, measured on a production box running one Codex login that had been
+  rate-limited for a day:
+
+  **Codex's quota reading was invented.** `account/rateLimits/read` answered `usedPercent: 0`
+  twice, 21 s apart, with `resetsAt` moving with the clock — always exactly `now + 7 days`. That is
+  the app-server's *empty default*, not a measurement: the real snapshot from a live request is
+  `{"limit_id":"premium","primary":null,"secondary":null}`, because on a ChatGPT Plus plan the
+  window that stops you is announced only in the refusal text. cezar stored the fake 0 % anyway,
+  which put every Codex account in **band 0** — the most-favoured value — while it could not run a
+  thing. `parseWindow` now drops a window that is indistinguishable from an unpopulated snapshot,
+  restoring the rule this module already stated: *"Never invents … Zero is a claim."*
+
+  **A usage band cannot be compared across providers, and `pool:*` was comparing them.** A Claude
+  Max week at 70 % and a Codex Plus week at 0 % are fractions of two differently-sized allowances.
+  `selectPoolAccount` now picks each provider's winner on the band and chooses **between** providers
+  on in-flight and dispatch order only — two levels, so every comparison stays between like rows and
+  the result no longer depends on the order candidates arrive in. A single-provider pool
+  (`pool:claude`, `pool:codex`) is unchanged.
+
+  **Discovery was Claude-only on an argument that had already been overtaken.** It refused Codex
+  because identity lives in `auth.json` beside a live API key — while `readAccountIdentity` had been
+  reading that file's `id_token` claims for the "Show details" route since 2026-07-29. The
+  credentials are separable at the reader, not at the caller: `readCodexAuthClaims` returns the JWT
+  payload and a boolean, never the API key or either token. `~/.codex*` homes are discovered now,
+  each carrying its email and plan, and each provider's card offers its own.
+
+- ⚙️ **`CEZ_AUTO_ACCOUNTS=1` — register detected logins instead of only offering them** (same spec,
+  D5; opt-in, exact `'1'`, off by default). This reverses the 2026-08-14 decision that discovery
+  must never write, and only where it is switched on. The case it exists for is a hosted box:
+  `CEZ_REMOTE=1` withholds the accounts listing and 409s the POST, so there is no UI path at all
+  there and a second account has to be added by hand-editing JSON over ssh. A boot hook and a
+  5-minute sweep append any config dir that carries its CLI's markers **and** records an account it
+  is signed in as — never a dir the CLI merely created, which would put a login that cannot run into
+  the rotation. Append-only: no existing row is relabelled, repointed or removed. Reported as
+  `capabilities.autoAccounts`, deliberately not withheld in hosted mode, because it says whether the
+  server will write rather than who the operator is.
+
 - 🔐 **The cluster HTTP family authenticates the NODE now — and the hub turns out to have nothing
   to authenticate it against** (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, **D20**,
   still behind `CEZ_CLUSTER=1` and off by default).

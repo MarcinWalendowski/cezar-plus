@@ -83,6 +83,7 @@
  */
 
 import { followupsEnabled } from '../handoff.ts';
+import { autoAccountsEnabled } from '../workspace/agent-accounts-auto.ts';
 import type { AuthProvider, Capabilities } from '@loki-labs/better-cezar-contract';
 
 /** Every IPv4 address in 127.0.0.0/8, anchored. Anchoring is load-bearing: a
@@ -301,6 +302,10 @@ export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHo
     // by `isLocalOrgModeActive`, the boot gate and the workspace-browse confinement, none of which
     // should be swayed by a decision that is specific to this one panel.
     accountUsage: env.CEZ_ACCOUNT_USAGE === '1' && (localHandoff || env.CEZ_ACCOUNT_USAGE_HOSTED === '1'),
+    // NOT AND-ed with `localHandoff` — see the field's doc in `contract/health.ts`. Read through
+    // `autoAccountsEnabled` so the flag has one spelling: the sweep itself re-checks it, and two
+    // copies of `=== '1'` is how a capability comes to report a feature that is not running.
+    autoAccounts: autoAccountsEnabled(env),
     // Inverted, like `workspaceViews` above — `=== '1'` everywhere else, `!== '0'` in these two.
     // (This comment used to claim it was "the one INVERTED gate in this object"; corrected
     // 2026-08-16 when `workspaceViews` joined it, for a different reason: skills predates the
