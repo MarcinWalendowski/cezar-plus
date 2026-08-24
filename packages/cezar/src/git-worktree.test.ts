@@ -567,7 +567,10 @@ describe('pruneOrphans (real git)', () => {
 
     const report = await pruneOrphans(repo, new Set(), { findForeignOwner: () => undefined });
 
-    expect(report.removed).toEqual([runId]);
+    expect(report.removed).toEqual([{
+      id: runId,
+      reason: expect.stringMatching(/no blocking worktree lease.*no foreign workspace owner.*autosave committed.*recovery branch kept/),
+    }]);
     expect(existsSync(wt.path)).toBe(false);
     expect(await branchExists(repo, branchFor(runId))).toBe(true);
     const saved = await run('git', ['show', `${branchFor(runId)}:draft.txt`], { cwd: repo });
@@ -588,7 +591,7 @@ describe('pruneOrphans (real git)', () => {
     const after = await run('git', ['rev-parse', 'HEAD'], { cwd: repo });
     expect(after.stdout).toBe(before.stdout);
     expect((await run('git', ['status', '--porcelain'], { cwd: repo })).stdout).toContain('dirty.txt');
-    expect(report.removed).toEqual([runId]);
+    expect(report.removed).toEqual([{ id: runId, reason: expect.stringContaining('autosave nothing-to-do') }]);
     expect(existsSync(candidate)).toBe(false);
   });
 
@@ -619,7 +622,7 @@ describe('pruneOrphans (real git)', () => {
 
     const report = await pruneOrphans(repo, new Set(), { findForeignOwner: () => undefined });
 
-    expect(report.removed).toEqual([runId]);
+    expect(report.removed).toEqual([{ id: runId, reason: expect.stringContaining('autosave nothing-to-do') }]);
     expect(report.declined).toEqual([]);
     expect(existsSync(wt.path)).toBe(false);
     expect(await branchExists(repo, branch)).toBe(true);
@@ -636,7 +639,7 @@ describe('pruneOrphans (real git)', () => {
 
     const report = await pruneOrphans(repo, new Set(), { findForeignOwner: () => undefined });
 
-    expect(report.removed).toEqual([runId]);
+    expect(report.removed).toEqual([{ id: runId, reason: expect.stringContaining('recovery branch kept') }]);
     expect(existsSync(wt.path)).toBe(false);
     expect(await branchExists(repo, branch)).toBe(true);
   });
@@ -688,7 +691,10 @@ describe('pruneOrphans (real git)', () => {
 
     const report = await pruneOrphans(repo, new Set());
 
-    expect(report.removed).toEqual([runId]);
+    expect(report.removed).toEqual([{
+      id: runId,
+      reason: expect.stringMatching(/foreign ownership check not configured.*recovery branch kept/),
+    }]);
     expect(existsSync(wt.path)).toBe(false);
     expect(await branchExists(repo, branch)).toBe(true);
   });
@@ -701,7 +707,7 @@ describe('pruneOrphans (real git)', () => {
 
     const report = await pruneOrphans(repo, new Set(), { findForeignOwner: () => undefined });
 
-    expect(report.removed).toEqual([runId]);
+    expect(report.removed).toEqual([{ id: runId, reason: expect.stringContaining('recovery branch kept') }]);
     expect(existsSync(wt.path)).toBe(false);
     expect(await branchExists(repo, branch)).toBe(true);
   });
