@@ -151,7 +151,7 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
         projectId: 'proj-hub-e2e-spoke-side',
       });
 
-      const server = startServer(
+      const { server } = startServer(
         { repoRoot, store, manager: { isActive: () => false } as unknown as RunManager, version: '0.0.0-test' },
         0,
       );
@@ -331,7 +331,7 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
       // refuse rather than silently pick a side.
       await ensureNodeIdentity({ role: 'spoke', hubUrl: 'https://not-really-a-hub.example' });
 
-      const server = startServer(
+      const { server } = startServer(
         {
           repoRoot,
           store,

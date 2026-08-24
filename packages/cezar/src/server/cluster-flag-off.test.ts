@@ -333,7 +333,7 @@ describe('cluster is inert with CEZ_CLUSTER unset (spec verification 12)', () =>
     /** Boots a REAL server on an ephemeral port — `attachUpgradeFallback` is wired inside
      *  `startServer`, so nothing short of a listening server exercises the argument under test. */
     async function boot(): Promise<number> {
-      const server = startServer(
+      const { server } = startServer(
         { repoRoot, store, manager: { isActive: () => false } as unknown as RunManager, version: '0.0.0-test' },
         0,
       );

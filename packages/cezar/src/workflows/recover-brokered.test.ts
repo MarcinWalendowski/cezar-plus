@@ -255,6 +255,7 @@ describe('recover() re-attach across an unflushed run-record mutation (flush-on-
    *  test controls so it can choose whether the NEXT mutation gets flushed too. */
   function seedRunningRun(seedStore: RunStore): string {
     const { id } = seedStore.createRun({
+      author: localCliAuthor(),
       title: 't',
       workflow: 'two-step',
       task: 'do the thing',
@@ -292,7 +293,7 @@ describe('recover() re-attach across an unflushed run-record mutation (flush-on-
    *  Also records `spoolDir`/`consumedOffset` on the run, exactly as `brokerFor()` does before a
    *  real spawn (`run.ts:1749`) — this task's own criterion 3 requires both be present. */
   function liveSpoolForRunTests(spoolStore: RunStore, id: string): string {
-    const dir = spoolDirFor(join(dataDir, 'runs'), id);
+    const dir = spoolDirFor(join(dataDir, 'runs'), id, 'flush-gap-test-instance');
     mkdirSync(dir, { recursive: true });
     writeSpoolMeta(dir, {
       schema: 1,
