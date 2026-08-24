@@ -1,15 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { workflowStepDefSchema as contractWorkflowStepDefSchema } from '@loki-labs/better-cezar-contract';
 import { KNOWN_PRESETS_BY_RUNNER, modelConflictsWithRunner } from '../core/model-presets.ts';
+import type { RunnerId } from '../core/agent-runner.ts';
 import {
   AUTONOMOUS_IMPLEMENTATION_WORKFLOW,
   BRIEFS_DIR,
+  CLASS_CHOICE_BY_RUNNER,
+  CLAUDE_CLASS_CHOICE,
+  CODEX_CLASS_CHOICE,
   DEFAULT_ALLOWED_TOOLS,
   FILE_WRITE_RECIPE,
   RECORD_READ_RECIPE,
   parseReviewVerdict,
   resolveStepModel,
   SPEC_TO_DEPLOY_WORKFLOW,
+  TASK_CLASSES,
+  UNCLASSIFIABLE_TASK_CLASS,
   chainStepNote,
   skillStackOf,
   workflowDefSchema,
@@ -955,5 +961,147 @@ describe('contract mirrors the step keys the parity guard cannot see', () => {
       if (!step.byRunner) continue;
       expect(contractWorkflowStepDefSchema.parse(step).byRunner, step.id).toEqual(step.byRunner);
     }
+  });
+});
+
+
+/**
+ * The classifier's half of the router (`.ai/specs/2026-08-24-auto-classify-task-model.md`).
+ * `resolveStepModel`'s fifth parameter is the LAST resort: everything anybody named already wins,
+ * and it fills a hole only when nothing at all was named.
+ */
+describe('auto task class (2026-08-24-auto-classify-task-model)', () => {
+  const AUTO = { model: 'gpt-5.6-terra', effort: 'medium' } as const;
+  const bare: WorkflowStepDef = { id: 'x', prompt: '{{task}}' };
+
+  it('fills a step that names nothing, on codex', () => {
+    expect(resolveStepModel(bare, 'codex', undefined, 0, AUTO)).toEqual(AUTO);
+  });
+
+  it('is ignored when a byRunner pair names the pair', () => {
+    const step = SPEC_TO_DEPLOY_WORKFLOW.steps.find((s) => s.id === 'implement')!;
+    expect(resolveStepModel(step, 'codex', undefined, 0, AUTO)).toEqual({
+      model: 'gpt-5.6-luna',
+      effort: 'xhigh',
+    });
+  });
+
+  it('is ignored when the step names a model', () => {
+    const pinned: WorkflowStepDef = { id: 'x', prompt: '{{task}}', model: 'sonnet' };
+    expect(resolveStepModel(pinned, 'codex', undefined, 0, AUTO)).toEqual({
+      model: 'sonnet',
+      effort: undefined,
+    });
+  });
+
+  it('is ignored when the run names a model — the composer picker wins over the classifier', () => {
+    expect(resolveStepModel(bare, 'codex', 'gpt-5.6-sol', 0, AUTO)).toEqual({
+      model: 'gpt-5.6-sol',
+      effort: undefined,
+    });
+  });
+
+  it('is ignored when the step names ONLY an effort — a ceiling is a source, not a hole', () => {
+    // The mixed-source case. A step with an effort and no model is not unpinned: filling it would
+    // replace a deliberate ceiling with a different pair, which is the same half-applied-override
+    // failure the `byRunner` "both halves or neither" rule exists to prevent.
+    const ceiling: WorkflowStepDef = { id: 'x', prompt: '{{task}}', effort: 'low' };
+    expect(resolveStepModel(ceiling, 'codex', undefined, 0, AUTO)).toEqual({
+      model: undefined,
+      effort: 'low',
+    });
+  });
+
+  it('supplies BOTH halves or neither — it never lends its effort to another layer\'s model', () => {
+    const pinned: WorkflowStepDef = { id: 'x', prompt: '{{task}}', model: 'sonnet' };
+    const resolved = resolveStepModel(pinned, 'codex', undefined, 0, AUTO);
+    expect(resolved.effort, 'the auto effort must not ride along with a pinned model').toBeUndefined();
+  });
+
+  it('resolves to nothing when there is no auto choice — today\'s behaviour, unchanged', () => {
+    // The negative control on all of the above: without it, every assertion here passes equally
+    // well for a resolver that returns the auto pair unconditionally.
+    expect(resolveStepModel(bare, 'codex')).toEqual({ model: undefined, effort: undefined });
+    expect(resolveStepModel(bare, 'claude')).toEqual({ model: undefined, effort: undefined });
+  });
+
+  it('composes with the escalation ladder: an auto explore climbs, an auto tiny does not', () => {
+    // `explore` is terra/medium, which `escalatable()` recognises...
+    expect(resolveStepModel(bare, 'codex', undefined, 1, CODEX_CLASS_CHOICE.explore)).toEqual({
+      model: 'gpt-5.6-sol',
+      effort: 'high',
+    });
+    expect(resolveStepModel(bare, 'codex', undefined, 2, CODEX_CLASS_CHOICE.explore)).toEqual({
+      model: 'gpt-5.6-sol',
+      effort: 'max',
+    });
+    // ...and `tiny` is luna/medium, which it deliberately does not. A failing tiny task must not
+    // end up on the most expensive model in the catalog.
+    expect(resolveStepModel(bare, 'codex', undefined, 2, CODEX_CLASS_CHOICE.tiny)).toEqual(
+      CODEX_CLASS_CHOICE.tiny,
+    );
+  });
+
+  it('maps every class to a distinct codex pair, and only to 5.6 models', () => {
+    const pairs = TASK_CLASSES.map((c) => `${CODEX_CLASS_CHOICE[c].model}:${CODEX_CLASS_CHOICE[c].effort}`);
+    expect(new Set(pairs).size, `two classes share a pair: ${pairs.join(', ')}`).toBe(TASK_CLASSES.length);
+    for (const c of TASK_CLASSES) {
+      expect(CODEX_CLASS_CHOICE[c].model, c).toMatch(/^gpt-5\.6-(luna|terra|sol)$/);
+      expect(CODEX_CLASS_CHOICE[c].effort, c).toBeDefined();
+    }
+  });
+
+  it('the Claude table uses only shipped claude presets, and keeps the table\'s ORDER', async () => {
+    // Grounded, not invented: `opus` is the owner's "spec + review by opus always" tier, `sonnet`
+    // the "the rest ... claude sonnet" tier, `haiku` cezar's own cheap alias. All three must be
+    // real presets or the pin is dropped at dispatch exactly as the dead codex ids were.
+    for (const c of TASK_CLASSES) {
+      expect(KNOWN_PRESETS_BY_RUNNER.claude, c).toContain(CLAUDE_CLASS_CHOICE[c].model);
+    }
+    expect(CLAUDE_CLASS_CHOICE.tiny.model).toBe('haiku');
+    expect(CLAUDE_CLASS_CHOICE.complex.model).toBe('opus');
+    // Claude has no tier between sonnet and opus, so effort is what separates the middle two rows.
+    // Losing that would collapse `scoped` and `explore` into the same cell.
+    expect(CLAUDE_CLASS_CHOICE.scoped.model).toBe(CLAUDE_CLASS_CHOICE.explore.model);
+    expect(CLAUDE_CLASS_CHOICE.scoped.effort).not.toBe(CLAUDE_CLASS_CHOICE.explore.effort);
+  });
+
+  it('every runner table covers every class, and no model conflicts with its own runner', () => {
+    for (const [runner, table] of Object.entries(CLASS_CHOICE_BY_RUNNER)) {
+      for (const c of TASK_CLASSES) {
+        const choice = table![c];
+        expect(choice, `${runner}.${c}`).toBeDefined();
+        // The guard that killed the old codex presets: a table naming another runner's id would be
+        // dropped at dispatch and the class would silently do nothing.
+        expect(
+          modelConflictsWithRunner(choice.model!, runner as RunnerId),
+          `${runner}.${c} names ${choice.model}, which ${runner} cannot serve`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('opencode and pi have NO class table, so they classify nothing', () => {
+    // The negative control on the runner map: without it, "codex and claude classify" is equally
+    // provable by a map that classifies everything. Their models are discovered from the host, so a
+    // literal table here would be one release from naming a model the user's provider lacks.
+    expect(CLASS_CHOICE_BY_RUNNER.opencode).toBeUndefined();
+    expect(CLASS_CHOICE_BY_RUNNER.pi).toBeUndefined();
+    expect(Object.keys(CLASS_CHOICE_BY_RUNNER).sort()).toEqual(['claude', 'codex']);
+  });
+
+  it('the unclassifiable fallback is terra/medium — cheaper than sol AND on the escalation ladder', () => {
+    // Asserted as the concrete pair, not merely "something non-null". The whole point of D3 is
+    // that the fallback is a specific cell chosen for two properties: it is strictly better than
+    // the `gpt-5.6-sol` + null-effort default it replaces, and it is one of the two rungs that
+    // climb. A test that only checked "defined" would pass for a luna fallback with no ladder.
+    expect(CODEX_CLASS_CHOICE[UNCLASSIFIABLE_TASK_CLASS]).toEqual({
+      model: 'gpt-5.6-terra',
+      effort: 'medium',
+    });
+    expect(
+      resolveStepModel(bare, 'codex', undefined, 1, CODEX_CLASS_CHOICE[UNCLASSIFIABLE_TASK_CLASS]),
+      'the fallback must be escalatable, or a failure has nowhere to climb',
+    ).toEqual({ model: 'gpt-5.6-sol', effort: 'high' });
   });
 });

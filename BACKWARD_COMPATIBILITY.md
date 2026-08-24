@@ -377,6 +377,30 @@ behaviour-changing for one thing, named below.**
 - **Rollback is deleting the `byRunner` keys.** Nothing is migrated, nothing is stored, and no
   persisted record changes shape.
 
+## Automatic task classification on codex (2026-08-24)
+
+Spec `.ai/specs/2026-08-24-auto-classify-task-model.md`. **No schema, no route, no stored field —
+but it changes which model an unpinned codex step runs on, which is the point.**
+
+- **Nothing is added to any contract.** No wire field, no run-record field, no config key, no CLI
+  flag. The classifier's answer lives in memory for the length of a run; a restart re-derives it.
+  The only new surface is two `note` events on the run thread, through the channel the step's
+  `model:` line already uses.
+- **What actually changes at runtime, and only on codex:** a step that names no model — the
+  one-step quick-task workflow, and every path cezar starts by itself — used to run on codex's own
+  default (`gpt-5.6-sol`, `reasoningEffort: null`). It now runs on the class-chosen pair. Runs on
+  Claude are byte-identical, asserted by the pre-existing test *"an auto (empty) model persists no
+  identity and pins nothing on the wire"*, which fails if the codex-only gate is removed.
+- **Everything anybody pinned still wins.** `byRunner`, `step.model`, `step.effort` and the
+  composer's `input.model` are each checked before the classifier is consulted, and a step carrying
+  any of them never triggers a classification at all. Neither does a run under `modelsLocked`.
+- **One extra agent call per codex run with no pinned model**, on `config.defaultRunner`, billed to
+  the same agent profile the project's runs are billed to. It cannot block a run: every failure
+  path answers `explore` and says so on the thread.
+- **Rollback is deleting the `autoChoice` argument at the one call site in `runAgentStep`.**
+  `resolveStepModel`'s fifth parameter is optional and defaults to the previous behaviour, and no
+  persisted record changes shape.
+
 ## When in doubt
 
 If a change might break any surface above, say so in the PR description, label the PR `risk-high`, and route it through the review + QA gates in `SDLC.md`. A silent break found in review is a blocker per `CODE_REVIEW.md`.

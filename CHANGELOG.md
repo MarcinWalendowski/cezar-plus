@@ -5,6 +5,38 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- 🎚 **cezar classifies a task into a row of that table when nobody pinned one** (spec
+  `.ai/specs/2026-08-24-auto-classify-task-model.md`).
+
+  The per-step pins below reach eight steps of one built-in workflow. They reach **nothing else** —
+  a task typed into the composer runs the one-step quick-task workflow, and so do the paths cezar
+  starts by itself (a notes continuation, a reopen, an automation, `cezar run` from a script). On
+  codex an unpinned step is not left on "a reasonable default": it is left on `gpt-5.6-sol` at
+  `reasoningEffort: null`, the same worst cell the router below exists to remove.
+
+  So one cheap agent call — no tools, 30 s, on `config.defaultRunner` — reads the task text and
+  answers one of four classes, which map to the same four constants the step table uses:
+
+  | class | the owner's row | codex |
+  | --- | --- | --- |
+  | `tiny` | commits, renaming, spacing, tiny UI changes | `gpt-5.6-luna` medium |
+  | `scoped` | a normal bug fix, or a clearly scoped feature | `gpt-5.6-luna` xhigh |
+  | `explore` | an unclear task spanning several parts of the repo | `gpt-5.6-terra` medium |
+  | `complex` | a complex bug, architecture, auth, payments, migrations | `gpt-5.6-sol` medium |
+
+  It is the **bottom** of the resolution stack, not a new top: a `byRunner` pair, a step `model`, a
+  step `effort` and the composer's own picker each win untouched, and the classifier only fills a
+  hole where every one of them named nothing. One call per run, not per step, and none at all when
+  the run is on Claude, when anything is pinned, or when `modelsLocked` is set — under a lock the
+  answer would be computed and then discarded.
+
+  **A task cannot be blocked by it.** Every failure — runner down, timeout, two unparseable answers
+  — resolves to `explore` → `gpt-5.6-terra` medium, and *says on the thread that it degraded*. That
+  class rather than `undefined` or a middle guess, because it is strictly better than the default it
+  replaces (cheaper model, a real reasoning level instead of none) and it is one of the two rungs
+  the escalation ladder recognises, so a failure climbs to `sol high` on its own. A Luna fallback
+  would have no ladder under it.
+
 - 🧭 **A model router for codex: the owner's task→model table, applied per step of `spec-to-deploy`**
   (spec `.ai/specs/2026-08-24-codex-step-model-and-effort.md`).
 

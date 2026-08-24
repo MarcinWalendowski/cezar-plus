@@ -2,8 +2,10 @@ import { execFile } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { AGENT_MODELS_LOCKED_ENV } from '../core/agent-model-policy.ts';
 import { RunStore } from '../runs/store.ts';
 import type { WorkflowDef } from './types.ts';
 import { RunManager } from './run.ts';
@@ -125,12 +127,31 @@ describe('model identity wiring (dry run)', () => {
     expect(stepOf(id, 'verify')?.modelIdentity).toBeUndefined();
   }, 30_000);
 
-  it('an auto (empty) model persists no identity and pins nothing on the wire', async () => {
+  /**
+   * CHANGED 2026-08-24 by `.ai/specs/2026-08-24-auto-classify-task-model.md`. This asserted that an
+   * auto (empty) model pinned NOTHING — `capturedModel()` undefined, no identity on run or step.
+   * That is no longer the behaviour: a step nobody pinned is now classified and given the class's
+   * model, on Claude as well as codex.
+   *
+   * Two things make the new assertion read differently, not just differently-valued:
+   *
+   * 1. **`capturedModel()` (argv index 0) is now the CLASSIFIER's own invocation**, which runs
+   *    before the step spawns and pins `haiku` deliberately. Index 0 stopped meaning "the step" for
+   *    unpinned runs — which is exactly why this case asserts the STEP RECORD, written from the
+   *    same binding that reaches the runner, rather than an argv position whose meaning depends on
+   *    how many calls preceded it. The other cases in this describe still read index 0 safely
+   *    because they pin a model, and a pinned step never classifies.
+   * 2. The classifier here answers through the `CEZ_DRY_RUN` mock's `[cez-classify]` branch, which
+   *    returns `scoped` — chosen in that mock precisely so it differs from the `explore` fallback.
+   */
+  it('an auto (empty) model is CLASSIFIED, and the classifier itself runs on haiku', async () => {
     const id = await runToEnd({ task: 'do the thing' });
-    expect(capturedModel()).toBeUndefined();
-    expect(store.getRun(id)?.modelIdentity).toBeUndefined();
-    expect(stepOf(id, 'work')?.model).toBeUndefined();
-    expect(stepOf(id, 'work')?.modelIdentity).toBeUndefined();
+    expect(capturedModel(), 'the first CLI call is the classifier, not the step').toBe('haiku');
+    const work = stepOf(id, 'work');
+    expect(work?.model, 'the step runs on the class-chosen model, not the CLI default').toBe('sonnet');
+    expect(work?.modelIdentity).toBe('anthropic/sonnet');
+    // A check step never reaches `runAgentStep`, so it still resolves and records nothing.
+    expect(stepOf(id, 'verify')?.model).toBeUndefined();
   }, 30_000);
 
   /**
@@ -371,4 +392,159 @@ describe('byRunner reaches the runner (dry run)', () => {
     expect(flag('--model')).toBe('sonnet');
     expect(flag('--effort')).toBe('low');
   }, 30_000);
+});
+
+
+/**
+ * The classifier's glue (`.ai/specs/2026-08-24-auto-classify-task-model.md`, Phase 3): a codex step
+ * that nobody pinned must reach the runner on a class-chosen model, not on codex's own default.
+ *
+ * Driven against the mock app-server (`CEZ_CODEX_BIN`), which answers prose rather than the
+ * classifier's JSON — so what these cases actually exercise is **D3, the degrade**: two unparseable
+ * answers, then `UNCLASSIFIABLE_TASK_CLASS` → `gpt-5.6-terra` at `medium`. That is the path worth
+ * pinning here. It is the one that runs when nobody is looking, it is the one whose alternative
+ * (leave it `undefined`) restores the exact defect the router exists to remove, and it is
+ * reachable in a test without teaching a mock to impersonate a classifier.
+ *
+ * The assertion reads the STEP RECORD rather than the child's argv: `stepRawModel` is persisted
+ * onto the step immediately before the spawn (`2026-08-22-per-step-model-display`), from the same
+ * binding that reaches the runner, so the record cannot agree with a model the spawn did not get.
+ */
+describe('auto task class reaches a codex step (mock app-server)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+  const mockBin = fileURLToPath(
+    new URL('../core/__fixtures__/codex/mock-codex-app-server.mjs', import.meta.url),
+  );
+
+  beforeAll(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-autoclass-'));
+    for (const key of ['CEZ_DRY_RUN', 'CEZ_CODEX_BIN', 'CEZ_FOLLOWUPS']) savedEnv[key] = process.env[key];
+    process.env.CEZ_DRY_RUN = '1';
+    process.env.CEZ_CODEX_BIN = mockBin;
+    delete process.env.CEZ_FOLLOWUPS;
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    writeFileSync(
+      join(repoRoot, '.ai/cezar', 'config.json'),
+      JSON.stringify({ maxParallel: 1, defaultRunner: 'codex' }),
+      'utf8',
+    );
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterAll(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const TERMINAL = new Set(['done', 'review', 'failed', 'cancelled']);
+
+  async function drive(def: WorkflowDef, model?: string): Promise<string> {
+    const record = manager.startRun(def, {
+      task: 'do the thing',
+      author: localCliAuthor(),
+      runner: 'codex',
+      ...(model ? { model } : {}),
+    });
+    const deadline = Date.now() + 25_000;
+    while (!TERMINAL.has(store.getRun(record.id)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not finish in time');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return record.id;
+  }
+
+  const modelOf = (id: string, stepId: string): string | undefined =>
+    store.getRun(id)?.steps?.find((s) => s.id === stepId)?.model;
+
+  // The trailing check step is not decoration: a lone agent step parks the run at `waiting`
+  // (needs-you) rather than finishing, exactly as it does in the sibling describes above.
+  const unpinned: WorkflowDef = {
+    name: 'autoclass-unpinned',
+    source: 'built-in',
+    steps: [{ id: 'work', prompt: '{{task}}' }, { id: 'verify', command: 'true' }],
+  };
+
+  it('an unpinned codex step runs on a class-chosen model, never on codex\'s default', async () => {
+    const id = await drive(unpinned);
+    expect(modelOf(id, 'work')).toBe('gpt-5.6-terra');
+  }, 40_000);
+
+  it('the run-level model still wins — the classifier never overrides the picker', async () => {
+    // The negative control on the case above: without it, "the classifier fills a hole" is equally
+    // provable by wiring that classifies unconditionally and ignores everything the user chose.
+    const id = await drive(unpinned, 'gpt-5.6-sol');
+    expect(modelOf(id, 'work')).toBe('gpt-5.6-sol');
+  }, 40_000);
+
+  it('says which class it picked once per RUN, not once per step', async () => {
+    // Two agent steps, deliberately. With one, `toHaveLength(1)` passes for a classifier with no
+    // cache at all — the assertion would be about the workflow's shape rather than about the
+    // cache, and a per-step classifier would pay for eight calls on a `spec-to-deploy` chain
+    // while this stayed green.
+    const id = await drive({
+      name: 'autoclass-twostep',
+      source: 'built-in',
+      steps: [
+        { id: 'work', prompt: '{{task}}' },
+        { id: 'again', prompt: 'and again: {{task}}' },
+        { id: 'verify', command: 'true' },
+      ],
+    });
+    expect(modelOf(id, 'work')).toBe('gpt-5.6-terra');
+    expect(modelOf(id, 'again'), 'the cached choice must reach the second step too').toBe('gpt-5.6-terra');
+    const notes = store
+      .readEvents(id)
+      .map((e) => (e as { message?: string }).message ?? '')
+      .filter((m) => m.startsWith('task class:'));
+    // The fail-soft counter. A classifier that quietly chooses which model spends the owner's
+    // quota is a quieter outage, not a fixed one, so the degrade has to be readable in the
+    // transcript — and distinguishable from a successful classification.
+    expect(notes, 'one classification for the whole run').toHaveLength(1);
+    expect(notes[0]).toContain('could not classify');
+  }, 60_000);
+
+  it('does not classify at all when models are locked', async () => {
+    // Not a correctness property — a cost one. Under the lock `stepRawModel` is forced to
+    // `undefined` whatever the classifier says, so a classification here would spend the owner's
+    // quota to compute a value nothing reads. Asserted on the NOTE, because the model field looks
+    // identical either way, which is exactly why this needs its own case.
+    const saved = process.env[AGENT_MODELS_LOCKED_ENV];
+    process.env[AGENT_MODELS_LOCKED_ENV] = '1';
+    try {
+      const id = await drive(unpinned);
+      expect(modelOf(id, 'work')).toBeUndefined();
+      const notes = store
+        .readEvents(id)
+        .map((e) => (e as { message?: string }).message ?? '')
+        .filter((m) => m.startsWith('task class:'));
+      expect(notes).toEqual([]);
+    } finally {
+      if (saved === undefined) delete process.env[AGENT_MODELS_LOCKED_ENV];
+      else process.env[AGENT_MODELS_LOCKED_ENV] = saved;
+    }
+  }, 40_000);
+
+  it('a step that pins its own codex pair is left alone', async () => {
+    const id = await drive({
+      name: 'autoclass-pinned',
+      source: 'built-in',
+      steps: [
+        { id: 'work', prompt: '{{task}}', byRunner: { codex: { model: 'gpt-5.6-luna', effort: 'xhigh' } } },
+        { id: 'verify', command: 'true' },
+      ],
+    });
+    expect(modelOf(id, 'work')).toBe('gpt-5.6-luna');
+  }, 40_000);
 });

@@ -256,18 +256,32 @@ export interface StepModelChoice {
  * `fallbackModel` is the run-level model (`input.model`), which applies only when neither the
  * override nor the step names one. It is deliberately NOT consulted for effort: there is no
  * run-level effort, and inventing one here would give every step of every run a ceiling.
+ *
+ * `autoChoice` is the classifier's answer (`.ai/specs/2026-08-24-auto-classify-task-model.md`) and
+ * is the LAST resort, below every one of those. It applies only when the layers above named
+ * **nothing at all** — not a model, not an effort. A step that names an effort ceiling and no
+ * model is not a hole to fill: the ceiling is a deliberate source, and replacing it with a
+ * different pair is precisely the mixed-source failure the "both halves or neither" rule above
+ * exists to prevent.
+ *
+ * The guard reads the RESULT (`named`) rather than re-testing the four inputs. Re-deriving
+ * "did anybody name something?" from `step`/`fallbackModel` a second time is how the two
+ * expressions drift, and this one has to agree with the one directly above it by construction.
  */
 export function resolveStepModel(
   step: WorkflowStepDef,
   backend: RunnerId,
   fallbackModel?: string,
   priorFailures = 0,
+  autoChoice?: StepModelChoice,
 ): StepModelChoice {
   const override = step.byRunner?.[backend];
-  const chosen: StepModelChoice =
+  const named: StepModelChoice =
     override && (override.model !== undefined || override.effort !== undefined)
       ? { model: override.model ?? step.model ?? fallbackModel, effort: override.effort }
       : { model: step.model ?? fallbackModel, effort: step.effort };
+  const nothingNamed = named.model === undefined && named.effort === undefined;
+  const chosen: StepModelChoice = nothingNamed && autoChoice ? autoChoice : named;
   return escalate(chosen, priorFailures);
 }
 
@@ -786,11 +800,15 @@ const RUN_TESTS_STEP_EFFORT = 'medium';
  * same judgement-vs-construction split {@link SPEC_TO_DEPLOY_STEP_MODEL} already encodes for
  * Claude.
  *
- * **`gpt-5.4` is not used**, though the table offers it for the tiny-changes row. The 2026-08-22
- * owner instruction *"in codex use only 5.6"* is why `KNOWN_PRESETS_BY_RUNNER.codex` lists the 5.6
- * family only, and the two instructions genuinely disagree. Nothing here BLOCKS it — an id absent
- * from every runner's preset list fails open — so typing it still works; the built-in workflow
- * simply does not name it. Flagged for the owner rather than resolved quietly.
+ * **`gpt-5.4` is not used. RESOLVED 2026-08-24 — the two instructions do not actually conflict.**
+ * This paragraph said they "genuinely disagree" and flagged it for the owner; on re-reading the
+ * table, the tiny-changes row reads *"Luna Medium/High **or** GPT-5.4"*. It is a disjunction, so
+ * naming Luna satisfies it outright — there was never a row this policy could not express. The
+ * later, narrower instruction *"in codex use only 5.6"* (2026-08-22) then picks which branch of
+ * that `or` to take, which is why `KNOWN_PRESETS_BY_RUNNER.codex` lists the 5.6 family only.
+ *
+ * Nothing here BLOCKS `gpt-5.4` — an id absent from every runner's preset list fails open, so
+ * typing it still works. The built-in workflow and the class table simply do not name it.
  *
  * Every effort here is one all three 5.6 models advertise (`supported_reasoning_levels`, measured
  * from `models_cache.json` on both production accounts: sol and terra `low…ultra`, luna
@@ -811,6 +829,107 @@ const CODEX_MECHANICAL = { model: 'gpt-5.6-luna', effort: 'medium' } as const;
  *  what just happened rather than an edit, and `high` is the half of "Medium/High" that suits
  *  something a human will read as the record. */
 const CODEX_WRITE = { model: 'gpt-5.6-luna', effort: 'high' } as const;
+
+/**
+ * The fourth row of the owner's table — *"Complex bug, architecture, auth, payments, migrations"*.
+ *
+ * No `spec-to-deploy` step names it, which is not an oversight: that chain splits the complex work
+ * across `spec`/`review-spec`, and both of those pin `SPEC_AUTHORING_RUNNER = 'claude'`, so on a
+ * codex run they never reach a codex model at all. It exists for the classifier
+ * (`.ai/specs/2026-08-24-auto-classify-task-model.md`), which is the only caller that can land on
+ * this row — an ad-hoc "migrate the auth tables" task has no step table to read it from.
+ */
+const CODEX_COMPLEX = { model: 'gpt-5.6-sol', effort: 'medium' } as const;
+
+/**
+ * The four task classes the owner's table names, in ascending cost
+ * (`.ai/specs/2026-08-24-auto-classify-task-model.md`).
+ *
+ * Exported as a `readonly` tuple rather than a bare union because the classifier builds its zod
+ * enum and its prompt's allowed-values list from this one array: three copies of four strings is
+ * how a fifth class ends up accepted by the schema and never mentioned to the model.
+ */
+export const TASK_CLASSES = ['tiny', 'scoped', 'explore', 'complex'] as const;
+export type TaskClass = (typeof TASK_CLASSES)[number];
+
+/**
+ * Class → the codex pair, reusing the SAME constants `spec-to-deploy`'s steps use. Deliberately
+ * not a second table of literals: the owner wrote one table, and a `tiny` task and a `commit-push`
+ * step are the same row of it. If that row moves, both move together or the two surfaces disagree
+ * about what the owner said.
+ *
+ * There is no Claude half. On Claude an unpinned step gets the CLI's own default, which is a
+ * reasonable model at a reasonable setting; on codex it gets `gpt-5.6-sol` at `null` effort, the
+ * one cell the table never selects. The asymmetry in the code mirrors a real asymmetry in the
+ * defaults, and inventing a Claude policy here would be inventing one the owner never wrote.
+ */
+export const CODEX_CLASS_CHOICE: Record<TaskClass, StepModelChoice> = {
+  tiny: CODEX_MECHANICAL,
+  scoped: CODEX_BUILD,
+  explore: CODEX_EXPLORE,
+  complex: CODEX_COMPLEX,
+};
+
+/**
+ * The Claude half of the same four rows.
+ *
+ * **Not invented here.** Every tier is already recorded, and this record only arranges them:
+ *
+ * - `opus` for the row where *the judgement is the deliverable* — owner instruction 2026-08-22,
+ *   *"writing spec + spec review should be by opus always"* ({@link SPEC_AUTHORING_MODEL}), and
+ *   `AGENTS.md`'s delegation table, which puts architecture decisions, planning and review on the
+ *   session model. The owner's own words for this class are "complex bug, architecture, auth,
+ *   payments, migrations" — that table's opus column, verbatim.
+ * - `sonnet` for construction — the same instruction's *"the rest can be load balanced by codex or
+ *   claude sonnet"* ({@link SPEC_TO_DEPLOY_STEP_MODEL}), and `AGENTS.md`'s Sonnet column
+ *   (implementing an approved spec, mechanical migrations, a component whose contract is settled).
+ * - `haiku` for the cheapest row — cezar's own established cheap-alias role: it is the default
+ *   `namerModel` (`.ai/specs/2026-07-17-task-auto-naming.md`) and a shipped
+ *   `KNOWN_PRESETS_BY_RUNNER.claude` preset.
+ *
+ * **Effort separates `scoped` from `explore`, because Claude has no tier between them.** The codex
+ * table moves those two rows apart by MODEL (luna → terra); Claude's ladder is haiku/sonnet/opus,
+ * and putting `explore` on opus would contradict the instruction that reserves opus for judgement.
+ * So both are sonnet and `explore` gets the higher ceiling, which keeps the table's ORDER intact —
+ * haiku < sonnet/high < sonnet/xhigh < opus — without inventing a fourth Claude tier.
+ *
+ * **This changes a default that was previously sane**, unlike the codex half. An unpinned Claude
+ * step used to get the CLI's own choice, which was reasonable; it now gets a class-chosen one. That
+ * is a policy decision the owner asked for, not a defect repair, and `BACKWARD_COMPATIBILITY.md`
+ * says so in those words.
+ */
+export const CLAUDE_CLASS_CHOICE: Record<TaskClass, StepModelChoice> = {
+  tiny: { model: 'haiku', effort: 'medium' },
+  scoped: { model: SPEC_TO_DEPLOY_STEP_MODEL, effort: 'high' },
+  explore: { model: SPEC_TO_DEPLOY_STEP_MODEL, effort: 'xhigh' },
+  complex: { model: SPEC_AUTHORING_MODEL, effort: 'medium' },
+};
+
+/**
+ * Which runners have a class table at all.
+ *
+ * `opencode` and `pi` deliberately have none, for the reason `KNOWN_PRESETS_BY_RUNNER` leaves them
+ * empty: their model ids are discovered from the host, so any literal here would be one release
+ * away from naming a model the user's provider does not have. A runner absent from this record
+ * classifies nothing and keeps its own default — the behaviour every runner had before this table
+ * existed.
+ */
+export const CLASS_CHOICE_BY_RUNNER: Partial<Record<RunnerId, Record<TaskClass, StepModelChoice>>> = {
+  codex: CODEX_CLASS_CHOICE,
+  claude: CLAUDE_CLASS_CHOICE,
+};
+
+/**
+ * What a task cezar could not classify is treated as (spec D3).
+ *
+ * `explore` is not a neutral middle — it is chosen for three properties the alternatives lack.
+ * It is the honest reading of the row (*"unclear task that requires exploring several parts of the
+ * repo"* is what an unclassifiable task is, from here); it is strictly better than the `undefined`
+ * it replaces on every axis (cheaper model than sol, a real reasoning level instead of `null`);
+ * and it is one of the two rungs {@link CODEX_ESCALATION} recognises, so a failure climbs to
+ * `sol high` on its own. A Luna fallback would have no ladder under it.
+ */
+export const UNCLASSIFIABLE_TASK_CLASS: TaskClass = 'explore';
 
 /**
  * The owner's standard operating pipeline as ONE selectable chain (spec

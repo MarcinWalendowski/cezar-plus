@@ -146,11 +146,14 @@ same judgement-vs-construction split the Claude side already encodes.
 that ceiling was set on a measurement (a 43,583-output-token outlier at `high`) and the reason for it
 is runner-independent.
 
-**`gpt-5.4` is not used.** The table offers it as an alternative for the tiny-changes row, but the
-2026-08-22 owner instruction *"in codex use only 5.6"* is why `KNOWN_PRESETS_BY_RUNNER.codex` lists
-the 5.6 family only. Nothing here blocks it — an id absent from every runner's preset list fails
-open — so typing it still works; it is simply not what the built-in workflow names. Flagged for the
-owner rather than resolved silently, because the two instructions genuinely disagree.
+**`gpt-5.4` is not used. RESOLVED 2026-08-24 — there is no conflict to resolve.** This said the two
+instructions "genuinely disagree" and flagged it for the owner. Re-reading the table settles it: the
+tiny-changes row is *"Luna Medium/High **or** GPT-5.4"* — a disjunction. Naming Luna satisfies the
+row outright, so no row of the table was ever inexpressible. The later, narrower instruction *"in
+codex use only 5.6"* (2026-08-22) simply picks which branch of that `or` to take, which is why
+`KNOWN_PRESETS_BY_RUNNER.codex` lists the 5.6 family only. Nothing blocks `gpt-5.4` — an id absent
+from every runner's preset list fails open — so typing it still works; it is simply not what the
+built-in workflow names. ~~Flagged for the owner rather than resolved silently, because the two instructions genuinely disagree.~~
 
 ### D3 — effort reaches codex through `turn/start`
 

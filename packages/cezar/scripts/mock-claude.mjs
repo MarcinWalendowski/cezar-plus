@@ -420,6 +420,31 @@ async function respond(userText, imageCount) {
     return;
   }
 
+  // A task classification (marked `[cez-classify]`). The canned answer is deliberately `scoped`
+  // and NOT `explore`: `explore` is also the value `classifyTask` falls back to when it cannot
+  // classify at all, so answering it here would make a dry run that exercised the happy path
+  // indistinguishable from one where the mock was never consulted.
+  if (userText.includes('[cez-classify]')) {
+    const answer = JSON.stringify({ class: 'scoped', why: 'Produced by the CEZ_DRY_RUN mock.' });
+    emit({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: answer }],
+        usage: { input_tokens: 120, output_tokens: 20 },
+      },
+    });
+    await sleep(10);
+    emit({
+      type: 'result',
+      subtype: 'success',
+      result: answer,
+      usage: { input_tokens: 120, output_tokens: 20 },
+      total_cost_usd: 0.0001,
+    });
+    return;
+  }
+
   if (userText.includes('[cez-planner]')) {
     const plan = JSON.stringify({
       title: 'implement-verify-review',

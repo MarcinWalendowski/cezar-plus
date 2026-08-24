@@ -128,6 +128,7 @@ import { UiEventSink } from '../runs/ui-event-sink.ts';
 import type { UiEvent } from '../core/ui-events.ts';
 import {
   chainStepNote,
+  CLASS_CHOICE_BY_RUNNER,
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_WORKFLOW,
   DEFAULT_WORKFLOW_NAME,
@@ -135,9 +136,12 @@ import {
   resolveStepModel,
   stepKind,
   type ReviewVerdict,
+  type StepModelChoice,
+  type TaskClass,
   type WorkflowDef,
   type WorkflowStepDef,
 } from './types.ts';
+import { classifyTask } from '../task-classifier.ts';
 
 const CHECK_OUTPUT_CAP = 20_000;
 
@@ -1072,6 +1076,25 @@ export class RunManager {
    *  otherwise hand them straight back and the rescue would undo itself in a millisecond. */
   private readonly forceStarted = new Set<string>();
 
+  /**
+   * The classifier's answer for a run, computed on the first step that has no model pinned
+   * (`.ai/specs/2026-08-24-auto-classify-task-model.md`, D4). One agent call per run, not per step.
+   *
+   * **The CLASS is cached, not the model.** A run can change runner partway through — a retarget,
+   * or a step naming its own `runner` — and the class is a property of the TASK while the model is
+   * a property of (class, runner). Caching a model would either carry the first runner's id into
+   * the second runner's step or force a second classification of the same text; caching the class
+   * does neither.
+   *
+   * In memory on purpose. A server restart re-classifies, which costs one more cheap call and
+   * nothing else — whereas persisting it would mean a new field on the run record and on the wire
+   * contract to hold a value that is already recoverable, since the model each step actually ran on
+   * is written onto the step before its spawn (`2026-08-22-per-step-model-display`).
+   *
+   * Cleared in `dropActive` with the run's other per-run maps.
+   */
+  private readonly autoTaskClasses = new Map<string, TaskClass>();
+
   /** The workspace-wide parallel-cap semaphore + cached resource config
    *  (spec 2026-07-20, step 2.5). Boot constructs ONE and every manager shares
    *  it; the private fallback keeps single-manager callers and tests working. */
@@ -1284,6 +1307,59 @@ export class RunManager {
         : {}),
       ...agentTmpEnv(this.dataDir, runId),
     };
+  }
+
+  /**
+   * The model+effort for a step that nobody pinned, from the classifier
+   * (`.ai/specs/2026-08-24-auto-classify-task-model.md`). One call per RUN, cached — a
+   * `spec-to-deploy` chain would otherwise pay for eight identical classifications of one task.
+   *
+   * Reached only when the step's runner HAS a class table and every layer above named nothing.
+   * The two halves arrived for different reasons and it is worth keeping them straight: on codex an
+   * unpinned step was falling to `gpt-5.6-sol` at `null` effort — the most expensive model in the
+   * catalog at its shallowest setting, the one cell the owner's table never selects — so that half
+   * repairs a bad default. On Claude the CLI's own choice was already sane, so that half is a
+   * policy the owner asked for, applying the same table's rows.
+   *
+   * **The answer is always announced, and a degrade says it degraded.** A fail-soft path with no
+   * counter is a quieter outage rather than a fixed one, and this one chooses which model spends
+   * the owner's quota — so the transcript must distinguish "classified as explore" from "could not
+   * classify, using explore". `classifyTask` never throws, so there is no catch here: its failure
+   * paths are values, carrying `classified: false` and a reason.
+   */
+  private async autoTaskChoice(
+    runId: string,
+    stepId: string,
+    task: string,
+    classTable: Record<TaskClass, StepModelChoice>,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): Promise<StepModelChoice> {
+    const cached = this.autoTaskClasses.get(runId);
+    const taskClass = cached ?? (await this.classifyOnce(runId, stepId, task, emit));
+    return classTable[taskClass];
+  }
+
+  /** The call itself, separated from the mapping so the CLASS is what gets cached — not one
+   *  runner's model. A chain that switches runner mid-run (a retarget, or a step naming its own
+   *  `runner`) must not re-classify, and must not carry the first runner's model into the second
+   *  runner's step. The class is a property of the task; the model is a property of the pair. */
+  private async classifyOnce(
+    runId: string,
+    stepId: string,
+    task: string,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): Promise<TaskClass> {
+    const result = await classifyTask(this.repoRoot, task);
+    this.autoTaskClasses.set(runId, result.taskClass);
+    const why = result.reason ? ` — ${result.reason}` : '';
+    emit({
+      type: 'note',
+      stepId,
+      message: result.classified
+        ? `task class: ${result.taskClass}${why}`
+        : `task class: ${result.taskClass} (could not classify${why})`,
+    });
+    return result.taskClass;
   }
 
   /**
@@ -2840,6 +2916,7 @@ export class RunManager {
     this.memoryPausing.delete(runId);
     this.lastNamerKey.delete(runId);
     this.forceStarted.delete(runId);
+    this.autoTaskClasses.delete(runId);
     // The run's slot is gone from busySlots() as of the deletes above — hand it
     // to the workspace's oldest queued run, in ANY project. Every terminal path
     // funnels through here, so this one call covers them all.
@@ -6066,7 +6143,31 @@ export class RunManager {
     // model came from `step.model ?? input.model` and the effort from `step.effort` at the spawn
     // site 180 lines below — two independent reads that a per-runner override would have pulled
     // apart, applying codex's model with Claude's ceiling.
-    const stepChoice = resolveStepModel(step, stepBackend, input.model, escalation.priorFailures);
+    // Resolved TWICE, deliberately, and the first call is the hole detector. `unpinned` asks
+    // "did any layer name anything?" using the very function that would fill the hole, rather than
+    // re-deriving that question from `step.byRunner` / `step.model` / `input.model` here — two
+    // expressions for one question is how they drift, and this one has to agree with
+    // `resolveStepModel`'s own precedence by construction. Both calls are pure.
+    const unpinned = resolveStepModel(step, stepBackend, input.model, escalation.priorFailures);
+    // `agentModelsLocked` is part of the gate, not just of the mapping below: under a lock
+    // `stepRawModel` is forced to `undefined`, so a classification would be paid for and then
+    // discarded. The one property this must not have is spending the owner's quota to compute a
+    // value nothing reads.
+    //
+    // Keyed on the runner having a TABLE, not on a runner name. `opencode` and `pi` have none —
+    // their models are discovered from the host — so they classify nothing and keep the behaviour
+    // they had before this existed, without a second list here to fall out of step with the first.
+    const classTable = CLASS_CHOICE_BY_RUNNER[stepBackend];
+    const autoChoice =
+      classTable &&
+      unpinned.model === undefined &&
+      unpinned.effort === undefined &&
+      !agentModelsLocked(this.repoRoot)
+        ? await this.autoTaskChoice(runId, step.id, input.task, classTable, emit)
+        : undefined;
+    const stepChoice = autoChoice
+      ? resolveStepModel(step, stepBackend, input.model, escalation.priorFailures, autoChoice)
+      : unpinned;
     // Hoisted rather than inlined into the call below, because it is now read TWICE — once by the
     // mapper and once by the record. Two copies of the same expression is exactly how the thing
     // that ran and the thing the record claims ran drift apart.
