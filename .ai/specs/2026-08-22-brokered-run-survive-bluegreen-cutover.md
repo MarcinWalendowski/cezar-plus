@@ -1,6 +1,16 @@
 # A brokered run is re-launched, not re-attached, across a blue-green cutover
 
-**Status:** QA Needed. **Note on this file's history:** an earlier pass of this same step wrote a
+**Status:** **Partial, QA Needed.** Phase 1 is implemented in `d65602b5` and pushed to
+`origin/cez/cd439910`, but as of 2026-08-24 it is not an ancestor of `origin/main` and is not in
+the deployed release `20260824T140312Z-a2a74f43`. Focused broker recovery tests passed 9/9, the
+combined broker and cluster suites passed 37/37, and typecheck passed; no lint script exists. The
+full root gate remained red at 11,383 passed, 3 failed, 4 skipped because of the separately specced
+stable gate blockers in `.ai/specs/2026-08-24-stable-test-gate-blockers.md`. Phase 2's controlled
+second-cutover production measurement has not run, and
+`.ai/analysis/2026-08-22-bluegreen-cutover-measurement.md` does not exist. Therefore all three
+task acceptance criteria remain open and Phase 3 must not mark the parent criterion MET.
+
+**Note on this file's history:** an earlier pass of this same step wrote a
 spec at this path and it was reviewed (verdict: revise) — but the file itself did not survive into
 this retry's worktree (no commit, `git log --all` has no entry for it, and the brief the first pass
 left under `.ai/specs/briefs/` is likewise gone). This is a **fresh write**, not an edit of that
@@ -196,9 +206,10 @@ receives `SIGTERM` and runs `shutdown()` is still running the *old* release's co
 symlink, so the cutover that installs Phase 1 exercises Phase 1's *absence*, not its presence. This
 chain's own `deploy` step is therefore the **install** cutover; Phase 2 measures across a **second**,
 subsequent `--strategy=blue-green` cutover (a redeploy of the same HEAD), whose outgoing process is
-the first one to actually run Phase 1's shutdown path. Phase 3 is a record-keeping follow-up (amend
-the parent spec's status header), explicitly out of scope for *this* step to execute (spec writing
-only) but named so the chain's later steps know to do it.
+the first one to actually run Phase 1's shutdown path. Phase 3 is a record-keeping follow-up. The
+parent spec's status header now correctly keeps criterion 1 open; its older historical `MET`
+passages remain preserved beneath explicit correction text until Phase 2 supplies evidence that
+can close the criterion.
 
 ### Phase 1 — close the non-boot `RunStore` flush gap
 
@@ -297,11 +308,10 @@ interrupted-or-reattached exactly like every other run, so anything held only in
 
 ### Phase 3 — mark the record (a later step's job, not this one's)
 
-Once Phase 2's results exist, amend the parent spec's status header (currently *"REOPENED 2026-08-21
-19:05 UTC … criterion 1 does not hold"*) in place — per the workspace's own correction convention,
-edit the stale header rather than appending below it — citing this file and the Phase 2 artifact.
-This spec does not do that edit itself (out of scope: "change no other file in this step"), but the
-chain's `document` step should, and should cite this file's path when it does.
+The document step has corrected the parent spec's status header in place to keep criterion 1 open
+and point here. Once Phase 2's results exist, amend that same header again, following the
+workspace's correction convention and citing both this file and the Phase 2 artifact. Do not mark
+the criterion `MET` before all three acceptance checks pass.
 
 ---
 

@@ -1,6 +1,23 @@
 # Non-disruptive cezar self-deploy / update
 
-**Status:** **QA Needed — REOPENED 2026-08-21 19:05 UTC.** This line read *"Done 2026-08-21 — both acceptance criteria measured"* and **criterion 1 does not hold on the blue-green cutover path**: a controlled re-measurement found the run RE-LAUNCHED, not re-attached. Criterion 2 stands. See "Criterion 1 was reopened by a controlled re-measurement". — **and NOT a prerequisite for anything**
+**Status:** **QA Needed, REOPENED 2026-08-21 19:05 UTC. Criterion 1 remains open as of
+2026-08-24.** The non-boot `RunStore` shutdown-flush hardening is implemented in `d65602b5` on
+`origin/cez/cd439910`, but it is not on `origin/main` or in the deployed release. The required
+paired second-cutover evidence does not exist yet: unchanged broker/meta pid and scope timestamp,
+an identical pre-cutover spool prefix hash, persisted `spoolDir` with non-zero `consumedOffset`,
+and the re-attach lifecycle line. See
+`.ai/specs/2026-08-22-brokered-run-survive-bluegreen-cutover.md`. Criterion 2 stands. This spec is
+not a prerequisite for self-deploy.
+
+**CORRECTED 2026-08-24:** the original reopened status is retained below. It remains historically
+correct about the failed 2026-08-21 measurement, but its nearby older `Criterion 1 ... MET` text is
+not the current verdict and must not be read as closing the reopened criterion.
+
+Original text: **QA Needed, REOPENED 2026-08-21 19:05 UTC.** This line read *"Done 2026-08-21,
+both acceptance criteria measured"* and **criterion 1 does not hold on the blue-green cutover
+path**: a controlled re-measurement found the run RE-LAUNCHED, not re-attached. Criterion 2 stands.
+See "Criterion 1 was reopened by a controlled re-measurement". This spec is not a prerequisite for
+anything.
 release `20260821T183127Z-be3aab61` since 2026-08-21 18:31:54 UTC (first cutover was
 `20260821T181100Z-ad0b5f17` at 18:11:08). **Criterion 1 (a deploy mid-run leaves the run alive and
 streaming) is MET, measured.** **Criterion 2 (cutover gap = 0) is MET at the listener** — 3790

@@ -3,6 +3,17 @@
 **Task id:** cd439910-d96d-4d32-9493-b39b5654d66d
 **Step:** 1/8 — Gather the record (this document is a brief, not a spec; no code was written)
 
+**CORRECTED 2026-08-24:** the diagnosis below was a research snapshot before the follow-up spec
+settled the mechanism. Its claims that none of the suspects had been ruled out, no post-reopen
+broker-isolation fix existed, and suspect 2 was the most promising are superseded by
+`.ai/specs/2026-08-22-brokered-run-survive-bluegreen-cutover.md`. Suspects 1 and 2 do not fit the
+measured failure. Suspect 3 was the original cause: `fde2dae8` derived the user runtime directory
+when `XDG_RUNTIME_DIR` was absent and `cf334d89` forwarded the user-scope environment through the
+child allowlist, moving brokers from `delegated` to `scope` isolation. A separate non-boot
+`RunStore` flush gap was then fixed in `d65602b5`, but that commit is only on the task branch and
+the required paired blue-green acceptance E2E remains unrun. The original research text is kept
+unchanged below.
+
 ## The problem, in this repository's own terms
 
 `RunManager.recover()` is supposed to re-attach to a still-alive brokered run's spool after
