@@ -3271,6 +3271,55 @@ invented; these are the names to use when one lands.
 > > second, I would have had two reds and a plausible story about which of my changes caused the new
 > > one.
 > >
+> > **44. THE RUN-2 FLAKE, INVESTIGATED — and the honest limit of what I can conclude cheaply.** The
+> > second red was `workflows/workspace-parallel.test.ts` → *"removes the directory, keeps `cez/<id8>`,
+> > and leaves no leftover entry on the record"*. I did NOT stop at calling it a flake, because it is a
+> > worktree test and I had just bounded `git()`, which is the kind of coincidence that deserves
+> > checking rather than a label.
+> >
+> > **What the import graph says, and it does NOT exonerate me.** The test file itself never imports
+> > `server/git.ts` — it shells out with its own `execFileSync`. But it imports `RunManager` from
+> > `workflows/run.ts`, and `run.ts:59` imports `getHeadCommit` and `getRepoInfo`. So my changed
+> > function IS in the transitive path, and "the test doesn't import it" would have been a false
+> > exoneration.
+> >
+> > **Reproduction profile, measured:**
+> >
+> > | scope | runs | failures |
+> > | --- | --- | --- |
+> > | that file alone | 5 | **0** |
+> > | `src/workflows/` + `src/workspace/` (59 files) | see below | 0 so far |
+> > | full suite (609 files) | 2 | **1** |
+> >
+> > So it needs full-suite contention to fire. **That also kills the comparison experiment I set up:**
+> > running a `git.ts`-reverted arm against a subset that never reproduces the flake would show zero on
+> > both sides and prove nothing — a negative control with no trigger. Distinguishing "pre-existing
+> > flake" from "my change made a rare flake likelier" would need many FULL-suite runs per arm, which
+> > is on the order of an hour of box time for a statistical answer about test flakiness.
+> >
+> > **What IS established:**
+> > 1. It **passed in gate run 1 on the byte-identical tree**, my change included. A deterministic
+> >    regression cannot pass. So this is not one.
+> > 2. It passes 5/5 in isolation, so the assertion itself is not broken.
+> > 3. My bound acts at **30,000ms**; the failure occurs at **206ms**. The timeout mechanism cannot be
+> >    the cause.
+> >
+> > **4. RESOLVED BY MEASUREMENT, after my first answer was wrong.** I initially wrote that a timing
+> > perturbation was "implausible because the timer never fires at these durations". That argument
+> > covers the timer FIRING and says nothing about the cost of CREATING one, so I instrumented `git()`
+> > and counted: **79 invocations in that one test file** (30 `remote`, 49 `rev-parse`). The mechanism
+> > is therefore live and at real volume — not dead, as I had implied.
+> >
+> > So I measured the magnitude instead of asserting it: 79 × (`setTimeout` + `unref` + `clearTimeout`)
+> > costs **10.6 microseconds**, which is **0.005% of the 206ms** window the flaky assertion runs in.
+> > Five orders of magnitude short. Combined with (1) — it passed on the byte-identical tree — the
+> > change is exonerated on magnitude, with the mechanism acknowledged rather than waved away.
+> >
+> > **The reusable lesson, and it caught me twice in one investigation: "the guard never fires" is not
+> > the same claim as "the guard costs nothing".** A bound that never trips still allocates, schedules
+> > and clears on every call. If you are going to dismiss an added mechanism, dismiss it on a measured
+> > number, not on the branch you know it will not take.
+> >
 > > **Standing constraints, unchanged:** push to `origin` only, never `upstream`, never a bare
 > > `git push`. Do NOT merge PR #9 (it auto-deploys to `prod-host`, where the owner's agents
 > > run — the owner's call, and the hard prerequisite for any E2E). Do NOT run the Access

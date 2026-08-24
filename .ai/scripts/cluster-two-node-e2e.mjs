@@ -216,14 +216,25 @@ async function main() {
     );
   }
 
-  // The credential is the spoke's own, written by `join` under 0600.
-  const spokeCred = existsSync(join(spokeHome, 'cluster')) ? readJsonIfPresent(join(spokeHome, 'cluster', 'node.json')) : undefined;
+  // The credential is the spoke's own, written by `join` under 0600. Asserted on CONTENT, not on the
+  // directory existing: "a cluster dir is present" is satisfied by almost anything, including a dir
+  // the hub created for its own reasons. What must be true is that THIS home holds a SPOKE identity
+  // pointing at THIS hub — which is also the fact the runtime compares against the environment.
+  const spokeCred = readJsonIfPresent(join(spokeHome, 'cluster', 'node.json'));
   check(
-    "the spoke's own home holds its cluster state",
-    existsSync(join(spokeHome, 'cluster')),
-    `no cluster dir under ${spokeHome}`,
+    "the spoke's own home holds a SPOKE credential naming this hub",
+    spokeCred?.role === 'spoke' && spokeCred?.hubUrl === hubUrl && typeof spokeCred?.secret === 'string',
+    spokeCred
+      ? `role=${spokeCred.role} hubUrl=${spokeCred.hubUrl} (expected spoke / ${hubUrl})`
+      : `no readable credential at ${join(spokeHome, 'cluster', 'node.json')}`,
   );
-  if (spokeCred) log(`spoke cluster state present (${Object.keys(spokeCred).join(', ')})`);
+  // And the hub must NOT have written itself a spoke credential — the mirror of the roster check.
+  const hubCred = readJsonIfPresent(join(hubHome, 'cluster', 'node.json'));
+  check(
+    "the hub's own identity is a HUB, not a spoke of anything",
+    hubCred?.role === 'hub',
+    hubCred ? `hub identity role=${hubCred.role}` : `no readable identity at ${join(hubHome, 'cluster', 'node.json')}`,
+  );
 
   // A SEPARATE CLI PROCESS reading what the SERVER process wrote — two processes, two homes.
   const active = JSON.parse(await cli(hubHome, ['cluster', 'active', '--json'], { CEZ_CLUSTER_HUB: hubUrl }));
