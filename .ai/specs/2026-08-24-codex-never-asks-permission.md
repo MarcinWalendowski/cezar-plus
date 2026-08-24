@@ -1,6 +1,6 @@
 # Codex never asks for permission: cezar answers the approval requests it currently ignores
 
-**Status:** Implemented (QA Needed: runtime E2E not run)
+**Status:** Implemented and runtime verified (release gate blocked by existing unrelated test failures)
 **Date:** 2026-08-24
 **Repo:** `cezar`
 **Owner request:** "when running codex apply similar option as in claude --dangerously bypass
@@ -378,6 +378,21 @@ protected entry; CHANGELOG under 🐛 Fixes (the hang) + a line for the D8 doc c
 
 ## Verification
 
+### Runtime result, 2026-08-24
+
+Two real spawned Codex runs completed without parking, waiting, or an inactivity stop. Run
+`505618b2-b747-4aca-a33c-1ef82957c89b` wrote a file, ran `printf shell-ok`, and reached
+`https://api.github.com/zen`. Run `8261e10a-06d1-4a8f-b7a8-53b88392bf8a` repeated the task with
+`CEZ_CODEX_NETWORK=0`: file and shell operations succeeded, the network request failed with DNS
+denial and exit 6, and Codex handled the denial and completed. Both run records contain zero
+`requestApproval` or `auto-approved` events, so the thread-level `approvalPolicy: never` posture
+held in these runs and the live responder branch was not exercised.
+
+Focused tests passed 95 of 95. Typecheck, `test:unit` (53 of 53), build, and `test:package` (18 of
+18) passed. The full Vitest gate remains red on existing unrelated suites, including
+`knowledge/catalog.test.ts`, `workflows/system-prompt.test.ts`, and `sources/scheduler.test.ts`.
+The feature therefore remains blocked from release despite passing its focused and runtime gates.
+
 Every guard names the mutation that must turn it red, no guard is listed that a broken
 implementation would still pass.
 
@@ -474,4 +489,3 @@ behaves. On `prod-host`:
    fails as a *denied command the agent handles*, not as a prompt. Evidence is the same read as
    step 4: `grep -c 'requestApproval\|auto-approved' .ai/cezar/runs/<runId>.ndjson`, reported
    either way.
-
