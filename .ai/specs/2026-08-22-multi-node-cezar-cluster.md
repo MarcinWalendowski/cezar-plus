@@ -3091,6 +3091,84 @@ invented; these are the names to use when one lands.
 > > "unreported and failing" — the tempting move — the harness defect would have stayed open and item
 > > 11 would still read as unfixed.
 > >
+> > **37. THE GIT WEDGE IS NOW CLOSED AT THE CAUSE, not just on the cluster's four calls.**
+> > `server/git.ts`'s private `git()` had no `timeout`, so every one of its consumers inherited an
+> > unbounded wait. Measured: **45 production call sites** outside that file
+> > (`getRepoInfo` 33, `getHeadCommit` 8, `getStatus` 2, `getLog` 1, `getDiff` 1). `cluster/peers.ts`
+> > could only wrap three of them from the outside, and its own docblock at `:384` named this function
+> > as the real fix — *"flagged rather than half-done here"*. Done now.
+> >
+> > Same ladder as `runGit`, and for the same measured reason (`timeout` guarantees only that a SIGNAL
+> > is sent; Node settles on child EXIT): SIGTERM at `timeout`, then SIGKILL plus destroying our pipe
+> > ends after a 2s grace, then **abandon and throw regardless of whether the child ever died**.
+> > Signature unchanged, so no call site moved. Default is deliberately generous — **30s**, tunable via
+> > `CEZ_GIT_TIMEOUT_MS` — because this exists to convert "hangs forever" into "fails", not to impose
+> > an SLA on 45 working call sites; an unparseable or non-positive value falls back to the default
+> > rather than reading as "disabled".
+> >
+> > **Proven by a PATH-shimmed SIGTERM-deaf `git`** (`server/git-bounded.test.ts`, 3 tests). Because
+> > `execFile('git', …)` resolves through PATH, a shim named `git` running `trap '' TERM; sleep 30`
+> > exercises the real production path. **The load-bearing assertion is the MESSAGE, not the
+> > rejection**: a rejection alone cannot separate "execFile's own timeout rejected us" from "we hit
+> > our deadline and abandoned the child", and only the second is the fix — so the test matches
+> > `/abandoned/`. Two controls keep it honest: a shim that behaves must still return the parsed
+> > answer (or a `git.ts` that rejects unconditionally would pass), and a shim exiting 128 must reject
+> > with ITS error and NOT the abandonment message.
+> >
+> > Mutation-verified: forcing the deadline to 600_000 kills the first test (times out at 20s) and
+> > leaves both controls green. Restored; 3/3 green; repo typecheck clean.
+> >
+> > **38. THE REVOKE SWEEP COULD LATCH ITSELF OFF FOREVER — latent, closed, and the open item I came
+> > to fix turned out to be one I should NOT.**
+> >
+> > I had this on the list as *"the one-line `DELETE /cluster/nodes/:nodeId` → `refuse()` wiring for an
+> > immediate revoke cut."* Both halves of that note were wrong. It is **not one line** — `linkServer`
+> > is a local `let` inside `startClusterRuntime` (`cluster-routes.ts:1134`), not reachable from the
+> > route builder, so it needs threading a getter through. And it is **not desirable**:
+> > `link-server.ts:600-611` already reasoned it out and chose the unconditional sweep *over* the
+> > immediate cut, because `cez cluster revoke` runs in a separate CLI process where no
+> > `ClusterLinkServer` exists, and because making the cut conditional on every revoke path
+> > remembering to call `refuse` is *"exactly the shape that produced `disableNode`'s own earlier
+> > `if (found)` hole."* **Closed as won't-do**, so a later session does not "fix" a deliberate
+> > decision. The residual exposure — a revoked node served for up to one reap tick (30s in
+> > production) — is documented there and accepted.
+> >
+> > **Reading that code did surface a real hazard, of a class this branch has hit before.**
+> > `sweepRevoked` guards re-entry with `sweepInFlight`, released in a `finally`. Its per-node `try`
+> > catches a **rejection** — but `await this.lookupSecret(...)` that **never settles** runs neither the
+> > `catch` nor the `finally`. One hanging re-check therefore latches `sweepInFlight` `true`
+> > permanently, every later sweep returns at the guard, and **revocation silently stops working for
+> > the entire cluster** — silently because the only warn on that path is in the `catch` a hang never
+> > reaches. The docblock reasons carefully about the THROW case (*"an unreadable secret store must not
+> > self-DoS the cluster"*) and not about the HANG case.
+> >
+> > **LATENT, NOT LIVE — stated plainly so nobody records a shipped defect.** Production's lookup
+> > (`node-secrets.ts#lookupNodeSecret`) is `return readNodeSecretsMap(options)[nodeId]` — it INDEXES
+> > the result, so the read is synchronous and cannot hang. A sync read on a stalled mount blocks the
+> > event loop instead: worse, but immediately visible, and it cannot latch a flag it never yields to.
+> > The exposure is the **injectable seam** (`ClusterLinkServerOptions#lookupSecret`) for any consumer
+> > that supplies an async/network-backed lookup.
+> >
+> > Fixed with `lookupSecretBounded` — a race that converts non-settlement into a sentinel while
+> > letting a **rejection propagate unchanged**, so the existing catch keeps its policy. The timeout
+> > branch takes the same action as a throw (warn, leave the link up, retry next sweep) because "the
+> > store did not answer" is not evidence of revocation; the difference that matters is that it
+> > RETURNS, so the `finally` runs. Tunable via `CEZ_CLUSTER_SECRET_LOOKUP_TIMEOUT_MS`, default 5s,
+> > unparseable/non-positive falling back to the default rather than reading as "disabled".
+> >
+> > **The upgrade-path lookup (`:185`) is deliberately NOT bounded, and that is a scope decision, not
+> > an oversight.** A hang there holds one socket upgrade open — bounded blast radius, and the client
+> > times out on its own side. Bounding it needs a refuse reason meaning "the secret store did not
+> > answer", and every honest option is bad: `unknown-node` asserts something false about the node, and
+> > a new `ClusterLinkRefuseReason` member is a contract change that reddens the exhaustive reason
+> > gates. **Flagged in the code rather than mislabelled in the wire protocol.**
+> >
+> > Proven: 35/35 in `link-server.test.ts`. Removing the race kills EXACTLY the new test (the 5s
+> > `waitFor` expires) and leaves all 34 others green — **including the throwing-lookup test, which is
+> > structurally incapable of seeing this defect.** That is the whole argument for why a second test was
+> > needed rather than an extension of the first. Full cluster suite after restore: 830/830 across 35
+> > files.
+> >
 > > **Standing constraints, unchanged:** push to `origin` only, never `upstream`, never a bare
 > > `git push`. Do NOT merge PR #9 (it auto-deploys to `prod-host`, where the owner's agents
 > > run — the owner's call, and the hard prerequisite for any E2E). Do NOT run the Access

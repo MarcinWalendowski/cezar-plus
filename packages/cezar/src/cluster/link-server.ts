@@ -168,9 +168,69 @@ function headerValue(headers: IncomingMessage['headers'], name: string): string 
   return Array.isArray(raw) ? raw[0] : raw;
 }
 
+/** How long `sweepRevoked` will wait for one node's credential re-check before giving up on it for
+ *  this tick. Generous: the bound exists to stop a hang, not to police a slow store. */
+const DEFAULT_SECRET_LOOKUP_TIMEOUT_MS = 5_000;
+
+/** `CEZ_CLUSTER_SECRET_LOOKUP_TIMEOUT_MS` — an env var, not a config file, per this workspace's
+ *  convention, and the same shape as `peers.ts`'s `CEZ_CLUSTER_GIT_TIMEOUT_MS`. Anything unparseable
+ *  or non-positive falls back to the default: the one thing this must never do is read as
+ *  "disabled", because an unbounded re-check is the defect the bound exists to close. */
+function secretLookupTimeoutMs(): number {
+  const raw = process.env.CEZ_CLUSTER_SECRET_LOOKUP_TIMEOUT_MS;
+  const parsed = raw === undefined ? Number.NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SECRET_LOOKUP_TIMEOUT_MS;
+}
+
+/** Distinguishable from a real `undefined` (no stored secret — which IS revocation) and from a
+ *  rejection. Returned rather than thrown so each caller keeps its own policy. */
+const LOOKUP_TIMED_OUT = Symbol('cluster-link-secret-lookup-timed-out');
+
+/**
+ * `lookupSecret` is an INJECTABLE seam (`ClusterLinkServerOptions#lookupSecret`), and a promise that
+ * never SETTLES is a different failure from one that rejects: a rejection runs the caller's `catch`
+ * and its `finally`; a non-settlement runs neither. `sweepRevoked` guards re-entry with
+ * `sweepInFlight`, reset in a `finally` — so a lookup that hangs latches that flag `true` **forever**
+ * and every later sweep returns at the guard. The consequence is not a slow sweep: it is that
+ * revocation silently stops working for the whole cluster, with no warning, because the only warn on
+ * that path fires in the `catch` a hang never reaches.
+ *
+ * **Latent, not live — stated so nobody records this as a shipped defect.** Production's own lookup
+ * (`node-secrets.ts#lookupNodeSecret`) indexes a SYNCHRONOUS read, so it cannot hang; a sync read on
+ * a stalled mount blocks the event loop instead, which is worse but immediately visible and cannot
+ * latch a flag it never yields to. This bounds the SEAM, for any consumer that injects an
+ * async/network-backed lookup.
+ */
+async function lookupSecretBounded(
+  lookup: (nodeId: ClusterNodeId) => Promise<string | undefined>,
+  nodeId: ClusterNodeId,
+  timeoutMs: number = secretLookupTimeoutMs(),
+): Promise<string | undefined | typeof LOOKUP_TIMED_OUT> {
+  let timer: NodeJS.Timeout | undefined;
+  const bound = new Promise<typeof LOOKUP_TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(LOOKUP_TIMED_OUT), timeoutMs);
+    // A CLI or a shutting-down server must be able to exit with a re-check outstanding.
+    timer.unref?.();
+  });
+  try {
+    // A REJECTION still propagates, deliberately: the caller's existing catch is the right policy
+    // for "the store answered, with an error". Only non-settlement is converted.
+    return await Promise.race([lookup(nodeId), bound]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** Verifies the signed, freshness-bounded principal on the upgrade request against the enrolled
  *  node's secret. Never consults the Origin header: a node has no origin, and a browser must not be
- *  able to reach this path at all. */
+ *  able to reach this path at all.
+ *
+ *  **NOT bounded, deliberately — see `lookupSecretBounded`.** A hanging `lookupSecret` here holds one
+ *  socket upgrade open indefinitely, which is a bounded blast radius (one client, which times out on
+ *  its own side) and not the cluster-wide latch the sweep has. Bounding it would need a refuse reason
+ *  meaning "the secret store did not answer", and the honest options are all bad: `unknown-node` says
+ *  something false about the node, and a new `ClusterLinkRefuseReason` member is a contract change
+ *  that reddens the exhaustive reason gates. Flagged rather than mislabelled. */
 export async function authenticateLinkUpgrade(
   req: IncomingMessage,
   lookupSecret: (nodeId: ClusterNodeId) => Promise<string | undefined>,
@@ -626,7 +686,18 @@ export class ClusterLinkServer {
       for (const node of [...this.nodes.values()]) {
         let secret: string | undefined;
         try {
-          secret = await this.lookupSecret(node.nodeId);
+          const looked = await lookupSecretBounded((id) => this.lookupSecret(id), node.nodeId);
+          if (looked === LOOKUP_TIMED_OUT) {
+            // Same policy as a throw below — leave the link up and retry — because "the store did
+            // not answer" is not evidence of revocation. The difference that matters is that this
+            // branch RETURNS, so the `finally` runs and `sweepInFlight` is released.
+            this.options.warn?.(
+              `cluster link: re-checking ${node.nodeId}'s credential did not answer within ` +
+                `${secretLookupTimeoutMs()}ms, leaving the link up and retrying next sweep`,
+            );
+            continue;
+          }
+          secret = looked;
         } catch (err) {
           this.options.warn?.(
             `cluster link: could not re-check ${node.nodeId}'s credential, leaving the link up and retrying next sweep: ` +

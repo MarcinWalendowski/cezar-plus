@@ -449,6 +449,67 @@ describe('ClusterLinkServer', () => {
       expect(warnings.some((m) => m.includes('store unavailable'))).toBe(true);
       c.ws.close();
     });
+
+    it('a lookup that HANGS on one node still revokes another — a non-settling re-check must not latch the sweep forever', async () => {
+      // A REJECTION and a NON-SETTLEMENT are different failures, and only the first is covered by
+      // the test above. `sweepRevoked` guards re-entry with `sweepInFlight`, released in a `finally`
+      // — and a `finally` never runs for an await that never settles. So one hanging credential
+      // re-check latches that flag `true` permanently and every later sweep returns at the guard:
+      // revocation stops working for the WHOLE cluster, silently, because the only warn on that
+      // path lives in the `catch` a hang never reaches.
+      const HANG = 'node-hang';
+      const onFrame = vi.fn(async (): Promise<ClusterDownlinkFrame[]> => []);
+      const warnings: string[] = [];
+      let hanging = false;
+      let revoked = false;
+      const previous = process.env.CEZ_CLUSTER_SECRET_LOOKUP_TIMEOUT_MS;
+      process.env.CEZ_CLUSTER_SECRET_LOOKUP_TIMEOUT_MS = '100';
+      try {
+        const { url, server } = await boot(onFrame, {
+          lookupSecret: async (nodeId) => {
+            // Both nodes must be able to UPGRADE first — the upgrade path reads this same lookup,
+            // so a lookup that hangs from the start would simply never let the node connect, and
+            // the test would prove nothing about the sweep.
+            if (nodeId === HANG) return hanging ? new Promise<string>(() => {}) : SECRET;
+            if (nodeId === NODE_ID) return revoked ? undefined : SECRET;
+            return undefined;
+          },
+          heartbeatMs: 250,
+          helloDeadlineMs: 60_000,
+          warn: (m) => warnings.push(m),
+        });
+
+        // Insertion order is the sweep's iteration order (`[...this.nodes.values()]`), so the
+        // hanging node must go FIRST or it never blocks the one being revoked.
+        const hang = connectRaw(url, signedHeaders(HANG, SECRET, new Date().toISOString()));
+        await hang.waitOpen();
+        hang.send(validHello(HANG));
+        const victim = await connectNode(url);
+        victim.send(validHello(NODE_ID));
+        await vi.waitFor(() => expect(server.connectedNodes()).toEqual([HANG, NODE_ID]));
+
+        hanging = true;
+        revoked = true;
+
+        // THE ASSERTION: the revoked node goes, even though the sweep hit a non-settling re-check
+        // before reaching it. Without the bound this never happens, at any timeout.
+        await vi.waitFor(() => expect(server.connectedNodes()).not.toContain(NODE_ID), { timeout: 5_000 });
+
+        // DISCRIMINATOR: it went via the timeout branch, not by some other path that happens to
+        // produce the same visible outcome.
+        expect(warnings.some((m) => m.includes('did not answer within'))).toBe(true);
+
+        // FAIL-SAFE CONTROL: a store that did not answer is NOT evidence of revocation, so the
+        // hanging node keeps its link. If this ever flips, the bound has become a self-DoS.
+        expect(server.connectedNodes()).toContain(HANG);
+
+        hang.ws.close();
+        victim.ws.close();
+      } finally {
+        if (previous === undefined) delete process.env.CEZ_CLUSTER_SECRET_LOOKUP_TIMEOUT_MS;
+        else process.env.CEZ_CLUSTER_SECRET_LOOKUP_TIMEOUT_MS = previous;
+      }
+    }, 20_000);
   });
 
   // ---- D40a: the hub ends a socket that upgraded and never said anything usable ----------------

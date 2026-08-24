@@ -21,9 +21,88 @@ export interface LogEntry {
   when: string;
 }
 
+/**
+ * BOUNDED, since 2026-08-24. Every git call from this module used to be able to hang forever: no
+ * `timeout`, and `execFile` resolves only on the child's exit. 45 production call sites across this
+ * repo inherited that, and `cluster/peers.ts` had to wrap three of them (`getRepoInfo`,
+ * `getHeadCommit`, `getStatus`) in its own deadline because it could not fix the cause from there —
+ * its comment named this function as the real fix. This is it.
+ *
+ * **`timeout` alone is not the bound.** It guarantees only that a SIGNAL is sent; Node settles the
+ * promise on the child's EXIT. A git that ignores SIGTERM — or one blocked in uninterruptible I/O on
+ * a stalled network mount, which ignores SIGKILL too — leaves the caller waiting exactly as long as
+ * before. Measured on Node 22: a `trap '' TERM; sleep 25` child was still pending at 4000ms with
+ * `killed: true` already set. So the ladder is: SIGTERM at `timeout` (git installs handlers and
+ * removes `.git/index.lock` on the way out — SIGKILLing it mid-write can wedge every later git in
+ * that repo, trading this stall for a permanent one), SIGKILL plus closing OUR pipe ends
+ * `GIT_KILL_GRACE_MS` later, and then we stop waiting and throw regardless of whether the child ever
+ * died. Abandoning it is the point: a child that cannot be reaped must not be able to hold a caller.
+ *
+ * The default is deliberately GENEROUS. This exists to convert "hangs forever" into "fails", not to
+ * enforce a tight SLA — a cold cache on a very large checkout can honestly need seconds, and a false
+ * timeout here would degrade 45 call sites that work fine today. Tune with `CEZ_GIT_TIMEOUT_MS` when
+ * a machine genuinely needs longer.
+ */
+const DEFAULT_GIT_TIMEOUT_MS = 30_000;
+
+/** Between the SIGTERM `execFile`'s own `timeout` sends and the SIGKILL + giving up. Non-zero so the
+ *  ordinary case still surfaces `execFile`'s real rejection rather than a synthesised one. */
+const GIT_KILL_GRACE_MS = 2_000;
+
+/** An env var, not a config file, per this workspace's convention. Anything unparseable or
+ *  non-positive falls back to the default — the one thing this must never do is read as "disabled",
+ *  because an unbounded git call is the defect this function exists to close. */
+function gitTimeoutMs(): number {
+  const raw = process.env.CEZ_GIT_TIMEOUT_MS;
+  const parsed = raw === undefined ? Number.NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_GIT_TIMEOUT_MS;
+}
+
 async function git(root: string, args: string[]): Promise<string> {
-  const { stdout } = await exec('git', args, { cwd: root, maxBuffer: 10 * 1024 * 1024 });
-  return stdout;
+  const pending = exec('git', args, {
+    cwd: root,
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: gitTimeoutMs(),
+    killSignal: 'SIGTERM',
+  });
+
+  // Recorded into a variable rather than raced as a rejecting promise: if the deadline wins, a
+  // rejection arriving afterwards must already have a handler attached or it is an unhandled
+  // rejection that can take the process down.
+  let outcome: { ok: true; stdout: string } | { ok: false; err: unknown } | undefined;
+  const settled = pending.then(
+    ({ stdout }) => {
+      outcome = { ok: true, stdout: String(stdout) };
+    },
+    (err: unknown) => {
+      outcome = { ok: false, err };
+    },
+  );
+
+  let deadline: NodeJS.Timeout | undefined;
+  const abandoned = new Promise<void>((resolve) => {
+    deadline = setTimeout(resolve, gitTimeoutMs() + GIT_KILL_GRACE_MS);
+    // A CLI process must be able to exit with a git call still outstanding.
+    deadline.unref?.();
+  });
+
+  try {
+    await Promise.race([settled, abandoned]);
+    if (outcome === undefined) {
+      // SIGTERM has already been sent and ignored — otherwise the child would have exited and
+      // `settled` would have won this race.
+      pending.child.kill('SIGKILL');
+      pending.child.stdout?.destroy();
+      pending.child.stderr?.destroy();
+      throw new Error(
+        `git ${args[0] ?? ''} in ${root} did not finish within ${gitTimeoutMs() + GIT_KILL_GRACE_MS}ms and was abandoned`,
+      );
+    }
+    if (!outcome.ok) throw outcome.err;
+    return outcome.stdout;
+  } finally {
+    if (deadline) clearTimeout(deadline);
+  }
 }
 
 /** Null when `dir` isn't inside a git repository. */
