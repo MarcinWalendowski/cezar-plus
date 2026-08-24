@@ -79,6 +79,9 @@ describe('cluster/hub-autostart-dispatch', () => {
       identity: identity(),
       semaphore: semaphore(),
       connectedNodeIds: () => [],
+      // A stand-in for the hub's real `hubSeq` counter. Returns a fixed range so a test can assert
+      // the number that reaches the record came from HERE and was not invented downstream.
+      allocateHubSeq: async () => ({ from: 7, to: 7 }),
       env: env(),
       warn: vi.fn(),
       ...overrides,
@@ -101,7 +104,10 @@ describe('cluster/hub-autostart-dispatch', () => {
     const place = createHubAutostartDispatch(deps({ dispatcher: hub }));
     const outcome = await place.place({ todo, workflow, repoRoot, dataDir: join(repoRoot, '.ai/cezar') });
 
-    expect(outcome).toEqual({ start: 'local' });
+    // `clustered: false` is the load-bearing half. Being clustered is a property of the PROJECT,
+    // not the node: without this the hub asks itself for an acknowledgement, gets none, and
+    // refuses `hub-unconfirmed` — so an unpaired todo runs and is never stamped.
+    expect(outcome).toEqual({ start: 'local', startOptions: { clustered: false } });
     expect(dispatch).not.toHaveBeenCalled();
   });
 
@@ -141,7 +147,25 @@ describe('cluster/hub-autostart-dispatch', () => {
     const place = createHubAutostartDispatch(deps({ dispatcher: hub }));
     const outcome = await place.place({ todo, workflow, repoRoot, dataDir: join(repoRoot, '.ai/cezar') });
 
-    expect(outcome).toEqual({ start: 'local' });
+    // PAIRED and placed here, so the claim IS clustered and needs an acknowledgement — from the
+    // one node that could give it, which is this one.
+    expect(outcome.start).toBe('local');
+    const startOptions = (outcome as { startOptions?: { clustered?: boolean; confirmStart?: unknown } }).startOptions;
+    expect(startOptions?.clustered).toBe(true);
+    expect(typeof startOptions?.confirmStart).toBe('function');
+
+    // Exercised, not merely present: a confirmer that exists and answers nothing leaves exactly the
+    // `hub-unconfirmed` refusal this whole seam is here to end.
+    const confirm = startOptions!.confirmStart as (c: {
+      dataDir: string;
+      todoId: string;
+      taskId: string;
+    }) => Promise<{ accepted: boolean; hubSeq: number; opId: string; fields?: Record<string, unknown> }>;
+    const ack = await confirm({ dataDir: join(repoRoot, '.ai/cezar'), todoId: 'todo-1', taskId: 'run-1' });
+    expect(ack.accepted).toBe(true);
+    expect(ack.hubSeq).toBe(7); // from the injected allocator, not invented
+    expect(ack.fields?.startedOn).toBe('hub-1');
+    expect(ack.opId.length).toBeLessThanOrEqual(64); // the contract's bound
   });
 
   it('a DECLINED dispatch (already-dispatched) becomes {start: "none"} naming the EXISTING dispatch, not a new reason', async () => {
