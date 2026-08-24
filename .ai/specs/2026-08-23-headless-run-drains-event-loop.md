@@ -1,5 +1,70 @@
 # Headless Run Event Liveness
 
+**VERIFIED 2026-08-24 (verification step). Read this block before the two below: it is the only
+one written after anything was actually executed, and it settles AC1/AC3 and re-scopes AC2.**
+
+- **Integration (§0).** `main` had moved again to `c328ec06`; merged into `cez/eeceb869` at
+  `8426420a`, clean, **zero conflicts** (`merge-tree --write-tree` exit 0, unlike the `8790d334`
+  reading below). The anchored registry grep still returns exactly **7**
+  (`run.ts:972/976/977/983/985/986/1036`), and `git diff 3e3977c7 origin/main -- run.ts` filtered
+  to `new Map<`/`new Set<`/`private readonly` is **empty**: `main` added no eighth run-state
+  registry across either merge, so `runLiveness` is still complete. Re-anchored in `index.ts`:
+  `beforeExit` `:1106`, keep-alive `:1107`, `startRun` `:1119`.
+- **Gates (§7), from the repo root.** `npm run typecheck` **exit 0**. `npm run test:unit`
+  **exit 0, `# pass 53 / # fail 0`**. `npm run build` **exit 0** (`check:pack ok — 1236 files`).
+  `npm test` **exit 1: `Test Files 6 failed | 620 passed | 2 skipped (628)`, `Tests 15 failed |
+  11723 passed | 4 skipped (11742)`**, and **every one of those 15 is pre-existing on `main`**,
+  proved rather than assumed: the same suite on a clean `origin/main` worktree (`c328ec06`,
+  hardlinked `node_modules` so it tests its own tree) is **`Tests 16 failed | 11707 passed`**, and
+  `comm` over the two sorted failure-name lists shows **zero failures present on this branch and
+  absent on `main`**. The one extra on `main` is a `|web|` onboarding flake. So this branch's
+  failure set is a strict **subset** of `main`'s. The reds are `system-prompt.test.ts` (8),
+  `step-stopped.test.ts` (3), `config-api`, `pasted-attachments`, `scheduler`, and the
+  long-documented `catalog.test.ts` C18 timing case.
+- **This spec's own tests are green and were confirmed to actually run** (absence from a vitest
+  log proves nothing: it only prints failures). Run explicitly with `--reporter=verbose`:
+  `src/runs/run-exit-guard.test.ts` **7 passed** and `src/workflows/run-liveness.test.ts`
+  **8 passed**, i.e. `Test Files 2 passed (2)`, `Tests 15 passed (15)`, covering all seven liveness
+  sources, both miss paths and the terminal-branch totality case.
+- **AC3 is CLOSED, by three independent measurements.**
+  1. **Fault injection (§2).** `CEZ_DRY_RUN=1 CEZ_RUN_FAULT=stall-step timeout 45 node
+     dist/index.js run 'mock:done'` → **exit 124** with the record still `running`. That is the
+     predicted post-P2 behaviour, not a defect: a stalled agent step keeps the run in `active`,
+     so `runLiveness` correctly reports live and the wedge correctly does **not** fire. The
+     process **hangs instead of exiting 0**, which is exactly the class AC3 names.
+  2. **Healthy path (§1/§4).** A real dry run ends **exit 1** with
+     `status: "failed"` and the failing step's error **on the record**. Never `exit 0` with a
+     `running` row.
+  3. **Resource probe (§1), like-for-like against unfixed `main`.** Same fixture, same probe,
+     same run shape: **unfixed `main` 15 single-handle windows / 45 transitions; this branch 1 /
+     46**. Transition ref-sets containing `refd=[]`: **0**. The single remaining window is
+     `[probe +401ms] refd=[FSReqPromise]`, in **boot**, before the keep-alive arms (present by
+     +440ms) and before `startRun` creates a record, so a drain there has no run to leave
+     `running`, so it is outside the class. The §1 prediction of exactly 0 was therefore not
+     met, and the reason is recorded here rather than rounded up.
+- **AC2 is NOT met, and the blocker is a defect this spec never predicted.**
+  `npm run test:package` is **`# pass 17 / # fail 1`** (`PKG_EXIT=1`), **idle and again under an
+  8-way busy-loop load**, identical both times, which is itself evidence the liveness class is
+  closed, since the original failure was load-sensitive. The one red is the AC2 case by name,
+  `test/e2e/package-cli.test.ts:14`, and it now fails for a **completely different reason**:
+  ```
+  ✗ You've hit your usage limit. Upgrade to Pro (…) or try again at Aug 31st, 2026 12:32 PM.
+  ```
+  **The same case fails identically on clean `origin/main`** (`# pass 17 / # fail 1`, same
+  message), so it is neither caused nor fixed by this branch. **Root cause, read from source:**
+  `resolveCodexExecutable()` (`src/core/codex-app-server-transport.ts:20`) is
+  `override ?? process.env.CEZ_CODEX_BIN ?? 'codex'`, and it has **no `CEZ_DRY_RUN` branch**, while
+  the Claude runner does (`src/core/claude-cli-runner.ts:137`, `… ? mockClaudePath() : 'claude'`).
+  Since `main`'s ten-stage default workflow pins step 2 (`review-spec`) to `gpt-5.6-sol`, a
+  `CEZ_DRY_RUN=1` run **spawns the real `codex` CLI**, which is out of quota until Aug 31. A
+  codex app-server mock exists but only as a test fixture
+  (`src/core/__fixtures__/codex/mock-codex-app-server.mjs`, 223 lines), not in the packaged
+  `scripts/`. Closing AC2 means shipping a codex dry-run mock, a separate defect and a separate
+  concept, so it wants its own spec rather than being smuggled into this one.
+- **The original exit-0 symptom is no longer reproducible on `main` either**, because the quota
+  failure now aborts the workflow at step 2 before the drain window is reached. AC1's bisect
+  result (`a7510b2f`) stands unchanged; it was answered statically and needed no build.
+
 **REVISED 2026-08-24 (spec step of the re-run, against HEAD `7a19ca72`).** Read this block
 first: it re-anchors the two below, which are correct about mechanism and stale about line
 numbers and git position.
@@ -32,9 +97,13 @@ numbers and git position.
   `git merge-tree --write-tree HEAD main` exits **1**, with exactly one conflicted path and it
   is a document: `.ai/specs/briefs/2026-08-23-headless-run-exits-mid-workflow.md` (add/add).
   `run.ts` auto-merges. Verification §0 runs again with these numbers.
-- **Still nothing has been executed.** No `npm run typecheck`, no `npm test`, no
-  `npm run test:unit`, no `npm run build`, no `npm run test:package`, no resource probe, no
-  `CEZ_RUN_FAULT` run, no load-based secondary bisect. AC2 and AC3 remain open. The one
+- **CORRECTED 2026-08-24 (verification step): this bullet's claim is no longer true; every
+  gate below has now been executed, and the measurements are in the new status block at the very
+  top of this file.** ~~Still nothing has been executed. No `npm run typecheck`, no `npm test`,
+  no `npm run test:unit`, no `npm run build`, no `npm run test:package`, no resource probe, no
+  `CEZ_RUN_FAULT` run, no load-based secondary bisect. AC2 and AC3 remain open.~~ AC3 is closed
+  and measured; AC2 is blocked on a defect this spec did not predict (the codex backend escapes
+  `CEZ_DRY_RUN`), see the top block. The one
   pre-flight that *was* measured: this worktree now has a real root `node_modules` (317 entries,
   28 `.bin`, `vitest`/`tsx`/`typescript` all present), while `packages/cezar/node_modules` is
   empty, which is the normal hoisted-workspace shape, not the `AGENTS.md` resolve-upward trap.
