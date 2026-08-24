@@ -15,8 +15,9 @@ import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp, type ServerDeps } from './server.ts';
 
 /**
- * `GET /api/v1/workspace/agent-profiles/discovered` — the Claude logins already on this machine
- * (spec `.ai/specs/2026-08-14-claude-subscription-autodetect.md`).
+ * `GET /api/v1/workspace/agent-profiles/discovered`: the Claude and Codex logins already on this
+ * machine (spec `.ai/specs/2026-08-14-claude-subscription-autodetect.md`, widened to Codex by
+ * `.ai/specs/2026-08-24-second-codex-account-balancing.md`).
  *
  * The `oauthAccount` bodies below are TRIMMED CAPTURES of the real files on the machine this was
  * built on (`~/.claude.json`, `~/.claude-bis/.claude.json`, read 2026-08-14) — field names, nesting
@@ -97,6 +98,23 @@ describe('discovered agent accounts API', () => {
     return dir;
   };
 
+  /** A Codex profile the CLI would recognize, with a trimmed identity JWT in `auth.json`. */
+  const codexDir = (name: string, email = 'codex@example.com'): string => {
+    const dir = join(home, name);
+    mkdirSync(dir, { recursive: true });
+    const claims = {
+      email,
+      'https://api.openai.com/auth': {
+        chatgpt_plan_type: 'plus',
+        organizations: [{ title: 'Personal' }],
+      },
+    };
+    const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const idToken = `${part({ alg: 'RS256', typ: 'JWT' })}.${part(claims)}.not-a-signature`;
+    writeFileSync(join(dir, 'auth.json'), JSON.stringify({ tokens: { id_token: idToken } }));
+    return dir;
+  };
+
   const discovered = async (app = makeApp()): Promise<DiscoveredAgentAccountsResponse> => {
     const res = await apiRequest(app, '/api/v1/workspace/agent-profiles/discovered');
     expect(res.status).toBe(200);
@@ -123,6 +141,28 @@ describe('discovered agent accounts API', () => {
         configDir: join(home, '.claude-bis'),
         identity: { email: 'second@example.com', plan: 'Max 20x' },
         added: false,
+      },
+    ]);
+  });
+
+  it('discovers a Codex default after the Claude default in the fixture home', async () => {
+    claudeDir('.claude', 'claude@example.com');
+    codexDir('.codex', 'codex@example.com');
+
+    const { accounts } = await discovered();
+
+    expect(accounts).toEqual([
+      {
+        provider: 'claude',
+        configDir: join(home, '.claude'),
+        identity: { email: 'claude@example.com', plan: 'Max 20x' },
+        added: true,
+      },
+      {
+        provider: 'codex',
+        configDir: join(home, '.codex'),
+        identity: { email: 'codex@example.com', plan: 'Plus' },
+        added: true,
       },
     ]);
   });

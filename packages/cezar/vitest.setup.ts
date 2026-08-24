@@ -73,6 +73,15 @@ const pinSandboxHome = (): void => {
 // one.
 delete process.env.CEZ_AUTH
 
+// Spec `.ai/specs/2026-08-24-isolate-discovered-account-tests.md`: provider-home overrides are
+// ambient machine state, not valid defaults for fixture suites. The discovered-account suite
+// previously leaked the real `CODEX_HOME` into exact-list assertions, recorded in
+// `/tmp/cezar-b3b5719c-control-parent-agent-profiles.log`. Delete both provider overrides rather
+// than substituting sandbox paths, because no replacement path is correct for every suite. Keep
+// `XDG_CONFIG_HOME` untouched: it is not a provider home, and suites that use it already own it.
+delete process.env.CLAUDE_CONFIG_DIR
+delete process.env.CODEX_HOME
+
 pinSandboxHome()
 beforeEach(pinSandboxHome)
 // Registered before any suite's own hooks, so vitest runs it last on the way out —
