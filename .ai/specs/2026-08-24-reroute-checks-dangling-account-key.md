@@ -1,7 +1,10 @@
 # The out-of-quota reroute checks the account a run is actually pinned to run on
 
-**Status:** Implemented (QA Needed — the production nudge on the owner's stuck task has not been
-confirmed post-deploy).
+**Status:** Implemented — fixes the `execute()` path only. **CORRECTED 2026-08-24, same day: this
+does NOT fix the task named below**, or any other already-started, already-failed task sitting on
+`autoResumeAt` — see `.ai/specs/2026-08-24-continuation-reroute-held-account.md`, which extends
+this one to cover `continueRun`/`runContinuation` (the manual Continue button and every unattended
+auto-resume), the path this spec never touched.
 **Date:** 2026-08-24
 **Repo:** `cezar`
 **Extends:** `.ai/specs/2026-08-23-retarget-task-to-another-engine.md` (Phase 4, the reroute this
@@ -139,3 +142,14 @@ including the new case) passed clean both runs.
 **V3 (production).** After deploy, the owner's stuck run (or its next auto-resume) should reroute
 off `codex:default` — confirm via its event log (`… out of quota, so this task starts on codex:…
 instead`) and `runner`/`agentProfile` updating on the record. Until confirmed this is QA Needed.
+
+**CORRECTED 2026-08-24, same day — V3 did not happen, and could not have.** After this spec's fix
+deployed, the owner reported still seeing the same error on `15ff402b` (this spec's own example)
+and, after trying "Run on another engine" in the UI, on a second task `22b6f7cd` too. Re-read after
+the deploy: `15ff402b` was still `status: "failed"`, `agentProfile` still `"secondary"`, same error,
+`autoResumeAt` unchanged — this fix never fired for it. The reason: both tasks had already started
+and failed once, which routes every retry through `continueRun` → `runContinuation`
+(the manual Continue button, and `fireAutoResume`'s unattended timer — nothing else calls it) — a
+wholly separate method from `execute()`, which is the only one this spec touched. `~V3~` above
+describes what SHOULD have happened and did not; the actual fix for a run in this state is
+`.ai/specs/2026-08-24-continuation-reroute-held-account.md`.

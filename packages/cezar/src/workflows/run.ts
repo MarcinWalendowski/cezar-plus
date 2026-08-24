@@ -3047,7 +3047,10 @@ export class RunManager {
    */
   private async rerouteExplicitAccountIfLimited(
     runId: string,
-    input: ExecuteRunInput,
+    // Narrowed to the two fields this actually reads (not the full `ExecuteRunInput`) so
+    // `runContinuation` can call it too — a continuation has no `ExecuteRunInput`, only the
+    // account/provider a resume is about to pin to.
+    input: Pick<ExecuteRunInput, 'agentProfile' | 'runner'>,
     defaultRunner: RunnerId,
   ): Promise<PoolChoice | undefined> {
     if (!this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
@@ -4248,6 +4251,73 @@ export class RunManager {
     // invisible to the enforcer forever. Best-effort; falls back to repoRoot.
     await rematerializeReclaimedWorktree(this.repoRoot, this.store, runId);
     const record = this.store.getRun(runId);
+    // Resuming reattaches to a session that lives inside ONE account's config dir, so the
+    // continuation must run under the account that created it — not whatever the project has
+    // been switched to since. The owning step is the one carrying this session id. Computed here,
+    // as early as possible, because `continueBackend` (below) is read by everything else in this
+    // method, including the step-start stamp and the `session` event handler further down — both
+    // of which used to write the raw `backend` PARAMETER, which a reroute can now diverge from.
+    const resumedProfileId = sessionId === undefined
+      ? undefined
+      : record?.steps.find((s) => s.sessionId === sessionId)?.profileId;
+    // Out-of-quota fallback for a RESUME (extends spec 2026-08-24-reroute-checks-dangling-
+    // account-key). `execute()` checks a fresh dispatch against a hold via
+    // `rerouteExplicitAccountIfLimited`; nothing ever checked a CONTINUATION the same way, so a
+    // manual Continue and every unattended auto-resume (`fireAutoResume` calls `continueRun`,
+    // nothing else) kept re-pinning to the same held login forever — measured on
+    // `prod-host`: a run parked behind a hold auto-resumed, failed, and re-armed the next
+    // appointment days out, on repeat, while a second unlimited account of the same provider sat
+    // idle. `agentEnvForStep` (below) resolves the SAME account this reroute checks
+    // (`recordedProfileId ?? run.agentProfile`) when called from here — the two must agree on the
+    // identity or this checks a hold nobody will run under, the exact defect
+    // `2026-08-24-reroute-checks-dangling-account-key.md` fixed for `execute()`.
+    const rerouted = await this.rerouteExplicitAccountIfLimited(
+      runId,
+      { agentProfile: resumedProfileId ?? record?.agentProfile, runner: backend },
+      backend,
+    );
+    if (rerouted) {
+      // Same reasoning as `execute()`'s own write of `chosen.accountId`: from here on the record
+      // names the account that is actually going to run, so the thread header, the next resume,
+      // and "which account spent this" all keep answering with a login that exists. `runner` too —
+      // the candidate pool spans every profile-capable provider (same as `execute()`'s reroute), so
+      // the account that opened up is not necessarily on the provider this continuation was pinned
+      // to; leaving `runner` unchanged would send `continueBackend` (below) to the OLD provider
+      // while `agentProfile` named an account on the NEW one, and `resolveProfileEnvForRoot` would
+      // resolve that pair against the WRONG provider's login list.
+      //
+      // A crossed-provider reroute can also strand a model pin the OLD provider understood and the
+      // NEW one does not (`continueRun`'s own `opts.runner` switch already guards this — search
+      // `inheritedPinIsForeign` — but that guard only runs when the CALLER named a runner; this
+      // reroute picks one automatically, on a plain Continue or an unattended auto-resume, so
+      // nothing upstream has looked at the pairing). Dropped rather than substituted, same call
+      // `modelForBackend` already makes for the per-step path, and the same reason: a pinned vendor
+      // id for the new provider goes stale; falling through to its own default does not.
+      const foreignModelPin =
+        record?.model !== undefined && modelConflictsWithRunner(record.model, rerouted.provider);
+      this.store.updateRun(runId, {
+        runner: rerouted.provider,
+        agentProfile: rerouted.accountId,
+        ...(foreignModelPin ? { model: undefined } : {}),
+      });
+    }
+    // A rerouted continuation cannot reattach to the old transcript — it lives inside the OLD
+    // account's own config dir, which is the entire reason `resumedProfileId` was pinned in the
+    // first place. Forcing the downgrade here reuses the exact fresh-session mechanism the
+    // "no transcript for the recorded session" branch below already has for the same shape of
+    // problem (a resume that cannot honor the session it was given).
+    let resumeDowngraded = rerouted !== undefined;
+    if (resumeDowngraded) {
+      this.store.appendEvent(runId, {
+        type: 'note',
+        stepId,
+        message: 'the account this session belongs to is out of quota — starting fresh on the new account',
+      });
+    }
+    // Backend + model come off the record: the run's current backend by default, or the
+    // follow-up override that `continueRun` persisted before scheduling (#401) — or the reroute
+    // just above, which takes the same precedence a fresh dispatch gives `chosen` over `input.runner`.
+    const continueBackend = rerouted?.provider ?? backend;
     // The env is a live ceiling: a run created while the inbox was on must not keep writing
     // follow-ups after it is switched off.
     const generateFollowups = followupsEnabled() && record?.generateFollowups !== false;
@@ -4350,7 +4420,7 @@ export class RunManager {
       iterations: 1,
       startedAt: new Date().toISOString(),
       sessionId,
-      backend,
+      backend: continueBackend,
     });
     this.store.appendEvent(runId, { type: 'step-start', stepId, name, kind: 'agent', iteration: 1 });
     // Attachments pasted into the follow-up composer, on the same terms as a live-session
@@ -4406,7 +4476,7 @@ export class RunManager {
       }
       if (sessionError) return;
       if (event.type === 'session') {
-        this.store.updateStep(runId, stepId, { sessionId: event.sessionId, backend });
+        this.store.updateStep(runId, stepId, { sessionId: event.sessionId, backend: continueBackend });
       }
       if (event.type === 'token-usage') {
         this.store.updateStep(runId, stepId, { tokensUsed: event.tokensUsed });
@@ -4557,9 +4627,6 @@ export class RunManager {
       }
     };
 
-    // Backend + model come off the record: the run's current backend by default, or the
-    // follow-up override that `continueRun` persisted before scheduling (#401).
-    const continueBackend = backend;
     /** Settle this turn as a failure before anything is spawned — the shape both
      *  pre-spawn gates below need (model identity, #405; temp directory, #785). */
     const failBeforeSpawn = (message: string): void => {
@@ -4590,8 +4657,13 @@ export class RunManager {
     // instead of `opus`). Fail loud here too rather than let the backend pick a default.
     let continueModel: string | undefined;
     // Hoisted for the same reason as `stepRawModel` in `runAgentStep`: the mapper and the record
-    // must read one expression, not two copies of it.
-    const continueRawModel = agentModelsLocked(this.repoRoot) ? undefined : record?.model;
+    // must read one expression, not two copies of it. Re-checked against `continueBackend` (not
+    // just read off the STALE in-memory `record`) so a crossed-provider reroute above is honored
+    // here even though `record` was never re-fetched after that write.
+    const continueRawModel =
+      agentModelsLocked(this.repoRoot) || (record?.model !== undefined && modelConflictsWithRunner(record.model, continueBackend))
+        ? undefined
+        : record?.model;
     try {
       const normalized = normalizeModelForBackend(continueBackend, continueRawModel, {
         configuredProvider: await configuredModelProvider(continueBackend, state.cwd),
@@ -4620,12 +4692,6 @@ export class RunManager {
       failBeforeSpawn(err.message);
       return;
     }
-    // Resuming reattaches to a session that lives inside ONE account's config dir, so the
-    // continuation must run under the account that created it — not whatever the project has
-    // been switched to since. The owning step is the one carrying this session id.
-    const resumedProfileId = sessionId === undefined
-      ? undefined
-      : record?.steps.find((s) => s.sessionId === sessionId)?.profileId;
     // The temp-directory preflight (#785) rides along with the account resolution: a resumed
     // turn hits the same broken `/tmp` a fresh one would, and an agent whose shell silently
     // returns nothing is worse than a turn that refuses to start and says why.
@@ -4637,9 +4703,9 @@ export class RunManager {
     try {
       continueProfile = await this.agentEnvForStep(runId, continueBackend, {
         generateFollowups,
-        recordedProfileId: resumedProfileId,
+        recordedProfileId: rerouted ? rerouted.accountId : resumedProfileId,
         stepId,
-        ...(sessionId === undefined ? {} : { sessionId }),
+        ...(sessionId === undefined || resumeDowngraded ? {} : { sessionId }),
       });
     } catch (err) {
       if (!(err instanceof AgentTempDirError)) throw err;
@@ -4655,8 +4721,10 @@ export class RunManager {
     // no `userPrompt` rebuild is needed on a miss: `prompt` is the caller's own opening message
     // either way, not a restart-continuation prompt tied to an assumption the session already
     // holds context (see spec Phase 1, "Phase 3 is unaffected for a different reason").
-    let resumeDowngraded = false;
-    if (continueBackend === 'claude' && sessionId !== undefined) {
+    // Skipped when the reroute above already downgraded: the transcript is on the OLD account's
+    // config dir, which `continueProfile.env` (built for the NEW account) can no longer see —
+    // checking it here would read as "missing" for the wrong reason and double-log the downgrade.
+    if (!resumeDowngraded && continueBackend === 'claude' && sessionId !== undefined) {
       const claudeHome = agentHomePaths({ ...process.env, ...continueProfile.env }).claude;
       const exists = await claudeSessionTranscriptExists(claudeHome, state.cwd, sessionId);
       if (!exists) {
@@ -4824,7 +4892,7 @@ export class RunManager {
       // continuation-path twin of the chain loop's Phase 2 branch, and what
       // `recover-session-failure.test.ts` exercises. `sessionId !== undefined` means this attempt
       // actually resumed a session; `!retriedMissingSession` bounds it to one retry.
-      } else if (!retriedMissingSession && sessionId !== undefined && isMissingSessionRejection(backend, message)) {
+      } else if (!retriedMissingSession && sessionId !== undefined && isMissingSessionRejection(continueBackend, message)) {
         missingSessionRetry = true;
         this.store.appendEvent(runId, {
           type: 'note',
@@ -4836,7 +4904,7 @@ export class RunManager {
           stepId,
           name: 'run.step.resumed_after_missing_session',
           runId,
-          backend,
+          backend: continueBackend,
         });
       } else {
         sink.sessionEnded('error', message);

@@ -376,3 +376,149 @@ describe('out-of-quota fallback', () => {
     expect((await loadAgentAccountUsage()).accounts['claude:default']?.dispatch?.count ?? 0).toBe(before);
   }, 30_000);
 });
+
+/**
+ * The twin gap in the SAME feature, on the RESUME side (extends
+ * `.ai/specs/2026-08-24-reroute-checks-dangling-account-key.md`). Everything above drives
+ * `execute()` — a fresh dispatch — through `rerouteExplicitAccountIfLimited`. Nothing drove a
+ * CONTINUATION through it: `runContinuation` resolved the account a resume is pinned to
+ * (`resumedProfileId ?? run.agentProfile`) directly, with no hold check at all, so a manual
+ * Continue and every unattended auto-resume (`fireAutoResume` calls `continueRun`, nothing else)
+ * kept re-failing on the same held login forever, re-arming the next appointment days out on
+ * repeat, while a second account of the same provider sat idle.
+ *
+ * A separate `describe` because the fixture needs the OPPOSITE initial condition from the one
+ * above: the account has to be OPEN when the run starts (so a real session gets minted on it) and
+ * only becomes held partway through — the sibling suite's shared `beforeEach` pre-limits
+ * `claude:default` before anything runs, which would foreclose that.
+ */
+describe('out-of-quota fallback — a resume pinned to a now-held account', () => {
+  let repoRoot: string;
+  let home: string;
+  let store: RunStore;
+  let manager: RunManager | undefined;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  const workflow: WorkflowDef = {
+    name: 'quick-task',
+    source: 'built-in',
+    steps: [{ id: 'work', name: 'Work', prompt: '{{task}}' }],
+  };
+
+  function managerWith(fallback: boolean): RunManager {
+    const limits = (): WorkspaceResourceLimits => ({
+      maxParallel: 2,
+      memoryLimitMb: null,
+      fallbackAcrossAccountsWhenLimited: fallback,
+    });
+    return new RunManager(store, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: limits(), load: async () => limits() }),
+    });
+  }
+
+  beforeEach(async () => {
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    savedEnv.CEZ_HOME = process.env.CEZ_HOME;
+    savedEnv.CEZ_CODEX_BIN = process.env.CEZ_CODEX_BIN;
+    process.env.CEZ_DRY_RUN = '1';
+    // Codex doesn't gate on `CEZ_DRY_RUN` (only claude-cli-runner does) — it always shells out to
+    // whatever `CEZ_CODEX_BIN` names, `codex` by default. The reroute here can land on codex, so
+    // this suite needs its own mock too, same fixture `run.test.ts`'s codex tests use.
+    process.env.CEZ_CODEX_BIN = join(import.meta.dirname, '../core/__fixtures__/codex/mock-codex-app-server.mjs');
+    home = mkdtempSync(join(tmpdir(), 'cez-fallback-resume-home-'));
+    process.env.CEZ_HOME = home;
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-fallback-resume-'));
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+  });
+
+  afterEach(() => {
+    manager?.dispose();
+    manager = undefined;
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('a resume pinned to an account that went into a usage-limit hold starts fresh on an unlimited one, instead of re-failing on repeat', async () => {
+    manager = managerWith(true);
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:limit',
+      runner: 'claude',
+      worktree: false,
+    });
+    // The mock's `mock:limit` turn fails with the same "usage limit reached|<epoch>" envelope the
+    // real CLI emits — `scheduleAutoResumeIfLimited` reads that off `run.error` and records the
+    // hold against the account the failed step actually ran on (`recordAccountLimit`), same as
+    // production. Waiting for `autoResumeAt` specifically, not just `status`: a `failed` run with
+    // no scheduled resume is a different state (an ordinary failure) this case is not about.
+    await expect.poll(() => store.getRun(record.id)?.autoResumeAt, { timeout: 20_000 }).toBeDefined();
+    const before = store.getRun(record.id);
+    expect(before?.status).toBe('failed');
+    const originalSessionId = before?.steps.find((s) => s.id === 'work')?.sessionId;
+    expect(originalSessionId).toBeDefined();
+    // `recordAccountLimit` writes through `mergeWriteAgentAccountUsage`, fire-and-forget — wait for
+    // it to actually land, or the reroute below races its own precondition.
+    await expect
+      .poll(async () => (await loadAgentAccountUsage()).accounts['claude:default']?.limited?.until, { timeout: 10_000 })
+      .toBeDefined();
+
+    // The manual "Continue" button and the unattended auto-resume (`fireAutoResume`) both call
+    // exactly this, with no account-aware path of their own — that pairing is the bug.
+    const resumed = await manager.continueRun(record.id, { text: 'mock:done' });
+    expect(resumed.ok).toBe(true);
+    // `waiting`, not `done`: the codex mock (`__fixtures__/codex/mock-codex-app-server.mjs`) plays
+    // one fixed scripted turn regardless of the prompt text — it has no `mock:done`-style scripting
+    // like the claude mock — and a codex session parks at `waiting` after a turn the same way a
+    // live one would. The fact under test is which ACCOUNT the continuation reached, not how that
+    // fixture's turn ends, so this waits for the step to leave `pending`/`running` rather than for
+    // a specific terminal status.
+    await expect
+      .poll(() => store.getRun(record.id)?.steps.find((s) => s.id.startsWith('continue-'))?.status, {
+        timeout: 20_000,
+      })
+      .toMatch(/^(waiting|done|review)$/);
+
+    const after = store.getRun(record.id);
+    // Moved off the held login — and onto a different PROVIDER here, since claude:default was the
+    // only claude candidate and codex:default is the only other one in this fixture (the same
+    // cross-provider reach the fresh-dispatch suite's "moves the task" case exercises).
+    expect(after?.runner).toBe('codex');
+    expect(after?.agentProfile).toBe('default');
+    const events = store.readEvents(record.id).map((e) => String(e.message ?? ''));
+    expect(
+      events.some((m) => m.includes('claude:default') && m.includes('out of quota') && m.includes('codex:default')),
+    ).toBe(true);
+    // Cannot have resumed the OLD session — it lives inside the held account's own config dir — so
+    // the continuation step must carry a freshly minted id, not the original.
+    const continueStep = after?.steps.find((s) => s.id.startsWith('continue-'));
+    expect(continueStep?.sessionId).toBeDefined();
+    expect(continueStep?.sessionId).not.toBe(originalSessionId);
+  }, 45_000);
+
+  it('a resume pinned to an account that is NOT held resumes it normally — unchanged by the fix', async () => {
+    manager = managerWith(true);
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      runner: 'claude',
+      worktree: false,
+    });
+    await expect.poll(() => store.getRun(record.id)?.status, { timeout: 20_000 }).toBe('done');
+    const resumed = await manager.continueRun(record.id, { text: 'mock:done keep going' });
+    expect(resumed.ok).toBe(true);
+    await expect.poll(() => store.getRun(record.id)?.status, { timeout: 20_000 }).toBe('done');
+    const events = store.readEvents(record.id).map((e) => String(e.message ?? ''));
+    expect(events.some((m) => m.includes('out of quota'))).toBe(false);
+    expect(store.getRun(record.id)?.agentProfile).toBeUndefined();
+    expect(store.getRun(record.id)?.runner).toBe('claude');
+  }, 40_000);
+});
