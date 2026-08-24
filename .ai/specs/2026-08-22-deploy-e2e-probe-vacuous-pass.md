@@ -1,16 +1,21 @@
 # The deploy E2E probe must not report PASS on what it never observed
 
-**Status:** **Implemented — QA Needed.** P1 (vacuous-pass guard), P2 (hard 401/403 failure) and P3's
-documentation half shipped 2026-08-23 in commit `83ddbdd2`, pushed to `origin/main` (worktree
-`29c070f0`; unrelated to this same-day commit's own subject line, which is an autosave message from
-the implementing session). Gates green: `npm run typecheck` (0 errors), `npm run test:unit`
-(53/53, including 9 new cases in `packages/cezar/test/unit/deploy-e2e-probe.test.ts`), `npm test`
-(516/518, 2 pre-existing unrelated flakes in `src/knowledge/catalog.test.ts` and
-`src/components/add-project-dialog.test.tsx`). **Not yet done:** P3's live half — this spec's own
-Verification section, "The live, credentialed run on `prod-host`" — has not been executed in
-this task's chain, so acceptance criterion 3 ("records real seq continuity across a cutover on the
-hosted box") is unmet, and the parent spec's in-place correction (Verification step 6, below) is
-correctly still deferred. Todo `8dc8bf3a` tracks the remainder.
+**Status:** **Superseded 2026-08-23 by
+`.ai/specs/2026-08-22-deploy-e2e-probe-measured-assertions.md`.** This task independently shipped
+the P1 vacuous-pass guard, P2 hard 401/403 failure, and P3 documentation in commit `83ddbdd2`.
+Commit `fe158c70` shipped the canonical measured-assertions implementation and its production
+verification. The credentialed cutover artifact
+`.ai/cezar/artifacts/deploy-e2e-20260823194023.json` contains 2,164 SSE events, one reconnect, and
+55 run-status samples, so the observation path was measured for real. The probe correctly returned
+FAILED, not PASS: it found one refused connection and 94 sequence gaps. Todo `8206c158` tracks the
+unexplained sequence gaps; todo `6c89af7c` continues to track the cutover reset and latency.
+
+**Corrected 2026-08-24:** the earlier status below called the full test gate green while also
+reporting `npm test` at 516/518. That was false. `npm run typecheck` and `npm run test:unit` were
+green; the full test run was red on two failures believed unrelated to this change. No lint gate
+was run because this repository has no lint script. The required red-without-fix regression proof
+was also not executed in this task's chain. The canonical superseding spec carries the actual
+verification record.
 
 **Date:** 2026-08-22
 **Owner ask (task context):** "deploy-e2e-probe reports a false PASS when it observed nothing."
