@@ -2561,6 +2561,58 @@ invented; these are the names to use when one lands.
 > returns `holdsProject: false` **for the hub too**, and a project with no origin then queues
 > `project-has-no-origin` with nowhere left to go.
 >
+> **54. FIXED 2026-08-24 — the hub had no `confirmStart` supplier, so turning `CEZ_CLUSTER=1` on
+> would have stopped every local autostart on the box.** This is the item that had to land before
+> production could be switched into cluster mode, and it is the same defect shape as D43: an
+> **optional field at a seam between two owners**.
+>
+> `markStartedWithClaim` (`todos.ts:881`) branches on `clustered`. When clustered, it calls
+> `askHubToConfirm`, which is `const confirm = options?.confirmStart; if (!confirm) return undefined;`
+> — and a missing ack with no `humanIntent` returns `{ started: false, reason: 'hub-unconfirmed' }`.
+> `confirmStart` had **zero production suppliers**: every caller of `startTodoRun` reached it through
+> `startAutostartTodo`, which passed no `startOptions` at all. So with the flag off the path is
+> unreachable and every test is green; with the flag on, all 12 of the owner's projects autostart
+> locally on the hub and **every one of them fails to stamp**. Nothing in the suite could have caught
+> it: the seam's own tests construct `TodoStartOptions` explicitly, which is exactly the
+> "tests pass by constructing WITH the optional field" failure mode.
+>
+> **The fix routes through the seam that already knows the answer.** `TodoDispatchOutcome`'s
+> `{ start: 'local' }` arm gained `startOptions?: TodoStartOptions`, filled by
+> `hub-autostart-dispatch.ts`, which is the one place that has already computed whether the project
+> is paired:
+>
+> - **unpaired project** -> `{ start: 'local', startOptions: { clustered: false } }`. Being clustered
+>   is a property of the PROJECT, not the node — most hub projects are unpaired, and for those the
+>   correct answer under `CEZ_CLUSTER=1` is the unclustered stamp path, not a hub round-trip to
+>   itself.
+> - **hub placed the work on ITSELF** -> `{ clustered: true, confirmStart: hubSelfConfirm(projectKey) }`,
+>   a confirmer that allocates a real `hubSeq` from `HubSeqAllocator` (wired in `cluster-routes.ts`
+>   as `allocateHubSeq: (input) => replication.allocate(input)`) and returns
+>   `{ opId: 'hub-local:<todoId>', hubSeq, accepted: true, fields: { startedOn: <hub nodeId> } }`.
+>   The hub confirms its own claim through the same ack shape a spoke would get, so the run is
+>   numbered in the same sequence and `startedOn` is truthful.
+> - `start: 'remote'` returns before the stamp path entirely and is unaffected.
+>
+> **Why OPTIONAL and not required here, which is the opposite of D43's answer.** The discriminator is
+> what an omitting caller gets: one correct value, or a plausible wrong one. The only omitting caller
+> is `DISPATCH_LOCAL` — the constant returned when `typeof project.cluster !== 'function'`, i.e. there
+> is no cluster at all — and for it "decide from the environment" is the one correct answer. That
+> reasoning is written into the type's docblock so the next editor does not have to re-derive it.
+>
+> **Verified, not assumed.** Three tests added to `todo-autostart.test.ts` inside the `describe` block
+> that genuinely sets `process.env.CEZ_CLUSTER = '1'` (a suite that sets it only in a sibling block
+> would have been vacuous): unpaired stamps in ONE pass with the flag set; paired self-confirms and
+> the todo comes back with `hubSeq === 41` and `startedOn === 'hub-node-1'` and the allocator recorded
+> `[41]`; and a **negative control** — a local outcome carrying NO `startOptions` is still unstamped,
+> which is the pre-fix behaviour and proves the assertions are not passing for an unrelated reason.
+> `hub-autostart-dispatch.test.ts` asserts the exact `startOptions` object on the unpaired arm and
+> exercises the confirmer on the paired arm (`ack.hubSeq === 7`, `ack.fields?.startedOn === 'hub-1'`,
+> `ack.opId.length <= 64` — the contract's strict cap).
+>
+> **Box gate, merged-tree, 2026-08-24:** typecheck 0, build 0, `test:unit` 0, `test:package` 0,
+> full suite `606 passed | 1 failed | 2 skipped` — the one red being C18, the standing CPU-budget
+> failure. Ownership audit `0`. Tree verified 2030 files identical to the Mac before the run.
+>
 > **NEWEST FIRST: items 31-36 in the nested list below are the most recent and correct two of my
 > own earlier claims.** Item 31 closes the second standing red as pre-existing; item 32 lists what
 > five session-limit deaths actually left (two of my four claims were false) and records the

@@ -60,8 +60,18 @@ export const CLUSTERING_OFF = 'clustering-off' as const;
 export const DISPATCH_LOCAL = 'dispatch-local' as const;
 
 export type TodoDispatchOutcome =
-  /** Run it here — either there is no cluster, or the hub placed the work on itself. */
-  | { start: 'local' }
+  /**
+   * Run it here — either there is no cluster, or the hub placed the work on itself.
+   *
+   * `startOptions` is how the placer — the only thing that has already worked out whether this
+   * project is clustered — tells `markStarted` what kind of claim this is. **Absent means "decide
+   * from the environment", which is what every pre-Milestone-C caller got and still gets.** It is
+   * optional rather than required precisely because the omitting caller (`DISPATCH_LOCAL`, i.e.
+   * single-node cezar) gets the one correct answer and not a plausible wrong one — the
+   * discriminator D43 turns on. A clustered hub must say which it means, and
+   * `createHubAutostartDispatch` always does.
+   */
+  | { start: 'local'; startOptions?: TodoStartOptions }
   /** Handed to another node. MUST NOT start here, and nothing local is written: the node that
    *  accepts stamps `startedTaskId` itself and its claim op carries that back to the hub. */
   | { start: 'remote'; nodeId: ClusterNodeId; dispatchId: string }
@@ -440,6 +450,9 @@ async function startAutostartTodo(project: TodoAutostartProject, todo: TodoItem)
   //
   // With `DISPATCH_LOCAL` this is the pre-Milestone-C path exactly — one comparison, then the same
   // `startTodoRun` that has always run here.
+  // Set by a `start: 'local'` outcome that knows this project's cluster status. Left undefined on
+  // the `DISPATCH_LOCAL` path, where `markStarted` reads the environment exactly as it always has.
+  let startOptions: TodoStartOptions | undefined;
   const dispatch = project.dispatch();
   if (dispatch !== DISPATCH_LOCAL) {
     const outcome = await dispatch.place({
@@ -469,11 +482,17 @@ async function startAutostartTodo(project: TodoAutostartProject, todo: TodoItem)
       reportRefusal(project, todo, outcome.reason);
       return;
     }
-    // `start: 'local'` — the hub placed the work on itself. Falls through to exactly the same
-    // start the single-node path takes; a local placement builds and sends no frame at all.
+    // `start: 'local'` — the hub placed the work on itself, OR the project is not clustered at
+    // all. Falls through to the same start the single-node path takes; a local placement builds
+    // and sends no frame. What it DOES carry is `startOptions`, and that is the whole fix for a
+    // clustered hub: without it `markStarted` asks a hub that has nobody to ask, gets no
+    // acknowledgement, and refuses `hub-unconfirmed` — writing nothing, so the row still reads
+    // `autostart: true` and the next pass starts the work a second time. `pendingStamp` bounds
+    // that to one extra attempt per restart; it does not prevent it.
+    startOptions = outcome.startOptions;
   }
 
-  const { run, stamped } = await startTodoRun(project, todo, workflow, 'todo-autostart');
+  const { run, stamped } = await startTodoRun(project, todo, workflow, 'todo-autostart', startOptions);
   if (!stamped) {
     // **D43.** The run EXISTS and the record does not know it. Remember that, or the next pass
     // reads a row that still says `autostart: true` with no `startedTaskId` and starts a second

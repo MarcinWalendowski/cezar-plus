@@ -20,6 +20,8 @@ import type {
   WorkflowDef,
 } from '@loki-labs/better-cezar-contract';
 import type { HubDispatcher } from './hub-dispatch.ts';
+import type { HubSeqAllocator } from './hub-seq.ts';
+import type { TodoStartConfirmer } from '../todos.ts';
 import { buildPlacementCandidates } from './hub-candidates.ts';
 import { readPeers } from './peers.ts';
 import type { TodoAutostartDispatch, TodoDispatchOutcome } from '../todo-autostart.ts';
@@ -37,6 +39,10 @@ export interface HubAutostartDispatchDeps {
   /** `linkServer.connectedNodes()`. A GETTER for the same reason `HubDispatcherDeps#linkServer` is:
    *  the link does not exist yet when this is constructed. */
   connectedNodeIds: () => readonly ClusterNodeId[];
+  /** The hub's own `hubSeq` counter — the same allocator the inbound op path uses, so a claim this
+   *  hub grants ITSELF is numbered from the one sequence and can replicate outward like any other.
+   *  Without it a hub-authored record carries no `hubSeq` and can never reach a spoke at all. */
+  allocateHubSeq: HubSeqAllocator['allocate'];
   env?: NodeJS.ProcessEnv;
   warn?: (message: string) => void;
   now?: () => Date;
@@ -72,13 +78,45 @@ export function createHubAutostartDispatch(deps: HubAutostartDispatchDeps): Todo
   const warn = deps.warn ?? (() => {});
   const now = deps.now ?? (() => new Date());
 
+  /**
+   * The hub's acknowledgement of its OWN claim. Allocates from the same `hubSeq` counter the
+   * inbound op path uses, so the record is numbered in the one sequence and is replicable — which
+   * is also the fix for "a hub-authored todo never gets a hubSeq, so it can never reach a spoke".
+   *
+   * Deliberately does NOT go through `applyOpAtHub`: that path exists to serialize an op that
+   * arrived from ELSEWHERE and to record it against `opId` for replay dedupe. There is no inbound
+   * op here and nothing to dedupe against, and `markStartedWithClaim` performs the write itself
+   * under the todos lease the moment this resolves — routing through the op applier would write
+   * the same fields twice.
+   */
+  const hubSelfConfirm =
+    (projectKey: ClusterProjectKey): TodoStartConfirmer =>
+    async (claim) => {
+      const range = await deps.allocateHubSeq({ scope: 'project', projectKey, count: 1 });
+      return {
+        // Bounded to 64 chars by the contract; a todo id is 36, so this fits with room to spare.
+        opId: `hub-local:${claim.todoId}`,
+        hubSeq: range.from,
+        accepted: true,
+        // The hub is the node that ran it, and `startedOn` is what the board renders.
+        fields: { startedOn: deps.identity.nodeId },
+      };
+    };
+
   return {
     async place(input): Promise<TodoDispatchOutcome> {
       const projectKey = await pairedProjectKey(input.repoRoot, deps.identity.nodeId, deps.env, deps.warn);
       if (!projectKey) {
         // Not a cluster project. Not an error, and deliberately not a refusal: a hub runs its own
         // unpaired projects exactly as a single-node cezar does.
-        return { start: 'local' };
+        //
+        // **`clustered: false` is that sentence applied to the CLAIM, and it is load-bearing.**
+        // `CEZ_CLUSTER=1` is a property of the NODE, but being clustered is a property of the
+        // PROJECT: most projects on a hub have no pairing and no peer that could ever hold a
+        // competing claim. Left to the environment, `markStarted` would ask a hub that has nobody
+        // to ask, refuse `hub-unconfirmed`, and write nothing — so every unpaired todo on a
+        // clustered hub would start, fail to stamp, and be started again by the next pass.
+        return { start: 'local', startOptions: { clustered: false } };
       }
 
       const repoInfo = await getRepoInfo(input.repoRoot);
@@ -158,7 +196,19 @@ export function createHubAutostartDispatch(deps: HubAutostartDispatchDeps): Todo
         return { start: 'none', reason: placement.detail ?? placement.reason };
       }
 
-      if (placement.nodeId === deps.identity.nodeId) return { start: 'local' };
+      if (placement.nodeId === deps.identity.nodeId) {
+        // The hub placed the work on itself, and this project IS paired — so the claim is
+        // clustered and needs an acknowledgement. The hub is the thing that would acknowledge it,
+        // which is exactly why there is nobody to ask: `confirmStart` is absent in shipped code,
+        // so `markStartedWithClaim` refuses `hub-unconfirmed` and writes nothing.
+        //
+        // **A hub confirming its own claim is not a shortcut past the exactly-once property; it is
+        // that property stated where it is trivially true.** The serializer for every claim in the
+        // cluster is this process. `markStartedWithClaim` re-reads under the todos lease AFTER
+        // this returns and refuses `already-started` if a spoke's op won in between, so a genuine
+        // race still resolves the normal way — this only removes a round trip to ourselves.
+        return { start: 'local', startOptions: { clustered: true, confirmStart: hubSelfConfirm(projectKey) } };
+      }
 
       const sent = attempt.dispatch;
       if (!sent) {

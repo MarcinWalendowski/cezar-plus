@@ -1260,6 +1260,11 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
               identity,
               semaphore: deps.semaphore,
               connectedNodeIds: () => linkServer?.connectedNodes() ?? [],
+              // The SAME allocator the inbound op path uses (`replication` is the object handed to
+              // `createHubFrameRouter` just below), not a second counter over the same file: two
+              // allocators would hand out the same number twice and silently retire each other's
+              // records via the `hubSeq <= watermark` drop in `cluster/ops.ts`.
+              allocateHubSeq: (input) => replication.allocate(input),
               env,
               warn,
             }),

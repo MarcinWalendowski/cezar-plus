@@ -852,6 +852,71 @@ describe('todo autostart — a refused stamp must not restart the run (D43)', ()
     expect(refusals[0]?.reason).toContain('could not be stamped');
   });
 
+  // ---- the HUB half of D43: a clustered hub confirming its own claim ---------------------------
+  //
+  // The three tests above describe a node that is clustered and has nobody to ask. A HUB is that
+  // node by definition — it IS the thing a claim would be asked of — so before this fix, turning
+  // `CEZ_CLUSTER=1` on a hub meant every locally-started todo ran and was never stamped. These
+  // drive the real `markStarted` with the flag genuinely set, and differ from the above ONLY in
+  // what the placer hands back.
+
+  it('an UNPAIRED project (startOptions clustered:false) stamps in ONE pass with the flag set', async () => {
+    process.env.CEZ_CLUSTER = '1';
+    // What `createHubAutostartDispatch` returns for a project with no confirmed pairing: being
+    // clustered is a property of the PROJECT, and this one has no peer that could hold a rival
+    // claim. This is the owner's ordinary case — most projects on a hub are unpaired.
+    const dispatch = { place: async () => ({ start: 'local' as const, startOptions: { clustered: false } }) };
+
+    await reconcileAutostartTodos({ ...project, dispatch: () => dispatch });
+    await reconcileAutostartTodos({ ...project, dispatch: () => dispatch });
+
+    expect(runIds).toHaveLength(1);
+    const todo = await readFile1();
+    expect(todo.startedTaskId).toBe(runIds[0]);
+    expect(todo.autostart).toBeUndefined();
+  });
+
+  it('a PAIRED project self-confirms: stamped, with the hub\'s own startedOn and its allocated hubSeq', async () => {
+    process.env.CEZ_CLUSTER = '1';
+    const allocated: number[] = [];
+    const dispatch = {
+      place: async () => ({
+        start: 'local' as const,
+        startOptions: {
+          clustered: true,
+          confirmStart: async (claim: { todoId: string }) => {
+            allocated.push(41);
+            return { opId: `hub-local:${claim.todoId}`, hubSeq: 41, accepted: true, fields: { startedOn: 'hub-node-1' } };
+          },
+        },
+      }),
+    };
+
+    await reconcileAutostartTodos({ ...project, dispatch: () => dispatch });
+
+    expect(runIds).toHaveLength(1);
+    const todo = await readFile1();
+    expect(todo.startedTaskId).toBe(runIds[0]);
+    expect(todo.autostart).toBeUndefined();
+    // The acknowledgement was genuinely consulted and its VALUES were written — not merely that a
+    // stamp happened, which `clustered: false` would also produce.
+    expect(allocated).toEqual([41]);
+    expect(todo.hubSeq).toBe(41);
+    expect(todo.startedOn).toBe('hub-node-1');
+  });
+
+  it('NEGATIVE CONTROL — a local outcome carrying NO startOptions is still unstamped, so the two above are not passing for some unrelated reason', async () => {
+    process.env.CEZ_CLUSTER = '1';
+    const dispatch = { place: async () => ({ start: 'local' as const }) };
+
+    await reconcileAutostartTodos({ ...project, dispatch: () => dispatch });
+
+    expect(runIds).toHaveLength(1);
+    const todo = await readFile1();
+    expect(todo.startedTaskId).toBeUndefined();
+    expect(todo.autostart).toBe(true);
+  });
+
   it('CONTROL — with the flag unset nothing above changes the live path: one run, stamped, autostart cleared', async () => {
     delete process.env.CEZ_CLUSTER;
 
