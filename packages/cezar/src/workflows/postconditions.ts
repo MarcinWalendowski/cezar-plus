@@ -91,8 +91,8 @@ export interface PostconditionContext {
 }
 
 /**
- * Under `CEZ_DRY_RUN=1` every agent CLI is replaced by `scripts/mock-claude.mjs`, which emits a
- * scripted transcript and performs no real work: it never commits and it never deploys. Asking
+ * Under `CEZ_DRY_RUN=1` every agent CLI is replaced by its bundled mock, which emits a scripted
+ * transcript and performs no real work: it never commits and it never deploys. Asking
  * "did the agent really commit / really deploy?" of a mock therefore asks a question the mode is
  * defined to answer no to, and a post-condition that can only ever be red makes a dry run
  * structurally unable to finish — which is what it did between `57fc8807` (the commit that

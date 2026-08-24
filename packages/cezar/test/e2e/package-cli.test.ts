@@ -30,7 +30,13 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     assert.ok(record, 'npm pack should describe the generated tarball');
 
     const packagedPaths = new Set(record.files.map((file) => file.path));
-    for (const requiredPath of ['dist/index.js', 'web/dist/index.html', 'scripts/mock-claude.mjs', 'scripts/mock-codex-app-server.mjs', 'README.md']) {
+    for (const requiredPath of [
+      'dist/index.js',
+      'web/dist/index.html',
+      'scripts/mock-claude.mjs',
+      'scripts/mock-codex-app-server.mjs',
+      'README.md',
+    ]) {
       assert.ok(packagedPaths.has(requiredPath), `release tarball should contain ${requiredPath}`);
     }
     assert.equal(packagedPaths.has('src/index.ts'), false, 'release tarball should not contain TypeScript sources');
