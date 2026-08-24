@@ -96,13 +96,18 @@ describe('model identity wiring (dry run)', () => {
     return store.getRun(runId)?.steps.find((s) => s.id === stepId);
   }
 
-  /** The `--model` value the mock was actually invoked with, or undefined when unset. */
-  function capturedModel(index = 0): string | undefined {
+  /** The value the mock was actually invoked with for `flag`, or undefined when unset. */
+  function capturedFlag(flag: string, index = 0): string | undefined {
     const lines = readFileSync(argsFile, 'utf8').trim().split('\n');
     expect(lines.length).toBeGreaterThan(index);
     const argv = JSON.parse(lines[index] as string) as string[];
-    const idx = argv.indexOf('--model');
+    const idx = argv.indexOf(flag);
     return idx < 0 ? undefined : argv[idx + 1];
+  }
+
+  /** The `--model` value the mock was actually invoked with, or undefined when unset. */
+  function capturedModel(index = 0): string | undefined {
+    return capturedFlag('--model', index);
   }
 
   it('a bare preset reaches the CLI bare and persists provider-qualified', async () => {
@@ -239,4 +244,131 @@ describe('model identity wiring (dry run)', () => {
       }),
     ).resolves.toEqual({ ok: false, error: "model 'anthropic/claude-opus-4-8' is not a codex model" });
   }, 40_000);
+});
+
+/**
+ * The per-runner step override reaches the RUNNER, not just the resolver
+ * (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D1).
+ *
+ * `types.test.ts` pins `resolveStepModel` as a pure function; this pins the half that ships — that
+ * `runAgentStep` reads the resolved PAIR and hands both halves to the spawned agent. It is driven
+ * on the **claude** backend deliberately, because that is the one whose model and effort both
+ * appear in argv and can therefore be observed from outside. The codex leg differs only in which
+ * runner consumes `AgentRunSpec.effort`, and `codex-app-server-runner.test.ts` pins that end
+ * against the mock app-server's real `turn/start` payload. The two halves meet at `AgentRunSpec`.
+ *
+ * Without this, "the table applies" is provable by a resolver nothing calls — the shape where a
+ * unit suite is green over a function the engine reads one line above and then ignores.
+ */
+describe('byRunner reaches the runner (dry run)', () => {
+  let repoRoot: string;
+  let argsFile: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeAll(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-byrunner-'));
+    argsFile = join(repoRoot, 'mock-args.ndjson');
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    savedEnv.CEZ_MOCK_ARGS_FILE = process.env.CEZ_MOCK_ARGS_FILE;
+    savedEnv.CEZ_FOLLOWUPS = process.env.CEZ_FOLLOWUPS;
+    process.env.CEZ_DRY_RUN = '1';
+    process.env.CEZ_MOCK_ARGS_FILE = argsFile;
+    delete process.env.CEZ_FOLLOWUPS;
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    writeFileSync(join(repoRoot, '.ai/cezar', 'config.json'), JSON.stringify({ maxParallel: 1 }), 'utf8');
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterAll(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const TERMINAL = new Set(['done', 'review', 'failed', 'cancelled']);
+
+  async function drive(def: WorkflowDef): Promise<string> {
+    writeFileSync(argsFile, '', 'utf8');
+    const record = manager.startRun(def, { task: 'do the thing', author: localCliAuthor() });
+    const deadline = Date.now() + 20_000;
+    while (!TERMINAL.has(store.getRun(record.id)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not finish in time');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return record.id;
+  }
+
+  function argvOf(index = 0): string[] {
+    const lines = readFileSync(argsFile, 'utf8').trim().split('\n');
+    expect(lines.length).toBeGreaterThan(index);
+    return JSON.parse(lines[index] as string) as string[];
+  }
+  const flag = (name: string): string | undefined => {
+    const argv = argvOf();
+    const idx = argv.indexOf(name);
+    return idx < 0 ? undefined : argv[idx + 1];
+  };
+
+  it('hands the spawned agent BOTH halves of the override, not the step\'s own pair', async () => {
+    await drive({
+      name: 'byrunner-test',
+      source: 'built-in',
+      steps: [
+        {
+          id: 'work',
+          prompt: '{{task}}',
+          model: 'sonnet',
+          effort: 'low',
+          byRunner: { claude: { model: 'haiku', effort: 'max' } },
+        },
+        { id: 'verify', command: 'true' },
+      ],
+    });
+    expect(flag('--model')).toBe('haiku');
+    expect(flag('--effort')).toBe('max');
+  }, 30_000);
+
+  it('leaves a step with no override on its own pair', async () => {
+    // The negative control: without it, the assertion above is equally satisfied by wiring that
+    // ignores `step.model`/`step.effort` entirely and always reads `byRunner`.
+    await drive({
+      name: 'byrunner-control',
+      source: 'built-in',
+      steps: [
+        { id: 'work', prompt: '{{task}}', model: 'sonnet', effort: 'low' },
+        { id: 'verify', command: 'true' },
+      ],
+    });
+    expect(flag('--model')).toBe('sonnet');
+    expect(flag('--effort')).toBe('low');
+  }, 30_000);
+
+  it('ignores another runner\'s override entirely', async () => {
+    await drive({
+      name: 'byrunner-other',
+      source: 'built-in',
+      steps: [
+        {
+          id: 'work',
+          prompt: '{{task}}',
+          model: 'sonnet',
+          effort: 'low',
+          byRunner: { codex: { model: 'gpt-5.6-luna', effort: 'xhigh' } },
+        },
+        { id: 'verify', command: 'true' },
+      ],
+    });
+    expect(flag('--model')).toBe('sonnet');
+    expect(flag('--effort')).toBe('low');
+  }, 30_000);
 });

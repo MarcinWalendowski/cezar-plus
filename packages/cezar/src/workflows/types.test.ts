@@ -8,11 +8,13 @@ import {
   FILE_WRITE_RECIPE,
   RECORD_READ_RECIPE,
   parseReviewVerdict,
+  resolveStepModel,
   SPEC_TO_DEPLOY_WORKFLOW,
   chainStepNote,
   skillStackOf,
   workflowDefSchema,
   workflowStepSchema,
+  type WorkflowStepDef,
 } from './types.ts';
 
 /**
@@ -744,5 +746,214 @@ describe('workflowStepSchema — verify', () => {
     const plain = { id: 'a', skill: 'a', name: 'a', prompt: '{{task}}' };
     expect(skillStackOf([plain])).toEqual(['a']);
     expect(skillStackOf([{ ...plain, verify: { builtin: 'everything-committed' as const, max: 1 } }])).toBeNull();
+  });
+});
+
+/**
+ * The codex half of the per-step model policy
+ * (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`).
+ *
+ * Before this, `spec-to-deploy` named a Claude model on all eight steps, `modelForBackend` dropped
+ * six of them on a codex run as another runner's id, and those steps fell through to codex's own
+ * default — measured on `prod-host` as `gpt-5.6-sol` at `reasoningEffort: null`: the most
+ * expensive model in the catalog at its shallowest setting, for `Commit & push` and `Deploy`
+ * alike.
+ */
+describe('per-step model and effort, per runner', () => {
+  const stepOf = (id: string): WorkflowStepDef => {
+    const step = SPEC_TO_DEPLOY_WORKFLOW.steps.find((s) => s.id === id);
+    expect(step, `spec-to-deploy has no step "${id}"`).toBeDefined();
+    return step!;
+  };
+
+  describe('resolveStepModel (D1)', () => {
+    it('takes the byRunner pair for the backend that will run the step', () => {
+      const step = stepOf('implement');
+      expect(resolveStepModel(step, 'codex')).toEqual({ model: 'gpt-5.6-luna', effort: 'xhigh' });
+    });
+
+    it('leaves every other backend on the step\'s own model and effort', () => {
+      // The negative control on the test above: without it, "the codex table applies" is equally
+      // provable by a resolver that returns the codex pair for everything.
+      const step = stepOf('implement');
+      expect(resolveStepModel(step, 'claude')).toEqual({ model: 'sonnet', effort: undefined });
+      expect(resolveStepModel(step, 'opencode')).toEqual({ model: 'sonnet', effort: undefined });
+    });
+
+    it('is unchanged for a step that names no byRunner, on either backend', () => {
+      // The other negative control, and the one that guards every workflow this spec never
+      // touched: a step with no override must resolve identically to what the old
+      // `step.model ?? input.model` / `step.effort` pair produced.
+      const plain: WorkflowStepDef = { id: 'x', prompt: '{{task}}', model: 'sonnet', effort: 'high' };
+      expect(resolveStepModel(plain, 'codex')).toEqual({ model: 'sonnet', effort: 'high' });
+      expect(resolveStepModel(plain, 'claude')).toEqual({ model: 'sonnet', effort: 'high' });
+    });
+
+    it('falls back to the run-level model, and never invents a run-level effort', () => {
+      const bare: WorkflowStepDef = { id: 'x', prompt: '{{task}}' };
+      expect(resolveStepModel(bare, 'codex', 'gpt-5.6-sol')).toEqual({
+        model: 'gpt-5.6-sol',
+        effort: undefined,
+      });
+    });
+
+    it('does not half-apply an override that names only an effort', () => {
+      // The pair is the unit. An override carrying only `effort` must still take the step's model,
+      // not leave the model undefined — the shape that would drop a pin and keep a ceiling.
+      const step: WorkflowStepDef = {
+        id: 'x',
+        prompt: '{{task}}',
+        model: 'sonnet',
+        effort: 'low',
+        byRunner: { codex: { effort: 'max' } },
+      };
+      expect(resolveStepModel(step, 'codex')).toEqual({ model: 'sonnet', effort: 'max' });
+    });
+  });
+
+  describe('the spec-to-deploy table (D2)', () => {
+    it('names a codex model and effort on every step that does not pin the claude runner', () => {
+      // Asserted as a WHOLE rather than step by step, so a ninth step added later without a codex
+      // pin reddens this instead of silently inheriting codex's default.
+      const table = Object.fromEntries(
+        SPEC_TO_DEPLOY_WORKFLOW.steps.map((step) => [step.id, resolveStepModel(step, 'codex')]),
+      );
+      expect(table).toEqual({
+        context: { model: 'gpt-5.6-terra', effort: 'medium' },
+        // `spec` and `review-spec` pin `runner: 'claude'`, so they never reach a codex backend at
+        // all — owner instruction 2026-08-22, "writing spec + spec review should be by opus
+        // always". They keep the Claude pair even when asked about codex.
+        spec: { model: 'opus', effort: undefined },
+        'review-spec': { model: 'opus', effort: undefined },
+        implement: { model: 'gpt-5.6-luna', effort: 'xhigh' },
+        'run-tests': { model: 'gpt-5.6-luna', effort: 'medium' },
+        'commit-push': { model: 'gpt-5.6-luna', effort: 'medium' },
+        document: { model: 'gpt-5.6-luna', effort: 'high' },
+        deploy: { model: 'gpt-5.6-luna', effort: 'medium' },
+      });
+    });
+
+    it('keeps the two judgement steps pinned to claude, which is what makes them opus', () => {
+      for (const id of ['spec', 'review-spec']) {
+        expect(stepOf(id).runner, `${id} must pin the runner`).toBe('claude');
+        expect(stepOf(id).byRunner, `${id} must not carry a codex pin`).toBeUndefined();
+      }
+    });
+
+    it('every codex model it names is one the picker offers', () => {
+      // `KNOWN_PRESETS_BY_RUNNER.codex` is the 5.6 family only (owner: "in codex use only 5.6").
+      // A model named here but absent there would be a workflow the composer cannot express.
+      for (const step of SPEC_TO_DEPLOY_WORKFLOW.steps) {
+        const model = step.byRunner?.codex?.model;
+        if (!model) continue;
+        expect(KNOWN_PRESETS_BY_RUNNER.codex, `${step.id} names ${model}`).toContain(model);
+        expect(modelConflictsWithRunner(model, 'codex')).toBe(false);
+      }
+    });
+  });
+
+  describe('escalation (D4) — "Terra/Sol Medium failed → Sol High/Max"', () => {
+    const terraMedium: WorkflowStepDef = {
+      id: 'x',
+      prompt: '{{task}}',
+      byRunner: { codex: { model: 'gpt-5.6-terra', effort: 'medium' } },
+    };
+
+    it('climbs terra-medium to sol high, then sol max, and stops there', () => {
+      expect(resolveStepModel(terraMedium, 'codex', undefined, 0)).toEqual({
+        model: 'gpt-5.6-terra',
+        effort: 'medium',
+      });
+      expect(resolveStepModel(terraMedium, 'codex', undefined, 1)).toEqual({
+        model: 'gpt-5.6-sol',
+        effort: 'high',
+      });
+      expect(resolveStepModel(terraMedium, 'codex', undefined, 2)).toEqual({
+        model: 'gpt-5.6-sol',
+        effort: 'max',
+      });
+      // `ultra` is never reached — "Sol Ultra: basically never", and the enum omits it.
+      expect(resolveStepModel(terraMedium, 'codex', undefined, 9)).toEqual({
+        model: 'gpt-5.6-sol',
+        effort: 'max',
+      });
+    });
+
+    it('climbs sol-medium the same way', () => {
+      const solMedium: WorkflowStepDef = {
+        id: 'x',
+        prompt: '{{task}}',
+        byRunner: { codex: { model: 'gpt-5.6-sol', effort: 'medium' } },
+      };
+      expect(resolveStepModel(solMedium, 'codex', undefined, 1)).toEqual({
+        model: 'gpt-5.6-sol',
+        effort: 'high',
+      });
+    });
+
+    it('does NOT climb a luna row, however many times it failed', () => {
+      // The direction that matters, and the one a "climb on any failure" ladder gets wrong: a
+      // failing tiny task must not end up on the most expensive model in the catalog.
+      const implement = stepOf('implement');
+      for (const priorFailures of [1, 2, 5]) {
+        expect(resolveStepModel(implement, 'codex', undefined, priorFailures)).toEqual({
+          model: 'gpt-5.6-luna',
+          effort: 'xhigh',
+        });
+      }
+      expect(resolveStepModel(stepOf('commit-push'), 'codex', undefined, 3)).toEqual({
+        model: 'gpt-5.6-luna',
+        effort: 'medium',
+      });
+    });
+
+    it('leaves a claude step alone — the ladder is codex-only by construction', () => {
+      // `sonnet` at no effort is not an escalatable rung, so a Claude step cannot be pushed onto
+      // a codex model by failing. Nothing keys on the backend id to achieve that; it falls out of
+      // the rungs being named by model.
+      expect(resolveStepModel(stepOf('implement'), 'claude', undefined, 3)).toEqual({
+        model: 'sonnet',
+        effort: undefined,
+      });
+    });
+  });
+});
+
+/**
+ * The keys the mutual-assignability parity guard structurally CANNOT enforce.
+ *
+ * `contract-parity.workflows.test.ts` compares the server's `WorkflowStepDef` with the contract's
+ * by assigning each to the other. An **optional** property present on only one side stays
+ * assignable in both directions, so a server-only key typechecks green and the guard says nothing
+ * — the hazard the contract's own `heavy` docblock spells out. `GET /workflows` serves the
+ * server's `WorkflowDef` verbatim, so such a key is already on the wire under a name the contract
+ * does not know, and the first consumer to rebuild a step field-by-field drops it on the way back
+ * through `POST /workflows`.
+ *
+ * For `byRunner` that is not theoretical: `spec-to-deploy` carries a codex model and effort on six
+ * of its eight steps, so a round-trip through a contract type missing the key saves the built-in
+ * workflow back with its whole codex policy gone.
+ */
+describe('contract mirrors the step keys the parity guard cannot see', () => {
+  it('parses and PRESERVES effort and byRunner rather than stripping them', () => {
+    const parsed = contractWorkflowStepDefSchema.parse({
+      id: 'implement',
+      prompt: '{{task}}',
+      model: 'sonnet',
+      effort: 'max',
+      byRunner: { codex: { model: 'gpt-5.6-luna', effort: 'xhigh' } },
+    });
+    // `toMatchObject`, and on the PARSE OUTPUT: a schema that does not declare a key strips it
+    // silently rather than throwing, so asserting the input round-trips is the only way to tell
+    // "the contract knows this key" from "the contract quietly discarded it".
+    expect(parsed.effort).toBe('max');
+    expect(parsed.byRunner).toEqual({ codex: { model: 'gpt-5.6-luna', effort: 'xhigh' } });
+  });
+
+  it('every codex pin in spec-to-deploy survives a contract round-trip', () => {
+    for (const step of SPEC_TO_DEPLOY_WORKFLOW.steps) {
+      if (!step.byRunner) continue;
+      expect(contractWorkflowStepDefSchema.parse(step).byRunner, step.id).toEqual(step.byRunner);
+    }
   });
 });

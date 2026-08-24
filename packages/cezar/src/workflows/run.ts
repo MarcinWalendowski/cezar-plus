@@ -131,6 +131,7 @@ import {
   DEFAULT_WORKFLOW,
   DEFAULT_WORKFLOW_NAME,
   parseReviewVerdict,
+  resolveStepModel,
   stepKind,
   type ReviewVerdict,
   type WorkflowDef,
@@ -5176,6 +5177,11 @@ export class RunManager {
             stepChainNote,
             sentAttachments,
             stepResume,
+            // The POST-CONDITION ledger, not `retriesUsed`: the table's escalation row is about a
+            // step that ran and did not meet its goal, which is exactly what `verifyRetries`
+            // counts. `retriesUsed` counts a CHECK step looping back to an earlier step — a
+            // different event, and one that can re-enter a step that never failed.
+            { priorFailures: verifyRetries.get(step.id) ?? 0 },
           ),
         );
         startImages = undefined;
@@ -5738,6 +5744,14 @@ export class RunManager {
      *  `verifyTranscript` (spec 2026-08-22-resume-fresh-session-fallback) is a separate flag
      *  rather than "resumeFrom is set" — see `ChainResumePoint.resume`. */
     resumeFrom?: { sessionId: string; profileId?: string; prompt: string; verifyTranscript?: true },
+    /** How many times this step's post-condition has already sent it back — 0 on the first
+     *  attempt. Drives the codex escalation ladder
+     *  (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D4).
+     *
+     *  An object rather than a bare `number` deliberately: this parameter list is fifteen long and
+     *  ends in two optionals, and a lone trailing number is the shape that swaps with a neighbour
+     *  and still typechecks. */
+    escalation: { priorFailures: number } = { priorFailures: 0 },
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -5960,6 +5974,12 @@ export class RunManager {
     // unresolvable model (e.g. a bare id on opencode) returns the step error
     // instead of letting the backend silently substitute its default.
     let backendModel: string | undefined;
+    // Resolved ONCE, for the backend that will actually run this step, and both halves from the
+    // same source (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D1). Before this, the
+    // model came from `step.model ?? input.model` and the effort from `step.effort` at the spawn
+    // site 180 lines below — two independent reads that a per-runner override would have pulled
+    // apart, applying codex's model with Claude's ceiling.
+    const stepChoice = resolveStepModel(step, stepBackend, input.model, escalation.priorFailures);
     // Hoisted rather than inlined into the call below, because it is now read TWICE — once by the
     // mapper and once by the record. Two copies of the same expression is exactly how the thing
     // that ran and the thing the record claims ran drift apart.
@@ -5970,7 +5990,7 @@ export class RunManager {
     // for a step that ran on codex's default. Same reason the hoist exists at all.
     const stepRawModel = agentModelsLocked(this.repoRoot)
       ? undefined
-      : this.modelForBackend(runId, step.id, stepBackend, step.model ?? input.model);
+      : this.modelForBackend(runId, step.id, stepBackend, stepChoice.model);
     try {
       const normalized = normalizeModelForBackend(stepBackend, stepRawModel, {
         configuredProvider: await configuredModelProvider(stepBackend, state.cwd),
@@ -6153,7 +6173,9 @@ export class RunManager {
           ],
           env: stepProfile.env,
           model: backendModel,
-          effort: step.effort,
+          // `stepChoice.effort`, not `step.effort`: a `byRunner` entry carries the pair, and
+          // reading the step's own effort here would apply the other backend's ceiling.
+          effort: stepChoice.effort,
           sessionId: spawnSessionId,
           resume: resumeDowngraded ? false : resumeFrom !== undefined,
           // Interactive sessions have no wall clock — the idle timer rules.

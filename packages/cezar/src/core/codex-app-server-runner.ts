@@ -463,10 +463,27 @@ class CodexSession implements AgentSession {
     // with its default (no summary), so the reasoning thread stays empty even
     // though the mapper and UI can render it. The override persists for this
     // turn and every subsequent turn, so seeding it on turn/start is enough.
+    //
+    // `effort` rides in the SAME object, and this is the only place it can
+    // (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D3). Read off the app-server's own
+    // `generate-json-schema` output — `v2/TurnStartParams.json` documents it as *"Override the
+    // reasoning effort for this turn and subsequent turns"*. `thread/start` is the trap: it
+    // ACCEPTS `effort`, `reasoningEffort`, `modelReasoningEffort`, `model_reasoning_effort` and
+    // `reasoning_effort` without error and applies none of them (measured 2026-08-24 — the thread
+    // comes back `reasoningEffort: null` every time, because unknown params are tolerated), so a
+    // change made there looks exactly like a change that worked.
+    //
+    // Because the override is per turn, resume needs nothing extra: every turn goes through here,
+    // including the first turn after a `thread/resume`. That is deliberately unlike `model`, which
+    // `thread/resume` must restate because a thread PERSISTS the model it was born with.
+    //
+    // Key omitted, never sent as null, when no effort was resolved — the overwhelmingly common
+    // case, and it must leave the model on its own default rather than pin it to one.
     const res = await this.rpc.request('turn/start', {
       threadId: this.threadId,
       input,
       summary: reasoningSummary(),
+      ...(this.spec.effort ? { effort: this.spec.effort } : {}),
     });
     this.activeTurnId = turnIdOf(res) ?? this.activeTurnId;
   }

@@ -5,6 +5,54 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- 🧭 **A model router for codex: the owner's task→model table, applied per step of `spec-to-deploy`**
+  (spec `.ai/specs/2026-08-24-codex-step-model-and-effort.md`).
+
+  `spec-to-deploy` has expressed a per-step model policy since 2026-08-21 — `spec`/`review-spec` on
+  `opus`, the other six on `sonnet`. **On a codex run it expressed nothing.** Every one of those
+  pins is a Claude alias, `modelForBackend` drops it as another runner's id, and the step falls
+  through to codex's own default. Measured on `prod-host`, that default is **`gpt-5.6-sol`
+  with `reasoningEffort: null`**: the most expensive model in the catalog at its *shallowest*
+  reasoning level, for `Commit & push` and `Deploy` alike. Nobody chose it; it is the absence of a
+  choice.
+
+  A step can now name a model **and a reasoning effort per runner** (`byRunner`), so one step says
+  `sonnet` for Claude and `gpt-5.6-luna`/`xhigh` for codex instead of naming one and losing the
+  other. The pair is one field rather than two parallel maps, because the table has rows that
+  differ *only* in effort (Luna Medium vs Luna XHigh), and a half-applied override lands on a row
+  nobody chose.
+
+  | step | codex | effort |
+  | --- | --- | --- |
+  | Gather the record | `gpt-5.6-terra` | medium |
+  | Write / Review the spec | *(unchanged — pinned opus-on-Claude)* | — |
+  | Implement the spec | `gpt-5.6-luna` | xhigh |
+  | Run the tests · Commit & push · Deploy | `gpt-5.6-luna` | medium |
+  | Document the decision | `gpt-5.6-luna` | high |
+
+  `implement` is Luna XHigh and not Sol even for an auth or migration task: by the time it runs the
+  architecture decision has been made and reviewed on opus two steps earlier. The table's Sol row is
+  about *deciding*, and that is what `spec`/`review-spec` are.
+
+- ⚙️ **Reasoning effort reaches codex** (same spec, D3). `step.effort` was Claude-only — the schema
+  said so in its own docblock — which made four of the table's six rows inexpressible, since they
+  differ from another row only by effort. It now rides on `turn/start`, in the same params object
+  cezar already sends `summary` in. Read off the app-server's own `generate-json-schema` output
+  rather than guessed: `v2/TurnStartParams.json` documents `effort` as *"Override the reasoning
+  effort for this turn and subsequent turns."*
+
+  **`thread/start` is the trap, and it was measured.** It accepts `effort`, `reasoningEffort`,
+  `modelReasoningEffort`, `model_reasoning_effort` **and** `reasoning_effort` without error and
+  applies none of them — the thread comes back `reasoningEffort: null` every time, because unknown
+  params are tolerated. A change made there looks exactly like a change that worked, which is why
+  the test asserts the `turn/start` payload cezar writes rather than the turn's outcome.
+
+- ⬆️ **Escalation, exactly where the table puts it** (same spec, D4). A step that fails on
+  `terra`/`medium` or `sol`/`medium` retries on `sol`/`high`, then `sol`/`max`. Luna rows do **not**
+  climb — a failing tiny task must not end up on the most expensive model, which is precisely what
+  the table declines to do — and `ultra` is never reached, because it is the one level the `effort`
+  enum omits.
+
 - 🔀 **A second Codex account, detected by itself — and a pool that can actually balance one**
   (spec `.ai/specs/2026-08-24-second-codex-account-balancing.md`).
 

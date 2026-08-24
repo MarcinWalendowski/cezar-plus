@@ -348,6 +348,27 @@ flag is set to exactly `1`.**
 - **Non-destructive rollback**: unset the flag and restart. Nothing is migrated or deleted, and the
   rows already written stay exactly as they are.
 
+## `byRunner` on a workflow step, and `effort` on codex (2026-08-24)
+
+Spec `.ai/specs/2026-08-24-codex-step-model-and-effort.md`. **Additive to what a user authors;
+behaviour-changing for one thing, named below.**
+
+- **`workflowStepSchema` gains one optional key**, `byRunner`. Every existing workflow YAML, every
+  inline chain on `POST /runs`, and every persisted `workflowDef` parses unchanged, and a step
+  without the key resolves to exactly the `step.model ?? input.model` / `step.effort` pair it did
+  before — asserted directly, on both backends, rather than assumed.
+- **`skillStackOf` now returns `null` for a step carrying `byRunner` or `effort`**, as it already
+  did for `model`. That is a widening of an existing refusal, not a new one: round-tripping such a
+  step through the compact skill form would silently discard the pair.
+- **What actually changes at runtime, and only on codex:** a `spec-to-deploy` run started on codex
+  used to run six of its eight steps on codex's own default model at its own default effort. It now
+  runs them on the models named in the table. Runs on Claude are byte-identical — same models, same
+  efforts, same argv.
+- **`AgentRunSpec.effort` is no longer ignored by the codex runner.** A caller that set it for a
+  codex run previously had it dropped on the floor; it is now sent. No caller in this repo did.
+- **Rollback is deleting the `byRunner` keys.** Nothing is migrated, nothing is stored, and no
+  persisted record changes shape.
+
 ## When in doubt
 
 If a change might break any surface above, say so in the PR description, label the PR `risk-high`, and route it through the review + QA gates in `SDLC.md`. A silent break found in review is a blocker per `CODE_REVIEW.md`.
