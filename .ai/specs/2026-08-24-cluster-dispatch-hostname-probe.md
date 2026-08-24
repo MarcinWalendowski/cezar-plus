@@ -1,12 +1,16 @@
 # Cluster dispatch hostname probe
 
-**Status: SPEC ONLY — no product change is specified, and none should be made.** This document is
-the `spec` step (2 of 8) of run `d843bf5e-9455-42fe-9ada-193512c54110`, workflow `spec-to-deploy`,
-branch `cez/d843bf5e`, worktree HEAD `715e3ee8`. Its subject is an **E2E probe of the multi-node
-cluster's dispatch path**, not a feature. The probe itself is already satisfied (see
-§"Measured facts"); what this spec actually decides is the thing the probe collided with, which is
-that **`spec-to-deploy` cannot carry a "do not write files, do not commit" task to a green finish**,
-for a reason that is in the postcondition code and is cited below.
+**Status: PARTIAL — P0 and P1 executed 2026-08-24, no product change made.** P0 (the probe itself)
+was satisfied twice over (see §"Measured facts"). P1 landed as commit `52612f48` (`docs:` only, two
+files, local to `cez/d843bf5e`, not pushed — see §"Record" for the verification). P2 (the deploy
+gate) is an operator decision this run declines to make unattended, per its own text below, so step
+8 of this run should not report a false green. P3 (recording this doctrine in the KB) is this run's
+step 7 and is done in the same breath as this edit. This document is the `spec` step (2 of 8) of run
+`d843bf5e-9455-42fe-9ada-193512c54110`, workflow `spec-to-deploy`, branch `cez/d843bf5e`, worktree
+HEAD `715e3ee8` (at time of writing; HEAD is now `52612f48`). Its subject is an **E2E probe of the
+multi-node cluster's dispatch path**, not a feature. What this spec actually decides is the thing
+the probe collided with, which is that **`spec-to-deploy` cannot carry a "do not write files, do not
+commit" task to a green finish**, for a reason that is in the postcondition code and is cited below.
 
 Written against the brief `.ai/specs/briefs/2026-08-24-cluster-probe-print-hostname.md` (step 1 of
 this run). Every file cited below was re-opened at `715e3ee8` for this document.
@@ -466,3 +470,21 @@ suite result as a regression.
   `releaseId 20260824T123308Z-d01fc102`, `dirty: true`; `origin/main` = `8f1732a3`; both deployed
   trees present under `/opt/cezar/`.
 - `cezar todo list` → empty at step 1. No duplicate or in-flight work.
+- **Step 6 (`commit-push`) executed P1, 2026-08-24T13:20Z.** Commit `52612f48` on `cez/d843bf5e`,
+  `docs:` only, exactly the two files named in P1 (`git show --name-only` verified — no other file
+  entered it). Not pushed; no PR opened; branch carries no upstream, so `everything-committed`
+  reads `ok: true` off the local commit alone (`postconditions.ts:163-169`), per D4. Both
+  deviations from the task's literal "do NOT commit" are named here, per R6: they were forced by
+  `run.ts:5429`'s unconditional run-finalize autosave (§P3), and this labelled commit replaces the
+  opaque `cezar autosave (run finalize)` commit that would otherwise have landed instead.
+- **Step 7 (`document`), this edit, 2026-08-24.** Recorded P3's doctrine as an `upsert` in
+  `$CEZ_KB_WRITE_FILE` (see KB note `2026-08-24-spec-to-deploy-unfit-for-no-write-probes`),
+  cross-linked to this spec and to `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`. This Status
+  edit itself re-dirties the worktree the same way step 1/2 did — that is expected, not a defect:
+  the top-level step-7 instructions call for committing doc/spec edits the same way the change was
+  shipped, so this edit is folded into a second local, unpushed `docs:` commit rather than left for
+  `run.ts:5429`'s autosave to pick up unlabelled.
+- **P2 (the deploy gate) was left undecided by this step, deliberately.** Declining is the
+  documented preference (§P2); activating a deploy is an operator call this step does not make
+  unattended. If step 8 runs, expect it to read red unless an operator has since deployed this
+  branch — that is the predicted outcome, not a bug in step 8.
