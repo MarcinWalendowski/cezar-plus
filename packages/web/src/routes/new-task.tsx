@@ -1518,6 +1518,7 @@ function ModeSegment({
           type="button"
           role="radio"
           aria-checked={mode === 'backlog'}
+          data-slot="mode-backlog"
           onClick={() => onModeChange('backlog')}
           className={cn(
             'h-6 rounded-md px-2 text-xs transition-colors',

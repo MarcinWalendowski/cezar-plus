@@ -335,6 +335,12 @@ files.
    Those names are **examples, not the set**: see the corrected scrub above, which unsets the
    whole `CEZ_*` prefix precisely so this list never has to be right.
 
+3. **CORRECTED 2026-08-24: C18 uses a measured host-calibrated budget.** The same-process ratio
+   candidate was measured and rejected because its first five samples ranged from 4.2x to 5.9x baseline
+   (max/min 1.39), above the 1.20 stability gate. C18 is now serialized and uses a 59.2 ms/MiB
+   absolute limit measured on this host, with a negative-control regression check. A red C18 after
+   this correction is again a statement about the diff, not an excuse to widen the constant.
+   **The historical absolute-budget description below is retained as the record it corrects.**
 3. **An absolute time budget calibrated on a different machine.** `knowledge/catalog.test.ts`
    C18 asserts `bestMs / totalMiB < 40` — a hard 40 ms/MiB, taken on the box the test was
    written on. Its comment already defends against ambient *load* (CPU time, not wall; minimum
