@@ -468,6 +468,45 @@ export function isNodeAuthenticatedClusterPath(relativePath: string): boolean {
   );
 }
 
+/**
+ * `/cluster/join` — the ONE cluster path whose credential is the request body rather than a node
+ * signature or a cockpit session.
+ *
+ * **Why it needs its own set rather than joining `NODE_AUTHENTICATED_CLUSTER_BASE_PATHS`.** A node
+ * that is joining does not have a node credential yet — acquiring one is the entire point of the
+ * request — so `requireNodeAuth` can never authenticate it. What authenticates it is the join code
+ * itself: single-use, TTL-bounded, stored only as a SHA-256 digest, and compared in constant time
+ * (`enrollment.ts#matchesEnrollmentCode`). `redeemEnrollmentCode` answers `ok:false` with a named
+ * reason for every code it does not recognise, and folds "never minted" into `code-expired` so a
+ * redeemer cannot probe which codes exist.
+ *
+ * **FOUND 2026-08-24, on the production hub.** This path used to sit behind the cockpit wall
+ * alongside `/cluster/enroll*`, under the reasoning that both are "operator actions taken at a
+ * human's own browser". That is true of `enroll` and false of `join`: `join` is called by the
+ * CLI **on the machine being added**, by `cluster/enrollment.ts#joinCluster`, which has no cockpit
+ * session and no way to obtain one. So on every deployment that sets `CEZ_AUTH` — which is every
+ * real one — the wall answered 401 before this handler ran and `cez cluster join <code>` could not
+ * succeed against any hub, ever. It was measured against `prod-host` running `CEZ_AUTH=oidc`:
+ * the CLI reported `access-rejected`, which named the wrong system entirely (Cloudflare Access was
+ * not in the path at all — the 401 was cezar's own perimeter).
+ *
+ * The suite did not catch it because it asserted the MECHANISM, not the outcome:
+ * `cluster-node-auth-wall.test.ts` pinned `POST /cluster/join` to the blanket 401 as a containment
+ * check. Nothing anywhere asked whether a spoke could then still join.
+ *
+ * **Deliberately EXACT-match, not the `/`-bounded prefix rule above.** There is no legitimate
+ * `/cluster/join/<something>`, so an exact test is the narrowest thing that works, and it keeps
+ * `/cluster/enroll` (which MINTS codes and must stay session-only) and `GET /cluster` (the roster)
+ * behind the wall. Widening this to a prefix, or adding `enroll` to it, would expose code minting
+ * to anyone who can reach the host.
+ */
+export const CODE_AUTHENTICATED_CLUSTER_PATHS = ['/cluster/join'] as const;
+
+/** True iff `relativePath` (no `/api/v1` prefix) is authenticated by a join code — exact match. */
+export function isCodeAuthenticatedClusterPath(relativePath: string): boolean {
+  return CODE_AUTHENTICATED_CLUSTER_PATHS.some((path) => relativePath === path);
+}
+
 export function createClusterRoutes(deps: ClusterRouteDeps) {
   const env = deps.env ?? process.env;
 

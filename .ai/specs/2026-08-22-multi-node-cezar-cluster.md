@@ -2613,6 +2613,84 @@ invented; these are the names to use when one lands.
 > full suite `606 passed | 1 failed | 2 skipped` — the one red being C18, the standing CPU-budget
 > failure. Ownership audit `0`. Tree verified 2030 files identical to the Mac before the run.
 >
+> **55. FIXED 2026-08-24 — `cez cluster join` could never succeed against ANY hub with `CEZ_AUTH`
+> set, and this spec's own test suite is what kept it invisible.** Found by running the real command
+> against the real production hub, which is the only thing that could have found it.
+>
+> `joinCluster` POSTs to `/api/v1/cluster/join`. `server.ts`'s cockpit auth wall admits
+> `/api/v1/cluster/*` only for `NODE_AUTHENTICATED_CLUSTER_BASE_PATHS` — `corpus`, `todos`,
+> `allocate`, `leases` — and `/cluster/join` is deliberately NOT one of them. The exemption's own
+> comment says why: *"the roster (`GET /cluster`), `/cluster/enroll*` (mints enrollment codes) and
+> `/cluster/join` stay behind THIS wall, cockpit-session-only — they are operator actions taken at a
+> human's own browser."*
+>
+> **That reasoning is true of `enroll` and false of `join`.** `join` is called by the CLI **on the
+> machine being added**. It has no cockpit session and no way to acquire one — acquiring a
+> credential is the entire point of the request. So on every deployment that sets `CEZ_AUTH` (which
+> is every real one; production is `CEZ_AUTH=oidc`) the wall answered 401 before the handler ran.
+> Measured directly, through the tunnel, before the fix:
+>
+> | request | status |
+> | --- | --- |
+> | `POST /api/v1/cluster/join` | **401** |
+> | `POST /api/v1/cluster` | 401 |
+> | `GET /api/v1/health` (control) | 200 |
+> | `GET /api/v1/ready` (control) | 200 |
+>
+> The controls are what make it a wall finding rather than "the tunnel is broken".
+>
+> **The error message named the wrong system.** `redeemEnrollmentCode`'s caller classifies any
+> 3xx/401/403 as `access-rejected` with the fixed text *"Cloudflare Access rejected this request
+> before it reached the hub."* Cloudflare Access was not in the path at all — the request went over
+> an ssh tunnel straight to loopback on the box. D17 built that named-reason ladder precisely so an
+> operator could tell a credential problem from a stale code; here it sent them to the Cloudflare
+> dashboard for a defect in cezar's own middleware. **Still open** (53g below).
+>
+> **Why the suite could not catch it — it asserted the MECHANISM and never the OUTCOME.**
+> `cluster-node-auth-wall.test.ts` had `POST /cluster/join` in its `COCKPIT_ONLY` table, asserting
+> the blanket 401 *as a containment check*. The test was passing **because** the defect was present.
+> Nothing in 609 test files asked the actual question: can a spoke join a hub that has auth on? This
+> is the branch's signature failure mode in its purest form — a green suite pinning a behaviour
+> nobody had checked was the right behaviour.
+>
+> **The fix: a second exempt family, on a different credential.**
+> `CODE_AUTHENTICATED_CLUSTER_PATHS = ['/cluster/join']` in `cluster-routes.ts`, with
+> `isCodeAuthenticatedClusterPath` — **exact match, not the `/`-bounded prefix rule** used for the
+> node-auth set, because no legitimate route nests under `/cluster/join` and a prefix would only
+> widen the hole. The wall calls it exactly as it calls the node-auth predicate, so the two wiring
+> points still cannot drift.
+>
+> **What authenticates the route instead:** the join code in the body — single-use, TTL-bounded,
+> stored only as a SHA-256 digest, compared in constant time, and unable to MINT anything.
+> `/cluster/enroll*` (which does mint) and the `GET /cluster` roster stay behind the wall. That
+> containment is the whole justification, so it is asserted four separate ways, and a mutation
+> smuggling `/cluster/enroll` into the exempt set turns all four red.
+>
+> **Mutation-verified, both directions** (restored from a scratchpad copy, md5-checked, because this
+> is a shared checkout):
+>
+> | mutation | result |
+> | --- | --- |
+> | drop the wall's `isCodeAuthenticatedClusterRequest` branch | **RED** — `expected 401 to be 200`, i.e. exactly the pre-fix symptom |
+> | add `/cluster/enroll` to the exempt set | **RED × 4** — app-level, floor, containment, predicate |
+>
+> The new test asserts a PAIR and neither half is sufficient alone: the wall lets it through (not
+> `{error:'unauthenticated'}`) **and** an unknown code is still refused (`ok:false`,
+> `reason:'code-expired'`). Without the second half it would pass against a route that admitted
+> anyone. It also needs `ensureNodeIdentity({role:'hub'})` in its own `beforeEach`: `/cluster/join`
+> is hub-gated, and without a hub identity `requireHub`'s 409 fires first — measured, not assumed,
+> and the same trap the D20 block's own comment already warns about.
+>
+> **Box gate, merged tree, 2026-08-24:** typecheck 0, build 0, `test:unit` 0, `test:package` 0,
+> full suite `606 passed | 1 failed | 2 skipped`, the one red being C18. Ownership audit `0`.
+>
+> **53g (NEW, open). `access-rejected` is asserted, never measured.** The classifier maps every
+> 3xx/401/403 to one fixed sentence blaming Cloudflare Access. It cannot distinguish Access from
+> cezar's own perimeter, from a reverse proxy, or from anything else that answers 401 — and it
+> states a cause it has no evidence for. The honest shape is the one D17 already uses everywhere
+> else: name what was observed (`HTTP 401 from <url>`) and let the *reason* stay a reason. Nothing
+> branches on the message, so this is a message-only change with no protocol impact.
+>
 > **NEWEST FIRST: items 31-36 in the nested list below are the most recent and correct two of my
 > own earlier claims.** Item 31 closes the second standing red as pre-existing; item 32 lists what
 > five session-limit deaths actually left (two of my four claims were false) and records the

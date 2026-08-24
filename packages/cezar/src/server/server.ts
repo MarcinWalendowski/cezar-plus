@@ -27,7 +27,12 @@ import { currentRelease, runtimeInfo, type RuntimeInfo } from './runtime-info.ts
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
-import { createClusterRoutes, isNodeAuthenticatedClusterPath, startClusterRuntime } from './cluster-routes.ts';
+import {
+  createClusterRoutes,
+  isCodeAuthenticatedClusterPath,
+  isNodeAuthenticatedClusterPath,
+  startClusterRuntime,
+} from './cluster-routes.ts';
 import { createWorkspaceReportsRoutes } from './workspace-reports-routes.ts';
 import { createNotesRoutes } from './notes-routes.ts';
 import {
@@ -1916,6 +1921,11 @@ export function createApp(deps: ServerDeps) {
     if (!path.startsWith(V1_PREFIX)) return false;
     return isNodeAuthenticatedClusterPath(path.slice(V1_PREFIX.length));
   }
+  /** The join-code family — see `isCodeAuthenticatedClusterPath`'s doc in `cluster-routes.ts`. */
+  function isCodeAuthenticatedClusterRequest(path: string): boolean {
+    if (!path.startsWith(V1_PREFIX)) return false;
+    return isCodeAuthenticatedClusterPath(path.slice(V1_PREFIX.length));
+  }
   app.use('/api/*', async (c, next) => {
     if (c.req.path === `${V1_PREFIX}/health`) return next();
     // `/ready` joins the exemption for a concrete operational reason (P5 of
@@ -1935,6 +1945,15 @@ export function createApp(deps: ServerDeps) {
     // from here — this branch only decides which requests get handed to it instead of the
     // cockpit's own 401.
     if (isNodeAuthenticatedClusterRequest(c.req.path)) return next();
+    // `POST /cluster/join` carries its own credential — the single-use, TTL-bounded join code,
+    // matched against a stored SHA-256 digest in constant time. It CANNOT be node-authenticated:
+    // the caller is a machine acquiring its first credential, and it has no cockpit session either
+    // (`cez cluster join` runs on the node being added, not in the hub operator's browser). Behind
+    // this wall the route answered 401 on every deployment that sets `CEZ_AUTH`, which is every
+    // real one — measured on `prod-host`, where the CLI then reported `access-rejected` and
+    // named Cloudflare Access for cezar's own refusal. Exact-match and this path only:
+    // `/cluster/enroll*` MINTS codes and stays session-only, as does the `GET /cluster` roster.
+    if (isCodeAuthenticatedClusterRequest(c.req.path)) return next();
     const principalContext = c as unknown as Context<{ Variables: { principal: Principal } }>;
     // `resolveAuthProvider`, not `resolveCapabilities(...).auth`: which provider a deployment
     // requires is a server-side policy, not a capability the cockpit is told about, and it is
