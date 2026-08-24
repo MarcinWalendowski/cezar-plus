@@ -124,6 +124,32 @@ describe('cluster/leases', () => {
     });
   });
 
+  // Negative control 2b: `leasesHeldBy` must itself apply the liveness filter, not just return
+  // whatever rows carry the node's id. A prior version of this suite deleted that filter's
+  // conjunct in `leases.ts` and stayed green, because every caller in this file only ever asked
+  // `leasesHeldBy` about a store where every row was still live — "returns live leases" and
+  // "returns all leases" were indistinguishable. This drives the SAME node's clock past one
+  // lease's TTL while a second lease it holds is still live, so the expired-and-absent case and
+  // the live-and-returned case (the mirror control) are both exercised in one assertion.
+  describe('leasesHeldBy filters on liveness', () => {
+    it('excludes a lease past its TTL and still returns one that is live, for the same holder', async () => {
+      let clock = new Date('2026-08-22T00:00:00.000Z');
+      const now = () => clock;
+
+      const short = await acquireLease('scheduler', 'node-a', { id: 'automations', ttlMs: 1_000 }, { now });
+      expect(short.acquired).toBe(true);
+      const long = await acquireLease('account', 'node-a', { id: 'acct-1', ttlMs: 100_000 }, { now });
+      expect(long.acquired).toBe(true);
+
+      // Past the short lease's TTL, well inside the long lease's.
+      clock = new Date(clock.getTime() + 2_000);
+
+      const held = await leasesHeldBy('node-a', { now });
+      expect(held).toHaveLength(1); // the expired 'automations' lease must not appear
+      expect(held[0]!.id).toBe('acct-1'); // mirror control: the still-live lease is returned
+    });
+  });
+
   // Negative control 3, the unit-level analogue of Verification 10 ("exactly-once across a lease
   // wipe"). The full property (a replicated todo claim survives a wiped hub) is architectural —
   // D4/D9a moved claims off leases entirely, onto the hub's linearized ack, which is not this

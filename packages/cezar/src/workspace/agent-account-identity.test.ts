@@ -4,9 +4,11 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { claudeStateFilePath } from '../paths.ts';
 import {
+  discoverAgentAccounts,
   discoverClaudeAccounts,
   planLabel,
   readClaudeAccountIdentity,
+  readCodexAccountIdentity,
 } from './agent-account-identity.ts';
 
 /**
@@ -212,5 +214,162 @@ describe('discoverClaudeAccounts', () => {
 
   it('answers an empty list on a machine with no Claude home at all', async () => {
     expect(await discoverClaudeAccounts(env())).toEqual([]);
+  });
+});
+
+/**
+ * Codex identity + discovery (spec `.ai/specs/2026-08-24-second-codex-account-balancing.md`, D3).
+ *
+ * The `auth.json` bodies below carry the three credential-shaped keys the real file has —
+ * `OPENAI_API_KEY`, `access_token`, `refresh_token` — with recognizable sentinel values, because
+ * the assertion that matters in this block is that NONE of them comes back out. A fixture without
+ * them would pass against a reader that returns the whole file.
+ *
+ * The claim set is a trimmed capture of the real `id_token` payload on `prod-host`
+ * (2026-08-24): the key `https://api.openai.com/auth`, the spelling `chatgpt_plan_type`, and the
+ * organizations array are the vendor's, not invented.
+ */
+const API_KEY_SENTINEL = 'sk-proj-NEVER-RETURN-THIS';
+const ACCESS_SENTINEL = 'ACCESS-NEVER-RETURN-THIS';
+const REFRESH_SENTINEL = 'REFRESH-NEVER-RETURN-THIS';
+
+function jwt(claims: Record<string, unknown>): string {
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  // A real three-part token. The signature is nonsense on purpose: nothing verifies it, and a
+  // fixture carrying a valid-looking one would suggest something does.
+  return `${part({ alg: 'RS256', typ: 'JWT' })}.${part(claims)}.not-a-signature`;
+}
+
+const CODEX_CLAIMS = {
+  email: 'someone@example.com',
+  name: 'Someone',
+  'https://api.openai.com/auth': {
+    chatgpt_account_id: '00000000-0000-4000-8000-000000000002',
+    chatgpt_plan_type: 'plus',
+    organizations: [{ id: 'org-1', is_default: true, role: 'owner', title: 'Personal' }],
+  },
+};
+
+function codexDir(name: string, auth: unknown, markers = ['auth.json']): string {
+  const dir = join(home, name);
+  mkdirSync(dir, { recursive: true });
+  for (const marker of markers) {
+    if (marker === 'auth.json') continue;
+    writeFileSync(join(dir, marker), '');
+  }
+  if (auth !== undefined) writeFileSync(join(dir, 'auth.json'), JSON.stringify(auth));
+  return dir;
+}
+
+const signedInAuth = (claims: Record<string, unknown> = CODEX_CLAIMS) => ({
+  OPENAI_API_KEY: API_KEY_SENTINEL,
+  tokens: { id_token: jwt(claims), access_token: ACCESS_SENTINEL, refresh_token: REFRESH_SENTINEL },
+  last_refresh: '2026-08-22T14:23:52.825806765Z',
+});
+
+describe('readCodexAccountIdentity', () => {
+  it('reads the email and plan out of the id_token claims', async () => {
+    const dir = codexDir('.codex', signedInAuth());
+    expect(await readCodexAccountIdentity(dir)).toEqual({ email: 'someone@example.com', plan: 'Plus' });
+  });
+
+  it('returns nothing credential-shaped, which is the whole argument for reading this file', async () => {
+    // THE test for D3. The exclusion this feature reverses was justified by the risk that a value
+    // out of `auth.json` ends up in a log line or an error body later — so the guarantee has to be
+    // that no such value is ever in a caller's hands, and it is asserted over the SERIALIZED
+    // result rather than field by field, so a key added tomorrow cannot slip past it.
+    const dir = codexDir('.codex', signedInAuth());
+    const serialized = JSON.stringify(await readCodexAccountIdentity(dir));
+    expect(serialized).not.toContain(API_KEY_SENTINEL);
+    expect(serialized).not.toContain(ACCESS_SENTINEL);
+    expect(serialized).not.toContain(REFRESH_SENTINEL);
+    // …and non-vacuously: the read really did happen and really did find something.
+    expect(serialized).toContain('someone@example.com');
+  });
+
+  it('drops the organization when it is the personal default', async () => {
+    const dir = codexDir('.codex', signedInAuth());
+    expect((await readCodexAccountIdentity(dir))?.organization).toBeUndefined();
+  });
+
+  it('keeps a real organization', async () => {
+    const claims = structuredClone(CODEX_CLAIMS);
+    claims['https://api.openai.com/auth'].organizations[0]!.title = 'Northwind Robotics';
+    const dir = codexDir('.codex', signedInAuth(claims));
+    expect((await readCodexAccountIdentity(dir))?.organization).toBe('Northwind Robotics');
+  });
+
+  it('answers null for an API-key login, which has no id_token at all', async () => {
+    const dir = codexDir('.codex', { OPENAI_API_KEY: API_KEY_SENTINEL, tokens: null });
+    expect(await readCodexAccountIdentity(dir)).toBeNull();
+  });
+
+  it('answers null for a malformed token rather than throwing', async () => {
+    const dir = codexDir('.codex', { tokens: { id_token: 'not.a.jwt' } });
+    expect(await readCodexAccountIdentity(dir)).toBeNull();
+  });
+
+  it('answers null when there is no auth.json', async () => {
+    const dir = codexDir('.codex', undefined, ['config.toml']);
+    expect(await readCodexAccountIdentity(dir)).toBeNull();
+  });
+});
+
+describe('discoverAgentAccounts', () => {
+  const env = (): NodeJS.ProcessEnv => ({ HOME: home });
+
+  it('finds both providers, each provider default first', async () => {
+    claudeDir('.claude', { oauthAccount: { ...OAUTH_ACCOUNT, emailAddress: 'first@example.com' } });
+    codexDir('.codex', signedInAuth());
+    codexDir('.codex-secondary', signedInAuth({ ...CODEX_CLAIMS, email: 'second@example.com' }));
+
+    const found = await discoverAgentAccounts(env());
+
+    expect(found.map((row) => `${row.provider}:${row.path}`)).toEqual([
+      `claude:${join(home, '.claude')}`,
+      `codex:${join(home, '.codex')}`,
+      `codex:${join(home, '.codex-secondary')}`,
+    ]);
+    expect(found[2]?.identity?.email).toBe('second@example.com');
+  });
+
+  /** NEGATIVE CONTROL, the codex half: the name prefix is not the recognizer here either. */
+  it('does not offer a ~/.codex* folder carrying none of the CLI\'s markers', async () => {
+    codexDir('.codex', signedInAuth());
+    mkdirSync(join(home, '.codex-notes', 'drafts'), { recursive: true });
+
+    expect((await discoverAgentAccounts(env())).map((row) => row.path)).toEqual([join(home, '.codex')]);
+  });
+
+  it('follows CODEX_HOME for the codex default', async () => {
+    const overridden = codexDir('.codex-work', signedInAuth());
+    codexDir('.codex', signedInAuth());
+
+    const found = await discoverAgentAccounts({ HOME: home, CODEX_HOME: overridden });
+
+    expect(found[0]?.path).toBe(overridden);
+    expect(found.filter((row) => row.path === overridden)).toHaveLength(1);
+  });
+
+  it('lists a codex dir it cannot identify, rather than dropping it', async () => {
+    // `config.toml` alone is a marker, so a dir the CLI made but was never signed into IS a dir —
+    // it is just not an account. Discovery says so by listing it with a null identity; the
+    // auto-register sweep is what refuses to register it.
+    codexDir('.codex', undefined, ['config.toml']);
+
+    const found = await discoverAgentAccounts(env());
+    expect(found.map((row) => row.path)).toEqual([join(home, '.codex')]);
+    expect(found[0]?.identity).toBeNull();
+  });
+
+  it('discoverClaudeAccounts still answers Claude only', async () => {
+    // The superseded export is a filter over the widened one, so an out-of-tree caller keeps the
+    // answer it had. Without codex present the two would be indistinguishable, which is why this
+    // fixture has one of each.
+    claudeDir('.claude', { oauthAccount: OAUTH_ACCOUNT });
+    codexDir('.codex', signedInAuth());
+
+    expect((await discoverClaudeAccounts(env())).map((row) => row.provider)).toEqual(['claude']);
+    expect((await discoverAgentAccounts(env())).map((row) => row.provider)).toEqual(['claude', 'codex']);
   });
 });

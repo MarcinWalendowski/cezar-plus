@@ -251,7 +251,27 @@ describe('resolveCapabilities — followups (#471)', () => {
       // hosted mode: the hub is the node that runs hosted, so a capability that vanished under
       // `CEZ_REMOTE=1` would hide the cluster from the only machine that can be one.
       cluster: false,
+      // Opt-IN (`CEZ_AUTO_ACCOUNTS=1`, spec 2026-08-24-second-codex-account-balancing), and NOT
+      // withheld in hosted mode either — see the dedicated test below for why the two differ.
+      autoAccounts: false,
     });
+  });
+
+  it('reports autoAccounts under CEZ_REMOTE, unlike accountUsage', () => {
+    // The pair is the assertion: with both flags set, hosted mode withholds one and not the other.
+    // `accountUsage` gates a DISCLOSURE (each login's email, org and plan), so hosted is the
+    // audience question and it needs its own `CEZ_ACCOUNT_USAGE_HOSTED=1` override.
+    // `autoAccounts` gates a server-side WRITE that discloses nothing, and hosted boxes are exactly
+    // the ones whose operators cannot use the Add-account pane instead — withholding it there would
+    // switch the feature off on the only machines that need it.
+    const hosted = resolveCapabilities({ CEZ_AUTO_ACCOUNTS: '1', CEZ_ACCOUNT_USAGE: '1', CEZ_REMOTE: '1' }, '0.0.0.0');
+    expect(hosted).toMatchObject({ autoAccounts: true, accountUsage: false, localHandoff: false });
+  });
+
+  it.each(['true', 'yes', '0', ''])('does not enable autoAccounts for the spelling %j', (value) => {
+    // Strict `'1'`, like every other capability here. A flag that WRITES state must not be
+    // turn-on-able by a plausible typo.
+    expect(resolveCapabilities({ CEZ_AUTO_ACCOUNTS: value }, undefined).autoAccounts).toBe(false);
   });
 });
 

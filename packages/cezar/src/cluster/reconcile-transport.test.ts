@@ -5,6 +5,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { ClusterEdgeAuthConfigError } from './edge-auth.ts';
 import {
   CLUSTER_NODE_ID_HEADER,
   CLUSTER_NODE_PRINCIPAL_HEADER,
@@ -180,6 +181,111 @@ describe('createHttpReconcileTransport — signs every request (D20), against a 
     const transport = createHttpReconcileTransport({ nodeId: NODE_ID, secret: SECRET, hubUrl: hub.url });
 
     await expect(transport.list('proj-a')).rejects.toThrow(/bad-signature/);
+  });
+});
+
+describe('createHttpReconcileTransport — edge auth (Cloudflare Access headers)', () => {
+  let hub: { server: Server; url: string; captured: CapturedRequest[] };
+
+  afterEach(async () => {
+    await stopServer(hub.server);
+  });
+
+  it('no-op floor: with no edgeHeaders option and no CEZ_CLUSTER_ACCESS_* env vars set, the request carries no CF-Access-* header at all — the backward-compat guarantee', async () => {
+    const prevId = process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID;
+    const prevSecret = process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET;
+    delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID;
+    delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET;
+    try {
+      hub = await startFakeHub(() => ({ status: 200, body: { path: '/hub/proj-a/.ai/cezar/todos.json.bak' } }));
+      const transport = createHttpReconcileTransport({ nodeId: NODE_ID, secret: SECRET, hubUrl: hub.url });
+      await transport.backup('proj-a');
+
+      const sent = hub.captured[0]!;
+      expect(sent.headers['cf-access-client-id']).toBeUndefined();
+      expect(sent.headers['cf-access-client-secret']).toBeUndefined();
+      // Exactly what signedFetchInit has always sent — unchanged when the feature does not apply.
+      expect(sent.headers[CLUSTER_NODE_ID_HEADER]).toBe(NODE_ID);
+      expect(typeof sent.headers[CLUSTER_NODE_PRINCIPAL_HEADER]).toBe('string');
+      expect(typeof sent.headers[CLUSTER_NODE_SIGNATURE_HEADER]).toBe('string');
+    } finally {
+      if (prevId === undefined) delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID;
+      else process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID = prevId;
+      if (prevSecret === undefined) delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET;
+      else process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET = prevSecret;
+    }
+  });
+
+  it('merges an injected edgeHeaders literal into the ACTUAL request on the wire (real local HTTP server, not a mock)', async () => {
+    hub = await startFakeHub(() => ({ status: 200, body: { projectKey: 'proj-a', todos: [] } }));
+    const transport = createHttpReconcileTransport({
+      nodeId: NODE_ID,
+      secret: SECRET,
+      hubUrl: hub.url,
+      edgeHeaders: { 'CF-Access-Client-Id': 'cid-e2e-123', 'CF-Access-Client-Secret': 'csecret-e2e-456' },
+    });
+
+    await transport.list('proj-a');
+
+    const sent = hub.captured[0]!;
+    expect(sent.headers['cf-access-client-id']).toBe('cid-e2e-123');
+    expect(sent.headers['cf-access-client-secret']).toBe('csecret-e2e-456');
+    // And node auth still verifies — an edge header is additive, not a substitute.
+    const verdict = verifyNodeHttpPrincipal(
+      { principal: sent.headers[CLUSTER_NODE_PRINCIPAL_HEADER], signature: sent.headers[CLUSTER_NODE_SIGNATURE_HEADER] },
+      sent.headers[CLUSTER_NODE_ID_HEADER],
+      SECRET,
+      { method: sent.method, path: sent.path, bodyHash: hashRequestBody(sent.bodyText) },
+    );
+    expect(verdict).toEqual({ ok: true, nodeId: NODE_ID });
+  });
+
+  it('precedence: an edgeHeaders entry that collides with a node-auth header name never wins — the genuine signed principal reaches the wire and still verifies', async () => {
+    hub = await startFakeHub(() => ({ status: 200, body: { path: 'unused' } }));
+    const transport = createHttpReconcileTransport({
+      nodeId: NODE_ID,
+      secret: SECRET,
+      hubUrl: hub.url,
+      edgeHeaders: {
+        [CLUSTER_NODE_ID_HEADER]: 'attacker-supplied-node-id',
+        [CLUSTER_NODE_PRINCIPAL_HEADER]: 'attacker-supplied-principal',
+        [CLUSTER_NODE_SIGNATURE_HEADER]: 'attacker-supplied-signature',
+      },
+    });
+
+    await transport.backup('proj-a');
+
+    const sent = hub.captured[0]!;
+    expect(sent.headers[CLUSTER_NODE_ID_HEADER]).toBe(NODE_ID);
+    expect(sent.headers[CLUSTER_NODE_ID_HEADER]).not.toBe('attacker-supplied-node-id');
+    expect(sent.headers[CLUSTER_NODE_PRINCIPAL_HEADER]).not.toBe('attacker-supplied-principal');
+    expect(sent.headers[CLUSTER_NODE_SIGNATURE_HEADER]).not.toBe('attacker-supplied-signature');
+    // Proves it end to end: the REAL verifier only accepts a genuinely signed principal, so this
+    // passing means the real node headers — not the colliding edge values — are what was checked.
+    const verdict = verifyNodeHttpPrincipal(
+      { principal: sent.headers[CLUSTER_NODE_PRINCIPAL_HEADER], signature: sent.headers[CLUSTER_NODE_SIGNATURE_HEADER] },
+      sent.headers[CLUSTER_NODE_ID_HEADER],
+      SECRET,
+      { method: sent.method, path: sent.path, bodyHash: hashRequestBody(sent.bodyText) },
+    );
+    expect(verdict).toEqual({ ok: true, nodeId: NODE_ID });
+  });
+
+  it('construction throws ClusterEdgeAuthConfigError when the environment is half-configured and no edgeHeaders override is given', () => {
+    const prevId = process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID;
+    const prevSecret = process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET;
+    delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID;
+    process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET = 'only-the-secret-is-set';
+    try {
+      expect(() =>
+        createHttpReconcileTransport({ nodeId: NODE_ID, secret: SECRET, hubUrl: 'http://127.0.0.1:1' }),
+      ).toThrow(ClusterEdgeAuthConfigError);
+    } finally {
+      if (prevId === undefined) delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID;
+      else process.env.CEZ_CLUSTER_ACCESS_CLIENT_ID = prevId;
+      if (prevSecret === undefined) delete process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET;
+      else process.env.CEZ_CLUSTER_ACCESS_CLIENT_SECRET = prevSecret;
+    }
   });
 });
 

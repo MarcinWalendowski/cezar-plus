@@ -24,7 +24,7 @@ import {
   type TodoClusterOptions,
   type TodoItem,
 } from './todos.ts';
-import { deriveTodoOps } from './cluster/ops.ts';
+import { CLUSTER_META_TODO_FIELDS, deriveTodoOps } from './cluster/ops.ts';
 import { localCliAuthor } from './runs/task-author.ts';
 
 /**
@@ -651,6 +651,53 @@ describe('pendingSince — the optimistic marker, written inside the existing le
     expect(stored?.pendingFields).toEqual(expect.arrayContaining(['summary']));
   });
 
+  /**
+   * **D36 (2026-08-23) — the source half of the every-tick resend loop.** `createTodo` stamps
+   * `Object.keys(todo)`, which includes `id`; `id` is in `cluster/ops.ts#CLUSTER_META_TODO_FIELDS`,
+   * so no derived op can ever name it, so D27's narrowing in `cluster/replica.ts` can never resolve
+   * it and `pendingSince` never clears. Measured on the first two-process E2E as `hub-seq.json`
+   * climbing ~1 every 5 seconds with the cluster idle. The loop itself is asserted end to end in
+   * `cluster/ops.test.ts`; this pins the source: an un-sendable key is never recorded as owed.
+   */
+  it('D36 — createTodo never records an un-sendable key (id) as owed, while still stamping the real content fields', async () => {
+    const todo = await createTodo(dataDir, { summary: 'New work', status: 'todo' }, localCliAuthor('cli-todo-add'), CLUSTER_ON);
+    const [stored] = await readTodos(dataDir, CLUSTER_ON);
+    // FLOOR — the record really is owed, so "id is absent" is not the trivial truth about a record
+    // that stamped nothing at all.
+    expect(stored?.pendingFields).toEqual(expect.arrayContaining(['summary', 'status']));
+    expect(stored?.pendingFields).not.toContain('id');
+    // Not a hand-typed denylist: every key the ops layer calls meta is absent, `placement` aside —
+    // that one is deliberately ordinary content a spoke may propose.
+    for (const key of CLUSTER_META_TODO_FIELDS) expect(stored?.pendingFields).not.toContain(key);
+    // The record is still owed as a whole — the marker is untouched by any of this.
+    expect(typeof stored?.pendingSince).toBe('string');
+    expect(todo.id).toBeTruthy();
+  });
+
+  /**
+   * The write-side heal for records already on disk when D36 landed. They carry
+   * `pendingFields: ['id']` and are stuck; the next local edit takes the same lease and rewrites
+   * the record anyway, so it normalizes the array in passing. (The receive-side heal, for a stuck
+   * record nobody edits again, is `cluster/replica.ts`'s — covered in `replica.test.ts`.)
+   */
+  it('D36 — a record already stuck on disk at pendingFields: [id] is healed by the next local edit, keeping what is genuinely owed', async () => {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(
+      todosPath(dataDir),
+      JSON.stringify([
+        { id: 't1', summary: 'Ship it', pendingSince: '2026-08-23T00:00:00.000Z', pendingFields: ['id', 'summary'], hubSeq: 4 },
+      ]),
+      'utf8',
+    );
+    const result = await updateTodo(dataDir, 't1', { status: 'done' }, CLUSTER_ON);
+    expect(result?.pendingFields).not.toContain('id');
+    // The union is still a union — the stuck record's genuinely un-sent `summary` edit survives the
+    // heal, and the new one joins it. A heal that reset the array would be a lost write (D5).
+    expect(result?.pendingFields?.slice().sort()).toEqual(['status', 'summary']);
+    // "Pending since when" is unchanged: this is a heal, not a new cycle.
+    expect(result?.pendingSince).toBe('2026-08-23T00:00:00.000Z');
+  });
+
   it('updateTodo stamps an entry that had no marker', async () => {
     mkdirSync(dataDir, { recursive: true });
     writeFileSync(todosPath(dataDir), JSON.stringify([{ id: 't1', summary: 'Ship it' }]), 'utf8');
@@ -749,7 +796,16 @@ describe('removeTodo, clustered — a delete is a tombstone, never a removal (D6
     expect(isTombstoned(items[0] as { tombstone?: { at: string } })).toBe(true);
     expect(typeof items[0]?.tombstone?.at).toBe('string');
     expect(typeof items[0]?.pendingSince).toBe('string');
-    expect(items[0]?.pendingFields).toContain('tombstone');
+    // **CORRECTED 2026-08-23 (D36).** This used to assert `pendingFields` CONTAINS `'tombstone'`.
+    // It no longer does, deliberately: `tombstone` is in `cluster/ops.ts#CLUSTER_META_TODO_FIELDS`,
+    // so no op can ever carry it as content (it drives the op KIND instead), so recording it as
+    // owed is a `pendingFields` entry nothing can ever resolve — the D36 shape that made every
+    // replicated row re-send forever. What makes the delete travel is the per-record `pendingSince`
+    // marker asserted above, which `removeTodo` still stamps; the very next test drives that end to
+    // end through the real `deriveTodoOps`, so this is not a guarantee traded away for a green.
+    expect(items[0]?.pendingFields).not.toContain('tombstone');
+    // And `id` is gone from the owed set for the same reason — this is the key D36 was measured on.
+    expect(items[0]?.pendingFields).not.toContain('id');
   });
 
   it('derives a tombstone op, not an upsert — the delete is what travels', async () => {

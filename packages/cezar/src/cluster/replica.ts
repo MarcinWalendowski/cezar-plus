@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import type { ClusterOp, ClusterReplicaCorrection, ClusterReplicaFrame } from '@loki-labs/better-cezar-contract';
 import type { TodoItem } from '../todos.ts';
+import { CLUSTER_META_TODO_FIELDS } from './ops.ts';
 
 /**
  * Applying a hub replica push over local + pending state — **pure**, no I/O, no clock beyond the
@@ -189,13 +190,77 @@ export function applyOpToRecord(record: TodoItem | undefined, op: ClusterOp): To
     for (const key of op.clearedFields) delete (base as Record<string, unknown>)[key];
   }
 
-  if (op.hubSeq !== undefined) base.hubSeq = op.hubSeq;
+  // D27 — CORRECTED 2026-08-23. This used to read `if (op.hubSeq !== undefined) base.hubSeq =
+  // op.hubSeq; delete base.pendingSince;`, unconditionally, on the theory that "any hub-applied
+  // change settles this record... it is no longer pending once the hub has an opinion." That
+  // theory is FALSE: `pendingSince` is a per-RECORD marker but the work it stands for is tracked
+  // per-FIELD, in `pendingFields` — this op may speak to only SOME of them. Deleting the marker
+  // for a field the op never touched loses the only signal `cluster/ops.ts#deriveTodoOps`
+  // (`if (!todo.pendingSince) continue;`) reads to know the record is still owed, so the
+  // receiver's own un-sent edit on every OTHER field is silently dropped from its outbox forever
+  // — no error, no trace, just a write that never leaves the node. (The old comment's "`pending`
+  // decides" was never true either: `input.pending`, below in `applyReplica`, is read in exactly
+  // one place — `diffCorrections` — only to compute what to SHOW the cockpit, never to guard what
+  // this function keeps.)
+  //
+  // The fix: narrow `pendingFields` to whatever this op does NOT name, and only clear the
+  // per-record `pendingSince` marker once nothing remains un-spoken-for. A field the op DOES
+  // touch is resolved either way it turns out — confirmed, if it matches what this node already
+  // had pending, or overruled, if the hub applied a different value for it (D4: the hub is the
+  // only writer, so its value wins outright rather than being queued to re-send). Telling a
+  // confirmation from a correction apart is `diffCorrections`'s job, from `input.pending`,
+  // computed independently of this function — so that distinction costs this function nothing,
+  // and a genuine field-level conflict resolves the same way a claim's does (below).
+  //
+  // A tombstone resolves EVERY pending field unconditionally: once the hub has deleted the row
+  // there is nothing left to send an edit for, matching `cluster/ops.ts#collapseOwed`'s own rule
+  // that a tombstone wipes whatever the outbox had accumulated for that record.
+  const touchedFieldNames = new Set<string>([
+    ...(op.fields ? Object.keys(op.fields) : []),
+    ...(op.clearedFields ?? []),
+    ...(op.unknown ? Object.keys(op.unknown) : []),
+  ]);
+  //
+  // **D36 (2026-08-23) — a meta key is never "still pending" either.** `CLUSTER_META_TODO_FIELDS`
+  // names the keys `cluster/ops.ts` can never put on an op, so no op can ever appear in
+  // `touchedFieldNames` for one, so a record that has such a key in `pendingFields` can never
+  // resolve here and is re-derived on every flush tick forever. `todos.ts#stampPending` is the fix
+  // — it no longer records them — and this filter is the HEAL for the records already on disk when
+  // that landed: they arrive here carrying `pendingFields: ['id']`, and the very resend loop they
+  // are stuck in is what delivers the push that now settles them. Deriving from the same imported
+  // set as `partitionTodoFields` is the point: this is not a second list to keep in step, it is the
+  // same one, read where `pendingFields` is written.
+  const stillPending =
+    op.op === 'tombstone'
+      ? []
+      : (base.pendingFields ?? []).filter(
+          (field) => !touchedFieldNames.has(field) && !CLUSTER_META_TODO_FIELDS.has(field),
+        );
+  // `base.pendingFields === undefined` — a record from before per-field tracking existed, or one
+  // an older peer wrote without it (`cluster/ops.ts`'s own "missing pendingFields" fallback) — has
+  // no field list to narrow BY, so this op settles the whole record, same as before this fix. That
+  // is a deliberate, not an oversight: there is nothing more precise to be with here.
+  const resolved = base.pendingFields === undefined || stillPending.length === 0;
 
-  // Any hub-applied change settles this record: the `pendingSince` marker describes outstanding
-  // LOCAL work, and the hub has now spoken for whatever it held. `applyReplica` is the one that
-  // decides, from `pending`, whether that outstanding work was confirmed or corrected — either
-  // way, it is no longer "pending" once the hub has an opinion.
-  delete base.pendingSince;
+  if (resolved) {
+    delete base.pendingFields;
+    delete base.pendingSince;
+  } else {
+    base.pendingFields = stillPending;
+  }
+
+  // Bumped unconditionally, resolved or not: `hubSeq` tracks the highest hub order this record has
+  // received ANY authoritative content for, independent of what remains owed — matching how it is
+  // read everywhere else (`applyReplica`'s own idempotence skip above; `hub-apply.ts`'s parallel
+  // check on the hub's own copy of the record). It used to be tempting to gate this the same way
+  // `todos.ts#markStartedWithClaim` guards `item.hubSeq = ack.hubSeq` with `if (!item.pendingSince)`
+  // (`todos.ts:912`/`:936`) — withholding it while something remains pending, so a stale `hubSeq`
+  // could never look "caught up" to `cluster/ops.ts#deriveTodoOps`'s own defensive per-record gate.
+  // That is backwards here: withholding it leaves the record's `hubSeq` BELOW where the project
+  // watermark has already moved to (that watermark advances on this same push, resolved or not),
+  // which trips that exact gate the other way instead. The correct fix was in that gate, not here —
+  // see its own `pendingFields`-aware CORRECTED note (D27) — leaving this bump free to be simple.
+  if (op.hubSeq !== undefined) base.hubSeq = op.hubSeq;
 
   if (op.op === 'tombstone') {
     base.tombstone = { at: op.ts };

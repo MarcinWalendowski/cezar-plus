@@ -6,6 +6,7 @@ import {
   type ClusterProjectKey,
   type StoredClusterTodoRecord,
 } from '@loki-labs/better-cezar-contract';
+import { resolveEdgeAuthHeaders } from './edge-auth.ts';
 import { signedNodeRequestHeaders } from './node-auth.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';
 import { readPeers } from './peers.ts';
@@ -47,6 +48,19 @@ export interface HttpReconcileTransportOptions {
    *  but some tests (dry-run wiring at the `reconcile.ts` level) want a transport with no network
    *  at all. Defaults to `globalThis.fetch`. */
   readonly fetchImpl?: typeof fetch;
+  /**
+   * The EDGE credential (Cloudflare Access, `edge-auth.ts`) — headers proving this machine may
+   * reach the hub's hostname at all, merged into every request `signedFetchInit` builds.
+   * Independent of, and never a substitute for, the three D20 node-auth headers
+   * `signedNodeRequestHeaders` produces: on a key collision the node-auth headers always win (see
+   * `signedFetchInit`), so an edge credential can never overwrite the node principal. Injected
+   * rather than resolved in here directly, so a test can hand it a literal; when omitted this
+   * transport resolves it once, at `createHttpReconcileTransport` call time — same idiom as
+   * `fetchImpl` above — from the environment via `resolveEdgeAuthHeaders()`: `undefined` (the
+   * zero-config path) unless `CEZ_CLUSTER_ACCESS_CLIENT_ID`/`CEZ_CLUSTER_ACCESS_CLIENT_SECRET` are
+   * set.
+   */
+  readonly edgeHeaders?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -56,8 +70,22 @@ export interface HttpReconcileTransportOptions {
  * this family)"). `bodyText` is always the EXACT string sent as the body — `signedNodeRequestHeaders`
  * defaults an omitted one to `''` internally either way, so the two are equivalent for the
  * signature; the distinction here is only about which headers a GET should carry.
+ *
+ * `edgeHeaders` (Cloudflare Access, `edge-auth.ts`) is spread FIRST in both branches below, and the
+ * three signed node-auth headers are spread LAST, in the same object literal, so they always win a
+ * key collision — checked directly: `node-auth.ts#nodeHttpPrincipalSchema` signs only `nodeId`,
+ * `method`, `path` (pathname) and `bodyHash`, never any header, so merging an edge credential in
+ * before or after `signedNodeRequestHeaders` runs has no effect on the signature either way; the
+ * merge ORDER here exists solely to fix header-value precedence, not to protect a signature that
+ * headers were never part of.
  */
-function signedFetchInit(options: HttpReconcileTransportOptions, method: 'GET' | 'POST', url: URL, bodyText: string): RequestInit {
+function signedFetchInit(
+  options: HttpReconcileTransportOptions,
+  method: 'GET' | 'POST',
+  url: URL,
+  bodyText: string,
+  edgeHeaders: Readonly<Record<string, string>> | undefined,
+): RequestInit {
   const signed = signedNodeRequestHeaders({
     nodeId: options.nodeId,
     secret: options.secret,
@@ -68,7 +96,10 @@ function signedFetchInit(options: HttpReconcileTransportOptions, method: 'GET' |
   });
   return {
     method,
-    headers: method === 'GET' ? signed.headers : { 'content-type': 'application/json', ...signed.headers },
+    headers:
+      method === 'GET'
+        ? { ...edgeHeaders, ...signed.headers }
+        : { ...edgeHeaders, 'content-type': 'application/json', ...signed.headers },
     body: method === 'GET' ? undefined : signed.body,
   };
 }
@@ -86,6 +117,11 @@ async function describeFailure(route: string, res: Response): Promise<string> {
 
 export function createHttpReconcileTransport(options: HttpReconcileTransportOptions): RemoteReconcileTransport {
   const fetchImpl = options.fetchImpl ?? fetch;
+  // Resolved once, here — same idiom as `fetchImpl` above, not re-resolved per request. Throws
+  // `ClusterEdgeAuthConfigError` synchronously out of this factory call on a half-configured
+  // environment, so a misconfiguration fails loudly at transport-creation time rather than
+  // surfacing later as an unexplained 403 on the first `list`/`backup`/`apply`.
+  const edgeHeaders = options.edgeHeaders ?? resolveEdgeAuthHeaders(options.env);
 
   return {
     async listProjects(): Promise<ClusterProjectKey[]> {
@@ -97,7 +133,7 @@ export function createHttpReconcileTransport(options: HttpReconcileTransportOpti
 
     async list(projectKey: ClusterProjectKey): Promise<TodoItem[]> {
       const url = new URL(`/api/v1/cluster/todos/${encodeURIComponent(projectKey)}`, options.hubUrl);
-      const res = await fetchImpl(url, signedFetchInit(options, 'GET', url, ''));
+      const res = await fetchImpl(url, signedFetchInit(options, 'GET', url, '', edgeHeaders));
       if (!res.ok) throw new Error(await describeFailure(`GET /cluster/todos/${projectKey}`, res));
       const payload = storedClusterTodosSnapshotResponseSchema.parse(await res.json());
       return payload.todos.map(asTodoItem);
@@ -105,7 +141,7 @@ export function createHttpReconcileTransport(options: HttpReconcileTransportOpti
 
     async backup(projectKey: ClusterProjectKey): Promise<string> {
       const url = new URL(`/api/v1/cluster/todos/${encodeURIComponent(projectKey)}/backup`, options.hubUrl);
-      const res = await fetchImpl(url, signedFetchInit(options, 'POST', url, ''));
+      const res = await fetchImpl(url, signedFetchInit(options, 'POST', url, '', edgeHeaders));
       if (!res.ok) throw new Error(await describeFailure(`POST /cluster/todos/${projectKey}/backup`, res));
       const payload = clusterTodosBackupResponseSchema.parse(await res.json());
       return payload.path;
@@ -115,7 +151,7 @@ export function createHttpReconcileTransport(options: HttpReconcileTransportOpti
       if (adds.length === 0) return;
       const bodyText = JSON.stringify({ todos: adds });
       const url = new URL(`/api/v1/cluster/todos/${encodeURIComponent(projectKey)}/append`, options.hubUrl);
-      const res = await fetchImpl(url, signedFetchInit(options, 'POST', url, bodyText));
+      const res = await fetchImpl(url, signedFetchInit(options, 'POST', url, bodyText, edgeHeaders));
       if (!res.ok) throw new Error(await describeFailure(`POST /cluster/todos/${projectKey}/append`, res));
       // Validated for shape (a malformed 200 is still a bug worth catching), but the parsed value
       // itself is not needed: `appendTodosPreservingIds`' idempotence already makes a retried

@@ -678,11 +678,13 @@ function RevokeNodeDialog({
   )
 }
 
-// ---- D12: the four queued reasons, as a static reference (see module docblock) -------------------
+// ---- D12: the five queued reasons, as a static reference (see module docblock) -------------------
 
 const CLUSTER_QUEUED_REASONS = clusterQueuedReasonSchema.options
 
 const QUEUED_REASON_COPY: Record<ClusterQueuedReason, string> = {
+  'no-node-accepts-dispatch':
+    'No node has opted in to running dispatched work. Run `cez cluster accept-dispatch --on` on each node that should take work — this is OFF by default, so a new cluster sits here.',
   'no-node-with-label': 'No node carries the label this task requires.',
   'all-eligible-at-capacity': 'Every eligible node is already at capacity.',
   'pinned-node-offline': 'The node this task needs is offline.',

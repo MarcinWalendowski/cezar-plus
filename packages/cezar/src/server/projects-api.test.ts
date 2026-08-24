@@ -1611,6 +1611,7 @@ describe('workspace projects API', () => {
         workspaceViews: true,
         notify: false,
         accountUsage: false,
+        autoAccounts: false,
         skills: true,
         // Unconditional key, `false` because `CEZ_CLUSTER` is off — see the note on the same
         // assertion in `health-forge.test.ts`, which is the other place this shape is pinned.

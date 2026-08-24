@@ -128,13 +128,29 @@ export interface ReconcileOptions extends ClusterHomeOptions {
    */
   resolveLocalDataDir?: (projectKey: ClusterProjectKey) => string;
   /**
-   * The peer side of every paired project — see `RemoteReconcileTransport`. OPTIONAL for the same
-   * reason as `resolveLocalDataDir`: nothing in this plan yet exposes a live "fetch a peer's full
-   * todo list" call to wire a default from — the cluster link (`link-client.ts`) is fire-and-forget
-   * and event-streamed (`send`/`on('frame', …)`, no request/response), and there is no HTTP route
-   * for a project's full todos snapshot in `packages/contract/src/cluster.ts`'s API list. That is a
-   * real gap in the plan, not an oversight in this file — flagged prominently in the report rather
-   * than papered over with an invented transport this package does not own.
+   * The peer side of every paired project — see `RemoteReconcileTransport`.
+   *
+   * **CORRECTED 2026-08-23 — the gap this described is closed, and the route it says does not
+   * exist now does.** The original text (kept below) called out "no HTTP route for a project's full
+   * todos snapshot" as a real gap in the plan. D21 built exactly that route family —
+   * `GET /cluster/todos/:projectKey` plus `/backup` and `/append`, all node-authenticated (D20) —
+   * and `cluster/reconcile-transport.ts#createHttpReconcileTransport` is the transport that speaks
+   * it. So a reader looking for "the missing piece" should stop looking: it is built, and
+   * `index.ts`'s `cez cluster reconcile` wires it for real.
+   *
+   * What has NOT changed is that this field stays OPTIONAL, for the surviving half of the original
+   * reason: this module has no peer registry of its own, so it cannot pick a peer or mint that
+   * peer's credential without importing `peers.ts` and `node-identity.ts`. The caller resolves both
+   * and hands the transport in. Omitting it still throws a named error rather than silently doing
+   * nothing.
+   *
+   * Original text, unchanged: *"OPTIONAL for the same reason as `resolveLocalDataDir`: nothing in
+   * this plan yet exposes a live 'fetch a peer's full todo list' call to wire a default from — the
+   * cluster link (`link-client.ts`) is fire-and-forget and event-streamed (`send`/`on('frame', …)`,
+   * no request/response), and there is no HTTP route for a project's full todos snapshot in
+   * `packages/contract/src/cluster.ts`'s API list. That is a real gap in the plan, not an oversight
+   * in this file — flagged prominently in the report rather than papered over with an invented
+   * transport this package does not own."*
    */
   remote?: RemoteReconcileTransport;
 }
@@ -361,10 +377,33 @@ export async function reconcileAll(options: ReconcileOptions): Promise<Reconcile
 
 export interface PeriodicReconcileOptions extends ClusterHomeOptions {
   intervalMs: number;
-  /** One pass: in production, a non-dry-run `reconcileAll` against every peer this node is linked
-   *  to (peer enumeration is `cluster/peers.ts`'s pairing store, out of this package's scope — see
-   *  the module header); a test supplies a double directly, so the scheduling guarantees below are
-   *  provable without depending on that module landing first. */
+  /**
+   * One pass.
+   *
+   * **CORRECTED 2026-08-23 — there is no production caller, so this described one that does not
+   * exist.** Verified: `startPeriodicReconcile` is referenced in exactly two places outside its own
+   * tests — its definition here, and a docblock in `server/cluster-routes.ts` recording that
+   * activation *deliberately does not arm it*. Nothing constructs these options in production, and
+   * `dryRun` is a REQUIRED field on `ReconcileOptions` with no default, so there is no standing
+   * behaviour for this sentence to have been describing.
+   *
+   * This matters because the original text was written in the present tense and directly
+   * contradicts D21, which keeps the real merge owner-gated. A reader hitting it would reasonably
+   * conclude either that a periodic non-dry-run reconcile is already running (it is not), or that
+   * arming one non-dry-run is simply implementing the documented design (it is not — it is the
+   * decision D21 reserved). The divergence in play is ~110 one-side-only rows, which is exactly the
+   * class a non-dry-run pass merges, so guessing here is expensive.
+   *
+   * What is true today: a test supplies a double directly, which is what makes the scheduling
+   * guarantees below provable without depending on peer enumeration. Whoever arms the first real
+   * caller owns the dry-run decision, must get it from the owner, and must correct this block again
+   * to say which way it went. Original text, describing an intent rather than a caller:
+   *
+   * > in production, a non-dry-run `reconcileAll` against every peer this node is linked to (peer
+   * > enumeration is `cluster/peers.ts`'s pairing store, out of this package's scope — see the
+   * > module header); a test supplies a double directly, so the scheduling guarantees below are
+   * > provable without depending on that module landing first.
+   */
   run: () => Promise<unknown>;
   /** Stamped on success only. A reconcile that threw must leave the previous timestamp alone, or
    *  the health signal reports freshness it does not have. */

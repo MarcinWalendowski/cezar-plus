@@ -122,6 +122,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
       // Added 2026-08-23 with `CEZ_CLUSTER`. It is `false` here because the flag is off, and it is
       // PRESENT because the key is unconditional — `capabilities.cluster` ships in every health
@@ -188,6 +189,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
       cluster: false,
     });
@@ -224,6 +226,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
       cluster: false,
     });
@@ -245,6 +248,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
       cluster: false,
     });
@@ -278,6 +282,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
       cluster: false,
     });
@@ -305,6 +310,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
       cluster: false,
     });
@@ -326,6 +332,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       workspaceViews: true,
       notify: false,
       accountUsage: false,
+      autoAccounts: false,
       skills: true,
       cluster: false,
     });

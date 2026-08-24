@@ -25,6 +25,15 @@ import { listAgentProfiles, type ResolvedAgentProfile } from './agent-profiles.t
  * 2. **Lowest usage band.** `floor(worstUsedPercent / 10)` over the account's fresh quota — see
  *    `usageBand` for why a band and not the raw percent, and for the condition under which this
  *    key applies at all.
+ *
+ *    **NARROWED 2026-08-24 by `2026-08-24-second-codex-account-balancing.md` (D2): this signal is
+ *    now applied WITHIN a provider, never across one.** As written it ranked a Claude percentage
+ *    directly against a Codex percentage, which are fractions of two differently-sized allowances;
+ *    under `pool:*` — this repo's own production setting — that is the normal comparison rather
+ *    than a corner case, and it let a Codex account that reported 0% out-rank every Claude login on
+ *    the machine. `bestOf` below picks each provider's winner on this signal and then chooses
+ *    between the winners on signals 3 and 4 only. Signals 1, 3 and 4 are unchanged, and a
+ *    single-provider pool (`pool:claude`, `pool:codex`) behaves exactly as it always has.
  * 3. **Fewest in-flight runs.** Exact, live, and needs no vendor API — it is the only signal that
  *    describes *right now* rather than the past.
  * 4. **Least recently dispatched.** Breaks the tie, and is what makes the spread even over a
@@ -133,20 +142,64 @@ export function selectPoolAccount(options: {
 
   const eligible = ranked.filter((row) => !row.limited);
   const pool = eligible.length > 0 ? eligible : ranked;
-  // Decided ONCE over the set about to be compared, never per pair, so the comparator stays a total
-  // order (a per-pair rule would be intransitive the moment one candidate is unmeasured).
-  //
-  // A measured account and an unmeasured one are not comparable by usage, and the tempting default
-  // — unmeasured sorts best — is the dangerous one: it would hand every run to whichever login the
-  // probe happens to be failing on. Sorting it *worst* is no better, since a cockpit that never
-  // probes at all would then have a stable arbitrary favourite. So a partially measured pool simply
-  // balances the way it did before quota existed.
-  const byBand = pool.every((row) => row.band !== undefined);
-  const best = pool.reduce((a, b) => (compare(a, b, byBand) <= 0 ? a : b));
+  const best = bestOf(pool);
   return {
     provider: best.profile.provider,
     accountId: best.profile.isDefault ? 'default' : best.profile.id,
   };
+}
+
+/**
+ * The winner of a candidate set, in two levels: each provider's own best, then the best of those
+ * (`.ai/specs/2026-08-24-second-codex-account-balancing.md`, D2).
+ *
+ * ## Why the band is confined to one provider
+ *
+ * `floor(usedPercent / 10)` is a fraction of a subscription's own allowance, and two providers'
+ * allowances are different sizes bought under different plans. Ranking a Claude Max week at 70%
+ * directly against a Codex Plus week at 0% reads "0 is less used, send the work there", which is a
+ * statement about two numbers and not about which login can better absorb a run.
+ *
+ * That comparison only became reachable when `pool:*` shipped — until then a pool was one
+ * provider's logins and every band in a set measured the same thing. It is what this repo's own
+ * production configuration uses (`defaults = {claude: "pool:*", codex: "pool:*"}`), so the
+ * cross-provider case is the normal one here, not a corner.
+ *
+ * ## Why it is two levels rather than a smarter comparator
+ *
+ * The obvious spelling — "compare bands only when both rows are the same provider" — is
+ * intransitive: with Claude A (band 0), Claude B (band 7) and an unmeasured Codex C, A beats B,
+ * B ties C, C ties A, and the winner then depends on the order the array happens to be in. Every
+ * comparison here is between rows that are alike, so each level stays a total order and the result
+ * does not depend on input order.
+ *
+ * ## What the second level compares on
+ *
+ * In-flight and least-recently-dispatched — the two signals that are provider-independent by
+ * construction. One counts runs, the other counts time. Neither claims anything about allowance,
+ * which is the claim that could not be made honestly across a provider boundary.
+ */
+function bestOf(pool: readonly Ranked[]): Ranked {
+  const byProvider = new Map<ProviderId, Ranked[]>();
+  for (const row of pool) {
+    const rows = byProvider.get(row.profile.provider);
+    if (rows) rows.push(row);
+    else byProvider.set(row.profile.provider, [row]);
+  }
+  const winners = [...byProvider.values()].map((rows) => {
+    // Decided ONCE over the set about to be compared, never per pair, so the comparator stays a
+    // total order (a per-pair rule would be intransitive the moment one candidate is unmeasured).
+    //
+    // A measured account and an unmeasured one are not comparable by usage, and the tempting
+    // default — unmeasured sorts best — is the dangerous one: it would hand every run to whichever
+    // login the probe happens to be failing on. Sorting it *worst* is no better, since a cockpit
+    // that never probes at all would then have a stable arbitrary favourite. So a partially
+    // measured provider simply balances the way it did before quota existed.
+    const byBand = rows.every((row) => row.band !== undefined);
+    return rows.reduce((a, b) => (compare(a, b, byBand) <= 0 ? a : b));
+  });
+  // `byBand: false` at this level is the D2 rule itself, not a degradation: see the doc above.
+  return winners.reduce((a, b) => (compare(a, b, false) <= 0 ? a : b));
 }
 
 /** Ordering key, lowest wins. Ties fall through to the next signal, never to array order. */

@@ -34,6 +34,11 @@ import {
 import { clusterHomeDir, ensureNodeIdentity, loadNodeIdentity, nodeIdentityPath } from './node-identity.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';
 import { storeNodeSecret } from './node-secrets.ts';
+// `peers.ts` imports `withEnrollCodesLease` FROM this file — this is a deliberate circular import
+// between two files this package owns, and it is safe because every use on both sides is inside an
+// async function BODY, never at module-evaluation time, and both `readPeers`/`upsertNode` here and
+// `withEnrollCodesLease` there are hoisted `function` declarations, not `const` arrow bindings.
+import { readPeers, upsertNode } from './peers.ts';
 import { assertCezarHomeWriteIsSandboxed } from '../paths.ts';
 
 /**
@@ -61,6 +66,15 @@ import { assertCezarHomeWriteIsSandboxed } from '../paths.ts';
  * store, inside this file's own `enroll-codes` lease and BEFORE the code is marked redeemed — see
  * `withEnrollCodesLease` and the call site in `redeemEnrollmentCode` for the ordering and why it is
  * chosen deliberately, not incidentally.
+ *
+ * **CORRECTED 2026-08-23, same day.** D22 fixed the secret; it did not fix the roster row.
+ * `redeemEnrollmentCode` stored a working secret for a node that `peers.ts` had never heard of —
+ * invisible to the roster, unstampable by `markNodeSeen`, and, the half that actually mattered,
+ * un-revokable: `disableNode` only removed a node's secret for a roster row it found, so this gap
+ * made revoke itself unreliable. Fixed by writing the roster row too, inside the same lease, FIRST
+ * of the now-three writes — see the call site in `redeemEnrollmentCode` for the crash-point
+ * analysis and the invariant it protects, and `peers.ts#disableNode`'s own correction for the other
+ * half: secret removal there is no longer gated on the roster row having been found either.
  *
  * The code digest idiom is `auth/org-claim-token.ts`'s, verbatim rather than re-derived. The frame
  * signature idiom is `supervisor/forwarded-principal.ts`'s, also verbatim: sign-then-verify (the
@@ -419,6 +433,57 @@ export async function redeemEnrollmentCode(
         'redeemEnrollmentCode: this hub has no identity of its own yet — cluster boot has not run.',
       );
     }
+
+    // CORRECTED 2026-08-23, same day — the roster row is written HERE, first of the three writes
+    // this lease now makes, closing a gap found in production reasoning rather than in a crash: this
+    // function used to mint and store a working secret for a node with NO `peers.json` row at all,
+    // which made that node invisible to the roster, unstampable by `markNodeSeen` (which deliberately
+    // never fabricates a row), and — the half that actually matters — un-revokable: `disableNode`
+    // could only remove a node's secret for a roster row it found, so a joined-but-unrostered node
+    // kept a valid, indefinitely usable credential no matter how many times an operator "revoked" it.
+    //
+    // The invariant this write order exists to hold, at EVERY crash point below, is: **there is
+    // never a stored node secret without a corresponding roster row.** That is what makes revoke
+    // reliable, because revoke finds nodes through the roster, and it only holds if the roster row
+    // is written strictly BEFORE the secret:
+    //  - crash after this write but before the secret write below: an inert roster row with no
+    //    working credential — visible, un-authenticatable, and harmless. The code is not yet marked
+    //    redeemed, so re-redeeming the SAME code simply upserts this same row again and proceeds;
+    //    the invariant never broke.
+    //  - crash after the secret write but before the code is marked redeemed (the ordering D22
+    //    already pinned, unchanged below): an inert ORPHAN secret behind a roster row that already
+    //    exists — recoverable the same way, and still never a secret without a row.
+    //  - the one order this rules out is secret-before-roster, which is the exact defect being
+    //    fixed here: nothing before this session's fix ever wrote the roster row at all, which is
+    //    the degenerate case of "crash" that never resolves — a permanent, unrevokable secret with
+    //    nothing in the roster to find it by.
+    //
+    // Re-join semantics: a node id already in the roster (disabled, or simply reconnecting after a
+    // restart) has its row REPLACED, not appended — `upsertNode`'s own full-replace contract — which
+    // is also how a stale `disabledAt` gets cleared: redemption itself is the operator's evidence
+    // that this node should be active again (a fresh code had to be minted for it to get here), so
+    // the rebuilt row carries no `disabledAt` at all, regardless of what the old row said.
+    // `nodeName` and `acceptsDispatch` are the two fields `PATCH /cluster/nodes/:nodeId` lets an
+    // operator set deliberately, and a re-join — the SPOKE's own action, not the operator's — must
+    // not silently undo that choice, so both are carried forward from the existing row when one
+    // exists. A brand-new node has no prior row to carry forward from, so `acceptsDispatch` falls
+    // back to D11's fail-closed default (off — a newly enrolled node replicates state and runs
+    // nothing) rather than anything the joining node claims about itself, and `nodeName` falls back
+    // to the name the join request carried.
+    const existingPeers = await readPeers(options);
+    const existingNode = existingPeers.nodes.find((n) => n.nodeId === request.nodeId);
+    await upsertNode(
+      {
+        nodeId: request.nodeId,
+        nodeName: existingNode?.nodeName ?? request.nodeName,
+        role: 'spoke',
+        labels: request.labels,
+        acceptsDispatch: existingNode?.acceptsDispatch ?? false,
+        protocol: request.protocol,
+        version: request.version,
+      },
+      options,
+    );
 
     const secret = randomBytes(NODE_SECRET_BYTES).toString('hex');
     // D22: the secret is persisted BEFORE the code is marked redeemed, inside this SAME lease.

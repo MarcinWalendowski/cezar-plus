@@ -322,6 +322,129 @@ it('parallel variants ignore a worktree opt-out and retain isolated mode', () =>
 });
 
 /**
+ * Milestone C, D-e (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`): `hasCapacity()` is the
+ * honest reader `cluster/spoke-runtime.ts#handleDispatch` calls before answering a dispatch offer
+ * — it has to read the SAME semaphore state that actually admits a queued run, not a separate or
+ * stale snapshot. These construct a `RunManager` directly against `WorkspaceSemaphore` fixtures
+ * already trusted elsewhere in this file (line ~72-73's `maxParallel: 0` no-capacity fixture) and
+ * call `hasCapacity()` with nothing else going on, so a mutation that stubbed the read (e.g.
+ * hardcoding `true`, or reading `presence`-shaped data that does not exist on `RunManager` at all)
+ * fails here without needing a real agent run.
+ */
+describe('RunManager#hasCapacity (Milestone C, D-e)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+
+  afterEach(() => {
+    manager?.dispose();
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('is true for a fresh manager under the default (unbounded) semaphore', async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-has-capacity-open-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+
+    await expect(manager.hasCapacity()).resolves.toBe(true);
+  });
+
+  it('is false when the workspace semaphore reports maxParallel: 0 — the real gate, not a stub', async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-has-capacity-closed-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 0 } }),
+    });
+
+    await expect(manager.hasCapacity()).resolves.toBe(false);
+  });
+});
+
+/**
+ * D-e follow-up: `hasCapacity()`'s own docblock names `pump()`'s inline gate (`:1670-1676`) as the
+ * same three-condition check, duplicated rather than shared because `pump()`'s cached `repo` and
+ * synchronous loop are load-bearing (this file's owning session declined to restructure it for
+ * that reason). One concept enforced at two sites drifts silently — each has its own passing
+ * tests that cannot see the other move out of step. This asserts BOTH answers from the SAME
+ * fixture rather than trusting them to agree: it goes red the day a fourth condition is added to
+ * one side and not the other.
+ */
+describe('RunManager#hasCapacity agrees with pump() (Milestone C, D-e follow-up)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  const WORKFLOW: WorkflowDef = {
+    name: '(planned)',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Do the task', prompt: '{{task}}' }],
+  };
+
+  afterEach(() => {
+    manager?.dispose();
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store?.flush();
+    if (repoRoot) rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('hasCapacity(): false ⇒ pump() leaves the run queued, never starts it', async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-capacity-agree-closed-'));
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 0 } }),
+    });
+
+    await expect(manager.hasCapacity()).resolves.toBe(false);
+
+    const created = manager.startRun(WORKFLOW, {
+      author: localCliAuthor(),
+      task: 'mock:done should stay queued',
+      worktree: false,
+    });
+    // `maxParallel: 0` makes admission structurally impossible — no amount of waiting changes the
+    // outcome, so a short settle (rather than a long poll to a deadline) is enough to catch a
+    // `pump()` that disagreed with the read and started it anyway.
+    await new Promise((r) => setTimeout(r, 200));
+    expect(store.getRun(created.id)?.status).toBe('queued');
+  });
+
+  it('hasCapacity(): true ⇒ pump() actually starts the run', async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-capacity-agree-open-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+
+    await expect(manager.hasCapacity()).resolves.toBe(true);
+
+    const created = manager.startRun(WORKFLOW, {
+      author: localCliAuthor(),
+      task: 'mock:done should actually start',
+      worktree: false,
+    });
+    const deadline = Date.now() + 20_000;
+    while (store.getRun(created.id)?.status === 'queued') {
+      if (Date.now() > deadline) {
+        throw new Error('run never left queued — pump() disagreed with hasCapacity()');
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(store.getRun(created.id)?.status).not.toBe('queued');
+  });
+});
+
+/**
  * Turn-end bookkeeping (#389, task auto-naming spec) against a REAL fixture
  * repo: `recordTurnEnd` is the exact method both agent-event paths fire on
  * `turn-end`, driven directly here because a live agent session is the only

@@ -333,7 +333,11 @@ function AgentTab({
         ))}
       </ul>
 
-      {provider === 'claude' && canCarryAccounts ? <DetectedLogins /> : null}
+      {/* Per provider, not Claude-only: each card offers the logins of ITS OWN agent, so a codex
+          home is never proposed under the Claude card (adding it there would store a codex dir as a
+          Claude account). `canCarryAccounts` still gates it — a provider that cannot hold a second
+          account has nothing to detect. */}
+      {canCarryAccounts ? <DetectedLogins provider={provider} /> : null}
 
       {!canCarryAccounts ? (
         <p data-slot="accounts-single-only" className="text-[11.5px] text-soft-foreground">
@@ -357,21 +361,26 @@ function AgentTab({
  * offers them by EMAIL instead: the fact a person actually uses to answer "which subscription is
  * this?".
  *
- * Claude only, and the whole block is absent for the other agents. Codex could not be discovered
- * without reading its `auth.json`, which holds a live API key and refresh token beside the account
- * id — see `workspace/agent-account-identity.ts`.
+ * **CORRECTED 2026-08-24** (spec `.ai/specs/2026-08-24-second-codex-account-balancing.md`): this
+ * read ~~"Claude only, and the whole block is absent for the other agents. Codex could not be
+ * discovered without reading its `auth.json`, which holds a live API key and refresh token beside
+ * the account id"~~. Codex homes are discovered now — the identity comes from a reader that returns
+ * the `id_token`'s claims and never a credential, so the risk that paragraph named is handled at
+ * the reader rather than by not looking. A row carries its own provider; nothing here assumes one.
  *
  * Adding is one click but NOT one silent write: the click posts the same `POST …/agent-profiles`
  * that the dialog posts, through the same duplicate-folder and absolute-path guards, and nothing
  * here writes anything until it is clicked.
  */
-function DetectedLogins() {
+function DetectedLogins({ provider }: { provider: ProviderId }) {
   const discovered = useDiscoveredAgentAccounts()
   const create = useCreateAgentProfile()
   // Already-added dirs are dropped rather than shown greyed out: they are RIGHT ABOVE this block,
   // in the list of accounts, with more detail. A second rendering of the same account would read
   // as a second account.
-  const candidates = (discovered.data?.accounts ?? []).filter((account) => !account.added)
+  const candidates = (discovered.data?.accounts ?? []).filter(
+    (account) => !account.added && account.provider === provider,
+  )
   if (candidates.length === 0) return null
 
   return (
@@ -409,7 +418,9 @@ function DetectedLogins() {
               onClick={() =>
                 create.mutate(
                   {
-                    provider: 'claude',
+                    // The ROW's provider, never a literal: a codex home added as a claude account
+                    // would be stored with `CLAUDE_CONFIG_DIR` semantics and spawn the wrong CLI.
+                    provider: account.provider,
                     configDir: account.configDir,
                     // The email as the label, and this is load-bearing rather than a nicety: the
                     // accounts listing carries no identity (D5), so the label is the ONLY place the

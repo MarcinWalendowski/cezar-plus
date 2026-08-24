@@ -412,7 +412,7 @@ describe('the cluster section', () => {
     expect(row.querySelector('[data-action="cluster-node-revoke"]')).toBeNull()
   })
 
-  it('12d: the four queued reasons render as four pairwise-distinct strings', async () => {
+  it('12d: every queued reason renders, as pairwise-distinct strings', async () => {
     serve()
     renderSection()
     await waitFor(() => expect(screen.getByText('No nodes yet')).toBeTruthy())
@@ -421,7 +421,12 @@ describe('the cluster section', () => {
 
     const reasonEls = await waitFor(() => {
       const els = document.querySelectorAll('[data-slot="cluster-queued-reason"]')
-      expect(els.length).toBe(4)
+      // Derived from the schema, NOT a literal. This was `4` and went stale the moment
+      // `no-node-accepts-dispatch` landed (2026-08-24) — while the assertion below, which is
+      // already schema-driven, would have caught a genuinely missing entry on its own. A literal
+      // here bought no coverage the next line does not have, and cost a red in a package the
+      // change never touched. The deliberate count-tripwire lives in `placement.test.ts`.
+      expect(els.length).toBe(clusterQueuedReasonSchema.options.length)
       return els
     })
     const texts = [...reasonEls].map((el) => el.textContent ?? '')

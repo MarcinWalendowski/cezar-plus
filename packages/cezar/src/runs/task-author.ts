@@ -30,6 +30,7 @@ export const taskAuthorViaSchema = z.enum([
   'note-approval',
   'note-continuation',
   'report-triage',
+  'cluster-dispatch',
 ]);
 export type TaskAuthorVia = z.infer<typeof taskAuthorViaSchema>;
 

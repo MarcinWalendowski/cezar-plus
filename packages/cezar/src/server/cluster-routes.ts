@@ -15,8 +15,8 @@ import {
   type ClusterNode,
   type ClusterNodeId,
   type ClusterNodeRevokeResponse,
+  type ClusterOp,
   type ClusterOverviewResponse,
-  type ClusterPairing,
   type ClusterPairingProposal,
   type ClusterPairingsResponse,
   type ClusterProjectKey,
@@ -25,6 +25,7 @@ import {
   type ClusterTodosAppendResponse,
   type ClusterTodosBackupResponse,
   type ClusterTodosSnapshotResponse,
+  type StoredClusterNode,
   clusterAllocateKindParamSchema,
   clusterAllocateRequestSchema,
   clusterCodeIdParamSchema,
@@ -39,8 +40,7 @@ import {
   clusterPairingActionSchema,
   clusterProjectKeyParamSchema,
   clusterTodosAppendRequestSchema,
-  type StoredClusterNode,
-  type StoredClusterPairing,
+  type StoredClusterNodeIdentity,
 } from '@loki-labs/better-cezar-contract';
 import { clusterEnabled } from './capabilities.ts';
 import { jsonZodValidator, paramZodValidator } from './validators.ts';
@@ -51,16 +51,35 @@ import {
   redeemEnrollmentCode,
   revokeEnrollmentCode,
 } from '../cluster/enrollment.ts';
+import { applyOpAtHub } from '../cluster/hub-apply.ts';
+import { createHubFrameRouter, type HubReplicationDeps } from '../cluster/hub-router.ts';
+import { createHubDispatcher, type HubDispatcher } from '../cluster/hub-dispatch.ts';
+import { createHubAutostartDispatch } from '../cluster/hub-autostart-dispatch.ts';
+import {
+  armClusterAutostart,
+  createHubAutostartCluster,
+  createSpokeAutostartCluster,
+} from '../cluster/autostart-seam.ts';
+import { DISPATCH_LOCAL } from '../todo-autostart.ts';
+import type { HubOpOutcome } from '../cluster/hub-ops.ts';
+import { createHubSeqAllocator } from '../cluster/hub-seq.ts';
 import { acquireLease, releaseLease } from '../cluster/leases.ts';
+import { ClusterLinkClient } from '../cluster/link-client.ts';
+import { toNodeWire, toPairingWire } from '../cluster/wire.ts';
+import { ClusterLinkServer, type UpgradeCapableServer } from '../cluster/link-server.ts';
 import { createNodeAuthMiddleware, getAuthenticatedClusterNode } from '../cluster/node-auth.ts';
-import { loadNodeIdentity } from '../cluster/node-identity.ts';
+import { clusterModeFromEnv, loadNodeIdentity, nodeIdentityPath } from '../cluster/node-identity.ts';
 import { lookupNodeSecret as lookupStoredNodeSecret } from '../cluster/node-secrets.ts';
+import { createOpHistoryStore, OP_HISTORY_PRUNE_INTERVAL_MS } from '../cluster/op-history.ts';
+import { startSpokeRuntime, type SpokeRuntimeHandle } from '../cluster/spoke-runtime.ts';
 import { applyPairingAction, disableNode, readPeers, upsertNode } from '../cluster/peers.ts';
 import { readRemoteRuns } from '../cluster/run-projection.ts';
 import { loadServerState } from '../server-install/state.ts';
 import { workspaceConfigPath } from '../paths.ts';
 import { backupAndAppendTodosPreservingIds, backupTodos, readTodos, type TodoItem } from '../todos.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
+import type { RunManager } from '../workflows/run.ts';
+import type { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 
 /**
  * The CLUSTER family of `/api/v1` (`CEZ_CLUSTER=1`). See
@@ -160,6 +179,16 @@ import { loadWorkspaceConfig } from '../workspace/config.ts';
  * `GET /cluster/active` all read this node's own locally-mirrored state, and `/cluster/enroll` is
  * an operator action taken at the hub's own cockpit. None of those is a node authenticating itself
  * to another node, so node-auth is not on them.
+ *
+ * **`GET /cluster/active`'s "locally-mirrored state" is real but, as things stand, permanently
+ * empty in production — that is a defect in what feeds it, not in this claim.** `run-projection.ts`'s
+ * writers (`applyRemoteRuns`, `markNodeUnreachable`) have zero production callers, so
+ * `runs-remote.json` is never written and this route always answers `runs: []`. Wiring that writer
+ * is Milestone D (weeks, ops-gated) and out of this package's scope. Until it lands, this route —
+ * like `linkHealth()` below — reports what is true rather than fabricating activity: an empty
+ * mirror answers `runs: []`, and `asOf` (`clusterActiveResponseSchema`'s own doc) is `undefined`
+ * whenever nothing has ever reported, rather than the wall-clock-now that used to paper over the
+ * gap and make an empty answer read as a checked, current fact.
  *
  * `POST /cluster/join` is excluded on purpose and would be a lockout bug if it weren't: it is the
  * enrollment handshake ITSELF, and a joining node has no secret yet to sign with.
@@ -261,6 +290,17 @@ const NO_AUTHENTICATED_NODE_ON_GATED_ROUTE = 'internal: no authenticated cluster
 const IN_FLIGHT_STATUSES = new Set(['queued', 'running', 'waiting', 'review']);
 
 /**
+ * How often the hub sweeps its own unanswered dispatches (`HubDispatcher#sweepUnanswered`).
+ *
+ * Deliberately well under `DEFAULT_DISPATCH_TIMEOUT_MS` (90s) rather than equal to it: the sweep
+ * decides *when a record older than the timeout is noticed*, not what the timeout is, so a cadence
+ * equal to the timeout would let a record sit up to 180s before being labelled. It is also NOT the
+ * op-history cadence — that one prunes a durable file and is sized for a hub that restarts ~10x a
+ * day; this one only walks a small in-memory map.
+ */
+const DISPATCH_SWEEP_INTERVAL_MS = 30_000;
+
+/**
  * The projection → `ClusterActiveRun[]` map, exported because `cez cluster active` in
  * `../index.ts` answers the same question from the same file and two spellings of "what is in
  * flight" would eventually disagree — the CLI's answer is what an agent reads before it starts
@@ -290,39 +330,29 @@ export function clusterActiveRunsFrom(remote: readonly ClusterRemoteRun[]): Clus
     }));
 }
 
-/** Corpus-relative, always. `.strict()` on the wire means a stored row's `.passthrough()` extras
- *  must be dropped by an explicit mapping rather than spread through — the omission is the
- *  mechanism that keeps an unexpected on-disk key off the wire. */
-function toNodeWire(node: StoredClusterNode): ClusterNode {
-  return {
-    nodeId: node.nodeId,
-    nodeName: node.nodeName,
-    role: node.role,
-    labels: node.labels,
-    acceptsDispatch: node.acceptsDispatch,
-    protocol: node.protocol,
-    version: node.version,
-    ...(node.lastSeenAt !== undefined ? { lastSeenAt: node.lastSeenAt } : {}),
-    ...(node.capacity !== undefined ? { capacity: node.capacity } : {}),
-    ...(node.capacityAt !== undefined ? { capacityAt: node.capacityAt } : {}),
-    ...(node.hostMetrics !== undefined ? { hostMetrics: node.hostMetrics } : {}),
-    ...(node.repoDrift !== undefined ? { repoDrift: node.repoDrift } : {}),
-    ...(node.corpus !== undefined ? { corpus: node.corpus } : {}),
-    ...(node.disabledAt !== undefined ? { disabledAt: node.disabledAt } : {}),
-  };
+/**
+ * `asOf` for `GET /cluster/active` and `cez cluster active` (`clusterActiveResponseSchema`'s own
+ * doc) — the most recent `StoredClusterNode#lastSeenAt` among this hub's LINKED (non-`disabledAt`)
+ * roster nodes, or `undefined` if none of them has ever reported. Reads `lastSeenAt` and nothing
+ * else — no wall clock — because `lastSeenAt` (stamped for real by `markNodeSeen` on every
+ * presence heartbeat, `hub-router.ts`'s `presence` case) is the one signal this hub actually has
+ * for "when did I last hear from this node"; a value derived from request time instead would make
+ * that question impossible to ever answer honestly, which is the exact defect this function
+ * replaces — both call sites used to hardcode `new Date().toISOString()` here.
+ *
+ * Exported for the same reason `clusterActiveRunsFrom` above is: `cez cluster active` in
+ * `../index.ts` answers the same question from the same file, and two spellings of "when did we
+ * last hear from the cluster" must not be free to disagree.
+ */
+export function clusterActiveAsOfFrom(nodes: readonly StoredClusterNode[]): string | undefined {
+  let latest: string | undefined;
+  for (const node of nodes) {
+    if (node.disabledAt !== undefined || node.lastSeenAt === undefined) continue;
+    if (latest === undefined || node.lastSeenAt > latest) latest = node.lastSeenAt;
+  }
+  return latest;
 }
 
-function toPairingWire(pairing: StoredClusterPairing): ClusterPairing {
-  const byNode: ClusterPairing['byNode'] = {};
-  for (const [nodeId, member] of Object.entries(pairing.byNode)) {
-    byNode[nodeId] = {
-      nodeId: member.nodeId,
-      projectId: member.projectId,
-      ...(member.confirmedAt !== undefined ? { confirmedAt: member.confirmedAt } : {}),
-    };
-  }
-  return { projectKey: pairing.projectKey, byNode };
-}
 
 /**
  * Discovered before configured, the shape `notifications-routes.ts#discoverCockpitUrl` already
@@ -389,6 +419,94 @@ function todosDataDir(projectRoot: string): string {
   return join(projectRoot, '.ai/cezar');
 }
 
+/**
+ * D20's authenticated set, and the ONLY place it is named. Base paths relative to this router's
+ * own mount point (`/cluster/...` — no `/api/v1`, matching every other path constant in this
+ * file), one entry per family the module header's "D20" section names as node-authenticated:
+ * the corpus mirror, and the todos snapshot/backup/append trio. `/cluster/allocate` and
+ * `/cluster/leases` are hub-authenticated (`requireHub`) as well as node-authenticated — see the
+ * "CORRECTED 2026-08-23 (D22)" note above for why both gates apply to them.
+ *
+ * Two callers read this array and NEITHER hand-lists paths of its own, which is what makes them
+ * unable to disagree rather than merely consistent today:
+ *  - `createClusterRoutes` below `.use()`s `requireNodeAuth` on every entry (`base` and
+ *    `${base}/*`) in a loop over this exact array — the `.use()` targets are GENERATED from it,
+ *    not separately written and kept in sync by hand.
+ *  - `server.ts`'s cockpit auth wall calls `isNodeAuthenticatedClusterPath` (below) to decide
+ *    which `/api/v1/cluster/*` requests it lets past for `requireNodeAuth` to authenticate
+ *    instead of answering its own blanket 401. It does not duplicate the list or the matching
+ *    rule — it calls the same function this file's own `.use()` loop is built from.
+ *
+ * Adding a node-authenticated route means adding its base path here, in this one place. Nowhere
+ * else in this file or in `server.ts` may name one of these paths for either purpose.
+ */
+export const NODE_AUTHENTICATED_CLUSTER_BASE_PATHS = [
+  '/cluster/corpus',
+  '/cluster/todos',
+  '/cluster/allocate',
+  '/cluster/leases',
+] as const;
+
+/**
+ * True for `relativePath` (e.g. `/cluster/todos/workspace-root`, spelled the way this file's own
+ * `.use()` targets are — no `/api/v1` prefix) iff `requireNodeAuth` covers it: the base path
+ * itself, or anything nested under it.
+ *
+ * Matches Hono's own `X` + `X/*` wildcard semantics exactly — verified against the installed
+ * `hono@4.12.29` (a request to the bare base path, with no trailing segment, already reaches a
+ * `${base}/*`-registered middleware; the pairing below is defensive redundancy, not a second
+ * mechanism), never assumed: a `/`-bounded prefix test, so `/cluster/todos` matches but
+ * `/cluster/todosomething` does not — a bare `startsWith(base)` would wrongly admit the latter.
+ * `c.req.path` (what both this file and `server.ts`'s wall read) already excludes the query
+ * string and already has `..` segments resolved by the WHATWG `URL` parser `@hono/node-server`
+ * builds it from, so this needs no query-stripping or traversal-normalisation of its own — see
+ * `server.ts`'s call site for the one thing it still has to do, which is strip `V1_PREFIX`.
+ */
+export function isNodeAuthenticatedClusterPath(relativePath: string): boolean {
+  return NODE_AUTHENTICATED_CLUSTER_BASE_PATHS.some(
+    (base) => relativePath === base || relativePath.startsWith(`${base}/`),
+  );
+}
+
+/**
+ * `/cluster/join` — the ONE cluster path whose credential is the request body rather than a node
+ * signature or a cockpit session.
+ *
+ * **Why it needs its own set rather than joining `NODE_AUTHENTICATED_CLUSTER_BASE_PATHS`.** A node
+ * that is joining does not have a node credential yet — acquiring one is the entire point of the
+ * request — so `requireNodeAuth` can never authenticate it. What authenticates it is the join code
+ * itself: single-use, TTL-bounded, stored only as a SHA-256 digest, and compared in constant time
+ * (`enrollment.ts#matchesEnrollmentCode`). `redeemEnrollmentCode` answers `ok:false` with a named
+ * reason for every code it does not recognise, and folds "never minted" into `code-expired` so a
+ * redeemer cannot probe which codes exist.
+ *
+ * **FOUND 2026-08-24, on the production hub.** This path used to sit behind the cockpit wall
+ * alongside `/cluster/enroll*`, under the reasoning that both are "operator actions taken at a
+ * human's own browser". That is true of `enroll` and false of `join`: `join` is called by the
+ * CLI **on the machine being added**, by `cluster/enrollment.ts#joinCluster`, which has no cockpit
+ * session and no way to obtain one. So on every deployment that sets `CEZ_AUTH` — which is every
+ * real one — the wall answered 401 before this handler ran and `cez cluster join <code>` could not
+ * succeed against any hub, ever. It was measured against `prod-host` running `CEZ_AUTH=oidc`:
+ * the CLI reported `access-rejected`, which named the wrong system entirely (Cloudflare Access was
+ * not in the path at all — the 401 was cezar's own perimeter).
+ *
+ * The suite did not catch it because it asserted the MECHANISM, not the outcome:
+ * `cluster-node-auth-wall.test.ts` pinned `POST /cluster/join` to the blanket 401 as a containment
+ * check. Nothing anywhere asked whether a spoke could then still join.
+ *
+ * **Deliberately EXACT-match, not the `/`-bounded prefix rule above.** There is no legitimate
+ * `/cluster/join/<something>`, so an exact test is the narrowest thing that works, and it keeps
+ * `/cluster/enroll` (which MINTS codes and must stay session-only) and `GET /cluster` (the roster)
+ * behind the wall. Widening this to a prefix, or adding `enroll` to it, would expose code minting
+ * to anyone who can reach the host.
+ */
+export const CODE_AUTHENTICATED_CLUSTER_PATHS = ['/cluster/join'] as const;
+
+/** True iff `relativePath` (no `/api/v1` prefix) is authenticated by a join code — exact match. */
+export function isCodeAuthenticatedClusterPath(relativePath: string): boolean {
+  return CODE_AUTHENTICATED_CLUSTER_PATHS.some((path) => relativePath === path);
+}
+
 export function createClusterRoutes(deps: ClusterRouteDeps) {
   const env = deps.env ?? process.env;
 
@@ -432,36 +550,39 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
     ...(deps.now ? { now: deps.now } : {}),
   });
 
-  return (
-    new Hono<ProjectApiEnv>()
-      // The gate, on explicit paths — see the module header for why never `use('*')`, and why the
-      // answer is 409 rather than the 404 an earlier draft of Verification 12 asked for.
-      .use('/cluster', requireCluster)
-      .use('/cluster/*', requireCluster)
-      // Hub-only, same mechanism and same explicit-path rule. Method-agnostic, which none of these
-      // paths minds — every route under them is hub-side by definition.
-      .use('/cluster/enroll', requireHub)
-      .use('/cluster/enroll/*', requireHub)
-      .use('/cluster/join', requireHub)
-      .use('/cluster/allocate/*', requireHub)
-      .use('/cluster/leases/*', requireHub)
-      // D20, after `requireCluster` so the flag wins first (off answers 409, never 401) — the
-      // corpus family (real content, scoped per node, D8a) plus `/cluster/todos/*` (D21's
-      // snapshot/backup/append trio — landed as this wildcard's own routes below, each further
-      // scoped to a confirmed pairing).
-      .use('/cluster/corpus', requireNodeAuth)
-      .use('/cluster/corpus/*', requireNodeAuth)
-      .use('/cluster/todos/*', requireNodeAuth)
-      // D20, added by this package: `requireHub` establishes ONLY that this server is a hub, never
-      // who is asking — `/cluster/allocate/:kind` and `/cluster/leases/*` need both, since they now
-      // attribute the allocation/lease to the caller (see the two handlers below, and the module
-      // header's D20 section for why this was held back before). Registered AFTER `requireHub`,
-      // same cheap-gate-first ordering the corpus/todos block above already follows relative to
-      // `requireCluster`: a request to a non-hub still gets `requireHub`'s 409 NOT_A_HUB rather than
-      // node-auth's 401, which is the more specific fact of the two.
-      .use('/cluster/allocate/*', requireNodeAuth)
-      .use('/cluster/leases/*', requireNodeAuth)
+  const app = new Hono<ProjectApiEnv>()
+    // The gate, on explicit paths — see the module header for why never `use('*')`, and why the
+    // answer is 409 rather than the 404 an earlier draft of Verification 12 asked for.
+    .use('/cluster', requireCluster)
+    .use('/cluster/*', requireCluster)
+    // Hub-only, same mechanism and same explicit-path rule. Method-agnostic, which none of these
+    // paths minds — every route under them is hub-side by definition.
+    .use('/cluster/enroll', requireHub)
+    .use('/cluster/enroll/*', requireHub)
+    .use('/cluster/join', requireHub)
+    .use('/cluster/allocate/*', requireHub)
+    .use('/cluster/leases/*', requireHub);
 
+  // D20, GENERATED from `NODE_AUTHENTICATED_CLUSTER_BASE_PATHS` above — that array's own doc
+  // explains why this loop is the ONLY place `requireNodeAuth` is `.use()`'d, and why
+  // `server.ts`'s cockpit wall cannot drift from this set. Broken out of the fluent chain above
+  // (rather than four more `.use()` lines) specifically so the registrations are generated,
+  // not hand-copied from the array beside it.
+  //
+  // Registered after `requireCluster` (flag wins first: off answers 409, never a node-auth 401)
+  // and after `requireHub` for `/cluster/allocate/*` and `/cluster/leases/*` — deliberately: a
+  // request to a non-hub still gets `requireHub`'s 409 NOT_A_HUB rather than node-auth's 401,
+  // the more specific fact of the two (unchanged from before this package). `.use()` returns
+  // `this` and does not touch the chain's inferred route schema (unlike `.get()`/`.post()`/etc,
+  // which is why the trap `requireHub`'s own doc warns about — a bare handler collapsing a
+  // route's schema — does not apply to a loop of `.use()` calls).
+  for (const base of NODE_AUTHENTICATED_CLUSTER_BASE_PATHS) {
+    app.use(base, requireNodeAuth);
+    app.use(`${base}/*`, requireNodeAuth);
+  }
+
+  return (
+    app
       // ---- roster ---------------------------------------------------------------------------
       .get('/cluster', async (c) => {
         const identity = await loadNodeIdentity({ env });
@@ -739,11 +860,16 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
       // ---- what else is in flight (D19 rung 4) -----------------------------------------------
       /** Backs `cezar cluster active` — a read an agent can already make over the `Bash` + `cez`
        *  surface it has, with no MCP server involved. Both spellings share
-       *  `clusterActiveRunsFrom` above; see its doc for the injection rule `summary` carries and
-       *  for why `paths` is empty until package 4.3. */
+       *  `clusterActiveRunsFrom` and `clusterActiveAsOfFrom` above; see their docs for the
+       *  injection rule `summary` carries, for why `paths` is empty until package 4.3, and for why
+       *  `asOf` is roster-derived rather than a request-time clock. */
       .get('/cluster/active', async (c) => {
-        const runs = clusterActiveRunsFrom(await readRemoteRuns({ env }));
-        const body: ClusterActiveResponse = { runs, asOf: new Date().toISOString() };
+        const [runs, peers] = await Promise.all([
+          readRemoteRuns({ env }).then(clusterActiveRunsFrom),
+          readPeers({ env }),
+        ]);
+        const asOf = clusterActiveAsOfFrom(peers.nodes);
+        const body: ClusterActiveResponse = { runs, ...(asOf !== undefined ? { asOf } : {}) };
         return c.json(body);
       })
 
@@ -819,33 +945,487 @@ export interface ClusterRuntimeDeps {
   version: string;
   env?: NodeJS.ProcessEnv;
   warn?: (message: string) => void;
+  /**
+   * The `http.Server` `ClusterLinkServer.attach()`es to when this node is the hub — the same
+   * server `server/ws.ts`'s cockpit socket hub attaches to. **Required, not optional.** An optional
+   * field here would let a caller forget it and get a hub that starts up looking healthy and is
+   * silently unreachable over the link — exactly the class of failure the D20/D23/D24/D25
+   * corrections in the spec spent this whole session finding, the hard way, by measuring a running
+   * system rather than by a type catching it. `server/server.ts#startServer` is the only production
+   * caller and passes the real listening server once it exists; `createApp` has none to give,
+   * which is why this call lives in `startServer`, not `createApp` (package 1.5).
+   */
+  server: UpgradeCapableServer;
+  /**
+   * Milestone C: how the SPOKE branch's `startSpokeRuntime` resolves a dispatched project's
+   * `repoRoot` to the live `RunManager` that will actually run the work — threaded straight
+   * through to `SpokeRuntimeDeps#resolveDispatchManager`, whose own doc has the full argument for
+   * why this is required rather than optional. `server/server.ts#startServer` is the only
+   * production caller, wiring it off `sharedContexts` the same way `todoAutostartProject` is built
+   * there (`:1621`). Irrelevant to the hub branch — a hub never calls `startSpokeRuntime` — but
+   * required on this type regardless, for the same reason `server` above is: an optional field a
+   * spoke-only caller forgets to set is a spoke that links up looking healthy and cannot run
+   * anything dispatched to it.
+   */
+  resolveDispatchManager: (repoRoot: string) => Promise<RunManager | undefined>;
+  /**
+   * D47: the shared workspace-wide `WorkspaceSemaphore` — threaded straight through to
+   * `SpokeRuntimeDeps#semaphore`, whose own doc has the full argument for what it fixes. Optional
+   * for the same "legacy callers and tests that build no managers" reason `ServerDeps#semaphore`
+   * is optional (`server.ts:6857`'s own doc) — unlike `server`/`resolveDispatchManager` above,
+   * its absence degrades to today's already-shipped behaviour (an omitted `liveCapacity`, which
+   * `peers.ts#collectPresence` already defaults honestly) rather than to silent unreachability, so
+   * making it required here would be a stricter rule than the rest of this file already keeps.
+   */
+  semaphore?: WorkspaceSemaphore;
+  /**
+   * Test-only timing knob — threaded straight through to `SpokeRuntimeDeps#heartbeatMs`, whose own
+   * doc gives the production default (`DEFAULT_HEARTBEAT_MS`, 30_000, matching the hub's expected
+   * presence cadence). Optional, same shape as `ClusterRouteDeps#now` above (a D20 test hook that
+   * pins the clock): a production caller has no reason to override a cadence chosen to match the
+   * hub, and an absent value here degrades to the exact same 30s beat this file has always shipped
+   * — never to a wrong-but-plausible number a caller forgot to set, which is what would make this
+   * required instead (the `server`/`resolveDispatchManager` reasoning above does not apply: their
+   * absence makes a node look healthy while being silently unreachable/undispatchable; this field's
+   * absence makes it beat at the same cadence it always has). Exists so
+   * `cluster-link-activation.test.ts`'s Milestone C scenario can drive a real presence beat carrying
+   * a real `WorkspaceSemaphore`'s load in milliseconds, not by waiting out a real 30s tick.
+   */
+  heartbeatMs?: number;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Builds the `HubReplicationDeps` `startClusterRuntime`'s hub branch hands to
+ * `createHubFrameRouter` — the wiring that makes Milestone B's `hub-apply.ts`/`hub-seq.ts`/
+ * `op-history.ts` (~1,500 lines, fully tested, zero production callers before this function)
+ * reachable outside a test file. Exported and unit-tested on its own, separate from the E2E in
+ * `cluster-link-activation.test.ts` that proves this is actually the function `startClusterRuntime`
+ * calls — see that file for why both are needed.
+ *
+ * `linkServer` is a GETTER, not the `ClusterLinkServer` instance itself, so this function can be
+ * built and exercised (including its throw paths) without ever standing up a real link. The
+ * production caller passes `() => linkServer`, closing over a `let` it assigns synchronously right
+ * after this call returns — safe because `ClusterLinkServer` never invokes `onFrame` (the only path
+ * that reaches `sendTo`/`connectedNodes`) before a real socket has authenticated and delivered a
+ * frame, which is always later than this synchronous assignment (see `link-server.ts`: `onFrame` is
+ * called only from `onMessage`, reachable only via `ws.on('message')` on a socket that only exists
+ * after the `'connection'` listener fires, which only happens after `handleUpgrade` accepts the
+ * auth). `identity` is accepted for parity with `HubFrameRouterDeps` and to name this hub in the
+ * pairing-refusal message below; it plays no role in `resolveHubTodosRoot`, which loads its own
+ * copy of the hub's identity from disk per call (it has to — it is also reachable from the HTTP
+ * `/cluster/todos/*` family, which does not have this function's `identity` in scope).
+ *
+ * **`applyOp` resolves its dataDir PER OP, never once.** A `ClusterOp` carries its own
+ * `scope`/`projectKey` and nothing anywhere validates that they agree with the frame's — a hub
+ * accepting a single fixed `dataDir` closure would write project B's ops into project A's
+ * `todos.json` the moment a frame's `projectKey` and an op's disagreed. The required mutation test
+ * for this file is exactly that substitution; see the "REQUIRED mutation" note in the test.
+ *
+ * **Every unresolvable case THROWS, never returns `{accepted:false}`.** Per `hub-ops.ts`'s own
+ * reject-vs-throw contract, a returned rejection is a DURABLE verdict — the spoke advances past it
+ * and drops the op from its outbox forever. Neither case below is durable: an unconfirmed pairing
+ * is confirmed by a human at any later time, and a corrupt `peers.json` degrades to an empty roster
+ * (`peers.ts`), which is indistinguishable here from "genuinely unpaired" — treating either as a
+ * permanent rejection would silently discard writes behind a transient or operator-fixable state. A
+ * throw costs only a burned `hubSeq` (an unbounded counter, so log noise, not a failure) and leaves
+ * the op owed in the spoke's outbox, which is the far better failure per `hub-router.ts`'s own
+ * stated posture for this whole file.
+ *
+ * **The authorization gap this closes.** Nothing else on the link path checked that the AUTHORING
+ * node (`op.nodeId`) is confirmed-paired with the project it is writing, while the HTTP
+ * `/cluster/todos/*` family gates exactly that, both ways (D20/D21 — see `resolveHubTodosRoot`
+ * above). Passing `op.nodeId` as `resolveHubTodosRoot`'s `callerNodeId` makes the link path match:
+ * today the two already agree by construction (`deriveTodoOps` stamps `nodeId: input.nodeId`, the
+ * authoring node's own), so this costs nothing for the honest case, but it is what stops a node
+ * refused a project over HTTP from writing that project over the socket instead. A stronger
+ * guard — refusing an op whose `op.nodeId` disagrees with the link's AUTHENTICATED identity — has to
+ * live in `hub-router.ts`'s `ops` case, not here; this function only ever sees the op, not the
+ * socket that carried it.
+ */
+export function buildHubReplication(
+  identity: StoredClusterNodeIdentity,
+  env: NodeJS.ProcessEnv,
+  warn: (message: string) => void,
+  linkServer: () => ClusterLinkServer | undefined,
+): HubReplicationDeps {
+  const allocator = createHubSeqAllocator({ env, warn });
+  const opHistory = createOpHistoryStore({ env, warn });
+
+  const applyOp = async (op: ClusterOp & { hubSeq: number }): Promise<HubOpOutcome> => {
+    if (op.scope !== 'project' || !op.projectKey) {
+      // No workspace-scoped todo store exists anywhere in the tree yet (module docblock of
+      // `hub-apply.ts` names the same "never fabricate" posture for `entity`). Thrown, not
+      // returned — see this function's own docblock.
+      throw new Error(
+        `cluster hub: no ${op.scope}-scoped store exists on this build — op ${op.opId} left unacknowledged`,
+      );
+    }
+    // `op.nodeId` is the AUTHORING node, the same both-ways-confirmed gate the HTTP
+    // /cluster/todos family applies (D20/D21, `resolveHubTodosRoot` above in this file).
+    const root = await resolveHubTodosRoot(op.projectKey, op.nodeId, env);
+    if (!root) {
+      throw new Error(
+        `cluster hub (${identity.nodeId}): project "${op.projectKey}" is not confirmed-paired with ` +
+          `node "${op.nodeId}" on this hub — op ${op.opId} left unacknowledged; it stays in that ` +
+          "node's outbox until the pairing is confirmed",
+      );
+    }
+    return applyOpAtHub(todosDataDir(root), op);
+  };
+
+  return {
+    allocate: (input) => allocator.allocate(input),
+    applyOp,
+    findAppliedOp: (opId) => opHistory.find(opId),
+    recordAppliedOp: (opId, result) => opHistory.record(opId, result),
+    // `false` = "not connected", which `hub-router.ts`'s `ops` case already handles correctly: it
+    // warns and deliberately does NOT advance that node's watermark, so the frame is owed again on
+    // the next batch. That is also the right answer for the pre-assignment window (this function
+    // called before `linkServer()` has anything to return) — over-sending is free, under-sending
+    // loses a write.
+    sendTo: (nodeId, frame) => linkServer()?.send(nodeId, frame) ?? false,
+    // B4 — connect-time replay's ONE production read. Deliberately the SAME two calls `applyOp`
+    // above makes, in the same order: `resolveHubTodosRoot` (D20/D21's both-ways-confirmed pairing
+    // gate) and then the project's todos. Not a second implementation of that gate that happens to
+    // agree today — one rule, one call site, so a change to who may be replayed a project cannot
+    // drift from who may write it. `undefined` here is that gate's REFUSAL and is passed through
+    // unchanged; `hub-router.ts#readTodosFor` documents why it must stay distinguishable from `[]`.
+    readTodosFor: async (projectKey, nodeId) => {
+      const root = await resolveHubTodosRoot(projectKey, nodeId, env);
+      if (!root) return undefined;
+      return readTodos(todosDataDir(root));
+    },
+    connectedNodes: () => linkServer()?.connectedNodes() ?? [],
+  };
 }
 
 /**
  * The ONE wiring line `server.ts` carries for this feature, beside the existing
- * `providerRuntimeAuth.watch` / `watchTodoAutostart` block — the single place the link
- * (`cluster/link-{client,server}.ts`, package 1.3), the periodic full reconcile
- * (`cluster/reconcile.ts#startPeriodicReconcile`, package 2.4) and the run-projection observer
- * (`cluster/run-projection.ts`, package 3.4) get attached. It lives here rather than in `server.ts`
- * so those packages fill a body in a file they can be given, instead of each editing the one file
+ * `providerRuntimeAuth.watch` / `watchTodoAutostart` block. It lives here rather than in
+ * `server.ts` so a package fills a body in a file it can be given, instead of editing the one file
  * twenty concurrent agents share (PLAN P3).
  *
  * **With `CEZ_CLUSTER` unset this returns immediately having armed nothing** — no timer, no socket,
  * no file under `~/.cezar/cluster` or `.ai/cezar/cluster` — which is the half of Verification 12
  * that neither a `capabilities` assertion nor a route probe can see.
  *
+ * **With the flag on, this is package 1.5's activation: it arms the node link, hub or spoke.** It
+ * deliberately does NOT arm the periodic full reconcile (`cluster/reconcile.ts#startPeriodicReconcile`)
+ * or the run-projection observer (`cluster/run-projection.ts`, package 3.4) — both are later
+ * increments. The reconcile timer in particular stays unarmed on purpose right now:
+ * `reconcile.ts#PeriodicReconcileOptions.run`'s own docblock names its production caller as a
+ * **non-dry-run** `reconcileAll`, which would perform the 110-row merge this whole design exists
+ * for automatically and unattended on first link — the one thing spec P9 gates on the owner being
+ * present. See `.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md` → "Found during
+ * implementation" for the open decision; arming it is a separate, deliberate step, not something
+ * that should ride in behind this one.
+ *
+ * **Hub vs spoke is decided from the PERSISTED identity (`loadNodeIdentity`), not from
+ * `clusterModeFromEnv(env)` directly.** The identity on disk is what actually carries the
+ * credential `ClusterLinkServer`/`ClusterLinkClient` sign and verify with, so it is the thing that
+ * determines which branch runs and with what secret; `clusterModeFromEnv(env)` is consulted only as
+ * a CROSS-CHECK against it. The two are written together at enrollment time
+ * (`enrollment.ts#joinCluster` → `ensureNodeIdentity`) and should never disagree in normal
+ * operation — a disagreement means the operator edited `CEZ_CLUSTER`/`CEZ_CLUSTER_HUB` without
+ * re-enrolling, or vice versa, which is a real misconfiguration. It gets a NAMED warning and arms
+ * nothing, the same "refuse rather than silently pick a side" posture D2 uses for an ambiguous
+ * project pairing — proceeding on a guess would run the wrong protocol against the wrong secret.
+ * **No identity on disk at all** is not that: it is the normal, honest starting state for a node
+ * that has never enrolled (a spoke gets one from `cezar cluster join <code>`), so it warns once and
+ * arms nothing without treating it as an error.
+ *
+ * `loadNodeIdentity` is the only asynchronous step this function takes. Once it resolves, every
+ * remaining check and the hub/spoke construction are synchronous, so the returned disposer needs
+ * exactly ONE `disposed` check — placed after that await, before anything is constructed — to
+ * cancel correctly even when called while identity is still loading: a `stop()` that raced the load
+ * must prevent the link from ever being armed, never leave a socket or a heartbeat timer behind for
+ * the caller to leak.
+ *
  * Returns the stop function, the disposal shape used throughout this codebase.
  */
 export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
   const env = deps.env ?? process.env;
+  const warn = deps.warn ?? ((message: string) => console.warn(message));
   if (!clusterEnabled(env)) return () => {};
-  // Reached only with the flag on. Nothing is armed yet: the link, the reconcile timer and the run
-  // projection are packages 1.3, 2.4 and 3.4 of
-  // `.ai/runs/2026-08-22-multi-node-cezar-cluster/PLAN.md`. Said out loud rather than left as a
-  // silent no-op, because a cluster that is enabled and inert looks exactly like one that is
-  // working until somebody asks a second node a question.
-  (deps.warn ?? console.warn)(
-    'CEZ_CLUSTER=1: the cluster routes are served, but the node link and the periodic reconcile have not landed yet (plan packages 1.3 / 2.4) — no node will connect and nothing replicates.',
-  );
-  return () => {};
+
+  let disposed = false;
+  let teardown: (() => void) | undefined;
+
+  void (async () => {
+    let identity: StoredClusterNodeIdentity | undefined;
+    try {
+      identity = await loadNodeIdentity({ env, warn });
+    } catch (err) {
+      warn(`cluster: could not load this node's identity — arming nothing: ${errorMessage(err)}`);
+      return;
+    }
+    if (!identity) {
+      warn(
+        `CEZ_CLUSTER=1: this node has no cluster identity on disk yet (${nodeIdentityPath(env)} is ` +
+          'absent) — a spoke gets one from `cezar cluster join <code>`; arming nothing until it does.',
+      );
+      return;
+    }
+
+    const mode = clusterModeFromEnv(env);
+    if (!mode.enabled) return; // unreachable — `clusterEnabled` above reads the exact same env var
+
+    if (identity.role === 'hub') {
+      if (mode.role !== 'hub') {
+        warn(
+          `CEZ_CLUSTER: this node's identity says role "hub", but the environment says "${mode.role}" ` +
+            '(CEZ_CLUSTER_HUB is set) — refusing to guess which is right; arming nothing until they agree.',
+        );
+        return;
+      }
+      if (disposed) return; // stop() ran while identity was loading — never arm a link it cannot reach
+
+      // A forward declaration so `buildHubReplication`'s `sendTo`/`connectedNodes` can reach the
+      // `ClusterLinkServer` instance whose OWN constructor needs the router that needs them. Safe —
+      // see `buildHubReplication`'s docblock for the full argument — because `onFrame` cannot run
+      // before a real socket has authenticated and delivered a message, which is always later than
+      // this synchronous assignment.
+      let linkServer: ClusterLinkServer | undefined;
+      const replication = buildHubReplication(identity, env, warn, () => linkServer);
+
+      // B2a: sweep op-history's durable per-opId verdict cache on its own timer, independent of the
+      // instance `buildHubReplication` builds internally for `applyOp`/`findAppliedOp`/
+      // `recordAppliedOp` — both point at the same `op-history.json` and neither holds in-memory
+      // state beyond the file, so two instances are exactly as correct as one (op-history.ts's own
+      // module docblock). See `OP_HISTORY_PRUNE_INTERVAL_MS`'s docblock for the cadence trade. One
+      // immediate sweep on arm: at ~10 blue-green restarts/day this is the sweep that actually runs
+      // in production; the interval is the backstop for a long-lived hub.
+      const opHistory = createOpHistoryStore({ env, warn });
+      const pruneOnce = (): void => {
+        // `prune()` REJECTS on whole-file corruption (op-history.ts). Unhandled inside a timer
+        // callback has no caller to receive it — an uncaught rejection there kills the process.
+        void opHistory
+          .prune()
+          .then((removed) => {
+            if (removed > 0) warn(`cluster hub: pruned ${removed} expired op-history verdict(s)`);
+          })
+          .catch((err: unknown) => {
+            warn(`cluster hub: op-history prune failed, retrying next sweep: ${errorMessage(err)}`);
+          });
+      };
+      pruneOnce();
+      const pruneTimer = setInterval(pruneOnce, OP_HISTORY_PRUNE_INTERVAL_MS);
+      // A CLI process must be able to exit with a hub link open; a maintenance sweep must never be
+      // the thing holding the event loop alive — same reason as `spoke-runtime.ts`'s own timers.
+      pruneTimer.unref?.();
+
+      // **Milestone C activation.** The dispatcher is what turns a placement into a frame on the
+      // wire and correlates the spoke's answer back. Constructed here, and NOT inside
+      // `createHubFrameRouter`, because the router must be able to route a reply INTO it — so the
+      // dispatcher has to exist first, and the router receives it as `dispatchCorrelation`.
+      //
+      // `() => linkServer` closes over the same forward-declared `let` `buildHubReplication` above
+      // already does, and is safe for the identical reason documented there: nothing can call
+      // `send` before a socket has authenticated and delivered a frame, which is strictly later
+      // than the synchronous assignment three statements down.
+      //
+      // Constructing it has NO side effect (`HubDispatcher#sweepUnanswered`'s docblock: "nothing
+      // here starts one itself"), so this line alone changes no behaviour — a hub with no dispatch
+      // caller behaves exactly as it did before. What it DOES change is that a `freshness` reply
+      // carrying `accepted`/`refused` now resolves the dispatch it answers, instead of being
+      // observed and dropped (`hub-router.ts:617`, the `?? []` branch).
+      const dispatcher: HubDispatcher = createHubDispatcher({
+        hubNodeId: identity.nodeId,
+        linkServer: () => linkServer,
+        env,
+        warn,
+      });
+
+      // A `'pending'` record inflates its target's `active` in every subsequent placement this hub
+      // makes (`dispatch()`'s "placement hot-spot" adjustment), so a dispatch that is never
+      // answered does not merely sit in a list — it makes its node look permanently busier than it
+      // is, and eventually unplaceable. The sweep is what bounds that, by moving it to the named
+      // terminal state `'unanswered'`.
+      //
+      // **This sweep LABELS; it does not re-dispatch.** Re-dispatching from here would convert a
+      // lost accept into two live runs on two machines (spec item 10) — the sweep deliberately
+      // stops at the label, and a fresh attempt can only come from the todo's next reconcile pass,
+      // by which time an accepted run's own claim op has normally stamped `startedTaskId` and the
+      // pass skips it. That residual window (spoke started, claim op still in the outbox, dispatch
+      // already swept) is D41 and is NOT closed here.
+      const dispatchSweepTimer = setInterval(() => {
+        const swept = dispatcher.sweepUnanswered();
+        for (const record of swept) {
+          warn(
+            `cluster hub: dispatch "${record.dispatchId}" for todo "${record.todoId}" to ` +
+              `"${record.nodeId}" was never answered — marking unanswered (not re-dispatching)`,
+          );
+        }
+      }, DISPATCH_SWEEP_INTERVAL_MS);
+      // Same reason as `pruneTimer` above: a maintenance sweep must never hold the event loop open.
+      dispatchSweepTimer.unref?.();
+
+      linkServer = new ClusterLinkServer({
+        identity,
+        onFrame: createHubFrameRouter({
+          identity,
+          env,
+          warn,
+          replication,
+          // Without this the hub sends dispatches and never learns their fate: `hub-router.ts`'s
+          // `freshness` case falls through to `?? []` and the record stays `'pending'` until the
+          // sweep above mislabels it `'unanswered'` — i.e. every accepted run would look lost.
+          dispatchCorrelation: dispatcher,
+        }),
+        warn,
+      });
+      linkServer.attach(deps.server);
+
+      // **This is the line that makes work distribute.** Everything above builds the machinery;
+      // `todo-autostart.ts` is what actually turns an `autostart: true` todo into a run, and until
+      // this arms, it has no placement to consult and starts everything locally — which is how a
+      // fully built dispatch stack sat with zero production callers.
+      let disarmAutostart: () => void = () => {};
+      if (deps.semaphore) {
+        disarmAutostart = armClusterAutostart(
+          {
+            // NOT `CLUSTERING_OFF` — see `createHubAutostartCluster`. A hub does not ask itself for
+            // permission, but it must still read `startedTaskId`/`startedOn` off the record, which
+            // `CLUSTERING_OFF` would skip on the first line. That read is the only thing that stops
+            // a RESTARTED hub re-dispatching work a spoke is already running, because the
+            // dispatcher's own duplicate guard is in-memory and does not survive the restart.
+            cluster: createHubAutostartCluster(identity.nodeId),
+            dispatch: createHubAutostartDispatch({
+              dispatcher,
+              identity,
+              semaphore: deps.semaphore,
+              connectedNodeIds: () => linkServer?.connectedNodes() ?? [],
+              // The SAME allocator the inbound op path uses (`replication` is the object handed to
+              // `createHubFrameRouter` just below), not a second counter over the same file: two
+              // allocators would hand out the same number twice and silently retire each other's
+              // records via the `hubSeq <= watermark` drop in `cluster/ops.ts`.
+              allocateHubSeq: (input) => replication.allocate(input),
+              env,
+              warn,
+            }),
+          },
+          warn,
+        );
+      } else {
+        // Honest refusal rather than a fabricated capacity. `buildPlacementCandidates` measures
+        // this hub's own headroom off the live semaphore; with none threaded through there is no
+        // way to report it, and synthesising one would make the hub look either permanently idle
+        // or permanently full. Autostart stays local-only on such a process.
+        warn(
+          'cluster hub: no workspace semaphore was threaded into startClusterRuntime, so this hub ' +
+            'cannot measure its own capacity — arming the link but NOT placement; autostart todos ' +
+            'will start locally rather than being distributed',
+        );
+      }
+
+      teardown = () => {
+        clearInterval(pruneTimer);
+        clearInterval(dispatchSweepTimer);
+        disarmAutostart();
+        void linkServer?.close();
+      };
+      return;
+    }
+
+    // identity.role === 'spoke' — `clusterNodeRoleSchema` has no third value.
+    const hubUrl = identity.hubUrl;
+    if (!hubUrl) {
+      warn(
+        `cluster: this node's identity is a spoke with no hubUrl recorded (${nodeIdentityPath(env)} ` +
+          'is corrupt or was hand-edited) — arming nothing.',
+      );
+      return;
+    }
+    if (mode.role !== 'spoke' || mode.hubUrl !== hubUrl) {
+      const envSays = mode.role === 'spoke' ? `"${mode.hubUrl}"` : 'this node is the hub';
+      warn(
+        `CEZ_CLUSTER_HUB: this node was enrolled as a spoke of "${hubUrl}", but the environment says ` +
+          `${envSays} — refusing to guess which is right; arming nothing until they agree.`,
+      );
+      return;
+    }
+
+    if (disposed) return; // stop() ran while identity was loading — never arm a link it cannot reach
+    // D38 — the spoke's `hello` reports where it actually is, instead of the hardcoded `[]` that
+    // made every reconnect replay the whole scope. LATE-BOUND, and not as a matter of taste: the
+    // runtime holding these numbers does not exist yet on the next line, and it takes `linkClient`
+    // as its own dependency, so this is a genuine cycle and a value passed here could only ever be
+    // the empty one. Same shape as `buildHubReplication`'s `sendTo: (…) => linkServer()?.…` above.
+    //
+    // The `?? []` is a floor, NOT a window this code actually passes through — measured, because
+    // the first version of this comment claimed it was. `start()` -> `dial()` -> `new WebSocket()`
+    // returns synchronously and `sendHello` fires from `ws.on('open')` (`link-client.ts:274`),
+    // which needs a network round trip; the assignment below runs synchronously two statements
+    // later. So no `hello` is ever sent with `spokeRuntime` unassigned, and a test asserting an
+    // empty first `hello` is observing "nothing applied yet", never "the runtime is unwired" —
+    // two true statements producing identical bytes, only one of them a mechanism. Keep the
+    // fallback anyway: it costs nothing and the ordering above is a property of another file.
+    //
+    // `[]` is also the correct answer after a process
+    // restart: `spoke-runtime.ts` holds these in memory only, deliberately, so `[]` there means
+    // "I genuinely do not know where I am", and a full replay is the right consequence. Nothing is
+    // persisted here for exactly that reason — persisting would reassert a position across a
+    // restart that the runtime cannot vouch for, turning a bounded over-send into a silent
+    // under-send.
+    let spokeRuntime: SpokeRuntimeHandle | undefined;
+    const linkClient = new ClusterLinkClient({
+      identity,
+      hubUrl,
+      version: deps.version,
+      warn,
+      watermarks: () => spokeRuntime?.watermarks() ?? [],
+    });
+    linkClient.start();
+    const stopHeartbeat = startSpokeRuntime({
+      link: linkClient,
+      env,
+      warn,
+      resolveDispatchManager: deps.resolveDispatchManager,
+      semaphore: deps.semaphore,
+      heartbeatMs: deps.heartbeatMs,
+    });
+    spokeRuntime = stopHeartbeat;
+
+    // **The spoke half of the same activation, and it is a GUARD rather than a feature.** Without
+    // it this node runs `CLUSTERING_OFF`, under which `mayAutostartTodo` allows on its first line —
+    // so a todo replicated down from the hub would be started locally by this node's own reconcile
+    // pass AT THE SAME TIME as the hub dispatches it. Two agents, two worktrees, one todo. Note
+    // that `todos.ts`'s `hub-unconfirmed` refusal does NOT prevent that: it withholds the STAMP,
+    // and by the time it runs `startTodoRun` has already started the agent.
+    const disarmAutostart = armClusterAutostart(
+      {
+        cluster: createSpokeAutostartCluster({
+          nodeId: identity.nodeId,
+          // `online` is the only state in which the hub can actually answer. `connecting` is not
+          // reachable-yet, and treating it as reachable would send a claim into a socket that does
+          // not exist.
+          hubReachable: () => linkClient.health().state === 'online',
+          // A worker self-starts nothing — see `createSpokeAutostartCluster#authoredHere` for why
+          // this is a stated policy and not a missing implementation.
+          authoredHere: () => false,
+        }),
+        // A worker never PLACES work; it executes what it is dispatched.
+        dispatch: DISPATCH_LOCAL,
+      },
+      warn,
+    );
+
+    teardown = () => {
+      stopHeartbeat();
+      disarmAutostart();
+      void linkClient.stop();
+    };
+  })().catch((err: unknown) => {
+    warn(`cluster: activation failed unexpectedly: ${errorMessage(err)}`);
+  });
+
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    teardown?.();
+  };
 }
