@@ -6,8 +6,14 @@ import { RunStore } from '../runs/store.ts';
 import { localCliAuthor } from '../runs/task-author.ts';
 import type { RunManager, StartRunInput } from '../workflows/run.ts';
 import type { WorkflowDef } from '../workflows/types.ts';
+import { CLUSTER_PROTOCOL } from '@loki-labs/better-cezar-contract';
 import { ensureNodeIdentity } from '../cluster/node-identity.ts';
-import { NODE_AUTHENTICATED_CLUSTER_BASE_PATHS, isNodeAuthenticatedClusterPath } from './cluster-routes.ts';
+import {
+  CODE_AUTHENTICATED_CLUSTER_PATHS,
+  NODE_AUTHENTICATED_CLUSTER_BASE_PATHS,
+  isCodeAuthenticatedClusterPath,
+  isNodeAuthenticatedClusterPath,
+} from './cluster-routes.ts';
 import { connectedProviderAuth } from './provider-auth.testkit.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp, type SessionResolver } from './server.ts';
@@ -46,6 +52,13 @@ import { createApp, type SessionResolver } from './server.ts';
  * `.use()`s `requireNodeAuth` on every entry of the same array in a loop. Neither hand-lists a
  * path of its own. See that array's own doc comment for the full argument; this file is the proof
  * that argument holds through the real, wired-together app, not just at the type level.
+ *
+ * **EXTENDED 2026-08-24 — there is a SECOND exempt family, on a different credential.**
+ * `POST /cluster/join` is admitted too, and is authenticated by the join code in its body rather
+ * than by a node signature: the caller is a machine acquiring its first credential. This file
+ * previously asserted the opposite (it pinned `/cluster/join` to the wall's blanket 401 as a
+ * containment check), which is why `cez cluster join` could not succeed against any hub with
+ * `CEZ_AUTH` set. See `isCodeAuthenticatedClusterPath`'s doc in `cluster-routes.ts`.
  */
 describe('the cockpit wall admits D20 node-authenticated cluster paths, and only those', () => {
   let repoRoot: string;
@@ -165,7 +178,6 @@ describe('the cockpit wall admits D20 node-authenticated cluster paths, and only
     const COCKPIT_ONLY: Array<[label: string, method: string, path: string, init?: RequestInit]> = [
       ['GET /cluster (roster)', 'GET', '/api/v1/cluster'],
       ['POST /cluster/enroll', 'POST', '/api/v1/cluster/enroll', json({})],
-      ['POST /cluster/join', 'POST', '/api/v1/cluster/join', json({ code: 'CEZ-AAAA-BBBB' })],
     ];
 
     it.each(COCKPIT_ONLY.map(([label]) => label))(
@@ -177,6 +189,84 @@ describe('the cockpit wall admits D20 node-authenticated cluster paths, and only
         expect(await res.json()).toEqual({ error: 'unauthenticated' });
       },
     );
+  });
+
+  // ---- the join code IS the credential: admitted past the wall, still refused without one ----
+  /**
+   * **FOUND 2026-08-24 on the production hub, and this file is why it survived.** `POST
+   * /cluster/join` used to sit in `COCKPIT_ONLY` above, asserted to answer the wall's blanket 401.
+   * That assertion was true of the mechanism and wrong about the outcome: `join` is called by
+   * `cluster/enrollment.ts#joinCluster` on the machine BEING ADDED, which has no cockpit session
+   * and no way to acquire one, so with `CEZ_AUTH` set — every real deployment — `cez cluster join
+   * <code>` could not succeed against any hub that has ever existed. Nothing here asked that
+   * question; the suite pinned the wall's behaviour and stopped.
+   *
+   * The two assertions below are deliberately a PAIR, and neither is sufficient alone:
+   *   1. the wall lets it through (not `{ error: 'unauthenticated' }`), and
+   *   2. something still refuses an unknown code (`ok: false`, `reason: 'code-expired'`).
+   * Without (2) this test would pass just as well against a route that admitted anyone.
+   */
+  describe('POST /cluster/join is admitted by the wall and authenticated by the CODE instead', () => {
+    // `/cluster/join` is ALSO hub-gated (`requireHub`), which answers 409 before the handler runs
+    // on a node with no hub identity — measured: without this the assertion below saw 409, not 200.
+    // That 409 is itself proof the wall let the request past, but it would make the `code-expired`
+    // half of the pair unreachable, which is the half that proves something still refuses.
+    beforeEach(async () => {
+      await ensureNodeIdentity({ role: 'hub' }, { env: process.env });
+    });
+
+    it('with CEZ_AUTH on and NO session, an unknown code reaches redeemEnrollmentCode', async () => {
+      const res = await apiRequest(
+        makeApp(),
+        '/api/v1/cluster/join',
+        json({
+          code: 'cezj_not-a-real-code',
+          nodeId: '11111111-2222-3333-4444-555555555555',
+          nodeName: 'joining-node',
+          labels: [],
+          protocol: CLUSTER_PROTOCOL,
+          version: '0.0.0-test',
+        }),
+      );
+      // The wall would have answered 401 `{ error: 'unauthenticated' }` with no `reason` field.
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { ok: boolean; reason?: string; error?: string };
+      expect(body.error).toBeUndefined();
+      // The second lock: an unrecognised code is refused, and folded into `code-expired` so a
+      // redeemer cannot probe which codes were ever minted.
+      expect(body.ok).toBe(false);
+      expect(body.reason).toBe('code-expired');
+    });
+
+    it('floor: the code-authenticated set is non-empty and names /cluster/join and nothing else', () => {
+      // Same reason as the D20 floor above: an empty array would make the exemption inert and
+      // every assertion about it vacuous — and here it would ALSO silently restore the defect.
+      expect(CODE_AUTHENTICATED_CLUSTER_PATHS.length).toBeGreaterThan(0);
+      expect([...CODE_AUTHENTICATED_CLUSTER_PATHS]).toEqual(['/cluster/join']);
+    });
+
+    it('containment: enroll stays session-only, so this is not a blanket widening', () => {
+      // The whole justification for admitting `join` is that it cannot mint anything. If `enroll`
+      // ever joined it, code minting would be reachable with no session at all — so this assertion
+      // is what keeps the exemption honest, and it is checked at the predicate AND, above in
+      // COCKPIT_ONLY, through the real app.
+      expect(isCodeAuthenticatedClusterPath('/cluster/enroll')).toBe(false);
+      expect(isNodeAuthenticatedClusterPath('/cluster/enroll')).toBe(false);
+    });
+  });
+
+  describe('isCodeAuthenticatedClusterPath: EXACT match, never a prefix', () => {
+    it.each([
+      ['/cluster/join', true],
+      // No legitimate route nests under it, so a `/`-bounded prefix rule would only widen the hole.
+      ['/cluster/join/extra', false],
+      ['/cluster/joinx', false],
+      ['/cluster/enroll', false],
+      ['/cluster', false],
+      ['', false],
+    ] as const)('%s => %s', (path, expected) => {
+      expect(isCodeAuthenticatedClusterPath(path)).toBe(expected);
+    });
   });
 
   // ---- unit-level boundary tests on the shared predicate -------------------------------------
