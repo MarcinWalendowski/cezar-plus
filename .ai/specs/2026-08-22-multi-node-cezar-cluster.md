@@ -2516,6 +2516,51 @@ invented; these are the names to use when one lands.
 > operator procedure (`accept-dispatch --on` on the node, `PATCH` from the hub). That is the design;
 > what was broken was that one of the two steps had no command at all.
 >
+> ### 53. STILL OPEN AFTER 52 — carried from the parallel investigations, none of it fixed.
+>
+> **53a. No test asserts a dispatched run's claim ever reaches the hub** (`SPOKE-REAL`). The
+> mechanism is proven in PRODUCTION by item 47 — the master's todos carry run ids minted on the
+> worker — but that is a live observation, not a gate. The branch depends on `CEZ_CLUSTER`:
+> unset (how `spoke-runtime.test.ts` runs) the record gets `startedTaskId` only, no `pendingSince`,
+> and `deriveTodoOps` returns `[]` — **so no claim op is produced in those tests at all**.
+> `cluster-link-activation.test.ts:859` does set `CEZ_CLUSTER=1` and therefore EXECUTES the branch,
+> but asserts nothing about the record or the op. The one assertion worth adding: after the merge
+> gate accepts, read the spoke's `todos.json` for `startedTaskId` + `pendingSince`, and assert an op
+> carrying `startedTaskId` arrived at the hub. Without it D41's window (spoke started, claim still
+> in the outbox, dispatch swept) is invisible.
+>
+> **53b. Every dispatch test runs against a FAKE `RunManager`** (`SPOKE-REAL`, cross-checked with
+> `grep -a` against `new RunManager` — the 7 hits are all step/account dispatch under `workflows/`,
+> unrelated). `spoke-runtime.test.ts:470` does call a real `RunStore.createRun` on a real tmpdir, so
+> a real id and a real `runs.json` row exist — but everything the real `startRun` does *after*
+> `createRun` is skipped: no `workflowDef` persistence, no `pendingJobs.set`, no `queue.push`, no
+> `pump()`. **Nothing spawns.** So "the spoke accepted" is well covered and "the spoke ran it" is
+> covered only by item 47's live runs.
+>
+> **53c. Four spoke branches decline SILENTLY — no frame at all**, so the hub waits out the 90s
+> `DEFAULT_DISPATCH_TIMEOUT_MS` and marks `unanswered` (`SPOKE-REAL`): `collectPresence()` fails
+> (`:983`), no `repoDrift` for the projectKey (`:995`), `resolveDispatchManager` undefined (`:1038`),
+> and **the todo not yet in the spoke's own `todos.json`** (`:1104`) — the same finding as 46g, and
+> the likeliest on a fresh spoke, because dispatch can outrun replication. All four name a reason in
+> the spoke's warn log and nowhere else.
+>
+> **53d. `hub-autostart-dispatch.ts` never passes `override`**, so `dispatchRefusalReason` refuses
+> `merging` → `behind` → `dirty` (`dispatch.ts:139-142`). Confirmed live in item 47: a dirty lab
+> checkout refused every dispatch with `dirty` until it was cleaned. Named refusal, not silence —
+> but there is no way for an operator to force placement onto a node with a dirty tree.
+>
+> **53e. `capacityAgeMs` and `corpusStalenessMs` are read by NOTHING** in placement (`PLACE-RANK`,
+> verified by grep; `capacityAgeMs`'s own docblock says "Nothing reads it yet"). So a stale claim and
+> a 10-day-behind corpus do not influence ranking at all. Measured consequence: placement is
+> headroom-then-nodeId only, and on tied capacity the nodeId tiebreak is a **coin flip** across
+> random UUIDs — 200 random pairs split hub 98 / spoke 102. There is no hub bias, which is the good
+> news; there is also no staleness penalty, which is not.
+>
+> **53f. A no-pairing project cannot run anywhere** (`PLACE-RANK`, probe H3). `resolveHubTodosRoot`
+> requires `pairing.byNode[<the hub's OWN nodeId>]?.confirmedAt`, so a hub project with no pairing row
+> returns `holdsProject: false` **for the hub too**, and a project with no origin then queues
+> `project-has-no-origin` with nowhere left to go.
+>
 > **NEWEST FIRST: items 31-36 in the nested list below are the most recent and correct two of my
 > own earlier claims.** Item 31 closes the second standing red as pre-existing; item 32 lists what
 > five session-limit deaths actually left (two of my four claims were false) and records the
