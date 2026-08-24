@@ -357,10 +357,73 @@ describe('placeRun', () => {
   });
 });
 
-describe('the four queued reasons', () => {
-  it('are pairwise distinct — a fifth reason reusing an existing value must fail this', () => {
+describe('the five queued reasons', () => {
+  it('are pairwise distinct — a sixth reason reusing an existing value must fail this', () => {
     const reasons = clusterQueuedReasonSchema.options;
-    expect(reasons).toHaveLength(4);
+    // Bumped 4 -> 5 on 2026-08-24 when `no-node-accepts-dispatch` landed. The count is a
+    // TRIPWIRE, not bookkeeping: it exists so adding a reason cannot happen without someone
+    // also teaching `QUEUED_REASON_COPY` and `detailFor` about it.
+    expect(reasons).toHaveLength(5);
     expect(new Set(reasons).size).toBe(reasons.length);
+  });
+});
+
+/**
+ * D11 defaults `acceptsDispatch` to OFF on every node, and until 2026-08-24 nothing shipped could
+ * turn it on — so this is the state a correctly-clustered pair actually sits in. It used to answer
+ * `all-eligible-at-capacity`, which is false on an idle cluster and sends whoever reads the board
+ * to look at load: the one place the cause is not.
+ */
+describe('no-node-accepts-dispatch — the consent gap, not a capacity lie', () => {
+  it('reports the consent gap when every node is IDLE but nobody has opted in', () => {
+    const nodes = [
+      candidate({ nodeId: 'hub', acceptsDispatch: false, capacity: capacity({ active: 0 }) }),
+      candidate({ nodeId: 'spoke', acceptsDispatch: false, capacity: capacity({ active: 0 }) }),
+    ];
+    expect(placeRun(request(), nodes)).toEqual({
+      status: 'queued',
+      reason: 'no-node-accepts-dispatch',
+    });
+  });
+
+  it('OUTRANKS no-node-with-label: a consent gap must not masquerade as a missing label', () => {
+    // The node DOES carry `macos`. Answering `no-node-with-label` would send an operator to add a
+    // label that is already there, so the ordering inside `queuedReasonFor` is load-bearing.
+    const nodes = [candidate({ nodeId: 'mac', labels: ['macos'], acceptsDispatch: false })];
+    expect(placeRun(request({ placement: { requires: ['macos'] } }), nodes)).toEqual({
+      status: 'queued',
+      reason: 'no-node-accepts-dispatch',
+    });
+  });
+
+  it('NEGATIVE CONTROL: one node opted in and FULL still reports all-eligible-at-capacity', () => {
+    const nodes = [
+      candidate({ nodeId: 'off', acceptsDispatch: false }),
+      candidate({
+        nodeId: 'on',
+        acceptsDispatch: true,
+        capacity: capacity({ maxParallel: 1, active: 1 }),
+      }),
+    ];
+    expect(placeRun(request(), nodes)).toEqual({
+      status: 'queued',
+      reason: 'all-eligible-at-capacity',
+    });
+  });
+
+  it('NEGATIVE CONTROL: opted-in but OFFLINE keeps the old answer — this change does not widen', () => {
+    // Consent is not liveness. Reporting the consent gap here would be a new lie replacing the old.
+    const nodes = [candidate({ nodeId: 'asleep', acceptsDispatch: true, online: false })];
+    expect(placeRun(request(), nodes)).toEqual({
+      status: 'queued',
+      reason: 'all-eligible-at-capacity',
+    });
+  });
+
+  it('carries NO detail — the cause is the cluster, not any one node it could name', () => {
+    const nodes = [candidate({ nodeId: 'a', acceptsDispatch: false })];
+    const result = placeRun(request(), nodes) as { reason: string; detail?: string };
+    expect(result.reason).toBe('no-node-accepts-dispatch');
+    expect(result.detail).toBeUndefined();
   });
 });

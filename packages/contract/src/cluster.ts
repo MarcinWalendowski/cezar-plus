@@ -576,6 +576,11 @@ export type ClusterActiveResponse = z.infer<typeof clusterActiveResponseSchema>;
  * FOUR distinct values, and collapsing them into "queued" is what sends a person to buy a node when
  * the real fix was opening a laptop lid. They look identical from the board and are not:
  *
+ *  - `no-node-accepts-dispatch` — nobody has opted in. D11 defaults `acceptsDispatch` to OFF on
+ *    every node, so this is the state a freshly clustered pair sits in until an operator runs
+ *    `cez cluster accept-dispatch --on`. It is reported separately BECAUSE the honest answer is
+ *    not "everyone is full": saying `all-eligible-at-capacity` on a completely idle cluster sends
+ *    whoever reads the board to look at load, which is the one place the cause is not;
  *  - `no-node-with-label` — no node carries the label `requires` asked for;
  *  - `all-eligible-at-capacity` — every eligible node is full;
  *  - `pinned-node-offline` — the node it needs is asleep or revoked;
@@ -584,6 +589,7 @@ export type ClusterActiveResponse = z.infer<typeof clusterActiveResponseSchema>;
  *    state, so it is a live case, not a hypothetical.
  */
 export const clusterQueuedReasonSchema = z.enum([
+  'no-node-accepts-dispatch',
   'no-node-with-label',
   'all-eligible-at-capacity',
   'pinned-node-offline',

@@ -64,7 +64,12 @@ import { registerAndAdoptProject, suppressBootRegistration } from './registered-
 // `cez cluster active` be a read an agent can make from inside a run (D19 rung 4).
 import { CLUSTER_PROTOCOL, type ClusterCorpusSubmitResponse } from '@loki-labs/better-cezar-contract';
 import { createEnrollmentCode, joinCluster, leaveCluster } from './cluster/enrollment.ts';
-import { ensureNodeIdentity, loadNodeIdentity, nodeIdentityPath } from './cluster/node-identity.ts';
+import {
+  ensureNodeIdentity,
+  loadNodeIdentity,
+  nodeIdentityPath,
+  setAcceptsDispatch,
+} from './cluster/node-identity.ts';
 import { signedNodeRequestHeaders } from './cluster/node-auth.ts';
 import { disableNode, readPeers } from './cluster/peers.ts';
 import { resolveSpokeReconcileWiring } from './cluster/reconcile-wiring.ts';
@@ -1382,6 +1387,13 @@ const CLUSTER_USAGE = `usage:
                               protocol-major — because an operator who cannot tell an
                               Access rejection from a stale code will re-mint codes to
                               fix a credential problem.
+  cez cluster accept-dispatch --on | --off [--json]
+                              opt THIS node in or out of running work the hub places on it.
+                              D11 defaults to OFF, so a freshly clustered node runs nothing
+                              until this is set — and the queue then reads
+                              \`no-node-accepts-dispatch\`, not a capacity problem. On a SPOKE
+                              the hub must also permit it (\`PATCH /cluster/nodes/:nodeId\`);
+                              the command prints that second half.
   cez cluster active [--json]  what is in flight across the cluster: task summary,
                               node, branch, and when each linked node last reported.
                               NOT yet a collision check: touched paths are not
@@ -1446,6 +1458,12 @@ async function runClusterCommand(args: string[]): Promise<number> {
         'dry-run': { type: 'boolean', default: false },
         apply: { type: 'boolean', default: false },
         self: { type: 'boolean', default: false },
+        // `accept-dispatch`'s pair. Two explicit booleans rather than one `--on` whose absence
+        // means off: this writes a consent bit that decides whether a machine runs other
+        // people's work, and a bare `cez cluster accept-dispatch` that silently meant OFF is
+        // exactly the kind of default nobody reads twice.
+        on: { type: 'boolean', default: false },
+        off: { type: 'boolean', default: false },
         json: { type: 'boolean', default: false },
       },
       allowPositionals: true,
@@ -1668,9 +1686,59 @@ async function runClusterCommand(args: string[]): Promise<number> {
         return 0;
       }
 
+      /**
+       * **D11's missing writer.** `setAcceptsDispatch` shipped exported, tested, and with ZERO
+       * production callers, so a node's own consent bit had no way to be set by anything an
+       * operator could run — and since D11 defaults it OFF, a correctly clustered pair placed
+       * nothing and reported `all-eligible-at-capacity` while completely idle. Measured
+       * 2026-08-24: the only way to make a real two-node dispatch happen was to hand-write
+       * `node.json`, which is not a procedure that can be shipped.
+       *
+       * **This is one of TWO keys, and it is deliberately not both.** A node runs dispatched work
+       * only when its OWN identity says yes (this command — the copy `offerDispatch` re-enforces
+       * when the frame lands) AND the hub's roster row says yes (`PATCH /cluster/nodes/:nodeId`,
+       * the operator's policy about that node, which `eligibleCandidates` filters on). Neither
+       * implies the other and BOTH failures are silent, so this prints the other half rather than
+       * letting an operator believe one command finished the job. On a hub the two collapse: the
+       * hub's candidate is built from its own identity, so there is no roster row to also set.
+       */
+      case 'accept-dispatch': {
+        if (values.on === true && values.off === true) {
+          console.error('cez cluster accept-dispatch: pass --on or --off, not both');
+          return 1;
+        }
+        if (values.on !== true && values.off !== true) {
+          console.error(
+            'cez cluster accept-dispatch: say which — `--on` to accept dispatched work on this node, `--off` to stop',
+          );
+          return 1;
+        }
+        const accepts = values.on === true;
+        const identity = await setAcceptsDispatch(accepts);
+        const isHub = identity.role === 'hub';
+        emit(
+          { nodeId: identity.nodeId, role: identity.role, acceptsDispatch: identity.acceptsDispatch },
+          () => [
+            `${identity.nodeId} (${identity.role}) now ${accepts ? 'ACCEPTS' : 'refuses'} dispatched work.`,
+            ...(accepts && isHub
+              ? ['', 'This is a hub: placement reads its own identity, so nothing further is needed here.']
+              : accepts
+                ? [
+                    '',
+                    'That is the NODE half. The hub must also permit this node, or placement filters it out:',
+                    `  PATCH /api/v1/cluster/nodes/${identity.nodeId}   {"acceptsDispatch": true}`,
+                    'Both are required, and neither failure says anything — a node the hub has not',
+                    'permitted is never a candidate, and a node that has not opted in refuses the frame.',
+                  ]
+                : ['', 'Runs already dispatched here are unaffected; this refuses NEW frames.']),
+          ],
+        );
+        return 0;
+      }
+
       default:
         console.error(`cez cluster: unknown subcommand "${sub}"`);
-        console.error('known: init, enroll, join, active, reconcile, revoke');
+        console.error('known: init, enroll, join, accept-dispatch, active, reconcile, revoke');
         console.error(CLUSTER_USAGE);
         return 1;
     }

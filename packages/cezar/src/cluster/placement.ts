@@ -229,7 +229,9 @@ function rankByHeadroom(pool: readonly PlacementCandidate[]): PlacementCandidate
  *    A pinned node that IS reachable but simply full is `all-eligible-at-capacity` — it is not
  *    offline, it is busy.
  * 3. `requires` that no online, dispatching node satisfies → `no-node-with-label`.
- * 4. Otherwise the eligible set was non-empty but every member lacked headroom →
+ * 4. Nothing at all has `acceptsDispatch` → `no-node-accepts-dispatch`, checked BEFORE the label
+ *    branch so a consent gap never masquerades as a missing label.
+ * 5. Otherwise the eligible set was non-empty but every member lacked headroom →
  *    `all-eligible-at-capacity`, the catch-all.
  */
 function queuedReasonFor(
@@ -249,9 +251,22 @@ function queuedReasonFor(
     return 'all-eligible-at-capacity';
   }
 
+  // Checked BEFORE `requires`, and the order is the whole point. If nobody has opted in, the label
+  // question was never reached — answering `no-node-with-label` would send an operator to add a
+  // label to a node that already carries it, while the real cause is a consent bit that has never
+  // been set on ANY node. Report the cause that comes first in the pipeline.
+  // CONSENT only — deliberately NOT `&& c.online`. "Nobody has opted in" is a claim about the
+  // operator never having run the command; a cluster whose nodes all opted in and are merely
+  // asleep is a different fact, and answering this reason there would be a new lie replacing the
+  // old one. That case keeps the pre-existing catch-all, which this change does not widen.
+  const optedIn = candidates.filter((c) => c.acceptsDispatch);
+  if (optedIn.length === 0) {
+    return 'no-node-accepts-dispatch';
+  }
+
   const requires = request.placement?.requires ?? [];
   if (requires.length > 0) {
-    const dispatchable = candidates.filter((c) => c.acceptsDispatch && c.online);
+    const dispatchable = optedIn.filter((c) => c.online);
     const hasLabel = dispatchable.some((c) => requires.every((label) => c.labels.includes(label)));
     if (!hasLabel) {
       return 'no-node-with-label';
@@ -269,6 +284,12 @@ function detailFor(reason: ClusterQueuedReason, request: PlacementRequest): stri
       return request.projectKey;
     case 'pinned-node-offline':
       return request.placement?.node;
+    case 'no-node-accepts-dispatch':
+      // Deliberately no detail. Every other reason names the ONE thing to look at; this one is a
+      // property of the whole cluster (nobody has run `cez cluster accept-dispatch --on`), so any
+      // node named here would read as "this node is the problem" and send the fix to the wrong
+      // place. The reason string is already the specific answer.
+      return undefined;
     case 'no-node-with-label':
       return (request.placement?.requires ?? []).join(', ').slice(0, 200) || undefined;
     case 'all-eligible-at-capacity':

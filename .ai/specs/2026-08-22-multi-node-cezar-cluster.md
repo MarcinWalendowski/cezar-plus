@@ -2452,6 +2452,70 @@ invented; these are the names to use when one lands.
 > here* — path granularity does not separate two owners inside one file. Stage the hunks
 > (`git apply --cached` with a hand-built patch), never `git add packages/cezar/src/server/server.ts`.
 >
+> ### 52. **D11 HAD NO WRITER — and item 47's E2E only worked because my harness did by hand what no shipped code can do.** Fixed 2026-08-24.
+>
+> **This corrects item 47's framing, not its facts.** Every measurement in 47 stands: work really was
+> placed and really did execute on both nodes. But two agents (`BOX-HUB`, `PLACE-RANK`) independently
+> reported that `acceptsDispatch` has **zero production callers** and predicted *"every task queues
+> forever"* — the exact opposite of what I had just watched happen. That contradiction was the most
+> useful thing either of them said, and **they were right about the code while I was right about the
+> run.** The resolution: my own E2E harness writes the file directly —
+> `scratchpad/e2e-BASELINE.mjs:244`, `writeFileSync(path, JSON.stringify({...identity,
+> acceptsDispatch: value}))` — and PATCHes the hub's roster row at `:566`. Its own docblock at `:46`
+> even says the field *"has no CLI command"*. **So the demonstration was real and the procedure was
+> not shippable**, and nothing in the run would ever have revealed that, because the harness looked
+> exactly like setup.
+>
+> Verified independently with `grep -a --include='*.ts'` (quoted glob): `setAcceptsDispatch` appears
+> only as its own definition (`node-identity.ts:174`), one comment (`hub-candidates.ts:82`), and two
+> test files. Exported, tested, unreachable — the "correct and unreachable" shape again.
+>
+> **It is TWO keys, and that is deliberate rather than a bug** — which is why the fix is a writer and
+> NOT a protocol change:
+> - **node consent** — the node's own `node.json`, re-enforced by `offerDispatch` when the frame
+>   lands. Writer: `setAcceptsDispatch`. Had **no caller**.
+> - **hub policy** — the hub's roster row, which `eligibleCandidates` filters on. Writer:
+>   `PATCH /api/v1/cluster/nodes/:nodeId`. Exists.
+>
+> Neither implies the other, **both fail silently**, and `acceptsDispatch` appears nowhere in
+> `peers.ts` / `link-client.ts` / `hub-router.ts` — so a spoke's consent never travels to the hub and
+> was never meant to. On a **hub** the two collapse (its candidate is built from its own identity,
+> `hub-candidates.ts:150`), which is why the hub cannot opt itself in over HTTP at all: `BOX-HUB`
+> measured `PATCH` against the hub's own id returning **404 `unknown node`**, because the handler
+> resolves against `peers.nodes` and the hub is `self`.
+>
+> **The second defect: the queue reported a capacity problem on a completely idle cluster.**
+> `queuedReasonFor` had no branch for "nobody opted in", so it fell through to the catch-all —
+> `PLACE-RANK` measured `{"status":"queued","reason":"all-eligible-at-capacity"}` with both nodes
+> empty. That sends an operator to look at load, the one place the cause is not.
+>
+> **What landed:**
+> - `cez cluster accept-dispatch --on | --off` (`index.ts`) — the missing writer. Proven end to end
+>   against a real node identity: `--off` → `node.json` `false`, `--on` → `true`. It prints the
+>   *other* key rather than implying one command finished the job, and says so differently on a hub.
+> - `no-node-accepts-dispatch`, a fifth `ClusterQueuedReason`, checked **before** the `requires`
+>   branch — ordering is load-bearing: a node that carries `macos` but has not opted in must not be
+>   reported as `no-node-with-label`, or the operator adds a label that is already there.
+> - **Scope deliberately narrowed after first writing it too wide.** The branch filters on consent
+>   ONLY, not `&& online`. A cluster whose nodes all opted in and are merely asleep is a *different*
+>   fact, and answering the new reason there would have been a new lie replacing the old one. That
+>   case keeps the pre-existing catch-all; this change does not widen it.
+> - `QUEUED_REASON_COPY` in `cluster-section.tsx` — a `Record<ClusterQueuedReason, string>`, so a
+>   missing key is a **web typecheck error**, not a blank cell. Good design, caught it for free.
+>
+> **The tripwire fired, as designed.** `placement.test.ts` asserted `reasons).toHaveLength(4)` — a
+> deliberate count so a new reason cannot land without someone teaching `QUEUED_REASON_COPY` and
+> `detailFor` about it. Bumped to 5 knowingly, with the reason recorded in the test.
+>
+> **Mutation-checked, including the controls.** Disabling the branch (`if (false && ...)`) killed the
+> three positive tests and **left both negative controls green** — opted-in-but-full still says
+> `all-eligible-at-capacity`, opted-in-but-offline still says `all-eligible-at-capacity`. A control
+> that dies with the feature was never a control. Restored, md5 `588ca5bb…` identical.
+>
+> **Still true after this fix:** a spoke needs BOTH keys, so standing up a worker remains a two-step
+> operator procedure (`accept-dispatch --on` on the node, `PATCH` from the hub). That is the design;
+> what was broken was that one of the two steps had no command at all.
+>
 > **NEWEST FIRST: items 31-36 in the nested list below are the most recent and correct two of my
 > own earlier claims.** Item 31 closes the second standing red as pre-existing; item 32 lists what
 > five session-limit deaths actually left (two of my four claims were false) and records the
