@@ -1,7 +1,9 @@
 # Workspace prune record reconciliation
 
-**Status:** partial. Ownership protection is implemented and runtime verified; removal
-authorization observability remains to implement.
+**Status:** implemented and pushed to `origin/main` in `8737a136`. Ownership protection is
+runtime verified; removal-authorization observability is verified by automated coverage. The
+production journal wording was not directly observed. Deployment of `8737a136` belongs to the
+next workflow step.
 
 **Task:** `b3b5719c-ccf6-445c-9b97-39dd7eaf077e`
 
@@ -21,10 +23,10 @@ intact.
 Later commits `362865ec` and `32379c34` added leases, autosave-before-removal, and unconditional
 branch preservation. They superseded only the accepted spec's original branch-deletion safety
 net, not its cross-project ownership rule. The exact production restart timing was exercised on
-2026-08-24 and passed. This spec reconciles the repeated task to that shipped record and adds the
-one acceptance gap still present in current code: a successful removal outcome and its console
-log must name the worktree and explain why removal was authorized. It does not authorize a
-second ownership implementation.
+2026-08-24 and passed. This spec reconciles the repeated task to that shipped record. Commit
+`8737a136` closed the remaining acceptance gap: a successful removal outcome and both boot log
+call sites now name the worktree and explain why removal was authorized. It did not add a second
+ownership implementation.
 
 ## Problem
 
@@ -92,12 +94,12 @@ directory not named by P's own run store. It declines fresh or unreadable leases
 when the ownership check is unavailable, declines a foreign claim with the owning run and
 project in its reason, then autosaves any remaining candidate before directory removal. It never
 deletes the branch. The call site appends every outcome to
-`.ai/cezar/worktree-reaps.jsonl` (`packages/cezar/src/server/project-context.ts:474-477`). Kept
-and declined candidates currently carry reasons, but the successful removal emitted at
-`packages/cezar/src/git-worktree.ts:703-705` has no reason, and
-`packages/cezar/src/server/project-context.ts:479` logs only the removed ids under the generic
-label `orphaned worktree(s)`. The implementation phase must make successful authorization just
-as inspectable as refusal, without weakening any prune gate.
+`.ai/cezar/worktree-reaps.jsonl` (`packages/cezar/src/server/project-context.ts:474-477`). Kept,
+declined, and removed candidates carry reasons. Commit `8737a136` made the removed variant
+reason-bearing and changed both `packages/cezar/src/server/project-context.ts` and
+`packages/cezar/src/index.ts` to print each removed id beside its authorization reason.
+Successful authorization is therefore as inspectable as refusal without weakening any prune
+gate.
 
 Production supplies the otherwise unregistered boot root to `ProjectContexts`. The structural
 guard at `packages/cezar/src/server/server-boot-root-wiring.test.ts:19-28` pins this wiring.
@@ -134,7 +136,7 @@ Independently shippable verification step with no code mutation.
 
 ### Phase 3: Explain authorized removals
 
-Independently shippable implementation step after the accepted ownership behavior is confirmed.
+Implemented in `8737a136` after the accepted ownership behavior was confirmed.
 
 - Extend the internal removed outcome in `packages/cezar/src/git-worktree.ts` with a required
   reason describing why removal was authorized after the lease, foreign-ownership, and autosave
@@ -180,9 +182,9 @@ of ownership. Matching uses the existing fields:
 empty index from a non-empty index that could not be loaded. It is not persisted and is not an
 API field.
 
-Prune outcomes are internal records with `id`, `outcome`, optional `reason`, autosave state, and
-`branchKept`. Phase 3 makes `reason` required for the `removed` variant while leaving it present
-on `kept` and `declined` variants. Outcomes are appended to
+Prune outcomes are internal records with `id`, `outcome`, required `reason`, autosave state, and
+`branchKept`. Commit `8737a136` made `reason` required for every materialized outcome, including
+the `removed` variant. Outcomes are appended to
 `.ai/cezar/worktree-reaps.jsonl`. No migration is needed.
 
 ## API contracts
@@ -195,12 +197,11 @@ remain unchanged. The feature is internal startup and reconciliation safety.
 
 No product analytics event is required because the behavior is an internal safety operation.
 The durable operational surface remains `.ai/cezar/worktree-reaps.jsonl`, paired with the boot
-log summaries in `project-context.ts:474-481`. Current kept and declined outcomes explain why
-destruction did not proceed. Current removed outcomes do not explain why destruction was
-authorized, and the removed console line supplies only ids. Phase 3 closes that gap by requiring
-the removed durable record and console log to identify each worktree and state the authorization
-reason. Automated assertions, rather than inaccessible production journal text, pin the wording
-contract.
+log summaries in `project-context.ts:474-481`. Kept and declined outcomes explain why
+destruction did not proceed. Removed outcomes explain why destruction was authorized, and both
+removal log call sites identify the worktree beside the same reason. Commit `8737a136` closed
+that observability gap. Automated assertions, rather than inaccessible production journal text,
+pin the wording contract.
 
 ## Risks
 
@@ -219,10 +220,9 @@ contract.
 
 ## Verification
 
-The spec-writing step changes no source code. Phase 3 does edit source and tests for the bounded
-observability gap. Verification is concrete and executable, but the commands are intentionally
-not executed during this spec-writing step under the repository rule that builds and tests
-require prior approval.
+The implementation and verification steps changed source and tests for the bounded observability
+gap. The following commands and assertions were the planned verification inputs; actual results
+are recorded below.
 
 1. Focused automated regression and safety coverage:
 
@@ -258,8 +258,8 @@ require prior approval.
    - A successful removal must emit a row containing the candidate id, `removed` outcome, and a
      reason explaining the checks that authorized removal, including the actual autosave result.
    - The project-context console assertion must identify the removed worktree and include the
-     same authorization reason. Before implementation, temporarily revert the source change and
-     prove these two new assertions fail against the current reasonless path.
+     same authorization reason. The implementation step proved the new assertions red against
+     the reasonless path before applying the source change.
 
 4. Runtime E2E:
 
@@ -276,12 +276,24 @@ require prior approval.
    - run every readiness probe declared in `.ai/deploy-targets.json` and require all of them to
      pass before reporting the change shipped.
 
-Existing evidence: accepted spec status records green typecheck, build, unit, and package gates;
-commit `5ffa383c` is an ancestor of `origin/main`; the handoff records the exact production timing
-E2E passing on 2026-08-24. That evidence closes the ownership-protection criterion but does not
-close Phase 3. This spec is complete only after the removal reason assertions pass, the full
-gates are green, the single commit is pushed to `origin/main`, the blue-green deploy succeeds,
-and every declared readiness probe passes.
+### Verification results
+
+- The focused ownership, project-context, boot-root wiring, and real-git prune coverage passed.
+  The new removal assertions were first shown to fail against the reasonless source path.
+- `npm run typecheck`, `npm run test:unit`, `npm run build`, and `npm run test:package` passed.
+  Root `npm test` completed with 11,382 passing tests and two failures in
+  `agent-profiles-discovered-api.test.ts`; the same failures reproduced from the parent checkout
+  and are tracked separately as host-profile contamination. This record does not call that root
+  gate green.
+- Commit `8737a136` contains the implementation and this spec, is pushed to `origin/main`, and was
+  verified as the remote head after a conflict-free rebase.
+- The exact production timing E2E passed on 2026-08-24 with `E2E_EXIT=0`: a live workspace run's
+  target directory and branch survived a cold restart and authenticated target-project context
+  build. Production journal access was unavailable, so the new console wording is covered by
+  automated tests rather than a runtime log observation.
+- Deployment and readiness verification for `8737a136` remain the responsibility of the next
+  workflow step. This spec is implemented, but this documentation step does not claim that
+  `8737a136` is deployed.
 
 ## Sources read
 
