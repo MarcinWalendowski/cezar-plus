@@ -547,6 +547,7 @@ describe('ProjectContexts — cross-project orphan-prune safety (spec 2026-08-22
   const roots: string[] = [];
 
   afterEach(() => {
+    vi.restoreAllMocks();
     for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
@@ -604,6 +605,7 @@ describe('ProjectContexts — cross-project orphan-prune safety (spec 2026-08-22
 
   it('omitting bootRoot from ProjectContexts (the old, listProjects()-only design) still loses the worktree directory', async () => {
     const { targetRoot, runId, worktreePath } = await setUp();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
     const contexts = new ProjectContexts({
       listProjects: async () => [{ id: 'target', root: targetRoot, status: 'ok', name: 'target' }],
@@ -614,7 +616,21 @@ describe('ProjectContexts — cross-project orphan-prune safety (spec 2026-08-22
 
     await contexts.context('target');
     await waitForReap(targetRoot, runId);
+    await waitForCondition(() => log.mock.calls.some(([message]) => String(message).includes(runId.slice(0, 8))));
     contexts.disposeAll();
+
+    const outcome = JSON.parse(readFileSync(join(targetRoot, '.ai/cezar/worktree-reaps.jsonl'), 'utf8').trim()) as {
+      outcome: string;
+      reason?: string;
+      runId: string;
+    };
+    expect(outcome).toMatchObject({
+      outcome: 'removed',
+      runId,
+      reason: expect.stringContaining('autosave nothing-to-do'),
+    });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(`${runId.slice(0, 8)} (${outcome.reason})`));
+    log.mockRestore();
 
     // Layer 2 (branch-reachability) still saves the BRANCH — the unique commit above keeps it
     // unmerged — but the DIRECTORY is still wrongly reclaimed without the boot-root candidate: this

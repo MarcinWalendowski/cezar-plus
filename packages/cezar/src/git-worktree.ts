@@ -568,7 +568,7 @@ export async function worktreeShortstat(
 }
 
 export interface PruneOrphansReport {
-  removed: string[];
+  removed: { id: string; reason: string }[];
   declined: { id: string; reason: string }[];
   kept: { id: string; reason: string }[];
 }
@@ -576,7 +576,7 @@ export interface PruneOrphansReport {
 export interface PruneOrphanOutcome {
   id: string;
   outcome: 'removed' | 'kept' | 'declined';
-  reason?: string;
+  reason: string;
   autosave?: AutosaveResult;
   branchKept: true;
 }
@@ -632,8 +632,8 @@ async function leaseDeclineReason(
 
 /**
  * Startup reconcile: `git worktree prune` + remove every directory under `.ai/cezar/worktrees/`
- * whose run id is no longer in THIS project's own store. Returns the removed and declined run ids
- * for the boot log. Never throws.
+ * whose run id is no longer in THIS project's own store. Returns reason-bearing removed, kept,
+ * and declined entries for the boot log. Never throws.
  *
  * Extended by spec 2026-08-22-cross-project-worktree-orphan-prune-safety to close a cross-project
  * data-loss bug: a candidate here can belong to a WORKSPACE run whose worktree record lives only
@@ -662,7 +662,7 @@ export async function pruneOrphans(
   } catch {
     return { removed: [], declined: [], kept: [] }; // no worktrees dir yet
   }
-  const removed: string[] = [];
+  const removed: { id: string; reason: string }[] = [];
   const declined: { id: string; reason: string }[] = [];
   const kept: { id: string; reason: string }[] = [];
   for (const entry of entries) {
@@ -701,8 +701,12 @@ export async function pruneOrphans(
       }
     }
     await removeWorktree(repoRoot, worktreePath);
-    removed.push(entry.name);
-    opts?.onOutcome?.({ id: entry.name, outcome: 'removed', autosave, branchKept: true });
+    const ownershipReason = opts?.findForeignOwner === undefined
+      ? 'foreign ownership check not configured'
+      : 'no foreign workspace owner';
+    const reason = `no blocking worktree lease; ${ownershipReason}; autosave ${autosave}; directory removed, recovery branch kept`;
+    removed.push({ id: entry.name, reason });
+    opts?.onOutcome?.({ id: entry.name, outcome: 'removed', reason, autosave, branchKept: true });
   }
   return { removed, declined, kept };
 }

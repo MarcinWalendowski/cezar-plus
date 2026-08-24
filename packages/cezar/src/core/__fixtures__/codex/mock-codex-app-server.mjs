@@ -31,6 +31,8 @@ let resumedEffectiveModel;
 /** True only for the first `turn/start` immediately following a `thread/resume` — the window a
  *  real codex rejection over a poisoned `thread_settings.model` would land in. */
 let firstTurnAfterResume = false;
+const approvalResponses = new Set();
+let notificationAwaitingResponse = false;
 
 const ignoreEof = process.env.MOCK_CODEX_IGNORE_EOF === '1';
 const ignoreSigterm = process.env.MOCK_CODEX_IGNORE_SIGTERM === '1';
@@ -51,7 +53,34 @@ rl.on('line', (line) => {
   } catch {
     return;
   }
-  if (msg.id === 'ask-1' && msg.result) {
+  if (notificationAwaitingResponse && msg.method === undefined && msg.id !== undefined) {
+    notificationAwaitingResponse = false;
+    emit({ method: 'turn/failed', params: { turn: { id: 'turn_mock_1', status: 'failed' }, error: { message: 'notification received an unexpected response' } } });
+  } else if (typeof msg.id === 'string' && /^approval-\d+$/.test(msg.id) && (msg.result || msg.error)) {
+    const mode = process.env.MOCK_CODEX_APPROVAL;
+    const decision = msg.result?.decision;
+    const permissions = msg.result?.permissions;
+    const valid = msg.error?.code === -32601 && mode === 'unsupported'
+      || mode === 'command' && decision === 'acceptForSession'
+      || mode === 'command-hostile' && decision === 'accept'
+      || mode === 'burst' && decision === 'acceptForSession'
+      || mode === 'future' && decision === 'acceptForSession'
+      || mode === 'foreign' && decision === 'acceptForSession'
+      || mode === 'file' && decision === 'acceptForSession'
+      || mode === 'permissions' && msg.result?.scope === 'session' && permissions &&
+        (process.env.CEZ_CODEX_NETWORK === '0' ? !('network' in permissions) : true)
+      || mode === 'v1' && decision === 'approved_for_session';
+    if (!valid) {
+      emit({ method: 'turn/failed', params: { turn: { id: 'turn_mock_1', status: 'failed' }, error: { message: 'invalid mock approval response' } } });
+    } else if (mode === 'burst') {
+      approvalResponses.add(msg.id);
+      if (approvalResponses.size === 12) {
+        emit({ method: 'turn/completed', params: { turn: { id: 'turn_mock_1', status: 'completed' } } });
+      }
+    } else {
+      emit({ method: 'turn/completed', params: { turn: { id: 'turn_mock_1', status: 'completed' } } });
+    }
+  } else if (msg.id === 'ask-1' && msg.result) {
     const answer = msg.result.answers?.library?.answers;
     const freeText = msg.result.answers?.first?.answers;
     emit((Array.isArray(answer) && answer[0] === 'Vitest') || (Array.isArray(freeText) && freeText[0] === 'Use sensible defaults')
@@ -101,6 +130,52 @@ rl.on('line', (line) => {
     firstTurnAfterResume = false;
     emit({ id: msg.id, result: { turn: { id: 'turn_mock_1' } } });
     emit({ method: 'turn/started', params: { turn: { id: 'turn_mock_1', status: 'inProgress', items: [] } } });
+    if (process.env.MOCK_CODEX_ORPHAN === '1') emit({ id: 99, result: {} });
+    const approvalMode = process.env.MOCK_CODEX_APPROVAL;
+    if (approvalMode) {
+      const commandMode = approvalMode === 'command' || approvalMode === 'command-hostile'
+        || approvalMode === 'burst' || approvalMode === 'future' || approvalMode === 'foreign';
+      const method = approvalMode === 'file'
+        ? 'item/fileChange/requestApproval'
+        : approvalMode === 'permissions'
+          ? 'item/permissions/requestApproval'
+          : approvalMode === 'v1'
+            ? 'execCommandApproval'
+            : approvalMode === 'unsupported'
+              ? 'mcpServer/elicitation/request'
+              : approvalMode === 'future'
+                ? 'item/futureThing/requestApproval'
+                : 'item/commandExecution/requestApproval';
+      const params = approvalMode === 'permissions'
+        ? {
+            cwd: '/repo', itemId: 'item_approval', startedAtMs: 0, threadId: 'th_mock_1',
+            turnId: 'turn_mock_1', permissions: { fileSystem: { root: '/outside' }, network: { enabled: true } },
+          }
+        : {
+            itemId: 'item_approval', startedAtMs: 0,
+            threadId: approvalMode === 'foreign' ? 'th_child' : 'th_mock_1', turnId: 'turn_mock_1',
+            ...(commandMode ? {
+              command: ['bash', '-lc', 'true'],
+              availableDecisions: approvalMode === 'command-hostile' ? ['decline', 'cancel'] : ['accept', 'acceptForSession', 'decline'],
+            } : {}),
+          };
+      const approvalCount = approvalMode === 'burst' ? 12 : 1;
+      for (let index = 1; index <= approvalCount; index += 1) {
+        emit({ id: `approval-${index}`, method, params });
+      }
+      return;
+    }
+    if (process.env.MOCK_CODEX_NOTIFICATION === '1') {
+      notificationAwaitingResponse = true;
+      emit({ method: 'mcpServer/elicitation/request', params: {} });
+      setTimeout(() => {
+        if (notificationAwaitingResponse) {
+          notificationAwaitingResponse = false;
+          emit({ method: 'turn/completed', params: { turn: { id: 'turn_mock_1', status: 'completed' } } });
+        }
+      }, 50);
+      return;
+    }
     // codex resuming a thread with a model it cannot serve — reproduced here instead of only in
     // prose, so the negative control (Phase 1b) exercises the real wire shape. Reuses the exact
     // rejection captured off prod-host 2026-08-22 (see `mock:provider-rejected` below),

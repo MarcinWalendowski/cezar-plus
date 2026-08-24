@@ -947,6 +947,88 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
     }
   }, 30_000);
 
+  it.each([
+    ['command', 'item/commandExecution/requestApproval'],
+    ['command-hostile', 'item/commandExecution/requestApproval'],
+    ['file', 'item/fileChange/requestApproval'],
+    ['permissions', 'item/permissions/requestApproval'],
+    ['v1', 'execCommandApproval'],
+    ['future', 'item/futureThing/requestApproval'],
+  ] as const)('answers %s approval requests without parking the turn', async (mode, method) => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const events: AgentEvent[] = [];
+    const session = runner.startSession(
+      { userPrompt: `mock approval ${mode}`, cwd: process.cwd(), env: { MOCK_CODEX_APPROVAL: mode } },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+    await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
+    expect(events.some((event) => event.type === 'note' && event.message.includes(method))).toBe(true);
+  }, 30_000);
+
+  it('answers an approval from a child thread instead of filtering it as foreign lifecycle', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const session = runner.startSession(
+      { userPrompt: 'mock foreign approval', cwd: process.cwd(), env: { MOCK_CODEX_APPROVAL: 'foreign' } },
+      undefined,
+      { autoEndAfterFirstTurn: true },
+    );
+    await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
+  }, 30_000);
+
+  it('drops an orphaned response without answering the response', async () => {
+    const events: AgentEvent[] = [];
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const session = runner.startSession(
+      { userPrompt: 'mock orphaned response', cwd: process.cwd(), env: { MOCK_CODEX_ORPHAN: '1' } },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+    await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
+    expect(events.some((event) => event.type === 'note' && event.message.includes('unsupported method'))).toBe(false);
+  }, 30_000);
+
+  it('answers unsupported requests with a named JSON-RPC error', async () => {
+    const events: AgentEvent[] = [];
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const session = runner.startSession(
+      { userPrompt: 'mock unsupported request', cwd: process.cwd(), env: { MOCK_CODEX_APPROVAL: 'unsupported' } },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+    await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
+    expect(events).toContainEqual({
+      type: 'note',
+      message: 'codex requested unsupported method mcpServer/elicitation/request; cezar replied -32601',
+    });
+  }, 30_000);
+
+  it('does not answer a true notification', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const session = runner.startSession(
+      { userPrompt: 'mock notification', cwd: process.cwd(), env: { MOCK_CODEX_NOTIFICATION: '1' } },
+      undefined,
+      { autoEndAfterFirstTurn: true },
+    );
+    await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
+  }, 30_000);
+
+  it('caps approval notes at ten and emits one summary note', async () => {
+    const events: AgentEvent[] = [];
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const session = runner.startSession(
+      { userPrompt: 'mock approval burst', cwd: process.cwd(), env: { MOCK_CODEX_APPROVAL: 'burst' } },
+      (event) => events.push(event),
+      { autoEndAfterFirstTurn: true },
+    );
+    await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
+    expect(events.filter((event) => event.type === 'note' && event.message.startsWith('codex asked for'))).toHaveLength(10);
+    expect(events).toContainEqual({
+      type: 'note',
+      message: 'codex approval requests continue; further approvals are auto-approved silently',
+    });
+  }, 30_000);
+
   it('bridges native requestUserInput to ask.requested and answers the server request', async () => {
     const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
     const v2: UiEvent[] = [];
