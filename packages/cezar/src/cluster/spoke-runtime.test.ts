@@ -398,6 +398,57 @@ describe('startSpokeRuntime — downlink dispatch', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('proj_unknown'));
     dispose();
   });
+
+  it("answers a dispatch with the DISPATCHED project's own repo-freshness, not another paired project's (site coverage: `presence.repoDrift.find` must select by projectKey, not position)", async () => {
+    const { link, sent, emit } = createFakeLink();
+    // Two paired projects with OPPOSITE freshness — proj_a clean, proj_b mid-conflict — so a
+    // lookup that degraded from `.find(d => d.projectKey === projectKey)` to `repoDrift[0]` would
+    // hand back proj_a's (clean) drift for a dispatch that actually named proj_b.
+    const driftA = makeDrift({ projectKey: 'proj_a', headSha: 'a'.repeat(40), ahead: 0, behind: 0, dirty: 0, merging: false });
+    const driftB = makeDrift({ projectKey: 'proj_b', headSha: 'b'.repeat(40), ahead: 9, behind: 4, dirty: 2, merging: true });
+    const collectPresence = vi.fn(async () => makePresence({ repoDrift: [driftA, driftB] }));
+    // `acceptsDispatch: false` (NOOP_OUTBOX) isolates the `repoDrift` lookup on its own: the
+    // refusal reason is always `dispatch-not-accepted` regardless of freshness or pairing, so this
+    // test cannot pass by accidentally exercising `discovery.projects.find` (a different site)
+    // instead — only the echoed freshness fields are on trial here.
+    const dispose = startSpokeRuntime({
+      resolveDispatchManager: NOOP_RESOLVE_MANAGER,
+      link,
+      heartbeatMs: 60_000,
+      collectPresence,
+      collectOutboxProjects: NOOP_OUTBOX,
+      warn: () => {},
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    sent.length = 0;
+
+    // Names the SECOND entry — under `repoDrift[0]` the reply would echo proj_a's freshness.
+    emit(makeDispatch({ dispatchId: 'd-drift-b', projectKey: 'proj_b' }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sent).toHaveLength(1);
+    const frameB = sent[0] as ClusterFreshnessFrame;
+    expect(frameB.projectKey).toBe('proj_b');
+    expect(frameB.headSha).toBe(driftB.headSha);
+    expect(frameB.ahead).toBe(driftB.ahead);
+    expect(frameB.behind).toBe(driftB.behind);
+    expect(frameB.dirty).toBe(driftB.dirty);
+    expect(frameB.merging).toBe(driftB.merging);
+
+    // Mirror control: proj_a IS the first entry, so this direction alone cannot distinguish a
+    // correct `.find()` from a broken `[0]` — it exists to prove the assertions above are sound
+    // (a real, correct lookup DOES pass them) rather than being vacuously satisfied either way.
+    sent.length = 0;
+    emit(makeDispatch({ dispatchId: 'd-drift-a', projectKey: 'proj_a' }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sent).toHaveLength(1);
+    const frameA = sent[0] as ClusterFreshnessFrame;
+    expect(frameA.projectKey).toBe('proj_a');
+    expect(frameA.headSha).toBe(driftA.headSha);
+    expect(frameA.merging).toBe(driftA.merging);
+    dispose();
+  });
 });
 
 /**
@@ -725,13 +776,25 @@ describe('startSpokeRuntime — D47 live capacity in the presence beat', () => {
     await rm(cezHome, { recursive: true, force: true });
   });
 
-  it('reports this node\'s real busy() through liveCapacity when a semaphore is wired', async () => {
+  it('reports this node\'s real busy() AND heavyActive() through liveCapacity when a semaphore is wired', async () => {
     vi.useRealTimers();
     const { link, sent } = createFakeLink();
     const semaphore = new WorkspaceSemaphore();
     // A bare `SemaphoreParticipant` stub — `busySlots()` is the only number this test cares
     // about; `pump`/`oldestQueuedAt` are required by the interface but never invoked by `busy()`.
     semaphore.register({ busySlots: () => 2, pump: () => {}, oldestQueuedAt: () => null });
+
+    // A REAL heavy step, held open, so `heavyActive()` is genuinely 1 rather than the fixture's
+    // usual (and only) value of 0 — the `heavyActiveCount` field is private and moves only
+    // through `runHeavyStep`, so this is the one honest way to make the number nonzero. No
+    // deadlock: `DEFAULT_LIMITS` sets no `maxHeavySteps`, so `maxHeavySteps()` is `Infinity` and
+    // `acquireHeavyStep` grants immediately.
+    let releaseHeavy!: () => void;
+    const heavyHeld = new Promise<void>((resolve) => {
+      releaseHeavy = resolve;
+    });
+    const heavyStep = semaphore.runHeavyStep(() => heavyHeld);
+    await waitFor(() => expect(semaphore.heavyActive()).toBe(1));
 
     const dispose = startSpokeRuntime({
       link,
@@ -751,8 +814,15 @@ describe('startSpokeRuntime — D47 live capacity in the presence beat', () => {
     const frame = sent[0] as ClusterPresenceFrame;
     expect(frame.type).toBe('presence');
     expect(frame.capacity.active).toBe(2);
-    expect(frame.capacity.heavyActive).toBe(0);
+    // The `heavyActive` half of the SAME `liveCapacity` object above `active` was — until this
+    // held-open heavy step — pinned by nothing: every other fixture in this file leaves it at its
+    // fixture-default 0, so `heavyActive: deps.semaphore.heavyActive()` and a hard-coded
+    // `heavyActive: 0` were indistinguishable to the whole suite. This is the assertion that can
+    // actually fail on that field.
+    expect(frame.capacity.heavyActive).toBe(1);
     dispose();
+    releaseHeavy();
+    await heavyStep;
   });
 
   it('omits liveCapacity — today\'s already-shipped default — when no semaphore is wired', async () => {
@@ -1295,6 +1365,204 @@ describe('startSpokeRuntime — replica downlink', () => {
       expect(onDisk[0]!.summary).toBe('updated by hub');
       dispose();
     });
+  });
+});
+
+/** A real temp project for the multi-project selection tests below: its own `todos.json` (one
+ *  todo, id unique to this project so reading the WRONG project's dir can never find it) and its
+ *  own capturing fake `RunManager`/`RunStore`, matching the "Milestone C" `beforeEach` above but
+ *  duplicated per-project rather than shared, since these tests need TWO live projects at once. */
+async function setupDispatchProject(projectKey: string, todoId: string) {
+  const repoRoot = await mkdtemp(join(tmpdir(), `cez-spoke-select-${projectKey}-`));
+  const dataDir = join(repoRoot, '.ai/cezar');
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(join(dataDir, 'todos.json'), JSON.stringify([makeTodo({ id: todoId, summary: `todo for ${projectKey}` })]), 'utf8');
+  const store = RunStore.open(dataDir);
+  const started: StartRunInput[] = [];
+  const createdRunIds: string[] = [];
+  const manager: RunManager = {
+    startRun: (_workflow: unknown, input: StartRunInput) => {
+      started.push(input);
+      const run = store.createRun({ author: input.author, title: 't', workflow: '(inbox)', task: input.task, steps: [] });
+      createdRunIds.push(run.id);
+      return run;
+    },
+    hasCapacity: async () => true,
+  } as unknown as RunManager;
+  return { projectKey, repoRoot, dataDir, store, started, createdRunIds, manager };
+}
+
+/**
+ * Milestone C's dispatch tests and the replica-downlink integration test above each drive exactly
+ * ONE confirmed project, so `discovery.projects.find(p => p.projectKey === projectKey)` — used by
+ * BOTH `handleDispatch` (repoRoot/dataDir/manager resolution) and `applyReplicaDownlink` (which
+ * project's `todos.json` a replica write lands on) — had never been exercised with a SECOND,
+ * differently-keyed project to pick between. A lookup that degraded to `discovery.projects[0]`
+ * would still pass every existing test in this file; these two exist to make that mutation fail.
+ */
+describe('startSpokeRuntime — multi-project selection (site coverage: lookups must pick by key, not position)', () => {
+  it("handleDispatch resolves the DISPATCHED project's own repoRoot/dataDir/manager, not the first paired project's (site coverage: `discovery.projects.find` in handleDispatch)", async () => {
+    vi.useRealTimers(); // real fs I/O under a real O_EXCL lease — same reason Milestone C's tests do
+    const projA = await setupDispatchProject('proj_a', 't_a');
+    const projB = await setupDispatchProject('proj_b', 't_b');
+    try {
+      const { link, sent, emit } = createFakeLink();
+      const driftA = makeDrift({ projectKey: 'proj_a', behind: 0, dirty: 0, merging: false });
+      const driftB = makeDrift({ projectKey: 'proj_b', behind: 0, dirty: 0, merging: false });
+      const collectPresence = async () => makePresence({ repoDrift: [driftA, driftB] });
+      const collectOutboxProjects = async (): Promise<OutboxDiscovery> => ({
+        nodeId: 'node_a',
+        // proj_a FIRST — the entry `discovery.projects[0]` would wrongly return for every
+        // dispatch, regardless of which project the frame actually names.
+        projects: [
+          { projectKey: 'proj_a', dataDir: projA.dataDir, repoRoot: projA.repoRoot },
+          { projectKey: 'proj_b', dataDir: projB.dataDir, repoRoot: projB.repoRoot },
+        ],
+        acceptsDispatch: true,
+      });
+      const resolveDispatchManager = async (root: string) =>
+        root === projA.repoRoot ? projA.manager : root === projB.repoRoot ? projB.manager : undefined;
+
+      const dispose = startSpokeRuntime({
+        resolveDispatchManager,
+        link,
+        heartbeatMs: 3_600_000,
+        opFlushMs: 3_600_000,
+        collectPresence,
+        collectOutboxProjects,
+        readTodos: readTodosFile,
+        warn: () => {},
+      });
+      await waitFor(() => expect(sent.length).toBeGreaterThan(0)); // the immediate presence beat
+      sent.length = 0;
+
+      // Dispatch names proj_b — NOT the first project in `discovery.projects` — and its OWN
+      // todoId, present only in proj_b's todos.json. A lookup degraded to `[0]` would resolve
+      // proj_a's dataDir instead, fail to find "t_b" there, and silently decline to answer at all
+      // (no frame, no run) rather than start against the wrong repo outright — still wrong, and
+      // just as sharply caught by "nothing started" below.
+      emit(makeDispatch({ dispatchId: 'd-select-b', todoId: 't_b', projectKey: 'proj_b', workflow: { def: VALID_WORKFLOW_DEF } }));
+
+      await waitFor(() => expect(projB.started).toHaveLength(1));
+      expect(projA.started).toHaveLength(0); // the wrong project's manager was never touched
+      expect(projB.started[0]!.task).toContain('todo for proj_b');
+
+      await waitFor(() => expect(sent).toHaveLength(1));
+      const frameB = sent[0] as ClusterFreshnessFrame;
+      expect(frameB.accepted).toEqual({ dispatchId: 'd-select-b', runId: projB.createdRunIds[0] });
+
+      // Mirror control: proj_a IS the first entry, so this direction alone cannot distinguish a
+      // correct `.find()` from a broken `[0]` — it exists to prove the assertions above are sound
+      // (a real, correct selection DOES pass them), not to catch this mutation.
+      sent.length = 0;
+      emit(makeDispatch({ dispatchId: 'd-select-a', todoId: 't_a', projectKey: 'proj_a', workflow: { def: VALID_WORKFLOW_DEF } }));
+      await waitFor(() => expect(projA.started).toHaveLength(1));
+      expect(projB.started).toHaveLength(1); // unchanged by this second dispatch
+      await waitFor(() => expect(sent).toHaveLength(1));
+      const frameA = sent[0] as ClusterFreshnessFrame;
+      expect(frameA.accepted).toEqual({ dispatchId: 'd-select-a', runId: projA.createdRunIds[0] });
+
+      dispose();
+    } finally {
+      await rm(projA.repoRoot, { recursive: true, force: true });
+      await rm(projB.repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("applyReplicaDownlink writes to the FRAME's own project, never a differently-paired project's todos.json (site coverage: `discovery.projects.find` in applyReplicaDownlink)", async () => {
+    vi.useRealTimers(); // real fs I/O under a real O_EXCL lease — see the module's own note on why
+    const rootA = await mkdtemp(join(tmpdir(), 'cez-spoke-replica-select-a-'));
+    const dataDirA = join(rootA, '.ai/cezar');
+    await mkdir(dataDirA, { recursive: true });
+    await writeFile(join(dataDirA, 'todos.json'), JSON.stringify([{ id: 't1', summary: 'original a' }]), 'utf8');
+
+    const rootB = await mkdtemp(join(tmpdir(), 'cez-spoke-replica-select-b-'));
+    const dataDirB = join(rootB, '.ai/cezar');
+    await mkdir(dataDirB, { recursive: true });
+    await writeFile(join(dataDirB, 'todos.json'), JSON.stringify([{ id: 't1', summary: 'original b' }]), 'utf8');
+
+    try {
+      const { link, emit } = createFakeLink();
+      const collectPresence = async () => makePresence();
+      const collectOutboxProjects = async (): Promise<OutboxDiscovery> => ({
+        nodeId: 'node_a',
+        // proj_a FIRST — the entry `discovery.projects[0]` would wrongly return for EVERY replica
+        // frame, regardless of which project the frame actually names.
+        projects: [
+          { projectKey: 'proj_a', dataDir: dataDirA, repoRoot: rootA },
+          { projectKey: 'proj_b', dataDir: dataDirB, repoRoot: rootB },
+        ],
+        acceptsDispatch: false,
+      });
+
+      let settle: () => void;
+      let applied = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      const applyHubReplica = async (dir: string, input: ApplyHubReplicaInput) => {
+        const result = await applyHubReplicaFile(dir, input);
+        settle();
+        return result;
+      };
+
+      const dispose = startSpokeRuntime({
+        resolveDispatchManager: NOOP_RESOLVE_MANAGER,
+        link,
+        heartbeatMs: 3_600_000,
+        opFlushMs: 3_600_000,
+        collectPresence,
+        collectOutboxProjects,
+        readTodos: readTodosFile,
+        applyHubReplica,
+        warn: () => {},
+      });
+
+      // A replica frame explicitly naming proj_b — the SECOND entry. A lookup degraded to `[0]`
+      // would resolve proj_a's dataDir and write the hub's change into the WRONG project's file.
+      const frameB: ClusterReplicaFrame = {
+        type: 'replica',
+        protocol: CLUSTER_PROTOCOL,
+        scope: 'project',
+        projectKey: 'proj_b',
+        changes: [{ opId: 'op1', nodeId: 'hub', ts: new Date().toISOString(), scope: 'project', projectKey: 'proj_b', entity: 'todo', entityId: 't1', op: 'upsert', fields: { summary: 'set by hub for b' }, hubSeq: 1 }],
+        hubSeq: 1,
+      };
+      emit(frameB);
+      await applied;
+
+      const onDiskA = JSON.parse(await readFile(join(dataDirA, 'todos.json'), 'utf8')) as Array<{ id: string; summary: string }>;
+      const onDiskB = JSON.parse(await readFile(join(dataDirB, 'todos.json'), 'utf8')) as Array<{ id: string; summary: string }>;
+      // The whole point: a frame naming proj_b must never touch proj_a's file.
+      expect(onDiskA[0]!.summary).toBe('original a');
+      expect(onDiskB[0]!.summary).toBe('set by hub for b');
+
+      // Mirror control: proj_a IS the first entry, so a frame naming it lands correctly even under
+      // a broken `[0]` selector — this direction shows the assertions above are sound, not that
+      // they alone catch the mutation (only the proj_b direction above does that).
+      applied = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      const frameA: ClusterReplicaFrame = {
+        type: 'replica',
+        protocol: CLUSTER_PROTOCOL,
+        scope: 'project',
+        projectKey: 'proj_a',
+        changes: [{ opId: 'op2', nodeId: 'hub', ts: new Date().toISOString(), scope: 'project', projectKey: 'proj_a', entity: 'todo', entityId: 't1', op: 'upsert', fields: { summary: 'set by hub for a' }, hubSeq: 1 }],
+        hubSeq: 1,
+      };
+      emit(frameA);
+      await applied;
+
+      const onDiskA2 = JSON.parse(await readFile(join(dataDirA, 'todos.json'), 'utf8')) as Array<{ id: string; summary: string }>;
+      const onDiskB2 = JSON.parse(await readFile(join(dataDirB, 'todos.json'), 'utf8')) as Array<{ id: string; summary: string }>;
+      expect(onDiskA2[0]!.summary).toBe('set by hub for a');
+      expect(onDiskB2[0]!.summary).toBe('set by hub for b'); // unchanged by the second frame
+
+      dispose();
+    } finally {
+      await rm(rootA, { recursive: true, force: true });
+      await rm(rootB, { recursive: true, force: true });
+    }
   });
 });
 

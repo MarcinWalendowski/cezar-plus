@@ -262,6 +262,11 @@ export class ClusterLinkServer {
   private readonly lookupSecret: (nodeId: ClusterNodeId) => Promise<string | undefined>;
   private heartbeat?: ReturnType<typeof setInterval>;
   private closed = false;
+  /** D48. `sweepRevoked` is async and driven by an interval, so a slow secret store could otherwise
+   *  stack overlapping sweeps, each walking a map the others are mutating. One at a time; a tick
+   *  that arrives while a sweep is running is dropped, not queued — the next one re-reads
+   *  everything anyway. */
+  private sweepInFlight = false;
 
   constructor(private readonly options: ClusterLinkServerOptions) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: CLUSTER_FRAME_MAX_BYTES });
@@ -332,8 +337,16 @@ export class ClusterLinkServer {
       // `clusterLinkRefuseReasonSchema` (`contract/src/cluster.ts`) has EIGHT members —
       // `protocol-major`, `unknown-node`, `bad-signature`, `stale-principal`, `node-disabled`,
       // `frame-too-large`, `handshake-timeout`, `internal` — and only the first is raised "below" in
-      // this function; the rest come from the upgrade guard, `reap()`, `peers.ts`'s revoke, and
-      // `hub-router.ts`. Nor is every
+      // this function; the rest come from the upgrade guard, `reap()`, and `hub-router.ts`.
+      //
+      // **CORRECTED again 2026-08-23, same day (D48) — `node-disabled` did NOT come from
+      // "`peers.ts`'s revoke", as this list claimed; it came from nowhere at all.** Measured:
+      // `grep -a node-disabled` over the whole workspace found the contract's enum member, this
+      // sentence, and one line of `link-server.test.ts` — no production emitter existed. The
+      // attribution was not a documentation slip but a description of the D48 hole: `disableNode`
+      // deletes the node's secret and never touches its live socket, so nothing ever raised the one
+      // reason named for revocation. `reap()` -> `sweepRevoked` is the emitter now, and the entry
+      // above is corrected to say so. Nor is every
       // refusal link-ending in the same way: what IS reserved to exactly one reason lives at the
       // OTHER end, where `link-client.ts` sets `suppressReconnect` for `protocol-major` alone, so
       // every other reason is retried. Read that as the real decision surface, not this list.
@@ -554,8 +567,87 @@ export class ClusterLinkServer {
   refuse(nodeId: ClusterNodeId, reason: ClusterLinkRefuseReason, message?: string): void {
     const node = this.nodes.get(nodeId);
     if (!node) return;
+    this.refuseNode(node, reason, message);
+  }
+
+  /** `refuse` by IDENTITY rather than by id, for callers holding a `ConnectedNode` they read at
+   *  some earlier point — `sweepRevoked`, whose `await` gives a reconnect room to replace the map
+   *  entry in between. Refusing by id there could write a `node-disabled` frame onto, and close, a
+   *  freshly re-enrolled node's legitimate socket on behalf of the revoked one it replaced. Same
+   *  hazard `closeNode`'s own identity guard exists for, one step earlier. */
+  private refuseNode(node: ConnectedNode, reason: ClusterLinkRefuseReason, message?: string): void {
     this.writeFrame(node, { type: 'refuse', protocol: CLUSTER_PROTOCOL, reason, message });
     this.closeNode(node, reason);
+  }
+
+  /**
+   * **D48, 2026-08-23 — revoking a node now ends the link it ALREADY has.** Until this, revocation
+   * moved exactly one thing: `peers.ts#disableNode` stamped `disabledAt` and deleted the node's
+   * stored secret. That makes `authenticateLinkUpgrade` refuse the node's NEXT dial with
+   * `unknown-node` — and does nothing whatsoever to the socket it is holding right now. A link
+   * authenticates ONCE, at upgrade; no frame on an established socket carries a signature, and
+   * nothing re-read the credential afterwards. So a revoked node kept its live link and kept being
+   * served indefinitely: it stayed in `connectedNodes()` (hence a replica fan-out target), its
+   * `ops` frames kept being applied, and the only thing that would ever have cut it was the node
+   * choosing to disconnect. The revoke reported success the whole time.
+   *
+   * `hub-router.ts` declines to gate its `hello` handler on `disabledAt`, and says why: the upgrade
+   * guard "already refuses the UPGRADE before a socket exists to carry a `hello` on". That is true
+   * of a NEW connection and false of a live one, and it is the same conflation this sweep closes —
+   * "cannot authenticate again" and "is not authenticated now" are different claims.
+   *
+   * **Deliberately a PULL, not a push from the revoking code.** A push (`disableNode` calling
+   * `refuse`) cannot work for the primary revoke path at all: `cez cluster revoke <nodeId>` runs in
+   * a separate CLI process, where no `ClusterLinkServer` exists and the live socket belongs to the
+   * hub server process. It would also be conditional on every present and future revoke path
+   * remembering to make the call — exactly the shape that produced `disableNode`'s own earlier
+   * `if (found)` hole. Re-reading the credential is unconditional by construction: whatever removed
+   * the secret, by whatever path and in whatever process, the link goes.
+   *
+   * **The window is bounded by the reap cadence** (`heartbeatMs`, `HEARTBEAT_MS` = 30s in
+   * production), not closed instantly — a revoked node may be served for up to one tick. Stated
+   * rather than hidden: an in-process caller that needs the cut to be immediate can call
+   * `refuse(nodeId, 'node-disabled')` directly, and this sweep remains the backstop that holds when
+   * nobody does.
+   *
+   * **A lookup that THROWS is not evidence of revocation**, and is skipped rather than treated as
+   * one. Cutting every link because the secret store was briefly unreadable would convert one bad
+   * read into a cluster-wide outage that could not heal — the upgrade path reads the same store, so
+   * nothing could reconnect either. A store that reads fine and simply has no entry is a different
+   * thing and IS revocation: `lookupNodeSecret` degrades a missing file to `undefined` on purpose,
+   * and "no secrets are stored" correctly means nothing may be linked.
+   */
+  private async sweepRevoked(): Promise<void> {
+    if (this.sweepInFlight || this.closed) return;
+    this.sweepInFlight = true;
+    try {
+      // Snapshot before awaiting: the map is mutated by reconnects, by 'close' handlers and by the
+      // refusals below, and walking it live across an `await` is how the wrong socket gets cut.
+      for (const node of [...this.nodes.values()]) {
+        let secret: string | undefined;
+        try {
+          secret = await this.lookupSecret(node.nodeId);
+        } catch (err) {
+          this.options.warn?.(
+            `cluster link: could not re-check ${node.nodeId}'s credential, leaving the link up and retrying next sweep: ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+          continue;
+        }
+        if (secret !== undefined) continue;
+        if (this.closed) return;
+        // Identity, not id — see `refuseNode`. A node re-enrolled during the await above holds a
+        // DIFFERENT `ConnectedNode` here, and its new link is none of this sweep's business.
+        if (this.nodes.get(node.nodeId) !== node) continue;
+        this.options.warn?.(
+          `cluster link: ${node.nodeId} has no stored secret any more — it was revoked while linked; ` +
+            'refusing with node-disabled so the live socket cannot outlive the credential that opened it',
+        );
+        this.refuseNode(node, 'node-disabled', 'this node was revoked on the hub');
+      }
+    } finally {
+      this.sweepInFlight = false;
+    }
   }
 
   /**
@@ -579,6 +671,12 @@ export class ClusterLinkServer {
   }
 
   private reap(): void {
+    // D48 — re-check every live link's credential on this same tick. Fire-and-forget on purpose:
+    // `reap` is a synchronous interval callback and the liveness work below must not wait on a
+    // filesystem read. `sweepRevoked` never rejects (it catches per node), so there is no floating
+    // rejection here; `sweepInFlight` keeps ticks from stacking.
+    void this.sweepRevoked();
+
     // D40a — collected before acting, because `refuse` deletes from the map this loop is walking.
     const t = this.now().getTime();
     const wedged = [...this.nodes.values()].filter(

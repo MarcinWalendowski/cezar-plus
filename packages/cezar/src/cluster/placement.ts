@@ -50,6 +50,21 @@ export interface PlacementCandidate {
   /** Linked right now. An asleep Mac is a state, not an error — and not a placement target. */
   online: boolean;
   capacity: ClusterCapacity;
+  /**
+   * How old the `capacity` claim above is, in ms — `undefined` means UNKNOWN, and unknown means
+   * **STALE**, never fresh (spec item 25). It is data rather than a clock read because this module
+   * commits to being pure; the age is measured by whoever builds the candidate
+   * (`hub-candidates.ts`), against one instant for the whole set.
+   *
+   * **Nothing reads it yet.** The rule it exists for is a DE-RANK — a leading sort key in
+   * `rankByHeadroom` at a 90_000 ms threshold (`3 × DEFAULT_HEARTBEAT_MS`, which is also
+   * `DEFAULT_DISPATCH_TIMEOUT_MS`, so a node can never be both fresh enough to place on and
+   * already timed out for its last dispatch) — deliberately not an EXCLUDE: an emptied pool routes
+   * to `all-eligible-at-capacity`, which would be a manufactured lie about a node whose claim is
+   * merely old, and one hub clock jump would make every node stale in the same window. That change
+   * is its own decision and has not landed; this field is the input it will read.
+   */
+  capacityAgeMs?: number;
   /** Whether this node actually holds the project. Pairing is confirmed per node, so this is not
    *  derivable from the roster alone. */
   holdsProject: boolean;

@@ -454,6 +454,26 @@ describe('cluster/ops — compactOps', () => {
     expect(after).toEqual([]);
   });
 
+  it('the retained-tombstone decision is made by TS order, not by the order ops were fed in — a scrambled acked history', () => {
+    // Same three-op history as the retention-window test above (one entity, all acked), but fed in
+    // descending ts order: the actually-oldest op is LAST in the array and the actually-newest
+    // (the tombstone) is FIRST. Without the internal chronological sort, `compactOps` would treat
+    // whichever op happens to be LAST in the array as "latest" — here that is the oldest upsert,
+    // which is not even a tombstone, so the real tombstone would never be considered for retention
+    // at all and the whole group would be dropped.
+    const upsertOld = upsert('t1', { summary: 'first' }, '2026-08-22T00:00:00.000Z', 1);
+    const upsertMiddle = upsert('t1', { summary: 'second' }, '2026-08-22T00:00:01.000Z', 2);
+    const tombstoneLatest = tombstone('t1', '2026-08-22T00:00:02.000Z', 3);
+
+    const out = compactOps([tombstoneLatest, upsertMiddle, upsertOld], {
+      ackedThroughHubSeq: 5,
+      tombstoneRetentionMs: 3_600_000,
+      now: () => new Date('2026-08-22T00:30:00.000Z'), // 30 min after the tombstone, inside the window
+    });
+
+    expect(out).toEqual([tombstoneLatest]);
+  });
+
   it('collapses repeated owed upserts of one entity into one, unioning fields (later key wins)', () => {
     const ops = [
       upsert('t1', { summary: 'first' }, '2026-08-22T00:00:00.000Z'),
@@ -463,6 +483,21 @@ describe('cluster/ops — compactOps', () => {
     const out = compactOps(ops, { ackedThroughHubSeq: 0, tombstoneRetentionMs: 60_000 });
     expect(out).toHaveLength(1);
     expect(out[0]?.fields).toEqual({ summary: 'second', priority: 'high' });
+  });
+
+  it('last-write-wins inside a collapse follows TS order, not array-feed order — genuinely scrambled input', () => {
+    // Same key (`summary`) touched three times, fed in reverse-chronological order: the op that is
+    // chronologically LAST (and therefore should win) is fed FIRST. Without the internal sort over
+    // `ts`, `collapseOwed` walks the ops in whatever order they arrived in and the array's last
+    // element — the chronologically OLDEST op here — would win instead.
+    const ops = [
+      upsert('t1', { summary: 'newest' }, '2026-08-22T00:00:02.000Z'),
+      upsert('t1', { summary: 'middle' }, '2026-08-22T00:00:01.000Z'),
+      upsert('t1', { summary: 'oldest' }, '2026-08-22T00:00:00.000Z'),
+    ];
+    const out = compactOps(ops, { ackedThroughHubSeq: 0, tombstoneRetentionMs: 60_000 });
+    expect(out).toHaveLength(1);
+    expect(out[0]?.fields).toEqual({ summary: 'newest' });
   });
 
   it('two owed ops for one entity with DISJOINT field sets collapse to one op owing the union of both — the pendingFields amendment requires this, not just permits it', () => {
@@ -536,6 +571,55 @@ describe('cluster/ops — compactOps', () => {
     ];
     const out = compactOps(ops, { ackedThroughHubSeq: 0, tombstoneRetentionMs: 60_000 });
     expect(out[0]?.unknown).toEqual({ fromNewer: 1 });
+  });
+
+  describe('the group key is the FULL (scope, projectKey, entity, entityId) tuple, not entityId alone', () => {
+    // Each case below shares one `entityId` across two ops and varies exactly ONE of the other
+    // three key components, holding the rest fixed — a single combined case (varying all three at
+    // once) would only prove that *something* in the key matters, not which component. If
+    // `opGroupKey` degenerated to `entityId` alone, every pair below would collapse into one group
+    // and one op's `fields` would be lost entirely (the later op wins the merge on the shared
+    // `summary` key), rather than surviving as two independent ops.
+
+    it('two owed ops sharing entityId but differing ENTITY are kept as separate groups', () => {
+      const opTodo = upsert('shared-1', { summary: 'todo content' }, '2026-08-22T00:00:00.000Z');
+      const opRun = { ...upsert('shared-1', { summary: 'run content' }, '2026-08-22T00:00:01.000Z'), entity: 'run' as const };
+
+      const out = compactOps([opTodo, opRun], { ackedThroughHubSeq: 0, tombstoneRetentionMs: 60_000 });
+
+      expect(out).toHaveLength(2);
+      expect(out.find((o) => o.entity === 'todo')?.fields).toEqual({ summary: 'todo content' });
+      expect(out.find((o) => o.entity === 'run')?.fields).toEqual({ summary: 'run content' });
+    });
+
+    it('two owed ops sharing entityId but differing SCOPE are kept as separate groups', () => {
+      const opProject = upsert('shared-2', { summary: 'project content' }, '2026-08-22T00:00:00.000Z');
+      const opWorkspace = {
+        ...upsert('shared-2', { summary: 'workspace content' }, '2026-08-22T00:00:01.000Z'),
+        scope: 'workspace' as const,
+        projectKey: undefined,
+      };
+
+      const out = compactOps([opProject, opWorkspace], { ackedThroughHubSeq: 0, tombstoneRetentionMs: 60_000 });
+
+      expect(out).toHaveLength(2);
+      expect(out.find((o) => o.scope === 'project')?.fields).toEqual({ summary: 'project content' });
+      expect(out.find((o) => o.scope === 'workspace')?.fields).toEqual({ summary: 'workspace content' });
+    });
+
+    it('two owed ops sharing entityId but differing PROJECT KEY are kept as separate groups', () => {
+      const opProjA = upsert('shared-3', { summary: 'proj-1 content' }, '2026-08-22T00:00:00.000Z');
+      const opProjB = {
+        ...upsert('shared-3', { summary: 'proj-2 content' }, '2026-08-22T00:00:01.000Z'),
+        projectKey: 'proj-2',
+      };
+
+      const out = compactOps([opProjA, opProjB], { ackedThroughHubSeq: 0, tombstoneRetentionMs: 60_000 });
+
+      expect(out).toHaveLength(2);
+      expect(out.find((o) => o.projectKey === 'proj-1')?.fields).toEqual({ summary: 'proj-1 content' });
+      expect(out.find((o) => o.projectKey === 'proj-2')?.fields).toEqual({ summary: 'proj-2 content' });
+    });
   });
 
   describe('test 5 — compaction preserves the applied result exactly (property-style, randomised)', () => {

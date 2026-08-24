@@ -1784,7 +1784,37 @@ export type StoredClusterWatermarks = z.infer<typeof storedClusterWatermarksSche
 export const storedClusterRemoteRunSchema = clusterRemoteRunSchema.passthrough();
 export type StoredClusterRemoteRun = z.infer<typeof storedClusterRemoteRunSchema>;
 
+/** One node's entry in the report envelope below. Named (rather than inlined in the `z.record`)
+ *  for the same reason `storedClusterRemoteRunSchema` is: the reader salvages this file PER ENTRY,
+ *  so it needs a parser for a single entry — a whole-record `safeParse` fails atomically on the
+ *  first bad one and would take every other node's freshness down with it (D13). */
+export const storedClusterRemoteRunReportSchema = z.object({ reportedAt: z.string() }).passthrough();
+export type StoredClusterRemoteRunReport = z.infer<typeof storedClusterRemoteRunReportSchema>;
+
 export const storedClusterRemoteRunsSchema = z
-  .object({ runs: z.array(storedClusterRemoteRunSchema).default([]) })
+  .object({
+    runs: z.array(storedClusterRemoteRunSchema).default([]),
+    /**
+     * Per-node report envelope — what `runs` alone cannot say.
+     *
+     * Without it, "this node has never reported" and "this node reported and had nothing running"
+     * are the same observation: zero rows carrying that `nodeId`. They are not the same fact, and a
+     * board that renders them identically tells a viewer a node is idle when it may simply be gone.
+     * With it there are three distinguishable states, not one:
+     *
+     *  - no `nodes` entry ................. never tracked; say nothing about that node
+     *  - an entry, and no rows ............ reported, and genuinely had nothing in flight
+     *  - an entry, and rows ............... those rows are as of `reportedAt`, however old that is
+     *
+     * `reportedAt` is stamped from the ARRIVAL of the frame that carried the rows and passed in to
+     * `applyRemoteRuns` — never computed at write time and never at read time. A freshness field
+     * that reads its own clock reports when it was LOOKED AT, which always looks fresh and is the
+     * exact defect that ships when this is left to a default.
+     *
+     * An entry is never pruned when a node reports zero rows: that is the second state above, and
+     * dropping the entry would collapse it back into the first.
+     */
+    nodes: z.record(clusterNodeIdSchema, storedClusterRemoteRunReportSchema).optional(),
+  })
   .passthrough();
 export type StoredClusterRemoteRuns = z.infer<typeof storedClusterRemoteRunsSchema>;

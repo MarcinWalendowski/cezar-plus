@@ -1,10 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  storedClusterRemoteRunReportSchema,
   storedClusterRemoteRunSchema,
   type ClusterNodeId,
   type ClusterProjectKey,
   type ClusterRemoteRun,
+  type StoredClusterRemoteRunReport,
 } from '@loki-labs/better-cezar-contract';
 import type { RunRecord, RunStore } from '../runs/store.ts';
 import { clusterHomeDir, type ClusterHomeOptions } from './node-identity.ts';
@@ -182,20 +184,36 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * The whole file, as this node reads it: the foreign rows PLUS the per-node report envelope.
+ *
+ * `runs` alone cannot tell "node-b has never reported" from "node-b reported and had nothing
+ * running" — both are zero rows carrying that `nodeId`. `nodes` is what separates them, so any
+ * consumer asking a freshness or liveness question must read this rather than `readRemoteRuns`.
+ * See `storedClusterRemoteRunsSchema.nodes` for the three states.
+ */
+export interface RemoteRunsFile {
+  readonly runs: ClusterRemoteRun[];
+  /** Keyed by node id. A node with no entry has never reported — the map is never pre-populated
+   *  from the roster, because "on the roster" is not "has been heard from". */
+  readonly nodes: Record<string, StoredClusterRemoteRunReport>;
+}
+
 /** Per-entry salvage, missing file reads as empty. This is what the workspace runs list unions in.
  *  Follows `reports-triage.ts`'s `readRaw` idiom exactly: broken JSON, a non-object body, or a
  *  `runs` field that is not an array all degrade to `[]` with one warning; a single malformed ROW
  *  is skipped with its own warning rather than failing every other node's rows in the same file —
  *  `storedClusterRemoteRunSchema.safeParse` is applied per entry, never to the array as a whole,
  *  because a whole-array `.safeParse` fails atomically on the first bad element (D13: an entry a
- *  newer node wrote and this one cannot place must never take the rest of the file down with it). */
-export async function readRemoteRuns(options?: ClusterHomeOptions): Promise<ClusterRemoteRun[]> {
+ *  newer node wrote and this one cannot place must never take the rest of the file down with it).
+ *  The `nodes` envelope is salvaged the same way, per node, for the same reason. */
+export async function readRemoteRunsFile(options?: ClusterHomeOptions): Promise<RemoteRunsFile> {
   const path = remoteRunsPath(options?.env);
   let raw: string;
   try {
     raw = await readFile(path, 'utf8');
   } catch {
-    return []; // no file yet — this node has never received a peer's projection
+    return { runs: [], nodes: {} }; // no file yet — this node has never received a peer's projection
   }
 
   let parsed: unknown;
@@ -206,13 +224,13 @@ export async function readRemoteRuns(options?: ClusterHomeOptions): Promise<Clus
       options,
       `[cez] ${path} is not valid JSON — treating the remote run projection as empty (${describeError(error)})`,
     );
-    return [];
+    return { runs: [], nodes: {} };
   }
-  const runs =
-    typeof parsed === 'object' && parsed !== null ? (parsed as { runs?: unknown }).runs : undefined;
+  const body = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+  const runs = body?.runs;
   if (!Array.isArray(runs)) {
     reportWarning(options, `[cez] ${path} is not the expected shape — treating the remote run projection as empty`);
-    return [];
+    return { runs: [], nodes: {} };
   }
 
   const rows: ClusterRemoteRun[] = [];
@@ -227,29 +245,105 @@ export async function readRemoteRuns(options?: ClusterHomeOptions): Promise<Clus
     }
     rows.push(result.data);
   }
-  return rows;
+
+  // A file written before the envelope existed simply has no `nodes` — that reads as "no node has
+  // been heard from", which is exactly right for a file this node has not applied a report into
+  // since. It is never synthesised from the rows: a row's presence says nothing about WHEN.
+  const nodes: Record<string, StoredClusterRemoteRunReport> = {};
+  const rawNodes = body?.nodes;
+  if (rawNodes !== undefined) {
+    if (typeof rawNodes !== 'object' || rawNodes === null || Array.isArray(rawNodes)) {
+      reportWarning(options, `[cez] ignored a malformed "nodes" envelope in ${path} — node freshness is unknown`);
+    } else {
+      for (const [nodeId, entry] of Object.entries(rawNodes as Record<string, unknown>)) {
+        const result = storedClusterRemoteRunReportSchema.safeParse(entry);
+        if (!result.success) {
+          reportWarning(
+            options,
+            `[cez] skipped a malformed node report for "${nodeId}" in ${path}: ${result.error.issues.map((i) => i.message).join('; ')}`,
+          );
+          continue;
+        }
+        nodes[nodeId] = result.data;
+      }
+    }
+  }
+
+  return { runs: rows, nodes };
 }
 
-async function writeRemoteRuns(runs: readonly ClusterRemoteRun[], options?: ClusterHomeOptions): Promise<void> {
+/** The rows only — what the workspace runs list unions in. A caller that needs to tell a silent
+ *  node from an idle one wants `readRemoteRunsFile` instead. */
+export async function readRemoteRuns(options?: ClusterHomeOptions): Promise<ClusterRemoteRun[]> {
+  return (await readRemoteRunsFile(options)).runs;
+}
+
+function writeRemoteRunsFile(file: RemoteRunsFile, options?: ClusterHomeOptions): void {
   // Reuses `workspace/config.ts`'s shared atomic writer — same tmp+rename, `0600` file / `0700`
   // dir, and `assertCezarHomeWriteIsSandboxed` guard `node-identity.ts` already reuses it for, so
   // this directory keeps exactly one place that knows how an atomic write happens.
-  atomicWriteJsonSync(remoteRunsPath(options?.env), { runs });
+  atomicWriteJsonSync(remoteRunsPath(options?.env), { runs: file.runs, nodes: file.nodes });
+}
+
+/**
+ * Serialises every read-modify-write of `runs-remote.json`, per file.
+ *
+ * Both mutators below read the whole file, filter it in memory and write the result back, and the
+ * read is a real suspension point — `readRemoteRunsFile` does `await readFile(path, 'utf8')`. With
+ * N spokes reporting into one hub, two `applyRemoteRuns` calls overlap there routinely: the second
+ * reads a snapshot that predates the first's write, its `kept` filter therefore never sees the
+ * first node's rows, and the second write drops a whole node's row-set until that node's next beat.
+ * Node's single-threaded execution does NOT make this safe; it is safe only across code with no
+ * `await` between read and write, which this is not.
+ *
+ * Keyed by resolved path, exactly as `todo-autostart.ts`'s `reconcileTail` is keyed by `dataDir` —
+ * one chain per file, so two tests (or two `CEZ_HOME`s) never serialise against each other. The
+ * rejection handling is `notes/store.ts#serialize`'s: the caller gets the real promise so a failed
+ * write still throws where it happened, while the stored tail is the swallowed one so one failure
+ * cannot wedge every later write in the process.
+ */
+const remoteRunsTail = new Map<string, Promise<unknown>>();
+
+function serializeRemoteRunsWrite<T>(mutator: () => Promise<T>, options?: ClusterHomeOptions): Promise<T> {
+  const key = remoteRunsPath(options?.env);
+  const prior = remoteRunsTail.get(key) ?? Promise.resolve();
+  const next = prior.then(mutator, mutator);
+  remoteRunsTail.set(
+    key,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return next;
 }
 
 /** Replaces one node's rows wholesale — a node's projection is authoritative for its own runs and
  *  for nothing else, so a merge across nodes could never be right. Every kept/incoming row is
  *  stamped with `nodeId` on the way in (never trusted verbatim off the wire) so this file can never
- *  end up with a row claiming a `nodeId` other than the one that was just told to own it. */
+ *  end up with a row claiming a `nodeId` other than the one that was just told to own it.
+ *
+ *  `reportedAt` is REQUIRED and is stamped by the caller from the arrival of the frame that carried
+ *  these rows. It is not defaulted and never computed here: a caller that omitted it would not get
+ *  "no freshness claim", it would get a plausible WRONG one — the moment the write happened rather
+ *  than the moment the node spoke — and the field exists precisely to expose staleness. An empty
+ *  `runs` still writes the entry: "reported, and had nothing running" is a real observation, and it
+ *  is the one this envelope exists to tell apart from silence. */
 export async function applyRemoteRuns(
   nodeId: ClusterNodeId,
   runs: readonly ClusterRemoteRun[],
+  reportedAt: string,
   options?: ClusterHomeOptions,
 ): Promise<void> {
-  const existing = await readRemoteRuns(options);
-  const kept = existing.filter((row) => row.nodeId !== nodeId);
-  const incoming = runs.map((run) => (run.nodeId === nodeId ? run : { ...run, nodeId }));
-  await writeRemoteRuns([...kept, ...incoming], options);
+  return serializeRemoteRunsWrite(async () => {
+    const file = await readRemoteRunsFile(options);
+    const kept = file.runs.filter((row) => row.nodeId !== nodeId);
+    const incoming = runs.map((run) => (run.nodeId === nodeId ? run : { ...run, nodeId }));
+    writeRemoteRunsFile(
+      { runs: [...kept, ...incoming], nodes: { ...file.nodes, [nodeId]: { reportedAt } } },
+      options,
+    );
+  }, options);
 }
 
 /** Statuses `markNodeUnreachable` will touch — the terminal three are excluded on purpose (see its
@@ -261,19 +355,26 @@ const LIVE_RUN_STATUSES = new Set<ClusterRemoteRun['status']>(['queued', 'runnin
  *  visibility, never a status change, and reversible when the node comes back (the next
  *  `applyRemoteRuns` for that node replaces these rows wholesale, `unreachable` included).
  *  Idempotent and returns the count actually TOUCHED this call, not the count already marked, so a
- *  caller cannot mistake a re-run for fresh news. */
+ *  caller cannot mistake a re-run for fresh news.
+ *
+ *  Leaves the `nodes` envelope exactly as it found it, including the now-stale `reportedAt`. That
+ *  staleness is the point: "these rows are as of 11:04" is what makes an unreachable row readable
+ *  as history rather than as current state, and refreshing or clearing it here would either claim
+ *  this node just spoke or erase the only record that it ever did. */
 export async function markNodeUnreachable(
   nodeId: ClusterNodeId,
   at: Date,
   options?: ClusterHomeOptions,
 ): Promise<number> {
-  const existing = await readRemoteRuns(options);
-  let changed = 0;
-  const next = existing.map((row) => {
-    if (row.nodeId !== nodeId || row.unreachable || !LIVE_RUN_STATUSES.has(row.status)) return row;
-    changed += 1;
-    return { ...row, unreachable: true, unreachableSince: at.toISOString() };
-  });
-  if (changed > 0) await writeRemoteRuns(next, options);
-  return changed;
+  return serializeRemoteRunsWrite(async () => {
+    const file = await readRemoteRunsFile(options);
+    let changed = 0;
+    const next = file.runs.map((row) => {
+      if (row.nodeId !== nodeId || row.unreachable || !LIVE_RUN_STATUSES.has(row.status)) return row;
+      changed += 1;
+      return { ...row, unreachable: true, unreachableSince: at.toISOString() };
+    });
+    if (changed > 0) writeRemoteRunsFile({ runs: next, nodes: file.nodes }, options);
+    return changed;
+  }, options);
 }

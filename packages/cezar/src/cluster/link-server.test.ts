@@ -326,6 +326,131 @@ describe('ClusterLinkServer', () => {
     await vi.waitFor(() => expect(server.connectedNodes()).toEqual([]));
   });
 
+  // ---- D48: revoking a node must end the link it ALREADY has, not only refuse its next one -----
+  //
+  // Two different mechanisms wear one word. `disableNode` (peers.ts) removes the node's stored
+  // secret, which makes `authenticateLinkUpgrade` refuse the NEXT dial with `unknown-node` — the
+  // control test below proves that half has always worked. It says nothing about the socket the
+  // node is holding RIGHT NOW: that socket authenticated once, at upgrade, and nothing re-checked
+  // the credential afterwards, so a revoked node kept being served indefinitely. `hub-router.ts`
+  // declines to gate on `disabledAt` for exactly this reason, and its stated justification —
+  // "`authenticateLinkUpgrade` already refuses the UPGRADE before a socket exists to carry a
+  // `hello` on" — is true of a new connection and false of a live one.
+  //
+  // **The assertion here is the negative control, deliberately.** "The roster row is gone" and
+  // "this credential no longer works" are different claims and only the second is the security
+  // property; a test asserting the first is exactly how the previous version of this bug shipped
+  // green. So this asserts the OLD LINK IS REJECTED — refused on the wire, closed 1008, and no
+  // longer deliverable — not that a record is absent.
+  describe('revocation of a LIVE link (D48)', () => {
+    it('a node whose secret is removed WHILE CONNECTED is refused node-disabled and can no longer be served', async () => {
+      // A mutable store standing in for `node-secrets.json`. Deleting the entry is precisely and
+      // only what `disableNode` -> `removeNodeSecret` does to a revoked node; nothing in the
+      // product touches the live socket, which is the whole point.
+      const secrets = new Map<string, string>([[NODE_ID, SECRET]]);
+      const onFrame = vi.fn(async (): Promise<ClusterDownlinkFrame[]> => []);
+      const { url, server } = await boot(onFrame, {
+        lookupSecret: async (nodeId) => secrets.get(nodeId),
+        // Same reasoning as the D40a tests: comfortably above a localhost pong round trip, so the
+        // liveness half of `reap()` cannot be what ends this socket.
+        heartbeatMs: 250,
+        helloDeadlineMs: 60_000,
+      });
+      const c = await connectNode(url);
+      c.send(validHello(NODE_ID));
+      await vi.waitFor(() => expect(server.connectedNodes()).toEqual([NODE_ID]));
+
+      // POSITIVE CONTROL — before the revoke this link genuinely works. Without this the assertions
+      // below could pass against a link that was never established.
+      expect(server.send(NODE_ID, ackFrameFor())).toBe(true);
+      expect(await c.next()).toMatchObject({ type: 'ack' });
+
+      const closed = c.waitClose();
+      // ---- the revoke ------------------------------------------------------------------------
+      secrets.delete(NODE_ID);
+
+      // THE SECURITY PROPERTY: the credential this socket was admitted on is gone, so the socket
+      // must go too — with a stated reason, as every other teardown in this file has.
+      expect(await c.next(3_000)).toMatchObject({ type: 'refuse', reason: 'node-disabled' });
+      expect(await closed).toBe(1008);
+      await vi.waitFor(() => expect(server.connectedNodes()).toEqual([]));
+      // …and the hub can no longer hand it anything at all. `connectedNodes()` is a filtered view;
+      // `send()` is the actual delivery path, so both are asserted rather than one standing in for
+      // the other.
+      expect(server.send(NODE_ID, ackFrameFor())).toBe(false);
+    });
+
+    it('cuts a revoked socket that never sent a hello — the sweep is keyed on the credential, not on helloReceived', async () => {
+      const secrets = new Map<string, string>([[NODE_ID, SECRET]]);
+      const onFrame = vi.fn(async (): Promise<ClusterDownlinkFrame[]> => []);
+      const { url, server } = await boot(onFrame, {
+        lookupSecret: async (nodeId) => secrets.get(nodeId),
+        heartbeatMs: 250,
+        // Far out of reach, so a `node-disabled` verdict here cannot be the D40a hello deadline
+        // wearing another name — the reason string is the discriminator between the two.
+        helloDeadlineMs: 60_000,
+      });
+      const c = await connectNode(url);
+      // Deliberately no hello: this socket is upgraded and authenticated but not yet served, which
+      // `connectedNodes()` hides. A revoked credential must still end it.
+      expect(server.connectedNodes()).toEqual([]);
+
+      const closed = c.waitClose();
+      secrets.delete(NODE_ID);
+
+      expect(await c.next(3_000)).toMatchObject({ type: 'refuse', reason: 'node-disabled' });
+      expect(await closed).toBe(1008);
+      expect(server.send(NODE_ID, ackFrameFor())).toBe(false);
+    });
+
+    it('CONTROL — a re-dial with the revoked credential was ALREADY refused at the upgrade; this half was never broken', async () => {
+      const secrets = new Map<string, string>([[NODE_ID, SECRET]]);
+      const { url } = await boot(async () => [], {
+        lookupSecret: async (nodeId) => secrets.get(nodeId),
+        heartbeatMs: 250,
+        helloDeadlineMs: 60_000,
+      });
+      secrets.delete(NODE_ID);
+
+      // Same shape as "rejects the upgrade with a named reason header" above: `ws` routes a
+      // non-101 response to 'unexpected-response' and emits no 'error' once that has a listener,
+      // so this awaits the response directly rather than a rejected open.
+      const c = connectRaw(url, signedHeaders(NODE_ID, SECRET, new Date().toISOString()));
+      const { status, reason } = await c.waitUnexpectedResponse();
+      expect(status).toBe(401);
+      expect(reason).toBe('unknown-node');
+    });
+
+    it('a lookup that THROWS leaves live links alone — an unreadable secret store must not self-DoS the cluster', async () => {
+      let broken = false;
+      const onFrame = vi.fn(async (): Promise<ClusterDownlinkFrame[]> => []);
+      const warnings: string[] = [];
+      const { url, server } = await boot(onFrame, {
+        lookupSecret: async (nodeId) => {
+          if (broken) throw new Error('store unavailable');
+          return nodeId === NODE_ID ? SECRET : undefined;
+        },
+        heartbeatMs: 250,
+        helloDeadlineMs: 60_000,
+        warn: (m) => warnings.push(m),
+      });
+      const c = await connectNode(url);
+      c.send(validHello(NODE_ID));
+      await vi.waitFor(() => expect(server.connectedNodes()).toEqual([NODE_ID]));
+
+      broken = true;
+      // A transient read failure is not evidence of revocation, and cutting every link on it would
+      // turn one unreadable file into a cluster-wide outage that cannot heal (the upgrade path
+      // reads the same store, so nothing could reconnect either). Two full sweeps must pass with
+      // the link intact.
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(server.connectedNodes()).toEqual([NODE_ID]);
+      expect(server.send(NODE_ID, ackFrameFor())).toBe(true);
+      expect(warnings.some((m) => m.includes('store unavailable'))).toBe(true);
+      c.ws.close();
+    });
+  });
+
   // ---- D40a: the hub ends a socket that upgraded and never said anything usable ----------------
   //
   // The wedge this closes is not "a client that connects and sits idle" — it is a client that sends

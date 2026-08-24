@@ -274,7 +274,13 @@ describe('placeRun', () => {
   });
 
   describe('6b — overlap refusal names the other run (D19 rung 3)', () => {
-    it('queues and names the other run when an active run in this project overlaps a touched path', () => {
+    it('queues and names the other run when an active run in this project overlaps a touched path, even when it is not first in activeRuns', () => {
+      const decoy = activeRun({
+        runId: 'r_decoy',
+        nodeId: 'worker-1',
+        projectKey: 'proj-1',
+        paths: ['packages/cezar/src/cluster/dispatch.ts'],
+      });
       const conflicting = activeRun({
         runId: 'r_holding',
         nodeId: 'worker-2',
@@ -284,22 +290,53 @@ describe('placeRun', () => {
       const req = request({
         projectKey: 'proj-1',
         touchedPaths: ['packages/cezar/src/cluster/placement.ts'],
-        activeRuns: [conflicting],
+        // `decoy` is listed first and does not overlap — a scan that only inspected
+        // `activeRuns[0]` would miss `conflicting` entirely and place instead of block.
+        activeRuns: [decoy, conflicting],
       });
       const nodes = [candidate({ nodeId: 'idle', capacity: capacity({ active: 0 }) })];
       expect(placeRun(req, nodes)).toEqual({ status: 'blocked', blockedBy: conflicting });
     });
 
-    it('negative control: non-overlapping paths in the same project still dispatch', () => {
-      const other = activeRun({
+    it('mirror control: the same fixture with the conflicting run listed first still names it (order is not what matters)', () => {
+      const conflicting = activeRun({
         runId: 'r_holding',
+        nodeId: 'worker-2',
+        projectKey: 'proj-1',
+        paths: ['packages/cezar/src/cluster/placement.ts'],
+      });
+      const decoy = activeRun({
+        runId: 'r_decoy',
+        nodeId: 'worker-1',
         projectKey: 'proj-1',
         paths: ['packages/cezar/src/cluster/dispatch.ts'],
       });
       const req = request({
         projectKey: 'proj-1',
         touchedPaths: ['packages/cezar/src/cluster/placement.ts'],
-        activeRuns: [other],
+        activeRuns: [conflicting, decoy],
+      });
+      const nodes = [candidate({ nodeId: 'idle', capacity: capacity({ active: 0 }) })];
+      expect(placeRun(req, nodes)).toEqual({ status: 'blocked', blockedBy: conflicting });
+    });
+
+    it('negative control: non-overlapping paths across multiple active runs in the same project still dispatch', () => {
+      const otherA = activeRun({
+        runId: 'r_holding_a',
+        projectKey: 'proj-1',
+        paths: ['packages/cezar/src/cluster/dispatch.ts'],
+      });
+      const otherB = activeRun({
+        runId: 'r_holding_b',
+        projectKey: 'proj-1',
+        paths: ['packages/cezar/src/cluster/hub-dispatch.ts'],
+      });
+      const req = request({
+        projectKey: 'proj-1',
+        touchedPaths: ['packages/cezar/src/cluster/placement.ts'],
+        // Two non-overlapping active runs, not one — a full scan that false-positives on
+        // "any activeRuns present" rather than checking each one would wrongly block here.
+        activeRuns: [otherA, otherB],
       });
       const nodes = [candidate({ nodeId: 'idle', capacity: capacity({ active: 0 }) })];
       expect(placeRun(req, nodes)).toEqual({ status: 'placed', nodeId: 'idle' });

@@ -449,6 +449,36 @@ describe('cluster/peers', () => {
       const proposals = proposePairings(advertsByNode, existing);
       expect(proposals).toEqual([]);
     });
+
+    it('pairs every node, not just the first two sorted node ids — four nodes on one shared origin', () => {
+      // Sorted node id order is hub, mac, spoke1, spoke2. The greedy matcher can only ever use
+      // each node's single advert once (a `claimed` set, not multi-pairing), so with FOUR nodes
+      // on the same origin the correct result is two proposals — (hub,mac) and (spoke1,spoke2) —
+      // covering all four. Truncating the node id list to the first two (as `.slice(0, 2)` would)
+      // silently drops spoke1/spoke2 from every signal loop: this is the only shape that tells
+      // "no candidates" apart from "candidates never considered".
+      const advertsByNode = new Map([
+        ['hub', [advert({ projectId: 'p-hub', originUrl: 'git@github.com:acme/shared.git' })]],
+        ['mac', [advert({ projectId: 'p-mac', originUrl: 'git@github.com:acme/shared.git' })]],
+        ['spoke1', [advert({ projectId: 'p-spoke1', originUrl: 'git@github.com:acme/shared.git' })]],
+        ['spoke2', [advert({ projectId: 'p-spoke2', originUrl: 'git@github.com:acme/shared.git' })]],
+      ]);
+      const proposals = proposePairings(advertsByNode, []);
+      const pairedNodeIds = new Set(proposals.flatMap((p) => p.members.map((m) => m.nodeId)));
+      expect(pairedNodeIds).toEqual(new Set(['hub', 'mac', 'spoke1', 'spoke2']));
+    });
+
+    it('adopts an existing projectKey from either advert rather than minting a fresh one', () => {
+      const advertsByNode = new Map([
+        ['hub', [advert({ projectId: 'p-hub', projectKey: 'pk-known', originUrl: 'git@github.com:acme/y.git' })]],
+        ['mac', [advert({ projectId: 'p-mac', originUrl: 'git@github.com:acme/y.git' })]],
+      ]);
+      const proposals = proposePairings(advertsByNode, []);
+      expect(proposals).toHaveLength(1);
+      // Not `expect.any(String)` — that would also pass for a freshly minted randomUUID(). The
+      // whole point is this is the SAME key the advert already carried, not a new one.
+      expect(proposals[0]?.projectKey).toBe('pk-known');
+    });
   });
 
   // ---- applyPairingAction --------------------------------------------------------------------

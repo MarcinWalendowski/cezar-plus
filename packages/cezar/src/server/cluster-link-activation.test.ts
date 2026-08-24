@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -402,6 +402,97 @@ describe('cluster link activation (package 1.5) — a real hub and a real spoke 
 
       await vi.waitFor(() => expect(hubServer.connectedNodes()).toEqual(['spoke-1']), { timeout: 5_000 });
     });
+
+    /**
+     * THE HUB'S PROJECTION IS THE HUB'S OWN, AND IT IS ACTUALLY WRITTEN.
+     */
+    it("a presence beat lands in the HUB's own roster — not in the spoke's home, and not nowhere", async () => {
+      // Two homes, deliberately distinct. If they were the same directory every assertion below
+      // would pass against a hub writing the spoke's home, which is the coincidence this test exists
+      // to rule out.
+      const spokeHome = tempDir('cez-cluster-projection-spoke-home-');
+      const hubHome = tempDir('cez-cluster-projection-hub-home-');
+      const warns: string[] = [];
+
+      const hubIdentity: StoredClusterNodeIdentity = {
+        nodeId: 'hub-projection',
+        nodeName: 'hub-projection',
+        createdAt: new Date().toISOString(),
+        role: 'hub',
+        acceptsDispatch: false,
+        labels: [],
+      };
+      // `env` is what makes this test's whole point testable. Production passes it
+      // (`cluster-routes.ts:1165`), and without it `homeOptions` falls back to ambient
+      // `process.env.CEZ_HOME` — which the spoke sets to ITS home below, so the hub would read
+      // and write the spoke's roster and every assertion here would be measuring the wrong file.
+      const router = createHubFrameRouter({
+        identity: hubIdentity,
+        env: { CEZ_HOME: hubHome },
+        warn: (m) => warns.push(m),
+      });
+
+      // Counted AFTER `router` has resolved, never on the way in: `markNodeSeen` is awaited inside
+      // that call, so a counter incremented before it would let this test read the roster before the
+      // write it is asserting has happened.
+      let processedPresences = 0;
+      const hubServer = new ClusterLinkServer({
+        identity: hubIdentity,
+        onFrame: async (nodeId: string, frame: ClusterUplinkFrame) => {
+          const replies = await router(nodeId, frame);
+          if (frame.type === 'presence') processedPresences++;
+          return replies;
+        },
+        lookupSecret: async (nodeId) => (nodeId === 'spoke-1' ? NODE_SECRET : undefined),
+      });
+      const httpServer = createServer();
+      await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
+      booted.push(httpServer);
+      hubServer.attach(httpServer);
+      disposers.push(() => void hubServer.close());
+      const hubUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
+
+      // Roster row in the HUB's home — `markNodeSeen` never fabricates one, so without this the
+      // beat arrives, is refused as "unrostered", and assertion (1) fails for a reason that has
+      // nothing to do with home resolution.
+      await upsertNode(
+        {
+          nodeId: 'spoke-1',
+          nodeName: 'spoke-1',
+          role: 'spoke',
+          labels: [],
+          acceptsDispatch: false,
+          protocol: CLUSTER_PROTOCOL,
+          version: '0.0.0-test',
+        },
+        { env: { CEZ_HOME: hubHome } },
+      );
+
+      await persistNodeCredential({ nodeId: 'spoke-1', hubUrl, secret: NODE_SECRET }, { env: { CEZ_HOME: spokeHome } });
+      process.env.CEZ_HOME = spokeHome;
+      process.env.CEZ_CLUSTER = '1';
+      process.env.CEZ_CLUSTER_HUB = hubUrl;
+
+      const stop = startClusterRuntime({
+        version: '0.0.0-test',
+        server: fakeUpgradeServer(),
+        resolveDispatchManager: async () => undefined,
+        heartbeatMs: 50,
+      });
+      disposers.push(stop);
+
+      await vi.waitFor(() => expect(processedPresences).toBeGreaterThan(0), { timeout: 5_000 });
+
+      // (1) POSITIVE — the hub's own roster row went from "never seen" to stamped.
+      const row = (await readPeers({ env: { CEZ_HOME: hubHome } })).nodes.find((n) => n.nodeId === 'spoke-1');
+      expect.soft(row?.lastSeenAt).toBeDefined();
+
+      // (2) NEGATIVE — the hub never touched the spoke's home.
+      expect.soft(existsSync(join(spokeHome, 'cluster', 'peers.json'))).toBe(false);
+
+      // (3) The hub did not silently decline the beat.
+      expect.soft(warns.filter((w) => w.includes('unrostered'))).toEqual([]);
+    }, 15_000);
 
     /**
      * D38, END TO END ACROSS ALL THREE FILES — the one thing every unit test on this feature is

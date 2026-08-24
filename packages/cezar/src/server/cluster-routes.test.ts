@@ -766,7 +766,7 @@ describe('GET /cluster/active — asOf is evidence, not a request-time stamp', (
         },
         { env },
       );
-      await applyRemoteRuns(NODE_ID, [finishedRemoteRun()], { env });
+      await applyRemoteRuns(NODE_ID, [finishedRemoteRun()], '2026-08-23T11:59:00.000Z', { env });
 
       const idleRes = await apiRequest(routes(), '/cluster/active');
       expect(idleRes.status).toBe(200);

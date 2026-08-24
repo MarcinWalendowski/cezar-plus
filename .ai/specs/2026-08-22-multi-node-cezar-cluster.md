@@ -2343,7 +2343,12 @@ invented; these are the names to use when one lands.
 
 ## What remains, and what it takes to get this Mac running work
 
-> **HANDOFF STATE — updated 2026-08-23, written to survive a session change.**
+> **HANDOFF STATE — updated 2026-08-24, written to survive a session change.**
+> **NEWEST FIRST: items 31-35 in the nested list below are the most recent and correct two of my
+> own earlier claims.** Item 31 closes the second standing red as pre-existing; item 32 lists what
+> five session-limit deaths actually left (two of my four claims were false) and records the
+> red-then-green I ran over the survivors; items 33-34 are unreachability + a policy docblock with
+> no implementation; item 35 is D measured, including a finding against its own design.
 > Read this block first; it is the current truth and is kept current after every action.
 >
 > **THIS BLOCK IS ~1,000 LINES. THE NEXT 40 ARE THE ONES YOU MUST READ; the rest is the record of
@@ -2964,6 +2969,120 @@ invented; these are the names to use when one lands.
 > > **worst-case ceiling** when that first beat loses the race against the WS handshake: 30 s → ~2 s.
 > > That is still worth having in a suite with a rotating flake pool, but it is a ceiling fix, not a
 > > speedup.
+> >
+> > **31. THE SECOND STANDING RED IS PRE-EXISTING — it is not ours. DEFINITIVE.** The slow
+> > `cluster-flag-off.test.ts` timeout (item 17, diagnosed in item 20 as a progressive `startServer()`
+> > cost) was measured against `origin/main` itself: **it times out there too, at 15,250 ms.** So the
+> > Mac's standing-red count is **two**, both pre-existing, plus the rotating flake pool — and no
+> > branch change is implicated. This closes the only open question about the Mac gate's baseline.
+> > Do not spend another run attributing it.
+> >
+> > **32. FIVE AGENTS DIED ON A SESSION LIMIT, and TWO OF MY OWN CLAIMS ABOUT WHAT THEY LEFT WERE
+> > FALSE.** The limit reset at 00:00 Europe/Warsaw. I recorded, from their in-flight tool activity,
+> > that four of them had left files modified. Measured against HEAD afterwards:
+> >
+> > | agent | what I claimed it left | what `git diff HEAD` actually shows |
+> > | --- | --- | --- |
+> > | D0-HARNESS | `cluster-link-activation.test.ts` modified | **+68/−1 at `src/server/` — my "NOTHING" was ITSELF the error, see below** |
+> > | RELAY-BUDGET | nothing | nothing (correct) |
+> > | HUB-CANDIDATES | `hub-candidates.ts`/`.test.ts` + `placement.ts` | confirmed: +2 new files, `placement.ts` +15 |
+> > | D1-PROJECTION | `run-projection.ts`/`.test.ts` + `contract/src/cluster.ts` | confirmed: +376/−32 across 3 files |
+> >
+> > **CORRECTED, same session: `git diff -- <path>` over a path that DOES NOT EXIST prints nothing and
+> > exits 0 — byte-identical to "this file is unmodified".** I checked
+> > `packages/cezar/src/cluster/cluster-link-activation.test.ts`; the file lives at
+> > `packages/cezar/src/server/`. So I turned a correct earlier note ("D0-HARNESS left work") into a
+> > false correction, and would have thrown away a good test. Only `git status` listing the real path
+> > caught it. **Any "unmodified"/"absent" conclusion from a pathspec needs the path proven to exist
+> > first** (`[ -f "$p" ]`, or `git ls-files --error-unmatch`). The same trap does NOT apply to
+> > RELAY-BUDGET: `packages/cezar/src/cluster/relay.ts` exists and is genuinely unmodified, so that row
+> > stands.
+> >
+> > **Inferring what an agent wrote from watching it work is still not measurement** — a tool call in
+> > flight is an intent. But the fix is to re-measure with a *validated* path, not to trust a bare
+> > empty diff.
+> >
+> > **The two real footprints are now VERIFIED BY ME, red-then-green, because their authors died
+> > before reporting and an unreported green is worth nothing on this branch.** 55 tests pass across
+> > `run-projection.test.ts` + `hub-candidates.test.ts`; under two mutations — unknown capacity age
+> > silently becoming `capacityAgeMs: 0` (perfectly fresh), and dropping the `reportedAt` stamp
+> > entirely — **8 tests died**, including *"stamps the reportedAt it was GIVEN, never the clock it was
+> > written at"* and *"tells 'never reported' apart from 'reported and had nothing'"*. Both halves
+> > hold: red under mutation, green against HEAD. Repo-wide typecheck is 0 errors. That coverage is
+> > real and discriminating; it should be kept.
+> >
+> > **33. BOTH DEAD AGENTS' MODULES ARE UNREACHABLE IN PRODUCTION — 0 production callers each.**
+> > `buildPlacementCandidates` and `applyRemoteRuns` are each matched only by their own definition
+> > (`grep -a`, `--include='*.ts'` quoted, tests excluded). This is *expected* — the dispatch trigger
+> > is deliberately unarmed pending the owner's decision — but it must never be written up as
+> > delivered. **The 55 green tests say nothing about production behaviour; they are the third
+> > instance on this branch of code that is correct, fully tested, and unreachable.**
+> >
+> > **34. A POLICY DOCBLOCK WITH NO IMPLEMENTATION, and a seam trap pre-planted for whoever writes the
+> > de-rank.** `hub-candidates.ts:208` states *"`capacityAgeMs` — `undefined` means UNKNOWN, which
+> > means STALE (spec item 25)"*. `capacityAgeMs` is written by that module and **read by nothing**:
+> > its only other occurrence in production is its declaration at `placement.ts:67`. So the de-rank
+> > item 25 decided does not exist yet, and the docblock reads as though it were in force.
+> >
+> > **The trap is in the direction of the omission.** `:227` omits the field when the age is unknown
+> > (`...(capacityAgeMs !== undefined ? { capacityAgeMs } : {})`). The natural de-rank a future session
+> > will write is `if (c.capacityAgeMs !== undefined && c.capacityAgeMs > threshold) derank(c)` — under
+> > which an unknown age **escapes de-ranking entirely**, the exact inverse of the documented policy,
+> > with every existing test still green because no test can see a consumer that does not exist. This
+> > is the branch's signature defect (an optional field at a seam between two owners) pre-loaded one
+> > session ahead of the code that will trip on it. **Whoever implements the de-rank: treat ABSENT as
+> > maximally stale, and let the failing case be the one that proves it.**
+> >
+> > **35. MILESTONE D, MEASURED — and the measurements argue AGAINST the design they were gathered
+> > to support.** From 7 days of real run history on this workspace:
+> >
+> > - **94% of restarts land with at least one run in flight** (102 of 109), 80% with an event within
+> >   ±30 s. Mean **10.33** runs in flight, max 23. Restart-time behaviour is therefore the *normal*
+> >   case for D, not an edge case, and it splits into two failures that scale differently.
+> > - **Mean bytes/event corrected 2,038 → 1,850.** The old figure was taken from the largest run
+> >   alone. Duty cycle ~8%.
+> > - **The demand-driven relay machinery buys nothing on bandwidth or disk.** Relaying every
+> >   in-flight run unconditionally costs ~76 KB/s and ~24 MB/day — against 120 GB free, ~14 years to
+> >   fill. So the 0→1/1→0 refcount complexity is justifiable **only** by spoke memory and by the
+> >   affordance surface, and must not later be defended on a cost argument the numbers do not
+> >   support. *(This finding came from the agent that had recommended the design. Recorded here so
+> >   the honest version is the one that survives.)*
+> > - **Viewership is UNMEASURABLE today, with a 94% upper bound.** SSE leaves no artifact and nothing
+> >   logs subscribe/unsubscribe, so "was anyone watching" cannot be answered retrospectively — and
+> >   the agent explicitly declined to interpolate one, on the grounds that a derived number wearing a
+> >   measurement's clothes is the error we just retired with the 2,038 B figure. **The foreign SSE
+> >   route's own 0→1 / 1→0 refcount transitions ARE the instrument.** Log them from the first commit
+> >   or this stays unanswerable for another 7 days.
+> > - **An orphaned mirror has no deletion trigger.** A mirror whose run finished on a node that never
+> >   returns is never superseded by `applyRemoteRuns` (which replaces a node's rows wholesale) and
+> >   never pruned by the local store (which only knows its own runs). That is a correctness gap, not
+> >   disk pressure, and it needs an owner in D's first phase — retention itself can defer.
+> >
+> > **36. ITEM 11's HARNESS DEFECT IS FIXED, AND THE TEST THAT EXPOSED IT NOW PINS PER-NODE HOME
+> > RESOLUTION.** D0-HARNESS's surviving test — *"a presence beat lands in the HUB's own roster, not in
+> > the spoke's home, and not nowhere"* — arrived RED, 3 soft assertions down. It was **not** a broken
+> > test and **not** a production defect: all three failures collapsed to one cause, and it was in the
+> > test.
+> >
+> > `createHubFrameRouter` builds `homeOptions = { env: deps.env, warn: deps.warn }`
+> > (`hub-router.ts:172`) and feeds it to both `readPeers` (`:351`) and `markNodeSeen` (`:591`).
+> > Production passes `env` (`cluster-routes.ts:1165`). **The test did not**, so `homeOptions.env` was
+> > `undefined`, both calls fell back to ambient `process.env.CEZ_HOME` — which the spoke sets to its
+> > OWN home four lines later — and the hub therefore read and wrote the spoke's roster. Hence: no row
+> > in `hubHome` (1), a `peers.json` in `spokeHome` (2), and `presence from unrostered node "spoke-1"`
+> > (3). Two-line fix: pass `env: { CEZ_HOME: hubHome }`, and `upsertNode` a spoke row into the hub's
+> > home because `markNodeSeen` never fabricates one.
+> >
+> > **It then killed the production mutation it exists for.** Dropping `env` from `homeOptions` in
+> > `hub-router.ts:172` turns the test red; restoring it turns it green. So this is now the branch's
+> > first test that genuinely pins the hub half's per-node home resolution — the thing item 12 said
+> > only a two-process E2E could cover. It does not replace that E2E (one mutable `process.env`, no
+> > real link loss, no Access upgrade) but it does close the in-process half.
+> >
+> > **The generalisable part: a red test from a dead agent is evidence, not debris.** Three soft
+> > assertions with a negative control told the whole story without its author. Had it been deleted as
+> > "unreported and failing" — the tempting move — the harness defect would have stayed open and item
+> > 11 would still read as unfixed.
 > >
 > > **Standing constraints, unchanged:** push to `origin` only, never `upstream`, never a bare
 > > `git push`. Do NOT merge PR #9 (it auto-deploys to `prod-host`, where the owner's agents
@@ -4345,6 +4464,87 @@ invented; these are the names to use when one lands.
 >   pruned at `MAX_RUNS_KEPT=300` while the NDJSON outlives the records; and the two byte totals 40
 >   minutes apart differ by 1.7%, consistent with a live box growing at ~3.6 MB/h.
 >   Defect evidence, separate from capacity planning: **max line 701,011 B, and 2 lines over 256 KB.**
+>
+> - **B26 — THE HEARTBEAT WEDGE IS CLOSED, and my brief was wrong in three places.**
+>   - **My `peers.ts:262` was ONE OF FOUR git calls a presence beat makes.** The other three
+>     (`getHeadCommit`, `getStatus`, `getRepoInfo`) go through **`src/server/git.ts:25`, which has no
+>     `timeout` either.** Fixing only `runGit` would have closed 1 of 4 and left the wedge fully
+>     reachable. *Naming one line number in a brief invites fixing one line number.*
+>   - **`execFile`'s `timeout` does NOT guarantee settlement — and not for the reason I guessed.**
+>     Measured on Node v22.12.0 before anything was designed: `sleep 60` with `{timeout: 300}`
+>     rejects at 305 ms; the same **with a backgrounded grandchild holding the inherited stdout
+>     pipe also rejects, at 303 ms — so the still-open-pipe hazard I warned about does NOT
+>     reproduce on this Node.** But `trap '' TERM; sleep 25` is **still pending at 4000 ms** with
+>     `child.killed === true` and `exitCode === null`. **`timeout` guarantees the SIGNAL IS SENT,
+>     never that the process dies, and Node settles only on child exit.** The production shape is
+>     not a shell `trap` — it is a process in uninterruptible I/O on a stalled mount, which ignores
+>     SIGKILL too. Hence the shipped design: an outer deadline that **settles OUR promise
+>     unconditionally**, rather than escalating signals and hoping. *Killing their process and
+>     settling your promise are different problems; only the second is yours to guarantee.*
+>   - **SIGTERM before SIGKILL is load-bearing, and the reason is specific:** git's own handlers
+>     remove `.git/index.lock`. **A SIGKILLed git mid-write leaves a lock that wedges every later
+>     git in that repo** — trading a transient stall for a permanent one.
+>   Shipped: `timeout: 10_000` (env-tunable via `CEZ_CLUSTER_GIT_TIMEOUT_MS`; unparseable or
+>   non-positive falls back to the default and can never read as "disabled"), SIGTERM then SIGKILL at
+>   +2 s, pipe ends destroyed, caller answered unconditionally. 10 s is above every honest case
+>   (`rev-parse` instant, `rev-list --count` seconds, `status --porcelain` tens of seconds on a cold
+>   tree) and well under the 30 s cadence — **a git slower than the cadence is already useless for
+>   this purpose.**
+>   **Class, not instance:** `withDeadline(runBeat(generation), beatDeadlineMs)` wraps the **entire
+>   beat body**, so a *future* await added inside `collectPresence` cannot latch either. Default
+>   `max(2 × heartbeatMs, 60_000)`.
+>   **Why not a watchdog:** the `finally` already always-clears — it simply never executes, so
+>   nothing placed in it can help. A watchdog clearing from outside works but carries a bug the
+>   deadline does not: the zombie settles later, runs its own `finally`, and **frees a flag a NEWER
+>   beat owns**, permitting exactly the overlapping collections the guard exists to prevent.
+>
+> - **B27 — WHY THE PRE-EXISTING TEST COULD NEVER HAVE CAUGHT THIS, and it generalises.** There was
+>   already a test named *"a `collectPresence` rejection is warned and skipped"*. **A rejection runs
+>   the `finally` and clears the flag.** Only a promise that NEVER SETTLES latches. So the existing
+>   test exercised the adjacent, harmless case and read as coverage of the dangerous one.
+>   **`reject` and `never settle` are different failure modes and a test for one says nothing about
+>   the other** — check which your fixture actually produces (`new Promise(() => {})`, not
+>   `Promise.reject`). The second-layer fixture is a **real child process** via a PATH-injected fake
+>   `git` that ignores SIGTERM, i.e. the shape measured above as defeating `timeout` alone.
+>
+> - **B28 — a guard was written, tested, PROVEN UNREACHABLE, and DELETED.** A generation check in the
+>   `finally` (`if (beatOwner === generation)`) was added; mutating it to unconditional came back
+>   **GREEN**, because with the deadline guaranteeing settlement the path from `await` resuming to
+>   `finally` is one unbroken microtask chain, and `beat()` is re-entered only from an interval
+>   callback — a macrotask that cannot interleave. **It was removed rather than shipped as an
+>   assertion that cannot fail, and the docblock that credited it was corrected.** The same token IS
+>   load-bearing at the other site, where mutation goes red. *Deleting provably-dead defensive code
+>   is a result; keeping it is how a suite accumulates assertions that can never fail.*
+>
+> - **B29 — a LATE-SETTLING abandoned beat was sending its PRE-STALL capacity number** (found while
+>   building the proof, not by looking for it). The hub stamps whatever arrives with its own arrival
+>   time via `markNodeSeen` → `capacityAt` and presents it as current — so this is the
+>   *"slept for an hour, arrives claiming capacity as of an hour ago"* failure that the module
+>   already rules out for **missed** beats, arriving through a different door. Now dropped, and this
+>   is where the generation token earns its place: mutating it away goes red.
+>
+> - **B30 — the spoke will NOT fabricate a capacity it cannot compute; it stays silent. The real fix
+>   is hub-side and needs the OWNER.** `ClusterCapacity` has no "unknown" on the wire
+>   (`maxParallel`/`active`/`enforcement` all required), so both in-contract options are lies:
+>   `active: 0` (the stale claim, which *wins* `rankByHeadroom`) or `active: maxParallel`
+>   (fail-closed but fabricated). The module's own doctrine is *decline to answer rather than answer
+>   falsely* — `handleDispatch` already declines to send a freshness frame rather than invent a
+>   `headSha`.
+>   **The staleness data already exists and placement never reads it**: `markNodeSeen` stamps
+>   `capacityAt` on every frame and `peers.ts`'s docblock says *"Capacity is a claim, and it is
+>   rendered with its age"* — but `PlacementCandidate` carried `online` and `capacity` and **no age**.
+>   **This converges with HUB-CANDIDATES' independent work**, which added `capacityAgeMs` at
+>   `placement.ts:67` for its own reasons. Two agents reached the same missing field from opposite
+>   ends. What remains for the owner: exclude-vs-de-prefer, the threshold (~2-3 heartbeats), and a
+>   **new `ClusterQueuedReason`** — that module is explicit that collapsing reasons is the bug.
+>   Given B12, this is the more urgent half: without a trigger the black-hole loop cannot close
+>   today, but **the moment placement is wired, a stale frame wins the ranking on the first dispatch.**
+>
+> - **B31 — STILL OPEN, flagged not fixed: `src/server/git.ts:25`'s `git()` has no timeout**, so
+>   every *other* consumer of it remains unbounded. The three beat-reachable callers were bounded
+>   from `peers.ts` by an outer deadline that **abandons rather than reaps** (no child handle is
+>   reachable from there) — a limitation stated in the code rather than glossed. Reaping belongs in
+>   `server/git.ts` and needs its owner.
 >
 > - **B21 — `asOf` is ALREADY FIXED; do not re-plan it.** `clusterActiveAsOfFrom`
 >   (`cluster-routes.ts:326-334`) derives it from roster `lastSeenAt`, the contract is

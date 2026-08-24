@@ -146,6 +146,113 @@ const DEFAULT_HEARTBEAT_MS = 30_000;
  *  a caller may want them decoupled (e.g. a slow heartbeat, fast outbox, on a flaky link). */
 const DEFAULT_OP_FLUSH_MS = 5_000;
 
+/**
+ * **The outer bound on ONE presence beat — the guard that makes the reentrancy flag unlatchable
+ * (2026-08-23).**
+ *
+ * `beat()` has always taken a reentrancy flag and cleared it in a `finally`. That is correct for
+ * every case where the awaited work SETTLES, and worthless for the one where it does not: a
+ * `finally` behind a promise that never resolves never runs, so a single unsettled await inside
+ * `beat()` latched the flag `true` permanently and the node stopped beating. Forever. Silently —
+ * the early `if (beatInFlight) return` logged nothing, emitted no counter, and recorded no
+ * timestamp, so the only externally visible symptom was a presence frame that never arrived again,
+ * on a link whose websocket kept ponging perfectly. The hub therefore never reaped the node and
+ * kept serving its LAST frame, frozen — almost always `active: 0`, maximum headroom, which makes
+ * the wedged node the one placement prefers. Not a dead node: an attractor.
+ *
+ * `cluster/peers.ts` now bounds every git the presence collection runs, which closes today's known
+ * instance. **This closes the CLASS**, and the two are not the same job: `collectPresence` is a
+ * caller-supplied dep, and the beat body will grow more awaits than it has today.
+ *
+ * **Why a deadline rather than "a `finally` that always clears the flag, plus a watchdog".** The
+ * `finally` is already there and already always-clears — it simply never executes, so no amount of
+ * work in it can help; that shape cannot be the fix. A watchdog that clears the flag from OUTSIDE
+ * does work, and carries a bug the deadline does not: the abandoned beat may settle later and run
+ * its own `finally`, clearing a flag a NEWER beat now owns, permitting exactly the overlapping
+ * presence collections the guard exists to prevent. The deadline has neither problem, because the
+ * beat's own stack reaches its own `finally`.
+ *
+ * **CORRECTED 2026-08-23, same session — what the generation token is actually for.** This
+ * paragraph ended by crediting the token with making a zombie's `finally` release only its OWN
+ * claim. Mutation-checked, and false: replacing the release with an unconditional
+ * `beatOwner = undefined` left every test green, because with the deadline in place the path from
+ * the `await` resuming to the `finally` is one unbroken microtask chain and `beat()` is only
+ * re-entered from an interval callback, a macrotask that cannot interleave. The owner cannot have
+ * changed there; the check was unreachable and is gone.
+ *
+ * The token earns its place somewhere else, and that site IS reachable and IS mutation-checked:
+ * `runBeat` compares it before `link.send`, so a beat abandoned at its deadline that settles
+ * minutes later DROPS its capacity claim instead of putting it on the wire. That claim was computed
+ * before the stall and the hub stamps whatever it receives with its own arrival time
+ * (`peers.ts#markNodeSeen` → `capacityAt`), so sending it would present a pre-stall number as
+ * current — the "slept for an hour, arrives claiming capacity as of an hour ago" failure this
+ * module already rules out for missed beats, arriving through a different door.
+ *
+ * **What abandoning costs, stated rather than hidden:** whatever was hanging is left hanging, so a
+ * hang that recurs every beat accumulates one abandoned promise (and possibly one orphaned git) per
+ * cadence. That is strictly better than the alternative it replaces — zero further beats, forever,
+ * with no log line — and the escalating warn below is what stops it from being invisible while it
+ * accumulates. It is also why `peers.ts` reaps its own children rather than relying on this layer.
+ */
+const DEFAULT_BEAT_DEADLINE_MS = 60_000;
+
+/** Distinguishes "the beat ran out of time" from any other rejection, so the deadline gets its own
+ *  named report and a genuine throw from `link.send` still reaches the caller's existing handler
+ *  unchanged. Module-private: the tests assert on the emitted message and on recovery, never on the
+ *  class. */
+class BeatDeadlineError extends Error {}
+
+/**
+ * Bounds `work`, and cleans its own timer up on every path.
+ *
+ * `Promise.race` attaches a rejection handler to `work` itself, so a rejection that arrives AFTER
+ * the deadline has already won is a handled rejection rather than an unhandled one. The timer is
+ * `unref`'d for the same reason both interval timers here are: a CLI process must be able to exit
+ * with a beat still outstanding.
+ */
+function withDeadline<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const bomb = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new BeatDeadlineError(`${what} did not settle within ${ms}ms`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([work, bomb]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/** The first skip of a run is reported immediately — one beat outliving its whole cadence is
+ *  already worth a line — and thereafter only every Nth, so a genuinely stuck beat restates itself
+ *  periodically instead of going quiet after one warning. Arithmetic: at the shipped 30s cadence
+ *  that is 1 line at the start of a stall plus 1 line per 5 minutes while it lasts (~12/hour), on a
+ *  path that writes nothing to disk. */
+const BEAT_SKIP_RESTATE_EVERY = 10;
+
+/** What the presence loop can honestly say about its own liveness — see `SpokeRuntimeHandle`. */
+export interface SpokeBeatHealth {
+  /** Consecutive ticks that found a beat already in flight and returned. `0` on the healthy path. */
+  consecutiveSkips: number;
+  /**
+   * When a beat last ran to COMPLETION, ISO — meaning the loop reached the end of the beat and
+   * released its guard, **not** that a presence frame was delivered. A beat whose
+   * `collectPresence()` rejected, or whose `link.send` returned `false`, still counts: those are
+   * reported by their own warnings, and folding them in here would answer a different question from
+   * the one this field exists for. The question it answers is "is the presence loop still turning",
+   * because the defect it was added for is a loop that has silently stopped.
+   *
+   * `undefined` before the first beat finishes — itself the signal rather than a missing value: a
+   * runtime whose very FIRST beat wedged has no completion to report, which is exactly the state
+   * that used to be indistinguishable from a healthy startup.
+   */
+  lastCompletedAt: string | undefined;
+  /** How long ago that was, ms. The number that separates a latched flag (grows without bound)
+   *  from ordinary overlap (never exceeds roughly one cadence). */
+  msSinceLastCompleted: number | undefined;
+  /** A beat is running right now. Ordinary on its own; damning together with a large
+   *  `msSinceLastCompleted`. */
+  inFlight: boolean;
+}
+
 /** The subset of `ClusterLinkClient` this runtime needs — narrowed so a test can drive it with a
  *  plain fake and no socket. */
 export interface SpokeLink {
@@ -217,6 +324,14 @@ export interface SpokeRuntimeDeps {
   warn?: (message: string) => void;
   /** Default 30_000. */
   heartbeatMs?: number;
+  /**
+   * The outer bound on one beat — see `DEFAULT_BEAT_DEADLINE_MS` for what it is defending against
+   * and why a `finally` alone cannot. Defaults to `max(2 × heartbeatMs, 60_000)`: a beat that
+   * outlives two full cadences is not slow, it is stuck, and the floor keeps a caller with a very
+   * fast heartbeat from abandoning beats that are merely doing real work (`collectPresence` runs
+   * up to four git commands per paired project, each bounded at 12s by `peers.ts`).
+   */
+  beatDeadlineMs?: number;
   /** Test hook; defaults to `cluster/peers.ts#collectPresence`. */
   collectPresence?: () => Promise<ClusterPresenceFrame>;
 
@@ -369,6 +484,25 @@ export type SpokeRuntimeHandle = (() => void) & {
    * reaches the frame.
    */
   readonly watermarks: () => readonly ClusterWatermark[];
+
+  /**
+   * Whether the presence loop is still alive, and how long it has been since it last was
+   * (2026-08-23).
+   *
+   * Added because the defect this closes was **silence**, not slowness: a skipped beat left no
+   * trace anywhere, so a permanently latched reentrancy flag and an ordinary once-in-a-while
+   * overlap looked identical from outside the module — and from the hub's side both look like a
+   * healthy node, because the websocket keeps ponging either way and the hub keeps serving the last
+   * presence frame it received. `consecutiveSkips` and `msSinceLastCompleted` are exactly the two
+   * numbers that separate them.
+   *
+   * **Nothing consumes this yet**, stated rather than left to be discovered:
+   * `server/cluster-routes.ts` (another session's file) calls this handle for `watermarks()` only,
+   * and the logs carry the same facts today. It exists so the cockpit can render "linked, but has
+   * not reported for 14 minutes" without re-deriving it from a log scrape, and so a test can assert
+   * on STATE rather than on the wording of a warning.
+   */
+  readonly beatHealth: () => SpokeBeatHealth;
 };
 
 /**
@@ -402,10 +536,26 @@ export function startSpokeRuntime(deps: SpokeRuntimeDeps): SpokeRuntimeHandle {
   const readTodosFn = deps.readTodos ?? readTodosFile;
   const applyHubReplicaFn = deps.applyHubReplica ?? applyHubReplicaFile;
 
+  const beatDeadlineMs = deps.beatDeadlineMs ?? Math.max(2 * heartbeatMs, DEFAULT_BEAT_DEADLINE_MS);
+
   let disposed = false;
   // Guards against a slow `collectPresence()` still being in flight when the next tick fires —
   // never two overlapping presence collections (git subprocesses) racing each other.
-  let beatInFlight = false;
+  //
+  // A GENERATION rather than a boolean, since 2026-08-23. The flag is released on two different
+  // stacks now — the beat's own `finally`, and the deadline path when that beat is abandoned — and
+  // a boolean cannot tell "I still hold this" from "a newer beat took it while I was gone". An
+  // abandoned beat that settles minutes later would clear a flag it no longer owns and let two
+  // presence collections run at once, which is the exact hazard the guard exists for. `undefined`
+  // means no beat is in flight; otherwise it holds the generation of the beat that owns it.
+  let beatOwner: number | undefined;
+  let beatGeneration = 0;
+  // Observability, because SILENCE is the actual defect here: a skipped beat used to leave no
+  // trace at all — no log, no counter, no timestamp — so a permanently latched flag and an
+  // ordinary once-in-a-while overlap were indistinguishable from outside, and only one of them is
+  // a node that has gone dark. Both are reported now, and `beatHealth()` exposes them as state.
+  let consecutiveBeatSkips = 0;
+  let lastBeatCompletedAt: number | undefined;
   // Set on the first missed beat of an outage, cleared on the next delivered one — so a long
   // outage warns ONCE, not once per missed beat.
   let outageWarned = false;
@@ -488,29 +638,112 @@ export function startSpokeRuntime(deps: SpokeRuntimeDeps): SpokeRuntimeHandle {
     return marks;
   }
 
-  const beat = async (): Promise<void> => {
-    if (disposed || beatInFlight) return;
-    beatInFlight = true;
+  /** Everything one beat actually does. Split out from `beat` so the deadline can wrap the WHOLE
+   *  body rather than just today's one `await` — a bound on `collectPresence()` alone would fix the
+   *  instance and leave the next await added here just as able to latch the guard. */
+  const runBeat = async (generation: number): Promise<void> => {
+    let frame: ClusterPresenceFrame;
     try {
-      let frame: ClusterPresenceFrame;
-      try {
-        frame = await collectPresence();
-      } catch (err) {
-        warn?.(`cluster spoke: presence collection failed, skipping this beat: ${errorMessage(err)}`);
-        return;
-      }
-      if (disposed) return; // dispose() ran while collectPresence() was in flight
-      const sent = deps.link.send(frame);
-      if (sent) {
-        outageWarned = false;
-      } else if (!outageWarned) {
-        outageWarned = true;
-        warn?.(
-          'cluster spoke: presence heartbeat not delivered (link offline or over budget) — will keep beating silently until it recovers',
-        );
-      }
+      frame = await collectPresence();
+    } catch (err) {
+      warn?.(`cluster spoke: presence collection failed, skipping this beat: ${errorMessage(err)}`);
+      return;
+    }
+    if (disposed) return; // dispose() ran while collectPresence() was in flight
+    if (beatOwner !== generation) {
+      // This beat was ABANDONED at its deadline and has come back from the dead — its collection
+      // finally settled, minutes late, and a newer beat owns the loop now. Sending here would put a
+      // capacity claim on the wire that was computed before the stall and is stamped by the hub
+      // with its OWN arrival time (`peers.ts#markNodeSeen` → `capacityAt`), i.e. presented as
+      // current. That is precisely the "a machine that has slept for an hour arrives claiming
+      // capacity as of an hour ago" failure the module doc rules out for missed beats, arriving by
+      // a different door. Drop it; the beat that owns the loop will send a fresh one.
+      warn?.(
+        `cluster spoke: a presence beat that had already been abandoned at its deadline settled late — dropping its now-stale capacity claim rather than putting it on the wire`,
+      );
+      return;
+    }
+    const sent = deps.link.send(frame);
+    if (sent) {
+      outageWarned = false;
+    } else if (!outageWarned) {
+      outageWarned = true;
+      warn?.(
+        'cluster spoke: presence heartbeat not delivered (link offline or over budget) — will keep beating silently until it recovers',
+      );
+    }
+  };
+
+  /** Deliberately does NOT contain the words "presence heartbeat": that phrase belongs to the
+   *  link-outage warning above, and this runtime's own tests count occurrences of it to prove that
+   *  outage warns once per outage rather than once per missed beat. Two different conditions must
+   *  not be greppable as one. */
+  function noteBeatSkipped(): void {
+    consecutiveBeatSkips += 1;
+    const stalledFor = lastBeatCompletedAt === undefined ? undefined : Date.now() - lastBeatCompletedAt;
+    const since =
+      stalledFor === undefined
+        ? 'no beat has EVER completed on this runtime'
+        : `no beat has completed for ${stalledFor}ms`;
+    if (consecutiveBeatSkips === 1) {
+      warn?.(
+        `cluster spoke: presence beat SKIPPED — the previous beat is still in flight (${since}). One skip is ordinary overlap; repeated skips are not.`,
+      );
+      return;
+    }
+    if (consecutiveBeatSkips % BEAT_SKIP_RESTATE_EVERY === 0) {
+      warn?.(
+        `cluster spoke: presence beat has now SKIPPED ${consecutiveBeatSkips} consecutive ticks and ${since} (deadline ${beatDeadlineMs}ms). This node is not reporting capacity, while its link stays up — the hub is still serving its last, stale, presence frame.`,
+      );
+    }
+  }
+
+  /** "Completed" means the beat reached the end of its own body and released the guard — see
+   *  `SpokeBeatHealth#lastCompletedAt` for why that, and not "a frame was delivered", is the thing
+   *  worth tracking here. So a recovery line can legitimately be followed by a presence-collection
+   *  failure on the same beat: the loop is turning again, which is what recovered. */
+  function noteBeatCompleted(): void {
+    if (consecutiveBeatSkips > 0) {
+      warn?.(`cluster spoke: presence beat recovered after ${consecutiveBeatSkips} skipped tick(s)`);
+    }
+    consecutiveBeatSkips = 0;
+    lastBeatCompletedAt = Date.now();
+  }
+
+  const beat = async (): Promise<void> => {
+    if (disposed) return;
+    if (beatOwner !== undefined) {
+      noteBeatSkipped();
+      return;
+    }
+    const generation = ++beatGeneration;
+    beatOwner = generation;
+    try {
+      await withDeadline(runBeat(generation), beatDeadlineMs, 'presence beat');
+      noteBeatCompleted();
+    } catch (err) {
+      // A non-deadline error is rethrown ON PURPOSE: `runBeat` already handles the one failure it
+      // expects (`collectPresence` rejecting), so anything reaching here came from somewhere that
+      // has no handler — `link.send` throwing, say — and the existing `beat().catch(...)` at both
+      // call sites is where that is reported. Swallowing it here would silently delete a report
+      // that exists today. The `finally` below still runs either way, which is the whole point.
+      if (!(err instanceof BeatDeadlineError)) throw err;
+      warn?.(
+        `cluster spoke: presence beat exceeded its ${beatDeadlineMs}ms deadline and was ABANDONED — something inside presence collection is not returning (git, disk, or the link). The reentrancy guard has been released, so the next tick beats normally; before this bound existed it would have latched and this node would never have beaten again.`,
+      );
     } finally {
-      beatInFlight = false;
+      // Unconditional, and that is a PROPERTY OF THE DEADLINE rather than an oversight. This line
+      // was `if (beatOwner === generation) beatOwner = undefined;` until the mutation check for it
+      // came back green: with `withDeadline` guaranteeing the race settles, everything from the
+      // `await` resuming to this `finally` is one unbroken microtask chain, and `beat()` is only
+      // ever re-entered from an interval callback — a MACROTASK, which cannot interleave. So the
+      // owner provably cannot have changed here, the guard could not fail, and an assertion that
+      // cannot fail is decoration. Deleted rather than kept as reassurance.
+      //
+      // It would be REQUIRED under the watchdog shape this design rejected (clear the flag from
+      // outside, on a timer): there the zombie's `finally` really does run while a newer beat owns
+      // the loop. Restore it, with its test, if the deadline ever goes.
+      beatOwner = undefined;
     }
   };
 
@@ -735,7 +968,17 @@ export function startSpokeRuntime(deps: SpokeRuntimeDeps): SpokeRuntimeHandle {
 
     let presence: ClusterPresenceFrame;
     try {
-      presence = await collectPresence();
+      // The SAME hangable call the heartbeat makes, and bounded for the same reason one layer
+      // along: a `collectPresence()` that never settles here latches no flag, so it wedges nothing
+      // — it simply means this dispatch is never answered at all, which is the precise failure
+      // D12a exists to prevent ("a hub that hears nothing back cannot tell refused from dead link
+      // from crashed mid-run"). Bounding it turns a permanent silence into a named log line.
+      //
+      // Only this call is wrapped, not the whole handler. The rest of the chain ends in
+      // `startTodoRun`, which legitimately does real work; a deadline over that would abandon a run
+      // that is actually starting and then report a `start-failed` that never happened — replacing
+      // one lie with a worse one.
+      presence = await withDeadline(collectPresence(), beatDeadlineMs, `presence collection for dispatch ${dispatchId}`);
     } catch (err) {
       warn?.(`cluster spoke: cannot answer dispatch ${dispatchId} — presence collection failed: ${errorMessage(err)}`);
       return;
@@ -982,5 +1225,18 @@ export function startSpokeRuntime(deps: SpokeRuntimeDeps): SpokeRuntimeHandle {
   // `watermarks` keeps answering after `dispose()`, on purpose: the positions it reports remain a
   // true statement of where this runtime got to, and a disposed runtime returning `[]` would be a
   // fabricated "I am at zero" for the one caller (`sendHello`) whose whole job is not to say that.
-  return Object.assign(dispose, { watermarks: currentWatermarks });
+  const beatHealth = (): SpokeBeatHealth => {
+    const lastCompleted = lastBeatCompletedAt;
+    return {
+      consecutiveSkips: consecutiveBeatSkips,
+      lastCompletedAt: lastCompleted === undefined ? undefined : new Date(lastCompleted).toISOString(),
+      msSinceLastCompleted: lastCompleted === undefined ? undefined : Date.now() - lastCompleted,
+      inFlight: beatOwner !== undefined,
+    };
+  };
+
+  // `beatHealth` keeps answering after `dispose()` for the same reason `watermarks` does: the
+  // counters remain a true statement of what this runtime did, and a disposed runtime reporting a
+  // fabricated "healthy, zero skips" would be the same class of lie.
+  return Object.assign(dispose, { watermarks: currentWatermarks, beatHealth });
 }
