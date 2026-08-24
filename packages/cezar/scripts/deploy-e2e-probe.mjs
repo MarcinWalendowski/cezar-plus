@@ -12,32 +12,32 @@
  *   (c) an SSE subscriber on a live run's events → `seq` continuous across its reconnect
  *   (a) the run's status and its transcript      → never leaves `running`, no `interrupted` event
  *
+ * Every assertion is a `{ verdict, sample, reason? }` tuple, never a bare boolean: an assertion
+ * computed over zero observations reports `verdict: 'not-measured'`, not `'passed'`. This matters
+ * because the SSE and run-status endpoints are behind this box's session auth — a probe run with no
+ * credential (or one whose credential dies mid-run) legitimately measures nothing on those two
+ * streams, and a bare `every(Boolean)` over an empty array reads `true`. See
+ * `.ai/specs/2026-08-22-deploy-e2e-probe-measured-assertions.md` for the full rationale.
+ *
  * Deliberately a standalone script with no dependencies and no cezar imports: it has to keep
  * running while the cezar it is measuring is replaced, so it must not be part of that cezar. Run
  * it from anywhere that can reach the host.
  *
  * Usage:
- *   node deploy-e2e-probe.mjs --base http://127.0.0.1:4321 --run <runId> --seconds 120 \
- *        [--out artifacts/deploy-e2e.json] [--header 'cf-access-token: …']
+ *   node deploy-e2e-probe.mjs --base http://127.0.0.1:4321 --project cezar --run <runId> --seconds 120 \
+ *        [--out artifacts/deploy-e2e.json] [--header 'cookie: cez_session=<id>']
  *
- *   For a hosted box (CEZ_AUTH=oidc), --run's /runs and /events calls need a session credential:
- *   sign in at https://<host>/ in a browser, open devtools → Application/Storage → Cookies →
- *   <host>, copy the `cez_session` value, then pass:
- *     --header 'cookie: cez_session=<value>'
- *   The cookie is HttpOnly (packages/cezar/src/auth/session.ts) — browser JS (document.cookie)
- *   cannot read it, only the browser's own cookie inspector or a captured Set-Cookie response
- *   header can. That is a constraint on browser script, not on this script: an operator with
- *   disk access to CEZ_HOME on the same box (e.g. an agent task running on prod-host
- *   itself) can instead read an unexpired session id straight out of
- *   <CEZ_HOME>/identity/identity.json (IdentityStore keeps no in-memory cache, so a session
- *   written or read this way is honoured by the running server on its next lookup —
- *   packages/cezar/src/auth/identity-store.ts:169,300-301), or mint a dedicated short-TTL one
- *   via SessionService.createSession(userId, ttlMs) (session.ts:239) and destroy it afterward,
- *   which avoids borrowing a real user's session. There is still no bearer-token/service-account
- *   HTTP auth path — the only way a request authenticates is this one cookie.
+ * `/api/v1/runs/:id` and `/api/v1/runs/:id/events` require a principal on a `CEZ_AUTH`-enabled
+ * box; `/api/v1/ready` does not. Over loopback (the address every recorded run uses), the working
+ * credential is this box's own OIDC session cookie — read an unexpired id out of
+ * `<CEZ_HOME>/identity/identity.json` and pass it as `--header 'cookie: cez_session=<id>'` (see
+ * the parent spec's "How to run the acceptance E2E" section). `cf-access-token` is a different
+ * header for a different perimeter — Cloudflare Access, which fronts the public edge
+ * (`https://cockpit.example.com`), not loopback — and is not what this probe's own credential
+ * clears.
  *
- * Exit code is the verdict: 0 = every assertion held, 1 = at least one did not (including any
- * assertion that could not be measured at all — see NOT_MEASURED below).
+ * Exit code is the verdict: 0 = every assertion passed, 1 = at least one failed, 2 = at least one
+ * assertion could not be measured (and none failed) — e.g. no credential was supplied.
  */
 
 import { writeFileSync, mkdirSync } from 'node:fs';
@@ -49,6 +49,10 @@ function arg(name, fallback) {
 }
 
 const BASE = arg('base', 'http://127.0.0.1:4321').replace(/\/+$/, '');
+const PROJECT_ID = arg('project');
+const RUNS_BASE = PROJECT_ID
+  ? `${BASE}/api/v1/p/${encodeURIComponent(PROJECT_ID)}/runs`
+  : `${BASE}/api/v1/runs`;
 const RUN_ID = arg('run');
 const SECONDS = Number(arg('seconds', '120'));
 const OUT = arg('out');
@@ -60,39 +64,52 @@ for (let i = 0; i < process.argv.length; i++) {
   if (key && rest.length) headers[key.trim()] = rest.join(':').trim();
 }
 
-// Validate the operator-supplied window before any request is made. A malformed value (a unit
-// typo like `2m`, or the flag given with no following value) drives `deadline` to NaN, `while
-// (Date.now() < deadline)` is false on its very first check, and every observation-dependent
-// assertion would otherwise read as a vacuous PASS having issued zero requests.
-if (!Number.isFinite(SECONDS) || SECONDS <= 0) {
-  console.error(`deploy-e2e-probe: --seconds must be a finite positive number, got ${JSON.stringify(arg('seconds', '120'))}`);
-  process.exit(1);
-}
-if (!Number.isFinite(POLL_HZ) || POLL_HZ <= 0) {
-  console.error(`deploy-e2e-probe: --hz must be a finite positive number, got ${JSON.stringify(arg('hz', '10'))}`);
-  process.exit(1);
-}
-
 const started = Date.now();
 const deadline = started + SECONDS * 1000;
+
+/** 401/403 is a real auth rejection; a 3xx is a perimeter (e.g. Cloudflare Access) redirecting a
+ * client that `fetch`'s default `redirect: 'follow'` would otherwise chase into a phantom 200. Both
+ * are the same failure class for this probe's purposes: the endpoint was never actually reached. */
+function isAuthFailureStatus(status) {
+  return status === 401 || status === 403 || (status >= 300 && status < 400);
+}
+
+function logAuthRequired(url, status) {
+  console.error(
+    `[deploy-e2e-probe] AUTH REQUIRED: GET ${url} answered ${status} — pass a session cookie, e.g. ` +
+      `--header 'cookie: cez_session=<id>' (see .ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md ` +
+      `§ Verification). This stream will not be measured.`,
+  );
+}
 
 /** (b) — every request's outcome, so a single failure is attributable to a millisecond. */
 const poll = { total: 0, ok: 0, nonOk: [], connectErrors: [], maxLatencyMs: 0, latencies: [] };
 /** (c) — every `seq` the SSE subscriber saw, in arrival order, across every reconnect. */
-const sse = { seqs: [], reconnects: 0, reloadFrames: 0, errors: [] };
+const sse = {
+  seqs: [],
+  reconnects: 0,
+  reloadFrames: 0,
+  dataFrames: 0,
+  errors: [],
+  errorCount: 0,
+  authFailed: false,
+};
 /** (a) — the run's status over time, sampled by the poller. */
 const runStatuses = new Set();
+const run = { sampleCount: 0, authFailed: false, errorCount: 0, lastError: null };
 let sawInterrupted = false;
 let sawKeptGoing = false;
-/** A 401/403 on `/runs` or `/events` is a deterministic policy decision, not a flaky condition —
- * recorded once each so the retry loop can stop instead of burning the whole `--seconds` window. */
-const authErrors = { events: null, runs: null };
-let runsAuthFailed = false;
+let sseAuthRequiredLogged = false;
+let runAuthRequiredLogged = false;
 
 async function pollOnce() {
   const at = Date.now();
   try {
-    const response = await fetch(`${BASE}/api/v1/ready`, { headers, signal: AbortSignal.timeout(10_000) });
+    const response = await fetch(`${BASE}/api/v1/ready`, {
+      headers,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(10_000),
+    });
     const latency = Date.now() - at;
     poll.total += 1;
     poll.latencies.push(latency);
@@ -111,21 +128,26 @@ async function pollOnce() {
 
 /** Sample the run record, so (a) is measured continuously rather than only before and after. */
 async function sampleRun() {
-  if (!RUN_ID || runsAuthFailed) return;
+  if (!RUN_ID || run.authFailed) return;
+  const url = `${RUNS_BASE}/${RUN_ID}`;
   try {
-    const response = await fetch(`${BASE}/api/v1/runs/${RUN_ID}`, { headers, signal: AbortSignal.timeout(10_000) });
-    if (response.status === 401 || response.status === 403) {
-      // A policy decision that will not change tick-to-tick — stop hitting it for the rest of
-      // the run instead of firing ~once a second against a 401 until `deadline`.
-      runsAuthFailed = true;
-      if (!authErrors.runs) {
-        authErrors.runs = { status: response.status, atMs: Date.now() - started, path: `/api/v1/runs/${RUN_ID}` };
+    const response = await fetch(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) {
+      const bodySnippet = (await response.text().catch(() => '')).slice(0, 200);
+      run.errorCount += 1;
+      run.lastError = { status: response.status, bodySnippet };
+      if (isAuthFailureStatus(response.status)) {
+        run.authFailed = true;
+        if (!runAuthRequiredLogged) {
+          runAuthRequiredLogged = true;
+          logAuthRequired(url, response.status);
+        }
       }
       return;
     }
-    if (!response.ok) return;
-    const run = await response.json();
-    if (run?.status) runStatuses.add(run.status);
+    run.sampleCount += 1;
+    const record = await response.json();
+    if (record?.status) runStatuses.add(record.status);
   } catch {
     // Counted by the poller above; this sampler is not the failure detector.
   }
@@ -136,26 +158,35 @@ async function sampleRun() {
  *
  * Resuming is the whole test: a client that reconnected from scratch would see the transcript
  * replayed and could not tell a gap from a duplicate. Carrying the last seq is what makes the
- * continuity assertion meaningful.
+ * continuity assertion meaningful — and `sse.reconnects` only counts a connection that actually
+ * resumed (carried `Last-Event-ID` and got back a live stream), not every loop iteration that
+ * happened to end, so a window with no real cutover in it can't manufacture a false reconnect.
  */
 async function subscribe() {
   if (!RUN_ID) return;
   let lastSeq = 0;
   while (Date.now() < deadline) {
+    if (sse.authFailed) return;
+    const isReconnect = lastSeq !== 0;
+    const url = `${RUNS_BASE}/${RUN_ID}/events`;
     try {
-      const response = await fetch(`${BASE}/api/v1/runs/${RUN_ID}/events`, {
+      const response = await fetch(url, {
         headers: { ...headers, accept: 'text/event-stream', ...(lastSeq ? { 'Last-Event-ID': String(lastSeq) } : {}) },
+        redirect: 'manual',
       });
-      if (response.status === 401 || response.status === 403) {
-        // Same reasoning as sampleRun(): a deterministic policy decision, not a transient drop.
-        // Stop and return instead of sleeping 100ms and reconnecting until `deadline` (up to
-        // ~1200 attempts in a default 120s run).
-        if (!authErrors.events) {
-          authErrors.events = { status: response.status, atMs: Date.now() - started, path: `/api/v1/runs/${RUN_ID}/events` };
+      if (isAuthFailureStatus(response.status)) {
+        sse.authFailed = true;
+        if (!sseAuthRequiredLogged) {
+          sseAuthRequiredLogged = true;
+          logAuthRequired(url, response.status);
         }
         return;
       }
-      if (!response.ok || !response.body) throw new Error(`events answered ${response.status}`);
+      const contentType = response.headers.get('content-type') ?? '';
+      if (!response.ok || !response.body || !contentType.startsWith('text/event-stream')) {
+        throw new Error(`events answered ${response.status} (content-type: ${contentType || 'none'})`);
+      }
+      if (isReconnect) sse.reconnects += 1;
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -177,9 +208,9 @@ async function subscribe() {
           return;
         }
       }
-      sse.reconnects += 1;
     } catch (err) {
       sse.errors.push({ atMs: Date.now() - started, error: String(err?.message ?? err) });
+      sse.errorCount += 1;
       await new Promise((r) => setTimeout(r, 100));
     }
   }
@@ -201,6 +232,9 @@ function handleFrame(frame, setSeq) {
   if (!data) return;
   try {
     const payload = JSON.parse(data);
+    // Every parsed data frame counts here, seq or not — the interrupted-event assertion is driven
+    // by `message`, not `seq`, so this is its sample base, not `sse.seqs.length`.
+    sse.dataFrames += 1;
     if (typeof payload.seq === 'number') {
       sse.seqs.push(payload.seq);
       setSeq(payload.seq);
@@ -228,6 +262,21 @@ function continuity(seqs) {
   return { gaps, duplicates };
 }
 
+/**
+ * An assertion computed over zero samples is `not-measured`, full stop — the predicate never runs
+ * on nothing. A stream whose credential died (`authFailed`) is `not-measured` regardless of how
+ * many samples it collected before the failure, since measurement that stopped early is not the
+ * same as measurement that covered the whole window; `sample` still reports the true pre-failure
+ * count so an artifact reader can see how much data was collected before the credential died.
+ */
+function assertion(sample, authFailed, notMeasuredReason, predicate) {
+  if (authFailed) return { verdict: 'not-measured', sample, reason: 'auth-failed' };
+  if (sample === 0) {
+    return notMeasuredReason ? { verdict: 'not-measured', sample, reason: notMeasuredReason } : { verdict: 'not-measured', sample };
+  }
+  return { verdict: predicate() ? 'passed' : 'failed', sample };
+}
+
 async function main() {
   const pollLoop = (async () => {
     const interval = 1000 / POLL_HZ;
@@ -248,35 +297,30 @@ async function main() {
   const latencies = poll.latencies.slice().sort((a, b) => a - b);
   const p = (q) => latencies[Math.min(latencies.length - 1, Math.floor(latencies.length * q))] ?? 0;
 
-  // An assertion computed from zero observations is NOT_MEASURED, never a vacuous PASS — an
-  // empty array/set satisfies `.every(...)` and `.length === 0` trivially, and this script was
-  // measured printing `passed: true` on exactly that basis (see the spec this implements).
-  const pollObserved = poll.total > 0;
-  const sseObserved = sse.seqs.length > 0;
-  const runObserved = runStatuses.size > 0;
+  const noRunId = !RUN_ID;
+  // Gated on having observed a *resumed* connection, not just on having seen frames: a window with
+  // no cutover in it saw events but never measured continuity "across a reconnect", which is what
+  // acceptance criterion #2 actually asks for.
+  const sseSample = sse.reconnects > 0 ? sse.seqs.length : 0;
 
   const assertions = {
-    // (b) the definition of "gap = 0" the spec commits to.
-    'b: zero failed HTTP requests': !pollObserved ? 'NOT_MEASURED' : poll.nonOk.length === 0 ? 'PASS' : 'FAIL',
-    'b: zero refused connections': !pollObserved ? 'NOT_MEASURED' : poll.connectErrors.length === 0 ? 'PASS' : 'FAIL',
-  };
-  if (RUN_ID) {
-    // Whether the two authenticated endpoints were even reachable — a 401/403 is a hard failure,
-    // not a silently-ignored error entry.
-    assertions['auth: /runs/:id reachable'] = authErrors.runs ? 'FAIL' : 'PASS';
-    assertions['auth: /runs/:id/events reachable'] = authErrors.events ? 'FAIL' : 'PASS';
-    // (c) no lost or duplicated events across the reconnect. Only meaningful once `--run` is
-    // supplied — `sse.seqs` can only be non-empty when RUN_ID is set.
-    assertions['c: no seq gaps'] = !sseObserved ? 'NOT_MEASURED' : gaps.length === 0 ? 'PASS' : 'FAIL';
-    assertions['c: no seq duplicates'] = !sseObserved ? 'NOT_MEASURED' : duplicates.length === 0 ? 'PASS' : 'FAIL';
+    // (b) the definition of "gap = 0" the spec commits to. Never gated on RUN_ID or auth — /ready
+    // is exempt from the principal middleware.
+    'b: zero failed HTTP requests': assertion(poll.total, false, undefined, () => poll.nonOk.length === 0),
+    'b: zero refused connections': assertion(poll.total, false, undefined, () => poll.connectErrors.length === 0),
+    // (c) no lost or duplicated events across the reconnect.
+    'c: no seq gaps': assertion(sseSample, sse.authFailed, noRunId ? 'no-run-id' : undefined, () => gaps.length === 0),
+    'c: no seq duplicates': assertion(sseSample, sse.authFailed, noRunId ? 'no-run-id' : undefined, () => duplicates.length === 0),
     // (a) the run never leaves `running`, and is not force-continued.
-    assertions['a: run never left running'] = !runObserved
-      ? 'NOT_MEASURED'
-      : [...runStatuses].every((s) => s === 'running')
-        ? 'PASS'
-        : 'FAIL';
-    assertions['a: no interrupted event'] = !runObserved ? 'NOT_MEASURED' : !sawInterrupted ? 'PASS' : 'FAIL';
-  }
+    'a: run never left running': assertion(run.sampleCount, run.authFailed, noRunId ? 'no-run-id' : undefined, () =>
+      [...runStatuses].every((s) => s === 'running'),
+    ),
+    'a: no interrupted event': assertion(sse.dataFrames, sse.authFailed, noRunId ? 'no-run-id' : undefined, () => !sawInterrupted),
+  };
+
+  const verdicts = Object.values(assertions).map((a) => a.verdict);
+  const verdict = verdicts.includes('failed') ? 'failed' : verdicts.includes('not-measured') ? 'not-measured' : 'passed';
+  const exitCode = verdict === 'passed' ? 0 : verdict === 'failed' ? 1 : 2;
 
   const report = {
     base: BASE,
@@ -287,8 +331,9 @@ async function main() {
       ok: poll.ok,
       failed: poll.nonOk.length,
       connectErrors: poll.connectErrors.length,
-      // `gapMs` as the spec names it: the max client-observed latency across the swap.
+      // `gapMs` as the parent spec names it: the max client-observed latency across the swap.
       gapMs: poll.maxLatencyMs,
+      maxLatencyMs: poll.maxLatencyMs, // exact alias of gapMs — same number, the name defect 8dc8bf3a asked for
       p50: p(0.5),
       p99: p(0.99),
       failures: poll.nonOk.slice(0, 20),
@@ -298,16 +343,27 @@ async function main() {
       events: sse.seqs.length,
       reconnects: sse.reconnects,
       reloadFrames: sse.reloadFrames,
+      dataFrames: sse.dataFrames,
       gaps,
       duplicates,
-      // 401/403 on `/events` exits subscribe() before it would repeat, so this array holds only
-      // the transient (non-auth) errors the retry loop rode out.
       errors: sse.errors.slice(0, 20),
+      errorCount: sse.errorCount,
+      authFailed: sse.authFailed,
     },
-    run: { statuses: [...runStatuses], sawInterrupted, sawKeptGoing },
-    auth: { events: authErrors.events, runs: authErrors.runs },
+    run: {
+      statuses: [...runStatuses],
+      sawInterrupted,
+      sawKeptGoing,
+      sampleCount: run.sampleCount,
+      authFailed: run.authFailed,
+      errorCount: run.errorCount,
+      lastError: run.lastError,
+    },
     assertions,
-    passed: Object.values(assertions).every((state) => state === 'PASS'),
+    verdict,
+    // Kept for callers that still grep `"passed": true` — narrowed so it can never read `true` on a
+    // `not-measured` verdict, which is the defect this field's own presence used to launder.
+    passed: verdict === 'passed',
   };
 
   const text = JSON.stringify(report, null, 2);
@@ -316,17 +372,12 @@ async function main() {
     writeFileSync(OUT, `${text}\n`);
   }
   console.log(text);
-  for (const [name, state] of Object.entries(assertions)) {
-    console.log(`${state.padEnd(12)}  ${name}`);
-    if (state === 'FAIL' && name.startsWith('auth:')) {
-      const detail = name.includes('events') ? report.auth.events : report.auth.runs;
-      console.log(
-        `      → ${detail.status} unauthenticated at t=${detail.atMs}ms. Supply credentials: --header 'cookie: cez_session=<value>'`,
-      );
-      console.log(`        (see script usage comment / README "CEZ_AUTH=oidc" for how to obtain one)`);
-    }
+  for (const [name, result] of Object.entries(assertions)) {
+    const label = result.verdict === 'passed' ? 'PASS' : result.verdict === 'failed' ? 'FAIL' : 'UNMEASURED';
+    console.log(`${label.padEnd(10)}  ${name.padEnd(36)}  (n=${result.sample})`);
   }
-  process.exit(report.passed ? 0 : 1);
+  console.log(`verdict=${verdict} exit=${exitCode}`);
+  process.exit(exitCode);
 }
 
 await main();

@@ -1,5 +1,22 @@
 # deploy-e2e-probe: an assertion with zero samples must say so, never PASS
 
+> **SUPERSEDED 2026-08-24 by the merge of this fix — the code below IS now on `origin/main`.**
+> The correction immediately below (written earlier the same day) says this file was added as
+> documentation only, that "the code itself remains on the unmerged branch", and that
+> "`origin/main`'s `deploy-e2e-probe.mjs` has no `--project`/`PROJECT_ID` support". Both were true
+> when written and are false now. The blocker it names — the `packages/web/src/api/client.ts`
+> typecheck break, todo `96a25516` — is cleared upstream: `npm run typecheck` is green across all
+> four workspace packages. Following that block's own instruction ("Whoever lands `96a25516` should
+> rebase `cez/3ee1ebf0` on top and merge this fix — at that point this file's status should be
+> corrected again, in place"), `cez/3ee1ebf0` was merged on 2026-08-24, carrying
+> `packages/cezar/scripts/deploy-e2e-probe.mjs` (tri-state assertions **and** `--project`/
+> `PROJECT_ID` scoping) and `packages/cezar/test/e2e/deploy-e2e-probe.test.ts` (7 scenarios, green).
+> `fe158c70` stays unresolvable — repeated rebases rewrote it — so cite this merge by date, not by
+> that SHA. The "Status" line below still overstates history: Phases 1–5 are complete, but
+> "shipped" became true only with this merge.
+>
+> Earlier correction of 2026-08-24, left unchanged below:
+>
 > **CORRECTED 2026-08-24 — added to `origin/main` as a documentation-only file; the code below
 > is NOT shipped.** The status line directly beneath this one reads *"Implemented, tested and
 > shipped... commit `fe158c70` on `cez/3ee1ebf0`"*. That was never true of `origin/main` and is no

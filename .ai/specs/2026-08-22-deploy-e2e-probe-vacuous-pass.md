@@ -1,5 +1,20 @@
 # The deploy E2E probe must not report PASS on what it never observed
 
+**SUPERSEDED 2026-08-24 (merge) — `cez/3ee1ebf0` is now an ancestor of `origin/main`.** Three
+claims below were true when written and are false now, so read them as history: (1) the status line
+saying commit `fe158c70` and
+`.ai/specs/2026-08-22-deploy-e2e-probe-measured-assertions.md` "**remain on branch `cez/3ee1ebf0`
+and are not ancestors of `origin/main`**"; (2) "Until that lands and the branch is rebased and
+merged, the **shipped** probe (this file's `83ddbdd2`) has no `--project` flag"; and (3) the
+blocker itself — todo `96a25516`, the `packages/web/src/api/client.ts` typecheck break — which
+cleared upstream (`npm run typecheck` is green across all four workspace packages). The branch was
+rebased onto current `origin/main` and merged on 2026-08-24, so the shipped probe now carries both
+the tri-state `{verdict, sample, reason?}` assertions and `--project`/`PROJECT_ID` scoping, and can
+reach this box's project-scoped run routes directly. `fe158c70` itself stays unresolvable — repeated
+rebases rewrote its SHA — so cite that merge by date, not by that SHA. What this file records about
+`83ddbdd2` (the earlier, independent P1/P2/P3 fix that shipped first) is unchanged and still
+accurate. Original text follows unchanged.
+
 **Status:** **Implemented and verified 2026-08-23.** Commit `83ddbdd2` on `origin/main` shipped the
 P1 vacuous-pass guard, P2 hard 401/403 failure, and P3 credential documentation. A sibling task
 then exercised the credentialed production cutover with a stricter report shape; its commit
