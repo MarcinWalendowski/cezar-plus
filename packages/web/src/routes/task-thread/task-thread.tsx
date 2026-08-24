@@ -32,6 +32,7 @@ import { PlanDock, planCounts } from './plan-dock'
 import { collectSubagents, findSubagent, subagentChildren } from './subagent-dock'
 import { SubagentSheet } from './subagent-sheet'
 import { ApprovalCard } from './approval-card'
+import { HandoffCard } from './handoff-card'
 import { AcceptCelebration, ReviewPanel } from './review-panel'
 import { queuePosition } from './run-actions'
 import { RunHeader } from './run-header'
@@ -382,6 +383,7 @@ export function ThreadView({
         {/* The review gate (spec 009): a finished run with changes parks here — nothing
             auto-merges. The panel exists exactly while the run rests at `review`. */}
         {run.pendingApproval ? <ApprovalCard key={run.id} run={run} /> : null}
+        {run.pendingHandoff ? <HandoffCard key={run.id} run={run} /> : null}
         {run.status === 'review' ? <ReviewPanel key={run.id} run={run} /> : null}
       </div>
 

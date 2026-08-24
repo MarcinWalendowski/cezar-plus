@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { mkdtemp } from 'node:fs/promises';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import {
   parseAskMarkerResult,
@@ -59,7 +61,7 @@ import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeS
 import { LEASE_HEARTBEAT_MS, removeWorktreeLeases, touchWorktreeLeases, writeWorktreeLease } from '../workspace/worktree-lease.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 import { loadWorkflows } from './load.ts';
-import { evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
+import { deriveBaseBranch, evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
 import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/store.ts';
 import type { TaskAuthor } from '../runs/task-author.ts';
 import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.ts';
@@ -121,7 +123,7 @@ import {
   discardWorkspaceWorktrees,
   materializeWorkspaceWorktrees,
 } from '../workspace/workspace-worktrees.ts';
-import type { PendingApproval, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
+import type { PendingApproval, PendingHandoff, TestAttestation, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { UiEventSink } from '../runs/ui-event-sink.ts';
@@ -268,6 +270,7 @@ const REPOSITORY_ROOT_LOCK_DISABLED_NOTE =
 
 /** How a parked approval gate released (spec 2026-08-20, P3). */
 type ApprovalOutcome = { kind: 'approved' } | { kind: 'changes'; notes: string } | { kind: 'cancelled' };
+type HandoffOutcome = { kind: 'resolved'; verdict: PostconditionResult } | { kind: 'skipped' } | { kind: 'cancelled' };
 
 interface ActiveRun {
   cancelled: boolean;
@@ -329,6 +332,8 @@ interface ActiveRun {
   /** Resolver for a run parked on a human approval gate (spec 2026-08-20, P3). Present ONLY
    *  while parked; `approve`/`requestChanges` call it, `cancel` aborts it. */
   approvalWaiter?: (outcome: ApprovalOutcome) => void;
+  /** Resolver for a run parked on a manual deployment or merge handoff. */
+  handoffWaiter?: (outcome: { kind: 'resolve' | 'skip' }) => Promise<{ resolved: boolean; verdict: string }>;
   /**
    * A continuation ended its turn with `CEZ:DONE` while its run's CHAIN still had pending steps
    * (spec 2026-08-20, P2). The marker is a statement about the agent's OWN step, so the session
@@ -2271,6 +2276,13 @@ export class RunManager {
         continue;
       }
       if (run.status === 'waiting') {
+        if (run.pendingHandoff) {
+          this.store.appendEvent(run.id, {
+            type: 'lifecycle',
+            message: `cezar restarted, still waiting for ${run.pendingHandoff.kind === 'manual-deploy' ? 'manual deployment' : 'manual merge'}`,
+          });
+          continue;
+        }
         // A run parked on an APPROVAL GATE stays parked (spec 2026-08-20, P3). Everything below
         // this line settles the open step to `done` — which, for a gated step, would silently
         // grant the approval that a human was asked for and never gave. That is the exact failure
@@ -3047,14 +3059,32 @@ export class RunManager {
    */
   private async rerouteExplicitAccountIfLimited(
     runId: string,
-    input: ExecuteRunInput,
+    // Narrowed to the two fields this actually reads (not the full `ExecuteRunInput`) so
+    // `runContinuation` can call it too — a continuation has no `ExecuteRunInput`, only the
+    // account/provider a resume is about to pin to.
+    input: Pick<ExecuteRunInput, 'agentProfile' | 'runner'>,
     defaultRunner: RunnerId,
   ): Promise<PoolChoice | undefined> {
     if (!this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
     try {
       const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
       const provider = (input.runner ?? defaultRunner) as ProviderId;
-      const current = accountUsageKey(provider, input.agentProfile);
+      // A dangling `agentProfile` — one that names no stored account for this provider (a since-
+      // removed account, or a value written before the account existed) — resolves to the provider's
+      // DEFAULT login downstream (`selectProfile`'s own fallback, `workspace/agent-profiles.ts`).
+      // Checking the raw id here reads as "not limited" for an id that never had a usage entry in
+      // the first place, so this returned early forever while the DEFAULT account it silently fell
+      // back to sat held: measured on `prod-host`, a run pinned to `codex:secondary` — no such
+      // account exists — kept resolving to (and failing on) the held `codex:default`, while a real,
+      // unlimited `codex:second-example-com` sat idle. Resolve against the same rule
+      // `selectProfile` uses so this checks the hold on the account that will actually run.
+      const resolvedAgentProfile =
+        input.agentProfile !== undefined &&
+        input.agentProfile !== DEFAULT_AGENT_ACCOUNT_ID &&
+        accounts.accounts.some((account) => account.provider === provider && account.id === input.agentProfile)
+          ? input.agentProfile
+          : undefined;
+      const current = accountUsageKey(provider, resolvedAgentProfile);
       // Nothing to route around. The common case, and the cheap exit.
       if (!isLimited(usageEntry(usage, current).limited)) return undefined;
 
@@ -3069,7 +3099,7 @@ export class RunManager {
         ? selectPoolAccount({ candidates, store: usage, inflight: this.semaphore.accountInflight() })
         : undefined;
       if (!choice) return undefined;
-      if (choice.provider === provider && choice.accountId === (input.agentProfile || DEFAULT_AGENT_ACCOUNT_ID)) {
+      if (choice.provider === provider && choice.accountId === (resolvedAgentProfile ?? DEFAULT_AGENT_ACCOUNT_ID)) {
         return undefined;
       }
 
@@ -3617,7 +3647,12 @@ export class RunManager {
       // settles it `cancelled` directly; every other statusless run is genuinely gone (409).
       const run = this.store.getRun(runId);
       if (run?.status === 'waiting') {
-        this.store.updateRun(runId, { status: 'cancelled', finishedAt: new Date().toISOString() });
+        this.store.updateRun(runId, {
+          status: 'cancelled',
+          finishedAt: new Date().toISOString(),
+          pendingHandoff: undefined,
+          waitingReason: undefined,
+        });
         this.store.appendEvent(runId, { type: 'lifecycle', message: 'run cancelled' });
         return true;
       }
@@ -4248,6 +4283,73 @@ export class RunManager {
     // invisible to the enforcer forever. Best-effort; falls back to repoRoot.
     await rematerializeReclaimedWorktree(this.repoRoot, this.store, runId);
     const record = this.store.getRun(runId);
+    // Resuming reattaches to a session that lives inside ONE account's config dir, so the
+    // continuation must run under the account that created it — not whatever the project has
+    // been switched to since. The owning step is the one carrying this session id. Computed here,
+    // as early as possible, because `continueBackend` (below) is read by everything else in this
+    // method, including the step-start stamp and the `session` event handler further down — both
+    // of which used to write the raw `backend` PARAMETER, which a reroute can now diverge from.
+    const resumedProfileId = sessionId === undefined
+      ? undefined
+      : record?.steps.find((s) => s.sessionId === sessionId)?.profileId;
+    // Out-of-quota fallback for a RESUME (extends spec 2026-08-24-reroute-checks-dangling-
+    // account-key). `execute()` checks a fresh dispatch against a hold via
+    // `rerouteExplicitAccountIfLimited`; nothing ever checked a CONTINUATION the same way, so a
+    // manual Continue and every unattended auto-resume (`fireAutoResume` calls `continueRun`,
+    // nothing else) kept re-pinning to the same held login forever — measured on
+    // `prod-host`: a run parked behind a hold auto-resumed, failed, and re-armed the next
+    // appointment days out, on repeat, while a second unlimited account of the same provider sat
+    // idle. `agentEnvForStep` (below) resolves the SAME account this reroute checks
+    // (`recordedProfileId ?? run.agentProfile`) when called from here — the two must agree on the
+    // identity or this checks a hold nobody will run under, the exact defect
+    // `2026-08-24-reroute-checks-dangling-account-key.md` fixed for `execute()`.
+    const rerouted = await this.rerouteExplicitAccountIfLimited(
+      runId,
+      { agentProfile: resumedProfileId ?? record?.agentProfile, runner: backend },
+      backend,
+    );
+    if (rerouted) {
+      // Same reasoning as `execute()`'s own write of `chosen.accountId`: from here on the record
+      // names the account that is actually going to run, so the thread header, the next resume,
+      // and "which account spent this" all keep answering with a login that exists. `runner` too —
+      // the candidate pool spans every profile-capable provider (same as `execute()`'s reroute), so
+      // the account that opened up is not necessarily on the provider this continuation was pinned
+      // to; leaving `runner` unchanged would send `continueBackend` (below) to the OLD provider
+      // while `agentProfile` named an account on the NEW one, and `resolveProfileEnvForRoot` would
+      // resolve that pair against the WRONG provider's login list.
+      //
+      // A crossed-provider reroute can also strand a model pin the OLD provider understood and the
+      // NEW one does not (`continueRun`'s own `opts.runner` switch already guards this — search
+      // `inheritedPinIsForeign` — but that guard only runs when the CALLER named a runner; this
+      // reroute picks one automatically, on a plain Continue or an unattended auto-resume, so
+      // nothing upstream has looked at the pairing). Dropped rather than substituted, same call
+      // `modelForBackend` already makes for the per-step path, and the same reason: a pinned vendor
+      // id for the new provider goes stale; falling through to its own default does not.
+      const foreignModelPin =
+        record?.model !== undefined && modelConflictsWithRunner(record.model, rerouted.provider);
+      this.store.updateRun(runId, {
+        runner: rerouted.provider,
+        agentProfile: rerouted.accountId,
+        ...(foreignModelPin ? { model: undefined } : {}),
+      });
+    }
+    // A rerouted continuation cannot reattach to the old transcript — it lives inside the OLD
+    // account's own config dir, which is the entire reason `resumedProfileId` was pinned in the
+    // first place. Forcing the downgrade here reuses the exact fresh-session mechanism the
+    // "no transcript for the recorded session" branch below already has for the same shape of
+    // problem (a resume that cannot honor the session it was given).
+    let resumeDowngraded = rerouted !== undefined;
+    if (resumeDowngraded) {
+      this.store.appendEvent(runId, {
+        type: 'note',
+        stepId,
+        message: 'the account this session belongs to is out of quota — starting fresh on the new account',
+      });
+    }
+    // Backend + model come off the record: the run's current backend by default, or the
+    // follow-up override that `continueRun` persisted before scheduling (#401) — or the reroute
+    // just above, which takes the same precedence a fresh dispatch gives `chosen` over `input.runner`.
+    const continueBackend = rerouted?.provider ?? backend;
     // The env is a live ceiling: a run created while the inbox was on must not keep writing
     // follow-ups after it is switched off.
     const generateFollowups = followupsEnabled() && record?.generateFollowups !== false;
@@ -4350,7 +4452,7 @@ export class RunManager {
       iterations: 1,
       startedAt: new Date().toISOString(),
       sessionId,
-      backend,
+      backend: continueBackend,
     });
     this.store.appendEvent(runId, { type: 'step-start', stepId, name, kind: 'agent', iteration: 1 });
     // Attachments pasted into the follow-up composer, on the same terms as a live-session
@@ -4406,7 +4508,7 @@ export class RunManager {
       }
       if (sessionError) return;
       if (event.type === 'session') {
-        this.store.updateStep(runId, stepId, { sessionId: event.sessionId, backend });
+        this.store.updateStep(runId, stepId, { sessionId: event.sessionId, backend: continueBackend });
       }
       if (event.type === 'token-usage') {
         this.store.updateStep(runId, stepId, { tokensUsed: event.tokensUsed });
@@ -4557,9 +4659,6 @@ export class RunManager {
       }
     };
 
-    // Backend + model come off the record: the run's current backend by default, or the
-    // follow-up override that `continueRun` persisted before scheduling (#401).
-    const continueBackend = backend;
     /** Settle this turn as a failure before anything is spawned — the shape both
      *  pre-spawn gates below need (model identity, #405; temp directory, #785). */
     const failBeforeSpawn = (message: string): void => {
@@ -4590,8 +4689,13 @@ export class RunManager {
     // instead of `opus`). Fail loud here too rather than let the backend pick a default.
     let continueModel: string | undefined;
     // Hoisted for the same reason as `stepRawModel` in `runAgentStep`: the mapper and the record
-    // must read one expression, not two copies of it.
-    const continueRawModel = agentModelsLocked(this.repoRoot) ? undefined : record?.model;
+    // must read one expression, not two copies of it. Re-checked against `continueBackend` (not
+    // just read off the STALE in-memory `record`) so a crossed-provider reroute above is honored
+    // here even though `record` was never re-fetched after that write.
+    const continueRawModel =
+      agentModelsLocked(this.repoRoot) || (record?.model !== undefined && modelConflictsWithRunner(record.model, continueBackend))
+        ? undefined
+        : record?.model;
     try {
       const normalized = normalizeModelForBackend(continueBackend, continueRawModel, {
         configuredProvider: await configuredModelProvider(continueBackend, state.cwd),
@@ -4620,12 +4724,6 @@ export class RunManager {
       failBeforeSpawn(err.message);
       return;
     }
-    // Resuming reattaches to a session that lives inside ONE account's config dir, so the
-    // continuation must run under the account that created it — not whatever the project has
-    // been switched to since. The owning step is the one carrying this session id.
-    const resumedProfileId = sessionId === undefined
-      ? undefined
-      : record?.steps.find((s) => s.sessionId === sessionId)?.profileId;
     // The temp-directory preflight (#785) rides along with the account resolution: a resumed
     // turn hits the same broken `/tmp` a fresh one would, and an agent whose shell silently
     // returns nothing is worse than a turn that refuses to start and says why.
@@ -4637,9 +4735,9 @@ export class RunManager {
     try {
       continueProfile = await this.agentEnvForStep(runId, continueBackend, {
         generateFollowups,
-        recordedProfileId: resumedProfileId,
+        recordedProfileId: rerouted ? rerouted.accountId : resumedProfileId,
         stepId,
-        ...(sessionId === undefined ? {} : { sessionId }),
+        ...(sessionId === undefined || resumeDowngraded ? {} : { sessionId }),
       });
     } catch (err) {
       if (!(err instanceof AgentTempDirError)) throw err;
@@ -4655,8 +4753,10 @@ export class RunManager {
     // no `userPrompt` rebuild is needed on a miss: `prompt` is the caller's own opening message
     // either way, not a restart-continuation prompt tied to an assumption the session already
     // holds context (see spec Phase 1, "Phase 3 is unaffected for a different reason").
-    let resumeDowngraded = false;
-    if (continueBackend === 'claude' && sessionId !== undefined) {
+    // Skipped when the reroute above already downgraded: the transcript is on the OLD account's
+    // config dir, which `continueProfile.env` (built for the NEW account) can no longer see —
+    // checking it here would read as "missing" for the wrong reason and double-log the downgrade.
+    if (!resumeDowngraded && continueBackend === 'claude' && sessionId !== undefined) {
       const claudeHome = agentHomePaths({ ...process.env, ...continueProfile.env }).claude;
       const exists = await claudeSessionTranscriptExists(claudeHome, state.cwd, sessionId);
       if (!exists) {
@@ -4824,7 +4924,7 @@ export class RunManager {
       // continuation-path twin of the chain loop's Phase 2 branch, and what
       // `recover-session-failure.test.ts` exercises. `sessionId !== undefined` means this attempt
       // actually resumed a session; `!retriedMissingSession` bounds it to one retry.
-      } else if (!retriedMissingSession && sessionId !== undefined && isMissingSessionRejection(backend, message)) {
+      } else if (!retriedMissingSession && sessionId !== undefined && isMissingSessionRejection(continueBackend, message)) {
         missingSessionRetry = true;
         this.store.appendEvent(runId, {
           type: 'note',
@@ -4836,7 +4936,7 @@ export class RunManager {
           stepId,
           name: 'run.step.resumed_after_missing_session',
           runId,
-          backend,
+          backend: continueBackend,
         });
       } else {
         sink.sessionEnded('error', message);
@@ -5268,7 +5368,7 @@ export class RunManager {
     let stopReason: AgentStopReason | undefined;
 
     let i = resumeIdx;
-    while (i < workflow.steps.length) {
+    stepLoop: while (i < workflow.steps.length) {
       if (state.cancelled) break;
       if (this.budgetSpent(runId, config)) {
         state.budgetExceeded = true;
@@ -5461,7 +5561,25 @@ export class RunManager {
         }
         if (state.budgetExceeded) break; // its own turn-end handler already landed this — see there
 
-        const verdict = await this.runStepVerify(runId, state, step, emit);
+        let verdict = await this.runStepVerify(runId, state, step, emit, config);
+        if (state.cancelled) break;
+        while (verdict.handoff) {
+          const handoff = await this.awaitHandoff(
+            runId,
+            state,
+            step,
+            emit,
+            verdict,
+            () => this.runStepVerify(runId, state, step, emit, config),
+          );
+          if (handoff.kind === 'cancelled') break;
+          if (handoff.kind === 'skipped') {
+            this.finishStep(runId, step.id, 'skipped', 'manual handoff skipped', emit);
+            i++;
+            continue stepLoop;
+          }
+          verdict = handoff.verdict;
+        }
         if (state.cancelled) break;
         if (!verdict.ok) {
           const attempt = this.retryAfterFailedPostcondition(runId, step, verdict, verifyRetries, emit);
@@ -5541,6 +5659,8 @@ export class RunManager {
           }
         }
 
+        if (step.id === 'run-tests') await this.recordTestAttestation(runId, state, step.id, emit);
+        if (step.id === 'commit-push') await this.recordShippedAttestation(runId, state, step.id, emit);
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
@@ -5550,7 +5670,25 @@ export class RunManager {
       this.spendBudgetUnit(runId); // a check attempt is one unit, same as an agent turn
       if (state.cancelled) break;
       if (ok) {
-        const verdict = await this.runStepVerify(runId, state, step, emit);
+        let verdict = await this.runStepVerify(runId, state, step, emit, config);
+        if (state.cancelled) break;
+        while (verdict.handoff) {
+          const handoff = await this.awaitHandoff(
+            runId,
+            state,
+            step,
+            emit,
+            verdict,
+            () => this.runStepVerify(runId, state, step, emit, config),
+          );
+          if (handoff.kind === 'cancelled') break;
+          if (handoff.kind === 'skipped') {
+            this.finishStep(runId, step.id, 'skipped', 'manual handoff skipped', emit);
+            i++;
+            continue stepLoop;
+          }
+          verdict = handoff.verdict;
+        }
         if (state.cancelled) break;
         if (!verdict.ok) {
           // Deliberately NOT stashed in `checkFailure`: that channel appends text to a retried
@@ -5563,6 +5701,8 @@ export class RunManager {
           runError = `step "${step.id}" did not meet its post-condition: ${verdict.detail}`;
           break;
         }
+        if (step.id === 'run-tests') await this.recordTestAttestation(runId, state, step.id, emit);
+        if (step.id === 'commit-push') await this.recordShippedAttestation(runId, state, step.id, emit);
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
@@ -5654,6 +5794,144 @@ export class RunManager {
     this.dropActive(runId);
   }
 
+
+  /** Park the chain until a manual deployment or merge is resolved or skipped. */
+  private async awaitHandoff(
+    runId: string,
+    state: ActiveRun,
+    step: WorkflowStepDef,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+    verdict: PostconditionResult,
+    recheck: () => Promise<PostconditionResult>,
+  ): Promise<HandoffOutcome> {
+    const handoff = verdict.handoff;
+    if (!handoff) return { kind: 'resolved', verdict };
+    const run = this.store.getRun(runId);
+    const existing = run?.pendingHandoff?.stepId === step.id ? run.pendingHandoff : undefined;
+    const pending: PendingHandoff = existing
+      ? {
+          ...existing,
+          kind: handoff.kind,
+          reason: handoff.reason.slice(0, 2_000),
+          ...(handoff.targets ? { targets: handoff.targets.slice(0, 50) } : {}),
+        }
+      : {
+          kind: handoff.kind,
+          stepId: step.id,
+          requestedAt: new Date().toISOString(),
+          reason: handoff.reason.slice(0, 2_000),
+          ...(handoff.targets ? { targets: handoff.targets.slice(0, 50) } : {}),
+          ...(run?.baseBranch ? { baseBranch: run.baseBranch } : {}),
+        };
+
+    this.store.updateRun(runId, { pendingHandoff: pending, status: 'waiting', waitingReason: 'handoff', activity: undefined });
+    this.store.updateStep(runId, step.id, { status: 'waiting' });
+    emit({
+      type: 'lifecycle',
+      stepId: step.id,
+      message: pending.kind === 'manual-deploy' ? 'awaiting manual deployment' : 'awaiting manual merge',
+    });
+
+    let restore: () => void = () => undefined;
+    const outcome = await new Promise<HandoffOutcome>((resolve) => {
+      let settled = false;
+      const once = (value: HandoffOutcome) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      state.handoffWaiter = async (decision) => {
+        if (decision.kind === 'skip') {
+          once({ kind: 'skipped' });
+          return { resolved: true, verdict: 'manual handoff skipped' };
+        }
+        const checked = await recheck();
+        if (checked.ok) {
+          once({ kind: 'resolved', verdict: checked });
+          return { resolved: true, verdict: checked.detail };
+        }
+        const next: PendingHandoff = {
+          ...pending,
+          reason: checked.detail.slice(0, 2_000),
+          ...(checked.handoff?.kind ? { kind: checked.handoff.kind } : {}),
+          ...(checked.handoff?.targets ? { targets: checked.handoff.targets.slice(0, 50) } : {}),
+        };
+        this.store.updateRun(runId, { pendingHandoff: next, status: 'waiting', waitingReason: 'handoff' });
+        emit({ type: 'note', stepId: step.id, message: `handoff recheck is still red: ${checked.detail}` });
+        return { resolved: false, verdict: checked.detail };
+      };
+      const parkedInterrupt = state.interrupt;
+      state.interrupt = () => {
+        parkedInterrupt();
+        once({ kind: 'cancelled' });
+      };
+      restore = () => {
+        state.interrupt = parkedInterrupt;
+      };
+      this.waiting.add(runId);
+      this.releaseSlot();
+    });
+
+    restore();
+    state.handoffWaiter = undefined;
+    this.waiting.delete(runId);
+    this.store.updateRun(runId, { pendingHandoff: undefined, waitingReason: undefined });
+    if (outcome.kind !== 'cancelled') {
+      this.store.updateRun(runId, { status: 'running' });
+      this.store.updateStep(runId, step.id, { status: 'running' });
+    }
+    return outcome;
+  }
+
+  /** Capture the final green test tree without touching the repository's real Git index. */
+  private async recordTestAttestation(
+    runId: string,
+    state: ActiveRun,
+    stepId: string,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): Promise<void> {
+    const temp = await mkdtemp(join(tmpdir(), 'cez-test-attestation-'));
+    const index = join(temp, 'index');
+    try {
+      const env = { ...process.env, GIT_INDEX_FILE: index };
+      const added = await runGit(state.cwd, ['add', '-A'], env);
+      const tree = added.ok ? await runGit(state.cwd, ['write-tree'], env) : added;
+      if (!tree.ok || !tree.stdout.trim()) {
+        emit({ type: 'note', stepId, message: `could not record test attestation: ${tree.stderr.trim() || 'git write-tree failed'}` });
+        return;
+      }
+      const head = await runGit(state.cwd, ['rev-parse', 'HEAD']);
+      const attestation: TestAttestation = {
+        stepId,
+        treeSha: tree.stdout.trim(),
+        ...(head.ok ? { headSha: head.stdout.trim() } : {}),
+        at: new Date().toISOString(),
+      };
+      this.store.updateRun(runId, { testAttestation: attestation });
+      emit({ type: 'note', stepId, message: `tests attested tree ${attestation.treeSha}` });
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  }
+
+  private async recordShippedAttestation(
+    runId: string,
+    state: ActiveRun,
+    stepId: string,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): Promise<void> {
+    const attestation = this.store.getRun(runId)?.testAttestation;
+    if (!attestation) return;
+    const head = await runGit(state.cwd, ['rev-parse', 'HEAD']);
+    if (!head.ok || !head.stdout.trim()) {
+      emit({ type: 'note', stepId, message: `could not record shipped SHA: ${head.stderr.trim() || 'HEAD is unavailable'}` });
+      return;
+    }
+    this.store.updateRun(runId, {
+      testAttestation: { ...attestation, shippedSha: head.stdout.trim() },
+    });
+    emit({ type: 'note', stepId, message: `shipped revision attested at ${head.stdout.trim()}` });
+  }
 
   // ---- the human approval gate (spec 2026-08-20-split-steps-spec-review-and-approval-gate, P3) --
 
@@ -5826,6 +6104,60 @@ export class RunManager {
       message: `changes requested by ${by}`,
     });
     return this.releaseApproval(runId, { kind: 'changes', notes: `${notes}\n\n— requested by ${by}` }, pending);
+  }
+
+  async resolveHandoff(
+    runId: string,
+    by = 'unknown',
+    note?: string,
+  ): Promise<{ ok: boolean; resolved?: boolean; verdict?: string; error?: string }> {
+    const run = this.store.getRun(runId);
+    if (!run) return { ok: false, error: 'not found' };
+    const pending = run.pendingHandoff;
+    if (!pending) return { ok: false, error: 'this run is not waiting for a handoff' };
+    this.store.appendEvent(runId, {
+      type: 'note',
+      stepId: pending.stepId,
+      message: `handoff resolve requested by ${by}${note ? `: ${note}` : ''}`,
+    });
+    const state = this.active.get(runId);
+    if (state?.handoffWaiter) {
+      const result = await state.handoffWaiter({ kind: 'resolve' });
+      return { ok: true, resolved: result.resolved, verdict: result.verdict };
+    }
+    return this.requeueHandoff(run, pending, 'handoff resolve requested after restart');
+  }
+
+  async skipHandoff(
+    runId: string,
+    by = 'unknown',
+    note: string,
+  ): Promise<{ ok: boolean; skipped?: boolean; error?: string }> {
+    const run = this.store.getRun(runId);
+    if (!run) return { ok: false, error: 'not found' };
+    const pending = run.pendingHandoff;
+    if (!pending) return { ok: false, error: 'this run is not waiting for a handoff' };
+    this.store.appendEvent(runId, { type: 'note', stepId: pending.stepId, message: `handoff skipped by ${by}: ${note}` });
+    const state = this.active.get(runId);
+    if (state?.handoffWaiter) {
+      await state.handoffWaiter({ kind: 'skip' });
+      return { ok: true, skipped: true };
+    }
+    this.store.updateRun(runId, { pendingHandoff: undefined, waitingReason: undefined });
+    this.store.updateStep(runId, pending.stepId, { status: 'skipped', error: note, finishedAt: new Date().toISOString() });
+    await this.reenterChain(this.store.getRun(runId) ?? run, 'manual handoff skipped');
+    return { ok: true, skipped: true };
+  }
+
+  private async requeueHandoff(
+    run: RunRecord,
+    pending: PendingHandoff,
+    reason: string,
+  ): Promise<{ ok: boolean; resolved?: boolean; verdict?: string; error?: string }> {
+    this.store.updateRun(run.id, { pendingHandoff: undefined, waitingReason: undefined });
+    this.store.updateStep(run.id, pending.stepId, { status: 'pending', error: undefined, finishedAt: undefined });
+    await this.reenterChain(this.store.getRun(run.id) ?? run, reason, { resetTo: pending.stepId });
+    return { ok: true, resolved: true, verdict: 'handoff recheck queued' };
   }
 
   /**
@@ -7219,27 +7551,51 @@ export class RunManager {
     state: ActiveRun,
     step: WorkflowStepDef,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+    config: CezConfig,
   ): Promise<PostconditionResult> {
     const verify = step.verify;
     if (!verify) return { ok: true, detail: '' };
 
-    if (verify.command) {
-      const { ok, output } = await this.runShell(state, step.id, verify.command, emit);
-      return { ok, detail: ok ? output : `\`${verify.command}\` exited non-zero:\n${output}` };
-    }
-
     // A workspace run applies its per-project worktrees back UNSTAGED on purpose, so it is
     // supposed to commit nothing — `everything-committed` has to know that or it fails them all.
-    const workspaceRun = (this.store.getRun(runId)?.workspaceProjects?.length ?? 0) > 0;
-    const result = await evaluatePostcondition(verify.builtin as string, { cwd: state.cwd, workspaceRun });
-    emit({
-      type: 'check-output',
-      stepId: step.id,
-      command: `post-condition: ${verify.builtin}`,
-      text: result.detail,
-      exitCode: result.ok ? 0 : 1,
-    });
-    return result;
+    const run = this.store.getRun(runId);
+    const workspaceRun = (run?.workspaceProjects?.length ?? 0) > 0;
+    const entries = Array.isArray(verify) ? verify : [verify];
+    const baseBranch = await deriveBaseBranch(state.cwd, run?.baseBranch, config.baseBranch);
+    const results: Array<PostconditionResult & { max: number }> = [];
+    for (const entry of entries) {
+      let result: PostconditionResult;
+      if (entry.command) {
+        const { ok, output } = await this.runShell(state, step.id, entry.command, emit);
+        result = { ok, detail: ok ? output : `\`${entry.command}\` exited non-zero:\n${output}` };
+      } else {
+        result = await evaluatePostcondition(entry.builtin as string, {
+          cwd: state.cwd,
+          workspaceRun,
+          stepId: step.id,
+          attestation: run?.testAttestation,
+          autoMerge: config.autoMerge,
+          baseBranch,
+        });
+        emit({
+          type: 'check-output',
+          stepId: step.id,
+          command: `post-condition: ${entry.builtin}`,
+          text: result.detail,
+          exitCode: result.ok ? 0 : 1,
+        });
+      }
+      results.push({ ...result, max: entry.max });
+    }
+    const failed = results.filter((result) => !result.ok);
+    if (failed.length === 0) return { ok: true, detail: results.map((result) => result.detail).filter(Boolean).join('\n') };
+    const first = failed[0] as PostconditionResult & { max: number };
+    return {
+      ok: false,
+      detail: failed.map((result) => result.detail).join('\n'),
+      ...(first.handoff ? { handoff: first.handoff } : {}),
+      retryMax: first.max,
+    };
   }
 
   /**
@@ -7255,7 +7611,7 @@ export class RunManager {
     ledger: Map<string, number>,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
   ): string | undefined {
-    const max = step.verify?.max ?? 0;
+    const max = verdict.retryMax ?? 0;
     const used = ledger.get(step.id) ?? 0;
     if (used >= max) return undefined;
     ledger.set(step.id, used + 1);
@@ -7311,7 +7667,7 @@ export class RunManager {
   private finishStep(
     runId: string,
     stepId: string,
-    status: 'done' | 'failed',
+    status: 'done' | 'failed' | 'skipped',
     error: string | undefined,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
     /** Set only when CEZAR stopped the step. `status` stays `failed` — `StepStatus` is a
@@ -7343,6 +7699,18 @@ export class RunManager {
       `step "${stepId}" complete — status=${status}${stopReason ? ' (stopped, not failed)' : ''}`,
     );
   }
+}
+
+function runGit(
+  cwd: string,
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile('git', args, { cwd, env, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8' }, (error, stdout, stderr) => {
+      resolve({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' });
+    });
+  });
 }
 
 function findLastAgentStepIndex(workflow: WorkflowDef): number {

@@ -575,6 +575,30 @@ function AgentsForm({
       </Field>
 
       <Field
+        title="Automatically merge into the base branch"
+        hint="When on, the merge stage may land the shipped revision on this repository's base branch. Off keeps protected merges manual. Default: off."
+      >
+        <label className="flex w-fit items-center gap-3">
+          <Switch
+            aria-label="Automatically merge into the base branch"
+            data-slot="agents-auto-merge"
+            checked={config.autoMerge ?? false}
+            disabled={save.isPending}
+            onCheckedChange={(checked) =>
+              save.mutate(
+                { autoMerge: checked },
+                { onSuccess: () => toast(checked ? 'Automatic merge on' : 'Automatic merge off') },
+              )
+            }
+          />
+          <span className="text-[13px] text-muted-foreground">
+            {(config.autoMerge ?? false) ? 'On' : 'Off'}
+            {config.autoMerge === null || config.autoMerge === undefined ? ' (default)' : ''}
+          </span>
+        </label>
+      </Field>
+
+      <Field
         title="Approvals before implementing a spec"
         hint="How many people must approve the spec before a task implements, pushes or deploys it. Default: 0 — approved automatically, nothing pauses. Above 1 needs real sign-in accounts, because it counts people, not clicks."
       >

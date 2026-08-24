@@ -356,6 +356,8 @@ export const configResponseSchema = z.object({
   /** Optional review gate (#489): null = no config key, the `CEZ_REVIEW_GATE` env default (OFF)
    *  decides. */
   reviewGate: z.boolean().nullable(),
+  /** Whether protected base branches may be landed automatically by the merge stage. */
+  autoMerge: z.boolean().nullable(),
   /**
    * Where an effective value came from, so the one Settings area can label a field **Inherited**
    * or **Overridden** (`.ai/specs/2026-08-21-one-settings-area.md`, Phase 3).
@@ -411,6 +413,7 @@ export const setConfigInputSchema = z.object({
   liveTitleUpdates: z.boolean().nullable().optional(),
   /** null clears the key back to the env-default behavior (OFF). */
   reviewGate: z.boolean().nullable().optional(),
+  autoMerge: z.boolean().nullable().optional(),
   minApprovers: z.number().int().min(0).max(10).nullable().optional(),
 });
 export type SetConfigInput = z.infer<typeof setConfigInputSchema>;

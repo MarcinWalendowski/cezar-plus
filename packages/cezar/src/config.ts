@@ -134,6 +134,8 @@ const configSchema = z.object({
    *  decides (default OFF — the deliberate inverse of `liveTitleUpdates`).
    *  Autonomous runs always skip the gate regardless of this. */
   reviewGate: z.boolean().optional(),
+  /** Allow the merge stage to land changes on the base branch automatically. */
+  autoMerge: z.boolean().optional(),
   /**
    * Branch task worktrees fork from and draft PRs target (e.g. `develop`).
    * Unset = the branch currently checked out. Settable from the Repo tab.

@@ -86,6 +86,7 @@ describe('the config API', () => {
       worktreeRetention: DEFAULT_WORKTREE_RETENTION,
       liveTitleUpdates: null,
       reviewGate: null,
+      autoMerge: null,
       // Which TIER answered (`.ai/specs/2026-08-21-one-settings-area.md`). With no repo file and
       // no machine file, nothing is inherited and nothing is overridden — and BOTH keys are
       // present, because "no machine opinion" has to be sayable.
@@ -209,6 +210,7 @@ describe('the config API', () => {
       worktreeRetention: DEFAULT_WORKTREE_RETENTION,
       liveTitleUpdates: null,
       reviewGate: null,
+      autoMerge: null,
       inherited: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
       // Exactly the keys the RAW file holds after the merge — the two the user had plus the three
       // the PUT wrote. `defaultRunner`, `plannerModel` and `worktreeRetention` are effective values
