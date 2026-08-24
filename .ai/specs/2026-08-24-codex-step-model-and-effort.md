@@ -326,4 +326,30 @@ box with `typecheck` (0) and the whole `workflows/` + codex-runner suites (487 p
 `model "sonnet" is not a codex model`, and the rollout for the `implement` step records
 `gpt-5.6-luna` at `xhigh`. Then `find /var/lib/cezar -not -user cezar | wc -l` → 0.
 
-Until V7 has run this is **QA Needed**, not Done.
+**V7a — done: the SHIPPED ARTIFACT carries the table.** Release `20260824T133306Z-b2c3aa79`,
+resolved out of `/opt/cezar/packages/cezar/dist/workflows/types.js` on the box itself:
+
+```
+context      codex: gpt-5.6-terra  medium   | claude: sonnet
+spec         codex: opus                    | claude: opus          ← runner-pinned, unchanged
+review-spec  codex: opus                    | claude: opus
+implement    codex: gpt-5.6-luna   xhigh    | claude: sonnet
+run-tests    codex: gpt-5.6-luna   medium   | claude: sonnet medium
+commit-push  codex: gpt-5.6-luna   medium   | claude: sonnet
+document     codex: gpt-5.6-luna   high     | claude: sonnet
+deploy       codex: gpt-5.6-luna   medium   | claude: sonnet
+context @ priorFailures 0/1/2/5 → terra/medium, sol/high, sol/max, sol/max
+```
+
+This is the deployed build answering, not the source — it rules out "green in the repo, not in the
+release", which is the gap between a passing suite and a live system. Ownership audit 0.
+
+**V7b — NOT done, and deliberately not self-served.** The remaining half is a real run: only a
+**new** run picks the table up, because a run persists its `workflowDef` at creation and the four
+codex runs on the box today were created before this shipped. Starting one is not a read — a
+`spec-to-deploy` chain commits, pushes and deploys — so it is the owner's call rather than
+something to fire off as verification. What it would add over V7a is the wire evidence: no step
+emitting `model "sonnet" is not a codex model`, and the `implement` rollout recording
+`gpt-5.6-luna` at `xhigh`.
+
+Until V7b has run this is **QA Needed**, not Done.
