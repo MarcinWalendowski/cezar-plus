@@ -3,8 +3,10 @@ import {
   workflowDefSchema,
   type ClusterAckFrame,
   type ClusterAckResult,
+  type ClusterActiveRun,
   type ClusterDispatchFrame,
   type ClusterDispatchWorkflow,
+  type ClusterCorpusChangedFrame,
   type ClusterDownlinkFrame,
   type ClusterFreshnessFrame,
   type ClusterNodeId,
@@ -65,6 +67,14 @@ import { applyReplicaFrame, type ReplicaApplyResult } from './replica.ts';
  * claim right up until Milestone C let a dispatch actually place work on it. `deps.semaphore`
  * (optional — see `SpokeRuntimeDeps#semaphore`'s own doc) is read into `liveCapacity` on every
  * beat when present; absent, the call omits the option and keeps today's default unchanged.
+ *
+ * **D-active (2026-08-24) — the presence beat now reports this node's REAL in-flight runs, not
+ * just its load.** `deps.listActiveRuns` (optional — see its own doc) is awaited fresh on every
+ * beat and passed through as `collectPresence`'s `activeRuns`, the same present-when-present,
+ * omitted-when-absent shape D47 already established for `liveCapacity` above. This is what makes
+ * `presence.active` (`clusterNodeShape#active`) and the roster half of `GET /cluster/active`
+ * (`cluster-routes.ts#clusterActiveRunsFromRoster`) carry anything at all in production —
+ * `cluster-routes.ts`'s `startClusterRuntime` wires the real, disk-backed default.
  *
  * **The outbox is never a queue this file holds.** `deriveTodoOps` re-derives the owed set from
  * records still marked `pendingSince` on every tick — nothing sent-but-unacked is kept in memory
@@ -369,8 +379,34 @@ export interface SpokeRuntimeDeps {
    */
   semaphore?: WorkspaceSemaphore;
 
+  /**
+   * This node's own in-flight runs, read fresh on every presence beat and passed through as
+   * `collectPresence`'s `activeRuns` option (`CollectPresenceOptions#activeRuns`'s own doc) — the
+   * source `presence.active` (`clusterNodeShape#active`) and the roster half of
+   * `GET /cluster/active` (`cluster-routes.ts#clusterActiveRunsFromRoster`) both read.
+   *
+   * Optional, matching `semaphore` above's own optionality and for the identical reason: an absent
+   * value is left OMITTED at the `collectPresence()` call site below, never defaulted to `[]` here
+   * — `[]` is a real claim ("this node reports nothing running") that only a caller who actually
+   * asked may make (`CollectPresenceOptions#activeRuns`'s own doc on why absent and `[]` differ).
+   * `cluster-routes.ts`'s `startClusterRuntime` wires the real, disk-backed default
+   * (`collectLocalActiveRuns`); a caller with none — an older wiring, or a test — gets exactly
+   * today's shipped behaviour: no `active` key on the wire at all.
+   */
+  listActiveRuns?: () => ClusterActiveRun[] | Promise<ClusterActiveRun[]>;
+
   /** Default 5_000. */
   opFlushMs?: number;
+  /**
+   * Called when the hub pushes `corpus-changed`, to run the mirror sweep NOW rather than waiting
+   * out the interval. Optional on purpose, and its absence WARNS rather than passing silently
+   * (see the `corpus-changed` case in `onFrame`): a cockpit with no mirror wired is a real state,
+   * but one that cannot be allowed to look like a hub that never sent the hint.
+   *
+   * It receives the hint only. It must not treat the frame as the change — the sweep it triggers
+   * is the authoritative read, and a dropped frame must cost latency, never a document.
+   */
+  onCorpusChanged?: (frame: ClusterCorpusChangedFrame) => void | Promise<void>;
   /** Test hook; defaults to `discoverOutboxProjects` above (this node's identity + confirmed
    *  pairings, read from disk). */
   collectOutboxProjects?: () => Promise<OutboxDiscovery>;
@@ -516,21 +552,31 @@ export function startSpokeRuntime(deps: SpokeRuntimeDeps): SpokeRuntimeHandle {
   const warn = deps.warn;
   const heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   const opFlushMs = deps.opFlushMs ?? DEFAULT_OP_FLUSH_MS;
+  const onCorpusChanged = deps.onCorpusChanged;
   const opSendBudget = deps.opSendBudget ?? DEFAULT_OP_SEND_BUDGET;
   // D47: `liveCapacity` is passed only when this node has a real semaphore to read — an absent
   // semaphore is left OMITTED, not defaulted to a fabricated `{active: 0, heavyActive: 0}` here;
   // `peers.ts#collectPresence` already applies that exact default itself when the option is
   // missing (its own doc), so omitting is today's unchanged behaviour, never a new claim.
+  //
+  // D-active: `deps.listActiveRuns` is called HERE, inside the closure body, so it is re-read on
+  // every beat exactly the way `deps.semaphore.busy()`/`.heavyActive()` already are above — this
+  // closure is built once but its body runs once per `collectPresence()` call, i.e. once per beat.
+  // Absent stays OMITTED, matching `CollectPresenceOptions#activeRuns`'s own absent/`[]` distinction:
+  // an unwired node must not have this file assert "nothing running" on its behalf.
   const collectPresence =
     deps.collectPresence ??
-    ((): Promise<ClusterPresenceFrame> =>
-      collectClusterPresence({
+    (async (): Promise<ClusterPresenceFrame> => {
+      const activeRuns = deps.listActiveRuns ? await deps.listActiveRuns() : undefined;
+      return collectClusterPresence({
         env: deps.env,
         warn,
         ...(deps.semaphore
           ? { liveCapacity: { active: deps.semaphore.busy(), heavyActive: deps.semaphore.heavyActive() } }
           : {}),
-      }));
+        ...(activeRuns !== undefined ? { activeRuns } : {}),
+      });
+    });
   const collectOutboxProjects =
     deps.collectOutboxProjects ?? ((): Promise<OutboxDiscovery> => discoverOutboxProjects(deps.env, warn));
   const readTodosFn = deps.readTodos ?? readTodosFile;
@@ -1184,10 +1230,36 @@ export function startSpokeRuntime(deps: SpokeRuntimeDeps): SpokeRuntimeHandle {
       case 'relay':
         warn?.(`cluster spoke: relay requested for run ${frame.runId} — relay is not built yet`);
         break;
+      case 'corpus-changed':
+        // A HINT, not the change (`clusterCorpusChangedFrameSchema`). The authoritative read is the
+        // spoke's own `?since=` sweep, so all this does is ask for that sweep NOW instead of at the
+        // next interval. Nothing here applies a document, and nothing here may: a frame is droppable
+        // and the mirror must never depend on one arriving.
+        if (onCorpusChanged) {
+          void Promise.resolve(onCorpusChanged(frame)).catch((err: unknown) => {
+            warn?.(`cluster spoke: corpus-changed sweep threw for version ${frame.corpusVersion}: ${errorMessage(err)}`);
+          });
+        } else {
+          // Named, not swallowed. Without this the mirror silently keeps its interval cadence and
+          // looks identical to a hub that never sent the hint — the `relay` case's posture.
+          warn?.(
+            `cluster spoke: hub reports corpus version ${frame.corpusVersion} but no mirror sweep is wired — falling back to the interval sweep`,
+          );
+        }
+        break;
       case 'welcome':
       case 'refuse':
         // Owned by `ClusterLinkClient` itself — not a gap, so it does not warn.
         break;
+      default: {
+        // Exhaustiveness, added with the eleventh frame (`corpus-changed`). The switch had no
+        // `default` and no `never` check, so a frame added to `clusterDownlinkFrameSchema` compiled
+        // clean and was then dropped in silence — indistinguishable from a hub that never sent it.
+        // This turns the next such addition into a TYPE error at the one place that must handle it.
+        const unhandled: never = frame;
+        warn?.(`cluster spoke: unhandled downlink frame ${JSON.stringify(unhandled)}`);
+        break;
+      }
     }
   };
 

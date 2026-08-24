@@ -19,6 +19,17 @@ green: `typecheck`, `test:unit` (44/44), `build`; `npm test` (vitest) has one pr
 unrelated failure (`knowledge/catalog.test.ts` C18, a documented host-speed timing trap, 517/518
 files / 9573/9575 tests otherwise green) not touched by this change.
 
+**CORRECTED 2026-08-24 by task `9bf5030d`:** the later duplicate report's original hypothesis
+named `097d1b15` as the likely regression. Direct commit-content comparison instead identifies
+`954c6a55` as the commit that first made the latent timer defect reachable through a real
+headless `cezar run`: its parent has no broker construction in `ClaudeCliRunner.startSession`,
+while `954c6a55` wires `spawnBroker` and `BrokeredSession` into that path. Commit `097d1b15`
+changed the default workflow and explains why the observed first step was "Gather the record",
+but it did not create the exit mechanism. This attribution is supported by the direct diff, not
+yet by the literal `git bisect` required by task `9bf5030d`; that task remains partial. The
+shipping result above is unchanged: `3e6d1b7e` fixed the defect and its own package, unit, and
+built-CLI verification remains the authoritative acceptance record.
+
 ## TLDR
 
 `npm run test:package` is red 1/15 on `prod-host`: the packaged CLI's `cezar run mock:done

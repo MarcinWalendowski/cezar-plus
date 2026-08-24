@@ -3,6 +3,7 @@ import { CopyIcon, NetworkIcon, PlusIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 import type {
+  ClusterActiveResponse,
   ClusterCapacity,
   ClusterCapacityEnforcement,
   ClusterEnrollRequest,
@@ -135,11 +136,40 @@ async function clusterFetch<T>(path: string, init: RequestInit = {}): Promise<T>
 const CLUSTER_QUERY_KEY = ['cluster', 'overview'] as const
 
 /** `enabled: false` until the capability read confirms the route exists — see the module
- *  docblock on why this ordering is load-bearing, not defensive polish. */
-function useClusterOverview(enabled: boolean) {
+ *  docblock on why this ordering is load-bearing, not defensive polish.
+ *
+ * Exported (2026-08-24, "which worker is processing this task" — `.ai/specs/2026-08-22-multi-
+ * node-cezar-cluster.md`) so `components/task-node-cell.tsx` can resolve a todo's `startedOn`/
+ * `placement.node` against the SAME roster query rather than opening a second fetch path to the
+ * same route — this file still owns the request layer (module docblock, "What this file owns"),
+ * the hook is just no longer private to it. */
+export function useClusterOverview(enabled: boolean) {
   return useQuery({
     queryKey: CLUSTER_QUERY_KEY,
     queryFn: ({ signal }) => clusterFetch<ClusterOverviewResponse>('/cluster', { signal }),
+    enabled,
+  })
+}
+
+const CLUSTER_ACTIVE_QUERY_KEY = ['cluster', 'active'] as const
+
+/**
+ * `GET /cluster/active` (D19 rung 4) — what else is in flight across the linked roster, as this
+ * node's own locally-mirrored `runs-remote.json` currently has it. `enabled: false` until the
+ * capability read confirms clustering is on, same ordering rule as `useClusterOverview` above
+ * (the module docblock's "why this ordering is load-bearing" applies identically here — the route
+ * answers 409 while `CEZ_CLUSTER` is unset).
+ *
+ * Exported (2026-08-24, "which worker is processing this task") so `components/task-node-cell.tsx`
+ * can resolve a RUN against it — the run-side counterpart to `useClusterOverview`'s reuse by the
+ * same file for todos. Its own doc there covers why the answer is `runs: []` in production today
+ * (the writer that feeds this mirror has no caller yet) and why that must render as "nothing known
+ * elsewhere", never as an error.
+ */
+export function useActiveClusterRuns(enabled: boolean) {
+  return useQuery({
+    queryKey: CLUSTER_ACTIVE_QUERY_KEY,
+    queryFn: ({ signal }) => clusterFetch<ClusterActiveResponse>('/cluster/active', { signal }),
     enabled,
   })
 }

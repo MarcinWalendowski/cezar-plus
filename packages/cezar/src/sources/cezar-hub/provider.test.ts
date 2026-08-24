@@ -2,8 +2,8 @@ import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ClusterCorpusDoc, ClusterCorpusManifestResponse } from '@loki-labs/better-cezar-contract';
-import { CLUSTER_CORPUS_DEFAULT_SCOPE } from '@loki-labs/better-cezar-contract';
+import type { ClusterCorpusBody, ClusterCorpusDoc, ClusterCorpusManifestResponse } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_CORPUS_BATCH_MAX_PATHS, CLUSTER_CORPUS_DEFAULT_SCOPE } from '@loki-labs/better-cezar-contract';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LINK_PRINCIPAL_MAX_AGE_MS } from '../../cluster/enrollment.ts';
 import {
@@ -13,6 +13,7 @@ import {
   hashRequestBody,
   verifyNodeHttpPrincipal,
 } from '../../cluster/node-auth.ts';
+import type { SourceChange, SourceDocumentRef } from '../provider-types.ts';
 import { FileSourceSink } from '../sink.ts';
 import { SourceStore } from '../store.ts';
 import { computeDocId, runSourceSync } from '../sync.ts';
@@ -65,6 +66,22 @@ interface HubFixture {
   manifest?: ClusterCorpusManifestResponse | ((url: URL) => ClusterCorpusManifestResponse);
   manifestStatus?: number;
   docs?: Record<string, string>;
+  /** Per-path hash, keyed the same as `docs`. Defaults to whatever `manifest`'s own `docs[]` says
+   *  for that path (when `manifest` is a static object) - the common case, and what keeps every
+   *  EXISTING fixture below correct with zero changes: the manifest's `doc(path, hash)` and the
+   *  body responses agree on `hash` automatically. Only needed explicitly when `manifest` is a
+   *  per-URL function (the `since`-aware fixtures below), or when a test wants a deliberately
+   *  MISMATCHED hash (the "stale prefetch is never trusted" negative control). */
+  docHashes?: Record<string, string>;
+  /** Overrides the synthesized `POST /corpus/bodies` response entirely - used by the `truncated`
+   *  loop test, which needs the SAME chunk requested twice to answer differently each time. */
+  bodiesResponse?: (paths: string[]) => { docs: ClusterCorpusBody[]; missing: string[]; truncated: boolean };
+}
+
+function upsertDocOf(changes: SourceChange[], externalId: string): SourceDocumentRef {
+  const match = changes.find((c) => c.type === 'upsert' && c.doc.externalId === externalId);
+  if (!match || match.type !== 'upsert') throw new Error(`no upsert change for "${externalId}"`);
+  return match.doc;
 }
 
 function urlOf(input: string | URL | Request): string {
@@ -73,12 +90,20 @@ function urlOf(input: string | URL | Request): string {
   return input.url;
 }
 
-/** A fake hub: routes `GET /api/v1/cluster/corpus` and `GET /api/v1/cluster/corpus/*path` off the
- *  fixture above, and records every request URL so a test can assert what the provider actually
- *  asked for (verification 18's "legible" half). */
-function makeHubFetch(fixture: HubFixture): { fetchImpl: typeof fetch; requests: string[] } {
+/** A fake hub: routes `GET /api/v1/cluster/corpus`, `GET /api/v1/cluster/corpus/*path` and `POST
+ *  /api/v1/cluster/corpus/bodies` off the fixture above, and records every request (method + URL,
+ *  and for POST the parsed `paths`) so a test can assert what the provider actually asked for
+ *  (verification 18's "legible" half, and item 56's batching/diff-before-fetch assertions). */
+function makeHubFetch(fixture: HubFixture): {
+  fetchImpl: typeof fetch;
+  requests: string[];
+  batchRequests: Array<{ paths: string[] }>;
+} {
   const requests: string[] = [];
-  const fetchImpl = (async (input: string | URL | Request) => {
+  const batchRequests: Array<{ paths: string[] }> = [];
+  const staticDocs: ClusterCorpusDoc[] = fixture.manifest && typeof fixture.manifest !== 'function' ? fixture.manifest.docs : [];
+  const hashOf = (path: string): string => fixture.docHashes?.[path] ?? staticDocs.find((d) => d.path === path)?.hash ?? '';
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(urlOf(input));
     requests.push(url.toString());
     if (url.pathname === '/api/v1/cluster/corpus') {
@@ -86,6 +111,30 @@ function makeHubFetch(fixture: HubFixture): { fetchImpl: typeof fetch; requests:
       const body = typeof fixture.manifest === 'function' ? fixture.manifest(url) : fixture.manifest;
       return new Response(JSON.stringify(body), {
         status: fixture.manifestStatus ?? 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (url.pathname === '/api/v1/cluster/corpus/bodies') {
+      const parsedBody = typeof init?.body === 'string' ? (JSON.parse(init.body) as { paths: string[] }) : { paths: [] };
+      batchRequests.push({ paths: parsedBody.paths });
+      if (fixture.bodiesResponse) {
+        return new Response(JSON.stringify(fixture.bodiesResponse(parsedBody.paths)), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      const docs: ClusterCorpusBody[] = [];
+      const missing: string[] = [];
+      for (const path of parsedBody.paths) {
+        const body = fixture.docs?.[path];
+        if (body === undefined) {
+          missing.push(path);
+          continue;
+        }
+        docs.push({ path, hash: hashOf(path), body });
+      }
+      return new Response(JSON.stringify({ docs, missing, truncated: false }), {
+        status: 200,
         headers: { 'content-type': 'application/json' },
       });
     }
@@ -98,11 +147,14 @@ function makeHubFetch(fixture: HubFixture): { fetchImpl: typeof fetch; requests:
         .join('/');
       const body = fixture.docs?.[path];
       if (body === undefined) return new Response(JSON.stringify({ error: 'not found' }), { status: 404 });
-      return new Response(JSON.stringify({ path, body }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ path, hash: hashOf(path), body }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
     }
     return new Response('not found', { status: 404 });
   }) as unknown as typeof fetch;
-  return { fetchImpl, requests };
+  return { fetchImpl, requests, batchRequests };
 }
 
 interface CapturedRequest {
@@ -603,43 +655,52 @@ describe('verification 17 - divergence is quarantined, never overwritten and nev
 });
 
 describe('verification 18 - mirror scope is honoured and legible', () => {
-  it('the default scope excludes reports/raw-input in the outgoing request, and nothing report-scoped lands in the mirror', async () => {
+  // CORRECTED 2026-08-24 (owner, "everything should be on by default" - contract/src/cluster.ts's
+  // own docblock on `CLUSTER_CORPUS_DEFAULT_SCOPE`): this used to assert the default EXCLUDED
+  // reports/raw-input. It now includes every scope by default; the mechanism these two tests exist
+  // to prove (legible, not just absent - "not found" vs "not mirrored" must stay distinguishable)
+  // is unchanged, so they now exercise it via the default (all six) and an explicit narrowing.
+  it('the default scope declares every scope, legibly, on every manifest request', async () => {
     const { store, connection, sink, mirrorRoot } = await setup();
+    const hub = makeHubFetch({ manifest: manifest([doc('knowledge/a.md', 'h1')]) });
+    const provider = new CezarHubSourceProvider(connection, { ...AUTH, fetchImpl: hub.fetchImpl });
+    await runSourceSync({ connection, store, sink, provider, mirrorRoot });
+
+    // Legible, not just absent - EVERY manifest request (the sweep's own `detect()` probe included)
+    // DECLARES the scope it is asking for, so a reader of the wire traffic can already tell what a
+    // node mirrors before any response arrives.
+    const manifestRequests = hub.requests.filter((request) => new URL(request).pathname === '/api/v1/cluster/corpus');
+    expect(manifestRequests.length).toBeGreaterThan(0);
+    for (const request of manifestRequests) {
+      const requestedScope = new URL(request).searchParams.get('scope')?.split(',');
+      expect(requestedScope).toEqual([...CLUSTER_CORPUS_DEFAULT_SCOPE]);
+      expect(requestedScope).toContain('reports');
+      expect(requestedScope).toContain('raw-input');
+    }
+  });
+
+  it('narrowing scope away from reports/ is a real, visible switch on the request, and nothing report-scoped lands in the mirror', async () => {
+    const { store, connection, sink, mirrorRoot } = await setup();
+    const narrowScope = CLUSTER_CORPUS_DEFAULT_SCOPE.filter((s) => s !== 'reports' && s !== 'raw-input');
     // A well-behaved hub (3b.2's job to build): it echoes back exactly the scope it was asked for
     // and returns no reports/ doc, because none was requested.
     const hub = makeHubFetch({ manifest: manifest([doc('knowledge/a.md', 'h1')]) });
-    const provider = new CezarHubSourceProvider(connection, { ...AUTH, fetchImpl: hub.fetchImpl });
+    const provider = new CezarHubSourceProvider(connection, { ...AUTH, scope: narrowScope, fetchImpl: hub.fetchImpl });
     await runSourceSync({ connection, store, sink, provider, mirrorRoot });
 
     // Half 1: not found - nothing report-scoped is on disk.
     const mirrored = await sink.list('conn-1');
     expect(mirrored.some((entry) => entry.source.externalId.startsWith('reports/'))).toBe(false);
 
-    // Half 2: legible, not just absent - EVERY manifest request (the sweep's own `detect()` probe
-    // included, see module header on why that is a second one; a per-document body fetch carries
-    // no scope param at all and is excluded here) DECLARES the scope it is asking for, so a reader
-    // of the wire traffic can already tell "not mirrored here" from "not found at all" before any
-    // response arrives.
+    // Half 2: legible, not just absent.
     const manifestRequests = hub.requests.filter((request) => new URL(request).pathname === '/api/v1/cluster/corpus');
     expect(manifestRequests.length).toBeGreaterThan(0);
     for (const request of manifestRequests) {
       const requestedScope = new URL(request).searchParams.get('scope')?.split(',');
-      expect(requestedScope).toEqual([...CLUSTER_CORPUS_DEFAULT_SCOPE]);
+      expect(requestedScope).toEqual(narrowScope);
       expect(requestedScope).not.toContain('reports');
       expect(requestedScope).not.toContain('raw-input');
     }
-  });
-
-  it('opting a node into reports/ is a real, visible switch on the request - not silently unavailable', async () => {
-    const hub = makeHubFetch({ manifest: manifest([]) });
-    const provider = new CezarHubSourceProvider(connectionFixture(), {
-      ...AUTH,
-      scope: [...CLUSTER_CORPUS_DEFAULT_SCOPE, 'reports'],
-      fetchImpl: hub.fetchImpl,
-    });
-    await provider.pollChanges(null, { collectionExternalId: 'corpus' });
-    const requestedScope = new URL(hub.requests[0]!).searchParams.get('scope')?.split(',');
-    expect(requestedScope).toContain('reports');
   });
 
   it('a manifest response missing the required "scope" field is rejected as malformed, never silently trusted', async () => {
@@ -651,6 +712,160 @@ describe('verification 18 - mirror scope is honoured and legible', () => {
     const provider = new CezarHubSourceProvider(connectionFixture(), { ...AUTH, fetchImpl });
     const page = await provider.pollChanges(null, { collectionExternalId: 'corpus' });
     expect(page).toEqual({ changes: [], watermark: null, nextPageCursor: null, complete: false, truncated: false });
+  });
+});
+
+// ---- item 56 (2026-08-24): manifest coalescing, `since`, and batch body prefetch --------------
+//
+// A `since`-aware fake hub, used by several tests below: the manifest response depends on the
+// `since` query param, matching the real contract's delta semantics (`docs[]` is the changed set
+// once `since` is supplied). `docHashes` is passed explicitly throughout this section because
+// `manifest` is a per-URL FUNCTION here, not a static object - `makeHubFetch` can only derive
+// hashes from a static manifest (module comment on `HubFixture`).
+
+describe('item 56 - manifest coalescing (detect + pollChanges share one fetch)', () => {
+  it('a no-change sweep, on a provider instance that already ran once, issues exactly ONE HTTP request', async () => {
+    const { store, connection, sink, mirrorRoot } = await setup();
+    const hub = makeHubFetch({
+      manifest: (url) =>
+        url.searchParams.get('since') === 'v1'
+          ? manifest([], [], { corpusVersion: 'v1' })
+          : manifest([doc('knowledge/a.md', 'h1')], [], { corpusVersion: 'v1' }),
+      docs: { 'knowledge/a.md': 'Body A.' },
+      docHashes: { 'knowledge/a.md': 'h1' },
+    });
+    // ONE provider instance, reused across both ticks - see the module header's mechanism 2 on why
+    // that is load-bearing: `detect()` has no `since` parameter of its own and can only match
+    // `pollChanges()`'s key via `lastKnownCorpusVersion`, which is in-memory and does not survive a
+    // fresh instance. `WorkspaceSourceScheduler`'s default resolver constructs a fresh provider every
+    // tick (verified against `../scheduler.ts`), so this specific "exactly one" guarantee is proven
+    // here for a persistent instance, not (yet) for today's production default - flagged in the
+    // module header and the implementation report, not silently claimed as a closed production gap.
+    const provider = new CezarHubSourceProvider(connection, { ...AUTH, fetchImpl: hub.fetchImpl });
+
+    await runSourceSync({ connection, store, sink, provider, mirrorRoot });
+    expect(await sink.readMeta(computeDocId(connection, 'knowledge/a.md'))).not.toBeNull();
+
+    const requestsBeforeTick2 = hub.requests.length;
+    const tick2 = await runSourceSync({ connection, store, sink, provider, mirrorRoot });
+    const tick2Requests = hub.requests.slice(requestsBeforeTick2);
+
+    // Negative control (module header / item 56 verification 1): counting REQUESTS, not diffs - a
+    // provider that silently refetched every body and rewrote identical bytes would still show
+    // `documentCount` unchanged, which is why this assertion is on `tick2Requests`, not on state.
+    expect(tick2Requests).toHaveLength(1);
+    expect(new URL(tick2Requests[0]!).pathname).toBe('/api/v1/cluster/corpus');
+    expect(new URL(tick2Requests[0]!).searchParams.get('since')).toBe('v1');
+    expect(tick2.complete).toBe(true);
+  });
+
+  it('concurrent detect() calls for the same manifest join one in-flight request, never two', async () => {
+    const { fetchImpl, requests } = makeHubFetch({ manifest: manifest([doc('knowledge/a.md', 'h1')]) });
+    const provider = new CezarHubSourceProvider(connectionFixture(), { ...AUTH, fetchImpl });
+    await Promise.all([provider.detect(), provider.detect()]);
+    expect(requests).toHaveLength(1);
+  });
+});
+
+describe('item 56 - since carries the last known corpusVersion', () => {
+  it('pollChanges sends the watermark\'s corpusVersion as ?since=, and none on the very first call', async () => {
+    const hub = makeHubFetch({ manifest: manifest([]) });
+    const provider = new CezarHubSourceProvider(connectionFixture(), { ...AUTH, fetchImpl: hub.fetchImpl });
+
+    await provider.pollChanges(null, { collectionExternalId: 'corpus' });
+    expect(new URL(hub.requests[0]!).searchParams.has('since')).toBe(false);
+
+    const watermark = { timestamp: '', tieBreaker: '', corpusVersion: 'v7' };
+    await provider.pollChanges(watermark, { collectionExternalId: 'corpus' });
+    expect(new URL(hub.requests[1]!).searchParams.get('since')).toBe('v7');
+  });
+
+  it('a changed doc is batch-fetched; an unchanged doc from the prior tick is never named in the request', async () => {
+    const { store, connection, sink, mirrorRoot } = await setup();
+    const hub = makeHubFetch({
+      manifest: (url) =>
+        url.searchParams.get('since') === 'v1'
+          ? manifest([doc('domains/c.md', 'hc')], [], { corpusVersion: 'v2' })
+          : manifest([doc('knowledge/a.md', 'ha'), doc('knowledge/b.md', 'hb')], [], { corpusVersion: 'v1' }),
+      docs: { 'knowledge/a.md': 'A body', 'knowledge/b.md': 'B body', 'domains/c.md': 'C body' },
+      docHashes: { 'knowledge/a.md': 'ha', 'knowledge/b.md': 'hb', 'domains/c.md': 'hc' },
+    });
+    const provider = new CezarHubSourceProvider(connection, { ...AUTH, fetchImpl: hub.fetchImpl });
+
+    await runSourceSync({ connection, store, sink, provider, mirrorRoot }); // tick 1: a.md + b.md mirrored
+    const batchesBeforeTick2 = hub.batchRequests.length;
+    await runSourceSync({ connection, store, sink, provider, mirrorRoot }); // tick 2: only c.md changed
+    const tick2Batches = hub.batchRequests.slice(batchesBeforeTick2);
+
+    expect(tick2Batches).toHaveLength(1);
+    expect(tick2Batches[0]!.paths).toEqual(['domains/c.md']);
+    expect(tick2Batches[0]!.paths).not.toContain('knowledge/a.md');
+    expect(tick2Batches[0]!.paths).not.toContain('knowledge/b.md');
+    expect(await sink.readMeta(computeDocId(connection, 'domains/c.md'))).not.toBeNull();
+  });
+});
+
+describe('item 56 - body batching', () => {
+  it('450 changed docs produce 3 batch requests of at most CLUSTER_CORPUS_BATCH_MAX_PATHS, never 450 single GETs', async () => {
+    const docs = Array.from({ length: 450 }, (_, i) => doc(`knowledge/doc-${i}.md`, `h${i}`));
+    const fixtureDocs = Object.fromEntries(docs.map((d) => [d.path, `body of ${d.path}`]));
+    const fixtureHashes = Object.fromEntries(docs.map((d) => [d.path, d.hash]));
+    const hub = makeHubFetch({ manifest: manifest(docs), docs: fixtureDocs, docHashes: fixtureHashes });
+    const provider = new CezarHubSourceProvider(connectionFixture(), { ...AUTH, fetchImpl: hub.fetchImpl });
+
+    await provider.pollChanges(null, { collectionExternalId: 'corpus' });
+
+    expect(hub.batchRequests).toHaveLength(3);
+    expect(hub.batchRequests[0]!.paths).toHaveLength(200);
+    expect(hub.batchRequests[1]!.paths).toHaveLength(200);
+    expect(hub.batchRequests[2]!.paths).toHaveLength(50);
+    for (const batch of hub.batchRequests) expect(batch.paths.length).toBeLessThanOrEqual(CLUSTER_CORPUS_BATCH_MAX_PATHS);
+    // Never one GET per document (the 235s-serial shape item 56 measures against): no single-doc
+    // GET route was hit for any of these paths.
+    const singleDocGets = hub.requests.filter((r) => new URL(r).pathname.startsWith('/api/v1/cluster/corpus/knowledge/doc-'));
+    expect(singleDocGets).toHaveLength(0);
+  });
+
+  it('truncated: true on a batch response is not failure - the provider asks again for the remainder, and both docs end up cached', async () => {
+    let call = 0;
+    const hub = makeHubFetch({
+      manifest: manifest([doc('knowledge/a.md', 'ha'), doc('knowledge/b.md', 'hb')]),
+      // No `docs` fixture at all - the single-document GET route 404s for both paths, so if either
+      // ends up served via that fallback (rather than the looped batch), the body would be wrong /
+      // missing, which the assertions below would catch.
+      bodiesResponse: (paths) => {
+        call += 1;
+        if (call === 1) return { docs: [{ path: 'knowledge/a.md', hash: 'ha', body: 'A body' }], missing: [], truncated: true };
+        expect(paths).toEqual(['knowledge/b.md']); // the loop asks again for exactly what it didn't get
+        return { docs: [{ path: 'knowledge/b.md', hash: 'hb', body: 'B body' }], missing: [], truncated: false };
+      },
+    });
+    const provider = new CezarHubSourceProvider(connectionFixture(), { ...AUTH, fetchImpl: hub.fetchImpl });
+
+    const page = await provider.pollChanges(null, { collectionExternalId: 'corpus' });
+    expect(hub.batchRequests).toHaveLength(2); // the truncated retry, not a silently dropped tail
+
+    const docA = await provider.fetchDocument(upsertDocOf(page.changes, 'knowledge/a.md'));
+    const docB = await provider.fetchDocument(upsertDocOf(page.changes, 'knowledge/b.md'));
+    expect(docA?.body).toBe('A body'); // completeness, not just "the response had truncated:true"
+    expect(docB?.body).toBe('B body');
+  });
+
+  it('a batch body whose hash does not match the manifest is never trusted from cache - fetchDocument falls back to the per-document GET', async () => {
+    const hub = makeHubFetch({
+      manifest: manifest([doc('knowledge/a.md', 'ha')]),
+      docs: { 'knowledge/a.md': 'Correct body.' },
+      // The batch response claims a DIFFERENT hash than the manifest promised for this path.
+      bodiesResponse: () => ({ docs: [{ path: 'knowledge/a.md', hash: 'stale-hash', body: 'Stale prefetched body.' }], missing: [], truncated: false }),
+    });
+    const provider = new CezarHubSourceProvider(connectionFixture(), { ...AUTH, fetchImpl: hub.fetchImpl });
+
+    const page = await provider.pollChanges(null, { collectionExternalId: 'corpus' });
+    const ref = page.changes[0]!.type === 'upsert' ? page.changes[0]!.doc : undefined;
+    const document = await provider.fetchDocument(ref!);
+    // Fell back to the single-document GET (which serves the CORRECT body from `fixture.docs`),
+    // never the mismatched batch entry.
+    expect(document?.body).toBe('Correct body.');
   });
 });
 

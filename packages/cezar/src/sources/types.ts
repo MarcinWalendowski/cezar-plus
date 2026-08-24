@@ -23,6 +23,45 @@ import { PROJECT_ID_RE } from '../workspace/config.ts';
 export const sourceKindSchema = z.string().min(1).max(32);
 export type SourceKind = z.infer<typeof sourceKindSchema>;
 
+/**
+ * Per-kind connection-interval policy, keyed by the plain `SourceKind` string — the same "one new
+ * row, no schema change" shape `./registry.ts`'s `SOURCE_PROVIDERS` uses for factories, kept here
+ * as data rather than as an `if (kind === ...)` branch in `sourceConnectionSchema` below, and kept
+ * as a literal string rather than an import from a specific provider module (e.g.
+ * `./cezar-hub/provider.ts`'s `CEZAR_HUB_SOURCE_KIND`) so this file stays what its own header
+ * promises: it knows `kind` as an opaque string, never a specific provider's identity.
+ *
+ * The default floor (300s) protects a THIRD-PARTY api (Notion, ...) from being hammered by an
+ * aggressive poll interval — a real rate-limit concern. `cezar-hub` talks to our OWN box over the
+ * enrollment tunnel, and under the manifest + `hash` + `?since=` design a no-change sweep costs
+ * exactly one small HTTP request (D8a of `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, item
+ * 56): 60s -> 1,440 requests/day against our own box, each a cheap delta manifest — nothing like
+ * 60s against Notion would be.
+ */
+const SOURCE_KIND_INTERVAL_POLICY: Readonly<Record<string, { min: number; default: number }>> = {
+  'cezar-hub': { min: 60, default: 60 },
+};
+const DEFAULT_INTERVAL_POLICY = { min: 300, default: 900 };
+
+/** The floor `sourceConnectionSchema`'s `superRefine` enforces for one `kind`. Exported so a
+ *  provisioner (e.g. the S5 cluster-runtime bootstrap that arms a `cezar-hub` connection) can pick
+ *  a legal value instead of guessing one. */
+export function minIntervalSecondsForKind(kind: string): number {
+  return (SOURCE_KIND_INTERVAL_POLICY[kind] ?? DEFAULT_INTERVAL_POLICY).min;
+}
+
+/** The interval a NEW connection of this `kind` should get when nothing more specific is chosen.
+ *  Not wired into `intervalSeconds`'s own `.default()` below — a zod field default cannot see a
+ *  sibling field's value (`kind`), so a per-kind schema-level default would need reshaping
+ *  `sourceConnectionSchema` into a whole-object `.transform()`, changing what every existing
+ *  `SourceConnectionInput`/`SourceConnection` consumer sees. `SourceStore.create()`'s own input
+ *  type (`Omit<SourceConnection, ...>`, the OUTPUT type) already forces every caller to pass a
+ *  concrete `intervalSeconds`, so that default is not load-bearing there either — this export is
+ *  the one, honest place a caller building that value gets it right. */
+export function defaultIntervalSecondsForKind(kind: string): number {
+  return (SOURCE_KIND_INTERVAL_POLICY[kind] ?? DEFAULT_INTERVAL_POLICY).default;
+}
+
 /** DATA, never `typeof provider.x === 'function'` (Q3): all five required so a provider that
  *  forgets one fails `parse`, not a runtime probe. */
 export const sourceCapabilitiesSchema = z.object({
@@ -109,7 +148,10 @@ export const sourceConnectionSchema = z
     name: z.string().min(1).max(200),
     enabled: z.boolean().default(false),
     mode: sourceConnectionModeSchema.default('mirror'),
-    intervalSeconds: z.number().int().min(300).max(86_400).default(900),
+    /** `.min(60)` is the GLOBAL floor (the lowest any kind may declare); the real, per-kind floor
+     *  is enforced below by `superRefine` via `minIntervalSecondsForKind` — see that function's
+     *  own doc comment for why the field-level `.default(900)` stays kind-agnostic. */
+    intervalSeconds: z.number().int().min(60).max(86_400).default(900),
     collections: z.array(sourceCollectionRefSchema).max(50).default([]),
     watchComments: z.boolean().default(false),
     maxDocuments: z.number().int().min(1).max(20_000).default(5_000),
@@ -119,7 +161,17 @@ export const sourceConnectionSchema = z
     /** Tombstone marker, never a hard delete (Q10). */
     deletedAt: z.string().datetime().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((value, ctx) => {
+    const floor = minIntervalSecondsForKind(value.kind);
+    if (value.intervalSeconds < floor) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['intervalSeconds'],
+        message: `intervalSeconds must be >= ${floor} for kind "${value.kind}"`,
+      });
+    }
+  });
 export type SourceConnection = z.infer<typeof sourceConnectionSchema>;
 /** Pre-parse shape — see `SourceCollectionRefInput`. Every defaulted field is optional here. */
 export type SourceConnectionInput = z.input<typeof sourceConnectionSchema>;

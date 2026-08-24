@@ -1,21 +1,47 @@
 # A brokered run must survive a full `systemctl stop && start`, not just a `restart` — verify `scope` isolation live, in production, under real disruption
 
-**Status: Phase 0 implemented and shipped 2026-08-23 — Phase 1 (the disruptive live-fire test)
-stays operator-gated and has NOT been run.** AC1 and AC2 (health reports `scope`; the broker's
-cgroup is disjoint from `cezar.service`'s own) were already true before this task started and are
-re-confirmed above. What this task actually built and shipped is: the two documentation
-corrections (0.1, 0.2 below — both applied in place, in this same commit lineage), the
-re-probe-until-`scope` hardening for the caching/ordering race (0.3, with the warn-once-per-value
-refinement from spec review), and the committed, re-runnable verification script (0.4,
-`packages/cezar/scripts/verify-stop-survival.sh`). Gates green (typecheck, full `packages/cezar`
-vitest run bar one pre-existing unrelated flaky perf test), unit-tested against synthetic fixtures.
-**AC3 and AC4 — a live run surviving a genuine `systemctl stop cezar.socket cezar.service &&
-systemctl start` — remain unmeasured.** No step in this task's chain ran Phase 1: it is a
-deliberate disruption of production (every in-flight task on the box, not just a test subject) and
-this workspace's own rules require explicit operator sign-off before it runs — see Phase 1 and
-Risks. The original framing below ("spec only... the remaining work is now three parts") is kept
-for its research value but is stale on the "spec only" characterization; Phase 0 is no longer
-spec-only, it is implemented code on `origin/main`.
+**Status: CORRECTED 2026-08-24 — Phase 1 HAS now been run, on the owner's explicit instruction,
+and AC3/AC4 FAIL.** The line below (kept unchanged, collapsed) said Phase 1 "stays operator-gated
+and has NOT been run" and that AC3/AC4 "remain unmeasured". Both were true when written and are
+now stale. Measured on `prod-host` at 2026-08-24T13:22:04Z, release `20260824T131538Z-d5fdbc21`,
+subject run `da0119ec` mid-step `review-spec`, broker pid 813494:
+
+- **AC1 holds.** `runtime.runBrokerIsolation` read `scope` before the stop and again after it.
+- **AC2 holds.** The stop was real (`InvocationID`, `MainPID` and `ActiveEnterTimestamp` all
+  changed) and the broker pid was still alive afterwards at an unchanged cgroup path.
+- **AC3 and AC4 FAIL.** The server came back and did not adopt the surviving broker. It logged
+  `seq=2718 cezar restarted — chain re-queued at step "review-spec" (6 of 8 step(s) remaining)`,
+  then `seq=2719 run started`, then resumed the work from the last session transcript. Zero
+  `this run kept going`, zero `interrupted`, zero `resuming the interrupted task`. All three
+  brokered runs in flight re-queued; none re-attached.
+
+**So `scope` isolation keeps the process alive and the survival buys nothing.** The outcome is
+the same restart-from-last-session that `delegated` produces, reached by a different route, plus
+a leak `delegated` does not have: the surviving broker is left **orphaned**, still running and
+still holding a live backend session against a worktree the new session now owns. Six were found
+alive at cleanup time, up to 17 minutes old, each with a live `claude` child; five were killed.
+**Three of them predated the test**, so this leaks on ordinary restarts too, not only on a stop.
+
+Two confounds were checked and ruled out. It is **not** a release skew: the orphaned broker and
+the restarted server were both `d5fdbc21`. And the re-attach path is **not** dead code:
+`this run kept going` appears in 36 run transcripts on this box.
+
+**The Phase 0.4 script could not run at all, and this commit fixes it.** Three defects, each of
+which failed on every possible input: it read `.backend` off the run record (no run record has
+that key; the run-level field is `runner`), it built the spool path as `runs/<id>.spool` when the
+real path is `runs/<id>.spool/<instanceId>` (given verbatim by the run record's `spoolDir`), and
+its `seq` assertion demanded strict consecutiveness, which is false in undisturbed operation
+(measured: 453 gaps in 5556 lines on an untouched control run). The first two abort in Step 2,
+before Step 3 arms anything, so every invocation since 2026-08-23 died before reaching the
+disruption. **The status line below also claims the script was "unit-tested against synthetic
+fixtures"; that is not supported** — no file in this repo references `verify-stop-survival`, and
+the Verification section's own instruction that the script be "exercised at least once ... before
+it is ever pointed at `prod-host`" was not carried out. That step is exactly what would
+have caught all three.
+
+**What is now open** is a real defect in the re-attach path rather than a missing measurement:
+the server must adopt a surviving `scope`-isolated broker after a full stop instead of re-queueing
+the chain, and it must not leave an orphan behind when it declines to. That needs its own task.
 
 <details>
 <summary>Original status line (kept for the framing "This spec corrects the task's own framing" depends on)</summary>
@@ -632,6 +658,33 @@ what was in doubt). Concrete, executable steps, restated from Phase 0.4/Phase 1 
 All six are pass/fail against concrete, already-identified artifacts (specific pids, specific
 `InvocationID`s, specific `seq` numbers, specific event strings quoted verbatim from `run.ts`) — no
 step requires inventing a new tool or harness beyond the one script Phase 0.4 commits.
+
+### Result, 2026-08-24 (Phase 1 executed)
+
+Run as root over the tunnel, after `--preflight-only` confirmed the subject on all three live
+claude-brokered runs. Verdict exit code 1.
+
+| Step | Outcome |
+| --- | --- |
+| 1. health reads `scope` before | **pass** |
+| 2. baseline captured | **pass** — pid 813494, cgroup `cezar-run-da0119ec-…-mt79ed2t-7.scope`, 1805 lines, last seq 2717 |
+| 3. watchdog armed | **pass** — `cezar-restore-watchdog-1787577716`, cleaned up afterwards |
+| 5. stop + start | **pass, and genuinely disruptive** — `InvocationID`, `MainPID`, `ActiveEnterTimestamp` all changed |
+| 6a. broker alive, same cgroup (AC2) | **pass** |
+| 6b. exactly one `kept going`, no `interrupted`/`resuming` (AC3/AC4) | **FAIL** — 0 of each; `chain re-queued` instead |
+| 6c. `seq` continuity (AC4) | not reached; the old assertion was itself invalid, see above |
+| 7. health reads `scope` after | **pass** |
+
+Step 6b is the finding. Steps 1, 2, 3, 5 and 7 confirm the test itself was valid: a real stop, a
+real subject, a real down window.
+
+**A note for whoever runs this next.** Two of this script's steps are time-sensitive in ways the
+original did not account for. A subject stops being valid the moment its step rolls over (the
+first subject picked here rolled from `review-spec` to `spec` between two probes 90 seconds
+apart), so preflight and fire back to back. And `systemctl start` returns when the unit is
+active, not when the server has finished deciding what to do with the surviving broker, so
+asserting on the transcript immediately produces a false FAIL; Step 5b/5c now wait for that, and
+wait neutrally across all four markers so the wait cannot manufacture a pass.
 
 ## Sources read
 

@@ -1133,3 +1133,96 @@ describe('author provenance in the meta row', () => {
     expect(screen.getByRole('heading', { level: 1 })).not.toBeNull()
   })
 })
+
+// ---- "which worker ran/is running this?" — run detail (2026-08-24) -----------------------------
+
+describe('the Node meta chip', () => {
+  const CLUSTER_NODE = (overrides: { nodeId: string; nodeName: string; lastSeenAt?: string }) => ({
+    role: 'spoke' as const,
+    labels: [] as string[],
+    acceptsDispatch: true,
+    protocol: { major: 1, minor: 0 },
+    version: '0.10.0',
+    ...overrides,
+  })
+  const HUB = CLUSTER_NODE({ nodeId: 'hub-1', nodeName: 'Hub' })
+  const SPOKE = CLUSTER_NODE({ nodeId: 'spoke-2', nodeName: 'Laptop' })
+
+  /** Adds the three cluster endpoints on top of the file's own `stubFetch` defaults. `cluster`
+   *  off (no override at all) is the default install and every other describe block in this file
+   *  already exercises that path implicitly — this block only needs the ON cases. */
+  function stubCluster(clusterActive: unknown, selfNodeId: string | undefined, spoke = SPOKE) {
+    return stubFetch({
+      '/api/v1/health': () =>
+        jsonResponse({
+          version: '0.0.0-test',
+          repoRoot: '/repo',
+          repo: { root: '/repo', branch: 'main' },
+          forge: null,
+          capabilities: { localHandoff: true, followups: true, cluster: true },
+          defaultRunner: 'claude',
+          checks: [],
+        }),
+      '/api/v1/cluster': () =>
+        jsonResponse({
+          self: selfNodeId ? CLUSTER_NODE({ nodeId: selfNodeId, nodeName: 'Hub' }) : undefined,
+          nodes: [HUB, spoke],
+          pairings: [],
+          proposals: [],
+          link: { state: 'disabled' },
+        }),
+      '/api/v1/cluster/active': () => jsonResponse(clusterActive),
+    })
+  }
+
+  const nodeCell = () => document.querySelector<HTMLElement>('[data-slot="task-node"]')
+
+  it('renders nothing at all on a single-node cockpit — clustering off (the file default)', () => {
+    stubFetch()
+    renderHeader(run('done'))
+    expect(nodeCell()).toBeNull()
+  })
+
+  it('a run not reported in /cluster/active renders as "this node"', async () => {
+    stubCluster({ runs: [] }, 'hub-1')
+    renderHeader(run('done', { id: 'r1' }))
+
+    // Waits for the RESOLVED kind, not merely "a cell exists" (this file's own pitfall elsewhere
+    // in this suite: the roster/active queries settle after the run itself is already rendered).
+    await waitFor(() => expect(nodeCell()?.dataset.nodeKind).toBe('self'))
+    expect(nodeCell()!.textContent).toBe('this node')
+  })
+
+  it('a run reported on another node renders that node — negative half: same run, self elsewhere renders "this node" instead', async () => {
+    const active = { runs: [{ runId: 'r1', nodeId: 'spoke-2', summary: 'doing it', paths: [] }] }
+    stubCluster(active, 'hub-1')
+    renderHeader(run('running', { id: 'r1' }))
+
+    await waitFor(() => expect(nodeCell()?.dataset.nodeKind).toBe('known'))
+    expect(nodeCell()!.textContent).toBe('Laptop')
+
+    cleanup()
+    stubCluster(active, 'spoke-2')
+    renderHeader(run('running', { id: 'r1' }))
+    await waitFor(() => expect(nodeCell()?.dataset.nodeKind).toBe('self'))
+    expect(nodeCell()!.textContent).toBe('this node')
+  })
+
+  it('renders a stale node\'s own age, never the roster-wide asOf', async () => {
+    const staleSpoke = { ...SPOKE, lastSeenAt: new Date(Date.now() - 20 * 60_000).toISOString() }
+    stubCluster(
+      {
+        runs: [{ runId: 'r1', nodeId: 'spoke-2', summary: 'doing it', paths: [] }],
+        // Deliberately recent — a cell reading this instead of the node's own lastSeenAt would
+        // false-pass as fresh.
+        asOf: new Date().toISOString(),
+      },
+      'hub-1',
+      staleSpoke,
+    )
+    renderHeader(run('running', { id: 'r1' }))
+
+    await waitFor(() => expect(document.querySelector('[data-slot="run-node-stale"]')).not.toBeNull())
+    expect(document.querySelector('[data-slot="run-node-stale"]')!.textContent).toBe('· 20m')
+  })
+})

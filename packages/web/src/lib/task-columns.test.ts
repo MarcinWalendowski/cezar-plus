@@ -15,6 +15,7 @@ describe('TASK_COLUMNS', () => {
       'task',
       'workflow',
       'branch',
+      'node',
       'diff',
       'reference',
       'tokens',
@@ -27,7 +28,7 @@ describe('TASK_COLUMNS', () => {
     expect(TASK_COLUMNS.slice(0, 2).map((column) => column.canFold)).toEqual([false, false])
   })
 
-  it('folds only Branch by default', () => {
+  it('folds only Branch and Node by default', () => {
     const normalized = normalizeExpandedColumns(undefined)
     expect(
       Object.fromEntries(TASK_COLUMNS.map((column) => [column.id, isColumnExpanded(column.id, normalized)])),
@@ -36,6 +37,7 @@ describe('TASK_COLUMNS', () => {
       task: true,
       workflow: true,
       branch: false,
+      node: false,
       diff: true,
       reference: true,
       tokens: true,
@@ -75,19 +77,18 @@ describe('TASK_COLUMNS', () => {
   })
 
   it('removes capability-hidden metrics without changing the saved registry', () => {
-    expect(taskColumnsForCapabilities({ tokens: false, cost: true }).map((column) => column.id)).toEqual([
-      'status',
-      'task',
-      'workflow',
-      'branch',
-      'diff',
-      'reference',
-      'cost',
-      'cpu',
-      'memory',
-      'context',
-      'started',
-    ])
+    expect(
+      taskColumnsForCapabilities({ tokens: false, cost: true, cluster: false }).map((column) => column.id),
+    ).toEqual(['status', 'task', 'workflow', 'branch', 'diff', 'reference', 'cost', 'cpu', 'memory', 'context', 'started'])
     expect(TASK_COLUMNS.map((column) => column.id)).toContain('tokens')
+  })
+
+  it('hides Node on a single-node cockpit — negative half: cluster on restores it', () => {
+    expect(
+      taskColumnsForCapabilities({ tokens: true, cost: true, cluster: false }).map((column) => column.id),
+    ).not.toContain('node')
+    expect(
+      taskColumnsForCapabilities({ tokens: true, cost: true, cluster: true }).map((column) => column.id),
+    ).toContain('node')
   })
 })

@@ -73,13 +73,14 @@ interface SentRequest {
 /** Health fixture: `backends` names the runners the host reports as installed (#401). A
  *  single-backend host is the default, which is what the pre-#401 tests assume. `followups`
  *  is on throughout — an inbox-less server (#471) renders the "inbox is off" state and has
- *  no cards at all, which is that feature's own test, not this file's. */
-const health = (backends: readonly string[] = ['claude']) => ({
+ *  no cards at all, which is that feature's own test, not this file's. `cluster` defaults off,
+ *  which is the default install — the node cell's own tests turn it on explicitly. */
+const health = (backends: readonly string[] = ['claude'], cluster = false) => ({
   version: '0.0.0-test',
   repoRoot: '/repo',
   repo: { root: '/repo', branch: 'main' },
   forge: null,
-  capabilities: { localHandoff: true, followups: true },
+  capabilities: { localHandoff: true, followups: true, cluster },
   defaultRunner: backends[0] ?? 'claude',
   checks: backends.map((name) => ({ name, available: true })),
 })
@@ -112,6 +113,8 @@ function stubFetch(
   backends: readonly string[] = ['claude'],
   defaultModels: Record<string, string> = {},
   providers: ProviderStatusResponse = connectedProviders(backends),
+  /** Off by default (the default install) — set to exercise the "which worker" node cell. */
+  cluster: { on: boolean; overview?: unknown } = { on: false },
 ): SentRequest[] {
   const sent: SentRequest[] = []
   let inbox = [...todos]
@@ -130,7 +133,12 @@ function stubFetch(
       if (method === 'GET' && path === '/api/v1/todos') return jsonResponse(inbox)
       if (method === 'GET' && path === '/api/v1/runs') return jsonResponse([RUN_1])
       // The runner/model pills (#401) read the host's backends and the per-runner defaults.
-      if (method === 'GET' && path === '/api/v1/health') return jsonResponse(health(backends))
+      if (method === 'GET' && path === '/api/v1/health') return jsonResponse(health(backends, cluster.on))
+      if (method === 'GET' && path === '/api/v1/cluster') {
+        return jsonResponse(
+          cluster.overview ?? { nodes: [], pairings: [], proposals: [], link: { state: 'disabled' } },
+        )
+      }
       if (method === 'GET' && path === '/api/v1/providers/status') return jsonResponse(providers)
       if (method === 'GET' && path === '/api/v1/models?runner=codex') return jsonResponse({ runner: 'codex', models: [{ id: 'gpt-future', label: 'gpt-future', description: 'Newest' }], source: 'live', stale: false })
       if (method === 'GET' && path === '/api/v1/config') {
@@ -268,6 +276,115 @@ describe('the inbox card list', () => {
       expect(dot?.className).toContain('animate-pulse')
       expect(dot?.getAttribute('title')).toBe('needs you')
     }
+  })
+})
+
+// ---- "which worker is processing this?" (2026-08-22-multi-node-cezar-cluster.md) --------------
+
+describe('the node cell', () => {
+  const CLUSTER_NODE = (overrides: { nodeId: string; nodeName: string; role?: 'hub' | 'spoke' }) => ({
+    role: 'spoke' as const,
+    labels: [] as string[],
+    acceptsDispatch: true,
+    protocol: { major: 1, minor: 0 },
+    version: '0.10.0',
+    ...overrides,
+  })
+  const HUB = CLUSTER_NODE({ nodeId: 'hub-1', nodeName: 'Hub', role: 'hub' })
+  const SPOKE = CLUSTER_NODE({ nodeId: 'spoke-2', nodeName: 'Laptop' })
+
+  const overview = (selfNodeId: string | undefined) => ({
+    self: selfNodeId ? { ...CLUSTER_NODE({ nodeId: selfNodeId, nodeName: 'Hub' }) } : undefined,
+    nodes: [HUB, SPOKE],
+    pairings: [],
+    proposals: [],
+    link: { state: 'disabled' },
+  })
+
+  const TODO_NO_CLAIM: TodoItem = { id: 'n1', summary: 'Investigate the flaky queue drain' }
+  const TODO_ON_SELF: TodoItem = { id: 'n2', summary: 'Rotate the staging cert', startedOn: 'hub-1' }
+  const TODO_ON_OTHER: TodoItem = { id: 'n3', summary: 'Backfill the report index', startedOn: 'spoke-2' }
+  const TODO_ON_UNKNOWN: TodoItem = { id: 'n4', summary: 'Reindex the corpus', startedOn: 'ghost-9' }
+  const NODE_TODOS: TodoItem[] = [TODO_NO_CLAIM, TODO_ON_SELF, TODO_ON_OTHER, TODO_ON_UNKNOWN]
+
+  const cardFor = (id: string) => cards().find((card) => card.dataset.id === id)!
+  const nodeCell = (id: string) => cardFor(id).querySelector<HTMLElement>('[data-slot="task-node"]')
+
+  it('renders no node cell at all on a single-node cockpit — clustering off', async () => {
+    stubFetch({}, NODE_TODOS, ['claude'], {}, connectedProviders(['claude']), {
+      on: false,
+      overview: overview('hub-1'),
+    })
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(4))
+    for (const card of cards()) {
+      expect(card.querySelector('[data-slot="task-node"]')).toBeNull()
+    }
+  })
+
+  it('an absent claim renders a dash, never "local" or a guess', async () => {
+    stubFetch({}, NODE_TODOS, ['claude'], {}, connectedProviders(['claude']), {
+      on: true,
+      overview: overview('hub-1'),
+    })
+    renderInbox()
+
+    await waitFor(() => expect(nodeCell('n1')).not.toBeNull())
+    const cell = nodeCell('n1')!
+    expect(cell.dataset.nodeKind).toBe('none')
+    expect(cell.textContent).toBe('—')
+    expect(cell.textContent?.toLowerCase()).not.toContain('local')
+  })
+
+  it('marks the node running this cockpit as "this node", not just its name', async () => {
+    stubFetch({}, NODE_TODOS, ['claude'], {}, connectedProviders(['claude']), {
+      on: true,
+      overview: overview('hub-1'),
+    })
+    renderInbox()
+
+    // Waits for the RESOLVED kind, not merely "a cell exists" — the roster fetch settles after
+    // the todos fetch, so an early render can show a transient `'unknown'` (no roster loaded
+    // yet) that would satisfy a weaker assertion without ever reaching the state under test.
+    await waitFor(() => expect(nodeCell('n2')?.dataset.nodeKind).toBe('self'))
+    expect(nodeCell('n2')!.textContent).toBe('this node')
+  })
+
+  it('negative half: the SAME nodeId renders as a plain known node when self is elsewhere', async () => {
+    stubFetch({}, NODE_TODOS, ['claude'], {}, connectedProviders(['claude']), {
+      on: true,
+      overview: overview('spoke-2'),
+    })
+    renderInbox()
+
+    await waitFor(() => expect(nodeCell('n2')?.dataset.nodeKind).toBe('known'))
+    expect(nodeCell('n2')!.textContent).toBe('Hub')
+  })
+
+  it('renders another node by its roster name', async () => {
+    stubFetch({}, NODE_TODOS, ['claude'], {}, connectedProviders(['claude']), {
+      on: true,
+      overview: overview('hub-1'),
+    })
+    renderInbox()
+
+    await waitFor(() => expect(nodeCell('n3')?.dataset.nodeKind).toBe('known'))
+    expect(nodeCell('n3')!.textContent).toBe('Laptop')
+  })
+
+  it('renders an unresolvable node id, never blank', async () => {
+    stubFetch({}, NODE_TODOS, ['claude'], {}, connectedProviders(['claude']), {
+      on: true,
+      overview: overview('hub-1'),
+    })
+    renderInbox()
+
+    await waitFor(() => expect(nodeCell('n4')).not.toBeNull())
+    const cell = nodeCell('n4')!
+    expect(cell.dataset.nodeKind).toBe('unknown')
+    expect(cell.textContent).not.toBe('')
+    expect(cell.textContent).toContain('ghost-9')
   })
 })
 

@@ -14,6 +14,7 @@ import { Pill } from '@/components/pill'
 import { ProjectFilter } from '@/components/project-filter'
 import { ReferenceChip } from '@/components/reference-chip'
 import { StatusDot } from '@/components/status-dot'
+import { RunNodeCell, useRunNodeRoster, type RunNodeRoster } from '@/components/task-node-cell'
 import { Button } from '@/components/ui/button'
 import { deriveAttention } from '@/lib/attention'
 import { shortAge } from '@/lib/format'
@@ -39,14 +40,18 @@ import {
  * Workspace-level — mounted OUTSIDE `ProjectScopeRoute` (`routes.tsx`), reached from the
  * `[ This project | All projects ]` switch `tasks-overview.tsx` renders in its header
  * (scaffold-owned, PLAN D22c). **This file reads only `useHealth`, `useProjects`,
- * `useWorkspaceRuns`, `useWorkspaceUiState` and `putWorkspaceUiState` — never a scope-led query or
- * client function** (the "scope trap": with no `ProjectScopeRoute` above it, `queryScope()`
- * silently resolves to the boot project's `'default'` sentinel, so a project-local call here would
- * read data for the wrong repo with no error). `useProjects()` (`GET /api/v1/projects`) is safe
- * here despite the rule: it is workspace-level by construction, "one registry no matter which
- * project is active" (its own doc comment), so it never touches `queryScope()` either — it is
- * added (multi-project spec, foreign-number guard phase) so each cross-project ROW can resolve
- * its OWN project's `repoUrl`, never the boot project's. `workspace-tasks.test.tsx` asserts the
+ * `useWorkspaceRuns`, `useWorkspaceUiState`, `putWorkspaceUiState`, and (2026-08-24, the Node
+ * column) `useRunNodeRoster`'s own `useClusterOverview`/`useActiveClusterRuns` — never a
+ * scope-led query or client function** (the "scope trap": with no `ProjectScopeRoute` above it,
+ * `queryScope()` silently resolves to the boot project's `'default'` sentinel, so a project-local
+ * call here would read data for the wrong repo with no error). `useProjects()`
+ * (`GET /api/v1/projects`) is safe here despite the rule: it is workspace-level by construction,
+ * "one registry no matter which project is active" (its own doc comment), so it never touches
+ * `queryScope()` either — it is added (multi-project spec, foreign-number guard phase) so each
+ * cross-project ROW can resolve its OWN project's `repoUrl`, never the boot project's. The cluster
+ * hooks are the same: `clusterFetch` (`cluster-section.tsx`) hits `/api/v1/cluster*` directly,
+ * never `queryScope()`, because a roster is a property of the node, not of any one project.
+ * `workspace-tasks.test.tsx` asserts the
  * scope-led rule by request log (no `/api/v1/p/*` request), which this does not violate.
  *
  * **Divergence from the spec's literal wording, recorded here because the spec's "UI/UX" section
@@ -248,6 +253,10 @@ function WorkspaceTasksBoard({
 }) {
   const [query, setQuery] = React.useState('')
   const now = useNow(30_000)
+  // "Which worker ran/is running this?" (2026-08-24) — computed once here (this file is not on
+  // the design-guardian's `no-tick-in-thread-containers` list, so reusing the board's own `now`
+  // is fine) and threaded down like `now`/`repoBase` below.
+  const runNodeRoster = useRunNodeRoster(now)
 
   // An explicit "nothing selected" is a real answer, distinct from "no tasks yet" — it needs no
   // network read at all to explain itself.
@@ -350,6 +359,7 @@ function WorkspaceTasksBoard({
                   <Th>Project</Th>
                   <Th>Workflow</Th>
                   <Th>Branch</Th>
+                  {runNodeRoster.clusterOn ? <Th>Node</Th> : null}
                   <Th>±</Th>
                   <Th>Ref</Th>
                   <Th right>Cost</Th>
@@ -366,6 +376,7 @@ function WorkspaceTasksBoard({
                     hold={queueHold(run, holds, defaultRunner)}
                     now={now}
                     repoBase={repoByProject.get(run.project)}
+                    runNodeRoster={runNodeRoster}
                   />
                 ))}
               </tbody>
@@ -381,6 +392,7 @@ function WorkspaceTasksBoard({
                 hold={queueHold(run, holds, defaultRunner)}
                 now={now}
                 repoBase={repoByProject.get(run.project)}
+                runNodeRoster={runNodeRoster}
               />
             ))}
           </div>
@@ -455,6 +467,7 @@ function WorkspaceTaskRow({
   hold,
   now,
   repoBase,
+  runNodeRoster,
 }: {
   run: WorkspaceRunRow
   projectName: string | undefined
@@ -465,6 +478,7 @@ function WorkspaceTaskRow({
   /** This row's OWN project's repo, resolved by the board from `run.project` — see
    *  `WorkspaceTasksBoard`'s doc comment on `repoByProject`. */
   repoBase: string | undefined
+  runNodeRoster: RunNodeRoster
 }) {
   const attention = deriveAttention(run)
   const scheduled = scheduledResume(run)
@@ -515,6 +529,11 @@ function WorkspaceTaskRow({
       </td>
       <td className={cn(TD_BASE, 'text-[12.5px] text-muted-foreground')}>{workflowLabel(run)}</td>
       <td className={TD_BASE}>{run.branch ? <BranchChip branch={run.branch} /> : <Dash />}</td>
+      {runNodeRoster.clusterOn ? (
+        <td className={TD_BASE}>
+          <RunNodeCell roster={runNodeRoster} runId={run.id} />
+        </td>
+      ) : null}
       <td className={TD_BASE}>{run.diffStat ? <DiffStatLabel stat={run.diffStat} /> : <Dash />}</td>
       <td className={TD_BASE}>{reference ? <ReferenceChip reference={reference} taskTitle={title} /> : <Dash />}</td>
       {queuePosition !== null ? (
@@ -544,6 +563,7 @@ function WorkspaceTaskCard({
   hold,
   now,
   repoBase,
+  runNodeRoster,
 }: {
   run: WorkspaceRunRow
   projectName: string | undefined
@@ -552,6 +572,7 @@ function WorkspaceTaskCard({
   now: number
   /** This card's OWN project's repo — see `WorkspaceTaskRow`'s doc comment on the prop. */
   repoBase: string | undefined
+  runNodeRoster: RunNodeRoster
 }) {
   const attention = deriveAttention(run)
   const scheduled = scheduledResume(run)
@@ -605,6 +626,12 @@ function WorkspaceTaskCard({
           <>
             <Sep />
             <span>{run.branch}</span>
+          </>
+        ) : null}
+        {runNodeRoster.clusterOn ? (
+          <>
+            <Sep />
+            <RunNodeCell roster={runNodeRoster} runId={run.id} className="text-[11.5px]" />
           </>
         ) : null}
         {run.diffStat ? (

@@ -9,6 +9,7 @@ import {
   storedClusterNodeSchema,
   storedClusterPairingSchema,
   storedClusterPeersSchema,
+  type ClusterActiveRun,
   type ClusterCapacity,
   type ClusterNodeId,
   type ClusterPairing,
@@ -171,6 +172,13 @@ export async function markNodeSeen(
       ...(presence.hostMetrics ? { hostMetrics: presence.hostMetrics } : {}),
       ...(presence.repoDrift ? { repoDrift: presence.repoDrift } : {}),
       ...(presence.corpus ? { corpus: presence.corpus } : {}),
+      // `presence.active` is `undefined` or an ARRAY — never `[]`-as-falsy, since every array
+      // (including an empty one) is truthy in JS. So this spread persists `active: []` exactly as
+      // faithfully as it persists a populated array, and only an absent field is dropped. That
+      // distinction is the whole point (see `clusterNodeShape#active`'s own doc): absent means "this
+      // node has not wired active-run reporting", `[]` means "reports nothing running" — collapsing
+      // the two here would make it impossible for a stale roster row to ever recover into "empty".
+      ...(presence.active !== undefined ? { active: presence.active } : {}),
     };
     const nodes = [...peers.nodes];
     nodes[idx] = updated;
@@ -709,6 +717,17 @@ export async function collectRepoFreshness(
  */
 export interface CollectPresenceOptions extends ClusterHomeOptions {
   liveCapacity?: { active: number; heavyActive: number };
+  /**
+   * This node's own in-flight runs, so `presence.active` and `GET /cluster/active` read one
+   * definition of "active" (that schema field's own doc). Same absence discipline as `maxHeavySteps`
+   * below, and deliberately NOT `liveCapacity`'s: `liveCapacity` defaults an absent caller to
+   * `{active: 0, heavyActive: 0}` because `ClusterCapacity#active`/`#heavyActive` are REQUIRED wire
+   * fields with no way to omit them. `active` on the wire is optional precisely so a node that has
+   * not wired this option can say nothing, rather than the frame asserting "nothing running" on its
+   * behalf — a claim it never made. So: option omitted → frame omits `active`; option passed as
+   * `[]` → frame carries `active: []`, verbatim, never coerced into an omission.
+   */
+  activeRuns?: readonly ClusterActiveRun[];
 }
 
 /** The heartbeat this node sends: two capacity numbers (D14), host metrics, per-project drift, and
@@ -747,5 +766,8 @@ export async function collectPresence(
     capacity,
     hostMetrics: currentHostMetrics(),
     repoDrift: repoDrift.slice(0, 200),
+    // `!== undefined`, not truthy: an omitting caller gets no `active` key at all, and a caller that
+    // explicitly passes `[]` gets `active: []` on the wire — see `CollectPresenceOptions#activeRuns`.
+    ...(options?.activeRuns !== undefined ? { active: options.activeRuns.slice(0, 200) } : {}),
   };
 }
