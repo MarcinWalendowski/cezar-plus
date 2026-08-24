@@ -3238,6 +3238,39 @@ invented; these are the names to use when one lands.
 > > and the WebSocket upgrade through Cloudflare Access (a 302 on an upgrade is a failure mode no
 > > localhost test produces).
 > >
+> > **42. FOUR RESEARCH AGENTS DIED ON `API Error: 529 Overloaded` WITH ZERO OUTPUT — and nothing in
+> > items 37-41 came from them.** Dispatched 06:05 UTC to survey the existing harness, the enrollment
+> > sequence, what two processes buy over one, and the relay frame budget. All four failed at
+> > 06:06-06:07, within a minute, producing nothing. One (`HARNESS-INV`) failed a second time at 06:24
+> > when a status-check message woke it. This is a server-side transient, not a task problem — but the
+> > record needs to say plainly that **no delegated research informed any of the work above.**
+> >
+> > **What replaced them was measurement, and it was better.** Instead of waiting, I read
+> > `.ai/scripts/test-env-up.sh` and the `cluster` CLI directly and then BUILT the harness. That is what
+> > surfaced item 41's `CEZ_CLUSTER_HUB` finding — a fact about what the runtime does when a value is
+> > absent, which no amount of reading the code would have produced, because the interesting behaviour
+> > is a contradiction between two stores that only exists at runtime with two processes. **When a
+> > delegated survey and a cheap experiment answer the same question, the experiment answers it
+> > better.** Two questions remain genuinely unanswered and are the ones worth re-dispatching: the relay
+> > frame-budget mechanics (the 100-frame/s link budget, whether the 64-event budget ever engages given
+> > `scheduleFlush` uses `setImmediate`, and whether `consumeSendBudget()` failing warns anything), and
+> > an adversarial check on which of the five two-process-only claims in item 12 are overstated.
+> >
+> > **43. THE MAC IS NOT A GATE, RE-MEASURED — and the flake pool is CONFIRMED by running twice.**
+> > While the box gate ran I also ran the server suite on the Mac, which was simultaneously syncing a
+> > tree, running four agents and a full suite. It produced three reds with durations of **75,050ms,
+> > 100,681ms and 104,299ms** — pure load artifacts, and I discarded the run rather than reporting the
+> > numbers. Stated because a red with a 100-second duration is the signature of contention, not of a
+> > defect, and it is tempting to attribute it to whatever you last changed.
+> >
+> > On the box, **run 1 and run 2 disagree, which is the whole reason the doctrine says run twice.**
+> > Run 1: exactly one failure, `catalog.test.ts` C18. Run 2: C18 again (so C18 is **deterministic,
+> > 2/2**) **plus a second, different failure that run 1 did not produce** — *"removes the directory,
+> > keeps `cez/<id8>`, and leaves no leftover entry on the record"*, a worktree-cleanup assertion. A red
+> > that MOVES between two runs of an identical tree is a flake, not a regression. Had I run only the
+> > second, I would have had two reds and a plausible story about which of my changes caused the new
+> > one.
+> >
 > > **Standing constraints, unchanged:** push to `origin` only, never `upstream`, never a bare
 > > `git push`. Do NOT merge PR #9 (it auto-deploys to `prod-host`, where the owner's agents
 > > run — the owner's call, and the hard prerequisite for any E2E). Do NOT run the Access
