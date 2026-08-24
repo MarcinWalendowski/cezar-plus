@@ -25,6 +25,43 @@ import { z } from 'zod';
 export const sourceKindSchema = z.string().min(1).max(32);
 export type SourceKind = z.infer<typeof sourceKindSchema>;
 
+/**
+ * Per-kind connection-interval floor, MIRRORING `packages/cezar/src/sources/types.ts`'s own
+ * `SOURCE_KIND_INTERVAL_POLICY` — this package cannot import that one (a separate, Node-free
+ * package; see the module header), so the same small map is restated here rather than shared,
+ * matching how this file already mirrors that one's OPEN storage schemas as a CLOSED wire shape.
+ * Keep the two in step by hand.
+ *
+ * The default floor (300s) protects a THIRD-PARTY api (Notion, ...); `cezar-hub` talks to our own
+ * box over the enrollment tunnel, where a no-change sweep costs one small HTTP request under the
+ * manifest + `hash` + `?since=` design (D8a of `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`,
+ * item 56), so 60s is safe there and nowhere else.
+ */
+const SOURCE_KIND_MIN_INTERVAL_SECONDS: Readonly<Record<string, number>> = {
+  'cezar-hub': 60,
+};
+const DEFAULT_MIN_INTERVAL_SECONDS = 300;
+
+function minIntervalSecondsForKind(kind: string): number {
+  return SOURCE_KIND_MIN_INTERVAL_SECONDS[kind] ?? DEFAULT_MIN_INTERVAL_SECONDS;
+}
+
+/** Shared `superRefine` body for both the create and update input schemas below — a stricter,
+ *  per-kind floor on top of each field's own kind-agnostic `.min(60)`, the global lowest any kind
+ *  may declare. `intervalSeconds` is optional on both bodies (a PUT/POST may omit it entirely), so
+ *  an absent value is left for the server's own default rather than flagged here. */
+function checkIntervalFloor(value: { kind: string; intervalSeconds?: number }, ctx: z.RefinementCtx): void {
+  if (value.intervalSeconds === undefined) return;
+  const floor = minIntervalSecondsForKind(value.kind);
+  if (value.intervalSeconds < floor) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['intervalSeconds'],
+      message: `intervalSeconds must be >= ${floor} for kind "${value.kind}"`,
+    });
+  }
+}
+
 export const sourceAvailabilitySchema = z.object({
   available: z.boolean(),
   reason: z.string().optional(),
@@ -308,24 +345,31 @@ export type SourceLogResponse = z.infer<typeof sourceLogResponseSchema>;
 
 // ---- request bodies ------------------------------------------------------------------------
 
-/** `POST /sources`. The connection definition minus everything the server owns — id, revision, the
- *  timestamps and every runtime-state field. */
-export const createSourceConnectionInputSchema = z.object({
+/** The plain `ZodObject` both request bodies below extend — kept unexported and un-refined so
+ *  `.extend()` stays available (`superRefine` returns a `ZodEffects`, which has no `.extend()`);
+ *  each of the two exported schemas below attaches its own `checkIntervalFloor` afterward. */
+const sourceConnectionInputBaseSchema = z.object({
   kind: sourceKindSchema,
   name: z.string().min(1).max(200),
   enabled: z.boolean().optional(),
   mode: sourceConnectionModeSchema.optional(),
-  intervalSeconds: z.number().int().min(300).max(86_400).optional(),
+  /** `.min(60)` is the global floor; the real, per-kind floor is `checkIntervalFloor`, applied by
+   *  `superRefine` below. */
+  intervalSeconds: z.number().int().min(60).max(86_400).optional(),
   collections: z.array(sourceCollectionRefSchema).max(50).optional(),
   watchComments: z.boolean().optional(),
   maxDocuments: z.number().int().min(1).max(20_000).optional(),
   maxBodyBytes: z.number().int().min(4_096).max(4_194_304).optional(),
 });
+
+/** `POST /sources`. The connection definition minus everything the server owns — id, revision, the
+ *  timestamps and every runtime-state field. */
+export const createSourceConnectionInputSchema = sourceConnectionInputBaseSchema.superRefine(checkIntervalFloor);
 export type CreateSourceConnectionInput = z.input<typeof createSourceConnectionInputSchema>;
 
 /** `PUT /sources/:connectionId` — the same body plus the revision the editor read; a stale one
  *  answers 409 rather than overwriting somebody else's edit. */
-export const updateSourceConnectionInputSchema = createSourceConnectionInputSchema.extend({
-  expectedRevision: z.number().int(),
-});
+export const updateSourceConnectionInputSchema = sourceConnectionInputBaseSchema
+  .extend({ expectedRevision: z.number().int() })
+  .superRefine(checkIntervalFloor);
 export type UpdateSourceConnectionInput = z.input<typeof updateSourceConnectionInputSchema>;

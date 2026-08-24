@@ -2,7 +2,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CLUSTER_PROTOCOL, type ClusterRemoteRun, type StoredClusterNode } from '@loki-labs/better-cezar-contract';
+import {
+  CLUSTER_PROTOCOL,
+  type ClusterActiveRun,
+  type ClusterRemoteRun,
+  type StoredClusterNode,
+} from '@loki-labs/better-cezar-contract';
 import { readAllocations } from '../cluster/allocate.ts';
 import { readLeases } from '../cluster/leases.ts';
 import {
@@ -15,11 +20,16 @@ import {
 } from '../cluster/node-auth.ts';
 import { ensureNodeIdentity } from '../cluster/node-identity.ts';
 import { storeNodeSecret } from '../cluster/node-secrets.ts';
-import { applyPairingAction, upsertNode } from '../cluster/peers.ts';
+import { applyPairingAction, disableNode, upsertNode } from '../cluster/peers.ts';
 import { applyRemoteRuns } from '../cluster/run-projection.ts';
 import { workspaceConfigPath } from '../paths.ts';
 import { atomicWriteJsonSync, defaultWorkspaceConfig } from '../workspace/config.ts';
-import { createClusterRoutes, type ClusterRouteDeps } from './cluster-routes.ts';
+import {
+  clusterActiveRunsFromRoster,
+  createClusterRoutes,
+  mergeActiveRuns,
+  type ClusterRouteDeps,
+} from './cluster-routes.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 
 /**
@@ -791,5 +801,175 @@ describe('GET /cluster/active — asOf is evidence, not a request-time stamp', (
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * D-active (2026-08-24): the roster half of `GET /cluster/active`. The route used to depend
+ * entirely on `run-projection.ts`'s dead writers (`applyRemoteRuns`/`markNodeUnreachable`, zero
+ * production callers per this file's own module header), so it always answered `runs: []`. Every
+ * node now reports its own in-flight runs on `presence.active`, the roster persists it
+ * (`peers.ts#markNodeSeen`), and the route unions the roster with the projection.
+ */
+describe('GET /cluster/active — the roster half', () => {
+  let home: string;
+  let env: NodeJS.ProcessEnv;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'cez-cluster-active-roster-'));
+    env = { CEZ_CLUSTER: '1', CEZ_HOME: home };
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const routes = () => createClusterRoutes({ version: '0.0.0-test', env });
+
+  function activeRun(overrides: Partial<ClusterActiveRun> = {}): ClusterActiveRun {
+    return { runId: 'r1', nodeId: NODE_ID, paths: [], ...overrides };
+  }
+
+  it('a run reported on a linked node\'s `active` reaches the response', async () => {
+    await upsertNode(
+      {
+        nodeId: NODE_ID,
+        nodeName: 'node a',
+        role: 'spoke',
+        labels: [],
+        acceptsDispatch: false,
+        protocol: CLUSTER_PROTOCOL,
+        version: '0.0.0-test',
+        lastSeenAt: '2026-08-24T10:00:00.000Z',
+        active: [activeRun({ runId: 'r-roster-1' })],
+      },
+      { env },
+    );
+
+    const res = await apiRequest(routes(), '/cluster/active');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { runs: ClusterActiveRun[] };
+    expect(body.runs.map((r) => r.runId)).toEqual(['r-roster-1']);
+  });
+
+  it('NEGATIVE CONTROL: a run reported by a `disabledAt` (revoked) node does NOT appear', async () => {
+    await upsertNode(
+      {
+        nodeId: NODE_ID,
+        nodeName: 'node a',
+        role: 'spoke',
+        labels: [],
+        acceptsDispatch: false,
+        protocol: CLUSTER_PROTOCOL,
+        version: '0.0.0-test',
+        lastSeenAt: '2026-08-24T10:00:00.000Z',
+        active: [activeRun({ runId: 'r-revoked-1' })],
+        disabledAt: '2026-08-24T10:05:00.000Z',
+      },
+      { env },
+    );
+
+    const res = await apiRequest(routes(), '/cluster/active');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { runs: ClusterActiveRun[] };
+    expect(body.runs).toEqual([]);
+  });
+
+  it('unions the roster with the (still-live-but-dead-in-practice) projection, deduped by runId — roster wins a collision', async () => {
+    await upsertNode(
+      {
+        nodeId: NODE_ID,
+        nodeName: 'node a',
+        role: 'spoke',
+        labels: [],
+        acceptsDispatch: false,
+        protocol: CLUSTER_PROTOCOL,
+        version: '0.0.0-test',
+        lastSeenAt: '2026-08-24T10:00:00.000Z',
+        active: [activeRun({ runId: 'shared-run', summary: 'from the roster' })],
+      },
+      { env },
+    );
+    // Same runId, different content, via the projection path — proves the roster entry wins
+    // rather than whichever source happened to merge first.
+    await applyRemoteRuns(
+      NODE_ID,
+      [
+        {
+          projectId: 'proj-1',
+          nodeId: NODE_ID,
+          id: 'shared-run',
+          title: 'from the projection',
+          status: 'running',
+          createdAt: '2026-08-24T09:00:00.000Z',
+          archived: false,
+          workflow: 'w',
+        },
+        {
+          projectId: 'proj-1',
+          nodeId: NODE_ID,
+          id: 'projection-only-run',
+          title: 'projection-only',
+          status: 'running',
+          createdAt: '2026-08-24T09:00:00.000Z',
+          archived: false,
+          workflow: 'w',
+        },
+      ],
+      '2026-08-24T10:00:00.000Z',
+      { env },
+    );
+
+    const res = await apiRequest(routes(), '/cluster/active');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { runs: ClusterActiveRun[] };
+    const byId = new Map(body.runs.map((r) => [r.runId, r]));
+    expect([...byId.keys()].sort()).toEqual(['projection-only-run', 'shared-run']);
+    expect(byId.get('shared-run')?.summary).toBe('from the roster'); // roster wins the collision
+  });
+});
+
+describe('clusterActiveRunsFromRoster (unit)', () => {
+  function node(overrides: Partial<StoredClusterNode> = {}): StoredClusterNode {
+    return {
+      nodeId: 'n1',
+      nodeName: 'n1',
+      role: 'spoke',
+      labels: [],
+      acceptsDispatch: false,
+      protocol: CLUSTER_PROTOCOL,
+      version: '0.0.0-test',
+      ...overrides,
+    };
+  }
+
+  it('reads `active` off every linked node', () => {
+    const run: ClusterActiveRun = { runId: 'r1', nodeId: 'n1', paths: [] };
+    expect(clusterActiveRunsFromRoster([node({ active: [run] })])).toEqual([run]);
+  });
+
+  it('a node with no `active` field contributes nothing (absent is not `[]`)', () => {
+    expect(clusterActiveRunsFromRoster([node()])).toEqual([]);
+  });
+
+  it('NEGATIVE CONTROL: skips a `disabledAt` node even though it still carries `active`', () => {
+    const run: ClusterActiveRun = { runId: 'r1', nodeId: 'n1', paths: [] };
+    expect(clusterActiveRunsFromRoster([node({ active: [run], disabledAt: '2026-08-24T00:00:00.000Z' })])).toEqual(
+      [],
+    );
+  });
+});
+
+describe('mergeActiveRuns (unit)', () => {
+  it('dedupes by runId, keeping the ROSTER entry on a collision', () => {
+    const rosterRun: ClusterActiveRun = { runId: 'shared', nodeId: 'n1', paths: [], summary: 'roster' };
+    const projectionRun: ClusterActiveRun = { runId: 'shared', nodeId: 'n1', paths: [], summary: 'projection' };
+    const other: ClusterActiveRun = { runId: 'other', nodeId: 'n1', paths: [] };
+    const merged = mergeActiveRuns([rosterRun], [projectionRun, other]);
+    expect(merged).toEqual([rosterRun, other]);
+  });
+
+  it('two empty sources merge to an empty array', () => {
+    expect(mergeActiveRuns([], [])).toEqual([]);
   });
 });

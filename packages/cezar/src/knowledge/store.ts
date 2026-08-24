@@ -76,6 +76,23 @@ export interface KnowledgeStoreOptions {
    * a platform without recursive `fs.watch`, just chosen rather than forced.
    */
   disableWatchers?: boolean;
+  /**
+   * Called once per COMPLETED reindex, immediately after `catalogGeneration` is bumped (D8a /
+   * cluster item 57). Added 2026-08-24 so a hub can push a `corpus-changed` hint to its spokes the
+   * moment its corpus actually moves, instead of every spoke waiting out its own interval.
+   *
+   * **Here rather than at a write route, deliberately.** The obvious hook was
+   * `POST /cluster/corpus/submit`, but that is only the spoke→hub path: a report drained by
+   * `cezar-reports-drain`, a `/cezar-sync` write, or a plain editor save all reach disk without
+   * passing through it, and each would have pushed nothing. The `catalogGeneration++` below is the
+   * one point every write path and BOTH change triggers converge on — its own comment says so —
+   * which makes it the only hook that cannot be bypassed by adding a new writer later.
+   *
+   * It receives no argument and must not throw: a listener's failure is warned and swallowed, never
+   * allowed to fail a reindex. It is also NOT a substitute for the interval sweep — a listener that
+   * never fires must degrade to "slower", never to "stale forever".
+   */
+  onChanged?: () => void;
 }
 
 export type WriteFailure = { ok: false; status: 400 | 404 | 409; error: string };
@@ -130,6 +147,7 @@ export class KnowledgeStore {
   private readonly now: () => Date;
   private readonly warn: (message: string) => void;
   private readonly watchersDisabled: boolean;
+  private readonly onChanged: (() => void) | undefined;
 
   static create(repoRoot: string, dataDir: string, options: KnowledgeStoreOptions = {}): KnowledgeStore {
     return new KnowledgeStore(repoRoot, dataDir, options);
@@ -145,6 +163,7 @@ export class KnowledgeStore {
     this.caps = options.caps ?? DEFAULT_SCAN_CAPS;
     this.now = options.now ?? (() => new Date());
     this.warn = options.warn ?? ((message) => console.warn(`[cez] knowledge: ${message}`));
+    this.onChanged = options.onChanged;
     this.watchersDisabled = options.disableWatchers ?? false;
   }
 
@@ -237,6 +256,18 @@ export class KnowledgeStore {
       // triggers (D15) and every write converge, is what keeps `searchMemo`/`slugIndexMemo` from
       // ever serving a stale index without needing a second bump call anywhere else.
       this.catalogGeneration++;
+      // Fire AFTER the bump, so a listener that turns around and reads this store observes the new
+      // index rather than the one it was told had changed. Swallowed-and-warned: a corpus broadcast
+      // failing must never fail the reindex that provoked it.
+      if (this.onChanged) {
+        try {
+          this.onChanged();
+        } catch (err) {
+          this.warn(
+            `knowledge: onChanged listener threw after reindex (index is still correct): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
 
       await this.persist();
       // A root that did not exist yet (e.g. `project`, before its first write) may exist now —

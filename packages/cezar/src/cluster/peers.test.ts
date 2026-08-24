@@ -311,6 +311,45 @@ describe('cluster/peers', () => {
       const peers = await readPeers();
       expect(peers.nodes).toEqual([]);
     });
+
+    // ---- `active` — absent vs `[]` must round-trip distinctly (D-active) ---------------------
+
+    it('a presence frame with no `active` field leaves the roster row without one', async () => {
+      await upsertNode(makeStoredNode({ nodeId: 'n1' }));
+      const updated = await markNodeSeen('n1', makePresence());
+      expect(updated?.active).toBeUndefined();
+      const peers = await readPeers();
+      expect(peers.nodes[0]?.active).toBeUndefined();
+    });
+
+    it('a presence frame with `active: []` persists an EMPTY array, not an absent field', async () => {
+      await upsertNode(makeStoredNode({ nodeId: 'n1' }));
+      const updated = await markNodeSeen('n1', makePresence({ active: [] }));
+      expect(updated?.active).toEqual([]);
+      expect(updated?.active).not.toBeUndefined();
+      const peers = await readPeers();
+      expect(peers.nodes[0]?.active).toEqual([]);
+    });
+
+    it('a presence frame with populated `active` persists the runs verbatim', async () => {
+      await upsertNode(makeStoredNode({ nodeId: 'n1' }));
+      const run = { runId: 'r1', nodeId: 'n1', paths: [] };
+      const updated = await markNodeSeen('n1', makePresence({ active: [run] }));
+      expect(updated?.active).toEqual([run]);
+      const peers = await readPeers();
+      expect(peers.nodes[0]?.active).toEqual([run]);
+    });
+
+    it('a later beat with no `active` field does not erase a previously-reported one (overwrite, not merge — same as capacity above)', async () => {
+      await upsertNode(makeStoredNode({ nodeId: 'n1' }));
+      const run = { runId: 'r1', nodeId: 'n1', paths: [] };
+      await markNodeSeen('n1', makePresence({ active: [run] }));
+      // The SECOND frame carries no `active` at all (an older/unwired beat) — the spread idiom
+      // leaves the roster's existing `active` untouched rather than clobbering it, exactly like
+      // `hostMetrics`/`repoDrift`/`corpus` above already behave on an omitting beat.
+      const second = await markNodeSeen('n1', makePresence());
+      expect(second?.active).toEqual([run]);
+    });
   });
 
   // ---- normalizeOriginUrl ------------------------------------------------------------------------
@@ -635,6 +674,26 @@ describe('cluster/peers', () => {
       const presence = await collectPresence();
       expect(presence.capacity.active).toBe(0);
       expect(presence.capacity.heavyActive).toBe(0);
+    });
+
+    // ---- `activeRuns` — absent vs `[]` must round-trip distinctly (D-active) -----------------
+
+    it('omits `active` entirely when the caller passes no `activeRuns` option at all', async () => {
+      const presence = await collectPresence();
+      expect(presence.active).toBeUndefined();
+      expect('active' in presence).toBe(false); // not merely `undefined` — the KEY itself is absent
+    });
+
+    it('carries `active: []` verbatim when the caller explicitly passes an empty array', async () => {
+      const presence = await collectPresence({ activeRuns: [] });
+      expect(presence.active).toEqual([]);
+      expect('active' in presence).toBe(true); // present, even though empty — never coerced to absent
+    });
+
+    it('carries a populated `activeRuns` through as `active`, unchanged', async () => {
+      const run = { runId: 'r1', nodeId: 'n1', paths: [] };
+      const presence = await collectPresence({ activeRuns: [run] });
+      expect(presence.active).toEqual([run]);
     });
   });
 });

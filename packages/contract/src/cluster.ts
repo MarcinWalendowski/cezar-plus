@@ -82,7 +82,7 @@ import { workflowDefSchema } from './workflows.ts';
  * REFUSES the link with `protocol-major` and shows it in the cockpit (D13).
  */
 export const CLUSTER_PROTOCOL_MAJOR = 1;
-export const CLUSTER_PROTOCOL_MINOR = 0;
+export const CLUSTER_PROTOCOL_MINOR = 1;
 
 export const clusterProtocolSchema = z
   .object({
@@ -202,8 +202,32 @@ export type ClusterRepoFreshness = z.infer<typeof clusterRepoFreshnessSchema>;
  */
 export const clusterCorpusScopeSchema = z.string().min(1).max(64);
 
-export const CLUSTER_CORPUS_DEFAULT_SCOPE = ['knowledge', 'domains', 'changelog', 'tasks'] as const;
-export const CLUSTER_CORPUS_OPT_IN_SCOPE = ['reports', 'raw-input'] as const;
+/**
+ * **CHANGED 2026-08-24 on the owner's instruction — every scope mirrors by default.** This read
+ * `['knowledge', 'domains', 'changelog', 'tasks']`, with `reports`/`raw-input` opt-in, because
+ * `reports/` is 196 files carrying phone numbers and chat ids and D8a did not want them on a
+ * disposable VPS worker. The first real worker is the owner's own Mac, where that argument is much
+ * weaker, and the instruction was explicit: *"everything should be on by default"*.
+ *
+ * **The scoping MECHANISM is unchanged and must stay** — `mirrorScope` is still a per-node value
+ * that the node reports on `presence`, so "not found" and "not mirrored" remain distinguishable
+ * (spec Verification 18). Only the DEFAULT moved. A future VPS worker should be narrowed by setting
+ * its scope explicitly rather than by changing this constant back, which would silently re-narrow
+ * the Mac too.
+ */
+export const CLUSTER_CORPUS_DEFAULT_SCOPE = [
+  'knowledge',
+  'domains',
+  'changelog',
+  'tasks',
+  'reports',
+  'raw-input',
+] as const;
+
+/** Kept as a NAME for the two scopes that used to be opt-in, because `presence` rendering and the
+ *  cockpit still distinguish them, and a reviewer narrowing a disposable worker needs the list. It
+ *  is no longer subtracted from the default — see `CLUSTER_CORPUS_DEFAULT_SCOPE` above. */
+export const CLUSTER_CORPUS_SENSITIVE_SCOPE = ['reports', 'raw-input'] as const;
 
 /**
  * A mirror's own freshness, carried on every `presence` frame — because **a stale mirror must be
@@ -223,6 +247,35 @@ export const clusterCorpusStatusSchema = z
   })
   .strict();
 export type ClusterCorpusStatus = z.infer<typeof clusterCorpusStatusSchema>;
+
+/**
+ * One in-flight run as `GET /api/v1/cluster/active` and `cez cluster active` report it — D19 rung 4,
+ * "let an agent read what else is in flight", and the input rung 3's overlap refusal is computed
+ * from. Declared here, above `clusterNodeShape`, because the roster row's own `active` field
+ * (below) references it — moved 2026-08-24 from its previous spot beside `clusterActiveResponseSchema`
+ * so that reference is not a forward one.
+ *
+ * **`summary` is agent- or human-authored text read by another agent, and therefore an injection
+ * surface** (D19's closing rule). A consumer frames it as an attributed report — *"run `r_123` on
+ * `worker-2` reported: …"* — and never merges it into a system prompt, never lets it grant a
+ * capability, name a tool or widen an allowlist. It is bounded here; that is necessary and not
+ * sufficient.
+ */
+export const clusterActiveRunSchema = z
+  .object({
+    runId: z.string().min(1).max(120),
+    nodeId: clusterNodeIdSchema,
+    projectKey: clusterProjectKeySchema.optional(),
+    todoId: z.string().max(200).optional(),
+    summary: z.string().max(500).optional(),
+    branch: z.string().max(200).optional(),
+    /** REPO-RELATIVE, from `collectChanges` on the owning node — one git call at dispatch. Never
+     *  absolute: an absolute path is a local-machine fact and has no meaning on the reader's host. */
+    paths: z.array(z.string().max(400)).max(500),
+    startedAt: z.string().optional(),
+  })
+  .strict();
+export type ClusterActiveRun = z.infer<typeof clusterActiveRunSchema>;
 
 // ---- the roster: one node, wire and stored ------------------------------------------------------
 
@@ -251,6 +304,35 @@ const clusterNodeShape = {
   hostMetrics: hostMetricsResponseSchema.optional(),
   repoDrift: z.array(clusterRepoFreshnessSchema).max(200).optional(),
   corpus: clusterCorpusStatusSchema.optional(),
+  /**
+   * Which corpus scopes THIS node mirrors (D8a). Optional, and its absence means
+   * `CLUSTER_CORPUS_DEFAULT_SCOPE` — which since 2026-08-24 is **all six scopes**, on the owner's
+   * instruction that everything be on by default. So an omitting node gets the full corpus, not an
+   * empty one: the safe reading of "unset" here is *everything the hub allows*, because the hub
+   * enforces scope on its own side regardless and a silently-empty mirror is the failure D8a is
+   * written against.
+   *
+   * It lives on the ROSTER row rather than only in the node's local config because the hub is what
+   * enforces it — `corpus-store.ts#scopeForNode` reads this to decide what a manifest may contain.
+   * A node asking for a scope it is not granted is refused by the hub, not trusted; this field is
+   * the hub's record of the grant, and `clusterCorpusStatusSchema.scope` is what the node REPORTS
+   * back. The two are deliberately separate so a disagreement is visible rather than reconciled
+   * into silence.
+   */
+  mirrorScope: z.array(clusterCorpusScopeSchema).max(32).optional(),
+  /**
+   * This node's in-flight runs, as last reported on a `presence` frame (`markNodeSeen` stamps it
+   * verbatim, same as `corpus`/`repoDrift`) — the roster-backed half of `GET /cluster/active`
+   * (`cluster-routes.ts`), unioned there with the `readRemoteRuns` projection so the route cannot
+   * regress to always-`[]` the way it did before this field existed.
+   *
+   * **A per-node SNAPSHOT CLAIM stamped by `lastSeenAt`, never a live read.** `active` is absent or
+   * `[]` for reasons that are NOT the same and must not be collapsed: **absent** means this node has
+   * not wired active-run reporting at all (older cezar, or a node whose `collectPresence` caller
+   * never passed `activeRuns`); **`[]`** means this node reports nothing running right now. A
+   * consumer that treats absence as "nothing running" is claiming knowledge this node never sent.
+   */
+  active: z.array(clusterActiveRunSchema).max(200).optional(),
   /** Set by a hub-side revoke. Revocation is two-sided (spec → "Security and blast radius" 5): the
    *  spoke's credential is deleted too, because a hub-side revoke alone does not stop a spoke from
    *  continuing to push ops. */
@@ -519,33 +601,6 @@ export const clusterRemoteRunSchema = runIndexEntrySchema
   })
   .strict();
 export type ClusterRemoteRun = z.infer<typeof clusterRemoteRunSchema>;
-
-/**
- * One in-flight run as `GET /api/v1/cluster/active` and `cez cluster active` report it — D19 rung 4,
- * "let an agent read what else is in flight", and the input rung 3's overlap refusal is computed
- * from.
- *
- * **`summary` is agent- or human-authored text read by another agent, and therefore an injection
- * surface** (D19's closing rule). A consumer frames it as an attributed report — *"run `r_123` on
- * `worker-2` reported: …"* — and never merges it into a system prompt, never lets it grant a
- * capability, name a tool or widen an allowlist. It is bounded here; that is necessary and not
- * sufficient.
- */
-export const clusterActiveRunSchema = z
-  .object({
-    runId: z.string().min(1).max(120),
-    nodeId: clusterNodeIdSchema,
-    projectKey: clusterProjectKeySchema.optional(),
-    todoId: z.string().max(200).optional(),
-    summary: z.string().max(500).optional(),
-    branch: z.string().max(200).optional(),
-    /** REPO-RELATIVE, from `collectChanges` on the owning node — one git call at dispatch. Never
-     *  absolute: an absolute path is a local-machine fact and has no meaning on the reader's host. */
-    paths: z.array(z.string().max(400)).max(500),
-    startedAt: z.string().optional(),
-  })
-  .strict();
-export type ClusterActiveRun = z.infer<typeof clusterActiveRunSchema>;
 
 export const clusterActiveResponseSchema = z
   .object({
@@ -1024,6 +1079,95 @@ export const clusterCorpusPathParamSchema = z
   .object({ path: z.string().min(1).max(500) })
   .strict();
 export type ClusterCorpusPathParam = z.infer<typeof clusterCorpusPathParamSchema>;
+
+/**
+ * One document body. `hash` rides along so a caller can verify it got the body the manifest
+ * promised — the manifest and the body are two round trips, and the corpus can change between them.
+ */
+export const clusterCorpusBodySchema = z
+  .object({
+    path: z.string().min(1).max(500),
+    hash: z.string().min(1).max(128),
+    body: z.string(),
+  })
+  .strict();
+export type ClusterCorpusBody = z.infer<typeof clusterCorpusBodySchema>;
+
+/** `GET /api/v1/cluster/corpus/*path` — the single-document answer. Kept alongside the batch route
+ *  below rather than replaced by it: `adopt` and a one-file repair want exactly one document, and
+ *  this is the route the wildcard scope guard is already written against. */
+export const clusterCorpusDocResponseSchema = clusterCorpusBodySchema;
+export type ClusterCorpusDocResponse = z.infer<typeof clusterCorpusDocResponseSchema>;
+
+/** How many paths one batch request may name. 200 x ~3.6 KB average ≈ 700 KB, comfortably inside
+ *  the byte cap below, and it is what turns a 2173-document first mirror from 235 s of serial round
+ *  trips into ~1.2 s of eleven (measured 2026-08-24: median RTT to the hub is 108 ms). */
+export const CLUSTER_CORPUS_BATCH_MAX_PATHS = 200;
+
+/** Byte ceiling on ONE batch response. Reached before the path cap on a corpus of large documents,
+ *  which is exactly why `truncated` exists: the route returns what fits and says so. */
+export const CLUSTER_CORPUS_BATCH_MAX_BYTES = 4_000_000;
+
+/**
+ * `POST /api/v1/cluster/corpus/bodies` — N document bodies in one round trip.
+ *
+ * **This is a performance route and nothing else.** Every path is scope-checked with the SAME
+ * function the single-document route uses; a batch route carrying its own copy of that rule is how
+ * the two drift and one of them stops refusing `reports/`. Ordering of `docs` is not guaranteed to
+ * match `paths`, so a caller keys on `path`.
+ */
+export const clusterCorpusBodiesRequestSchema = z
+  .object({
+    paths: z.array(z.string().min(1).max(500)).min(1).max(CLUSTER_CORPUS_BATCH_MAX_PATHS),
+  })
+  .strict();
+export type ClusterCorpusBodiesRequest = z.infer<typeof clusterCorpusBodiesRequestSchema>;
+
+export const clusterCorpusBodiesResponseSchema = z
+  .object({
+    docs: z.array(clusterCorpusBodySchema),
+    /** Paths the caller asked for that this hub does not have, or that fall outside its mirror
+     *  scope — returned as a LIST rather than an error so one bad path cannot fail a batch of 200.
+     *  A missing document and an out-of-scope one are deliberately not distinguished: telling a
+     *  node which out-of-scope paths exist is the disclosure the scope check exists to prevent. */
+    missing: z.array(z.string().max(500)),
+    /** True when the byte cap cut the response short. The caller loops on what it did not receive.
+     *  Distinguished from failure, exactly as `complete` is on the manifest. */
+    truncated: z.boolean(),
+  })
+  .strict();
+export type ClusterCorpusBodiesResponse = z.infer<typeof clusterCorpusBodiesResponseSchema>;
+
+/**
+ * `GET /api/v1/cluster/corpus?since=<corpusVersion>` — the delta form of the manifest.
+ *
+ * Absent `since`, the manifest is the whole (scoped) corpus. With it, `docs` carries only what
+ * changed after that version and `tombstones` only what was deleted after it. **A delta manifest's
+ * omissions are not deletions** — that is the entire reason `tombstones` is an explicit array and
+ * not something a client derives by comparing file lists (spec Verification 16).
+ */
+export const clusterCorpusManifestQuerySchema = z
+  .object({
+    since: z.string().min(1).max(120).optional(),
+    /**
+     * A NARROWING HINT, never a grant. Added 2026-08-24 because the built spoke client
+     * (`sources/cezar-hub/provider.ts`) already sends `?scope=` on every request while this schema
+     * was `.strict()` to `since` alone — so every real manifest request 400'd at the validator, and
+     * the route had to re-declare the field locally to work at all. Declaring it here is the fix at
+     * the source; a client and a contract disagreeing about the wire is not something a route
+     * should paper over.
+     *
+     * **The hub INTERSECTS this against what the node is actually granted
+     * (`corpus-store.ts#scopeForNode`); it can only ever narrow, never widen.** A node asking for a
+     * scope it does not hold gets the intersection, not the request — which is why accepting an
+     * unauthenticated-ish query field here is safe: it expresses a preference, and the grant is
+     * read from the roster row (`mirrorScope`) regardless. Do not later "simplify" this by trusting
+     * it directly.
+     */
+    scope: z.string().max(500).optional(),
+  })
+  .strict();
+export type ClusterCorpusManifestQuery = z.infer<typeof clusterCorpusManifestQuerySchema>;
 
 /**
  * `POST /api/v1/cluster/corpus/submit` — **the only write direction the corpus has** (D8, D8a).
@@ -1593,6 +1737,44 @@ export const clusterReplicaFrameSchema = z
 export type ClusterReplicaFrame = z.infer<typeof clusterReplicaFrameSchema>;
 
 /**
+ * ← hub to spoke: **a hint that the corpus moved, never the change itself.**
+ *
+ * The mirror's cadence used to be its only trigger, and the `sources` floor was 300 s
+ * (`sources/types.ts`), so a worker could read a corpus five to fifteen minutes stale and answer
+ * confidently from it — D8a's "a stale mirror must be loud" with nothing making it loud in time.
+ * This frame collapses that to a round trip (~108 ms measured) for the ordinary case.
+ *
+ * **It carries no paths and no bodies, deliberately.** The spoke's response is to run its normal
+ * `GET /cluster/corpus?since=` sweep, which is authoritative and scope-enforced on the hub. If the
+ * frame instead carried the changed paths there would be two accounts of what changed, and a
+ * dropped frame would become a silent GAP in the mirror. As a hint, a dropped frame costs LATENCY
+ * ONLY — the interval sweep still catches it — which is why the interval must remain a floor and
+ * must never be raised to "we have push now". Push for the common case, poll to bound the failure.
+ *
+ * `scope` lets a spoke that mirrors a subset skip a sweep for a commit that cannot concern it.
+ * Ignoring it is always safe: the worst outcome is one wasted delta manifest, which costs a single
+ * request because the manifest diffs on `hash`.
+ *
+ * Adding a frame is a MINOR bump, not a MAJOR one, and that is measured rather than assumed:
+ * `link-client.ts#parseDownlink` `safeParse`s the downlink union and, on failure, warns and returns
+ * `undefined` — the message handler's `if (!frame) return;` drops that ONE frame and leaves the
+ * socket open. So a spoke on an older build loses the hint and falls back to its interval sweep,
+ * which is degradation, not half-application. (The rule at `CLUSTER_PROTOCOL_MAJOR` reserves MAJOR
+ * for a new envelope key, a REMOVED frame, or a changed meaning. None of those apply.)
+ */
+export const clusterCorpusChangedFrameSchema = z
+  .object({
+    type: z.literal('corpus-changed'),
+    protocol: clusterProtocolSchema,
+    /** The hub's version AFTER the commit — the same value a spoke passes back as `?since=`. */
+    corpusVersion: z.string().min(1).max(120),
+    /** Scopes the commit touched. Absent means "unknown, sweep anyway". */
+    scope: z.array(clusterCorpusScopeSchema).max(32).optional(),
+  })
+  .strict();
+export type ClusterCorpusChangedFrame = z.infer<typeof clusterCorpusChangedFrameSchema>;
+
+/**
  * ← hub to spoke.
  *
  * **Nothing here may become a local-machine affordance.** There is no path, no worktree, no session
@@ -1765,6 +1947,7 @@ export const clusterDownlinkFrameSchema = z.discriminatedUnion('type', [
   clusterRefuseFrameSchema,
   clusterAckFrameSchema,
   clusterReplicaFrameSchema,
+  clusterCorpusChangedFrameSchema,
   clusterDispatchFrameSchema,
   clusterRelayRequestFrameSchema,
 ]);

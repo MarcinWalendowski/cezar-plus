@@ -120,6 +120,9 @@ function stubFetch({
   indexStatuses,
   todos = [],
   todoPatchStatus = 200,
+  cluster = false,
+  clusterOverview,
+  clusterActive,
 }: {
   runs?: RunIndexEntry[]
   projects?: ProjectListEntry[]
@@ -137,6 +140,14 @@ function stubFetch({
   /** What `PATCH /todos/:id` answers with — 200 by default, or a status the mutation must roll
    *  back from (the same shape `archiveStatus` gives the runs side). */
   todoPatchStatus?: number
+  /** Off by default (the default install) — set to exercise the Filed table's node column. */
+  cluster?: boolean
+  /** `GET /api/v1/cluster`'s answer when `cluster` is on. */
+  clusterOverview?: unknown
+  /** `GET /api/v1/cluster/active`'s answer when `cluster` is on — what the Runs table's node
+   *  column joins a row's `run.id` against. Absent = `{ runs: [] }`, the honest "nothing known
+   *  elsewhere" default a real, not-yet-wired hub answers with today. */
+  clusterActive?: unknown
 } = {}) {
   sent = []
   seenAt = undefined
@@ -155,8 +166,17 @@ function stubFetch({
         body: init.body === undefined ? undefined : JSON.parse(String(init.body)),
       })
       if (path === '/api/v1/health') {
-        // Only the slice `usageMetricVisibility` reads — the host's cost/token gate.
-        return jsonResponse({ capabilities: { costMetrics, tokenUsageMetrics: true } })
+        // Only the slice `usageMetricVisibility` reads — the host's cost/token gate — plus
+        // `cluster`, which the Filed table's node column gates on.
+        return jsonResponse({ capabilities: { costMetrics, tokenUsageMetrics: true, cluster } })
+      }
+      if (path === '/api/v1/cluster') {
+        return jsonResponse(
+          clusterOverview ?? { nodes: [], pairings: [], proposals: [], link: { state: 'disabled' } },
+        )
+      }
+      if (path === '/api/v1/cluster/active') {
+        return jsonResponse(clusterActive ?? { runs: [] })
       }
       if (path === '/api/v1/projects') {
         return jsonResponse({ projects, bootProject: 'api', projectsDir: '/repos' })
@@ -1540,5 +1560,237 @@ describe('the Filed section', () => {
     // No acceptance criteria and no knowledge refs on this entry — no section for either.
     expect(dialog.querySelector('[data-slot="filed-task-acceptance-criteria"]')).toBeNull()
     expect(dialog.querySelector('[data-slot="filed-task-knowledge-refs"]')).toBeNull()
+  })
+})
+
+// ---- "which worker is processing this?" (2026-08-22-multi-node-cezar-cluster.md) --------------
+
+describe('the Filed section — node column', () => {
+  const CLUSTER_NODE = (overrides: { nodeId: string; nodeName: string; role?: 'hub' | 'spoke' }) => ({
+    role: 'spoke' as const,
+    labels: [] as string[],
+    acceptsDispatch: true,
+    protocol: { major: 1, minor: 0 },
+    version: '0.10.0',
+    ...overrides,
+  })
+  const HUB = CLUSTER_NODE({ nodeId: 'hub-1', nodeName: 'Hub', role: 'hub' })
+  const SPOKE = CLUSTER_NODE({ nodeId: 'spoke-2', nodeName: 'Laptop' })
+
+  const overview = (selfNodeId: string | undefined) => ({
+    self: selfNodeId ? { ...CLUSTER_NODE({ nodeId: selfNodeId, nodeName: 'Hub' }) } : undefined,
+    nodes: [HUB, SPOKE],
+    pairings: [],
+    proposals: [],
+    link: { state: 'disabled' },
+  })
+
+  const NODE_TODOS: WorkspaceTodoEntry[] = [
+    { project: 'api', todo: { id: 'nt-1', ts: '2026-07-14T09:00:00Z', summary: 'No claim yet' } },
+    {
+      project: 'api',
+      todo: { id: 'nt-2', ts: '2026-07-14T09:00:01Z', summary: 'Running on self', startedOn: 'hub-1' },
+    },
+    {
+      project: 'web',
+      todo: { id: 'nt-3', ts: '2026-07-14T09:00:02Z', summary: 'Running elsewhere', startedOn: 'spoke-2' },
+    },
+    {
+      project: 'web',
+      todo: { id: 'nt-4', ts: '2026-07-14T09:00:03Z', summary: 'Unresolvable node', startedOn: 'ghost-9' },
+    },
+  ]
+
+  const rowFor = (id: string) =>
+    document.querySelector<HTMLElement>(`[data-slot="filed-task-row"][data-todo-id="${id}"]`)
+  const nodeCellIn = (el: HTMLElement | null) => el?.querySelector<HTMLElement>('[data-slot="task-node"]')
+
+  it('renders no Node column at all on a single-node cockpit — clustering off', async () => {
+    stubFetch({ todos: NODE_TODOS, cluster: false })
+    renderPage()
+    await screen.findByText('No claim yet')
+
+    expect(screen.queryByText('Node')).toBeNull()
+    for (const row of document.querySelectorAll('[data-slot="filed-task-row"]')) {
+      expect(row.querySelector('[data-slot="task-node"]')).toBeNull()
+    }
+  })
+
+  it('an absent claim renders a dash, never "local" or a guess', async () => {
+    stubFetch({ todos: NODE_TODOS, cluster: true, clusterOverview: overview('hub-1') })
+    renderPage()
+    await screen.findByText('No claim yet')
+
+    // Waits for the resolved kind, not merely "a cell exists" — the roster fetch settles after
+    // the todos fetch, so an early render can show a transient state that would satisfy a
+    // weaker assertion without ever reaching the state under test.
+    await waitFor(() => expect(nodeCellIn(rowFor('nt-1'))?.dataset.nodeKind).toBe('none'))
+    const cell = nodeCellIn(rowFor('nt-1'))!
+    expect(cell.textContent).toBe('—')
+    expect(cell.textContent?.toLowerCase()).not.toContain('local')
+  })
+
+  it('marks self distinctly from a known other node', async () => {
+    stubFetch({ todos: NODE_TODOS, cluster: true, clusterOverview: overview('hub-1') })
+    renderPage()
+    await screen.findByText('No claim yet')
+
+    await waitFor(() => expect(nodeCellIn(rowFor('nt-2'))?.dataset.nodeKind).toBe('self'))
+    expect(nodeCellIn(rowFor('nt-2'))!.textContent).toBe('this node')
+
+    await waitFor(() => expect(nodeCellIn(rowFor('nt-3'))?.dataset.nodeKind).toBe('known'))
+    expect(nodeCellIn(rowFor('nt-3'))!.textContent).toBe('Laptop')
+  })
+
+  it('negative half: the SAME nodeId renders as a plain known node when self is elsewhere', async () => {
+    stubFetch({ todos: NODE_TODOS, cluster: true, clusterOverview: overview('spoke-2') })
+    renderPage()
+    await screen.findByText('No claim yet')
+
+    await waitFor(() => expect(nodeCellIn(rowFor('nt-2'))?.dataset.nodeKind).toBe('known'))
+    expect(nodeCellIn(rowFor('nt-2'))!.textContent).toBe('Hub')
+  })
+
+  it('renders an unresolvable node id, never blank', async () => {
+    stubFetch({ todos: NODE_TODOS, cluster: true, clusterOverview: overview('hub-1') })
+    renderPage()
+    await screen.findByText('No claim yet')
+
+    await waitFor(() => expect(nodeCellIn(rowFor('nt-4'))?.dataset.nodeKind).toBe('unknown'))
+    const cell = nodeCellIn(rowFor('nt-4'))!
+    expect(cell.textContent).not.toBe('')
+    expect(cell.textContent).toContain('ghost-9')
+  })
+
+  it('carries the same node info into the detail dialog', async () => {
+    stubFetch({ todos: NODE_TODOS, cluster: true, clusterOverview: overview('hub-1') })
+    renderPage()
+    await screen.findByText('Running elsewhere')
+
+    fireEvent.click(screen.getByText('Running elsewhere'))
+    const dialog = await screen.findByRole('dialog')
+
+    await waitFor(() =>
+      expect(dialog.querySelector<HTMLElement>('[data-slot="task-node"]')?.dataset.nodeKind).toBe('known'),
+    )
+    expect(dialog.querySelector<HTMLElement>('[data-slot="task-node"]')?.textContent).toBe('Laptop')
+  })
+})
+
+// ---- "which worker ran/is running this?" — the RUNS side (2026-08-24) --------------------------
+
+describe('the Runs table — node column', () => {
+  const CLUSTER_NODE = (overrides: { nodeId: string; nodeName: string; lastSeenAt?: string }) => ({
+    role: 'spoke' as const,
+    labels: [] as string[],
+    acceptsDispatch: true,
+    protocol: { major: 1, minor: 0 },
+    version: '0.10.0',
+    ...overrides,
+  })
+  const HUB = CLUSTER_NODE({ nodeId: 'hub-1', nodeName: 'Hub' })
+  const SPOKE = CLUSTER_NODE({ nodeId: 'spoke-2', nodeName: 'Laptop' })
+
+  const overview = (selfNodeId: string | undefined, spoke = SPOKE) => ({
+    self: selfNodeId ? CLUSTER_NODE({ nodeId: selfNodeId, nodeName: 'Hub' }) : undefined,
+    nodes: [HUB, spoke],
+    pairings: [],
+    proposals: [],
+    link: { state: 'disabled' },
+  })
+
+  // `a1` is `running` (RUNS fixture), so it renders in the pinned "Running" section rather than
+  // the table below (`RunningTasks`'s own doc — LIFTED out, never duplicated). Its row is still
+  // `[data-slot="global-task-row"]`, the same selector every other test in this file uses for it.
+  const rowFor = (runId: string) =>
+    document.querySelector<HTMLElement>(`[data-slot="global-task-row"][data-run-id="${runId}"]`)
+  const nodeCellIn = (el: HTMLElement | null) => el?.querySelector<HTMLElement>('[data-slot="task-node"]')
+
+  it('renders no Node column at all on a single-node cockpit — clustering off', async () => {
+    stubFetch({ cluster: false })
+    renderPage()
+    await screen.findByText('Add checkout endpoint')
+
+    expect(screen.queryByText('Node')).toBeNull()
+    for (const row of document.querySelectorAll('[data-slot="global-task-row"]')) {
+      expect(row.querySelector('[data-slot="task-node"]')).toBeNull()
+    }
+  })
+
+  it('a run not reported in /cluster/active renders as "this node" — local by construction, never blank or "unknown"', async () => {
+    stubFetch({ cluster: true, clusterOverview: overview('hub-1'), clusterActive: { runs: [] } })
+    renderPage()
+    await screen.findByText('Add checkout endpoint')
+
+    // Waits for the RESOLVED kind, not merely "a cell exists" — the roster/active fetches settle
+    // after the runs-index does, so an early render could show a transient state.
+    await waitFor(() => expect(nodeCellIn(rowFor('a1'))?.dataset.nodeKind).toBe('self'))
+    expect(nodeCellIn(rowFor('a1'))!.textContent).toBe('this node')
+  })
+
+  it('a run reported in /cluster/active on another node renders that node — not "self"', async () => {
+    stubFetch({
+      cluster: true,
+      clusterOverview: overview('hub-1'),
+      clusterActive: { runs: [{ runId: 'w1', nodeId: 'spoke-2', summary: 'checkout page', paths: [] }] },
+    })
+    renderPage()
+    await screen.findByText('Checkout page')
+
+    await waitFor(() => expect(nodeCellIn(rowFor('w1'))?.dataset.nodeKind).toBe('known'))
+    expect(nodeCellIn(rowFor('w1'))!.textContent).toBe('Laptop')
+    // `i1`, absent from /cluster/active, still resolves local — the two rows must not agree.
+    await waitFor(() => expect(nodeCellIn(rowFor('i1'))?.dataset.nodeKind).toBe('self'))
+  })
+
+  it('negative half: the SAME run/node pair renders "self" when self IS that node', async () => {
+    stubFetch({
+      cluster: true,
+      clusterOverview: overview('spoke-2'),
+      clusterActive: { runs: [{ runId: 'w1', nodeId: 'spoke-2', summary: 'checkout page', paths: [] }] },
+    })
+    renderPage()
+    await screen.findByText('Checkout page')
+
+    await waitFor(() => expect(nodeCellIn(rowFor('w1'))?.dataset.nodeKind).toBe('self'))
+    expect(nodeCellIn(rowFor('w1'))!.textContent).toBe('this node')
+  })
+
+  it('a run on a node the roster no longer carries renders "unknown node (id)", never blank or self', async () => {
+    stubFetch({
+      cluster: true,
+      clusterOverview: overview('hub-1'),
+      clusterActive: { runs: [{ runId: 'i1', nodeId: 'ghost-9', summary: 'bump the runner', paths: [] }] },
+    })
+    renderPage()
+    await screen.findByText('Bump the runner')
+
+    await waitFor(() => expect(nodeCellIn(rowFor('i1'))?.dataset.nodeKind).toBe('unknown'))
+    const cell = nodeCellIn(rowFor('i1'))!
+    expect(cell.textContent).not.toBe('')
+    expect(cell.textContent).toContain('ghost-9')
+  })
+
+  it('a stale node\'s run renders its own staleness, not the roster-wide asOf', async () => {
+    // Computed from the REAL clock (`useNow` is not mockable here — the route calls it with no
+    // injection point) rather than a fixed date: 15 minutes ago, whenever "now" happens to be.
+    const staleSpoke = { ...SPOKE, lastSeenAt: new Date(Date.now() - 15 * 60_000).toISOString() }
+    stubFetch({
+      cluster: true,
+      // asOf is deliberately RECENT here — if the cell read it instead of the node's own
+      // lastSeenAt, this would false-pass as fresh.
+      clusterOverview: overview('hub-1', staleSpoke),
+      clusterActive: {
+        runs: [{ runId: 'w1', nodeId: 'spoke-2', summary: 'checkout page', paths: [] }],
+        asOf: new Date().toISOString(),
+      },
+    })
+    renderPage()
+    await screen.findByText('Checkout page')
+
+    await waitFor(() =>
+      expect(rowFor('w1')?.querySelector('[data-slot="run-node-stale"]')).not.toBeNull(),
+    )
+    expect(rowFor('w1')!.querySelector('[data-slot="run-node-stale"]')!.textContent).toBe('· 15m')
   })
 })

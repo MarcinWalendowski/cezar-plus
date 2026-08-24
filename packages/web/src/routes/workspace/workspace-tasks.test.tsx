@@ -99,10 +99,18 @@ function stubFetch({
   healthResponse = health(),
   runsResponse = RUNS_RESPONSE,
   uiState = {} as WorkspaceUiState,
+  clusterOverview,
+  clusterActive,
 }: {
   healthResponse?: HealthResponse
   runsResponse?: WorkspaceRunsResponse
   uiState?: WorkspaceUiState
+  /** `GET /api/v1/cluster`'s answer, read when `healthResponse.capabilities.cluster` is on
+   *  (`global-tasks.test.tsx` precedent — same shape, same default). */
+  clusterOverview?: unknown
+  /** `GET /api/v1/cluster/active`'s answer — what the Node column joins a row's `run.id`
+   *  against. Absent = `{ runs: [] }`, the honest "nothing known elsewhere" default. */
+  clusterActive?: unknown
 } = {}): SentRequest[] {
   const sent: SentRequest[] = []
   let storedUiState = { ...uiState }
@@ -128,6 +136,14 @@ function stubFetch({
         })
         const projects = projectIds ? runsResponse.projects.filter((p) => projectIds.includes(p.id)) : runsResponse.projects
         return jsonResponse({ ...runsResponse, runs, projects })
+      }
+      if (method === 'GET' && path === '/api/v1/cluster') {
+        return jsonResponse(
+          clusterOverview ?? { nodes: [], pairings: [], proposals: [], link: { state: 'disabled' } },
+        )
+      }
+      if (method === 'GET' && path === '/api/v1/cluster/active') {
+        return jsonResponse(clusterActive ?? { runs: [] })
       }
       if (method === 'GET' && path === '/api/v1/workspace/ui-state') return jsonResponse(storedUiState)
       if (method === 'PUT' && path === '/api/v1/workspace/ui-state') {
@@ -390,5 +406,126 @@ describe('the New task entry point', () => {
     await screen.findByText('The cross-project board is off')
     const link = screen.getByRole('link', { name: /New task/ })
     expect(link.getAttribute('href')).toBe('/workspace/new')
+  })
+})
+
+/** "Which worker ran/is running this?" (2026-08-24) — the cross-project board's own copy of
+ *  `global-tasks.test.tsx`'s "the Runs table — node column" describe block (same fixtures, same
+ *  reasoning), against this file's own runs (`run-boot-1`, `run-shop-1`) and row markup
+ *  (`[data-slot="workspace-task-row"]`). */
+describe('the Node column', () => {
+  const CLUSTER_NODE = (overrides: { nodeId: string; nodeName: string; lastSeenAt?: string }) => ({
+    role: 'spoke' as const,
+    labels: [] as string[],
+    acceptsDispatch: true,
+    protocol: { major: 1, minor: 0 },
+    version: '0.10.0',
+    ...overrides,
+  })
+  const HUB = CLUSTER_NODE({ nodeId: 'hub-1', nodeName: 'Hub' })
+  const SPOKE = CLUSTER_NODE({ nodeId: 'spoke-2', nodeName: 'Laptop' })
+
+  const overview = (selfNodeId: string | undefined, spoke = SPOKE) => ({
+    self: selfNodeId ? CLUSTER_NODE({ nodeId: selfNodeId, nodeName: 'Hub' }) : undefined,
+    nodes: [HUB, spoke],
+    pairings: [],
+    proposals: [],
+    link: { state: 'disabled' },
+  })
+
+  const clusterHealth = (cluster: boolean) => health({ capabilities: { ...CAPABILITIES_ON, cluster } })
+
+  const rowFor = (runId: string) =>
+    document.querySelector<HTMLElement>(`[data-slot="workspace-task-row"][data-run-id="${runId}"]`)
+  const nodeCellIn = (el: HTMLElement | null) => el?.querySelector<HTMLElement>('[data-slot="task-node"]')
+
+  it('renders no Node column at all on a single-node cockpit — clustering off', async () => {
+    stubFetch({ healthResponse: clusterHealth(false) })
+    renderAt('/workspace/tasks')
+    await findInTable('Fix the flaky retry test')
+
+    expect(within(desktopTable()).queryByText('Node')).toBeNull()
+    for (const row of desktopTable().querySelectorAll('[data-slot="workspace-task-row"]')) {
+      expect(row.querySelector('[data-slot="task-node"]')).toBeNull()
+    }
+  })
+
+  it('a run not reported in /cluster/active renders as "this node" — local by construction, never blank or "unknown"', async () => {
+    stubFetch({
+      healthResponse: clusterHealth(true),
+      clusterOverview: overview('hub-1'),
+      clusterActive: { runs: [] },
+    })
+    renderAt('/workspace/tasks')
+    await findInTable('Fix the flaky retry test')
+
+    // Waits for the RESOLVED kind, not merely "a cell exists" — the roster/active fetches settle
+    // after the runs response does, so an early render could show a transient state.
+    await waitFor(() => expect(nodeCellIn(rowFor('run-boot-1'))?.dataset.nodeKind).toBe('self'))
+    expect(nodeCellIn(rowFor('run-boot-1'))!.textContent).toBe('this node')
+  })
+
+  it('a run reported in /cluster/active on another node renders that node — not "self"', async () => {
+    stubFetch({
+      healthResponse: clusterHealth(true),
+      clusterOverview: overview('hub-1'),
+      clusterActive: { runs: [{ runId: 'run-shop-1', nodeId: 'spoke-2', summary: 'ship the storefront', paths: [] }] },
+    })
+    renderAt('/workspace/tasks')
+    await findInTable('Ship the storefront')
+
+    await waitFor(() => expect(nodeCellIn(rowFor('run-shop-1'))?.dataset.nodeKind).toBe('known'))
+    expect(nodeCellIn(rowFor('run-shop-1'))!.textContent).toBe('Laptop')
+    // `run-boot-1`, absent from /cluster/active, still resolves local — the two rows must not agree.
+    await waitFor(() => expect(nodeCellIn(rowFor('run-boot-1'))?.dataset.nodeKind).toBe('self'))
+  })
+
+  it('negative half: the SAME run/node pair renders "self" when self IS that node', async () => {
+    stubFetch({
+      healthResponse: clusterHealth(true),
+      clusterOverview: overview('spoke-2'),
+      clusterActive: { runs: [{ runId: 'run-shop-1', nodeId: 'spoke-2', summary: 'ship the storefront', paths: [] }] },
+    })
+    renderAt('/workspace/tasks')
+    await findInTable('Ship the storefront')
+
+    await waitFor(() => expect(nodeCellIn(rowFor('run-shop-1'))?.dataset.nodeKind).toBe('self'))
+    expect(nodeCellIn(rowFor('run-shop-1'))!.textContent).toBe('this node')
+  })
+
+  it('a run on a node the roster no longer carries renders "unknown node (id)", never blank or self', async () => {
+    stubFetch({
+      healthResponse: clusterHealth(true),
+      clusterOverview: overview('hub-1'),
+      clusterActive: { runs: [{ runId: 'run-shop-1', nodeId: 'ghost-9', summary: 'ship the storefront', paths: [] }] },
+    })
+    renderAt('/workspace/tasks')
+    await findInTable('Ship the storefront')
+
+    await waitFor(() => expect(nodeCellIn(rowFor('run-shop-1'))?.dataset.nodeKind).toBe('unknown'))
+    const cell = nodeCellIn(rowFor('run-shop-1'))!
+    expect(cell.textContent).not.toBe('')
+    expect(cell.textContent).toContain('ghost-9')
+  })
+
+  it("a stale node's run renders its own staleness, not the roster-wide asOf", async () => {
+    // Computed from the REAL clock (`useNow` is not mockable here — the board calls it with no
+    // injection point) rather than a fixed date: 15 minutes ago, whenever "now" happens to be.
+    const staleSpoke = { ...SPOKE, lastSeenAt: new Date(Date.now() - 15 * 60_000).toISOString() }
+    stubFetch({
+      healthResponse: clusterHealth(true),
+      // asOf is deliberately RECENT here — if the cell read it instead of the node's own
+      // lastSeenAt, this would false-pass as fresh.
+      clusterOverview: overview('hub-1', staleSpoke),
+      clusterActive: {
+        runs: [{ runId: 'run-shop-1', nodeId: 'spoke-2', summary: 'ship the storefront', paths: [] }],
+        asOf: new Date().toISOString(),
+      },
+    })
+    renderAt('/workspace/tasks')
+    await findInTable('Ship the storefront')
+
+    await waitFor(() => expect(rowFor('run-shop-1')?.querySelector('[data-slot="run-node-stale"]')).not.toBeNull())
+    expect(rowFor('run-shop-1')!.querySelector('[data-slot="run-node-stale"]')!.textContent).toBe('· 15m')
   })
 })

@@ -718,12 +718,26 @@ Two properties this design must add on top, because they are cluster-specific:
 1. **The sweep is node-local and therefore takes no scheduler lease.** It writes only this node's
    own mirror, so the Phase 5 test — *"does a second tick do the work a second time, anywhere but
    here?"* — answers no. Leasing it would be the wrong instinct.
-2. **The mirror is scoped, and `reports/` is the reason.** 196 files of user reports carrying
+2. **CORRECTED 2026-08-24 by the owner — every scope mirrors by DEFAULT, including `reports/`
+   and `raw-input/`.** Owner's instruction, verbatim: *"everything should be on by default"*, given
+   while bringing the first real worker up. The scoping MECHANISM stays exactly as designed — a node
+   still reports which set it holds, and the cockpit still says so, because "not found" and "not
+   mirrored" must never be the same observation. What changed is only the default value: all of
+   `knowledge/`, `domains/`, `changelog/`, `tasks/`, `reports/`, `raw-input/`.
+
+   ~~**The mirror is scoped, and `reports/` is the reason.** 196 files of user reports carrying
    phones and chat ids. Mirroring them to a rebuild-on-a-whim VPS worker spreads PII to machines
    whose whole premise is that they are disposable. Default mirror set for a worker:
    `knowledge/`, `domains/`, `changelog/`, `tasks/`. `reports/` and `raw-input/` are opt-in per
    node, off by default, and the cockpit says which set a node holds — an agent must never be left
-   guessing whether "not found" means absent or unmirrored.
+   guessing whether "not found" means absent or unmirrored.~~
+
+   **Do not read this as "the PII argument was wrong."** It was about a *disposable VPS worker*, and
+   it still holds for one. The first worker is the owner's own Mac — a trusted machine that already
+   holds this data by other means — which is what makes all-scopes-on the right default *here*. The
+   thing to preserve is that the scope stays a per-node value that a node reports, so a future VPS
+   worker can be narrowed without redesigning anything. A reviewer adding such a node should revisit
+   this bullet rather than inheriting the Mac's setting by accident.
 
 **Sync cost is not the constraint here; correctness is.** Measured 2026-08-22: the corpus is
 **13 MB / 2140 files** (tasks 636 · changelog 832 · knowledge 433 · reports 196 · raw-input 33 ·
@@ -2690,6 +2704,99 @@ invented; these are the names to use when one lands.
 > states a cause it has no evidence for. The honest shape is the one D17 already uses everywhere
 > else: name what was observed (`HTTP 401 from <url>`) and let the *reason* stay a reason. Nothing
 > branches on the message, so this is a message-only change with no protocol impact.
+>
+> **56. 2026-08-24 — THE CORPUS MIRROR IS NOT PARTIAL, IT IS ABSENT. Measured on production, then
+> designed.** Owner: *"SYNC is very important part of this system between master/hub and worker"*.
+> Before designing anything I measured what exists, because the handoff above says the sweep is
+> "partial" and that turned out to be generous.
+>
+> | piece | state, measured 2026-08-24 |
+> | --- | --- |
+> | `GET /api/v1/cluster/corpus` (manifest) | **409 stub** — `CORPUS_PENDING` (`cluster-routes.ts:734`) |
+> | `GET /api/v1/cluster/corpus/*path` (one body) | **409 stub** (`:754`) |
+> | `POST /api/v1/cluster/corpus/submit` (write-up) | **409 stub** (`:757`) |
+> | `sources/cezar-hub/provider.ts` (spoke side, 3b.1) | **built** — a real body, not a stub |
+> | anything that CREATES a `cezar-hub` `SourceConnection` | **nothing** — only the `SOURCE_PROVIDERS` row references the kind |
+> | `GET /cluster/todos/:projectKey` (D21 todos) | **built and real** |
+>
+> So package **3b.2 was never written**, and 3b.1 talks to three 409s. A worker mirrors nothing, and
+> the failure is the silent one D8a already named: `loadKnowledgeSummary` returns `undefined`, the
+> prompt block is simply absent, and a knowledge-blind agent reports success.
+>
+> **Two independent gaps, and fixing either alone still leaves zero mirrored files.** The routes, and
+> the connection nobody creates. A reviewer who fixes only 3b.2 will find the mirror still empty and
+> reasonably conclude the routes are broken.
+>
+> ### The performance shape, measured rather than assumed
+>
+> D8a says *"sync cost is not the constraint here; correctness is"*, and that is right about what to
+> spend the DESIGN budget on. It is not a licence for a first sync that takes four minutes. Measured
+> against the live hub on 2026-08-24:
+>
+> - corpus: **2173 files / 13 MB** — knowledge 451 · domains 9 · changelog 847 · tasks 636 ·
+>   reports 196 · raw-input 33 (D8a measured 2140; it has grown by 33)
+> - churn: **12 files in 24 h**, 46 in 48 h
+> - link RTT to the hub, 10 samples: **median 108 ms** (min 107, max 110)
+>
+> | first mirror of 2173 docs | wall clock |
+> | --- | --- |
+> | one HTTP GET per document, serial | **235 s** |
+> | one GET per document, 16-way parallel | 15 s |
+> | **batched, 200 docs per request (11 requests)** | **1.2 s** |
+>
+> Steady state — manifest plus 12 changed bodies — is **1.4 s serial**. So the batch endpoint is the
+> whole performance story, it is worth ~200x on the first sync, and it costs nothing in correctness:
+> tombstones, quarantine, watermarks and scope all apply per document exactly as before. **The
+> per-document route stays** — it is what `adopt` and a single-file repair need, and it is the one
+> the wildcard-scope guard is already written against.
+>
+> ### Design
+>
+> **S1 — the manifest is a DIFF INPUT, not a file list.** `GET /cluster/corpus` answers
+> `{ version, scope[], docs: [{ path, hash, bytes, updatedAt }], tombstones: [{ path, deletedAt }] }`.
+> `hash` is what makes diff-before-fetch possible without reading a single body, and it is why the
+> 1.4 s steady state is 12 bodies rather than 2173. `?since=<version>` filters to what changed.
+> **Tombstones are explicit and are their own array** — never absence-diffing, because a
+> watermark-filtered delta legitimately omits unchanged documents, and treating that omission as
+> deletion is the exact bug the `sources` sweep's docblock warns about (spec Verification 16).
+>
+> **S2 — `POST /cluster/corpus/bodies` `{ paths[] }` → `{ docs: [{ path, hash, body }] }`.** Capped
+> per response (paths per request AND total bytes), and it answers `truncated` with what it did
+> return rather than failing, so a caller loops instead of guessing. Scope-enforced per path with
+> the SAME function the per-document route uses — not a second copy of the rule, which is how the
+> two drift and one of them stops checking `reports/`.
+>
+> **S3 — the provider diffs before it fetches.** Compare manifest `hash` against the local mirror,
+> request only the differing paths, in batches, with bounded concurrency. A no-change sweep must
+> cost exactly ONE request. That is a stated performance assertion, not an aspiration — see
+> Verification below.
+>
+> **S4 — scope is a per-node value the node REPORTS.** `mirrorScope` on the roster row, surfaced on
+> `presence.corpus = { version, fetchedAt, scope[], quarantined }`. **Default is every scope**, per
+> the owner's 2026-08-24 correction to D8a point 2 above — including `reports/` and `raw-input/`.
+> The mechanism stays because "not found" and "not mirrored" must remain distinguishable
+> (Verification 18); only the default changed.
+>
+> **S5 — the connection is provisioned by the cluster runtime, not by a human.** A spoke arming its
+> runtime ensures a `cezar-hub` `SourceConnection` exists, idempotently. This is the gap that makes
+> everything else inert, and leaving it as an operator step would reproduce exactly the
+> two-keys-and-neither-says-anything trap D11 already sprang on dispatch today.
+>
+> ### Verification — the assertions, and why each has a negative half
+>
+> Spec Verification 16/17/18 already state the correctness half and are unchanged. Added here:
+>
+> 1. **Diff-before-fetch is real:** sweep twice against an unchanged corpus; the second sweep issues
+>    **exactly one** HTTP request. *Negative control:* a test that only asserts "no files changed"
+>    passes against a provider that refetched all 2173 bodies and wrote identical bytes. Count the
+>    requests, not the diffs.
+> 2. **The batch route is scope-enforced identically to the per-document route.** Ask for a path
+>    outside scope via `bodies` and via `GET /corpus/*` and assert the SAME refusal. A batch route
+>    with its own copy of the check is the drift this asserts against.
+> 3. **`truncated` is honoured:** a request over the cap returns a subset plus `truncated: true`, and
+>    the provider loops to completion. *Negative control:* assert the final mirror is complete, or a
+>    provider that silently dropped the remainder passes.
+> 4. **The provisioned connection is idempotent:** arm the runtime twice, get one connection.
 >
 > **NEWEST FIRST: items 31-36 in the nested list below are the most recent and correct two of my
 > own earlier claims.** Item 31 closes the second standing red as pre-existing; item 32 lists what
@@ -7365,3 +7472,451 @@ for them — that is precisely how the two copies became unrelated histories in 
 8. **Does this go upstream?** `open-mercato/cezar` is never pushed to, but this is a general
    feature. If it should stay fork-private, say so before Phase 1 — it changes nothing technically
    and everything about how the flags are documented.
+
+> **57. 2026-08-24 — SYNC CADENCE: PUSH FOR LATENCY, POLL AS THE FLOOR. Two planes, not one.**
+> Owner: *"each worker must be aware that there is a task processing somewhere on different worker
+> that probably touch something else… incremental sync should be almost real time (eg. every 1
+> minut maximum)"*.
+>
+> **The question splits, and only half of it is a sync question.** "Worker B must know worker A is
+> touching something" reads as a latency requirement, but no sync cadence solves it: at a 1-second
+> mirror two nodes still both claim the same todo inside the window. What closes it is **D9a
+> confirm-before-start**, which is already in the contract — the claim is the one write that never
+> applies optimistically; the spoke sends the claim op and waits for the hub's `ack`, whose
+> `clusterAckResultSchema.fields` carries the APPLIED `startedTaskId`/`startedOn`, and the loser
+> gets `accepted: false` **with the winner's stamp attached**. The hub linearizes; there is no
+> convergence window to race in. **Conflict correctness is therefore independent of mirror
+> latency**, and tuning the mirror to buy it would be tuning the wrong knob. Mirror latency buys
+> *visibility* — how fast a cockpit shows what already happened — which is worth having but is a
+> different property, and this entry exists so the next session does not conflate them.
+>
+> **Task-state propagation already beats the 1-minute target, and is push, not poll.** Measured
+> 2026-08-24: spoke outbox flush `DEFAULT_OP_FLUSH_MS = 5_000` (`spoke-runtime.ts:147`) → hub
+> applies and assigns `hubSeq` (`hub-router.ts`) → `planReplicaFanout` pushes a `replica` frame to
+> **every connected node** → applied through the store API so `fs.watch` fires and the cockpit WS
+> updates. Built and wired into the live hub path. Worst case ≈5.1 s at a 108 ms median RTT. **The
+> 30 s `HEARTBEAT_MS` (`link-server.ts:66`) is liveness reaping only and is not the sync path** —
+> it is easy to misread as one, which is why it is named here.
+>
+> **The corpus could not meet 60 s, and the blocker was a validator, not a design.**
+> `intervalSeconds: z.number().int().min(300).max(86_400).default(900)` — `sources/types.ts:112`
+> and `contract/src/sources.ts:318`. A **300 s floor** puts the requirement out of reach by
+> configuration: the fastest *legal* setting is 5× over budget, the default 15×. The 300 s floor is
+> right for what it was written for (third-party APIs with real rate limits) and wrong for a mirror
+> of our own hub over an ssh tunnel. So the floor becomes **per source kind**, declared by the
+> provider rather than an `if (kind === 'cezar-hub')` inside the validator — a hardcoded kind check
+> in a schema is the shape that drifts the moment a second low-latency kind appears. Widening a
+> published validator is additive; narrowing would not be.
+>
+> **The eleventh frame: `corpus-changed` (contract, MINOR 0 → 1).** The hub tells connected spokes
+> its corpus version moved. It **carries no paths and no bodies** — the spoke's response is its
+> ordinary `?since=` sweep, which is authoritative and scope-enforced hub-side. Had the frame
+> carried the changed paths there would be two accounts of what changed and a dropped frame would
+> be a silent **gap**; as a hint, a dropped frame costs **latency only**. That asymmetry is the
+> whole design, and it is why **the interval stays a floor and must never be raised to "we have
+> push now"**.
+>
+> - *Cost, done as arithmetic rather than taste:* churn is **12 files/24 h**, so push costs ~12
+>   frames/day and delivers in ~108 ms. The 60 s floor costs 1440 requests/day — affordable **only
+>   because** the manifest diffs on `hash` with `?since=`, making a no-change sweep exactly ONE
+>   small request. The cadence question was not answerable before that landed.
+> - *MINOR, and measured rather than assumed:* `link-client.ts#parseDownlink` `safeParse`s the
+>   downlink union and on failure **warns and returns `undefined`**; the message handler's
+>   `if (!frame) return;` drops that one frame and leaves the socket open. An older spoke loses the
+>   hint and falls back to its interval sweep — degradation, not half-application. `MAJOR` is
+>   reserved for a new envelope key, a REMOVED frame, or a changed meaning; none apply.
+>
+> **A silent-drop hazard found while wiring it, and closed.** `spoke-runtime.ts#onFrame` switched on
+> `frame.type` with **no `default` and no `never` check**. Adding an eleventh frame to
+> `clusterDownlinkFrameSchema` therefore **typechecked clean while the frame was dropped in
+> silence** — indistinguishable from a hub that never sent it. The switch now ends in
+> `const unhandled: never = frame`, so the next frame added to the union is a TYPE error at the one
+> place obliged to handle it. Note the ordering trap for anyone repeating this: adding the guard
+> *before* the handler turns every other agent's typecheck red, so the two land together.
+> `onCorpusChanged` is optional, and **its absence warns** rather than passing quietly — a cockpit
+> with no mirror wired is a real state, but must not look like a hub that never sent the hint.
+>
+> **Verification (negative halves are the point).**
+> - A `cezar-hub` connection at `intervalSeconds: 60` validates **and** a non-`cezar-hub` one at 60
+>   is still refused. Without the second assertion a per-kind floor is indistinguishable from a
+>   global floor accidentally removed.
+> - 59 is refused even for `cezar-hub` — a floor is a floor.
+> - The scheduler's computed next-run is +60 s (assert the time, not that validation passed), and
+>   `STALE_INTERVAL_MULTIPLIER` (`scheduler.ts:63`) does not make the staleness window absurd at 60.
+> - A `corpus-changed` frame triggers exactly ONE sweep and applies no document itself.
+> - **Dropping the frame entirely must still converge** via the interval — the assertion that
+>   proves the hint is an optimization and not a dependency.
+
+> **58. 2026-08-24 — A PAIRING IS CONFIRMED PER NODE, AND CONFIRMING IT ON THE HUB NEVER REACHES
+> THE NODE. Measured on the live pair, and it is what stalled the E2E.**
+>
+> Symptom, from the worker's own log rather than the hub's:
+> `cluster spoke: cannot answer dispatch b333d9fb-… truthfully — no repo-freshness data for project
+> "cezar" (not paired/confirmed here)`. The hub had dispatched; the spoke refused. This is the
+> cross-plane rule in CLAUDE.md doing real work — the hub's logs alone show a healthy dispatch and
+> name no cause.
+>
+> **Measured state at the moment of the stall:**
+> - Hub `/var/lib/cezar/.cezar/cluster/peers.json` → pairing `cezar` with **both** `confirmedAt`
+>   stamps present (hub `06495ac4`, worker `7d3a6aba`, both 12:02:41Z). Complete, by the hub's own
+>   D21 rule that the pairing must run BOTH ways.
+> - Worker `~/cezar-worker/.cezar/cluster/` → `node.json` only. **`peers.json` did not exist at
+>   all.**
+>
+> **Why, and it is a seam rather than a bug in either half.** `spoke-runtime.ts#discoverOutboxProjects`
+> reads `readPeers()` — the spoke's OWN disk — and requires `pairing.byNode[identity.nodeId].confirmedAt`.
+> Every production writer of a pairing row is hub-side (`server/cluster-routes.ts:803`
+> `applyPairingAction`, `enrollment.ts:475` `upsertNode`). The `welcome` frame *does* carry
+> `pairings`, and `link-client.ts` declines to save them on purpose — its docblock, twice: *"Nothing
+> here is persisted, deliberately"*, *"Report what is known right now; persist NOTHING."* So the
+> spoke's authoritative source for "am I paired" is a file **nothing on the spoke ever writes**.
+> Consequence: `projects: []` forever → no outbox flush, no repo-freshness, and every dispatch
+> refused.
+>
+> `clusterPairingActionSchema` says the two-sided shape is intended, not accidental: *"A pairing is
+> confirmed per node, because that is the grant being made: this repo, on that machine."* Confirming
+> "for node X" **on the hub** is the hub recording its own belief about X. It is not X consenting,
+> and X is never told. That is defensible as consent design; what is not defensible is that the
+> missing half is **invisible from both cockpits**.
+>
+> **Fixed on the live pair by confirming the worker's own side against its own API** —
+> `POST /api/v1/cluster/pairings/cezar {action:'confirm', nodeId:<self>, projectId:'cezar'}` on
+> `localhost:4790`. `applyPairingAction` creates the row when `idx === -1`, so confirm works with no
+> prior row, and `unpair` reverses it. Note `/cluster/pairings` is `requireCluster` only, NOT
+> `requireHub` (`cluster-routes.ts:556-564`) — a spoke confirming its own side is a supported call,
+> merely an undiscoverable one.
+>
+> **Open (recorded, not fixed):**
+> - **58a.** Nothing surfaces the half-confirmed state. The hub renders a confirmed pairing and
+>   dispatches into it; the spoke renders none. Neither says "the other side has not confirmed",
+>   which is the one fact that explains the refusal. The roster already flows down in `welcome` —
+>   the spoke has the hub's view in memory and could diff it against its own disk and SAY so,
+>   without persisting anything and without touching `link-client`'s deliberate no-persist rule.
+> - **58b.** The refusal never became a `queuedReason`. Todo `6631a387` sat at `status: todo`,
+>   `startedTaskId: 589e075c`, `startedOn: null`, **`queuedReason: null`** — placement recorded no
+>   decision in either direction, so the board shows a todo that is neither running nor explicably
+>   waiting. A refusal that reaches the hub and is dropped is worse than one that never arrived,
+>   because the hub then has the answer and discards it.
+> - **58c.** A todo that has been dispatched once and refused is **permanently stuck**:
+>   `reconcileAutostartTodosOnce` skips on `todo.startedTaskId` being set, and the refusal never
+>   cleared it. There is no retry path. Verified by having to mint a fresh todo (`adcee60c`) to
+>   re-run the E2E at all.
+> - **58d.** No CLI confirms a pairing (the earlier open item about a browser-only PATCH, now with a
+>   second victim). On a headless hub, and on a worker with no browser pointed at it, the only route
+>   is a hand-built `curl`. `cez cluster init` is likewise absent from the CLI usage text.
+>
+> **Do not "fix" this by having the spoke trust `welcome`.** Persisting the hub's roster onto the
+> spoke would make the grant one-sided and would delete the only consent step the spoke has — the
+> hub could then pair a machine into a project without that machine ever agreeing. The gap to close
+> is **visibility** (58a) and **retry** (58b/58c), not the two-sidedness.
+
+> **59. 2026-08-24 — THE MIRROR HAD THREE GATES, ALL OFF, AND EACH ONE FAILS SILENTLY. Measured on
+> the live worker process, not inferred.**
+>
+> Item 56 found the corpus routes stubbed and the connection never created. Building those is
+> necessary and **still not sufficient**. Read from `pid 78086`'s actual environment
+> (`~/cezar-worker`, the live spoke):
+>
+> | Gate | State | Consequence when off |
+> |---|---|---|
+> | `CEZ_CLUSTER=1` | set | — |
+> | `CEZ_KB=1` | set | — |
+> | **`CEZ_SOURCES`** | **unset** | `project-context.ts:110` never builds `sourceStore`; the sources routes answer 409 |
+> | **`WorkspaceSourceScheduler` constructed** | **never, anywhere** | nothing ever sweeps a connection that does exist |
+>
+> The scheduler gap is not a discovery, it is a **documented** one nobody closed:
+> `sources/scheduler.ts:28` says outright *"Nothing wires this scheduler into the boot flow yet."*
+> `grep -a` confirms zero production constructors. So the shipped state is a feature whose engine
+> was never started, and whose own comment says so.
+>
+> **Each gate fails in the same invisible way**, which is why three of them stacked without anyone
+> noticing: a missing mirror is not an error. `loadKnowledgeSummary` returns `undefined`, the
+> agent's system prompt simply carries no knowledge block, and a knowledge-blind agent completes its
+> task and reports success. Nothing anywhere is red. This is D8a's stated failure mode arriving by
+> three independent routes at once.
+>
+> **Decision: the corpus mirror does NOT gate on `CEZ_SOURCES`.** That flag gates the *user-facing
+> external-connector feature* — its REST routes, its cockpit UI, its per-project store — and
+> Notion-style connectors are what it was written for. The corpus mirror is **cluster
+> infrastructure**: it is how a worker knows anything at all. Binding cluster sync to an unrelated
+> product flag is a hidden coupling whose failure is silent and whose cause is unguessable from the
+> symptom. `corpus-mirror-bootstrap.ts` already took this posture independently (it opens its own
+> `SourceStore.open(dataDir)` rather than reading `c.get('project').sourceStore`), and
+> `corpus-mirror-runtime.ts` follows it. **This is a widening, not a bypass** — the hub still
+> enforces scope on every request, so a spoke gains no access it was not granted.
+>
+> **Decision: the mirror is provisioned per REGISTERED project, not per CONFIRMED pairing.** The
+> `sources` knowledge root is `<repoRoot>/.ai/cezar/sources/` (`knowledge/paths.ts:42`) — per
+> project by construction, so there is no node-wide mirror location to use instead. Gating it on
+> confirmed pairings would have made the corpus mirror inherit item 58's two-sided handshake, i.e. a
+> brand-new worker mirrors **nothing** until a human confirms on both machines — the exact
+> silently-inert outcome this item is about, and flatly against "everything should be on by
+> default". Pairing is a grant about *work* (todo replication, dispatch). Mirroring a read-only
+> corpus into a project the node already has locally is not a work grant and needs no second
+> consent.
+>
+> - **59a (open, with the arithmetic).** Per-project provisioning duplicates the corpus once per
+>   project on a node: the hub has 10 registered projects × 13 MB ≈ 130 MB, and 10 delta manifests
+>   per sweep instead of 1 (at 60 s: 14,400 requests/day rather than 1,440). Cheap enough to ship —
+>   a delta manifest is one small request — but it is redundancy, not a design. The fix is a
+>   node-level mirror at `workspaceKnowledgeRoot(env)` (`<CEZ_HOME>/knowledge`, already a
+>   registered, indexed, node-wide root) with projects reading it from there, which needs the sweep
+>   to stop being per-`SourceStore`. Recorded rather than built: it is a refactor of the sources
+>   seam, not part of making sync work.
+> - **59b (open).** `CEZ_SOURCES` remains off on the worker, so the sources **routes and cockpit UI**
+>   still 409 there. That is now cosmetic for sync — the mirror runs without them — but it means the
+>   cockpit cannot show a human the mirror's state on a spoke, which is thin given D8a's "a stale
+>   mirror must be loud".
+
+> **60. 2026-08-24 — THE HUB HAS NO OUTBOX, SO NO WORK CAN EVER RUN ON A SPOKE. Measured on live
+> production. This is the root blocker, and everything else in items 56-59 sits downstream of it.**
+>
+> **The chain, end to end, each link measured rather than inferred:**
+> 1. `clusterDispatchFrameSchema` carries `todoId` and **no todo content**. So a dispatch REQUIRES
+>    the record to have been replicated to the target beforehand.
+> 2. `replay.ts` will not replay a row with no `hubSeq`. `hub-router.ts:471-479` says why, in its own
+>    words: *"A record only gets a hubSeq by passing through this hub's own apply path… these rows
+>    need a first write, not a replay."*
+> 3. `grep -a` (mandatory — `cluster/ops.ts` is one of the four binary-misclassified files):
+>    **`deriveTodoOps` is called from `spoke-runtime.ts` only**, lines 777 and 930. The documented
+>    pipeline (`hub-router.ts:39`) is *"spoke outbox → hub oplog → hubSeq → ack → replica fan-out"* —
+>    it **begins at a spoke**. There is no hub-side outbox.
+> 4. Therefore a todo created ON the hub never becomes an op, never gets a `hubSeq`, and is never
+>    replicated or replayed to anyone.
+>
+> **Live measurement, `/var/lib/cezar/loki-labs/cezar/.ai/cezar/todos.json`:**
+> **159 todos, `hubSeq` non-null on ZERO of them.** The spoke's own `.ai/cezar/todos.json` **does
+> not exist at all.** Symptom at the worker:
+> `cluster spoke: cannot start dispatch f41f1f96 — todo "e11348a4" is not present locally for
+> project "cezar" yet`.
+>
+> So the cluster can place work, deliver a dispatch frame, and have the target refuse it — forever —
+> while every component reports healthy. Placement works. The link works. Pairing works. Capacity,
+> freshness and heartbeat all work. **The record the work refers to is the one thing that never
+> travels.**
+>
+> **A second, independent defect found in the same measurement, and it decides the fix's shape.**
+> `todos.ts#stampPending` opens `if (!clusteringOn(options)) return;` — **a write from a process with
+> clustering off stamps no marker at all, and nothing ever backfills it.** `cez todo add` run over
+> ssh on the box does NOT inherit `CEZ_CLUSTER=1`, which lives in the systemd unit and not in
+> `/etc/profile.d/`. Measured consequence: **only 2 of 159 records carry `pendingSince`** — the two
+> written through the *server* — and the 157 written through the *CLI* are born permanently
+> unreplicatable, silently. Two todos I created during this session are in that state.
+>
+> - **Therefore the hub outbox keys on `hubSeq == null`, NOT on `pendingSince`.** Keying on the
+>   marker would replicate 2 records and leave 157 invisible forever: the bug reproduced under the
+>   name of a fix. Keying on `hubSeq` covers both populations and is self-limiting, since applying
+>   sets it.
+> - **Residual, named not papered over:** a hub-local *edit* to an already-replicated todo
+>   (`hubSeq` set) made by a non-cluster process still stamps no `pendingSince` and is still missed.
+>   That is a `stampPending` problem, not an outbox problem. Options are to make the CLI
+>   cluster-aware, or to put `CEZ_CLUSTER=1` in `/etc/profile.d/` on the box; neither is done.
+>
+> **Why this went unseen.** Every failure on this path is a *refusal*, and every refusal is
+> truthful, local, and quiet. The spoke says "not present locally" to its own log. The hub logs a
+> successful dispatch. `REPLAY-UNORDERED` is one warning line per source, deliberately not per
+> record — correct for volume, but it means 159 unreplicatable rows produce a single line that reads
+> like a note. And a todo's `queuedReason` stayed `null` throughout (item 58b), so the board showed a
+> task that was neither running nor explicably waiting. Nothing was ever red.
+>
+> **Verification for the fix — negative halves are the whole point.**
+> - A todo with **neither** `pendingSince` nor `hubSeq` (the CLI shape, 157 of 159 real records) is
+>   picked up. Without this assertion the fix helps 2 records and looks green.
+> - A todo that **already** carries a `hubSeq` is NOT re-sent. A prior regression of exactly this
+>   shape measured ~17,280 redundant ops/day with the cluster idle.
+> - A tick with nothing owed sends **zero** frames — assert the count; a tick that always sends also
+>   "passes".
+> - 600 owed records split within `CLUSTER_OPS_PER_FRAME_MAX`/`CLUSTER_FRAME_MAX_BYTES` with
+>   **records-in == records-out**.
+> - End to end: after the outbox runs, the spoke's `todos.json` exists, and a dispatch for a
+>   replicated todo is **accepted** rather than refused.
+
+> **61. 2026-08-24 — WIRED, not merely built. Every module in items 56-60 now has a live call site,
+> and that was a deliberate acceptance criterion rather than a finishing touch.**
+>
+> Items 56 and 59 both diagnosed the same disease — a fully built, fully tested component with **zero
+> production callers** (`sources/cezar-hub/provider.ts`, `WorkspaceSourceScheduler`,
+> `run-projection.ts`'s writers). Shipping this work unwired would have reproduced it under a new
+> name, so the call sites landed with the code:
+>
+> | Module | Call site |
+> |---|---|
+> | `hub-outbox.ts` | `startClusterRuntime` hub branch |
+> | `corpus-broadcast.ts` | hub branch, registered on the change bus |
+> | `corpus-change-bus.ts` | emitted from `project-context.ts`'s `KnowledgeStore` |
+> | `KnowledgeStore#onChanged` | fires at `catalogGeneration++` |
+> | `corpus-mirror-runtime.ts` | `startClusterRuntime` spoke branch |
+> | `corpus-mirror-bootstrap.ts` | called per sweep by the runtime |
+> | `onCorpusChanged` | spoke branch → `mirror.triggerSweep()` |
+>
+> **Decision — the hub outbox keeps its OWN watermark map, and this is the established design, not a
+> shortcut.** `hub-router.ts`'s watermarks are a private in-memory `Map`, and its docblock states the
+> asymmetry that makes their ephemerality safe: *"over-sending costs bandwidth while under-sending
+> loses a write"*, with each node's `hello` re-seeding truth on reconnect. A second map inherits
+> exactly those properties — starts empty, may re-send, the receiver drops anything at or below its
+> own watermark. Exposing the router's map would have meant changing its return type (it returns a
+> bare function) and its callers, for no correctness gain. In practice the outbox does not re-send at
+> all: once applied, a record carries a `hubSeq` and has cleared `pendingSince`, so `selectOwed`
+> stops returning it.
+>
+> **The outbox's `selectOwed` is a UNION, better than the brief asked for.** It keys on
+> `Boolean(todo.pendingSince) || todo.hubSeq === undefined`. Keying on `hubSeq` alone (as item 60
+> specified) would have missed the residual that item named — a hub-local *edit* to an
+> already-replicated record made by a non-cluster process, which stamps no marker but does carry a
+> `hubSeq`. The union catches both populations and still self-limits.
+>
+> **The push hook went to `catalogGeneration++`, not to `POST /cluster/corpus/submit`.** The submit
+> route is only the spoke→hub path; a `cezar-reports-drain` write, a `/cezar-sync` write, or a plain
+> editor save all reach disk without passing through it and would have pushed nothing. The
+> `catalogGeneration++` line is, by its own comment, *"the one place both change triggers and every
+> write converge"* — the only hook a future writer cannot bypass. A `corpus-change-bus` module-level
+> registry bridges the two ends, which are built in different files in the wrong order; the scope is
+> narrow enough to justify it (at most one listener, replaced not accumulated, empty payload) and its
+> disposer is identity-checked so a superseded blue-green runtime's late teardown cannot silently
+> unregister its successor's listener.
+>
+> **Corrected in passing:** `corpus-mirror-bootstrap.ts` wrote a hardcoded `intervalSeconds: 900`
+> into `sources.json` while `corpus-mirror-runtime.ts` keeps its own 60s clock and never reads that
+> field. Not merely conservative — **a lie told to a human** reading the file, which would have said
+> the mirror syncs every 15 minutes while it synced every minute. It now asks
+> `defaultIntervalSecondsForKind(CEZAR_HUB_SOURCE_KIND)`. Two hand-kept copies of one number is what
+> the per-kind policy table exists to prevent.
+>
+> **Open, recorded not fixed:**
+> - **61a. SETTLED 2026-08-24 by the box gate — Mac load, not this work.** The box ran the full
+>   suite four times. `cluster-flag-off.test.ts` failed in NONE of them. The only red that repeats
+>   is `catalog.test.ts` C18 (the known standing red). A *second* red appears in some runs and it is
+>   a **different test each time** — `add-project-dialog.test.tsx` (web) once, `workspace-parallel.test.ts`
+>   (server) once, absent twice. A red that moves between runs of an identical tree is a flake pool,
+>   not a broken test, and none of the movers is a file this work touches. Original text, unchanged:
+>   *"`cluster-flag-off.test.ts`'s WS-upgrade floor test timed out at **84.7s** on the dev Mac while
+>   ~8 agents were running. It is a timeout, not an assertion failure, and the flag-off path returns
+>   before anything this work constructs — but 'probably load' is not a measurement. It is
+>   deliberately left to the box gate to settle, on an idle machine, rather than attributed here."*
+> - **61b.** `CEZ_SOURCES` stays off on the worker, so the sources routes and cockpit UI still 409
+>   there. Cosmetic for sync (the mirror runs without them), but it means a human cannot see the
+>   mirror's state on a spoke — thin, given D8a's "a stale mirror must be loud".
+
+### 62. "Which worker is running this" had two paths to the answer, and both were dead
+
+**Found 2026-08-24, while answering the cockpit request "show what worker is processing a task,
+everywhere".** The todo side answers it honestly (`TodoItem.startedOn` / `placement.node`, rendered
+by `lib/task-node.ts` + `components/task-node-cell.tsx`). The RUN side could not answer it at all,
+and the reason turned out not to be a missing feature but two *built* features with no producer.
+
+> **Path 1 — the presence frame.** `clusterPresenceFrameSchema` has carried
+> `active: z.array(clusterActiveRunSchema).max(200).optional()` since it was written, with a
+> docblock stating it exists so `GET /cluster/active` and the overlap refusal read ONE definition
+> of "active" rather than two that drift. Measured on both ends:
+> - `peers.ts#collectPresence` returns `{type, protocol, capacity, hostMetrics, repoDrift}` — it has
+>   **never set `active`**. The field is optional, so its absence is silent.
+> - `peers.ts#markNodeSeen` spreads `capacity`, `hostMetrics`, `repoDrift` and `corpus` onto the
+>   roster row — and **not `active`**. So even a spoke that did send it would have it dropped.
+>
+> **Path 2 — the run projection.** `GET /cluster/active` reads `readRemoteRuns()`. Its writers,
+> `applyRemoteRuns` and `markNodeUnreachable`, have **zero production callers** — a fact already
+> recorded in a comment at `cluster-routes.ts:227` and then not acted on. The route therefore
+> returns `[]` in production, always.
+>
+> **This is the third instance of one class on this branch**, after `sources/cezar-hub/provider.ts`
+> and the hub outbox (item 60): *a complete, tested, documented mechanism with no production
+> caller*. It is not caught by tests, because the tests construct the producer themselves; it is not
+> caught by typecheck, because an optional field's absence is legal; and it is not caught by reading
+> the module, because the module is correct. The only thing that finds it is asking, of each
+> mechanism, **"who calls this in production?"** — and the answer has to be a file path, not a
+> plausible story. Two of the three had a comment somewhere already saying the callers were missing.
+> A known gap that nothing re-surfaces reads, six weeks later, exactly like a working feature.
+
+**Decision — fix the presence path, union it into the route.** Presence beats the projection file
+here: it is already sent on every heartbeat, already persisted per node by `markNodeSeen`, and
+already carries an arrival stamp (`lastSeenAt`) so staleness is answerable. The projection file
+needs `markNodeUnreachable` to self-correct, and that is the very caller that does not exist.
+`GET /cluster/active` unions both sources so the projection path cannot regress if it is ever wired.
+
+- **Absent and empty must stay distinguishable.** `collectPresence` omits `active` entirely when no
+  caller wires it, and includes it — *even as `[]`* — when one does. `[]` is "this node reports
+  nothing running"; absent is "this node does not report". Collapsing them would let an unwired node
+  read as idle, which is the failure this whole item is about.
+- **Per-run freshness is NOT `asOf`.** The response's `asOf` is the most recent `lastSeenAt` across
+  all nodes, so a fresh node makes a stale node's runs look current. The cockpit joins
+  `run.nodeId` to that node's own `lastSeenAt` instead. The route deliberately does **not** filter
+  stale nodes out: dropping a row silently is worse than rendering it with its true age.
+
+### 63. Two reds the box gate found that the Mac never would have
+
+Both were introduced by this work and both were invisible on the dev Mac. Recorded because the
+*reason* each hid is reusable, not because the fixes are interesting.
+
+> **63a. The upstream-purity gate — deterministic, and a real design defect, not a lint.**
+> `notifications/transports/webhook.test.ts` scans every file under `packages/{cezar,web}/src` and
+> fails on `loki|lokimessages|imsg` outside the fork's own package specifier. cezar ships as
+> `@open-mercato/cezar`; the gate is what keeps one operator's world out of it.
+>
+> It failed in **both** box runs — deterministic, so not the flake pool. The cause was
+> `corpus-store.ts` resolving the corpus root via a hardcoded workspace directory name. That is a
+> specific person's filesystem layout compiled into a published tool, and the honest description is
+> a design defect that a naming gate happened to catch.
+>
+> **The trap in fixing it: `CEZ_PROJECTS_DIR` is unset on `prod-host`**, so that hardcoded
+> candidate is *what resolves the live corpus today*. Deleting it to satisfy the gate would have
+> turned a green gate into broken corpus sync in production — the gate would have gone green
+> **because** the feature stopped working. Replaced instead with an explicit `CEZ_CORPUS_ROOT`
+> override plus a deterministic sorted scan of `<home>/*/notion-export`, which resolves to the same
+> path on both machines while naming no workspace. Mutation-checked: reversing the sort reddens the
+> determinism test and nothing else.
+>
+> Note the second-order version of the same mistake, made and caught here: the *correction comment*
+> explaining the fix spelled the forbidden token, so the file still failed the gate. A source-scanning
+> gate reads comments too.
+
+> **63b. A test that was flaky by construction, and the arithmetic that proves the fix is safe.**
+> `scheduler.test.ts`'s 60s-floor test asserted `Date.parse(nextDueAt) === startMs + 60_000` —
+> *exact* equality — while `advanceTimersByTimeAsync(1)` moves the virtual clock 1ms with `runOne`
+> in flight. Whether `writeNextDueAt` reads `startMs` or `startMs + 1` is async continuation
+> ordering. It failed once on the box and passed **5/5** locally: one run can never tell a broken
+> test from a load-sensitive flake, which is the whole reason the gate runs twice.
+>
+> Widened to a ±5ms window. **This does not lower the floor**, and the arithmetic is the argument:
+> the values the test exists to exclude are the pre-existing 300s and the 900s default, which are
+> 300_000 and 900_000 ms away — no tolerance small enough to write down could admit one. Verified
+> rather than asserted: forcing the interval back to 300s still reddens the test.
+
+> **62a. The bound on cross-worker awareness, stated rather than left to be discovered.**
+> Presence flows spoke → hub, so `GET /cluster/active` answers "what else is in flight" **on the
+> hub**. A spoke does not receive other spokes' presence and cannot answer it for runs.
+>
+> This is less of a gap than it first looks, and the reason is worth knowing: **todo-level
+> attribution does reach spokes**, for free. `clusterOpSchema` carries `startedOn` (the contract
+> notes `placement` and `startedOn` are "the only two anything renders"), so a `replica` frame
+> lands a hub-placed claim on the spoke's own records, and the cockpit's node cell renders it there
+> with no extra wiring. Todo-level is also the layer that matters for the question the user actually
+> asked — "is another worker already touching this" — because D9a's confirm-before-start reads the
+> todo, not the run index.
+>
+> So: **a worker knows which node holds a TODO; only the hub knows which node holds a RUN.** If
+> run-level awareness on a spoke is ever wanted, the honest shape is the hub relaying a digest
+> downlink, not spokes gossiping — the hub is already the linearization point and adding a second
+> one would create exactly the two-definitions-of-active drift that `ClusterPresenceFrame#active`'s
+> own docblock exists to prevent.
+
+> **62b. What the run-side node column can and cannot say today — and a correction to the reason.**
+> The cockpit's runs boards (`global-tasks`, `tasks-overview`, `workspace-tasks`, run detail) list
+> runs from the LOCAL run index only. `/cluster/active` now genuinely carries foreign runs on the
+> hub (roster half, fed by presence), but no board renders a foreign run as a ROW, so the
+> `runId` join has nothing foreign to match and every row resolves to "this node".
+>
+> That is honest, and it is not useless — with two cockpits open it says which one you are looking
+> at — but it is a constant per cockpit today, and it should be read that way rather than as a
+> fleet view.
+>
+> **Correcting the reason, because the mechanism named matters more than the conclusion:** the
+> implementing agent attributed this to `/cluster/active` being fed from the `runs-remote.json`
+> projection keyed on `projectKey` rather than `projectId`. That was true this morning and is not
+> true now — item 62 replaced that source with the roster half. The conclusion survives the
+> correction; the reason does not, and acting on the stale reason would send the next session to
+> fix the projection's key when the actual gap is that no board lists foreign runs.
+>
+> **Follow-up, not built:** the natural home for foreign in-flight runs is the cluster settings
+> section, per node — `useActiveClusterRuns` already exists and already returns them. Deliberately
+> not built here: the user's question ("which worker is processing this task") is answered on the
+> TODO side, which does reach spokes (62a), and the deploy + live E2E is the governing goal.

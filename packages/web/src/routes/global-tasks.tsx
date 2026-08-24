@@ -45,6 +45,14 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
 import { AuthorCell, TaskLocationProvider } from '@/components/author-cell'
+import {
+  RunNodeCell,
+  TaskNodeCell,
+  useRunNodeRoster,
+  useTaskNodeRoster,
+  type RunNodeRoster,
+  type TaskNodeRoster,
+} from '@/components/task-node-cell'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { deriveAttention } from '@/lib/attention'
 import {
@@ -284,6 +292,11 @@ export function GlobalTasksRoute() {
     if (sharedView !== view) setSharedView(view)
   }, [view, sharedView, setSharedView])
   const now = useNow(30_000)
+  // "Which worker is processing this?" for the RUNS side of the page (`.ai/specs/2026-08-22-
+  // multi-node-cezar-cluster.md`) — one roster fetch for both the pinned Running section and the
+  // table below, same reasoning `FiledTasks`' own `nodeRoster` gives for the Filed section: a
+  // single fetch, `.clusterOn` gating the column/cell everywhere it is threaded.
+  const runNodeRoster = useRunNodeRoster(now)
 
   /**
    * `replace`, always: filtering is one continuous gesture, and a history entry per click would
@@ -508,6 +521,7 @@ export function GlobalTasksRoute() {
           onSetRead={(task, read) => setRead.mutate({ task, read })}
           busy={archive.isPending || setRead.isPending}
           showCost={metrics.cost}
+          runNodeRoster={runNodeRoster}
         />
 
         {/* Filed work — table, statuses, detail dialog, archive (2026-08-17-filed-tasks-table-
@@ -584,6 +598,7 @@ export function GlobalTasksRoute() {
                   onSetRead={(task, read) => setRead.mutate({ task, read })}
                   busy={archive.isPending || setRead.isPending}
                   showCost={metrics.cost}
+                  runNodeRoster={runNodeRoster}
                 />
               </section>
             ))}</>
@@ -619,6 +634,7 @@ function RunningTasks({
   onSetRead,
   busy,
   showCost,
+  runNodeRoster,
 }: {
   tasks: readonly GlobalTask[]
   now: number
@@ -626,6 +642,7 @@ function RunningTasks({
   onSetRead: (task: GlobalTask, read: boolean) => void
   busy: boolean
   showCost: boolean
+  runNodeRoster: RunNodeRoster
 }) {
   if (tasks.length === 0) return null
 
@@ -645,6 +662,7 @@ function RunningTasks({
         onSetRead={onSetRead}
         busy={busy}
         showCost={showCost}
+        runNodeRoster={runNodeRoster}
       />
     </section>
   )
@@ -724,6 +742,10 @@ function FiledTasks({
   const update = useUpdateFiledTodo()
   const now = useNow(30_000)
   const isDesktop = useIsDesktop()
+  // "Which worker is processing this?" (2026-08-22-multi-node-cezar-cluster.md). One roster
+  // fetch for the whole section — `nodeRoster.clusterOn` gates the Node column/cell everywhere
+  // below, so a single-node cockpit never grows a column that is always empty.
+  const nodeRoster = useTaskNodeRoster()
   const [detail, setDetail] = React.useState<WorkspaceTodoEntry | null>(null)
   const [shown, setShown] = React.useState(FILED_ROW_PAGE_SIZE)
 
@@ -794,6 +816,7 @@ function FiledTasks({
               key={`${entry.project}:${entry.todo.id}`}
               entry={entry}
               now={now}
+              nodeRoster={nodeRoster}
               onOpenDetail={() => setDetail(entry)}
               onStart={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
               onArchive={(archived) => update.mutate({ entry, patch: { archived } })}
@@ -825,6 +848,7 @@ function FiledTasks({
                   <Th>Task</Th>
                   <Th className="w-[124px]">Project</Th>
                   <Th className="hidden w-[104px] lg:table-cell">Author</Th>
+                  {nodeRoster.clusterOn ? <Th className="hidden w-[110px] xl:table-cell">Node</Th> : null}
                   <Th className="w-[84px]">Priority</Th>
                   <Th className="w-[64px] text-right">Age</Th>
                   <Th className="w-[64px] text-right">
@@ -838,6 +862,7 @@ function FiledTasks({
                     key={`${entry.project}:${entry.todo.id}`}
                     entry={entry}
                     now={now}
+                    nodeRoster={nodeRoster}
                     onOpenDetail={() => setDetail(entry)}
                     onStart={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
                     onArchive={(archived) => update.mutate({ entry, patch: { archived } })}
@@ -865,6 +890,7 @@ function FiledTasks({
 
       <FiledDetailDialog
         entry={detail}
+        nodeRoster={nodeRoster}
         onClose={() => setDetail(null)}
         onStart={(entry) => {
           setDetail(null)
@@ -968,6 +994,7 @@ function FiledPriorityChip({ priority }: { priority: FiledPriority }) {
 function FiledRow({
   entry,
   now,
+  nodeRoster,
   onOpenDetail,
   onStart,
   onArchive,
@@ -976,6 +1003,7 @@ function FiledRow({
 }: {
   entry: WorkspaceTodoEntry
   now: number
+  nodeRoster: TaskNodeRoster
   onOpenDetail: () => void
   onStart: () => void
   onArchive: (archived: boolean) => void
@@ -1017,6 +1045,11 @@ function FiledRow({
       <td className={cn(TD_BASE, 'hidden lg:table-cell')}>
         <AuthorCell author={entry.todo.author} />
       </td>
+      {nodeRoster.clusterOn ? (
+        <td className={cn(TD_BASE, 'hidden xl:table-cell')}>
+          <TaskNodeCell info={nodeRoster.resolve(entry.todo)} />
+        </td>
+      ) : null}
       <td className={TD_BASE}>
         {entry.todo.priority ? <FiledPriorityChip priority={entry.todo.priority} /> : <Dash />}
       </td>
@@ -1087,6 +1120,7 @@ function FiledRow({
 function FiledCard({
   entry,
   now,
+  nodeRoster,
   onOpenDetail,
   onStart,
   onArchive,
@@ -1095,6 +1129,7 @@ function FiledCard({
 }: {
   entry: WorkspaceTodoEntry
   now: number
+  nodeRoster: TaskNodeRoster
   onOpenDetail: () => void
   onStart: () => void
   onArchive: (archived: boolean) => void
@@ -1135,6 +1170,12 @@ function FiledCard({
           <>
             <Sep />
             <FiledPriorityChip priority={entry.todo.priority} />
+          </>
+        ) : null}
+        {nodeRoster.clusterOn ? (
+          <>
+            <Sep />
+            <TaskNodeCell info={nodeRoster.resolve(entry.todo)} />
           </>
         ) : null}
       </div>
@@ -1181,6 +1222,7 @@ function FiledCard({
  */
 function FiledDetailDialog({
   entry,
+  nodeRoster,
   onClose,
   onStart,
   onArchive,
@@ -1188,6 +1230,7 @@ function FiledDetailDialog({
   archivePending,
 }: {
   entry: WorkspaceTodoEntry | null
+  nodeRoster: TaskNodeRoster
   onClose: () => void
   onStart: (entry: WorkspaceTodoEntry) => void
   onArchive: (entry: WorkspaceTodoEntry, archived: boolean) => void
@@ -1198,7 +1241,14 @@ function FiledDetailDialog({
     <Dialog open={entry !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
       <DialogContent data-slot="filed-task-detail" className="block max-h-[80dvh] overflow-y-auto sm:max-w-2xl">
         {entry ? (
-          <FiledDetailBody entry={entry} onStart={onStart} onArchive={onArchive} startPending={startPending} archivePending={archivePending} />
+          <FiledDetailBody
+            entry={entry}
+            nodeRoster={nodeRoster}
+            onStart={onStart}
+            onArchive={onArchive}
+            startPending={startPending}
+            archivePending={archivePending}
+          />
         ) : null}
       </DialogContent>
     </Dialog>
@@ -1207,12 +1257,14 @@ function FiledDetailDialog({
 
 function FiledDetailBody({
   entry,
+  nodeRoster,
   onStart,
   onArchive,
   startPending,
   archivePending,
 }: {
   entry: WorkspaceTodoEntry
+  nodeRoster: TaskNodeRoster
   onStart: (entry: WorkspaceTodoEntry) => void
   onArchive: (entry: WorkspaceTodoEntry, archived: boolean) => void
   startPending: boolean
@@ -1239,6 +1291,7 @@ function FiledDetailBody({
         {todo.ts ? (
           <span className="text-[11px] text-soft-foreground">Filed {new Date(todo.ts).toLocaleString()}</span>
         ) : null}
+        {nodeRoster.clusterOn ? <TaskNodeCell info={nodeRoster.resolve(todo)} /> : null}
       </div>
 
       {todo.context ? (
@@ -1582,6 +1635,7 @@ function TaskTable({
   onSetRead,
   busy,
   showCost,
+  runNodeRoster,
 }: {
   tasks: readonly GlobalTask[]
   now: number
@@ -1590,6 +1644,7 @@ function TaskTable({
   onSetRead: (task: GlobalTask, read: boolean) => void
   busy: boolean
   showCost: boolean
+  runNodeRoster: RunNodeRoster
 }) {
   // Below `md` the table's ~700px minimum row is a sideways-scroll on a phone, so the same rows
   // render as stacked cards instead (mobile-ux spec 2026-08-19). Gated on `useIsDesktop` rather
@@ -1612,6 +1667,7 @@ function TaskTable({
             onSetRead={onSetRead}
             busy={busy}
             showCost={showCost}
+            runNodeRoster={runNodeRoster}
           />
         ))}
       </div>
@@ -1637,6 +1693,7 @@ function TaskTable({
               <Th className="hidden w-[120px] xl:table-cell">Tags</Th>
               <Th className="w-[84px]">Ref</Th>
               <Th className="hidden w-[104px] xl:table-cell">Author</Th>
+              {runNodeRoster.clusterOn ? <Th className="hidden w-[124px] xl:table-cell">Node</Th> : null}
               <Th className="hidden w-[108px] xl:table-cell">Workflow</Th>
               {showCost ? <Th className="hidden w-[64px] text-right lg:table-cell">Cost</Th> : null}
               <Th className="hidden w-[56px] text-right xl:table-cell">CPU</Th>
@@ -1659,6 +1716,7 @@ function TaskTable({
                 onSetRead={onSetRead}
                 busy={busy}
                 showCost={showCost}
+                runNodeRoster={runNodeRoster}
               />
             ))}
           </tbody>
@@ -1699,6 +1757,7 @@ function TaskRow({
   onSetRead,
   busy,
   showCost,
+  runNodeRoster,
 }: {
   task: GlobalTask
   now: number
@@ -1707,6 +1766,7 @@ function TaskRow({
   onSetRead: (task: GlobalTask, read: boolean) => void
   busy: boolean
   showCost: boolean
+  runNodeRoster: RunNodeRoster
 }) {
   const { run } = task
   const attention = deriveAttention(run)
@@ -1807,6 +1867,11 @@ function TaskRow({
       <td className={cn(TD_BASE, 'hidden xl:table-cell')}>
         <AuthorCell author={run.author} />
       </td>
+      {runNodeRoster.clusterOn ? (
+        <td className={cn(TD_BASE, 'hidden xl:table-cell')}>
+          <RunNodeCell roster={runNodeRoster} runId={run.id} />
+        </td>
+      ) : null}
       <td className={cn(TD_BASE, 'hidden text-[12.5px] text-muted-foreground xl:table-cell')}>
         {displayWorkflowName(run.workflow)}
       </td>
@@ -1853,6 +1918,7 @@ function GlobalTaskCard({
   onSetRead,
   busy,
   showCost,
+  runNodeRoster,
 }: {
   task: GlobalTask
   now: number
@@ -1861,6 +1927,7 @@ function GlobalTaskCard({
   onSetRead: (task: GlobalTask, read: boolean) => void
   busy: boolean
   showCost: boolean
+  runNodeRoster: RunNodeRoster
 }) {
   const { run } = task
   const attention = deriveAttention(run)
@@ -1900,6 +1967,9 @@ function GlobalTaskCard({
   }
   const workflow = displayWorkflowName(run.workflow)
   if (workflow) parts.push(<span key="workflow">{workflow}</span>)
+  if (runNodeRoster.clusterOn) {
+    parts.push(<RunNodeCell key="node" roster={runNodeRoster} runId={run.id} />)
+  }
   if (showCost && cost) parts.push(<span key="cost">{cost}</span>)
   if (context.text) {
     parts.push(

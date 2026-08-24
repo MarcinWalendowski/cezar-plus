@@ -1148,3 +1148,112 @@ describe('TasksOverviewRoute — wired to the app', () => {
     })
   })
 })
+
+// ---- "which worker is processing this?" — the per-project table (2026-08-24) --------------------
+
+describe('TasksOverviewRoute — the Node column', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    cleanup()
+    fetchMock.mockReset()
+    vi.unstubAllGlobals()
+  })
+
+  const CLUSTER_NODE = (overrides: { nodeId: string; nodeName: string; lastSeenAt?: string }) => ({
+    role: 'spoke' as const,
+    labels: [] as string[],
+    acceptsDispatch: true,
+    protocol: { major: 1, minor: 0 },
+    version: '0.10.0',
+    ...overrides,
+  })
+  const HUB = CLUSTER_NODE({ nodeId: 'hub-1', nodeName: 'Hub' })
+  const SPOKE = CLUSTER_NODE({ nodeId: 'spoke-2', nodeName: 'Laptop' })
+
+  function json(body: unknown, status = 200) {
+    return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+  }
+
+  function renderApp(
+    runs: RunRecord[],
+    { cluster, clusterActive }: { cluster: boolean; clusterActive?: unknown },
+  ) {
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url === '/api/v1/runs') return json(runs)
+      if (url === '/api/v1/projects') return json({ projects: [], bootProject: 'default', projectsDir: '/repos' })
+      if (url === '/api/v1/health') {
+        return json({
+          version: '0.0.0-test',
+          repoRoot: '/repo',
+          repo: { root: '/repo', branch: 'main' },
+          forge: null,
+          capabilities: { localHandoff: true, followups: true, cluster },
+          defaultRunner: 'claude',
+          checks: [],
+        })
+      }
+      if (url === '/api/v1/cluster') {
+        return json({
+          self: CLUSTER_NODE({ nodeId: 'hub-1', nodeName: 'Hub' }),
+          nodes: [HUB, SPOKE],
+          pairings: [],
+          proposals: [],
+          link: { state: 'disabled' },
+        })
+      }
+      if (url === '/api/v1/cluster/active') return json(clusterActive ?? { runs: [] })
+      // Node folds by default (`task-columns.ts`) — pre-expand it via the persisted workspace
+      // state rather than driving the fold-toggle button, which needs its own valid GET to have
+      // already resolved before `useTaskTableColumns.toggleColumn` will act on a click at all.
+      if (url === '/api/v1/workspace/ui-state') return json({ taskTable: { expandedColumns: { node: true } } })
+      return json({})
+    })
+    return render(
+      <QueryClientProvider client={createQueryClient()}>
+        <MemoryRouter>
+          <ListViewProvider>
+            <TasksOverviewRoute />
+          </ListViewProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+  }
+
+  const nodeCellIn = (id: string) => tableRow(id)?.querySelector<HTMLElement>('[data-slot="task-node"]')
+
+  it('renders no Node column at all on a single-node cockpit — clustering off', async () => {
+    renderApp([run({ id: 'r1', status: 'done' })], { cluster: false })
+    await waitFor(() => expect(tableRow('r1')).not.toBeNull())
+
+    // Node folds by default, so its header carries no visible "Node" text even when present —
+    // the header CELL itself (`data-column-id="node"`) is the reliable presence signal, same as
+    // the row/card cell check below.
+    expect(document.querySelector('[data-column-id="node"]')).toBeNull()
+    expect(nodeCellIn('r1')).toBeNull()
+  })
+
+  it('a run not reported in /cluster/active renders as "this node" — local by construction', async () => {
+    renderApp([run({ id: 'r1', status: 'done' })], { cluster: true, clusterActive: { runs: [] } })
+    await waitFor(() => expect(tableRow('r1')).not.toBeNull())
+
+    await waitFor(() => expect(nodeCellIn('r1')?.dataset.nodeKind).toBe('self'))
+    expect(nodeCellIn('r1')!.textContent).toBe('this node')
+  })
+
+  it('a run reported in /cluster/active on another node renders that node, not "self"', async () => {
+    renderApp([run({ id: 'r1', status: 'done' })], {
+      cluster: true,
+      clusterActive: { runs: [{ runId: 'r1', nodeId: 'spoke-2', summary: 's', paths: [] }] },
+    })
+    await waitFor(() => expect(tableRow('r1')).not.toBeNull())
+
+    await waitFor(() => expect(nodeCellIn('r1')?.dataset.nodeKind).toBe('known'))
+    expect(nodeCellIn('r1')!.textContent).toBe('Laptop')
+  })
+})

@@ -4,6 +4,7 @@ import { AutomationStore } from '../automations/store.ts';
 import { reconcileAutomationReceipts } from '../automations/task-template.ts';
 import { DEFAULT_WORKTREE_RETENTION, resolveWorktreeRetention } from '../config.ts';
 import { canonicalPath, pruneOrphans } from '../git-worktree.ts';
+import { emitCorpusChanged } from '../cluster/corpus-change-bus.ts';
 import { KnowledgeStore } from '../knowledge/store.ts';
 import { NotificationOutbox, notificationsDataDir } from '../notifications/outbox.ts';
 import { NotificationRegistry } from '../notifications/registry.ts';
@@ -88,6 +89,11 @@ export function activateOptionalStores(opts: {
     ? KnowledgeStore.create(root, dataDir, {
         env,
         hosted: env.CEZ_REMOTE === '1' || !isLoopbackHost(bindHost),
+        // A hub tells its spokes the corpus moved the moment it actually moves, instead of every
+        // spoke waiting out its own interval (cluster spec item 57). Emitting unconditionally is
+        // deliberate: the bus is a no-op with nothing registered, which is the state on a spoke and
+        // on any non-clustered cockpit, so this costs a function call and gates on nothing.
+        onChanged: () => emitCorpusChanged(),
       })
     : undefined;
   if (knowledgeStore) {

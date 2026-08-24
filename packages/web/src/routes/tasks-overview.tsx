@@ -14,6 +14,7 @@ import {
   ListChecksIcon,
   LinkIcon,
   MemoryStickIcon,
+  NetworkIcon,
   PencilIcon,
   PlusIcon,
   ScaleIcon,
@@ -30,6 +31,7 @@ import { useRunUsage } from '@/api/global-events'
 import { queryKeys, useHealth, useProjectRepoBase, useReferenceProjectId, useRuns } from '@/api/queries'
 import type { RunRecord, Runner } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
+import { RunNodeCell, useRunNodeRoster, type RunNodeRoster } from '@/components/task-node-cell'
 import { DiffStatLabel } from '@/components/diff-stat'
 import { HostUsageStat } from '@/components/host-usage-stat'
 import { DirectionalUsage } from '@/components/directional-usage'
@@ -104,6 +106,7 @@ export function TasksOverview({
   hostUsage = null,
   repoBase,
   defaultRunner,
+  runNodeRoster = { clusterOn: false, resolve: () => undefined, freshness: () => undefined },
 }: {
   /** Undefined while `/api/runs` has not answered: the header renders, the body stays empty —
    *  an empty state before we know there are no runs would be a lie. */
@@ -147,6 +150,12 @@ export function TasksOverview({
    *  when its own record does not (`queueHold`). A prop, not a hook read here — the same
    *  presentational discipline as `showWorkspaceSwitch`. */
   defaultRunner?: Runner
+  /** "Which worker is processing this?" (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`) — a
+   *  prop, not a hook read here, for the same presentational-component reason as
+   *  `showWorkspaceSwitch`: `TasksOverviewRoute` has query access and resolves it once. Defaults
+   *  to the honest single-node answer (`clusterOn: false`) so a direct render — this file's own
+   *  test suite — never grows a Node column it did not ask for. */
+  runNodeRoster?: RunNodeRoster
 }) {
   const [query, setQuery] = React.useState('')
   const all = runs ?? []
@@ -160,7 +169,11 @@ export function TasksOverview({
   const holds = usageLimitHolds(all)
   const strips = compareGroups(filterRuns(all, query), view)
   const finished = finishedRunCount(all)
-  const columns = taskColumnsForCapabilities({ tokens: showTokens, cost: showCost })
+  const columns = taskColumnsForCapabilities({
+    tokens: showTokens,
+    cost: showCost,
+    cluster: runNodeRoster.clusterOn,
+  })
   const unread = unreadDoneCount(all)
 
   // One search control, rendered in the desktop header and — below `md`, where that header is
@@ -310,6 +323,7 @@ export function TasksOverview({
                         columns={columns}
                         expandedColumns={expandedColumns}
                         repoBase={repoBase}
+                        runNodeRoster={runNodeRoster}
                       />
                     ))}
                   </tbody>
@@ -329,6 +343,7 @@ export function TasksOverview({
                   showTokens={showTokens}
                   showCost={showCost}
                   repoBase={repoBase}
+                  runNodeRoster={runNodeRoster}
                 />
               ))}
             </div>
@@ -544,6 +559,8 @@ function TaskColumnIconView({ icon }: { icon?: TaskColumnIcon }) {
       return <WorkflowIcon className={className} aria-hidden="true" />
     case 'branch':
       return <GitBranchIcon className={className} aria-hidden="true" />
+    case 'node':
+      return <NetworkIcon className={className} aria-hidden="true" />
     case 'diff':
       return <FileDiffIcon className={className} aria-hidden="true" />
     case 'reference':
@@ -584,6 +601,7 @@ function TableRow({
   columns,
   expandedColumns,
   repoBase,
+  runNodeRoster,
 }: {
   run: RunRecord
   queuePosition: number | null
@@ -595,6 +613,7 @@ function TableRow({
   expandedColumns: NormalizedExpandedColumns
   /** The row's own project's repo — see `TasksOverview`'s doc comment on the prop. */
   repoBase?: string
+  runNodeRoster: RunNodeRoster
 }) {
   const navigate = useNavigate()
   const attention = deriveAttention(run)
@@ -652,6 +671,7 @@ function TableRow({
             to={to}
             onRename={onRename}
             now={now}
+            runNodeRoster={runNodeRoster}
           />
         )
       })}
@@ -671,6 +691,7 @@ function TaskTableCell({
   to,
   onRename,
   now,
+  runNodeRoster,
 }: {
   column: TaskColumnDefinition
   expanded: boolean
@@ -683,6 +704,7 @@ function TaskTableCell({
   to: string
   onRename: (id: string, title: string) => void
   now: number
+  runNodeRoster: RunNodeRoster
 }) {
   if (!expanded) return <FoldedTd column={column.id} />
 
@@ -715,6 +737,12 @@ function TaskTableCell({
       return (
         <td data-column-id={column.id} className={TD_BASE}>
           {run.branch ? <BranchChip branch={run.branch} /> : <Dash />}
+        </td>
+      )
+    case 'node':
+      return (
+        <td data-column-id={column.id} className={TD_BASE}>
+          <RunNodeCell roster={runNodeRoster} runId={run.id} />
         </td>
       )
     case 'diff':
@@ -916,6 +944,7 @@ function TaskCard({
   showTokens,
   showCost,
   repoBase,
+  runNodeRoster,
 }: {
   run: RunRecord
   queuePosition: number | null
@@ -926,6 +955,7 @@ function TaskCard({
   showCost: boolean
   /** The card's own project's repo — see `TasksOverview`'s doc comment on the prop. */
   repoBase?: string
+  runNodeRoster: RunNodeRoster
 }) {
   const navigate = useNavigate()
   const attention = deriveAttention(run)
@@ -995,7 +1025,13 @@ function TaskCard({
                 <span>{run.branch}</span>
               </>
             ) : null}
-            {/* Branch · ±diff · IN/OUT · cost — the compact card's meta order. */}
+            {runNodeRoster.clusterOn ? (
+              <>
+                <Sep />
+                <RunNodeCell roster={runNodeRoster} runId={run.id} className="text-[11.5px]" />
+              </>
+            ) : null}
+            {/* Branch · Node · ±diff · IN/OUT · cost — the compact card's meta order. */}
             {run.diffStat ? (
               <>
                 <Sep />
@@ -1092,6 +1128,10 @@ export function TasksOverviewRoute() {
     onError: (error: Error) => toast(error.message, { tone: 'danger' }),
   })
   const now = useNow(30_000)
+  // "Which worker is processing this?" (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`) —
+  // reuses the same `now` above rather than a second clock, same reasoning `global-tasks.tsx`
+  // gives for its own `runNodeRoster`.
+  const runNodeRoster = useRunNodeRoster(now)
   const taskTableColumns = useTaskTableColumns()
   // Chip statuses are hydrated HERE rather than inside `TasksOverview`, which is a pure
   // presentational component rendered directly (and without a query client) by its tests. The
@@ -1134,6 +1174,7 @@ export function TasksOverviewRoute() {
         hostUsage={<HostUsageStat />}
         repoBase={repoBase}
         defaultRunner={health.data?.defaultRunner}
+        runNodeRoster={runNodeRoster}
       />
     </ReferenceStatusProvider>
   )

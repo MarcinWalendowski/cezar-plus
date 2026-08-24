@@ -11,6 +11,8 @@ import { CenteredState } from '@/components/centered-state'
 import { EnginePills, engineBody, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
 import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { StatusDot } from '@/components/status-dot'
+import { TaskNodeCell, useTaskNodeRoster } from '@/components/task-node-cell'
+import type { TaskNodeInfo } from '@/lib/task-node'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
@@ -76,6 +78,10 @@ export function InboxRoute() {
   // Only to tell "source task" links from "source task deleted" — the legacy check against
   // its run map. The overview keeps this query warm, so revisits cost nothing.
   const runs = useRuns()
+  // "Which worker is processing this?" (2026-08-22-multi-node-cezar-cluster.md). One roster
+  // fetch for the whole list — `nodeRoster.clusterOn` gates whether any card grows the cell at
+  // all, so a single-node cockpit never shows a column that is always empty.
+  const nodeRoster = useTaskNodeRoster()
 
   const todos = todosQuery.data === undefined ? undefined : visibleTodos(todosQuery.data)
 
@@ -136,6 +142,8 @@ export function InboxRoute() {
                     ? null
                     : (runs.data?.some((run) => run.id === todo.taskId) ?? false)
                 }
+                nodeInfo={nodeRoster.clusterOn ? nodeRoster.resolve(todo) : undefined}
+                showNode={nodeRoster.clusterOn}
               />
             ))}
           </ul>
@@ -149,9 +157,16 @@ function TodoCard({
   todo,
   /** null: no source task at all; false: it existed once but was deleted. */
   sourceTaskExists,
+  nodeInfo,
+  showNode,
 }: {
   todo: TodoItem
   sourceTaskExists: boolean | null
+  /** Resolved once, by the route, against the shared roster — see `useTaskNodeRoster`. */
+  nodeInfo: TaskNodeInfo | undefined
+  /** False on a single-node cockpit: the card renders no node cell at all rather than an
+   *  always-empty one. */
+  showNode: boolean
 }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -274,6 +289,10 @@ function TodoCard({
                 skill: {todo.suggestedSkill}
               </span>
             ) : null}
+            {/* Which worker is processing this — gated on `showNode` (single-node cockpits render
+                no cell at all, see `TodoCard`'s own prop doc), so `nodeInfo` is only ever passed
+                here already resolved against the shared roster. */}
+            {showNode ? <TaskNodeCell info={nodeInfo} /> : null}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5 self-center">

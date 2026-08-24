@@ -1,11 +1,17 @@
 import { Hono } from 'hono';
 import type { Context, Next } from 'hono';
-import { join } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve, sep } from 'node:path';
+import { z } from 'zod';
 import {
   CLUSTER_PROTOCOL,
   type ClusterActiveResponse,
   type ClusterActiveRun,
   type ClusterAllocateResponse,
+  type ClusterCorpusBodiesResponse,
+  type ClusterCorpusDocResponse,
+  type ClusterCorpusManifestResponse,
+  type ClusterCorpusSubmitResponse,
   type ClusterEnrollResponse,
   type ClusterEnrollRevokeResponse,
   type ClusterJoinResponse,
@@ -29,6 +35,9 @@ import {
   clusterAllocateKindParamSchema,
   clusterAllocateRequestSchema,
   clusterCodeIdParamSchema,
+  clusterCorpusBodiesRequestSchema,
+  clusterCorpusManifestQuerySchema,
+  clusterCorpusPathParamSchema,
   clusterCorpusSubmitRequestSchema,
   clusterEnrollRequestSchema,
   clusterJoinRequestSchema,
@@ -41,9 +50,10 @@ import {
   clusterProjectKeyParamSchema,
   clusterTodosAppendRequestSchema,
   type StoredClusterNodeIdentity,
+  CLUSTER_CORPUS_DEFAULT_SCOPE,
 } from '@loki-labs/better-cezar-contract';
 import { clusterEnabled } from './capabilities.ts';
-import { jsonZodValidator, paramZodValidator } from './validators.ts';
+import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import type { ProjectApiEnv } from './server.ts';
 import { allocate } from '../cluster/allocate.ts';
 import {
@@ -68,16 +78,30 @@ import { ClusterLinkClient } from '../cluster/link-client.ts';
 import { toNodeWire, toPairingWire } from '../cluster/wire.ts';
 import { ClusterLinkServer, type UpgradeCapableServer } from '../cluster/link-server.ts';
 import { createNodeAuthMiddleware, getAuthenticatedClusterNode } from '../cluster/node-auth.ts';
+import {
+  buildManifest,
+  isPathInScope,
+  readDoc,
+  readDocs,
+  resolveCorpusRoot,
+  scopeForNode,
+} from '../cluster/corpus-store.ts';
 import { clusterModeFromEnv, loadNodeIdentity, nodeIdentityPath } from '../cluster/node-identity.ts';
 import { lookupNodeSecret as lookupStoredNodeSecret } from '../cluster/node-secrets.ts';
 import { createOpHistoryStore, OP_HISTORY_PRUNE_INTERVAL_MS } from '../cluster/op-history.ts';
+import { startHubOutbox } from '../cluster/hub-outbox.ts';
+import { createCorpusBroadcaster } from '../cluster/corpus-broadcast.ts';
+import { setCorpusChangeListener } from '../cluster/corpus-change-bus.ts';
+import { startCorpusMirrorRuntime } from '../cluster/corpus-mirror-runtime.ts';
 import { startSpokeRuntime, type SpokeRuntimeHandle } from '../cluster/spoke-runtime.ts';
-import { applyPairingAction, disableNode, readPeers, upsertNode } from '../cluster/peers.ts';
+import { advertisedProjects, applyPairingAction, disableNode, readPeers, upsertNode } from '../cluster/peers.ts';
+import type { ClusterHomeOptions } from '../cluster/node-identity.ts';
 import { readRemoteRuns } from '../cluster/run-projection.ts';
 import { loadServerState } from '../server-install/state.ts';
 import { workspaceConfigPath } from '../paths.ts';
 import { backupAndAppendTodosPreservingIds, backupTodos, readTodos, type TodoItem } from '../todos.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
+import { WorkspaceRunIndex, type WorkspaceRunProjectSource } from '../workspace/run-index.ts';
 import type { RunManager } from '../workflows/run.ts';
 import type { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 
@@ -147,14 +171,34 @@ import type { WorkspaceSemaphore } from '../workspace/semaphore.ts';
  * routes below it. That asymmetry is deliberate and harmless: an unattached upgrade is genuinely a
  * path that does not exist, not a feature refusing to answer.
  *
- * ## What is honestly not here yet
+ * ## The corpus family (package 3b.2, D8a) — what is here and what is honestly not
  *
- * The corpus family (`GET /cluster/corpus`, `GET /cluster/corpus/*path`,
- * `POST /cluster/corpus/submit`) has no module to call: there is no `cluster/corpus.ts` among the
- * sixteen, and package **3b.2** is what writes both the hub-side sweep and these bodies. They
- * answer a stated 409 until then — the same posture `sources-routes.ts` takes with
- * `SYNC_ENGINE_PENDING`, and for the same reason: a route that pretends is worse than a route that
- * says which package it is waiting for.
+ * `GET /cluster/corpus` (manifest, `?since=`), `GET /cluster/corpus/*path` (one document),
+ * `POST /cluster/corpus/bodies` (batch, S2 of the 2026-08-24 handoff item) and
+ * `POST /cluster/corpus/submit` (the one write direction, D8/D8a) all read/write through
+ * `../cluster/corpus-store.ts`, never re-deriving scope or path logic here — `isPathInScope` is
+ * called from the single-document, batch AND submit handlers so the three cannot drift apart.
+ * All four still answer the SAME stated 409 (a new message, not `CORPUS_PENDING`) when
+ * `resolveCorpusRoot` finds no corpus configured on this hub — a route that pretends is worse than
+ * one that says what is missing, same posture `sources-routes.ts` takes with `SYNC_ENGINE_PENDING`.
+ *
+ * `GET /cluster/corpus`'s `scope` query parameter is a narrowing HINT ONLY, never trusted as
+ * authorization — see `node-auth.ts#signedNodeRequestHeaders`'s own doc for why the signature
+ * cannot cover it and what that would otherwise let a captured header pair do. The entitled scope
+ * always comes from `scopeForNode` reading this node's OWN roster row, freshly, per request.
+ *
+ * **`POST /cluster/corpus/submit` implements two of the four refusal reasons its response schema
+ * declares — `out-of-scope` and `stale-base` — and leaves `too-large` and `read-only-path`
+ * unreached, on purpose.** `too-large` is already unreachable through this schema: the request
+ * body is capped at 1MB by `clusterCorpusSubmitRequestSchema` itself, so an oversized submission
+ * 400s at the validator and never reaches this handler; a hub-side cap smaller than the wire cap
+ * would be a new policy this package was not asked to invent. `read-only-path` has no policy
+ * anywhere in the spec naming which corpus paths, if any, are read-only server-side — flagged for
+ * whoever owns that decision rather than guessed at here. `stale-base` is optimistic concurrency
+ * keyed on `readDoc`'s own `hash` (the same value the manifest and single-document routes already
+ * hand out as `ClusterCorpusDoc.hash`/`ClusterCorpusBody.hash`) — a submitter who never fetched the
+ * document, or whose `baseVersion` no longer matches, is refused rather than silently clobbering a
+ * concurrent write.
  *
  * ## D20 — which routes authenticate the NODE, and which do not
  *
@@ -180,15 +224,18 @@ import type { WorkspaceSemaphore } from '../workspace/semaphore.ts';
  * an operator action taken at the hub's own cockpit. None of those is a node authenticating itself
  * to another node, so node-auth is not on them.
  *
- * **`GET /cluster/active`'s "locally-mirrored state" is real but, as things stand, permanently
- * empty in production — that is a defect in what feeds it, not in this claim.** `run-projection.ts`'s
- * writers (`applyRemoteRuns`, `markNodeUnreachable`) have zero production callers, so
- * `runs-remote.json` is never written and this route always answers `runs: []`. Wiring that writer
- * is Milestone D (weeks, ops-gated) and out of this package's scope. Until it lands, this route —
- * like `linkHealth()` below — reports what is true rather than fabricating activity: an empty
- * mirror answers `runs: []`, and `asOf` (`clusterActiveResponseSchema`'s own doc) is `undefined`
- * whenever nothing has ever reported, rather than the wall-clock-now that used to paper over the
- * gap and make an empty answer read as a checked, current fact.
+ * **CORRECTED 2026-08-24 — `GET /cluster/active` is no longer permanently empty in production.**
+ * This paragraph used to say the route's "locally-mirrored state" was real but permanently empty,
+ * because its only feed was `run-projection.ts`'s `runs-remote.json`, whose writers (`applyRemoteRuns`,
+ * `markNodeUnreachable`) have zero production callers. That projection is still dead — Milestone D
+ * (weeks, ops-gated) is still what wires it — but it is no longer the route's only source: every
+ * node now reports its own in-flight runs on its `presence` frame (`clusterNodeShape#active`), the
+ * roster persists it (`peers.ts#markNodeSeen`), and the route unions the roster
+ * (`clusterActiveRunsFromRoster`) with the still-dead projection (`mergeActiveRuns`) so the route
+ * does not depend on Milestone D landing to answer anything. What is still true from the original
+ * paragraph: this route — like `linkHealth()` below — reports what is true rather than fabricating
+ * activity, and `asOf` (`clusterActiveResponseSchema`'s own doc) is `undefined` whenever no linked
+ * roster node has ever reported, rather than a wall-clock-now that would paper over that gap.
  *
  * `POST /cluster/join` is excluded on purpose and would be a lockout bug if it weren't: it is the
  * enrollment handshake ITSELF, and a joining node has no secret yet to sign with.
@@ -263,8 +310,17 @@ const CLUSTER_OFF =
   'clustering is disabled — set CEZ_CLUSTER=1 (and CEZ_CLUSTER_HUB=<url> to join one as a spoke) and restart cezar';
 const NOT_A_HUB = 'this node is a spoke — enrollment, leases and allocation are hub-side only';
 const NO_IDENTITY = 'this node has no cluster identity yet — run `cezar cluster join <code>` first';
-const CORPUS_PENDING =
-  'the corpus mirror is not available yet — the hub-side corpus sweep (plan 3b.2) has not landed; nothing is mirrored and nothing can be submitted';
+/** All four corpus routes answer this 409 when `resolveCorpusRoot` finds nothing configured on
+ *  this hub — the same shape the earlier `CORPUS_PENDING` scaffold answered while package 3b.2 was
+ *  unwritten, with a new message: it is no longer "the route is unbuilt", it is "this hub has no
+ *  corpus to serve". */
+const CORPUS_ROOT_UNCONFIGURED =
+  'this hub has no corpus root configured — nothing is mirrored and nothing can be submitted';
+/** `GET /cluster/corpus/*path` and the `bodies` batch route answer this for both a genuinely
+ *  missing document and one outside the asking node's mirror scope — deliberately the SAME
+ *  refusal, so a caller can never learn which out-of-scope paths exist (mirrors
+ *  `clusterCorpusBodiesResponseSchema.missing`'s own doc). */
+const CORPUS_DOC_NOT_FOUND = 'no such document in the corpus mirror scope for this node';
 
 /**
  * D21/D20's closing rule, in one message: "an authenticated spoke asking for a project it is not
@@ -353,6 +409,128 @@ export function clusterActiveAsOfFrom(nodes: readonly StoredClusterNode[]): stri
   return latest;
 }
 
+/**
+ * The ROSTER half of `GET /cluster/active` (D-active, 2026-08-24) — each linked node's own
+ * last-reported `presence.active` (`clusterNodeShape#active`'s own doc), read straight off the
+ * roster row `markNodeSeen` stamped it onto. This exists because the module header's "`GET
+ * /cluster/active`'s locally-mirrored state" paragraph is still true of the OTHER half:
+ * `run-projection.ts`'s writers have zero production callers, so `clusterActiveRunsFrom` alone
+ * always answers `[]`. The roster is the live path.
+ *
+ * **Skips a `disabledAt` node.** A revoked node's last-reported claim is not evidence that anything
+ * is running now — the credential that would let it correct that claim has been pulled, unlike a
+ * merely stale (but still linked) node, whose last-reported runs are kept below on purpose: this
+ * route is deliberately not staleness-filtered.
+ *
+ * **Deliberately does NOT filter by `lastSeenAt` freshness.** A node's runs stay in the response
+ * even when that node has gone quiet — per-run freshness is answered by the caller joining
+ * `run.nodeId` to that node's `lastSeenAt` (already on the roster the cockpit holds), not by this
+ * route silently dropping rows a caller might still want to see (e.g. "what was running when we
+ * lost contact"). Do not "fix" a stale-looking row here by filtering it out.
+ */
+export function clusterActiveRunsFromRoster(nodes: readonly StoredClusterNode[]): ClusterActiveRun[] {
+  const runs: ClusterActiveRun[] = [];
+  for (const node of nodes) {
+    if (node.disabledAt !== undefined) continue;
+    for (const run of node.active ?? []) runs.push(run);
+  }
+  return runs;
+}
+
+/**
+ * Unions the roster and projection sources for `GET /cluster/active`, deduped by `runId`.
+ * **The roster entry wins a collision.** `presence.active` is a live heartbeat-cadence claim
+ * (`markNodeSeen`, stamped on every presence beat); the projection (`readRemoteRuns`) is the older
+ * path this module's header records as currently dead in production (zero writer callers) and a
+ * future Milestone D might revive. Should both ever name the same run, the fresher source is the
+ * one worth trusting, not whichever happened to merge first.
+ */
+export function mergeActiveRuns(
+  roster: readonly ClusterActiveRun[],
+  projection: readonly ClusterActiveRun[],
+): ClusterActiveRun[] {
+  const merged: ClusterActiveRun[] = [...roster];
+  const seen = new Set(roster.map((run) => run.runId));
+  for (const run of projection) {
+    if (seen.has(run.runId)) continue;
+    seen.add(run.runId);
+    merged.push(run);
+  }
+  return merged;
+}
+
+/**
+ * This node's OWN in-flight runs, read straight off disk (D-active, 2026-08-24) — the
+ * `SpokeRuntimeDeps#listActiveRuns` default wired into `startSpokeRuntime` below, so
+ * `presence.active` (`clusterNodeShape#active`'s own doc) and the roster half of
+ * `GET /cluster/active` (`clusterActiveRunsFromRoster` above) actually carry something, rather
+ * than a dependency this package declared and left permanently unwired.
+ *
+ * **Built on `WorkspaceRunIndex` (`workspace/run-index.ts`), never `RunStore`/`ProjectContexts`.**
+ * That module's own header is explicit that it "never instantiates" a store — it is a read-only,
+ * stat-cached parser over every registered project's `runs.json`. That is what makes this function
+ * buildable AT ALL from inside this file: `ClusterRuntimeDeps` carries a PER-PROJECT
+ * `resolveDispatchManager`, never a workspace-wide runs index or `sharedContexts` — those are
+ * `server.ts`-local closures this package does not receive and must not reach for. A presence beat
+ * that had to await a live `RunManager` for every registered project would also tie this beat's
+ * latency to however many projects this node happens to have open; `WorkspaceRunIndex`'s
+ * stat-then-maybe-reparse reads do not.
+ *
+ * **`run.project` is the LOCAL registry id; `ClusterActiveRun.projectKey` needs the CLUSTER key.**
+ * The two are different identifier spaces (`clusterProjectAdvertSchema`'s own doc), so this joins
+ * against `advertisedProjects()` — confirmed pairings only, by that function's own doc — to build
+ * the map. A run in a project that is not (yet) paired keeps reporting, honestly, with no
+ * `projectKey` at all, rather than being dropped or guessed at.
+ *
+ * `listProjects` is injectable for tests; the production default skips the per-project git probe
+ * `workspace/projects.ts#listProjects()` pays for (branch, forge, health) because none of it is
+ * read here — the same simplification `startClusterRuntime`'s corpus-mirror wiring above already
+ * makes for the identical reason.
+ */
+export async function collectLocalActiveRuns(
+  nodeId: ClusterNodeId,
+  options?: ClusterHomeOptions & {
+    listProjects?: () => Promise<readonly WorkspaceRunProjectSource[]>;
+  },
+): Promise<ClusterActiveRun[]> {
+  const env = options?.env;
+  const listProjectsFn =
+    options?.listProjects ??
+    (async (): Promise<WorkspaceRunProjectSource[]> => {
+      const config = await loadWorkspaceConfig(workspaceConfigPath(env));
+      return config.projects.map((project) => ({
+        id: project.id,
+        root: project.root,
+        status: 'ok' as const,
+        name: project.name,
+      }));
+    });
+
+  const [{ runs }, adverts] = await Promise.all([
+    new WorkspaceRunIndex({ listProjects: listProjectsFn }).list({ view: 'active' }),
+    advertisedProjects({ env }),
+  ]);
+
+  const projectKeyById = new Map<string, ClusterProjectKey>();
+  for (const advert of adverts) {
+    if (advert.projectKey !== undefined) projectKeyById.set(advert.projectId, advert.projectKey);
+  }
+
+  return runs
+    .filter((run) => IN_FLIGHT_STATUSES.has(run.status))
+    .map((run) => {
+      const projectKey = projectKeyById.get(run.project);
+      return {
+        runId: run.id,
+        nodeId,
+        ...(projectKey !== undefined ? { projectKey } : {}),
+        summary: (run.titleSummary ?? run.title).slice(0, 500),
+        ...(run.branch !== undefined ? { branch: run.branch.slice(0, 200) } : {}),
+        paths: [],
+        startedAt: run.startedAt ?? run.createdAt,
+      };
+    });
+}
 
 /**
  * Discovered before configured, the shape `notifications-routes.ts#discoverCockpitUrl` already
@@ -375,6 +553,75 @@ function hubUrlFor(c: Context, env: NodeJS.ProcessEnv): string {
  *  honest value here is `offline`. */
 function linkHealth(): ClusterLinkHealth {
   return { state: 'offline' };
+}
+
+/**
+ * `clusterCorpusManifestQuerySchema` (contract) extended, locally, with a `scope` key the landed
+ * contract schema does not declare and keeps `.strict()` against. `sources/cezar-hub/provider.ts
+ * #fetchManifest` (already built, package 3b.1) sends `?scope=knowledge,domains,…` on every
+ * request — `node-auth.ts#signedNodeRequestHeaders`'s own doc names this as a live counter-example
+ * to "nothing security-relevant in the query string" and is explicit that the fix belongs here,
+ * hub-side, not in the client: treat `scope` as a narrowing hint, never as authorization (the GET
+ * handler below does exactly that — see its own doc). `.extend()` on a `.strict()` zod object
+ * keeps rejecting any OTHER unknown key, so this is additive, not a widening of what the contract
+ * schema tolerates generally.
+ */
+const corpusManifestQuerySchema = clusterCorpusManifestQuerySchema.extend({
+  scope: z.string().max(500).optional(),
+});
+
+/**
+ * `GET /cluster/corpus/*`'s wildcard tail — measured, not `c.req.param('*')`. A BARE trailing `*`
+ * (unlike a NAMED wildcard, `:path{.+}`) creates no capture at all in this Hono version's
+ * `RegExpRouter`: the compiled pattern for a trailing `*` is a non-capturing `(?:|/.*)`, so
+ * `c.req.param('*')` is `undefined` on every request — measured directly against the installed
+ * `hono` while wiring this in, after every request 404'd with `CORPUS_DOC_NOT_FOUND` even for a
+ * document that plainly existed. The scaffold's own doc explains why the route cannot use
+ * `:path{.+}` instead (`bc-route-inventory.test.ts`'s brace expansion), so the extraction has to
+ * happen by hand: `c.req.path` is Hono's OWN already-decoded pathname (`getPath`, `utils/url.ts`,
+ * one `decodeURI` pass) regardless of mount depth, so finding the literal `/cluster/corpus/`
+ * marker and slicing after it works whether this router is mounted under `/api/v1` (`createApp`)
+ * or bare (`createClusterRoutes` in a unit test) — never a hardcoded prefix length.
+ */
+function corpusWildcardTail(c: Context): string | undefined {
+  const marker = '/cluster/corpus/';
+  const idx = c.req.path.indexOf(marker);
+  return idx === -1 ? undefined : c.req.path.slice(idx + marker.length);
+}
+
+/** `scope=knowledge,domains` → `['knowledge','domains']`. `undefined` (absent, empty, or only
+ *  whitespace/commas) means "no hint" — the caller gets its full entitled scope. Never trusted as
+ *  authorization on its own; see the manifest route's own doc. */
+function parseScopeHint(raw: string | undefined): string[] | undefined {
+  if (!raw) return undefined;
+  const parts = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  return parts.length > 0 ? parts : undefined;
+}
+
+/**
+ * The requesting node's own roster row, read fresh on every corpus request — corpus scope is a
+ * per-node GRANT (D8a S4 of the 2026-08-24 handoff item), never trusted from the request itself.
+ * No `mirrorScope` field is declared on `StoredClusterNode` yet, so `scopeForNode` falls back to
+ * its default (every scope, per the owner's 2026-08-24 correction to D8a) for every node today —
+ * but `storedClusterNodeSchema` is `.passthrough()`, so a future per-node override already
+ * survives this read intact with no change needed here.
+ *
+ * Returns `corpus-store.ts#scopeForNode`'s own narrow parameter shape rather than the full
+ * `StoredClusterNode`, and casts to it once, here, rather than at every call site: `.passthrough()`
+ * types every extra key as `unknown` via an index signature, which is NOT assignable to an
+ * optional `readonly string[]` field even though the property may simply be absent — a real
+ * TS2345 measured while wiring this in, not a stylistic cast.
+ */
+async function findRosterNodeScope(
+  nodeId: ClusterNodeId,
+  env: NodeJS.ProcessEnv,
+): Promise<{ mirrorScope?: readonly string[] } | undefined> {
+  const peers = await readPeers({ env });
+  const node = peers.nodes.find((n) => n.nodeId === nodeId);
+  return node as { mirrorScope?: readonly string[] } | undefined;
 }
 
 /**
@@ -728,10 +975,40 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
         },
       )
 
-      // ---- corpus (D8a) — scaffold until package 3b.2 ----------------------------------------
+      // ---- corpus (D8a, package 3b.2) ---------------------------------------------------------
       // Registered exact-before-wildcard so `/cluster/corpus` cannot be swallowed by the
       // one-document path below.
-      .get('/cluster/corpus', (c) => c.json({ error: CORPUS_PENDING }, 409))
+      /**
+       * `GET /cluster/corpus?since=&scope=` — the manifest is a DIFF INPUT (S1 of the 2026-08-24
+       * handoff item), not a file list: `hash` is what makes diff-before-fetch possible without
+       * reading a single body, and `since` filters to what changed after that corpus version.
+       * `docs`/`tombstones` are both explicit arrays straight from `buildManifest` — never
+       * absence-diffed here (spec Verification 16).
+       *
+       * `scope` is validated by `corpusManifestQuerySchema` below (this file's own extension of
+       * the contract's `.strict()` `clusterCorpusManifestQuerySchema`, tolerating the one extra
+       * key the already-built spoke client sends — see that schema's own doc) but is honoured as a
+       * NARROWING HINT ONLY: intersected against `scopeForNode`'s answer for the AUTHENTICATED
+       * node, never unioned with it. `node-auth.ts#signedNodeRequestHeaders`'s own doc is explicit
+       * that nothing in this family's query string may be security-relevant, because the request
+       * signature never covers `url.search` — so a node asking for MORE than it is entitled to is
+       * silently capped back to its grant here, not refused; only a node asking for less is
+       * actually narrowed.
+       */
+      .get('/cluster/corpus', queryZodValidator(corpusManifestQuerySchema), async (c) => {
+        const node = getAuthenticatedClusterNode(c);
+        if (!node) return c.json({ error: NO_AUTHENTICATED_NODE_ON_GATED_ROUTE }, 500);
+        const root = resolveCorpusRoot({ env });
+        if (!root) return c.json({ error: CORPUS_ROOT_UNCONFIGURED }, 409);
+        const { since, scope: scopeParam } = c.req.valid('query');
+        const entitled = scopeForNode(await findRosterNodeScope(node.nodeId, env));
+        const hint = parseScopeHint(scopeParam);
+        const scope = hint ? entitled.filter((s) => hint.includes(s)) : entitled;
+        // No reconstruction: `corpus-store.ts#CorpusManifest` is declared as `ClusterCorpusManifestResponse`
+        // itself (a type alias, not merely a structural match), specifically so the two can never drift.
+        const body: ClusterCorpusManifestResponse = await buildManifest(scope, since, { env });
+        return c.json(body);
+      })
 
       /**
        * **The one param in this family that is NOT middleware-validated, deliberately.** Every
@@ -743,21 +1020,110 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
        * backticked path in `BACKWARD_COMPATIBILITY.md` §2, so the doc entry for that spelling
        * expands `{.+}` to `.+` and stops matching the registered route. The fix would be editing
        * that guard's `expandBraces`, which is relaxing an assertion to make a suite pass. So the
-       * route keeps the plain wildcard and the inventory keeps matching.
+       * route keeps the plain wildcard, and the tail is extracted with `corpusWildcardTail`
+       * (below — NOT `c.req.param('*')`, which is `undefined` for a bare trailing `*` in this
+       * Hono version's `RegExpRouter`; see that function's own doc) and parsed with
+       * `clusterCorpusPathParamSchema` at the TOP of the handler below, by hand.
        *
-       * **Package 3b.2 therefore owns two checks this scaffold cannot do for it:** parse
-       * `c.req.param('*')` with `clusterCorpusPathParamSchema` at the top of the handler, and then
-       * refuse a path outside the asking node's mirror scope. A wildcard is the one segment a
-       * caller composes freely, so "it parsed" is not "it is in scope" — `reports/` is off by
-       * default because it is 196 files carrying phone numbers and chat ids.
+       * A malformed path (fails the schema), an out-of-scope path, and a genuinely absent
+       * document all answer the SAME `CORPUS_DOC_NOT_FOUND` 404 — "it parsed" is never "it is in
+       * scope", and `reports/`/`raw-input/` staying distinguishable from "not mirrored" is a
+       * `presence` concern (D8a S4), not something this route's 404 body may leak. `isPathInScope`
+       * is the SAME function the batch route below uses, never a second copy of the rule.
        */
-      .get('/cluster/corpus/*', (c) => c.json({ error: CORPUS_PENDING }, 409))
+      .get('/cluster/corpus/*', async (c) => {
+        const node = getAuthenticatedClusterNode(c);
+        if (!node) return c.json({ error: NO_AUTHENTICATED_NODE_ON_GATED_ROUTE }, 500);
+        const root = resolveCorpusRoot({ env });
+        if (!root) return c.json({ error: CORPUS_ROOT_UNCONFIGURED }, 409);
+        const parsed = clusterCorpusPathParamSchema.safeParse({ path: corpusWildcardTail(c) });
+        if (!parsed.success) return c.json({ error: CORPUS_DOC_NOT_FOUND }, 404);
+        const scope = scopeForNode(await findRosterNodeScope(node.nodeId, env));
+        if (!isPathInScope(parsed.data.path, scope)) return c.json({ error: CORPUS_DOC_NOT_FOUND }, 404);
+        const doc = await readDoc(parsed.data.path, scope, { env });
+        if (!doc) return c.json({ error: CORPUS_DOC_NOT_FOUND }, 404);
+        const body: ClusterCorpusDocResponse = { path: doc.path, hash: doc.hash, body: doc.body };
+        return c.json(body);
+      })
 
-      .post(
-        '/cluster/corpus/submit',
-        jsonZodValidator(clusterCorpusSubmitRequestSchema),
-        (c) => c.json({ error: CORPUS_PENDING }, 409),
-      )
+      /**
+       * `POST /cluster/corpus/bodies` — S2/S3 of the 2026-08-24 handoff item: N document bodies in
+       * one round trip, which is what turns a 2173-document first mirror from 235s of serial round
+       * trips into ~1.2s of eleven (measured 2026-08-24, median RTT to the hub 108ms). Scope-checks
+       * every requested path with the exact same `isPathInScope` the single-document route above
+       * uses — a batch route carrying its own copy of that rule is how the two drift and one stops
+       * refusing `reports/` (`clusterCorpusBodiesResponseSchema`'s own doc). An out-of-scope path
+       * and a genuinely missing one both land in `missing`, undistinguished, for the same
+       * disclosure reason as the single-document 404 above.
+       */
+      .post('/cluster/corpus/bodies', jsonZodValidator(clusterCorpusBodiesRequestSchema), async (c) => {
+        const node = getAuthenticatedClusterNode(c);
+        if (!node) return c.json({ error: NO_AUTHENTICATED_NODE_ON_GATED_ROUTE }, 500);
+        const root = resolveCorpusRoot({ env });
+        if (!root) return c.json({ error: CORPUS_ROOT_UNCONFIGURED }, 409);
+        const { paths } = c.req.valid('json');
+        const scope = scopeForNode(await findRosterNodeScope(node.nodeId, env));
+        const inScope = paths.filter((p) => isPathInScope(p, scope));
+        const outOfScope = paths.filter((p) => !isPathInScope(p, scope));
+        const result = await readDocs(inScope, scope, { env });
+        const body: ClusterCorpusBodiesResponse = {
+          docs: result.docs,
+          // Out-of-scope paths and paths `readDocs` itself could not find are folded into ONE
+          // list, unlabelled — the same non-disclosure the single-document 404 above practices.
+          missing: [...outOfScope, ...result.missing],
+          truncated: result.truncated,
+        };
+        return c.json(body);
+      })
+
+      /**
+       * `POST /cluster/corpus/submit` — the corpus's only write direction (D8, D8a). Implements
+       * `out-of-scope` (via the same `isPathInScope` the two GET routes above use) and `stale-base`
+       * (optimistic concurrency keyed on `readDoc`'s own `hash` — the same value the manifest and
+       * single-document routes already hand out as `ClusterCorpusDoc.hash`/`ClusterCorpusBody.hash`,
+       * so no second versioning scheme is invented here: a submitter who supplies a `baseVersion`
+       * that does not match the document's current hash — including "no such document exists yet"
+       * — is refused rather than silently clobbering a concurrent write). Does NOT implement
+       * `too-large` (already unreachable: the request body is capped at 1MB by
+       * `clusterCorpusSubmitRequestSchema` itself, so an oversized submission 400s at the validator
+       * and never reaches this handler) or `read-only-path` (no policy anywhere in the spec names
+       * which corpus paths, if any, are read-only server-side) — see the module header's corpus
+       * section for the fuller note. Refusals answer 200 with `{ok:false,reason}`, matching
+       * `POST /cluster/join`'s `code-expired` precedent elsewhere in this file: the body, not the
+       * status, is what a caller branches on.
+       *
+       * The write itself is re-verified against the resolved corpus root (belt and suspenders,
+       * same posture as `node-auth.ts#request`'s own credential re-check) rather than trusting
+       * `isPathInScope` alone to have ruled out traversal.
+       */
+      .post('/cluster/corpus/submit', jsonZodValidator(clusterCorpusSubmitRequestSchema), async (c) => {
+        const node = getAuthenticatedClusterNode(c);
+        if (!node) return c.json({ error: NO_AUTHENTICATED_NODE_ON_GATED_ROUTE }, 500);
+        const root = resolveCorpusRoot({ env });
+        if (!root) return c.json({ error: CORPUS_ROOT_UNCONFIGURED }, 409);
+        const { path, body: docBody, baseVersion } = c.req.valid('json');
+        const scope = scopeForNode(await findRosterNodeScope(node.nodeId, env));
+        if (!isPathInScope(path, scope)) {
+          const refusal: ClusterCorpusSubmitResponse = { ok: false, reason: 'out-of-scope' };
+          return c.json(refusal);
+        }
+        const existing = await readDoc(path, scope, { env });
+        if (baseVersion !== undefined && existing?.hash !== baseVersion) {
+          const refusal: ClusterCorpusSubmitResponse = { ok: false, reason: 'stale-base' };
+          return c.json(refusal);
+        }
+        const resolvedRoot = resolve(root) + sep;
+        const target = resolve(root, path);
+        if (!target.startsWith(resolvedRoot)) {
+          const refusal: ClusterCorpusSubmitResponse = { ok: false, reason: 'out-of-scope' };
+          return c.json(refusal);
+        }
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, docBody, 'utf8');
+        const manifest = await buildManifest(scope, undefined, { env });
+        const ok: ClusterCorpusSubmitResponse = { ok: true, path, corpusVersion: manifest.corpusVersion };
+        return c.json(ok);
+      })
 
       // ---- todos snapshot, backup, append (D21) ----------------------------------------------
       /** `RemoteReconcileTransport#list` (`cluster/reconcile.ts`, run from `cluster/reconcile-
@@ -864,10 +1230,11 @@ export function createClusterRoutes(deps: ClusterRouteDeps) {
        *  injection rule `summary` carries, for why `paths` is empty until package 4.3, and for why
        *  `asOf` is roster-derived rather than a request-time clock. */
       .get('/cluster/active', async (c) => {
-        const [runs, peers] = await Promise.all([
+        const [projectionRuns, peers] = await Promise.all([
           readRemoteRuns({ env }).then(clusterActiveRunsFrom),
           readPeers({ env }),
         ]);
+        const runs = mergeActiveRuns(clusterActiveRunsFromRoster(peers.nodes), projectionRuns);
         const asOf = clusterActiveAsOfFrom(peers.nodes);
         const body: ClusterActiveResponse = { runs, ...(asOf !== undefined ? { asOf } : {}) };
         return c.json(body);
@@ -992,6 +1359,19 @@ export interface ClusterRuntimeDeps {
    * a real `WorkspaceSemaphore`'s load in milliseconds, not by waiting out a real 30s tick.
    */
   heartbeatMs?: number;
+  /**
+   * D-active (2026-08-24): a TEST OVERRIDE only — threaded straight through to
+   * `SpokeRuntimeDeps#listActiveRuns`, whose own doc has the full argument. Production never sets
+   * this field: `startClusterRuntime`'s spoke branch below wires the real default itself
+   * (`collectLocalActiveRuns`, disk-backed, self-contained) at the point it calls
+   * `startSpokeRuntime`, the same place `deps.semaphore`/`deps.resolveDispatchManager` are handed
+   * through. Unlike those two, this one has no `server.ts` half to wire, because
+   * `collectLocalActiveRuns` needs nothing `server.ts` alone holds (see its own doc for why
+   * `WorkspaceRunIndex` makes that possible) — so leaving this optional and unset in production is
+   * not a gap, it is the whole point of building the default here instead of asking every caller to
+   * supply one.
+   */
+  listActiveRuns?: () => ClusterActiveRun[] | Promise<ClusterActiveRun[]>;
 }
 
 function errorMessage(err: unknown): string {
@@ -1322,10 +1702,103 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
         );
       }
 
+      /**
+       * The hub half of the corpus push (spec item 57). On every completed reindex of this node's
+       * corpus, tell connected spokes the version moved so they sweep NOW rather than at their next
+       * interval — ~108ms measured, against a 60s floor.
+       *
+       * **Hooked to the reindex, not to `POST /cluster/corpus/submit`.** That route is only the
+       * spoke->hub write path; a report drained by `cezar-reports-drain`, a `/cezar-sync` write, or
+       * a plain editor save all reach disk without passing through it and would have pushed
+       * nothing. `KnowledgeStore`'s `catalogGeneration++` is the one point every write path and both
+       * change triggers converge on (its own comment says so), which is the only hook a future
+       * writer cannot bypass.
+       *
+       * The frame carries no paths and no bodies, so a dropped one costs LATENCY ONLY and the
+       * interval sweep still catches it. Nothing here may be used to justify lengthening that
+       * interval.
+       */
+      /**
+       * **The hub's own outbox (spec item 60) — the reason no work could run on a spoke.**
+       *
+       * The documented pipeline is "spoke outbox -> hub oplog -> hubSeq -> ack -> replica fan-out";
+       * it BEGINS at a spoke, and `deriveTodoOps` had exactly two callers, both in
+       * `spoke-runtime.ts`. So a todo created ON this hub never became an op, never got a `hubSeq`,
+       * and `replay.ts` refuses to replay a row without one. Measured on production 2026-08-24:
+       * 159 todos, `hubSeq` non-null on ZERO, and a paired spoke whose `todos.json` did not exist —
+       * so every dispatch was answered "todo is not present locally for project".
+       *
+       * **Watermarks here are this outbox's own map, not the router's.** The router's are private,
+       * in-memory, and re-seeded from each node's `hello` — its own docblock states the asymmetry
+       * that makes that safe: *"over-sending costs bandwidth while under-sending loses a write"*. An
+       * independent map inherits exactly those properties (starts empty, may re-send, the spoke
+       * drops anything at or below its own watermark), so this is the established design rather
+       * than a shortcut around it. In practice it does not even re-send: once a record is applied it
+       * carries a `hubSeq` and clears `pendingSince`, so `selectOwed` stops returning it.
+       */
+      const hubOutboxWatermarks = new Map<ClusterNodeId, Map<ClusterProjectKey, number>>();
+      const stopHubOutbox = startHubOutbox({
+        identity,
+        listProjects: async () => {
+          const [peers, config] = await Promise.all([
+            readPeers({ env, warn }),
+            loadWorkspaceConfig(workspaceConfigPath(env)),
+          ]);
+          const byId = new Map(config.projects.map((project) => [project.id, project]));
+          const projects: { projectKey: ClusterProjectKey; dataDir: string }[] = [];
+          for (const pairing of peers.pairings) {
+            // The hub's OWN side of the pairing, matching `resolveHubTodosRoot`'s `hubMember` gate.
+            // A pairing this hub has not confirmed is not a project it may replicate out of.
+            const hubMember = pairing.byNode[identity.nodeId];
+            if (!hubMember?.confirmedAt) continue;
+            const project = byId.get(hubMember.projectId);
+            if (!project) continue;
+            projects.push({ projectKey: pairing.projectKey, dataDir: todosDataDir(project.root) });
+          }
+          return projects;
+        },
+        // The SAME allocator the incoming spoke-`ops` path draws from, so both share one monotonic
+        // counter per (scope, projectKey). A second allocator would hand out colliding `hubSeq`.
+        allocateSeq: replication.allocate,
+        connectedNodes: () => linkServer?.connectedNodes() ?? [],
+        readWatermark: (nodeId, projectKey) => hubOutboxWatermarks.get(nodeId)?.get(projectKey) ?? 0,
+        advanceWatermark: (nodeId, projectKey, hubSeq) => {
+          let perNode = hubOutboxWatermarks.get(nodeId);
+          if (!perNode) {
+            perNode = new Map();
+            hubOutboxWatermarks.set(nodeId, perNode);
+          }
+          // Monotonic: never move a watermark backwards, or an out-of-order advance would re-open a
+          // window the receiver has already passed.
+          if ((perNode.get(projectKey) ?? 0) < hubSeq) perNode.set(projectKey, hubSeq);
+        },
+        sendTo: (nodeId, frame) => linkServer?.send(nodeId, frame) ?? false,
+        warn,
+      });
+      if (stopHubOutbox.status !== 'armed') {
+        warn(`cluster hub: outbox not armed (${stopHubOutbox.status})${stopHubOutbox.reason ? `: ${stopHubOutbox.reason}` : ''}`);
+      }
+
+      const corpusBroadcaster = createCorpusBroadcaster({
+        link: {
+          connectedNodes: () => linkServer?.connectedNodes() ?? [],
+          send: (nodeId, frame) => linkServer?.send(nodeId, frame) ?? false,
+        },
+        readCorpusVersion: async () => {
+          const manifest = await buildManifest(CLUSTER_CORPUS_DEFAULT_SCOPE, undefined, { env });
+          return manifest.corpusVersion;
+        },
+        warn,
+      });
+      const unregisterCorpusListener = setCorpusChangeListener(() => corpusBroadcaster.notifyChanged(), { warn });
+
       teardown = () => {
         clearInterval(pruneTimer);
         clearInterval(dispatchSweepTimer);
         disarmAutostart();
+        unregisterCorpusListener();
+        corpusBroadcaster.stop();
+        stopHubOutbox();
         void linkServer?.close();
       };
       return;
@@ -1380,6 +1853,37 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
       watermarks: () => spokeRuntime?.watermarks() ?? [],
     });
     linkClient.start();
+
+    /**
+     * The corpus mirror (D8a, spec items 56/57/59). Armed here rather than inside
+     * `startSpokeRuntime` because it needs the awaited `identity` this async branch already holds,
+     * and because it is a PEER of the link rather than a child of it — it keeps sweeping on its own
+     * 60s clock whether or not the socket is up, which is the whole point of the interval being a
+     * floor rather than a consequence of a push.
+     *
+     * **`listProjects` reads every REGISTERED project, not only confirmed pairings** (item 59).
+     * Gating on pairings would make the mirror inherit item 58's two-sided handshake — a fresh
+     * worker would mirror NOTHING until a human confirmed on both machines, silently, which is the
+     * exact inert failure D8a exists to prevent and is against "everything on by default". Pairing
+     * grants WORK (todo replication, dispatch); mirroring a read-only corpus into a project this
+     * node already has locally is not a work grant. The hub enforces scope on its own side either
+     * way, so this widens nothing a node was not already granted.
+     *
+     * Re-read every sweep, never captured once: a project registered after boot mirrors with no
+     * restart, matching `discoverOutboxProjects`'s own re-read-from-disk posture.
+     */
+    const corpusMirror = startCorpusMirrorRuntime({
+      identity,
+      listProjects: async () => {
+        const config = await loadWorkspaceConfig(workspaceConfigPath(env));
+        return config.projects.map((project) => join(project.root, '.ai/cezar'));
+      },
+      warn,
+    });
+    if (corpusMirror.status !== 'armed') {
+      warn(`cluster spoke: corpus mirror not armed (${corpusMirror.status})${corpusMirror.reason ? `: ${corpusMirror.reason}` : ''}`);
+    }
+
     const stopHeartbeat = startSpokeRuntime({
       link: linkClient,
       env,
@@ -1387,6 +1891,14 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
       resolveDispatchManager: deps.resolveDispatchManager,
       semaphore: deps.semaphore,
       heartbeatMs: deps.heartbeatMs,
+      // D-active: the real, disk-backed default — see `collectLocalActiveRuns`'s own doc for why
+      // it can be built here (self-contained, `WorkspaceRunIndex`-based) rather than threaded from
+      // `server.ts` the way `resolveDispatchManager`/`semaphore` are. `deps.listActiveRuns` stays a
+      // test-only override (`ClusterRuntimeDeps#listActiveRuns`'s own doc); production never sets it.
+      listActiveRuns: deps.listActiveRuns ?? (() => collectLocalActiveRuns(identity.nodeId, { env })),
+      // The hub's `corpus-changed` hint sweeps NOW instead of at the next interval. The frame is
+      // deliberately not forwarded: it is a hint, and the sweep is the authoritative read.
+      onCorpusChanged: () => void corpusMirror.triggerSweep(),
     });
     spokeRuntime = stopHeartbeat;
 
@@ -1417,6 +1929,7 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
     teardown = () => {
       stopHeartbeat();
       disarmAutostart();
+      corpusMirror.dispose();
       void linkClient.stop();
     };
   })().catch((err: unknown) => {

@@ -4,6 +4,7 @@ export const TASK_COLUMN_IDS = [
   'task',
   'workflow',
   'branch',
+  'node',
   'diff',
   'reference',
   'tokens',
@@ -18,6 +19,7 @@ export type TaskColumnId = (typeof TASK_COLUMN_IDS)[number]
 export type TaskColumnIcon =
   | 'workflow'
   | 'branch'
+  | 'node'
   | 'diff'
   | 'reference'
   | 'tokens'
@@ -36,7 +38,9 @@ export interface TaskColumnDefinition {
   /** Preferred expanded width. Task deliberately has none and receives the flexible remainder. */
   width?: string
   icon?: TaskColumnIcon
-  capability?: 'tokens' | 'cost'
+  /** `'cluster'` (Node) hides the WHOLE column, not just its density, on a single-node cockpit —
+   *  see `taskColumnsForCapabilities`'s own doc for why that is a capability, not a fold. */
+  capability?: 'tokens' | 'cost' | 'cluster'
 }
 
 /**
@@ -63,6 +67,16 @@ export const TASK_COLUMNS = [
     align: 'left',
     width: '128px',
     icon: 'branch',
+  },
+  {
+    id: 'node',
+    label: 'Node',
+    canFold: true,
+    defaultExpanded: false,
+    align: 'left',
+    width: '124px',
+    icon: 'node',
+    capability: 'cluster',
   },
   { id: 'diff', label: '±', canFold: true, defaultExpanded: true, align: 'left', width: '78px', icon: 'diff' },
   {
@@ -175,6 +189,9 @@ export function toggleExpandedColumn(raw: unknown, id: TaskColumnId): Record<str
 export function taskColumnsForCapabilities(capabilities: {
   tokens: boolean
   cost: boolean
+  /** `capabilities.cluster` (`useHealth()`) — off on a single-node cockpit, which must not grow a
+   *  Node column that could only ever say "this node". */
+  cluster: boolean
 }): readonly TaskColumnDefinition[] {
   return TASK_COLUMNS.filter((column: TaskColumnDefinition) => {
     return column.capability === undefined || capabilities[column.capability]

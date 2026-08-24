@@ -34,6 +34,7 @@ import {
 } from '@/api/queries'
 import { DEFAULT_AGENT_ACCOUNT_ID, type ApiRun, type OpenTarget } from '@loki-labs/better-cezar-api-client'
 import { AuthorCell } from '@/components/author-cell'
+import { RunNodeCell, useRunNodeRoster } from '@/components/task-node-cell'
 import { DiffStatLabel } from '@/components/diff-stat'
 import { LiveDuration } from '@/components/live-duration'
 import { TitleEditInput, useTitleEditor } from '@/components/editable-title'
@@ -539,6 +540,12 @@ function MetaRow({
    *  plain text, because the route it used to link to is disabled. */
   automationsAvailable: boolean
 }) {
+  // "Which worker ran/is running this?" (2026-08-24). `Date.now()`, not `useNow` — this file is
+  // on the guardian's `no-tick-in-thread-containers` list (see its own doc): a container-level
+  // 1s/30s clock re-renders the whole header on every tick. A plain per-render read still refreshes
+  // whenever this header re-renders for any other reason (run status polling, the roster/active
+  // queries themselves resolving), which is close enough for a staleness annotation.
+  const runNodeRoster = useRunNodeRoster(Date.now())
   // #526: the issue chip may be synthesized from the CEZ:ISSUE marker, and the only repository
   // such a link may name is the one on screen — never the transcript's.
   const repoBase = useProjectRepoBase()
@@ -601,6 +608,13 @@ function MetaRow({
     // `parentTo` is left to the provider: the thread is project-scoped, but a workspace run's
     // parent may live in another project, so guessing the scope here would mint a 404.
     parts.push(<AuthorCell key="author" author={run.author} />)
+  }
+  if (runNodeRoster.clusterOn) {
+    // "Absence is absence, not a placeholder" (this function's own doc) still holds: while the
+    // roster/active queries have not resolved a self id yet, `resolve` honestly returns
+    // `undefined` (`resolveRunNode`'s own doc) and nothing is pushed — never a guessed node.
+    const nodeInfo = runNodeRoster.resolve(run.id)
+    if (nodeInfo) parts.push(<RunNodeCell key="node" roster={runNodeRoster} runId={run.id} />)
   }
   if (run.automation) {
     // Provenance is history and is always shown; only the LINK is gated. Following it with the

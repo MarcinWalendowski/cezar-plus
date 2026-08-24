@@ -851,6 +851,99 @@ describe('startSpokeRuntime — D47 live capacity in the presence beat', () => {
   });
 });
 
+/**
+ * D-active (2026-08-24): the presence beat now also reports this node's OWN in-flight runs.
+ * Same shape as the D47 suite above — `deps.collectPresence` is deliberately NOT set so these
+ * drive the REAL, un-overridden `collectPresence` default, proving `deps.listActiveRuns` actually
+ * reaches `collectClusterPresence`'s `activeRuns` option rather than a re-implementation of the
+ * wiring agreeing with itself.
+ */
+describe('startSpokeRuntime — D-active listActiveRuns in the presence beat', () => {
+  let cezHome: string;
+
+  beforeEach(async () => {
+    cezHome = await mkdtemp(join(tmpdir(), 'cez-home-'));
+  });
+
+  afterEach(async () => {
+    await rm(cezHome, { recursive: true, force: true });
+  });
+
+  it('reports this node\'s real listActiveRuns() result as `active` on the presence frame', async () => {
+    vi.useRealTimers();
+    const { link, sent } = createFakeLink();
+    const run = { runId: 'r1', nodeId: 'n1', paths: [] };
+    const listActiveRuns = vi.fn(async () => [run]);
+
+    const dispose = startSpokeRuntime({
+      link,
+      env: { CEZ_HOME: cezHome },
+      heartbeatMs: 3_600_000,
+      opFlushMs: 3_600_000,
+      collectOutboxProjects: NOOP_OUTBOX,
+      resolveDispatchManager: NOOP_RESOLVE_MANAGER,
+      listActiveRuns,
+      warn: () => {},
+    });
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+
+    // What this catches: `deps.listActiveRuns` never reaching `collectClusterPresence`'s
+    // `activeRuns` option — the frame would carry no `active` key at all regardless of what this
+    // node is actually running.
+    const frame = sent[0] as ClusterPresenceFrame;
+    expect(frame.type).toBe('presence');
+    expect(frame.active).toEqual([run]);
+    expect(listActiveRuns).toHaveBeenCalled();
+    dispose();
+  });
+
+  it('omits `active` entirely — never a fabricated `[]` — when no listActiveRuns is wired', async () => {
+    vi.useRealTimers();
+    const { link, sent } = createFakeLink();
+
+    const dispose = startSpokeRuntime({
+      link,
+      env: { CEZ_HOME: cezHome },
+      heartbeatMs: 3_600_000,
+      opFlushMs: 3_600_000,
+      collectOutboxProjects: NOOP_OUTBOX,
+      resolveDispatchManager: NOOP_RESOLVE_MANAGER,
+      warn: () => {},
+    });
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+
+    // What this catches: an absent `listActiveRuns` causing the beat to assert `active: []` (a
+    // real "nothing running" claim) instead of leaving the key off the wire entirely — the same
+    // absent-vs-`[]` distinction `CollectPresenceOptions#activeRuns` exists to preserve.
+    const frame = sent[0] as ClusterPresenceFrame;
+    expect('active' in frame).toBe(false);
+    dispose();
+  });
+
+  it('an EMPTY listActiveRuns() result reports `active: []`, not an omitted key', async () => {
+    vi.useRealTimers();
+    const { link, sent } = createFakeLink();
+    const listActiveRuns = vi.fn(async () => []);
+
+    const dispose = startSpokeRuntime({
+      link,
+      env: { CEZ_HOME: cezHome },
+      heartbeatMs: 3_600_000,
+      opFlushMs: 3_600_000,
+      collectOutboxProjects: NOOP_OUTBOX,
+      resolveDispatchManager: NOOP_RESOLVE_MANAGER,
+      listActiveRuns,
+      warn: () => {},
+    });
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+
+    const frame = sent[0] as ClusterPresenceFrame;
+    expect(frame.active).toEqual([]);
+    expect('active' in frame).toBe(true);
+    dispose();
+  });
+});
+
 describe('startSpokeRuntime — downlink relay / handshake frames', () => {
   it('warns on a relay request — relaying is not built yet', async () => {
     const { link, emit } = createFakeLink();
