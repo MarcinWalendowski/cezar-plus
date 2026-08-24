@@ -550,9 +550,22 @@ export type ClusterActiveRun = z.infer<typeof clusterActiveRunSchema>;
 export const clusterActiveResponseSchema = z
   .object({
     runs: z.array(clusterActiveRunSchema),
-    /** When the hub last heard from every node, so a caller can tell "nothing is running" from
-     *  "nobody has reported recently". */
-    asOf: z.string(),
+    /**
+     * The most recent time this hub heard from any of its linked roster nodes
+     * (`StoredClusterNode#lastSeenAt`, stamped for real by `markNodeSeen` on every presence
+     * heartbeat) — **absent when no linked node has ever reported, including an empty roster.**
+     * Exists so a caller can tell "nothing is running" from "nobody has reported recently": an
+     * absent `asOf` means `runs` is not evidence of anything, whatever it contains.
+     *
+     * **CORRECTED 2026-08-23 — this used to be `z.string()`, unconditionally filled by both call
+     * sites (`cluster-routes.ts`, `index.ts`) with `new Date().toISOString()`.** That is
+     * wall-clock-now, not a fact about any node, so the one field this type carries specifically
+     * to expose staleness was permanently fresh regardless of whether anything had ever reported
+     * — an untracked cluster and a tracked-but-idle one were byte-identical. Optionality is the
+     * fix: absence IS the "nothing tracked" signal, so there is no need for a second discriminator
+     * field alongside it.
+     */
+    asOf: z.string().optional(),
   })
   .strict();
 export type ClusterActiveResponse = z.infer<typeof clusterActiveResponseSchema>;
@@ -563,6 +576,11 @@ export type ClusterActiveResponse = z.infer<typeof clusterActiveResponseSchema>;
  * FOUR distinct values, and collapsing them into "queued" is what sends a person to buy a node when
  * the real fix was opening a laptop lid. They look identical from the board and are not:
  *
+ *  - `no-node-accepts-dispatch` — nobody has opted in. D11 defaults `acceptsDispatch` to OFF on
+ *    every node, so this is the state a freshly clustered pair sits in until an operator runs
+ *    `cez cluster accept-dispatch --on`. It is reported separately BECAUSE the honest answer is
+ *    not "everyone is full": saying `all-eligible-at-capacity` on a completely idle cluster sends
+ *    whoever reads the board to look at load, which is the one place the cause is not;
  *  - `no-node-with-label` — no node carries the label `requires` asked for;
  *  - `all-eligible-at-capacity` — every eligible node is full;
  *  - `pinned-node-offline` — the node it needs is asleep or revoked;
@@ -571,6 +589,7 @@ export type ClusterActiveResponse = z.infer<typeof clusterActiveResponseSchema>;
  *    state, so it is a live case, not a hypothetical.
  */
 export const clusterQueuedReasonSchema = z.enum([
+  'no-node-accepts-dispatch',
   'no-node-with-label',
   'all-eligible-at-capacity',
   'pinned-node-offline',
@@ -822,9 +841,21 @@ export type ClusterSelf = z.infer<typeof clusterSelfSchema>;
 
 // ---- link health, and the refusals that are values ----------------------------------------------
 
-/** Why the hub refused a link. Values, not prose, for the same reason the join reasons are:
- *  `protocol-major` is an upgrade, `bad-signature` is a credential, `node-disabled` is a revoke,
- *  and an operator who cannot tell them apart fixes the wrong one. */
+/**
+ * Why the hub refused a link. Values, not prose, for the same reason the join reasons are:
+ * `protocol-major` is an upgrade, `bad-signature` is a credential, `node-disabled` is a revoke,
+ * and an operator who cannot tell them apart fixes the wrong one.
+ *
+ * **Adding a member is a compatibility event, and this is a `z.enum`** — a spoke running an older
+ * build parses an unrecognized reason as an INVALID frame and drops it whole (`link-client.ts`'s
+ * `parseDownlink`), so it sees a bare close with no stated cause: the exact silent failure D40
+ * exists to remove, delivered by the mechanism meant to explain it. `handshake-timeout` was added
+ * on 2026-08-23 after checking that no such spoke can exist — `@loki-labs/better-cezar` has never
+ * been published (`npm view` → 404), `packages/contract` is private, and `CEZ_CLUSTER` is unset on
+ * every box. **Re-check both before adding the next one**, and prefer teaching the spoke to parse
+ * this leniently (a known-value union with an `unknown` fallback) over relying on that check
+ * holding forever.
+ */
 export const clusterLinkRefuseReasonSchema = z.enum([
   'protocol-major',
   'unknown-node',
@@ -832,6 +863,12 @@ export const clusterLinkRefuseReasonSchema = z.enum([
   'stale-principal',
   'node-disabled',
   'frame-too-large',
+  /** The socket upgraded and then said nothing this hub could use, past `HELLO_DEADLINE_MS`. D40a:
+   *  the spoke's own `handshakeTimeout` bounds the HTTP 101 only, so an upgrade that SUCCEEDS on a
+   *  link the hub never serves — a `hello` dropped as unparseable, leaving `helloReceived` false —
+   *  wedges at `connecting` forever with ping/pong keeping the socket healthy. Only the hub knows
+   *  whether a socket it accepted ever spoke, so only the hub can end it. */
+  'handshake-timeout',
   'internal',
 ]);
 export type ClusterLinkRefuseReason = z.infer<typeof clusterLinkRefuseReasonSchema>;
@@ -1401,6 +1438,14 @@ export type ClusterAccountGrantDecision = z.infer<typeof clusterAccountGrantDeci
  * `corpus-stale` is D8a's: a knowledge read has no natural error, so a mirror behind its bound
  * refuses with the corpus NAMED rather than running against a five-day-old record and reporting
  * success.
+ *
+ * **`start-failed` (D48) is the one member that is not a pre-start condition.** Every other value
+ * is decided BEFORE any side effect — `dispatch.ts#dispatchRefusalReason`'s own docblock is
+ * explicit that it "is checked before anything below has any side effect". `start-failed` is what
+ * the target sends when every one of those eight checks passed and it attempted the run anyway,
+ * and `RunManager.startRun` (or whatever underneath it) threw. There is no pre-start reason to
+ * name in that case — the checks were honest — so this exists rather than forcing a lie onto one
+ * of the other eight (`at-capacity` in particular would misreport WHY nothing started).
  */
 export const clusterDispatchRefusalReasonSchema = z.enum([
   'dispatch-not-accepted',
@@ -1411,6 +1456,7 @@ export const clusterDispatchRefusalReasonSchema = z.enum([
   'unpaired-project',
   'at-capacity',
   'unknown-workflow',
+  'start-failed',
 ]);
 export type ClusterDispatchRefusalReason = z.infer<typeof clusterDispatchRefusalReasonSchema>;
 
@@ -1582,6 +1628,40 @@ export type ClusterDispatchFrame = z.infer<typeof clusterDispatchFrameSchema>;
  * answer "can this target take work", so a refusal is the same answer with its reason attached, and
  * the protocol keeps exactly the ten frames the spec fixes. Without it the hub can render only
  * "nothing happened", which is the failure the four named reasons exist to prevent.
+ *
+ * **`accepted` (D48) is that same argument applied to the other verdict, and it is load-bearing
+ * beyond correlation.** The hub's dispatch correlation store (`cluster/hub-dispatch.ts`) can match
+ * WHICH pending dispatch a bare accept reply belongs to by `(nodeId, projectKey)` alone — but only
+ * when exactly one is in flight to that node for that project. Two non-overlapping dispatches to
+ * one node's one project can be in flight at once (D19 rung 3's overlap check keys on touched
+ * paths, not on project identity), so an accepted reply had to carry its own `dispatchId` for the
+ * ambiguous case to be resolvable at all, the same way `refused` already does.
+ *
+ * **`runId` is not a correlation nicety — it is how the hub learns which run its dispatch produced,
+ * without polling `GET /cluster/active` and guessing by `todoId` (C-a2, corrected by C-a3).** An
+ * earlier version of this docblock said the hub stamps the dispatched todo once its correlation
+ * store resolves this block — that is not implementable: a claim IS `startedTaskId`
+ * (`hub-apply.ts#claimFields`), and the run id does not exist until the spoke's `startRun` mints
+ * it, so the hub has nothing to claim with at dispatch time. What actually stamps the todo: the
+ * spoke itself, optimistically and with `humanIntent: true` (the confirmed start of a run it just
+ * caused, not the scheduler-denied escape hatch `todos.ts:840` guards against), the moment
+ * `startRun` returns — the ordinary outbox flush carries that claim op to the hub, where
+ * `applyOpAtHub` serializes it against any other claim the normal way. So `runId` here is not a
+ * write trigger; it is the only place a dispatched run's id is ever visible to the hub at all, and
+ * it is what Milestone D's relay (which streams events BY run id) needs to subscribe to the run
+ * this dispatch produced.
+ *
+ * **Sent only after the run actually exists**, not merely after the pre-start checks pass — the
+ * target waits for its own `startRun` to return before answering, so this frame is never sent
+ * carrying a `runId` nothing yet backs. A `startRun` that throws AFTER those checks pass answers
+ * with `refused: { reason: 'start-failed' }` instead (see that reason's own docblock) — never with
+ * `accepted` and never by silently reusing one of the eight pre-start reasons, both of which would
+ * misreport why nothing started.
+ *
+ * **Mutually exclusive with `refused` by construction** (the `.refine` below): one verdict, one
+ * reply, matching every other decide-then-answer function in this codebase (`dispatch.ts#offerDispatch`'s
+ * own doc comment: "Check, THEN start or refuse — every refusal reason is decided before anything
+ * below has any side effect").
  */
 export const clusterFreshnessFrameSchema = clusterRepoFreshnessSchema
   .extend({
@@ -1596,8 +1676,23 @@ export const clusterFreshnessFrameSchema = clusterRepoFreshnessSchema
       })
       .strict()
       .optional(),
+    /** D48/C-a2 — see this schema's own docblock. Present only on the reply to a dispatch this
+     *  target just started, after `startRun` returned. */
+    accepted: z
+      .object({
+        dispatchId: z.string().min(1).max(64),
+        /** The run this dispatch produced — what Milestone D's relay keys on, and the only way
+         *  the hub learns which run a dispatch became. Same bound as `ClusterActiveRun.runId` /
+         *  `ClusterRelayRequestFrame.runId`. */
+        runId: z.string().min(1).max(120),
+      })
+      .strict()
+      .optional(),
   })
-  .strict();
+  .strict()
+  .refine((frame) => !(frame.refused && frame.accepted), {
+    message: 'a freshness reply carries `refused` or `accepted`, never both',
+  });
 export type ClusterFreshnessFrame = z.infer<typeof clusterFreshnessFrameSchema>;
 
 /** → spoke to hub: the heartbeat the scheduler places from. Capacity is a CLAIM; the hub stamps it
@@ -1695,7 +1790,37 @@ export type StoredClusterWatermarks = z.infer<typeof storedClusterWatermarksSche
 export const storedClusterRemoteRunSchema = clusterRemoteRunSchema.passthrough();
 export type StoredClusterRemoteRun = z.infer<typeof storedClusterRemoteRunSchema>;
 
+/** One node's entry in the report envelope below. Named (rather than inlined in the `z.record`)
+ *  for the same reason `storedClusterRemoteRunSchema` is: the reader salvages this file PER ENTRY,
+ *  so it needs a parser for a single entry — a whole-record `safeParse` fails atomically on the
+ *  first bad one and would take every other node's freshness down with it (D13). */
+export const storedClusterRemoteRunReportSchema = z.object({ reportedAt: z.string() }).passthrough();
+export type StoredClusterRemoteRunReport = z.infer<typeof storedClusterRemoteRunReportSchema>;
+
 export const storedClusterRemoteRunsSchema = z
-  .object({ runs: z.array(storedClusterRemoteRunSchema).default([]) })
+  .object({
+    runs: z.array(storedClusterRemoteRunSchema).default([]),
+    /**
+     * Per-node report envelope — what `runs` alone cannot say.
+     *
+     * Without it, "this node has never reported" and "this node reported and had nothing running"
+     * are the same observation: zero rows carrying that `nodeId`. They are not the same fact, and a
+     * board that renders them identically tells a viewer a node is idle when it may simply be gone.
+     * With it there are three distinguishable states, not one:
+     *
+     *  - no `nodes` entry ................. never tracked; say nothing about that node
+     *  - an entry, and no rows ............ reported, and genuinely had nothing in flight
+     *  - an entry, and rows ............... those rows are as of `reportedAt`, however old that is
+     *
+     * `reportedAt` is stamped from the ARRIVAL of the frame that carried the rows and passed in to
+     * `applyRemoteRuns` — never computed at write time and never at read time. A freshness field
+     * that reads its own clock reports when it was LOOKED AT, which always looks fresh and is the
+     * exact defect that ships when this is left to a default.
+     *
+     * An entry is never pruned when a node reports zero rows: that is the second state above, and
+     * dropping the entry would collapse it back into the first.
+     */
+    nodes: z.record(clusterNodeIdSchema, storedClusterRemoteRunReportSchema).optional(),
+  })
   .passthrough();
 export type StoredClusterRemoteRuns = z.infer<typeof storedClusterRemoteRunsSchema>;

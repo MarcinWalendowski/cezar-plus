@@ -9,9 +9,10 @@ import {
   type ClusterProjectAdvert,
   type StoredClusterNode,
 } from '@loki-labs/better-cezar-contract';
+import { createEnrollmentCode, redeemEnrollmentCode } from './enrollment.ts';
 import { hashRequestBody, signNodeHttpPrincipal, verifyNodeHttpPrincipal, type NodeHttpPrincipal } from './node-auth.ts';
 import { ensureNodeIdentity } from './node-identity.ts';
-import { lookupNodeSecret, storeNodeSecret } from './node-secrets.ts';
+import { lookupNodeSecret, nodeSecretsPath, storeNodeSecret } from './node-secrets.ts';
 import { registerProject } from '../workspace/projects.ts';
 import {
   advertisedProjects,
@@ -175,6 +176,100 @@ describe('cluster/peers', () => {
         ok: false,
         reason: 'unknown-node',
       });
+    });
+
+    // Isolated unit test of Part 2 of this session's fix, independent of `redeemEnrollmentCode`
+    // (Part 1): constructs the defect's exact pre-condition directly — a stored secret with NO
+    // roster row at all — by calling `storeNodeSecret` without ever calling `upsertNode`. This is
+    // the state that (before this session) `redeemEnrollmentCode` always left behind, and it is
+    // also the state a legacy install could already have on disk from before Part 1 shipped, so the
+    // guard has to hold on its own, not only in combination with Part 1.
+    it('disableNode removes the secret even when the node has NO roster row — revocation must not depend on the roster (Part 2, in isolation)', async () => {
+      await storeNodeSecret('ghost-node', 'ghost-secret');
+      expect(await lookupNodeSecret('ghost-node')).toBe('ghost-secret');
+
+      const found = await disableNode('ghost-node');
+      // `found`'s MEANING is unchanged — there never was a roster row, so this is still `false`.
+      expect(found).toBe(false);
+
+      // But the credential is gone regardless — the whole point of decoupling the two.
+      expect(await lookupNodeSecret('ghost-node')).toBeUndefined();
+    });
+  });
+
+  // ---- redeemEnrollmentCode → disableNode: the roster-row gap fixed this session --------------
+  //
+  // The `disableNode` test above proves revocation works once a roster row exists, but it gets
+  // there with `upsertNode` — a hand-built fixture that was never the bug. The actual defect was
+  // that `redeemEnrollmentCode` (`enrollment.ts`) never called `upsertNode` at all, so a node that
+  // only ever went through the real join path had no roster row for `disableNode` to find. These
+  // two tests drive the REAL join path end to end, with no manual roster row, no mocks.
+  describe('redeemEnrollmentCode → disableNode (real join path, no manual roster row)', () => {
+    async function realJoin(nodeId: string) {
+      const { response } = await createEnrollmentCode({ hubUrl: 'https://hub.example', hubVersion: '0.10.0' });
+      return redeemEnrollmentCode({
+        code: response.code,
+        nodeId,
+        nodeName: `worker-${nodeId}`,
+        labels: ['linux'],
+        protocol: CLUSTER_PROTOCOL,
+        version: '0.10.0',
+      });
+    }
+
+    // THE security regression test (task brief). Before this session's fix, `redeemEnrollmentCode`
+    // wrote a secret and nothing else — no roster row — so `disableNode` (gated on finding the row)
+    // returned `false` and never called `removeNodeSecret`. This test proves the full, real
+    // sequence: join, then revoke, then the credential is actually gone.
+    it('a node that only ever went through redeemEnrollmentCode is ACTUALLY revoked by disableNode', async () => {
+      await ensureNodeIdentity({ role: 'hub' });
+      const joined = await realJoin('spoke-real-join');
+      expect(joined.ok).toBe(true);
+      if (!joined.ok) return;
+
+      // Visible: redemption ALONE produced a roster row.
+      const afterJoin = await readPeers();
+      expect(afterJoin.nodes.find((n) => n.nodeId === 'spoke-real-join')).toBeDefined();
+
+      // Authenticatable: the stored secret is exactly the one handed to the spoke.
+      expect(await lookupNodeSecret('spoke-real-join')).toBe(joined.secret);
+
+      expect(await disableNode('spoke-real-join')).toBe(true);
+
+      // ACTUALLY revoked, not just hidden from the roster.
+      expect(await lookupNodeSecret('spoke-real-join')).toBeUndefined();
+    });
+
+    // Write-order negative control (mutation test 3 per the task brief): the invariant
+    // `redeemEnrollmentCode` protects is "never a stored secret without a roster row", which only
+    // holds if the roster row is written BEFORE the secret. Blocking the secret store's own tmp
+    // path forces `storeNodeSecret` to throw after the roster write has already landed; if a future
+    // edit reordered the two writes (secret first), this same crash would land BEFORE the roster
+    // write ever ran, and the first assertion below would go red.
+    it('a crash between the roster write and the secret write leaves the roster row and NO secret (write-order negative control)', async () => {
+      await ensureNodeIdentity({ role: 'hub' });
+      const { response } = await createEnrollmentCode({ hubUrl: 'https://hub.example', hubVersion: '0.10.0' });
+
+      const blockedTmp = `${nodeSecretsPath()}.tmp`;
+      mkdirSync(blockedTmp, { recursive: true });
+      try {
+        await expect(
+          redeemEnrollmentCode({
+            code: response.code,
+            nodeId: 'spoke-crash',
+            nodeName: 'worker-crash',
+            labels: [],
+            protocol: CLUSTER_PROTOCOL,
+            version: '0.10.0',
+          }),
+        ).rejects.toThrow();
+      } finally {
+        rmSync(blockedTmp, { recursive: true, force: true });
+      }
+
+      const peers = await readPeers();
+      expect(peers.nodes.find((n) => n.nodeId === 'spoke-crash')).toBeDefined();
+      expect(await lookupNodeSecret('spoke-crash')).toBeUndefined();
     });
   });
 
@@ -353,6 +448,36 @@ describe('cluster/peers', () => {
       ];
       const proposals = proposePairings(advertsByNode, existing);
       expect(proposals).toEqual([]);
+    });
+
+    it('pairs every node, not just the first two sorted node ids — four nodes on one shared origin', () => {
+      // Sorted node id order is hub, mac, spoke1, spoke2. The greedy matcher can only ever use
+      // each node's single advert once (a `claimed` set, not multi-pairing), so with FOUR nodes
+      // on the same origin the correct result is two proposals — (hub,mac) and (spoke1,spoke2) —
+      // covering all four. Truncating the node id list to the first two (as `.slice(0, 2)` would)
+      // silently drops spoke1/spoke2 from every signal loop: this is the only shape that tells
+      // "no candidates" apart from "candidates never considered".
+      const advertsByNode = new Map([
+        ['hub', [advert({ projectId: 'p-hub', originUrl: 'git@github.com:acme/shared.git' })]],
+        ['mac', [advert({ projectId: 'p-mac', originUrl: 'git@github.com:acme/shared.git' })]],
+        ['spoke1', [advert({ projectId: 'p-spoke1', originUrl: 'git@github.com:acme/shared.git' })]],
+        ['spoke2', [advert({ projectId: 'p-spoke2', originUrl: 'git@github.com:acme/shared.git' })]],
+      ]);
+      const proposals = proposePairings(advertsByNode, []);
+      const pairedNodeIds = new Set(proposals.flatMap((p) => p.members.map((m) => m.nodeId)));
+      expect(pairedNodeIds).toEqual(new Set(['hub', 'mac', 'spoke1', 'spoke2']));
+    });
+
+    it('adopts an existing projectKey from either advert rather than minting a fresh one', () => {
+      const advertsByNode = new Map([
+        ['hub', [advert({ projectId: 'p-hub', projectKey: 'pk-known', originUrl: 'git@github.com:acme/y.git' })]],
+        ['mac', [advert({ projectId: 'p-mac', originUrl: 'git@github.com:acme/y.git' })]],
+      ]);
+      const proposals = proposePairings(advertsByNode, []);
+      expect(proposals).toHaveLength(1);
+      // Not `expect.any(String)` — that would also pass for a freshly minted randomUUID(). The
+      // whole point is this is the SAME key the advert already carried, not a new one.
+      expect(proposals[0]?.projectKey).toBe('pk-known');
     });
   });
 

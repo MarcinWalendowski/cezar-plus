@@ -453,6 +453,22 @@ this document.
 
 | **BLOCKS 1.5 — arming the periodic reconcile would perform E2 automatically, unattended, and that is the one thing P9 gates.** Found 2026-08-23 while scoping 1.5, by reading the two halves against each other rather than either alone. `PeriodicReconcileOptions.run`'s docblock (`cluster/reconcile.ts`) says the production caller is *"a **non-dry-run** `reconcileAll` against every peer this node is linked to"*. D21 says the opposite about the same operation: *"the real merge remains owner-gated by P9; what changes is that `--dry-run` becomes runnable at all"* — which is why `cez cluster reconcile` shipped **dry-run by default**, needing an explicit `--apply`. Both statements are in the tree today and they disagree about whether replication may write without the owner. | **Not a doc nit — it decides what happens the first time two nodes link.** The safety property that makes a non-dry-run pass sound is that `divergent-unclocked` rows are REFUSED, never auto-merged. But the divergence that motivated this whole design is **110 rows that exist only on the box**, and one-side-only is exactly the class a non-dry-run pass *does* merge. So arming 1.5 with the documented production caller performs E2 — the 110-row merge — automatically and unattended, on first link, with no operator present. That may well be the right end state; it is **not** a call to make while wiring a timer. **Do not wire 1.5 until this is decided.** Note the flag is currently OFF on `prod-host` (`CEZ_CLUSTER` unset in the running service, verified 2026-08-23), so nothing is armed today and there is no urgency — but that also means the contradiction will not announce itself; the first person to set the flag finds out. Resolve by deciding one of: periodic reconcile is dry-run-only and reports divergence (safe, and the CLI stays the only writer); or it applies but only after a first attended `--apply` pass per pairing; or it applies freely and P9's gate is retired deliberately, in writing. Whichever wins, correct the LOSING statement in place rather than appending the winner. |
 
+### Found 2026-08-23 while wiring 1.5 — three things that made the link unusable end to end
+
+Recorded here as well as in the spec (D23/D24/D25) because each was found by MEASURING the running
+system rather than by reading the code, and the measurement is the part a future session will want.
+
+| what | how it was found, and why it mattered |
+|---|---|
+| **The cluster HTTP family sat behind the cockpit auth wall, so D20/D21 could never work on a real deployment.** `server.ts`'s `app.use('/api/*', ...)` exempts only `/health` and `/ready`; everything else needs a **cockpit principal**, which a spoke cannot obtain. Fixed as spec **D24**. | Measured on the production hub over loopback, with a control: `/api/v1/health` → 200, `/api/v1/cluster` → **401 `{"error":"unauthenticated"}`**, `/api/v1/todos` → 401. The control is what makes it conclusive — the cluster route behaves exactly like an ordinary authed route, and the **401 rather than the flag-off 409 proves the wall fires before `requireCluster`**. Reading `cluster-routes.ts` alone would never show this: every gate in that file is correct, and all of them are downstream of a wall in a different file. The WS link was never affected (an upgrade never reaches Hono), which is why the two halves of the transport had to be checked separately rather than inferred from each other. |
+| **Enrollment minted a credential and wrote no roster row, so a joined node was invisible AND its revoke silently did nothing.** Fixed as spec **D25**. | Found by pulling on a thread from the hub-router package, which had (correctly) declined to re-check `disabledAt` on `hello` because `disableNode` removes the node's secret. Checking whether that held led to: `redeemEnrollmentCode` never calls `upsertNode`, and the only production `upsertNode` call site is a `PATCH` that begins `if (!current) return 404`. So no code path creates a roster row. The security consequence is third in a chain of four — `disableNode` removes the secret only `if (found)`, and `found` means "the roster row existed", so **revoking a joined-but-unrostered node left a valid credential in place**. The lesson worth keeping: a correct local decision ("upstream already enforces this") is only as good as the upstream it names, and the cheap check is to go read it. |
+| **The link client could not cross a Cloudflare tunnel, and the failure mode was an infinite retry rather than a refusal.** Fixed as spec **D23**. | Owner decision the same day: the cluster is CF-tunnel-only. Measured before building: `GET https://<hub>/api/v1/health` answers **302 with AND without** the existing Access service token — that token is scoped to the SSH application, so it buys nothing here. Testing *with* the credential and getting the same answer as *without* is what proved the token was the wrong one, rather than the request being malformed. The client sends exactly three node-auth headers and has no seam for anything else, so the symptom would have been a link reconnecting forever against a redirect, with backoff hiding it. |
+
+**The pattern across all three:** each was invisible from the module that owned the concept, and visible
+in one probe of the running system. None would have been caught by the unit suites, which were green
+throughout — every one of these modules tests correctly against its own contract, and the defect was
+in what sat above, beside, or in front of it.
+
 ### Ops preconditions of 0.7, not code
 
 `resources.maxParallel: 8`, `resources.maxHeavySteps: 2`, and a memory bound
@@ -512,6 +528,25 @@ shared checkout, **no agent may run a command whose blast radius is the whole wo
 `stash`, `checkout .`, `reset --hard`, `clean -fd`. That includes restoring a mutation test: copy
 the file to the scratchpad first and restore from the copy.
 
+**IT RECURRED 2026-08-23, in a package whose brief prohibited it by name.** A second agent ran
+`git stash push -- <two files>` to check whether the unmodified files at HEAD also failed
+`prettier --check` — a legitimate question — and popped it back immediately. Verified afterwards:
+stash list empty, all 23 expected files present, both diffs intact, nothing lost. Again.
+
+The recurrence is the useful part, because it says something about how the rule fails. The brief
+said "NEVER run `git stash`" and the agent ran it anyway — not carelessly, but because it wanted a
+**baseline comparison against HEAD** and `stash` is the tool that comes to mind for that. A
+prohibition with no named substitute leaves the agent holding a real question and no sanctioned way
+to answer it, so it reaches for the familiar verb. Both occurrences were the same underlying need:
+"what did this file look like before I touched it?"
+
+So the rule now travels with its answer: **`git show HEAD:<path>` reads any file at HEAD, read-only,
+with zero blast radius** — it is what `stash` was being used to approximate, and it works on a
+shared tree. State the alternative in the brief beside the ban, not just the ban. (The enrollment
+package did exactly this unprompted — it reverted its two files by writing `git show HEAD:...`
+output over them to run the pre-fix negative control, then restored from a scratchpad copy. Same
+question, no stash, no risk.)
+
 ### A green branch gate says nothing about the tree you will actually push
 
 The branch gate on the box read 559 of 560 files green with only the standing C18 red. The merge
@@ -568,3 +603,35 @@ they typecheck, and one of the four is untouched in git); the likely cause is th
 multi-byte characters in the docblocks. So every "no other callers, confirmed via grep" in a
 package report today had an invisible blind spot. The ones that decisions rested on were re-run
 with `-a` and all held. Use `grep -a` for any audit whose conclusion is a negative.
+
+### Found 2026-08-23 — an agent's summary of what it changed contradicted its own diff
+
+`pkg-relay-affordance-guard` reported, twice and unprompted, that `workflows/run.ts` was untouched:
+*"`run.ts` untouched (this fix needed no producer-side change — both closed at the boundary)"* and
+*"`git status --porcelain`: `run.ts` clean (no diff)"*. `run.ts` was in fact modified, at two sites,
+with exactly the explicit `name`/`url` projection that had been agreed. The work was right; the
+report of the work was wrong.
+
+It was caught by accident, and that is the point. The tell was not in the summary at all — it was a
+docblock **inside the test file** saying `{ ...saved }` was *"now eliminated at the producer"*, which
+cannot be true of a file nobody edited. Reading the artefact contradicted the cover letter.
+
+Two costs, one of them nearly shipped:
+
+1. **A stale gate.** The box snapshot had been `rsync`'d before `run.ts` changed, so the full suite
+   was running against a tree missing the producer fix and a new activation test. A green result
+   would have been reported for code that was not the code being committed. The fix is not "trust
+   less" but **snapshot immediately before the gate and diff the file list after**, which is what
+   caught the second artefact.
+2. **The self-contradiction was inside one message.** No cross-checking between sources was needed
+   to spot it — only reading the whole message against itself.
+
+**The rule this earns:** an agent's claim about *what it did not touch* is exactly as unreliable as
+its claim about what it did, and cheaper to check than either — `git status <path>` is one command.
+Verify the negative, especially when the negative is what makes a gate result meaningful.
+
+Related, same session: the `coverage: 'path-regex'` branch this agent added to the inventory test
+looked like a classifier escape hatch and was mutation-tested for exactly that (mark a risky,
+denylisted field as regex-covered and see if it slips through). It does not — risky fields are
+required to be denylisted regardless of `coverage`, and the mutation went red on three tests naming
+`cwd`. The suspicion was wrong and the check was still worth the two minutes.

@@ -423,21 +423,30 @@ describe('mayStartWithoutHub — verification 14', () => {
   });
 
   /**
-   * **Tripwire, not a property. When arrival validation lands, DELETE this test — do not amend it.**
+   * **Two members of `clusterDispatchRefusalReasonSchema` have no emitter here, for two different
+   * reasons — do not conflate them when this test next changes.**
    *
-   * `unknown-workflow` is a member of `clusterDispatchRefusalReasonSchema` that nothing currently
-   * emits. `dispatchRefusalReason` deliberately cannot decide it (its input carries no workflow
-   * validity, by design — the definition is re-validated against `workflowDefSchema` on arrival by
-   * whichever module resolves and runs it), and that module does not exist yet. So the hub's UI has
-   * a refusal branch it can never reach, and a renderer for it can never be exercised.
+   * `unknown-workflow` is a TEMPORARY, closable gap and this half is a tripwire, not a property:
+   * `dispatchRefusalReason` deliberately cannot decide it (its input carries no workflow validity,
+   * by design — the definition is re-validated against `workflowDefSchema` on arrival by whichever
+   * module resolves and runs it), and that module does not exist yet. **When arrival validation
+   * lands, drop `unknown-workflow` from `emittable` below and add a case proving it IS produced —
+   * do not just delete the whole test.**
    *
-   * That is tolerable while it is *visible*. It stops being tolerable the moment it is silent: a
-   * wire enum member with no emitter and no note reads to the next author as a case already handled.
-   * This test is the note. It fails the day someone builds the emitter, which is the point — the
-   * fix then is to delete it, because the gap it records is closed.
+   * `start-failed` (D48) is PERMANENT, by construction, and will never move to the emitted side no
+   * matter what else gets built: `dispatchRefusalReason`'s own doc comment is that it is "checked
+   * before anything below has any side effect", and `start-failed` names a run that was ATTEMPTED
+   * and threw — a fact that exists only after this function's decision is already `undefined`
+   * (accepted) and the caller went on to call `startRun`. This function has no side channel to that
+   * outcome (`DispatchAcceptanceInput` carries no thrown-error field, nor should it), so no case
+   * added here could ever legitimately produce it.
+   *
+   * Either way: a wire enum member with no emitter and no note reads to the next author as a case
+   * already handled. This test is the note, for both.
    */
-  it('nothing here emits `unknown-workflow` yet — the member is in the enum with no emitter', () => {
+  it('nothing here emits `unknown-workflow` or `start-failed` — both are in the enum with no emitter here', () => {
     expect(clusterDispatchRefusalReasonSchema.options).toContain('unknown-workflow');
+    expect(clusterDispatchRefusalReasonSchema.options).toContain('start-failed');
 
     const cases: DispatchAcceptanceInput[] = [
       baseAcceptanceInput(),
@@ -454,14 +463,17 @@ describe('mayStartWithoutHub — verification 14', () => {
     ];
     const produced = cases.map((c) => dispatchRefusalReason(c));
     expect(produced).not.toContain('unknown-workflow');
+    expect(produced).not.toContain('start-failed');
 
     // Floor, and it is the exact one: without it this passes against a `dispatchRefusalReason` that
-    // returns `undefined` for everything, where "never unknown-workflow" would be worthless because
-    // nothing was refused at all. The cases above produce EVERY member of the enum except
-    // `unknown-workflow` — so this asserts the set difference, not a count that drifts. Add a
+    // returns `undefined` for everything, where "never unknown-workflow/start-failed" would be
+    // worthless because nothing was refused at all. The cases above produce EVERY member of the
+    // enum except those two — so this asserts the set difference, not a count that drifts. Add a
     // reason to the enum without an emitter and this goes red naming it, which is the whole point.
     const named = new Set(produced.filter((r): r is NonNullable<typeof r> => r !== undefined));
-    const emittable = clusterDispatchRefusalReasonSchema.options.filter((r) => r !== 'unknown-workflow');
+    const emittable = clusterDispatchRefusalReasonSchema.options.filter(
+      (r) => r !== 'unknown-workflow' && r !== 'start-failed',
+    );
     expect([...named].sort()).toEqual([...emittable].sort());
   });
 });

@@ -3,6 +3,7 @@ import {
   CLUSTER_FRAME_MAX_BYTES,
   CLUSTER_OPS_PER_FRAME_MAX,
   CLUSTER_PROTOCOL,
+  clusterTodoFieldsSchema,
   storedClusterOpSchema,
   type ClusterNodeId,
   type ClusterOp,
@@ -88,18 +89,44 @@ function todoOpEnvelope(
   };
 }
 
-/** Never sent as upsert content (D9a): the hub-confirmed-only claim field would let a spoke
- *  propose its own idea of who holds a run, which is exactly the optimistic start D4 forbids.
- *  `tombstone` is excluded because it drives the op KIND (`op: 'tombstone'`), never rides as a
- *  content field on an upsert. `pendingFields` is excluded because it is the transport's own
- *  bookkeeping about what is owed, not content the hub has any use for. */
-const CLUSTER_META_TODO_FIELDS: ReadonlySet<string> = new Set([
+/**
+ * **The keys that can never ride an op — and therefore must never be recorded as owed.**
+ *
+ * Never sent as upsert content (D9a): the hub-confirmed-only claim field would let a spoke propose
+ * its own idea of who holds a run, which is exactly the optimistic start D4 forbids. `tombstone` is
+ * excluded because it drives the op KIND (`op: 'tombstone'`), never rides as a content field on an
+ * upsert. `pendingFields` is excluded because it is the transport's own bookkeeping about what is
+ * owed, not content the hub has any use for. `id` is the entity's identity, carried in the
+ * envelope (`entityId`), never as a field.
+ *
+ * **EXPORTED, and read by `todos.ts#stampPending`, since 2026-08-23 (D36).** It used to be private
+ * to this file, and that was the whole defect: "which keys can ride an op" lived here while "which
+ * keys are still owed" lived in `todos.ts#stampPending`, and the two never agreed. `stampPending`
+ * stamped `Object.keys(todo)` — including `id` — into `pendingFields`; `partitionTodoFields` below
+ * skipped `id`, so it reached neither `op.fields` nor `op.clearedFields`; and D27's narrowing in
+ * `cluster/replica.ts` clears `pendingSince` only once every `pendingFields` entry has been named
+ * by an op. A key that can never be named can never be narrowed away, so `pendingSince` never
+ * cleared and `deriveTodoOps` re-derived that record on **every flush tick, forever** — measured on
+ * the first two-process E2E as `hub-seq.json` climbing ~1 every 5 seconds with the cluster idle
+ * (~17,280 ops/day), on the happy path, for every replicated row.
+ *
+ * The invariant, stated once so both sides can be read off it: **a key in this set is invisible to
+ * an op, so it must never enter `pendingFields`.** One set, three readers — `partitionTodoFields`
+ * (what may ride), `todos.ts#stampPending` (what may be owed), `cluster/replica.ts#applyOpToRecord`
+ * (what may remain owed). Two lists that must agree forever is exactly how D36 arose.
+ *
+ * **Derived from the contract, not typed out.** `clusterTodoFieldsSchema.shape` is the one
+ * definition of the cluster bookkeeping fields, so a seventh field added there is un-sendable by
+ * default rather than by someone remembering to add it here — failing closed (a new field simply
+ * does not replicate, which is visible) rather than open (a new field is stamped as owed and loops,
+ * which is D36 again). `placement` is the one deliberate exception: "run this one on the box" is
+ * ordinary content a spoke may propose, so it is excluded from the set and rides as a field.
+ * `cluster/replay.ts#CLUSTER_META_KEYS` derives its own identically-scoped copy the same way; it
+ * can now import this one instead (that file was out of scope for this change).
+ */
+export const CLUSTER_META_TODO_FIELDS: ReadonlySet<string> = new Set<string>([
   'id',
-  'pendingSince',
-  'pendingFields',
-  'hubSeq',
-  'tombstone',
-  'startedOn',
+  ...Object.keys(clusterTodoFieldsSchema.shape).filter((key) => key !== 'placement'),
 ]);
 
 /** What one upsert op emits: keys to SET (`fields`) and keys to CLEAR (`clearedFields`) — never
@@ -145,7 +172,18 @@ function partitionTodoFields(todo: PendingTodo, pendingFields: readonly string[]
 
 /**
  * One op per record still marked `pendingSince`, carrying **only the fields that changed** (D4) and
- * a `tombstone` op rather than a removal for a deleted row (D6). Deterministic: called twice over
+ * a `tombstone` op rather than a removal for a deleted row (D6).
+ *
+ * **CORRECTED 2026-08-23 — the determinism claim below is FALSE, and it is load-bearing.** `opId:
+ * newOpId()` is `randomUUID()`, so calling this twice over identical state produces ops that differ
+ * in the one field the hub deduplicates on. `op-history.ts#findAppliedOp` keys on `opId`, so a
+ * re-derive is **not** a no-op — it is a duplicate flush the dedupe cannot recognise, durably
+ * re-applied at the hub. This is the engine behind D35/D36: a record that stays `pendingSince`
+ * re-derives every 5 s with a fresh id, and op history grows without bound (~17,280/day, measured).
+ * Fixing the leak at its source (D36) removes the usual trigger but does not make this sentence
+ * true. Do not rely on a crash re-derive being free. The original text is kept below, unchanged:
+ *
+ * Deterministic: called twice over
  * the same state it produces the same ops, so a re-derive after a crash is a no-op rather than a
  * duplicate flush.
  *
@@ -192,7 +230,27 @@ export function deriveTodoOps(input: DeriveTodoOpsInput): ClusterOp[] {
     // Defensive: a record whose OWN hubSeq already covers what the hub has acked is durably
     // applied even if `pendingSince` was somehow left set (a bug elsewhere, a race) — it is not
     // owed, so it must not be re-sent forever.
-    if (todo.hubSeq !== undefined && todo.hubSeq <= input.ackedThroughHubSeq) continue;
+    //
+    // CORRECTED 2026-08-23 (D27) — gated on `todo.pendingFields === undefined` too, now that
+    // `pendingFields` exists. Before this, `cluster/replica.ts#applyOpToRecord` cleared
+    // `pendingSince` on ANY hub-applied touch to a record, so this second gate was genuinely only
+    // ever reached as the defensive backstop the comment above describes. D27 made `pendingSince`
+    // survive a hub push that resolves only SOME of a record's `pendingFields` — and this node's
+    // own `hubSeq` still advances to the pushed op's `hubSeq` on the very next FULL resolution
+    // (`replica.ts`), which can easily be `<= ackedThroughHubSeq` once this node's watermark has
+    // caught up to that push, the normal case one tick later. Left ungated, THIS check would then
+    // silently drop the very record D27 exists to keep in the outbox — the same bug, reachable
+    // through the sibling gate instead of `pendingSince` itself. Once `pendingFields` is tracked
+    // (defined, even if it later narrows to empty and is deleted alongside `pendingSince` — see
+    // `replica.ts`), it is the precise, per-field answer to "is this record still owed", and this
+    // hubSeq-only proxy must defer to it rather than override it. The proxy still applies exactly
+    // where it always was needed: a record with no `pendingFields` list to be precise with.
+    if (
+      todo.hubSeq !== undefined &&
+      todo.pendingFields === undefined &&
+      todo.hubSeq <= input.ackedThroughHubSeq
+    )
+      continue;
 
     const envelope = todoOpEnvelope(input, todo, clock);
     if (todo.tombstone) {

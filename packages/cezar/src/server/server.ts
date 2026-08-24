@@ -27,7 +27,7 @@ import { currentRelease, runtimeInfo, type RuntimeInfo } from './runtime-info.ts
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
-import { createClusterRoutes, startClusterRuntime } from './cluster-routes.ts';
+import { createClusterRoutes, isNodeAuthenticatedClusterPath, startClusterRuntime } from './cluster-routes.ts';
 import { createWorkspaceReportsRoutes } from './workspace-reports-routes.ts';
 import { createNotesRoutes } from './notes-routes.ts';
 import {
@@ -122,6 +122,7 @@ import {
   type TodoItem,
 } from '../todos.ts';
 import { watchTodoAutostart, type TodoAutostartProject } from '../todo-autostart.ts';
+import { currentAutostartDispatch, currentClusterAutostart } from '../cluster/autostart-seam.ts';
 import { watchReopenRequests, type ReopenWatchProject } from '../reopen-watch.ts';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.ts';
 import {
@@ -1619,6 +1620,46 @@ export function createApp(deps: ServerDeps) {
     repoRoot: ctx.root,
     dataDir: ctx.dataDir,
     manager: ctx.manager,
+    // **D43, 2026-08-23 — stated, not omitted.** This object used to end at `manager`, and
+    // `TodoAutostartProject#cluster` was optional with "absent means clustering is off" as its
+    // contract. The result was that the whole D9a autostart guard was dead code while `todos.ts`
+    // read `CEZ_CLUSTER` from the environment and refused the write, so setting that flag started
+    // one todo on every reconcile pass, forever, and never stamped it.
+    //
+    // `CLUSTERING_OFF` is the SAME behaviour that absence had — it changes nothing today — but it
+    // is now a decision this file makes out loud, and omitting it is a typecheck error.
+    //
+    // ~~**Deliberately not `clusterModeFromEnv` yet, and this is not an oversight.** Handing this a
+    // live seam requires a production `claimStart` — a hub round trip for the claim — and there is
+    // none: `TodoAutostartCluster` has no implementation anywhere outside tests. Wiring the flag
+    // through without one does not enable the feature, it only moves the same failure: measured,
+    // an autostart todo authored on this node still starts unboundedly (the read-side guard allows
+    // via `mayStartWithoutHub`, the write side still refuses `hub-unconfirmed`). Switching this on
+    // is a behavioural decision with production consequences and belongs to the owner, not to this
+    // wiring line.~~
+    //
+    // **SUPERSEDED 2026-08-24 (Milestone C activation) — the owner made that decision** ("VPS is
+    // master, this mac is connected as additional worker and tasks are distributed across
+    // master/workers"), and the production `claimStart` this comment said did not exist now does:
+    // `cluster/autostart-seam.ts#createSpokeAutostartCluster`. It needs no hub round trip and no
+    // new frame type, because a worker's honest answer to *"may I self-start the master's work"* is
+    // a REFUSAL, not a request. The scope is the part that matters and it is unchanged from D15a:
+    // with the hub unreachable `mayAutostartTodo` never reaches `claimStart` at all, so a
+    // disconnected worker still runs what it authored.
+    //
+    // The failure this comment measured is closed rather than moved: it was the READ side allowing
+    // while the WRITE side refused `hub-unconfirmed`, one concept with two disagreeing sources.
+    // Both sides now answer from the same armed policy.
+    //
+    // **Both fields are FUNCTIONS, and that is load-bearing.** This object is built in `createApp`;
+    // the cluster runtime that knows this node's role is armed later, in `startServer`. A value
+    // read here would be read BEFORE the answer exists and would pin every node to
+    // `CLUSTERING_OFF` forever — D43's exact failure arriving by a different route. These two
+    // named functions read the armed policy at DECISION time. With `CEZ_CLUSTER` unset nothing is
+    // ever armed and they return `CLUSTERING_OFF` / `DISPATCH_LOCAL`: the single-node path,
+    // untouched. See D43 and item 45 in `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`.
+    cluster: currentClusterAutostart,
+    dispatch: currentAutostartDispatch,
   });
   watchTodoAutostart(todoAutostartProject(bootContext));
   for (const id of contexts.ids()) {
@@ -1643,13 +1684,8 @@ export function createApp(deps: ServerDeps) {
   }
   contexts.onContextBuilt((ctx) => watchReopenRequests(reopenWatchProject(ctx)));
 
-  // The cluster's one wiring line (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, PLAN 1.5).
-  // Everything it attaches — the node link, the periodic full reconcile, the foreign-run
-  // projection — lives behind `startClusterRuntime` in `server/cluster-routes.ts` so the packages
-  // that fill those in edit a file they own rather than this one (PLAN P3). With `CEZ_CLUSTER`
-  // unset it returns immediately having armed nothing: no timer, no socket, no file under
-  // `~/.cezar/cluster` (spec Verification 12).
-  startClusterRuntime({ version: deps.version });
+  // The cluster's one wiring line moved to `startServer` below (PLAN 1.5's activation) — it needs
+  // the real `http.Server` to attach the node link to, which does not exist yet here in `createApp`.
 
   const app = new Hono();
 
@@ -1861,6 +1897,25 @@ export function createApp(deps: ServerDeps) {
   // stays the deliberate trade: one cast per reader against breaking ~30 callers' annotations.
   // (This comment previously said "No handler reads `c.get('principal')` yet"; corrected
   // 2026-08-07 at the repair stage, since four handlers below now do.)
+  //
+  // D20 exemption (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`): a request under
+  // `${V1_PREFIX}/cluster/*` on one of `cluster-routes.ts`'s node-authenticated prefixes carries
+  // no cockpit session — it is a SPOKE authenticating itself to the hub, and a spoke has no
+  // cockpit session to have. Left ungated, this middleware answered 401 before `requireNodeAuth`
+  // in `createClusterRoutes` ever ran, which meant the D20 mechanism could never fire in any real
+  // deployment (every one sets `CEZ_AUTH`) — measured on production: `GET /api/v1/cluster`
+  // answered 401 identically to an ordinary authed route, with no distinguishing reason. This
+  // check reads `isNodeAuthenticatedClusterPath`, the SAME function `createClusterRoutes` derives
+  // its `.use(base, requireNodeAuth)` registrations from — see that array's own doc in
+  // `cluster-routes.ts` for why the two cannot drift apart. It is deliberately narrower than
+  // `/cluster/*`: the roster (`GET /cluster`), `/cluster/enroll*` (mints enrollment codes) and
+  // `/cluster/join` stay behind THIS wall, cockpit-session-only — they are operator actions taken
+  // at a human's own browser, and admitting them here would expose enrollment-code minting to the
+  // open internet with no session required at all.
+  function isNodeAuthenticatedClusterRequest(path: string): boolean {
+    if (!path.startsWith(V1_PREFIX)) return false;
+    return isNodeAuthenticatedClusterPath(path.slice(V1_PREFIX.length));
+  }
   app.use('/api/*', async (c, next) => {
     if (c.req.path === `${V1_PREFIX}/health`) return next();
     // `/ready` joins the exemption for a concrete operational reason (P5 of
@@ -1874,6 +1929,12 @@ export function createApp(deps: ServerDeps) {
     // release id and a list of booleans, which is the shape `/health` already publishes to the
     // whole internet.
     if (c.req.path === `${V1_PREFIX}/ready`) return next();
+    // See the doc comment above this middleware's registration for what this is and why it is
+    // safe to let past with no cockpit principal: `requireNodeAuth` (D20), wired onto the
+    // identical path set in `createClusterRoutes`, is what actually authenticates the request
+    // from here — this branch only decides which requests get handed to it instead of the
+    // cockpit's own 401.
+    if (isNodeAuthenticatedClusterRequest(c.req.path)) return next();
     const principalContext = c as unknown as Context<{ Variables: { principal: Principal } }>;
     // `resolveAuthProvider`, not `resolveCapabilities(...).auth`: which provider a deployment
     // requires is a server-side policy, not a capability the cockpit is told about, and it is
@@ -7375,6 +7436,48 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   });
   server.once('close', () => { unsubscribe(); automationScheduler.stop(); backupScheduler.stop(); });
   socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost, deps.sessionResolver));
+  // The cluster's one wiring line (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, PLAN 1.5).
+  // Lives here, not in `createApp`, because `ClusterLinkServer.attach()` needs the real, listening
+  // `http.Server` this function just built — `createApp` has none to give. Everything this arms —
+  // the node link, hub or spoke — lives behind `startClusterRuntime` in `server/cluster-routes.ts`
+  // so the package that fills it in edits a file it owns rather than this one (PLAN P3). With
+  // `CEZ_CLUSTER` unset it returns immediately having armed nothing: no timer, no socket, no file
+  // under `~/.cezar/cluster` (spec Verification 12). With it set but this node never enrolled, it
+  // warns and arms nothing too — see that function's own doc for why that is the honest state
+  // rather than an error, and for why the hub/spoke branch is decided from the identity on disk
+  // rather than from the environment directly.
+  //
+  // Milestone C: how the spoke branch resolves a dispatched project's `repoRoot` to the live
+  // `RunManager` that will actually run the work — required on `ClusterRuntimeDeps`
+  // (`SpokeRuntimeDeps#resolveDispatchManager`'s own doc has the full argument for why). Built
+  // on demand rather than a `todoAutostartProject`-style live map: the boot project short-circuits
+  // to `deps.manager` (the exact pattern the automation launcher above already uses for the same
+  // boot/non-boot split), and every other root resolves through `sharedContexts.context()` — the
+  // BUILDING call, not `peek()` — because a dispatch is a headless "run this now" trigger exactly
+  // like an automation firing, and a project this node's cockpit has never opened must still
+  // become dispatchable the moment the hub sends work for it, not stay silently unreachable until
+  // a person happens to open it first.
+  const resolveDispatchManager = async (repoRoot: string): Promise<RunManager | undefined> => {
+    if (repoRoot === deps.repoRoot) return deps.manager;
+    const projects = await listProjects();
+    const match = projects.find((p) => p.root === repoRoot);
+    if (!match) return undefined;
+    if (match.id === (deps.bootProjectId ?? 'default')) return deps.manager;
+    try {
+      return (await sharedContexts.context(match.id)).manager;
+    } catch {
+      return undefined;
+    }
+  };
+  // D47: the same shared `WorkspaceSemaphore` `agentAccountUsageRoutes` above already asks for
+  // in-flight counts, threaded here so the spoke's presence beat can report its OWN live load
+  // (`busy()`/`heavyActive()`) instead of the `{active: 0, heavyActive: 0}` `peers.ts#collectPresence`
+  // has always silently defaulted to absent a caller wiring the real numbers — see
+  // `SpokeRuntimeDeps#semaphore`'s own doc for why that default stopped being an honest "idle"
+  // claim the moment Milestone C let a dispatch actually place work on it. Optional for the same
+  // "legacy callers and tests that build no managers" reason `deps.semaphore` is optional
+  // everywhere else in this file (`:6857`'s own doc).
+  startClusterRuntime({ version: deps.version, server, resolveDispatchManager, semaphore: deps.semaphore });
   // The one listener that destroys an upgrade nobody owns (ws.ts#attachUpgradeFallback).
   //
   // `CLUSTER_LINK_PATH` is listed only when `CEZ_CLUSTER` is on, and that asymmetry is deliberate.

@@ -41,6 +41,10 @@ export const taskAuthorViaSchema = z.enum([
   'note-continuation',
   /** A user report approved into a todo (`server/workspace-reports-routes.ts`). */
   'report-triage',
+  /** A todo run started on this node because a `dispatch` frame from the cluster hub told it to
+   *  (Milestone C, `cluster/spoke-runtime.ts#handleDispatch`) — the hub already granted the claim
+   *  before sending the frame, so no human and no local watcher caused this run. */
+  'cluster-dispatch',
 ]);
 export type TaskAuthorVia = z.infer<typeof taskAuthorViaSchema>;
 
