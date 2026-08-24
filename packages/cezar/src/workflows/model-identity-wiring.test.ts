@@ -416,7 +416,7 @@ describe('auto task class reaches a codex step (mock app-server)', () => {
   let manager: RunManager;
   const savedEnv: Record<string, string | undefined> = {};
   const mockBin = fileURLToPath(
-    new URL('../core/__fixtures__/codex/mock-codex-app-server.mjs', import.meta.url),
+    new URL('../../scripts/mock-codex-app-server.mjs', import.meta.url),
   );
 
   beforeAll(async () => {

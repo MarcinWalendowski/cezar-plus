@@ -59,7 +59,7 @@ function captureMockRpc(): { calls: () => Array<{ method: string; params: Record
  */
 describe('a teardown cezar initiated (codex app-server)', () => {
   const mockBin = fileURLToPath(
-    new URL('./__fixtures__/codex/mock-codex-app-server.mjs', import.meta.url),
+    new URL('../../scripts/mock-codex-app-server.mjs', import.meta.url),
   );
 
   it('settles the session instead of failing it when the app-server exits 143', async () => {
@@ -300,7 +300,7 @@ describe('SIGTERM→SIGKILL escalation for an app-server that survives SIGTERM',
  */
 describe('an external signal kills the agent process directly (OOM killer / operator kill -9)', () => {
   const mockBin = fileURLToPath(
-    new URL('./__fixtures__/codex/mock-codex-app-server.mjs', import.meta.url),
+    new URL('../../scripts/mock-codex-app-server.mjs', import.meta.url),
   );
 
   it('a real subprocess killed by an untrapped SIGKILL fails the run and names the signal', async () => {
@@ -381,7 +381,7 @@ describe('an external signal kills the agent process directly (OOM killer / oper
  */
 describe('thread/resume states an explicit model (codex resume poisoning)', () => {
   const mockBin = fileURLToPath(
-    new URL('./__fixtures__/codex/mock-codex-app-server.mjs', import.meta.url),
+    new URL('../../scripts/mock-codex-app-server.mjs', import.meta.url),
   );
 
   it('negative control: resume sends an explicit model even when the pin was dropped', async () => {
@@ -626,7 +626,7 @@ describe('thread/resume states an explicit model (codex resume poisoning)', () =
  */
 describe('reasoning effort rides on turn/start (codex)', () => {
   const mockBin = fileURLToPath(
-    new URL('./__fixtures__/codex/mock-codex-app-server.mjs', import.meta.url),
+    new URL('../../scripts/mock-codex-app-server.mjs', import.meta.url),
   );
 
   const turnStartParams = async (spec: { effort?: string; model?: string }): Promise<Record<string, unknown>> => {

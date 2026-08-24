@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// Test-only mock of `codex app-server` — speaks just enough JSON-RPC 2.0
-// JSONL (§3 of agent-event-protocols.md) for the runner wiring test in
-// `codex-ui-mapper.test.ts`: initialize/thread/turn handshake, one scripted
-// turn with an agentMessage + a commandExecution (with live outputDelta),
-// cumulative token usage, then exits on stdin EOF like the real server.
+// Mock of `codex app-server` for CEZ_DRY_RUN=1 (`.ai/specs/2026-08-24-codex-dry-run-mock.md`) and
+// for the runner wiring test in `codex-ui-mapper.test.ts` — one file, two consumers, the same
+// arrangement `scripts/mock-claude.mjs` already has. Speaks just enough JSON-RPC 2.0 JSONL (§3 of
+// agent-event-protocols.md): initialize/thread/turn handshake, one scripted turn with an
+// agentMessage + a commandExecution (with live outputDelta), cumulative token usage, then exits on
+// stdin EOF like the real server.
 //
 // `MOCK_CODEX_IGNORE_EOF=1` switches to the #703 teardown shape instead: the
 // server stays deaf to stdin EOF (the CLI hang the EOF watchdog exists for)
@@ -96,6 +97,22 @@ rl.on('line', (line) => {
     emit({ id: msg.id, result: { data: [
       { model: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol', description: '' },
     ], nextCursor: null } });
+  } else if (msg.method === 'account/rateLimits/read') {
+    // A small, fixed, plausible envelope so `probeCodexQuota` (`agent-account-probe.ts`) resolves
+    // fast under CEZ_DRY_RUN instead of idling out to DEFAULT_PROBE_TIMEOUT_MS — shaped from the
+    // recorded LIVE wire capture at `__fixtures__/codex/account-rate-limits.json`, parsed by the
+    // same zod schema the real answer is. If a codex upgrade changes this shape, the app-server's
+    // own "unknown variant" answer names every method it knows (`agent-account-probe.ts:65-70`) —
+    // that list is the oracle to re-check this against.
+    emit({ id: msg.id, result: {
+      rateLimits: {
+        limitId: 'codex', limitName: null,
+        primary: { usedPercent: 0, windowDurationMins: 43200, resetsAt: 1789482577 },
+        secondary: null,
+        credits: { hasCredits: false, unlimited: false, balance: null },
+        individualLimit: null, planType: 'free', rateLimitReachedType: null,
+      },
+    } });
   } else if (msg.method === 'thread/start' || msg.method === 'thread/resume') {
     // Every start/resume request is echoed to stderr so a test can assert on the REQUEST, not
     // only on the outcome (Phase 1b).

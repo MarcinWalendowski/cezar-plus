@@ -16,9 +16,8 @@ const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 const MOCK_CODEX = join(
   fileURLToPath(new URL('.', import.meta.url)),
   '..',
-  'core',
-  '__fixtures__',
-  'codex',
+  '..',
+  'scripts',
   'mock-codex-app-server.mjs',
 );
 

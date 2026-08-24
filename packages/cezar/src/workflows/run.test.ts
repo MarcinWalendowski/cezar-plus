@@ -2491,9 +2491,9 @@ describe('native Codex requestUserInput parks and resumes the run (#565)', () =>
   beforeEach(async () => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-565-'));
     delete process.env.CEZ_DRY_RUN;
-    // Resolved from this file, not the cwd: the fixture is a sibling of the source under test,
-    // so the path holds wherever vitest is invoked from and survives the tree moving.
-    process.env.CEZ_CODEX_BIN = join(import.meta.dirname, '../core/__fixtures__/codex/mock-codex-app-server.mjs');
+    // Resolved from this file, not the cwd: the bundled dry-run mock lives at the package root's
+    // scripts/, so the path holds wherever vitest is invoked from and survives the tree moving.
+    process.env.CEZ_CODEX_BIN = join(import.meta.dirname, '../../scripts/mock-codex-app-server.mjs');
     await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
     writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
     await run('git', ['add', '-A'], { cwd: repoRoot });
