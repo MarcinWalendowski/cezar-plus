@@ -16,10 +16,12 @@ asked for a second codex account, detected automatically, balanced against the f
 
 Adding the login is configuration. The other two thirds are not, and one of them is a defect:
 
-1. **Codex's quota reading is invented.** Probed twice on the box, 21 s apart:
-   `usedPercent: 0` both times and `resetsAt` moved with the clock — always exactly
-   `takenAt + 10080 min`. The app-server is answering with an empty snapshot, not a measurement.
-   `probeCodexQuota` stores it anyway, so every codex account presents as **band 0**, the
+1. **Codex's quota reading is invented *while the app-server holds no snapshot*.** (Narrowed
+   2026-08-24 — this bullet read "Codex's quota reading is invented", full stop, and that is too
+   broad; see the correction in Problem. Codex reports a real, anchored window once it has one.)
+   Probed twice on the box, 21 s apart: `usedPercent: 0` both times and `resetsAt` moved with the
+   clock — always exactly `takenAt + 10080 min`. That is an empty snapshot, not a measurement.
+   `probeCodexQuota` stores it anyway, so a cold codex account presents as **band 0**, the
    most-favoured value, which is the one claim `agent-account-probe.ts` says in its own rules it
    must never make: *"Never invents … Zero is a claim ('nothing used'), and it is the wrong one."*
 2. **A band cannot be compared across providers, and `pool:*` compares them.** `byBand` is
@@ -71,19 +73,44 @@ The *real* snapshot, captured from a live request in a session rollout
 "rate_limits": { "limit_id": "premium", "primary": null, "secondary": null, "plan_type": "plus" }
 ```
 
-**On a ChatGPT Plus plan the windows that matter are `null`.** The limit that actually stops codex
-is the weekly *premium* allowance, and it is announced only in the refusal text ("You've hit your
-usage limit. Upgrade to Pro … purchase more credits"), never as a percentage. There is no numeric
-signal to be had on this plan — not from the app-server, not from the rollouts. So the honest
-answer for a codex account here is **unmeasured**, and `limited` holds plus the live signals are
-what balancing has to run on.
+~~**On a ChatGPT Plus plan the windows that matter are `null`.** The limit that actually stops codex
+is the weekly *premium* allowance, announced only in the refusal text, never as a percentage. There
+is no numeric signal to be had on this plan — not from the app-server, not from the rollouts. So the
+honest answer for a codex account here is **unmeasured**.~~ ~~Confirmed on a second account and a
+higher tier during Phase 5: the `second@example.com` login is `pro`, and its first probe
+answered `usedPercent: 0` with `resetsAt` exactly 604 800 s after `takenAt`, so this is not a
+Plus-tier quirk.~~
 
-**Confirmed on a second account and a higher tier (2026-08-24, during Phase 5).** The
-`second@example.com` login registered by this spec is `chatgpt_plan_type: pro`, and its
-first probe answered `usedPercent: 0`, `windowDurationMins: 10080`, `resetsAt` exactly 604 800 s
-after `takenAt`. So this is not a Plus-tier quirk that Pro would have fixed: both accounts on this
-box are unmeasured, and the two-signal balance below is what they will actually run on.
+**CORRECTED 2026-08-24, ~55 minutes after V6 began — codex DOES report a real window, on Plus and
+on Pro, and both paragraphs above are struck.** They are left in place because they are what the
+guard was argued from, and a reader has to know how far that argument actually reaches.
 
+Four probes over three minutes, on both accounts, after the deploy:
+
+| home | plan | `usedPercent` | `resetsAt` |
+| --- | --- | --- | --- |
+| `.codex` | plus | **1 → 2 → 4 → 5** (climbing with real use) | `1788179533/4` — moved **1 s in 180 s** |
+| `.codex-secondary` | pro | 0 (nothing has run on it) | `1788179610` — **identical** across 180 s |
+
+`limitId` is `codex`, not `premium`. `resetsAt` is **anchored**, not recomputed per call.
+`usedPercent` tracks consumption. That is a measurement — and the 11:39 reading was not a tier's
+behaviour, it was the app-server answering while it held **no snapshot yet**, five days into a
+refusal on an account nothing had run on since.
+
+**What survives, and what does not.** D1's *guard* survives untouched, because it never keyed on the
+plan: it keys on **rolling vs anchored**, which is exactly what separates the 11:39 reading from the
+12:38 one. A cold answer still enters the pool as band 0 if it is stored, and that is still the
+failure it exists for — verified live, since the deployed filter keeps both real windows above. What
+does not survive is the conclusion drawn from it: "there is no numeric signal to be had on this
+plan", and with it the idea that codex rows are permanently unmeasured. They are not; both rows
+carry a live band today. Reading the Pro account's first probe as "confirmation" was the same
+mistake made twice — that probe was its account's first, so it measured the same cold state, not the
+tier.
+
+**This makes D2 more load-bearing, not less.** With codex genuinely reporting, `pool:*` compares a
+Claude Max band against a Codex band — 5 % of a codex week against 55 % of a Claude week — on
+*every* dispatch, rather than only during the window where codex reports nothing. The cross-provider
+comparison being unsound was never contingent on codex being unmeasured.
 ### Why "unmeasured" is not free
 
 `selectPoolAccount` decides `byBand = pool.every(row => row.band !== undefined)` once over the whole

@@ -264,9 +264,32 @@ const UNPOPULATED_RESET_EPSILON_S = 120;
  * `resetsAt` advanced by exactly the gap between the calls: it is `now + windowDurationMins`,
  * recomputed per call. The account it describes was `limited` at the time, five days into a weekly
  * refusal. Nothing there is a fact about usage — the app-server had no snapshot and answered with
- * a fresh, full window. The real snapshot on that plan, captured from a live request in a session
- * rollout, is `{"limit_id":"premium","primary":null,"secondary":null}`: on ChatGPT Plus the
- * windows that matter are `null` and the allowance is announced only in the refusal text.
+ * a fresh, full window. The session rollout captured from a live request at the same time carried
+ * `{"limit_id":"premium","primary":null,"secondary":null}`.
+ *
+ * ## CORRECTED 2026-08-24, hours later — this is a COLD-SNAPSHOT state, not the plan's behaviour
+ *
+ * The paragraph above used to end: *"on ChatGPT Plus the windows that matter are `null` and the
+ * allowance is announced only in the refusal text."* **That is false**, and it is left struck
+ * rather than deleted because it is the reason this function exists and a reader needs to know how
+ * far it actually reaches. Measured on the same box the same afternoon, four probes over three
+ * minutes, on both accounts:
+ *
+ * ```
+ * .codex            plus  usedPercent 1 → 2 → 4 → 5   resetsAt 1788179533/4  (moved 1s in 180s)
+ * .codex-secondary  pro   usedPercent 0               resetsAt 1788179610    (identical, 180s)
+ * ```
+ *
+ * `limitId` was `codex`, not `premium`; `usedPercent` tracked real consumption on the account that
+ * was being used; and `resetsAt` was **anchored** — unchanged while `takenAt` advanced by 180 s.
+ * That is a genuine measurement, and codex reports one on Plus as well as on Pro.
+ *
+ * So the empty default is what the app-server answers when it holds **no snapshot yet**, not what a
+ * tier permanently answers. It is still worth dropping — a cold answer entering the pool as band 0
+ * is the exact failure this was built for — but it is a transient state, and any claim that codex
+ * "cannot report quota" is wrong. The discriminator below is unchanged by this, because it never
+ * keyed on the plan: it keys on ROLLING vs ANCHORED, which is precisely what separates the two
+ * measurements above.
  *
  * ## Why this must be dropped rather than stored
  *
@@ -286,9 +309,18 @@ const UNPOPULATED_RESET_EPSILON_S = 120;
  *
  * ## The cost of being wrong
  *
- * A genuinely idle account reads as unmeasured for as long as it stays idle. `selectPoolAccount`
- * then ranks it on in-flight and dispatch order rather than on its band — one dispatch's worth of
- * fairness. The opposite error puts every run on a login that is out of quota.
+ * A real window that opened within the last `UNPOPULATED_RESET_EPSILON_S` and has been used 0% is
+ * dropped. `selectPoolAccount` then ranks that account on in-flight and dispatch order rather than
+ * on its band — one dispatch's worth of fairness, for at most two minutes out of a seven-day
+ * window, after which the anchored `resetsAt` drifts out of the epsilon on its own. Observed
+ * live: `.codex-secondary` at `usedPercent: 0` was dropped 84 s after its window opened and kept
+ * 264 s after, with no change to the account.
+ *
+ * **Amended 2026-08-24 with the correction above.** This paragraph used to read *"a genuinely idle
+ * account reads as unmeasured for as long as it stays idle"*, which assumed `resetsAt` rolls; it is
+ * anchored, so an idle account is unmeasured only just after its window opens, not indefinitely.
+ *
+ * The opposite error puts every run on a login that is out of quota.
  */
 function looksUnpopulated(
   window: { usedPercent: number; windowDurationMins: number; resetsAt: number },

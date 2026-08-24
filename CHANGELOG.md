@@ -11,14 +11,23 @@
   Three findings, measured on a production box running one Codex login that had been
   rate-limited for a day:
 
-  **Codex's quota reading was invented.** `account/rateLimits/read` answered `usedPercent: 0`
-  twice, 21 s apart, with `resetsAt` moving with the clock — always exactly `now + 7 days`. That is
-  the app-server's *empty default*, not a measurement: the real snapshot from a live request is
-  `{"limit_id":"premium","primary":null,"secondary":null}`, because on a ChatGPT Plus plan the
-  window that stops you is announced only in the refusal text. cezar stored the fake 0 % anyway,
-  which put every Codex account in **band 0** — the most-favoured value — while it could not run a
-  thing. `parseWindow` now drops a window that is indistinguishable from an unpopulated snapshot,
-  restoring the rule this module already stated: *"Never invents … Zero is a claim."*
+  **Codex's quota reading was invented while the app-server held no snapshot.**
+  `account/rateLimits/read` answered `usedPercent: 0` twice, 21 s apart, with `resetsAt` moving with
+  the clock — always exactly `now + 7 days`. That is the app-server's *empty default*, not a
+  measurement. cezar stored the fake 0 % anyway, which put a cold Codex account in **band 0** — the
+  most-favoured value — while it could not run a thing. `parseWindow` now drops a window that is
+  indistinguishable from an unpopulated snapshot, restoring the rule this module already stated:
+  *"Never invents … Zero is a claim."*
+
+  **Narrowed the same day, before this shipped as Done.** The first reading of this said codex
+  *cannot* report on a ChatGPT Plus plan, from a rollout snapshot carrying
+  `{"limit_id":"premium","primary":null,"secondary":null}`. Four probes over three minutes after
+  the deploy disprove it: `limitId: "codex"`, `resetsAt` **anchored** (identical while `takenAt`
+  advanced 180 s), and `usedPercent` climbing 1 → 2 → 4 → 5 on the account in use. The guard is
+  unchanged, because it keys on **rolling vs anchored** rather than on the plan — and it keeps both
+  of those real windows. What changed is the conclusion: codex rows are not permanently unmeasured,
+  which makes the per-provider band split below load-bearing on every dispatch rather than only
+  while codex says nothing.
 
   **A usage band cannot be compared across providers, and `pool:*` was comparing them.** A Claude
   Max week at 70 % and a Codex Plus week at 0 % are fractions of two differently-sized allowances.
