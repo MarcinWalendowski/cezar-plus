@@ -29,6 +29,7 @@ describe('discovered agent accounts API', () => {
     remote: process.env.CEZ_REMOTE,
     dryRun: process.env.CEZ_DRY_RUN,
     claudeDir: process.env.CLAUDE_CONFIG_DIR,
+    codexDir: process.env.CODEX_HOME,
   };
   let home: string;
   let cezHome: string;
@@ -49,6 +50,7 @@ describe('discovered agent accounts API', () => {
     process.env.HOME = home;
     delete process.env.CEZ_REMOTE;
     delete process.env.CLAUDE_CONFIG_DIR;
+    delete process.env.CODEX_HOME;
     process.env.CEZ_DRY_RUN = '1';
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     clearProjectProbeCache();
@@ -63,6 +65,7 @@ describe('discovered agent accounts API', () => {
       ['CEZ_REMOTE', saved.remote],
       ['CEZ_DRY_RUN', saved.dryRun],
       ['CLAUDE_CONFIG_DIR', saved.claudeDir],
+      ['CODEX_HOME', saved.codexDir],
     ] as const) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

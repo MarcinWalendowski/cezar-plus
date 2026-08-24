@@ -3669,6 +3669,21 @@ export class RunManager {
   }
 
   /**
+   * Whether a run can still make progress in this process. This is intentionally wider than
+   * isActive(), whose narrower answer controls server-side mutations.
+   */
+  runLiveness(runId: string): { live: boolean; reason: string } {
+    if (this.active.has(runId)) return { live: true, reason: 'active step chain' };
+    if (this.starting.has(runId)) return { live: true, reason: 'starting' };
+    if (this.queue.includes(runId)) return { live: true, reason: 'queued' };
+    if (this.waiting.has(runId)) return { live: true, reason: 'waiting for input' };
+    if (this.monitoring.has(runId)) return { live: true, reason: 'monitoring' };
+    if (this.autoResumeTimers.has(runId)) return { live: true, reason: 'auto-resume scheduled' };
+    if (this.pendingJobs.has(runId)) return { live: true, reason: 'pending job' };
+    return { live: false, reason: 'no active step, scheduled resume, or queued job' };
+  }
+
+  /**
    * Fold a queued run's persisted prompt — `run.task` plus everything stacked
    * onto it (#472) — into the job input that is about to execute.
    *
@@ -5372,6 +5387,12 @@ export class RunManager {
         error: undefined,
       });
       emit({ type: 'step-start', stepId: step.id, name: step.name ?? step.id, kind, iteration });
+
+      const runFault = process.env.CEZ_RUN_FAULT;
+      const [faultName, faultStepId] = runFault?.split(':', 2) ?? [];
+      if (faultName === 'stall-step' && kind === 'agent' && (!faultStepId || faultStepId === step.id)) {
+        await new Promise<never>(() => {});
+      }
 
       if (kind === 'agent') {
         // The last agent step of the workflow is interactive: after its turn

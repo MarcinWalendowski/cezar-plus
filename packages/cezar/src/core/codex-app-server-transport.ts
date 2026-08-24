@@ -1,4 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve as resolvePath } from 'node:path';
 import { trackChildExit } from './agent-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
 import { EOF_KILL_GRACE_MS, EOF_TERM_GRACE_MS, KILL_GRACE_MS } from './claude-cli-runner.ts';
@@ -16,8 +18,20 @@ interface PendingRequest {
   reject: (error: Error) => void;
 }
 
+/** Path to the bundled mock (`scripts/mock-codex-app-server.mjs`), for CEZ_DRY_RUN=1. */
+function mockCodexPath(): string {
+  // Resolved the same way `mockClaudePath`/`mockPiPath` are, rather than through `new
+  // URL().pathname`: on Windows that yields a leading-slash `/C:/…` which `spawn` cannot execute.
+  const here = dirname(fileURLToPath(import.meta.url));
+  // here = <pkg>/dist/core (built) or <pkg>/src/core (tsx dev).
+  return resolvePath(here, '..', '..', 'scripts', 'mock-codex-app-server.mjs');
+}
+
+// CEZ_DRY_RUN=1 swaps in the bundled mock (see .ai/specs/2026-08-24-codex-dry-run-mock.md) so a
+// dry run never spends real codex quota, matching the mock tiers ClaudeCliRunner and PiRunner
+// already have. CEZ_CODEX_BIN stays above the mock so an operator can still force a real codex.
 export function resolveCodexExecutable(override?: string): string {
-  return override ?? process.env.CEZ_CODEX_BIN ?? 'codex';
+  return override ?? process.env.CEZ_CODEX_BIN ?? (process.env.CEZ_DRY_RUN === '1' ? mockCodexPath() : 'codex');
 }
 
 export function buildCodexAppServerEnv(extraEnv?: Record<string, string>): NodeJS.ProcessEnv {

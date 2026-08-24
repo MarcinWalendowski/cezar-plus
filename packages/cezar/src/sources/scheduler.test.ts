@@ -264,12 +264,16 @@ describe('WorkspaceSourceScheduler', () => {
         coordinator,
         handle: (): ProjectSourceHandle => ({ projectId: 'p', dataDir: root }),
         resolveProvider: () => stubProvider(),
+        // Pin the scheduler's own clock. `vi.waitFor` advances fake time by its polling interval;
+        // that cadence is test-harness machinery, not part of the 60s source-sync contract.
+        now: () => startMs,
       });
       await scheduler.start();
       // No `nextDueAt` recorded yet, so the due entry is scheduled at `at = startMs` (`collectDue`'s
       // `at = nowMs` fallback), a zero-delay timer; let `runOne` actually run and write `nextDueAt`
       // in its `finally`.
       await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(store.state('conn-1')?.nextDueAt).toBeDefined());
       const nextDueAt = store.state('conn-1')?.nextDueAt;
       expect(nextDueAt).toBeDefined();
       // Exact, not a loose ">": `writeNextDueAt` computes `nowMs + intervalSeconds * 1000` off the
@@ -277,18 +281,8 @@ describe('WorkspaceSourceScheduler', () => {
       // scheduled time) — proving the 60s interval drove the computed next-run time, rather than
       // the pre-existing 300s (or 900s default) surviving somewhere behind a floor check that only
       // gated validation.
-      // A ±5ms window, NOT exact equality. `advanceTimersByTimeAsync(1)` moves the virtual clock
-      // by 1ms while `runOne` is in flight, so whether `writeNextDueAt` reads `startMs` or
-      // `startMs + 1` depends on async continuation ordering. That is a real 1ms race: this
-      // assertion failed once on the production box and passed on five consecutive local runs —
-      // the signature of a load-sensitive flake, not of a broken scheduler.
-      //
-      // The window does not weaken what the test proves. The values it exists to exclude are the
-      // pre-existing 300s and the 900s default — 300_000 and 900_000 ms away — so no tolerance
-      // small enough to be written here could ever admit one of them.
       const actualNextDue = Date.parse(nextDueAt!);
-      expect(actualNextDue).toBeGreaterThanOrEqual(startMs + 60_000);
-      expect(actualNextDue).toBeLessThanOrEqual(startMs + 60_000 + 5);
+      expect(actualNextDue).toBe(startMs + 60_000);
       scheduler.stop();
     } finally {
       vi.useRealTimers();

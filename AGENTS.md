@@ -370,7 +370,32 @@ files.
    above: point `TMPDIR`/`TMP`/`TEMP` at `/tmp`, which is a tmpfs outside every repo here. Note
    CI never sees this — `ubuntu-latest` has a plain `/tmp` — so it is purely a local-agent trap.
 
-5. **`npm run test:package` fails 1/15 under the run broker, and it predates your branch.** Case
+5. **CORRECTED 2026-08-23 by `.ai/specs/2026-08-23-headless-run-drains-event-loop.md`: the
+   package suite now has 18 cases, and the named dry-run workflow case is eighth. The prior
+   broker timer fix closed one step-scoped drain window, but a multi-step headless run still had
+   no run-lifetime handle across hand-offs. The original entry remains below.**
+   **CORRECTED A THIRD TIME 2026-08-24 by `.ai/specs/2026-08-24-codex-dry-run-mock.md` (commit
+   `03a16af3`, reconciled with a parallel session's independent fix at merge commit `c25d8ee5`,
+   pushed to `origin/main`): this case, and the whole trap, is now PAST TENSE.** `npm run
+   test:package` is green: **25/25**, case count grown again since the correction below was
+   written. Fixing "this one means shipping a codex app-server mock in `scripts/`" is done: it
+   ships at `packages/cezar/scripts/mock-codex-app-server.mjs` (moved via `git mv` from
+   `src/core/__fixtures__/codex/`, which keeps its other 28 fixtures). `resolveCodexExecutable()`
+   now has the same three-tier `CEZ_DRY_RUN` resolution the Claude and pi runners already had, so
+   `CEZ_DRY_RUN=1` no longer spawns a real, quota-billed `codex` CLI. If this case is red again,
+   that is new information, not a re-confirmation of either correction below.
+   **CORRECTED AGAIN 2026-08-24 (measured, both on this branch and on clean `origin/main`
+   `c328ec06`): the case is still red at `# pass 17 / # fail 1`, but the symptom below is no
+   longer what you will see.** It no longer stalls or exits 0. It fails fast with
+   `You've hit your usage limit … try again at Aug 31st, 2026`, because
+   `resolveCodexExecutable()` (`src/core/codex-app-server-transport.ts:20`) has **no
+   `CEZ_DRY_RUN` branch** where the Claude runner does (`src/core/claude-cli-runner.ts:137`), so
+   the ten-stage default workflow's codex-pinned `review-spec` step **spawns the real `codex`
+   CLI even under `CEZ_DRY_RUN=1`**. Do not read this red as the liveness bug: that one is
+   closed and measured (single-handle probe windows went 15 to 1 against unfixed `main`). Fixing
+   this one means shipping a codex app-server mock in `scripts/`; the only one that exists today
+   is a test fixture at `src/core/__fixtures__/codex/mock-codex-app-server.mjs`.
+   **`npm run test:package` fails 1/15 under the run broker, and it predates your branch.** Case
    5 (`packages/cezar/test/e2e/package-cli.test.ts:86`, "the release tarball installs and runs the
    dry-run CLI workflow") stalls at step 1 ("Gather the record") with the run status stuck
    `running` and the CLI exiting 0. Reproduces IDENTICALLY at clean HEAD — this predates any

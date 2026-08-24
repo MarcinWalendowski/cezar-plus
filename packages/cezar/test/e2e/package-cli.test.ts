@@ -11,7 +11,7 @@ const execFile = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
-test('the release tarball installs and runs the dry-run CLI workflow', { timeout: 120_000 }, async () => {
+test('the release tarball installs and runs the dry-run CLI workflow', { timeout: 240_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'cezar-package-e2e-'));
 
   try {
@@ -30,7 +30,13 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     assert.ok(record, 'npm pack should describe the generated tarball');
 
     const packagedPaths = new Set(record.files.map((file) => file.path));
-    for (const requiredPath of ['dist/index.js', 'web/dist/index.html', 'scripts/mock-claude.mjs', 'README.md']) {
+    for (const requiredPath of [
+      'dist/index.js',
+      'web/dist/index.html',
+      'scripts/mock-claude.mjs',
+      'scripts/mock-codex-app-server.mjs',
+      'README.md',
+    ]) {
       assert.ok(packagedPaths.has(requiredPath), `release tarball should contain ${requiredPath}`);
     }
     assert.equal(packagedPaths.has('src/index.ts'), false, 'release tarball should not contain TypeScript sources');
@@ -77,10 +83,12 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     // server.json) to a temp dir — booting the real CLI must never touch the
     // developer's real ~/.cezar.
     const cezHome = join(root, 'cez-home');
+    // The eight-step workflow measured 20.6s on an idle box. Keep enough margin for npm pack,
+    // installation, and a loaded gate host without hiding an event-loop liveness failure.
     const run = await execFile(process.execPath, [cliPath, 'run', 'mock:done', '--repo', fixtureRepo], {
       cwd: consumerDir,
       env: { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: cezHome },
-      timeout: 60_000,
+      timeout: 120_000,
       maxBuffer: 10 * 1024 * 1024,
     });
     assert.match(run.stdout, /run (done|review)/);

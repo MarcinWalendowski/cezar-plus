@@ -21,6 +21,7 @@ import { CodexAppServerRunner } from './codex-app-server-runner.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, '__fixtures__', 'codex');
+const SCRIPTS = join(HERE, '..', '..', 'scripts');
 
 /** Replay a fixture exactly as the runner drives the mapper: every parsed
  *  JSONL frame is folded in order, unparseable lines are skipped. (The
@@ -819,7 +820,7 @@ describe('mapCodexNotification edge cases', () => {
 });
 
 describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)', () => {
-  const mockBin = join(FIXTURES, 'mock-codex-app-server.mjs');
+  const mockBin = join(SCRIPTS, 'mock-codex-app-server.mjs');
 
   it('emits v2 events through opts.onUiEvent while v1 events keep flowing', async () => {
     const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });

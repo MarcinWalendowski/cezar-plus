@@ -424,7 +424,7 @@ describe('out-of-quota fallback — a resume pinned to a now-held account', () =
     // Codex doesn't gate on `CEZ_DRY_RUN` (only claude-cli-runner does) — it always shells out to
     // whatever `CEZ_CODEX_BIN` names, `codex` by default. The reroute here can land on codex, so
     // this suite needs its own mock too, same fixture `run.test.ts`'s codex tests use.
-    process.env.CEZ_CODEX_BIN = join(import.meta.dirname, '../core/__fixtures__/codex/mock-codex-app-server.mjs');
+    process.env.CEZ_CODEX_BIN = join(import.meta.dirname, '../../scripts/mock-codex-app-server.mjs');
     home = mkdtempSync(join(tmpdir(), 'cez-fallback-resume-home-'));
     process.env.CEZ_HOME = home;
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-fallback-resume-'));
@@ -475,7 +475,7 @@ describe('out-of-quota fallback — a resume pinned to a now-held account', () =
     // exactly this, with no account-aware path of their own — that pairing is the bug.
     const resumed = await manager.continueRun(record.id, { text: 'mock:done' });
     expect(resumed.ok).toBe(true);
-    // `waiting`, not `done`: the codex mock (`__fixtures__/codex/mock-codex-app-server.mjs`) plays
+    // `waiting`, not `done`: the codex mock (`scripts/mock-codex-app-server.mjs`) plays
     // one fixed scripted turn regardless of the prompt text — it has no `mock:done`-style scripting
     // like the claude mock — and a codex session parks at `waiting` after a turn the same way a
     // live one would. The fact under test is which ACCOUNT the continuation reached, not how that
