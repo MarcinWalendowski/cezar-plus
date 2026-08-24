@@ -1,15 +1,15 @@
 # Headless `cez run` exit-0-mid-workflow (task 9bf5030d): bisect the regression and close the duplicate
 
-**Status: AC1, AC2, AND AC3 VERIFIED; INTEGRATED AUTOMATED GATES GREEN, SHIPMENT IN PROGRESS
-(updated 2026-08-24).** The runtime defect this task was filed for is implemented, tested and
-shipped by the sibling task's commit `3e6d1b7e`, and is confirmed fixed on current `origin/main`
-by direct measurement (AC3). The formal `git bisect` this task owed has now been run and names
-`954c6a55` (AC1). AC2 (`test:package` green on main) is **not** satisfied, and cannot be satisfied
-by this task without a code change that is out of its scope: the same e2e case is still red on
-`origin/main` (`c328ec06`), but for a different reason — under `CEZ_DRY_RUN=1` the `spec-to-deploy`
-workflow now routes its `review-spec` step to **codex**, which the dry-run mock does not cover, so
-the packaged release e2e reaches a **real, paid codex account**. See "Authoritative verification"
-below.
+**Status: IMPLEMENTED, TESTED, AND SHIPPED 2026-08-24.** Commit `8219c6f0` ("fix: mock codex in
+dry runs") is pushed to `origin/main`. AC1, AC2, and AC3 are verified, and the integrated automated
+gates are green. The runtime defect this task was filed for was fixed by the sibling task's commit
+`3e6d1b7e` and independently confirmed on current main. The formal `git bisect` names `954c6a55`
+as first bad.
+
+**CORRECTED 2026-08-24 by `8219c6f0`: AC2 is satisfied.** The bundled Codex app-server mock now
+covers `CEZ_DRY_RUN=1`; after integration, the packed-release E2E passed 25/25 without a provider
+call. The earlier current-main diagnosis is retained below as the evidence that motivated the
+scope extension.
 
 ### Scope extension — close AC2 without changing workflow routing
 
@@ -678,6 +678,11 @@ independent confirmation of AC3 from the opposite direction: the same build that
 mid-workflow provider failure loudly (exit 1, record `failed`) also runs the chain to completion
 and exits 0 with the record at `done` — the two outcomes the original defect collapsed into one
 silent exit-0.
+
+**SUPERSEDED 2026-08-24 by the executed and integrated verification above.** The checklist below
+was written before `8219c6f0` shipped. Its future-tense and indicative-only qualifications are
+historical; the final record is the integrated 11,748-test root gate, typecheck, build and pack
+check, and packed-release E2E 25/25 recorded above.
 
 
 1. **AC1** — `git bisect` transcript (Phase 1) names `954c6a55` as first-bad. Cross-check against

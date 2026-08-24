@@ -38,6 +38,11 @@ task `9bf5030d` has now independently confirmed the fix holds on current `origin
 (`c328ec06`): a headless dry run whose provider fails mid-workflow exits **1** with its record at
 `"status": "failed"`, never 0-with-`running`.
 
+**CORRECTED 2026-08-24 by `8219c6f0`:** the separate dry-run Codex escape described below is fixed.
+Under `CEZ_DRY_RUN=1`, Codex now resolves to the bundled app-server mock, and the integrated
+packed-release E2E passed 25/25 without a provider call. The original diagnosis remains below for
+history.
+
 **Separate defect found while confirming this, NOT covered by `3e6d1b7e`:** on current main the
 release e2e case is red again for an unrelated reason — under `CEZ_DRY_RUN=1` the `spec-to-deploy`
 workflow routes its `review-spec` step to **codex**, which the dry-run mock does not cover
