@@ -18,6 +18,23 @@ for anything.**
 > written at ~18:20 UTC and false about ninety minutes later; the probe has now been run four times
 > across five real cutovers. The falsehood was in the status line itself, which is what every
 > reader scans first, so it is amended here rather than appended to.
+
+> **CORRECTED 2026-08-23** — this header previously read *"**SSE continuity remains unmeasured**
+> (the API is behind OIDC; no static token on the box)."* That was true until a credentialed
+> production cutover on 2026-08-23 finally exercised the SSE assertions on real data —
+> `sse.events = 2164`, `sse.reconnects = 1`. See "Status log — 2026-08-23" below for the measured
+> table and its caveat. **This measurement was taken against code on the unmerged branch
+> `cez/3ee1ebf0`** (`.ai/specs/2026-08-22-deploy-e2e-probe-measured-assertions.md`, added to
+> `origin/main` 2026-08-24 as a documentation-only record — its code is not merged), deployed
+> directly to `prod-host` for that one run, not against what the probe on `origin/main` ships
+> today. `origin/main`'s own shipped fix (`83ddbdd2`, see
+> `.ai/specs/2026-08-22-deploy-e2e-probe-vacuous-pass.md`) stops the vacuous PASS but has no
+> `--project` flag, so it still cannot reach this box's project-scoped run routes to reproduce this
+> measurement — that gap stays open until `cez/3ee1ebf0` is unblocked (todo `96a25516`) and merged.
+> This also closes out the "filed as `06a170b8`" / "Filed as `e36b79c0`" / "Filed as `8dc8bf3a`"
+> citations in the status logs below: those three (consolidated onto `8dc8bf3a`, per
+> `specs-547bad8b140a`) are now `done`. The keep-alive/latency defect `6c89af7c` is unaffected and
+> stays open.
 **Date:** 2026-08-19, rewritten 2026-08-20
 **Owner ask:** "ensure that we can deploy/update cezar itself without any disruption."
 **Todo:** `d0386413-8bac-4e2a-88c4-62c37ab87ea1`
@@ -188,6 +205,52 @@ a successful deploy, **not** an actual drain step.
 Release `20260821T183255Z-deadbeef` is left in the ledger marked `healthy: false` — it is the
 deliberately-broken candidate from the bad-build test, kept as evidence. It is unreachable by
 `--rollback` (`previous` is `ad0b5f17`) and `keep: 5` will not prune it yet.
+
+---
+
+## Status log — 2026-08-23: SSE continuity finally measured, and it failed
+
+**This measurement required code that is not on `origin/main`.** The probe's `c:`/`a:` assertions
+used to read `PASS` on zero observations, because `gaps.length === 0` and `[].every(...)` are both
+vacuously true on an empty array — fixed on `origin/main` by `83ddbdd2`
+(`.ai/specs/2026-08-22-deploy-e2e-probe-vacuous-pass.md`). That shipped fix closes
+`06a170b8` / `e36b79c0` / `8dc8bf3a` (consolidated onto `8dc8bf3a`, now `done`), but has no
+`--project` flag, so it cannot reach this box's project-scoped run routes at all. The run below used
+a further fix — session-cookie credential plus `--project` — designed and validated in
+`.ai/specs/2026-08-22-deploy-e2e-probe-measured-assertions.md` (task
+`3ee1ebf0-0d78-4cda-b50d-af6dff78910b`), whose code lives only on the unmerged branch
+`cez/3ee1ebf0`, deployed directly to `prod-host` for this one measurement. That branch remains
+blocked from merging by an unrelated typecheck break (todo `96a25516`); until it lands, this
+measurement cannot be repeated from what the probe on `origin/main` actually ships.
+
+**A credentialed run across a real cutover, for the first time.** Release
+`20260823T194110Z-9c65f9e9` (blue-green), probed with a session cookie and `--project cezar`,
+artifact `.ai/cezar/artifacts/deploy-e2e-20260823194023.json` (retained in that task's worktree):
+
+| assertion | verdict | sample |
+| --- | --- | --- |
+| `b: zero failed HTTP requests` | passed | 544 |
+| `b: zero refused connections` | **failed** | 544 (1 refusal — the same boot-window cost as `6c89af7c` above, not a new mechanism) |
+| `c: no seq gaps` | **failed** | 2164 (94 gaps across the 1 reconnect — measured for the first time; see caveat below) |
+| `c: no seq duplicates` | passed | 2164 |
+| `a: run never left running` | passed | 55 |
+| `a: no interrupted event` | passed | 2174 |
+
+Overall `verdict=failed exit=1`. **This is the fix working, not a regression** — the point of the
+whole prior effort was that this assertion had never actually run before.
+
+**The 94-gap number needs a caveat, not a headline.** Two same-session runs with **zero**
+reconnects (`deploy-e2e-20260823193705.json`: 73 gaps in 2116 events; `deploy-e2e-20260823193836.json`:
+82 gaps in 2147 events) show a comparable raw gap rate to the reconnect run's 94-in-2164, even
+though their `c:` assertions correctly stayed `not-measured` (no reconnect in the window, per the
+probe's own reconnect-gate). So a ~3.5% raw seq-gap rate appears present whether or not a deploy
+cutover happens in that window — it is **not yet established** that the reconnect run's gaps are
+cutover-caused event loss rather than a pre-existing property of how `/api/v1/runs/:id/events`
+allocates `seq` numbers. Tracked as a new, distinct follow-up: todo `8206c158`. **Criterion 2's SSE
+half is therefore measured, not clean** — the assertion can now fail on real data, which is the
+criterion this whole line of work exists to prove, but "no seq gaps" itself does not yet hold, for
+a reason that isn't pinned down, and the fix that produced this measurement is itself not yet
+shipped to `origin/main`.
 
 ---
 
@@ -769,15 +832,44 @@ script that runs the continuous client of step 2 and evaluates assertions (a), (
 deliberately **not** part of cezar and imports nothing from it: it has to keep measuring while the
 cezar it is measuring is replaced, so being inside that process would make it the first casualty.
 
+**CORRECTED 2026-08-24 — the block below previously ran unauthenticated against the public edge
+and named a `npm run lint` gate that does not exist.** This box terminates OIDC auth
+(`CEZ_AUTH=oidc`); `/runs` and `/events` 401 without a session credential, which is why the SSE
+half went unmeasured for so long (see "Status log — 2026-08-23" above). `origin/main`'s shipped
+probe (`83ddbdd2`) accepts a `cookie` header for this — read an unexpired session id out of
+`<CEZ_HOME>/identity/identity.json` on the box itself, no browser round trip needed:
+
 ```bash
+# 0. read an unexpired session id already on the box (no new mechanism; reads what OIDC login minted)
+SESSION_ID=$(node -e '
+  const fs = require("fs");
+  const path = (process.env.CEZ_HOME || require("os").homedir() + "/.cezar") + "/identity/identity.json";
+  const store = JSON.parse(fs.readFileSync(path, "utf8"));
+  const now = Date.now();
+  const live = (store.sessions || []).filter(s => new Date(s.expiresAt).getTime() > now);
+  if (!live.length) { console.error("no unexpired session in " + path); process.exit(1); }
+  live.sort((a, b) => new Date(b.expiresAt) - new Date(a.expiresAt));
+  console.log(live[0].id);
+')
 # 1. start a long-running agent task and note its run id
-# 2. start the probe (runs for --seconds, exits non-zero if any assertion fails)
+# 2. start the probe (runs for --seconds; exit 0 = passed, 1 = a real failure)
 node packages/cezar/scripts/deploy-e2e-probe.mjs \
-     --base https://cockpit.example.com --run <runId> --seconds 180 \
+     --base http://127.0.0.1:4321 --run <runId> --seconds 180 \
+     --header "cookie: cez_session=$SESSION_ID" \
      --out .ai/cezar/artifacts/deploy-e2e-$(date -u +%Y%m%dT%H%M%SZ).json
 # 3. from INSIDE the cockpit, in another task:
 cezar server-deploy --strategy=blue-green --follow
 ```
+
+Loopback (`http://127.0.0.1:4321`), not the public edge (`https://cockpit.example.com`): the edge
+sits behind Cloudflare Access, a separate perimeter from this session cookie, and every artifact on
+record was measured over loopback. **`--project <id>` does not exist on this shipped probe** — it
+still calls the unscoped `/api/v1/runs/:id`, which 404s on this box (it boots in workspace mode;
+runs live at `/api/v1/p/<project>/runs/:id`). The probe correctly reports `NOT_MEASURED` rather than
+a vacuous `PASS` when that happens, but cannot collect real SSE data until the `--project` fix on
+unmerged branch `cez/3ee1ebf0` lands (see "Status log — 2026-08-23" above, and todo `96a25516`).
+`$SESSION_ID` is a live user's real credential — pass it only via `--header`/the env var above,
+never paste it into a log line, this spec, or a `cezar todo`/knowledge entry.
 
 It reports `gapMs` (max client-observed latency across the swap — the number the spec names), the
 poller's failure and refusal counts, the SSE `seq` gaps and duplicates, whether a `reload` frame
@@ -787,9 +879,11 @@ release whose `/api/v1/ready` returns 503; both are covered as unit branches in
 `server-install/release-deploy.test.ts`, and the on-box repeat is what promotes them from covered
 to verified.
 
-**Gates:** `npm run typecheck`, `npm run lint`, `npm run test` green before deploy — necessary,
-not sufficient. Until the E2E above has actually run on the box, this ships as **QA Needed**, not
-Done.
+**Gates:** `npm run typecheck`, `npm run test` green before deploy — necessary, not sufficient.
+There is no `npm run lint` script in this repo (root and `packages/cezar/package.json` both
+checked; neither defines one, and no ESLint/Biome/Prettier config exists anywhere in the tree) —
+this line previously named one as a gate, which was never actually runnable. Until the E2E above
+has actually run on the box, this ships as **QA Needed**, not Done.
 
 ---
 

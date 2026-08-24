@@ -97,7 +97,7 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
   const canPush = (allowlist: string[] | undefined) =>
     (allowlist ?? []).some((entry) => 'git push'.startsWith(entry.trim()));
 
-  it('is the eight-step context → spec → review → implement → tests → push → document → deploy chain', () => {
+  it('is the nine-step context → spec → review → implement → tests → push → merge → document → deploy chain', () => {
     expect(SPEC_TO_DEPLOY_WORKFLOW.name).toBe('spec-to-deploy');
     expect(SPEC_TO_DEPLOY_WORKFLOW.source).toBe('built-in');
     // Grew from six to eight on 2026-08-20 (spec
@@ -110,6 +110,7 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
       'implement',
       'run-tests',
       'commit-push',
+      'merge',
       'document',
       'deploy',
     ]);
@@ -188,16 +189,17 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     expect(models).toEqual([
       ['context', 'sonnet'],
       ['spec', 'opus'],
-      ['review-spec', 'opus'],
+      ['review-spec', 'gpt-5.6-sol'],
       ['implement', 'sonnet'],
       ['run-tests', 'sonnet'],
       ['commit-push', 'sonnet'],
+      ['merge', 'sonnet'],
       ['document', 'sonnet'],
       ['deploy', 'sonnet'],
     ]);
     // The asymmetry itself, stated from the other side: opus is on exactly the two judgement
     // steps, and no step is left unpinned to fall through to the composer's pick.
-    expect(models.filter(([, m]) => m === 'opus').map(([id]) => id)).toEqual(['spec', 'review-spec']);
+    expect(models.filter(([, m]) => m === 'opus').map(([id]) => id)).toEqual(['spec']);
     expect(models.filter(([, m]) => !m)).toEqual([]);
   });
 
@@ -212,11 +214,11 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
    * ones the run's own runner is allowed to choose ("the rest can be load balanced by codex or
    * claude sonnet"). A stray runner pin there would quietly disable that.
    */
-  it('pins the runner on the two opus steps, and only there', () => {
+  it('pins the review runner and leaves construction steps load-balanced', () => {
     const runners = SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => [s.id, s.runner] as const);
     expect(runners.filter(([, r]) => r !== undefined)).toEqual([
       ['spec', 'claude'],
-      ['review-spec', 'claude'],
+      ['review-spec', 'codex'],
     ]);
     // Count-anchored, so a renamed or dropped step list cannot make this vacuous.
     expect(runners.filter(([, r]) => r === undefined).map(([id]) => id)).toEqual([
@@ -224,6 +226,7 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
       'implement',
       'run-tests',
       'commit-push',
+      'merge',
       'document',
       'deploy',
     ]);
@@ -261,10 +264,11 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     expect(efforts).toEqual([
       ['context', undefined],
       ['spec', undefined],
-      ['review-spec', undefined],
+      ['review-spec', 'xhigh'],
       ['implement', undefined],
       ['run-tests', 'medium'],
       ['commit-push', undefined],
+      ['merge', undefined],
       ['document', undefined],
       ['deploy', undefined],
     ]);
@@ -294,7 +298,7 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     }
     // Floor: a loop over an emptied or renamed step list would otherwise assert nothing at all.
     expect(checked).toEqual(SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => s.id));
-    expect(checked.length).toBe(8);
+    expect(checked.length).toBe(9);
   });
 
   it('the record-reading step cannot reach a shell beyond kb + read-only git', () => {
@@ -627,11 +631,17 @@ describe('SPEC_TO_DEPLOY_WORKFLOW steps are green only when verified', () => {
   const step = (id: string) => SPEC_TO_DEPLOY_WORKFLOW.steps.find((s) => s.id === id);
 
   it('gates commit-push on everything actually being committed', () => {
-    expect(step('commit-push')?.verify).toEqual({ builtin: 'everything-committed', max: 1 });
+    expect(step('commit-push')?.verify).toEqual([
+      { builtin: 'everything-committed', max: 1 },
+      { builtin: 'tested-revision-shipped', max: 1 },
+    ]);
   });
 
   it('gates document on the same thing — an uncommitted record is not a record', () => {
-    expect(step('document')?.verify).toEqual({ builtin: 'everything-committed', max: 1 });
+    expect(step('document')?.verify).toEqual([
+      { builtin: 'everything-committed', max: 1 },
+      { builtin: 'merged-into-base', max: 1 },
+    ]);
   });
 
   it('gates deploy on ALL services being deployed, not merely on the step ending', () => {
@@ -650,9 +660,10 @@ describe('SPEC_TO_DEPLOY_WORKFLOW steps are green only when verified', () => {
   it('every declared post-condition names a builtin the runner can actually evaluate', () => {
     // A `verify` naming an unknown builtin is RED at runtime, which would fail the default
     // workflow for everyone. Catch a typo here instead.
-    const known = new Set(['everything-committed', 'all-services-deployed']);
+    const known = new Set(['everything-committed', 'all-services-deployed', 'tested-revision-shipped', 'merged-into-base']);
     for (const s of SPEC_TO_DEPLOY_WORKFLOW.steps) {
-      if (s.verify?.builtin) expect(known.has(s.verify.builtin)).toBe(true);
+      const entries = s.verify ? (Array.isArray(s.verify) ? s.verify : [s.verify]) : [];
+      for (const entry of entries) if (entry.builtin) expect(known.has(entry.builtin)).toBe(true);
     }
   });
 });
@@ -725,11 +736,22 @@ describe('workflowStepSchema — verify', () => {
 
   it('defaults max to 1, so a failed post-condition always gets one re-run', () => {
     const parsed = workflowStepSchema.parse({ ...base, verify: { builtin: 'everything-committed' } });
-    expect(parsed.verify?.max).toBe(1);
+    expect((Array.isArray(parsed.verify) ? parsed.verify[0] : parsed.verify)?.max).toBe(1);
   });
 
   it('accepts a plain shell post-condition', () => {
     expect(() => workflowStepSchema.parse({ ...base, verify: { command: 'test -f dist/index.js' } })).not.toThrow();
+  });
+
+  it('accepts an ordered list of post-conditions and defaults every max independently', () => {
+    const parsed = workflowStepSchema.parse({
+      ...base,
+      verify: [{ builtin: 'everything-committed' }, { command: 'true', max: 2 }],
+    });
+    expect(parsed.verify).toEqual([
+      { builtin: 'everything-committed', max: 1 },
+      { command: 'true', max: 2 },
+    ]);
   });
 
   it('rejects a verify that names both a builtin and a command', () => {
@@ -829,21 +851,22 @@ describe('per-step model and effort, per runner', () => {
         // `spec` and `review-spec` pin `runner: 'claude'`, so they never reach a codex backend at
         // all — owner instruction 2026-08-22, "writing spec + spec review should be by opus
         // always". They keep the Claude pair even when asked about codex.
-        spec: { model: 'opus', effort: undefined },
-        'review-spec': { model: 'opus', effort: undefined },
+        spec: { model: 'gpt-5.6-sol', effort: 'medium' },
+        'review-spec': { model: 'gpt-5.6-sol', effort: 'xhigh' },
         implement: { model: 'gpt-5.6-luna', effort: 'xhigh' },
         'run-tests': { model: 'gpt-5.6-luna', effort: 'medium' },
         'commit-push': { model: 'gpt-5.6-luna', effort: 'medium' },
+        merge: { model: 'gpt-5.6-luna', effort: 'medium' },
         document: { model: 'gpt-5.6-luna', effort: 'high' },
         deploy: { model: 'gpt-5.6-luna', effort: 'medium' },
       });
     });
 
-    it('keeps the two judgement steps pinned to claude, which is what makes them opus', () => {
-      for (const id of ['spec', 'review-spec']) {
-        expect(stepOf(id).runner, `${id} must pin the runner`).toBe('claude');
-        expect(stepOf(id).byRunner, `${id} must not carry a codex pin`).toBeUndefined();
-      }
+    it('pins spec to Claude fallback and review to Codex SOL', () => {
+      expect(stepOf('spec').runner).toBe('claude');
+      expect(stepOf('spec').byRunner?.codex).toEqual({ model: 'gpt-5.6-sol', effort: 'medium' });
+      expect(stepOf('review-spec').runner).toBe('codex');
+      expect(stepOf('review-spec').byRunner?.claude).toEqual({ model: 'opus', effort: 'xhigh' });
     });
 
     it('every codex model it names is one the picker offers', () => {

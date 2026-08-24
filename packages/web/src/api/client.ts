@@ -1489,6 +1489,26 @@ export async function requestRunChanges(id: string, notes: string): Promise<unkn
   )
 }
 
+export async function resolveRunHandoff(id: string, note?: string): Promise<unknown> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].handoff.resolve.$post({
+      param: { projectId: queryScope(), id: encodeURIComponent(id) },
+      json: note ? { note } : {},
+    }),
+    runPath(id, '/handoff/resolve'),
+  )
+}
+
+export async function skipRunHandoff(id: string, note: string): Promise<unknown> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].handoff.skip.$post({
+      param: { projectId: queryScope(), id: encodeURIComponent(id) },
+      json: { note },
+    }),
+    runPath(id, '/handoff/skip'),
+  )
+}
+
 export async function continueRun(id: string, opts: ContinueOptions = {}): Promise<ContinueResponse> {
   const body = {
     ...(opts.text !== undefined ? { text: opts.text } : {}),

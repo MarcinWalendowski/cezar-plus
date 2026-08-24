@@ -8,9 +8,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DEPLOY_TARGETS_FILE,
   allServicesDeployed,
+  deriveBaseBranch,
   deployTargetsSchema,
   evaluatePostcondition,
   everythingCommitted,
+  mergedIntoBase,
+  testedRevisionShipped,
 } from './postconditions.ts';
 
 const run = promisify(execFile);
@@ -39,6 +42,11 @@ const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 
 async function git(cwd: string, args: string[]): Promise<void> {
   await run('git', [...GIT_ID, ...args], { cwd });
+}
+
+async function gitText(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
+  const result = await run('git', [...GIT_ID, ...args], { cwd, env });
+  return result.stdout.trim();
 }
 
 describe('everything-committed', () => {
@@ -185,7 +193,7 @@ describe('all-services-deployed', () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
-  function declare(targets: Array<{ name: string; probe: string }>): void {
+  function declare(targets: Array<{ name: string; probe: string; manual?: boolean; manualReason?: string }>): void {
     writeFileSync(join(repo, DEPLOY_TARGETS_FILE), JSON.stringify({ targets }));
   }
 
@@ -271,6 +279,130 @@ describe('all-services-deployed', () => {
     declare([{ name: 'cwd', probe: 'test -f marker.txt' }]);
 
     await expect(allServicesDeployed({ cwd: repo })).resolves.toMatchObject({ ok: true });
+  });
+
+  it('returns a manual deployment handoff for a failed manual target', async () => {
+    declare([{ name: 'cezar service', probe: 'false', manual: true, manualReason: 'activate it by hand' }]);
+    const result = await allServicesDeployed({ cwd: repo });
+    expect(result.ok).toBe(false);
+    expect(result.handoff).toEqual({ kind: 'manual-deploy', reason: expect.any(String), targets: ['cezar service'] });
+    expect(result.detail).toContain('manual deployment required');
+    expect(result.handoff?.reason).toContain('activate it by hand');
+  });
+});
+
+describe('tested-revision-shipped', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = mkdtempSync(join(tmpdir(), 'cez-postcond-attestation-'));
+    await git(repo, ['init', '-b', 'main']);
+    writeFileSync(join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, ['add', '.']);
+    await git(repo, ['commit', '-m', 'seed']);
+  });
+
+  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  it('allows record-only changes after the tested tree', async () => {
+    const temp = mkdtempSync(join(tmpdir(), 'cez-attestation-index-'));
+    try {
+      const env = { ...process.env, GIT_INDEX_FILE: join(temp, 'index') };
+      await gitText(repo, ['add', '-A'], env);
+      const treeSha = await gitText(repo, ['write-tree'], env);
+      mkdirSync(join(repo, '.ai', 'specs'), { recursive: true });
+      writeFileSync(join(repo, '.ai', 'specs', 'record.md'), 'record\n');
+      await expect(
+        testedRevisionShipped({
+          cwd: repo,
+          stepId: 'commit-push',
+          attestation: { stepId: 'run-tests', treeSha, at: new Date().toISOString() },
+        }),
+      ).resolves.toMatchObject({ ok: true });
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a source change after the tested tree', async () => {
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'change.ts'), 'export const changed = false;\n');
+    await git(repo, ['add', '.']);
+    await git(repo, ['commit', '-m', 'source']);
+    const temp = mkdtempSync(join(tmpdir(), 'cez-attestation-index-'));
+    try {
+      const env = { ...process.env, GIT_INDEX_FILE: join(temp, 'index') };
+      await gitText(repo, ['add', '-A'], env);
+      const treeSha = await gitText(repo, ['write-tree'], env);
+      writeFileSync(join(repo, 'src', 'change.ts'), 'export const changed = true;\n');
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'changed source']);
+      const result = await testedRevisionShipped({
+        cwd: repo,
+        stepId: 'commit-push',
+        attestation: { stepId: 'run-tests', treeSha, at: new Date().toISOString() },
+      });
+      expect(result.ok).toBe(false);
+      expect(result.detail).toContain('src/change.ts');
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when an attested tree cannot be resolved', async () => {
+    await expect(
+      testedRevisionShipped({
+        cwd: repo,
+        stepId: 'commit-push',
+        attestation: { stepId: 'run-tests', treeSha: 'deadbeef', at: new Date().toISOString() },
+      }),
+    ).resolves.toMatchObject({ ok: false });
+  });
+});
+
+describe('merge postconditions', () => {
+  it('defaults a missing remote default to main and strips origin prefixes and SHA refs', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'cez-postcond-base-'));
+    try {
+      await git(repo, ['init', '-b', 'main']);
+      expect(await deriveBaseBranch(repo, 'origin/develop')).toBe('develop');
+      expect(await deriveBaseBranch(repo, '0123456789abcdef0123456789abcdef01234567', 'feature')).toBe('feature');
+      expect(await deriveBaseBranch(repo)).toBe('main');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('treats automatic merge disabled as a green manual landing decision', async () => {
+    const result = await mergedIntoBase({ cwd: process.cwd(), autoMerge: false });
+    expect(result).toMatchObject({ ok: true });
+    expect(result.detail).toContain('manual landing');
+  });
+
+  it('requests a manual merge when an opted-in merge did not reach the remote base', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'cez-postcond-merge-handoff-'));
+    const remote = mkdtempSync(join(tmpdir(), 'cez-postcond-merge-remote-'));
+    try {
+      await git(repo, ['init', '-b', 'main']);
+      writeFileSync(join(repo, 'seed.txt'), 'seed\n');
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'seed']);
+      await git(remote, ['init', '--bare', '-b', 'main']);
+      await git(repo, ['remote', 'add', 'origin', remote]);
+      await git(repo, ['push', '-u', 'origin', 'main']);
+      writeFileSync(join(repo, 'feature.txt'), 'feature\n');
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'feature']);
+
+      const result = await mergedIntoBase({ cwd: repo, autoMerge: true, baseBranch: 'main' });
+
+      expect(result.ok).toBe(false);
+      expect(result.handoff).toMatchObject({ kind: 'manual-merge' });
+      expect(result.detail).toContain('manual merge required');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(remote, { recursive: true, force: true });
+    }
   });
 });
 

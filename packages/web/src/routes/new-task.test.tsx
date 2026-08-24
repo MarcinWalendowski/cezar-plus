@@ -167,6 +167,7 @@ const CONFIG: ConfigResponse = {
   worktreeRetention: 10,
   liveTitleUpdates: null,
   reviewGate: null,
+  autoMerge: null,
   inherited: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
   overridden: [],
   minApprovers: null,

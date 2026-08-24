@@ -92,14 +92,41 @@ export const workflowStepDefSchema = z
      *  `src/workflows/types.ts`, `max` default included; the run record persists a workflow def,
      *  and `contract-parity.workflows.test.ts` fails the typecheck if the two drift. */
     verify: z
-      .object({
-        builtin: z.enum(['everything-committed', 'all-services-deployed']).optional(),
-        command: z.string().min(1).optional(),
-        max: z.number().int().nonnegative().default(1),
-      })
-      .refine((v) => Boolean(v.builtin) !== Boolean(v.command), {
-        message: "a step's verify names either a builtin or a command, not both",
-      })
+      .union([
+        z
+          .object({
+            builtin: z.enum([
+              'everything-committed',
+              'all-services-deployed',
+              'tested-revision-shipped',
+              'merged-into-base',
+            ]).optional(),
+            command: z.string().min(1).optional(),
+            max: z.number().int().nonnegative().default(1),
+          })
+          .refine((v) => Boolean(v.builtin) !== Boolean(v.command), {
+            message: "a step's verify names either a builtin or a command, not both",
+          }),
+        z
+          .array(
+            z
+              .object({
+                builtin: z.enum([
+                  'everything-committed',
+                  'all-services-deployed',
+                  'tested-revision-shipped',
+                  'merged-into-base',
+                ]).optional(),
+                command: z.string().min(1).optional(),
+                max: z.number().int().nonnegative().default(1),
+              })
+              .refine((v) => Boolean(v.builtin) !== Boolean(v.command), {
+                message: "a step's verify names either a builtin or a command, not both",
+              }),
+          )
+          .min(1)
+          .max(4),
+      ])
       .optional(),
   })
   .refine((s) => Boolean(s.command) !== Boolean(s.prompt ?? s.skill), {

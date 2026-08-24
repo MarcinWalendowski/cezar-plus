@@ -1141,6 +1141,8 @@ function approverOf(c: Context<ProjectApiEnv>): string {
 
 const approveRunSchema = z.object({ note: z.string().max(2000).optional() });
 const requestChangesSchema = z.object({ notes: z.string().trim().min(1).max(4000) });
+const handoffResolveSchema = z.object({ by: z.string().trim().max(200).optional(), note: z.string().max(2000).optional() });
+const handoffSkipSchema = z.object({ by: z.string().trim().max(200).optional(), note: z.string().trim().min(1).max(2000) });
 
 const gitCommitSchema = z.object({
   message: z.string().trim().min(1, 'must not be empty').max(5_000),
@@ -5227,6 +5229,26 @@ export function createApp(deps: ServerDeps) {
       return c.json({ run: store.getRun(id) });
     })
 
+    .post('/runs/:id/handoff/resolve', jsonZodValidator(handoffResolveSchema, { absent: {} }), async (c) => {
+      const { store, manager } = c.get('project');
+      const id = c.req.param('id');
+      if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
+      const body = c.req.valid('json');
+      const result = await manager.resolveHandoff(id, body.by ?? approverOf(c), body.note);
+      if (!result.ok) return c.json({ error: result.error ?? 'cannot resolve handoff' }, 409);
+      return c.json({ resolved: result.resolved ?? false, verdict: result.verdict ?? '' });
+    })
+
+    .post('/runs/:id/handoff/skip', jsonZodValidator(handoffSkipSchema), async (c) => {
+      const { store, manager } = c.get('project');
+      const id = c.req.param('id');
+      if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
+      const body = c.req.valid('json');
+      const result = await manager.skipHandoff(id, body.by ?? approverOf(c), body.note);
+      if (!result.ok) return c.json({ error: result.error ?? 'cannot skip handoff' }, 409);
+      return c.json({ skipped: true });
+    })
+
     // Live-session participation (spec 002): deliver a user message (text +
     // pasted screenshots) into the run's open claude session.
     .post('/runs/:id/messages', jsonZodValidator(messageSchema), async (c) => {
@@ -6722,6 +6744,7 @@ export function createApp(deps: ServerDeps) {
       // Optional review gate (#489): tri-state — null means "no config key, the
       // CEZ_REVIEW_GATE env default (OFF) decides".
       reviewGate: config.reviewGate ?? null,
+      autoMerge: config.autoMerge ?? null,
       // Which TIER answered (`.ai/specs/2026-08-21-one-settings-area.md`). Every field above is
       // still the EFFECTIVE value; these two only say where it came from, so the one Settings area
       // can label a field Inherited or Overridden instead of guessing.
@@ -6783,6 +6806,10 @@ export function createApp(deps: ServerDeps) {
       if (parsed.data.reviewGate !== undefined) {
         if (parsed.data.reviewGate === null) delete raw.reviewGate;
         else raw.reviewGate = parsed.data.reviewGate;
+      }
+      if (parsed.data.autoMerge !== undefined) {
+        if (parsed.data.autoMerge === null) delete raw.autoMerge;
+        else raw.autoMerge = parsed.data.autoMerge;
       }
       if (parsed.data.minApprovers !== undefined) {
         // `null` clears the key so the env (then 0) decides again. An explicit 0 is DIFFERENT and
@@ -6858,6 +6885,7 @@ export function createApp(deps: ServerDeps) {
     // Optional review gate toggle (Settings → Agents, #489): null clears the key
     // back to the env-default behavior (OFF).
     reviewGate: z.boolean().nullable().optional(),
+    autoMerge: z.boolean().nullable().optional(),
     // Human approval gate (Settings → Agents, spec 2026-08-20-split-steps-spec-review-and-
     // approval-gate). null clears the key back to the env default (0 = auto-approved); an
     // explicit 0 is stored, because "auto-approve here whatever the env says" is a real decision.

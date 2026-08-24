@@ -231,6 +231,29 @@ export const pendingApprovalSchema = z.object({
 });
 export type PendingApproval = z.infer<typeof pendingApprovalSchema>;
 
+/** A run paused until a person lands a protected change or deploys a manual target. */
+export const pendingHandoffSchema = z.object({
+  kind: z.enum(['manual-deploy', 'manual-merge']),
+  stepId: z.string(),
+  requestedAt: z.string(),
+  reason: z.string().max(2_000),
+  targets: z.array(z.string()).max(50).optional(),
+  prUrl: z.string().url().max(500).optional(),
+  sha: z.string().max(64).optional(),
+  baseBranch: z.string().max(300).optional(),
+});
+export type PendingHandoff = z.infer<typeof pendingHandoffSchema>;
+
+/** The tree produced by the final green test gate and the commit that shipped it. */
+export const testAttestationSchema = z.object({
+  stepId: z.string(),
+  treeSha: z.string().length(40),
+  headSha: z.string().length(40).optional(),
+  shippedSha: z.string().length(40).optional(),
+  at: z.string(),
+});
+export type TestAttestation = z.infer<typeof testAttestationSchema>;
+
 export const runRecordSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -320,11 +343,13 @@ export const runRecordSchema = z.object({
   /** Set while the run is parked on a human approval gate (spec 2026-08-20, P3); cleared the
    *  moment the gate releases or the chain moves on. Absent on every ungated run. */
   pendingApproval: pendingApprovalSchema.optional(),
+  pendingHandoff: pendingHandoffSchema.optional(),
+  testAttestation: testAttestationSchema.optional(),
   /** `monitoring` while `status === 'running'` and the agent is working on downstream work.
    *  Absent on old runs; cleared on resume/end. */
   activity: runActivitySchema.optional(),
   /** Why an unmarked interactive turn is parked. Additive so older records and clients remain valid. */
-  waitingReason: z.enum(['question', 'report']).optional(),
+  waitingReason: z.enum(['question', 'report', 'handoff']).optional(),
   /** Verbatim trailing question detected in the agent's prose, never synthesized by cezar. */
   waitingQuestion: z.string().max(280).optional().catch(undefined),
   /** Exact ISO-8601 deadline for the next automatic monitoring check. */
@@ -520,7 +545,7 @@ export const runIndexEntrySchema = z.object({
   status: runStatusSchema,
   activity: runActivitySchema.optional(),
   /** Why an unmarked interactive turn is parked. */
-  waitingReason: z.enum(['question', 'report']).optional(),
+  waitingReason: z.enum(['question', 'report', 'handoff']).optional(),
   /** Verbatim trailing question detected in the agent's prose. */
   waitingQuestion: z.string().max(280).optional().catch(undefined),
   /** Why a `review` run stopped, when it was not the ordinary diff-first review gate (#489) —
