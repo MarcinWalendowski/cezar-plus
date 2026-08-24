@@ -1,6 +1,6 @@
 # Backlog Task Composer
 
-**Status:** partial. Implementation and focused tests are complete in the task worktree, but the feature is unshipped and QA Needed. The root gate remains red on catalog C18, and browser runtime E2E was skipped.
+**Status:** implemented, QA needed. The feature landed on `origin/main` at `c406f2fa`; focused tests, typecheck, build, and diff checks passed. The authoritative root, unit, and package gates remain red on reproduced shared drift, browser runtime E2E was skipped because `agent-browser` was unavailable, and production deployment plus live behavior verification remain pending.
 **Date:** 2026-08-22
 **Owner ask:** "allow to add new tasks to backlog without starting it"
 

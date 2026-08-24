@@ -2,8 +2,9 @@
 
 **Status:** implemented, QA needed until the merged-tree gates and runtime E2E pass. Written 2026-08-24 for run `235c9e50-6ac4-4d0b-a96e-55cad81a7908`.
 **Supersedes nothing.** It is the landing plan for `.ai/specs/2026-08-22-backlog-add-without-starting.md`,
-which stays the design record for the feature itself and whose `Status:` line this spec's Phase 5
-updates.
+which stays the design record for the feature itself. Its `Status:` is now implemented, QA needed,
+with landed SHA `c406f2fa`; it must not be called deployed until the browser, full-gate, and
+production verification criteria below pass.
 **Brief:** `.ai/specs/briefs/2026-08-24-backlog-composer-recovery.md` (step 1 of this run).
 
 ## TLDR
@@ -758,8 +759,9 @@ Naming hazard carried by the retained diff and worth keeping: `resolveComposerRu
 
 **Phase 5 record-keeping** (same session as the code, per `CLAUDE.md` §"Project Knowledge & Tasks"):
 
-- Flip `.ai/specs/2026-08-22-backlog-add-without-starting.md`'s `Status:` from *partial / unshipped*
-  to implemented-and-deployed, naming `$LANDED`.
+- Keep `.ai/specs/2026-08-22-backlog-add-without-starting.md`'s `Status:` at implemented, QA needed,
+  naming landed SHA `c406f2fa` and the outstanding failed or skipped verification. Change it to
+  implemented-and-deployed only after V4 through V6 pass.
 - Close todo `d9ebe916-4f0b-4a57-8cb3-608013e8aa60` with the six C18 samples.
 - Corpus changelog entry under `notion-export/`, **then**
   `cd /var/lib/cezar/loki-labs && CEZ_KB=1 cez kb reindex` and grep the slug in
