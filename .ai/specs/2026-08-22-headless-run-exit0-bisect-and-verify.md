@@ -173,9 +173,30 @@ an entire earlier bisect attempt.
   `task-classifier.ts:36` — "the `CEZ_DRY_RUN` mock only exists for claude and pi". Disabling codex
   does not rescue it either: the run then refuses to start at all ("Codex is disabled. Enable it in
   Settings → Agents → Providers.", exit 1, **no run record created**), because the default
-  `spec-to-deploy` workflow now hard-depends on codex. So case 8 is unreachable-green on any
-  machine without a healthy, paid codex quota, and green only at the cost of spending real credits
-  on every release e2e. Closing AC2 therefore requires a **code** change to provider dispatch under
+  `spec-to-deploy` workflow now names codex on `review-spec`.
+
+  **CORRECTED 2026-08-24, later the same day, by a second measurement** (~~So case 8 is
+  unreachable-green on any machine without a healthy, paid codex quota, and green only at the cost
+  of spending real credits on every release e2e.~~): that sentence overstated it. The failure is a
+  **cold-start** artifact, not an absolute. `spec-to-deploy`'s designed degradation — "when every
+  codex account is limited, `review-spec` descends to opus at `xhigh`"
+  (`.ai/specs/2026-08-24-default-workflow-ten-stages.md`, D1) — **does** fire, but only once the
+  limit is recorded in `agent-account-usage.json`. Measured back to back against the same built CLI
+  on `c328ec06`, sharing one `CEZ_HOME`: run 1 (cold) routes `review-spec` to
+  `openai/gpt-5.6-sol`, spends a real codex call to discover the limit, and fails the run; run 2
+  (warm) routes it to **`anthropic/opus`** and the full nine-step chain completes — `run done`,
+  exit 0, `status=done`, every step `done`. The e2e creates a **fresh temp `CEZ_HOME` per case**,
+  so it is always the cold run, and always pays the discovery call.
+
+  **What survives the correction, and is the actual defect:** a `CEZ_DRY_RUN=1` run makes a real
+  call to a real paid provider. That is true regardless of quota state — on a machine with healthy
+  codex quota case 8 *passes*, silently spending codex credits on every release e2e, which is why
+  this was never caught before a rate-limited box ran it. The asymmetry is one line:
+  `claude-cli-runner.ts:136-137` resolves its binary as `CEZ_CLAUDE_BIN ?? (CEZ_DRY_RUN === '1' ?
+  mockClaudePath() : 'claude')`, while `codex-app-server-transport.ts:20` resolves
+  `override ?? CEZ_CODEX_BIN ?? 'codex'` — **no `CEZ_DRY_RUN` branch at all.** The routing itself is
+  deliberate and owner-instructed (D1, 2026-08-24, correcting the 2026-08-22 "spec review by opus
+  always" policy), so the fix belongs on the dry-run boundary, not on the routing. Closing AC2 therefore requires a **code** change to provider dispatch under
   dry run, which is a different defect from this task's and is called out as such rather than
   smuggled into a verification task.
 - **AC3 — SATISFIED, measured on current `origin/main` (`c328ec06`).** A headless dry run now
@@ -502,10 +523,25 @@ not occur. Control, same build, `disabledProviders: ["codex"]`: `Codex is disabl
 Settings → Agents → Providers.`, exit 1, and **no run record is created at all** — which is how we
 know the workflow hard-depends on codex rather than merely preferring it.
 
-**What this does not establish.** Case 8 was never observed green on current main, so there is no
-positive proof that the *rest* of the workflow (steps 4-9, `commit-push`, the postconditions) still
-completes end to end on `c328ec06`; the provider wall is hit at step 3 and everything past it is
-unmeasured. That is a gap in AC2's coverage, not a suspicion of a second defect.
+**Superseded 2026-08-24 by the warm-run measurement below** (~~What this does not establish. Case 8
+was never observed green on current main, so there is no positive proof that the rest of the
+workflow (steps 4-9, `commit-push`, the postconditions) still completes end to end on `c328ec06`;
+the provider wall is hit at step 3 and everything past it is unmeasured.~~) — the gap is now closed
+by measurement, in the affirmative:
+
+```
+RUN 1 (cold CEZ_HOME)   review-spec · model: openai/gpt-5.6-sol  ✗ usage limit → run failed, exit 1
+RUN 2 (warm CEZ_HOME)   review-spec · model: anthropic/opus      → run done, exit 0
+  context:done spec:done review-spec:done implement:done run-tests:done
+  commit-push:done merge:done document:done deploy:done          (13095 tokens)
+```
+
+All nine steps of `spec-to-deploy` complete end to end on `c328ec06` once the codex limit is on
+record. So there is no second defect hiding behind the provider wall, and this is a third,
+independent confirmation of AC3 from the opposite direction: the same build that reports a
+mid-workflow provider failure loudly (exit 1, record `failed`) also runs the chain to completion
+and exits 0 with the record at `done` — the two outcomes the original defect collapsed into one
+silent exit-0.
 
 
 1. **AC1** — `git bisect` transcript (Phase 1) names `954c6a55` as first-bad. Cross-check against
