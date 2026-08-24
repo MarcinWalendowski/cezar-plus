@@ -101,6 +101,46 @@ describe('manual handoff gate', () => {
     expect(store.getRun(id)?.pendingHandoff).toBeUndefined();
   });
 
+  /**
+   * spec `.ai/specs/2026-08-24-manual-deploy-not-a-bug.md` D2b: without this, the card is legible
+   * until the first Resolve press, then reverts to `checked.detail`, the full probe-source report:
+   * exactly the wall of truncated bash this task is named after. `set -u` stands in for "cezar's
+   * own probe source", the cheap marker the spec's own verification step uses.
+   */
+  it('a red Resolve re-persists the concise handoff.reason, not the full probe-source detail', async () => {
+    const id = createRun();
+    const state = { cancelled: false, interrupt: () => undefined };
+    gate().active.set(id, state);
+    const initial: PostconditionResult = {
+      ok: false,
+      detail: 'manual deployment required for cezar service; FAIL cezar service: `set -u\n...probe source...`',
+      handoff: { kind: 'manual-deploy', reason: 'manual deployment required for cezar service: activate it by hand', targets: ['cezar service'] },
+    };
+    const stillRed: PostconditionResult = {
+      ok: false,
+      detail: 'manual deployment required for cezar service; FAIL cezar service: `set -u\n...probe source...`',
+      handoff: {
+        kind: 'manual-deploy',
+        reason: 'manual deployment required for cezar service: still not live, activate it by hand',
+        targets: ['cezar service'],
+      },
+    };
+    const parked = gate().awaitHandoff(id, state, { id: 'deploy' }, () => undefined, initial, async () => stillRed);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const red = await manager.resolveHandoff(id, 'ada');
+    expect(red).toMatchObject({ ok: true, resolved: false });
+
+    const pending = store.getRun(id)?.pendingHandoff;
+    expect(pending?.reason).toBe(stillRed.handoff?.reason);
+    expect(pending?.reason).not.toContain('set -u');
+    expect(pending?.reason?.length).toBeLessThan(2_000);
+
+    // Unpark so the test does not leak a waiting run into the next one.
+    state.interrupt();
+    await parked.catch(() => undefined);
+  });
+
   it('keeps a persisted handoff parked across recovery', async () => {
     const id = createRun();
     store.updateRun(id, {

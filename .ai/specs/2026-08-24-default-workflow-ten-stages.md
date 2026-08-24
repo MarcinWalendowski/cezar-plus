@@ -1,6 +1,6 @@
 # The default workflow becomes ten stages
 
-**Status:** Partial 2026-08-24. Implementation exists in the task worktree. Typecheck and the focused 57-test gate pass, while the full suite has 9 reproduced baseline-failure files and 20 tests; commit and push are blocked, and runtime QA has not run. QA Needed.
+**Status:** Partial 2026-08-24. Implementation exists in the task worktree. Typecheck and the focused 57-test gate pass, while the full suite has 9 reproduced baseline-failure files and 20 tests; commit and push are blocked, and runtime QA has not run. QA Needed. **Note 2026-08-24:** the last item of Phase 5 (the `deploy` step prompt gaining a manual-target refusal) and item 1 of Phase 6 (the `AGENTS.md:7`/`:12` correction) did not land with the rest of this spec; both landed instead in `.ai/specs/2026-08-24-manual-deploy-not-a-bug.md`, which also fixed the handoff-card legibility defect their absence exposed.
 **Date:** 2026-08-24
 **Repo:** `cezar`
 **Brief:** `.ai/specs/briefs/2026-08-24-default-workflow-revision.md` (KB `specs-8512200feb66`)

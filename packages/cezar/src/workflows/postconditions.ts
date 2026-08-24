@@ -338,11 +338,19 @@ export async function allServicesDeployed(ctx: PostconditionContext): Promise<Po
   // here than the wall-clock a parallel fan-out would save.
   const lines: string[] = [];
   const failed: string[] = [];
-  const manualFailed: string[] = [];
+  // The card (handoff.reason) needs each manual target's own probe OUTPUT, not just its name:
+  // that text is otherwise folded into `lines` (source included) and discarded. Carry the target
+  // object itself, not its name: `deployTargetsSchema` has no uniqueness constraint on `name`, so
+  // a name-keyed lookup can cross-render one target's reason onto another's.
+  type ManualFailure = { target: DeployTargets['targets'][number]; outcome: ProbeOutcome };
+  const manualFailed: ManualFailure[] = [];
   for (const target of parsed.targets) {
     const outcome = await runProbe(ctx.cwd, target.probe, ctx.probeTimeoutMs ?? PROBE_TIMEOUT_MS);
     lines.push(`${outcome.ok ? 'OK  ' : 'FAIL'} ${target.name} — \`${target.probe}\`${outcome.ok ? '' : `\n${outcome.output}`}`);
-    if (!outcome.ok) (target.manual ? manualFailed : failed).push(target.name);
+    if (!outcome.ok) {
+      if (target.manual) manualFailed.push({ target, outcome });
+      else failed.push(target.name);
+    }
   }
 
   if (failed.length > 0) {
@@ -352,15 +360,17 @@ export async function allServicesDeployed(ctx: PostconditionContext): Promise<Po
     };
   }
   if (manualFailed.length > 0) {
-    const reasons = parsed.targets
-      .filter((target) => manualFailed.includes(target.name) && target.manualReason)
-      .map((target) => `${target.name}: ${target.manualReason}`)
-      .join('; ');
-    const reason = `manual deployment required for ${manualFailed.join(', ')}${reasons ? ` (${reasons})` : ''}; ${lines.join('\n')}`;
+    const names = manualFailed.map(({ target }) => target.name);
+    const detail = `manual deployment required for ${names.join(', ')}; ${lines.join('\n')}`;
+    // Unlike `detail`, `reason` is what the handoff card renders: no probe SOURCE, and no target
+    // that PASSED. Only the failing manual targets' own name, manualReason and probe OUTPUT.
+    const reason = `manual deployment required for ${names.join(', ')}:\n${manualFailed
+      .map(({ target, outcome }) => `${target.name}${target.manualReason ? `: ${target.manualReason}` : ''}\n${outcome.output}`)
+      .join('\n\n')}`;
     return {
       ok: false,
-      detail: reason,
-      handoff: { kind: 'manual-deploy', reason, targets: manualFailed },
+      detail,
+      handoff: { kind: 'manual-deploy', reason, targets: names },
     };
   }
   return { ok: true, detail: `all ${plural(parsed.targets.length, 'service')} deployed:\n${lines.join('\n')}` };

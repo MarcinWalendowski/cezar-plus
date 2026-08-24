@@ -289,6 +289,65 @@ describe('all-services-deployed', () => {
     expect(result.detail).toContain('manual deployment required');
     expect(result.handoff?.reason).toContain('activate it by hand');
   });
+
+  /**
+   * spec `.ai/specs/2026-08-24-manual-deploy-not-a-bug.md` D2: this is the exact shape that
+   * produced the task the spec fixes, one manual target red and one target green, and it is the
+   * shape a naive fix gets wrong (iterating `parsed.targets` quietly re-admits the passing one).
+   * `handoff.reason` is the card's text; `detail` is the full log and must lose nothing.
+   */
+  it('the manual-deploy handoff.reason names only the failing manual target, not the probe source or a passing target', async () => {
+    declare([
+      {
+        name: 'cezar service (backend)',
+        probe: 'echo "live=9c896e32 head=e38cb619, the running server is NOT serving this HEAD"; exit 1',
+        manual: true,
+        manualReason: 'a person activates cezar, not an agent',
+      },
+      { name: 'cezar UI (web)', probe: 'true', manual: true, manualReason: 'a person activates cezar, not an agent' },
+    ]);
+
+    const result = await allServicesDeployed({ cwd: repo });
+
+    expect(result.ok).toBe(false);
+    expect(result.handoff?.targets).toEqual(['cezar service (backend)']);
+
+    const reason = result.handoff?.reason ?? '';
+    // The failing target's own name, its manualReason and its probe's stdout.
+    expect(reason).toContain('cezar service (backend)');
+    expect(reason).toContain('a person activates cezar, not an agent');
+    expect(reason).toContain('live=9c896e32 head=e38cb619');
+    // The passing target is absent, and neither probe's shell source leaks in.
+    expect(reason).not.toContain('cezar UI (web)');
+    expect(reason).not.toContain('echo "live=9c896e32');
+
+    // `detail` is the full log: both targets, both probe sources, unchanged.
+    expect(result.detail).toContain('cezar service (backend)');
+    expect(result.detail).toContain('cezar UI (web)');
+    expect(result.detail).toContain('echo "live=9c896e32');
+  });
+
+  // Regression test for the truncation that produced the task: cezar's own two real probes, run
+  // through the same manual-deploy shape, must keep `handoff.reason` well under the 2,000-character
+  // slice `awaitHandoff` applies.
+  it('handoff.reason stays under 2000 characters with cezar-sized real probes', async () => {
+    const bigProbe = (label: string) =>
+      [
+        'set -u',
+        `# ${label} probe, sized like cezar's own ~1,400/~1,100 character bash probes.`,
+        ...Array.from({ length: 20 }, (_, i) => `# padding line ${i} to simulate a realistic probe body`),
+        'echo "diagnostic: the running server is NOT serving this HEAD"',
+        'exit 1',
+      ].join('\n');
+    declare([
+      { name: 'cezar service (backend)', probe: bigProbe('backend'), manual: true, manualReason: 'activate it by hand' },
+      { name: 'cezar UI (web)', probe: bigProbe('ui').replace('exit 1', 'exit 0'), manual: true, manualReason: 'activate it by hand' },
+    ]);
+
+    const result = await allServicesDeployed({ cwd: repo });
+
+    expect(result.handoff?.reason.length).toBeLessThan(2_000);
+  });
 });
 
 describe('tested-revision-shipped', () => {
