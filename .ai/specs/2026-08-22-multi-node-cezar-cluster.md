@@ -2344,7 +2344,14 @@ invented; these are the names to use when one lands.
 ## What remains, and what it takes to get this Mac running work
 
 > **HANDOFF STATE — updated 2026-08-24, written to survive a session change.**
-> **NEWEST FIRST: items 31-35 in the nested list below are the most recent and correct two of my
+> **COMMITTED as `9ce77c92`** — the revoke sweep, the wedge fix at both layers, the D harness fix,
+> and every test proven red-then-green. 19 files, +3141/−90. Staged by explicit path (a peer
+> session is live in this checkout); the peer's provider-login work was left untouched. Verified
+> before commit: repo-wide typecheck 0 errors, 871 tests green across 36 files (all of
+> `src/cluster/` plus `cluster-link-activation` and `cluster-routes`). **The BOX gate is still
+> pending and no two-process E2E has ever run — do not read this commit as merge-ready.**
+>
+> **NEWEST FIRST: items 31-36 in the nested list below are the most recent and correct two of my
 > own earlier claims.** Item 31 closes the second standing red as pre-existing; item 32 lists what
 > five session-limit deaths actually left (two of my four claims were false) and records the
 > red-then-green I ran over the survivors; items 33-34 are unreachability + a policy docblock with
