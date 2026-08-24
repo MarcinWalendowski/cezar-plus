@@ -1,24 +1,15 @@
 # A plain turn end must carry its question
 
-**Status:** Implemented in this task's worktree, **verification incomplete**, QA Needed, not Done.
-The 2026-08-24 implement step closed the reviewed store-transition, restart-predicate,
-report-markup, and run-index projection gaps and added their named regressions. No gate or runtime
-E2E was run in that step because the repository requires permission before running anything.
-P1–P5 landed as autosave commits `d47ec1e6` and `116c3ee1`; the latter committed what an earlier
-revision of this line still called "uncommitted follow-ups" (contract, notification precedence,
-dock render, mock verbs, focused tests). **Neither autosave is an ancestor of `origin/main`**, so
-none of this is shipped behaviour. Re-checked against `116c3ee1` on 2026-08-24: `git diff HEAD --
-packages/` is empty, so the tree is exactly those two commits. Every line number cited below was
-re-derived against that tree in this revision, which is what it took to make that claim true — the
-Problem, decision-table and Touch-points sections were still carrying **pre-P2** numbers, and the
-decision table cited two *different* stale numbers for the same expression. One citation is
-deliberately not current, and says so where it appears: "What the user actually sees" describes
-**shipped** behaviour, so it cites `origin/main` (`84fb8237`), where that write still sits inline
-rather than inside `parkPlainEnd`. Green: the focused regressions (6 files,
-365 tests), `npm run typecheck`, the production build and `check-pack`. Not green: the full suite
-(7 failures, all outside the changed files, under a load average of ~52 with 14 concurrent vitest
-processes — contention, re-confirmed red on isolated rerun), and **V8, the runtime E2E, which has
-never run** (agent-browser could not launch). This repo has no `lint` script.
+**Status:** Implemented and pushed to `origin/main` in `d811d34c` on 2026-08-24,
+**verification incomplete**, QA Needed, not Done. The final feature commit includes P1-P5, the
+reviewed store-transition, restart-predicate, report-markup and run-index projection corrections,
+and their named regressions. Green: `npm ci`, `npm run typecheck`, the focused runs-index
+regression (20/20), `npm run test:unit` (44/44), the production build and `check-pack`,
+`npm run test:package` (18/18), both release-package dry runs and `git diff --check`. This repo has
+no `lint` script. The required root `npm test` gate is not green: 10,774 passed, 1 failed and 4
+skipped. The sole failure is the C18 knowledge-catalog host-speed budget, reproduced on clean
+detached baseline `116c3ee1`, so it is not evidence against this feature but still prevents a
+green-gate claim. **V8, the runtime/browser E2E, has never run**, so the feature remains QA Needed.
 
 **CORRECTED 2026-08-24:** the three defects below were open against autosave `116c3ee1`, then were
 implemented in the following implement step. The original review finding remains below as the
@@ -30,6 +21,11 @@ record of what the corrective patch invalidated:
 - **the two new fields are cleared at only some of the sites that clear `activity`** (corrected in
   P2 step 2 — one choke point in the store, not N call sites; the landed code enumerates call sites
   and misses five).
+
+**SUPERSEDED 2026-08-24 by `d811d34c`:** the audit below was true against autosave `116c3ee1`.
+The final feature commit closed the transition-keyed clearing, split recovery predicate and
+report-markup gaps. The original finding remains below as the record of what the corrective patch
+invalidated.
 
 **All three re-confirmed open on 2026-08-24**, by reading the code rather than trusting this list.
 (1) The mid-chain row is a spec-text fix and is applied below. (2) `run.ts:1841` still reads
@@ -762,38 +758,35 @@ Run from the repo root, `/var/lib/cezar/loki-labs/cezar` (or this task's worktre
 `npm run typecheck` and `npm test` (root `package.json` scripts) — **there is no `lint` script in
 this repo**, so do not report one as green.
 
-**What has actually run, as of this revision** (the honest state, since the first draft of this
-section was written before any code existed): the focused regression set is 6 files / 365 tests and
-green, and `npm run typecheck`, the production build and `check-pack` are green. Per V, re-checked
-by grep against the tree rather than carried over from the previous draft, which claimed more
-coverage than exists:
+**What has actually run, as of this revision:** the final gate pass exercised the named feature
+regressions after the corrective patch. `npm run typecheck`, `npm run test:unit`, the production
+build and `check-pack`, `npm run test:package`, both release-package dry runs and the focused
+runs-index regression are green. Per V:
 
 | V | In the tree? |
 |---|---|
 | V1 contract | **yes**: `system-prompt.test.ts`, *"pairs the plain end with CEZ:ASK as a rule, not a bare sanction"*, green |
 | V2 detector unit | **yes**: `core/turn-question.test.ts`, 12 cases, green |
-| V3 record | **partly**: the `report` park (`run.test.ts:1457-1463`) and the `question` park (`:1465-1475`) exist. The reply-clears case exists only at store level (`store.test.ts:315-324`), not through `deliverMessage` |
-| V3a choke point | **implemented, not run in this step**: direct store cases cover transitions, same-status idle park, no-status patch, and explicit replacement |
-| V3b contract summary mirror | **implemented, not run in this step**: both fields are in `runIndexEntrySchema`, the server projection, and the workspace index regression |
-| V4 both twins | **implemented, not run in this step**: twin A and continuation twin cases exist. The manual discrimination mutation is still for the verification step |
-| V5 nudge bounded | **implemented, not run in this step**: one-shot cap, no fabricated user message, upgrade, and autonomous exemption are covered |
+| V3 record | **yes, exercised**: report and question parks plus reply clearing are covered |
+| V3a choke point | **yes, exercised**: direct store cases cover transitions, same-status idle park, no-status patch, and explicit replacement |
+| V3b contract summary mirror | **yes, exercised**: both fields are in `runIndexEntrySchema`, the server projection, and the 20/20 workspace index regression |
+| V4 both twins | **yes, exercised**: twin A and continuation twin cases cover the shared transition |
+| V5 nudge bounded | **yes, exercised**: one-shot cap, no fabricated user message, upgrade, and autonomous exemption are covered |
 | V5a stale-ask precedence | **yes**: `notifications/decider.test.ts:141`, *"a current prose question outranks stale ask text in run.needs-you"*, green |
 | V6 dock | **yes**: `task-thread.test.tsx:241` and `:249`, both directions, green |
-| V7 restart | **implemented, not run in this step**: single-step attention and multi-step chain re-entry cases were added |
-| V2a mock verbs | **no** |
+| V7 restart | **yes, exercised**: single-step attention and multi-step chain re-entry cases cover the split recovery predicates |
+| V2a mock verbs | **yes, exercised**: report, question and sticky ask-on-nudge shapes are explicit |
 | V8 runtime E2E | **no**, never run |
 
-The full suite is red by 7 failures, all outside the files this spec
-touches, under a load average of ~52 with 14 concurrent vitest processes; isolated reruns stayed
-red, so that is contention and it is not evidence either way about this change — it has to be
-re-run on a quiet box before anyone calls the gates green.
+The root suite is red: 10,774 passed, 1 failed and 4 skipped. The sole failure is the C18
+knowledge-catalog host-speed budget, reproduced on clean detached baseline `116c3ee1`. It is not
+evidence against this feature, but the required full gate is still not green.
 
 Per repo doctrine, gates green is necessary and not sufficient: **V8 is what makes this Done rather
 than QA Needed, and V8 has never run.**
 
-Every V below also has to be re-run after the three corrections in this revision land (P2 step 2b's
-choke point, P5's split predicate, P3's report-path markup) — the current passes were against the
-uncorrected code. Two of them need new cases, named in V3 and V7.
+The named automated regressions were run after the three corrections landed. V8 remains the
+unexecuted runtime gate.
 
 **V1 — the contract change is pinned (P1).** `npm test -- system-prompt`. The assertions go in
 `packages/cezar/src/workflows/system-prompt.test.ts:163-170` — the existing `describe('handoff
