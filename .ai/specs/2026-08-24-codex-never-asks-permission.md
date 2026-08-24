@@ -1,6 +1,6 @@
 # Codex never asks for permission: cezar answers the approval requests it currently ignores
 
-**Status:** Implemented and runtime verified (release gate blocked by existing unrelated test failures)
+**Status:** Implemented, runtime verified, and deployed
 **Date:** 2026-08-24
 **Repo:** `cezar`
 **Owner request:** "when running codex apply similar option as in claude --dangerously bypass
@@ -389,9 +389,12 @@ denial and exit 6, and Codex handled the denial and completed. Both run records 
 held in these runs and the live responder branch was not exercised.
 
 Focused tests passed 95 of 95. Typecheck, `test:unit` (53 of 53), build, and `test:package` (18 of
-18) passed. The full Vitest gate remains red on existing unrelated suites, including
+18) passed. The full Vitest gate remained red on existing unrelated suites, including
 `knowledge/catalog.test.ts`, `workflows/system-prompt.test.ts`, and `sources/scheduler.test.ts`.
-The feature therefore remains blocked from release despite passing its focused and runtime gates.
+**CORRECTED 2026-08-24:** The feature was nevertheless pushed and deployed by a later workflow.
+Production health reports release `20260824T200849Z-34163544`, SHA
+`34163544c210644f1d377e3ce339f134e94a3f5e`, healthy. This records what happened and does not
+reclassify the red full-suite gate as passing.
 
 Every guard names the mutation that must turn it red, no guard is listed that a broken
 implementation would still pass.
