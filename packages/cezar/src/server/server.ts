@@ -39,8 +39,9 @@ import {
   createAgentAccountUsageRoutes,
   type AgentAccountUsageRouteDeps,
 } from './agent-account-usage-routes.ts';
-import { CLUSTER_LINK_PATH, isAgentPoolId } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_LINK_PATH, isAgentPoolId, parseAgentRoute } from '@loki-labs/better-cezar-contract';
 import { inflightFromRuns } from '../workspace/agent-account-usage.ts';
+import { poolCandidates } from '../workspace/agent-route-select.ts';
 import { NoteStore } from '../notes/store.ts';
 import { NoteCoordinator } from '../notes/coordinator.ts';
 import { NoteProcessor } from '../notes/processor.ts';
@@ -182,6 +183,7 @@ import {
   isAbsoluteConfigDir,
   loadAgentAccounts,
   mergeWriteAgentAccounts,
+  selectionFor,
   type AgentAccount,
   type AgentAccountStore,
 } from '../workspace/agent-accounts.ts';
@@ -1451,6 +1453,46 @@ export function createApp(deps: ServerDeps) {
     return applyProviderEnablement(discovered, workspace.disabledProviders);
   };
   /**
+   * Whether `provider`'s account POOL, as `repoRoot` has it configured, has at least one
+   * CONNECTED login of its own — independent of the discovered default `providerStatus` answers
+   * for.
+   *
+   * `resolvePoolForDispatch`/`resolvePoolForProvider` (`workspace/agent-route-select.ts`) already
+   * route a run around a dead default onto a healthy pool member at dispatch time. This gate did
+   * not know that: a project pooled onto two Claude logins still 409'd every task the moment the
+   * discovered default logged out, however healthy the other login was — the exact shape of the
+   * production incident that blanked `claude:default`'s credentials while `claude:secondary` sat
+   * unused and reachable. Reuses `poolCandidates`, the same candidate-resolution `resolvePoolForProvider`
+   * dispatches through, so this can never see a different pool than dispatch would try. **Read-only**:
+   * unlike dispatch, it must not record a usage entry or advance the round-robin cursor for a run
+   * that has not actually started.
+   *
+   * Only consulted once the default row is already unavailable (see call site) — the common,
+   * connected path pays nothing extra.
+   */
+  const poolHasConnectedAccount = async (
+    provider: ProviderId,
+    repoRoot: string,
+  ): Promise<boolean> => {
+    const accounts = await loadAgentAccounts().catch(() => defaultAgentAccountStore());
+    const route = parseAgentRoute(selectionFor(accounts, repoRoot, provider));
+    if (route.kind !== 'pool') return false;
+    // Forces the candidate set to `provider`, even on the wildcard `pool:*` — mirrors
+    // `resolvePoolForProvider`'s own reasoning: this is answering for one required provider, and a
+    // wildcard must not cross to another one here either.
+    const candidates = poolCandidates(
+      { kind: 'pool', provider },
+      listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS),
+    ).filter((profile) => !profile.isDefault);
+    if (candidates.length === 0) return false;
+    const statuses = await Promise.all(
+      candidates.map((profile) =>
+        providerAuth.profileStatus(profile.provider, { id: profile.id, configDir: profile.path })),
+    );
+    return statuses.some((status) => status.status === 'connected');
+  };
+
+  /**
    * The gate: why a run cannot start against `required`, or null when it can.
    *
    * VERIFY BEFORE YOU REFUSE. Auth state is served stale-while-revalidate (see
@@ -1467,9 +1509,15 @@ export function createApp(deps: ServerDeps) {
    * A runtime auth latch is deliberately NOT escaped by this: `withRuntimeFailures` keeps forcing
    * the row disconnected until the user acknowledges that exact incident, so the re-probe cannot
    * talk cezar out of a rejection it actually observed.
+   *
+   * `repoRoot`, when the caller has one, gates a still-refused provider through
+   * {@link poolHasConnectedAccount} one last time before answering — the discovered default is not
+   * the only login a run can actually dispatch to. Absent (a caller with no project in scope, e.g.
+   * a workspace-wide default-runner check) skips that step and answers exactly as before.
    */
   const providerActionError = async (
     required: readonly ProviderId[],
+    repoRoot?: string,
   ): Promise<string | null> => {
     const known = await providerStatus();
     const message = unavailableProviderMessage(required, known);
@@ -1479,7 +1527,16 @@ export function createApp(deps: ServerDeps) {
     const disabled = required.some((provider) =>
       known.providers.find((row) => row.provider === provider)?.enabled === false);
     if (disabled) return message;
-    return unavailableProviderMessage(required, await providerStatus({ refresh: true }));
+    const fresh = await providerStatus({ refresh: true });
+    if (repoRoot === undefined) return unavailableProviderMessage(required, fresh);
+    const stillBlocked: ProviderId[] = [];
+    for (const provider of required) {
+      const row = fresh.providers.find((r) => r.provider === provider);
+      if (row?.status === 'connected') continue;
+      if (await poolHasConnectedAccount(provider, repoRoot)) continue;
+      stillBlocked.push(provider);
+    }
+    return unavailableProviderMessage(stillBlocked, fresh);
   };
   const openTerminal = deps.openTerminal ?? openInTerminal;
   const openFile = deps.openFile ?? openFileInDefaultApp;
@@ -2509,7 +2566,7 @@ export function createApp(deps: ServerDeps) {
       return { error: AGENT_MODELS_LOCKED_ERROR, status: 409 };
     }
     const fallback = (body.runner as RunnerId | undefined) ?? (await loadConfig(root)).defaultRunner;
-    const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback));
+    const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), root);
     if (blocked) return { error: blocked, status: 409 };
     // A composer override names an account the user just picked, so a stale id (deleted since the
     // page loaded) is answered honestly instead of quietly running on the default.
@@ -4623,7 +4680,7 @@ export function createApp(deps: ServerDeps) {
     .post('/plan', jsonZodValidator(planSchema), async (c) => {
       const { root: repoRoot } = c.get('project');
       const parsed = { data: c.req.valid('json') };
-      const blocked = await providerActionError([(await loadConfig(repoRoot)).defaultRunner]);
+      const blocked = await providerActionError([(await loadConfig(repoRoot)).defaultRunner], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
       return c.json(await planChain(repoRoot, parsed.data.task));
     });
@@ -5173,7 +5230,7 @@ export function createApp(deps: ServerDeps) {
     // Live-session participation (spec 002): deliver a user message (text +
     // pasted screenshots) into the run's open claude session.
     .post('/runs/:id/messages', jsonZodValidator(messageSchema), async (c) => {
-      const { store, manager } = c.get('project');
+      const { root: repoRoot, store, manager } = c.get('project');
       const id = c.req.param('id');
       const run = store.getRun(id);
       if (!run) return c.json({ error: 'not found' }, 404);
@@ -5184,7 +5241,7 @@ export function createApp(deps: ServerDeps) {
       // disconnected (provider-auth spec: disabling never blocks existing-task mutations).
       // In the dequeue race, the ladder below safely turns this into a starting-state buffer.
       if (run.status !== 'queued') {
-        const blocked = await providerActionError([providerForActiveRun(run)]);
+        const blocked = await providerActionError([providerForActiveRun(run)], repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);
       }
       const content: ContentBlock[] = [
@@ -5209,7 +5266,7 @@ export function createApp(deps: ServerDeps) {
       // this message in as the continuation prompt instead of answering `409 session closed`. A
       // live/queued/starting run never reaches this rung — those are handled above.
       if (currentRun?.status === 'waiting' && !manager.isActive(id)) {
-        const blocked = await providerActionError([providerForExistingRun(currentRun, undefined)]);
+        const blocked = await providerActionError([providerForExistingRun(currentRun, undefined)], repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);
         const text = content
           .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
@@ -5334,7 +5391,7 @@ export function createApp(deps: ServerDeps) {
       if (agentModelsLocked(repoRoot) && parsed.data.model?.trim()) {
         return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
       }
-      const blocked = await providerActionError([providerForExistingRun(run, parsed.data.runner)]);
+      const blocked = await providerActionError([providerForExistingRun(run, parsed.data.runner)], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
       const result = await manager.continueRun(id, {
         text: parsed.data.text,
@@ -5377,7 +5434,7 @@ export function createApp(deps: ServerDeps) {
       // The provider being moved TO is the one that has to be usable — `providerForExistingRun`
       // falls back to the run's own when no override was sent, which is the right question for a
       // retarget that only changes the account or the model.
-      const blocked = await providerActionError([providerForExistingRun(run, target.runner)]);
+      const blocked = await providerActionError([providerForExistingRun(run, target.runner)], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
 
       if (run.status === 'queued') {
@@ -5428,7 +5485,7 @@ export function createApp(deps: ServerDeps) {
       const sessionStep = [...run.steps].reverse().find((s) => s.sessionId);
       const sessionId = sessionStep?.sessionId;
       if (!sessionId) return c.json({ error: 'no agent session to resume' }, 409);
-      const blocked = await providerActionError([providerForExistingRun(run)]);
+      const blocked = await providerActionError([providerForExistingRun(run)], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
       const cwd = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
       const command = resumeCommand(run.runner, sessionId);
@@ -5530,7 +5587,7 @@ export function createApp(deps: ServerDeps) {
       // and what the client's cliTargetResumes now labels. Resume-after-finish is untouched.
       const cliRunner = agentCliRunner(target);
       if (cliRunner) {
-        const blocked = await providerActionError([cliRunner]);
+        const blocked = await providerActionError([cliRunner], repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);
         const engineOwnsSession = run.status === 'running' || run.status === 'queued' || run.status === 'waiting';
         const sessionStep = engineOwnsSession ? undefined : [...run.steps].reverse().find((s) => s.sessionId);
@@ -6103,7 +6160,7 @@ export function createApp(deps: ServerDeps) {
         const workflow = await resolveTodoWorkflow(repoRoot, todo);
 
         const fallback = parsed.data?.runner ?? (await loadConfig(repoRoot)).defaultRunner;
-        const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback));
+        const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);
 
         const run = manager.startRun(workflow, {

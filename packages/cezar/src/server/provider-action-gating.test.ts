@@ -5,6 +5,7 @@ import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProviderAuthService, type ProviderId } from '../core/provider-auth.ts';
 import { RunStore, type RunRecord } from '../runs/store.ts';
+import { mergeWriteAgentAccounts } from '../workspace/agent-accounts.ts';
 import { defaultWorkspaceConfig, type WorkspaceConfig } from '../workspace/config.ts';
 import { RunManager, type StartRunInput } from '../workflows/run.ts';
 import type { WorkflowDef } from '../workflows/types.ts';
@@ -379,6 +380,123 @@ describe('the gate verifies before it refuses', () => {
 
     expect((await start(app, 'claude')).status).toBe(201);
     expect(state.probes).toBe(warmed);
+  });
+
+  /**
+   * The discovered DEFAULT is not the only login dispatch can reach.
+   * `resolvePoolForDispatch`/`resolvePoolForProvider` (`workspace/agent-route-select.ts`) already
+   * route a run around a dead default onto a healthy pool member — measured in production doing
+   * exactly that on run `da0119ec`, 2026-08-23. This gate did not know that until now: a project
+   * pooled onto two Claude logins still 409'd every task the moment the discovered default logged
+   * out, however healthy the other login was.
+   */
+  describe('a project pooled onto more than one login', () => {
+    const savedHome = { value: undefined as string | undefined };
+    let home: string;
+
+    beforeEach(() => {
+      savedHome.value = process.env.CEZ_HOME;
+      home = mkdtempSync(join(tmpdir(), 'cez-gate-pool-home-'));
+      process.env.CEZ_HOME = home;
+    });
+
+    afterEach(() => {
+      if (savedHome.value === undefined) delete process.env.CEZ_HOME;
+      else process.env.CEZ_HOME = savedHome.value;
+      rmSync(home, { recursive: true, force: true });
+    });
+
+    /** A claude default AND a `secondary` pool member, each with its own login state, keyed by
+     *  whether the probe carries the secondary's `CLAUDE_CONFIG_DIR`. */
+    const setupPool = async (options: { defaultLoggedIn: boolean; secondaryLoggedIn: boolean }) => {
+      const secondaryDir = join(home, 'secondary-claude');
+      await mergeWriteAgentAccounts((store) => {
+        store.accounts.push({ id: 'secondary', provider: 'claude', configDir: secondaryDir, label: 'Secondary', addedAt: '2026-08-24T00:00:00.000Z' });
+        store.defaults.claude = 'pool:claude';
+        return store;
+      });
+      const providerAuth = new ProviderAuthService({
+        platform: 'linux',
+        runCommand: async (executable, _args, _timeoutMs, env) => {
+          if (executable === 'claude') {
+            const loggedIn = env?.CLAUDE_CONFIG_DIR ? options.secondaryLoggedIn : options.defaultLoggedIn;
+            return loggedIn
+              ? { stdout: '{"loggedIn":true}', stderr: '', exitCode: 0 }
+              : { stdout: '{"loggedIn":false}', stderr: '', exitCode: 1 };
+          }
+          if (executable === 'codex') return { stdout: 'Logged in using ChatGPT', stderr: '', exitCode: 0 };
+          return { stdout: '└  1 credential', stderr: '', exitCode: 0 };
+        },
+      });
+      const app = createApp({
+        repoRoot,
+        store,
+        manager: { startRun, sendMessage: vi.fn(() => true), continueRun: vi.fn(() => ({ ok: true })) } as unknown as RunManager,
+        version: 'test',
+        providerAuth,
+        workspaceConfig: memoryWorkspaceConfig([]),
+      });
+      await providerAuth.status(); // warms/learns the default's state, same as the sibling tests
+      return app;
+    };
+
+    it('starts the run on the default logout — a connected pool member covers it', async () => {
+      const app = await setupPool({ defaultLoggedIn: false, secondaryLoggedIn: true });
+
+      const response = await start(app, 'claude');
+      expect(response.status).toBe(201);
+      expect(startRun).toHaveBeenCalledTimes(1);
+    });
+
+    it('still refuses when NEITHER the default NOR the pool has a connected login', async () => {
+      // The negative control. A pool check that always says yes would pass the case above and
+      // silently wave every task through regardless of whether anything in the pool actually works.
+      const app = await setupPool({ defaultLoggedIn: false, secondaryLoggedIn: false });
+
+      const response = await start(app, 'claude');
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: 'Claude Code credentials are unavailable. Authorize it in Settings → Agents → Providers.',
+      });
+      expect(startRun).not.toHaveBeenCalled();
+    });
+
+    it('a DISABLED provider still refuses even with a connected pool member — that is a settings fact', async () => {
+      const secondaryDir = join(home, 'secondary-claude');
+      await mergeWriteAgentAccounts((store) => {
+        store.accounts.push({ id: 'secondary', provider: 'claude', configDir: secondaryDir, label: 'Secondary', addedAt: '2026-08-24T00:00:00.000Z' });
+        store.defaults.claude = 'pool:claude';
+        return store;
+      });
+      const providerAuth = new ProviderAuthService({
+        platform: 'linux',
+        runCommand: async (executable, _args, _timeoutMs, env) => {
+          if (executable === 'claude') {
+            return env?.CLAUDE_CONFIG_DIR
+              ? { stdout: '{"loggedIn":true}', stderr: '', exitCode: 0 }
+              : { stdout: '{"loggedIn":false}', stderr: '', exitCode: 1 };
+          }
+          if (executable === 'codex') return { stdout: 'Logged in using ChatGPT', stderr: '', exitCode: 0 };
+          return { stdout: '└  1 credential', stderr: '', exitCode: 0 };
+        },
+      });
+      const app = createApp({
+        repoRoot,
+        store,
+        manager: { startRun, sendMessage: vi.fn(() => true), continueRun: vi.fn(() => ({ ok: true })) } as unknown as RunManager,
+        version: 'test',
+        providerAuth,
+        workspaceConfig: memoryWorkspaceConfig(['claude']),
+      });
+      await providerAuth.status();
+
+      const response = await start(app, 'claude');
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: 'Claude Code is disabled. Enable it in Settings → Agents → Providers.',
+      });
+      expect(startRun).not.toHaveBeenCalled();
+    });
   });
 });
 
