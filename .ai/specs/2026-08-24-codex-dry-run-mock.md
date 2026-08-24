@@ -1,7 +1,11 @@
 # `CEZ_DRY_RUN=1` still spawns the real `codex`, so the offline dry run spends real quota and the packaged e2e is red
 
-**Status:** Specified, not implemented. Written 2026-08-24 by the spec step of task
-`eeceb869-64ee-462a-a180-675761e24ce7`, on branch `cez/eeceb869` at HEAD `2256f748`.
+**Status:** Implemented, tested, and shipped 2026-08-24. Committed `03a16af3` ("fix: dry-run codex
+through a bundled mock instead of the real CLI"), then reconciled with a parallel session's
+independent fix for the same defect (`8219c6f0`, `33ac3b20`) at merge commit `c25d8ee5`, pushed to
+`origin/main`. This branch's `scripts/` move (P1-P3 below) is what shipped; see "Executed 2026-08-24"
+in the Status log for the reconciliation and the final gate numbers. Originally written by the spec
+step of task `eeceb869-64ee-462a-a180-675761e24ce7`, on branch `cez/eeceb869` at HEAD `2256f748`.
 **Date:** 2026-08-24
 **Repo:** `cezar`
 **Closes:** acceptance criterion 2 of task `eeceb869` ("`npm run test:package` is green"), the one
@@ -755,3 +759,40 @@ merge is the expected reading, not a failure.
   and file contents in this document were read at that commit, not carried from the brief. Not
   implemented. `origin/main` has moved to `587db317` since this branch's last merge; integrate
   before P1.
+- **2026-08-24, executed (implement + run-tests + commit-push steps).** P1-P3 implemented as
+  specified (`git mv` into `scripts/`, the third `resolveCodexExecutable` tier, `findPackGaps` and
+  `package-cli.test.ts` guards). P4: `npm run typecheck` exit 0; `npm run build` exit 0
+  (`check:pack ok`, 1240 files); `npm run test:package` exit 0, **25/25**, including case
+  *"the release tarball installs and runs the dry-run CLI workflow"* (the AC2 target case), now
+  green with no real provider call. `npm test` and `npm run test:unit` both reproduce their
+  pre-existing failures (15 and 8) identically on a stashed pre-diff control, confirmed unrelated;
+  filed as todo `d9bdb51f-817d-4903-99a9-cd1c6ce25c75` since the run-tests log's earlier
+  `428c4e0e` reference was never actually created (the `cezar todo add`-inside-a-worktree trap
+  documented on todo `46dbb850`).
+
+  **Reconciliation, not a clean P5.** Committed as `03a16af3`, but `git push origin
+  cez/eeceb869:main` was rejected non-fast-forward twice: a parallel session had independently
+  landed its own fix for the identical AC2 defect on `origin/main` (`8219c6f0` "fix: mock codex in
+  dry runs", followed by a docs commit `33ac3b20`), documented in
+  `.ai/specs/2026-08-22-headless-run-exit0-bisect-and-verify.md`. That fix kept the mock at
+  `src/core/__fixtures__/codex/mock-codex-app-server.mjs` instead of moving it. Merged both in,
+  resolved the four real conflicts (`transport.ts`, `transport.test.ts`, `package-cli.test.ts`,
+  the mock's rename target) **in favor of this spec's `scripts/` move**, confirmed on disk:
+  `packages/cezar/scripts/mock-codex-app-server.mjs` exists, `src/core/__fixtures__/codex/` no
+  longer holds the `.mjs` (the other 28 fixtures stay). Dropped the now-stale duplicate
+  `package.json` `files` entry the other session's approach didn't need. Kept the other session's
+  unrelated test fixes (they cleared 8 of `npm test`'s pre-existing failures for free). Re-ran
+  gates post-merge: typecheck 0, build 0, test:package 25/25, `npm test`/`test:unit` failures
+  confirmed untouched by either diff. Pushed `origin cez/eeceb869:main` → `c25d8ee5`.
+  `origin/main` and this branch's `HEAD` are now identical.
+
+  P5's six D6 corrections: `task-classifier.ts:36`, `AGENTS.md` trap 5, the
+  `2026-08-23-headless-run-drains-event-loop.md` AC2 line, the
+  `2026-08-22-headless-run-exit0-bisect-and-verify.md` architecture correction (mock location:
+  `scripts/`, not `__fixtures__/`, per the reconciliation above), the KB `notion-859eb87e7872`
+  section-heading correction, and todo `49162dbe` all done in this (document) step. The
+  `.ai/specs/2026-08-22-run-broker-cli-keepalive.md` row from D6 needed no edit: its existing
+  codex-gap caveat (added by an earlier step) already reads correctly now that the gap is closed,
+  since it only ever said the case was red "for reasons unrelated to this spec" (true before and
+  after). The MOCK_RPC stderr echo and `.env.example` documentation open questions were left
+  undecided, as the spec allowed; not blocking.

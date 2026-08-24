@@ -61,6 +61,13 @@ one written after anything was actually executed, and it settles AC1/AC3 and re-
   (`src/core/__fixtures__/codex/mock-codex-app-server.mjs`, 223 lines), not in the packaged
   `scripts/`. Closing AC2 means shipping a codex dry-run mock, a separate defect and a separate
   concept, so it wants its own spec rather than being smuggled into this one.
+- **CORRECTED 2026-08-24 (document step of task `eeceb869`): AC2 is now CLOSED too.** The deferral
+  above was correct and the separate spec it called for is
+  `.ai/specs/2026-08-24-codex-dry-run-mock.md`, implemented and shipped the same day (commit
+  `03a16af3`, reconciled with a parallel session's independent fix at merge commit `c25d8ee5`,
+  pushed to `origin/main`). `npm run test:package` is green, 25/25, including the AC2 case by
+  name. All three of this task's acceptance criteria are met; see that spec's Status log for the
+  executed numbers.
 - **The original exit-0 symptom is no longer reproducible on `main` either**, because the quota
   failure now aborts the workflow at step 2 before the drain window is reached. AC1's bisect
   result (`a7510b2f`) stands unchanged; it was answered statically and needed no build.

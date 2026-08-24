@@ -13,6 +13,21 @@ scope extension.
 
 ### Scope extension — close AC2 without changing workflow routing
 
+**CORRECTED 2026-08-24, by the reconciled merge (document step of task `eeceb869`): the mock did
+not stay at `__fixtures__/`.** This section's own commit (`8219c6f0`) landed on `origin/main`
+alongside an independent, parallel fix for the identical defect from task `eeceb869`
+(`.ai/specs/2026-08-24-codex-dry-run-mock.md`, commit `03a16af3`), which took a different design:
+`git mv` the mock into the packaged `scripts/` directory rather than adding it to the allowlist
+in place. `eeceb869`'s push hit this commit as a non-fast-forward reject, merged both branches,
+and resolved the conflict **in favor of the `scripts/` move**, verified on disk after the merge
+(`c25d8ee5`): `packages/cezar/scripts/mock-codex-app-server.mjs` exists,
+`src/core/__fixtures__/codex/mock-codex-app-server.mjs` does not (the other 28 fixtures in that
+directory are untouched). So the paragraph below, describing "promotes that existing asset...
+rather than inventing a second mock", is accurate in spirit (one mock, not two) but wrong on the
+final path: read `scripts/mock-codex-app-server.mjs` wherever it says
+`src/core/__fixtures__/codex/mock-codex-app-server.mjs`. The original text is left below as the
+record of what this session actually built and verified before the merge.
+
 The user directed this task to continue after the AC2 diagnosis. The remaining work therefore
 belongs to this spec rather than a separate follow-up: make Codex obey the same dry-run boundary as
 Claude and pi, then re-run the package gate that exposed the leak. The repository already contains

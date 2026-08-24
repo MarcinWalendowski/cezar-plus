@@ -368,6 +368,16 @@ files.
    package suite now has 18 cases, and the named dry-run workflow case is eighth. The prior
    broker timer fix closed one step-scoped drain window, but a multi-step headless run still had
    no run-lifetime handle across hand-offs. The original entry remains below.**
+   **CORRECTED A THIRD TIME 2026-08-24 by `.ai/specs/2026-08-24-codex-dry-run-mock.md` (commit
+   `03a16af3`, reconciled with a parallel session's independent fix at merge commit `c25d8ee5`,
+   pushed to `origin/main`): this case, and the whole trap, is now PAST TENSE.** `npm run
+   test:package` is green: **25/25**, case count grown again since the correction below was
+   written. Fixing "this one means shipping a codex app-server mock in `scripts/`" is done: it
+   ships at `packages/cezar/scripts/mock-codex-app-server.mjs` (moved via `git mv` from
+   `src/core/__fixtures__/codex/`, which keeps its other 28 fixtures). `resolveCodexExecutable()`
+   now has the same three-tier `CEZ_DRY_RUN` resolution the Claude and pi runners already had, so
+   `CEZ_DRY_RUN=1` no longer spawns a real, quota-billed `codex` CLI. If this case is red again,
+   that is new information, not a re-confirmation of either correction below.
    **CORRECTED AGAIN 2026-08-24 (measured, both on this branch and on clean `origin/main`
    `c328ec06`): the case is still red at `# pass 17 / # fail 1`, but the symptom below is no
    longer what you will see.** It no longer stalls or exits 0. It fails fast with

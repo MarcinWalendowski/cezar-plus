@@ -33,7 +33,9 @@ import { TASK_CLASSES, UNCLASSIFIABLE_TASK_CLASS, type TaskClass } from './workf
  * **It classifies on `config.defaultRunner`, not on the runner the task will use.** The class is a
  * property of the TASK, not of the engine — "migrate the auth tables" is complex work whoever runs
  * it — so there is nothing to gain by forcing the call onto codex, and two things to lose: the
- * `CEZ_DRY_RUN` mock only exists for claude and pi, and a codex-only classify would spend the same
+ * CORRECTED 2026-08-24 by `.ai/specs/2026-08-24-codex-dry-run-mock.md`: ~~`CEZ_DRY_RUN` mock only
+ * exists for claude and pi~~, it now covers codex too, via `scripts/mock-codex-app-server.mjs`.
+ * The second reason still stands unchanged: a codex-only classify would spend the same
  * account's codex quota the run is about to spend. Only the class→model MAPPING is codex-specific,
  * and that lives in `CODEX_CLASS_CHOICE`.
  */
