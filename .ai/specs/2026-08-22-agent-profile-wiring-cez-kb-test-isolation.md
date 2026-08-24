@@ -2,6 +2,13 @@
 
 Brief: `.ai/specs/briefs/2026-08-22-agent-profile-wiring-cez-kb-env-leak.md`
 
+**CORRECTED 2026-08-24:** The implementation record below was premature. After the branch merged
+the current `origin/main`, `agentEnvForStep` also supplied the unconditional base plumbing keys
+`CEZ_SESSION_ID` and `CEZ_STEP_ID`. The new flag-on exact-list case omitted those keys and failed
+1 of 8 tests. The follow-up correction adds both base keys to that expectation. The production
+decision remains unchanged: `CEZ_KB_ROOTS` and `CEZ_KB_WRITE_FILE` are absent with `CEZ_KB` off
+and present with it on.
+
 **Status: IMPLEMENTED 2026-08-24.** Shipped in commit `878708f5` and pushed to `origin/main`.
 The targeted baseline passed 7 of 7 tests before the change, then 8 of 8 tests passed after the
 local isolation and flag-on contract case landed. This was a confirm-and-harden change, not a
@@ -416,6 +423,13 @@ npm test -- packages/cezar/src/workflows/agent-profile-wiring.test.ts
 
 ## Implementation record
 
+- **CORRECTED 2026-08-24:** The first pushed flag-on case omitted the unconditional base keys
+  `CEZ_SESSION_ID` and `CEZ_STEP_ID`, so it failed 1 of 8 tests after the branch caught up to
+  current `origin/main`. The follow-up expectation includes both keys. On the final merged tree,
+  the targeted file passed 8 of 8 and `npm run typecheck` passed after `env -u NODE_ENV npm ci`.
+  A full-suite attempt was not a usable feature gate: several unrelated suites were already
+  running concurrently, and it produced broad CLI and UI timeouts plus the documented catalog
+  CPU-budget failure before the cezar restart terminated it. No failure touched this test file.
 - Commit `878708f5` is on `origin/main`. The feature diff saves, clears, and restores
   `process.env.CEZ_KB` in `agent-profile-wiring.test.ts`, and adds the flag-on exact-key case.
 - Production `run.ts` was intentionally unchanged. `CEZ_KB_ROOTS` and `CEZ_KB_WRITE_FILE`

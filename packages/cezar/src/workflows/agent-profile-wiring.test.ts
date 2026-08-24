@@ -107,6 +107,8 @@ describe('RunManager agent-profile resolution', () => {
       'CEZ_HANDOFF_FILE',
       'CEZ_KB_ROOTS',
       'CEZ_KB_WRITE_FILE',
+      'CEZ_SESSION_ID',
+      'CEZ_STEP_ID',
       'CEZ_TASK_ID',
       'CEZ_TODOS_FILE',
       'NODE_ENV',
