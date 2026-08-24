@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { mkdtemp } from 'node:fs/promises';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import {
   parseAskMarkerResult,
@@ -59,7 +61,7 @@ import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeS
 import { LEASE_HEARTBEAT_MS, removeWorktreeLeases, touchWorktreeLeases, writeWorktreeLease } from '../workspace/worktree-lease.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 import { loadWorkflows } from './load.ts';
-import { evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
+import { deriveBaseBranch, evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
 import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/store.ts';
 import type { TaskAuthor } from '../runs/task-author.ts';
 import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.ts';
@@ -121,7 +123,7 @@ import {
   discardWorkspaceWorktrees,
   materializeWorkspaceWorktrees,
 } from '../workspace/workspace-worktrees.ts';
-import type { PendingApproval, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
+import type { PendingApproval, PendingHandoff, TestAttestation, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { UiEventSink } from '../runs/ui-event-sink.ts';
@@ -268,6 +270,7 @@ const REPOSITORY_ROOT_LOCK_DISABLED_NOTE =
 
 /** How a parked approval gate released (spec 2026-08-20, P3). */
 type ApprovalOutcome = { kind: 'approved' } | { kind: 'changes'; notes: string } | { kind: 'cancelled' };
+type HandoffOutcome = { kind: 'resolved'; verdict: PostconditionResult } | { kind: 'skipped' } | { kind: 'cancelled' };
 
 interface ActiveRun {
   cancelled: boolean;
@@ -329,6 +332,8 @@ interface ActiveRun {
   /** Resolver for a run parked on a human approval gate (spec 2026-08-20, P3). Present ONLY
    *  while parked; `approve`/`requestChanges` call it, `cancel` aborts it. */
   approvalWaiter?: (outcome: ApprovalOutcome) => void;
+  /** Resolver for a run parked on a manual deployment or merge handoff. */
+  handoffWaiter?: (outcome: { kind: 'resolve' | 'skip' }) => Promise<{ resolved: boolean; verdict: string }>;
   /**
    * A continuation ended its turn with `CEZ:DONE` while its run's CHAIN still had pending steps
    * (spec 2026-08-20, P2). The marker is a statement about the agent's OWN step, so the session
@@ -2271,6 +2276,13 @@ export class RunManager {
         continue;
       }
       if (run.status === 'waiting') {
+        if (run.pendingHandoff) {
+          this.store.appendEvent(run.id, {
+            type: 'lifecycle',
+            message: `cezar restarted, still waiting for ${run.pendingHandoff.kind === 'manual-deploy' ? 'manual deployment' : 'manual merge'}`,
+          });
+          continue;
+        }
         // A run parked on an APPROVAL GATE stays parked (spec 2026-08-20, P3). Everything below
         // this line settles the open step to `done` — which, for a gated step, would silently
         // grant the approval that a human was asked for and never gave. That is the exact failure
@@ -3635,7 +3647,12 @@ export class RunManager {
       // settles it `cancelled` directly; every other statusless run is genuinely gone (409).
       const run = this.store.getRun(runId);
       if (run?.status === 'waiting') {
-        this.store.updateRun(runId, { status: 'cancelled', finishedAt: new Date().toISOString() });
+        this.store.updateRun(runId, {
+          status: 'cancelled',
+          finishedAt: new Date().toISOString(),
+          pendingHandoff: undefined,
+          waitingReason: undefined,
+        });
         this.store.appendEvent(runId, { type: 'lifecycle', message: 'run cancelled' });
         return true;
       }
@@ -5336,7 +5353,7 @@ export class RunManager {
     let stopReason: AgentStopReason | undefined;
 
     let i = resumeIdx;
-    while (i < workflow.steps.length) {
+    stepLoop: while (i < workflow.steps.length) {
       if (state.cancelled) break;
       if (this.budgetSpent(runId, config)) {
         state.budgetExceeded = true;
@@ -5523,7 +5540,25 @@ export class RunManager {
         }
         if (state.budgetExceeded) break; // its own turn-end handler already landed this — see there
 
-        const verdict = await this.runStepVerify(runId, state, step, emit);
+        let verdict = await this.runStepVerify(runId, state, step, emit, config);
+        if (state.cancelled) break;
+        while (verdict.handoff) {
+          const handoff = await this.awaitHandoff(
+            runId,
+            state,
+            step,
+            emit,
+            verdict,
+            () => this.runStepVerify(runId, state, step, emit, config),
+          );
+          if (handoff.kind === 'cancelled') break;
+          if (handoff.kind === 'skipped') {
+            this.finishStep(runId, step.id, 'skipped', 'manual handoff skipped', emit);
+            i++;
+            continue stepLoop;
+          }
+          verdict = handoff.verdict;
+        }
         if (state.cancelled) break;
         if (!verdict.ok) {
           const attempt = this.retryAfterFailedPostcondition(runId, step, verdict, verifyRetries, emit);
@@ -5603,6 +5638,8 @@ export class RunManager {
           }
         }
 
+        if (step.id === 'run-tests') await this.recordTestAttestation(runId, state, step.id, emit);
+        if (step.id === 'commit-push') await this.recordShippedAttestation(runId, state, step.id, emit);
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
@@ -5612,7 +5649,25 @@ export class RunManager {
       this.spendBudgetUnit(runId); // a check attempt is one unit, same as an agent turn
       if (state.cancelled) break;
       if (ok) {
-        const verdict = await this.runStepVerify(runId, state, step, emit);
+        let verdict = await this.runStepVerify(runId, state, step, emit, config);
+        if (state.cancelled) break;
+        while (verdict.handoff) {
+          const handoff = await this.awaitHandoff(
+            runId,
+            state,
+            step,
+            emit,
+            verdict,
+            () => this.runStepVerify(runId, state, step, emit, config),
+          );
+          if (handoff.kind === 'cancelled') break;
+          if (handoff.kind === 'skipped') {
+            this.finishStep(runId, step.id, 'skipped', 'manual handoff skipped', emit);
+            i++;
+            continue stepLoop;
+          }
+          verdict = handoff.verdict;
+        }
         if (state.cancelled) break;
         if (!verdict.ok) {
           // Deliberately NOT stashed in `checkFailure`: that channel appends text to a retried
@@ -5625,6 +5680,8 @@ export class RunManager {
           runError = `step "${step.id}" did not meet its post-condition: ${verdict.detail}`;
           break;
         }
+        if (step.id === 'run-tests') await this.recordTestAttestation(runId, state, step.id, emit);
+        if (step.id === 'commit-push') await this.recordShippedAttestation(runId, state, step.id, emit);
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
@@ -5716,6 +5773,144 @@ export class RunManager {
     this.dropActive(runId);
   }
 
+
+  /** Park the chain until a manual deployment or merge is resolved or skipped. */
+  private async awaitHandoff(
+    runId: string,
+    state: ActiveRun,
+    step: WorkflowStepDef,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+    verdict: PostconditionResult,
+    recheck: () => Promise<PostconditionResult>,
+  ): Promise<HandoffOutcome> {
+    const handoff = verdict.handoff;
+    if (!handoff) return { kind: 'resolved', verdict };
+    const run = this.store.getRun(runId);
+    const existing = run?.pendingHandoff?.stepId === step.id ? run.pendingHandoff : undefined;
+    const pending: PendingHandoff = existing
+      ? {
+          ...existing,
+          kind: handoff.kind,
+          reason: handoff.reason.slice(0, 2_000),
+          ...(handoff.targets ? { targets: handoff.targets.slice(0, 50) } : {}),
+        }
+      : {
+          kind: handoff.kind,
+          stepId: step.id,
+          requestedAt: new Date().toISOString(),
+          reason: handoff.reason.slice(0, 2_000),
+          ...(handoff.targets ? { targets: handoff.targets.slice(0, 50) } : {}),
+          ...(run?.baseBranch ? { baseBranch: run.baseBranch } : {}),
+        };
+
+    this.store.updateRun(runId, { pendingHandoff: pending, status: 'waiting', waitingReason: 'handoff', activity: undefined });
+    this.store.updateStep(runId, step.id, { status: 'waiting' });
+    emit({
+      type: 'lifecycle',
+      stepId: step.id,
+      message: pending.kind === 'manual-deploy' ? 'awaiting manual deployment' : 'awaiting manual merge',
+    });
+
+    let restore: () => void = () => undefined;
+    const outcome = await new Promise<HandoffOutcome>((resolve) => {
+      let settled = false;
+      const once = (value: HandoffOutcome) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      state.handoffWaiter = async (decision) => {
+        if (decision.kind === 'skip') {
+          once({ kind: 'skipped' });
+          return { resolved: true, verdict: 'manual handoff skipped' };
+        }
+        const checked = await recheck();
+        if (checked.ok) {
+          once({ kind: 'resolved', verdict: checked });
+          return { resolved: true, verdict: checked.detail };
+        }
+        const next: PendingHandoff = {
+          ...pending,
+          reason: checked.detail.slice(0, 2_000),
+          ...(checked.handoff?.kind ? { kind: checked.handoff.kind } : {}),
+          ...(checked.handoff?.targets ? { targets: checked.handoff.targets.slice(0, 50) } : {}),
+        };
+        this.store.updateRun(runId, { pendingHandoff: next, status: 'waiting', waitingReason: 'handoff' });
+        emit({ type: 'note', stepId: step.id, message: `handoff recheck is still red: ${checked.detail}` });
+        return { resolved: false, verdict: checked.detail };
+      };
+      const parkedInterrupt = state.interrupt;
+      state.interrupt = () => {
+        parkedInterrupt();
+        once({ kind: 'cancelled' });
+      };
+      restore = () => {
+        state.interrupt = parkedInterrupt;
+      };
+      this.waiting.add(runId);
+      this.releaseSlot();
+    });
+
+    restore();
+    state.handoffWaiter = undefined;
+    this.waiting.delete(runId);
+    this.store.updateRun(runId, { pendingHandoff: undefined, waitingReason: undefined });
+    if (outcome.kind !== 'cancelled') {
+      this.store.updateRun(runId, { status: 'running' });
+      this.store.updateStep(runId, step.id, { status: 'running' });
+    }
+    return outcome;
+  }
+
+  /** Capture the final green test tree without touching the repository's real Git index. */
+  private async recordTestAttestation(
+    runId: string,
+    state: ActiveRun,
+    stepId: string,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): Promise<void> {
+    const temp = await mkdtemp(join(tmpdir(), 'cez-test-attestation-'));
+    const index = join(temp, 'index');
+    try {
+      const env = { ...process.env, GIT_INDEX_FILE: index };
+      const added = await runGit(state.cwd, ['add', '-A'], env);
+      const tree = added.ok ? await runGit(state.cwd, ['write-tree'], env) : added;
+      if (!tree.ok || !tree.stdout.trim()) {
+        emit({ type: 'note', stepId, message: `could not record test attestation: ${tree.stderr.trim() || 'git write-tree failed'}` });
+        return;
+      }
+      const head = await runGit(state.cwd, ['rev-parse', 'HEAD']);
+      const attestation: TestAttestation = {
+        stepId,
+        treeSha: tree.stdout.trim(),
+        ...(head.ok ? { headSha: head.stdout.trim() } : {}),
+        at: new Date().toISOString(),
+      };
+      this.store.updateRun(runId, { testAttestation: attestation });
+      emit({ type: 'note', stepId, message: `tests attested tree ${attestation.treeSha}` });
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  }
+
+  private async recordShippedAttestation(
+    runId: string,
+    state: ActiveRun,
+    stepId: string,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): Promise<void> {
+    const attestation = this.store.getRun(runId)?.testAttestation;
+    if (!attestation) return;
+    const head = await runGit(state.cwd, ['rev-parse', 'HEAD']);
+    if (!head.ok || !head.stdout.trim()) {
+      emit({ type: 'note', stepId, message: `could not record shipped SHA: ${head.stderr.trim() || 'HEAD is unavailable'}` });
+      return;
+    }
+    this.store.updateRun(runId, {
+      testAttestation: { ...attestation, shippedSha: head.stdout.trim() },
+    });
+    emit({ type: 'note', stepId, message: `shipped revision attested at ${head.stdout.trim()}` });
+  }
 
   // ---- the human approval gate (spec 2026-08-20-split-steps-spec-review-and-approval-gate, P3) --
 
@@ -5888,6 +6083,60 @@ export class RunManager {
       message: `changes requested by ${by}`,
     });
     return this.releaseApproval(runId, { kind: 'changes', notes: `${notes}\n\n— requested by ${by}` }, pending);
+  }
+
+  async resolveHandoff(
+    runId: string,
+    by = 'unknown',
+    note?: string,
+  ): Promise<{ ok: boolean; resolved?: boolean; verdict?: string; error?: string }> {
+    const run = this.store.getRun(runId);
+    if (!run) return { ok: false, error: 'not found' };
+    const pending = run.pendingHandoff;
+    if (!pending) return { ok: false, error: 'this run is not waiting for a handoff' };
+    this.store.appendEvent(runId, {
+      type: 'note',
+      stepId: pending.stepId,
+      message: `handoff resolve requested by ${by}${note ? `: ${note}` : ''}`,
+    });
+    const state = this.active.get(runId);
+    if (state?.handoffWaiter) {
+      const result = await state.handoffWaiter({ kind: 'resolve' });
+      return { ok: true, resolved: result.resolved, verdict: result.verdict };
+    }
+    return this.requeueHandoff(run, pending, 'handoff resolve requested after restart');
+  }
+
+  async skipHandoff(
+    runId: string,
+    by = 'unknown',
+    note: string,
+  ): Promise<{ ok: boolean; skipped?: boolean; error?: string }> {
+    const run = this.store.getRun(runId);
+    if (!run) return { ok: false, error: 'not found' };
+    const pending = run.pendingHandoff;
+    if (!pending) return { ok: false, error: 'this run is not waiting for a handoff' };
+    this.store.appendEvent(runId, { type: 'note', stepId: pending.stepId, message: `handoff skipped by ${by}: ${note}` });
+    const state = this.active.get(runId);
+    if (state?.handoffWaiter) {
+      await state.handoffWaiter({ kind: 'skip' });
+      return { ok: true, skipped: true };
+    }
+    this.store.updateRun(runId, { pendingHandoff: undefined, waitingReason: undefined });
+    this.store.updateStep(runId, pending.stepId, { status: 'skipped', error: note, finishedAt: new Date().toISOString() });
+    await this.reenterChain(this.store.getRun(runId) ?? run, 'manual handoff skipped');
+    return { ok: true, skipped: true };
+  }
+
+  private async requeueHandoff(
+    run: RunRecord,
+    pending: PendingHandoff,
+    reason: string,
+  ): Promise<{ ok: boolean; resolved?: boolean; verdict?: string; error?: string }> {
+    this.store.updateRun(run.id, { pendingHandoff: undefined, waitingReason: undefined });
+    this.store.updateStep(run.id, pending.stepId, { status: 'pending', error: undefined, finishedAt: undefined });
+    await this.reenterChain(this.store.getRun(run.id) ?? run, reason, { resetTo: pending.stepId });
+    return { ok: true, resolved: true, verdict: 'handoff recheck queued' };
   }
 
   /**
@@ -7281,27 +7530,51 @@ export class RunManager {
     state: ActiveRun,
     step: WorkflowStepDef,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+    config: CezConfig,
   ): Promise<PostconditionResult> {
     const verify = step.verify;
     if (!verify) return { ok: true, detail: '' };
 
-    if (verify.command) {
-      const { ok, output } = await this.runShell(state, step.id, verify.command, emit);
-      return { ok, detail: ok ? output : `\`${verify.command}\` exited non-zero:\n${output}` };
-    }
-
     // A workspace run applies its per-project worktrees back UNSTAGED on purpose, so it is
     // supposed to commit nothing — `everything-committed` has to know that or it fails them all.
-    const workspaceRun = (this.store.getRun(runId)?.workspaceProjects?.length ?? 0) > 0;
-    const result = await evaluatePostcondition(verify.builtin as string, { cwd: state.cwd, workspaceRun });
-    emit({
-      type: 'check-output',
-      stepId: step.id,
-      command: `post-condition: ${verify.builtin}`,
-      text: result.detail,
-      exitCode: result.ok ? 0 : 1,
-    });
-    return result;
+    const run = this.store.getRun(runId);
+    const workspaceRun = (run?.workspaceProjects?.length ?? 0) > 0;
+    const entries = Array.isArray(verify) ? verify : [verify];
+    const baseBranch = await deriveBaseBranch(state.cwd, run?.baseBranch, config.baseBranch);
+    const results: Array<PostconditionResult & { max: number }> = [];
+    for (const entry of entries) {
+      let result: PostconditionResult;
+      if (entry.command) {
+        const { ok, output } = await this.runShell(state, step.id, entry.command, emit);
+        result = { ok, detail: ok ? output : `\`${entry.command}\` exited non-zero:\n${output}` };
+      } else {
+        result = await evaluatePostcondition(entry.builtin as string, {
+          cwd: state.cwd,
+          workspaceRun,
+          stepId: step.id,
+          attestation: run?.testAttestation,
+          autoMerge: config.autoMerge,
+          baseBranch,
+        });
+        emit({
+          type: 'check-output',
+          stepId: step.id,
+          command: `post-condition: ${entry.builtin}`,
+          text: result.detail,
+          exitCode: result.ok ? 0 : 1,
+        });
+      }
+      results.push({ ...result, max: entry.max });
+    }
+    const failed = results.filter((result) => !result.ok);
+    if (failed.length === 0) return { ok: true, detail: results.map((result) => result.detail).filter(Boolean).join('\n') };
+    const first = failed[0] as PostconditionResult & { max: number };
+    return {
+      ok: false,
+      detail: failed.map((result) => result.detail).join('\n'),
+      ...(first.handoff ? { handoff: first.handoff } : {}),
+      retryMax: first.max,
+    };
   }
 
   /**
@@ -7317,7 +7590,7 @@ export class RunManager {
     ledger: Map<string, number>,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
   ): string | undefined {
-    const max = step.verify?.max ?? 0;
+    const max = verdict.retryMax ?? 0;
     const used = ledger.get(step.id) ?? 0;
     if (used >= max) return undefined;
     ledger.set(step.id, used + 1);
@@ -7373,7 +7646,7 @@ export class RunManager {
   private finishStep(
     runId: string,
     stepId: string,
-    status: 'done' | 'failed',
+    status: 'done' | 'failed' | 'skipped',
     error: string | undefined,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
     /** Set only when CEZAR stopped the step. `status` stays `failed` — `StepStatus` is a
@@ -7405,6 +7678,18 @@ export class RunManager {
       `step "${stepId}" complete — status=${status}${stopReason ? ' (stopped, not failed)' : ''}`,
     );
   }
+}
+
+function runGit(
+  cwd: string,
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile('git', args, { cwd, env, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8' }, (error, stdout, stderr) => {
+      resolve({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' });
+    });
+  });
 }
 
 function findLastAgentStepIndex(workflow: WorkflowDef): number {

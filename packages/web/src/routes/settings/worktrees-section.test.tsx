@@ -39,6 +39,7 @@ function serve(config: Partial<ConfigResponse> = {}) {
     overridden: [],
     minApprovers: null,
     ...config,
+    autoMerge: config.autoMerge ?? null,
   }
   const json = (payload: unknown, status = 200) =>
     new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } })

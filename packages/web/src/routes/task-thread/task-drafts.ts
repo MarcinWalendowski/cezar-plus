@@ -19,6 +19,7 @@ const PREFIX = {
   prompt: 'cez-task-prompt:',
   reviewNotes: 'cez-task-review-notes:',
   approvalNotes: 'cez-task-approval-notes:',
+  handoffNotes: 'cez-task-handoff-notes:',
 } as const
 
 export type TaskDraftKind = keyof typeof PREFIX

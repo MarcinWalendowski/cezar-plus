@@ -39,10 +39,21 @@ export interface PostconditionResult {
   /** The verdict, in a sentence. Stored as the step's `error` when red and shown in the
    *  cockpit's check card either way, so it has to read as an explanation on its own. */
   detail: string;
+  handoff?: {
+    kind: 'manual-deploy' | 'manual-merge';
+    reason: string;
+    targets?: string[];
+  };
+  retryMax?: number;
 }
 
 /** The built-ins a workflow step can name in `verify.builtin`. */
-export const POSTCONDITION_IDS = ['everything-committed', 'all-services-deployed'] as const;
+export const POSTCONDITION_IDS = [
+  'everything-committed',
+  'all-services-deployed',
+  'tested-revision-shipped',
+  'merged-into-base',
+] as const;
 export type PostconditionId = (typeof POSTCONDITION_IDS)[number];
 
 export interface PostconditionContext {
@@ -64,6 +75,19 @@ export interface PostconditionContext {
    * are testable without mutating `process.env`. See `dryRunVerdict` for why it passes.
    */
   dryRun?: boolean;
+  /** Step identity and test attestation used by the shipping gates. */
+  stepId?: string;
+  attestation?: {
+    stepId: string;
+    treeSha: string;
+    headSha?: string;
+    shippedSha?: string;
+    at: string;
+  };
+  /** Whether the merge stage is allowed to land a protected base automatically. */
+  autoMerge?: boolean;
+  /** Resolved base branch for merge postconditions. */
+  baseBranch?: string;
 }
 
 /**
@@ -200,10 +224,29 @@ export const deployTargetsSchema = z.object({
     z.object({
       name: z.string().min(1),
       probe: z.string().min(1),
+      manual: z.boolean().optional(),
+      manualReason: z.string().min(1).max(2_000).optional(),
     }),
   ),
 });
 export type DeployTargets = z.infer<typeof deployTargetsSchema>;
+
+const HEX_REF = /^[0-9a-f]{7,40}$/i;
+
+/** Resolve the branch a merge stage targets without ever switching branches. */
+export async function deriveBaseBranch(
+  cwd: string,
+  runBaseBranch?: string,
+  configBaseBranch?: string,
+): Promise<string> {
+  for (const candidate of [runBaseBranch, configBaseBranch]) {
+    const normalized = candidate?.trim().replace(/^origin\//, '');
+    if (normalized && !HEX_REF.test(normalized)) return normalized;
+  }
+  const remoteHead = await git(cwd, ['symbolic-ref', 'refs/remotes/origin/HEAD']);
+  const match = remoteHead.stdout.trim().match(/^refs\/remotes\/origin\/(.+)$/);
+  return match?.[1] ?? 'main';
+}
 
 interface ProbeOutcome {
   ok: boolean;
@@ -295,10 +338,11 @@ export async function allServicesDeployed(ctx: PostconditionContext): Promise<Po
   // here than the wall-clock a parallel fan-out would save.
   const lines: string[] = [];
   const failed: string[] = [];
+  const manualFailed: string[] = [];
   for (const target of parsed.targets) {
     const outcome = await runProbe(ctx.cwd, target.probe, ctx.probeTimeoutMs ?? PROBE_TIMEOUT_MS);
     lines.push(`${outcome.ok ? 'OK  ' : 'FAIL'} ${target.name} — \`${target.probe}\`${outcome.ok ? '' : `\n${outcome.output}`}`);
-    if (!outcome.ok) failed.push(target.name);
+    if (!outcome.ok) (target.manual ? manualFailed : failed).push(target.name);
   }
 
   if (failed.length > 0) {
@@ -307,12 +351,90 @@ export async function allServicesDeployed(ctx: PostconditionContext): Promise<Po
       detail: `${failed.length} of ${parsed.targets.length} service(s) are NOT deployed: ${failed.join(', ')}\n${lines.join('\n')}`,
     };
   }
+  if (manualFailed.length > 0) {
+    const reasons = parsed.targets
+      .filter((target) => manualFailed.includes(target.name) && target.manualReason)
+      .map((target) => `${target.name}: ${target.manualReason}`)
+      .join('; ');
+    const reason = `manual deployment required for ${manualFailed.join(', ')}${reasons ? ` (${reasons})` : ''}; ${lines.join('\n')}`;
+    return {
+      ok: false,
+      detail: reason,
+      handoff: { kind: 'manual-deploy', reason, targets: manualFailed },
+    };
+  }
   return { ok: true, detail: `all ${plural(parsed.targets.length, 'service')} deployed:\n${lines.join('\n')}` };
+}
+
+const SHIPPED_PATH_PREFIXES = ['.ai/specs/', '.ai/cezar/knowledge/', 'docs/', 'CHANGELOG.md'];
+
+function pathIsShippingRecord(path: string): boolean {
+  return SHIPPED_PATH_PREFIXES.some((prefix) =>
+    prefix.endsWith('/') ? path.startsWith(prefix) : path === prefix,
+  );
+}
+
+/** Verify that the tests attested the revision the shipping step is acting on. */
+export async function testedRevisionShipped(ctx: PostconditionContext): Promise<PostconditionResult> {
+  const attestation = ctx.attestation;
+  if (!attestation) return { ok: true, detail: 'no test attestation was recorded, so no earlier revision can be contradicted' };
+  if (!attestation.treeSha) return { ok: false, detail: 'the test attestation has no tree SHA' };
+
+  if (ctx.stepId === 'merge') {
+    const shippedSha = attestation.shippedSha;
+    if (!shippedSha) return { ok: true, detail: 'the commit stage did not record a shipped SHA, so merge verification is local-only' };
+    const head = await git(ctx.cwd, ['rev-parse', 'HEAD']);
+    if (!head.ok) return { ok: false, detail: `cannot resolve HEAD while checking shipped revision: ${head.stderr.trim()}` };
+    const inHead = await git(ctx.cwd, ['merge-base', '--is-ancestor', shippedSha, 'HEAD']);
+    if (!inHead.ok) {
+      return { ok: false, detail: `shipped revision ${shippedSha} is not an ancestor of current HEAD ${head.stdout.trim()}` };
+    }
+    const base = ctx.baseBranch ?? 'main';
+    const remote = await git(ctx.cwd, ['rev-parse', '--verify', `refs/remotes/origin/${base}`]);
+    if (!remote.ok) return { ok: true, detail: `origin/${base} is unavailable, so the shipped revision is verified locally` };
+    const remoteRef = `origin/${base}`;
+    const onRemoteBase = await git(ctx.cwd, ['merge-base', '--is-ancestor', shippedSha, remoteRef]);
+    if (onRemoteBase.ok) return { ok: true, detail: `shipped revision ${shippedSha} is an ancestor of ${remoteRef}` };
+    const anchor = attestation.headSha ?? shippedSha;
+    const count = await git(ctx.cwd, ['rev-list', '--count', `${anchor}..${remoteRef}`]);
+    return {
+      ok: false,
+      detail: `base ${remoteRef} moved by ${count.ok ? count.stdout.trim() : 'an unknown number of'} commit(s) since the tested revision; re-run the tests on the merged tree`,
+      retryMax: 1,
+    };
+  }
+
+  const tree = await git(ctx.cwd, ['cat-file', '-e', `${attestation.treeSha}^{tree}`]);
+  if (!tree.ok) return { ok: false, detail: `test attestation tree ${attestation.treeSha} cannot be resolved` };
+  const headTree = await git(ctx.cwd, ['rev-parse', 'HEAD^{tree}']);
+  if (!headTree.ok) return { ok: false, detail: `cannot resolve HEAD tree: ${headTree.stderr.trim()}` };
+  const changed = await git(ctx.cwd, ['diff-tree', '--no-commit-id', '--name-only', '-r', attestation.treeSha, headTree.stdout.trim()]);
+  if (!changed.ok) return { ok: false, detail: `could not compare the tested tree with HEAD: ${changed.stderr.trim()}` };
+  const paths = changed.stdout.split('\n').map((path) => path.trim()).filter(Boolean);
+  const outside = paths.filter((path) => !pathIsShippingRecord(path));
+  if (outside.length > 0) {
+    return { ok: false, detail: `HEAD changed outside the tested revision in ${outside.join(', ')}` };
+  }
+  return { ok: true, detail: `HEAD preserves the tested tree; only record paths changed after the test attestation` };
+}
+
+/** Verify that the current revision has landed on the configured base when auto-merge is on. */
+export async function mergedIntoBase(ctx: PostconditionContext): Promise<PostconditionResult> {
+  if (!ctx.autoMerge) return { ok: true, detail: 'automatic merge is disabled, so manual landing remains allowed' };
+  const base = ctx.baseBranch ?? 'main';
+  const remote = await git(ctx.cwd, ['rev-parse', '--verify', `refs/remotes/origin/${base}`]);
+  if (!remote.ok) return { ok: true, detail: `origin/${base} is unavailable, so merge verification is local-only` };
+  const ancestor = await git(ctx.cwd, ['merge-base', '--is-ancestor', 'HEAD', `origin/${base}`]);
+  if (ancestor.ok) return { ok: true, detail: `HEAD is merged into origin/${base}` };
+  const reason = `manual merge required: HEAD is not merged into origin/${base}`;
+  return { ok: false, detail: reason, handoff: { kind: 'manual-merge', reason } };
 }
 
 const BUILTINS: Record<PostconditionId, (ctx: PostconditionContext) => Promise<PostconditionResult>> = {
   'everything-committed': everythingCommitted,
   'all-services-deployed': allServicesDeployed,
+  'tested-revision-shipped': testedRevisionShipped,
+  'merged-into-base': mergedIntoBase,
 };
 
 /**

@@ -2,6 +2,18 @@ import { z } from 'zod';
 import { RUNNER_IDS, type RunnerId } from '../core/agent-runner.ts';
 import { POSTCONDITION_IDS } from './postconditions.ts';
 
+const verifyEntrySchema = z
+  .object({
+    builtin: z.enum(POSTCONDITION_IDS).optional(),
+    command: z.string().min(1).optional(),
+    max: z.number().int().nonnegative().default(1),
+  })
+  .refine((v) => Boolean(v.builtin) !== Boolean(v.command), {
+    message: "a step's verify names either a builtin or a command, not both",
+  });
+
+const verifySchema = z.union([verifyEntrySchema, z.array(verifyEntrySchema).min(1).max(4)]);
+
 /**
  * A workflow is an ordered list of steps. Two step kinds:
  *  - `agent` — one claude CLI run (prompt + optional skill + model + tools);
@@ -133,16 +145,7 @@ export const workflowStepSchema = z
      * queued runs, and why a widening like this one is safe.
      */
     heavy: z.boolean().optional(),
-    verify: z
-      .object({
-        builtin: z.enum(POSTCONDITION_IDS).optional(),
-        command: z.string().min(1).optional(),
-        max: z.number().int().nonnegative().default(1),
-      })
-      .refine((v) => Boolean(v.builtin) !== Boolean(v.command), {
-        message: 'a step\'s verify names either a builtin or a command, not both',
-      })
-      .optional(),
+    verify: verifySchema.optional(),
   })
   .refine((s) => Boolean(s.command) !== Boolean(s.prompt ?? s.skill), {
     message: 'a step is either an agent step (prompt/skill) or a check step (command), not both',
@@ -841,6 +844,29 @@ const CODEX_WRITE = { model: 'gpt-5.6-luna', effort: 'high' } as const;
  */
 const CODEX_COMPLEX = { model: 'gpt-5.6-sol', effort: 'medium' } as const;
 
+/** Spec review is the SOL xhigh judgement pass, with Claude opus as the explicit fallback. */
+const CODEX_REVIEW = { model: 'gpt-5.6-sol', effort: 'xhigh' } as const;
+
+/** The version-control grant shared by the commit and merge stages. */
+const SHIP_BASH_ALLOWLIST = [
+  'git status',
+  'git diff',
+  'git log',
+  'git show',
+  'git branch',
+  'git rev-parse',
+  'git add',
+  'git commit',
+  'git fetch',
+  'git pull',
+  'git push',
+  'git merge',
+  'git checkout',
+  'git switch',
+  'gh pr',
+  'gh repo',
+];
+
 /**
  * The four task classes the owner's table names, in ascending cost
  * (`.ai/specs/2026-08-24-auto-classify-task-model.md`).
@@ -1045,6 +1071,7 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       name: 'Write the spec',
       model: SPEC_AUTHORING_MODEL,
       runner: SPEC_AUTHORING_RUNNER,
+      byRunner: { codex: CODEX_COMPLEX },
       // Narrowed by the P1 split: the record sweep moved to `context`, so this step's window holds
       // the brief and the code it names rather than the raw search output. `Task` is deliberately
       // NOT granted here — the writing is the one job that must not be delegated, for the reason
@@ -1088,8 +1115,10 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     {
       id: 'review-spec',
       name: 'Review the spec',
-      model: SPEC_AUTHORING_MODEL,
-      runner: SPEC_AUTHORING_RUNNER,
+      model: CODEX_REVIEW.model,
+      effort: CODEX_REVIEW.effort,
+      runner: 'codex',
+      byRunner: { claude: { model: SPEC_AUTHORING_MODEL, effort: 'xhigh' } },
       // P2 of `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`.
       //
       // READ-ONLY BY CONSTRUCTION — no `Write`, no `Edit`. A reviewer that can edit what it
@@ -1113,8 +1142,8 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         'Original task, for context:',
         '{{task}}',
         '',
-        'Everything after this step acts on the spec: it gets implemented, committed, PUSHED to a',
-        'remote and DEPLOYED. You are the last checkpoint before that. Read the spec in full, open',
+        'Everything after this step acts on the spec: it gets implemented, committed, pushed to a',
+        'remote and deployed. You are the last checkpoint before that. Read the spec in full, open',
         'the code and prior specs it cites, and answer:',
         '1. Does it solve the task that was actually asked — the whole ask, not a convenient part?',
         '2. Are its claims about the CURRENT code true? Check the citations; a spec built on a file,',
@@ -1258,37 +1287,23 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
     },
     {
       id: 'commit-push',
-      name: 'Commit & push / merge',
+      name: 'Commit & push',
       model: SPEC_TO_DEPLOY_STEP_MODEL,
       byRunner: { codex: CODEX_MECHANICAL },
       // The step is green only if the tree is CLEAN and (where a remote is reachable) nothing is
       // unpushed — owner instruction 2026-08-20 on run `23221162`, which reported `status=done`
       // leaving 7 modified and 5 untracked files and no commit: "everything must be committed in
       // the commit step". One re-run first, carrying the list of files it left behind.
-      verify: { builtin: 'everything-committed', max: 1 },
+      verify: [
+        { builtin: 'everything-committed', max: 1 },
+        { builtin: 'tested-revision-shipped', max: 1 },
+      ],
       // Owner decision 2026-08-19 ("commit & push/merge"): a SCOPED remote-reaching grant — git
       // (incl. `git push`, branch/merge plumbing) and `gh pr` only. This is the one step that ships
       // to the remote. It is still an allowlist, NOT unrestricted bash: no arbitrary shell, only the
       // version-control verbs shipping needs. `cez kb` is not here — documenting is the next step.
       allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
-      bashAllowlist: [
-        'git status',
-        'git diff',
-        'git log',
-        'git show',
-        'git branch',
-        'git rev-parse',
-        'git add',
-        'git commit',
-        'git fetch',
-        'git pull',
-        'git push',
-        'git merge',
-        'git checkout',
-        'git switch',
-        'gh pr',
-        'gh repo',
-      ],
+      bashAllowlist: SHIP_BASH_ALLOWLIST,
       prompt: [
         'The change is implemented and its tests pass. SHIP it, following THIS repository\'s own',
         'conventions — do not impose a workflow the repo does not use.',
@@ -1298,15 +1313,41 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         '',
         '1. Commit whatever is staged/uncommitted with a clear message (imperative, lowercase prefix',
         '   — `feat:`/`fix:`/`chore:`… — referencing the spec, e.g. "feat: implement <spec>").',
-        '2. Ship it the way this repo ships: check recent `git log` / a CONTRIBUTING doc / the KB for',
-        '   whether it pushes a branch directly, or opens a PR (`gh pr create`) and merges it',
-        '   (`gh pr merge`). Follow that. If `main` is protected, open a PR rather than forcing a push.',
-        '3. If self-merging is the repo\'s convention, merge; if review is expected, leave the PR open',
-        '   and say so.',
+        '2. Push the task branch the way this repo ships: check recent `git log` / a CONTRIBUTING doc',
+        '   / the KB for whether it pushes directly or opens a PR. If `main` is protected, open a PR',
+        '   rather than forcing a push. Do not merge the base branch in this step.',
         '',
         'If pushing or merging is not possible or not authorized here (no remote, protected branch,',
         'no credentials), commit locally and REPORT that plainly — do not force it. End your report',
         'with the commit(s), the branch, and the push/PR/merge result.',
+      ].join('\n'),
+    },
+    {
+      id: 'merge',
+      name: 'Merge into base',
+      model: SPEC_TO_DEPLOY_STEP_MODEL,
+      byRunner: { codex: CODEX_MECHANICAL },
+      verify: [
+        { builtin: 'tested-revision-shipped', max: 1 },
+        { builtin: 'merged-into-base', max: 1 },
+      ],
+      allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+      bashAllowlist: SHIP_BASH_ALLOWLIST,
+      prompt: [
+        'The change is committed and pushed. LAND it on the repository base branch, following this',
+        'repository\'s own conventions.',
+        '',
+        'Original task, for context:',
+        '{{task}}',
+        '',
+        'Derive the target in this order: the run\'s baseBranch, the repository config baseBranch,',
+        'then the remote default branch. Strip an `origin/` prefix and ignore a raw 7 to 40 character',
+        'hex SHA when choosing a branch.',
+        'Use only the repository\'s established landing mechanism: `gh pr merge` or',
+        '`git push <remote> HEAD:refs/heads/<base>`. You may merge the base into the task branch when',
+        'needed, but never checkout or switch to the base branch in this task worktree.',
+        'When auto-merge is disabled, leave the task parked for the manual merge handoff if the base',
+        'is protected. Report the target branch and the landing result.',
       ].join('\n'),
     },
     {
@@ -1316,7 +1357,10 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       byRunner: { codex: CODEX_WRITE },
       // This step COMMITS too (spec status, KB, tracker), so it inherits the same post-condition:
       // a record written into an uncommitted file is a record the next session never reads.
-      verify: { builtin: 'everything-committed', max: 1 },
+      verify: [
+        { builtin: 'everything-committed', max: 1 },
+        { builtin: 'merged-into-base', max: 1 },
+      ],
       // `Task` for the same measured reason the reading step has it: 361 s of model time against
       // 109 s of tool time, and its three reads — what the KB already says, what the spec claims,
       // what the tracker thinks — are independent. It WRITES (Edit/Write are granted), so the
@@ -1341,12 +1385,16 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         'git show',
         'git add',
         'git commit',
+        'git fetch',
+        'git merge',
+        'git rev-parse',
         'git push',
         'gh pr',
         'cez kb',
       ],
       prompt: [
-        'The change for this task is implemented, tested, and shipped. Now WRITE THE RECORD STRAIGHT',
+        'The change for this task is implemented, tested, committed, and landed on the base branch.',
+        'Now WRITE THE RECORD STRAIGHT',
         'so the next session reads the truth — in the SAME breath as the code, never later.',
         '',
         'Original task, for context:',
@@ -1381,8 +1429,9 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         '',
         FILE_WRITE_RECIPE,
         '',
-        'Commit the doc/spec edits and push them the same way the change was shipped (branch push or',
-        'PR). If pushing is not authorized here, commit locally and say so. End your report listing',
+        'Commit the doc/spec edits on the task branch, then land that record on the base branch using',
+        'the same mechanism. If pushing is not authorized here, commit locally and say so. End your',
+        'report listing',
         'what you recorded and where.',
       ].join('\n'),
     },
