@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Hono } from 'hono';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_WORKTREE_RETENTION } from '../config.ts';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
@@ -26,6 +26,8 @@ describe('the config API', () => {
   const savedCodexHome = process.env.CODEX_HOME;
   const savedXdgConfigHome = process.env.XDG_CONFIG_HOME;
   const savedModelsLocked = process.env.CEZ_AGENT_MODELS_LOCKED;
+  const savedClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  const savedAnthropicModel = process.env.ANTHROPIC_MODEL;
   let store: RunStore;
   let app: Hono;
 
@@ -36,6 +38,9 @@ describe('the config API', () => {
     process.env.CEZ_HOME = join(homeRoot, '.cezar');
     process.env.CODEX_HOME = join(homeRoot, '.codex');
     process.env.XDG_CONFIG_HOME = join(homeRoot, '.config');
+    // Keep this fixture on the HOME fallback because paths.ts:256-263 gives CLAUDE_CONFIG_DIR precedence.
+    delete process.env.CLAUDE_CONFIG_DIR;
+    delete process.env.ANTHROPIC_MODEL;
     delete process.env.CEZ_AGENT_MODELS_LOCKED;
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
     mkdirSync(join(homeRoot, '.cezar'), { recursive: true });
@@ -58,6 +63,10 @@ describe('the config API', () => {
     else process.env.XDG_CONFIG_HOME = savedXdgConfigHome;
     if (savedModelsLocked === undefined) delete process.env.CEZ_AGENT_MODELS_LOCKED;
     else process.env.CEZ_AGENT_MODELS_LOCKED = savedModelsLocked;
+    if (savedClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = savedClaudeConfigDir;
+    if (savedAnthropicModel === undefined) delete process.env.ANTHROPIC_MODEL;
+    else process.env.ANTHROPIC_MODEL = savedAnthropicModel;
   });
 
   const configPath = () => join(repoRoot, '.ai/cezar', 'config.json');
@@ -110,6 +119,34 @@ describe('the config API', () => {
       opencode: 'openai/gpt-5.1',
     });
     expect((await getBody()).modelsLocked).toBe(false);
+  });
+
+  describe('with a hostile ambient Claude config dir', () => {
+    let decoy: string;
+
+    beforeAll(() => {
+      decoy = mkdtempSync(join(tmpdir(), 'cez-configapi-decoy-'));
+      writeFileSync(join(decoy, 'settings.json'), '{"model":"decoy-model"}');
+      process.env.CLAUDE_CONFIG_DIR = decoy;
+      process.env.ANTHROPIC_MODEL = 'decoy-model';
+    });
+
+    afterAll(() => rmSync(decoy, { recursive: true, force: true }));
+
+    it('still reads the fake HOME, not the ambient override', async () => {
+      mkdirSync(join(homeRoot, '.claude'), { recursive: true });
+      mkdirSync(join(homeRoot, '.codex'), { recursive: true });
+      mkdirSync(join(homeRoot, '.config', 'opencode'), { recursive: true });
+      writeFileSync(join(homeRoot, '.claude', 'settings.json'), '{"model":"sonnet"}');
+      writeFileSync(join(homeRoot, '.codex', 'config.toml'), 'model = "gpt-5-codex"\n');
+      writeFileSync(join(homeRoot, '.config', 'opencode', 'opencode.json'), '{"model":"openai/gpt-5.1"}');
+
+      expect((await getBody()).defaultModels).toEqual({
+        claude: 'sonnet',
+        codex: 'gpt-5-codex',
+        opencode: 'openai/gpt-5.1',
+      });
+    });
   });
 
   it('locks native defaults and rejects Cezar model overrides', async () => {
