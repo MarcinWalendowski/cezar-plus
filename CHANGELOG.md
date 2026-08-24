@@ -5,6 +5,103 @@
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+- 🧭 **A model router for codex: the owner's task→model table, applied per step of `spec-to-deploy`**
+  (spec `.ai/specs/2026-08-24-codex-step-model-and-effort.md`).
+
+  `spec-to-deploy` has expressed a per-step model policy since 2026-08-21 — `spec`/`review-spec` on
+  `opus`, the other six on `sonnet`. **On a codex run it expressed nothing.** Every one of those
+  pins is a Claude alias, `modelForBackend` drops it as another runner's id, and the step falls
+  through to codex's own default. Measured on `prod-host`, that default is **`gpt-5.6-sol`
+  with `reasoningEffort: null`**: the most expensive model in the catalog at its *shallowest*
+  reasoning level, for `Commit & push` and `Deploy` alike. Nobody chose it; it is the absence of a
+  choice.
+
+  A step can now name a model **and a reasoning effort per runner** (`byRunner`), so one step says
+  `sonnet` for Claude and `gpt-5.6-luna`/`xhigh` for codex instead of naming one and losing the
+  other. The pair is one field rather than two parallel maps, because the table has rows that
+  differ *only* in effort (Luna Medium vs Luna XHigh), and a half-applied override lands on a row
+  nobody chose.
+
+  | step | codex | effort |
+  | --- | --- | --- |
+  | Gather the record | `gpt-5.6-terra` | medium |
+  | Write / Review the spec | *(unchanged — pinned opus-on-Claude)* | — |
+  | Implement the spec | `gpt-5.6-luna` | xhigh |
+  | Run the tests · Commit & push · Deploy | `gpt-5.6-luna` | medium |
+  | Document the decision | `gpt-5.6-luna` | high |
+
+  `implement` is Luna XHigh and not Sol even for an auth or migration task: by the time it runs the
+  architecture decision has been made and reviewed on opus two steps earlier. The table's Sol row is
+  about *deciding*, and that is what `spec`/`review-spec` are.
+
+- ⚙️ **Reasoning effort reaches codex** (same spec, D3). `step.effort` was Claude-only — the schema
+  said so in its own docblock — which made four of the table's six rows inexpressible, since they
+  differ from another row only by effort. It now rides on `turn/start`, in the same params object
+  cezar already sends `summary` in. Read off the app-server's own `generate-json-schema` output
+  rather than guessed: `v2/TurnStartParams.json` documents `effort` as *"Override the reasoning
+  effort for this turn and subsequent turns."*
+
+  **`thread/start` is the trap, and it was measured.** It accepts `effort`, `reasoningEffort`,
+  `modelReasoningEffort`, `model_reasoning_effort` **and** `reasoning_effort` without error and
+  applies none of them — the thread comes back `reasoningEffort: null` every time, because unknown
+  params are tolerated. A change made there looks exactly like a change that worked, which is why
+  the test asserts the `turn/start` payload cezar writes rather than the turn's outcome.
+
+- ⬆️ **Escalation, exactly where the table puts it** (same spec, D4). A step that fails on
+  `terra`/`medium` or `sol`/`medium` retries on `sol`/`high`, then `sol`/`max`. Luna rows do **not**
+  climb — a failing tiny task must not end up on the most expensive model, which is precisely what
+  the table declines to do — and `ultra` is never reached, because it is the one level the `effort`
+  enum omits.
+
+- 🔀 **A second Codex account, detected by itself — and a pool that can actually balance one**
+  (spec `.ai/specs/2026-08-24-second-codex-account-balancing.md`).
+
+  Three findings, measured on a production box running one Codex login that had been
+  rate-limited for a day:
+
+  **Codex's quota reading was invented while the app-server held no snapshot.**
+  `account/rateLimits/read` answered `usedPercent: 0` twice, 21 s apart, with `resetsAt` moving with
+  the clock — always exactly `now + 7 days`. That is the app-server's *empty default*, not a
+  measurement. cezar stored the fake 0 % anyway, which put a cold Codex account in **band 0** — the
+  most-favoured value — while it could not run a thing. `parseWindow` now drops a window that is
+  indistinguishable from an unpopulated snapshot, restoring the rule this module already stated:
+  *"Never invents … Zero is a claim."*
+
+  **Narrowed the same day, before this shipped as Done.** The first reading of this said codex
+  *cannot* report on a ChatGPT Plus plan, from a rollout snapshot carrying
+  `{"limit_id":"premium","primary":null,"secondary":null}`. Four probes over three minutes after
+  the deploy disprove it: `limitId: "codex"`, `resetsAt` **anchored** (identical while `takenAt`
+  advanced 180 s), and `usedPercent` climbing 1 → 2 → 4 → 5 on the account in use. The guard is
+  unchanged, because it keys on **rolling vs anchored** rather than on the plan — and it keeps both
+  of those real windows. What changed is the conclusion: codex rows are not permanently unmeasured,
+  which makes the per-provider band split below load-bearing on every dispatch rather than only
+  while codex says nothing.
+
+  **A usage band cannot be compared across providers, and `pool:*` was comparing them.** A Claude
+  Max week at 70 % and a Codex Plus week at 0 % are fractions of two differently-sized allowances.
+  `selectPoolAccount` now picks each provider's winner on the band and chooses **between** providers
+  on in-flight and dispatch order only — two levels, so every comparison stays between like rows and
+  the result no longer depends on the order candidates arrive in. A single-provider pool
+  (`pool:claude`, `pool:codex`) is unchanged.
+
+  **Discovery was Claude-only on an argument that had already been overtaken.** It refused Codex
+  because identity lives in `auth.json` beside a live API key — while `readAccountIdentity` had been
+  reading that file's `id_token` claims for the "Show details" route since 2026-07-29. The
+  credentials are separable at the reader, not at the caller: `readCodexAuthClaims` returns the JWT
+  payload and a boolean, never the API key or either token. `~/.codex*` homes are discovered now,
+  each carrying its email and plan, and each provider's card offers its own.
+
+- ⚙️ **`CEZ_AUTO_ACCOUNTS=1` — register detected logins instead of only offering them** (same spec,
+  D5; opt-in, exact `'1'`, off by default). This reverses the 2026-08-14 decision that discovery
+  must never write, and only where it is switched on. The case it exists for is a hosted box:
+  `CEZ_REMOTE=1` withholds the accounts listing and 409s the POST, so there is no UI path at all
+  there and a second account has to be added by hand-editing JSON over ssh. A boot hook and a
+  5-minute sweep append any config dir that carries its CLI's markers **and** records an account it
+  is signed in as — never a dir the CLI merely created, which would put a login that cannot run into
+  the rotation. Append-only: no existing row is relabelled, repointed or removed. Reported as
+  `capabilities.autoAccounts`, deliberately not withheld in hosted mode, because it says whether the
+  server will write rather than who the operator is.
+
 - 🔐 **The cluster HTTP family authenticates the NODE now — and the hub turns out to have nothing
   to authenticate it against** (spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, **D20**,
   still behind `CEZ_CLUSTER=1` and off by default).

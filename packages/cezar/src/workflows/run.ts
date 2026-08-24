@@ -9,6 +9,7 @@ import {
   type AskRequest,
 } from '../core/ask.ts';
 import { claudeSessionTranscriptExists, type AgentSession } from '../core/claude-cli-runner.ts';
+import { detectTrailingQuestion, type TrailingQuestion } from '../core/turn-question.ts';
 import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.ts';
 import { parseUsageLimit } from '../core/usage-limit.ts';
 import { createRunner } from '../core/runner-factory.ts';
@@ -131,6 +132,7 @@ import {
   DEFAULT_WORKFLOW,
   DEFAULT_WORKFLOW_NAME,
   parseReviewVerdict,
+  resolveStepModel,
   stepKind,
   type ReviewVerdict,
   type WorkflowDef,
@@ -282,6 +284,9 @@ interface ActiveRun {
   monitoringWakeTimer?: NodeJS.Timeout;
   monitoringWakeIntervalMinutes?: number;
   monitoringWakeups?: number;
+  /** Bounded re-emit nudges spent on this run (cap `MAX_ASK_STRUCTURE_NUDGES`).
+   *  Process-local by design, like `monitoringWakeups`: a restart is a fresh epoch. */
+  askStructureNudges?: number;
   autosaveTimer?: NodeJS.Timeout;
   leaseTimer?: NodeJS.Timeout;
   leaseRoots?: string[];
@@ -371,6 +376,14 @@ const AUTONOMOUS_NUDGE =
   'Continue working autonomously until the task is fully complete. Do not ask me for confirmation or clarification — make reasonable assumptions and proceed. When everything is done, end the session with your done signal.';
 const MONITORING_WAKE_NUDGE =
   'Re-check the downstream work you were monitoring. Continue toward the task goal; emit CEZ:MONITORING again only if it is still pending.';
+/** One nudge per run (spec 2026-08-23-plain-end-structured-question, D6): an agent that declined
+ *  once has answered the question, and a cap of one cannot loop by construction. */
+const MAX_ASK_STRUCTURE_NUDGES = 1;
+/** The sentinel substring (`You ended that turn with no marker`) is matched literally by the
+ *  bundled dry-run mock's `mock:ask-on-nudge` verb — the mock is a separate process and never
+ *  imports this constant. */
+const ASK_STRUCTURE_NUDGE =
+  'You ended that turn with no marker, which parks the task and tells the user to reply — but the cockpit has nothing for them to tap. If you were asking them something, send it again now as a single CEZ:ASK <json> line with 2–4 concrete options. If you were NOT asking anything, end plainly again, or with CEZ:DONE if the goal is achieved — do not invent a question.';
 
 /** Stop both halves of a broker launch before its spool is replaced by a retry. Best effort.
  *  Distinct from `reapAbandonedBroker` (`../core/reap-abandoned-broker.ts`), which stops a
@@ -2202,7 +2215,10 @@ export class RunManager {
         // to plain `done` here silently drops the "needs you" signal, so a restart made a task
         // with an open question look finished. Detect that before the steps are settled and keep
         // it in the attention-bearing `review` gate instead (the ask card still resumes it).
+        /** An explicit unanswered marker is strong enough to outrank chain re-entry. */
         const pendingAsk = this.runHasPendingAsk(run.id);
+        /** A heuristic prose verdict may preserve attention, but must never withhold queued work. */
+        const pendingAttention = pendingAsk || run.waitingReason === 'question';
         // The turn was over and the ball was in the user's court, so the open step really is
         // finished — but the CHAIN may not be (spec 2026-08-20, P2). Settle the step first, then
         // ask: if later steps are still pending, re-enter at the next one instead of calling
@@ -2218,11 +2234,11 @@ export class RunManager {
         if (!pendingAsk && (await this.reenterChain(settled, 'cezar restarted'))) continue;
         this.store.appendEvent(run.id, {
           type: 'lifecycle',
-          message: pendingAsk
+          message: pendingAttention
             ? 'cezar restarted — the open session was settled; your answer is still needed'
             : 'cezar restarted — the open session was settled',
         });
-        await this.settleSuccess(run.id, { pendingAsk });
+        await this.settleSuccess(run.id, { pendingAsk: pendingAttention });
         continue;
       }
       // `running`: FIRST ask whether the agent is even dead (P4 of
@@ -3885,8 +3901,15 @@ export class RunManager {
       this.waiting.delete(runId); // resumed — the run counts against slots again
       this.monitoring.delete(runId);
       // Clear any `monitoring` activity — the agent is actively working again
-      // (spec 2026-07-18-subagent-monitoring-status, #490).
-      this.store.updateRun(runId, { status: 'running', activity: undefined });
+      // (spec 2026-07-18-subagent-monitoring-status, #490). Also clears a markerless park's
+      // `waitingReason`/`waitingQuestion` (spec 2026-08-23-plain-end-structured-question) — a
+      // stale prose question must not survive a reply and sit beside a fresh turn's own outcome.
+      this.store.updateRun(runId, {
+        status: 'running',
+        activity: undefined,
+        waitingReason: undefined,
+        waitingQuestion: undefined,
+      });
       if (state.currentStepId) {
         this.store.updateStep(runId, state.currentStepId, { status: 'running' });
       }
@@ -4225,6 +4248,10 @@ export class RunManager {
       // one is a fresh attempt, so the stale reason must not survive into whatever this attempt
       // finishes as (PLAN D27 Phase 1; `stopReason` is only ever valid alongside `status: 'review'`).
       stopReason: undefined,
+      // A prose question from the run this continuation resumes must not survive into this fresh
+      // turn (spec 2026-08-23-plain-end-structured-question) — same reasoning as `activity` above.
+      waitingReason: undefined,
+      waitingQuestion: undefined,
     });
     this.store.updateStep(runId, stepId, {
       status: 'running',
@@ -4311,6 +4338,10 @@ export class RunManager {
         const askRejection = askResult ? askMarkerRejection(askResult) : undefined;
         const monitoring =
           sessionOpen && !done && !ask && MONITORING_MARKER_RE.test(turnText.trimEnd());
+        // A plain end — none of the three markers fired (spec
+        // 2026-08-23-plain-end-structured-question). Classified HERE, before `turnText` resets
+        // below — the same reason twin A (`runAgentStep`) hoists it at its own marker site.
+        const trailingQuestion = !done && !ask && !monitoring ? detectTrailingQuestion(turnText) : null;
         turnText = '';
         // The step budget (PLAN D27 Phase 1): this turn just happened, so it is spent
         // unconditionally — including the `done` turn, harmlessly, since nothing spends after it.
@@ -4337,6 +4368,9 @@ export class RunManager {
           return;
         }
         const budgetJustExceeded = sessionOpen && this.budgetSpent(runId, config);
+        // Did a plain end spend a bounded nudge instead of parking (P4)? Stays false on every
+        // marked ending, on an autonomous continuation, and when the session is not open.
+        let nudged = false;
         if (budgetJustExceeded) {
           // The bound (PLAN D27 Phase 1): an open session would otherwise self-continue
           // (autonomous nudge) or park (`waiting`/`monitoring`) for another turn — stop it here,
@@ -4368,27 +4402,50 @@ export class RunManager {
               return true;
             })();
           if (!autoContinued) {
-            // `CEZ:ASK` → park `waiting` (attention) AND surface the structured
-            // question as an ask card (#473). `CEZ:MONITORING` → non-attention
-            // `running`/`activity:'monitoring'` (#490). Both share the waiting
-            // lifecycle (free the slot, keep the idle timer); the autonomous
-            // nudge above still wins over either.
-            if (ask) emitAskRequested(sink, ask);
+            // `CEZ:ASK` → park `waiting` (attention) AND surface the structured question as an
+            // ask card (#473). `CEZ:MONITORING` → non-attention `running`/`activity:'monitoring'`
+            // (#490). A plain end is classified by `parkPlainEnd`, which may spend a bounded nudge
+            // instead of parking at all (spec 2026-08-23-plain-end-structured-question). All three
+            // share the waiting lifecycle otherwise (free the slot, keep the idle timer); the
+            // autonomous nudge above still wins over any of them.
             if (monitoring) {
-              this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
+              this.store.updateRun(runId, {
+                status: 'running',
+                activity: 'monitoring',
+                waitingReason: undefined,
+                waitingQuestion: undefined,
+              });
               this.store.updateStep(runId, stepId, { status: 'running' });
               this.monitoring.add(runId);
               this.clearIdleTimer(state);
               this.armMonitoringWakeTimer(runId, state);
-            } else {
-              this.store.updateRun(runId, { status: 'waiting', activity: undefined });
+              this.waiting.add(runId);
+              this.releaseSlot();
+            } else if (ask) {
+              emitAskRequested(sink, ask);
+              this.store.updateRun(runId, {
+                status: 'waiting',
+                activity: undefined,
+                waitingReason: undefined,
+                waitingQuestion: undefined,
+              });
               this.store.updateStep(runId, stepId, { status: 'waiting' });
               this.monitoring.delete(runId);
               this.clearMonitoringWakeTimer(state, runId);
+              this.waiting.add(runId);
+              this.armIdleTimer(runId, state);
+              this.releaseSlot();
+            } else {
+              nudged = this.parkPlainEnd(runId, stepId, trailingQuestion, state);
+              if (!nudged) {
+                this.store.updateStep(runId, stepId, { status: 'waiting' });
+                this.monitoring.delete(runId);
+                this.clearMonitoringWakeTimer(state, runId);
+                this.waiting.add(runId);
+                this.armIdleTimer(runId, state);
+                this.releaseSlot();
+              }
             }
-            this.waiting.add(runId);
-            if (!monitoring) this.armIdleTimer(runId, state);
-            this.releaseSlot();
           }
         }
         // A turn that completed is the ONLY evidence the provider's window actually reopened, so
@@ -4399,10 +4456,11 @@ export class RunManager {
         if (this.store.getRun(runId)?.autoResumeAttempts !== undefined) {
           this.store.updateRun(runId, { autoResumeAttempts: undefined });
         }
+        // A nudge turn is still `running`, not `waiting` — see P4 step 3.
         appendHandoffHeartbeat(
           this.dataDir,
           runId,
-          `turn complete — status=${monitoring ? 'monitoring' : sessionOpen ? 'waiting' : 'running'}`,
+          `turn complete — status=${monitoring ? 'monitoring' : nudged ? 'running' : sessionOpen ? 'waiting' : 'running'}`,
         );
       }
     };
@@ -5176,6 +5234,11 @@ export class RunManager {
             stepChainNote,
             sentAttachments,
             stepResume,
+            // The POST-CONDITION ledger, not `retriesUsed`: the table's escalation row is about a
+            // step that ran and did not meet its goal, which is exactly what `verifyRetries`
+            // counts. `retriesUsed` counts a CHECK step looping back to an earlier step — a
+            // different event, and one that can re-enter a step that never failed.
+            { priorFailures: verifyRetries.get(step.id) ?? 0 },
           ),
         );
         startImages = undefined;
@@ -5738,6 +5801,14 @@ export class RunManager {
      *  `verifyTranscript` (spec 2026-08-22-resume-fresh-session-fallback) is a separate flag
      *  rather than "resumeFrom is set" — see `ChainResumePoint.resume`. */
     resumeFrom?: { sessionId: string; profileId?: string; prompt: string; verifyTranscript?: true },
+    /** How many times this step's post-condition has already sent it back — 0 on the first
+     *  attempt. Drives the codex escalation ladder
+     *  (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D4).
+     *
+     *  An object rather than a bare `number` deliberately: this parameter list is fifteen long and
+     *  ends in two optionals, and a lone trailing number is the shape that swaps with a neighbour
+     *  and still typechecks. */
+    escalation: { priorFailures: number } = { priorFailures: 0 },
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -5880,6 +5951,10 @@ export class RunManager {
           !done &&
           !ask &&
           MONITORING_MARKER_RE.test(turnText.trimEnd());
+        // A plain end — none of the three markers fired (spec
+        // 2026-08-23-plain-end-structured-question). Classified HERE, before `turnText` resets
+        // below: the park block downstream sees only the empty string.
+        const trailingQuestion = !done && !ask && !monitoring ? detectTrailingQuestion(turnText) : null;
         turnText = '';
         // The step budget (PLAN D27 Phase 1): this turn just happened, so it is spent
         // unconditionally — including the `done` turn, harmlessly, since nothing spends after it.
@@ -5895,6 +5970,9 @@ export class RunManager {
         }
         const waiting = interactive && sessionOpen;
         const budgetJustExceeded = waiting && this.budgetSpent(runId, config);
+        // Did a plain end spend a bounded nudge instead of parking (P4)? Only meaningful when
+        // `waiting` is true; stays false on every marked ending and every non-interactive step.
+        let nudged = false;
         if (budgetJustExceeded) {
           // The bound (PLAN D27 Phase 1): an open session would otherwise park (`waiting` /
           // `monitoring`) for another turn — stop it here instead of granting one. `state`
@@ -5908,40 +5986,63 @@ export class RunManager {
           this.waiting.delete(runId);
           this.releaseSlot();
         } else if (waiting) {
-          // Turn over, session open. Either the ball is in the user's court
-          // (`waiting`) — optionally with a structured `CEZ:ASK` question the
-          // cockpit renders as an ask card (#473) — or the agent declared it is
-          // still working on its own downstream work with `CEZ:MONITORING`, which
-          // parks as `running`/`activity:'monitoring'`, a non-attention state,
-          // instead of raising "needs you" (#490). Lifecycle is identical: the
-          // run frees its slot and keeps the idle timer.
-          if (ask) emitAskRequested(sink, ask);
+          // Turn over, session open. The ball is in the user's court — with a structured
+          // `CEZ:ASK` question the cockpit renders as an ask card (#473), with the agent's own
+          // `CEZ:MONITORING` declaration that it is still working on its own downstream work
+          // (parks as `running`/`activity:'monitoring'`, a non-attention state, instead of raising
+          // "needs you", #490), or with a plain end, in which case `parkPlainEnd` classifies it
+          // (spec 2026-08-23-plain-end-structured-question) and may spend a bounded nudge instead
+          // of parking at all.
           if (monitoring) {
-            this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
+            this.store.updateRun(runId, {
+              status: 'running',
+              activity: 'monitoring',
+              waitingReason: undefined,
+              waitingQuestion: undefined,
+            });
             this.store.updateStep(runId, step.id, { status: 'running' });
             this.monitoring.add(runId);
             this.clearIdleTimer(state);
             this.armMonitoringWakeTimer(runId, state);
-          } else {
-            this.store.updateRun(runId, { status: 'waiting', activity: undefined });
+            this.waiting.add(runId);
+            this.releaseSlot();
+          } else if (ask) {
+            emitAskRequested(sink, ask);
+            this.store.updateRun(runId, {
+              status: 'waiting',
+              activity: undefined,
+              waitingReason: undefined,
+              waitingQuestion: undefined,
+            });
             this.store.updateStep(runId, step.id, { status: 'waiting' });
             this.monitoring.delete(runId);
             this.clearMonitoringWakeTimer(state, runId);
+            this.waiting.add(runId);
+            this.armIdleTimer(runId, state);
+            this.releaseSlot(); // the freed slot can start a queued run right away — in any project
+          } else {
+            nudged = this.parkPlainEnd(runId, step.id, trailingQuestion, state);
+            if (!nudged) {
+              this.store.updateStep(runId, step.id, { status: 'waiting' });
+              this.monitoring.delete(runId);
+              this.clearMonitoringWakeTimer(state, runId);
+              this.waiting.add(runId);
+              this.armIdleTimer(runId, state);
+              this.releaseSlot();
+            }
           }
-          this.waiting.add(runId);
-          if (!monitoring) this.armIdleTimer(runId, state);
-          this.releaseSlot(); // the freed slot can start a queued run right away — in any project
         }
         // The window is proven open — see the twin in `runContinuation`.
         if (this.store.getRun(runId)?.autoResumeAttempts !== undefined) {
           this.store.updateRun(runId, { autoResumeAttempts: undefined });
         }
         // Cez's own heartbeat — the handoff stays current even when the
-        // agent forgets to write (spec 007).
+        // agent forgets to write (spec 007). A nudge turn is still `running`, not `waiting` — see
+        // P4 step 3.
         appendHandoffHeartbeat(
           this.dataDir,
           runId,
-          `turn complete — status=${monitoring ? 'monitoring' : waiting ? 'waiting' : 'running'}`,
+          `turn complete — status=${monitoring ? 'monitoring' : nudged ? 'running' : waiting ? 'waiting' : 'running'}`,
         );
       }
     };
@@ -5960,6 +6061,12 @@ export class RunManager {
     // unresolvable model (e.g. a bare id on opencode) returns the step error
     // instead of letting the backend silently substitute its default.
     let backendModel: string | undefined;
+    // Resolved ONCE, for the backend that will actually run this step, and both halves from the
+    // same source (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D1). Before this, the
+    // model came from `step.model ?? input.model` and the effort from `step.effort` at the spawn
+    // site 180 lines below — two independent reads that a per-runner override would have pulled
+    // apart, applying codex's model with Claude's ceiling.
+    const stepChoice = resolveStepModel(step, stepBackend, input.model, escalation.priorFailures);
     // Hoisted rather than inlined into the call below, because it is now read TWICE — once by the
     // mapper and once by the record. Two copies of the same expression is exactly how the thing
     // that ran and the thing the record claims ran drift apart.
@@ -5970,7 +6077,7 @@ export class RunManager {
     // for a step that ran on codex's default. Same reason the hoist exists at all.
     const stepRawModel = agentModelsLocked(this.repoRoot)
       ? undefined
-      : this.modelForBackend(runId, step.id, stepBackend, step.model ?? input.model);
+      : this.modelForBackend(runId, step.id, stepBackend, stepChoice.model);
     try {
       const normalized = normalizeModelForBackend(stepBackend, stepRawModel, {
         configuredProvider: await configuredModelProvider(stepBackend, state.cwd),
@@ -6153,7 +6260,9 @@ export class RunManager {
           ],
           env: stepProfile.env,
           model: backendModel,
-          effort: step.effort,
+          // `stepChoice.effort`, not `step.effort`: a `byRunner` entry carries the pair, and
+          // reading the step's own effort here would apply the other backend's ceiling.
+          effort: stepChoice.effort,
           sessionId: spawnSessionId,
           resume: resumeDowngraded ? false : resumeFrom !== undefined,
           // Interactive sessions have no wall clock — the idle timer rules.
@@ -6724,8 +6833,9 @@ export class RunManager {
   /**
    * Does this run's transcript end on an UNANSWERED `CEZ:ASK`? True when its latest
    * `ask.requested` event has no later `user-message` (the event a resume/answer appends to
-   * resolve the card). Used by restart recovery to keep a task that asked the user a question
-   * in an attention state rather than settling it to plain `done`.
+   * resolve the card). Used by restart recovery where an explicit ask may outrank chain re-entry.
+   * A heuristically detected prose question is handled beside this predicate: it may preserve
+   * attention, but may not stall queued chain work (spec 2026-08-23, P5).
    */
   private runHasPendingAsk(runId: string): boolean {
     let lastAsk = -1;
@@ -6881,6 +6991,52 @@ export class RunManager {
     state.monitoringWakeTimer = undefined;
     state.monitoringWakeIntervalMinutes = undefined;
     if (runId) this.store.updateRun(runId, { monitoringWakeAt: undefined });
+  }
+
+  /**
+   * Shared by BOTH turn-end twins (`runAgentStep`, `runContinuation`) — the same lesson
+   * `specs-172ddd891dd0` (chain-integrity) left behind: one method called from both sites, not two
+   * copies that drift (spec 2026-08-23-plain-end-structured-question, R3).
+   *
+   * `trailingQuestion` is the VERDICT already computed at the marker site, before `turnText` was
+   * reset — this method never sees the raw turn text. Called ONLY on a genuine plain end (no
+   * `CEZ:DONE` / `CEZ:ASK` / `CEZ:MONITORING`).
+   *
+   * Returns `true` when a bounded `ASK_STRUCTURE_NUDGE` was sent instead of parking — the caller
+   * must then skip ONLY the park/slot-release block, not the trailing `autoResumeAttempts` /
+   * handoff-heartbeat statements that still run on every turn (P4 step 3).
+   */
+  private parkPlainEnd(
+    runId: string,
+    stepId: string,
+    trailingQuestion: TrailingQuestion | null,
+    state: ActiveRun,
+  ): boolean {
+    if (
+      trailingQuestion !== null &&
+      (state.askStructureNudges ?? 0) < MAX_ASK_STRUCTURE_NUDGES &&
+      !state.cancelled &&
+      !state.autonomous &&
+      state.session?.open
+    ) {
+      const sent = this.deliverMessage(runId, [{ type: 'text', text: ASK_STRUCTURE_NUDGE }], false);
+      if (sent) {
+        state.askStructureNudges = (state.askStructureNudges ?? 0) + 1;
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId,
+          message: `nudged to re-send a prose question as CEZ:ASK (${state.askStructureNudges}/${MAX_ASK_STRUCTURE_NUDGES})`,
+        });
+        return true;
+      }
+    }
+    this.store.updateRun(runId, {
+      status: 'waiting',
+      activity: undefined,
+      waitingReason: trailingQuestion !== null ? 'question' : 'report',
+      waitingQuestion: trailingQuestion?.text,
+    });
+    return false;
   }
 
   /** Autosave-commit the worktree every 90 s while the run lives (spec 006).

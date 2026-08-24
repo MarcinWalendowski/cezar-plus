@@ -157,6 +157,24 @@ export const capabilitiesSchema = z.object({
    * set it keeps this field `false`, exactly as before.
    */
   accountUsage: z.boolean(),
+
+  /**
+   * `CEZ_AUTO_ACCOUNTS=1` (`.ai/specs/2026-08-24-second-codex-account-balancing.md`, D5) — this
+   * server registers the agent logins it finds on its own machine, instead of only offering them
+   * in the Add-account pane.
+   *
+   * Reported because it is the one capability here that WRITES state nobody clicked for: an
+   * account row appearing in `agent-accounts.json` has two possible explanations, and this is what
+   * tells them apart. It is also the only way to confirm the setting on a hosted box, where the
+   * whole agent-profiles family is withheld and the pane cannot show anything at all.
+   *
+   * NOT AND-ed with `localHandoff`, unlike `accountUsage` above. That flag gates a DISCLOSURE — who
+   * the operator is — and hosted mode is the audience question. This one gates a server-side write
+   * that discloses nothing; gating it on hosted mode would switch the feature off on exactly the
+   * machines whose operators cannot use the UI instead. The boolean itself says nothing about any
+   * account: it says whether cezar will look.
+   */
+  autoAccounts: z.boolean(),
   /** The Skills surface. **Opt-OUT, and the only capability here that is** — `CEZ_SKILLS=0`
    *  hides it; every other value, including unset, leaves it on. Inverted deliberately: every
    *  flag above gates a feature that did not exist before it, so absent-means-off is the honest

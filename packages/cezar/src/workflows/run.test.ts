@@ -1577,10 +1577,68 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
   }, 30_000);
 
   it('a markerless turn-end still parks as waiting with no activity', async () => {
-    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'just do the thing', worktree: false });
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:report just do the thing', worktree: false });
     currentId = record.id;
     await waitFor(record.id, (r) => r?.status === 'waiting');
     expect(store.getRun(record.id)?.activity).toBeUndefined();
+    expect(store.getRun(record.id)?.waitingReason).toBe('report');
+    expect(store.getRun(record.id)?.waitingQuestion).toBeUndefined();
+  }, 30_000);
+
+  it('nudges a prose question once, then parks with the question visible', async () => {
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:question ship it?', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    expect(store.getRun(record.id)).toMatchObject({
+      waitingReason: 'question',
+      waitingQuestion: 'So: merge and deploy now, or hold for review?',
+    });
+    let events = store.readEvents(record.id);
+    expect(events.filter((event) => event.type === 'note' && String(event.message).includes('nudged to re-send')).length).toBe(1);
+    expect(events.some((event) => event.type === 'user-message')).toBe(false);
+
+    expect(manager.sendMessage(record.id, [{ type: 'text', text: 'mock:question and now?' }])).toBe(true);
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    events = store.readEvents(record.id);
+    expect(events.filter((event) => event.type === 'note' && String(event.message).includes('nudged to re-send')).length).toBe(1);
+  }, 30_000);
+
+  it('classifies a prose question on the continuation twin too', async () => {
+    const record = manager.startRun(SINGLE_STEP, { author: localCliAuthor(), task: 'mock:report first turn', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+
+    expect(manager.sendMessage(record.id, [{ type: 'text', text: 'mock:question and now?' }])).toBe(true);
+    await waitFor(record.id, (r) => r?.status === 'waiting' && r.waitingReason === 'question');
+    expect(store.getRun(record.id)?.waitingQuestion).toBe('So: merge and deploy now, or hold for review?');
+  }, 30_000);
+
+  it('upgrades a prose question to a structured ask when the agent accepts the nudge', async () => {
+    const record = manager.startRun(SINGLE_STEP, {
+      author: localCliAuthor(),
+      task: 'mock:ask-on-nudge mock:question ship it?',
+      worktree: false,
+    });
+    currentId = record.id;
+    await waitFor(record.id, () => store.readEvents(record.id).some((event) => event.type === 'ask.requested'));
+    expect(store.readEvents(record.id).some((event) => event.type === 'ask.requested')).toBe(true);
+    expect(store.getRun(record.id)?.waitingReason).toBeUndefined();
+    expect(store.getRun(record.id)?.waitingQuestion).toBeUndefined();
+  }, 30_000);
+
+  it('records but never nudges an autonomous prose question', async () => {
+    const record = manager.startRun(SINGLE_STEP, {
+      author: localCliAuthor(),
+      task: 'mock:question ship it?',
+      autonomous: true,
+      worktree: false,
+    });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    expect(store.getRun(record.id)?.waitingReason).toBe('question');
+    expect(store.readEvents(record.id).filter((event) =>
+      event.type === 'note' && String(event.message).includes('nudged to re-send')
+    )).toHaveLength(0);
   }, 30_000);
 
   it('strips the CEZ:MONITORING marker from server-emitted v1 text events', async () => {

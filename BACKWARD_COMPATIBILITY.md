@@ -203,10 +203,18 @@ Breaking: removing or renaming a v1 `AgentEvent` type or a v2 `UiEvent` `type`/`
 ## 8. In-band agent marker vocabulary (`packages/cezar/src/handoff.ts`, `packages/cezar/src/runs/task-markers.ts`)
 
 The plain-text markers the handoff contract asks every agent to emit and the engine parses from
-turn text: `CEZ:DONE` (#347), `CEZ:MONITORING` (#490), and the task-reference markers
-`CEZ:PR=<n>` / `CEZ:ISSUE=<n>` / `CEZ:TITLE=<phrase>` (spec 2026-07-18-task-ref-markers). These
-are an agent-facing contract: skills, prompts, and running agents rely on an emitted marker
-meaning what it meant when their session started.
+turn text: `CEZ:DONE` (#347), `CEZ:MONITORING` (#490), `CEZ:ASK <json>` (#473, structured
+question with tappable options), and the task-reference markers `CEZ:PR=<n>` / `CEZ:ISSUE=<n>` /
+`CEZ:TITLE=<phrase>` (spec 2026-07-18-task-ref-markers). These are an agent-facing contract:
+skills, prompts, and running agents rely on an emitted marker meaning what it meant when their
+session started.
+
+A turn can also end with none of these markers at all ("the plain end") — that ending is part of
+the same vocabulary, not an absence of one, and it is paired by rule with `CEZ:ASK` (spec
+2026-08-23-plain-end-structured-question): a plain end is for a turn the user only reads, and a
+turn that needs an answer from the user ends with `CEZ:ASK` instead of prose. A plain end that
+contains a question is a defect the engine detects and nudges the agent to fix by re-emitting it
+as `CEZ:ASK`, once per run — it never fabricates the question or the marker itself.
 
 Breaking: removing or renaming a marker, or changing what an emitted marker does (e.g. making
 `CEZ:PR` gate an action instead of steering display). Additive is fine — a new `CEZ:*` marker is
@@ -325,6 +333,49 @@ instruction rather than silently.
 - **No deprecation alias**: the flag *is* the migration path — one env var restores the previous
   behavior wholesale, which is what the "keep the old spelling for a minor release" rule exists to
   provide.
+
+## `CEZ_AUTO_ACCOUNTS=1` — cezar registers the logins it finds (2026-08-24)
+
+Spec `.ai/specs/2026-08-24-second-codex-account-balancing.md`, D5. **Additive and inert unless the
+flag is set to exactly `1`.**
+
+- **Additive on health**: `capabilities.autoAccounts` is a new required boolean on the CORS-open
+  `GET /api/v1/health`, on the same terms as `automations` and `cluster` before it. Every
+  pre-existing field stays byte-identical. Unlike `accountUsage` it is **not** withheld in hosted
+  mode: it reports whether the server will WRITE, not who the operator is.
+- **Off (the default, every existing install)**: nothing on disk is read or written that was not
+  read or written before. `GET …/agent-profiles/discovered` keeps proposing without registering,
+  which is the 2026-08-14 behaviour it was designed with.
+- **On**: at boot and every 5 minutes, a config dir under `~/.claude*` / `~/.codex*` that carries
+  its CLI's marker files AND records an account it is signed in as is appended to
+  `~/.cezar/agent-accounts.json`. **Append-only** — no existing row is relabelled, repointed or
+  removed — so the file stays hand-editable, which is the promise this document exists to keep.
+- **The known asymmetry, stated rather than hidden**: the sweep cannot see a deliberate deletion,
+  so an auto-registered account that is removed comes back. Turning the flag off is the way to stop
+  that; the accounts themselves are ordinary rows and survive the flag being turned off.
+- **Non-destructive rollback**: unset the flag and restart. Nothing is migrated or deleted, and the
+  rows already written stay exactly as they are.
+
+## `byRunner` on a workflow step, and `effort` on codex (2026-08-24)
+
+Spec `.ai/specs/2026-08-24-codex-step-model-and-effort.md`. **Additive to what a user authors;
+behaviour-changing for one thing, named below.**
+
+- **`workflowStepSchema` gains one optional key**, `byRunner`. Every existing workflow YAML, every
+  inline chain on `POST /runs`, and every persisted `workflowDef` parses unchanged, and a step
+  without the key resolves to exactly the `step.model ?? input.model` / `step.effort` pair it did
+  before — asserted directly, on both backends, rather than assumed.
+- **`skillStackOf` now returns `null` for a step carrying `byRunner` or `effort`**, as it already
+  did for `model`. That is a widening of an existing refusal, not a new one: round-tripping such a
+  step through the compact skill form would silently discard the pair.
+- **What actually changes at runtime, and only on codex:** a `spec-to-deploy` run started on codex
+  used to run six of its eight steps on codex's own default model at its own default effort. It now
+  runs them on the models named in the table. Runs on Claude are byte-identical — same models, same
+  efforts, same argv.
+- **`AgentRunSpec.effort` is no longer ignored by the codex runner.** A caller that set it for a
+  codex run previously had it dropped on the floor; it is now sent. No caller in this repo did.
+- **Rollback is deleting the `byRunner` keys.** Nothing is migrated, nothing is stored, and no
+  persisted record changes shape.
 
 ## When in doubt
 

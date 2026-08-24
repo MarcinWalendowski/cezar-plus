@@ -93,6 +93,10 @@ rl.on('line', (line) => {
       emit({ id: msg.id, result: { thread: { id: msg.params?.threadId } } });
     }
   } else if (msg.method === 'turn/start') {
+    // Echoed for the same reason thread/start is: `effort` rides on THIS request
+    // (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D3), and a turn that merely
+    // succeeds proves nothing about whether the key was sent, or sent as null.
+    process.stderr.write(`MOCK_RPC ${msg.method} ${JSON.stringify(msg.params)}\n`);
     const isFirstTurnAfterResume = firstTurnAfterResume;
     firstTurnAfterResume = false;
     emit({ id: msg.id, result: { turn: { id: 'turn_mock_1' } } });

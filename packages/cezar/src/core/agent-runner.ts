@@ -57,11 +57,17 @@ export interface AgentRunSpec {
    *  e.g. CEZ_HANDOFF_FILE / CEZ_TODOS_FILE / CEZ_TASK_ID (spec 007). */
   env?: Record<string, string>;
   model?: string;
-  /** claude CLI's own `--effort` (low|medium|high|xhigh|max). Claude-only — the codex and
-   *  opencode runners never read this field, same as bashAllowlist is decorative for them.
-   *  No env-side mirror: the CLI does not read `CLAUDE_EFFORT` as input (measured — see
-   *  .ai/specs/2026-08-21-run-tests-reasoning-ceiling.md, Revision note), so the flag is the
-   *  only signal. */
+  /** A reasoning-depth ceiling (low|medium|high|xhigh|max).
+   *
+   *  **CORRECTED 2026-08-24 — no longer Claude-only.** This said *"Claude-only — the codex and
+   *  opencode runners never read this field, same as bashAllowlist is decorative for them"*, which
+   *  is now true of opencode alone: the codex runner sends it as `turn/start`'s `effort`
+   *  (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D3). It is still the claude CLI's own
+   *  `--effort` on that side.
+   *
+   *  No env-side mirror on either backend: the claude CLI does not read `CLAUDE_EFFORT` as input
+   *  (measured — see .ai/specs/2026-08-21-run-tests-reasoning-ceiling.md, Revision note), and codex
+   *  takes it as an RPC param, so the flag and the param are the only signals. */
   effort?: string;
   /** Wall-clock kill switch for the run (ms). */
   timeoutMs?: number;

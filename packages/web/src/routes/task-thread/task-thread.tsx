@@ -190,6 +190,7 @@ export function ThreadView({
   // that has not run. Deliberately `queued` only: review/done/failed/cancelled keep the
   // existing copy and their Continue action.
   const queued = run.status === 'queued'
+  const hasWaitingQuestion = run.waitingReason === 'question' && Boolean(run.waitingQuestion)
   // …and the fourth — a closed run whose last session can be reopened — lives in
   // `ThreadComposer` now, together with the provider gate and the draft: nothing outside the
   // composer ever read those flags.
@@ -432,10 +433,27 @@ export function ThreadView({
           {run.status === 'waiting' ? (
             <div
               data-slot="paused-hint"
-              className="flex items-center gap-2 px-1 text-xs text-muted-foreground"
+              className={cn(
+                'flex gap-2 px-1 text-xs text-muted-foreground',
+                hasWaitingQuestion ? 'items-start' : 'items-center',
+              )}
             >
-              <StatusDot tone="pending" pulse />
-              The agent is paused, waiting for your reply
+              {hasWaitingQuestion ? (
+                <span className="pt-0.5"><StatusDot tone="pending" pulse /></span>
+              ) : (
+                <StatusDot tone="pending" pulse />
+              )}
+              <span>
+                The agent is paused, waiting for your reply
+                {hasWaitingQuestion ? (
+                  <span
+                    data-slot="waiting-question"
+                    className="mt-1.5 block rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-foreground"
+                  >
+                    {run.waitingQuestion}
+                  </span>
+                ) : null}
+              </span>
             </div>
           ) : null}
 

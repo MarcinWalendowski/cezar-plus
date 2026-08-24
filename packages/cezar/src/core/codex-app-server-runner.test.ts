@@ -610,3 +610,89 @@ describe('thread/resume states an explicit model (codex resume poisoning)', () =
     expect(errors[0]).toEqual({ type: 'error', message: 'model unavailable' });
   }, 15_000);
 });
+
+/**
+ * Reasoning effort reaches codex (`.ai/specs/2026-08-24-codex-step-model-and-effort.md`, D3).
+ *
+ * The assertion is on the `turn/start` REQUEST rather than on the turn's outcome, and that is the
+ * whole point: a turn succeeds identically whether the key was sent, omitted, or sent as `null`,
+ * so an outcome test would be green against every wrong implementation.
+ *
+ * `thread/start` is the trap this guards. Measured against the real app-server on
+ * `prod-host` (codex-cli 0.147.0): it accepts `effort`, `reasoningEffort`,
+ * `modelReasoningEffort`, `model_reasoning_effort` and `reasoning_effort` on `thread/start`
+ * WITHOUT error and applies none of them — the thread comes back `reasoningEffort: null` every
+ * time, because unknown params are tolerated. Only `v2/TurnStartParams.json` declares the field.
+ */
+describe('reasoning effort rides on turn/start (codex)', () => {
+  const mockBin = fileURLToPath(
+    new URL('./__fixtures__/codex/mock-codex-app-server.mjs', import.meta.url),
+  );
+
+  const turnStartParams = async (spec: { effort?: string; model?: string }): Promise<Record<string, unknown>> => {
+    const rpc = captureMockRpc();
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
+    const session = runner.startSession(
+      { userPrompt: 'hello', cwd: process.cwd(), ...spec },
+      undefined,
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+    rpc.stop();
+    const turn = rpc.calls().find((call) => call.method === 'turn/start');
+    expect(turn, 'the mock server echoed no turn/start at all').toBeDefined();
+    return turn!.params;
+  };
+
+  it('sends the resolved effort', async () => {
+    expect((await turnStartParams({ effort: 'xhigh' })).effort).toBe('xhigh');
+  }, 15_000);
+
+  it('OMITS the key when no effort was resolved, rather than sending null', async () => {
+    // The negative control on the test above. `toBeUndefined()` alone would pass against
+    // `effort: null`, which is a DIFFERENT instruction to the app-server — it pins the turn to a
+    // null override instead of leaving the model on its own default.
+    const params = await turnStartParams({});
+    expect('effort' in params).toBe(false);
+  }, 15_000);
+
+  it('does not put the effort on thread/start, where it would be silently ignored', async () => {
+    const rpc = captureMockRpc();
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
+    const session = runner.startSession(
+      { userPrompt: 'hello', cwd: process.cwd(), effort: 'max' },
+      undefined,
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+    rpc.stop();
+
+    const start = rpc.calls().find((call) => call.method === 'thread/start');
+    expect(start, 'no thread/start was captured').toBeDefined();
+    expect(start!.params.effort).toBeUndefined();
+    expect(start!.params.reasoningEffort).toBeUndefined();
+  }, 15_000);
+
+  it('restates the effort on the first turn after a resume', async () => {
+    // R2: `turn/start`'s override is documented as persisting "for this turn and subsequent
+    // turns", which makes it thread state — so a resumed step that did not restate it would
+    // inherit whatever the last turn set. It costs nothing here because every turn goes through
+    // `turn/start`, and this asserts that the resume path is not an exception to that.
+    const rpc = captureMockRpc();
+    const runner = new CodexAppServerRunner({
+      bin: mockBin,
+      timeoutMs: 0,
+      resumeModel: async () => ({ model: 'gpt-5.6-sol', source: 'catalog' }),
+    });
+    const session = runner.startSession(
+      { userPrompt: 'continue', cwd: process.cwd(), resume: true, sessionId: 'th_mock_1', effort: 'high' },
+      undefined,
+      { autoEndAfterFirstTurn: true },
+    );
+    await session.result;
+    rpc.stop();
+
+    const turn = rpc.calls().find((call) => call.method === 'turn/start');
+    expect(turn?.params.effort).toBe('high');
+  }, 15_000);
+});

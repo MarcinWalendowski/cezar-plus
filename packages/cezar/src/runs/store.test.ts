@@ -307,6 +307,66 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
     expect(RunStore.open(dataDir, { keepLive: true }).getRun(run.id)?.activity).toBeUndefined();
   });
 
+  it('round-trips a markerless waiting question and clears it on terminal writes', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.updateRun(run.id, {
+      status: 'waiting',
+      waitingReason: 'question',
+      waitingQuestion: 'Merge and deploy now, or hold?',
+    });
+    store.flush();
+    expect(RunStore.open(dataDir, { keepLive: true }).getRun(run.id)).toMatchObject({
+      waitingReason: 'question',
+      waitingQuestion: 'Merge and deploy now, or hold?',
+    });
+    store.updateRun(run.id, { status: 'done' });
+    expect(store.getRun(run.id)?.waitingReason).toBeUndefined();
+    expect(store.getRun(run.id)?.waitingQuestion).toBeUndefined();
+  });
+
+  it('clears a parked prose question on transitions but keeps the same park and explicit replacements', () => {
+    const store = RunStore.open(dataDir);
+    const freshPark = () => {
+      const run = store.createRun({ author: localCliAuthor(), title: 'park', workflow: 'quick-task', task: 'park', steps: [] });
+      store.updateRun(run.id, {
+        status: 'waiting',
+        waitingReason: 'question',
+        waitingQuestion: 'Merge or hold?',
+      });
+      return run.id;
+    };
+
+    for (const status of ['queued', 'running', 'done'] as const) {
+      const id = freshPark();
+      store.updateRun(id, { status });
+      expect(store.getRun(id)?.waitingReason).toBeUndefined();
+      expect(store.getRun(id)?.waitingQuestion).toBeUndefined();
+    }
+
+    const nativeAskId = freshPark();
+    store.updateRun(nativeAskId, { status: 'running' });
+    store.updateRun(nativeAskId, { status: 'waiting' });
+    expect(store.getRun(nativeAskId)?.waitingReason).toBeUndefined();
+    expect(store.getRun(nativeAskId)?.waitingQuestion).toBeUndefined();
+
+    const idleParkId = freshPark();
+    store.updateRun(idleParkId, { status: 'waiting', activity: undefined, currentStepId: undefined });
+    store.updateRun(idleParkId, { autoResumeAttempts: undefined });
+    expect(store.getRun(idleParkId)).toMatchObject({
+      waitingReason: 'question',
+      waitingQuestion: 'Merge or hold?',
+    });
+
+    store.updateRun(idleParkId, {
+      status: 'waiting',
+      waitingReason: 'report',
+      waitingQuestion: undefined,
+    });
+    expect(store.getRun(idleParkId)?.waitingReason).toBe('report');
+    expect(store.getRun(idleParkId)?.waitingQuestion).toBeUndefined();
+  });
+
   it('round-trips the monitoring deadline and clears monitoring state on terminal writes', () => {
     const store = RunStore.open(dataDir);
     const run = store.createRun({ author: localCliAuthor(), title: 'monitor', task: 'monitor', workflow: 'quick-task', steps: [] });

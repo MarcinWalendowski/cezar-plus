@@ -133,6 +133,17 @@ describe('notifications/decider: decide()', () => {
     expect(review?.url).toBe('https://github.com/x/y/pull/1');
   });
 
+  it('a current prose question outranks stale ask text in run.needs-you', () => {
+    const previous = new Map([['run-1', 'running' as const]]);
+    const [notification] = decide(previous, [run({
+      status: 'waiting',
+      askText: 'Which old option?',
+      waitingReason: 'question',
+      waitingQuestion: 'Merge and deploy, or hold?',
+    })], NOW, { bootAt: BOOT_AT });
+    expect(notification?.body).toBe('Merge and deploy, or hold?');
+  });
+
   it('dedupe key is projectId:runId:event', () => {
     const previous = new Map([['run-1', 'running' as const]]);
     const [n] = decide(previous, [run({ status: 'failed' })], NOW, { bootAt: BOOT_AT });
