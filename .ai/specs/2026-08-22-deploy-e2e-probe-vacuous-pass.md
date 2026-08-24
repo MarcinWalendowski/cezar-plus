@@ -1,21 +1,24 @@
 # The deploy E2E probe must not report PASS on what it never observed
 
-**Status:** **Superseded 2026-08-23 by
-`.ai/specs/2026-08-22-deploy-e2e-probe-measured-assertions.md`.** This task independently shipped
-the P1 vacuous-pass guard, P2 hard 401/403 failure, and P3 documentation in commit `83ddbdd2`.
-Commit `fe158c70` shipped the canonical measured-assertions implementation and its production
-verification. The credentialed cutover artifact
-`.ai/cezar/artifacts/deploy-e2e-20260823194023.json` contains 2,164 SSE events, one reconnect, and
-55 run-status samples, so the observation path was measured for real. The probe correctly returned
-FAILED, not PASS: it found one refused connection and 94 sequence gaps. Todo `8206c158` tracks the
-unexplained sequence gaps; todo `6c89af7c` continues to track the cutover reset and latency.
+**Status:** **Implemented and verified 2026-08-23.** Commit `83ddbdd2` on `origin/main` shipped the
+P1 vacuous-pass guard, P2 hard 401/403 failure, and P3 credential documentation. A sibling task
+then exercised the credentialed production cutover with a stricter report shape; its commit
+`fe158c70` and spec `.ai/specs/2026-08-22-deploy-e2e-probe-measured-assertions.md` remain on branch
+`cez/3ee1ebf0` and are **not** ancestors of `origin/main`, so they are supporting verification
+evidence, not a superseding main-branch source of truth. The retained operational artifact
+`.ai/cezar/artifacts/deploy-e2e-20260823194023.json` in that task's worktree contains 2,164 SSE
+events, one reconnect, and 55 run-status samples, so the observation path was measured for real.
+The probe correctly returned FAILED, not PASS: it found one refused connection and 94 sequence
+gaps. Todo `8206c158` tracks the unexplained sequence gaps; todo `6c89af7c` continues to track the
+cutover reset and latency.
 
 **Corrected 2026-08-24:** the earlier status below called the full test gate green while also
 reporting `npm test` at 516/518. That was false. `npm run typecheck` and `npm run test:unit` were
 green; the full test run was red on two failures believed unrelated to this change. No lint gate
 was run because this repository has no lint script. The required red-without-fix regression proof
-was also not executed in this task's chain. The canonical superseding spec carries the actual
-verification record.
+was also not executed in this task's chain. The sibling verification branch and retained artifact
+carry the production evidence; this file remains the canonical main-branch spec for the shipped
+change.
 
 **Date:** 2026-08-22
 **Owner ask (task context):** "deploy-e2e-probe reports a false PASS when it observed nothing."
@@ -520,14 +523,10 @@ browser step:
    deliberate rename of `poll.maxLatencyMs` to match the spec's own vocabulary), not
    `maxLatencyMs`; the parent spec's "`maxLatencyMs` came back null in every artifact" confusion
    (line 1187 there) was exactly this naming mismatch, not a missing measurement.
-6. Whatever this run actually finds about seq continuity — clean or not — becomes the new
-   authoritative answer to the parent spec's still-open "SSE continuity remains unmeasured" line,
-   and must be recorded there per this repo's correction convention (`CLAUDE.md` § "keep the record
-   straight"): edit `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`'s status header and
-   the "What was NOT measured" sections (lines 989-1061, 1180-1207) in place, marking what is now
-   superseded, rather than appending a new section that leaves the old "unmeasured" language
-   readable as current. **This edit is explicitly deferred to the implementation/deploy step of
-   this task** — this spec step changes no file other than itself.
+6. **Executed and recorded 2026-08-24.** The run found one refused connection and 94 sequence
+   gaps across 2,164 events. The parent spec's status header and historical "What was NOT
+   measured" sections now mark the unauthenticated zero-event result as superseded and preserve
+   the measured failures as open follow-ups.
 
 **Not in scope for this spec's verification:** proving or disproving whether the underlying broker
 re-attach defect (`45813876`) is fixed. This spec only makes the probe capable of reporting that

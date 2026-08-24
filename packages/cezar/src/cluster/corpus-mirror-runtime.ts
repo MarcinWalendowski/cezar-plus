@@ -225,6 +225,14 @@ export function startCorpusMirrorRuntime(deps: CorpusMirrorRuntimeDeps): CorpusM
   let disposed = false;
   let sweeping = false;
   let followUpRequested = false;
+  /**
+   * D8a-boot (2026-08-24): whether the LAST pass found nothing to mirror, so the warning below
+   * fires on the TRANSITION into "no projects" rather than every 60s forever. A counter or a
+   * timestamp would both need a policy for when to re-warn; a transition needs none, and a node
+   * that genuinely has no projects yet is a normal startup state that becomes abnormal only by
+   * persisting — which the operator sees once, in the log, at the moment it starts.
+   */
+  let warnedEmptyProjects = false;
   let currentCycle: Promise<void> | null = null;
 
   async function sweepProject(dataDir: string): Promise<void> {
@@ -265,6 +273,31 @@ export function startCorpusMirrorRuntime(deps: CorpusMirrorRuntimeDeps): CorpusM
       warn(`cluster corpus mirror: could not list projects to mirror: ${errorMessage(err)}`);
       return;
     }
+    // D8a-boot (2026-08-24): an EMPTY list is the silent-inertness failure this whole runtime
+    // exists to prevent, arriving through a door D8a did not cover. `startCorpusMirrorRuntime`
+    // reports `armed`, every sweep runs on time, `sources.json` is never created, and
+    // `knowledge/prompt.ts#loadKnowledgeSummary` returns `undefined` — so the agent's system
+    // prompt simply has no knowledge block and a knowledge-blind agent reports success. Measured
+    // on a fresh node 2026-08-24: `cezar serve --repo <dir>` makes that directory the BOOT
+    // project, which deliberately carries no workspace-registry row (`server.ts#registerFolder`'s
+    // own "Idempotent no-op" branch, D3 `suppressBootRegistration`), so a caller reading only the
+    // registry sees zero projects and mirrors nothing, forever.
+    //
+    // The call site is fixed to include the boot project (`server/cluster-routes.ts`), but this
+    // guard deliberately does NOT depend on that fix: it fires for ANY cause of emptiness,
+    // including a future caller that builds the list some other way and forgets. That is why the
+    // warning lives here, on the invariant ("a mirror with nothing to mirror is inert"), rather
+    // than at the one call site that happens to violate it today.
+    if (projects.length === 0) {
+      if (!warnedEmptyProjects) {
+        warnedEmptyProjects = true;
+        warn(
+          'cluster corpus mirror: no projects to mirror — this node is armed but will mirror NOTHING, so its agents get no knowledge block. A project registered with `cezar serve --repo <dir>` is the BOOT project and carries no registry row; register a project (Settings, or POST /api/v1/projects) or start without --repo.',
+        );
+      }
+      return;
+    }
+    warnedEmptyProjects = false;
     for (const dataDir of projects) {
       try {
         await sweepProject(dataDir);

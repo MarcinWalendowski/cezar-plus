@@ -6,9 +6,12 @@ release `20260821T183127Z-be3aab61` since 2026-08-21 18:31:54 UTC (first cutover
 streaming) is MET, measured.** **Criterion 2 (cutover gap = 0) is MET at the listener** — 3790
 fresh connections across a restart, zero refused — **with two residual costs that are recorded, not
 rounded up**: an intermittent keep-alive reset (3 in 4864 requests over 5 restarts) and ~1.1 s
-worst-case latency. **SSE continuity remains unmeasured** (the API is behind OIDC; no static token
-on the box). See "Status log — 2026-08-21 (18:31–18:41 UTC)" below. **NOT a prerequisite for
-anything.**
+worst-case latency. **CORRECTED 2026-08-24: SSE continuity is now measured, but not green.** A
+credentialed 2026-08-23 cutover observed 2,164 SSE events, one reconnect, and 55 run samples; the
+probe correctly failed on one refused connection and 94 sequence gaps. The sequence gaps remain
+unexplained (`8206c158`) and the reset/latency cost remains open (`6c89af7c`). See "Status log —
+2026-08-21 (18:31–18:41 UTC)" below for the historical unauthenticated runs. **NOT a prerequisite
+for anything.**
 
 > **CORRECTED 2026-08-21** — this header previously read *"Still QA Needed: the acceptance E2E
 > probe has never been run, so neither acceptance criterion has been measured."* That was true when
@@ -69,9 +72,10 @@ The polkit rule grants `manage-units` on `cezar.service`/`cezar.socket` and noth
    been run — there is no verdict artifact anywhere on the box … *designed for* and *plausible*, not
    *demonstrated*."~~ Verdict artifacts now exist at
    `.ai/cezar/tmp/7c2dd8f0-e53e-4e88-b4b3-b382c592bb12/deploy-e2e{,-2,-3}.json`. What genuinely
-   remains unmeasured is narrower: **SSE stream continuity across a cutover**, blocked because the
-   API sits behind `CEZ_AUTH`+OIDC and the box holds no static token, so the probe's `(c)`
-   assertions passed *vacuously* on zero events.
+   **CORRECTED 2026-08-24:** the narrower gap was subsequently measured with a credentialed probe.
+   It observed 2,164 SSE events across one reconnect and 55 run samples, and honestly failed on
+   one refusal and 94 sequence gaps. The original unauthenticated runs remain useful negative
+   evidence: their `(c)` assertions passed *vacuously* on zero events.
 2. **`gapMs: 50` in the deploy log is not the client-visible gap.** It is the deployer's own number
    for its own restart window. Socket activation is what actually closes the client-visible gap,
    and only the probe measures that. Do not quote the first as the second.
@@ -1007,12 +1011,15 @@ not run at all until `07f5c274`. Artifacts in `/var/lib/cezar/e2e-artifacts/`.
 | A bad build never flips | Release `20260821T185909Z` failed the smoke gate; ledger records `healthy: false`; the log says "Nothing was flipped and nothing was restarted". |
 | Boot-then-fail auto-rolls-back | Release `20260821T190232Z`: `instance_ready` → `cutover (gapMs 49)` → readiness failed → `deploy.rollback failedAt=readiness` → symlink restored to `20260821T190113Z`, ledger `healthy: false`, service and socket active, `/api/v1/ready` 200. |
 
-**NOT measured, and the probe says PASS anyway — read this before trusting it.** The probe
+**HISTORICAL RESULT — CORRECTED 2026-08-24 by a credentialed run.** The probe
 subscribes to `/api/v1/events` with no credential. This box is hosted (`CEZ_AUTH=oidc`), so every
 attempt returned **401** and `sse.events` stayed **0**. The assertions `c: no seq gaps` and
 `c: no seq duplicates` therefore passed **vacuously**: an empty sequence has neither. So criterion
 2's *SSE* clause is **unverified** — its HTTP clause is verified, and the artifact does not
 distinguish the two. An assertion that cannot fail is not an assertion; filed as `06a170b8`.
+The repaired probe later observed 2,164 SSE events across a real cutover and returned FAILED for
+94 sequence gaps, so this paragraph describes the old harness and no longer describes current
+measurement status.
 
 **Two costs kept rather than rounded away.** An earlier probe run over the same window recorded
 **1 refused connection in 1185 requests** with `gapMs 1096` — the ~1.1 s worst case while a new
@@ -1057,14 +1064,16 @@ window: socket activation converts a refusal into queueing, and the spec predict
 cost (Risks → "Cutover latency in place of cutover failure"). The single refusal is the case where
 the backlog did not absorb it; `6c89af7c` tracks it.
 
-### What was NOT measured, and why it matters
+### What was NOT measured in this historical pass, and why it mattered
 
 **The SSE half measured nothing.** Every subscribe returned 401 (20 attempts per run,
 `sse.events = 0`): this box terminates OIDC and the probe carries no credential, and loopback is
 not exempt. So "HTTP/SSE cutover gap = 0" is proven for unary HTTP and **unproven for SSE**. The
 run-level assertions are vacuous for the same reason — `run.statuses` was empty, so "never left
 running" passed over no observations at all. Filed as `e36b79c0`, whose first acceptance criterion
-is that the probe must report UNMEASURED rather than PASS on an empty event list.
+is that the probe must report UNMEASURED rather than PASS on an empty event list. **CORRECTED
+2026-08-24:** commit `83ddbdd2` on `origin/main` implements that guard, and the later credentialed
+production run observed 2,164 events rather than laundering an empty sample into PASS.
 
 ### Criterion 1 IS met, on independent evidence
 
@@ -1187,14 +1196,17 @@ failed, and — exactly as designed — *nothing was flipped and nothing was res
 ledger records `20260821T190232Z-07f5c274` with `note: e2e-readiness-fail, healthy: false`,
 followed immediately by a healthy release: the readiness gate rolled back on its own.
 
-### What was NOT measured, and must not be read as passing
+### What was NOT measured in these historical runs, and must not be read as passing
 
 **`/api/v1/events` answered 401 in all five runs**, because this box is hosted-mode with OIDC and
 the probe sends no credential. The SSE subscriber therefore observed **zero** events — and the
 probe still reported `c: no seq gaps` and `c: no seq duplicates` as PASS, because
 `gaps.length === 0` is trivially true on an empty sample (`deploy-e2e-probe.mjs:204`). The run
 assertions are vacuous the same way: `run.statuses` is `[]` and `sawInterrupted` never flips, yet
-both report PASS. `maxLatencyMs` came back `null` in every artifact.
+both report PASS. `maxLatencyMs` came back `null` in every artifact. **CORRECTED 2026-08-24:** a
+credentialed production run subsequently observed 2,164 SSE events, one reconnect, and 55 run
+samples. It returned FAILED on one refusal and 94 sequence gaps; todo `8206c158` owns the new gap
+finding.
 
 So of the six assertions, **two carry real data** (the HTTP poll pair) and four had nothing behind
 them. Two runs reported `passed: true` on that basis. Filed as `8dc8bf3a`.
@@ -1209,11 +1221,12 @@ the same conclusion the controlled re-measurement reached independently, and it 
 reopened criterion 1 at 19:05 UTC. Incidental survival of one restart is not evidence of
 re-attachment; the controlled measurement is authoritative and this paragraph defers to it.
 
-**Status therefore stays QA Needed**, on two independent counts: criterion 1 is reopened (the
-cutover path re-launches rather than re-attaches), and the SSE half of criterion 2 has never been
-observed even once. The HTTP half of criterion 2 is measured and clean. Calling any of that Done
-would round two unmeasured things up to a green tick — the specific failure `8dc8bf3a` exists to
-stop.
+**Status therefore stays QA Needed**, but the reason is corrected: criterion 1 is reopened (the
+cutover path re-launches rather than re-attaches), and the now-measured SSE half of criterion 2
+failed with 94 sequence gaps. The HTTP measurement also retained one real refusal/boot-window
+cost. Calling this Done would round measured failures up to a green tick; todos `8206c158` and
+`6c89af7c` preserve those distinct follow-ups. Todo `8dc8bf3a` is done because the harness itself
+now refuses vacuous PASS and successfully collected authenticated samples.
 
 ## Out of scope (decisions, not omissions)
 
