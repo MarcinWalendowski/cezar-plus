@@ -48,7 +48,9 @@ describe('a step cezar stopped is not a step that failed', () => {
   const chain = (steps: Array<{ id: string; prompt?: string }>): WorkflowDef => ({
     name: 'spec-to-deploy',
     source: 'built-in',
-    steps: steps.map((s) => ({ id: s.id, name: s.id, prompt: s.prompt ?? '{{task}}' })),
+    // This suite tests stop/re-entry semantics, not automatic task classification. Pinning the
+    // model keeps the classifier's own agent turn from consuming the mock hang or stop budget.
+    steps: steps.map((s) => ({ id: s.id, name: s.id, prompt: s.prompt ?? '{{task}}', model: 'sonnet' })),
   });
 
   /** The runners read their default bound from `CEZ_RUN_IDLE_TIMEOUT_MS` at construction, so the

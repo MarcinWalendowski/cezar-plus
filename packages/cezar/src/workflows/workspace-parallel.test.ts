@@ -281,8 +281,13 @@ describe('a workspace run that does not succeed discards its worktrees and keeps
       // (`ec6e8e06`, `be31d9e9`, `ef9901e3`) were measured carrying on 2026-08-20.
       expect(store.getRun(run.id)?.workspaceWorktrees ?? []).toEqual([]);
       // And nothing was applied into the real checkout: the run did not succeed.
+      // `.ai/` is cezar's own orchestration state, not worktree output; exclude that path while
+      // still catching every tracked edit and every other untracked file the failed run created.
       expect(
-        execFileSync('git', ['status', '--porcelain'], { cwd: project, encoding: 'utf8' }).trim(),
+        execFileSync('git', ['status', '--porcelain', '--', '.', ':(exclude).ai'], {
+          cwd: project,
+          encoding: 'utf8',
+        }).trim(),
       ).toBe('');
     },
     TEST_TIMEOUT_MS,

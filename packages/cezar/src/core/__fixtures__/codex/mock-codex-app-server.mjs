@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Test-only mock of `codex app-server` — speaks just enough JSON-RPC 2.0
-// JSONL (§3 of agent-event-protocols.md) for the runner wiring test in
-// `codex-ui-mapper.test.ts`: initialize/thread/turn handshake, one scripted
-// turn with an agentMessage + a commandExecution (with live outputDelta),
-// cumulative token usage, then exits on stdin EOF like the real server.
+// Bundled mock of `codex app-server` for CEZ_DRY_RUN=1 and protocol tests. It
+// speaks just enough JSON-RPC 2.0 JSONL (§3 of agent-event-protocols.md):
+// initialize/thread/turn handshake, one scripted turn with an agentMessage +
+// a commandExecution (with live outputDelta), cumulative token usage, then
+// exits on stdin EOF like the real server.
 //
 // `MOCK_CODEX_IGNORE_EOF=1` switches to the #703 teardown shape instead: the
 // server stays deaf to stdin EOF (the CLI hang the EOF watchdog exists for)

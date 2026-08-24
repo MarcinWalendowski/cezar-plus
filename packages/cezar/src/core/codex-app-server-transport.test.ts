@@ -11,10 +11,13 @@ import {
 } from './codex-app-server-transport.ts';
 
 const originalBin = process.env.CEZ_CODEX_BIN;
+const originalDryRun = process.env.CEZ_DRY_RUN;
 
 afterEach(() => {
   if (originalBin === undefined) delete process.env.CEZ_CODEX_BIN;
   else process.env.CEZ_CODEX_BIN = originalBin;
+  if (originalDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+  else process.env.CEZ_DRY_RUN = originalDryRun;
 });
 
 function fakeChild(): { child: ChildProcessWithoutNullStreams; writes: string[] } {
@@ -32,6 +35,17 @@ describe('Codex app-server transport', () => {
   it('resolves an explicit executable before the environment fallback', () => {
     process.env.CEZ_CODEX_BIN = '/host/codex';
     expect(resolveCodexExecutable('/configured/codex')).toBe('/configured/codex');
+    expect(resolveCodexExecutable()).toBe('/host/codex');
+  });
+
+  it('uses the bundled Codex app-server under CEZ_DRY_RUN without overriding explicit bins', () => {
+    delete process.env.CEZ_CODEX_BIN;
+    process.env.CEZ_DRY_RUN = '1';
+
+    expect(resolveCodexExecutable()).toMatch(/src[/\\]core[/\\]__fixtures__[/\\]codex[/\\]mock-codex-app-server\.mjs$/);
+    expect(resolveCodexExecutable('/configured/codex')).toBe('/configured/codex');
+
+    process.env.CEZ_CODEX_BIN = '/host/codex';
     expect(resolveCodexExecutable()).toBe('/host/codex');
   });
 

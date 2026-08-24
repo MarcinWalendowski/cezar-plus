@@ -18,6 +18,7 @@
     "dist",
     "web/dist",
     "scripts",
+    "src/core/__fixtures__/codex/mock-codex-app-server.mjs",
     "README.md"
   ],
   "engines": {

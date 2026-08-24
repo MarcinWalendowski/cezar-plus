@@ -1,4 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { dirname, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { trackChildExit } from './agent-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
 import { EOF_KILL_GRACE_MS, EOF_TERM_GRACE_MS, KILL_GRACE_MS } from './claude-cli-runner.ts';
@@ -17,7 +19,14 @@ interface PendingRequest {
 }
 
 export function resolveCodexExecutable(override?: string): string {
-  return override ?? process.env.CEZ_CODEX_BIN ?? 'codex';
+  return override ?? process.env.CEZ_CODEX_BIN ?? (process.env.CEZ_DRY_RUN === '1' ? mockCodexPath() : 'codex');
+}
+
+/** Path to the bundled Codex app-server mock, for `CEZ_DRY_RUN=1`. */
+function mockCodexPath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  // here = <pkg>/dist/core (built) or <pkg>/src/core (tsx dev).
+  return resolvePath(here, '..', '..', 'src', 'core', '__fixtures__', 'codex', 'mock-codex-app-server.mjs');
 }
 
 export function buildCodexAppServerEnv(extraEnv?: Record<string, string>): NodeJS.ProcessEnv {
