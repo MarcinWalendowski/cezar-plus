@@ -274,6 +274,13 @@
   owns it, and reconcile's duplicate is deleted.
 
 ## 🩹 Fixed
+- 🩹 **Codex approval requests no longer hang unattended runs.** The app-server can send command,
+  file-change, permission and legacy approval requests even when cezar asked for
+  `approvalPolicy: never`. Cezar now answers them with the most permissive valid decision, reports
+  the decision in the run timeline, and returns a named `-32601` error for unsupported requests.
+  `CEZ_CODEX_NETWORK=0` remains enforced when a permission profile is granted. Also removed the
+  stale `CEZ_APPROVAL_GATE` example that was already deleted from Claude's implementation.
+
 - 🩹 **An externally-killed `opencode` run reported `done` and the workflow carried on past it.**
   Same symptom as the `claude`/`pi`/`codex` fix, **different mechanism**: there, `waitForExit`
   dropped the signal; here there was no exit gate at all — both the `'exit'` and `'close'`

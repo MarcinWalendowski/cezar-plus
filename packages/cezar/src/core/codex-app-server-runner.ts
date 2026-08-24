@@ -16,6 +16,11 @@ import {
   KILL_GRACE_MS,
 } from './claude-cli-runner.ts';
 import { parseAskRequest, type AskQuestion } from './ask.ts';
+import {
+  codexApprovalNote,
+  codexApprovalReply,
+  type CodexServerRequestReply,
+} from './codex-approvals.ts';
 import { readNdjson } from './ndjson.ts';
 import { resolveCodexResumeModel, type CodexResumeModel } from './codex-resume-model.ts';
 import { sharedRunnerModelCatalog } from './runner-model-catalog.ts';
@@ -71,7 +76,9 @@ async function defaultResumeModel(pinned: string | undefined, cwd: string): Prom
  * Auth = the host's logged-in ChatGPT/Codex session (or CODEX_API_KEY). The
  * agent runs autonomously via `sandbox: danger-full-access` +
  * `approvalPolicy: never`, matching cezar's default auto permission mode
- * (spec 2026-07-17-permission-modes). Codex has no per-tool allowlist, so
+ * (spec 2026-07-17-permission-modes). Approval requests are answered with the
+ * most permissive decision the request can accept, so a vendor-side request
+ * cannot leave a run waiting. Codex has no per-tool allowlist, so
  * `spec.allowedTools` is ignored. `CEZ_CODEX_NETWORK=0` retains the previous
  * network-blocked `workspace-write` sandbox as an explicit restriction.
  */
@@ -123,6 +130,8 @@ class CodexSession implements AgentSession {
   private threadId: string | undefined;
   private activeTurnId: string | undefined;
   private pendingUserInput: PendingUserInput | undefined;
+  private approvalNotes = 0;
+  private approvalSummaryEmitted = false;
   private readonly toolCalls: AgentToolCallRecord[] = [];
   private readonly textChunks: string[] = [];
   /** Streamed agentMessage deltas buffered per item — v1 `text` is emitted
@@ -494,7 +503,39 @@ class CodexSession implements AgentSession {
       this.handleUserInputRequest(msg.id, msg.params ?? {});
       return;
     }
+    const rpcId = msg.id;
+    if (typeof msg.method === 'string' && (typeof rpcId === 'number' || typeof rpcId === 'string')) {
+      const params = msg.params ?? {};
+      const reply = codexApprovalReply(msg.method, params, process.env);
+      if (reply) {
+        this.rpc.respond({ id: rpcId, ...reply });
+        this.emitCodexApprovalNote(msg.method, params, reply);
+      } else {
+        this.rpc.respond({
+          id: rpcId,
+          error: { code: -32601, message: `cezar does not implement ${msg.method}` },
+        });
+        this.emit({ type: 'note', message: `codex requested unsupported method ${msg.method}; cezar replied -32601` });
+      }
+      return;
+    }
     if (typeof msg.method === 'string') this.handleNotification(msg.method, msg.params ?? {});
+  }
+
+  private emitCodexApprovalNote(
+    method: string,
+    params: Record<string, unknown>,
+    reply: CodexServerRequestReply,
+  ): void {
+    if (this.approvalNotes < MAX_APPROVAL_NOTES) {
+      this.approvalNotes += 1;
+      this.emit({ type: 'note', message: codexApprovalNote(method, params, reply, process.env) });
+      return;
+    }
+    if (!this.approvalSummaryEmitted) {
+      this.approvalSummaryEmitted = true;
+      this.emit({ type: 'note', message: 'codex approval requests continue; further approvals are auto-approved silently' });
+    }
   }
 
   private handleUserInputRequest(rpcId: number | string, params: Record<string, unknown>): void {
@@ -720,6 +761,8 @@ const NON_TOOL_ITEMS = new Set(['agentMessage', 'userMessage', 'reasoning', 'pla
 /** Turn-lifecycle notification methods — the only frames whose child-thread copies must be
  *  dropped so a sub-agent turn can't be mistaken for the parent's (#600). */
 const TURN_LIFECYCLE_METHODS = new Set(['turn/started', 'turn/completed', 'turn/failed']);
+
+export const MAX_APPROVAL_NOTES = 10;
 
 const REASONING_SUMMARIES = new Set(['auto', 'concise', 'detailed', 'none']);
 
