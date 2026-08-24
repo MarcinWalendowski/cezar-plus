@@ -1336,6 +1336,21 @@ export interface ClusterRuntimeDeps {
    */
   resolveDispatchManager: (repoRoot: string) => Promise<RunManager | undefined>;
   /**
+   * The directory this process booted with (`ServerDeps#repoRoot`) — folded into the corpus
+   * mirror's project list by `corpusMirrorProjectDataDirs`, whose doc has the full argument for
+   * why the registry alone is not enough.
+   *
+   * **Optional, and that is a deliberate exception to this interface's own "required, because its
+   * absence is silent" rule** (see `server` and `resolveDispatchManager` above). It is optional
+   * because the failure it guards is no longer silent: `corpus-mirror-runtime.ts#sweepOnce` warns
+   * loudly, once, the first time it finds NOTHING to mirror — for any cause, including a caller
+   * that forgets this field. An optional field whose absence is announced is a default; an
+   * optional field whose absence is silent is the bug this whole item is about. Making it required
+   * would also force a value on ten cluster tests that have no boot project and do not exercise
+   * the mirror at all.
+   */
+  bootProjectRoot?: string;
+  /**
    * D47: the shared workspace-wide `WorkspaceSemaphore` — threaded straight through to
    * `SpokeRuntimeDeps#semaphore`, whose own doc has the full argument for what it fixes. Optional
    * for the same "legacy callers and tests that build no managers" reason `ServerDeps#semaphore`
@@ -1527,6 +1542,51 @@ export function buildHubReplication(
  *
  * Returns the stop function, the disposal shape used throughout this codebase.
  */
+/**
+ * Every project this node should mirror the hub corpus into, as `<root>/.ai/cezar` `dataDir`
+ * values — the workspace registry PLUS the boot project.
+ *
+ * **The boot project is the half that was missing, and its absence was silent** (measured on a
+ * fresh node, 2026-08-24). `cezar serve --repo <dir>` makes `<dir>` the boot project, and a boot
+ * project deliberately carries NO workspace-registry row: `server.ts#registerFolder`'s own
+ * "Idempotent no-op" branch resolves it to the boot identity instead of appending a second row,
+ * because two registry rows over one root open two `RunStore`s over one `runs.json` and the last
+ * flush truncates the other's writes (`.ai/specs/2026-08-15-duplicate-project-context-wipes-runs.md`,
+ * D3 `suppressBootRegistration`). That is correct — but it means a node whose ONLY project is the
+ * one it booted with reads an EMPTY registry, mirrors nothing, and stays knowledge-blind forever
+ * while reporting `armed`. Item 59's own note directly above the call site argued the list must not
+ * gate on confirmed pairings precisely to avoid "the exact inert failure D8a exists to prevent";
+ * the same inertness survived through the boot-project door.
+ *
+ * Deduped on `resolve()` because the boot root is very often ALSO a registered project (any node
+ * that registered the directory before it was ever booted with `--repo` carries both), and one
+ * `dataDir` swept twice in a pass is wasted work against the same `SourceStore`. `resolve` and not
+ * `realpath`: this must stay synchronous-cheap and allocation-free per sweep, and two spellings
+ * that differ only by symlink degrade to a duplicate sweep of the same idempotent store, never to
+ * a wrong or lost document.
+ *
+ * The boot root is threaded in rather than re-derived here: `server.ts` owns `deps.repoRoot`, and
+ * a second derivation of "what did this process boot with" is exactly the kind of one-concept-at-
+ * two-points drift that goes stale on one side only.
+ */
+export async function corpusMirrorProjectDataDirs(options: {
+  bootProjectRoot?: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<readonly string[]> {
+  const config = await loadWorkspaceConfig(workspaceConfigPath(options.env));
+  const roots = config.projects.map((project) => project.root);
+  if (options.bootProjectRoot) roots.push(options.bootProjectRoot);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const root of roots) {
+    const dataDir = join(resolve(root), '.ai/cezar');
+    if (seen.has(dataDir)) continue;
+    seen.add(dataDir);
+    out.push(dataDir);
+  }
+  return out;
+}
+
 export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
   const env = deps.env ?? process.env;
   const warn = deps.warn ?? ((message: string) => console.warn(message));
@@ -1874,10 +1934,7 @@ export function startClusterRuntime(deps: ClusterRuntimeDeps): () => void {
      */
     const corpusMirror = startCorpusMirrorRuntime({
       identity,
-      listProjects: async () => {
-        const config = await loadWorkspaceConfig(workspaceConfigPath(env));
-        return config.projects.map((project) => join(project.root, '.ai/cezar'));
-      },
+      listProjects: () => corpusMirrorProjectDataDirs({ bootProjectRoot: deps.bootProjectRoot, env }),
       warn,
     });
     if (corpusMirror.status !== 'armed') {

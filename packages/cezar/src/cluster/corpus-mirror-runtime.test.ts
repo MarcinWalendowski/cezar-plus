@@ -323,3 +323,62 @@ describe('startCorpusMirrorRuntime — scope forwarding (S4)', () => {
     handle.dispose();
   });
 });
+
+describe('an empty project list is LOUD, not silent (item 64)', () => {
+  it('warns, and sweeps nothing, when there are no projects to mirror', async () => {
+    // The measured production failure: armed, on time, and mirroring nothing — with no log line
+    // anywhere saying so, so `loadKnowledgeSummary` returned undefined and the agent ran
+    // knowledge-blind while reporting success.
+    const warn = vi.fn();
+    const runSync = vi.fn(async () => SYNC_RESULT);
+    const handle = startCorpusMirrorRuntime(baseDeps({ listProjects: () => [], runSync, warn, intervalMs: 1_000 }));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(runSync).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain('no projects to mirror');
+    handle.dispose();
+  });
+
+  it('warns ONCE across many empty sweeps, not once per 60s tick forever', async () => {
+    const warn = vi.fn();
+    const handle = startCorpusMirrorRuntime(baseDeps({ listProjects: () => [], warn, intervalMs: 1_000 }));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    handle.dispose();
+  });
+
+  it('warns AGAIN if the list recovers and then goes empty a second time', async () => {
+    // The negative half of the throttle: a boolean that latched on would silence a REAL later
+    // regression (a project deregistered months after boot), which is the same silence this
+    // guard exists to break.
+    const warn = vi.fn();
+    let projects: readonly string[] = [];
+    const handle = startCorpusMirrorRuntime(baseDeps({ listProjects: () => projects, warn, intervalMs: 1_000 }));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    projects = ['/proj/.ai/cezar'];
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(warn).toHaveBeenCalledTimes(1); // recovered — nothing new to say
+
+    projects = [];
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(warn).toHaveBeenCalledTimes(2); // regressed — said again
+    handle.dispose();
+  });
+
+  it('a non-empty list never triggers the warning', async () => {
+    const warn = vi.fn();
+    const handle = startCorpusMirrorRuntime(baseDeps({ listProjects: () => ['/proj/.ai/cezar'], warn, intervalMs: 1_000 }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(warn).not.toHaveBeenCalled();
+    handle.dispose();
+  });
+});

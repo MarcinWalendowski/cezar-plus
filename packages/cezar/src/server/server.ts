@@ -7496,7 +7496,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   // claim the moment Milestone C let a dispatch actually place work on it. Optional for the same
   // "legacy callers and tests that build no managers" reason `deps.semaphore` is optional
   // everywhere else in this file (`:6857`'s own doc).
-  startClusterRuntime({ version: deps.version, server, resolveDispatchManager, semaphore: deps.semaphore });
+  startClusterRuntime({ version: deps.version, server, resolveDispatchManager, semaphore: deps.semaphore, bootProjectRoot: deps.repoRoot });
   // The one listener that destroys an upgrade nobody owns (ws.ts#attachUpgradeFallback).
   //
   // `CLUSTER_LINK_PATH` is listed only when `CEZ_CLUSTER` is on, and that asymmetry is deliberate.

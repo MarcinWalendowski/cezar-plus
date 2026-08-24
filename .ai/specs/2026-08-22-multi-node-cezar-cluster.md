@@ -7920,3 +7920,89 @@ Both were introduced by this work and both were invisible on the dev Mac. Record
 > section, per node — `useActiveClusterRuns` already exists and already returns them. Deliberately
 > not built here: the user's question ("which worker is processing this task") is answered on the
 > TODO side, which does reach spokes (62a), and the deploy + live E2E is the governing goal.
+
+### 64. A brand-new node mirrored NOTHING, silently — the boot project is not a registry project
+
+Measured 2026-08-24 on a genuinely empty directory (`/Users/mw/cezar-w2`), stood up specifically
+to answer the owner's question: *"in empty new directory to verify sync between nodes and where
+master is single source of truth"*. That question found a real defect that the two existing nodes
+could not have surfaced.
+
+**What happened.** The fresh node joined the hub cleanly (`149c5234`, spoke, protocol 1.1), beat
+presence on schedule, and appeared on the hub roster within seconds. It also mirrored nothing at
+all: no `sources.json`, no `source-state.json`, `documentCount` nowhere, and **not one line in any
+log saying so**. `startCorpusMirrorRuntime` reported `armed`, the 60s timer fired on time, and
+every sweep completed successfully — over an empty list.
+
+**Root cause, in one line of the call site.** The mirror's project list was:
+
+```ts
+const config = await loadWorkspaceConfig(workspaceConfigPath(env));
+return config.projects.map((project) => join(project.root, '.ai/cezar'));
+```
+
+That reads the workspace **registry**. A node started as `cezar serve --repo <dir>` puts `<dir>`
+in the one place the registry deliberately does not carry it: the **boot project** has no registry
+row, because `server.ts#registerFolder`'s "Idempotent no-op" branch resolves it to the boot
+identity instead of appending a second row (D3 `suppressBootRegistration`,
+`.ai/specs/2026-08-15-duplicate-project-context-wipes-runs.md` — two rows over one root open two
+`RunStore`s over one `runs.json` and the last flush truncates the other's writes). That suppression
+is correct. Its consequence here was not: a node whose only project is the one it booted with reads
+an empty registry and is knowledge-blind forever.
+
+Confirmed by controlled experiment rather than by reading: same node, same env, same binary, the
+**only** difference being `--repo`. With `--repo`, `POST /api/v1/projects` returns 200 with an empty
+`addedAt` and `config.projects` stays `[]`. Without it, the same POST persists a real row — and
+`sources.json` appeared within 10s, `syncState: ok`, `documentCount: 2182`.
+
+**This is the fourth instance of this branch's signature disease** (items 55, 56, 62): a mechanism
+that is complete, tested, documented, and unreachable in the configuration production actually
+runs. Note the shape here is nastier than its predecessors — the code has a real production caller,
+and that caller runs. It is the *argument* that is empty.
+
+**Sharpest detail:** the docblock immediately above this call site already argues that the list must
+NOT gate on confirmed pairings, because "a fresh worker would mirror NOTHING until a human confirmed
+on both machines, silently, which is the exact inert failure D8a exists to prevent". The author saw
+the failure mode precisely, widened the list from pairings to all registered projects to escape it,
+and the same inertness walked back in through the boot-project door. **Widening a set is not the
+same as establishing that the set is non-empty.**
+
+**Fix, in two independent halves.**
+
+1. `cluster-routes.ts#corpusMirrorProjectDataDirs` (new, exported, tested) unions the registry with
+   the boot project, deduped on `resolve()` — the boot root is very often *also* registered, which
+   is exactly the state the first working node was in, and one `dataDir` swept twice per pass is
+   wasted work. `server.ts` threads `bootProjectRoot: deps.repoRoot` at the single production call.
+2. `corpus-mirror-runtime.ts#sweepOnce` warns, loudly and once, whenever the list is **empty** —
+   for any cause, including a future caller that builds the list some other way and forgets. This
+   half deliberately does not depend on half 1 being correct. It is the guard that does not rest on
+   the contested fact, and it is why `bootProjectRoot` can stay optional without becoming an
+   off-by-default guard: an optional field whose absence is *announced* is a default; an optional
+   field whose absence is *silent* is this whole item.
+
+The warning fires on the transition into empty, not every tick, and resets on recovery — a latched
+flag would silence a genuine later regression (a project deregistered months after boot), which is
+the same silence the guard exists to break. That reset has its own test and its own mutation.
+
+**Verification.** 25 tests across the two suites, all green. Four mutations, each reddening a
+different count — drop the boot project (2 fail), drop the dedupe (2), drop the empty guard (3),
+latch the warning without resetting (1) — so no two mutations are one proof counted twice. Sources
+restored from scratchpad copies and md5-verified byte-identical.
+
+**Corrects item 61's "live E2E passing" claim, in place.** That claim was true of the node it was
+measured on and does **not** generalize, which is the part worth carrying forward. The first worker
+mirrors only because it happens to hold a *legacy* registry row (`addedAt 2026-08-24T12:00:31`) for
+a directory that later also became its boot root — an artifact of the order that node was set up
+in, not the fresh-node path. Every genuinely new node took the broken path until this fix. A
+one-node E2E cannot distinguish "the feature works" from "this node is carrying a lucky row".
+
+**What the fresh node did prove, once it had a project.** Master is the single source of truth,
+byte-for-byte: 2182 documents on `/var/lib/cezar/loki-labs/notion-export` and 2182 in the mirror,
+compared by `externalId` + sha256 (`remoteVersion` is the raw `sha256sum` of the host file, verified
+against the box). **`diff` of the two manifests: zero lines.** 0 conflicts, `corpusVersion 2183` on
+both, no `lastError`.
+
+**Not re-verified live with the fixed binary.** The fix is proven by unit tests and mutation, and
+the failing configuration is reproduced and explained, but the fixed build has not been run back
+through the `--repo` path on the fresh node — the owner asked to stop here and defer the remaining
+cluster work. That re-run is the first item of the deferred task.
