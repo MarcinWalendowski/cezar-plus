@@ -1834,3 +1834,99 @@ describe('RunStore — resource accounting (Phase 0: peaks, cpuSeconds, resource
     ]);
   });
 });
+
+/**
+ * V6 of `.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`: the reader stays after the writer
+ * goes.
+ *
+ * `workspaceWorktrees` is no longer written by anything — a workspace run creates no worktree. The
+ * field is not deleted because records written by an older cezar carry it and those directories
+ * are on users' disks: `run.ts` arms their leases and settle still applies or discards them
+ * (`BACKWARD_COMPATIBILITY.md`). A schema tightened to "nothing writes it, so drop it" would make
+ * every one of those runs lose track of a full checkout, silently, with no error anywhere.
+ *
+ * `autoStart` rides along in the same case for the opposite reason: it is the NEW optional field,
+ * and a record without one must still parse.
+ */
+describe('RunStore — legacy workspaceWorktrees survive the writer being removed', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-legacy-ws-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  const RECORD = {
+    ...LEGACY_RUN,
+    id: 'ws-legacy-1',
+    workspaceProjects: [{ id: 'chat', name: 'chat', root: '/w/chat', status: 'ok' }],
+    workspaceWorktrees: [
+      {
+        root: '/w/chat',
+        worktreePath: '/w/chat/.ai/cezar/worktrees/ws-legacy-1',
+        branch: 'cez/ws-legac',
+        baseBranch: 'main',
+        reclaimedAt: '2026-08-20T10:00:00.000Z',
+      },
+    ],
+  };
+
+  it('parses a record written before the change, entry for entry', () => {
+    const parsed = runRecordSchema.safeParse(RECORD);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.workspaceWorktrees).toEqual(RECORD.workspaceWorktrees);
+    // The new field is optional in the other direction: an old record has none.
+    expect(parsed.success && parsed.data.autoStart).toBeUndefined();
+  });
+
+  it('survives a load → flush round-trip through runs.json, unchanged', () => {
+    // Not just "parses": a store that reads the field and drops it on write erases the only record
+    // of where those directories are, and it does so the first time anything touches the run.
+    writeFileSync(join(dataDir, 'runs.json'), JSON.stringify([RECORD], null, 2));
+    const store = RunStore.open(dataDir);
+    expect(store.getRun('ws-legacy-1')?.workspaceWorktrees).toEqual(RECORD.workspaceWorktrees);
+    store.updateRun('ws-legacy-1', { title: 'renamed' });
+    store.flush();
+
+    const onDisk = JSON.parse(readFileSync(join(dataDir, 'runs.json'), 'utf8')) as Array<
+      Record<string, unknown>
+    >;
+    expect(onDisk[0]!.title).toBe('renamed');
+    expect(onDisk[0]!.workspaceWorktrees).toEqual(RECORD.workspaceWorktrees);
+  });
+
+  it('round-trips autoStart, the field the composer now sets', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      author: localCliAuthor(),
+      title: 'sweep the boards',
+      workflow: 'input-to-tasks',
+      task: 'sweep the boards',
+      steps: [],
+      autoStart: true,
+    });
+    store.flush();
+    expect(RunStore.open(dataDir).getRun(run.id)?.autoStart).toBe(true);
+  });
+
+  it('omits autoStart entirely when the composer did not ask for it', () => {
+    // Absent, not `false` — the same discipline the client applies to the wire body, so a record
+    // says "nobody asked" rather than "somebody asked for no".
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      author: localCliAuthor(),
+      title: 'ordinary',
+      workflow: 'quick-task',
+      task: 'ordinary',
+      steps: [],
+    });
+    store.flush();
+    const onDisk = JSON.parse(readFileSync(join(dataDir, 'runs.json'), 'utf8')) as Array<
+      Record<string, unknown>
+    >;
+    expect(onDisk.find((r) => r.id === run.id)).not.toHaveProperty('autoStart');
+  });
+});

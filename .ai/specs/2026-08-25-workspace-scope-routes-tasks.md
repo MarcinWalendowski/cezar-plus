@@ -1,6 +1,9 @@
 # Workspace scope routes tasks into projects; it stops editing them
 
-> **Status:** proposed · **Date:** 2026-08-25 · **Owner instruction, verbatim:**
+> **Status:** partial — **Phases 1–3 implemented 2026-08-25, QA Needed** (V8, the runtime E2E on
+> production, has not run; V7's on-the-box double gate has not run either — see *Implementation
+> status* below for exactly what was and was not executed). **Phase 4 not started and cannot be:
+> it is gated on the worktree drain.** · **Date:** 2026-08-25 · **Owner instruction, verbatim:**
 > *"when creating a task we can by default set scope to workspace and the only available workflow
 > there should be like: input-to-tasks, where retrieve the context across all workspace (like we are
 > doing now in our default workflow). The workflow steps should be: 1. Gather the context. 2. Create
@@ -440,3 +443,136 @@ lands:
 - `getRepoInfo` should carry its failure reason rather than returning a bare `null`, so the next
   incident of this shape is diagnosable. This spec removes the *consequence* on the workspace path;
   33 other call sites still read that `null`.
+
+## Implementation status — 2026-08-25
+
+Phases 1, 2 and 3 are implemented. What follows separates what was **executed** from what was
+**written but not yet run**, because gates green is necessary and not sufficient and this spec's
+own Verification section says so.
+
+### What changed
+
+**Phase 1 — no more cross-project worktrees.**
+
+- `workflows/run.ts` — the `isWorkspaceRun` prologue branch no longer materializes anything. A
+  workspace run emits *"reading every project, editing none; file work with `cez todo add
+  --project <id>`"* and falls through with no worktree and no lease. `materializeWorkspaceWorktrees`
+  is no longer imported. The resume path arms leases for whatever the record already carries and
+  re-materializes nothing.
+- **The reader stays** (`BACKWARD_COMPATIBILITY.md`): a record carrying `workspaceWorktrees` from an
+  older cezar still arms its leases, still applies back on success, still discards on any other
+  ending. That branch emits its own distinct note so a legacy run is legible in the transcript.
+- `workspace/granted-roots.ts` — `isolated` is now **all-or-nothing** (`withWorktree === paths.size`)
+  rather than `worktrees.length > 0`. That flag was the mechanism that told five concurrent prod
+  runs they were isolated while they shared one live checkout. The non-isolated prompt was rewritten
+  to say the paths are real, shared checkouts and that the run must not edit, create, delete,
+  commit, stash, reset or push a file in any project.
+
+**Phase 2 — `input-to-tasks` and `cez todo start`.**
+
+- `workflows/types.ts` — `INPUT_TO_TASKS_WORKFLOW`, three steps (`context`, `file`, `dispatch`).
+  **No step is given `Edit` or `Write`**, so "it does not touch your files" is a property of the
+  tool grant, not a request in a prompt. `file` files without `--start`; `dispatch` reads
+  `{{autoStart}}` and calls `cez todo start <id> --project <id>`.
+- `workflows/run.ts` — `applyTemplate` renders `{{autoStart}}`, read from the **record** rather than
+  the input so a resume answers identically.
+- `todo-cli.ts` — `cezar todo start <id> [--project] [--json]`. Accepts an id prefix, errors on an
+  ambiguous one, refuses an archived, tombstoned or already-started todo. `todos.ts`'s
+  `UpdateTodoPatch` gained `autostart?: true`.
+- `runs/store.ts` + `contract/workspace-run-start.ts` — optional `autoStart`. The route defaults
+  `workflow` to `input-to-tasks` when the caller names neither a workflow nor steps.
+
+**Phase 3 — composer.**
+
+- Scope already defaults to Workspace on every generic entry point (`?scope=auto`), and an explicit
+  link to one project's composer still means that project — that was left alone deliberately.
+- `workflowsForScope` filters the catalog to `input-to-tasks` at workspace scope, and the **same**
+  filtered list feeds `resolveSource`, so a draft still naming `spec-to-deploy` resolves to nothing
+  and the server defaults rather than quietly running the old workflow with no control on screen.
+- A **Start filed tasks** chip, workspace scope only, default off, deliberately *not* persisted in
+  the draft — it is the one control whose leftover `true` would start unattended agents in several
+  repos on a submit the user thought was a plain one. Off means the key is **absent** from the body,
+  so the default submission stays byte-identical to what an older cockpit sends.
+- `composerRunModeNote`'s workspace line was **corrected**: it read *"your real checkouts are
+  modified directly, with no worktree"*, which was true of the defect and is false of the fix.
+
+**Docs.** `README.md` (new "Workspace scope routes work" paragraph + the breaking note),
+`CHANGELOG.md` (Breaking + Added under Unreleased), and `BACKWARD_COMPATIBILITY.md` §118, whose
+description of the route was corrected in place with the superseded text kept below it.
+
+### Verification — executed
+
+- **V3 (the grant is honest)** — `workspace/granted-roots.test.ts`, 22 pass. Covers the
+  partially-isolated case (the exact prod defect, and the assertion that fails under the old
+  `worktrees.length > 0`), the fully-isolated legacy case so the change is a narrowing rather than a
+  blanket `false`, and the `brand` shape: every granted path is a registry root verbatim, never a
+  path synthesized from a neighbour's worktree.
+- **V4/V5 (filing, and dispatch genuinely optional)** — `workflows/load.test.ts` (catalog entry, no
+  `Edit`/`Write` on any step, files without `--start`, repo override still works);
+  `todo-cli.test.ts` `describe('start')`, 6 cases; `workflows/auto-start-template.test.ts`, 3 cases
+  asserting `{{autoStart}}` renders `true`/`false`/`false`-when-absent **at the spawn spec**.
+  Mutation-checked: deleting the `{{autoStart}}` replacement turns all three red, and `load.test.ts`
+  alone stays green — it proves the token is in the prompt, which is true whether or not anything
+  replaces it.
+- **V6 (compatibility)** — `runs/store.test.ts`, new `describe`: a legacy record parses entry for
+  entry and survives a load → update → flush round-trip with `workspaceWorktrees` unchanged; a new
+  record omits `autoStart` entirely rather than writing `false`.
+- **The route** — `server/workspace-run-routes.test.ts`, 5 new cases (14 total). Both of this
+  route's new behaviours were invisible to every pre-existing case in that file: `resolveWorkflow`
+  is stubbed, so the workflow NAME the route asks for was never inspected, and `autoStart` simply
+  rode along in the input object. The new cases record what `resolveWorkflow` was asked for and
+  assert the `input-to-tasks` default, that a named workflow still wins (a default, not a
+  restriction — rejecting a name that worked yesterday would be breaking), that an inline `steps`
+  chain gets no workflow name injected alongside it, and that `autoStart` passes through as
+  `undefined`/`true`/`false` — three distinct answers, because a record has to say what was *asked
+  for* or the optional dispatch step doing nothing reads as a step that failed. A non-boolean
+  `autoStart` 400s rather than arriving as a truthy value. Mutation-checked: removing the default
+  and removing the passthrough each turn exactly the case written for it red, and nothing else.
+- **Composer** — `new-task-form.test.ts` (`workflowsForScope` including the empty-not-fallback case,
+  `buildWorkspaceRunBody` autoStart), `new-task-draft.test.ts` (both workspace lines, and autoStart
+  changing nothing outside workspace scope), `new-task-project.test.tsx` (the picker at both scopes,
+  the chip's absence at project scope, the posted body in both directions). Mutation-checked: a
+  filter that keeps everything, and an `autoStart` key always sent, each turn a *different* test
+  red.
+- **Full web suite** — 186 files, 4108 tests, all pass.
+- **Typecheck** — `tsc --noEmit` on the contract and server projects: clean. The web project sits at
+  its **pre-existing** 8 errors, all in `api/client.ts`, none in any file this change touches
+  (proven with a `git stash` control: same count, same locations).
+- **Tests rewritten because the behaviour they pinned was deliberately removed**, each with the
+  reason in place: `workflows/boot-root-isolation.test.ts` (change C now asserts the adopted grant
+  puts the run on the routing path and cuts nothing, on the record and on disk),
+  `workflows/workspace-parallel.test.ts` (a failing workspace run leaves no worktree AND no branch,
+  where it used to assert the branch survived), `workflows/workspace-grant-wiring.test.ts` (the
+  prompt must say "do NOT edit", not the weaker "do NOT commit"), `new-task-project.test.tsx` and
+  `new-task-draft.test.ts` (the corrected header line).
+
+### Verification — NOT executed
+
+- **V1/V2** — the end-to-end worktree-count negative control and its mutation proof need a real
+  twelve-project workspace. Not run. The unit-level equivalents above are not a substitute for it.
+- **V7 (gates on the box, twice)** — **not run, and deliberately deferred.** The box was carrying
+  four concurrent agent runs at the time of writing. The reason to gate there is that it is *idle*;
+  gating on a loaded box reproduces the exact load-sensitive flakes the rule exists to escape, so
+  running it now would buy a worse answer, not a better one. It must still be run.
+
+  What was run locally, and what it shows: sweeps over `workflows/ workspace/ runs/ todo-cli todos`
+  (1520/1524) **twice**, plus `notes/ automations/ scheduling/` and the CLI-wiring suites
+  (147/150). Every red falls into one of two already-known pools, and each was attributed with a
+  control rather than assumed:
+  - **`fs.watch` timeouts on a loaded Mac** — `todos.test.ts` (3) and `todo-autostart.test.ts` (3).
+    `todo-autostart` is directly downstream of this change's `todos.ts` edit, so it was checked
+    against a **stashed clean tree**: the identical 3 cases fail there too.
+  - **Load-sensitive flakes** — `run.test.ts`'s native-Codex `requestUserInput` case and
+    `resume-missing-session.test.ts` (c). Both *moved* between two runs of the identical tree, which
+    is the signature of a flake pool rather than a broken test; one run naming a file proves
+    nothing.
+
+  None of the four failures this change originally introduced in `workflows/ workspace/ runs/`
+  remains.
+- **V8 (runtime E2E on production)** — not run. **This is why the spec is QA Needed and not Done.**
+
+### Phase 4 — blocked, by design
+
+Deleting the cross-project worktree machinery is gated on no reachable run record still carrying
+`workspaceWorktrees`. It does not become unblocked by time passing; it becomes unblocked when the
+drain is measured.

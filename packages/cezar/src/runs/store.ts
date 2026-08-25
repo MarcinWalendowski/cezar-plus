@@ -421,6 +421,17 @@ export const runRecordSchema = z.object({
   /** Explicit execution policy. `false` means the run intentionally uses the repo root;
    *  absent on older runs and for the default isolated-worktree mode. */
   worktree: z.literal(false).optional(),
+  /**
+   * Workspace runs only (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`): did the composer
+   * ask for the tasks this run files to be started automatically?
+   *
+   * Recorded rather than inferred, and read back through `{{autoStart}}` by `input-to-tasks`'s
+   * `dispatch` step. It is a decision taken ONCE at creation, so it has to survive every resume —
+   * which is why the step reads this field and not the rebuilt `input`. Absent means false: every
+   * run recorded before this existed, and every run created without the box ticked, are the same
+   * thing and must behave the same way.
+   */
+  autoStart: z.boolean().optional(),
   /** A workspace run's directory grant (`.ai/specs/2026-08-15-cross-project-workspace-run.md`):
    *  every registered project it may reach outside its cwd. Decided once at creation and
    *  persisted, so a project registered or removed mid-run never widens or narrows the grant of
@@ -438,7 +449,14 @@ export const runRecordSchema = z.object({
   /** A parallel workspace run's per-project worktrees (spec
    *  2026-08-19-parallel-workspace-runs-worktrees). Each granted git project is isolated in its own
    *  `cez/<id8>` worktree; the diff is applied back to the real checkout and the worktree removed on
-   *  finish. Mirrors `workspaceWorktreeSchema` in `contract/src/runs.ts` — keep the two in sync. */
+   *  finish. Mirrors `workspaceWorktreeSchema` in `contract/src/runs.ts` — keep the two in sync.
+   *
+   *  **LEGACY, READ-ONLY since 2026-08-25** (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`):
+   *  a workspace run creates no worktree, so nothing writes this field anymore. It stays parsed
+   *  because records written by older versions carry it and those directories are on users' disks —
+   *  `run.ts` still arms their leases, and settle still applies/discards them. Removing it is
+   *  breaking until no reachable record has one (`BACKWARD_COMPATIBILITY.md`, and the spec's
+   *  Phase 4, which is gated on that drain rather than on a date). */
   workspaceWorktrees: z
     .array(
       z.object({
@@ -811,6 +829,8 @@ export class RunStore extends EventEmitter {
     worktree?: false;
     /** A workspace run's grant — see the schema field above. */
     workspaceProjects?: WorkspaceGrantProject[];
+    /** `input-to-tasks` auto-start — see the schema field above. */
+    autoStart?: boolean;
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
@@ -843,6 +863,7 @@ export class RunStore extends EventEmitter {
       stepBudgetOverride: input.stepBudgetOverride,
       worktree: input.worktree,
       workspaceProjects: input.workspaceProjects,
+      autoStart: input.autoStart,
       groupId: input.groupId,
       variant: input.variant,
       // Stamped once, at the only mint point, and never rewritten — see the schema field above.

@@ -6,6 +6,9 @@ import {
   buildAutomationTask,
   availableRunners,
   buildCreateRunBody,
+  buildWorkspaceRunBody,
+  workflowsForScope,
+  WORKSPACE_WORKFLOW,
   MODELS_BY_RUNNER,
   modelConflictsWithRunner,
   modelsForRunner,
@@ -396,5 +399,70 @@ describe('buildAutomationTask', () => {
       variants: 2,
       autonomous: true,
     })
+  })
+})
+
+/**
+ * Workspace scope (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 3).
+ *
+ * The composer wiring is covered end to end in `new-task-project.test.tsx`; these are the rules
+ * themselves, at the seam where they are cheap to state exhaustively.
+ */
+describe('workflowsForScope', () => {
+  const wf = (name: string): WorkflowDef => ({ name, source: 'built-in', steps: [] })
+  const CATALOG = [wf('quick-task'), wf(WORKSPACE_WORKFLOW), wf('spec-to-deploy')]
+
+  it('keeps only input-to-tasks at workspace scope', () => {
+    expect(workflowsForScope(CATALOG, true).map((w) => w.name)).toEqual([WORKSPACE_WORKFLOW])
+  })
+
+  it('changes nothing at project scope', () => {
+    expect(workflowsForScope(CATALOG, false).map((w) => w.name)).toEqual([
+      'quick-task',
+      WORKSPACE_WORKFLOW,
+      'spec-to-deploy',
+    ])
+  })
+
+  it('returns EMPTY rather than a fallback when the catalog has no input-to-tasks', () => {
+    // The failure mode this pins is a rename on the server that this file does not follow. An
+    // empty picker is a visible "there is nothing to choose"; a fallback to the first entry would
+    // quietly hand a workspace run `spec-to-deploy`, which is the defect the whole spec is about.
+    expect(workflowsForScope([wf('quick-task'), wf('spec-to-deploy')], true)).toEqual([])
+  })
+
+  it('copies rather than aliases the catalog at project scope', () => {
+    // `workflows.data?.workflows` is react-query's cached array; returning it verbatim would let a
+    // later in-place sort or splice mutate the cache under every other reader of that query.
+    const input = [wf('quick-task')]
+    expect(workflowsForScope(input, false)).not.toBe(input)
+  })
+})
+
+describe('buildWorkspaceRunBody — autoStart', () => {
+  const base = {
+    task: 'sweep the boards',
+    // None: the server resolves the default, which since this spec is `input-to-tasks`.
+    source: null,
+    model: '',
+    runner: 'claude' as const,
+    defaultRunner: 'claude' as const,
+    images: [],
+  }
+
+  it('omits the key entirely when the chip is off', () => {
+    // Absent, not `false`: the route schema is `.strict()` and the default submission has to stay
+    // identical to what a cockpit built before this flag existed sends.
+    expect(buildWorkspaceRunBody({ ...base, autoStart: false })).not.toHaveProperty('autoStart')
+    expect(buildWorkspaceRunBody(base)).not.toHaveProperty('autoStart')
+  })
+
+  it('sends it when the chip is on', () => {
+    expect(buildWorkspaceRunBody({ ...base, autoStart: true }).autoStart).toBe(true)
+  })
+
+  it('still drops the three keys a workspace run fixes', () => {
+    const body = buildWorkspaceRunBody({ ...base, autoStart: true }) as Record<string, unknown>
+    for (const key of ['worktree', 'variants', 'todoId']) expect(body).not.toHaveProperty(key)
   })
 })

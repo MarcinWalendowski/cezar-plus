@@ -116,6 +116,7 @@ import {
   resolveRunner,
   resolveSource,
   startedRunPath,
+  workflowsForScope,
   type TaskSource,
 } from './new-task-form'
 import { parseNewTaskParams } from './new-task-params'
@@ -173,6 +174,13 @@ export function NewTaskRoute() {
     urlProjectId === undefined || search.get('scope') === 'auto' ? 'auto' : 'project',
   )
 
+  // "Start the tasks it files" (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 3).
+  // Off by default and deliberately NOT in the draft, unlike every other chip in the footer row:
+  // the draft survives navigation, and this is the one control whose leftover `true` would start
+  // unattended agents in several repos on a submit the user thought was a plain one. Opted into
+  // per submission, the same reasoning `workspace-new-task.tsx`'s autonomous toggle records.
+  const [autoStartFiled, setAutoStartFiled] = useState(false)
+
   // The deep-link params, captured ONCE: the mount effect below strips them from the URL
   // (legacy's `history.replaceState` — the launch key must not survive in history or survive
   // a reload to re-trigger), so live search params would vanish under us.
@@ -229,12 +237,17 @@ export function NewTaskRoute() {
   // The pill's displayed selection: null renders "Workspace"; falls back to `urlProjectId` for
   // the named-project case exactly as before this spec.
   const pillProjectId = pillMode === 'auto' ? null : (urlProjectId ?? null)
+  // What the source pill offers, and what a draft's stored pick resolves against — at workspace
+  // scope, `input-to-tasks` alone (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 3).
+  // `workflowList` itself stays unfiltered for the deep-link prefill below, which is a
+  // named-project path by construction.
+  const offeredWorkflows = workflowsForScope(workflowList, workspaceActive)
   const sourcesReady =
     skills.data !== undefined && workflows.data !== undefined && !uiState.isPending
   // The draft's own pick, and nothing else (2026-08-15, owner: "no workflow should be selected
   // by default"). `uiState.lastTask` used to be the second candidate here — see `resolveSource`'s
   // own doc comment for why a previously-used workflow no longer reappears preselected.
-  const source = resolveSource([draft.source], skillList, workflowList)
+  const source = resolveSource([draft.source], skillList, offeredWorkflows)
   const selectedSkill = source?.source === 'skill'
     ? skillList.find((skill) => skill.name === source.ref)
     : undefined
@@ -525,6 +538,7 @@ export function NewTaskRoute() {
           images,
           autonomous: autonomousOn,
           generateFollowups: generateFollowupsOn,
+          autoStart: autoStartFiled,
         }),
       )
       clearDraftText(draftProjectId)
@@ -700,7 +714,12 @@ export function NewTaskRoute() {
               unconditionally made this line false for every run the user opted out of — and
               for a non-git folder, where there is no worktree to opt into. */}
           <p data-slot="run-mode-note" className="mt-1.5 text-[13.5px] text-muted-foreground max-md:text-xs">
-            {composerRunModeNote({ worktree: worktreeOn, hasGit, workspace: workspaceActive })}
+            {composerRunModeNote({
+              worktree: worktreeOn,
+              hasGit,
+              workspace: workspaceActive,
+              autoStart: autoStartFiled,
+            })}
           </p>
         </header>
 
@@ -770,7 +789,7 @@ export function NewTaskRoute() {
                 ready={sourcesReady}
                 skills={skillList}
                 skillUsage={skillUsage}
-                workflows={workflowList}
+                workflows={offeredWorkflows}
                 onPick={(next) => update({ source: next })}
               />
               {/* Icon-only: this row already carries source/runner/model/variants/worktree/
@@ -852,6 +871,11 @@ export function NewTaskRoute() {
                 disabled={draft.runMode === 'plan'}
                 onChange={(on) => update({ autonomous: on })}
               />
+              {/* Workspace scope only: there is nothing to auto-start anywhere else — a
+                  project-scoped submit already IS the run. */}
+              {workspaceActive ? (
+                <AutoStartToggle on={autoStartFiled} onChange={setAutoStartFiled} />
+              ) : null}
               {selectedSkill?.interactive && (draft.autonomous === null || draft.worktree === null) ? (
                 <p className="basis-full text-xs text-muted-foreground" data-slot="interactive-skill-hint">
                   This skill recommends an interactive run in the current checkout. You can change either setting.
@@ -996,6 +1020,40 @@ function AutonomousToggle({
         <SquareIcon aria-hidden="true" className="size-3 shrink-0 text-soft-foreground" />
       )}
       Autonomous
+    </button>
+  )
+}
+
+/**
+ * Auto-start toggle (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 3) — workspace
+ * scope only. A workspace run files todos on each project's board and stops; checked, its optional
+ * third step marks each one `autostart` so the cockpit picks them up, each in its own worktree, in
+ * its own project.
+ *
+ * Unchecked is not "do less": it is the reviewable half of the flow, which is why it is the
+ * default and why the title says where the tasks land either way.
+ */
+function AutoStartToggle({ on, onChange }: { on: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={on}
+      data-slot="auto-start-toggle"
+      onClick={() => onChange(!on)}
+      title={
+        on
+          ? 'The tasks this files start immediately, each in its own project and worktree'
+          : 'The tasks this files wait on their project boards — check to start them immediately'
+      }
+      className={cn(chipClass, on && 'border-primary/60 text-foreground')}
+    >
+      {on ? (
+        <CheckIcon aria-hidden="true" className="size-3 shrink-0 text-primary" />
+      ) : (
+        <SquareIcon aria-hidden="true" className="size-3 shrink-0 text-soft-foreground" />
+      )}
+      Start filed tasks
     </button>
   )
 }

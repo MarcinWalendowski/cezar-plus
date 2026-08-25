@@ -331,18 +331,42 @@ describe('composerRunModeNote (#793)', () => {
     }
   })
 
-  // Workspace (cross-project-workspace-run.md) is a fourth state that wins over the other three:
-  // the run lands in every project's REAL working tree at once, so a note promising an isolated
-  // worktree would be false in the most consequential direction available.
+  // Workspace (cross-project-workspace-run.md) is a fourth state that wins over the other three.
+  // CORRECTED 2026-08-25 (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`): the expected
+  // string was ~~"your real checkouts are modified directly, with no worktree"~~, which described
+  // a run that edited every project's live tree. It no longer does one, so holding the header to
+  // that sentence would hold it to a false one.
   it('workspace wins over worktree/hasGit, and never promises isolation', () => {
     for (const worktree of [true, false]) {
       for (const hasGit of [true, false]) {
         const note = composerRunModeNote({ worktree, hasGit, workspace: true })
         expect(note).toBe(
-          'Runs once across every project — your real checkouts are modified directly, with no worktree.',
+          'Reads every project and files tasks on their boards — it edits no project file, and starts nothing.',
         )
         expect(note).not.toContain('isolated')
       }
+    }
+  })
+
+  it('autoStart drops the "starts nothing" half, and only that half', () => {
+    // The two workspace lines are one control's two states. A header still saying "starts nothing"
+    // above a ticked Start-filed-tasks chip is the same class of lie as the sentence corrected
+    // above — and one that only shows up when the user opts INTO the more consequential path.
+    const off = composerRunModeNote({ worktree: true, hasGit: true, workspace: true })
+    const on = composerRunModeNote({ worktree: true, hasGit: true, workspace: true, autoStart: true })
+    expect(off).toContain('starts nothing')
+    expect(on).not.toContain('starts nothing')
+    // Both still say where the work is filed — autoStart changes what happens next, not where.
+    for (const note of [off, on]) expect(note).toContain('files tasks on their boards')
+  })
+
+  it('autoStart on a NON-workspace note changes nothing', () => {
+    // The chip only renders at workspace scope; this pins that the parameter cannot leak into the
+    // other three states if a future caller passes it unconditionally.
+    for (const worktree of [true, false]) {
+      expect(composerRunModeNote({ worktree, hasGit: true, autoStart: true })).toBe(
+        composerRunModeNote({ worktree, hasGit: true }),
+      )
     }
   })
 

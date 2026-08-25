@@ -115,14 +115,28 @@ export function buildWorkspaceGrant(
   projects: readonly GrantedProject[],
   worktrees: readonly WorkspaceWorktree[] = [],
 ): WorkspaceGrant {
-  const isolated = worktrees.length > 0;
-  // The path the agent works in per project: its worktree when it has one, else the real root
-  // (a non-git or worktree-failed project, granted in place — see materializeWorkspaceWorktrees).
+  // `isolated` is now ALL-or-nothing, not any-or-nothing
+  // (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 1).
+  //
+  // It used to be `worktrees.length > 0`, so one isolated project made the whole grant claim
+  // isolation — and `workspaceGrantSystemPrompt` then told the agent that EVERY path below was a
+  // private worktree cezar would apply back and delete. In a mixed grant that sentence was false
+  // about exactly the paths where it mattered: the ones that fell back to the live checkout.
+  // Measured on prod 2026-08-24, five separate runs were told that about the same live `cezar`
+  // tree. A claim made about a set has to be true of every member of the set.
+  //
+  // New workspace runs create no worktrees at all, so this is `false` for them and the prompt says
+  // "read, do not edit". It stays true for a legacy run whose recorded worktrees are ALL still
+  // materialized, which is the one case the old sentence was honest about.
   const paths = new Map<string, string>();
+  let withWorktree = 0;
   for (const project of projects) {
     if (project.status === 'missing') continue;
-    paths.set(project.root, worktreePathOf(project.root, worktrees) ?? project.root);
+    const worktree = worktreePathOf(project.root, worktrees);
+    if (worktree) withWorktree += 1;
+    paths.set(project.root, worktree ?? project.root);
   }
+  const isolated = paths.size > 0 && withWorktree === paths.size;
   return {
     projects: [...projects],
     roots: dedupeContainedRoots([...paths.values()]),
@@ -187,12 +201,22 @@ export function workspaceGrantSystemPrompt(grant: WorkspaceGrant | undefined): s
       'you write to, and you write it by appending to CEZ_KB_WRITE_FILE, which is yours alone.',
     );
   } else {
+    // The path every NEW workspace run takes (spec 2026-08-25-workspace-scope-routes-tasks).
+    // The paths above are the REAL checkouts, shared with every other run in flight, and this
+    // run does not edit them — it routes work into them as todos. The old text here told the
+    // agent to edit the live trees and merely not to commit, which is the shape that left five
+    // runs' uncommitted edits interleaved in one checkout on 2026-08-24.
     lines.push(
       '',
-      'There is no worktree and no branch for this run: every edit lands directly in the real',
-      'working tree of each project, alongside whatever the user already had in progress. So do',
-      'NOT commit, stash, reset, or push in any of them unless the task explicitly asks for it —',
-      'you would be committing changes that are not yours. Report what you changed, per project.',
+      'These are the REAL checkouts, not worktrees, and they are shared with every other task',
+      'running right now. This task does not edit them. Read them to understand the work, then',
+      'file the work into the projects that need it:',
+      '',
+      '    cez todo add "<summary>" --project <id> --context "..." --acceptance "..."',
+      '',
+      'Do NOT edit, create, delete, commit, stash, reset or push a file in any project. Another',
+      'task is reading those same files as you work. The todos you file are the deliverable, and',
+      'each one runs later in its own isolated worktree. Report what you filed, per project.',
     );
   }
 

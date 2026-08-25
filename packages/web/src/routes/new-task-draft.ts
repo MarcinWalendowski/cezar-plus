@@ -109,10 +109,16 @@ export function resolveComposerRunMode(input: ComposerRunModeInput): {
  * and an explanation.
  *
  * `workspace` (`.ai/specs/2026-08-15-cross-project-workspace-run.md`) is a FOURTH state and it
- * wins over the other three, because a workspace run lands somewhere none of them describe: in
- * EVERY registered project's real working tree at once, with no worktree between the agent and
- * the user's uncommitted work. That is the most consequential thing this header can say, and it
- * is the one state where the Worktree chip on screen states a setting this submit ignores.
+ * wins over the other three, because a workspace run lands somewhere none of them describe. It is
+ * also the one state where the Worktree chip on screen states a setting this submit ignores.
+ *
+ * **CORRECTED 2026-08-25** (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 1+3).
+ * The workspace line said ~~"your real checkouts are modified directly, with no worktree"~~. That
+ * was true, and it was the defect: a workspace run edited every registered project's live tree,
+ * taking no lease, while up to `maxParallel` others did the same. A workspace run now writes no
+ * project file at all — it reads them and files todos — so the line says what it does instead,
+ * and `autoStart` splits it in two, because "tasks are waiting for you" and "agents are already
+ * running in several repos" are not the same promise.
  *
  * **CORRECTED 2026-08-16.** This parameter was `allAuto`, and the line it printed said "All /
  * Auto files tasks on the board — nothing starts". That was true of the task fan-out, which is
@@ -123,9 +129,12 @@ export function composerRunModeNote(input: {
   worktree: boolean
   hasGit: boolean
   workspace?: boolean
+  autoStart?: boolean
 }): string {
   if (input.workspace) {
-    return 'Runs once across every project — your real checkouts are modified directly, with no worktree.'
+    return input.autoStart
+      ? 'Reads every project and files tasks on their boards — then starts them, each in its own worktree.'
+      : 'Reads every project and files tasks on their boards — it edits no project file, and starts nothing.'
   }
   if (input.worktree) return 'Runs in an isolated worktree — review everything before it lands.'
   if (input.hasGit) return 'Runs in the repo working tree — your checkout is modified directly.'

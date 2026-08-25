@@ -121,7 +121,6 @@ import {
 import {
   applyWorkspaceWorktrees,
   discardWorkspaceWorktrees,
-  materializeWorkspaceWorktrees,
 } from '../workspace/workspace-worktrees.ts';
 import type { PendingApproval, PendingHandoff, TestAttestation, TestAttestationProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
@@ -568,6 +567,12 @@ export interface ExecuteRunInput {
    *  creation and re-applied from the RECORD on every later step, so the grant cannot drift when
    *  the registry changes mid-run. */
   workspaceProjects?: GrantedProject[];
+  /** WORKSPACE RUN, `input-to-tasks` (spec 2026-08-25-workspace-scope-routes-tasks): start the
+   *  tasks this run files rather than leaving them on the Filed board. Set only by
+   *  `POST /api/v1/workspace/runs`; persisted to the record, which is what the `dispatch` step
+   *  reads through `{{autoStart}}` — a resume rebuilds this input, and the decision must not
+   *  change under a restart. Absent means false. */
+  autoStart?: boolean;
   /** Autonomous mode (#autonomous): the run never parks at `waiting` for the
    *  user — turn-ends auto-continue until the agent signals done or the safety
    *  cap is hit. No "needs you" is ever raised. */
@@ -1537,6 +1542,10 @@ export class RunManager {
       // in `contract/src/runs.ts`. Variants never carry one: they exist to isolate, and a
       // workspace run has nothing to isolate into.
       workspaceProjects: group ? undefined : input.workspaceProjects,
+      // Frozen at creation for the same reason the grant above is: `input-to-tasks`'s `dispatch`
+      // step reads it back through `{{autoStart}}` on every step, including after a restart that
+      // rebuilds `input`. Variants never carry one, matching `workspaceProjects`.
+      autoStart: group ? undefined : input.autoStart,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -4395,34 +4404,23 @@ export class RunManager {
     const state: ActiveRun = { cancelled: false, interrupt: () => undefined, cwd };
     this.active.set(runId, state);
     this.starting.delete(runId);
-    // A resumed WORKSPACE run stays isolated and lease-free (spec 2026-08-19). Re-materialize its
-    // worktrees if a prior settle applied and removed them (continuing a finished workspace run),
-    // so the resumed session works in worktrees rather than falling back to the real checkouts.
+    // A resumed WORKSPACE run creates nothing (spec 2026-08-25-workspace-scope-routes-tasks,
+    // Phase 1). This branch used to RE-MATERIALIZE worktrees when a prior settle had removed them,
+    // which made it a second writer of the very mechanism that spec removes — and the more
+    // dangerous of the two, because a resume re-runs `materializeWorkspaceWorktrees` against
+    // projects whose repos may have changed underneath, so the in-place fallback (and with it the
+    // shared live checkout) was MORE likely here than on the initial pass.
+    //
+    // What survives is the reader: a run carrying worktrees from before the change keeps them, and
+    // keeps its leases armed. That arming is unconditional for the reason
+    // `2026-08-22-live-worktree-reaped-mid-run` ("What is still open" #2) gives — `dropActive`
+    // deletes every lease the run held when it last settled, and a resume that reused an existing
+    // live tree used to arm nothing at all, leaving a live worktree unleased: the incident's exact
+    // shape. A run with no worktrees now simply has nothing to lease.
     const workspaceRun = (record?.workspaceProjects?.length ?? 0) > 0;
     if (workspaceRun) {
       const live = (record?.workspaceWorktrees ?? []).filter((w) => existsSync(w.worktreePath));
-      if (live.length === 0) {
-        const worktrees = await materializeWorkspaceWorktrees(
-          runId,
-          record?.workspaceProjects ?? [],
-          (m) => this.store.appendEvent(runId, { type: 'note', message: m }),
-          // Same write-ordering fix as the initial materialize above — this resume path is the one
-          // that actually mattered for the 232ad6d4 incident's SECOND reclaim, which came after an
-          // interrupt-and-resume, not through the initial materialize.
-          (snapshot) => {
-            this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
-          },
-          this.repoRoot,
-        );
-        this.store.updateRun(runId, { workspaceWorktrees: worktrees });
-        await touchWorktreeLeases(worktrees.map((worktree) => worktree.root), runId, this.repoRoot);
-        this.armWorktreeLeases(state, runId, worktrees.map((worktree) => worktree.root));
-      } else {
-        // Spec 2026-08-22-live-worktree-reaped-mid-run, "What is still open" #2: `dropActive`
-        // deletes every lease this run held when it last settled, and reusing an EXISTING live
-        // tree here used to arm nothing at all — the most common resume path left a live workspace
-        // worktree with no lease, the incident's exact shape. Write and arm unconditionally,
-        // whether the trees were rebuilt above or reused here.
+      if (live.length > 0) {
         const roots = live.map((worktree) => worktree.root);
         await touchWorktreeLeases(roots, runId, this.repoRoot);
         this.armWorktreeLeases(state, runId, roots);
@@ -5151,35 +5149,54 @@ export class RunManager {
     // At the boot scratch root, a run that arrived without a grant adopts one and becomes a
     // workspace run here (spec 2026-08-21, change C) — see `adoptWorkspaceGrant`.
     await this.adoptWorkspaceGrant(runId, emit);
-    // A parallel WORKSPACE RUN (spec 2026-08-19): isolate each granted git project in its own
-    // `cez/<id8>` worktree, run up to maxParallel — no boot repo-root lease (below) and not counted
-    // by the non-git cap in `pump()`. cwd stays the boot scratch repo; the grant (--add-dir + the
-    // prompt) is redirected to the worktrees by `workspaceGrantOf` reading `workspaceWorktrees`.
+    // A WORKSPACE RUN ROUTES WORK, IT DOES NOT DO IT
+    // (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 1).
+    //
+    // It used to isolate every granted git project in its own `cez/<id8>` worktree and apply the
+    // diffs back on finish (spec 2026-08-19, extended 08-20/08-22). That is gone, and the reason is
+    // not cost: isolation was OPTIONAL PER PROJECT, and its fallback was the project's LIVE
+    // checkout with no lease of any kind — a workspace run deliberately takes none (see below).
+    // Measured on prod 2026-08-24, five runs were each handed `/var/lib/cezar/loki-labs/cezar`
+    // that way, grants 0–106 s apart, while `buildWorkspaceGrant`'s `isolated` flag (true whenever
+    // ANY project isolated) had their system prompts telling all five they were in a private
+    // worktree that cezar would apply back and delete.
+    //
+    // So a workspace run now writes NO project working tree. Its whole write surface is each
+    // project's `.ai/cezar/todos.json`, via `cez todo add --project` — the real work happens in
+    // ordinary project-scoped runs, whose per-task worktree fails CLOSED (the `catch` further
+    // down marks the run failed) instead of silently downgrading to a shared tree.
+    //
+    // **The reader stays.** cezar is published (`BACKWARD_COMPATIBILITY.md`), so a run recorded by
+    // an older version still carries `workspaceWorktrees` pointing at directories on the user's
+    // disk. Those keep their leases armed here and are still applied/discarded at settle
+    // (`applyWorkspaceRun`/`discardWorkspaceRun`); only the code that CREATES new ones is gone.
+    // Phase 4 deletes the rest once no reachable run record carries the field.
     const isWorkspaceRun = (this.store.getRun(runId)?.workspaceProjects?.length ?? 0) > 0;
     if (isWorkspaceRun) {
-      const projects = this.store.getRun(runId)?.workspaceProjects ?? [];
-      const worktrees = await materializeWorkspaceWorktrees(
-        runId,
-        projects,
-        (m) => emit({ type: 'note', message: m }),
-        // Persist a snapshot after EVERY worktree, not just at the end (spec
-        // 2026-08-22-cross-project-worktree-orphan-prune-safety) — otherwise the first project's
-        // worktree sits on disk, unrecorded anywhere a target project's own boot-time prune can
-        // see, for as long as the rest of this loop takes.
-        (snapshot) => {
-          this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
-        },
-        this.repoRoot,
+      const legacy = (this.store.getRun(runId)?.workspaceWorktrees ?? []).filter((worktree) =>
+        existsSync(worktree.worktreePath),
       );
-      this.store.updateRun(runId, { workspaceWorktrees: worktrees });
-      this.armWorktreeLeases(state, runId, worktrees.map((worktree) => worktree.root));
-      emit({
-        type: 'note',
-        message:
-          worktrees.length > 0
-            ? `workspace run — ${worktrees.length} project worktree(s) isolated; changes apply back on finish`
-            : 'workspace run — no git projects to isolate; running in place',
-      });
+      if (legacy.length > 0) {
+        const roots = legacy.map((worktree) => worktree.root);
+        // TOUCH BEFORE ARMING, matching the resume path. `armWorktreeLeases` only starts a
+        // heartbeat — it writes nothing for the first `LEASE_HEARTBEAT_MS` (90 s). The materialize
+        // this branch replaced could arm alone because it had just CREATED the worktrees and their
+        // leases; these were created by an earlier process, so their lease still names the previous
+        // run id or has expired, and another project's boot-time prune reaping a live worktree in
+        // that window is exactly `.ai/specs/2026-08-22-live-worktree-reaped-mid-run.md`.
+        await touchWorktreeLeases(roots, runId, this.repoRoot);
+        this.armWorktreeLeases(state, runId, roots);
+        emit({
+          type: 'note',
+          message: `workspace run — carrying ${legacy.length} worktree(s) from before this run started; they still apply back on finish`,
+        });
+      } else {
+        emit({
+          type: 'note',
+          message:
+            'workspace run — reading every project, editing none; file work with `cez todo add --project <id>`',
+        });
+      }
     } else if (repo && input.worktree === false && !this.bootScratchRoot) {
       // Composer opt-out: run in the repo working tree, no branch/worktree. The
       // repository-root lease serializes these runs by default; the explicit
@@ -6397,7 +6414,11 @@ export class RunManager {
       }
     }
 
-    let userPrompt = resumeFrom?.prompt ?? applyTemplate(step.prompt ?? '{{task}}', input.task);
+    // Read from the RECORD, not from `input`: a resume rebuilds `input`, and `autoStart` is a
+    // decision taken once at creation that must survive every later restart unchanged.
+    const autoStart = this.store.getRun(runId)?.autoStart === true;
+    let userPrompt =
+      resumeFrom?.prompt ?? applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart);
     if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
     if (checkFailure) {
       userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
@@ -6781,7 +6802,7 @@ export class RunManager {
         // `userPrompt` must be rebuilt from the step's own template — not just the session id —
         // or the fresh session runs contextless. Re-run exactly the three lines that built it the
         // first time, with `resumeFrom` treated as absent.
-        userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task);
+        userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart);
         if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
         if (checkFailure) {
           userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
@@ -7851,8 +7872,21 @@ function findLastAgentStepIndex(workflow: WorkflowDef): number {
   return -1;
 }
 
-function applyTemplate(template: string, task: string): string {
-  return template.replaceAll('{{task}}', task);
+/**
+ * Prompt tokens. `{{task}}` is the original and the only one a user-written workflow file is
+ * documented to use (`types.ts` header).
+ *
+ * `{{autoStart}}` was added 2026-08-25 for `input-to-tasks`'s optional `dispatch` step
+ * (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`): that step has to know whether the run
+ * was created with auto-start, and it is a per-RUN fact, not something the step can read from the
+ * repo. It renders as the literal `true`/`false` so the prompt can compare against it in words.
+ *
+ * Unknown tokens are LEFT ALONE, as they always were — `replaceAll` only touches what it matches.
+ * That is deliberate: a workflow file containing `{{foo}}` gets it through to the agent verbatim
+ * rather than an empty string, so a typo in a prompt is visible rather than silently blanked.
+ */
+function applyTemplate(template: string, task: string, autoStart = false): string {
+  return template.replaceAll('{{task}}', task).replaceAll('{{autoStart}}', String(autoStart));
 }
 
 /**

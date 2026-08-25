@@ -1,7 +1,7 @@
 import { parseArgs } from 'node:util';
 import { basename, join, resolve } from 'node:path';
 import { createTodoInputSchema, type TodoKnowledgeRef } from '@loki-labs/better-cezar-contract';
-import { createTodo, readTodos, type CreateTodoInput } from './todos.ts';
+import { createTodo, isTombstoned, readTodos, updateTodo, type CreateTodoInput } from './todos.ts';
 import { authorFromAgentEnv } from './runs/task-author.ts';
 import { loadWorkspaceConfig } from './workspace/config.ts';
 import { normalizeRoot } from './workspace/projects.ts';
@@ -43,9 +43,10 @@ const USAGE = `usage:
   cezar todo add "<summary>" [--project <id|path>] [--context "..."] [--acceptance "..." ...]
                               [--priority low|medium|high] [--skill <name>] [--spec <path>]
                               [--start] [--json]
+  cezar todo start <id> [--project <id|path>] [--json]
   cezar todo list [--project <id|path>] [--json]`;
 
-const KNOWN_SUBCOMMANDS = new Set(['add', 'list']);
+const KNOWN_SUBCOMMANDS = new Set(['add', 'list', 'start']);
 
 /**
  * `cez todo ...` entry point. Returns the process exit code, matching `runKnowledgeCommand`'s /
@@ -67,9 +68,9 @@ export async function runTodoCommand(args: string[], opts: TodoCliOptions): Prom
   }
 
   try {
-    return sub === 'add'
-      ? await handleAdd(rest, opts.repoRoot, io, opts.env ?? process.env)
-      : await handleList(rest, opts.repoRoot, io);
+    if (sub === 'add') return await handleAdd(rest, opts.repoRoot, io, opts.env ?? process.env);
+    if (sub === 'start') return await handleStart(rest, opts.repoRoot, io);
+    return await handleList(rest, opts.repoRoot, io);
   } catch (err) {
     io.error(`todo ${sub}: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
@@ -222,6 +223,93 @@ async function handleAdd(
 }
 
 // ---- list -----------------------------------------------------------------------------------
+
+const START_USAGE = 'usage: cezar todo start <id> [--project <id|path>] [--json]';
+
+/**
+ * `cezar todo start <id>` — mark an ALREADY-FILED todo for autostart
+ * (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 2).
+ *
+ * `--start` on `add` covers "file it and start it"; this covers "start the one I filed earlier",
+ * which is what `input-to-tasks`'s optional `dispatch` step needs — its `file` step deliberately
+ * files without `--start` so filing and starting stay separate, observable acts.
+ *
+ * This does NOT start a run. It sets `autostart: true`, and the RUNNING COCKPIT's `todos.json`
+ * watcher (`todo-autostart.ts`) turns that into a run — deliberately, and for the reason that
+ * module's own docblock gives: only the cockpit owns the project's concurrency cap and its
+ * single-workspace-run lease. A CLI that spawned the run itself would be the "second headless
+ * manager" that design explicitly rejects, and would bypass both.
+ *
+ * Refuses a todo that is archived, tombstoned, or already picked up (`startedTaskId`), because
+ * each of those means "starting this again is not what you want" and the flag alone cannot say so.
+ */
+async function handleStart(rest: string[], defaultRoot: string, io: TodoCliIo): Promise<number> {
+  let values: { project?: string; json?: boolean };
+  let positionals: string[];
+  try {
+    ({ values, positionals } = parseArgs({
+      args: rest,
+      options: { project: { type: 'string' }, json: { type: 'boolean', default: false } },
+      allowPositionals: true,
+    }));
+  } catch {
+    io.error(START_USAGE);
+    return 1;
+  }
+
+  const id = positionals[0];
+  if (!id) {
+    io.error(START_USAGE);
+    return 1;
+  }
+
+  const resolved = await resolveProjectRoot(values.project, defaultRoot);
+  if ('error' in resolved) {
+    io.error(`cezar todo start: ${resolved.error}`);
+    return 1;
+  }
+
+  const dataDir = join(resolved.root, '.ai/cezar');
+  const todos = await readTodos(dataDir);
+  // Accept an id PREFIX: every other surface (the board, `todo list`, this file's own output)
+  // shows full uuids, but a transcript quotes the short form, and refusing it would push callers
+  // toward copy-pasting from a listing they have to run first. Ambiguity is an error, never a pick.
+  const matches = todos.filter((todo) => todo.id === id || todo.id.startsWith(id));
+  if (matches.length === 0) {
+    io.error(`cezar todo start: no todo with id ${id} in ${resolved.root}`);
+    return 1;
+  }
+  if (matches.length > 1) {
+    io.error(
+      `cezar todo start: id ${id} is ambiguous (${matches.length} todos match) — use the full id`,
+    );
+    return 1;
+  }
+  const todo = matches[0]!;
+
+  if (isTombstoned(todo) || todo.archivedAt) {
+    io.error(`cezar todo start: ${todo.id} is archived or deleted — restore it first`);
+    return 1;
+  }
+  if (todo.startedTaskId) {
+    io.error(`cezar todo start: ${todo.id} already started as task ${todo.startedTaskId}`);
+    return 1;
+  }
+
+  const updated = await updateTodo(dataDir, todo.id, { autostart: true });
+  if (!updated) {
+    io.error(`cezar todo start: ${todo.id} vanished while updating`);
+    return 1;
+  }
+
+  if (values.json) {
+    io.log(JSON.stringify({ todo: updated }, null, 2));
+    return 0;
+  }
+  io.log(`${updated.id}  marked for autostart  ${updated.summary}`);
+  io.log('the running cockpit will start it under this project\'s concurrency cap');
+  return 0;
+}
 
 const LIST_USAGE = 'usage: cezar todo list [--project <id|path>] [--json]';
 

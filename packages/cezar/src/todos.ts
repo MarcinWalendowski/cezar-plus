@@ -661,6 +661,21 @@ export type UpdateTodoPatch = {
    * rewrite it in place would make the board's history unreadable.
    */
   summary?: TodoItem['summary'];
+  /**
+   * Maintenance-only, added 2026-08-25 for `cezar todo start`
+   * (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 2).
+   *
+   * `cezar todo add --start` could already set this AT CREATION, but nothing could set it on a todo
+   * that already existed. The `input-to-tasks` workflow needs exactly that: its `file` step files
+   * todos deliberately WITHOUT `--start`, so that filing and starting stay separately observable
+   * and a failure to start cannot lose the filed work. Its `dispatch` step then flips the ones it
+   * filed — which is a write to an existing row.
+   *
+   * Only ever set to `true` here. Clearing it is not offered: `markStarted` already stamps
+   * `startedTaskId` when the cockpit picks the todo up, and that — not the absence of this flag —
+   * is what stops it being started twice.
+   */
+  autostart?: true;
 };
 
 /**
@@ -700,6 +715,10 @@ export async function updateTodo(
     } else if (patch.archived === false) {
       delete item.archivedAt;
       touched.push('archivedAt');
+    }
+    if (patch.autostart === true) {
+      item.autostart = true;
+      touched.push('autostart');
     }
     if (patch.context !== undefined) {
       item.context = patch.context;

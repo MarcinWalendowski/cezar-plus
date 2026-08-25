@@ -344,15 +344,52 @@ export function buildCreateRunBody(opts: {
  * something the server will ignore.
  */
 export function buildWorkspaceRunBody(
-  opts: Omit<Parameters<typeof buildCreateRunBody>[0], 'variants' | 'worktree' | 'todoId'>,
+  opts: Omit<Parameters<typeof buildCreateRunBody>[0], 'variants' | 'worktree' | 'todoId'> & {
+    /** Start the todos this run files, instead of leaving them on their boards
+     *  (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 3). Omitted from the body
+     *  unless it is `true`: `workspaceRunStartInputSchema` is `.strict()`, and keeping the default
+     *  submission byte-identical to the one this composer sent before the flag existed is what
+     *  makes "off" indistinguishable from "an older cockpit". */
+    autoStart?: boolean
+  },
 ): WorkspaceRunStartInput {
+  const { autoStart, ...rest } = opts
   const {
     variants: _variants,
     worktree: _worktree,
     todoId: _todoId,
     ...body
-  } = buildCreateRunBody({ ...opts, variants: 1 })
-  return body
+  } = buildCreateRunBody({ ...rest, variants: 1 })
+  return { ...body, ...(autoStart === true ? { autoStart: true } : {}) }
+}
+
+/** The one workflow a WORKSPACE-scoped run may pick (`.ai/specs/2026-08-25-workspace-scope-routes-
+ *  tasks.md`, Phase 3). Spelled out here rather than imported: the catalog crosses the wire as
+ *  plain names, and `packages/cezar/src/workflows/types.ts` is server-side. If the two spellings
+ *  ever drift, this pill goes EMPTY rather than wrong — see `workflowsForScope`. */
+export const WORKSPACE_WORKFLOW = 'input-to-tasks'
+
+/**
+ * The workflow rows the source picker offers, for a scope.
+ *
+ * At workspace scope a run routes work rather than doing it: it reads every project, files todos,
+ * and may not edit a project file at all (Phase 1). Every other workflow in the catalog —
+ * `spec-to-deploy` and its codex sibling above all — is a chain of implement/commit/deploy steps
+ * that structurally cannot run under that grant, so offering one is offering a run that will fail
+ * politely halfway through.
+ *
+ * FILTERED, not disabled: a greyed-out `spec-to-deploy` still reads as "supported, just not right
+ * now". And the same filtered list feeds `resolveSource`, not only the menu — a draft that still
+ * names `spec-to-deploy` from before the user switched to Workspace then resolves to NOTHING,
+ * which the server reads as "no workflow named" and defaults to `input-to-tasks`. Filtering only
+ * the menu would leave that stale draft submitting the old workflow with no control on screen
+ * showing it.
+ */
+export function workflowsForScope(
+  workflows: readonly WorkflowDef[],
+  workspace: boolean,
+): WorkflowDef[] {
+  return workspace ? workflows.filter((w) => w.name === WORKSPACE_WORKFLOW) : [...workflows]
 }
 
 /** The automation editor persists the exact New task serialization, with only the transport-

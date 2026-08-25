@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -154,16 +154,23 @@ describe('a run homed at the workspace boot root never runs in place', () => {
     // No `workspaceProjects` — the shape nine of the ten `startRun` call sites produce.
     const run = manager.startRun(gatedHold(gate), { author: localCliAuthor(), task: 'ungranted' });
     try {
+      // CHANGED 2026-08-25 (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 1): this
+      // waited on `workspaceWorktrees` filling and asserted `project worktree(s) isolated`. The
+      // adoption is unchanged — what it produces is not. A workspace run materializes nothing now,
+      // so the observable the adoption lands on is the ROUTING note plus the grant on the record.
       await waitFor(
-        () => (store.getRun(run.id)?.workspaceWorktrees?.length ?? 0) > 0,
-        'the adopted grant to materialize a project worktree',
+        () =>
+          notes(store, run.id).some((m) => m.includes('reading every project, editing none')),
+        'the adopted grant to put the run on the routing path',
       );
       const midflight = store.getRun(run.id);
       expect(midflight?.workspaceProjects?.map((p) => p.root)).toEqual([project]);
-      expect(midflight?.workspaceWorktrees?.[0]?.root).toBe(project);
       expect(notes(store, run.id).some((m) => m.includes('adopted the workspace'))).toBe(true);
-      expect(notes(store, run.id).some((m) => m.includes('project worktree(s) isolated'))).toBe(true);
       expect(notes(store, run.id).some((m) => m.includes('exclusive access'))).toBe(false);
+      // Nothing was cut in the project — neither on the record nor on disk. Asserting both, because
+      // the record alone would stay empty for a materialize that ran and failed to persist.
+      expect(midflight?.workspaceWorktrees ?? []).toEqual([]);
+      expect(existsSync(join(project, '.ai/cezar/worktrees'))).toBe(false);
     } finally {
       writeFileSync(gate, '');
     }
