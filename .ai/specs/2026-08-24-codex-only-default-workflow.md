@@ -1,6 +1,9 @@
 # Codex-only default workflow
 
-**Status:** Proposed
+**Status:** Implemented / QA Needed — Phases 1-4 landed as `ef28ea0a` (merged into `origin/main`
+as `8443096f`); Phase 6 (V8, the runtime E2E) has not run and needs explicit owner approval
+before it does, per this spec's own V8 section. Do not read this as `Implemented` until V8 has
+actually passed.
 **Date:** 2026-08-24
 **Repo:** `cezar`
 **Read at:** `e38cb619` (worktree `a15215ef`, clean, tracking `origin/main`)
